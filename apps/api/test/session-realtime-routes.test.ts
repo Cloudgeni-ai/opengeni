@@ -10,15 +10,13 @@ import {
   createConnection,
   createSession,
   encryptEnvironmentValue,
-  ensureCodexRotationSettings,
   ensureManagedAccessForUser,
-  setActiveCodexCredential,
-  upsertCodexSubscriptionCredential,
   withWorkspaceRls,
   withSessionRlsActorContext,
   type Database,
   type DbClient,
 } from "@opengeni/db";
+import { connectSubscriptionCoreCodexConnection } from "@opengeni/db";
 import { signDelegatedAccessToken } from "@opengeni/contracts";
 import { and, eq } from "drizzle-orm";
 import * as schema from "@opengeni/db/schema";
@@ -142,14 +140,14 @@ async function fixture(withConnector = false) {
     subjectId,
   });
   const grant = access.workspaceGrants[0]!;
-  // The route lifecycle here runs on a legacy Codex credential fixture, which
-  // M3 PR 4 deletes with the legacy path. Migration 0680 starts every
-  // organization on the shared core, so this organization alone returns to
-  // the pre-cutover world (core realtime is covered by the PR 2c suites).
-  await shared.admin`
-    delete from subscription_provider_cutovers
-    where account_id = ${grant.accountId}::uuid and provider = 'codex'`;
-  const credential = await upsertCodexSubscriptionCredential(client.db, {
+  // Current lifecycle tests use core operation leases and retain the core gate.
+  const [personal] = await shared.admin`insert into workspaces(account_id, name)
+    values (${grant.accountId}, 'Fixture owner Personal') returning id`;
+  await shared.admin`insert into organization_memberships
+    (account_id, subject_id, role, status, personal_workspace_id)
+    values (${grant.accountId}, ${subjectId}, 'owner', 'active', ${personal!.id})
+    on conflict (account_id, subject_id) do nothing`;
+  const credential = await connectSubscriptionCoreCodexConnection(client.db, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId!,
     credentialEncrypted: encryptEnvironmentValue(
@@ -160,16 +158,17 @@ async function fixture(withConnector = false) {
         id_token: "test-id-token",
       }),
     ),
-    chatgptAccountId: `api-realtime-provider-${suffix}`,
-    scopes: null,
+    providerAccountId: `api-realtime-provider-${suffix}`,
+    providerSubjectId: subjectId,
+    accountEmail: null,
+    label: null,
     planType: "pro",
     isFedramp: false,
     expiresAt: new Date(Date.now() + 60 * 60_000),
     lastRefreshAt: new Date(),
-    connectedBySubjectId: subjectId,
+    subjectId,
   });
-  await ensureCodexRotationSettings(client.db, grant.accountId, grant.workspaceId!);
-  await setActiveCodexCredential(client.db, grant.workspaceId!, credential.id);
+  if (credential.kind !== "connected") throw new Error(`fixture refused: ${credential.reason}`);
   const connector = withConnector
     ? await createConnection(client.db, {
         accountId: grant.accountId,

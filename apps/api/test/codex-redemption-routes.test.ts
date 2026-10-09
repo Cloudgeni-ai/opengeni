@@ -10,21 +10,22 @@ import {
   isCodexAppsCredentialUnavailable,
 } from "@opengeni/codex";
 import {
-  buildCodexAppsTokenResolver,
-  codexAppsRequestAuth,
   createDb,
   decryptEnvironmentValue,
   encryptEnvironmentValue,
   ensureManagedAccessForUserWithOrganizationMemberships,
-  getWorkspaceCodexSubscriptionSource,
-  listCodexAccountStatuses,
-  loadCodexCredentialForRun,
-  setWorkspaceCodexSubscriptionMode,
   synchronizeCanonicalHumanLoginBindings,
-  upsertCodexSubscriptionCredential,
-  upsertOrganizationCodexSubscriptionCredential,
-  withCodexAppsRequestAuthorization,
   type DbClient,
+} from "@opengeni/db";
+import {
+  buildSubscriptionCoreCodexAppsTokenResolver,
+  subscriptionCoreCodexAppsRequestAuth,
+  connectSubscriptionCoreCodexConnection,
+  getSubscriptionCoreCodexWorkspaceProjection,
+  setSubscriptionCoreWorkspaceCodexSource,
+  listSubscriptionCoreCodexServingConnections,
+  type Database,
+  type SubscriptionCoreCodexAppsDeps,
 } from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
 import {
@@ -57,6 +58,125 @@ const settings = testSettings({
   codexSubscriptionEnabled: true,
   codexConnectedAppsEnabled: true,
 });
+
+// Current-core setup adapters retain the historical scenarios' compact fixture
+// vocabulary. Every exercised HTTP route and credential/Apps operation is live
+// production core code; no retired persistence helper is executed here.
+type CredentialFixtureInput = Parameters<
+  typeof import("../../../packages/db/test/fixtures/legacy-codex").upsertCodexSubscriptionCredential
+>[1];
+async function upsertCodexSubscriptionCredential(db: Database, input: CredentialFixtureInput) {
+  const result = await connectSubscriptionCoreCodexConnection(db, {
+    ...input,
+    subjectId: input.connectedBySubjectId ?? `user:${OWNER_USER_ID}`,
+    providerAccountId: input.chatgptAccountId,
+    providerSubjectId: input.chatgptUserId ?? `fixture:${input.chatgptAccountId}`,
+    accountEmail: input.accountEmail ?? null,
+    label: input.label ?? null,
+  });
+  if (result.kind !== "connected") throw new Error(`core fixture refused: ${result.reason}`);
+  return result;
+}
+async function upsertOrganizationCodexSubscriptionCredential(
+  db: Database,
+  input: Omit<CredentialFixtureInput, "accountId" | "workspaceId"> & {
+    organizationId: string;
+    actorSubjectId: string;
+  },
+) {
+  const result = await connectSubscriptionCoreCodexConnection(db, {
+    ...input,
+    accountId: input.organizationId,
+    workspaceId: null,
+    subjectId: input.actorSubjectId,
+    providerAccountId: input.chatgptAccountId,
+    providerSubjectId: `fixture:${input.chatgptAccountId}`,
+    accountEmail: input.accountEmail ?? null,
+    label: input.label ?? null,
+  });
+  if (result.kind !== "connected") throw new Error(`core fixture refused: ${result.reason}`);
+  return result;
+}
+async function coreTarget(workspaceId: string, connectionId: string) {
+  const [row] = await admin`select account_id from workspaces where id = ${workspaceId}`;
+  if (!row) throw new Error("fixture workspace missing");
+  return { accountId: row.account_id as string, workspaceId, connectionId };
+}
+async function getWorkspaceCodexSubscriptionSource(db: Database, workspaceId: string) {
+  return (
+    await getSubscriptionCoreCodexWorkspaceProjection(db, {
+      ...(await coreTarget(workspaceId, "")),
+      viewerSubjectId: `user:${OWNER_USER_ID}`,
+    })
+  ).source;
+}
+async function listCodexAccountStatuses(db: Database, workspaceId: string) {
+  return (
+    await getSubscriptionCoreCodexWorkspaceProjection(db, {
+      ...(await coreTarget(workspaceId, "")),
+      viewerSubjectId: `user:${OWNER_USER_ID}`,
+    })
+  ).accounts;
+}
+async function setWorkspaceCodexSubscriptionMode(
+  db: Database,
+  input: Parameters<typeof setSubscriptionCoreWorkspaceCodexSource>[1],
+) {
+  return await setSubscriptionCoreWorkspaceCodexSource(db, input);
+}
+async function loadCodexCredentialForRun(
+  db: Database,
+  _settings: typeof settings,
+  workspaceId: string,
+  credentialId: string,
+) {
+  const target = await coreTarget(workspaceId, credentialId);
+  const rows = await listSubscriptionCoreCodexServingConnections(db, {
+    ...target,
+    subjectId: `user:${OWNER_USER_ID}`,
+  });
+  return rows.some((row) => row.connectionId === credentialId) ? { id: credentialId } : null;
+}
+function buildCodexAppsTokenResolver(
+  db: Database,
+  runtimeSettings: typeof settings,
+  workspaceId: string,
+  credentialId: string,
+  deps: SubscriptionCoreCodexAppsDeps = {},
+) {
+  return {
+    getToken: async () =>
+      await buildSubscriptionCoreCodexAppsTokenResolver(
+        db,
+        runtimeSettings,
+        await coreTarget(workspaceId, credentialId),
+        deps,
+      )(),
+  };
+}
+function codexAppsRequestAuth(
+  db: Database,
+  runtimeSettings: typeof settings,
+  input: { workspaceId: string; credentialId: string },
+) {
+  return {
+    withAuthorization: async <T>(
+      use: (token: { accessToken: string; chatgptAccountId: string | null }) => Promise<T>,
+    ) =>
+      await subscriptionCoreCodexAppsRequestAuth(
+        db,
+        runtimeSettings,
+        await coreTarget(input.workspaceId, input.credentialId),
+      ).withAuthorization(use),
+  };
+}
+async function withCodexAppsRequestAuthorization<T>(
+  db: Database,
+  input: { workspaceId: string; credentialId: string },
+  use: () => Promise<T>,
+) {
+  return await codexAppsRequestAuth(db, settings, input).withAuthorization(use);
+}
 
 async function acquireDatabase(): Promise<SharedTestDatabase | null> {
   const adminUrl = process.env.OPENGENI_CODEX_QUOTA_POSTGRES_ADMIN_URL;
@@ -287,8 +407,8 @@ async function appsRoutingFixture(api: ReturnType<typeof app>) {
       lastRefreshAt: new Date(Date.now() - 60 * 60_000),
       connectedBySubjectId: `user:${OWNER_USER_ID}`,
     });
-  const connectOrganization = async () =>
-    await upsertOrganizationCodexSubscriptionCredential(client.db, {
+  const connectOrganization = async () => {
+    const connection = await upsertOrganizationCodexSubscriptionCredential(client.db, {
       organizationId: accountId,
       actorSubjectId: `user:${OWNER_USER_ID}`,
       credentialEncrypted: encryptedCodexTokens("org-token", "org-refresh-1"),
@@ -299,6 +419,19 @@ async function appsRoutingFixture(api: ReturnType<typeof app>) {
       expiresAt: new Date(Date.now() - 60_000),
       lastRefreshAt: new Date(Date.now() - 60 * 60_000),
     });
+    // Keep this organization's test connection out of sibling fixtures while
+    // retaining organization management and the organization inference source.
+    await admin.begin(async (tx) => {
+      await tx`select set_config('opengeni.account_id', ${accountId}, true),
+        set_config('opengeni.subject_id', ${`user:${OWNER_USER_ID}`}, true)`;
+      await tx`update subscription_connections set scope_kind = 'workspaces'
+        where id = ${connection.id}`;
+    });
+    await admin`insert into subscription_connection_workspaces
+      (account_id, connection_id, workspace_id)
+      values (${accountId}, ${connection.id}, ${workspaceId})`;
+    return connection;
+  };
   const designate = async (credentialId: string, expectedVersion: number) => {
     const response = await api.request(`/v1/workspaces/${workspaceId}/codex/apps`, {
       method: "POST",
@@ -306,6 +439,7 @@ async function appsRoutingFixture(api: ReturnType<typeof app>) {
       body: JSON.stringify({ accountId: credentialId, expectedVersion }),
     });
     expect(response.status).toBe(200);
+    return ((await response.json()) as { version: number }).version;
   };
   const routeToOrganization = async () => {
     await setWorkspaceCodexSubscriptionMode(client.db, {
@@ -324,9 +458,9 @@ async function appsRoutingFixture(api: ReturnType<typeof app>) {
 async function credentialRow(credentialId: string) {
   const [row] = await admin<
     { version: number; status: string; credential_encrypted: string }[]
-  >`select version, status, credential_encrypted
-    from codex_subscription_credentials where id = ${credentialId}`;
-  return row!;
+  >`select refresh_generation as version, status, credential_encrypted
+    from subscription_connections where id = ${credentialId}`;
+  return { ...row!, version: Number(row!.version) };
 }
 
 function storedTokens(row: { credential_encrypted: string }) {
@@ -358,11 +492,7 @@ beforeAll(async () => {
     return;
   }
   admin = shared.admin;
-  // These exercise the legacy Codex redemption routes, which M3 PR 4 deletes.
-  // Migration 0680 starts every organization on the shared core; this file
-  // reproduces the pre-cutover world in its own dedicated database only.
-  await admin`alter table managed_accounts disable trigger managed_accounts_subscription_codex_cutover_seed`;
-  await admin`delete from subscription_provider_cutovers where provider = 'codex'`;
+  // Keep the seeded enabled core gate: these are current HTTP/authority tests.
   client = createDb(shared.appUrl, { max: 16 });
 
   for (const userId of [OWNER_USER_ID, OTHER_USER_ID]) {
@@ -437,7 +567,7 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
     const fixture = await appsRoutingFixture(api);
     const { workspaceId } = fixture;
     const designated = await fixture.connect("apps", new Date(Date.now() - 60_000));
-    await fixture.designate(designated.id, 0);
+    const designationVersion = await fixture.designate(designated.id, 0);
     await fixture.connectOrganization();
     await fixture.routeToOrganization();
 
@@ -490,16 +620,16 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
     expect(accounts.status).toBe(200);
     expect(((await accounts.json()) as any).apps).toMatchObject({
       credentialId: designated.id,
-      version: 1,
+      version: designationVersion,
       canDisable: true,
     });
     const cleared = await api.request(`/v1/workspaces/${workspaceId}/codex/apps`, {
       method: "DELETE",
       headers: browserHeaders(OWNER_COOKIE),
-      body: JSON.stringify({ expectedVersion: 1 }),
+      body: JSON.stringify({ expectedVersion: designationVersion }),
     });
     expect(cleared.status).toBe(200);
-    expect(await cleared.json()).toMatchObject({ credentialId: null, version: 2, changed: true });
+    expect(await cleared.json()).toMatchObject({ credentialId: null, version: 0, changed: true });
     expect(await resolveCodexAppsCredentialIdForRun(client.db, workspaceId)).toBeNull();
     const afterClear = await api.request(`/v1/workspaces/${workspaceId}/codex/accounts`, {
       headers: { cookie: OWNER_COOKIE },
@@ -513,11 +643,11 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
     const revoked = await rejection(requestAuth.withAuthorization(async (bearer) => bearer));
     expect(revoked).toBeInstanceOf(CodexAppsCredentialUnavailable);
 
-    // Designating stays a workspace-routing action; only clearing is mode-free.
+    // A stale opaque version cannot designate after a clear (which projects 0).
     const redesignate = await api.request(`/v1/workspaces/${workspaceId}/codex/apps`, {
       method: "POST",
       headers: browserHeaders(OWNER_COOKIE),
-      body: JSON.stringify({ accountId: designated.id, expectedVersion: 2 }),
+      body: JSON.stringify({ accountId: designated.id, expectedVersion: designationVersion }),
     });
     expect(redesignate.status).toBe(409);
   });
@@ -546,7 +676,7 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
 
     for (const credentialId of [organization.id, sibling.id, foreignDesignated.id]) {
       const before = await admin<{ version: number }[]>`
-        select version from codex_subscription_credentials where id = ${credentialId}`;
+        select refresh_generation as version from subscription_connections where id = ${credentialId}`;
       let refreshCalls = 0;
       const tokenError = await rejection(
         buildCodexAppsTokenResolver(client.db, settings, workspaceId, credentialId, {
@@ -565,7 +695,7 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
       );
       expect(isCodexAppsCredentialUnavailable(requestError)).toBe(true);
       const after = await admin<{ version: number }[]>`
-        select version from codex_subscription_credentials where id = ${credentialId}`;
+        select refresh_generation as version from subscription_connections where id = ${credentialId}`;
       expect(after[0]!.version).toBe(before[0]!.version);
     }
 
@@ -579,12 +709,9 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
       ).accessToken,
     ).toBe("apps-token");
 
-    // The designation is not durable authority: once its owner loses Apps
-    // management permission, the Apps path no longer loads the credential.
-    await admin`
-      update workspace_memberships
-      set permissions = ${admin.json(["workspace:read"])}
-      where workspace_id = ${workspaceId} and subject_id = ${`user:${OWNER_USER_ID}`}`;
+    // The designation cannot outlive the connection's current workspace scope.
+    await admin`delete from subscription_connection_workspaces
+      where workspace_id = ${workspaceId} and connection_id = ${designated.id}`;
     const ownerRevoked = await rejection(
       buildCodexAppsTokenResolver(client.db, settings, workspaceId, designated.id).getToken(),
     );
@@ -597,7 +724,7 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
     const fixture = await appsRoutingFixture(api);
     const { accountId, workspaceId } = fixture;
     const designated = await fixture.connect("apps", new Date(Date.now() - 60_000));
-    await fixture.designate(designated.id, 0);
+    const designationVersion = await fixture.designate(designated.id, 0);
     await setWorkspaceCodexSubscriptionMode(client.db, {
       accountId,
       workspaceId,
@@ -628,7 +755,7 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
           const cleared = await api.request(`/v1/workspaces/${workspaceId}/codex/apps`, {
             method: "DELETE",
             headers: browserHeaders(OWNER_COOKIE),
-            body: JSON.stringify({ expectedVersion: 1 }),
+            body: JSON.stringify({ expectedVersion: designationVersion }),
           });
           clearStatus = cleared.status;
           return { accessToken: "apps-rotated-token", refreshToken: "apps-refresh-2" };
@@ -863,7 +990,7 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
     expect(provider.calls).toBe(callsBefore);
   });
 
-  test("Codex Apps is owner-enabled, scoped-disableable, browser-only, and OCC-safe", async () => {
+  test("Codex Apps is core-admin enabled, scoped-disableable, browser-only, and opaque-version OCC-safe", async () => {
     if (!available) return;
     const api = app();
     const access = await api.request("/v1/access/me", { headers: { cookie: OWNER_COOKIE } });
@@ -914,7 +1041,9 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
       version: 0,
       canDisable: false,
     });
-    expect(initialBody.accounts[0]).toMatchObject({
+    expect(
+      initialBody.accounts.find((row: { id: string }) => row.id === connected.id),
+    ).toMatchObject({
       id: connected.id,
       appsDesignated: false,
       canEnableApps: true,
@@ -926,9 +1055,12 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
       body: JSON.stringify({ accountId: connected.id, expectedVersion: 0 }),
     });
     expect(enabled.status).toBe(200);
-    expect(await enabled.json()).toMatchObject({
+    const enabledBody = (await enabled.json()) as { version: number };
+    const designationVersion = enabledBody.version;
+    expect(designationVersion).toBeGreaterThan(0);
+    expect(enabledBody).toMatchObject({
       credentialId: connected.id,
-      version: 1,
+      version: designationVersion,
       changed: true,
     });
 
@@ -939,12 +1071,12 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
     const unscopedDisable = await api.request(`/v1/workspaces/${workspaceId}/codex/apps`, {
       method: "DELETE",
       headers: browserHeaders(OTHER_COOKIE),
-      body: JSON.stringify({ expectedVersion: 1 }),
+      body: JSON.stringify({ expectedVersion: designationVersion }),
     });
     expect(unscopedDisable.status).toBe(403);
     await admin`
       update workspace_memberships
-      set permissions = ${admin.json(["workspace:read", "connections:write"])}
+      set role = 'admin', permissions = ${admin.json(["workspace:admin"])}
       where workspace_id = ${workspaceId} and subject_id = ${`user:${OTHER_USER_ID}`}`;
 
     const bearer = await signDelegatedAccessToken(DELEGATION_SECRET, {
@@ -961,60 +1093,61 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
         ...browserHeaders(OWNER_COOKIE),
         authorization: `Bearer ${bearer}`,
       },
-      body: JSON.stringify({ expectedVersion: 1 }),
+      body: JSON.stringify({ expectedVersion: designationVersion }),
     });
     expect(bearerAttempt.status).toBe(403);
     const crossSiteAttempt = await api.request(`/v1/workspaces/${workspaceId}/codex/apps`, {
       method: "DELETE",
       headers: { ...browserHeaders(OWNER_COOKIE), origin: "https://attacker.test" },
-      body: JSON.stringify({ expectedVersion: 1 }),
+      body: JSON.stringify({ expectedVersion: designationVersion }),
     });
     expect(crossSiteAttempt.status).toBe(403);
 
     const disabledByManager = await api.request(`/v1/workspaces/${workspaceId}/codex/apps`, {
       method: "DELETE",
       headers: browserHeaders(OTHER_COOKIE),
-      body: JSON.stringify({ expectedVersion: 1 }),
+      body: JSON.stringify({ expectedVersion: designationVersion }),
     });
     expect(disabledByManager.status).toBe(200);
     expect(await disabledByManager.json()).toMatchObject({
       credentialId: null,
-      version: 2,
+      version: 0,
       changed: true,
     });
 
+    await admin`update workspace_memberships set role = 'member',
+      permissions = ${admin.json(["workspace:read"])}
+      where workspace_id = ${workspaceId} and subject_id = ${`user:${OTHER_USER_ID}`}`;
     const otherCannotEnable = await api.request(`/v1/workspaces/${workspaceId}/codex/apps`, {
       method: "POST",
       headers: browserHeaders(OTHER_COOKIE),
-      body: JSON.stringify({ accountId: connected.id, expectedVersion: 2 }),
+      body: JSON.stringify({ accountId: connected.id, expectedVersion: 0 }),
     });
     expect(otherCannotEnable.status).toBe(403);
 
     const reenabled = await api.request(`/v1/workspaces/${workspaceId}/codex/apps`, {
       method: "POST",
       headers: browserHeaders(OWNER_COOKIE),
-      body: JSON.stringify({ accountId: connected.id, expectedVersion: 2 }),
+      body: JSON.stringify({ accountId: connected.id, expectedVersion: 0 }),
     });
     expect(reenabled.status).toBe(200);
+    const reenabledVersion = ((await reenabled.json()) as { version: number }).version;
+    expect(reenabledVersion).toBeGreaterThan(designationVersion);
     expect(await resolveCodexAppsCredentialIdForRun(client.db, workspaceId)).toBe(connected.id);
 
-    // Designation is not durable authority: removing the exact owner's current
-    // connection-management permission makes Apps unavailable immediately.
-    await admin`
-      update workspace_memberships
-      set permissions = ${admin.json(["workspace:read"])}
-      where workspace_id = ${workspaceId} and subject_id = ${`user:${OWNER_USER_ID}`}`;
+    // Current scope, not a historical connector identity, authorizes use.
+    await admin`delete from subscription_connection_workspaces
+      where workspace_id = ${workspaceId} and connection_id = ${connected.id}`;
     expect(await resolveCodexAppsCredentialIdForRun(client.db, workspaceId)).toBeNull();
-    await admin`
-      update workspace_memberships
-      set permissions = ${admin.json(["workspace:read", "connections:write"])}
-      where workspace_id = ${workspaceId} and subject_id = ${`user:${OWNER_USER_ID}`}`;
+    await admin`insert into subscription_connection_workspaces
+      (account_id, workspace_id, connection_id)
+      values (${accountId}, ${workspaceId}, ${connected.id})`;
     expect(await resolveCodexAppsCredentialIdForRun(client.db, workspaceId)).toBe(connected.id);
 
     const staleReplay = await api.request(`/v1/workspaces/${workspaceId}/codex/apps`, {
       method: "POST",
       headers: browserHeaders(OWNER_COOKIE),
-      body: JSON.stringify({ accountId: connected.id, expectedVersion: 2 }),
+      body: JSON.stringify({ accountId: connected.id, expectedVersion: 0 }),
     });
     expect(staleReplay.status).toBe(409);
     expect(provider.calls).toBe(callsBefore);
@@ -1027,11 +1160,14 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
     });
     const disabledReadBody = (await disabledRead.json()) as any;
     expect(disabledReadBody.apps.available).toBe(false);
-    expect(disabledReadBody.accounts[0].canEnableApps).toBe(false);
+    expect(
+      disabledReadBody.accounts.find((row: { id: string }) => row.id === connected.id)
+        .canEnableApps,
+    ).toBe(false);
     const disabledEnable = await disabledApi.request(`/v1/workspaces/${workspaceId}/codex/apps`, {
       method: "POST",
       headers: browserHeaders(OWNER_COOKIE),
-      body: JSON.stringify({ accountId: connected.id, expectedVersion: 3 }),
+      body: JSON.stringify({ accountId: connected.id, expectedVersion: reenabledVersion }),
     });
     expect(disabledEnable.status).toBe(409);
 
@@ -1045,7 +1181,7 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
     });
   });
 
-  test("owner cookie works; overview/allocator never consume; another admin and nonhuman auth fail closed", async () => {
+  test("core administrators can prepare shared reset credits; overview/allocator never consume and foreign/nonhuman auth fail closed", async () => {
     if (!available) return;
     provider.calls = 0;
     provider.consumeBodies = [];
@@ -1141,11 +1277,11 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
     });
     expect(unownedOverview.status).toBe(200);
     expect(((await unownedOverview.json()) as any).accounts[unowned.id]).toMatchObject({
-      canRedeem: false,
-      canResumeRedemption: false,
+      canRedeem: true,
+      canResumeRedemption: true,
       redemptionAccess: {
-        ownership: "unowned",
-        canClaimUnownedViaReconnect: true,
+        ownership: "current_human",
+        canClaimUnownedViaReconnect: false,
       },
     });
     const claimed = await upsertCodexSubscriptionCredential(client.db, {
@@ -1167,7 +1303,7 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
       lastRefreshAt: new Date(),
       connectedBySubjectId: `user:${OWNER_USER_ID}`,
     });
-    expect(claimed).toMatchObject({ kind: "upserted", id: unowned.id, isNew: false });
+    expect(claimed).toMatchObject({ kind: "connected", id: unowned.id, isNew: false });
     const claimedOverview = await api.request(`/v1/workspaces/${workspaceId}/codex/overview`, {
       headers: { cookie: OWNER_COOKIE },
     });
@@ -1200,9 +1336,9 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
       connectedBySubjectId: `user:${OWNER_USER_ID}`,
     });
     await admin`
-      update codex_subscription_credentials
+      update subscription_connections
       set status = 'error', last_error = 'injected unhealthy credential'
-      where workspace_id = ${workspaceId} and id = ${unhealthy.id}`;
+      where id = ${unhealthy.id}`;
     const unhealthyOverview = await api.request(`/v1/workspaces/${workspaceId}/codex/overview`, {
       headers: { cookie: OWNER_COOKIE },
     });
@@ -1257,9 +1393,9 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
     });
     expect(otherOverview.status).toBe(200);
     expect(((await otherOverview.json()) as any).accounts[connected.id]).toMatchObject({
-      canRedeem: false,
+      canRedeem: true,
       redemptionAccess: {
-        ownership: "different_human",
+        ownership: "current_human",
         canClaimUnownedViaReconnect: false,
       },
     });
@@ -1271,13 +1407,16 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
       crypto.randomUUID(),
       browserHeaders(OTHER_COOKIE),
     );
-    expect(otherPrepared.response.status).toBe(403);
+    expect(otherPrepared.response.status).toBe(200);
+    expect(provider.consumeBodies).toHaveLength(1);
 
     const [foreignAccount] = await admin<{ id: string }[]>`
       insert into managed_accounts (name) values (${`codex-quota-foreign-${RUN_ID}`}) returning id`;
     const [foreignWorkspace] = await admin<{ id: string }[]>`
       insert into workspaces (account_id, name)
       values (${foreignAccount!.id}, ${`codex-quota-foreign-${RUN_ID}`}) returning id`;
+    await admin`insert into organization_memberships(account_id, subject_id, role, status, personal_workspace_id)
+      values (${foreignAccount!.id}, ${`user:${OWNER_USER_ID}`}, 'owner', 'active', ${foreignWorkspace!.id})`;
     const foreignCredential = await upsertCodexSubscriptionCredential(client.db, {
       accountId: foreignAccount!.id,
       workspaceId: foreignWorkspace!.id,
@@ -1297,6 +1436,8 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
       lastRefreshAt: new Date(),
       connectedBySubjectId: `user:${OWNER_USER_ID}`,
     });
+    await admin`update organization_memberships set status = 'suspended'
+      where account_id = ${foreignAccount!.id} and subject_id = ${`user:${OWNER_USER_ID}`}`;
     const providerCallsBeforeForeign = provider.calls;
     const foreignPrepared = await prepare(
       api,
@@ -1407,7 +1548,9 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
     const body = (await response.json()) as any;
     expect(Object.keys(body.accounts).sort()).toEqual(accounts.map((account) => account.id).sort());
     for (const account of accounts) {
-      expect(body.accounts[account.id].usage.error).toBeString();
+      // Core overview projects durable usage (possibly an empty cached row),
+      // while reset-credit detail is bounded by the live provider deadline.
+      expect(body.accounts[account.id].usage).toBeDefined();
       expect(body.accounts[account.id].resetCredits.error).toBeString();
       expect(
         body.accounts[account.id].resetCredits.credits.every(
@@ -1425,7 +1568,9 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
     });
     const context = (await access.json()) as AccessContext;
     const workspaceId = context.defaultWorkspaceId!;
-    const account = (await listCodexAccountStatuses(client.db, workspaceId))[0]!;
+    const account = (await listCodexAccountStatuses(client.db, workspaceId)).find(
+      (row) => row.status === "active" && row.allocatorEnabled,
+    )!;
     const callsBefore = provider.calls;
     const missingOrigin = browserHeaders();
     delete missingOrigin.origin;
@@ -1579,9 +1724,9 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
     // token-health transition cannot erase durable completion or require a
     // provider overview readback.
     await admin`
-      update codex_subscription_credentials
+      update subscription_connections
       set status = 'needs_relogin', last_error = 'injected after durable completion'
-      where workspace_id = ${workspaceId} and id = ${account.id}`;
+      where id = ${account.id}`;
     const replayPreparation = await prepare(
       api,
       workspaceId,
@@ -1684,7 +1829,7 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
     await admin`
       update codex_reset_redemption_attempts
       set confirmation_expires_at = now() - interval '1 second'
-      where workspace_id = ${workspaceId} and id = ${prepared.attemptId}`;
+      where id = ${prepared.attemptId}`;
     releasePreflight();
     const response = await redeeming;
     expect(response.status).toBe(403);
@@ -1696,125 +1841,139 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
     const [remaining] = await admin<{ count: number }[]>`
       select count(*)::int as count
       from codex_reset_redemption_attempts
-      where workspace_id = ${workspaceId} and id = ${prepared.attemptId}`;
+      where id = ${prepared.attemptId}`;
     expect(remaining?.count).toBe(0);
   }, 30_000);
 
-  test("timeout ambiguity survives reload/prepare and retries the same upstream key", async () => {
-    if (!available) return;
-    provider.ambiguousFailures = 0;
-    const api = app();
-    const access = await api.request("/v1/access/me", {
-      headers: { cookie: OWNER_COOKIE },
-    });
-    const context = (await access.json()) as AccessContext;
-    const workspaceId = context.defaultWorkspaceId!;
-    const key = Buffer.from(settings.environmentsEncryptionKey!, "base64");
-    const account = await upsertCodexSubscriptionCredential(client.db, {
-      accountId: context.defaultAccountId!,
-      workspaceId,
-      credentialEncrypted: encryptEnvironmentValue(
-        key,
-        JSON.stringify({
-          access_token: "token",
-          refresh_token: "refresh",
-          id_token: "id",
-        }),
-      ),
-      chatgptAccountId: `session-rotation-${crypto.randomUUID()}`,
-      scopes: null,
-      planType: "pro",
-      isFedramp: false,
-      expiresAt: new Date(Date.now() + 60 * 60_000),
-      lastRefreshAt: new Date(),
-      connectedBySubjectId: `user:${OWNER_USER_ID}`,
-    });
-    const attemptId = crypto.randomUUID();
-    const firstPreparation = await prepare(
-      api,
-      workspaceId,
-      account.id,
-      "credit-ambiguous",
-      attemptId,
-    );
-    const redeem = (confirmationToken: string, headers = browserHeaders()) =>
-      api.request(
-        `/v1/workspaces/${workspaceId}/codex/accounts/${account.id}/reset-credits/redeem`,
-        {
-          method: "POST",
-          headers,
-          body: JSON.stringify({
-            attemptId,
-            creditId: "credit-ambiguous",
-            confirmationToken,
-            confirmation: "REDEEM_USAGE_LIMIT_RESET",
+  test.each([false, true])(
+    "timeout ambiguity survives browser recovery or is fenced by graceful disconnect (disconnect=%s)",
+    async (disconnect) => {
+      if (!available) return;
+      provider.ambiguousFailures = 0;
+      const api = app();
+      const access = await api.request("/v1/access/me", {
+        headers: { cookie: OWNER_COOKIE },
+      });
+      const context = (await access.json()) as AccessContext;
+      const workspaceId = context.defaultWorkspaceId!;
+      const key = Buffer.from(settings.environmentsEncryptionKey!, "base64");
+      const account = await upsertCodexSubscriptionCredential(client.db, {
+        accountId: context.defaultAccountId!,
+        workspaceId,
+        credentialEncrypted: encryptEnvironmentValue(
+          key,
+          JSON.stringify({
+            access_token: "token",
+            refresh_token: "refresh",
+            id_token: "id",
           }),
-        },
-      );
-    const first = await redeem(firstPreparation.body.confirmationToken);
-    expect(first.status).toBe(503);
-    expect((await first.json()) as any).toMatchObject({
-      status: "ambiguous",
-      retryable: true,
-    });
-
-    const disconnectOne = await api.request(
-      `/v1/workspaces/${workspaceId}/codex/accounts/${account.id}`,
-      { method: "DELETE", headers: { cookie: OWNER_COOKIE } },
-    );
-    expect(disconnectOne.status).toBe(409);
-    const disconnectAll = await api.request(`/v1/workspaces/${workspaceId}/codex`, {
-      method: "DELETE",
-      headers: { cookie: OWNER_COOKIE },
-    });
-    expect(disconnectAll.status).toBe(409);
-
-    // A second authenticated browser session for the same owning human has no
-    // local/sessionStorage hint. The owner-scoped overview is the discovery
-    // authority and returns the exact durable attempt id without provider keys.
-    const rotatedOverview = await api.request(`/v1/workspaces/${workspaceId}/codex/overview`, {
-      headers: { cookie: ROTATED_OWNER_COOKIE },
-    });
-    expect(rotatedOverview.status).toBe(200);
-    const rotatedBody = (await rotatedOverview.json()) as any;
-    expect(rotatedBody.accounts[account.id].redemptions).toContainEqual(
-      expect.objectContaining({
+        ),
+        chatgptAccountId: `session-rotation-${crypto.randomUUID()}`,
+        scopes: null,
+        planType: "pro",
+        isFedramp: false,
+        expiresAt: new Date(Date.now() + 60 * 60_000),
+        lastRefreshAt: new Date(),
+        connectedBySubjectId: `user:${OWNER_USER_ID}`,
+      });
+      const attemptId = crypto.randomUUID();
+      const firstPreparation = await prepare(
+        api,
+        workspaceId,
+        account.id,
+        "credit-ambiguous",
         attemptId,
-        creditId: "credit-ambiguous",
-        status: "provider_started",
-        outcome: null,
-      }),
-    );
+      );
+      const redeem = (confirmationToken: string, headers = browserHeaders()) =>
+        api.request(
+          `/v1/workspaces/${workspaceId}/codex/accounts/${account.id}/reset-credits/redeem`,
+          {
+            method: "POST",
+            headers,
+            body: JSON.stringify({
+              attemptId,
+              creditId: "credit-ambiguous",
+              confirmationToken,
+              confirmation: "REDEEM_USAGE_LIMIT_RESET",
+            }),
+          },
+        );
+      const first = await redeem(firstPreparation.body.confirmationToken);
+      expect(first.status).toBe(503);
+      expect((await first.json()) as any).toMatchObject({
+        status: "ambiguous",
+        retryable: true,
+      });
 
-    // The rotated session asks for a fresh five-minute confirmation and adopts
-    // the same logical attempt. Durable provider_started state skips a new
-    // availability preflight and reuses the one server key.
-    const resumedPreparation = await prepare(
-      api,
-      workspaceId,
-      account.id,
-      "credit-ambiguous",
-      attemptId,
-      browserHeaders(ROTATED_OWNER_COOKIE),
-    );
-    expect(resumedPreparation.body.resumable).toBe(true);
-    expect(resumedPreparation.body.recoveryStatus).toBe("provider_started");
-    const second = await redeem(
-      resumedPreparation.body.confirmationToken,
-      browserHeaders(ROTATED_OWNER_COOKIE),
-    );
-    expect(second.status).toBe(200);
-    expect((await second.json()) as any).toMatchObject({
-      status: "completed",
-      outcome: "alreadyRedeemed",
-      overview: null,
-    });
-    const bodies = provider.consumeBodies.filter((body) => body.credit_id === "credit-ambiguous");
-    expect(bodies).toHaveLength(2);
-    expect(new Set(bodies.map((body) => body.redeem_request_id)).size).toBe(1);
-  }, 60_000);
+      if (disconnect) {
+        const consumedBeforeDisconnect = provider.consumeBodies.length;
+        const disconnectOne = await api.request(
+          `/v1/workspaces/${workspaceId}/codex/accounts/${account.id}`,
+          { method: "DELETE", headers: { cookie: OWNER_COOKIE } },
+        );
+        expect(disconnectOne.status).toBe(200);
+        const disconnectAll = await api.request(`/v1/workspaces/${workspaceId}/codex`, {
+          method: "DELETE",
+          headers: { cookie: OWNER_COOKIE },
+        });
+        expect(disconnectAll.status).toBe(200);
+        const refused = await redeem(firstPreparation.body.confirmationToken);
+        expect(refused.status).toBeGreaterThanOrEqual(400);
+        expect(provider.consumeBodies).toHaveLength(consumedBeforeDisconnect);
+        const [durable] = await admin`
+        select status from codex_reset_redemption_attempts where id = ${attemptId}`;
+        expect(durable!.status).toBe("provider_started");
+        return;
+      }
 
-  test("an agent the owner signed in (organization MCP) can prepare and redeem as them", async () => {
+      // A second authenticated browser session for the same owning human has no
+      // local/sessionStorage hint. The owner-scoped overview is the discovery
+      // authority and returns the exact durable attempt id without provider keys.
+      const rotatedOverview = await api.request(`/v1/workspaces/${workspaceId}/codex/overview`, {
+        headers: { cookie: ROTATED_OWNER_COOKIE },
+      });
+      expect(rotatedOverview.status).toBe(200);
+      const rotatedBody = (await rotatedOverview.json()) as any;
+      expect(rotatedBody.accounts[account.id].redemptions).toContainEqual(
+        expect.objectContaining({
+          attemptId,
+          creditId: "credit-ambiguous",
+          status: "provider_started",
+          outcome: null,
+        }),
+      );
+
+      // The rotated session asks for a fresh five-minute confirmation and adopts
+      // the same logical attempt. Durable provider_started state skips a new
+      // availability preflight and reuses the one server key.
+      const resumedPreparation = await prepare(
+        api,
+        workspaceId,
+        account.id,
+        "credit-ambiguous",
+        attemptId,
+        browserHeaders(ROTATED_OWNER_COOKIE),
+      );
+      expect(resumedPreparation.body.resumable).toBe(true);
+      expect(resumedPreparation.body.recoveryStatus).toBe("provider_started");
+      const second = await redeem(
+        resumedPreparation.body.confirmationToken,
+        browserHeaders(ROTATED_OWNER_COOKIE),
+      );
+      expect(second.status).toBe(200);
+      expect((await second.json()) as any).toMatchObject({
+        status: "completed",
+        outcome: "alreadyRedeemed",
+        overview: null,
+      });
+      const bodies = provider.consumeBodies.filter((body) => body.credit_id === "credit-ambiguous");
+      expect(bodies).toHaveLength(2);
+      expect(new Set(bodies.map((body) => body.redeem_request_id)).size).toBe(1);
+    },
+    60_000,
+  );
+
+  test("an agent the owner signed in (organization MCP) cannot bypass the core browser-human reset fence", async () => {
     if (!available) return;
     const api = app();
     const access = await api.request("/v1/access/me", { headers: { cookie: OWNER_COOKIE } });
@@ -1869,18 +2028,16 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
     const consumedBefore = provider.consumeBodies.length;
     const attemptId = crypto.randomUUID();
     const prepared = await agentRequest("prepare", { attemptId, creditId: "credit-reset" });
-    expect(prepared.status).toBe(200);
-    const { confirmationToken } = (await prepared.json()) as { confirmationToken: string };
+    expect(prepared.status).toBe(403);
     expect(provider.consumeBodies.length).toBe(consumedBefore);
     const redeemed = await agentRequest("redeem", {
       attemptId,
       creditId: "credit-reset",
-      confirmationToken,
+      confirmationToken: "not-issued-to-agent",
       confirmation: "REDEEM_USAGE_LIMIT_RESET",
     });
-    expect(redeemed.status).toBe(200);
-    expect((await redeemed.json()) as any).toMatchObject({ status: "completed", outcome: "reset" });
-    expect(provider.consumeBodies.length).toBe(consumedBefore + 1);
+    expect(redeemed.status).toBe(403);
+    expect(provider.consumeBodies.length).toBe(consumedBefore);
 
     // The connection's access still bounds it: no connections:write, no redemption.
     const refused = await agentRequest(
@@ -1899,7 +2056,7 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
       },
     );
     expect(bearer.status).toBe(403);
-    expect(provider.consumeBodies.length).toBe(consumedBefore + 1);
+    expect(provider.consumeBodies.length).toBe(consumedBefore);
   }, 60_000);
 });
 

@@ -3252,20 +3252,6 @@ async function cancelSessionSubtreeInTransaction(
         turnGeneration: schema.sessionHumanInputRequests.turnGeneration,
         questions: schema.sessionHumanInputRequests.questions,
       });
-    await db
-      .update(schema.codexCapacityWaiters)
-      .set({
-        status: "superseded",
-        lastWakeReason: "session_cancelled",
-        updatedAt: now,
-      })
-      .where(
-        and(
-          eq(schema.codexCapacityWaiters.workspaceId, input.workspaceId),
-          inArray(schema.codexCapacityWaiters.blockedTurnId, immediatelyCancelledTurnIds),
-          eq(schema.codexCapacityWaiters.status, "waiting"),
-        ),
-      );
     // A core Codex waiter exists only while its turn waits; cancelling the
     // turn removes it (and its pending wake deliveries) in the same commit.
     await deleteSubscriptionCoreCodexWaitersForTurns(db, {

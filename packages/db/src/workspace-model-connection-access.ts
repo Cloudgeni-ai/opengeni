@@ -217,11 +217,14 @@ export async function assertModelConnectionAllowsTurn(
     query = sql`SELECT c.allowed_model_ids AS models FROM claude_subscription_credentials c
       JOIN revalidate_claude_subscription_authority(${input.workspaceId}::uuid, ${input.subjectId}, ${input.claudeCredentialId}::uuid, ${JSON.stringify(snapshot)}::jsonb) a ON a.id = c.id
       WHERE c.id = ${input.claudeCredentialId}::uuid AND c.status = 'active'`;
-  } else if (model.startsWith("codex/") || model.startsWith("supergrok/")) {
-    const codex = model.startsWith("codex/");
-    const id = codex ? input.codexCredentialId : input.xaiCredentialId;
+  } else if (model.startsWith("codex/")) {
+    // Codex must already have passed the exact core placement/lease boundary.
+    // Reaching this legacy-provider helper is not authority to dispatch it.
+    throw new Error("Codex model access requires shared-core placement");
+  } else if (model.startsWith("supergrok/")) {
+    const id = input.xaiCredentialId;
     if (!id) throw new Error("No subscription is available for this model");
-    query = sql`SELECT allowed_model_ids AS models FROM ${sql.identifier(codex ? "codex_subscription_credentials" : "xai_subscription_credentials")} WHERE id = ${id}::uuid`;
+    query = sql`SELECT allowed_model_ids AS models FROM xai_subscription_credentials WHERE id = ${id}::uuid`;
   } else if (
     model.startsWith("organization-gateway/") ||
     model.startsWith("organization-openrouter/") ||

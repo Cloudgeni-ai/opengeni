@@ -118,11 +118,18 @@ function payload(
   };
 }
 
-// These organizations have no Codex cutover row: the legacy routes run.
-// (The core-disposition routes are covered in codex-core-routes.test.ts.)
+// Public usage/settings shapes now run only through core compatibility projections.
 beforeEach(() => {
-  const cutover = spyOn(opengeniDb, "readCodexCutoverDisposition").mockResolvedValue("legacy");
-  restores.push(() => cutover.mockRestore());
+  const cutover = spyOn(opengeniDb, "readCodexCutoverDisposition").mockResolvedValue("core");
+  const alias = spyOn(opengeniDb, "resolveSubscriptionCoreCodexConnectionId").mockImplementation(
+    async (_db, input) => input.connectionId,
+  );
+  const wake = spyOn(opengeniDb, "deliverSubscriptionCoreCodexWake").mockResolvedValue(undefined);
+  restores.push(
+    () => cutover.mockRestore(),
+    () => alias.mockRestore(),
+    () => wake.mockRestore(),
+  );
 });
 const restores: Array<() => void> = [];
 afterEach(() => {
@@ -130,18 +137,26 @@ afterEach(() => {
 });
 
 function spyAccounts(rows: opengeniDb.CodexAccountStatus[]): void {
-  const spy = spyOn(opengeniDb, "listCodexAccountStatuses").mockResolvedValue(rows);
+  const spy = spyOn(opengeniDb, "getSubscriptionCoreCodexWorkspaceProjection").mockResolvedValue({
+    accounts: rows,
+    rotation: {
+      activeCredentialId: rows.find((row) => row.isActive)?.id ?? null,
+      rotationEnabled: true,
+      rotationStrategy: "sharded",
+    },
+    source: { effectiveSource: "workspace" },
+  } as never);
   restores.push(() => spy.mockRestore());
 }
 function spyUsage(
   byId: Record<string, CodexUsagePayload | (() => Promise<CodexUsagePayload>)>,
 ): void {
-  const spy = spyOn(opengeniDb, "fetchCodexUsageForAccount").mockImplementation(
+  const spy = spyOn(opengeniDb, "fetchSubscriptionCoreCodexUsage").mockImplementation(
     async (_db, _settings, _ws, id: string) => {
       const entry = byId[id];
-      if (typeof entry === "function") return entry();
+      if (typeof entry === "function") return { usage: await entry(), recovered: false };
       if (!entry) throw new Error(`unexpected usage fetch for ${id}`);
-      return entry;
+      return { usage: entry, recovered: false };
     },
   );
   restores.push(() => spy.mockRestore());
@@ -216,20 +231,7 @@ describe("GET /codex/accounts/:id/usage — single-account live read", () => {
 
 describe("GET /codex/usage — back-compat, repointed through the refreshing wrapper", () => {
   test("reads the active account via fetchCodexUsageForAccount (no stale-token 401)", async () => {
-    {
-      const spy = spyOn(opengeniDb, "getCodexCredentialStatus").mockResolvedValue({
-        connected: true,
-        credentialId: ID_A,
-        chatgptAccountId: "a",
-        scopes: null,
-        planType: "pro",
-        status: "active",
-        expiresAt: null,
-        lastRefreshAt: null,
-        lastError: null,
-      });
-      restores.push(() => spy.mockRestore());
-    }
+    spyAccounts([account(ID_A)]);
     spyUsage({ [ID_A]: payload("ok") });
     const res = await app().request(`/v1/workspaces/${WS}/codex/usage`, {
       headers: { authorization: await bearer(["workspace:read"]) },
@@ -240,10 +242,7 @@ describe("GET /codex/usage — back-compat, repointed through the refreshing wra
   });
 
   test("404s when no subscription is connected", async () => {
-    {
-      const spy = spyOn(opengeniDb, "getCodexCredentialStatus").mockResolvedValue(null);
-      restores.push(() => spy.mockRestore());
-    }
+    spyAccounts([]);
     const res = await app().request(`/v1/workspaces/${WS}/codex/usage`, {
       headers: { authorization: await bearer(["workspace:read"]) },
     });
@@ -254,42 +253,17 @@ describe("GET /codex/usage — back-compat, repointed through the refreshing wra
 // P3: PATCH /codex/settings — the rotation toggle/strategy write path. db accessors
 // are spied (poison db), so the route's validation + permission gate is what's tested.
 describe("PATCH /codex/settings — rotation settings", () => {
-  function spySettings(): {
-    ensure: ReturnType<typeof spyOn>;
-    update: ReturnType<typeof spyOn>;
-    mutation: ReturnType<typeof spyOn>;
-    source: ReturnType<typeof spyOn>;
-  } {
-    const source = spyOn(opengeniDb, "getWorkspaceCodexSubscriptionSource").mockResolvedValue({
-      accountId: ACCOUNT,
-      workspaceId: WS,
-      workspaceKind: "shared",
-      mode: "workspace",
-      effectiveSource: "workspace",
-      workspaceAvailable: true,
-      organizationAvailable: false,
-    });
-    const ensure = spyOn(opengeniDb, "ensureCodexRotationSettings").mockResolvedValue(undefined);
-    const update = spyOn(opengeniDb, "updateCodexRotationSettings").mockResolvedValue({
-      activeCredentialId: ID_A,
-      rotationEnabled: true,
-      rotationStrategy: "most_remaining",
-    });
-    const mutation = spyOn(opengeniDb, "withCodexCapacityMutation").mockImplementation(
-      async (_db, _input, mutate) => {
-        const result = await mutate({} as never);
-        return { result: result.result, wakeTargets: [] };
-      },
-    );
-    restores.push(() => ensure.mockRestore());
+  function spySettings() {
+    const update = spyOn(opengeniDb, "setSubscriptionCoreCodexRotation").mockResolvedValue({
+      rotation: { activeCredentialId: ID_A, rotationEnabled: true, rotationStrategy: "sharded" },
+      wake: null,
+    } as never);
     restores.push(() => update.mockRestore());
-    restores.push(() => mutation.mockRestore());
-    restores.push(() => source.mockRestore());
-    return { ensure, update, mutation, source };
+    return { update };
   }
 
   test("enables rotation and returns the effective settings", async () => {
-    const { ensure, update } = spySettings();
+    const { update } = spySettings();
     const res = await app().request(`/v1/workspaces/${WS}/codex/settings`, {
       method: "PATCH",
       headers: {
@@ -302,8 +276,12 @@ describe("PATCH /codex/settings — rotation settings", () => {
     const body = (await res.json()) as { rotationEnabled: boolean; rotationStrategy: string };
     expect(body.rotationEnabled).toBe(true);
     expect(body.rotationStrategy).toBe("sharded"); // sharded-rotation policy: the only effective strategy
-    expect(ensure).toHaveBeenCalledTimes(1);
-    expect(update).toHaveBeenCalledWith(expect.anything(), WS, { rotationEnabled: true });
+    expect(update).toHaveBeenCalledWith(expect.anything(), {
+      accountId: ACCOUNT,
+      workspaceId: WS,
+      subjectId: "tester",
+      rotationEnabled: true,
+    });
   });
 
   test("sharded-rotation policy: a strategy-only write is a deprecated no-op (200, db untouched)", async () => {
@@ -340,17 +318,9 @@ describe("PATCH /codex/settings — rotation settings", () => {
     expect(res.status).toBe(400);
   });
 
-  test("rejects workspace rotation mutations when the effective pool is organization-managed", async () => {
-    const { ensure, update, mutation, source } = spySettings();
-    source.mockResolvedValue({
-      accountId: ACCOUNT,
-      workspaceId: WS,
-      workspaceKind: "shared",
-      mode: "organization",
-      effectiveSource: "organization",
-      workspaceAvailable: false,
-      organizationAvailable: true,
-    });
+  test("returns the core not-found error without creating legacy settings", async () => {
+    const { update } = spySettings();
+    update.mockResolvedValue({ rotation: null, wake: null });
     const res = await app().request(`/v1/workspaces/${WS}/codex/settings`, {
       method: "PATCH",
       headers: {
@@ -359,10 +329,7 @@ describe("PATCH /codex/settings — rotation settings", () => {
       },
       body: JSON.stringify({ rotationEnabled: true }),
     });
-    expect(res.status).toBe(409);
-    expect(ensure).not.toHaveBeenCalled();
-    expect(update).not.toHaveBeenCalled();
-    expect(mutation).not.toHaveBeenCalled();
+    expect(res.status).toBe(404);
   });
 
   test("requires connections:write (read-only token is 403/401)", async () => {
@@ -379,10 +346,12 @@ describe("PATCH /codex/settings — rotation settings", () => {
   });
 });
 
-describe("PATCH /codex/source — active lease fencing", () => {
-  test("returns 409 when an active turn prevents changing the effective source", async () => {
-    const mutation = spyOn(opengeniDb, "setWorkspaceCodexSubscriptionMode").mockRejectedValue(
-      new Error("Codex subscription source cannot change while active turns are using it"),
+describe("PATCH /codex/source — core source refusal", () => {
+  test("retains 409 for the core personal-workspace source refusal", async () => {
+    const mutation = spyOn(opengeniDb, "setSubscriptionCoreWorkspaceCodexSource").mockRejectedValue(
+      new opengeniDb.SubscriptionCoreCodexSourceRefusedError(
+        "Codex source cannot change in personal workspaces",
+      ),
     );
     restores.push(() => mutation.mockRestore());
 
@@ -399,7 +368,7 @@ describe("PATCH /codex/source — active lease fencing", () => {
     expect(await res.json()).toMatchObject({
       error: {
         code: "conflict",
-        message: "Codex subscription source cannot change while active turns are using it",
+        message: "Codex source cannot change in personal workspaces",
         status: 409,
       },
     });

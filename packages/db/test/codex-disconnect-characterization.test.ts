@@ -11,14 +11,16 @@ import { acquireBlankTestDatabase, testSettings, type SharedTestDatabase } from 
 import {
   createDb,
   createSession,
-  disconnectOrganizationCodexAccount,
   encryptEnvironmentValue,
-  loadCodexCredentialForRun,
-  upsertOrganizationCodexSubscriptionCredential,
   withRlsContext,
   withSessionActivityRlsContext,
   type DbClient,
 } from "../src";
+import {
+  disconnectOrganizationCodexAccount,
+  loadCodexCredentialForRun,
+  upsertOrganizationCodexSubscriptionCredential,
+} from "./fixtures/legacy-codex";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 

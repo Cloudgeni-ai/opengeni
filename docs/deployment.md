@@ -4107,6 +4107,15 @@ The dormant core Codex writers (rolling migration 0688, after 0679 credit consen
 connect, disconnect and redemption keep working on the core once 0689
 enables the cutover.
 
+M3 PR 4 is a **runtime-only deletion**, not a cutover operation. Merging its
+source does not activate it. Start that binary only after the drained,
+codec-aware 0689 transaction has committed its receipt and the matching runtime
+readiness check succeeds. A missing or disabled Codex cutover row now means
+fail-closed maintenance; it must never consult the scrubbed legacy decision
+tables. Do not restart an older binary after scrub, remove a gate to recover,
+or bypass the receipt. Fix forward. Schema/columns, historical SQL, the codec
+stage, migration dispatch, seeding and readiness remain intact.
+
 Migrated logins without a verified signed-in upstream person remain separate;
 reconnect returns `identity_unverified` (409) rather than guessing which person
 owns them. An authorized administrator can disconnect the old login and then

@@ -1,7 +1,7 @@
 /**
  * Codex chat-turn placement on the shared subscription core (M3 PR 1,
  * inventory EP-T01..T05). Reached only when the organization's Codex cutover
- * row is enabled; the legacy selector is untouched for every other turn.
+ * row is enabled; missing or disabled cutover state fails closed.
  */
 import {
   armSubscriptionCoreCodexCapacityWait,

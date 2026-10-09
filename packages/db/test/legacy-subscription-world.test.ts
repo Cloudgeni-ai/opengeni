@@ -11,15 +11,29 @@ import {
   ensureManagedAccessForUser,
   getOrganizationPrivateSessionSettings,
   LegacyPlacementWorldDeadlineError,
-  loadLegacySubscriptionPlacementWorld,
+  loadLegacySubscriptionPlacementWorld as loadCurrentLegacyWorld,
   transitionSessionVisibility,
   updateOrganizationPrivateSessionSettings,
   withRlsContext,
   withSessionRlsActorContext,
   type DbClient,
-  type LegacyPlacementWorldRequest,
 } from "../src";
 import { rawRows } from "../src/database";
+import {
+  loadLegacySubscriptionPlacementWorld as loadHistoricalCodexWorld,
+  type LegacyPlacementWorldRequest,
+} from "./fixtures/legacy-subscription-world";
+
+// Codex is a historical migration fixture only. Claude/SuperGrok still exercise
+// the current executable shadow adapter, not its historical snapshot.
+function loadLegacySubscriptionPlacementWorld(
+  db: Parameters<typeof loadCurrentLegacyWorld>[0],
+  input: LegacyPlacementWorldRequest,
+) {
+  return input.provider === "codex"
+    ? loadHistoricalCodexWorld(db, input)
+    : loadCurrentLegacyWorld(db, { ...input, provider: input.provider });
+}
 
 // Real PostgreSQL under the restricted application role, so FORCE RLS applies.
 setDefaultTimeout(120_000);

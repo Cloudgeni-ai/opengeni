@@ -2,8 +2,10 @@ import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { acquireOwnerMigratedTestDatabase } from "@opengeni/testing";
+import { sql as query } from "drizzle-orm";
 import postgres from "postgres";
-import { createDb, createSession } from "../src/index";
+import { createDb, withSessionRlsActorContext } from "../src/index";
+import { withSessionActivityRlsContext } from "../src/database";
 import { LOSSLESS_CONTENT_WRITER_APPLICATION_NAME } from "../src/lossless-json";
 
 import { migrate } from "../src/migrate";
@@ -126,32 +128,6 @@ describe("migration 0264 connection authority runtime activation", () => {
           to_regprocedure('opengeni_private.capture_accepted_turn_connection_authorities_0264()') as retired_capture
       `;
       expect(historicalRoutines).toMatchObject({ current_capture: null, retired_capture: null });
-      // Current session adapters select the complete sessions row while this
-      // fixture intentionally withholds 0402/0598/0608. Supply only reader columns
-      // during fixture setup, then remove them before the ordered replay.
-      await sql`
-        alter table sessions
-        add column imported_archive_import_id text,
-        add column imported_archive_imported_at timestamptz,
-        add column imported_archive_request_hash text,
-        add column imported_archive_subject_id text,
-        add column imported_archive_next_offset integer,
-        add column keep_live boolean not null default false,
-        add column content_archive_state text,
-        add column content_archive_started_at timestamptz,
-        add column content_archived_at timestamptz,
-        add column content_archive jsonb,
-        add column content_archive_purged_at timestamptz,
-        add column scope_subject_id text,
-        add column input_wait_turn_id uuid,
-        add column input_wait_until timestamptz,
-        add column input_wait_reason text,
-        add column input_wait_set_at timestamptz,
-        add column execution_context_turn_id uuid,
-        add column initial_claude_provider_account_authority_snapshot jsonb
-          not null default '{"version":1,"scope":"workspace"}'::jsonb
-      `;
-
       const [account] = await sql<{ id: string }[]>`
         insert into managed_accounts (name) values ('connection cutover drain') returning id
       `;
@@ -189,25 +165,37 @@ describe("migration 0264 connection authority runtime activation", () => {
         `;
         return row!;
       });
+      // This is a pre-0264 row, not a current runtime create. The current
+      // mapper requires subscription-core tables deliberately withheld here.
+      // Seed historical facts directly; do not add fake current reader columns
+      // or restore a production legacy fallback to construct this fixture.
+      const session = { id: crypto.randomUUID() };
       const cutoverClient = createDb(blank.adminUrl, { max: 1 });
-      const session = await createSession(cutoverClient.db, {
-        accountId: account!.id,
-        workspaceId: target!.id,
-        initialMessage: "pre-activation authority",
-        resources: [],
-        tools: [],
-        metadata: {},
-        createdBy: { kind: "subject", subjectId },
-        model: "test-model",
-        reasoningEffort: "medium" as const,
-        latencyMode: "standard" as const,
-        sandboxBackend: "none",
-        subjectId,
-        // This is pre-0264 work, not fresh subscription selection. 0598 is
-        // withheld with its scheduled-ledger prerequisites in the shared tail.
-        initialClaudeProviderAccountAuthoritySnapshot: { version: 1, scope: "workspace" },
-      });
-      await cutoverClient.close();
+      try {
+        await withSessionRlsActorContext({ subjectId }, () =>
+          withSessionActivityRlsContext(
+            cutoverClient.db,
+            { accountId: account!.id, workspaceId: target!.id },
+            (tx) =>
+              tx.execute(query`
+          insert into sessions (
+            id, account_id, workspace_id, initial_message, model, sandbox_backend,
+            reasoning_effort, latency_mode,
+            sandbox_group_id, tool_policy, root_session_id, nested_agent_depth,
+            effective_max_nested_agent_depth, nested_agent_depth_policy_source,
+            nested_agent_depth_policy_session_id, created_by_kind, created_by_subject_id
+          ) values (
+            ${session.id}, ${account!.id}, ${target!.id}, 'pre-activation authority',
+            'test-model', 'none', 'medium', 'standard', ${session.id},
+            ${JSON.stringify({ mode: "workspace_default", inheritedFromSessionId: null })}::jsonb,
+            ${session.id}, 0, 5, 'session', ${session.id}, 'subject', ${subjectId}
+          )
+        `),
+          ),
+        );
+      } finally {
+        await cutoverClient.close();
+      }
       const explicitDelegation = [
         {
           serverId: "example",
@@ -334,27 +322,6 @@ describe("migration 0264 connection authority runtime activation", () => {
         await appSql.end({ timeout: 1 });
       }
 
-      await sql`
-        alter table sessions
-        drop column imported_archive_import_id,
-        drop column imported_archive_imported_at,
-        drop column imported_archive_request_hash,
-        drop column imported_archive_subject_id,
-        drop column imported_archive_next_offset,
-        drop column keep_live,
-        drop column content_archive_state,
-        drop column content_archive_started_at,
-        drop column content_archived_at,
-        drop column content_archive,
-        drop column content_archive_purged_at,
-        drop column scope_subject_id,
-        drop column input_wait_turn_id,
-        drop column input_wait_until,
-        drop column input_wait_reason,
-        drop column input_wait_set_at,
-        drop column execution_context_turn_id,
-        drop column initial_claude_provider_account_authority_snapshot
-      `;
       await migrateFixture();
       await owner`
         alter table sessions force row level security;

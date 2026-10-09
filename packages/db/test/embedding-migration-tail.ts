@@ -162,4 +162,6 @@ export const embeddingMigrationTail = [
   "0698_codex_ownerless_person_turns.sql",
   // Patches the request guard after 0697.
   "0699_codex_recovery_after_interrupted_attempt.sql",
+  // Completes ownerless refresh authorization in withheld 0667.
+  "0700_codex_ownerless_person_refresh.sql",
 ];

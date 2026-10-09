@@ -1,26 +1,27 @@
-import { afterAll, beforeAll, describe, expect, setDefaultTimeout, spyOn, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import type { Settings } from "@opengeni/config";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
-import * as db from "../src";
 import {
   claimSessionWorkForAttempt,
   createDb,
   createSession,
   enqueueSessionTurn,
-  ensureCodexRotationSettings,
   ensureManagedAccessForUser,
   getSubscriptionCoreCodexCurrentSelections,
   getWorkspaceConnectionModelRestrictions,
   isCodexBilledTurn,
   listSubscriptionCoreCodexServingConnections,
-  setInitialActiveCodexCredential,
   subscriptionCoreCodexConnectionAllowlist,
   subscriptionCoreCodexConnectionAllowsModel,
-  upsertCodexSubscriptionCredential,
   withSessionRlsActorContext,
   workspaceCodexSubscriptionActive,
   type DbClient,
 } from "../src";
+import {
+  ensureCodexRotationSettings,
+  setInitialActiveCodexCredential,
+  upsertCodexSubscriptionCredential,
+} from "./fixtures/legacy-codex";
 import { encryptEnvironmentValue } from "../src/environment-crypto";
 
 // Codex readiness after the drained cutover (0680): every organization is
@@ -306,8 +307,7 @@ describe.skipIf(!realDb)("Codex readiness on the shared core after the cutover",
     ]);
     // Subjectless readers see the same shared capacity.
     expect((await serving(org, ws, null)).map((row) => row.connectionId)).toEqual([connectionId]);
-    const legacyList = spyOn(db, "listCodexAccountStatuses");
-    try {
+    {
       expect(await workspaceCodexSubscriptionActive(client!.db, settings, ws)).toBe(true);
       expect(
         await isCodexBilledTurn({ db: client!.db, settings, workspaceId: ws, model: MODEL }),
@@ -318,9 +318,6 @@ describe.skipIf(!realDb)("Codex readiness on the shared core after the cutover",
         org.ownerSubjectId,
       );
       expect(restrictions["codex/"]).toBeNull();
-      expect(legacyList).not.toHaveBeenCalled();
-    } finally {
-      legacyList.mockRestore();
     }
   });
 
@@ -330,10 +327,10 @@ describe.skipIf(!realDb)("Codex readiness on the shared core after the cutover",
     // A legacy credential written in the pre-cutover world, then the row returns.
     await setCutover(org, null);
     await legacyCredential(org, ws);
-    expect(await workspaceCodexSubscriptionActive(client!.db, settings, ws)).toBe(true);
+    expect(await workspaceCodexSubscriptionActive(client!.db, settings, ws)).toBe(false);
     expect(
       (await getWorkspaceConnectionModelRestrictions(client!.db, ws, org.ownerSubjectId))["codex/"],
-    ).toBeNull();
+    ).toEqual([]);
     await setCutover(org, true);
     expect(await workspaceCodexSubscriptionActive(client!.db, settings, ws)).toBe(false);
     expect(
@@ -350,8 +347,7 @@ describe.skipIf(!realDb)("Codex readiness on the shared core after the cutover",
     const ws = org.sharedWorkspaceId;
     await sharedConnection(org, "shared-maintenance");
     await setCutover(org, false);
-    const legacyList = spyOn(db, "listCodexAccountStatuses");
-    try {
+    {
       expect(await serving(org, ws, org.ownerSubjectId)).toEqual([]);
       expect(await workspaceCodexSubscriptionActive(client!.db, settings, ws)).toBe(false);
       expect(
@@ -362,9 +358,6 @@ describe.skipIf(!realDb)("Codex readiness on the shared core after the cutover",
           "codex/"
         ],
       ).toEqual([]);
-      expect(legacyList).not.toHaveBeenCalled();
-    } finally {
-      legacyList.mockRestore();
     }
   });
 

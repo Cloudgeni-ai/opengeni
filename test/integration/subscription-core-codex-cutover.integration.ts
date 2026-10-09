@@ -20,7 +20,6 @@ import {
   type OwnerMigratedTestDatabase,
 } from "@opengeni/testing";
 import {
-  armCodexCapacityWait,
   claimSessionWorkForAttempt,
   createDb,
   createSession,
@@ -30,10 +29,12 @@ import {
   withSessionRlsActorContext,
   type DbClient,
 } from "@opengeni/db";
+import { armCodexCapacityWait } from "../../packages/db/test/fixtures/legacy-codex";
 import { migrate } from "../../packages/db/src/migrate";
 import { provisionRoles } from "../../packages/db/src/provision-roles";
 import { encryptEnvironmentValue } from "../../packages/db/src/environment-crypto";
 import { createCodexCapacityActivities } from "../../apps/worker/src/activities/codex-capacity";
+import { createHistoricalCodexCapacityPeek } from "../../apps/worker/test/fixtures/legacy-codex/peek";
 
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const MIGRATION = "0689_subscription_core_codex_cutover.sql";
@@ -191,7 +192,9 @@ describe.skipIf(!realDb)(
 
       // The legacy peek activity completes before the migration; its result
       // is what the workflow history records.
-      const recorded = await activities().getCodexCapacityWait({
+      const recorded = await createHistoricalCodexCapacityPeek(
+        async () => ({ db: client!.db }) as never,
+      ).getCodexCapacityWait({
         accountId,
         workspaceId,
         sessionId: session.id,

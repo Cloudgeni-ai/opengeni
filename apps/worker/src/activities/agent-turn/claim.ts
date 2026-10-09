@@ -4,7 +4,6 @@ import { FILESYSTEM_DISCONTINUITY_PROTOCOL } from "./recovery-warning";
 import {
   claimCodexActiveFromCutover,
   claimMayResolveCoreCodexApps,
-  claimMayResolveLegacyCodexApps,
   readClaimCodexCutoverState,
   readSubscriptionLeaseBusyChain,
   type ClaimCodexCutoverState,
@@ -16,7 +15,6 @@ import {
   getHumanInputResumeForEvent,
   getInteractionInterventionResumeForEvent,
   installOrReadTurnExecutionPolicyForAttempt,
-  workspaceCodexSubscriptionActive,
   requireSession,
   type AppendEventInput,
   type ApiIntegrationRuntime,
@@ -124,7 +122,6 @@ export type ClaimTurnOk = {
   credentialSubjectId: string | undefined;
   fileAuthoritySubjectId: string | null;
   capabilitySettings: Settings;
-  codexAppsCredentialId: string | null;
   /** The core Codex Apps designation (enabled Codex cutover only). */
   codexAppsCoreConnectionId?: string | null;
   turnExecutionPolicy: TurnExecutionPolicyV1;
@@ -289,25 +286,22 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   let installedApiIntegrations: readonly ApiIntegrationRuntime[] = [];
   const credentialSubjectId = credentialSubjectIdForTurnInitiator(turn);
   const fileAuthoritySubjectId = turn.initiatingHumanSubjectId ?? null;
-  // An organization whose Codex cutover row exists (enabled or disabled)
-  // reads no legacy Codex table at claim. The row is read once, with the
-  // legacy read's bounded retry, and serves the capability overlay, the Apps
-  // designation and the Codex availability below.
+  // Resolve the core gate once with bounded retry. Missing or disabled is
+  // maintenance; no claim path consults retired Codex decision state.
   let codexCutoverRead: Promise<ClaimCodexCutoverState> | null = null;
   const codexCutoverState = () =>
     (codexCutoverRead ??= readClaimCodexCutoverState(db, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
     }));
-  // The Apps designation for this claim, resolved once: legacy without a
-  // cutover row, the core designation (rechecked by the database on every
-  // Apps request) with an enabled one, none with a disabled one. The
+  // The core Apps designation is rechecked by the database on every request;
+  // missing or disabled cutover state resolves none. The
   // organization and cutover are known here, so neither is read again.
   const codexAppsDesignationRead = deploymentCatalogSettings.codexConnectedAppsEnabled
     ? resolveCodexAppsDesignationForRun(db, input.workspaceId, {
         accountId: input.accountId,
         disposition: codexCutoverState().then((cutover) =>
-          cutover === "not_configured" ? "legacy" : cutover === "enabled" ? "core" : "maintenance",
+          cutover === "enabled" ? "core" : "maintenance",
         ),
       })
     : Promise.resolve(null);
@@ -349,21 +343,11 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   // Read the active-credential flag once for the runtime capability overlay.
   // Accepted billing/provider identity comes from the turn policy below,
   // never from this mutable health snapshot.
-  // An organization whose Codex cutover row exists (enabled or disabled)
-  // reads no legacy Codex table at claim. For its accepted Codex turns the
-  // shared core decides availability at placement, so the catalog provider is
-  // installed when the cutover is enabled; a disabled cutover fails closed at
-  // placement. Every other turn of such an organization (another model, or a
-  // turn without a stored policy) installs the same overlay by the same rule:
-  // after 0680 the legacy tables are frozen and must not decide it. The row
-  // is read once, with the legacy read's bounded retry.
-  const codexActive = mcpSettings.codexSubscriptionEnabled
+  // Shared-core placement decides accepted-turn availability. The catalog
+  // overlay is installed only with an enabled cutover, for every turn model.
+  const codexSubscriptionActive = mcpSettings.codexSubscriptionEnabled
     ? claimCodexActiveFromCutover(await codexCutoverState())
-    : "read_legacy";
-  const codexSubscriptionActive =
-    codexActive === "read_legacy"
-      ? await workspaceCodexSubscriptionActive(db, mcpSettings, input.workspaceId, turn.id)
-      : codexActive;
+    : false;
   const codexSettings = await settingsWithCodexCredential(
     db,
     input.workspaceId,
@@ -412,10 +396,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   if (selectedDirectConnection) {
     capabilitySettings = withDirectModelProviders(capabilitySettings, [selectedDirectConnection]);
   }
-  // No turn of an organization with a Codex cutover row, whatever its model,
-  // resolves the legacy Apps designation. With an enabled cutover the core
-  // designation (rechecked by the database on every Apps request) is used; a
-  // disabled cutover resolves none.
+  // Reuse the exact core designation already resolved above.
   const codexAppsDesignation = capabilitySettings.codexConnectedAppsEnabled
     ? await codexAppsDesignationRead
     : null;
@@ -426,14 +407,6 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       cutover: await codexCutoverState(),
     })
       ? codexAppsDesignation.connectionId
-      : null;
-  const codexAppsCredentialId =
-    codexAppsDesignation?.source === "legacy" &&
-    claimMayResolveLegacyCodexApps({
-      codexConnectedAppsEnabled: true,
-      cutover: await codexCutoverState(),
-    })
-      ? codexAppsDesignation.credentialId
       : null;
   const candidatePolicy =
     claimedPolicy.kind === "valid"
@@ -825,7 +798,6 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       credentialSubjectId,
       fileAuthoritySubjectId,
       capabilitySettings,
-      codexAppsCredentialId,
       codexAppsCoreConnectionId,
       turnExecutionPolicy,
       trigger,

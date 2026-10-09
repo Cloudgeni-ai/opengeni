@@ -4,9 +4,8 @@ import { randomBytes } from "node:crypto";
 import type postgres from "postgres";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
 import { CODEX_TOKEN_URL, CODEX_WHAM_BASE } from "@opengeni/codex";
+import { createDb, encryptEnvironmentValue, type Database, type DbClient } from "../src/index";
 import {
-  createDb,
-  encryptEnvironmentValue,
   ensureCodexRotationSettings,
   fetchCodexUsageForAccount,
   getCodexCredentialStatus,
@@ -15,9 +14,7 @@ import {
   setActiveCodexCredential,
   setCodexCredentialExhausted,
   upsertCodexSubscriptionCredential,
-  type Database,
-  type DbClient,
-} from "../src/index";
+} from "./fixtures/legacy-codex";
 
 // P2 usage cache + the refreshing per-account usage wrapper, under a NON-superuser
 // role so FORCE RLS genuinely applies. fetchCodexUsageForAccount drives the SHARED

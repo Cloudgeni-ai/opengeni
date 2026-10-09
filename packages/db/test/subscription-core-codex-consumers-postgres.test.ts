@@ -318,7 +318,7 @@ function authorizationCases(harness: "template" | "owner-migrated") {
     const org = await organization();
     const connectionId = await sharedConnection(org, "gate-off");
     await seedHistoricalAppsDesignation(org, connectionId);
-    expect(await readCodexCutoverDisposition(client!.db, org.accountId)).toBe("legacy");
+    expect(await readCodexCutoverDisposition(client!.db, org.accountId)).toBe("maintenance");
     const scope = { accountId: org.accountId, workspaceId: org.sharedWorkspaceId };
     expect(await resolveSubscriptionCoreCodexAppsDesignation(client!.db, scope)).toBeNull();
     expect(await readCredential(org, org.sharedWorkspaceId, connectionId)).toEqual([]);

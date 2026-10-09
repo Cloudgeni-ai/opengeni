@@ -40,10 +40,7 @@ import type {
   SubscriptionConnection,
   SubscriptionQuota,
 } from "@opengeni/subscriptions";
-import {
-  codexPlanExcludesModel,
-  readCodexPlanEntitlementExclusion,
-} from "./codex-plan-entitlement";
+
 import {
   currentSessionRlsActorInitiatingHumanSubjectId,
   rawRows,
@@ -52,9 +49,8 @@ import {
   type Database,
 } from "./database";
 
-export type LegacySubscriptionProvider = "codex" | "xai" | "claude";
+export type LegacySubscriptionProvider = "xai" | "claude";
 export const LEGACY_SUBSCRIPTION_PROVIDERS: readonly LegacySubscriptionProvider[] = [
-  "codex",
   "xai",
   "claude",
 ];
@@ -117,7 +113,6 @@ export class LegacyPlacementWorldDeadlineError extends Error {
 export type LegacyPlacementInputs = {
   /** The pool the legacy selector uses for this turn. */
   source: "workspace" | "organization" | "user" | "disabled";
-  codexMode: "automatic" | "workspace" | "organization" | "disabled" | null;
   rotationEnabled: boolean | null;
   activeConnectionId: string | null;
   pin: { connectionId: string; source: "manual" | "policy" } | null;
@@ -137,38 +132,12 @@ export type LegacyPlacementWorldResult =
 type SessionRow = {
   visibility: string;
   owner_subject_id: string | null;
-  codex_pinned_credential_id: string | null;
-  codex_pin_source: string | null;
-  codex_last_credential_id: string | null;
   codex_compaction_mode: string;
   workspace_kind: string | null;
-  codex_mode: string | null;
   allowed_providers: string[] | null;
   allowed_models: string[] | null;
   has_model_policy: boolean;
   last_model_call_at: Date | string | null;
-};
-
-type CodexCredentialRow = {
-  id: string;
-  workspace_id: string | null;
-  authority_scope: string;
-  owner_organization_membership_id: string | null;
-  status: string;
-  allocator_enabled: boolean;
-  allowed_model_ids: string[] | null;
-  allowed_workspace_ids: string[] | null;
-  allow_personal_workspaces: boolean;
-  plan_type: string | null;
-  plan_entitlement_exclusion: unknown;
-  primary_used_percent: number | null;
-  primary_reset_at: Date | string | null;
-  secondary_used_percent: number | null;
-  secondary_reset_at: Date | string | null;
-  usage_checked_at: Date | string | null;
-  exhausted_until: Date | string | null;
-  exhausted_kind: string | null;
-  version: number;
 };
 
 type PoolCredentialRow = {
@@ -346,13 +315,9 @@ export async function loadLegacySubscriptionPlacementWorld(
         return await rawRows<T>(scoped, query);
       };
       const sessionRows = await read<SessionRow>(sql`
-        select s.visibility, s.owner_subject_id, s.codex_pinned_credential_id,
-          s.codex_pin_source, s.codex_last_credential_id, s.codex_compaction_mode,
+        select s.visibility, s.owner_subject_id, s.codex_compaction_mode,
           get_workspace_kind(${request.accountId}::uuid, ${request.workspaceId}::uuid)
             as workspace_kind,
-          (select preference.mode from workspace_codex_subscription_preferences preference
-            where preference.account_id = ${request.accountId}::uuid
-              and preference.workspace_id = ${request.workspaceId}::uuid) as codex_mode,
           -- The workspace's own policy, else its organization's default.
           case when policy.workspace_id is not null then policy.allowed_providers
             else organization_defaults.allowed_providers end as allowed_providers,
@@ -406,153 +371,14 @@ export async function loadLegacySubscriptionPlacementWorld(
       let rotation: RotationSetting | null = null;
       let rotationRow: RotationRow | undefined;
       let source: LegacyPlacementInputs["source"];
-      let codexMode: LegacyPlacementInputs["codexMode"] = null;
       let pin: LegacyPlacementInputs["pin"] = null;
       let lastConnectionId: string | null = null;
       let poolOrder: string[] = [];
       let truncated = false;
-      let providerSwitches: PlacementInput["settings"]["providers"] = {};
+      const providerSwitches: PlacementInput["settings"]["providers"] = {};
       let hasLocalAccounts = false;
 
-      if (provider === "codex") {
-        const mode = (session.codex_mode ?? "automatic") as NonNullable<
-          LegacyPlacementInputs["codexMode"]
-        >;
-        codexMode = mode;
-        // The turn's frozen accepted source, else today's effective source.
-        const [accepted_] = await read<{ source: string | null }>(sql`
-          select coalesce(
-            (select coalesce(
-                turn.metadata -> 'codexCredentialPolicySnapshotV1' ->> 'source',
-                (select binding.source from codex_turn_source_bindings binding
-                  where binding.turn_id = turn.id))
-              from session_turns turn
-              where turn.workspace_id = ${request.workspaceId}::uuid
-                and turn.session_id = ${request.sessionId}::uuid
-                and turn.id = ${request.turnId}::uuid),
-            resolve_workspace_codex_subscription_source(
-              ${request.accountId}::uuid, ${request.workspaceId}::uuid)
-          ) as source
-        `);
-        const accepted = accepted_?.source ?? "workspace";
-        source =
-          accepted === "organization" || accepted === "disabled"
-            ? accepted
-            : ("workspace" as const);
-        const rows = await read<CodexCredentialRow>(sql`
-          select id, workspace_id, authority_scope, owner_organization_membership_id, status,
-            allocator_enabled, allowed_model_ids, allowed_workspace_ids,
-            allow_personal_workspaces, plan_type, plan_entitlement_exclusion,
-            primary_used_percent, primary_reset_at, secondary_used_percent, secondary_reset_at,
-            usage_checked_at, exhausted_until, exhausted_kind, version
-          from codex_subscription_credentials
-          where account_id = ${request.accountId}::uuid
-            and ((workspace_id = ${request.workspaceId}::uuid
-                  and authority_scope in ('workspace', 'user'))
-              or (authority_scope = 'organization' and organization_id = ${request.accountId}::uuid))
-          order by created_at, id
-          limit ${LEGACY_WORLD_MAX_CONNECTIONS + 1}
-        `);
-        truncated = rows.length > LEGACY_WORLD_MAX_CONNECTIONS;
-        const bounded = rows.slice(0, LEGACY_WORLD_MAX_CONNECTIONS);
-        const local = bounded.filter((row) => row.authority_scope !== "organization");
-        // As resolve_workspace_codex_subscription_source counts them.
-        hasLocalAccounts = local.length > 0;
-        poolOrder = (
-          source === "organization"
-            ? bounded.filter((row) => row.authority_scope === "organization")
-            : source === "workspace"
-              ? local
-              : []
-        ).map((row) => row.id);
-        connections = bounded.map((row) => {
-          const observed = epoch(row.usage_checked_at) !== null;
-          const exhaustedUntil = epoch(row.exhausted_until);
-          const quota: SubscriptionQuota = {
-            windows: [
-              windowFor("primary", row.primary_used_percent, epoch(row.primary_reset_at), observed),
-              windowFor(
-                "secondary",
-                row.secondary_used_percent,
-                epoch(row.secondary_reset_at),
-                observed,
-              ),
-            ],
-            modelCooldowns: {},
-            exhaustedUntil,
-            exhaustedKind:
-              row.exhausted_kind === "quota" || row.exhausted_kind === "rate_limit"
-                ? row.exhausted_kind
-                : null,
-            revision: 0,
-            observedAt: epoch(row.usage_checked_at),
-            observedRefreshGeneration: row.version,
-            source: "usage_endpoint",
-          };
-          const excluded = codexPlanExcludesModel(
-            {
-              planType: row.plan_type,
-              planEntitlementExclusion: readCodexPlanEntitlementExclusion(
-                row.plan_entitlement_exclusion,
-              ),
-            },
-            request.productModelId,
-            request.now,
-          );
-          return {
-            id: row.id,
-            provider,
-            kind: "subscription",
-            ownership: legacyOwnership({
-              row,
-              workspaceId: request.workspaceId,
-              personalWorkspaceOwner,
-              userScopeOwner: null,
-              localAccountsUnassigned: mode === "organization",
-            }),
-            health: healthOf(row.status),
-            allocatorEnabled: row.allocator_enabled,
-            entitledModelIds: null,
-            excludedModelIds: excluded ? [request.productModelId] : [],
-            allowedModelIds: row.allowed_model_ids,
-            refreshGeneration: row.version,
-            quota,
-          };
-        });
-        const rotationRows = await read<RotationRow>(sql`
-          select 'workspace' as scope, active_credential_id, rotation_enabled
-            from codex_rotation_settings where workspace_id = ${request.workspaceId}::uuid
-          union all
-          select 'organization' as scope, active_credential_id, rotation_enabled
-            from organization_codex_rotation_settings where account_id = ${request.accountId}::uuid
-        `);
-        // Only the rows for the pool in effect are mapped (design 5.2).
-        const workspaceRotation = rotationRows.find((row) => row.scope === "workspace");
-        const organizationRotation = rotationRows.find((row) => row.scope === "organization");
-        rotationRow =
-          source === "organization"
-            ? organizationRotation
-            : source === "workspace"
-              ? workspaceRotation
-              : undefined;
-        const settingsRow =
-          mode === "organization" || (mode === "automatic" && !hasLocalAccounts)
-            ? organizationRotation
-            : workspaceRotation;
-        rotation = rotationOf(settingsRow);
-        if (mode === "workspace") {
-          providerSwitches = { codex: { useOrganizationAccounts: false, enabled: true } };
-        } else if (mode === "disabled") {
-          providerSwitches = { codex: { useOrganizationAccounts: true, enabled: false } };
-        }
-        const codexSession = request.legacySession ?? {
-          pinnedConnectionId: session.codex_pinned_credential_id,
-          pinSource: session.codex_pin_source,
-          lastConnectionId: session.codex_last_credential_id,
-        };
-        pin = pinOf(codexSession.pinnedConnectionId, codexSession.pinSource);
-        lastConnectionId = codexSession.lastConnectionId;
-      } else {
+      {
         const tables = POOL_TABLES[provider];
         const scope = request.authorityScope ?? "workspace";
         source = scope;
@@ -811,7 +637,6 @@ export async function loadLegacySubscriptionPlacementWorld(
         input,
         legacy: {
           source,
-          codexMode,
           rotationEnabled: rotationRow ? rotationRow.rotation_enabled : null,
           activeConnectionId: rotationRow?.active_credential_id ?? null,
           pin,
@@ -823,7 +648,7 @@ export async function loadLegacySubscriptionPlacementWorld(
         },
       } as const;
     },
-    request.provider === "codex" ? { accessMode: "read only" } : undefined,
+    undefined,
     "none",
   );
 }

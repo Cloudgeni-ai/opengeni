@@ -8,11 +8,9 @@ import {
 } from "@opengeni/core";
 import {
   acquireSubscriptionCoreCodexOperationLease,
-  buildCodexTokenResolver,
   buildSubscriptionCoreCodexConnectionTokenResolver,
   buildSubscriptionCoreCodexOperationFetch,
   getWorkspace,
-  listCodexAccountStatuses,
   listSubscriptionCoreCodexOperationCandidates,
   readCodexCutoverDisposition,
   releaseSubscriptionCoreCodexOperationLease,
@@ -24,13 +22,6 @@ import {
 import { fetchError, responseError } from "./openai";
 
 const TRANSCRIBE_URL = "https://chatgpt.com/backend-api/transcribe";
-
-async function workspaceHasActiveCodexAccount(db: Database, workspaceId: string): Promise<boolean> {
-  const account = (await listCodexAccountStatuses(db, workspaceId)).find(
-    (candidate) => candidate.isActive && candidate.status === "active",
-  );
-  return account != null;
-}
 
 /**
  * Once the shared-core Codex provider is selected, its failures are final for
@@ -225,7 +216,7 @@ export function createCodexSubscriptionTranscriptionProvider(input: {
         });
         return candidates.length > 0;
       }
-      return await workspaceHasActiveCodexAccount(input.db, context.workspaceId);
+      return false;
     });
   return {
     id: "codex-subscription",
@@ -244,87 +235,26 @@ export function createCodexSubscriptionTranscriptionProvider(input: {
     }) {
       const disposition = await readCodexCutoverDisposition(input.db, organizationId, workspaceId);
       if (disposition === "maintenance") throw coreTranscriptionUnavailable();
-      if (disposition === "core") {
-        return await transcribeOnCore(
-          { settings: input.settings, db: input.db, fetch: fetchImpl },
-          {
-            accountId: organizationId,
-            workspaceId,
-            subjectId,
-            requestId,
-            send: async (accessToken, chatgptAccountId, requestFetch) =>
-              await sendTranscription(requestFetch, {
-                accessToken,
-                chatgptAccountId,
-                audio,
-                mimeType,
-                filename,
-                requestId,
-                signal,
-              }),
-          },
-        );
-      }
-      const account = (await listCodexAccountStatuses(input.db, workspaceId)).find(
-        (candidate) => candidate.isActive && candidate.status === "active",
+
+      return await transcribeOnCore(
+        { settings: input.settings, db: input.db, fetch: fetchImpl },
+        {
+          accountId: organizationId,
+          workspaceId,
+          subjectId,
+          requestId,
+          send: async (accessToken, chatgptAccountId, requestFetch) =>
+            await sendTranscription(requestFetch, {
+              accessToken,
+              chatgptAccountId,
+              audio,
+              mimeType,
+              filename,
+              requestId,
+              signal,
+            }),
+        },
       );
-      if (!account) {
-        throw new TranscriptionServiceError({
-          fallbackSafe: true,
-          code: "unavailable",
-          message: "Transcription is unavailable.",
-        });
-      }
-      const resolver = buildCodexTokenResolver(input.db, input.settings, workspaceId, account.id);
-      let token: Awaited<ReturnType<typeof resolver.getToken>>;
-      try {
-        token = await resolver.getToken();
-      } catch {
-        throw new TranscriptionServiceError({
-          fallbackSafe: true,
-          code: "unavailable",
-          message: "Transcription is unavailable.",
-        });
-      }
-      const request = async (accessToken: string, accountId: string | null) => {
-        const form = new FormData();
-        form.append(
-          "file",
-          new Blob([Uint8Array.from(audio).buffer], { type: mimeType }),
-          filename,
-        );
-        return await fetchImpl(TRANSCRIBE_URL, {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-            ...(accountId ? { "ChatGPT-Account-ID": accountId } : {}),
-            originator: CODEX_ORIGINATOR,
-            "User-Agent": `${CODEX_ORIGINATOR}/${CODEX_CLIENT_VERSION}`,
-            version: CODEX_CLIENT_VERSION,
-            // Observability only; the upstream API is not treated as idempotent.
-            "x-opengeni-request-id": requestId,
-          },
-          body: form,
-          ...(signal ? { signal } : {}),
-        });
-      };
-      let response: Response;
-      try {
-        response = await request(token.accessToken, token.chatgptAccountId);
-        if (response.status === 401) {
-          token = await resolver.refresh();
-          response = await request(token.accessToken, token.chatgptAccountId);
-        }
-      } catch (error) {
-        throw fetchError(error);
-      }
-      if (!response.ok) throw responseError(response.status);
-      const body = await response.json().catch(() => null);
-      if (!body || typeof body.text !== "string") throw responseError(502);
-      return {
-        text: body.text,
-        languages: typeof body.language === "string" && body.language ? [body.language] : [],
-      };
     },
   };
 }

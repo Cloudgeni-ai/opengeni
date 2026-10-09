@@ -3,8 +3,6 @@ import {
   XAI_CREDENTIAL_LEASE_TTL_MS,
   CLAUDE_CREDENTIAL_LEASE_TTL_MS,
   heartbeatClaudeCredentialLeaseUntil,
-  heartbeatCodexCredentialLeaseUntil,
-  releaseCodexCredentialLease,
   releaseSubscriptionTurnLease,
   heartbeatXaiCredentialLeaseUntil,
   assertSubscriptionTurnLeaseCurrent,
@@ -81,15 +79,7 @@ export class CodexTurnLease extends SubscriptionTurnLease {
             ),
           );
         }
-        return heartbeatCodexCredentialLeaseUntil(
-          deps.db,
-          deps.accountId,
-          deps.workspaceId,
-          turnId,
-          holderId,
-          generation,
-          CODEX_CREDENTIAL_LEASE_TTL_MS,
-        );
+        return Promise.resolve(null);
       },
       lostError: (reason) => new CodexCredentialLeaseLostError(reason),
       onLost: (reason) => {
@@ -139,13 +129,7 @@ export class CodexTurnLease extends SubscriptionTurnLease {
     this.subscriptionCoreActor = actor ?? null;
   }
 
-  /** Keep legacy routing explicit when placement has not crossed cutover. */
-  useLegacyCodexLease(): void {
-    this.subscriptionCoreConnectionId = null;
-    this.subscriptionCoreActor = null;
-  }
-
-  /** The core connection this lease holds, or null on the legacy path. */
+  /** The core connection this lease holds, or null before placement. */
   get subscriptionCoreConnection(): string | null {
     return this.subscriptionCoreConnectionId;
   }
@@ -159,10 +143,9 @@ export class CodexTurnLease extends SubscriptionTurnLease {
   async assertCurrentForDispatch(): Promise<void> {
     this.assertUsable();
     const connectionId = this.subscriptionCoreConnectionId;
-    if (!connectionId) return;
     const turnId = this.codexDeps.getTurnId();
     const sessionId = this.codexDeps.getSessionId?.();
-    if (!turnId || !sessionId || !this.holderId || this.generation === null) {
+    if (!connectionId || !turnId || !sessionId || !this.holderId || this.generation === null) {
       this.markLost("not_found");
       this.assertUsable();
       return;
@@ -209,16 +192,7 @@ export class CodexTurnLease extends SubscriptionTurnLease {
     const turnId = this.codexDeps.getTurnId();
     if (!turnId || !this.holderId || this.generation === null) return false;
     const connectionId = this.subscriptionCoreConnectionId;
-    if (!connectionId) {
-      return await releaseCodexCredentialLease(
-        this.codexDeps.db,
-        this.codexDeps.accountId,
-        this.codexDeps.workspaceId,
-        turnId,
-        this.holderId,
-        this.generation,
-      );
-    }
+    if (!connectionId) return false;
     const sessionId = this.codexDeps.getSessionId?.();
     if (!sessionId) return false;
     return await this.inCoreScope(() =>

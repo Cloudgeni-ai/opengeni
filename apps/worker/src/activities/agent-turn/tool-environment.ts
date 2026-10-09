@@ -16,7 +16,6 @@ import {
   previewConnectorActionApproval,
   namedSubjectHasLiveWorkspaceAuthority,
   updateSessionTitleWithEvent,
-  codexAppsRequestAuth,
   subscriptionCoreCodexAppsRequestAuth,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
@@ -180,7 +179,6 @@ export type PrepareTurnToolRuntimeDeps = {
   fileAuthoritySubjectId: ClaimTurnOk["fileAuthoritySubjectId"];
   capabilitySettings: ClaimTurnOk["capabilitySettings"];
   installedApiIntegrations: ClaimTurnOk["installedApiIntegrations"];
-  codexAppsCredentialId: ClaimTurnOk["codexAppsCredentialId"];
   codexAppsCoreConnectionId?: ClaimTurnOk["codexAppsCoreConnectionId"];
   turnExecutionPolicy: ClaimTurnOk["turnExecutionPolicy"];
   trigger: ClaimTurnOk["trigger"];
@@ -409,7 +407,6 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     turn,
     session,
     installedApiIntegrations,
-    codexAppsCredentialId,
     codexAppsCoreConnectionId,
     turnExecutionPolicy,
     trigger,
@@ -566,20 +563,14 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     resolveCredential,
   });
   const localMcpServers = [...apiIntegrationMcpServers, ...githubRestMcp.localMcpServers];
-  // A core designation (enabled Codex cutover) and a legacy one are mutually
-  // exclusive: claim resolves at most one of them.
+  // Apps authorization is the exact core designation resolved at claim.
   const codexAppsAuth = codexAppsCoreConnectionId
     ? subscriptionCoreCodexAppsRequestAuth(db, runSettings, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
         connectionId: codexAppsCoreConnectionId,
       })
-    : codexAppsCredentialId
-      ? codexAppsRequestAuth(db, runSettings, {
-          workspaceId: input.workspaceId,
-          credentialId: codexAppsCredentialId,
-        })
-      : undefined;
+    : undefined;
   const linkedAuthority = await getExternalLinkTurnAuthorization(
     db,
     {

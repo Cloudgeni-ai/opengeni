@@ -4,15 +4,12 @@ import { configuredModels, withCodexCatalogProvider } from "@opengeni/config";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
 import { resolveDefaultSessionModel } from "@opengeni/core";
 import * as opengeniDb from "@opengeni/db";
+import { bootstrapWorkspace, createDb, encryptEnvironmentValue, type DbClient } from "@opengeni/db";
 import {
-  bootstrapWorkspace,
-  createDb,
-  encryptEnvironmentValue,
   ensureCodexRotationSettings,
   setInitialActiveCodexCredential,
   upsertCodexSubscriptionCredential,
-  type DbClient,
-} from "@opengeni/db";
+} from "../../../packages/db/test/fixtures/legacy-codex";
 import {
   acquireSharedTestDatabase,
   MemoryEventBus,
@@ -310,7 +307,7 @@ describe.skipIf(!realDb)("Codex model catalog and default after the cutover", ()
     expect(legacyAccounts).not.toHaveBeenCalled();
   }, 180_000);
 
-  test("without a cutover row the legacy readers decide, unchanged", async () => {
+  test("without a cutover row the catalog fails closed even with legacy rows", async () => {
     const fixture = await organization();
     await setCutover(fixture, null);
     // A core connection is invisible to the legacy path.
@@ -328,11 +325,11 @@ describe.skipIf(!realDb)("Codex model catalog and default after the cutover", ()
     for (const entry of codexEntries(after)) {
       expect({ id: entry.id, selectable: entry.availability.selectable }).toEqual({
         id: entry.id,
-        selectable: entry.id !== unserved.id,
+        selectable: false,
       });
     }
-    expect(after.defaultSelection?.source).toBe("subscription");
-    expect((await defaultModel(fixture)).source).toBe("subscription");
+    expect(after.defaultSelection?.source).not.toBe("subscription");
+    expect((await defaultModel(fixture)).source).not.toBe("subscription");
   }, 180_000);
 
   test("Codex connection access reads the core connection and refuses legacy writes", async () => {

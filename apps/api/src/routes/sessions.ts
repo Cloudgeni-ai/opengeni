@@ -25,7 +25,6 @@ import { SandboxRecoveryConflictError } from "@opengeni/db";
 import { codexAccountJson } from "./codex";
 import {
   deliverSubscriptionCoreCodexWake,
-  getSessionCodexAccounts,
   getSubscriptionCoreSessionCodexAccounts,
   pinSubscriptionCoreSessionCodexAccount,
 } from "@opengeni/db";
@@ -178,7 +177,6 @@ import {
   projectSessionForRelatedAccess,
   recordStreamAcknowledgment,
   requestSessionCompaction,
-  switchSessionCodexAccount,
   setSessionChannel,
   updateSessionVariableSets,
   ChannelNotFoundError,
@@ -2338,16 +2336,14 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     await requireAccessGrant(c, deps, workspaceId, "sessions:read");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
     // authorizeSessionHttp has already enforced private-session and agent scope.
-    const projection =
-      (await codexRouteDisposition(deps, grant.accountId)) === "core"
-        ? await getSubscriptionCoreSessionCodexAccounts(db, {
-            accountId: grant.accountId,
-            workspaceId,
-            sessionId: c.req.param("sessionId"),
-            // A turn on the viewer's own personal connection shows it to them.
-            viewerSubjectId: grant.subjectId,
-          })
-        : await getSessionCodexAccounts(db, workspaceId, c.req.param("sessionId"));
+    await codexRouteDisposition(deps, grant.accountId);
+    const projection = await getSubscriptionCoreSessionCodexAccounts(db, {
+      accountId: grant.accountId,
+      workspaceId,
+      sessionId: c.req.param("sessionId"),
+      // A turn on the viewer's own personal connection shows it to them.
+      viewerSubjectId: grant.subjectId,
+    });
     if (!projection) throw new HTTPException(404, { message: "session not found" });
     const activeAccountId = projection.rotation?.activeCredentialId ?? null;
     return c.json({
@@ -2395,60 +2391,23 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       }
     }
     const pinned = target === "auto" ? null : target;
-    if ((await codexRouteDisposition(deps, grant.accountId)) === "core") {
-      const core = await pinSubscriptionCoreSessionCodexAccount(db, {
-        accountId: grant.accountId,
-        workspaceId,
-        sessionId,
-        connectionId: pinned,
-        subjectId: grant.subjectId,
-      });
-      if (!core.result.changed) {
-        throw new HTTPException(404, { message: "session or codex account not found" });
-      }
-      await deliverSubscriptionCoreCodexWake(db, core.wake);
-      await publishDurableSessionEvents(bus, workspaceId, sessionId, core.result.events);
-      return c.json({
-        pinned: target === "auto" ? "auto" : target,
-        appliedTo: core.result.appliedTo,
-      });
-    }
-    const mutation = await switchSessionCodexAccount(db, {
+    await codexRouteDisposition(deps, grant.accountId);
+
+    const core = await pinSubscriptionCoreSessionCodexAccount(db, {
+      accountId: grant.accountId,
       workspaceId,
       sessionId,
-      credentialId: pinned,
+      connectionId: pinned,
       subjectId: grant.subjectId,
     });
-    const ok = mutation.result.changed;
-    if (!ok) {
-      throw new HTTPException(404, {
-        message: "session or codex account not found",
-      });
+    if (!core.result.changed) {
+      throw new HTTPException(404, { message: "session or codex account not found" });
     }
-    await Promise.allSettled(
-      mutation.wakeTargets.map((wake) =>
-        workflowClient.signalCodexCapacity
-          ? workflowClient.signalCodexCapacity({
-              accountId: wake.accountId,
-              workspaceId: wake.workspaceId,
-              sessionId: wake.sessionId,
-              workflowId: wake.workflowId,
-              wakeRevision: wake.wakeRevision,
-              workflowWakeRevision: wake.workflowWakeRevision,
-            })
-          : workflowClient.wakeSessionWorkflow({
-              accountId: wake.accountId,
-              workspaceId: wake.workspaceId,
-              sessionId: wake.sessionId,
-              workflowId: wake.workflowId,
-              wakeRevision: wake.workflowWakeRevision,
-            }),
-      ),
-    );
-    await publishDurableSessionEvents(bus, workspaceId, sessionId, mutation.result.events);
+    await deliverSubscriptionCoreCodexWake(db, core.wake);
+    await publishDurableSessionEvents(bus, workspaceId, sessionId, core.result.events);
     return c.json({
       pinned: target === "auto" ? "auto" : target,
-      appliedTo: mutation.result.appliedTo,
+      appliedTo: core.result.appliedTo,
     });
   });
 

@@ -40,6 +40,7 @@ const subscriptionCoreMigrations = [
   "0698_codex_ownerless_person_turns.sql",
   // Patches the request guard after 0697.
   "0699_codex_recovery_after_interrupted_attempt.sql",
+  "0700_codex_ownerless_person_refresh.sql",
 ] as const;
 const key = Buffer.alloc(32, 67);
 const ids = {
