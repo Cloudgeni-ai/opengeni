@@ -412,8 +412,10 @@ the operator without deleting durable evidence; see
 
 `CreateSessionRequest.firstPartyMcpTools` is an exact allowlist over the exported
 `FIRST_PARTY_MCP_TOOL_NAMES` catalog. Omission selects the safe default catalog,
-which excludes connector-wide `social_*`, `slack_bot_*` and `fiken_*` tools; those require
-explicit selection plus their normal connection permission. Historical native
+which excludes connector-wide `social_*` and `fiken_*` tools and most `slack_bot_*`
+tools. `slack_bot_list_channels`, `slack_bot_prepare_message`, and
+`slack_bot_send_prepared_message` are default-selected; other Slack bot tools
+require explicit selection plus their normal connection permission. Historical native
 `atlassian_*` names remain parseable but are excluded from execution; Atlassian
 agent access uses its hosted MCP connector. Explicit `[]` means
 no tools from the broad server. Unknown names fail validation. This field does
@@ -441,6 +443,16 @@ Repository discovery and browser connect status remain model-visible, but token
 minting and credential-file renewal stay host-side in the worker/runtime. No
 first-party MCP, Codemode, API, SDK, event, or audit projection returns a live
 installation token to the model or sandbox command surface.
+
+For a child, an explicit array replaces the entire inherited selection rather
+than adding to it, so omitted browser, computer, or scheduling names become
+unavailable even when needed by the task. Keep the selection omitted for an
+ordinary specialist.
+For a worker that must not start, message, or follow other sessions, use the
+existing `agent: { capabilities: { from: "all", subagents: false } }` and omit
+tool lists. Other parent-selected tools remain inherited, and the final answer
+still reaches the parent automatically. This guidance changes no inheritance,
+permission, or explicit-empty semantics and adds no tool-enablement UI.
 
 File and document resources are independent from this broad-server selection.
 Attaching a resource still materializes it for the session when
