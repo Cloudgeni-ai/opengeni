@@ -165,17 +165,23 @@ keeps the strict predicate.
 A stopped box's cold commit settles every open request, PTY and process it
 leaves on its exact provider tuple, not only crashed-worker orphans (a
 supervised process only when the provider was already missing; a box that was
-not stopped keeps them all). Rows already stranded on an ended
-epoch (legacy losses before exact loss settlement, or an older cold commit)
-are listed by `opengeni_private.list_sandbox_ended_epoch_blockers()`: open
-Modal home-route admissions and PTYs whose lease has a later epoch and a
-different instance, with no active retained process on the tuple. Lease
+not stopped keeps them all). Requests already stranded on an ended epoch
+(legacy losses before exact loss settlement, or an older cold commit) are listed
+by `opengeni_private.list_sandbox_ended_epoch_blockers(limit)`: open Modal
+home-route admissions whose lease has a later epoch and a different instance,
+with no active retained process on the tuple. An open PTY always belongs to an
+active process on its exact tuple, so it stays with that process. Lease
 succession alone is not proof the old box is gone, so the reaper inspects the
 exact historical sandbox and settles a tuple only on a terminated observation
-(`settleEndedEpochWorkspaceBlockers`: requests rejected, never replayed; PTYs
-closed; closed unquiesced owners woken). Running, NotFound (deletion or a
-rotated credential workspace) and probe failures keep the rows. Tuples with an
-active process stay with retained-process reconciliation.
+(`settleEndedEpochWorkspaceBlockers`: requests rejected, never replayed; closed
+unquiesced owners woken, including the owner of a command whose own stdin
+request was left open). Running, NotFound (deletion or a rotated credential
+workspace) and probe failures keep the rows. Each sweep lists up to 200 tuples
+in random order and probes them for at most one minute of the tick; a box whose probe
+did not prove it gone is retried with exponential backoff (5 minutes doubling to
+6 hours), so a box that never yields proof costs a probe a few times a day, not
+every tick. Tuples with an active process stay with retained-process
+reconciliation.
 
 A resumed attempt may attach another atomic internal-update batch to the same
 logical turn after its resolved open suffix. Each delivered update retains its

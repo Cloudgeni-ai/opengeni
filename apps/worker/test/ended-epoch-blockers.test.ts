@@ -13,6 +13,7 @@ import postgres from "postgres";
 import { type Settings } from "@opengeni/config";
 import {
   advanceWorkspaceGeneration,
+  advanceWorkspaceGenerationForRetainedProcess,
   claimSessionWorkForAttempt,
   confirmDrainCold,
   createDb,
@@ -284,10 +285,36 @@ async function reconcile(fixture: Fixture) {
   });
 }
 
+/** A pre-exact-settlement loss: the command was ended with its parent
+ * request and holder, but its own stdin request was left open. */
+async function abandonCommand(fixture: Fixture) {
+  await admin.begin(async (tx) => {
+    await tx`update sandbox_workspace_mutation_admissions set settled_at = now(),
+      provider_outcome = 'rejected'
+      where id = (select parent_admission_id from sandbox_retained_processes
+        where id = ${fixture.processId})`;
+    await tx`delete from sandbox_lease_holders where lease_id = ${fixture.leaseId}
+      and kind = 'process'`;
+    await tx`update sandbox_leases set refcount = 0 where id = ${fixture.leaseId}`;
+    await tx`update sandbox_retained_processes set state = 'lost', settled_at = now(),
+      settlement_reason = 'legacy_loss' where id = ${fixture.processId}`;
+  });
+}
+
 async function ownerWake(fixture: Fixture) {
   const [row] = await admin<{ reason: string }[]>`
     select reason from session_workflow_wake_outbox where session_id = ${fixture.attempt.sessionId}`;
   return row?.reason ?? null;
+}
+
+async function admitStdin(fixture: Fixture) {
+  return await advanceWorkspaceGenerationForRetainedProcess(db, {
+    accountId: fixture.accountId,
+    workspaceId: fixture.workspaceId,
+    sessionId: fixture.attempt.sessionId,
+    processId: fixture.processId,
+    operation: "writeStdin",
+  });
 }
 
 type HistoricalStatus = "terminated" | "running" | "not_found";
@@ -321,7 +348,7 @@ async function runReaper(status: HistoricalStatus, probed: string[] = []) {
 }
 
 async function listedFor(fixture: Fixture) {
-  return (await listEndedEpochWorkspaceBlockers(db)).filter(
+  return (await listEndedEpochWorkspaceBlockers(db, { limit: 500 })).filter(
     (tuple) => tuple.workspaceId === fixture.workspaceId,
   );
 }
@@ -415,6 +442,32 @@ describe("blockers on an ended lease epoch", () => {
     await runReaper("terminated");
     expect((await requestRow(current)).settled_at).toBeNull();
     expect((await requestRow(selfhosted)).settled_at).toBeNull();
+  }, 60_000);
+
+  test("a command's stdin request left after it exited wakes the command's owner", async () => {
+    const fixture = await deadAttemptFixture({ backgroundCommand: true });
+    // Only the command's own (process-actor) stdin request stays open: the
+    // turn's requests settled, then the command exited.
+    const stdin = await admitStdin(fixture);
+    await abandonCommand(fixture);
+    await admin`update sandbox_workspace_mutation_admissions
+      set settled_at = now(), provider_outcome = 'rejected'
+      where lease_id = ${fixture.leaseId} and id <> ${stdin.id}`;
+    await retireEpochUnsettled(fixture);
+    expect((await reconcile(fixture)).action).toBe("pending");
+    await admin`delete from session_workflow_wake_outbox
+      where session_id = ${fixture.attempt.sessionId}`;
+    await runReaper("terminated");
+    const [stdinRow] = await admin<
+      { provider_outcome: string | null; attempt_id: string | null }[]
+    >`
+      select provider_outcome, attempt_id from sandbox_workspace_mutation_admissions
+      where id = ${stdin.id}`;
+    expect(stdinRow).toMatchObject({ provider_outcome: "rejected", attempt_id: null });
+    // Before, the owner had no wake: the rejection joined owners only through
+    // the request's own attempt, which a process actor does not have.
+    expect(await ownerWake(fixture)).toBe("attempt_writer_provider_settled");
+    expect((await reconcile(fixture)).action).not.toBe("pending");
   }, 60_000);
 });
 
