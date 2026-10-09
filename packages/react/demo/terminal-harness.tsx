@@ -7,6 +7,7 @@ import {
 } from "@opengeni/react";
 import "./styles.css";
 import { enableWorkbenchDemoPeers } from "./workbench-peers";
+import { installTerminalReadinessFixture } from "./terminal-readiness-fixture";
 
 enableWorkbenchDemoPeers();
 
@@ -77,6 +78,18 @@ const params = new URLSearchParams(window.location.search);
 const view = params.get("view") ?? "idle";
 const theme = params.get("theme") === "light" ? "light" : "dark";
 const fail = params.get("fail");
+const readinessView = view === "readiness";
+const readinessMode = params.get("mode");
+const fixtureMode =
+  readinessMode === "silent" || readinessMode === "manual" || readinessMode === "legacy"
+    ? readinessMode
+    : "ready";
+// A local-only endpoint permits actual ttyd/native-addon browser verification;
+// the ordinary checked-in demo uses only synthetic fixture data.
+const localPty = params.get("pty");
+const livePty = localPty && /^ws:\/\/127\.0\.0\.1:\d+$/.test(localPty) ? localPty : null;
+const readinessFixture =
+  readinessView && !livePty ? installTerminalReadinessFixture(fixtureMode) : null;
 
 // Force the renderer fallback ladder BEFORE the component mounts (E1 proof).
 if (fail) (globalThis as { __OG_FORCE_RENDERER_FAIL__?: string }).__OG_FORCE_RENDERER_FAIL__ = fail;
@@ -129,8 +142,29 @@ function App() {
       data-og-theme={theme === "light" ? "light" : undefined}
     >
       <div className="mx-auto flex h-full max-w-4xl flex-col overflow-hidden rounded-og-lg border border-og-border bg-og-bg shadow-og-md">
+        {readinessFixture && fixtureMode !== "legacy" && fixtureMode !== "manual" && (
+          <button
+            className="border-b border-og-border px-3 py-2 text-og-sm text-og-fg"
+            onClick={() => readinessFixture.ready()}
+          >
+            Finish synthetic shell startup
+          </button>
+        )}
         <SandboxTerminal
-          result={result}
+          result={readinessView ? makeResult({ running: false }) : result}
+          terminalCapability={
+            readinessView
+              ? {
+                  transport: "pty-ws",
+                  ptyCapable: true,
+                  shell: "/bin/bash",
+                  url: livePty ?? "https://terminal.example",
+                  token: null,
+                  expiresAt: null,
+                  reason: null,
+                }
+              : undefined
+          }
           liveness={liveness}
           showHeader
           shell="/bin/bash"

@@ -17,6 +17,11 @@ import {
   STREAM_KIND_PTY,
   STREAM_ROLE_CLIENT,
 } from "../lib/relay-wire";
+import {
+  TERMINAL_INPUT_READY_PREFERENCE,
+  TERMINAL_INPUT_READY_PROTOCOL,
+  terminalInputReadyDecoder,
+} from "../lib/terminal-input-readiness";
 
 /** The ttyd connection lifecycle as surfaced to the component. */
 export type TerminalStreamStatus = "connecting" | "open" | "closed" | "error";
@@ -40,11 +45,16 @@ export type UseTerminalStreamOptions = {
 };
 
 export type UseTerminalStreamResult = {
-  /** True once the ttyd socket is open (and the auth frame has been sent). */
+  /** True when input can be sent. Legacy ttyd does not guarantee shell readiness. */
   connected: boolean;
   status: TerminalStreamStatus;
+  /** `waiting` requires explicit shell readiness; `legacy` has no such guarantee. */
+  inputReadiness: "pending" | "waiting" | "ready" | "legacy";
+  /** Deliberate escape for startup prompts/no-Readline shells. Clears queued
+   * typing without executing it, then enables unguaranteed manual input. */
+  useLegacyInput: () => void;
   /** Pipe a keystroke/paste to PTY stdin. Input during CONNECTING is bounded and
-   *  replayed only after ttyd authentication succeeds. */
+   *  replayed after negotiated readiness (or legacy ttyd preferences). */
   write: (data: string) => void;
   /** Tell ttyd the PTY window changed size (on xterm fit/resize). */
   resize: (cols: number, rows: number) => void;
@@ -52,8 +62,8 @@ export type UseTerminalStreamResult = {
   disconnect: () => void;
 };
 
-// Keystrokes entered during the websocket handshake are held until ttyd has
-// accepted its auth/resize frames. Bound the queue by UTF-16 code units (a hard
+// Keystrokes entered during startup are held until the negotiated input boundary.
+// Old ttyd servers retain explicitly legacy semantics. Bound by UTF-16 code units (a hard
 // <=128 KiB string payload in current JS engines) so a paste cannot turn a slow
 // handshake into unbounded renderer memory. Overflow rejects the whole pending
 // input rather than ever executing a truncated shell command.
@@ -161,7 +171,7 @@ function closeSocket(socket: WebSocket | null): void {
  *   - first frame: `JSON.stringify({ AuthToken: "" })` (+ optional columns/rows).
  *   - client→server: INPUT = "0"+data ; RESIZE = "1"+JSON({columns,rows}).
  *   - server→client: "0" = OUTPUT (→ xterm) ; "1" = SET_WINDOW_TITLE ;
- *     "2" = SET_PREFERENCES (ignored). Binary frames are decoded the same way.
+ *     "2" = SET_PREFERENCES (readiness negotiation). Binary frames decode identically.
  *
  * On a `url`/`token` rotation (a box rollover folds a fresh address into the cell)
  * the effect re-runs: the old socket closes and a fresh one connects — a brief
@@ -171,11 +181,15 @@ function closeSocket(socket: WebSocket | null): void {
 export function useTerminalStream(options: UseTerminalStreamOptions): UseTerminalStreamResult {
   const { capability, onOutput, onTitle, onReconnectNeeded, initialCols, initialRows } = options;
   const [status, setStatus] = useState<TerminalStreamStatus>("closed");
+  const [inputReadiness, setInputReadiness] =
+    useState<UseTerminalStreamResult["inputReadiness"]>("pending");
   const [reconnectGeneration, setReconnectGeneration] = useState(0);
   const wsRef = useRef<WebSocket | null>(null);
   const pendingInputRef = useRef("");
   const socketFailedRef = useRef(false);
   const socketAuthenticatedRef = useRef(false);
+  const legacyInputRef = useRef<(() => void) | null>(null);
+  const manuallyDisconnectedRef = useRef(false);
   const relayChannelRef = useRef<RelayChannel | null>(null);
   const relayIdentityRef = useRef<string | null>(null);
   const relayInputSequenceRef = useRef(0n);
@@ -207,6 +221,8 @@ export function useTerminalStream(options: UseTerminalStreamOptions): UseTermina
   transportRef.current = transport;
 
   useEffect(() => {
+    manuallyDisconnectedRef.current = false;
+    setInputReadiness("pending");
     // SSR / no WebSocket / not a live pty-ws cell: stay closed; the caller falls
     // back to the Channel-A read-only firehose.
     if (typeof window === "undefined" || typeof WebSocket === "undefined") return;
@@ -258,6 +274,11 @@ export function useTerminalStream(options: UseTerminalStreamOptions): UseTermina
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let socket: WebSocket;
     let relayChannel: RelayChannel | null = null;
+    let authSent = false;
+    let preferencesReceived = false;
+    let readinessNegotiated = false;
+    let sentSize: { cols: number; rows: number } | null = null;
+    const decodeReadyOutput = terminalInputReadyDecoder();
     const relayOutputDecoder = new TextDecoder();
     setStatus("connecting");
     try {
@@ -311,12 +332,47 @@ export function useTerminalStream(options: UseTerminalStreamOptions): UseTermina
       setStatus("connecting");
       reconnectTimer = setTimeout(() => {
         reconnectTimer = null;
-        if (!disposed) setReconnectGeneration((generation) => generation + 1);
+        if (!disposed && !manuallyDisconnectedRef.current)
+          setReconnectGeneration((generation) => generation + 1);
       }, delay);
     };
 
+    const openTtydInput = (mode: "ready" | "legacy", discardPending = false) => {
+      if (
+        disposed ||
+        wsRef.current !== socket ||
+        socket.readyState !== WebSocket.OPEN ||
+        !authSent ||
+        socketFailedRef.current
+      )
+        return;
+      if (discardPending) pendingInputRef.current = "";
+      try {
+        // A fit/resize may have happened while shell readiness was pending.
+        if (sentSize?.cols !== sizeRef.current.cols || sentSize.rows !== sizeRef.current.rows) {
+          socket.send(ttydResizeFrame(sizeRef.current.cols, sizeRef.current.rows));
+          sentSize = { ...sizeRef.current };
+        }
+        if (pendingInputRef.current.length > 0) {
+          socket.send(ttydInputFrame(pendingInputRef.current));
+          pendingInputRef.current = "";
+        }
+        socketAuthenticatedRef.current = true;
+        legacyInputRef.current = null;
+        setInputReadiness(mode);
+        setStatus("open");
+        reconnectAttemptRef.current = 0;
+        refreshRequestedRef.current = false;
+      } catch {
+        socketAuthenticatedRef.current = false;
+        setInputReadiness("pending");
+        setStatus("connecting");
+        closeSocket(socket);
+      }
+    };
+
     socket.onopen = () => {
-      if (disposed) return;
+      if (disposed || wsRef.current !== socket || socketFailedRef.current) return;
       if (relay && relayChannel) {
         try {
           socket.send(
@@ -343,26 +399,18 @@ export function useTerminalStream(options: UseTerminalStreamOptions): UseTermina
       try {
         socket.send(ttydAuthFrame({ columns: sizeRef.current.cols, rows: sizeRef.current.rows }));
         socket.send(ttydResizeFrame(sizeRef.current.cols, sizeRef.current.rows));
-        if (pendingInputRef.current.length > 0) {
-          // One websocket frame makes the pre-open queue all-or-nothing from this
-          // client's perspective; never execute a prefix of a buffered command.
-          socket.send(ttydInputFrame(pendingInputRef.current));
-          pendingInputRef.current = "";
-        }
-        socketAuthenticatedRef.current = true;
+        sentSize = { ...sizeRef.current };
+        authSent = true;
       } catch {
         socketFailedRef.current = false;
         setStatus("connecting");
         closeSocket(socket);
         return;
       }
-      setStatus("open");
-      reconnectAttemptRef.current = 0;
-      refreshRequestedRef.current = false;
     };
 
     socket.onmessage = (ev: MessageEvent) => {
-      if (disposed) return;
+      if (disposed || wsRef.current !== socket || socketFailedRef.current) return;
       if (relay) {
         if (!(ev.data instanceof ArrayBuffer) || !relayChannel) return;
         const bytes = new Uint8Array(ev.data);
@@ -386,6 +434,7 @@ export function useTerminalStream(options: UseTerminalStreamOptions): UseTermina
               pendingInputRef.current = "";
             }
             setStatus("open");
+            setInputReadiness("ready");
           } catch {
             socketFailedRef.current = true;
             setStatus("error");
@@ -410,19 +459,49 @@ export function useTerminalStream(options: UseTerminalStreamOptions): UseTermina
       const { command, payload } = decodeFrame(ev.data as string | ArrayBuffer);
       switch (command) {
         case TtydServerCommand.OUTPUT:
-          onOutputRef.current?.(payload);
+          if (readinessNegotiated) {
+            const decoded = decodeReadyOutput(payload);
+            if (decoded.output) onOutputRef.current?.(decoded.output);
+            if (decoded.ready && !socketAuthenticatedRef.current) openTtydInput("ready");
+          } else {
+            onOutputRef.current?.(payload);
+          }
           break;
         case TtydServerCommand.SET_WINDOW_TITLE:
           onTitleRef.current?.(payload);
           break;
-        // SET_PREFERENCES ("2") and anything else: ignored.
+        case TtydServerCommand.SET_PREFERENCES:
+          if (!authSent || preferencesReceived || socketAuthenticatedRef.current) break;
+          preferencesReceived = true;
+          try {
+            const preferences = JSON.parse(payload) as Record<string, unknown>;
+            if (!preferences || typeof preferences !== "object" || Array.isArray(preferences)) {
+              throw new Error("invalid ttyd preferences");
+            }
+            const protocol = preferences[TERMINAL_INPUT_READY_PREFERENCE];
+            if (protocol === undefined) {
+              // Old images/running daemons do not acquire a guarantee merely
+              // because this client is new. Preserve their legacy input path.
+              openTtydInput("legacy");
+            } else {
+              readinessNegotiated = protocol === TERMINAL_INPUT_READY_PROTOCOL;
+              setInputReadiness("waiting");
+              legacyInputRef.current = () => openTtydInput("legacy", true);
+            }
+          } catch {
+            // Invalid negotiation is not readiness. Manual input remains a
+            // deliberate escape, never an automatic fallback or timer flush.
+            setInputReadiness("waiting");
+            legacyInputRef.current = () => openTtydInput("legacy", true);
+          }
+          break;
         default:
           break;
       }
     };
 
     socket.onerror = () => {
-      if (!disposed) {
+      if (!disposed && wsRef.current === socket && !intentionalCloseRef.current.has(socket)) {
         // A network/relay outage is retryable with the same credential and PTY.
         // Keep accepting bounded input while the transport comes back.
         socketFailedRef.current = false;
@@ -431,8 +510,11 @@ export function useTerminalStream(options: UseTerminalStreamOptions): UseTermina
       }
     };
     socket.onclose = () => {
+      if (disposed || wsRef.current !== socket) return;
       if (wsRef.current === socket) wsRef.current = null;
       socketAuthenticatedRef.current = false;
+      legacyInputRef.current = null;
+      setInputReadiness("pending");
       if (!disposed) {
         if (socketFailedRef.current) setStatus("error");
         else scheduleTransportReconnect();
@@ -443,6 +525,7 @@ export function useTerminalStream(options: UseTerminalStreamOptions): UseTermina
       disposed = true;
       wsRef.current = null;
       socketAuthenticatedRef.current = false;
+      legacyInputRef.current = null;
       relayChannelRef.current = null;
       if (reconnectTimer !== null) clearTimeout(reconnectTimer);
       // Drop handlers so an in-flight close/error doesn't mutate state post-unmount.
@@ -468,6 +551,22 @@ export function useTerminalStream(options: UseTerminalStreamOptions): UseTermina
           ws.send(ttydInputFrame(data));
         }
       } catch {
+        // A synchronous ttyd send failure did not enqueue these bytes. Retain
+        // them for the next explicit readiness boundary, never replay a send
+        // which returned successfully. Relay sequencing keeps its own contract.
+        if (currentTransport === "pty-ws") {
+          const nextSize = pendingInputRef.current.length + data.length;
+          if (nextSize > MAX_PENDING_TERMINAL_INPUT_CODE_UNITS) {
+            pendingInputRef.current = "";
+            socketFailedRef.current = true;
+            socketAuthenticatedRef.current = false;
+            setStatus("error");
+            closeSocket(ws);
+            return;
+          }
+          pendingInputRef.current += data;
+        }
+        socketAuthenticatedRef.current = false;
         socketFailedRef.current = false;
         setStatus("connecting");
         closeSocket(ws);
@@ -502,18 +601,30 @@ export function useTerminalStream(options: UseTerminalStreamOptions): UseTermina
     }
   }, []);
   const disconnect = useCallback(() => {
+    manuallyDisconnectedRef.current = true;
     const ws = wsRef.current;
     wsRef.current = null;
     pendingInputRef.current = "";
     socketFailedRef.current = false;
     socketAuthenticatedRef.current = false;
+    legacyInputRef.current = null;
     relayChannelRef.current = null;
     setStatus("closed");
+    setInputReadiness("pending");
     if (ws) intentionalCloseRef.current.add(ws);
     closeSocket(ws);
   }, []);
+  const useLegacyInput = useCallback(() => legacyInputRef.current?.(), []);
 
   return useMemo<UseTerminalStreamResult>(() => {
-    return { connected: status === "open", status, write, resize, disconnect };
-  }, [status, write, resize, disconnect]);
+    return {
+      connected: status === "open",
+      status,
+      inputReadiness,
+      useLegacyInput,
+      write,
+      resize,
+      disconnect,
+    };
+  }, [status, inputReadiness, useLegacyInput, write, resize, disconnect]);
 }
