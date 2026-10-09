@@ -149,6 +149,12 @@ describe("organization MCP action catalog", () => {
     // A change here is deliberate: each one is refused for every MCP caller.
     expect(browserOnly.map(routeKey).sort()).toEqual(
       [
+        "GET /v1/inbox",
+        "GET /v1/inbox/settings",
+        "PATCH /v1/inbox/items/:itemId",
+        "PUT /v1/inbox/settings",
+        "GET /v1/workspaces/:workspaceId/sessions/:sessionId/inbox-mute",
+        "PUT /v1/workspaces/:workspaceId/sessions/:sessionId/inbox-mute",
         "POST /v1/organizations",
         "POST /v1/organizations/additional",
         "GET /v1/organization-memberships",

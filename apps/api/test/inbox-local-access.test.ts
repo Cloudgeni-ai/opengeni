@@ -133,7 +133,7 @@ describe("inbox access on a local install", () => {
       createdByContext: { label: "Local dev" },
     });
     const app = inboxApp("local");
-    const url = `http://x/v1/workspaces/${local.workspaceId}/sessions/${session.id}/inbox-mute`;
+    const url = `http://example.test/v1/workspaces/${local.workspaceId}/sessions/${session.id}/inbox-mute`;
     const muted = await app.request(url, {
       method: "PUT",
       headers: { "content-type": "application/json" },
@@ -146,7 +146,7 @@ describe("inbox access on a local install", () => {
     expect(await read.json()).toEqual({ repliesMuted: true });
 
     const missing = await app.request(
-      `http://x/v1/workspaces/${local.workspaceId}/sessions/${crypto.randomUUID()}/inbox-mute`,
+      `http://example.test/v1/workspaces/${local.workspaceId}/sessions/${crypto.randomUUID()}/inbox-mute`,
     );
     expect(missing.status).toBe(404);
   });

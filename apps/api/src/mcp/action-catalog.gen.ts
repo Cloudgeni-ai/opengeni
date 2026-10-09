@@ -2403,7 +2403,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "InboxSettings"
-    ]
+    ],
+    "browserOnly": "the person's inbox requires their own signed-in browser session"
   },
   {
     "id": "getInstalledPluginDetails",
@@ -2748,7 +2749,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "SessionInboxMute"
-    ]
+    ],
+    "browserOnly": "the person's session mute requires their own signed-in browser session"
   },
   {
     "id": "getSessionLineage",
@@ -3672,7 +3674,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "ListInboxResponse"
-    ]
+    ],
+    "browserOnly": "the person's inbox requires their own signed-in browser session"
   },
   {
     "id": "listInstalledPlugins",
@@ -5799,7 +5802,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "SessionInboxMute"
-    ]
+    ],
+    "browserOnly": "the person's session mute requires their own signed-in browser session"
   },
   {
     "id": "setSuperGrokAccountAllocator",
@@ -6384,7 +6388,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "InboxItem"
     ],
-    "response": []
+    "response": [],
+    "browserOnly": "the person's inbox requires their own signed-in browser session"
   },
   {
     "id": "updateInboxSettings",
@@ -6395,7 +6400,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "InboxSettings"
-    ]
+    ],
+    "browserOnly": "the person's inbox requires their own signed-in browser session"
   },
   {
     "id": "updateMachineAgent",
