@@ -31,7 +31,7 @@
 
 use crate::uploads::update_drain::{UpdateDrain, UpdateReservation, WorkReservation};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -392,6 +392,37 @@ impl<P: Platform> WorkspaceLink<P> {
         }
     }
 
+    /// Only an exact process subject at the same local connection and origin
+    /// may inherit the lane captured by an existing op's frame sink. A changed
+    /// bearer is deliberately not part of that identity: the new transport
+    /// authenticates with it while retained ops keep their original subject.
+    fn same_frame_scope(&self, candidate: &SupervisorLink<P>) -> bool {
+        self.connection_id == candidate.connection_id
+            && self.api_url == candidate.api_url
+            && self.creds.workspace_id == candidate.credentials.workspace_id
+            && self.creds.agent_id == candidate.credentials.agent_id
+            && self.connection_instance_id == candidate.connection_instance_id
+            && self.subject_prefix()
+                == format!(
+                    "agent.{}.{}.connection.{}",
+                    candidate.credentials.workspace_id,
+                    candidate.credentials.agent_id,
+                    candidate.connection_instance_id
+                )
+    }
+
+    fn replacing_definition(definition: SupervisorLink<P>, previous: &Self) -> Self {
+        let reuse_lane = previous.same_frame_scope(&definition);
+        let mut replacement = Self::from_definition(definition);
+        if reuse_lane {
+            // The previous serve task has cleared its sender before returning.
+            // Rebinding this same Arc lets retained pumps replay through the
+            // successor's authenticated bulk connection.
+            replacement.bulk_tx = previous.bulk_tx.clone();
+        }
+        replacement
+    }
+
     fn subject_prefix(&self) -> String {
         format!(
             "agent.{}.{}.connection.{}",
@@ -579,6 +610,7 @@ impl<P: Platform + 'static> Supervisor<P> {
             .map(|link| (link.connection_id.clone(), link))
             .collect();
         let mut active: HashMap<String, Arc<WorkspaceLink<P>>> = HashMap::new();
+        let mut removed_or_rescoped = HashSet::new();
         let mut serves = FuturesUnordered::new();
         for definition in desired.values().cloned() {
             let link = Arc::new(WorkspaceLink::from_definition(definition));
@@ -614,7 +646,15 @@ impl<P: Platform + 'static> Supervisor<P> {
                         .collect();
 
                     for (id, link) in &active {
-                        let unchanged = next.get(id).is_some_and(|candidate| {
+                        let same_scope = next.get(id).is_some_and(|candidate| {
+                            link.same_frame_scope(candidate)
+                        });
+                        if !same_scope {
+                            // Removal or an authority change is not a credential
+                            // refresh, even if the same name later reappears.
+                            removed_or_rescoped.insert(id.clone());
+                        }
+                        let unchanged = same_scope && next.get(id).is_some_and(|candidate| {
                             candidate.credentials == link.creds
                         });
                         if !unchanged {
@@ -632,9 +672,14 @@ impl<P: Platform + 'static> Supervisor<P> {
                 }
                 finished = serves.next(), if !serves.is_empty() => {
                     if let Some(id) = finished {
-                        active.remove(&id);
+                        let previous = active.remove(&id);
+                        let may_reuse = !removed_or_rescoped.remove(&id);
                         if let Some(definition) = desired.get(&id).cloned() {
-                            let link = Arc::new(WorkspaceLink::from_definition(definition));
+                            let link = Arc::new(match (previous.as_deref(), may_reuse) {
+                                (Some(previous), true) =>
+                                    WorkspaceLink::replacing_definition(definition, previous),
+                                _ => WorkspaceLink::from_definition(definition),
+                            });
                             active.insert(id.clone(), link.clone());
                             serves.push(self.run_owned_link(link));
                         }
@@ -4039,6 +4084,286 @@ mod tests {
 
         shutdown.request();
         let _ = tokio::time::timeout(Duration::from_secs(5), run).await;
+    }
+
+    #[test]
+    fn replacement_reuses_only_the_exact_frame_scope() {
+        use opengeni_agent_platform::NativePlatform;
+
+        let directory = tempfile::tempdir().expect("synthetic host directory");
+        let platform = Arc::new(NativePlatform::with_root(directory.path()));
+        let mut credentials = it::test_credentials("nats://127.0.0.1:1");
+        credentials.workspace_id = "example-workspace-a".into();
+        credentials.agent_id = "example-agent-a".into();
+        let definition = SupervisorLink::new("example-connection-a", platform, credentials)
+            .with_api_url("https://example.test")
+            .with_connection_instance_id("example-instance-a");
+        let original = WorkspaceLink::from_definition(definition.clone());
+
+        let mut refreshed = definition.clone();
+        refreshed.credentials.nats_bearer = "example-refreshed-bearer".into();
+        let successor = WorkspaceLink::replacing_definition(refreshed, &original);
+        assert!(Arc::ptr_eq(&original.bulk_tx, &successor.bulk_tx));
+        assert!(!Arc::ptr_eq(&original.epoch, &successor.epoch));
+        assert!(!Arc::ptr_eq(&original.uploads, &successor.uploads));
+
+        let mut different_instance = definition.clone();
+        different_instance.connection_instance_id = "example-instance-b".into();
+        let successor = WorkspaceLink::replacing_definition(different_instance, &original);
+        assert!(!Arc::ptr_eq(&original.bulk_tx, &successor.bulk_tx));
+
+        let mut different_workspace = definition.clone();
+        different_workspace.credentials.workspace_id = "example-workspace-b".into();
+        let successor = WorkspaceLink::replacing_definition(different_workspace, &original);
+        assert!(!Arc::ptr_eq(&original.bulk_tx, &successor.bulk_tx));
+
+        let mut different_agent = definition.clone();
+        different_agent.credentials.agent_id = "example-agent-b".into();
+        let successor = WorkspaceLink::replacing_definition(different_agent, &original);
+        assert!(!Arc::ptr_eq(&original.bulk_tx, &successor.bulk_tx));
+
+        let mut different_origin = definition.clone();
+        different_origin.api_url = Some("https://other.example.test".into());
+        let successor = WorkspaceLink::replacing_definition(different_origin, &original);
+        assert!(!Arc::ptr_eq(&original.bulk_tx, &successor.bulk_tx));
+
+        let mut different_connection = definition;
+        different_connection.connection_id = "example-connection-b".into();
+        let successor = WorkspaceLink::replacing_definition(different_connection, &original);
+        assert!(!Arc::ptr_eq(&original.bulk_tx, &successor.bulk_tx));
+    }
+
+    /// A completed op still owns its original frame sink when local credentials
+    /// refresh. The replacement link must make that sink publish into the new
+    /// bulk generation for the same exact process subject.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::too_many_lines)] // one real transport replacement and replay
+    async fn credential_refresh_replays_retained_op_on_the_same_subject() {
+        use opengeni_agent_platform::NativePlatform;
+
+        let Some(nats_bin) = it::find_nats_server() else {
+            eprintln!("SKIP credential_refresh_replays_retained_op: no nats-server");
+            return;
+        };
+        let port = it::free_local_port();
+        let _server = it::NatsServerGuard::spawn(&nats_bin, port);
+        let url = format!("nats://127.0.0.1:{port}");
+        let client = it::connect_with_retry(&url, Duration::from_secs(5)).await;
+        let directory = tempfile::tempdir().expect("synthetic host directory");
+        let platform = Arc::new(NativePlatform::with_root(directory.path()));
+        let mut first_creds = it::test_credentials(&url);
+        first_creds.workspace_id = "example-workspace-a".into();
+        first_creds.agent_id = "example-agent-a".into();
+        let mut second_creds = it::test_credentials(&url);
+        second_creds.workspace_id = "example-workspace-b".into();
+        second_creds.agent_id = "example-agent-b".into();
+        let first = SupervisorLink::new("example-connection-a", platform.clone(), first_creds)
+            .with_connection_instance_id("example-instance-a");
+        let second = SupervisorLink::new("example-connection-b", platform, second_creds)
+            .with_connection_instance_id("example-instance-b");
+        let first_link = WorkspaceLink::from_definition(first.clone());
+        let second_link = WorkspaceLink::from_definition(second.clone());
+        let op_id = "example-retained-op";
+        let mut frames = client
+            .subscribe(first_link.op_subject(op_id))
+            .await
+            .expect("subscribe before start");
+        let mut first_events = client
+            .subscribe(first_link.events_subject())
+            .await
+            .expect("first events");
+        let mut second_events = client
+            .subscribe(second_link.events_subject())
+            .await
+            .expect("second events");
+        let supervisor = Supervisor::new_links(&[first.clone(), second.clone()], "test-0.0.0");
+        let shutdown = supervisor.shutdown_handle();
+        let (updates_tx, updates_rx) =
+            tokio::sync::watch::channel(vec![first.clone(), second.clone()]);
+        let run = tokio::spawn(async move { supervisor.run_with_updates(updates_rx).await });
+        for events in [&mut first_events, &mut second_events] {
+            assert!(
+                it::wait_for_event(events, Duration::from_secs(10), |event| {
+                    matches!(event.event, Some(Event::Heartbeat(_)))
+                })
+                .await,
+                "both workspaces become live"
+            );
+        }
+
+        let start = ControlRequest {
+            request_id: op_id.into(),
+            epoch: 0,
+            resource_policy: None,
+            op: Some(v1::control_request::Op::OpStart(v1::OpStart {
+                op: Some(v1::op_start::Op::Exec(v1::ExecRequest {
+                    command: vec!["printf retained-example".into()],
+                    shell: true,
+                    ..Default::default()
+                })),
+                window_bytes: 1 << 20,
+                deadline_ms: 0,
+                origin_id: "example-session".into(),
+            })),
+        };
+        let started = client
+            .request(first_link.rpc_subject(), start.encode_to_vec().into())
+            .await
+            .expect("start request");
+        let started = ControlResponse::decode(started.payload.as_ref()).expect("start response");
+        assert!(
+            matches!(started.result, Some(v1::control_response::Result::OpStart(s)) if s.accepted)
+        );
+        let mut initial = Vec::new();
+        loop {
+            let message = tokio::time::timeout(Duration::from_secs(5), frames.next())
+                .await
+                .expect("initial frame deadline")
+                .expect("initial frame");
+            let frame = v1::OpFrame::decode(message.payload.as_ref()).expect("frame decodes");
+            match frame.body {
+                Some(v1::op_frame::Body::Data(data)) => initial.extend_from_slice(&data.bytes),
+                Some(v1::op_frame::Body::Exit(exit)) => {
+                    assert_eq!(exit.exit_code, 0);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(initial, b"retained-example");
+
+        let mut refreshed = first;
+        refreshed.credentials.nats_bearer = "example-refreshed-bearer".into();
+        assert_eq!(
+            refreshed.connection_instance_id,
+            first_link.connection_instance_id
+        );
+        updates_tx
+            .send(vec![refreshed.clone(), second.clone()])
+            .expect("credential refresh");
+        assert!(
+            it::wait_for_event(&mut first_events, Duration::from_secs(5), |event| {
+                matches!(event.event, Some(Event::GoingOffline(_)))
+            })
+            .await,
+            "old generation goes offline"
+        );
+        assert!(
+            it::wait_for_event(&mut first_events, Duration::from_secs(10), |event| {
+                matches!(event.event, Some(Event::Heartbeat(_)))
+            })
+            .await,
+            "replacement generation becomes live"
+        );
+
+        let attach = ControlRequest {
+            request_id: "example-attach".into(),
+            epoch: 0,
+            resource_policy: None,
+            op: Some(v1::control_request::Op::OpAttach(v1::OpAttach {
+                op_id: op_id.into(),
+                from_seq: 0,
+                attach_generation: 2,
+                window_bytes: 1 << 20,
+            })),
+        };
+        let reply = client
+            .request(first_link.rpc_subject(), attach.encode_to_vec().into())
+            .await
+            .expect("attach request");
+        let reply = ControlResponse::decode(reply.payload.as_ref()).expect("attach response");
+        assert!(
+            matches!(reply.result, Some(v1::control_response::Result::OpStatus(s))
+            if s.state == v1::OpState::Complete as i32)
+        );
+        let mut replayed = Vec::new();
+        loop {
+            let message = tokio::time::timeout(Duration::from_secs(3), frames.next())
+                .await
+                .expect("retained replay frame deadline")
+                .expect("replayed frame");
+            let frame = v1::OpFrame::decode(message.payload.as_ref()).expect("replay decodes");
+            match frame.body {
+                Some(v1::op_frame::Body::Data(data)) => replayed.extend_from_slice(&data.bytes),
+                Some(v1::op_frame::Body::Exit(exit)) => {
+                    assert_eq!(exit.exit_code, 0);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(replayed, b"retained-example");
+
+        let ping = ControlRequest {
+            request_id: "example-other-workspace".into(),
+            epoch: 0,
+            resource_policy: None,
+            op: Some(v1::control_request::Op::Ping(v1::PingRequest { nonce: 7 })),
+        };
+        let response = client
+            .request(second_link.rpc_subject(), ping.encode_to_vec().into())
+            .await
+            .expect("other workspace remains live");
+        assert!(ControlResponse::decode(response.payload.as_ref())
+            .expect("ping response")
+            .error
+            .is_none());
+
+        // Removing the link ends its authority to inherit the old frame sink.
+        // Re-adding the same definition must create a fresh lane while leaving
+        // the other workspace's link live.
+        updates_tx
+            .send(vec![second.clone()])
+            .expect("remove first link");
+        assert!(
+            it::wait_for_event(&mut first_events, Duration::from_secs(5), |event| {
+                matches!(event.event, Some(Event::GoingOffline(_)))
+            })
+            .await,
+            "removed generation goes offline"
+        );
+        updates_tx
+            .send(vec![refreshed, second])
+            .expect("re-add first link");
+        assert!(
+            it::wait_for_event(&mut first_events, Duration::from_secs(10), |event| {
+                matches!(event.event, Some(Event::Heartbeat(_)))
+            })
+            .await,
+            "re-added generation becomes live"
+        );
+        let reattach = ControlRequest {
+            request_id: "example-reattach".into(),
+            epoch: 0,
+            resource_policy: None,
+            op: Some(v1::control_request::Op::OpAttach(v1::OpAttach {
+                op_id: op_id.into(),
+                from_seq: 0,
+                attach_generation: 3,
+                window_bytes: 1 << 20,
+            })),
+        };
+        let reply = client
+            .request(first_link.rpc_subject(), reattach.encode_to_vec().into())
+            .await
+            .expect("reattach request");
+        let reply = ControlResponse::decode(reply.payload.as_ref()).expect("reattach response");
+        assert!(
+            matches!(reply.result, Some(v1::control_response::Result::OpStatus(s))
+            if s.state == v1::OpState::Complete as i32)
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), frames.next())
+                .await
+                .is_err(),
+            "removed connection must not inherit a retained frame sink"
+        );
+        shutdown.request();
+        tokio::time::timeout(Duration::from_secs(5), run)
+            .await
+            .expect("supervisor stops")
+            .expect("run task")
+            .expect("clean stop");
     }
 
     /// Real control RPC proof: bounded chunks, exact epoch, private staging,
