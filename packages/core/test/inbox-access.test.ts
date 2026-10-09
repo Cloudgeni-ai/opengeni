@@ -20,15 +20,22 @@ function context(overrides: Partial<AccessContext>): AccessContext {
 }
 
 describe("inboxSubjectForContext", () => {
-  test("a signed-in person reads their own inbox, never through a key", () => {
-    expect(inboxSubjectForContext(context({ mode: "managed", subjectId: "user:abc" }))).toBe(
-      "user:abc",
-    );
+  test("a user-shaped context without verified human provenance has no inbox", () => {
+    expect(inboxSubjectForContext(context({ mode: "managed", subjectId: "user:abc" }))).toBeNull();
     expect(
       inboxSubjectForContext(
         context({ mode: "managed", subjectId: "user:abc", credential: { id: "k" } as never }),
       ),
     ).toBeNull();
+    for (const principalKind of ["human_session", "service", "agent_attempt"] as const) {
+      const delegated = context({ mode: "managed", subjectId: "user:abc" });
+      delegated.workspaceGrants = delegated.workspaceGrants.map((grant) => ({
+        ...grant,
+        principalKind,
+        metadata: { delegated: true },
+      }));
+      expect(inboxSubjectForContext(delegated)).toBeNull();
+    }
   });
 
   test("a local-human-shaped context the local bootstrap did not produce has no inbox", () => {

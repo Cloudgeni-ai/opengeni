@@ -14599,8 +14599,8 @@ type InboxAccessContextShape = {
  * Who has an inbox: a signed-in person (`user:`), or the one human of a local
  * install. API keys, services, configured or development subjects and agents
  * act through sessions and have none. This is the shape the web uses to show
- * the Inbox; the API also checks provenance (only its own local bootstrap
- * produces the local human, see `inboxSubjectForContext` in `@opengeni/core`).
+ * the Inbox; the API also checks verified managed-human or local-bootstrap
+ * provenance (see `inboxSubjectForContext` in `@opengeni/core`).
  */
 export function accessContextHasInbox(
   context: InboxAccessContextShape | null | undefined,

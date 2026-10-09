@@ -2755,6 +2755,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "getSessionInboxMute",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/inbox-mute",
+    "request": [],
+    "response": [
+      "SessionInboxMute"
+    ],
+    "browserOnly": "the person's session mute requires their own signed-in browser session"
+  },
+  {
     "id": "getSessionLineage",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/lineage",
@@ -5794,6 +5804,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/organizations/:organizationId/supergrok/settings",
     "request": [],
     "response": []
+  },
+  {
+    "id": "setSessionInboxMute",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/inbox-mute",
+    "request": [
+      "SessionInboxMute"
+    ],
+    "response": [
+      "SessionInboxMute"
+    ],
+    "browserOnly": "the person's session mute requires their own signed-in browser session"
   },
   {
     "id": "setSuperGrokAccountAllocator",

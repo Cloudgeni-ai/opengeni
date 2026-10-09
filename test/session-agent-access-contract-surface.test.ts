@@ -66,8 +66,7 @@ const MIDDLEWARE_EXEMPT_OPERATIONS = {
   "session.fork.create": { handlerMarker: "forkManagedHumanSession(" },
 } as const;
 
-/** Route files registered outside the session module: the middleware does not
- * cover them, so each handler must call the seam itself. */
+/** Routes without proven session middleware coverage must call the seam themselves. */
 const OUT_OF_MODULE_HANDLER_MARKERS = [
   "requireSessionAuthorization(",
   "requireAgentSessionAccess(",
@@ -295,21 +294,46 @@ describe("agent-access scope stays enforced at every session entry point", () =>
     expect(tenancy).toContain('operation: "session.fork.create"');
   });
 
-  test("session routes registered outside the session module call the seam themselves", async () => {
+  test("session routes outside the session module call the seam or prove middleware coverage", async () => {
     let found = 0;
+    let inboxMutes = 0;
+    const app = await read("apps/api/src/app.ts");
     for (const file of await sourceFiles("apps/api/src/routes")) {
       if (file === SESSION_ROUTES) continue;
       const source = await read(file);
       for (const route of sessionRoutes(source)) {
         found += 1;
+        if (
+          file === "apps/api/src/routes/inbox.ts" &&
+          route.path === "/v1/workspaces/:workspaceId/sessions/:sessionId/inbox-mute" &&
+          (route.method === "GET" || route.method === "PUT")
+        ) {
+          // These personal routes are deliberately mounted after the wildcard
+          // session middleware; both registration order and classification matter.
+          const sessionRegistration = app.indexOf("registerSessionRoutes(app, routeDeps);");
+          expect(sessionRegistration).toBeGreaterThan(0);
+          expect(app.indexOf("registerInboxRoutes(app, routeDeps);")).toBeGreaterThan(
+            sessionRegistration,
+          );
+          expect(
+            sessionAuthorizationOperationForHttp(
+              route.method,
+              samplePathname(route.path),
+              SESSION_ID,
+            ),
+          ).toBe("session.read");
+          inboxMutes += 1;
+          continue;
+        }
         expect(
           OUT_OF_MODULE_HANDLER_MARKERS.some((marker) => route.body.includes(marker)),
-          `${file}: ${route.method} ${route.path} names a target session but never calls requireSessionAuthorization; the session middleware does not cover routes registered by other modules.`,
+          `${file}: ${route.method} ${route.path} names a target session but has neither an explicit authorization seam nor proven middleware coverage.`,
         ).toBe(true);
       }
     }
     // files.ts (two retained-artifact routes) and machines.ts (active-sandbox).
     expect(found).toBeGreaterThanOrEqual(3);
+    expect(inboxMutes).toBe(2);
   });
 
   test("every first-party MCP tool that names a target session reaches the seam", async () => {
