@@ -5549,6 +5549,12 @@
       }
     }
   }
+:where(.og-root).focus-visible\:outline,:where(.og-root) .focus-visible\:outline {
+    &:focus-visible {
+      outline-style: var(--tw-outline-style);
+      outline-width: 1px;
+    }
+  }
 :where(.og-root).focus-visible\:outline-2,:where(.og-root) .focus-visible\:outline-2 {
     &:focus-visible {
       outline-style: var(--tw-outline-style);
