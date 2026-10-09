@@ -3,20 +3,23 @@ import { constants, type BigIntStats } from "node:fs";
 import {
   lstat,
   mkdir,
-  mkdtemp,
   open,
   readdir,
   realpath,
-  rm,
   rmdir,
   unlink,
   type FileHandle,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { WorkspaceTreeFingerprint } from "@opengeni/contracts";
 import type { WorkspaceArchiveSpool } from "./archive-spool";
 import { WorkspaceArchiveIntegrityError } from "./workspace-archive";
+import {
+  createHostArchiveTemporaryDirectory,
+  hostArchiveTemporaryBases,
+  removeHostArchiveTemporaryDirectory,
+  sweepOrphanedHostArchiveTemporaryDirectoriesOnce,
+} from "./host-archive-temporary";
 
 const CHUNK_BYTES = 64 * 1024;
 // Filesystem representability, not an archive resource quota. Check component
@@ -418,10 +421,13 @@ async function privateTemporaryDirectory(root: string) {
   // Resolve the actual location before creating anything: TMPDIR can itself be a
   // symlink or live inside the source workspace. Never add spool files to it.
   const actualRoot = await realpath(root).catch(() => resolve(root));
-  for (const candidate of [tmpdir(), "/var/tmp", "/tmp"]) {
+  // Reclaim spools whose owner process stopped mid-capture/upload/restore
+  // before adding another multi-gigabyte one. Never removes a live owner's.
+  await sweepOrphanedHostArchiveTemporaryDirectoriesOnce();
+  for (const candidate of hostArchiveTemporaryBases()) {
     const base = await realpath(candidate).catch(() => null);
     if (!base || within(actualRoot, base) || within("/dev/shm", base)) continue;
-    return await mkdtemp(join(base, "opengeni-host-archive-"));
+    return await createHostArchiveTemporaryDirectory(base);
   }
   invalid("no private disk temporary directory exists outside the workspace");
 }
@@ -509,7 +515,7 @@ function ownedSpool(
       }
     },
     dispose() {
-      return (disposal ??= rm(directory, { recursive: true, force: true }));
+      return (disposal ??= removeHostArchiveTemporaryDirectory(directory));
     },
   };
 }
@@ -521,6 +527,7 @@ export async function captureHostWorkspaceArchive(
 ): Promise<{ spool: WorkspaceArchiveSpool; workspace: WorkspaceTreeFingerprint }> {
   const handle = await openRoot(root, false, expectedRoot);
   let temporary: string | undefined;
+  let handleClosed = false;
   try {
     const tree = await inventory(handle, excludedPaths);
     const before = await hashTree(root, handle, tree);
@@ -586,6 +593,10 @@ export async function captureHostWorkspaceArchive(
       decoded.sha256 !== archived.sha256
     )
       changed();
+    // Close before handing over ownership: a close failure after the transfer
+    // would reject without giving the caller the spool it must dispose.
+    handleClosed = true;
+    await handle.close();
     const spool = ownedSpool(temporary, path, writer.byteSize, writer.hash.digest("hex"));
     temporary = undefined;
     return { spool, workspace: archived };
@@ -593,9 +604,9 @@ export async function captureHostWorkspaceArchive(
     return captureError(error);
   } finally {
     try {
-      await handle.close();
+      if (!handleClosed) await handle.close();
     } finally {
-      if (temporary) await rm(temporary, { recursive: true, force: true });
+      if (temporary) await removeHostArchiveTemporaryDirectory(temporary);
     }
   }
 }
@@ -1105,7 +1116,7 @@ export async function restoreHostWorkspaceArchive(
     try {
       await Promise.all(handles.map((handle) => handle.close()));
     } finally {
-      await rm(temporary, { recursive: true, force: true });
+      await removeHostArchiveTemporaryDirectory(temporary);
     }
   }
 }

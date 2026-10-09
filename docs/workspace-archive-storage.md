@@ -18,6 +18,16 @@ provider archive protocols retain their existing compatibility paths; this is
 not a bounded-memory guarantee for those paths. Existing archive limits and
 capture/publication ownership fences remain authoritative and unchanged.
 
+Host spool directories (`opengeni-host-archive-o<pid-namespace>.<pid>.<start-time>-*`,
+`packages/runtime/src/sandbox/host-archive-temporary.ts`) record their owner
+process. Callers dispose them on every in-process path and a normal process exit
+removes the live ones. A worker that stops mid-capture, upload or restore cannot
+do either, so each worker start and the first spool of a process sweep
+directories whose owner is provably gone: same uid and PID namespace, and that
+PID no longer exists or has a different start time. Live owners, including peer
+workers sharing one TMPDIR, are never touched; unmarked legacy names are never
+swept.
+
 Docker drain's protected SDK receipt binds the canonical host root to its
 native daemon and exact container/session/mount authority. Current scoped
 lease/epoch/capture checks grant the reaper its read; the receipt alone does not.
