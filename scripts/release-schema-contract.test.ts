@@ -119,6 +119,18 @@ describe("release schema contract", () => {
     });
   });
 
+  test("registers the local install inbox recipient as rolling", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0677_local_human_inbox_recipient.sql",
+      ),
+    ).toMatchObject({
+      path: "0677_local_human_inbox_recipient.sql",
+      deploymentMode: "rolling",
+    });
+  });
+
   test("checks complete ledger metadata against migration files", async () => {
     const completeSourceContract = await buildCompleteSchemaContract();
     const sourceMigrationPaths = (
@@ -2559,6 +2571,7 @@ describe("release schema contract", () => {
       "0674_inbox_reply_hands_back.sql",
       "0675_inbox_subagent_turn_push.sql",
       "0676_sandbox_deadline_forced_capture.sql",
+      "0677_local_human_inbox_recipient.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
