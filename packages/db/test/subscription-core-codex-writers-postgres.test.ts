@@ -123,7 +123,7 @@ async function organization(): Promise<Org> {
       personal_connections_allowed, personal_fallback_allowed
     ) values (
       ${accountId}::uuid, ${shared!.admin.json({ codex: { mode: "spread" } })}::jsonb,
-      '{}'::jsonb, false, '{}'::jsonb, true, true
+      '{}'::jsonb, false, '{}'::jsonb, true, false
     )`;
   return {
     accountId,
@@ -769,11 +769,6 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
         expectedVersion: 2,
       }),
     );
-    await shared!
-      .admin`update subscription_settings set personal_fallback_allowed = true where account_id = ${org.accountId}::uuid and workspace_id is null`;
-    await shared!
-      .admin`insert into subscription_person_preferences(account_id, organization_membership_id, personal_fallback_opt_in)
-      values (${org.accountId}::uuid, ${member.membershipId}::uuid, true)`;
     const accepted = await withSessionRlsActorContext({ subjectId: member.subjectId }, async () => {
       const session = await createSession(client!.db, {
         accountId: org.accountId,

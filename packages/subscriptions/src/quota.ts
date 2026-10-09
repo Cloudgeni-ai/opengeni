@@ -3,7 +3,7 @@ import type { ModelId, SubscriptionConnection, SubscriptionQuota } from "./types
 /**
  * What the shared quota model says about a connection's capacity now
  * (design 2.2). `unknown` is never treated as available or exhausted
- * (SUB-ELIG-06): it stays eligible but ranks after known capacity (D-14).
+ * (SUB-ELIG-06): it participates in ordinary rotation without a ranking penalty (D-14).
  */
 export type QuotaCapacity =
   | { kind: "available" }

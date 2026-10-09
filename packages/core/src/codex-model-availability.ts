@@ -12,13 +12,15 @@ import {
   loadCodexCredentialForRun,
   readCodexCutoverDisposition,
   subscriptionCoreCodexConnectionAllowsModel,
+  recordSubscriptionCoreCodexModelCatalog,
+  SUBSCRIPTION_MODEL_CATALOG_TTL_MS,
   type CodexCredentialTokenSnapshot,
   type Database,
   type SubscriptionCoreCodexServingConnection,
 } from "@opengeni/db";
 import type { ModelAvailabilityObservation } from "./model-catalog";
 
-const CATALOG_CACHE_MS = 60_000;
+const CATALOG_CACHE_MS = SUBSCRIPTION_MODEL_CATALOG_TTL_MS;
 const CATALOG_ERROR_CACHE_MS = 5_000;
 type CatalogCacheEntry = {
   expiresAt: number;
@@ -217,6 +219,7 @@ export type WorkspaceCodexCatalogReadiness = {
 };
 
 type CatalogDependencies = {
+  recordModels: typeof recordSubscriptionCoreCodexModelCatalog;
   disposition: typeof readCodexCutoverDisposition;
   legacyActive: typeof legacyWorkspaceCodexSubscriptionActive;
   legacyAvailability: typeof loadWorkspaceCodexModelAvailability;
@@ -233,6 +236,7 @@ type CatalogDependencies = {
 const CATALOG_SERVICE_SUBJECT = "service:subscription-core";
 
 const defaultCatalogDependencies = (): CatalogDependencies => ({
+  recordModels: recordSubscriptionCoreCodexModelCatalog,
   disposition: readCodexCutoverDisposition,
   legacyActive: legacyWorkspaceCodexSubscriptionActive,
   legacyAvailability: loadWorkspaceCodexModelAvailability,
@@ -306,9 +310,26 @@ async function loadCoreConnectionCatalog(
           ),
         )
         .catch(() => ({ ok: false, slugs: [] as string[] }))
-        .then((result) => {
+        .then(async (result) => {
           entry.expiresAt = Date.now() + (result.ok ? CATALOG_CACHE_MS : CATALOG_ERROR_CACHE_MS);
-          return { ok: result.ok, slugs: result.slugs, checkedAt: new Date().toISOString() };
+          const observedAt = Date.now();
+          if (result.ok && token.credentialVersion !== null) {
+            await deps.recordModels(
+              db,
+              {
+                kind: "workspace",
+                ...context,
+                subjectId: context.subjectId ?? CATALOG_SERVICE_SUBJECT,
+              },
+              connection.connectionId,
+              { slugs: result.slugs, refreshGeneration: token.credentialVersion, observedAt },
+            );
+          }
+          return {
+            ok: result.ok,
+            slugs: result.slugs,
+            checkedAt: new Date(observedAt).toISOString(),
+          };
         }),
     };
     catalogs.set(key, entry);
@@ -316,6 +337,27 @@ async function loadCoreConnectionCatalog(
   } catch {
     return { ok: false, slugs: [], checkedAt: new Date().toISOString() };
   }
+}
+
+/**
+ * Placement consumes the same per-account catalog facts as the picker, never
+ * the union of another account's entitlements. Failed reads remain unknown.
+ * Personal credentials require an accepted-turn lease and are not probed by
+ * this workspace reader; their proven refusals remain model cooldowns.
+ */
+export async function refreshCoreCodexModelEntitlements(
+  db: Database,
+  settings: Settings,
+  context: WorkspaceCodexCatalogContext,
+  deps: CatalogDependencies = defaultCatalogDependencies(),
+): Promise<void> {
+  if ((await deps.disposition(db, context.accountId, context.workspaceId)) !== "core") return;
+  const connections = await deps.listServing(db, context);
+  await Promise.all(
+    connections
+      .filter((connection) => connection.ownership === "shared")
+      .map((connection) => loadCoreConnectionCatalog(db, settings, context, connection, deps)),
+  );
 }
 
 /**

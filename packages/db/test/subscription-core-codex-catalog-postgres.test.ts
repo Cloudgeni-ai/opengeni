@@ -390,13 +390,11 @@ describe.skipIf(!realDb)("Codex readiness on the shared core after the cutover",
     ).toEqual(["codex/gpt-5.5"]);
   });
 
-  test("a personal connection serves only its owner, in their own Personal workspace, with personal fallback allowed", async () => {
+  test("a personal connection serves its owner in their own Personal workspace without fallback opt-in", async () => {
     const org = await organization();
     const personal = await personalConnection(org, "personal-owner");
-    // 0680 seeds new organizations with personal fallback off: placement
-    // would not use the connection, so the catalog does not count it.
-    expect(await serving(org, org.personalWorkspaceId, org.ownerSubjectId)).toEqual([]);
-    await allowPersonalFallback(org, true);
+    // Fresh organization defaults keep fallback off; ordinary Personal work
+    // is still usable without modifying fallback preferences.
     const own = await serving(org, org.personalWorkspaceId, org.ownerSubjectId);
     expect(own.map((row) => [row.connectionId, row.ownership])).toEqual([[personal, "personal"]]);
     expect(

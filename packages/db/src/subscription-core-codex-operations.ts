@@ -806,6 +806,59 @@ function usageQuotaObservation(
   };
 }
 
+export const SUBSCRIPTION_MODEL_CATALOG_TTL_MS = 60_000;
+
+/** Store a shared connection's successful catalog read without altering quota or admin policy. */
+export async function recordSubscriptionCoreCodexModelCatalog(
+  db: Database,
+  scope: Extract<SubscriptionCoreCodexOperationScope, { kind: "workspace" }>,
+  connectionId: string,
+  observation: { slugs: readonly string[]; refreshGeneration: number; observedAt: number },
+): Promise<boolean> {
+  if (
+    !Number.isSafeInteger(observation.refreshGeneration) ||
+    observation.refreshGeneration < 1 ||
+    !Number.isFinite(observation.observedAt)
+  )
+    return false;
+  const access = await withOperationScope(db, scope, async (tx) => {
+    if (!(await codexCutoverEnabled(tx, scope.accountId))) return false;
+    // The existing credential seam rechecks live connection scope and refuses
+    // personal accounts outside an exact accepted turn.
+    const [connection] = await rawRows<{ refresh_generation: number | string }>(
+      tx,
+      sql`select refresh_generation from opengeni_private.read_subscription_codex_connection_credential(
+        ${routineArgs(scope, connectionId, null)})`,
+    );
+    if (!connection || Number(connection.refresh_generation) !== observation.refreshGeneration)
+      return false;
+    const [written] = await rawRows<{ connection_id: string }>(
+      tx,
+      sql`insert into subscription_connection_quota (account_id, connection_id,
+        model_catalog_slugs, model_catalog_refresh_generation, model_catalog_observed_at, model_catalog_expires_at)
+        values (${scope.accountId}::uuid, ${connectionId}::uuid, ARRAY[${sql.join(
+          observation.slugs.map((slug) => sql`${slug}`),
+          sql`, `,
+        )}]::text[],
+          ${observation.refreshGeneration}, ${new Date(observation.observedAt).toISOString()}::timestamptz,
+          ${new Date(observation.observedAt + SUBSCRIPTION_MODEL_CATALOG_TTL_MS).toISOString()}::timestamptz)
+        on conflict (connection_id) do update set
+          model_catalog_slugs = excluded.model_catalog_slugs,
+          model_catalog_refresh_generation = excluded.model_catalog_refresh_generation,
+          model_catalog_observed_at = excluded.model_catalog_observed_at,
+          model_catalog_expires_at = excluded.model_catalog_expires_at
+        where subscription_connection_quota.account_id = excluded.account_id and
+          (subscription_connection_quota.model_catalog_refresh_generation is null
+            or subscription_connection_quota.model_catalog_refresh_generation < excluded.model_catalog_refresh_generation
+            or (subscription_connection_quota.model_catalog_refresh_generation = excluded.model_catalog_refresh_generation
+              and subscription_connection_quota.model_catalog_observed_at < excluded.model_catalog_observed_at))
+        returning connection_id::text`,
+    );
+    return !!written;
+  });
+  return access?.value ?? false;
+}
+
 /**
  * Record a live usage reading on the connection's quota, fenced on the
  * refresh generation of the bearer that read it (design 2.2). Reports

@@ -102,8 +102,9 @@ export async function listSubscriptionConnectionAssignmentPolicies(
  */
 export async function listSubscriptionConnectionsForPlacement(
   db: Database,
-  input: { accountId: string; workspaceId: string; provider?: ProviderId },
+  input: { accountId: string; workspaceId: string; provider?: ProviderId; now?: Date },
 ): Promise<SubscriptionConnection[]> {
+  const now = (input.now ?? new Date()).toISOString();
   const rows = await rawRows<{
     id: string;
     provider: ProviderId;
@@ -114,6 +115,7 @@ export async function listSubscriptionConnectionsForPlacement(
     extra_credits_enabled: boolean;
     allocator_enabled: boolean;
     entitled_model_ids: string[] | null;
+    observed_model_slugs: string[] | null;
     excluded_models: string[];
     allowed_model_ids: string[] | null;
     refresh_generation: number | string;
@@ -130,6 +132,10 @@ export async function listSubscriptionConnectionsForPlacement(
       connection.ownership, connection.owner_organization_membership_id::text as owner_membership_id,
       connection.status as health, connection.allocator_enabled, connection.extra_credits_enabled,
       null::text[] as entitled_model_ids, connection.excluded_models,
+      case when quota.model_catalog_refresh_generation = connection.refresh_generation
+        and quota.model_catalog_observed_at <= ${now}::timestamptz
+        and quota.model_catalog_expires_at > ${now}::timestamptz
+        then quota.model_catalog_slugs else null end as observed_model_slugs,
       connection.allowed_model_ids, connection.refresh_generation,
       connection.scope_kind, connection.allow_personal_workspaces,
       connection.managed_by_workspace_id::text as managed_by_workspace_id,
@@ -232,6 +238,7 @@ export async function listSubscriptionConnectionsForPlacement(
       extraCreditsEnabled: row.extra_credits_enabled,
       allocatorEnabled: row.allocator_enabled,
       entitledModelIds: row.entitled_model_ids,
+      observedModelSlugs: row.observed_model_slugs,
       excludedModelIds: row.excluded_models,
       allowedModelIds: row.allowed_model_ids,
       // A shared connection with no assignment-policy row for this workspace

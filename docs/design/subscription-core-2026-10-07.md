@@ -301,7 +301,7 @@ No provider call happens inside it.
    changed, session became shared while on a personal account).
 5. Otherwise, per candidate model: shared connections that can serve it,
    ordered by rotation (the primary first, regardless of whether its quota
-   is known), then by known capacity before unknown, then by a deterministic
+   is known), then by a deterministic
    hash of the session and connection ids (D-21, D-23); then, with personal
    fallback, the owner's personal connections for the same model; then the
    next model.
@@ -1944,15 +1944,14 @@ core waiter, so a turn parked on a core waiter is not claimable). Catalog
 readiness uses chat placement's shared pools (automatic admits both local and
 organization candidates), without changing PR 2c Live/transcription's single-source
 policy, and the caller's own personal connections only in their own
-Personal workspace with personal connections and personal fallback allowed,
+Personal workspace with personal connections allowed,
 read through the owner-only reader; a subjectless reader sees shared
 connections only. Live model lists come from the 0671 connection seam, cached
 per refresh generation; a personal connection's list cannot be read outside
 an accepted turn, so its models are selectable with unknown status unless a
-refusal cooldown applies. Known gap: a person's personal-fallback opt-in can
-only be read inside an accepted turn, so the catalog may show Codex ready for
-someone who has not opted in and placement then waits (0689 opts in the
-owners it migrates). The full reader/writer inventory, with each call site
+refusal cooldown applies. Ordinary use in the owner’s Personal workspace does
+not require fallback consent; outside that workspace, private-session fallback
+still requires both the organization setting and the owner’s opt-in. The full reader/writer inventory, with each call site
 gated, unreachable or intentional, is in the PR 3 description.
 
 Personal funding in an owner-private shared-workspace session is intentionally
@@ -2184,3 +2183,25 @@ default instead of conversion at failover; account dedupe; turn failure
 receipts and bound; entitlement column and refresh generation; model-call
 timestamps and `connection_id` on call facts; faithful rotation mapping;
 security-parity shadow; reference-model fixes.
+
+### Catalog observations and selection corrections (2026-10-09)
+
+Migration 0695 stores successful Codex model-catalog observations beside quota
+with an independent credential generation and 60-second expiry. It stores raw
+upstream model ids, not the active picker list. The accepted turn’s immutable
+product-to-upstream mapping determines its entitlement, preserving retained
+models after retirement. Missing or failed reads remain unknown; stale or
+superseded observations do not restrict placement. Legacy turns without a frozen
+mapping remain unknown rather than guessing their upstream identity.
+
+The shared operation credential gate authorizes observation writes. Every core
+chat placement, waiter evaluation and extra-credit admission reads the same
+facts; no process-local catalog state is authoritative. Catalog expiry supplies
+a retry deadline. Quota updates preserve catalog facts, and catalog writes
+preserve quota, model cooldowns and administrator exclusions. No image, Live,
+transcription or Apps capability is inferred from the chat-model catalog.
+
+Own-Personal automatic use remains subject to live personal-connections policy
+and accepted personal authority. Unknown quota has no ranking penalty. The
+independent reference model includes Codex credit consent, refusal deadlines,
+included-capacity preference and explicit-pin behavior.

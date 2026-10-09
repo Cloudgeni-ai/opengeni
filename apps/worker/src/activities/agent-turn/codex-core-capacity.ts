@@ -22,6 +22,7 @@ import {
   type SubscriptionCoreCodexPlacement,
 } from "@opengeni/db";
 import type { Settings } from "@opengeni/config";
+import { refreshCoreCodexModelEntitlements } from "@opengeni/core";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import { recordTurnStartupPhase } from "../../observability-metrics";
 import {
@@ -184,6 +185,11 @@ export async function selectCoreCodexTurnCapacity(
     // Quarantines that ran out return to service before placement reads the
     // world; a recovery wakes the account's other waiters too.
     await recoverCoreCodexHealthAndWake({ db, signalCodexCapacityWorkflow }, identity);
+    await refreshCoreCodexModelEntitlements(db, deps.settings, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      subjectId: identity.initiatingHumanSubjectId,
+    });
     const leaseRequestedAt = performance.now();
     const placement = await placeSubscriptionCoreCodexTurn(db, {
       identity,
