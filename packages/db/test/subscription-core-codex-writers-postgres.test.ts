@@ -1,7 +1,14 @@
 // M3 PR 3b: Codex connect/disconnect, the owner-scoped personal writer, the
 // owner's personal-connection reader and organization-level reset-credit
 // redemption on the shared core, as the restricted application role.
-import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
+import {
+  afterAll,
+  beforeAll,
+  describe,
+  expect,
+  setDefaultTimeout,
+  test,
+} from "bun:test";
 import {
   acquireOwnerMigratedTestDatabase,
   acquireSharedTestDatabase,
@@ -50,7 +57,10 @@ import {
   type SubscriptionCoreCodexCredentialInput,
 } from "../src";
 import { rawRows, withRlsContext } from "../src/database";
-import { decryptEnvironmentValue, encryptEnvironmentValue } from "../src/environment-crypto";
+import {
+  decryptEnvironmentValue,
+  encryptEnvironmentValue,
+} from "../src/environment-crypto";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 import {
@@ -67,7 +77,9 @@ const MODEL = "codex/gpt-5.5";
 
 beforeAll(async () => {
   if (!realDb) return;
-  shared = await acquireSharedTestDatabase("subscription-core-codex-writers-v1");
+  shared = await acquireSharedTestDatabase(
+    "subscription-core-codex-writers-v1",
+  );
   if (!shared) throw new Error("Real PostgreSQL is required");
   client = createDb(shared.appUrl, { max: 6 });
 }, 180_000);
@@ -95,13 +107,18 @@ async function organization(): Promise<Org> {
   });
   const accountId = access.workspaceGrants[0]!.accountId;
   const ownerSubjectId = `user:${userId}`;
-  const [membership] = await shared!.admin<{ id: string; personal_workspace_id: string }[]>`
+  const [membership] = await shared!.admin<
+    { id: string; personal_workspace_id: string }[]
+  >`
     select id::text as id, personal_workspace_id::text as personal_workspace_id
     from organization_memberships
     where account_id = ${accountId}::uuid and subject_id = ${ownerSubjectId}
       and status = 'active' and revoked_at is null limit 1`;
   const workspaces: string[] = [];
-  for (const name of ["Core Codex writers shared", "Core Codex writers other"]) {
+  for (const name of [
+    "Core Codex writers shared",
+    "Core Codex writers other",
+  ]) {
     const [workspace] = await shared!.admin<{ id: string }[]>`
       insert into workspaces (account_id, name)
       values (${accountId}::uuid, ${name}) returning id::text as id`;
@@ -139,7 +156,11 @@ async function organization(): Promise<Org> {
 async function person(
   org: Org,
   role: "admin" | "member",
-): Promise<{ subjectId: string; membershipId: string; personalWorkspaceId: string }> {
+): Promise<{
+  subjectId: string;
+  membershipId: string;
+  personalWorkspaceId: string;
+}> {
   const subjectId = `user:core-codex-person-${crypto.randomUUID()}`;
   const [workspace] = await shared!.admin<{ id: string }[]>`
     insert into workspaces (account_id, name)
@@ -154,10 +175,17 @@ async function person(
   await shared!.admin`
     insert into workspace_memberships (account_id, workspace_id, subject_id, role)
     values (${org.accountId}::uuid, ${org.sharedWorkspaceId}::uuid, ${subjectId}, ${role})`;
-  return { subjectId, membershipId: membership!.id, personalWorkspaceId: workspace!.id };
+  return {
+    subjectId,
+    membershipId: membership!.id,
+    personalWorkspaceId: workspace!.id,
+  };
 }
 
-async function setCutover(accountId: string, enabled: boolean | null): Promise<void> {
+async function setCutover(
+  accountId: string,
+  enabled: boolean | null,
+): Promise<void> {
   if (enabled === null) {
     await shared!.admin`delete from subscription_provider_cutovers
       where account_id = ${accountId}::uuid and provider = 'codex'`;
@@ -207,7 +235,12 @@ function connect(
   );
 }
 
-function disconnect(org: Org, subjectId: string, workspaceId: string | null, connectionId: string) {
+function disconnect(
+  org: Org,
+  subjectId: string,
+  workspaceId: string | null,
+  connectionId: string,
+) {
   return withSessionRlsActorContext({ subjectId }, () =>
     disconnectSubscriptionCoreCodexConnection(client!.db, {
       accountId: org.accountId,
@@ -251,14 +284,22 @@ async function row(connectionId: string) {
 }
 
 function accessToken(encrypted: string): string {
-  return (JSON.parse(decryptEnvironmentValue(key, encrypted)) as { access_token: string })
-    .access_token;
+  return (
+    JSON.parse(decryptEnvironmentValue(key, encrypted)) as {
+      access_token: string;
+    }
+  ).access_token;
 }
 
 async function disconnectDesignationCase() {
   const org = await organization();
   await setCutover(org.accountId, true);
-  const connected = await connect(org, org.ownerSubjectId, null, "designation-drain");
+  const connected = await connect(
+    org,
+    org.ownerSubjectId,
+    null,
+    "designation-drain",
+  );
   if (connected.kind !== "connected") throw new Error("connect failed");
   await shared!.admin.begin(async (tx) => {
     await tx`set local session_replication_role = replica`;
@@ -270,10 +311,14 @@ async function disconnectDesignationCase() {
     workspaceId: org.otherWorkspaceId,
     connectionId: connected.id,
   };
-  const reserved = await reserveSubscriptionCoreCodexAppsRequest(client!.db, target, {
-    requestId: crypto.randomUUID(),
-    transportAttempt: 1,
-  });
+  const reserved = await reserveSubscriptionCoreCodexAppsRequest(
+    client!.db,
+    target,
+    {
+      requestId: crypto.randomUUID(),
+      transportAttempt: 1,
+    },
+  );
   await expect(
     reserveSubscriptionCoreCodexAppsRequest(
       client!.db,
@@ -281,7 +326,9 @@ async function disconnectDesignationCase() {
       { requestId: crypto.randomUUID(), transportAttempt: 1 },
     ),
   ).rejects.toThrow();
-  expect((await disconnect(org, org.ownerSubjectId, null, connected.id)).outcome).toBe("removed");
+  expect(
+    (await disconnect(org, org.ownerSubjectId, null, connected.id)).outcome,
+  ).toBe("removed");
   await expect(
     reserveSubscriptionCoreCodexAppsRequest(client!.db, target, {
       requestId: crypto.randomUUID(),
@@ -294,7 +341,8 @@ async function disconnectDesignationCase() {
   });
   expect(
     Array.from(
-      await shared!.admin`select connection_id from subscription_apps_designations
+      await shared!
+        .admin`select connection_id from subscription_apps_designations
     where account_id = ${org.accountId}::uuid and workspace_id = ${org.otherWorkspaceId}::uuid`,
     ),
   ).toEqual([]);
@@ -308,7 +356,9 @@ async function disconnectDesignationCase() {
     subjectId: org.ownerSubjectId,
     connectionId: connected.id,
   };
-  expect((await setSubscriptionCoreCodexPrimary(client!.db, staleTarget)).activated).toBeNull();
+  expect(
+    (await setSubscriptionCoreCodexPrimary(client!.db, staleTarget)).activated,
+  ).toBeNull();
   expect(
     (
       await setSubscriptionCoreCodexAllocator(client!.db, {
@@ -347,7 +397,9 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
   test("Codex Apps admission does not grant actorless Claude or xAI operation authority", async () => {
     const org = await organization();
     for (const provider of ["claude", "xai"]) {
-      const [source] = await shared!.admin<{ id: string }[]>`insert into subscription_connections(
+      const [source] = await shared!.admin<
+        { id: string }[]
+      >`insert into subscription_connections(
         account_id, provider, credential_encrypted, ownership, scope_kind)
         values (${org.accountId}::uuid, ${provider}, 'synthetic-nonsecret', 'shared', 'organization') returning id::text as id`;
       await expect(
@@ -373,7 +425,12 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
       const org = await organization();
       await setCutover(org.accountId, true);
       const workspaceId = organizationScope ? null : org.sharedWorkspaceId;
-      const connected = await connect(org, org.ownerSubjectId, workspaceId, "primary-drain");
+      const connected = await connect(
+        org,
+        org.ownerSubjectId,
+        workspaceId,
+        "primary-drain",
+      );
       if (connected.kind !== "connected") throw new Error("connect failed");
       await setSubscriptionCoreCodexPrimary(client!.db, {
         accountId: org.accountId,
@@ -387,13 +444,18 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
           workspaceId: org.sharedWorkspaceId,
           viewerSubjectId: org.ownerSubjectId,
         });
-      expect((await projection()).rotation.activeCredentialId).toBe(connected.id);
-      expect((await disconnect(org, org.ownerSubjectId, workspaceId, connected.id)).outcome).toBe(
-        "removed",
+      expect((await projection()).rotation.activeCredentialId).toBe(
+        connected.id,
       );
+      expect(
+        (await disconnect(org, org.ownerSubjectId, workspaceId, connected.id))
+          .outcome,
+      ).toBe("removed");
       const removed = await projection();
       expect(removed.rotation.activeCredentialId).toBeNull();
-      expect(removed.accounts.some((account) => account.id === connected.id)).toBe(false);
+      expect(
+        removed.accounts.some((account) => account.id === connected.id),
+      ).toBe(false);
     }
   });
 
@@ -401,7 +463,12 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
     for (const first of ["designate", "disconnect"] as const) {
       const org = await organization();
       await setCutover(org.accountId, true);
-      const connected = await connect(org, org.ownerSubjectId, null, `designation-race-${first}`);
+      const connected = await connect(
+        org,
+        org.ownerSubjectId,
+        null,
+        `designation-race-${first}`,
+      );
       if (connected.kind !== "connected") throw new Error("connect failed");
       const entered = Promise.withResolvers<void>();
       const release = Promise.withResolvers<void>();
@@ -420,29 +487,35 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
           subjectId: org.ownerSubjectId,
           connectionId: connected.id,
         });
-      const holding = withSessionRlsActorContext({ subjectId: org.ownerSubjectId }, () =>
-        withRlsContext(
-          client!.db,
-          {
-            accountId: org.accountId,
-            workspaceId: first === "designate" ? org.sharedWorkspaceId : null,
-          },
-          async (tx) => {
-            if (first === "designate")
-              expect(await designate(tx)).toMatchObject({ kind: "updated" });
-            else expect(await remove(tx)).toMatchObject({ outcome: "removed" });
-            entered.resolve();
-            await release.promise;
-          },
-        ),
+      const holding = withSessionRlsActorContext(
+        { subjectId: org.ownerSubjectId },
+        () =>
+          withRlsContext(
+            client!.db,
+            {
+              accountId: org.accountId,
+              workspaceId: first === "designate" ? org.sharedWorkspaceId : null,
+            },
+            async (tx) => {
+              if (first === "designate")
+                expect(await designate(tx)).toMatchObject({ kind: "updated" });
+              else
+                expect(await remove(tx)).toMatchObject({ outcome: "removed" });
+              entered.resolve();
+              await release.promise;
+            },
+          ),
       );
       void holding.catch(entered.reject);
       await entered.promise;
-      const waiting = withSessionRlsActorContext({ subjectId: org.ownerSubjectId }, async () =>
-        first === "designate" ? await remove() : await designate(),
+      const waiting = withSessionRlsActorContext(
+        { subjectId: org.ownerSubjectId },
+        async () =>
+          first === "designate" ? await remove() : await designate(),
       );
       for (let tries = 0; tries < 100; tries++) {
-        const [locks] = await shared!.admin`select count(*)::int as pending from pg_locks
+        const [locks] = await shared!
+          .admin`select count(*)::int as pending from pg_locks
           where locktype = 'advisory' and not granted and database = (select oid from pg_database where datname = current_database())`;
         if (locks!.pending > 0) break;
         if (tries === 99) {
@@ -454,11 +527,13 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
       release.resolve();
       await holding;
       const result = await waiting;
-      if (first === "designate") expect(result).toMatchObject({ outcome: "removed" });
+      if (first === "designate")
+        expect(result).toMatchObject({ outcome: "removed" });
       else expect(result).toMatchObject({ kind: "forbidden" });
       expect(
         Array.from(
-          await shared!.admin`select connection_id from subscription_apps_designations
+          await shared!
+            .admin`select connection_id from subscription_apps_designations
         where account_id = ${org.accountId}::uuid`,
         ),
       ).toEqual([]);
@@ -472,7 +547,12 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
   test("one-shot nonturn reservation, unknown crash outcome, reconnect and RLS isolation", async () => {
     const org = await organization();
     await setCutover(org.accountId, true);
-    const connected = await connect(org, org.ownerSubjectId, null, "request-custody");
+    const connected = await connect(
+      org,
+      org.ownerSubjectId,
+      null,
+      "request-custody",
+    );
     if (connected.kind !== "connected") throw new Error("connect failed");
     const scope = {
       kind: "workspace" as const,
@@ -489,7 +569,13 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
       request,
     );
     await expect(
-      reserveSubscriptionCoreCodexOperationRequest(client!.db, scope, null, connected.id, request),
+      reserveSubscriptionCoreCodexOperationRequest(
+        client!.db,
+        scope,
+        null,
+        connected.id,
+        request,
+      ),
     ).rejects.toThrow();
     const other = await organization();
     await expect(
@@ -513,15 +599,26 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
     await shared!
       .admin`update subscription_operation_leases set leased_until = now() - interval '1 hour'
       where operation_id = ${receipt.operationId}::uuid`;
-    expect((await disconnect(org, org.ownerSubjectId, null, connected.id)).outcome).toBe("removed");
-    expect((await disconnect(org, org.ownerSubjectId, null, connected.id)).outcome).toBe("removed");
+    expect(
+      (await disconnect(org, org.ownerSubjectId, null, connected.id)).outcome,
+    ).toBe("removed");
+    expect(
+      (await disconnect(org, org.ownerSubjectId, null, connected.id)).outcome,
+    ).toBe("removed");
     await expect(
-      reserveSubscriptionCoreCodexOperationRequest(client!.db, scope, null, connected.id, {
-        ...request,
-        transportAttempt: 2,
-      }),
+      reserveSubscriptionCoreCodexOperationRequest(
+        client!.db,
+        scope,
+        null,
+        connected.id,
+        {
+          ...request,
+          transportAttempt: 2,
+        },
+      ),
     ).rejects.toBeInstanceOf(SubscriptionCoreCodexSourceDisconnectedError);
-    const [retained] = await shared!.admin`select request_outcome from subscription_operation_leases
+    const [retained] = await shared!
+      .admin`select request_outcome from subscription_operation_leases
       where operation_id = ${receipt.operationId}::uuid`;
     expect(retained!.request_outcome).toBe("unknown");
     const [secret] = await shared!
@@ -535,23 +632,37 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
       (error: unknown) => error,
     );
     expect(String(lateWrite)).toContain("disconnected subscription identity");
-    const reconnected = await connect(org, org.ownerSubjectId, null, "request-custody");
+    const reconnected = await connect(
+      org,
+      org.ownerSubjectId,
+      null,
+      "request-custody",
+    );
     if (reconnected.kind !== "connected") throw new Error("reconnect failed");
     expect(reconnected.id).not.toBe(connected.id);
-    const projected = await withSessionRlsActorContext({ subjectId: org.ownerSubjectId }, () =>
-      getSubscriptionCoreOrganizationCodexProjection(client!.db, {
-        organizationId: org.accountId,
-        subjectId: org.ownerSubjectId,
-      }),
+    const projected = await withSessionRlsActorContext(
+      { subjectId: org.ownerSubjectId },
+      () =>
+        getSubscriptionCoreOrganizationCodexProjection(client!.db, {
+          organizationId: org.accountId,
+          subjectId: org.ownerSubjectId,
+        }),
     );
-    expect(projected.accounts.map((account) => account.id)).toEqual([reconnected.id]);
+    expect(projected.accounts.map((account) => account.id)).toEqual([
+      reconnected.id,
+    ]);
   });
 
   test("reserve versus disconnect linearizes in both lock orders", async () => {
     for (const first of ["reserve", "disconnect"] as const) {
       const org = await organization();
       await setCutover(org.accountId, true);
-      const connected = await connect(org, org.ownerSubjectId, null, `race-${first}`);
+      const connected = await connect(
+        org,
+        org.ownerSubjectId,
+        null,
+        `race-${first}`,
+      );
       if (connected.kind !== "connected") throw new Error("connect failed");
       const scope = {
         kind: "workspace" as const,
@@ -562,10 +673,16 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
       const entered = Promise.withResolvers<void>();
       const release = Promise.withResolvers<void>();
       const reserve = (db = client!.db) =>
-        reserveSubscriptionCoreCodexOperationRequest(db, scope, null, connected.id, {
-          requestId: crypto.randomUUID(),
-          transportAttempt: 1,
-        });
+        reserveSubscriptionCoreCodexOperationRequest(
+          db,
+          scope,
+          null,
+          connected.id,
+          {
+            requestId: crypto.randomUUID(),
+            transportAttempt: 1,
+          },
+        );
       const remove = (db = client!.db) =>
         disconnectSubscriptionCoreCodexConnection(db, {
           accountId: org.accountId,
@@ -574,7 +691,10 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
           connectionId: connected.id,
         });
       const holding = withSessionRlsActorContext(
-        { subjectId: org.ownerSubjectId, initiatingHumanSubjectId: org.ownerSubjectId },
+        {
+          subjectId: org.ownerSubjectId,
+          initiatingHumanSubjectId: org.ownerSubjectId,
+        },
         () =>
           withRlsContext(
             client!.db,
@@ -592,8 +712,9 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
       );
       await entered.promise;
       let completed = false;
-      const waiting = withSessionRlsActorContext({ subjectId: org.ownerSubjectId }, async () =>
-        first === "reserve" ? await remove() : await reserve(),
+      const waiting = withSessionRlsActorContext(
+        { subjectId: org.ownerSubjectId },
+        async () => (first === "reserve" ? await remove() : await reserve()),
       )
         .then(
           (value) => ({ value }),
@@ -604,7 +725,8 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
         });
       // Observe actual PostgreSQL lock contention, not a sleep-as-proof.
       for (let tries = 0; tries < 100; tries++) {
-        const [locks] = await shared!.admin`select count(*)::int as pending from pg_locks
+        const [locks] = await shared!
+          .admin`select count(*)::int as pending from pg_locks
           where locktype = 'advisory' and not granted and database = (select oid from pg_database where datname = current_database())`;
         if (locks!.pending > 0) break;
         if (tries === 99) {
@@ -617,7 +739,8 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
       release.resolve();
       await holding;
       const result = await waiting;
-      if (first === "reserve") expect(result).toMatchObject({ value: { outcome: "removed" } });
+      if (first === "reserve")
+        expect(result).toMatchObject({ value: { outcome: "removed" } });
       else
         expect("error" in result && result.error).toBeInstanceOf(
           SubscriptionCoreCodexSourceDisconnectedError,
@@ -628,18 +751,28 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
   test("refresh serialization scrubs the winning token and cannot resurrect a disconnected generation", async () => {
     const org = await organization();
     await setCutover(org.accountId, true);
-    const connected = await connect(org, org.ownerSubjectId, null, "refresh-drain");
+    const connected = await connect(
+      org,
+      org.ownerSubjectId,
+      null,
+      "refresh-drain",
+    );
     if (connected.kind !== "connected") throw new Error("connect failed");
     const entered = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
     const refreshing = withSessionRlsActorContext(
-      { subjectId: org.ownerSubjectId, initiatingHumanSubjectId: org.ownerSubjectId },
+      {
+        subjectId: org.ownerSubjectId,
+        initiatingHumanSubjectId: org.ownerSubjectId,
+      },
       () =>
         withRlsContext(
           client!.db,
           { accountId: org.accountId, workspaceId: org.sharedWorkspaceId },
           async (tx) => {
-            const [started] = await rawRows<{ refresh_generation: number | string }>(
+            const [started] = await rawRows<{
+              refresh_generation: number | string;
+            }>(
               tx,
               sql`select refresh_generation from opengeni_private.begin_subscription_codex_connection_refresh(
             ${org.accountId}::uuid, ${org.sharedWorkspaceId}::uuid, ${connected.id}::uuid,
@@ -669,7 +802,10 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
       from subscription_connections where id = ${connected.id}::uuid`;
     expect(stored).toEqual({ credential_encrypted: "", disconnected: true });
     await withSessionRlsActorContext(
-      { subjectId: org.ownerSubjectId, initiatingHumanSubjectId: org.ownerSubjectId },
+      {
+        subjectId: org.ownerSubjectId,
+        initiatingHumanSubjectId: org.ownerSubjectId,
+      },
       () =>
         withRlsContext(
           client!.db,
@@ -725,25 +861,48 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
         }),
       );
     expect(
-      (await personalAccounts(org, member.subjectId, member.personalWorkspaceId)).accounts[0],
+      (
+        await personalAccounts(
+          org,
+          member.subjectId,
+          member.personalWorkspaceId,
+        )
+      ).accounts[0],
     ).toMatchObject({
       extraCreditsEnabled: false,
       extraCreditsVersion: 1,
       extraCreditsUpdatedAt: null,
     });
-    for (const subject of [org.ownerSubjectId, "service:fixture", "user:other"]) {
-      expect((await change(alias, true, 1, subject)).result).toEqual({ kind: "not_found" });
+    for (const subject of [
+      org.ownerSubjectId,
+      "service:fixture",
+      "user:other",
+    ]) {
+      expect((await change(alias, true, 1, subject)).result).toEqual({
+        kind: "not_found",
+      });
     }
     expect(await change(connected.id, true, 1)).toMatchObject({
-      result: { kind: "updated", extraCreditsEnabled: true, extraCreditsVersion: 2 },
-      wake: { accountId: org.accountId, reason: "core_codex_extra_credits_changed" },
+      result: {
+        kind: "updated",
+        extraCreditsEnabled: true,
+        extraCreditsVersion: 2,
+      },
+      wake: {
+        accountId: org.accountId,
+        reason: "core_codex_extra_credits_changed",
+      },
     });
     expect(await change(alias, true, 1)).toMatchObject({
       result: { kind: "unchanged", extraCreditsVersion: 2 },
       wake: null,
     });
     expect(await change(alias, false, 1)).toMatchObject({
-      result: { kind: "conflict", extraCreditsEnabled: true, extraCreditsVersion: 2 },
+      result: {
+        kind: "conflict",
+        extraCreditsEnabled: true,
+        extraCreditsVersion: 2,
+      },
       wake: null,
     });
     await withSessionRlsActorContext({ subjectId: member.subjectId }, () =>
@@ -753,9 +912,15 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
         expectedVersion: 1,
       }),
     );
-    await connect(org, member.subjectId, member.personalWorkspaceId, "personal-credit");
-    const projection = (await personalAccounts(org, member.subjectId, member.personalWorkspaceId))
-      .accounts[0]!;
+    await connect(
+      org,
+      member.subjectId,
+      member.personalWorkspaceId,
+      "personal-credit",
+    );
+    const projection = (
+      await personalAccounts(org, member.subjectId, member.personalWorkspaceId)
+    ).accounts[0]!;
     expect(projection).toMatchObject({
       extraCreditsEnabled: true,
       extraCreditsVersion: 2,
@@ -769,51 +934,60 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
         expectedVersion: 2,
       }),
     );
-    const accepted = await withSessionRlsActorContext({ subjectId: member.subjectId }, async () => {
-      const session = await createSession(client!.db, {
-        accountId: org.accountId,
-        workspaceId: member.personalWorkspaceId,
-        subjectId: member.subjectId,
-        initialMessage: "credit consent",
-        resources: [],
-        metadata: {},
-        model: MODEL,
-        reasoningEffort: "medium",
-        latencyMode: "standard",
-        sandboxBackend: "none",
-        visibility: "user_private",
-        createdBy: { kind: "subject", subjectId: member.subjectId },
-        createdByContext: {},
-      });
-      const turn = await enqueueSessionTurn(client!.db, {
-        accountId: org.accountId,
-        workspaceId: member.personalWorkspaceId,
-        sessionId: session.id,
-        triggerEventId: crypto.randomUUID(),
-        temporalWorkflowId: `session-${session.id}`,
-        source: "user",
-        prompt: "credit consent",
-        resources: [],
-        tools: [],
-        model: MODEL,
-        reasoningEffort: "medium",
-        sandboxBackend: "none",
-        metadata: {},
-        initiator: { kind: "subject", subjectId: member.subjectId },
-      });
-      return {
-        accountId: org.accountId,
-        workspaceId: member.personalWorkspaceId,
-        sessionId: session.id,
-        turnId: turn.id,
-      };
-    });
+    const accepted = await withSessionRlsActorContext(
+      { subjectId: member.subjectId },
+      async () => {
+        const session = await createSession(client!.db, {
+          accountId: org.accountId,
+          workspaceId: member.personalWorkspaceId,
+          subjectId: member.subjectId,
+          initialMessage: "credit consent",
+          resources: [],
+          metadata: {},
+          model: MODEL,
+          reasoningEffort: "medium",
+          latencyMode: "standard",
+          sandboxBackend: "none",
+          visibility: "user_private",
+          createdBy: { kind: "subject", subjectId: member.subjectId },
+          createdByContext: {},
+        });
+        const turn = await enqueueSessionTurn(client!.db, {
+          accountId: org.accountId,
+          workspaceId: member.personalWorkspaceId,
+          sessionId: session.id,
+          triggerEventId: crypto.randomUUID(),
+          temporalWorkflowId: `session-${session.id}`,
+          source: "user",
+          prompt: "credit consent",
+          resources: [],
+          tools: [],
+          model: MODEL,
+          reasoningEffort: "medium",
+          sandboxBackend: "none",
+          metadata: {},
+          initiator: { kind: "subject", subjectId: member.subjectId },
+        });
+        return {
+          accountId: org.accountId,
+          workspaceId: member.personalWorkspaceId,
+          sessionId: session.id,
+          turnId: turn.id,
+        };
+      },
+    );
     const now = Date.now();
-    await shared!.admin`insert into subscription_connection_quota(account_id, connection_id, quota,
+    await shared!
+      .admin`insert into subscription_connection_quota(account_id, connection_id, quota,
       observed_refresh_generation, revision) values (${org.accountId}::uuid, ${connected.id}::uuid,
       ${shared!.admin.json({
         windows: [
-          { id: "primary", usedPercent: 100, resetsAt: now + 3600_000, status: "exhausted" },
+          {
+            id: "primary",
+            usedPercent: 100,
+            resetsAt: now + 3600_000,
+            status: "exhausted",
+          },
         ],
         modelCooldowns: {},
         exhaustedUntil: null,
@@ -821,7 +995,10 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
         observedAt: now,
         source: "usage_endpoint",
       })}::jsonb, 2, 1)`;
-    const identity = await readSubscriptionCoreTurnIdentity(client!.db, accepted);
+    const identity = await readSubscriptionCoreTurnIdentity(
+      client!.db,
+      accepted,
+    );
     if (!identity) throw new Error("accepted identity missing");
     const placement = () =>
       evaluateSubscriptionCoreCodexPlacement(client!.db, {
@@ -843,13 +1020,21 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
   });
 
   test("runs as the non-superuser, non-bypass application role", async () => {
-    const [role] = await rawRows<{ currentUser: string; superuser: boolean; bypassRls: boolean }>(
+    const [role] = await rawRows<{
+      currentUser: string;
+      superuser: boolean;
+      bypassRls: boolean;
+    }>(
       client!.db,
       sql`select current_user as "currentUser", rolsuper as superuser,
           rolbypassrls as "bypassRls"
         from pg_catalog.pg_roles where rolname = current_user`,
     );
-    expect(role).toEqual({ currentUser: "opengeni_app", superuser: false, bypassRls: false });
+    expect(role).toEqual({
+      currentUser: "opengeni_app",
+      superuser: false,
+      bypassRls: false,
+    });
   });
 
   test("without a cutover row, and with a disabled one, nothing is written or read", async () => {
@@ -861,16 +1046,21 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
         kind: "refused",
         reason: "unavailable",
       });
-      expect(await connect(org, owner, org.sharedWorkspaceId, "gate-ws")).toEqual({
-        kind: "refused",
-        reason: "unavailable",
-      });
-      expect(await connect(org, owner, org.personalWorkspaceId, "gate-personal")).toEqual({
+      expect(
+        await connect(org, owner, org.sharedWorkspaceId, "gate-ws"),
+      ).toEqual({
         kind: "refused",
         reason: "unavailable",
       });
       expect(
-        (await personalAccounts(org, owner, org.personalWorkspaceId)).personalAccountIds,
+        await connect(org, owner, org.personalWorkspaceId, "gate-personal"),
+      ).toEqual({
+        kind: "refused",
+        reason: "unavailable",
+      });
+      expect(
+        (await personalAccounts(org, owner, org.personalWorkspaceId))
+          .personalAccountIds,
       ).toBeUndefined();
     }
     const [count] = await shared!.admin<{ total: number }[]>`
@@ -882,7 +1072,9 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
     const connected = await connect(org, owner, null, "gate-then-disabled");
     if (connected.kind !== "connected") throw new Error("connect failed");
     await setCutover(org.accountId, false);
-    expect((await disconnect(org, owner, null, connected.id)).outcome).toBe("not_found");
+    expect((await disconnect(org, owner, null, connected.id)).outcome).toBe(
+      "not_found",
+    );
     expect(await row(connected.id)).not.toBeNull();
   });
 
@@ -890,7 +1082,11 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
     const org = await organization();
     await setCutover(org.accountId, true);
     const first = await connect(org, org.ownerSubjectId, null, "org-account");
-    expect(first).toMatchObject({ kind: "connected", isNew: true, ownership: "shared" });
+    expect(first).toMatchObject({
+      kind: "connected",
+      isNew: true,
+      ownership: "shared",
+    });
     if (first.kind !== "connected") throw new Error("connect failed");
     expect(await row(first.id)).toMatchObject({
       ownership: "shared",
@@ -899,27 +1095,39 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
       refresh_generation: "1",
       allow_personal_workspaces: true,
     });
-    const listed = await withSessionRlsActorContext({ subjectId: org.ownerSubjectId }, () =>
-      getSubscriptionCoreOrganizationCodexProjection(client!.db, {
-        organizationId: org.accountId,
-        subjectId: org.ownerSubjectId,
-      }),
+    const listed = await withSessionRlsActorContext(
+      { subjectId: org.ownerSubjectId },
+      () =>
+        getSubscriptionCoreOrganizationCodexProjection(client!.db, {
+          organizationId: org.accountId,
+          subjectId: org.ownerSubjectId,
+        }),
     );
     expect(listed.accounts.map((account) => account.id)).toEqual([first.id]);
     // The same upstream account replaces the credential of the same connection.
-    const again = await withSessionRlsActorContext({ subjectId: org.ownerSubjectId }, () =>
-      connectSubscriptionCoreCodexConnection(client!.db, {
-        accountId: org.accountId,
-        workspaceId: null,
-        subjectId: org.ownerSubjectId,
-        ...credential("org-account"),
-        credentialEncrypted: encryptEnvironmentValue(
-          key,
-          JSON.stringify({ access_token: "access-rotated", refresh_token: "r", id_token: "i" }),
-        ),
-      }),
+    const again = await withSessionRlsActorContext(
+      { subjectId: org.ownerSubjectId },
+      () =>
+        connectSubscriptionCoreCodexConnection(client!.db, {
+          accountId: org.accountId,
+          workspaceId: null,
+          subjectId: org.ownerSubjectId,
+          ...credential("org-account"),
+          credentialEncrypted: encryptEnvironmentValue(
+            key,
+            JSON.stringify({
+              access_token: "access-rotated",
+              refresh_token: "r",
+              id_token: "i",
+            }),
+          ),
+        }),
     );
-    expect(again).toMatchObject({ kind: "connected", id: first.id, isNew: false });
+    expect(again).toMatchObject({
+      kind: "connected",
+      id: first.id,
+      isNew: false,
+    });
     const replaced = await row(first.id);
     expect(replaced!.refresh_generation).toBe("2");
     // A user-shaped grant alone is not proof of a managed browser human.
@@ -931,7 +1139,9 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
     const org = await organization();
     await setCutover(org.accountId, true);
     // Both members of one ChatGPT Team workspace: same account id, different person.
-    const login = (loginPerson: string): SubscriptionCoreCodexCredentialInput => ({
+    const login = (
+      loginPerson: string,
+    ): SubscriptionCoreCodexCredentialInput => ({
       ...credential(`team-${loginPerson}`),
       providerAccountId: "chatgpt-team-workspace",
       providerSubjectId: `user-${loginPerson}`,
@@ -947,30 +1157,54 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
       );
     const alice = await asAdmin(login("alice"));
     const bob = await asAdmin(login("bob"));
-    if (alice.kind !== "connected" || bob.kind !== "connected") throw new Error("connect failed");
+    if (alice.kind !== "connected" || bob.kind !== "connected")
+      throw new Error("connect failed");
     expect(bob.id).not.toBe(alice.id);
     expect(bob.isNew).toBe(true);
-    expect(accessToken((await row(alice.id))!.credential_encrypted)).toBe("access-team-alice");
-    expect(accessToken((await row(bob.id))!.credential_encrypted)).toBe("access-team-bob");
+    expect(accessToken((await row(alice.id))!.credential_encrypted)).toBe(
+      "access-team-alice",
+    );
+    expect(accessToken((await row(bob.id))!.credential_encrypted)).toBe(
+      "access-team-bob",
+    );
     // Alice signing in again replaces only her own credential.
     const again = await asAdmin({
       ...login("alice"),
       credentialEncrypted: encryptEnvironmentValue(
         key,
-        JSON.stringify({ access_token: "access-alice-2", refresh_token: "r", id_token: "i" }),
+        JSON.stringify({
+          access_token: "access-alice-2",
+          refresh_token: "r",
+          id_token: "i",
+        }),
       ),
     });
-    expect(again).toMatchObject({ kind: "connected", id: alice.id, isNew: false });
-    expect(accessToken((await row(alice.id))!.credential_encrypted)).toBe("access-alice-2");
-    expect(accessToken((await row(bob.id))!.credential_encrypted)).toBe("access-team-bob");
+    expect(again).toMatchObject({
+      kind: "connected",
+      id: alice.id,
+      isNew: false,
+    });
+    expect(accessToken((await row(alice.id))!.credential_encrypted)).toBe(
+      "access-alice-2",
+    );
+    expect(accessToken((await row(bob.id))!.credential_encrypted)).toBe(
+      "access-team-bob",
+    );
   });
 
   test("a workspace reconnect cannot silently replace another workspace's login, even as org admin", async () => {
     const org = await organization();
     await setCutover(org.accountId, true);
-    const connected = await connect(org, org.ownerSubjectId, org.sharedWorkspaceId, "elsewhere");
+    const connected = await connect(
+      org,
+      org.ownerSubjectId,
+      org.sharedWorkspaceId,
+      "elsewhere",
+    );
     if (connected.kind !== "connected") throw new Error("connect failed");
-    expect(await connect(org, org.ownerSubjectId, org.otherWorkspaceId, "elsewhere")).toEqual({
+    expect(
+      await connect(org, org.ownerSubjectId, org.otherWorkspaceId, "elsewhere"),
+    ).toEqual({
       kind: "refused",
       reason: "managed_elsewhere",
     });
@@ -980,13 +1214,20 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
   test("unidentified migrated logins are never guessed, merged, or silently duplicated", async () => {
     const org = await organization();
     await setCutover(org.accountId, true);
-    const connected = await connect(org, org.ownerSubjectId, org.sharedWorkspaceId, "unidentified");
+    const connected = await connect(
+      org,
+      org.ownerSubjectId,
+      org.sharedWorkspaceId,
+      "unidentified",
+    );
     if (connected.kind !== "connected") throw new Error("connect failed");
     await shared!
       .admin`update subscription_connections set provider_subject_id = null where id = ${connected.id}::uuid`;
     const manager = await person(org, "admin");
     for (const subject of [org.ownerSubjectId, manager.subjectId]) {
-      expect(await connect(org, subject, org.sharedWorkspaceId, "unidentified")).toEqual({
+      expect(
+        await connect(org, subject, org.sharedWorkspaceId, "unidentified"),
+      ).toEqual({
         kind: "refused",
         reason: "identity_unverified",
       });
@@ -1000,7 +1241,12 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
   test("concurrent reconnect rechecks a disconnected identity under the lifecycle lock", async () => {
     const org = await organization();
     await setCutover(org.accountId, true);
-    const first = await connect(org, org.ownerSubjectId, null, "reconnect-drain-race");
+    const first = await connect(
+      org,
+      org.ownerSubjectId,
+      null,
+      "reconnect-drain-race",
+    );
     if (first.kind !== "connected") throw new Error("connect failed");
     const entered = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
@@ -1012,7 +1258,8 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
     await entered.promise;
     const waitForQueued = async (count: number) => {
       for (let i = 0; i < 200; i++) {
-        const [locks] = await shared!.admin`select count(*)::int as n from pg_locks
+        const [locks] = await shared!
+          .admin`select count(*)::int as n from pg_locks
           where locktype = 'advisory' and not granted
             and database = (select oid from pg_database where datname = current_database())`;
         if (locks!.n >= count) return;
@@ -1024,7 +1271,12 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
     let reconnecting: ReturnType<typeof connect> | undefined;
     try {
       await waitForQueued(1);
-      reconnecting = connect(org, org.ownerSubjectId, null, "reconnect-drain-race");
+      reconnecting = connect(
+        org,
+        org.ownerSubjectId,
+        null,
+        "reconnect-drain-race",
+      );
       await waitForQueued(2);
     } finally {
       release.resolve();
@@ -1036,10 +1288,12 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
     if (replacement.kind !== "connected") throw new Error("reconnect failed");
     expect(replacement.isNew).toBe(true);
     expect(replacement.id).not.toBe(first.id);
-    const [old] = await shared!.admin`select credential_encrypted from subscription_connections
+    const [old] = await shared!
+      .admin`select credential_encrypted from subscription_connections
       where id = ${first.id}::uuid`;
     expect(old!.credential_encrypted).toBe("");
-    const [current] = await shared!.admin`select status from subscription_connections
+    const [current] = await shared!
+      .admin`select status from subscription_connections
       where id = ${replacement.id}::uuid`;
     expect(current!.status).toBe("active");
   });
@@ -1062,7 +1316,8 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
       const deadline = Date.now() + 5000;
       let waiting = false;
       while (Date.now() < deadline) {
-        const [blocked] = await shared!.admin`select exists(select 1 from pg_locks
+        const [blocked] = await shared!
+          .admin`select exists(select 1 from pg_locks
           where locktype = 'advisory' and not granted and database = (select oid from pg_database where datname = current_database())) as waiting`;
         if (blocked!.waiting) {
           waiting = true;
@@ -1090,65 +1345,124 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
     const manager = await person(org, "admin");
     const plain = await person(org, "member");
     // An organization administrator connects a workspace account.
-    const local = await connect(org, org.ownerSubjectId, org.sharedWorkspaceId, "ws-account");
-    expect(local).toMatchObject({ kind: "connected", isNew: true, ownership: "shared" });
+    const local = await connect(
+      org,
+      org.ownerSubjectId,
+      org.sharedWorkspaceId,
+      "ws-account",
+    );
+    expect(local).toMatchObject({
+      kind: "connected",
+      isNew: true,
+      ownership: "shared",
+    });
     if (local.kind !== "connected") throw new Error("connect failed");
     expect(await row(local.id)).toMatchObject({
       scope_kind: "workspaces",
       managed_by_workspace_id: org.sharedWorkspaceId,
       allow_personal_workspaces: false,
     });
-    const [policy] = await shared!.admin<{ inference_pool: string; managed: string }[]>`
+    const [policy] = await shared!.admin<
+      { inference_pool: string; managed: string }[]
+    >`
       select inference_pool, managed_by_workspace_id::text as managed
       from subscription_connection_assignment_policies
       where connection_id = ${local.id}::uuid and workspace_id = ${org.sharedWorkspaceId}::uuid`;
-    expect(policy).toEqual({ inference_pool: "workspace", managed: org.sharedWorkspaceId });
-    const projection = await withSessionRlsActorContext({ subjectId: manager.subjectId }, () =>
-      getSubscriptionCoreCodexWorkspaceProjection(client!.db, {
-        accountId: org.accountId,
-        workspaceId: org.sharedWorkspaceId,
-      }),
+    expect(policy).toEqual({
+      inference_pool: "workspace",
+      managed: org.sharedWorkspaceId,
+    });
+    const projection = await withSessionRlsActorContext(
+      { subjectId: manager.subjectId },
+      () =>
+        getSubscriptionCoreCodexWorkspaceProjection(client!.db, {
+          accountId: org.accountId,
+          workspaceId: org.sharedWorkspaceId,
+        }),
     );
-    expect(projection.accounts.find((account) => account.id === local.id)?.source).toBe(
-      "workspace",
+    expect(
+      projection.accounts.find((account) => account.id === local.id)?.source,
+    ).toBe("workspace");
+    const organizationAccount = await connect(
+      org,
+      org.ownerSubjectId,
+      null,
+      "org-managed",
     );
-    const organizationAccount = await connect(org, org.ownerSubjectId, null, "org-managed");
-    if (organizationAccount.kind !== "connected") throw new Error("connect failed");
+    if (organizationAccount.kind !== "connected")
+      throw new Error("connect failed");
 
     // The delegated manager reconnects what the workspace manages ...
     expect(
-      await connect(org, manager.subjectId, org.sharedWorkspaceId, "ws-account"),
+      await connect(
+        org,
+        manager.subjectId,
+        org.sharedWorkspaceId,
+        "ws-account",
+      ),
     ).toMatchObject({ kind: "connected", id: local.id, isNew: false });
     expect((await row(local.id))!.refresh_generation).toBe("2");
     // ... but cannot take over an organization account, create a new shared
     // account, or delete one.
-    expect(await connect(org, manager.subjectId, org.sharedWorkspaceId, "org-managed")).toEqual({
+    expect(
+      await connect(
+        org,
+        manager.subjectId,
+        org.sharedWorkspaceId,
+        "org-managed",
+      ),
+    ).toEqual({
       kind: "refused",
       reason: "managed_elsewhere",
     });
-    expect(await connect(org, manager.subjectId, org.sharedWorkspaceId, "brand-new")).toEqual({
+    expect(
+      await connect(org, manager.subjectId, org.sharedWorkspaceId, "brand-new"),
+    ).toEqual({
       kind: "refused",
       reason: "forbidden",
     });
     expect(
-      (await disconnect(org, manager.subjectId, org.sharedWorkspaceId, local.id)).outcome,
+      (
+        await disconnect(
+          org,
+          manager.subjectId,
+          org.sharedWorkspaceId,
+          local.id,
+        )
+      ).outcome,
     ).toBe("forbidden");
     // A plain member manages nothing (the update policy refuses).
-    expect(await connect(org, plain.subjectId, org.sharedWorkspaceId, "ws-account")).toEqual({
+    expect(
+      await connect(org, plain.subjectId, org.sharedWorkspaceId, "ws-account"),
+    ).toEqual({
       kind: "refused",
       reason: "forbidden",
     });
-    expect((await disconnect(org, plain.subjectId, org.sharedWorkspaceId, local.id)).outcome).toBe(
-      "forbidden",
-    );
+    expect(
+      (await disconnect(org, plain.subjectId, org.sharedWorkspaceId, local.id))
+        .outcome,
+    ).toBe("forbidden");
     // An organization account named from a workspace route keeps the legacy 409.
     await expect(
-      disconnect(org, org.ownerSubjectId, org.sharedWorkspaceId, organizationAccount.id),
+      disconnect(
+        org,
+        org.ownerSubjectId,
+        org.sharedWorkspaceId,
+        organizationAccount.id,
+      ),
     ).rejects.toBeInstanceOf(SubscriptionCoreCodexOrganizationManagedError);
     expect(await row(local.id)).not.toBeNull();
     // The administrator removes the workspace account.
-    const removed = await disconnect(org, org.ownerSubjectId, org.sharedWorkspaceId, local.id);
-    expect(removed).toMatchObject({ outcome: "removed", connectionId: local.id });
+    const removed = await disconnect(
+      org,
+      org.ownerSubjectId,
+      org.sharedWorkspaceId,
+      local.id,
+    );
+    expect(removed).toMatchObject({
+      outcome: "removed",
+      connectionId: local.id,
+    });
     expect(await row(local.id)).toBeNull();
   });
 
@@ -1157,7 +1471,12 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
     const other = await organization();
     await setCutover(org.accountId, true);
     await setCutover(other.accountId, true);
-    const connected = await connect(org, org.ownerSubjectId, null, "alias-target");
+    const connected = await connect(
+      org,
+      org.ownerSubjectId,
+      null,
+      "alias-target",
+    );
     if (connected.kind !== "connected") throw new Error("connect failed");
     const alias = crypto.randomUUID();
     await shared!.admin`
@@ -1165,23 +1484,36 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
       values (${org.accountId}::uuid, 'codex', ${alias}::uuid, ${connected.id}::uuid)`;
     // RLS isolation: the other organization's administrator neither writes
     // into nor removes from this organization.
-    expect(await connect(other, other.ownerSubjectId, null, "intruder", org.accountId)).toEqual({
+    expect(
+      await connect(
+        other,
+        other.ownerSubjectId,
+        null,
+        "intruder",
+        org.accountId,
+      ),
+    ).toEqual({
       kind: "refused",
       reason: "forbidden",
     });
-    const foreign = await withSessionRlsActorContext({ subjectId: other.ownerSubjectId }, () =>
-      disconnectSubscriptionCoreCodexConnection(client!.db, {
-        accountId: org.accountId,
-        workspaceId: null,
-        subjectId: other.ownerSubjectId,
-        connectionId: connected.id,
-      }),
+    const foreign = await withSessionRlsActorContext(
+      { subjectId: other.ownerSubjectId },
+      () =>
+        disconnectSubscriptionCoreCodexConnection(client!.db, {
+          accountId: org.accountId,
+          workspaceId: null,
+          subjectId: other.ownerSubjectId,
+          connectionId: connected.id,
+        }),
     );
     expect(["forbidden", "not_found"]).toContain(foreign.outcome);
     expect(await row(connected.id)).not.toBeNull();
     // The legacy id resolves to the canonical connection.
     const removed = await disconnect(org, org.ownerSubjectId, null, alias);
-    expect(removed).toMatchObject({ outcome: "removed", connectionId: connected.id });
+    expect(removed).toMatchObject({
+      outcome: "removed",
+      connectionId: connected.id,
+    });
     expect(await row(connected.id)).toBeNull();
   });
 
@@ -1202,48 +1534,56 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
         ${connected.id}::uuid, ${org.ownerSubjectId}, 'browser', 'credit-guarded',
         'provider_started', now() + interval '5 minutes', now())`;
     // A chat lease on a running turn.
-    const session = await withSessionRlsActorContext({ subjectId: org.ownerSubjectId }, () =>
-      createSession(client!.db, {
-        accountId: org.accountId,
-        workspaceId: org.sharedWorkspaceId,
-        initialMessage: "writers lease fixture",
-        resources: [],
-        metadata: {},
-        model: MODEL,
-        reasoningEffort: "medium",
-        latencyMode: "standard",
-        sandboxBackend: "none",
-        subjectId: org.ownerSubjectId,
-        createdBy: { kind: "subject", subjectId: org.ownerSubjectId },
-        createdByContext: {},
-      }),
+    const session = await withSessionRlsActorContext(
+      { subjectId: org.ownerSubjectId },
+      () =>
+        createSession(client!.db, {
+          accountId: org.accountId,
+          workspaceId: org.sharedWorkspaceId,
+          initialMessage: "writers lease fixture",
+          resources: [],
+          metadata: {},
+          model: MODEL,
+          reasoningEffort: "medium",
+          latencyMode: "standard",
+          sandboxBackend: "none",
+          subjectId: org.ownerSubjectId,
+          createdBy: { kind: "subject", subjectId: org.ownerSubjectId },
+          createdByContext: {},
+        }),
     );
-    const turn = await withSessionRlsActorContext({ subjectId: org.ownerSubjectId }, () =>
-      enqueueSessionTurn(client!.db, {
-        accountId: org.accountId,
-        workspaceId: org.sharedWorkspaceId,
+    const turn = await withSessionRlsActorContext(
+      { subjectId: org.ownerSubjectId },
+      () =>
+        enqueueSessionTurn(client!.db, {
+          accountId: org.accountId,
+          workspaceId: org.sharedWorkspaceId,
+          sessionId: session.id,
+          triggerEventId: crypto.randomUUID(),
+          temporalWorkflowId: `session-${session.id}`,
+          source: "user",
+          prompt: "writers lease fixture",
+          resources: [],
+          tools: [],
+          model: MODEL,
+          reasoningEffort: "medium",
+          sandboxBackend: "none",
+          metadata: {},
+          initiator: { kind: "subject", subjectId: org.ownerSubjectId },
+        }),
+    );
+    const claimed = await claimSessionWorkForAttempt(
+      client!.db,
+      org.sharedWorkspaceId,
+      {
         sessionId: session.id,
-        triggerEventId: crypto.randomUUID(),
-        temporalWorkflowId: `session-${session.id}`,
-        source: "user",
-        prompt: "writers lease fixture",
-        resources: [],
-        tools: [],
-        model: MODEL,
-        reasoningEffort: "medium",
-        sandboxBackend: "none",
-        metadata: {},
-        initiator: { kind: "subject", subjectId: org.ownerSubjectId },
-      }),
+        workflowId: `session-${session.id}`,
+        workflowRunId: crypto.randomUUID(),
+        dispatchId: crypto.randomUUID(),
+        attemptId: crypto.randomUUID(),
+        trigger: { kind: "next" },
+      },
     );
-    const claimed = await claimSessionWorkForAttempt(client!.db, org.sharedWorkspaceId, {
-      sessionId: session.id,
-      workflowId: `session-${session.id}`,
-      workflowRunId: crypto.randomUUID(),
-      dispatchId: crypto.randomUUID(),
-      attemptId: crypto.randomUUID(),
-      trigger: { kind: "next" },
-    });
     expect(claimed.action).toBe("claimed");
     await insertLease({
       accountId: org.accountId,
@@ -1252,19 +1592,27 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
       turnId: turn.id,
       connectionId: connected.id,
     });
-    const identity = await withSessionRlsActorContext({ subjectId: org.ownerSubjectId }, () =>
-      readSubscriptionCoreTurnIdentity(client!.db, {
-        accountId: org.accountId,
-        workspaceId: org.sharedWorkspaceId,
-        sessionId: session.id,
-        turnId: turn.id,
-      }),
+    const identity = await withSessionRlsActorContext(
+      { subjectId: org.ownerSubjectId },
+      () =>
+        readSubscriptionCoreTurnIdentity(client!.db, {
+          accountId: org.accountId,
+          workspaceId: org.sharedWorkspaceId,
+          sessionId: session.id,
+          turnId: turn.id,
+        }),
     );
     if (!identity) throw new Error("missing accepted identity");
-    const [fence] = await shared!.admin<{ attempt_id: string; generation: number }[]>`
+    const [fence] = await shared!.admin<
+      { attempt_id: string; generation: number }[]
+    >`
       select active_attempt_id::text as attempt_id, execution_generation::int as generation
       from session_turns where id = ${turn.id}::uuid`;
-    const ref = { connectionId: connected.id, holderId: "writers-holder", generation: 1 };
+    const ref = {
+      connectionId: connected.id,
+      holderId: "writers-holder",
+      generation: 1,
+    };
     const request = {
       requestId: crypto.randomUUID(),
       transportAttempt: 1,
@@ -1285,19 +1633,30 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
       ref,
       { ...request, requestId: crypto.randomUUID() },
     );
-    await settleSubscriptionCoreCodexTurnCredentialRequest(client!.db, identity, ref, {
-      ...request,
-      operationId: usage.operationId,
-      outcome: "unknown",
-    });
-    const [usageEvidence] = await shared!.admin`select operation_kind, request_outcome
+    await settleSubscriptionCoreCodexTurnCredentialRequest(
+      client!.db,
+      identity,
+      ref,
+      {
+        ...request,
+        operationId: usage.operationId,
+        outcome: "unknown",
+      },
+    );
+    const [usageEvidence] = await shared!
+      .admin`select operation_kind, request_outcome
       from subscription_operation_leases where operation_id = ${usage.operationId}::uuid`;
     expect(usageEvidence).toMatchObject({
       operation_kind: "credential_request",
       request_outcome: "unknown",
     });
     // A read-only usage failure never manufactures an ambiguous model request.
-    const reserved = await reserveSubscriptionCoreCodexRequest(client!.db, identity, ref, request);
+    const reserved = await reserveSubscriptionCoreCodexRequest(
+      client!.db,
+      identity,
+      ref,
+      request,
+    );
     await expect(
       reserveSubscriptionCoreCodexRequest(client!.db, identity, ref, request),
     ).rejects.toThrow();
@@ -1322,11 +1681,73 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
     ).rejects.toBeInstanceOf(SubscriptionCoreCodexRequestOutcomeUnknownError);
     // Only explicit outcome evidence (a synthetic definitive refusal here),
     // never timeout/expiry, releases the cross-attempt uncertainty fence.
-    await shared!.admin`update subscription_operation_leases set request_outcome = 'refused'
+    await shared!
+      .admin`update subscription_operation_leases set request_outcome = 'refused'
       where operation_id = ${crashed}::uuid`;
-    expect((await disconnect(org, org.ownerSubjectId, null, connected.id)).outcome).toBe("removed");
+    // An explicit Retry claims a new execution generation after the turn
+    // failed. An unknown request from that earlier failed attempt was already
+    // surfaced as the failure; it must not make the retry fail forever. An
+    // earlier generation that paused for capacity (not failed) stays fenced.
+    const earlierAttempt = async (outcome: string) => {
+      const attemptId = crypto.randomUUID();
+      const operationId = crypto.randomUUID();
+      await shared!.admin.begin(async (tx) => {
+        await tx`set local session_replication_role = replica`;
+        await tx`insert into session_turn_attempts (id, account_id, workspace_id, session_id,
+            turn_id, execution_generation, state, outcome, temporal_workflow_id,
+            temporal_workflow_run_id, temporal_activity_id, verified_control_revision,
+            mcp_approval_policies, authority_epoch, authority_visibility, closed_at)
+          select ${attemptId}::uuid, account_id, workspace_id, session_id, turn_id,
+            ${fence!.generation - 1}, 'closed', ${outcome}, temporal_workflow_id,
+            temporal_workflow_run_id, ${crypto.randomUUID()}, verified_control_revision,
+            mcp_approval_policies, authority_epoch, authority_visibility, now()
+          from session_turn_attempts where id = ${fence!.attempt_id}::uuid`;
+        await tx`insert into subscription_operation_leases(account_id, workspace_id, operation_id,
+          attempt_id, operation_kind, session_id, turn_id, provider, connection_id, holder_id,
+          generation, leased_until, request_id, transport_attempt, request_reserved_at, request_outcome)
+          values (${org.accountId}::uuid, ${org.sharedWorkspaceId}::uuid, ${operationId}::uuid,
+            ${attemptId}::uuid, 'model', ${session.id}::uuid, ${turn.id}::uuid,
+            'codex', ${connected.id}::uuid, 'earlier-owner', 1, now() - interval '1 hour',
+            ${crypto.randomUUID()}, 1, now() - interval '2 hours', 'unknown')`;
+      });
+      return operationId;
+    };
+    const failedEarlier = await earlierAttempt("failed");
+    const afterRetry = await reserveSubscriptionCoreCodexRequest(
+      client!.db,
+      identity,
+      ref,
+      {
+        ...request,
+        requestId: crypto.randomUUID(),
+      },
+    ).then(
+      () => "admitted",
+      (error: unknown) =>
+        String((error as { cause?: unknown } | null)?.cause ?? error),
+    );
+    // Both the writer and the database admission trigger let the retry through.
+    expect(afterRetry).toBe("admitted");
+    const [kept] = await shared!
+      .admin`select request_outcome from subscription_operation_leases
+      where operation_id = ${failedEarlier}::uuid`;
+    expect(kept).toMatchObject({ request_outcome: "unknown" });
+    const pausedEarlier = await earlierAttempt("waiting_capacity");
+    await expect(
+      reserveSubscriptionCoreCodexRequest(client!.db, identity, ref, {
+        ...request,
+        requestId: crypto.randomUUID(),
+      }),
+    ).rejects.toBeInstanceOf(SubscriptionCoreCodexRequestOutcomeUnknownError);
+    await shared!
+      .admin`update subscription_operation_leases set request_outcome = 'refused'
+      where operation_id = ${pausedEarlier}::uuid`;
+    expect(
+      (await disconnect(org, org.ownerSubjectId, null, connected.id)).outcome,
+    ).toBe("removed");
     expect(await row(connected.id)).toBeNull();
-    const [scrubbed] = await shared!.admin`select credential_encrypted, status, allocator_enabled,
+    const [scrubbed] = await shared!
+      .admin`select credential_encrypted, status, allocator_enabled,
       disconnected_at is not null as disconnected from subscription_connections where id = ${connected.id}::uuid`;
     expect(scrubbed).toEqual({
       credential_encrypted: "",
@@ -1345,14 +1766,22 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
       .admin`update subscription_leases set leased_until = now() - interval '1 hour' where turn_id = ${turn.id}::uuid`;
     await shared!
       .admin`update subscription_operation_leases set leased_until = now() - interval '1 hour' where connection_id = ${connected.id}::uuid`;
-    expect((await disconnect(org, org.ownerSubjectId, null, connected.id)).outcome).toBe("removed");
+    expect(
+      (await disconnect(org, org.ownerSubjectId, null, connected.id)).outcome,
+    ).toBe("removed");
     const [leases] = await shared!.admin`select
       (select count(*) from subscription_leases where connection_id = ${connected.id}::uuid)::int as chat,
       (select count(*) from subscription_operation_leases where connection_id = ${connected.id}::uuid)::int as operation`;
-    expect(leases).toEqual({ chat: 1, operation: 3 });
-    const [unknown] = await shared!.admin`select request_outcome, request_observed_at
+    // Three request records plus the two earlier-generation fixtures and the
+    // admitted retry request above; disconnect deletes none of them.
+    expect(leases).toEqual({ chat: 1, operation: 6 });
+    const [unknown] = await shared!
+      .admin`select request_outcome, request_observed_at
       from subscription_operation_leases where operation_id = ${reserved.operationId}::uuid`;
-    expect(unknown).toEqual({ request_outcome: "reserved", request_observed_at: null });
+    expect(unknown).toEqual({
+      request_outcome: "reserved",
+      request_observed_at: null,
+    });
     // Reconnect is a new identity, even with exactly the same upstream person.
     const replacement = await connect(org, org.ownerSubjectId, null, "guarded");
     if (replacement.kind !== "connected") throw new Error("reconnect failed");
@@ -1363,7 +1792,8 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
       outcome: "response_received",
     });
     expect(await row(replacement.id)).not.toBeNull();
-    const [receipt] = await shared!.admin`select request_outcome from subscription_operation_leases
+    const [receipt] = await shared!
+      .admin`select request_outcome from subscription_operation_leases
       where operation_id = ${reserved.operationId}::uuid`;
     expect(receipt!.request_outcome).toBe("response_received");
     const [redemption] = await shared!
@@ -1407,7 +1837,9 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
         ) values (pg_backend_pid(), pg_current_xact_id(), 'codex_connection_owner',
           gen_random_uuid(), 'codex', 'user:intruder')`,
     ).catch((error: unknown) => error);
-    expect(String((direct as { cause?: unknown })?.cause ?? direct)).toContain("permission denied");
+    expect(String((direct as { cause?: unknown })?.cause ?? direct)).toContain(
+      "permission denied",
+    );
   });
 
   test("personal identity preserves distinct upstream people and refuses unresolved identities", async () => {
@@ -1428,14 +1860,24 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
       );
     const a = await write("upstream-A");
     const b = await write("upstream-B");
-    if (a.kind !== "connected" || b.kind !== "connected") throw new Error("connect failed");
+    if (a.kind !== "connected" || b.kind !== "connected")
+      throw new Error("connect failed");
     expect(a.id).not.toBe(b.id);
-    expect(await write("upstream-A")).toMatchObject({ kind: "connected", id: a.id, isNew: false });
-    expect(await write("upstream-B")).toMatchObject({ kind: "connected", id: b.id, isNew: false });
+    expect(await write("upstream-A")).toMatchObject({
+      kind: "connected",
+      id: a.id,
+      isNew: false,
+    });
+    expect(await write("upstream-B")).toMatchObject({
+      kind: "connected",
+      id: b.id,
+      isNew: false,
+    });
     for (const workspaceId of [org.personalWorkspaceId, null]) {
       if (workspaceId === null) await write("upstream-A", workspaceId);
       for (const unresolved of [null, `legacy:${crypto.randomUUID()}`]) {
-        await shared!.admin`update subscription_connections set provider_subject_id = ${unresolved}
+        await shared!
+          .admin`update subscription_connections set provider_subject_id = ${unresolved}
           where account_id = ${org.accountId}::uuid and provider_account_id = 'chatgpt-team-identity'
           and provider_subject_id = 'upstream-A'
           and ownership = ${workspaceId === null ? "shared" : "personal"}`;
@@ -1445,7 +1887,8 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
             reason: "identity_unverified",
           });
         }
-        await shared!.admin`update subscription_connections set provider_subject_id = 'upstream-A'
+        await shared!
+          .admin`update subscription_connections set provider_subject_id = 'upstream-A'
           where account_id = ${org.accountId}::uuid and provider_account_id = 'chatgpt-team-identity'
           and provider_subject_id is not distinct from ${unresolved}
           and ownership = ${workspaceId === null ? "shared" : "personal"}`;
@@ -1460,9 +1903,20 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
   test("canonical and aliased resolve and repeated personal disconnect never change unrelated settings", async () => {
     const org = await organization();
     await setCutover(org.accountId, true);
-    const a = await connect(org, org.ownerSubjectId, org.personalWorkspaceId, "resolve-A");
-    const b = await connect(org, org.ownerSubjectId, org.personalWorkspaceId, "resolve-B");
-    if (a.kind !== "connected" || b.kind !== "connected") throw new Error("connect failed");
+    const a = await connect(
+      org,
+      org.ownerSubjectId,
+      org.personalWorkspaceId,
+      "resolve-A",
+    );
+    const b = await connect(
+      org,
+      org.ownerSubjectId,
+      org.personalWorkspaceId,
+      "resolve-B",
+    );
+    if (a.kind !== "connected" || b.kind !== "connected")
+      throw new Error("connect failed");
     await withSessionRlsActorContext({ subjectId: org.ownerSubjectId }, () =>
       setSubscriptionCoreCodexPrimary(client!.db, {
         accountId: org.accountId,
@@ -1504,14 +1958,23 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
       );
       expect(await snapshot()).toEqual(before);
       expect(
-        (await disconnect(org, org.ownerSubjectId, org.personalWorkspaceId, target)).outcome,
+        (
+          await disconnect(
+            org,
+            org.ownerSubjectId,
+            org.personalWorkspaceId,
+            target,
+          )
+        ).outcome,
       ).toBe("removed");
       expect(await snapshot()).toEqual(before);
     }
   });
 
   test("the owner-scoped writer and fences hold under a NOBYPASSRLS migration owner", async () => {
-    const owned = await acquireOwnerMigratedTestDatabase("subscription-core-codex-writers-owner");
+    const owned = await acquireOwnerMigratedTestDatabase(
+      "subscription-core-codex-writers-owner",
+    );
     if (!owned) throw new Error("Real PostgreSQL is required");
     const previous = { shared, client };
     let ownerClient: DbClient | null = null;
@@ -1522,9 +1985,14 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
       appUrl.username = "opengeni_app";
       appUrl.password = owned.appPassword;
       ownerClient = createDb(appUrl.toString(), { max: 4 });
-      shared = { ...previous.shared!, admin: owned.admin } as SharedTestDatabase;
+      shared = {
+        ...previous.shared!,
+        admin: owned.admin,
+      } as SharedTestDatabase;
       client = ownerClient;
-      const [owner] = await owned.admin<{ rolsuper: boolean; rolbypassrls: boolean }[]>`
+      const [owner] = await owned.admin<
+        { rolsuper: boolean; rolbypassrls: boolean }[]
+      >`
         select rolsuper, rolbypassrls from pg_roles where rolname = ${owned.ownerRole}`;
       expect(owner).toEqual({ rolsuper: false, rolbypassrls: false });
       // The old binary inventories opengeni_private as its runtime API. New
@@ -1539,12 +2007,17 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
         expectedRole: "opengeni_app",
         targetSchema: "public",
       };
-      const posture = await inspectRuntimeDatabasePosture(ownerClient!.db, options);
+      const posture = await inspectRuntimeDatabasePosture(
+        ownerClient!.db,
+        options,
+      );
       expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
       expect(posture.subscriptionOwnerRoutines).toHaveLength(4);
       await disconnectDesignationCase();
       for (const routine of posture.subscriptionOwnerRoutines!) {
-        expect(posture.privateRoutines.some((entry) => entry.name === routine.name)).toBe(false);
+        expect(
+          posture.privateRoutines.some((entry) => entry.name === routine.name),
+        ).toBe(false);
       }
       await personalCase();
       await organizationRedemptionCase();
@@ -1562,8 +2035,17 @@ async function personalCase(): Promise<void> {
   await setCutover(org.accountId, true);
   const member = await person(org, "member");
   // The member connects in their own Personal workspace.
-  const first = await connect(org, member.subjectId, member.personalWorkspaceId, "personal-one");
-  expect(first).toMatchObject({ kind: "connected", isNew: true, ownership: "personal" });
+  const first = await connect(
+    org,
+    member.subjectId,
+    member.personalWorkspaceId,
+    "personal-one",
+  );
+  expect(first).toMatchObject({
+    kind: "connected",
+    isNew: true,
+    ownership: "personal",
+  });
   if (first.kind !== "connected") throw new Error("connect failed");
   expect(await row(first.id)).toMatchObject({
     ownership: "personal",
@@ -1573,7 +2055,12 @@ async function personalCase(): Promise<void> {
     managed_by_workspace_id: null,
   });
   const [authority] = await shared!.admin<
-    { resource_kind: string; status: string; generation: string; origin: string }[]
+    {
+      resource_kind: string;
+      status: string;
+      generation: string;
+      origin: string;
+    }[]
   >`select resource_kind, status, generation::text as generation,
       origin_workspace_id::text as origin
     from organization_user_resource_authorities where resource_id = ${first.id}::uuid`;
@@ -1585,51 +2072,91 @@ async function personalCase(): Promise<void> {
   });
   // A second account keeps the owner's one generation; a reconnect replaces
   // the credential in place.
-  const second = await connect(org, member.subjectId, member.personalWorkspaceId, "personal-two");
+  const second = await connect(
+    org,
+    member.subjectId,
+    member.personalWorkspaceId,
+    "personal-two",
+  );
   if (second.kind !== "connected") throw new Error("connect failed");
   expect((await row(second.id))!.authority_generation).toBe("1");
   expect(
-    await connect(org, member.subjectId, member.personalWorkspaceId, "personal-one"),
+    await connect(
+      org,
+      member.subjectId,
+      member.personalWorkspaceId,
+      "personal-one",
+    ),
   ).toMatchObject({ kind: "connected", id: first.id, isNew: false });
   expect((await row(first.id))!.refresh_generation).toBe("2");
   expect((await row(first.id))!.connected_by_subject_id).toBeNull();
 
   // Listed to the owner in their Personal workspace, and to nobody else.
-  const own = await personalAccounts(org, member.subjectId, member.personalWorkspaceId);
+  const own = await personalAccounts(
+    org,
+    member.subjectId,
+    member.personalWorkspaceId,
+  );
   expect(own.personalAccountIds?.sort()).toEqual([first.id, second.id].sort());
   expect(
-    own.accounts.filter((account) => own.personalAccountIds?.includes(account.id)),
+    own.accounts.filter((account) =>
+      own.personalAccountIds?.includes(account.id),
+    ),
   ).toHaveLength(2);
-  const adminView = await personalAccounts(org, org.ownerSubjectId, org.personalWorkspaceId);
-  expect(adminView.accounts.some((account) => account.id === first.id)).toBe(false);
-  const adminOrg = await withSessionRlsActorContext({ subjectId: org.ownerSubjectId }, () =>
-    getSubscriptionCoreOrganizationCodexProjection(client!.db, {
-      organizationId: org.accountId,
-      subjectId: org.ownerSubjectId,
-    }),
+  const adminView = await personalAccounts(
+    org,
+    org.ownerSubjectId,
+    org.personalWorkspaceId,
+  );
+  expect(adminView.accounts.some((account) => account.id === first.id)).toBe(
+    false,
+  );
+  const adminOrg = await withSessionRlsActorContext(
+    { subjectId: org.ownerSubjectId },
+    () =>
+      getSubscriptionCoreOrganizationCodexProjection(client!.db, {
+        organizationId: org.accountId,
+        subjectId: org.ownerSubjectId,
+      }),
   );
   expect(adminOrg.accounts).toHaveLength(0);
-  const [adminRead] = await withSessionRlsActorContext({ subjectId: org.ownerSubjectId }, () =>
-    rawRows<{ total: number }>(
-      client!.db,
-      sql`select count(*)::int as total from opengeni_private.subscription_codex_personal_connections(
+  const [adminRead] = await withSessionRlsActorContext(
+    { subjectId: org.ownerSubjectId },
+    () =>
+      rawRows<{ total: number }>(
+        client!.db,
+        sql`select count(*)::int as total from opengeni_private.subscription_codex_personal_connections(
         ${org.accountId}::uuid, ${member.personalWorkspaceId}::uuid, ${member.subjectId})`,
-    ),
+      ),
   );
   expect(adminRead!.total).toBe(0);
 
   // Not in someone else's Personal workspace, not as an administrator on the
   // member's behalf, and not when personal connections are turned off.
-  expect(await connect(org, org.ownerSubjectId, member.personalWorkspaceId, "takeover")).toEqual({
+  expect(
+    await connect(
+      org,
+      org.ownerSubjectId,
+      member.personalWorkspaceId,
+      "takeover",
+    ),
+  ).toEqual({
     kind: "refused",
     reason: "forbidden",
   });
-  await shared!.admin`update subscription_settings set personal_connections_allowed = false
+  await shared!
+    .admin`update subscription_settings set personal_connections_allowed = false
     where account_id = ${org.accountId}::uuid and workspace_id is null`;
   expect(
-    await connect(org, member.subjectId, member.personalWorkspaceId, "personal-three"),
+    await connect(
+      org,
+      member.subjectId,
+      member.personalWorkspaceId,
+      "personal-three",
+    ),
   ).toEqual({ kind: "refused", reason: "personal_connections_disabled" });
-  await shared!.admin`update subscription_settings set personal_connections_allowed = true
+  await shared!
+    .admin`update subscription_settings set personal_connections_allowed = true
     where account_id = ${org.accountId}::uuid and workspace_id is null`;
 
   // Only the owner removes it, and only from their Personal workspace.
@@ -1638,12 +2165,22 @@ async function personalCase(): Promise<void> {
     (account_id, provider, alias_connection_id, connection_id)
     values (${org.accountId}::uuid, 'codex', ${personalAlias}::uuid, ${first.id}::uuid)`;
   expect(
-    (await disconnect(org, org.ownerSubjectId, member.personalWorkspaceId, personalAlias)).outcome,
+    (
+      await disconnect(
+        org,
+        org.ownerSubjectId,
+        member.personalWorkspaceId,
+        personalAlias,
+      )
+    ).outcome,
   ).toBe("not_found");
-  expect((await disconnect(org, org.ownerSubjectId, null, first.id)).outcome).toBe("not_found");
-  expect((await disconnect(org, member.subjectId, org.sharedWorkspaceId, first.id)).outcome).toBe(
-    "not_found",
-  );
+  expect(
+    (await disconnect(org, org.ownerSubjectId, null, first.id)).outcome,
+  ).toBe("not_found");
+  expect(
+    (await disconnect(org, member.subjectId, org.sharedWorkspaceId, first.id))
+      .outcome,
+  ).toBe("not_found");
   const removed = await disconnect(
     org,
     member.subjectId,
@@ -1667,19 +2204,26 @@ async function personalCase(): Promise<void> {
     select status from organization_user_resource_authorities where resource_id = ${first.id}::uuid`;
   expect(revoked).toEqual({ status: "revoked" });
   // Disconnect-all in the Personal workspace removes the rest atomically.
-  const all = await withSessionRlsActorContext({ subjectId: member.subjectId }, () =>
-    disconnectAllSubscriptionCoreCodexConnections(client!.db, {
-      accountId: org.accountId,
-      workspaceId: member.personalWorkspaceId,
-      subjectId: member.subjectId,
-    }),
+  const all = await withSessionRlsActorContext(
+    { subjectId: member.subjectId },
+    () =>
+      disconnectAllSubscriptionCoreCodexConnections(client!.db, {
+        accountId: org.accountId,
+        workspaceId: member.personalWorkspaceId,
+        subjectId: member.subjectId,
+      }),
   );
   expect(all).toMatchObject({ removed: 1, refused: null });
   expect(await row(second.id)).toBeNull();
 
   // "Running on": a turn on the owner's personal connection shows it only to
   // the owner.
-  const third = await connect(org, member.subjectId, member.personalWorkspaceId, "personal-run");
+  const third = await connect(
+    org,
+    member.subjectId,
+    member.personalWorkspaceId,
+    "personal-run",
+  );
   if (third.kind !== "connected") throw new Error("connect failed");
   expect((await row(third.id))!.authority_generation).toBe("2");
   const personalAdmin = {
@@ -1703,9 +2247,15 @@ async function personalCase(): Promise<void> {
       )
     ).activated,
   ).toBe(third.id);
-  const personalPool = await personalAccounts(org, member.subjectId, member.personalWorkspaceId);
+  const personalPool = await personalAccounts(
+    org,
+    member.subjectId,
+    member.personalWorkspaceId,
+  );
   expect(personalPool.rotation.activeCredentialId).toBe(third.id);
-  const account = personalPool.accounts.find((candidate) => candidate.id === third.id)!;
+  const account = personalPool.accounts.find(
+    (candidate) => candidate.id === third.id,
+  )!;
   expect(account.label).toBe("renamed personal");
   expect(
     (
@@ -1727,49 +2277,57 @@ async function personalCase(): Promise<void> {
       }),
     ),
   ).toBeNull();
-  const session = await withSessionRlsActorContext({ subjectId: member.subjectId }, () =>
-    createSession(client!.db, {
-      accountId: org.accountId,
-      workspaceId: member.personalWorkspaceId,
-      initialMessage: "personal running fixture",
-      resources: [],
-      metadata: {},
-      model: MODEL,
-      reasoningEffort: "medium",
-      latencyMode: "standard",
-      sandboxBackend: "none",
-      visibility: "user_private",
-      subjectId: member.subjectId,
-      createdBy: { kind: "subject", subjectId: member.subjectId },
-      createdByContext: {},
-    }),
+  const session = await withSessionRlsActorContext(
+    { subjectId: member.subjectId },
+    () =>
+      createSession(client!.db, {
+        accountId: org.accountId,
+        workspaceId: member.personalWorkspaceId,
+        initialMessage: "personal running fixture",
+        resources: [],
+        metadata: {},
+        model: MODEL,
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "none",
+        visibility: "user_private",
+        subjectId: member.subjectId,
+        createdBy: { kind: "subject", subjectId: member.subjectId },
+        createdByContext: {},
+      }),
   );
-  const turn = await withSessionRlsActorContext({ subjectId: member.subjectId }, () =>
-    enqueueSessionTurn(client!.db, {
-      accountId: org.accountId,
-      workspaceId: member.personalWorkspaceId,
+  const turn = await withSessionRlsActorContext(
+    { subjectId: member.subjectId },
+    () =>
+      enqueueSessionTurn(client!.db, {
+        accountId: org.accountId,
+        workspaceId: member.personalWorkspaceId,
+        sessionId: session.id,
+        triggerEventId: crypto.randomUUID(),
+        temporalWorkflowId: `session-${session.id}`,
+        source: "user",
+        prompt: "personal running fixture",
+        resources: [],
+        tools: [],
+        model: MODEL,
+        reasoningEffort: "medium",
+        sandboxBackend: "none",
+        metadata: {},
+        initiator: { kind: "subject", subjectId: member.subjectId },
+      }),
+  );
+  const claimed = await claimSessionWorkForAttempt(
+    client!.db,
+    member.personalWorkspaceId,
+    {
       sessionId: session.id,
-      triggerEventId: crypto.randomUUID(),
-      temporalWorkflowId: `session-${session.id}`,
-      source: "user",
-      prompt: "personal running fixture",
-      resources: [],
-      tools: [],
-      model: MODEL,
-      reasoningEffort: "medium",
-      sandboxBackend: "none",
-      metadata: {},
-      initiator: { kind: "subject", subjectId: member.subjectId },
-    }),
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    },
   );
-  const claimed = await claimSessionWorkForAttempt(client!.db, member.personalWorkspaceId, {
-    sessionId: session.id,
-    workflowId: `session-${session.id}`,
-    workflowRunId: crypto.randomUUID(),
-    dispatchId: crypto.randomUUID(),
-    attemptId: crypto.randomUUID(),
-    trigger: { kind: "next" },
-  });
   expect(claimed.action).toBe("claimed");
   // This low-level enqueue fixture bypasses HTTP acceptance; freeze each
   // historical snapshot explicitly, then exercise real placement revalidation.
@@ -1814,25 +2372,33 @@ async function personalCase(): Promise<void> {
     turnId: turn.id,
     connectionId: third.id,
   });
-  const view = await withSessionRlsActorContext({ subjectId: member.subjectId }, () =>
-    getSubscriptionCoreSessionCodexAccounts(client!.db, {
-      accountId: org.accountId,
-      workspaceId: member.personalWorkspaceId,
-      sessionId: session.id,
-      viewerSubjectId: member.subjectId,
-    }),
+  const view = await withSessionRlsActorContext(
+    { subjectId: member.subjectId },
+    () =>
+      getSubscriptionCoreSessionCodexAccounts(client!.db, {
+        accountId: org.accountId,
+        workspaceId: member.personalWorkspaceId,
+        sessionId: session.id,
+        viewerSubjectId: member.subjectId,
+      }),
   );
-  expect(view?.currentSelection).toEqual({ waiting: false, credentialId: third.id });
+  expect(view?.currentSelection).toEqual({
+    waiting: false,
+    credentialId: third.id,
+  });
   expect(view?.currentAccount?.id).toBe(third.id);
-  const anonymous = await withSessionRlsActorContext({ subjectId: member.subjectId }, () =>
-    getSubscriptionCoreSessionCodexAccounts(client!.db, {
-      accountId: org.accountId,
-      workspaceId: member.personalWorkspaceId,
-      sessionId: session.id,
-    }),
+  const anonymous = await withSessionRlsActorContext(
+    { subjectId: member.subjectId },
+    () =>
+      getSubscriptionCoreSessionCodexAccounts(client!.db, {
+        accountId: org.accountId,
+        workspaceId: member.personalWorkspaceId,
+        sessionId: session.id,
+      }),
   );
   expect(anonymous?.currentAccount).toBeNull();
-  await shared!.admin`delete from subscription_leases where turn_id = ${turn.id}::uuid`;
+  await shared!
+    .admin`delete from subscription_leases where turn_id = ${turn.id}::uuid`;
 }
 
 async function organizationRedemptionCase(): Promise<void> {
@@ -1861,7 +2427,9 @@ async function organizationRedemptionCase(): Promise<void> {
     status: "active",
     owned: true,
   });
-  expect((await authority(manager.subjectId, org.sharedWorkspaceId))?.owned).not.toBe(true);
+  expect(
+    (await authority(manager.subjectId, org.sharedWorkspaceId))?.owned,
+  ).not.toBe(true);
 
   const claimFrom = (
     workspaceId: string,
@@ -1892,7 +2460,9 @@ async function organizationRedemptionCase(): Promise<void> {
   expect(started.kind).toBe("claimed");
   if (started.kind !== "claimed") throw new Error("claim failed");
   const upstreamKey = started.attempt.upstreamIdempotencyKey;
-  expect((await claimFrom(org.otherWorkspaceId, original)).kind).toBe("conflict");
+  expect((await claimFrom(org.otherWorkspaceId, original)).kind).toBe(
+    "conflict",
+  );
   // The provider call started and its outcome is unknown; the claim lapsed.
   await shared!.admin`update codex_reset_redemption_attempts
     set status = 'provider_started', provider_started_at = now(), claim_expires_at = null,
@@ -1900,27 +2470,33 @@ async function organizationRedemptionCase(): Promise<void> {
     where id = ${original}::uuid`;
   // Another logical attempt for the same credit from another workspace is
   // refused: the per-credit fence spans workspaces.
-  expect((await claimFrom(org.otherWorkspaceId, crypto.randomUUID())).kind).toBe("conflict");
+  expect(
+    (await claimFrom(org.otherWorkspaceId, crypto.randomUUID())).kind,
+  ).toBe("conflict");
   const [count] = await shared!.admin<{ total: number }[]>`
     select count(*)::int as total from codex_reset_redemption_attempts
     where credential_id = ${connectionId}::uuid and credit_id = 'credit-org'`;
   expect(count!.total).toBe(1);
   await shared!
     .admin`update codex_reset_redemption_attempts set subject_id = 'user:another-human' where id = ${original}::uuid`;
-  expect((await claimFrom(org.otherWorkspaceId, original)).kind).toBe("conflict");
+  expect((await claimFrom(org.otherWorkspaceId, original)).kind).toBe(
+    "conflict",
+  );
   await shared!
     .admin`update codex_reset_redemption_attempts set subject_id = ${org.ownerSubjectId} where id = ${original}::uuid`;
   // The same person recovers their own attempt from the other workspace: it
   // moves there and resumes on its one upstream key.
-  const fence = await withSessionRlsActorContext({ subjectId: org.ownerSubjectId }, () =>
-    fenceSubscriptionCoreCodexResetCredit(client!.db, {
-      accountId: org.accountId,
-      workspaceId: org.otherWorkspaceId,
-      credentialId: connectionId,
-      subjectId: org.ownerSubjectId,
-      creditId: "credit-org",
-      attemptId: original,
-    }),
+  const fence = await withSessionRlsActorContext(
+    { subjectId: org.ownerSubjectId },
+    () =>
+      fenceSubscriptionCoreCodexResetCredit(client!.db, {
+        accountId: org.accountId,
+        workspaceId: org.otherWorkspaceId,
+        credentialId: connectionId,
+        subjectId: org.ownerSubjectId,
+        creditId: "credit-org",
+        attemptId: original,
+      }),
   );
   expect(fence).toBe("refiled");
   const resumed = await claimFrom(org.otherWorkspaceId, original);
@@ -1933,25 +2509,41 @@ async function organizationRedemptionCase(): Promise<void> {
     where id = ${original}::uuid`;
   expect(moved).toEqual({ workspace_id: org.otherWorkspaceId });
   // A workspace administrator has no organization-level authority to fence.
-  const managerFence = await withSessionRlsActorContext({ subjectId: manager.subjectId }, () =>
-    fenceSubscriptionCoreCodexResetCredit(client!.db, {
-      accountId: org.accountId,
-      workspaceId: org.sharedWorkspaceId,
-      credentialId: connectionId,
-      subjectId: manager.subjectId,
-      creditId: "credit-org",
-      attemptId: original,
-    }),
+  const managerFence = await withSessionRlsActorContext(
+    { subjectId: manager.subjectId },
+    () =>
+      fenceSubscriptionCoreCodexResetCredit(client!.db, {
+        accountId: org.accountId,
+        workspaceId: org.sharedWorkspaceId,
+        credentialId: connectionId,
+        subjectId: manager.subjectId,
+        creditId: "credit-org",
+        attemptId: original,
+      }),
   );
   expect(managerFence).toBe("refused");
   const expired = crypto.randomUUID();
-  expect((await claimFrom(org.sharedWorkspaceId, expired, "browser-a", "expired-claim")).kind).toBe(
-    "claimed",
-  );
+  expect(
+    (
+      await claimFrom(
+        org.sharedWorkspaceId,
+        expired,
+        "browser-a",
+        "expired-claim",
+      )
+    ).kind,
+  ).toBe("claimed");
   await shared!
     .admin`update codex_reset_redemption_attempts set claim_expires_at = now() - interval '1 hour' where id = ${expired}::uuid`;
   expect(
-    (await claimFrom(org.otherWorkspaceId, crypto.randomUUID(), "browser-a", "expired-claim")).kind,
+    (
+      await claimFrom(
+        org.otherWorkspaceId,
+        crypto.randomUUID(),
+        "browser-a",
+        "expired-claim",
+      )
+    ).kind,
   ).toBe("claimed");
   const stale = await shared!
     .admin`select id from codex_reset_redemption_attempts where id = ${expired}::uuid`;

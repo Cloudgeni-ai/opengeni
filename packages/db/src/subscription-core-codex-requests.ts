@@ -3,7 +3,12 @@
  * that a remote request failed, and neither permits replay of that request.
  */
 import { sql } from "drizzle-orm";
-import { rawRows, withRlsContext, withSessionRlsActorContext, type Database } from "./database";
+import {
+  rawRows,
+  withRlsContext,
+  withSessionRlsActorContext,
+  type Database,
+} from "./database";
 import {
   authorizeSubscriptionCoreFrozenPersonalCodex,
   SubscriptionCoreCodexAccessLostError,
@@ -20,7 +25,9 @@ import { withSubscriptionCoreAcceptedTurn } from "./subscription-core-placement-
 export class SubscriptionCoreCodexSourceDisconnectedError extends Error {
   readonly code = "subscription_core_source_disconnected";
   constructor() {
-    super("The Codex subscription source was disconnected before this request was admitted");
+    super(
+      "The Codex subscription source was disconnected before this request was admitted",
+    );
     this.name = "SubscriptionCoreCodexSourceDisconnectedError";
   }
 }
@@ -31,12 +38,15 @@ export class SubscriptionCoreCodexSourceDisconnectedError extends Error {
 export class SubscriptionCoreCodexRequestOutcomeUnknownError extends Error {
   readonly code = "subscription_core_request_outcome_unknown";
   constructor() {
-    super("An earlier Codex request has an unresolved outcome; automatic replay is not safe");
+    super(
+      "An earlier Codex request has an unresolved outcome; automatic replay is not safe",
+    );
     this.name = "SubscriptionCoreCodexRequestOutcomeUnknownError";
   }
 }
 
-export type SubscriptionCoreCodexRequestOutcome = "response_received" | "refused" | "unknown";
+export type SubscriptionCoreCodexRequestOutcome =
+  "response_received" | "refused" | "unknown";
 type Request = { requestId: string; transportAttempt: number };
 type TurnRequest = Request & { attemptId: string; executionGeneration: number };
 type AppsScope = { kind: "apps"; accountId: string; workspaceId: string };
@@ -47,11 +57,16 @@ async function inScope<T>(
   operation: (tx: Database) => Promise<T>,
 ): Promise<T> {
   if (scope.kind === "turn") {
-    const result = await withSubscriptionCoreAcceptedTurn(db, scope.identity, async (tx) => {
-      await authorizeSubscriptionCoreFrozenPersonalCodex(tx, scope.identity);
-      return operation(tx);
-    });
-    if (result.status !== "completed") throw new SubscriptionCoreCodexAccessLostError();
+    const result = await withSubscriptionCoreAcceptedTurn(
+      db,
+      scope.identity,
+      async (tx) => {
+        await authorizeSubscriptionCoreFrozenPersonalCodex(tx, scope.identity);
+        return operation(tx);
+      },
+    );
+    if (result.status !== "completed")
+      throw new SubscriptionCoreCodexAccessLostError();
     return result.value;
   }
   const actor =
@@ -60,15 +75,24 @@ async function inScope<T>(
           subjectId: "service:subscription-core",
           initiatingHumanSubjectId: scope.sessionOwnerSubjectId,
         }
-      : { subjectId: scope.subjectId, initiatingHumanSubjectId: scope.subjectId };
-  return withSessionRlsActorContext(actor, () => withRlsContext(db, scope, operation));
+      : {
+          subjectId: scope.subjectId,
+          initiatingHumanSubjectId: scope.subjectId,
+        };
+  return withSessionRlsActorContext(actor, () =>
+    withRlsContext(db, scope, operation),
+  );
 }
 
 function tenant(scope: SubscriptionCoreCodexOperationScope | AppsScope) {
   return scope.kind === "turn" ? scope.identity : scope;
 }
 
-async function lockSource(tx: Database, accountId: string, connectionId: string) {
+async function lockSource(
+  tx: Database,
+  accountId: string,
+  connectionId: string,
+) {
   await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(
     ${`subscription-refresh:${connectionId}`}, 0))`);
   const [source] = await rawRows<{
@@ -169,14 +193,31 @@ async function reserveTurnRequest(
         and status = 'running' for share`,
     );
     if (!locked.length) throw new SubscriptionCoreCodexLeaseLostError();
+    // The fence blocks automatic replay inside one execution: a replacement
+    // attempt after a worker loss, or a resumed generation (approval or
+    // capacity), never treats an ambiguous earlier request as settled. A
+    // failed turn reruns only through an explicit Retry, which claims a new
+    // generation; requests whose earlier-generation attempt closed as failed
+    // were already surfaced as that failure and do not block the retry.
     const [prior] = await rawRows<{ unresolved: boolean }>(
       tx,
       sql`select exists (
-      select 1 from subscription_operation_leases where account_id = ${identity.accountId}::uuid
-        and workspace_id = ${identity.workspaceId}::uuid and session_id = ${identity.sessionId}::uuid
-        and turn_id = ${identity.turnId}::uuid and provider = 'codex' and operation_kind = 'model'
-        and request_id is not null and (request_outcome = 'unknown'
-          or (request_outcome = 'reserved' and attempt_id <> ${request.attemptId}::uuid))
+      select 1 from subscription_operation_leases request
+      where request.account_id = ${identity.accountId}::uuid
+        and request.workspace_id = ${identity.workspaceId}::uuid
+        and request.session_id = ${identity.sessionId}::uuid
+        and request.turn_id = ${identity.turnId}::uuid and request.provider = 'codex'
+        and request.operation_kind = 'model' and request.request_id is not null
+        and (request.request_outcome = 'unknown'
+          or (request.request_outcome = 'reserved' and request.attempt_id <> ${request.attemptId}::uuid))
+        and not exists (
+          select 1 from session_turn_attempts attempt
+          where attempt.account_id = request.account_id
+            and attempt.workspace_id = request.workspace_id
+            and attempt.session_id = request.session_id and attempt.turn_id = request.turn_id
+            and attempt.id = request.attempt_id
+            and attempt.execution_generation < ${request.executionGeneration}
+            and attempt.state = 'closed' and attempt.outcome = 'failed')
     ) as unresolved`,
     );
     if (operationKind === "model" && prior?.unresolved)
@@ -229,15 +270,18 @@ export async function reserveSubscriptionCoreCodexOperationRequest(
         ${ref?.operationId ?? null}::uuid, ${ref?.attemptId ?? null}::uuid,
         ${ref?.holderId ?? null}, ${ref?.generation ?? null}::bigint)`,
     );
-    if (authorized?.status !== "active") throw new SubscriptionCoreCodexAccessLostError();
-    if (scope.kind === "turn" && !ref) throw new SubscriptionCoreCodexAccessLostError();
+    if (authorized?.status !== "active")
+      throw new SubscriptionCoreCodexAccessLostError();
+    if (scope.kind === "turn" && !ref)
+      throw new SubscriptionCoreCodexAccessLostError();
     return insertRequest(tx, scope, connectionId, {
       ...request,
       attemptId: ref?.attemptId ?? crypto.randomUUID(),
       holderId: ref?.holderId ?? `request:${crypto.randomUUID()}`,
       generation: ref?.generation ?? 1,
       operationKind:
-        ref?.operationKind ?? (scope.kind === "session" ? "realtime" : "credential_request"),
+        ref?.operationKind ??
+        (scope.kind === "session" ? "realtime" : "credential_request"),
     });
   });
 }
@@ -267,7 +311,10 @@ export async function reserveSubscriptionCoreCodexAppsRequest(
 export async function settleSubscriptionCoreCodexAppsRequest(
   db: Database,
   target: { accountId: string; workspaceId: string; connectionId: string },
-  request: { operationId: string; outcome: SubscriptionCoreCodexRequestOutcome },
+  request: {
+    operationId: string;
+    outcome: SubscriptionCoreCodexRequestOutcome;
+  },
 ): Promise<void> {
   await withRlsContext(db, target, async (tx) => {
     await tx.execute(sql`update subscription_operation_leases set request_outcome = ${request.outcome}
@@ -301,12 +348,16 @@ export async function settleSubscriptionCoreCodexRequest(
 }
 
 /** Same exact holder/attempt settlement, without misclassifying a read as a model call. */
-export const settleSubscriptionCoreCodexTurnCredentialRequest = settleSubscriptionCoreCodexRequest;
+export const settleSubscriptionCoreCodexTurnCredentialRequest =
+  settleSubscriptionCoreCodexRequest;
 
 export async function settleSubscriptionCoreCodexOperationRequest(
   db: Database,
   scope: SubscriptionCoreCodexOperationScope,
-  request: { operationId: string; outcome: SubscriptionCoreCodexRequestOutcome },
+  request: {
+    operationId: string;
+    outcome: SubscriptionCoreCodexRequestOutcome;
+  },
 ): Promise<void> {
   await inScope(db, scope, async (tx) => {
     const { accountId, workspaceId } = tenant(scope);
