@@ -200,7 +200,7 @@ export function PublishedHtmlArtifactFrame(props: PublishedHtmlArtifactFrameProp
                 version: OPENGENI_SITE_BRIDGE_VERSION,
                 requestId: message.requestId,
                 ok: false,
-                error: siteBridgeError(error),
+                error: siteBridgeError(error, message.method === "call"),
               } satisfies OpenGeniSiteBridgeResponseMessage);
             }
           })
@@ -374,7 +374,10 @@ export async function handleSiteBridgeRequest(
   return await bridge.call(sanitizeOpenGeniSiteToolCallRequest(message.payload!), { signal });
 }
 
-export function siteBridgeError(error: unknown): {
+export function siteBridgeError(
+  error: unknown,
+  legacyCall = false,
+): {
   code: string;
   message: string;
   retryable: boolean;
@@ -388,18 +391,26 @@ export function siteBridgeError(error: unknown): {
     details?: { code?: unknown };
   };
   const nestedCode = candidate?.details?.code;
+  const knownPreexecution = candidate?.retryable === true && candidate?.outcomeUnknown === false;
   const stale =
-    candidate?.retryable === true &&
-    candidate?.outcomeUnknown === false &&
-    (nestedCode === "tool_definition_stale" || nestedCode === "catalog_stale");
+    knownPreexecution && (nestedCode === "tool_definition_stale" || nestedCode === "catalog_stale");
+  // Historical saved bundles inspect code alone. A stale-named transport error
+  // without known pre-execution proof must remain an error, not invite replay.
+  const unsafeControl =
+    legacyCall &&
+    !knownPreexecution &&
+    (candidate?.code === "catalog_stale" || candidate?.code === "tool_definition_stale");
+  const message =
+    typeof candidate?.message === "string" ? candidate.message : "Site tool request failed";
   return {
     code: stale
       ? nestedCode
-      : typeof candidate?.code === "string"
-        ? candidate.code
-        : "site_tool_call_failed",
-    message:
-      typeof candidate?.message === "string" ? candidate.message : "Site tool request failed",
+      : unsafeControl
+        ? "site_tool_call_failed"
+        : typeof candidate?.code === "string"
+          ? candidate.code
+          : "site_tool_call_failed",
+    message: unsafeControl ? `[${candidate.code}] ${message}` : message,
     retryable: candidate?.retryable === true,
     outcomeUnknown: candidate?.outcomeUnknown === true,
   };

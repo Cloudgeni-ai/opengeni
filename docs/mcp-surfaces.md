@@ -164,6 +164,14 @@ identities) through an upgraded host, which translates retained manifest pins
 into targeted calls. Modern clients negotiate direct targeted calls; older hosts
 require explicit SDK catalog mode. Local preview keeps frozen attempt/Codemode
 authority, fencing the entry again after any pre-submission catalog refresh.
+The host's legacy call projection separates executed provider errors from retry
+control: an error result named `catalog_stale` or `tool_definition_stale` becomes
+`site_tool_execution_failed`, with the original error intact under
+`structuredContent.error.providerError`. Other result fields, ordinary provider
+errors, and success outputs are unchanged. Stale-named transport errors without
+known preexecution proof become `site_tool_call_failed`, retaining the original
+code in the diagnostic message. Saved bundle bytes are not rewritten; only
+genuine known preexecution stale signals authorize refresh.
 OAuth and explicit catalog/declarations discovery are unchanged.
 For a mixed-version fleet, apply rolling migration
 `0685_target_tool_approval_bindings.sql` first. Bring up a fully upgraded API pool

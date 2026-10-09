@@ -213,7 +213,7 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
           return {
             operationId: response.operationId,
             catalogDigest: request.catalogDigest,
-            result: response.result,
+            result: legacySiteToolResult(response.result),
           };
         } catch (error) {
           if (
@@ -251,7 +251,7 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
           )
         )
           throw new Error("This requested tool is not enabled in the workspace");
-        return input.callTool({
+        const response = await input.callTool({
           workspaceId: input.workspaceId,
           signal,
           request: {
@@ -264,6 +264,7 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
               : {}),
           },
         });
+        return { ...response, result: legacySiteToolResult(response.result) };
       };
       try {
         return await call();
@@ -278,6 +279,41 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
           throw error;
         return await call(usedDigest);
       }
+    },
+  };
+}
+
+/** Saved Site bundles may treat a provider's error.code as retry authorization.
+ * An executed result is data, never a pre-execution control signal. Only wrap
+ * colliding error results on the legacy call path; keep the original diagnostic
+ * intact and do not project request arguments, tokens, or host credentials. */
+function legacySiteToolResult(
+  result: ToolGatewayCallResponse["result"],
+): ToolGatewayCallResponse["result"] {
+  if (!result?.isError) return result;
+  const structured = result.structuredContent;
+  const error = structured?.error;
+  if (
+    typeof error !== "object" ||
+    error === null ||
+    !("code" in error) ||
+    (error.code !== "catalog_stale" && error.code !== "tool_definition_stale")
+  )
+    return result;
+  return {
+    ...result,
+    structuredContent: {
+      ...structured,
+      error: {
+        code: "site_tool_execution_failed",
+        message:
+          "message" in error && typeof error.message === "string"
+            ? error.message
+            : "Site tool execution failed",
+        retryable: false,
+        outcomeUnknown: "outcomeUnknown" in error && error.outcomeUnknown === true,
+        providerError: error,
+      },
     },
   };
 }

@@ -1143,6 +1143,13 @@ loads, and retries at most once after a typed pre-execution
 replay even when a transport labels an error stale. Explicit pins are not
 silently dropped when malformed: only `undefined` means no explicit pin.
 The same retry veto applies to retained v1/catalog mode and Site host adapters.
+For saved Site bundles with code-only retry classifiers, the host's legacy call
+projection wraps executed stale-named provider errors as
+`site_tool_execution_failed`, retaining the complete original diagnostic at
+`result.structuredContent.error.providerError`. Success outputs and ordinary
+provider errors are unchanged; genuine known preexecution stale refresh remains
+available. Stale-named transport errors without that proof use
+`site_tool_call_failed` and retain the original code in their message.
 Pins are not silently advanced. An approved call uses the server's executable-effect and
 private-authority binding, not an implicit full-public-entry pin; supply
 `expectedDefinitionDigest` when that additional precondition is wanted.
