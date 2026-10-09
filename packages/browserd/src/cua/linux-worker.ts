@@ -9,11 +9,14 @@ export async function linuxWorkerLauncher(binary: string, environment: NodeJS.Pr
   const directory = environment.XDG_RUNTIME_DIR;
   if (!directory || !isAbsolute(directory) || !isAbsolute(binary))
     throw new Error("Linux CUA needs an allocated runtime directory and absolute worker path");
+  const setsid = Bun.which("setsid", { PATH: environment.PATH ?? "" });
+  if (!setsid || !isAbsolute(setsid))
+    throw new Error("Linux CUA requires setsid on the allocated environment PATH");
   const launcher = join(directory, "cua-worker-launcher");
-  const quoted = `'${binary.replaceAll("'", "'\\''")}'`;
+  const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
   await writeFile(
     launcher,
-    `#!/bin/sh\nunset WAYLAND_DISPLAY XAUTHORITY AT_SPI_BUS_ADDRESS\nexec /usr/bin/setsid -- ${quoted} "$@"\n`,
+    `#!/bin/sh\nunset WAYLAND_DISPLAY XAUTHORITY AT_SPI_BUS_ADDRESS\nexec ${quote(setsid)} -- ${quote(binary)} "$@"\n`,
     {
       mode: 0o700,
       flag: "wx",
