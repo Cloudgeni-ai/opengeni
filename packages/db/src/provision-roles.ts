@@ -2101,6 +2101,7 @@ BEGIN
       'begin_subscription_codex_connection_refresh(uuid,uuid,uuid,uuid,uuid,text,bigint)',
       'persist_subscription_codex_connection_refresh(uuid,uuid,uuid,bigint,text,timestamptz,timestamptz)',
       'fail_subscription_codex_connection_refresh(uuid,uuid,uuid,bigint,text)',
+      'subscription_codex_reset_authority(uuid,uuid,uuid,text)',
       'subscription_organization_admin(uuid)',
       'subscription_people_assignment_visible(uuid,uuid,uuid,text,text)',
       'subscription_person_preference_visible(uuid,uuid,text,text)',

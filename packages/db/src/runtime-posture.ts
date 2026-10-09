@@ -698,6 +698,7 @@ export const SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES = [
   "begin_subscription_codex_connection_refresh(uuid, uuid, uuid, uuid, uuid, text, bigint)",
   "persist_subscription_codex_connection_refresh(uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone)",
   "fail_subscription_codex_connection_refresh(uuid, uuid, uuid, bigint, text)",
+  "subscription_codex_reset_authority(uuid, uuid, uuid, text)",
 ] as const;
 
 /** Owner-only private helpers the runtime role must never be able to execute. */

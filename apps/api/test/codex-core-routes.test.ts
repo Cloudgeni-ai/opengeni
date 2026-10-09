@@ -307,10 +307,9 @@ describe("Codex routes with an enabled cutover", () => {
     expect(wakes).toHaveLength(2);
   });
 
-  test("operations the core does not serve yet answer a typed 409", async () => {
+  test("connect and disconnect (left to PR 3) still answer a typed 409", async () => {
     cutover("core");
     const requests: Array<[string, string]> = [
-      ["GET", "/codex/overview"],
       ["POST", "/codex/connect/start"],
       ["DELETE", `/codex/accounts/${CONNECTION}`],
       ["DELETE", "/codex"],
@@ -384,6 +383,52 @@ describe("Codex routes with an enabled cutover", () => {
       { accountId: ACCOUNT, reason: "usage_recovered" },
       { accountId: ACCOUNT, reason: "usage_recovered" },
     ]);
+  });
+
+  test("the overview settles usage and reset details per account through the core seam", async () => {
+    cutover("core");
+    mock("getSubscriptionCoreCodexWorkspaceProjection", async () => projection);
+    mock("listCodexResetRedemptionRecoveries", async () => {
+      throw new Error("legacy redemption recoveries must not run");
+    });
+    const usage = {
+      status: "ok" as const,
+      planType: "pro",
+      fiveHour: null,
+      weekly: null,
+      limitReached: false,
+      fetchedAt: new Date(0).toISOString(),
+      rateLimitResetCredits: null,
+    };
+    mock("fetchSubscriptionCoreCodexUsage", async () => ({ usage, recovered: false }));
+    const tokens = mock("buildSubscriptionCoreCodexConnectionTokenResolver", () => ({
+      getToken: async () => {
+        throw new Error("reset details unavailable in this fixture");
+      },
+      refresh: async () => {
+        throw new Error("reset details unavailable in this fixture");
+      },
+    }));
+    const response = await app().request(`/v1/workspaces/${WS}/codex/overview`, {
+      headers: { authorization: await bearer(["workspace:read"]) },
+    });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { accounts: Record<string, Record<string, unknown>> };
+    expect(Object.keys(body.accounts)).toEqual([CONNECTION]);
+    expect(body.accounts[CONNECTION]).toMatchObject({
+      accountId: CONNECTION,
+      usage: { source: "provider", value: usage },
+      resetCredits: { error: "network_error" },
+      // A bearer caller is never a redemption principal on the core.
+      canRedeem: false,
+      redemptionAccess: { ownership: "managed_human_unavailable" },
+    });
+    expect(tokens.mock.calls[0]![2]).toEqual({
+      kind: "workspace",
+      accountId: ACCOUNT,
+      workspaceId: WS,
+      subjectId: "tester",
+    });
   });
 
   test("the session account view and pin use the core binding", async () => {

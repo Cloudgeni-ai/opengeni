@@ -1278,9 +1278,9 @@ nothing unless the account's Codex cutover is enabled.
   own bounded recheck, 1 minute doubling to 15) and is logged.
 - **Not served on the core yet** (typed `409 conflict` with
   `details.reason = subscription_core_route_unsupported`, no legacy state
-  read): live usage reads and refresh (served by PR 2c), the overview and
-  reset-credit prepare/redeem (left to PR 3 by PR 2c); connect start/poll,
-  disconnect one or all (PR 3).
+  read): live usage reads and refresh, the overview and reset-credit
+  prepare/redeem (all served by PR 2c); connect start/poll, disconnect one
+  or all (PR 3).
 
 Known gaps after PR 2b: personal connections are not listed in any account
 pool view (their rows are visible only inside the owner's exact accepted
@@ -1292,7 +1292,8 @@ legacy plan-change history.
 ##### PR 2c: compaction, media, transcription, realtime, usage and billing attribution (dormant)
 
 PR 2c (stacked on PR 2b) moves the remaining Codex consumers that need a
-connection-level credential outside the chat-turn lease. Everything is
+connection-level credential outside the chat-turn lease, including reset
+credits and the overview. Everything is
 reached only with a Codex cutover row; without one the legacy code runs
 unchanged after at most one extra cutover-row read (transcription
 availability without an account in its context also reads the workspace row
@@ -1402,29 +1403,59 @@ enabled, and one added branch in the operation-lease guard.
   summaries and session titles; legacy and non-subscription calls leave it
   NULL. The subscription-use billing bypass is unchanged.
 
-Still answered with the typed 409 on the core, and left to PR 3 with the
-reason:
+- **Reset credits (EP-N18).** Prepare and redeem keep their routes,
+  payloads, HMAC confirmation, single-use ledger fences and
+  ambiguous-outcome recovery, over the same `codex_reset_redemption_attempts`
+  ledger (it has no foreign key on `credential_id`, so it holds the canonical
+  core id; legacy ids kept as canonical by the drained migration keep their
+  in-flight attempts and upstream idempotency keys). The route id may be the
+  canonical id or a legacy alias; it resolves to the canonical connection
+  before any check, and the confirmation binds the canonical id.
+  - Authority (design 6.3) is decided in SQL by
+    `subscription_codex_reset_authority`: the authenticated RLS subject must
+    be an organization administrator or an administrator of the workspace
+    that manages the shared Codex connection, and only with the cutover
+    enabled. The routine share-locks the connection through the
+    connection's own UPDATE policies (which admit exactly those
+    principals), so disconnect and credential replacement wait for the
+    ledger step. The claim, adopt and send-fence ledger functions take this
+    reader in place of the legacy `connected_by_subject_id` rule (an
+    injected authority; legacy callers pass nothing and are unchanged);
+    release and abandon touch only the attempt and are shared.
+  - Only a same-origin managed browser human may prepare or redeem: bearer,
+    MCP/service and scheduled callers are refused by the existing guard,
+    and an agent acting as a person, which the legacy route accepts, is
+    refused on the core.
+  - Decision: redemption is served only for a connection managed by the
+    requesting workspace. An organization-managed connection answers the
+    legacy 409 ("managed in Organization settings"), because the ledger's
+    per-credit fence is per workspace and an organization-level redemption
+    route does not exist yet.
+  - The bearer is read and refreshed through the 0671 connection seam under
+    `subscription-refresh:<id>`. Preflight, the DB-time send fence, the one
+    upstream idempotency key and claim release on an uncertain outcome are
+    the legacy sequence: an uncertain send is retried only with the same key.
+  - Completion (`completeSubscriptionCoreCodexResetRedemption`) records the
+    outcome and audit event and, for `reset` or `alreadyRedeemed`, clears
+    the stored exhaustion only when it was observed with the connection's
+    current refresh generation, then delivers a core wake after commit. The
+    legacy exhaustion columns and capacity outbox are never touched.
+- **Overview (EP-N21).** The core overview projects the workspace's core
+  pool. Each account's live usage (through the seam, as above) and reset
+  details (the seam bearer plus the provider inventory) settle
+  independently through a limiter of four provider calls, under the legacy
+  route deadline with a fallback from persisted core quota. Redemption flags
+  and recoveries come from the same SQL authority, for a same-origin browser
+  human only; any other caller sees `managed_human_unavailable` and no
+  redemption actions.
 
-- **Reset credits (EP-N18) and the overview (EP-N21).** The legacy
-  redemption ledger `codex_reset_redemption_attempts` has no foreign key on
-  `credential_id`, so it can hold core connection ids (and, because the
-  drained migration keeps legacy ids as canonical where possible, ambiguous
-  `provider_started` attempts carry over with their upstream idempotency
-  key). Every ledger function (claim, adopt, send fence, complete, release,
-  abandon, recoveries) authorizes against the legacy
-  `codex_subscription_credentials.connected_by_subject_id`, and completion
-  clears the legacy exhaustion and writes the legacy capacity outbox. PR 3
-  must add core variants of those functions over the same table that
-  authorize by §6.3 (organization administrator, or a workspace
-  administrator of the connection's managing workspace; same-origin managed
-  browser only, refusing bearer, MCP/service, scheduled and agent-acting-as-
-  person callers), read the secret through the connection seam above, take
-  `FOR SHARE` (or the refresh advisory key) on the connection against
-  disconnect, clear the core quota exhaustion under the refresh-generation
-  fence on a `reset`/`alreadyRedeemed` outcome and wake through the core,
-  and keep the routes, payloads, HMAC confirmation and single-use fences.
-  The overview depends on the same redemption access projection.
-- **Connect start/poll and disconnect (one or all)** stay PR 3, as in PR 2b.
+Left to PR 3:
+
+- **Connect start/poll and disconnect (one or all).** Their core writers must
+  respect the redemption share lock (a disconnect waits on it) and, for a
+  credential replacement, take the `subscription-refresh:<id>` key.
+- **Organization-level reset redemption** for organization-managed
+  connections (see the decision above).
 - **Facts repair.** The Insights repair that recreates a missing model-call
   fact from its usage event does not know the connection; a repaired fact
   has a NULL `connection_id`.

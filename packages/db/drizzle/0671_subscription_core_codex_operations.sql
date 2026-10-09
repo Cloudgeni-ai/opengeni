@@ -30,7 +30,14 @@
 --    one-statement codex_refresh_write capability; fail marks needs_relogin
 --    under the same compare-and-swap. As for chat and Apps, persistence does
 --    not repeat the authorization: the provider already rotated the token.
--- 4. guard_subscription_operation_lease_reference also admits a realtime
+-- 4. subscription_codex_reset_authority decides reset-credit redemption
+--    authority (design 6.3) for one shared Codex connection that the
+--    workspace manages, inside the redemption ledger transaction: an
+--    organization administrator, or an administrator of the managing
+--    workspace. It share-locks the connection row through the connection's
+--    own UPDATE policies (so disconnect and credential replacement wait), and
+--    the caller's subject must be the authenticated RLS subject.
+-- 5. guard_subscription_operation_lease_reference also admits a realtime
 --    operation for an ownerless session (no turn, no initiating human), which
 --    the existing shared-only check limits to organization- or
 --    workspace-scoped shared connections. Every other branch is unchanged.
@@ -501,6 +508,64 @@ BEGIN
 END
 $ownerless_realtime_operation_lease_guard$;
 
+DO $codex_reset_authority$
+DECLARE data_schema text := current_schema();
+BEGIN
+  EXECUTE format($ddl$
+    CREATE FUNCTION opengeni_private.subscription_codex_reset_authority(
+      p_account_id uuid, p_workspace_id uuid, p_connection_id uuid, p_subject_id text
+    ) RETURNS TABLE (status text, authorized boolean)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path = pg_catalog, %1$I, opengeni_private, pg_temp
+    AS $body$
+    DECLARE
+      target subscription_connections%%ROWTYPE;
+      locked boolean := false;
+    BEGIN
+      IF p_account_id IS NULL OR p_workspace_id IS NULL OR p_connection_id IS NULL
+        OR p_subject_id IS NULL
+        OR p_account_id IS DISTINCT FROM nullif(current_setting('opengeni.account_id', true), '')::uuid
+        OR p_workspace_id IS DISTINCT FROM nullif(current_setting('opengeni.workspace_id', true), '')::uuid
+        OR p_subject_id IS DISTINCT FROM nullif(current_setting('opengeni.subject_id', true), '')
+      THEN RETURN; END IF;
+      IF NOT EXISTS (
+        SELECT 1 FROM subscription_provider_cutovers cutover
+        WHERE cutover.account_id = p_account_id AND cutover.provider = 'codex'
+          AND cutover.enabled
+      ) THEN RETURN; END IF;
+      -- Read under the caller's own row-level security.
+      SELECT connection.* INTO target
+      FROM subscription_connections connection
+      WHERE connection.account_id = p_account_id AND connection.id = p_connection_id
+        AND connection.provider = 'codex' AND connection.kind = 'subscription'
+        AND connection.ownership = 'shared'
+        AND connection.managed_by_workspace_id = p_workspace_id;
+      IF NOT FOUND THEN RETURN; END IF;
+      -- FOR SHARE also applies the connection's UPDATE policies, which admit
+      -- exactly an organization administrator or an administrator of the
+      -- managing workspace; anyone else gets no lock and no authority.
+      PERFORM 1 FROM subscription_connections connection
+      WHERE connection.account_id = p_account_id AND connection.id = p_connection_id
+      FOR SHARE;
+      locked := FOUND;
+      status := target.status;
+      authorized := locked AND (
+        opengeni_private.subscription_organization_admin(p_account_id)
+        OR EXISTS (
+          SELECT 1 FROM workspace_memberships manager
+          WHERE manager.account_id = p_account_id
+            AND manager.workspace_id = p_workspace_id
+            AND manager.subject_id = p_subject_id
+            AND manager.role = 'admin'
+        )
+      );
+      RETURN NEXT;
+    END
+    $body$
+  $ddl$, data_schema);
+END
+$codex_reset_authority$;
+
 REVOKE ALL ON FUNCTION opengeni_private.subscription_codex_connection_target(
   uuid, uuid, uuid, uuid, uuid, text, bigint
 ) FROM PUBLIC;
@@ -515,6 +580,9 @@ REVOKE ALL ON FUNCTION opengeni_private.persist_subscription_codex_connection_re
 ) FROM PUBLIC;
 REVOKE ALL ON FUNCTION opengeni_private.fail_subscription_codex_connection_refresh(
   uuid, uuid, uuid, bigint, text
+) FROM PUBLIC;
+REVOKE ALL ON FUNCTION opengeni_private.subscription_codex_reset_authority(
+  uuid, uuid, uuid, text
 ) FROM PUBLIC;
 
 -- The internal target helper is not granted here; the routines above call it
@@ -533,6 +601,9 @@ BEGIN
     ) TO opengeni_app;
     GRANT EXECUTE ON FUNCTION opengeni_private.fail_subscription_codex_connection_refresh(
       uuid, uuid, uuid, bigint, text
+    ) TO opengeni_app;
+    GRANT EXECUTE ON FUNCTION opengeni_private.subscription_codex_reset_authority(
+      uuid, uuid, uuid, text
     ) TO opengeni_app;
   END IF;
 END
