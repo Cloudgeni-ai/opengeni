@@ -370,7 +370,13 @@ export async function getSubscriptionCoreCodexWorkspaceProjection(
         ? projection
         : {
             ...projection,
-            accounts: [...projection.accounts, ...personal],
+            accounts: [
+              ...projection.accounts,
+              ...personal.map((account) => ({
+                ...account,
+                isActive: account.id === projection.rotation.activeCredentialId,
+              })),
+            ],
             personalAccountIds: personal.map((account) => account.id),
           };
     },
@@ -484,6 +490,30 @@ function isRlsRefusal(error: unknown): boolean {
 
 type Administration = { accountId: string; workspaceId: string | null; subjectId: string };
 
+async function managePersonalConnection(
+  tx: Database,
+  input: Administration & { connectionId: string },
+  action: "rename" | "allocator" | "primary",
+  label: string | null = null,
+  enabled: boolean | null = null,
+  expectedVersion: number | null = null,
+): Promise<
+  ({ id: string } & Exclude<SubscriptionCoreCodexAllocatorResult, { kind: "not_found" }>) | null
+> {
+  if (!input.workspaceId) return null;
+  const [row] = await rawRows<{
+    result:
+      | ({ id: string } & Exclude<SubscriptionCoreCodexAllocatorResult, { kind: "not_found" }>)
+      | null;
+  }>(
+    tx,
+    sql`select opengeni_private.manage_subscription_codex_personal(
+      ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.subjectId}, ${input.connectionId}::uuid,
+      ${action}, ${label}, ${enabled}::boolean, ${expectedVersion}::integer) as result`,
+  );
+  return row?.result ?? null;
+}
+
 async function withCodexAdministration<T>(
   db: Database,
   input: Administration,
@@ -564,6 +594,19 @@ export async function setSubscriptionCoreCodexAllocator(
   wake: SubscriptionCoreCodexWake | null;
 }> {
   return await withCodexAdministration(db, input, async (tx) => {
+    const personal = await managePersonalConnection(
+      tx,
+      input,
+      "allocator",
+      null,
+      input.enabled,
+      input.expectedVersion,
+    );
+    if (personal)
+      return {
+        result: { ...personal, allocatorUpdatedAt: date(personal.allocatorUpdatedAt) },
+        wake: personal.kind === "updated" ? wakeFor(input, "core_codex_allocator_changed") : null,
+      };
     const current = await visibleSharedConnection(tx, input, input.connectionId);
     if (!current) return { result: { kind: "not_found" }, wake: null };
     const projection = (
@@ -783,6 +826,8 @@ export async function renameSubscriptionCoreCodexConnection(
   input: Administration & { connectionId: string; label: string | null },
 ): Promise<string | null> {
   return await withCodexAdministration(db, input, async (tx) => {
+    const personal = await managePersonalConnection(tx, input, "rename", input.label);
+    if (personal) return personal.id;
     const current = await visibleSharedConnection(tx, input, input.connectionId);
     if (!current) return null;
     const label = input.label === null ? null : input.label.trim().slice(0, 200) || null;
@@ -926,6 +971,9 @@ export async function setSubscriptionCoreCodexPrimary(
   input: Administration & { connectionId: string },
 ): Promise<{ activated: string | null; wake: SubscriptionCoreCodexWake | null }> {
   return await withCodexAdministration(db, input, async (tx) => {
+    const personal = await managePersonalConnection(tx, input, "primary");
+    if (personal)
+      return { activated: personal.id, wake: wakeFor(input, "core_codex_primary_changed") };
     const current = await visibleSharedConnection(tx, input, input.connectionId);
     if (!current) return { activated: null, wake: null };
     const written = await writeSettingsRow(tx, input, {

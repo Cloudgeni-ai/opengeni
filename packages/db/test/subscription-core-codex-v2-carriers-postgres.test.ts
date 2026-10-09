@@ -23,6 +23,7 @@ import {
   receiverCodexSubscriptionAuthorityV2InTransaction,
   withRlsContext,
   withSessionRlsActorContext,
+  updateScheduledTask,
   type DbClient,
 } from "../src";
 import { rawRows } from "../src/database";
@@ -295,6 +296,7 @@ describe.skipIf(!realDb)("Codex v2 accepted authority on the remaining carriers 
       });
     expect(await firing(org.ownerSubjectId)).toEqual(personal(org));
     expect(await firing("user:someone-else")).toEqual(EMPTY);
+    expect(await firing(null)).toEqual(EMPTY);
     // Never recomputed: a later re-grant does not change what the task froze.
     await shared!.admin`update organization_user_resource_authorities set generation = 2
       where account_id = ${org.accountId}::uuid and resource_kind = 'subscription_connection'`;
@@ -311,6 +313,123 @@ describe.skipIf(!realDb)("Codex v2 accepted authority on the remaining carriers 
         ),
     ).catch((error: unknown) => error);
     expect(String((rewrite as { cause?: unknown })?.cause ?? rewrite)).toContain("immutable");
+    // The revision slot is canonical and its trigger must narrow a foreign
+    // human's edit, not merely rely on the reader's defensive narrowing.
+    const otherSubject = `user:other-${crypto.randomUUID()}`;
+    const [otherWorkspace] = await shared!.admin`insert into workspaces (account_id, name)
+      values (${org.accountId}::uuid, 'Other personal') returning id`;
+    await shared!
+      .admin`insert into organization_memberships (account_id, subject_id, status, personal_workspace_id)
+      values (${org.accountId}::uuid, ${otherSubject}, 'active', ${otherWorkspace!.id}::uuid)`;
+    await shared!
+      .admin`insert into workspace_memberships (account_id, workspace_id, subject_id, role)
+      values (${org.accountId}::uuid, ${org.personalWorkspaceId}::uuid, ${otherSubject}, 'admin')`;
+    await withSessionRlsActorContext({ subjectId: otherSubject }, () =>
+      updateScheduledTask(client!.db, org.personalWorkspaceId, own.id, {
+        refreshPersonalResourceAuthority: true,
+        authorityUpdatedBy: { kind: "subject", subjectId: otherSubject },
+      }),
+    );
+    expect((await taskAuthority(own.id)).revision).toEqual(EMPTY);
+    expect(await firing(org.ownerSubjectId)).toEqual(EMPTY);
+  });
+
+  test("agent-created schedules inherit their exact causal turn, never fresh personal membership", async () => {
+    for (const frozen of [EMPTY, "personal"] as const) {
+      const org = await organization();
+      await setCutover(org.accountId, true);
+      const source = await session(org, org.personalWorkspaceId);
+      const expected = frozen === "personal" ? personal(org) : EMPTY;
+      const turnId = await acceptedTurn(
+        org,
+        org.personalWorkspaceId,
+        source.id,
+        org.ownerSubjectId,
+        expected,
+      );
+      const attemptId = crypto.randomUUID();
+      const claimed = await claimSessionWorkForAttempt(client!.db, org.personalWorkspaceId, {
+        sessionId: source.id,
+        workflowId: `session-${source.id}`,
+        workflowRunId: crypto.randomUUID(),
+        dispatchId: crypto.randomUUID(),
+        attemptId,
+        trigger: { kind: "next" },
+      });
+      if (claimed.action !== "claimed") throw new Error("not claimed");
+      await personalConnection(org);
+      for (const existing of [false, true]) {
+        const scheduled = await createScheduledTask(client!.db, {
+          accountId: org.accountId,
+          workspaceId: org.personalWorkspaceId,
+          name: "Inherited Codex authority",
+          status: "active",
+          schedule: { type: "manual" },
+          temporalScheduleId: crypto.randomUUID(),
+          runMode: existing ? "existing_session" : "new_session_per_run",
+          overlapPolicy: "allow_concurrent",
+          agentConfig: { prompt: "run", resources: [], tools: [], metadata: {} },
+          ...(existing ? { targetSessionId: source.id } : {}),
+          metadata: {},
+          createdByActor: {
+            type: "agent_attempt",
+            sessionId: source.id,
+            turnId,
+            attemptId,
+            executionGeneration: claimed.turn.executionGeneration,
+          },
+        });
+        expect(await taskAuthority(scheduled.id)).toEqual({ task: expected, revision: expected });
+      }
+    }
+  });
+
+  test("different frozen Codex values cannot coalesce into the same internal turn", async () => {
+    const org = await organization();
+    await setCutover(org.accountId, true);
+    const target = await session(org, org.personalWorkspaceId);
+    const parentTurnId = await acceptedTurn(
+      org,
+      org.personalWorkspaceId,
+      target.id,
+      org.ownerSubjectId,
+      personal(org),
+    );
+    await shared!.admin.begin(async (tx) => {
+      await tx`set local session_replication_role = replica`;
+      await tx`update session_turns set status = 'completed' where id = ${parentTurnId}::uuid`;
+    });
+    for (const authority of [personal(org), EMPTY]) {
+      await addSessionSystemUpdate(client!.db, {
+        accountId: org.accountId,
+        workspaceId: org.personalWorkspaceId,
+        sessionId: target.id,
+        kind: "child_terminal_result",
+        classification: "success",
+        sourceId: crypto.randomUUID(),
+        dedupeKey: crypto.randomUUID(),
+        summary: "Child done",
+        payload: {
+          type: "child_terminal_result",
+          childSessionId: crypto.randomUUID(),
+          status: "idle",
+        },
+        subscriptionAuthority: authority,
+        lineage: { parentTurnId },
+      });
+    }
+    const claimed = await claimSessionWorkForAttempt(client!.db, org.personalWorkspaceId, {
+      sessionId: target.id,
+      workflowId: `session-${target.id}`,
+      workflowRunId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    expect(claimed.action).toBe("claimed");
+    const updates = await shared!
+      .admin`select state from session_system_updates where session_id = ${target.id}::uuid order by state`;
+    expect(updates.map((update) => update.state)).toEqual(["delivered", "pending"]);
   });
 
   test("agent messages and Steer copy the receiving source, only for its exact owner", async () => {

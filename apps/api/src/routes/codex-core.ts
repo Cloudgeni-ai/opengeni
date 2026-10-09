@@ -87,8 +87,17 @@ export function coreCodexRouteUnsupported(): never {
   );
 }
 
-function projection(deps: ApiRouteDeps, accountId: string, workspaceId: string) {
-  return getSubscriptionCoreCodexWorkspaceProjection(deps.db, { accountId, workspaceId });
+function projection(
+  deps: ApiRouteDeps,
+  accountId: string,
+  workspaceId: string,
+  viewerSubjectId?: string,
+) {
+  return getSubscriptionCoreCodexWorkspaceProjection(deps.db, {
+    accountId,
+    workspaceId,
+    viewerSubjectId: viewerSubjectId ?? null,
+  });
 }
 
 /**
@@ -113,6 +122,11 @@ export async function coreCodexConnected(
   });
   if (result.kind === "refused") {
     switch (result.reason) {
+      case "identity_unverified":
+        throw new HTTPException(409, {
+          message:
+            "this migrated Codex login has no verified person identity; an organization administrator must disconnect it before connecting again",
+        });
       case "managed_elsewhere":
         throw new HTTPException(409, {
           message:
@@ -148,7 +162,8 @@ export async function coreCodexConnected(
             subjectId: input.subjectId,
           })
         ).rotation.activeCredentialId
-      : (await projection(deps, input.accountId, input.workspaceId)).rotation.activeCredentialId;
+      : (await projection(deps, input.accountId, input.workspaceId, input.subjectId)).rotation
+          .activeCredentialId;
   return c.json({
     status: "connected",
     plan: input.credential.planType,
@@ -283,8 +298,14 @@ export async function coreCodexStatus(
   accountId: string,
   workspaceId: string,
   catalogSettings: Parameters<typeof codexModelsForPicker>[0],
+  viewerSubjectId: string,
 ) {
-  const { accounts, rotation, source } = await projection(deps, accountId, workspaceId);
+  const { accounts, rotation, source } = await projection(
+    deps,
+    accountId,
+    workspaceId,
+    viewerSubjectId,
+  );
   const active = accounts.find((account) => account.id === rotation.activeCredentialId) ?? null;
   const readiness = codexWorkerReadiness({
     effectiveSource: source.effectiveSource,
@@ -498,7 +519,7 @@ export async function coreCodexRename(
   });
   if (!renamed) throw new HTTPException(404, { message: "codex account not found" });
   const accounts = admin.workspaceId
-    ? (await projection(deps, admin.accountId, admin.workspaceId)).accounts
+    ? (await projection(deps, admin.accountId, admin.workspaceId, admin.subjectId)).accounts
     : (
         await getSubscriptionCoreOrganizationCodexProjection(deps.db, {
           organizationId: admin.accountId,

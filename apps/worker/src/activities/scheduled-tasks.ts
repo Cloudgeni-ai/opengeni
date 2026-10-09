@@ -967,6 +967,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         workspaceId: task.workspaceId,
         taskId: task.id,
         revisionAuthorizerSubjectId: taskRevisionAuthority?.subjectId ?? null,
+        taskAuthorityRevision: task.authorityRevision,
       });
       // A scheduled bot selection was authorized when the task was written,
       // but connection status and tenant/role binding are mutable. Revalidate
@@ -2777,6 +2778,7 @@ async function recoverBoundScheduledTaskDispatch(input: {
         taskId: task.id,
         revisionAuthorizerSubjectId:
           input.acceptedExecution.causalHumanAuthority?.subjectId ?? null,
+        taskAuthorityRevision: task.authorityRevision,
       }),
       scheduledTaskRunId: input.run.id,
     },

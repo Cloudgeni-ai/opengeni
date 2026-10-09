@@ -2,7 +2,7 @@ import {
   SubscriptionPersonalAuthorityV2,
   XaiProviderAccountAuthoritySnapshotV1,
 } from "@opengeni/contracts";
-import { and, desc, eq, isNull } from "drizzle-orm";
+import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import { resolveClaudeSharedPoolAuthoritySnapshotInTransaction } from "./claude-subscription-accounts";
 import { withWorkspaceRls, type Database } from "./database";
 import * as schema from "./schema";
@@ -320,14 +320,21 @@ export async function getAcceptedSubscriptionTaskAuthority(
  */
 export async function getScheduledTaskSubscriptionAuthority(
   db: Database,
-  input: { workspaceId: string; taskId: string; revisionAuthorizerSubjectId: string | null },
+  input: {
+    workspaceId: string;
+    taskId: string;
+    taskAuthorityRevision?: number;
+    revisionAuthorizerSubjectId: string | null;
+  },
 ): Promise<SubscriptionPersonalAuthorityV2 | null> {
   return withWorkspaceRls(db, input.workspaceId, async (tx) => {
     const [row] = await tx
       .select({
         accountId: schema.scheduledTasks.accountId,
         ownerSubjectId: schema.scheduledTasks.ownerSubjectId,
-        subscriptionAuthority: schema.scheduledTasks.subscriptionAuthority,
+        subscriptionAuthority: sql<unknown>`opengeni_private.subscription_codex_revision_authority_v2(
+          ${schema.scheduledTasks.accountId}, ${schema.scheduledTasks.workspaceId},
+          ${schema.scheduledTasks.id}, coalesce(${input.taskAuthorityRevision ?? null}::bigint, ${schema.scheduledTasks.authorityRevision}))`,
       })
       .from(schema.scheduledTasks)
       .where(
@@ -346,7 +353,6 @@ export async function getScheduledTaskSubscriptionAuthority(
     if (
       frozen &&
       frozen.personal.length > 0 &&
-      input.revisionAuthorizerSubjectId !== null &&
       input.revisionAuthorizerSubjectId !== row.ownerSubjectId
     ) {
       return EMPTY_SUBSCRIPTION_AUTHORITY_V2;

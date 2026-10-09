@@ -2109,6 +2109,8 @@ BEGIN
       'subscription_codex_owner_capability_held(uuid,text[],text,uuid,boolean)',
       'subscription_codex_owner_membership_held(uuid,uuid)',
       'subscription_codex_task_authority_v2(uuid,uuid,uuid,text)',
+      'subscription_codex_revision_authority_v2(uuid,uuid,uuid,bigint)',
+      'manage_subscription_codex_personal(uuid,uuid,text,uuid,text,text,boolean,integer)',
       'subscription_organization_admin(uuid)',
       'subscription_people_assignment_visible(uuid,uuid,uuid,text,text)',
       'subscription_person_preference_visible(uuid,uuid,text,text)',

@@ -1050,7 +1050,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     const human = await requireOrganizationCodexHuman(c, deps, organizationId, {
       providerConsent: true,
     });
-    const disposition = await codexRouteDisposition(deps, organizationId);
+    await codexRouteDisposition(deps, organizationId);
     const { state } = (await c.req.json().catch(() => null)) as {
       state?: string;
     };
@@ -1113,7 +1113,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
         id_token: tokens.idToken,
       }),
     );
-    if (disposition === "core") {
+    if ((await codexRouteDisposition(deps, organizationId)) === "core") {
       return await coreCodexConnected(c, deps, {
         accountId: organizationId,
         workspaceId: null,
@@ -1128,6 +1128,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
           lastRefreshAt: new Date(),
           accountEmail: id.email ?? null,
           label: id.email ?? id.chatgptAccountId ?? null,
+          connectedBySubjectId: human.subjectId,
         },
       });
     }
@@ -1380,6 +1381,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/codex/connect/start", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
+    if (await managedCookieHuman(c, deps)) requireSameOriginBrowserMutation(c, deps);
     // The device-code start touches no account state: legacy and core alike.
     await codexRouteDisposition(deps, grant.accountId);
     let start: Awaited<ReturnType<typeof startDeviceCode>>;
@@ -1393,6 +1395,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     const state = createSignedState(githubStateSecret, {
       workspaceId,
+      actorSubjectId: grant.subjectId,
       deviceAuthId: start.deviceAuthId,
       userCode: start.userCode,
     });
@@ -1408,7 +1411,9 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/codex/connect/poll", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
-    const disposition = await codexRouteDisposition(deps, grant.accountId);
+    const connectingHuman = await managedCookieHuman(c, deps);
+    if (connectingHuman) requireSameOriginBrowserMutation(c, deps);
+    await codexRouteDisposition(deps, grant.accountId);
     const { state } = (await c.req.json()) as { state?: string };
     const payload = (state
       ? readSignedState(state, githubStateSecret)
@@ -1416,6 +1421,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (
       !payload ||
       payload.workspaceId !== workspaceId ||
+      payload.actorSubjectId !== grant.subjectId ||
       !payload.deviceAuthId ||
       !payload.userCode
     ) {
@@ -1462,14 +1468,13 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
     }
     const id = parseIdToken(tokens.idToken);
-    const connectingHuman = await managedCookieHuman(c, deps);
     const key = environmentsEncryptionKeyBytes(settings);
     if (!key) {
       throw new HTTPException(500, {
         message: "OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is not configured",
       });
     }
-    if (disposition === "core") {
+    if ((await codexRouteDisposition(deps, grant.accountId)) === "core") {
       // The core writer decides authority from the grant's subject: an
       // organization administrator (new or reconnected shared account), a
       // workspace administrator (reconnect of an account this workspace
@@ -1495,6 +1500,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
           lastRefreshAt: new Date(),
           accountEmail: id.email ?? null,
           label: id.email ?? id.chatgptAccountId ?? null,
+          connectedBySubjectId: connectingHuman?.subjectId ?? null,
         },
       });
     }
@@ -1585,6 +1591,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
         grant.accountId,
         workspaceId,
         (await resolveCatalogSettings(db, settings)).settings,
+        grant.subjectId,
       );
     }
     const [status, accounts, source, rotation] = await Promise.all([

@@ -48,11 +48,11 @@ function app() {
   } as never);
 }
 
-async function bearer(permissions: Permission[]): Promise<string> {
+async function bearer(permissions: Permission[], subjectId = "tester"): Promise<string> {
   const token = await signDelegatedAccessToken(DELEGATION_SECRET, {
     accountId: ACCOUNT,
     workspaceId: WS,
-    subjectId: "tester",
+    subjectId,
     permissions,
     principalKind: "human_session",
     exp: Math.floor(Date.now() / 1000) + 3600,
@@ -413,6 +413,12 @@ describe("Codex routes with an enabled cutover", () => {
     });
     expect(started.status).toBe(200);
     const { state } = (await started.json()) as { state: string };
+    const swapped = await app().request(`/v1/workspaces/${WS}/codex/connect/poll`, {
+      method: "POST",
+      headers: { ...headers, authorization: await bearer(["connections:write"], "another-person") },
+      body: JSON.stringify({ state }),
+    });
+    expect(swapped.status).toBe(400);
     const signIn = () =>
       mockDevice({
         token: () => json({ authorization_code: "authorization-code", code_verifier: "verifier" }),
@@ -466,6 +472,7 @@ describe("Codex routes with an enabled cutover", () => {
       providerAccountId: "chatgpt-core",
       planType: "pro",
       accountEmail: "core@example.test",
+      connectedBySubjectId: null,
     });
     // Only the encrypted envelope crosses the boundary.
     expect(String(call.credentialEncrypted)).not.toContain("refresh-token");
@@ -473,6 +480,7 @@ describe("Codex routes with an enabled cutover", () => {
     for (const [reason, status] of [
       ["forbidden", 403],
       ["managed_elsewhere", 409],
+      ["identity_unverified", 409],
       ["personal_connections_disabled", 409],
       ["unavailable", 503],
     ] as const) {
@@ -480,6 +488,19 @@ describe("Codex routes with an enabled cutover", () => {
       const refused = await poll();
       expect({ reason, status: refused.status }).toEqual({ reason, status });
     }
+    // The cutover can change while token exchange is in flight. Re-read it
+    // before deciding which writer may run; no stale legacy write is allowed.
+    let gateReads = 0;
+    mock("readCodexCutoverDisposition", async () => (++gateReads === 1 ? "legacy" : "core"));
+    result = {
+      kind: "connected",
+      id: CONNECTION,
+      isNew: false,
+      ownership: "shared",
+      wake: { accountId: ACCOUNT, reason: "core_codex_connected" },
+    };
+    expect((await poll()).status).toBe(200);
+    expect(gateReads).toBe(2);
   });
 
   test("disconnect one and all map every core outcome (M3 PR 3b)", async () => {

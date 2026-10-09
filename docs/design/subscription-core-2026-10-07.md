@@ -1526,8 +1526,10 @@ legacy path unchanged, a disabled row fails closed (typed 503), and every
 database routine below rechecks the enabled row itself.
 
 - **Connect and disconnect (SUB-OWN-01/04/08).** The device-code start
-  touches no state and runs unchanged (a disabled cutover still fails
-  closed). Poll writes through `connectSubscriptionCoreCodexConnection`:
+  touches no account state; workspace device state binds the starting actor
+  and poll rejects another actor. Managed-cookie start/poll require the same
+  browser origin. Both poll routes re-read the gate after token exchange,
+  before writing. Poll writes through `connectSubscriptionCoreCodexConnection`:
   - a new shared connection is an organization decision: only an
     organization administrator creates one. From the organization route it
     is organization-scoped and organization-managed; from a shared
@@ -1536,7 +1538,7 @@ database routine below rechecks the enabled row itself.
     with its assignment and pool policy;
   - the same upstream account reconnects in place: a new credential, the next
     refresh generation, active status. An organization administrator may
-    reconnect any shared connection, a workspace administrator only one their
+    reconnect any shared connection through the organization route, a workspace administrator only one their
     workspace manages (the core update policy); an account connected and
     managed elsewhere is never widened or taken over (`managed_elsewhere`,
     409). SUB-OWN-08 holds by construction: one connection per organization,
@@ -1545,14 +1547,20 @@ database routine below rechecks the enabled row itself.
     identity because every member of a ChatGPT Team/Business/Enterprise
     workspace shares the account id: another person's login of the same
     ChatGPT workspace is a new connection, never a replacement of someone
-    else's credential;
+    else's credential. Even an organization administrator using a workspace
+    route cannot reconnect a connection outside that workspace's pool.
+    A migrated login without a verified upstream person is not guessed or
+    duplicated: reconnect returns `identity_unverified` (409). An authorized
+    administrator must disconnect that legacy login and then connect anew;
   - in the person's own Personal workspace, connect creates or reconnects
     their personal connection through the owner-scoped writer
     `connect_subscription_codex_personal`, only with personal connections
     allowed there (SUB-OWN-05). A new personal connection carries a
     `subscription_connection` resource authority with the owner's one current
-    generation for personal Codex connections (1 for the first), so frozen
-    accepted authority keeps resolving to a single generation.
+    generation for active personal Codex connections (1 for the first). After
+    disconnect-all, the next generation exceeds the retained resource-authority
+    high-water mark, under the owner's authority lock: old frozen work cannot
+    regain access to newly connected credentials.
   Every credential replacement takes the connection's refresh key
   (`subscription-refresh:<id>`) before its row lock, so it waits for an
   in-flight refresh and for a redemption's `FOR SHARE`.
@@ -1564,16 +1572,20 @@ database routine below rechecks the enabled row itself.
   the refresh key and the row lock (waiting for a redemption's share lock),
   and is refused while any workspace's redemption of the connection is
   `provider_started` (its one upstream key must stay retryable) or while a
-  chat or operation lease still names it (leases are `RESTRICT`; a stale
-  lease is not cleared here because its session's restrictive visibility
-  policy applies to the routine too). Disconnect-all removes every account
+  live chat or operation lease still names it. Under the refresh and row locks,
+  the exact-connection owner capability deletes expired leases even in private
+  or other workspaces; live leases remain `RESTRICT`. Disconnect-all removes every account
   the workspace manages (or the person's personal connections) atomically.
   An organization account named from a workspace route keeps the legacy 409.
 - **Personal connections in their owner's views.** The owner-only reader
   `subscription_codex_personal_connections` returns the acting person's own
   personal Codex connections (no credential material) for a workspace they
   may use. Their Personal-workspace account list includes them (never an
-  Apps designation target: designations are shared-only), and a session
+  Apps designation target: designations are shared-only). Status, rename,
+  primary selection and allocator updates use the same viewer; mutations
+  require the active owner in their own Personal workspace. Migrated aliases
+  resolve inside this owner-only routine, never by widening application RLS.
+  A session
   running on one shows it as "Running on" to that owner only; everyone else
   still sees the id with no account.
 - **Organization-level reset redemption.** `subscription_codex_reset_authority`
@@ -1589,18 +1601,23 @@ database routine below rechecks the enabled row itself.
   workspace (including a ledger row the cutover keeps in its legacy
   workspace) is re-filed into the requesting workspace when its claim has
   lapsed, so prepare adopts it and the claim resumes on its one upstream
-  idempotency key.
+  idempotency key. Expired `processing` claims in another workspace are
+  removed under the credit lock. A live claim or another person's
+  `provider_started` attempt is never stolen or discarded.
 - **v2 writers at acceptance (design 3.7, EP-T13..T15).** Values are copied,
   never recomputed from current membership; non-human acceptance freezes
   the empty value; nothing is written before the cutover:
   - scheduled tasks freeze their value once at creation
     (`subscription_codex_task_authority_v2`, the acceptance rule: a personal
     entry only for the exact requesting person in their own Personal
-    workspace, or a reusable session's acceptance value). Revision
+    workspace, or a reusable session's acceptance value). An agent-created
+    task instead inherits the exact causal turn's v2 value, narrowed to the
+    same owner's personal/private destination; it never mints current membership
+    authority. Revision
     authorities derive theirs from the task by trigger (the empty value when
-    anyone but the owner authorized the revision). A firing copies the
-    task's value onto its first turn or its scheduled occurrence, narrowed to
-    the empty value when the accepted revision's authorizer is not the owner;
+    anyone but the owner authorized the revision, including no human authorizer).
+    A firing reads that canonical revision slot and copies it onto its first
+    turn or scheduled occurrence, with a further authorizer check;
   - Agent Message, Agent Steer and agent-submitted prompts copy the receiving
     source's value (its execution-context turn, its latest accepted turn, or
     a child's spawning parent turn) only when that source's exact owner is
@@ -1614,6 +1631,15 @@ database routine below rechecks the enabled row itself.
     Updates frozen with different values never share one turn; an update
     that froze none follows the v1 compatibility rule. Once the cutover is
     active, a missing value is the empty value.
+- **Upgrade digests.** Both scheduled-task digest functions exclude the new
+  immutable authority slot, like the immutable owner slot. Excluding only NULL
+  would protect the rolling migration but not a later rename after the drained
+  backfill. Neither rename nor pause/resume changes the execution digest or
+  authority revision. The other new carrier columns do not participate in
+  whole-row execution digests; the cutover's additional staging column is temporary.
+- **Connecting-person audit.** Only a verified managed-cookie human supplies
+  `connected_by_subject_id`; a `user:`-shaped bearer or agent subject is not
+  proof of a managed human. Local/service connections retain NULL.
 - **Owner-only capability policies.** The writers run as their owner under
   FORCE RLS with two new transaction-scoped capabilities,
   `codex_connection_owner` (the acting person's own personal connections and

@@ -53,6 +53,8 @@ export type SubscriptionCoreCodexCredentialInput = {
   lastRefreshAt: Date | null;
   accountEmail: string | null;
   label: string | null;
+  /** Verified managed-browser human, never inferred from a grant's spelling. */
+  connectedBySubjectId?: string | null;
 };
 
 export type SubscriptionCoreCodexConnectRefusal =
@@ -60,6 +62,8 @@ export type SubscriptionCoreCodexConnectRefusal =
   | "forbidden"
   /** The upstream account is already connected and managed elsewhere. */
   | "managed_elsewhere"
+  /** A migrated login has no proven upstream person; never guess or merge it. */
+  | "identity_unverified"
   /** Personal connections are turned off for this person here. */
   | "personal_connections_disabled"
   /** The Codex cutover is not enabled (or the caller is not exact). */
@@ -191,6 +195,16 @@ async function connectShared(
     );
   }
   const admin = await isOrganizationAdministrator(tx, input.accountId);
+  if (input.providerAccountId !== null && input.providerSubjectId !== null) {
+    const [unidentified] = await rawRows<{ id: string }>(
+      tx,
+      sql`select id from subscription_connections
+      where account_id = ${input.accountId}::uuid and provider = 'codex'
+        and kind = 'subscription' and ownership = 'shared'
+        and provider_account_id = ${input.providerAccountId} and provider_subject_id is null limit 1`,
+    );
+    if (unidentified) return { kind: "refused", reason: "identity_unverified" };
+  }
   const [existing] =
     input.providerAccountId === null
       ? []
@@ -205,7 +219,7 @@ async function connectShared(
         );
   // Only a managed human is recorded as the connecting person (legacy
   // parity): local administration and service principals own no reset credit.
-  const connectedBySubjectId = input.subjectId.startsWith("user:") ? input.subjectId : null;
+  const connectedBySubjectId = input.connectedBySubjectId ?? null;
   const wake: SubscriptionCoreCodexWake =
     input.workspaceId === null
       ? { accountId: input.accountId, reason: "core_codex_connected" }
@@ -215,6 +229,15 @@ async function connectShared(
           workspaceIds: [input.workspaceId],
         };
   if (existing) {
+    if (input.workspaceId !== null) {
+      const pool = await projectSubscriptionCoreCodexWorkspace(tx, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+      });
+      if (!pool.accounts.some((account) => account.id === existing.id)) {
+        return { kind: "refused", reason: "managed_elsewhere" };
+      }
+    }
     // Reconnect: the organization, or the workspace that manages it. Anyone
     // else would take over or widen an account managed elsewhere.
     if (!admin && existing.managed_by_workspace_id !== input.workspaceId) {
@@ -393,16 +416,16 @@ async function disconnectTarget(
     );
     return row ? { id: row.id, organization: true } : null;
   }
-  const personal = await listSubscriptionCoreCodexPersonalAccountsInTransaction(tx, {
-    accountId: input.accountId,
-    workspaceId: input.workspaceId,
-    subjectId: input.subjectId,
-  });
-  if (
-    (await workspaceKind(tx, input.accountId, input.workspaceId)) === "personal" &&
-    personal.some((account) => account.id === rawId)
-  ) {
-    return { id: rawId, organization: false };
+  if ((await workspaceKind(tx, input.accountId, input.workspaceId)) === "personal") {
+    // Resolve migrated aliases inside the owner-only routine. Ordinary app
+    // RLS deliberately hides personal aliases, including from administrators.
+    const [personal] = await rawRows<{ resolved: { id: string } | null }>(
+      tx,
+      sql`select opengeni_private.manage_subscription_codex_personal(
+        ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.subjectId}, ${rawId}::uuid,
+        'resolve', null, null, null) as resolved`,
+    );
+    if (personal?.resolved) return { id: personal.resolved.id, organization: false };
   }
   const id = await resolveSubscriptionConnectionId(tx, {
     accountId: input.accountId,

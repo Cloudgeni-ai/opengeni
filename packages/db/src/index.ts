@@ -17994,13 +17994,51 @@ export async function createScheduledTask(
           ? (frozenCreator.initiatingHumanSubjectId ??
             (frozenCreator.initiator.kind === "subject" ? frozenCreator.initiator.subjectId : null))
           : null;
-      const taskSubscriptionAuthority =
-        await codexSubscriptionAuthorityV2ForScheduledTaskInTransaction(scopedDb, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          reusableSessionId: input.targetSessionId ?? null,
-          acceptingSubjectId: taskOwnerSubjectId,
-        });
+      const creatorTurn = input.createdByActor
+        ? (
+            await scopedDb
+              .select({ authority: schema.sessionTurns.subscriptionAuthority })
+              .from(schema.sessionTurns)
+              .where(
+                and(
+                  eq(schema.sessionTurns.accountId, input.accountId),
+                  eq(schema.sessionTurns.workspaceId, input.workspaceId),
+                  eq(schema.sessionTurns.sessionId, input.createdByActor.sessionId),
+                  eq(schema.sessionTurns.id, input.createdByActor.turnId),
+                ),
+              )
+              .limit(1)
+          )[0]
+        : null;
+      const [taskDestination] =
+        input.createdByActor && taskOwnerSubjectId
+          ? await rawRows<{ eligible: boolean }>(
+              scopedDb,
+              sql`select
+            case when ${input.targetSessionId ?? null}::uuid is null then
+              get_workspace_kind(${input.accountId}::uuid, ${input.workspaceId}::uuid) = 'personal'
+            else exists (select 1 from sessions destination
+              where destination.account_id = ${input.accountId}::uuid
+                and destination.workspace_id = ${input.workspaceId}::uuid
+                and destination.id = ${input.targetSessionId ?? null}::uuid
+                and destination.owner_subject_id = ${taskOwnerSubjectId}
+                and (destination.visibility = 'user_private' or
+                  get_workspace_kind(${input.accountId}::uuid, ${input.workspaceId}::uuid) = 'personal'))
+            end as eligible`,
+            )
+          : [];
+      const taskSubscriptionAuthority = input.createdByActor
+        ? await codexSubscriptionAuthorityV2OrEmptyInTransaction(
+            scopedDb,
+            input.accountId,
+            taskDestination?.eligible ? creatorTurn?.authority : null,
+          )
+        : await codexSubscriptionAuthorityV2ForScheduledTaskInTransaction(scopedDb, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            reusableSessionId: input.targetSessionId ?? null,
+            acceptingSubjectId: taskOwnerSubjectId,
+          });
       const [row] = await scopedDb
         .insert(schema.scheduledTasks)
         .values({
