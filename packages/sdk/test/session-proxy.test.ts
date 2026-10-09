@@ -1862,6 +1862,47 @@ describe("createSessionProxyHandler", () => {
     expect(defaults.upstream.requests.at(-1)!.url.pathname).toContain("/download-url");
   });
 
+  test("workspace Sites are opt-in, read-only and need no session", async () => {
+    const site = `${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/published-artifacts/${SITE_ID}`;
+    const list = `${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/published-artifacts`;
+    // Off by default: the session-scoped artifact path still requires a session.
+    expect((await setup({ artifacts: true }).handler(new Request(site))).status).toBe(400);
+    expect((await setup().handler(new Request(site))).status).toBe(404);
+
+    const on = setup({ sites: true });
+    const forwarded = async (url: string) => {
+      const response = await on.handler(new Request(url));
+      expect(response.status).toBe(200);
+      return on.upstream.requests.at(-1)!.url;
+    };
+    expect((await forwarded(site)).pathname).toBe(
+      `/v1/workspaces/${WORKSPACE_ID}/published-artifacts/${SITE_ID}`,
+    );
+    const content = await forwarded(`${site}/content?versionId=v1&smuggled=1`);
+    expect(content.pathname).toBe(
+      `/v1/workspaces/${WORKSPACE_ID}/published-artifacts/${SITE_ID}/content`,
+    );
+    expect(Object.fromEntries(content.searchParams)).toEqual({ versionId: "v1" });
+    const listed = await forwarded(`${list}?limit=5&sourceSessionId=x`);
+    expect(Object.fromEntries(listed.searchParams)).toEqual({ limit: "5" });
+    const html = await on.handler(new Request(`${site}/html?versionId=v1`));
+    expect(await html.text()).toBe("<h1>Dashboard</h1>");
+    expect((await on.handler(new Request(`${site}/html`))).status).toBe(400);
+
+    // Writes stay closed without a session, and so do editable artifacts.
+    for (const [url, method] of [
+      [`${site}/rollback`, "POST"],
+      [`${site}/status`, "PUT"],
+    ] as const) {
+      const response = await on.handler(
+        new Request(url, { method, headers: { "Content-Type": "application/json" }, body: "{}" }),
+      );
+      expect(response.status).toBe(404);
+    }
+    const editable = site.replace("published-artifacts", "editable-artifacts");
+    expect((await on.handler(new Request(editable))).status).toBe(404);
+  });
+
   test("artifact viewer routes are opt-in, session-scoped, and association-checked", async () => {
     const item = `${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/editable-artifacts/${EDITABLE_ID}`;
     const scoped = { "x-opengeni-session-id": SESSION_ID };

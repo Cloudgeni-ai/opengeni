@@ -305,6 +305,16 @@ export type SessionProxyHandlerOptions = {
    */
   artifacts?: boolean | { editableLiveUrl?: string | undefined } | undefined;
   /**
+   * Read the workspace's Sites without naming a session: list, detail,
+   * content and HTML of published artifacts the signed-in user may read, for
+   * pages that belong to the workspace rather than to one chat (for example a
+   * page several sessions keep up to date, shown with `SiteDetail`). Read-only:
+   * publishing, rollback and status changes stay closed. Requests that send
+   * `x-opengeni-session-id` keep the session-scoped `artifacts` checks.
+   * Explicit opt-in, default false.
+   */
+  sites?: boolean | undefined;
+  /**
    * Chat list for `SessionList` / `OpenGeniChat` (`listSessionPage` only).
    * `"mine"` (default) lists sessions the resolved user created; `"visible"`
    * lists every session Opengeni lets that user read in the workspace (shared
@@ -406,6 +416,7 @@ export function createSessionProxyHandler(
   const realtimeVoiceEnabled = options.realtimeVoice ?? true;
   const sandboxFilesEnabled = options.sandboxFiles === true;
   const artifactsEnabled = options.artifacts !== undefined && options.artifacts !== false;
+  const sitesEnabled = options.sites === true;
   const editableLiveUrl = artifactsEnabled
     ? liveSocketUrl(
         (typeof options.artifacts === "object" ? options.artifacts.editableLiveUrl : undefined) ??
@@ -851,6 +862,59 @@ export function createSessionProxyHandler(
       }
 
       if (area === "editable-artifacts" || area === "published-artifacts") {
+        if (
+          area === "published-artifacts" &&
+          sitesEnabled &&
+          !request.headers.get(SESSION_SCOPE_HEADER)
+        ) {
+          // Workspace Sites under Opengeni's own read authorization for this user.
+          const [siteId, ...siteOp] = tail as [string | undefined, ...string[]];
+          const op = siteOp.join("/");
+          if (method !== "GET") return errorJson(404, "route_not_allowed", "Not found.");
+          if (siteId === undefined) {
+            return json(
+              await client.requestJson(
+                "GET",
+                `${base}/published-artifacts`,
+                undefined,
+                pick(query, SITE_LIST_FIELDS) as Record<string, string>,
+                call,
+              ),
+            );
+          }
+          if (!SEGMENT.test(siteId) || (op !== "" && op !== "content" && op !== "html")) {
+            return errorJson(404, "route_not_allowed", "Not found.");
+          }
+          const versionId = query.versionId;
+          if (
+            versionId !== undefined &&
+            (typeof versionId !== "string" || !SEGMENT.test(versionId))
+          ) {
+            reject(400, "version_invalid", "versionId is invalid.");
+          }
+          if (op === "html") {
+            if (typeof versionId !== "string") {
+              reject(400, "version_required", "versionId is required.");
+            }
+            const html = await downloadSessionProxySiteHtml(client, workspaceId, siteId, {
+              versionId: versionId as string,
+              signal: request.signal,
+            });
+            return new Response(boundedSiteHtml(html.body, request.signal), {
+              headers: SITE_HTML_HEADERS,
+            });
+          }
+          const item = `${base}/published-artifacts/${siteId}`;
+          return json(
+            await client.requestJson(
+              "GET",
+              op === "content" ? `${item}/content` : item,
+              undefined,
+              op === "content" && typeof versionId === "string" ? { versionId } : {},
+              call,
+            ),
+          );
+        }
         if (!artifactsEnabled) return errorJson(404, "route_not_allowed", "Not found.");
         const [artifactId, ...artifactOp] = tail as [string | undefined, ...string[]];
         const route = `${method} ${artifactOp.join("/")}`;
@@ -1311,6 +1375,7 @@ function withToolServer(
 }
 
 const EDITABLE_ARTIFACT_LIVE_PATH = "/v1/editable-artifacts/live";
+const SITE_LIST_FIELDS = ["limit", "cursor", "status"] as const;
 const TICKET_FIELDS = [
   "replicaId",
   "modality",
