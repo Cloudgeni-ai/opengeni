@@ -1,5 +1,25 @@
 # Compact session monitoring over MCP
 
+## Selected conversation targets and message receipts
+
+`session_target_get/set` retains optional conversational context in the calling
+session's versioned `conversationTargetV1` metadata. Set/clear uses an exact live
+attempt, optimistic version and operation ID; stale retries cannot restore a
+cleared selection. Target access is checked at selection and every read. The
+metadata grants no authority, never changes voice ownership, and is not an
+implicit dispatch destination. No session is automatically deleted.
+
+`session_message_status(sessionId, updateId)` follows an existing Send/Steer
+receipt belonging to this caller. Pending, cancelled and superseded input stays
+distinct from delivery. Delivered input names its exact consuming turn; only an
+outcome for that turn's current execution generation yields an exact bounded
+`session_events` result read. Read that result before relaying it; a status alone
+is not the answer. The tools do not resend, resume, wait, or consume results.
+Use ordinary `session_wait`/history and an explicitly timed `wait_for_input` when
+waiting on unrelated sessions (unlike children, they do not automatically send
+terminal results to the caller). A paused target requires authorized Resume or
+an explicitly requested change of direction through Steer.
+
 ## Child unread and consumption
 
 Unread is based on completed assistant messages, substantive final answers,

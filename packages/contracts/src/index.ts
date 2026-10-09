@@ -1,3 +1,4 @@
+export * from "./session-target";
 import { modelLogoUrl } from "./model-display";
 import { CustomMcpSetupRequest } from "./prepared-mcp-setup";
 import {
@@ -931,6 +932,9 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "command_read",
   "session_create",
   "session_send_message",
+  "session_message_status",
+  "session_target_get",
+  "session_target_set",
   "session_pause",
   "session_resume",
   "session_steer",

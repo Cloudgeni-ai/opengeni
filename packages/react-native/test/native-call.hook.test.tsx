@@ -87,6 +87,34 @@ async function setup() {
 }
 
 describe("native realtime call", () => {
+  test.each([null, "explicit-session"])(
+    "preserves the requested Phone-recents handle (%s)",
+    async (target) => {
+      const voice = fakeRealtime();
+      const system = fakeCall();
+      let recorded: string | null | undefined;
+      const original = system.call.startCall;
+      system.call.startCall = async (input) => {
+        recorded = input.target;
+        await original(input);
+      };
+      const hook = await renderHook(
+        () =>
+          useNativeRealtimeCall({
+            realtime: voice.realtime,
+            call: system.call,
+            title: "Call",
+            target,
+          }),
+        undefined,
+      );
+      await act(async () => {
+        await hook.result.current.start();
+      });
+      expect(recorded).toBe(target);
+      await hook.unmount();
+    },
+  );
   test("reports the system call, starts voice, and shows connected once voice is live", async () => {
     const { voice, system, hook, status } = await setup();
     await act(async () => await hook.result.current.start());
