@@ -258,6 +258,36 @@ describe("public repository hygiene", () => {
     ).toEqual([]);
   });
 
+  test("pins the released disconnect migration exception to its exact bytes and issue offset", () => {
+    const file = "packages/db/drizzle/0691_subscription_core_codex_disconnect.sql";
+    const source = readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
+    expect(auditPublicText(file, source)).toEqual([]);
+    for (const [path, text] of [
+      ["packages/db/drizzle/9999_new_migration.sql", source],
+      [file, `${source} `],
+      [file, source.replace("SET LOCAL", "set local")],
+      [file, source.replaceAll("\n", "\r\n")],
+    ]) {
+      expect(
+        auditPublicText(path!, text!).some(
+          (finding) => finding.reason === "internal issue reference",
+        ),
+      ).toBe(true);
+    }
+    for (const [metadata, reason] of [
+      [["private-user@", "gmail.com"].join(""), "personal email address"],
+      [["/home/", "private-owner/repo"].join(""), "non-generic home path"],
+      [[".agent/", "private-plan.md"].join(""), "private .agent document reference"],
+      [["OPE", "-999"].join(""), "internal issue reference"],
+    ]) {
+      expect(auditPublicText(file, `${source}\n${metadata}`)).toContainEqual({
+        file,
+        line: source.split("\n").length + 1,
+        reason,
+      });
+    }
+  });
+
   test("does not exempt newly added migrations", () => {
     const internalIssue = ["OPE", "-999"].join("");
     expect(

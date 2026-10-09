@@ -1,7 +1,6 @@
-# Codex graceful local disconnect (OPE-766)
+# Codex graceful local disconnect
 
-Status: implementation candidate; **not merged or deployed**. Follow-up to
-OPE-700/OPE-717. The integration base is landed cutover
+Status: implementation candidate; **not merged or deployed**. The integration base is landed cutover
 `2bd5590c5f0f8f31cb4dd62ce3df7a2c51168ca1` (migration 0689), including writers
 `3aa398dd5209eef4bc6f71781ed378be2183019f` (migration 0688). Those upstream
 changes have separate ownership and approval. Source landing does not imply
