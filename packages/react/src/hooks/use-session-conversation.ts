@@ -26,7 +26,7 @@ export type UseSessionConversationOptions = ClientOverride & {
   composerOptions?:
     | Pick<
         UseComposerOptions,
-        "sendExtras" | "sendBlocked" | "onSubmitted" | "onSent" | "onDeliveryError"
+        "sendExtras" | "sendBlocked" | "onSubmitted" | "onSent" | "onDeliveryError" | "initialDraft"
       >
     | undefined;
 };
@@ -82,6 +82,7 @@ export function useSessionConversation(
     );
   const composer = useComposer(sessionId, {
     ...eventOptions,
+    initialDraft: host?.initialDraft,
     effectiveControl: queue.effectiveControl ?? detail.session?.effectiveControl,
     sendDestination: () => (queue.queue.length > 0 || status === "running" ? "queue" : "chat"),
     sendExtras: () => {

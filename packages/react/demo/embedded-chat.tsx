@@ -15,6 +15,7 @@ import type { SendMessageInput, Session, SessionEvent, SessionQueueSnapshot } fr
 import {
   OpenGeniChat,
   OpenGeniProvider,
+  NewConversation,
   SessionConversationView,
   useSessionConversation,
 } from "@opengeni/react";
@@ -324,6 +325,35 @@ const client = fakeClient({
   },
 });
 
+// The demo can hold the real default new-chat flow at a response boundary.
+// Browser checks edit the next draft, retry an uncertain outcome, then settle
+// the same synthetic create without contacting a provider.
+const creationFixture = {
+  attempts: [] as Array<{ initialMessage?: string; idempotencyKey?: string }>,
+  finish: () => {},
+};
+Object.assign(window, { embeddedCreationHarness: creationFixture });
+Object.assign(client, {
+  createSession: async (
+    _workspace: string,
+    input: { initialMessage?: string; idempotencyKey?: string },
+  ) => {
+    creationFixture.attempts.push(structuredClone(input));
+    if (params.get("retry") === "1" && creationFixture.attempts.length === 1)
+      throw new TypeError("Response lost");
+    await new Promise<void>((resolve) => {
+      creationFixture.finish = resolve;
+    });
+    const created = chat(
+      "5a1c0000-0000-4000-8000-000000000099",
+      input.initialMessage ?? "New chat",
+      0,
+    );
+    sessions.unshift(created);
+    return created;
+  },
+});
+
 const palette =
   theme === "light"
     ? { page: "#ffffff", header: "#ffffff", ink: "#1d1d1b", muted: "#6b6b66", line: "#e7e7e4" }
@@ -453,7 +483,9 @@ function HostApp() {
         style={{ flex: 1, minHeight: 0, padding: narrow ? 0 : "16px 24px 24px" }}
       >
         <OpenGeniProvider client={client} workspaceId={WORKSPACE_ID}>
-          {params.get("controller") === "1" ? (
+          {params.get("new") === "standalone" ? (
+            <NewConversation />
+          ) : params.get("controller") === "1" ? (
             <PersistentConversationDemo />
           ) : (
             <OpenGeniChat defaultSessionId={scenario === "empty" ? null : SELECTED} />

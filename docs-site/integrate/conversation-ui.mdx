@@ -27,7 +27,7 @@ icon: "palette"
 
 The new-chat composer is the same as the follow-up one: attachments, your `conversationProps.composerProps`, and the model picker when offered. Files attached to the first message are added to the new chat.
 
-Live voice is off unless you turn it on, because each call is paid from your Opengeni credits per minute and asks the browser for the microphone. Pass `realtimeVoice: true` to `createSessionProxyHandler`, or `conversationProps={{ realtimeVoice: true }}`. Once a chat exists, its composer then shows a voice button when your workspace has a voice model available (for example hosted GPT Live). The user talks, the voice model answers, hands work to the agent in the same chat, and the transcript appears in the timeline. `realtimeVoice: false` on the proxy refuses voice even when the component asks for it.
+Live voice is off unless you turn it on, because each call is paid from your Opengeni credits per minute and asks the browser for the microphone. Pass `realtimeVoice: true` to `createSessionProxyHandler`, or `conversationProps={{ realtimeVoice: true }}`. The composer then shows a voice button when your workspace has a voice model available (for example hosted GPT Live). Starting voice in a new chat creates an empty conversation and starts the call there; typed text and attachments remain an unsent draft, not an invented first message. The user talks, the voice model answers, hands work to the agent in the same chat, and the transcript appears in the timeline. `realtimeVoice: false` on the proxy refuses voice even when the component asks for it.
 
 The indicator shown while the agent starts says "Thinking…". Use `conversationProps={{ genieLoading: { phrases: ["One moment…"] } }}` for your own copy, or `genieLoading.render` for your own visual.
 
@@ -121,6 +121,45 @@ panels and decision presentation without replacing their action handlers.
 `realtimeVoiceProps` provides optional connected-account state and voice
 autostart handoff; live voice remains opt-in as before.
 
+## A new conversation in your own layout
+
+`OpenGeniChat` still needs no creation controller setup. Its new-chat state and
+view are also available separately:
+
+```tsx
+<NewConversation baseUrl="/api/opengeni" onCreated={({ sessionId }) => openChat(sessionId)} />
+```
+
+For a persistent custom shell, mount `useNewConversation` and render
+`NewConversationView` with its `creation` result. An optional `createSession`
+adapter receives the first message, an idempotency key, and browser choices
+(files, model policy, or `startMode: "realtime"`). It returns the session ID;
+the server still owns agent configuration, access, and application records.
+For voice-first calls the first-message argument is empty. Do not manufacture
+a prompt in the adapter.
+
+The stock controller retains the exact in-flight request and adapter when an
+outcome is unknown. Retry checks that request instead of creating another chat
+from newer edits. A typed `OpenGeniApiError` with `outcomeUnknown: false`
+releases a definitively rejected attempt. `onCreated` receives newer unsent
+content in `draft`: pass it as `composerOptions.initialDraft` to the selected
+conversation. The real server draft supplies its persistence revision. It also
+receives `realtimeModel` for the optional voice-autostart handoff. `OpenGeniChat`
+already handles both. New uploads added during creation must finish, be retried,
+or be removed before the stock view switches to the created chat.
+
+`scopeKey` resets a controller's new draft when your host record changes. Changing
+scope or unmounting never cancels a server-side creation or navigates another
+scope to its late result. The controller holds active attempts in memory, not
+in browser storage; a custom server with durable creation recovery should keep
+its ordinary session discovery/reconciliation on the server. Browser markers
+are not authorization. Keep the controller mounted for layout changes, and
+remount on a signed-in user or tenant change.
+
+`NewConversation` and `NewConversationView` accept `labels` for pending/retry
+and upload-handoff copy. In `OpenGeniChat`, use `newChatPending`, `newChatRetry`,
+and `newChatFinishingUploads` in `labels`.
+
 ## Brand it
 
 `compiled.css` is scoped to the components and needs no Tailwind. Out of the box it needs no extra cosmetic host CSS. To match your product, override the `--og-*` CSS variables on any ancestor:
@@ -182,7 +221,7 @@ const toolRegistry = createDefaultToolRegistry({
 
 ## Start sessions from the browser
 
-New chats go through the proxy's `createSession` hook. The browser sends only the first message; your hook returns the full request, so tools, skills, and model stay on your server:
+New chats go through the proxy's `createSession` hook. The browser sends the first message and permitted choices; your hook returns the full request, so tools, skills, and authority stay on your server:
 
 ```ts
 createSessionProxyHandler(og, {
@@ -196,6 +235,13 @@ createSessionProxyHandler(og, {
   }),
 });
 ```
+
+The proxy carries the browser's idempotency key through unless the hook provides
+its own. Voice-first creation includes `startMode: "realtime"`, with no initial
+message or first-message files. The same value reaches `beforeForwardMessage`
+so an admission hook can distinguish empty creation from a text turn. Model
+choices still require the proxy's `modelSelection` option; live voice still
+obeys its `realtimeVoice` gate.
 
 ## Links, artifacts, and Sites
 

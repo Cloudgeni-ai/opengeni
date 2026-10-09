@@ -24,6 +24,7 @@ import {
   composerSubmissionErrorMessage,
 } from "../lib/format";
 import { normalizeError, useErrorMessage } from "../lib/error-message";
+import { notifyObserver as notifyComposerObserver } from "../lib/notify-observer";
 import { useSessionEventTrigger, type SessionEventFeedOptions } from "./internal";
 
 export type ComposerPolicy = {
@@ -36,6 +37,14 @@ export type ComposerSendExtras = Omit<
   SendMessageInput,
   "text" | "clientEventId" | "annotations" | "model" | "reasoningEffort" | "latencyMode"
 >;
+
+/** Unsent local content handed off from a new-conversation composer. */
+export type InitialComposerDraft = {
+  text: string;
+  resources?: ResourceRef[] | undefined;
+  annotations?: DraftTimelineAnnotation[] | undefined;
+  policy?: ComposerPolicy | undefined;
+};
 
 export type UseComposerOptions = EmbeddedSessionClientOverride &
   SessionEventFeedOptions & {
@@ -66,24 +75,14 @@ export type UseComposerOptions = EmbeddedSessionClientOverride &
     draftPersistence?: "durable" | "disabled" | undefined;
     /** Required explicit authority when durable draft persistence is disabled. */
     initialPolicy?: ComposerPolicy | undefined;
+    /**
+     * Seed local unsent content once when this session is mounted/selected.
+     * The real server draft still supplies the revision used for persistence.
+     * A retained uncertain submission takes precedence over this handoff.
+     * An empty seed does not erase an existing server draft.
+     */
+    initialDraft?: InitialComposerDraft | undefined;
   };
-
-// Host notifications are not part of message admission. Surface their failures
-// through the browser's error reporting, never through retryable delivery state.
-function notifyComposerObserver<Args extends unknown[]>(
-  observer: ((...args: Args) => unknown) | undefined,
-  ...args: Args
-): void {
-  const report = (cause: unknown) => globalThis.reportError?.(cause);
-  try {
-    const result = observer?.(...args);
-    if (result && typeof (result as PromiseLike<unknown>).then === "function") {
-      void Promise.resolve(result).catch(report);
-    }
-  } catch (cause) {
-    report(cause);
-  }
-}
 
 type ComposerDraftShadow = {
   text: string;
@@ -91,6 +90,19 @@ type ComposerDraftShadow = {
   annotations: DraftTimelineAnnotation[];
   policy?: ComposerPolicy | undefined;
 };
+
+function initialComposerShadow(
+  seed: InitialComposerDraft | undefined,
+): ComposerDraftShadow | undefined {
+  if (!seed || (!seed.text && !seed.resources?.length && !seed.annotations?.length && !seed.policy))
+    return undefined;
+  return {
+    text: seed.text,
+    resources: [...(seed.resources ?? [])],
+    annotations: cloneAnnotations(seed.annotations ?? []),
+    ...(seed.policy ? { policy: { ...seed.policy } } : {}),
+  };
+}
 
 type PendingComposerOperation = {
   delivery: "send" | "steer";
@@ -709,7 +721,9 @@ export function useComposer(
   const initialPendingOperation = restorePendingComposerOperation(pendingOperationKey);
   const initialOptimisticSends = restoreOptimisticSendOperations(pendingOperationKey);
   const initialShadow =
-    initialPendingOperation?.newerShadow ?? initialOptimisticSends.at(-1)?.newerShadow;
+    initialPendingOperation?.newerShadow ??
+    initialOptimisticSends.at(-1)?.newerShadow ??
+    initialComposerShadow(options.initialDraft);
   const [value, setValue] = useState(() => initialShadow?.text ?? "");
   const [annotations, setAnnotations] = useState<DraftTimelineAnnotation[]>(
     () => initialShadow?.annotations ?? [],
@@ -832,7 +846,9 @@ export function useComposer(
     steeringSettlementEventsRef.current = [];
     pendingClientEventId.current = pendingOperationRef.current?.input.clientEventId ?? null;
     const shadow =
-      pendingOperationRef.current?.newerShadow ?? restoredOptimisticSends.at(-1)?.newerShadow;
+      pendingOperationRef.current?.newerShadow ??
+      restoredOptimisticSends.at(-1)?.newerShadow ??
+      initialComposerShadow(options.initialDraft);
     localEditRevision.current = shadow ? 1 : 0;
     valueRef.current = shadow?.text ?? "";
     annotationsRef.current = shadow?.annotations ?? [];
@@ -873,7 +889,14 @@ export function useComposer(
     setDraftSaving(false);
     setDraftConflict(null);
     setRestoredResources(shadow?.resources ?? []);
-  }, [durableDrafts, options.initialPolicy, pendingOperationKey, sessionId, targetKey]);
+  }, [
+    durableDrafts,
+    options.initialPolicy,
+    options.initialDraft,
+    pendingOperationKey,
+    sessionId,
+    targetKey,
+  ]);
   useEffect(
     () => () => {
       if (draftReadRetryRef.current.timer !== null) {
