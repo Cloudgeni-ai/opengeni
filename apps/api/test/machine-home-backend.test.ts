@@ -405,7 +405,7 @@ describe("Stage-D honest label: machine-targeted home sandbox_backend", () => {
     expect(capturedInitialTurns).toHaveLength(1);
   }, 60_000);
 
-  test("a start that fails before its first turn leaves no queued session behind", async () => {
+  test("an unkeyed start that fails before its first turn leaves no queued session behind", async () => {
     if (!available) return;
     const { accountId, workspaceId } = await freshWorkspace();
     const bus = new MemoryEventBus();
@@ -451,27 +451,35 @@ describe("Stage-D honest label: machine-targeted home sandbox_backend", () => {
     ).rejects.toThrow("permission denied for initial turn authority");
     expect(await sessionCount()).toBe(0);
 
+    // An initialized session is never discarded.
+    const started = await createAndStartSessionWithOutcome(createInput({ failStart: false }));
+    expect(
+      await discardUninitializedSessionShell(db, {
+        accountId,
+        workspaceId,
+        sessionId: started.session.id,
+      }),
+    ).toBe("initialized");
+    expect(await sessionCount()).toBe(1);
+
+    // A keyed shell stays durable, and a retry with the same key repairs it.
     const key = crypto.randomUUID();
     await expect(
       createAndStartSessionWithOutcome(createInput({ key, failStart: true })),
     ).rejects.toThrow("permission denied for initial turn authority");
-    expect(await sessionCount()).toBe(0);
-
-    // A keyed retry after the failure starts the session normally.
+    expect(await sessionCount()).toBe(2);
     const retried = await createAndStartSessionWithOutcome(createInput({ key, failStart: false }));
-    expect(retried.outcome).toBe("created");
+    expect(retried.outcome).toBe("repaired");
     expect(retried.session.initialTurnId).toBeTruthy();
-    expect(await sessionCount()).toBe(1);
-
-    // An initialized session is never discarded.
+    expect(await sessionCount()).toBe(2);
     expect(
       await discardUninitializedSessionShell(db, {
         accountId,
         workspaceId,
         sessionId: retried.session.id,
       }),
-    ).toBe("initialized");
-    expect(await sessionCount()).toBe(1);
+    ).toBe("keyed");
+    expect(await sessionCount()).toBe(2);
   }, 60_000);
 
   test("a direct terminal command without op-stream fails closed without a phantom lease", async () => {

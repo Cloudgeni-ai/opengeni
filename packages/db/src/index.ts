@@ -32039,6 +32039,7 @@ export async function getSession(
 export type DiscardUninitializedSessionShellResult =
   | "discarded"
   | "initialized"
+  | "keyed"
   | "not_found"
   | "referenced";
 
@@ -32047,12 +32048,13 @@ export type DiscardUninitializedSessionShellResult =
  * initializer committed its first event or turn.
  *
  * Session creation commits the shell first and initializes it in a later
- * transaction. When that second step fails, the caller receives an error and
- * has no session, so the bare row must not stay visible as a queued session
- * that nothing will ever run. The row lock serializes with the initializer:
- * a shell that gained any event or turn is left untouched, so an outcome-
- * unknown initializer commit or a concurrent keyed repair always wins. A
- * keyed retry after discard simply creates the session again.
+ * transaction. When that second step fails for a create without an
+ * idempotency key, the caller receives an error and has no way to resume
+ * that session, so the bare row must not stay visible as a queued session
+ * that nothing will ever run. A keyed shell is kept: a retry with the same
+ * key repairs it with the parameters it was first accepted with. The row lock
+ * serializes with the initializer, so a shell that gained any event or turn
+ * (including an outcome-unknown initializer commit) is left untouched.
  */
 export async function discardUninitializedSessionShell(
   db: Database,
@@ -32066,23 +32068,6 @@ export async function discardUninitializedSessionShell(
         await scopedDb.transaction(async (txRaw) => {
           const tx = txRaw as unknown as Database;
           await lockWorkspaceInferenceControl(tx, input.workspaceId, "share");
-          const [keyed] = await tx
-            .select({ createIdempotencyKey: schema.sessions.createIdempotencyKey })
-            .from(schema.sessions)
-            .where(
-              and(
-                eq(schema.sessions.workspaceId, input.workspaceId),
-                eq(schema.sessions.id, input.sessionId),
-              ),
-            )
-            .limit(1);
-          const createIdempotencyKey = keyed?.createIdempotencyKey ?? null;
-          if (createIdempotencyKey !== null) {
-            // The keyed admission lock, taken before the row lock as keyed
-            // creates do, so a concurrent replay of this key serializes here.
-            await tx.execute(sql`select pg_advisory_xact_lock(
-              hashtext(${`session-create:${input.workspaceId}:${createIdempotencyKey}`}))`);
-          }
           const [shell] = await tx
             .select({
               id: schema.sessions.id,
@@ -32099,9 +32084,8 @@ export async function discardUninitializedSessionShell(
             .for("update")
             .limit(1);
           if (!shell) return "not_found" as const;
-          if (shell.lastSequence !== 0 || shell.createIdempotencyKey !== createIdempotencyKey) {
-            return "initialized" as const;
-          }
+          if (shell.createIdempotencyKey !== null) return "keyed" as const;
+          if (shell.lastSequence !== 0) return "initialized" as const;
           const [[event], [turn], [child]] = await Promise.all([
             tx
               .select({ id: schema.sessionEvents.id })
@@ -32144,14 +32128,7 @@ export async function discardUninitializedSessionShell(
               ),
             )
             .returning({ id: schema.sessions.id });
-          if (deleted.length !== 1) return "not_found" as const;
-          if (createIdempotencyKey !== null) {
-            // Release the key's durable winner so a retry with the same key
-            // creates the session instead of replaying a row that is gone.
-            await tx.execute(sql`select opengeni_private.release_discarded_session_create_key_v1(
-              ${input.workspaceId}::uuid, ${createIdempotencyKey}, ${input.sessionId}::uuid)`);
-          }
-          return "discarded" as const;
+          return deleted.length === 1 ? ("discarded" as const) : ("not_found" as const);
         }),
     );
   } catch (error) {

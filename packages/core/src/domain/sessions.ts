@@ -1292,7 +1292,9 @@ export async function createAndStartSessionWithOutcome(input: {
         changed: finished.changed,
       };
     }
-    const finished = await finishNewlyCreatedSession(
+    // A keyed shell whose start fails stays durable: a retry with the same key
+    // repairs it with the parameters it was first accepted with.
+    const finished = await finishStartSession(
       targetSeededBeforeCreateCommit ? { ...input, seedTargetSandbox: null } : input,
       keyed,
     );
@@ -1391,10 +1393,11 @@ export async function createAndStartSessionWithOutcome(input: {
 }
 
 /**
- * Start a shell this call just inserted. If the start fails before the first
- * event or turn commits, the caller gets the error and no session, so the bare
- * shell is discarded instead of lingering as a queued session nothing runs.
- * A shell that did initialize (including an outcome-unknown commit) is kept.
+ * Start an unkeyed shell this call just inserted. If the start fails before
+ * the first event or turn commits, the caller gets the error and has no way to
+ * resume that session, so the bare shell is discarded instead of lingering as
+ * a queued session nothing runs. A shell that did initialize (including an
+ * outcome-unknown commit) is kept.
  */
 async function finishNewlyCreatedSession(
   input: Parameters<typeof finishStartSession>[0],
