@@ -517,7 +517,7 @@ describe("model display across connection scopes", () => {
       claude("organization", "claude-opus-4-8"),
       anthropic("workspace", "claude-haiku-4-5-20251001"),
     ]);
-    expect(rows.map((row) => row.label)).toEqual(["Claude Opus 4.8", "Claude Haiku 4.5"]);
+    expect(rows.map((row) => row.label)).toEqual(["Opus 4.8", "Haiku 4.5"]);
   });
 
   test("org- and workspace-connected copies collapse to one row, keeping the selection", () => {
@@ -534,12 +534,13 @@ describe("model display across connection scopes", () => {
     expect(groups[0]!.rows.map((row) => row.id)).toEqual([
       "workspace-claude-subscription/claude-opus-5-5",
     ]);
-    expect(groups[1]!.rows.map((row) => row.label)).toEqual(["Claude Sonnet 4.6"]);
+    expect(groups[1]!.rows.map((row) => row.label)).toEqual(["Sonnet 4.6"]);
   });
 
-  test("Claude rows get a compact family-free label for narrow triggers", () => {
+  test("Claude rows already show the family-free name, with no extra compact label", () => {
     const rows = projectPickerRows([claude("organization", "claude-opus-5-5", "Claude Opus 5.5")]);
-    expect(rows[0]?.shortLabel).toBe("Opus 5.5");
+    expect(rows[0]?.label).toBe("Opus 5.5");
+    expect(rows[0]?.shortLabel).toBeUndefined();
   });
 
   test("uncurated long names drop trailing access and stage qualifiers for narrow triggers", () => {

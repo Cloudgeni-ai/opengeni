@@ -25,23 +25,15 @@ describe("modelDisplayName", () => {
   });
   test("strips routing prefixes from raw ids", () => {
     expect(modelDisplayName("codex/gpt-6.1-sol")).toBe("GPT-6.1 Sol");
-    expect(modelDisplayName("organization-claude-subscription/claude-opus-5-5")).toBe(
-      "Claude Opus 5.5",
-    );
-    expect(modelDisplayName("workspace-claude-subscription/claude-opus-5-5")).toBe(
-      "Claude Opus 5.5",
-    );
+    expect(modelDisplayName("organization-claude-subscription/claude-opus-5-5")).toBe("Opus 5.5");
+    expect(modelDisplayName("workspace-claude-subscription/claude-opus-5-5")).toBe("Opus 5.5");
     expect(modelDisplayName("gpt-6-luna")).toBe("GPT-6 Luna");
     expect(modelDisplayName("supergrok/grok-4.7")).toBe("Grok 4.7");
-    expect(modelDisplayName("workspace-openrouter/anthropic/claude-sonnet-4.6")).toBe(
-      "Claude Sonnet 4.6",
-    );
+    expect(modelDisplayName("workspace-openrouter/anthropic/claude-sonnet-4.6")).toBe("Sonnet 4.6");
     expect(modelDisplayName("workspace-openrouter/nvidia/nemotron-3-super-120b-a12b:free")).toBe(
       "Nemotron 3 Super 120B A12B",
     );
-    expect(modelDisplayName("organization-anthropic/claude-haiku-4-5-20251001")).toBe(
-      "Claude Haiku 4.5",
-    );
+    expect(modelDisplayName("organization-anthropic/claude-haiku-4-5-20251001")).toBe("Haiku 4.5");
   });
 
   test("org- and workspace-connected copies render identically", () => {
@@ -54,13 +46,24 @@ describe("modelDisplayName", () => {
       id: "workspace-claude-subscription/claude-opus-4-8",
       label: "claude-opus-4-8",
     };
-    expect(modelDisplayName(org)).toBe("Claude Opus 4.8");
+    expect(modelDisplayName(org)).toBe("Opus 4.8");
     expect(modelDisplayName(workspace)).toBe(modelDisplayName(org));
   });
 
   test("keeps names that are already readable", () => {
     expect(modelDisplayName("Workspace default")).toBe("Workspace default");
     expect(modelDisplayName("")).toBe("");
+  });
+
+  test("Anthropic families drop the redundant Claude word", () => {
+    expect(modelDisplayName({ id: "claude-sub/opus", label: "Claude Opus 5.5 (EU)" })).toBe(
+      "Opus 5.5 (EU)",
+    );
+    expect(modelDisplayName("workspace-opper/aws/claude-sonnet-4-6-eu")).toBe("Sonnet 4.6 EU");
+    // Older names put the version first; dropping Claude would leave "3.5 Sonnet".
+    expect(modelDisplayName("claude-3-5-sonnet-latest")).toBe("Claude 3.5 Sonnet");
+    expect(modelDisplayName("claude")).toBe("Claude");
+    expect(modelVendor({ id: "claude-sub/opus", label: "Claude Opus 5.5" })).toBe("anthropic");
   });
 
   test("keeps curated labels", () => {
