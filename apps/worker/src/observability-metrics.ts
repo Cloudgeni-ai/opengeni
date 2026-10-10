@@ -12,6 +12,7 @@ import {
   ACTIVE_USER_WINDOWS,
   type ActiveUserWindow,
   type CreditGrantTotals,
+  type IdleInteractionInspection,
   type SessionEventAppendPhaseObservation,
 } from "@opengeni/db";
 import {
@@ -1732,6 +1733,19 @@ export function recordSubscriptionCoreShadowStuckLoad(
     name: "opengeni_subscription_core_shadow_stuck_loads_total",
     help: "Shadow world loads still unsettled at the slot ceiling; the slot was released.",
     labels: { provider },
+  });
+}
+
+/** Idle browser/desktop release inspections by fixed outcome: `released`
+ * (the box drains now), `checkpointing` (idle browser saves prepared). */
+export function recordSandboxIdleInteractionRelease(
+  observability: Observability,
+  outcome: IdleInteractionInspection,
+): void {
+  observability.incrementCounter({
+    name: "opengeni_sandbox_idle_interaction_release_total",
+    help: "Idle browser and desktop release inspections on warm boxes, by fixed outcome.",
+    labels: { outcome },
   });
 }
 

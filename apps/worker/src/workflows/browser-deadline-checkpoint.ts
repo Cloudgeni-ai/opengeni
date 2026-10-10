@@ -24,14 +24,16 @@ export async function browserDeadlineCheckpointWorkflow(target: BrowserDeadlineC
 }
 
 /** Runs from the existing lease-sweep dispatch. Inventory never performs provider
- * I/O; each exact browser has an independent durable capture/cleanup child. */
+ * I/O; each exact browser has an independent durable capture/cleanup child.
+ * Provider-deadline saves and idle saves (prepared by the lease reaper) share it. */
 export async function browserDeadlineCheckpointSweepWorkflow(): Promise<void> {
   const targets = await inventory.listDueBrowserCheckpoints();
   await Promise.all(
     targets.map(async (target) => {
       try {
         await startChild(browserDeadlineCheckpointWorkflow, {
-          workflowId: `browser-deadline:${target.browserSessionId}:${target.leaseEpoch}:${target.controllerGeneration}`,
+          // A target without a reason keeps its pre-idle id (replay-safe).
+          workflowId: `${target.reason === "idle" ? "browser-idle" : "browser-deadline"}:${target.browserSessionId}:${target.leaseEpoch}:${target.controllerGeneration}`,
           taskQueue: workflowInfo().taskQueue,
           workflowIdReusePolicy: WorkflowIdReusePolicy.ALLOW_DUPLICATE,
           parentClosePolicy: ParentClosePolicy.ABANDON,

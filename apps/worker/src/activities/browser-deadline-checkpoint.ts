@@ -92,6 +92,24 @@ async function resumeCheckpointController({
   });
 }
 
+/** Whether this worker can save browser profiles: ownership, object storage,
+ * the controller delegation secret and the environments encryption key. */
+export function browserCheckpointPrerequisites(
+  settings: Settings,
+  objectStorage: ControlActivityServices["objectStorage"],
+): boolean {
+  if (
+    !settings.sandboxOwnershipEnabled ||
+    !objectStorage ||
+    !resolveFirstPartyDelegationSecret(settings)
+  )
+    return false;
+  const root = environmentsEncryptionKeyBytes(settings);
+  if (!root) return false;
+  root.fill(0);
+  return true;
+}
+
 export function createBrowserDeadlineCheckpointActivities(
   services: () => Promise<ControlActivityServices>,
   connectController: (
@@ -102,15 +120,7 @@ export function createBrowserDeadlineCheckpointActivities(
     async listDueBrowserCheckpoints() {
       return await withActivityHeartbeat(async () => {
         const { db, settings, objectStorage } = await services();
-        if (
-          !settings.sandboxOwnershipEnabled ||
-          !objectStorage ||
-          !resolveFirstPartyDelegationSecret(settings)
-        )
-          return [];
-        const root = environmentsEncryptionKeyBytes(settings);
-        if (!root) return [];
-        root.fill(0);
+        if (!browserCheckpointPrerequisites(settings, objectStorage)) return [];
         return await listBrowserDeadlineCheckpoints(db);
       });
     },
@@ -127,7 +137,12 @@ export function createBrowserDeadlineCheckpointActivities(
         let aad: Buffer | null = null;
         let timer: ReturnType<typeof setInterval> | null = null;
         try {
-          const claim = await browserDeadlineCheckpoint(db, target, { prepare: true, touch: true });
+          // Only the reaper's locked idle decision prepares an idle save; this
+          // activity continues it. A deadline save prepares here.
+          const claim = await browserDeadlineCheckpoint(db, target, {
+            prepare: target.reason !== "idle",
+            touch: true,
+          });
           if (!claim) return { status: "skipped" as const };
           let pulseRunning = false;
           let authorityLost = false;
@@ -260,7 +275,9 @@ export function createBrowserDeadlineCheckpointActivities(
                 ...target,
                 kind: "interaction",
                 holderId: `browser-session:${target.browserSessionId}`,
-                idleGraceMs: settings.sandboxIdleGraceMs,
+                // The idle window already elapsed before this save began, so
+                // a box the saved browser was last to hold drains now.
+                idleGraceMs: target.reason === "idle" ? 0 : settings.sandboxIdleGraceMs,
               });
             },
             undefined,

@@ -1699,6 +1699,24 @@ export async function prepareBrowserSessionResume(
   });
 }
 
+async function linkedComputerIsLive(
+  tx: Database,
+  workspaceId: string,
+  computerSessionId: string,
+): Promise<boolean> {
+  const [computer] = await tx
+    .select({ lifecycle: schema.computerSessions.lifecycle })
+    .from(schema.computerSessions)
+    .where(
+      and(
+        eq(schema.computerSessions.workspaceId, workspaceId),
+        eq(schema.computerSessions.id, computerSessionId),
+      ),
+    )
+    .limit(1);
+  return computer !== undefined && !["ended", "failed", "lost"].includes(computer.lifecycle);
+}
+
 async function prepareBrowserSessionLifecycleTransition(
   db: Database,
   input: PrepareBrowserSessionLifecycleInput,
@@ -1745,6 +1763,14 @@ async function prepareBrowserSessionLifecycleTransition(
           const terminal = row.lifecycle === transition.terminalLifecycle;
           if (!terminal) transition.assertReady(row);
           const now = new Date();
+          // A saved browser outlives the desktop it was shown on: that desktop
+          // stops with its box (idle release, provider deadline). Resume
+          // restores the profile headless instead of failing on a dead link.
+          const unlinkStoppedComputer =
+            !terminal &&
+            transition.kind === "resume" &&
+            row.linkedComputerSessionId !== null &&
+            !(await linkedComputerIsLive(tx, input.workspaceId, row.linkedComputerSessionId));
           const [operation] = await tx
             .insert(schema.interactionOperations)
             .values({
@@ -1776,6 +1802,7 @@ async function prepareBrowserSessionLifecycleTransition(
                           networkRouteAuthorityDigest: null,
                         }
                       : {}),
+                    ...(unlinkStoppedComputer ? { linkedComputerSessionId: null } : {}),
                     updatedAt: now,
                   })
                   .where(
