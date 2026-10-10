@@ -3673,6 +3673,12 @@ as "not an organization account":
    Accounts page and editor change together in the UI change, which awaits
    the owner's approval of its preview: listing managed accounts without the
    page change would show each twice, once with a misleading reach.
+   The UI change also makes the pages decide "own" from data the server
+   already computed: the organization list's `ownInWorkspaceIds` (workspaces
+   using each account as their own copy) and the workspace pool's
+   `workspaceSetAside` (some own connection is outside the effective pool),
+   so rows, counts and the "set aside" row agree for administrators and
+   workspace administrators alike.
    `organizationAdministeredConnection` (organization context only, through
    the shared-workspace inventory) is the one condition every organization
    route uses, except the organization primary: it keeps the legacy rule

@@ -1039,6 +1039,58 @@ describe("Codex account page", () => {
       await cleanup(view);
     }
   });
+
+  test("own accounts are set aside only when the server says some aren't in use", async () => {
+    const SET_ASIDE = "Set aside while the organization's are used";
+    // Its own account, also given to it by the organization, is in use here.
+    const own = codexAccount({ id: "acct-own", label: "Team plan", source: "workspace" });
+    const setAside = async (workspaceSetAside: boolean | undefined) => {
+      accounts = {
+        ...accounts,
+        accounts: [own],
+        source: {
+          ...source,
+          mode: "organization",
+          effectiveSource: "organization",
+          workspaceAvailable: true,
+          ...(workspaceSetAside === undefined ? {} : { workspaceSetAside }),
+        },
+      };
+      const view = await render();
+      try {
+        const rows = [...view.container.querySelectorAll<HTMLElement>("[data-slot=list-row]")].map(
+          (row) => row.textContent ?? "",
+        );
+        expect(rows.filter((row) => row.includes("Team plan"))).toHaveLength(1);
+        return rows.some((row) => row.includes(SET_ASIDE));
+      } finally {
+        await cleanup(view);
+      }
+    };
+    expect(await setAside(false)).toBe(false);
+    expect(await setAside(true)).toBe(true);
+    // An older server without the field follows the pool, as before.
+    expect(await setAside(undefined)).toBe(true);
+  });
+
+  test("the pool notice counts only the workspace's own accounts", async () => {
+    accounts = {
+      ...accounts,
+      accounts: [
+        codexAccount({ id: "acct-own", label: "Team plan", source: "workspace" }),
+        codexAccount({ id: "acct-org", label: "Acme Pro", source: "organization" }),
+      ],
+      source: { ...source, mode: "automatic", effectiveSource: "workspace" },
+    };
+    const view = await render();
+    try {
+      const text = view.container.textContent ?? "";
+      expect(text).toContain("New work uses this workspace's Codex account.");
+      expect(text).toContain("while it's connected");
+    } finally {
+      await cleanup(view);
+    }
+  });
 });
 
 describe("Connect Codex", () => {

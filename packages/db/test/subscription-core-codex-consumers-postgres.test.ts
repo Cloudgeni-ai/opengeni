@@ -818,8 +818,24 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
         .map((account) => account.id)
         .sort();
     expect(await listed()).toEqual([first]);
+    // Its own account is set aside; once the organization also gives it to
+    // this workspace it is in use through that pool, and nothing is set aside.
+    const setAside = async () =>
+      (await getSubscriptionCoreCodexWorkspaceProjection(client!.db, scope)).source
+        .workspaceSetAside;
+    expect(await setAside()).toBe(true);
+    await shared!.admin`
+      insert into subscription_connection_assignment_policies (
+        account_id, connection_id, workspace_id, inference_pool
+      ) values (${org.accountId}::uuid, ${second}::uuid, ${org.sharedWorkspaceId}::uuid,
+        'organization')`;
+    expect(await listed()).toEqual([first, second].sort());
+    expect(await setAside()).toBe(false);
+    await shared!.admin`delete from subscription_connection_assignment_policies
+      where connection_id = ${second}::uuid and inference_pool = 'organization'`;
     await setSubscriptionCoreWorkspaceCodexSource(client!.db, { ...admin, mode: "workspace" });
     expect(await listed()).toEqual([second]);
+    expect(await setAside()).toBe(false);
     expect(
       (await setSubscriptionCoreWorkspaceCodexSource(client!.db, { ...admin, mode: "disabled" }))
         .source,

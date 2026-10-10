@@ -67,7 +67,7 @@ try {
     // The access editor opens on its current reach: Design, which connected it.
     // Workspaces only: limiting it to people would hide it from Design's admins.
     await page.getByText("Available in").click();
-    await page.getByText("Connected in this workspace, so it stays included.").waitFor();
+    await page.getByText("Connected in this workspace, which keeps it as its own.").waitFor();
     assert((await page.getByText("Only selected people").count()) === 0, "people offered");
     await noOverflow();
     await shot("3-editor-workspaces");

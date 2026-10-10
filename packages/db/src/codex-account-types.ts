@@ -22,6 +22,8 @@ export type WorkspaceCodexSubscriptionSource = {
   effectiveSource: EffectiveCodexSubscriptionSource;
   workspaceAvailable: boolean;
   organizationAvailable: boolean;
+  /** Some of the workspace's own accounts are not in use here. Absent from older servers. */
+  workspaceSetAside?: boolean;
 };
 
 export type CodexAccountStatus = {

@@ -173,23 +173,27 @@ const methods: Record<string, (...args: never[]) => Promise<unknown>> = {
     // workspace set to the organization's lists only organization ones.
     // A workspace's own copy is its workspace-pool entry; a grant to the
     // workspace is an organization-pool entry (both when "all" includes it).
+    const personal = workspaceId === WORKSPACES.personal.id;
     const rows = organizationAccounts
-      .filter((entry) => workspaceId !== WORKSPACES.personal.id && !policies[entry.id]!.allowedPeople)
+      .filter((entry) => !policies[entry.id]!.allowedPeople)
       .map((entry) => {
         const policy = policies[entry.id]!;
         return {
           entry,
           local: local[entry.id]?.includes(workspaceId) ?? false,
-          organization:
-            policy.allowedWorkspaces === null || policy.allowedWorkspaces.includes(workspaceId),
+          // A Personal workspace only through "Personal workspaces".
+          organization: personal
+            ? policy.allowPersonalWorkspaces
+            : policy.allowedWorkspaces === null || policy.allowedWorkspaces.includes(workspaceId),
         };
       })
       .filter((row) => row.local || row.organization);
     const mode = workspaceId === WORKSPACES.design.id ? designSource : "automatic";
     const workspaceAvailable = rows.some((row) => row.local);
+    const listed = (row: (typeof rows)[number]) => mode === "automatic" || row.organization;
     return {
       accounts: rows
-        .filter((row) => mode === "automatic" || row.organization)
+        .filter(listed)
         .map((row) => ({ ...row.entry, source: row.local ? "workspace" : "organization" })),
       activeAccountId: ACME_PRO,
       source: {
@@ -201,6 +205,7 @@ const methods: Record<string, (...args: never[]) => Promise<unknown>> = {
           mode === "automatic" && workspaceAvailable ? "workspace" : "organization",
         workspaceAvailable,
         organizationAvailable: rows.some((row) => row.organization),
+        workspaceSetAside: rows.some((row) => row.local && !listed(row)),
       },
       settings: {
         rotationEnabled: true,

@@ -474,7 +474,7 @@ test("a refused or failed read says what to do, never the raw API error", async 
   }
 });
 
-test("a workspace's own account is an organization account: its workspace stays, people can be chosen", async () => {
+test("a workspace's own copy no workspace manages is an organization account: its workspace stays, people can be chosen", async () => {
   type Policy = {
     allowedModels: string[] | null;
     allowedWorkspaces: string[] | null;
@@ -490,6 +490,9 @@ test("a workspace's own account is an organization account: its workspace stays,
     version: 1,
   };
   const writes: Policy[] = [];
+  // Changed by the last two cases: a workspace manages it; the member list can't be read.
+  let managedBy: string | null = null;
+  let peopleReadable = true;
   const response = () => ({
     policy,
     models: [{ id: "model-a", label: "Model A" }],
@@ -499,13 +502,17 @@ test("a workspace's own account is an organization account: its workspace stays,
       { id: "workspace-c", name: "Legal" },
     ],
     personalWorkspacesSupported: true,
-    peopleSupported: true,
-    people: [
-      { id: "person-a", name: "Alex Morgan", email: "alex@example.com" },
-      { id: "person-b", name: null, email: "sam@example.com" },
-    ],
+    peopleSupported: managedBy === null && peopleReadable,
+    ...(peopleReadable
+      ? {
+          people: [
+            { id: "person-a", name: "Alex Morgan", email: "alex@example.com" },
+            { id: "person-b", name: null, email: "sam@example.com" },
+          ],
+        }
+      : {}),
     localWorkspaceIds: ["workspace-a"],
-    managedByWorkspaceId: "workspace-a",
+    managedByWorkspaceId: managedBy,
   });
   const labels = modelsScopeLabels("Acme", false);
   expect(organizationReachLabel(labels, response())).toBe("Engineering only");
@@ -587,7 +594,9 @@ test("a workspace's own account is an organization account: its workspace stays,
     await act(async () => root.render(<Page />));
     await flush();
     // Its workspace is shown included and can't be cleared.
-    expect(container.textContent).toContain("Connected in this workspace, so it stays included.");
+    expect(container.textContent).toContain(
+      "Connected in this workspace, which keeps it as its own.",
+    );
     expect(container.textContent).not.toContain("No workspace can use it");
     await choose("Finance");
     await save();
@@ -694,6 +703,38 @@ test("a workspace's own account is an organization account: its workspace stays,
     expect(saveButton().disabled).toBe(false);
     await choose("Only selected workspaces");
     expect(saveButton().disabled).toBe(true);
+
+    // People saved earlier stay chosen when the member list can't be read.
+    policy = {
+      ...policy,
+      allowedWorkspaces: [],
+      allowPersonalWorkspaces: false,
+      allowedPeople: ["person-a", "person-b"],
+    };
+    peopleReadable = false;
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await act(async () => root.render(<Page />));
+    await flush();
+    expect(container.textContent).toContain("2 people chosen.");
+    expect(container.textContent).not.toContain("Former member");
+    expect(container.querySelector('[role="radio"][aria-checked="true"]')?.textContent).toContain(
+      "Only selected people",
+    );
+    await choose("Only selected workspaces");
+    await choose("Only selected people");
+    expect(saveButton().disabled).toBe(true);
+
+    // A workspace manages it: no people choice (the server refuses one).
+    policy = { ...policy, allowedPeople: null };
+    peopleReadable = true;
+    managedBy = "workspace-a";
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await act(async () => root.render(<Page />));
+    await flush();
+    expect(container.textContent).not.toContain("Only selected people");
+    expect(container.textContent).toContain("Which workspaces can use it");
   } finally {
     await act(async () => root.unmount());
     container.remove();

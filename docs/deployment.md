@@ -4498,6 +4498,18 @@ organization route and on again on its workspace's route: the workspace's
 own copy serves again, other workspaces stay off, and the organization's
 switch still reads off until it is turned on there.
 
+**Accounts page change (separate release, after owner approval).** The
+organization Accounts page then lists a workspace-connected account once, as
+an organization account whose access the editor changes. Validate:
+`GET /v1/organizations/<organization id>/codex/accounts` returns each such
+account with `ownInWorkspaceIds` naming its workspace, and that workspace's
+`GET /v1/workspaces/<workspace id>/codex/accounts` returns
+`source.workspaceSetAside`. A browser tab still running the previous page
+lists the account twice (once as "<workspace> only") until it reloads. API
+and SDK callers of the organization account list now also receive
+workspace-connected accounts, each with `ownInWorkspaceIds`; nothing else
+changes.
+
 **Fix forward.** The previous setter definitions are in 0713. If they
 misbehave, ship a forward migration restoring those definitions and keeping
 `set_subscription_core_reach_allocator` (this release's API calls it on every

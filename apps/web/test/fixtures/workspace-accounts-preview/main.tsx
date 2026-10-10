@@ -34,13 +34,15 @@ function Harness() {
     ...(params.get("workspace") ? { workspace: params.get("workspace")! } : {}),
   });
   setNavigate((next) => setSearch(next as Search));
+  const selected = workspaces.find((workspace) => workspace.id === search.workspace) ?? workspaces[0]!;
   return (
     <WorkspaceModelsPage
       anchorWorkspaceId={WORKSPACES.design.id}
       workspacePage={Boolean(search.workspace)}
       workspaces={workspaces}
-      workspaceId={search.workspace ?? WORKSPACES.design.id}
-      workspaceName="Design"
+      workspaceId={selected.id}
+      workspaceName={selected.name}
+      personal={selected.personal}
       organizationId={ORGANIZATION_ID}
       organizationName="Acme"
       canManageSettings

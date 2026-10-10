@@ -283,7 +283,9 @@ export function ConnectionAccessFormPage({
   const disabled = !canManage;
   // Workspaces that use the account as their own keep it for any workspace choice.
   const local = data?.localWorkspaceIds ?? [];
-  const people = Boolean(organization && data?.peopleSupported);
+  // People saved earlier stay a choice even when the member list can't be shown.
+  const people = Boolean(organization && (data?.peopleSupported || data?.policy.allowedPeople));
+  const peopleListed = Boolean(data?.people);
   const scope = draft?.allowedPeople
     ? "people"
     : draft?.allowedWorkspaces === null
@@ -393,7 +395,7 @@ export function ConnectionAccessFormPage({
                     <CheckboxField
                       key={workspace.id}
                       label={workspace.name}
-                      description="Connected in this workspace, so it stays included."
+                      description="Connected in this workspace, which keeps it as its own."
                       disabled
                       checked
                     />
@@ -423,7 +425,13 @@ export function ConnectionAccessFormPage({
                 ) : null}
               </fieldset>
             ) : null}
-            {scope === "people" ? (
+            {scope === "people" && !peopleListed ? (
+              <p className="m-0 text-sm text-fg-muted">
+                {peopleCount(draft.allowedPeople!.length)} chosen. This organization has too many
+                members to list here.
+              </p>
+            ) : null}
+            {scope === "people" && peopleListed ? (
               <fieldset className="m-0 flex min-w-0 flex-col gap-3 border-0 p-0">
                 <legend className="mb-2 text-xs leading-4.5 font-medium text-fg">People</legend>
                 {[

@@ -135,7 +135,8 @@ function poolState(codex: CodexSubscriptions) {
     /** The organization shares accounts that new work here doesn't use. */
     organizationSetAside: inUse === "workspace" && Boolean(source?.organizationAvailable),
     /** This workspace has accounts that new work here doesn't use. */
-    workspaceSetAside: inUse === "organization" && Boolean(source?.workspaceAvailable),
+    workspaceSetAside:
+      inUse === "organization" && Boolean(source?.workspaceSetAside ?? source?.workspaceAvailable),
   };
 }
 
@@ -159,16 +160,17 @@ export function organizationOnlyCodexAccounts(
 }
 
 /**
- * Whether the "This workspace's Codex accounts · Set aside" row is shown. An
- * organization administrator knows which own accounts aren't in use here (an
- * own account the organization also gives this workspace is in use through
- * the organization's pool); anyone else, or an older list, follows the pool.
+ * Whether the "This workspace's Codex accounts · Set aside" row is shown. The
+ * server says whether any own account is not in use here (an own account the
+ * organization also gives this workspace is in use). With an older server, an
+ * organization administrator's list decides; anyone else follows the pool.
  */
 function workspaceSetAsideShown(
   codex: CodexSubscriptions,
   organization: OrganizationCodexPool | null,
 ): boolean {
   if (!poolState(codex).workspaceSetAside) return false;
+  if (codex.source?.workspaceSetAside !== undefined) return true;
   if (!organization?.codex.accounts.some((account) => account.ownInWorkspaceIds !== undefined))
     return true;
   const listed = new Set(codex.accounts.map((account) => account.id));
@@ -406,7 +408,8 @@ function OwnOrganizationCodexRow({
       codex={codex}
       account={account}
       places={places}
-      scopeLabel={access.data ? organizationReachLabel(places.scope, access.data) : undefined}
+      // No tag until its reach is known: "<workspace> only" may no longer be true.
+      scopeLabel={access.data ? organizationReachLabel(places.scope, access.data) : ""}
       onOpen={() => places.openAccount(account.id)}
     />
   );
@@ -516,7 +519,11 @@ export function CodexPoolNotice({
     mode: source.mode,
     inUse: source.effectiveSource,
     organizationAvailable: source.organizationAvailable,
-    workspaceCount: source.effectiveSource === "workspace" ? codex.accounts.length : 0,
+    // Only the workspace's own: automatic also lists the organization's here.
+    workspaceCount:
+      source.effectiveSource === "workspace"
+        ? codex.accounts.filter((account) => account.source !== "organization").length
+        : 0,
     organizationCount:
       source.effectiveSource === "organization" ? codex.accounts.length : organizationAccountCount,
     canConnect: codex.canManage,

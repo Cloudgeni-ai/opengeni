@@ -197,6 +197,12 @@ export type SubscriptionCoreWorkspaceSource = {
   effectiveSource: SubscriptionCoreEffectiveSource;
   workspaceAvailable: boolean;
   organizationAvailable: boolean;
+  /**
+   * Some of the workspace's own connections are not in the effective pool
+   * (set aside while the organization's are used). An own connection the
+   * organization also gives this workspace stays in the pool, so it is not.
+   */
+  workspaceSetAside: boolean;
 };
 
 /** One shared connection of a workspace's effective pool. */
@@ -350,6 +356,7 @@ export async function readSubscriptionCoreWorkspacePool(
       effectiveSource,
       workspaceAvailable,
       organizationAvailable,
+      workspaceSetAside: pools.some((entry) => entry.local && !inEffectiveSource(entry)),
     },
   };
 }
