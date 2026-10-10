@@ -186,6 +186,8 @@ export async function flushSessionRealtimeTranscriptTailInTransaction(
     sessionId: string;
     realtimeId: string;
     ownerSubjectId: string;
+    /** The owner's own label (their email) when a request carries it. */
+    ownerSubjectLabel?: string | null | undefined;
     now?: Date;
   },
 ): Promise<SessionRealtimeContextProjection | null> {
@@ -292,7 +294,7 @@ export async function flushSessionRealtimeTranscriptTailInTransaction(
     workspaceId: input.workspaceId,
     sessionId: input.sessionId,
     subjectId: input.ownerSubjectId,
-    subjectLabel: "Realtime",
+    subjectLabel: input.ownerSubjectLabel?.trim() || "Realtime",
     actor: {
       type: "human",
       subjectId: input.ownerSubjectId,

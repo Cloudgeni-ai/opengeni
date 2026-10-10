@@ -171,6 +171,8 @@ export type SessionRealtimeInboundEntryInput = {
 export type SyncSessionRealtimeLedgerInput = AssertSessionRealtimeOwnerInput & {
   /** Request-scoped callers bound the control prefix wait; lifecycle callers omit it. */
   controlLockTimeoutMs?: number;
+  /** The owner's own label (their email), so a voice request names its sender. */
+  ownerSubjectLabel?: string | null | undefined;
   connectionId: string;
   connectionEpoch: number;
   entries?: SessionRealtimeInboundEntryInput[] | undefined;
@@ -1134,7 +1136,12 @@ async function admitRealtimeDelegationInTransaction(
   db: SessionActivityDatabase,
   input: Pick<
     SyncSessionRealtimeLedgerInput,
-    "workspaceId" | "sessionId" | "realtimeId" | "connectionEpoch" | "ownerSubjectId"
+    | "workspaceId"
+    | "sessionId"
+    | "realtimeId"
+    | "connectionEpoch"
+    | "ownerSubjectId"
+    | "ownerSubjectLabel"
   >,
   accountId: string,
   incoming: SessionRealtimeInboundEntryInput,
@@ -1190,7 +1197,7 @@ async function admitRealtimeDelegationInTransaction(
     workspaceId: input.workspaceId,
     sessionId: input.sessionId,
     subjectId: input.ownerSubjectId,
-    subjectLabel: "Realtime",
+    subjectLabel: input.ownerSubjectLabel?.trim() || "Realtime",
     actor: {
       type: "human",
       subjectId: input.ownerSubjectId,

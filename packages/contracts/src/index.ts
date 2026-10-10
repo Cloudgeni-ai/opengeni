@@ -8084,9 +8084,31 @@ export function formatModelContextTimestamp(value: Date | string): string {
   return `${MODEL_CONTEXT_WEEKDAYS[date.getUTCDay()]} ${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC`;
 }
 
-/** The time part of one accepted user-role message, from its acceptance time. */
-export function renderMessageSentAtForModel(sentAt: Date | string): string {
-  return `[Message sent ${formatModelContextTimestamp(sentAt)}]`;
+const MAX_MESSAGE_SENDER_CHARS = 200;
+
+/**
+ * The person a human message came from, as frozen with its turn, made safe for
+ * the one-line metadata part: no brackets or line breaks, bounded length.
+ * Empty when nothing readable remains.
+ */
+export function messageSenderForModel(sender: string | null | undefined): string | undefined {
+  const text = (sender ?? "")
+    .replace(/[[\]\r\n\t]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, MAX_MESSAGE_SENDER_CHARS)
+    .trim();
+  return text || undefined;
+}
+
+/**
+ * The metadata part of one accepted user-role message: its acceptance time
+ * and, for a person's message, who sent it. Members of a shared workspace use
+ * the same agent, so the model must be able to tell them apart.
+ */
+export function renderMessageSentAtForModel(sentAt: Date | string, sender?: string | null): string {
+  const from = messageSenderForModel(sender);
+  return `[Message sent ${formatModelContextTimestamp(sentAt)}${from ? ` by ${from}` : ""}]`;
 }
 
 /**
@@ -8118,7 +8140,8 @@ export function renderSessionGoalContext(snapshot?: SessionGoalSnapshot): string
  * turn acceptance. `sentAt` is the message's durable acceptance time, so the
  * model knows the current date without spending a tool call on it. All of them
  * remain in the visible message's chronological position, and presentation
- * layers may omit their leading parts.
+ * layers may omit their leading parts. `sender` names the person who sent a
+ * human message; it rides on the `sentAt` part.
  */
 export function renderUserMessageContentForModel(
   text: string,
@@ -8126,6 +8149,7 @@ export function renderUserMessageContentForModel(
   modelContext?: string | null,
   goalSnapshot?: SessionGoalSnapshot,
   sentAt?: Date | string | null,
+  sender?: string | null,
 ): string | Array<{ type: "input_text"; text: string }> {
   const visibleContent = renderTimelineAnnotationsForModel(text, annotations);
   const context = modelContext?.trim();
@@ -8149,7 +8173,7 @@ export function renderUserMessageContentForModel(
         ]
       : []),
     ...(sentAt != null
-      ? [{ type: "input_text" as const, text: renderMessageSentAtForModel(sentAt) }]
+      ? [{ type: "input_text" as const, text: renderMessageSentAtForModel(sentAt, sender) }]
       : []),
     { type: "input_text", text: visibleContent },
   ];

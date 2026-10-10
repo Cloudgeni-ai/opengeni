@@ -855,6 +855,7 @@ describe("session realtime ledger", () => {
     const base = delegationSyncInput(value, first.claimed.connection);
     const input = {
       ...base,
+      ownerSubjectLabel: "voice.owner@example.com",
       entries: [{ ...base.entries[0]!, modelContext: `  ${modelContext}  ` }],
     };
 
@@ -926,7 +927,11 @@ describe("session realtime ledger", () => {
       role: "user",
       content: [
         { type: "input_text", text: `${MODEL_CONTEXT_LABEL}\n${modelContext}` },
-        { type: "input_text", text: renderMessageSentAtForModel(claim.turn.createdAt) },
+        // A voice request names the person on the call, not the voice channel.
+        {
+          type: "input_text",
+          text: renderMessageSentAtForModel(claim.turn.createdAt, "voice.owner@example.com"),
+        },
         { type: "input_text", text: input.entries[0]!.text },
       ],
     });

@@ -1213,9 +1213,19 @@ describe("immutable session turn initiators", () => {
     // joins the human request and stays pending for its own scheduled turn.
     expect(attachedHistory.map(({ item }) => item.role)).toEqual(["user"]);
     expect(attachedHistory[0]?.item.content).toEqual([
-      { type: "input_text", text: renderMessageSentAtForModel(attachedClaim.turn.createdAt) },
+      // The model is told which member sent the human message.
+      {
+        type: "input_text",
+        text: renderMessageSentAtForModel(
+          attachedClaim.turn.createdAt,
+          "Scheduled attachment sender",
+        ),
+      },
       { type: "input_text", text: "Keep this human task authoritative." },
     ]);
+    expect(String((attachedHistory[0]?.item.content as { text: string }[])[0]?.text)).toEndWith(
+      " by Scheduled attachment sender]",
+    );
     expect(
       await listOutstandingSessionSystemUpdates(client.db, grant.workspaceId!, attachedTarget.id),
     ).toMatchObject([{ state: "pending" }]);

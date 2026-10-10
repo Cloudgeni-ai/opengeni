@@ -1519,6 +1519,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           sessionId,
           realtimeId,
           ownerSubjectId: grant.subjectId,
+          ownerSubjectLabel: grant.subjectLabel ?? null,
           ...parsed.data,
         }),
       );
@@ -2106,6 +2107,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
                 sessionId,
                 realtimeId,
                 ownerSubjectId: grant.subjectId,
+                ownerSubjectLabel: grant.subjectLabel ?? null,
                 ...parsed.data,
                 controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
               },

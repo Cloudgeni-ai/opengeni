@@ -768,6 +768,7 @@ import {
   creatorColumns,
   frozenInitiatorForCommandActor,
   frozenScheduledOccurrenceInitiator,
+  humanTurnSenderLabel,
   initiatorColumns,
   initiatorFromStorage,
   UNATTRIBUTED_LEGACY_INITIATOR,
@@ -7754,6 +7755,7 @@ export function durableUserHistoryItem(
   modelContext?: string | null,
   goalSnapshot?: SessionGoalSnapshot,
   sentAt?: Date | null,
+  sender?: string | null,
 ): Record<string, unknown> {
   const attachmentRefs = resources.filter(
     (resource): resource is Extract<ResourceRef, { kind: "file" }> => resource.kind === "file",
@@ -7767,6 +7769,7 @@ export function durableUserHistoryItem(
       modelContext,
       goalSnapshot,
       sentAt,
+      sender,
     ),
     ...(attachmentRefs.length > 0 ? { [MODEL_ATTACHMENT_REFS_FIELD]: attachmentRefs } : {}),
     ...(annotations.length > 0
@@ -72863,6 +72866,7 @@ export async function claimSessionWorkForAttempt(
                   // Acceptance time, not claim time: a queued message keeps the
                   // moment the user sent it.
                   row.createdAt,
+                  humanTurnSenderLabel(row),
                 ),
               ),
             },
