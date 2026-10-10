@@ -255,6 +255,26 @@ describe("buildTimeline", () => {
     });
   });
 
+  test.each([
+    [{ reason: "no_eligible_capacity" }, "Waiting for Codex capacity."],
+    [{ detail: null, error: null }, "Waiting for Codex capacity."],
+    [{ detail: 42, error: {} }, "Waiting for Codex capacity."],
+    [{ detail: "", error: "" }, "Waiting for Codex capacity."],
+    [{ error: "Capacity is temporarily unavailable." }, "Capacity is temporarily unavailable."],
+    [
+      { detail: "", error: "Capacity is temporarily unavailable." },
+      "Capacity is temporarily unavailable.",
+    ],
+    [
+      { detail: "Waiting for capacity to reset.", error: "Unused fallback" },
+      "Waiting for capacity to reset.",
+    ],
+  ] as const)("keeps capacity wait notices readable for %j", (payload, text) => {
+    reset();
+    const [item] = buildTimeline([event("codex.capacity.waiting", payload)]);
+    expect(item).toMatchObject({ kind: "notice", tone: "waiting", text });
+  });
+
   test("accepts every typed admission reason with its matching event semantics", () => {
     reset();
     const cases = [
