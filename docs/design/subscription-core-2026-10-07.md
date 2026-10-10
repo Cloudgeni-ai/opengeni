@@ -2330,7 +2330,10 @@ Reading:
   INSERT` trigger that overwrites any supplied value with
   `transaction_timestamp()`, and a `BEFORE UPDATE` trigger that rejects
   changing it. Explicit values are replaced, never rejected, so rolling
-  inserts keep working.
+  inserts keep working. The column adds and trigger creation on busy tables
+  (`session_turns`, `sessions`) run under `SET LOCAL lock_timeout` as 0667
+  does, so the deploy fails fast instead of queueing behind a long
+  transaction.
 - That wait, and every wait caused by a record with `personal: []` and
   `shared_pool: none`, ends at the existing capacity-wait deadline with a
   typed turn failure the session owner sees ("this work was accepted before
@@ -2510,7 +2513,11 @@ with these provider-neutral changes:
 - **Receipt and readiness.** The precursor adds
   `opengeni_private.subscription_provider_cutover_receipts (provider,
   migration, committed_at)` and one readiness function taking `provider`; the
-  Codex receipt function stays. A binary requires the receipt of every
+  Codex receipt function stays. A provider cut over before PR 0 (Codex) is
+  recorded with `committed_at = '-infinity'`, so the time-based backstop never
+  treats its existing work as pre-receipt (Codex work mostly carries no
+  personal v2 entry and never gets a compatibility record); PR 0 tests that
+  Codex follow-up work accepted before PR 0 still runs after it. A binary requires the receipt of every
   provider whose cutover migration is in its own ledger and refuses to start
   otherwise.
 - **Switch rows before the receipt.** Runtime roles may not insert, enable or
@@ -2579,7 +2586,10 @@ the per-path resolver (a pure goal continuation compares with the goal's
 causal turn, not the context turn), and its PR records a pre-merge inventory of
 existing rows that the new Claude comparisons would reject, including live
 scheduled tasks whose Claude snapshots already disagree, so they are resolved
-before the comparisons go live.
+before the comparisons go live. The inventory and PR 0's tests also cover the
+callers of `validate_scheduled_agent_run_live_authority` (0447, 0452, 0459
+and the scheduled path in `packages/db/src/index.ts`), which inherit the new
+`scheduled_claude_authority_changed` refusal.
 Migration ordinals are the next free ones at merge
 (`bun run migration:renumber`). Every implementation PR follows the
 repository's complex-change review policy.
@@ -2696,8 +2706,10 @@ guard keeps provider names out of shared modules.
   yields a waiting `{personal: [], shared_pool: none}` copy;
   `authority_inserted_at` cannot be supplied or changed (a carrier derived
   from a missed source commits only with the `missing` copy, and an explicit
-  `created_at` from an older binary is still accepted); a mixed inbox batch of a narrowed
-  pre-cutover update and an unnarrowed post-cutover update is split.
+  `created_at` from an older binary is still accepted); a mixed inbox batch
+  of a narrowed pre-cutover update and an unnarrowed post-cutover update is
+  split, and so is a batch of a missed pre-receipt update and a post-receipt
+  update that both have no record.
 - Grants: after the cutover and a fresh `provision-roles`, runtime roles hold
   no write grant on the provider's legacy tables (posture contract).
 - Lifecycle facts: a core connect emits one `model.connected` fact with the
