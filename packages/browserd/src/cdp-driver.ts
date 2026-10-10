@@ -379,6 +379,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private readonly firstSeenAt = new Map<string, string>();
   private readonly attaching = new Map<string, Promise<TargetState>>();
   private readonly attachingSessions = new Map<string, string>();
+  /** Tabs whose renderer process died. Cleared when the tab attaches healthily again. */
+  private readonly crashedTargets = new Set<string>();
   private readonly targetPhysicalGenerations = new Map<string, string>();
   private connection: BrowserCdpConnection | null = null;
   private connectionPromise: Promise<BrowserCdpConnection> | null = null;
@@ -1585,7 +1587,14 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       () => undefined,
       () => undefined,
     );
-    return await result;
+    try {
+      return await result;
+    } catch (error) {
+      // A renderer that died mid-command ends that command through the detach
+      // below; report the crash itself rather than the transport symptom.
+      if (this.crashedTargets.has(targetId)) throw tabCrashedError();
+      throw error;
+    }
   }
 
   private async ensureTargetState(info: TargetInfo): Promise<TargetState> {
@@ -1612,18 +1621,39 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     if (typeof attached.sessionId !== "string") throw new Error("CDP did not attach the target");
     const sessionId = attached.sessionId;
     this.attachingSessions.set(info.targetId, sessionId);
+    // A tab whose renderer already died answers no page command; Chrome says so
+    // on Inspector.enable. Watch for it so attachment fails fast instead of
+    // hanging every later command until its timeout.
+    let signalCrash: () => void = () => undefined;
+    const crashed = new Promise<null>((resolve) => {
+      signalCrash = () => resolve(null);
+    });
+    const stopCrashWatch = connection.on("Inspector.targetCrashed", () => signalCrash(), sessionId);
+    // Only the crash signal matters here; a slow or unsupported enable must not
+    // replace the real initialization outcome.
+    void connection.send("Inspector.enable", {}, { sessionId }).catch(() => undefined);
     let frame: MainFrame;
     try {
-      await Promise.all([
-        connection.send("Page.enable", {}, { sessionId }),
-        connection.send("Runtime.enable", {}, { sessionId }),
-        connection.send("DOM.enable", {}, { sessionId }),
-        connection.send("Accessibility.enable", {}, { sessionId }),
-        connection.send("Network.enable", {}, { sessionId }),
-        connection.send("Log.enable", {}, { sessionId }),
-      ]);
-      await this.applyEmulation(connection, sessionId);
-      frame = await this.mainFrame(sessionId);
+      const initialized = (async () => {
+        await Promise.all([
+          connection.send("Page.enable", {}, { sessionId }),
+          connection.send("Runtime.enable", {}, { sessionId }),
+          connection.send("DOM.enable", {}, { sessionId }),
+          connection.send("Accessibility.enable", {}, { sessionId }),
+          connection.send("Network.enable", {}, { sessionId }),
+          connection.send("Log.enable", {}, { sessionId }),
+        ]);
+        await this.applyEmulation(connection, sessionId);
+        return await this.mainFrame(sessionId);
+      })();
+      const outcome = await Promise.race([initialized, crashed]);
+      if (!outcome) {
+        // Detaching below ends the enables still waiting on the dead renderer.
+        void initialized.catch(() => undefined);
+        this.crashedTargets.add(info.targetId);
+        throw tabCrashedError();
+      }
+      frame = outcome;
       if (
         this.attachingSessions.get(info.targetId) !== sessionId ||
         this.targetPhysicalGeneration(info.targetId) !== authorityGeneration
@@ -1642,9 +1672,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         .catch(() => undefined);
       throw error;
     } finally {
+      stopCrashWatch();
       if (this.attachingSessions.get(info.targetId) === sessionId)
         this.attachingSessions.delete(info.targetId);
     }
+    this.crashedTargets.delete(info.targetId);
     const state: TargetState = {
       targetId: info.targetId,
       sessionId,
@@ -1687,6 +1719,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       unsubscribe: [],
     };
     state.unsubscribe.push(
+      connection.on("Inspector.targetCrashed", () => this.onTargetCrashed(state), sessionId),
       connection.on(
         "Page.frameNavigated",
         (event) => this.onFrameNavigated(state, event),
@@ -4269,12 +4302,39 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   private removeState(targetId: string, preserveFirstSeen = false): void {
+    // A closed or destroyed tab is gone; a crashed one that we only detached from stays marked.
+    if (!preserveFirstSeen) this.crashedTargets.delete(targetId);
     const state = this.states.get(targetId);
     if (!state) return;
     this.failAllScreencasts(state, new CdpTransportError("browser target closed"));
     for (const unsubscribe of state.unsubscribe) unsubscribe();
     this.states.delete(targetId);
     if (!preserveFirstSeen) this.firstSeenAt.delete(targetId);
+  }
+
+  /**
+   * The tab's renderer died. Nothing will answer its pending or later page
+   * commands, so detach: that ends every command waiting on it at once, and
+   * the next use re-attaches and reports the crash immediately.
+   */
+  private onTargetCrashed(state: TargetState): void {
+    if (this.states.get(state.targetId) !== state) return;
+    this.crashedTargets.add(state.targetId);
+    const forget = () => {
+      if (this.states.get(state.targetId) !== state) return;
+      this.targetPhysicalGenerations.set(state.targetId, randomUUID());
+      this.removeState(state.targetId, true);
+    };
+    void this.ensureConnection()
+      .then((connection) =>
+        connection.send(
+          "Target.detachFromTarget",
+          { sessionId: state.sessionId },
+          { timeoutMs: 1_000 },
+        ),
+      )
+      .catch(() => undefined)
+      .finally(forget);
   }
 
   private protectedAuthQuiet(state: TargetState): boolean {
@@ -4292,6 +4352,15 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private timestamp(): string {
     return this.now().toISOString();
   }
+}
+
+/** Retrying can't help a tab whose page process died; say what will. */
+function tabCrashedError(): InteractionDefiniteDriverError {
+  return new InteractionDefiniteDriverError(
+    "resource_unavailable",
+    "This browser tab crashed and no longer responds. Open a new tab (and close this one), then continue there.",
+    false,
+  );
 }
 
 function frameStreamDiagnostic(event: string, fields: Readonly<Record<string, unknown>>): void {

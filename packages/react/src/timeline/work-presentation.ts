@@ -92,6 +92,9 @@ export function readableWorkStatus(
   const pausedMs = group.work.pausedMs ?? 0;
   if (end) {
     const durationMs = durationBetween(group.work.startedAt, end);
+    const cycles = group.work.cycles;
+    // Folded quiet cycles report their wall-clock span: waits are the point.
+    if (cycles) return { kind: "worked", label: `${cycles.count} updates over`, durationMs };
     return {
       kind: "worked",
       durationMs: durationMs === undefined ? undefined : Math.max(0, durationMs - pausedMs),
