@@ -144,6 +144,22 @@ try {
     assert((await page.getByText("Design team plan").count()) === 0, "listed twice on Design");
     await noOverflow();
     await shot("9-workspace-page-organization-source");
+
+    // Shared with every workspace too: in use here through the organization's
+    // pool, listed once with its real reach, nothing of Design's set aside.
+    await open(
+      "reach=all&workspace=00000000-0000-4000-8000-0000000000d1&designSource=organization",
+    );
+    await page.getByText("Design team plan").waitFor();
+    assert((await page.getByText("Design team plan").count()) === 1, "listed twice on Design");
+    await page.getByText("Selected workspaces").first().waitFor();
+    assert((await page.getByText("Design only").count()) === 0, "stale reach tag");
+    assert(
+      (await page.getByText("Set aside while the organization's are used").count()) === 0,
+      "own account shown as set aside",
+    );
+    await noOverflow();
+    await shot("10-workspace-page-shared-everywhere");
     assert(errors.length === 0, errors.join("\n"));
     await page.close();
   }

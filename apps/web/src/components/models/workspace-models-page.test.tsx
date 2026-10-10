@@ -1847,6 +1847,39 @@ describe("One Models page for the organization and the workspace", () => {
       }
     });
 
+    test("shared with everyone while its workspace uses the organization's accounts: one row, in use, with its real reach", async () => {
+      organizationAdmin = true;
+      accounts = {
+        ...accounts,
+        accounts: [
+          codexAccount({ id: "org-1", label: "Company plan", source: "organization" }),
+          codexAccount({ id: "acct-1", label: "Team plan", source: "workspace" }),
+        ],
+        activeAccountId: "org-1",
+        source: {
+          ...source,
+          mode: "organization",
+          effectiveSource: "organization",
+          workspaceAvailable: true,
+        },
+      };
+      routeBoth();
+      client.getModelConnectionAccess.mockImplementation(async (...args: unknown[]) => {
+        const access = managedAccess((args[0] as { connectionId: string }).connectionId);
+        return { ...access, policy: openPolicy };
+      });
+      const view = await render();
+      try {
+        await flush();
+        expect(rowsNamed(view.container, "Team plan")).toHaveLength(1);
+        expect(rowsNamed(view.container, "Team plan")[0]!.textContent).toContain("Everyone in");
+        // It is in use through the organization's pool: nothing of its own is set aside.
+        expect(view.container.textContent).not.toContain("Set aside while the organization");
+      } finally {
+        await cleanup(view);
+      }
+    });
+
     test("limited to chosen people, its workspace no longer lists it as its own, so it shows as the organization's", async () => {
       organizationAdmin = true;
       accounts = {

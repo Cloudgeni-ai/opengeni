@@ -158,6 +158,26 @@ export function organizationOnlyCodexAccounts(
   );
 }
 
+/**
+ * Whether the "This workspace's Codex accounts · Set aside" row is shown. An
+ * organization administrator knows which own accounts aren't in use here (an
+ * own account the organization also gives this workspace is in use through
+ * the organization's pool); anyone else, or an older list, follows the pool.
+ */
+function workspaceSetAsideShown(
+  codex: CodexSubscriptions,
+  organization: OrganizationCodexPool | null,
+): boolean {
+  if (!poolState(codex).workspaceSetAside) return false;
+  if (!organization?.codex.accounts.some((account) => account.ownInWorkspaceIds !== undefined))
+    return true;
+  const listed = new Set(codex.accounts.map((account) => account.id));
+  return organization.codex.accounts.some(
+    (account) =>
+      account.ownInWorkspaceIds?.includes(organization.workspace.id) && !listed.has(account.id),
+  );
+}
+
 /** How many rows Codex adds to the Accounts list once loaded. */
 export function codexListedCount(
   codex: CodexSubscriptions,
@@ -171,7 +191,9 @@ export function codexListedCount(
     ? organizationOnlyCodexAccounts(organization.codex.accounts, codex, organization.workspace.id)
         .length
     : codex.accounts.length - own + (pool.organizationSetAside ? 1 : 0);
-  return own + shared + (codex.pending ? 1 : 0) + (pool.workspaceSetAside ? 1 : 0);
+  return (
+    own + shared + (codex.pending ? 1 : 0) + (workspaceSetAsideShown(codex, organization) ? 1 : 0)
+  );
 }
 
 /** The ⋯ item that keeps new work on the organization's accounts, when it would change something. */
@@ -228,15 +250,25 @@ export function CodexAccountRows({
   const alwaysOrganization = alwaysOrganizationItem(codex, places);
   const own = codex.accounts.filter((account) => account.source !== "organization");
   const sharedInUse = codex.accounts.filter((account) => account.source === "organization");
-  const ownRows = own.map((account) => (
-    <CodexRow
-      key={account.id}
-      codex={codex}
-      account={account}
-      places={places}
-      onOpen={() => places.openAccount(account.id)}
-    />
-  ));
+  const ownRows = own.map((account) =>
+    organization?.codex.accounts.some((candidate) => candidate.id === account.id) ? (
+      <OwnOrganizationCodexRow
+        key={account.id}
+        codex={codex}
+        account={account}
+        places={places}
+        organization={organization}
+      />
+    ) : (
+      <CodexRow
+        key={account.id}
+        codex={codex}
+        account={account}
+        places={places}
+        onOpen={() => places.openAccount(account.id)}
+      />
+    ),
+  );
   const pendingRow = codex.pending ? (
     <ListRow
       leading={<ProviderTile provider="codex" size="lg" />}
@@ -246,7 +278,7 @@ export function CodexAccountRows({
       onOpen={places.openConnect}
     />
   ) : null;
-  const workspaceSetAsideRow = pool.workspaceSetAside ? (
+  const workspaceSetAsideRow = workspaceSetAsideShown(codex, organization) ? (
     <ListRow
       disabled
       leading={<ProviderTile provider="codex" size="lg" />}
@@ -345,6 +377,38 @@ export function CodexAccountRows({
       ) : null}
       {workspaceSetAsideRow}
     </>
+  );
+}
+
+/**
+ * This workspace's own account, which is also an organization account: tagged
+ * with where the organization makes it available once that is known.
+ */
+function OwnOrganizationCodexRow({
+  codex,
+  account,
+  places,
+  organization,
+}: {
+  codex: CodexSubscriptions;
+  account: CodexAccount;
+  places: CodexPlaces;
+  organization: OrganizationCodexPool;
+}) {
+  const access = useConnectionAccess({
+    client: organization.codex.client,
+    organizationId: organization.codex.organizationId,
+    kind: "codex",
+    connectionId: account.id,
+  });
+  return (
+    <CodexRow
+      codex={codex}
+      account={account}
+      places={places}
+      scopeLabel={access.data ? organizationReachLabel(places.scope, access.data) : undefined}
+      onOpen={() => places.openAccount(account.id)}
+    />
   );
 }
 
