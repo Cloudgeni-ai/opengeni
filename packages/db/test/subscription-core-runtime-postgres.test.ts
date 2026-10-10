@@ -1166,13 +1166,54 @@ describe("provider-neutral subscription runtime persistence", () => {
       expect(String(uppercaseAuthorityError)).toContain(
         "session_turns_subscription_authority_v2_chk",
       );
-      expect(
-        await runAccessCase({
-          cutover: "enabled",
-          provider: "claude",
-          cutoverProvider: "claude",
-        }),
-      ).toMatchObject({ authorized: false, visible: false });
+      // Claude has no cutover receipt (migration 0712): the application role
+      // can neither create nor enable its switch row, and a row that already
+      // exists (possible before 0712) with a matching v2 entry still grants
+      // no personal placement. Its personal access is decided by its v1 path.
+      const claudeRowError = await runAccessCase({
+        cutover: "enabled",
+        provider: "claude",
+        cutoverProvider: "claude",
+      }).then(
+        () => null,
+        (error: unknown) => error,
+      );
+      expect(String((claudeRowError as { cause?: unknown } | null)?.cause)).toContain(
+        "subscription_provider_cutovers_receipt_insert",
+      );
+      await shared!.admin`
+        insert into subscription_provider_cutovers (account_id, provider, enabled)
+        values (${state.accountId}::uuid, 'claude', true)`;
+      await shared!.admin`
+        update session_turns
+        set subscription_authority = ${shared!.admin.json({
+          version: 2,
+          personal: [
+            { provider: "codex", ownerMembershipId: membership!.id, authorityGeneration: 1 },
+            { provider: "claude", ownerMembershipId: membership!.id, authorityGeneration: 1 },
+          ],
+        })}::jsonb
+        where account_id = ${state.accountId}::uuid and id = ${personalTurn.id}::uuid`;
+      try {
+        expect(await runAccessCase({ cutover: "enabled", provider: "claude" })).toMatchObject({
+          authorized: false,
+        });
+        // The same turn still authorizes Codex, which has its receipt.
+        expect(await runAccessCase({ cutover: "enabled" })).toMatchObject({ authorized: true });
+      } finally {
+        await shared!.admin`
+          delete from subscription_provider_cutovers
+          where account_id = ${state.accountId}::uuid and provider = 'claude'`;
+        await shared!.admin`
+          update session_turns
+          set subscription_authority = ${shared!.admin.json({
+            version: 2,
+            personal: [
+              { provider: "codex", ownerMembershipId: membership!.id, authorityGeneration: 1 },
+            ],
+          })}::jsonb
+          where account_id = ${state.accountId}::uuid and id = ${personalTurn.id}::uuid`;
+      }
       expect(await runAccessCase({ cutover: "enabled", generation: 2 })).toMatchObject({
         authorized: false,
         visible: false,
@@ -2947,23 +2988,23 @@ describe("provider-neutral subscription runtime persistence", () => {
           ${state.accountId}::uuid, '{}'::jsonb, '{}'::jsonb, false, '{}'::jsonb, true, true
         ) on conflict (account_id, workspace_id) do update
           set personal_connections_allowed = true`;
-      // The accepted turn froze the owner's personal Codex authority (v1 stays
-      // authoritative until the drained cutover replaces the helper's source).
-      // The snapshot is immutable after acceptance, so this fixture writes it
-      // as the table owner with the immutability trigger briefly disabled.
-      await shared!.admin.begin(async (tx) => {
-        await tx.unsafe(
-          "alter table session_turns disable trigger session_turns_codex_authority_snapshot_immutable_trg",
-        );
-        await tx`
-          update session_turns
-          set codex_provider_account_authority_snapshot =
-            '{"version":1,"scope":"user","authorityGeneration":1}'::jsonb
-          where account_id = ${state.accountId}::uuid and id = ${personalTurn.id}::uuid`;
-        await tx.unsafe(
-          "alter table session_turns enable trigger session_turns_codex_authority_snapshot_immutable_trg",
-        );
-      });
+      // The accepted turn froze the owner's personal Codex authority in its v2
+      // entry, which the helper reads once the Codex cutover row is enabled
+      // (migration 0712 removed the legacy-generation v1 branch). Accepted
+      // authority is immutable to the application role; the fixture writes it
+      // as the table owner.
+      await shared!.admin`
+        insert into subscription_provider_cutovers (account_id, provider, enabled)
+        values (${state.accountId}::uuid, 'codex', true)`;
+      await shared!.admin`
+        update session_turns
+        set subscription_authority = ${shared!.admin.json({
+          version: 2,
+          personal: [
+            { provider: "codex", ownerMembershipId: membership!.id, authorityGeneration: 1 },
+          ],
+        })}::jsonb
+        where account_id = ${state.accountId}::uuid and id = ${personalTurn.id}::uuid`;
       const request = {
         accountId: state.accountId,
         workspaceId: personalWorkspaceId,

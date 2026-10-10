@@ -3022,6 +3022,127 @@ real-PostgreSQL posture test asserts that every retired routine is absent and
 that runtime roles hold no write grant on legacy tables. M4-A's shared-core
 guard keeps provider names out of shared modules.
 
+#### PR 0a: receipts, restrictions and personal helpers
+
+Migration 0712 (rolling) delivers the first part of row 0. Choices made where
+the plan left room, for reviewers:
+
+- **Receipts.** `opengeni_private.subscription_provider_cutover_receipts
+  (provider, migration, committed_at, seed_rotation)` is owner-only and
+  append-only (update, delete and truncate raise `55000`). Codex is recorded
+  with `committed_at = '-infinity'`. `seed_rotation` holds the provider's
+  rotation default for the organization seed, so the seed names no provider.
+  `opengeni_private.subscription_provider_cutover_committed(provider)` is
+  the only reader (SECURITY DEFINER, granted to the runtime role). The binary
+  lists `SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS` (Codex only) and refuses
+  to start without each receipt; a cutover PR adds its provider.
+- **Switch rows and connections.** Restrictive policies bind every role FORCE
+  RLS binds (runtime, owner and owner-run routines): no insert of a switch
+  row or core connection, and no enabling update, for a provider without a
+  receipt. A row may always be disabled. The runtime delete policy is
+  dropped for every provider, so no organization returns to "no row"; a
+  provider-neutral identity trigger keeps every switch row's and every core
+  connection's organization and provider, for every role (0702's scope guard
+  let organization administrators change a connection's provider, which
+  would have bypassed the insert restriction). Rows that already exist for
+  `xai` or `claude` stay, grant nothing (below) and are listed by the runbook
+  inventory.
+- **Seed.** 0689's seed function keeps its name; its body seeds an enabled row
+  per receipt provider and one settings row whose rotation is built from the
+  receipts. The seed-only policies are generalized
+  (`subscription_provider_cutovers_seed`, `subscription_settings_seed`,
+  setting `opengeni.subscription_cutover_seed`). Codex is seeded exactly as
+  before (tested by creating an organization on each side of 0712).
+- **Personal helpers.** 0668's legacy-generation branch is removed, not
+  generalized: `authorize_subscription_personal_access` grants only when the
+  provider has a receipt and an enabled row, and the frozen v2 entry, exact
+  owner membership, current generation and `personalConnectionsAllowed`
+  match. With no row it now grants nothing for Codex either; "no row" is
+  unreachable for Codex after 0689, so live behaviour is unchanged. The 0667
+  placement helper's provider list becomes the receipt check. Both return
+  false for `xai` and `claude` until their receipts. The compatibility-record
+  branch is added with the compatibility relation (PR 0b).
+- **Primaries.** Constant columns `{codex,claude,xai}_primary_provider` with
+  CHECKs carry the provider into composite foreign keys on
+  `(account_id, provider, id)`, `ON DELETE SET NULL` of the connection column
+  only. A primary pointing at another provider's connection is cleared and
+  counted as `disposition:primary_of_other_provider_cleared`.
+- **Report.** `opengeni_private.subscription_cutover_report (provider, metric,
+  account_id, legacy_count, core_count, recorded_at)` receives 0689's Codex
+  rows; 0689's relation stays read-only. PR 0 writes
+  `readiness:owners_with_multiple_current_personal_generations` for Codex
+  (one row per organization and a total row with `account_id` NULL;
+  `core_count` is the number of owners). The repair stays an owner decision.
+- **Kinds.** `video` is added; `model` and `credential_request` are admitted
+  for every provider; `apps` and 0711's `completion` stay Codex-only. The
+  unknown-outcome replay fence was already keyed by the provider registry
+  (0707).
+- **`model.connected`.** An `AFTER INSERT` trigger on
+  `subscription_connections` emits the fact with the legacy attribute
+  (`codex`, `supergrok`, `claude_subscription`), keyed by connection id and
+  without a workspace. A drained cutover sets
+  `opengeni.subscription_cutover_provider` for its own moves, which emit
+  nothing. Codex connects emit the fact again (they stopped at 0689).
+- **Credential format.** 0707's neutral refresh writers stored the encryption
+  envelope version in `credential_format`; they no longer touch it, so an
+  adapter format such as a setup token's survives refresh. Codex stores
+  `v1` either way. The neutral connect writer still writes `v1`; a provider
+  with another format passes it when its writer lands (X2b, C2b).
+- **Adapter.** `SubscriptionCoreAdapter.capabilitiesFor(format)` and
+  `credential.format(credential)` let `autoRenews` depend on the credential
+  format; the resolver and both refresh paths choose the refresher through
+  `subscriptionCoreCredentialRefresher`. Optional `fetchUsage` and
+  `liveModels`, a `modelId` on exhausted and rate-limited outcomes,
+  `modelCooldownFromOutcome`, the `video` operation kind and the wait reason
+  `accepted_authority_unavailable` are added.
+- **Rolling posture.** New owner-only trigger functions live in
+  `opengeni_subscription_internal`. The previous release's posture check
+  passes against the migrated schema before and after role provisioning.
+  The receipt reader is granted to every configured application role (not
+  only `opengeni_app`), because the restrictive policies call it for every
+  role they bind.
+- **Inventory.** The report also counts, per provider and organization,
+  switch rows (`inventory:switch_rows_without_receipt`) and core connections
+  (`inventory:connections_without_receipt`) of a provider without a receipt
+  at the time of 0712, so an operator sees them without a row-security
+  bypass.
+- **Known gap.** The operator-run lifecycle backfill (0565) reads only the
+  legacy credential tables, so Codex connections created between 0689 and
+  0712 never get a `model.connected` fact. Extending that backfill to core
+  connections is not part of PR 0.
+
+#### PR 0b and PR 0c: the rest of row 0
+
+Row 0 is split into three rolling PRs. PR 0a (above) delivers the receipts
+and readiness, the switch-row and connection restrictions, the personal
+helpers' receipt, enabled-row, v2, owner and generation checks, the
+provider-checked primaries, the operation kinds, the wait reason, the
+`model.connected` fact, the adapter interface additions and the
+provider-keyed report relation. The remaining items of row 0 and of the
+M4-A hand-over are:
+
+- **PR 0b (accepted authority across a cutover):** the compatibility
+  relation, reader and copy routines (inert); the server-owned
+  `authority_inserted_at` marker on carrier tables; the compatibility-record
+  branch of both personal helpers (`connectionIds`); the compatibility
+  deferred triggers; fences 0608 and scheduled admission comparing the v2
+  slot, the Claude scheduled comparisons and
+  `scheduled_claude_authority_changed`; the v1 liveness check switching to
+  the core check at the provider's receipt; and the pre-merge inventories
+  the plan requires: the functions it patches, the existing rows the new
+  Claude comparisons would reject (including live scheduled tasks whose
+  Claude snapshots already disagree), resolved before the comparisons go
+  live, and the callers of `validate_scheduled_agent_run_live_authority`
+  (0447, 0452, 0459 and the scheduled path in `packages/db/src/index.ts`),
+  which inherit the `scheduled_claude_authority_changed` refusal.
+- **PR 0c (Codex-named administration routines):** the provider-keyed
+  cutover planner (the `codex-subscription-core-cutover.ts` rules), the
+  auto-assignments table with its apply routine and triggers,
+  `record_subscription_codex_plan_change`, the 0702 reach helpers,
+  `list_organization_codex_workspace_ids`, and the scope visibility and wake
+  routines.
+
+No X1a or C1a call site merges before all three.
 #### PR 0c: provider-keyed cutover planner and organization reach
 
 PR 0c is the slice of PR 0 that makes the M3 cutover planner rules and the

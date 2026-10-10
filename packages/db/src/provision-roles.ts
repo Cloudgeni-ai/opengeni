@@ -2136,6 +2136,7 @@ BEGIN
       'subscription_core_personal_connections(text,uuid,uuid,text)',
       'subscription_core_reach(text,uuid,uuid)',
       'set_subscription_core_reach(text,uuid,uuid,boolean,boolean)',
+      'subscription_provider_cutover_committed(text)',
       'subscription_organization_admin(uuid)',
       'subscription_people_assignment_visible(uuid,uuid,uuid,text,text)',
       'subscription_person_preference_visible(uuid,uuid,text,text)',

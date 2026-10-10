@@ -25,7 +25,7 @@ The implementation lives in:
 
 - `packages/runtime/src/context-compaction.ts`: thresholds, portable rebuild,
   remote v2 retain/rebuild helpers, and the typed compaction signal.
-- `packages/runtime/src/prepared-compaction-request.ts`: retains the actual prepared request prefix at the model dispatch boundary. Responses pre-turn/operator and mid-turn compaction stop there before ordinary inference; no prefix is rebuilt from the original Agent. A missing prepared request fails closed. Remote v2 preserves all prepared model settings; portable Responses preserves the prepared tools and instructions while applying its summary-specific output limit and provider safety settings.
+- `packages/runtime/src/prepared-compaction-request.ts`: retains the actual prepared request prefix at the model dispatch boundary. Responses and Claude pre-turn/operator and mid-turn compaction stop there before ordinary inference; no prefix is rebuilt from the original Agent. A missing prepared request fails closed. Remote v2 preserves all prepared model settings; portable Responses preserves the prepared tools and instructions while applying its summary-specific output limit and provider safety settings; Claude preserves every cache-relevant field (see below).
 - `apps/worker/src/activities/run-input.ts`: operator compaction loads canonical history through ordinary input preparation without a synthetic message or required update batch.
 - `packages/runtime/src/index.ts`: portable summarizer + `requestRemoteCompactionV2`.
 - `apps/worker/src/activities/context-compaction.ts`: mode branch, summarizer
@@ -229,6 +229,15 @@ The compaction model receives:
 3. for Responses providers, the exact prepared system instructions and
    model-visible tool schemas from the ordinary agent request; portable
    compaction sets `tool_choice:none` and cannot execute returned tool calls.
+   Claude caches `tools` → `system` → `messages`, and its thinking mode,
+   `output_config.effort` and `tool_choice` are part of the cache key, so a
+   Claude checkpoint keeps the prepared tools, instructions, thinking, effort
+   and tool choice unchanged, changes only `max_tokens`, and appends a
+   text-only instruction after the checkpoint prompt in the same user turn.
+   Its history is the same projected prefix, so the call reads the warm cache.
+   If the model still calls a tool, one retry sets `tool_choice:none` (tools
+   and instructions stay cached); a reply with a tool call never becomes the
+   checkpoint.
    Chat providers still use a tool-less transcript request and composed
    instructions because their protocol differs;
 4. no provider-side context-management policy.

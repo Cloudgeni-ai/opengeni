@@ -1324,31 +1324,49 @@ export async function summarizeForCompaction(
         tracing: false,
         ...(options.signal ? { signal: options.signal } : {}),
       };
+  const dispatch = async (send: () => Promise<unknown>): Promise<unknown> => {
+    let result: unknown;
+    try {
+      result = await send();
+    } catch (error) {
+      throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(error), error);
+    }
+    const usage = modelResponseUsageFromResponse(result);
+    if (usage) {
+      await options.onUsage?.(usage);
+    }
+    return result;
+  };
   let response: unknown;
-  try {
-    response =
-      provider.api === "anthropic-messages"
-        ? await new AnthropicMessagesModel(
-            provider,
-            model,
-            instrumentedModelFetch(provider.id, globalThis.fetch),
-          ).getResponse(
-            anthropicCompactionRequest(input, {
-              maxOutputTokens: maxTokens,
-              ...(options.systemInstructions
-                ? { systemInstructions: options.systemInstructions }
-                : {}),
-              ...(options.promptCacheKey ? { promptCacheKey: options.promptCacheKey } : {}),
-              ...(options.signal ? { signal: options.signal } : {}),
-            }),
-          )
-        : await new CompactionResponsesModel(client, model, provider).fetchResponse(request);
-  } catch (error) {
-    throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(error), error);
+  if (provider.api === "anthropic-messages") {
+    const claude = new AnthropicMessagesModel(
+      provider,
+      model,
+      instrumentedModelFetch(provider.id, globalThis.fetch),
+    );
+    const claudeRequest = (forbidToolCalls: boolean) =>
+      anthropicCompactionRequest(input, {
+        maxOutputTokens: maxTokens,
+        ...(options.systemInstructions ? { systemInstructions: options.systemInstructions } : {}),
+        ...(options.promptCacheKey ? { promptCacheKey: options.promptCacheKey } : {}),
+        ...(options.signal ? { signal: options.signal } : {}),
+        ...(options.preparedRequest ? { preparedRequest: options.preparedRequest } : {}),
+        ...(forbidToolCalls ? { forbidToolCalls } : {}),
+      });
+    response = await dispatch(() => claude.getResponse(claudeRequest(false)));
+    // The cache-preserving request keeps the agent's tools. If the model calls
+    // one instead of summarizing, ask once more with tool selection disabled;
+    // partial text beside a tool call is never accepted as the summary.
+    if (options.preparedRequest && compactionResponseCalledTool(response)) {
+      response = await dispatch(() => claude.getResponse(claudeRequest(true)));
+    }
+  } else {
+    response = await dispatch(() =>
+      new CompactionResponsesModel(client, model, provider).fetchResponse(request),
+    );
   }
-  const usage = modelResponseUsageFromResponse(response);
-  if (usage) {
-    await options.onUsage?.(usage);
+  if (compactionResponseCalledTool(response)) {
+    throw new EmptyCompactionSummaryError({ stage: "checkpoint_response", reason: "tool_call" });
   }
   if (
     (response as ModelResponse)?.providerData?.anthropic?.stopReason === "max_tokens" ||
@@ -1616,6 +1634,21 @@ function isFailedCompactionProviderResponse(response: unknown): boolean {
     record.status === "failed" ||
     record.status === "incomplete" ||
     (record.error !== null && record.error !== undefined)
+  );
+}
+
+/** A checkpoint reply that selected a function tool is not a summary. */
+function compactionResponseCalledTool(response: unknown): boolean {
+  if (!response || typeof response !== "object") return false;
+  const output = (response as { output?: unknown }).output;
+  return (
+    Array.isArray(output) &&
+    output.some(
+      (item) =>
+        Boolean(item) &&
+        typeof item === "object" &&
+        (item as { type?: unknown }).type === "function_call",
+    )
   );
 }
 

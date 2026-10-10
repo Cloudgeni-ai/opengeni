@@ -47,6 +47,8 @@ const subscriptionCoreMigrations = [
   "0707_subscription_core_neutral_routines.sql",
   // Rewrites the operation-lease constraints and guard from withheld 0671.
   "0711_subscription_codex_completion_operations.sql",
+  // Records provider cutover receipts over withheld 0689 and restricts its tables.
+  "0712_subscription_core_generic_precursor.sql",
   // Renames and redefines the auto-assignment objects the withheld 0689 creates.
   "0713_subscription_core_provider_keyed_reach.sql",
 ] as const;

@@ -181,6 +181,10 @@ export const embeddingMigrationTail = [
   // Rewrites the operation-lease constraints and guard created by withheld
   // 0671; replay after it.
   "0711_subscription_codex_completion_operations.sql",
+  // Records the provider cutover receipts over withheld 0689, restricts the
+  // shared core tables from withheld 0642 and patches the capture function
+  // installed by withheld 0264/0275/0478; replay after them.
+  "0712_subscription_core_generic_precursor.sql",
   // Renames and rekeys the auto-assignment table, triggers and reach routines
   // withheld 0689 and 0702 create; replay after them.
   "0713_subscription_core_provider_keyed_reach.sql",

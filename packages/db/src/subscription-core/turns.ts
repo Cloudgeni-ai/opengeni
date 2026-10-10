@@ -29,6 +29,7 @@ import {
   personalFallbackActive,
   decidePlacement,
   quotaCapacity,
+  subscriptionCoreCredentialRefresher,
   type PlacementDecision,
   type PlacementInput,
   type PlacementSwitch,
@@ -1213,7 +1214,6 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
     deps: SubscriptionCoreRefreshDeps = {},
   ): Promise<SubscriptionCoreRefreshOutcome> {
     const key = encryptionKey(settings);
-    const refresher = provider.adapter.refresh;
     const now = deps.now ?? (() => new Date());
     const result = await withSubscriptionCoreRefreshLock(
       db,
@@ -1229,6 +1229,14 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
         if (!(await cutoverEnabled(tx, identity.accountId))) return { kind: "refused" };
         if (credential.refreshGeneration !== observedRefreshGeneration)
           return { kind: "superseded" };
+        let current: unknown;
+        try {
+          current = decodeCredential(key, credential.credentialEncrypted);
+        } catch (error) {
+          return { kind: "error", error };
+        }
+        // Renewal depends on the credential's format, never on the provider.
+        const refresher = subscriptionCoreCredentialRefresher(provider.adapter, current);
         if (!refresher) {
           // A credential that never renews (an API key, a setup token) is
           // refreshed only when it expired or the provider refused it: only a
@@ -1247,7 +1255,6 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
           return { kind: "relogin", message, marked: marked?.marked === true };
         }
         try {
-          const current = decodeCredential(key, credential.credentialEncrypted);
           const rotated = await refresher.rotate(current);
           // Persist before any other fallible work: a rolled-back transaction
           // would discard the only valid refresh token.

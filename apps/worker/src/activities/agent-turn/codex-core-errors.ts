@@ -47,6 +47,8 @@ const WAIT_COPY: Record<WaitReason, string> = {
   model_not_allowed: "This model is not allowed for the Codex subscriptions available here.",
   compaction_provider_locked:
     "This session is tied to a provider that has no capacity right now. Send a new message once an account is available again.",
+  accepted_authority_unavailable:
+    "This work was accepted before the account move and its account access could not be carried. Send it again.",
 };
 
 const WAITING_COPY: Record<WaitReason, string> = {
@@ -60,6 +62,8 @@ const WAITING_COPY: Record<WaitReason, string> = {
     "This model is not allowed for the Codex subscriptions available here. This turn continues if that changes.",
   compaction_provider_locked:
     "This session is tied to a provider that has no capacity right now. It continues automatically when an account is available.",
+  accepted_authority_unavailable:
+    "This work was accepted before the account move and its account access could not be carried. Send it again to continue.",
 };
 
 /**

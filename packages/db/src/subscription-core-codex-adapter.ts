@@ -49,6 +49,8 @@ export type SubscriptionCoreCodexTokens = {
 export const SUBSCRIPTION_CORE_CODEX_FORBIDDEN_QUARANTINE_MS = 60 * 60 * 1000;
 /** How long a model the Codex plan is not entitled to stays cooled down. */
 export const SUBSCRIPTION_CORE_CODEX_ENTITLEMENT_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+/** The `credential_format` of a Codex connection: OAuth tokens, which renew. */
+export const SUBSCRIPTION_CORE_CODEX_CREDENTIAL_FORMAT = "v1";
 
 export type SubscriptionCoreCodexAdapterDeps = {
   /** The OAuth token refresh call (tests inject a scripted upstream). */
@@ -59,20 +61,23 @@ export function subscriptionCoreCodexAdapter(
   deps: SubscriptionCoreCodexAdapterDeps = {},
 ): SubscriptionCoreAdapter<SubscriptionCoreCodexTokens> {
   const refresh = deps.refresh ?? refreshCodexToken;
+  const capabilities = {
+    autoRenews: true,
+    resetCredits: true,
+    extraCredits: true,
+    modelEntitlements: true,
+    realtime: true,
+    fundsMedia: true,
+    apps: true,
+    remoteCompaction: true,
+    quotaWindows: true,
+  };
   return {
     provider: SUBSCRIPTION_CORE_CODEX_PROVIDER,
     displayName: "Codex",
-    capabilities: {
-      autoRenews: true,
-      resetCredits: true,
-      extraCredits: true,
-      modelEntitlements: true,
-      realtime: true,
-      fundsMedia: true,
-      apps: true,
-      remoteCompaction: true,
-      quotaWindows: true,
-    },
+    capabilities,
+    // Codex has one credential format (OAuth tokens), and it renews.
+    capabilitiesFor: () => capabilities,
     credentialKind: "oauth",
     quotaKind: "usage_windows",
     // Workspace model policy names Codex models by their resolved provider.
@@ -115,6 +120,8 @@ export function subscriptionCoreCodexAdapter(
         });
       },
       expiry: (tokens) => accessTokenExpiry(tokens.accessToken),
+      // The format the Codex writers store in `credential_format`.
+      format: () => SUBSCRIPTION_CORE_CODEX_CREDENTIAL_FORMAT,
     },
     refresh: {
       windowMs: CODEX_REFRESH_WINDOW_MS,

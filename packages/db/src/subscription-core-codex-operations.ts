@@ -243,7 +243,8 @@ export function buildSubscriptionCoreCodexConnectionTokenResolver(
     holderKey: ref
       ? `${ref.operationId}:${ref.holderId}:${ref.generation}`
       : `connection:${connectionId}`,
-    policy: subscriptionCoreRefreshPolicy(SUBSCRIPTION_CORE_CODEX.adapter),
+    policy: (credential) =>
+      subscriptionCoreRefreshPolicy(SUBSCRIPTION_CORE_CODEX.adapter, credential.tokens),
     load: () => loadCredential(db, settings, scope, connectionId, ref),
     embeddedExpiry: (credential) =>
       SUBSCRIPTION_CORE_CODEX.adapter.credential.expiry(credential.tokens),

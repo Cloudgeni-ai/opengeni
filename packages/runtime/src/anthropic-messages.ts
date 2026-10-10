@@ -719,15 +719,21 @@ export class AnthropicMessagesModel implements Model {
     headers.set("content-type", "application/json");
     headers.set("accept", stream ? "text/event-stream" : "application/json");
     headers.set("anthropic-version", "2023-06-01");
-    // A portable checkpoint (including its tool-less summary request) rewrites
-    // the prefix. Image-policy upgrades can do so too. Keep signed blocks
-    // verbatim and use the provider's explicit invalid-block reset, never strip
-    // signatures ourselves. Retained checkpoints/images make this choice
-    // reproducible after worker/model-instance restarts.
+    // A portable checkpoint (including a standalone tool-less summary request)
+    // rewrites the prefix. Image-policy upgrades can do so too. Keep signed
+    // blocks verbatim and use the provider's explicit invalid-block reset, never
+    // strip signatures ourselves. Retained checkpoints/images make this choice
+    // reproducible after worker/model-instance restarts. A summary request that
+    // reuses the prepared ordinary prefix keeps its thinking mode unchanged (the
+    // mode is part of the cache key) and only opts its existing thinking into
+    // the reset, in case the checkpoint history differs from what was sent.
+    const preparedCompaction =
+      request.modelSettings.providerData?.opengeni_compaction_prefix === "prepared";
     const resetsPrefix =
       projection.resized ||
       request.modelSettings.providerData?.opengeni_portable_compaction === true ||
-      (Array.isArray(request.input) && request.input.some(isCompactionSummary));
+      (Array.isArray(request.input) && request.input.some(isCompactionSummary)) ||
+      (preparedCompaction && Boolean(body.thinking));
     if (claudeNativeModelProfile(this.model)?.prefixBoundThinking && resetsPrefix) {
       body.thinking = {
         type: "adaptive",
@@ -853,6 +859,7 @@ export class AnthropicMessagesModel implements Model {
               : "anthropic_http_error",
         source,
         response.headers,
+        { subscription: this.provider.anthropic?.auth === "oauth" },
       );
     }
     this.previousRequestId = response.headers.get("request-id") ?? undefined;
@@ -933,6 +940,7 @@ export class AnthropicMessagesModel implements Model {
             code,
             event.error,
             response.headers,
+            { subscription: this.provider.anthropic?.auth === "oauth" },
           ),
         });
       }
