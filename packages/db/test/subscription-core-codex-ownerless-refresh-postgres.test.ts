@@ -11,7 +11,7 @@ import {
 } from "../src";
 import { rawRows } from "../src/database";
 import { decryptEnvironmentValue, encryptEnvironmentValue } from "../src/environment-crypto";
-import { withSubscriptionCoreCodexRefreshLock } from "../src/subscription-core-placement-world";
+import { withSubscriptionCoreCodexRefreshLock } from "../src/subscription-core-codex-bindings";
 import {
   ownerlessRefreshFixture,
   ownerlessRefreshKey,

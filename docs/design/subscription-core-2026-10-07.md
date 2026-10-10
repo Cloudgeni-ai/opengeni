@@ -2227,6 +2227,102 @@ writers, so the keyed shape (one row per provider with the primary
 connection, backfilled from the columns) is a drained step in M6, together
 with dropping the columns.
 
+### 5.1.3 M4: shared TypeScript core and the adapter interface
+
+The TypeScript runtime follows the same rule as the SQL: one implementation,
+the provider as data. Shared modules live in `packages/db/src/subscription-core/`
+(plus three M3 modules kept at their paths and now parameterized by provider:
+`subscription-core-placement-world.ts`, `subscription-core-repository.ts`,
+`subscription-core-acceptance-authority.ts`). They take a
+`SubscriptionCoreProvider` binding (`subscription-core/provider.ts`): the
+provider's adapter, the SQL expression for its remote-compaction session lock
+(or null), and the error classes its callers expect. Each shared runtime is a
+factory memoized per binding (`subscriptionCoreTurns(provider)`,
+`subscriptionCoreOperations(provider)`, `subscriptionCoreRequests(provider)`).
+
+Adapter interface (`packages/subscriptions/src/adapter.ts`, pure types).
+`SubscriptionCoreAdapter` is what the shared runtime reads, next to the
+existing `ModelConnectionAdapter`/`SubscriptionProviderAdapter` (sign-in,
+transport, entitled models, error classification, cache facts, history
+compatibility, refresh and quota decoding, §2.1):
+
+- `provider`, `displayName` (error texts only, never routing),
+  `modelPolicyProviderId`;
+- `capabilities` (`ProviderCapabilities`, now with `extraCredits`);
+- `credentialKind`: `oauth`, `setup_token` or `api_key`;
+- `quotaKind`: `usage_windows`, `spend_budget` or `rate_limits`;
+- `cacheFacts` (exact TTL or a measured idle cut-off);
+- `health`: forbidden-quarantine and entitlement-cooldown durations;
+- `credential`: `decode`/`encode` of the decrypted plaintext (fixed error
+  text, never echoing it) and `expiry` (the embedded expiry when the store has
+  none);
+- `refresh`: `CredentialRefresher` (`windowMs`, `fallbackMs`, `rotate`,
+  `reloginMessage` classifying a permanent refusal) or `null` for credentials
+  that never renew;
+- `reloginText(message)`: the stored needs-relogin text.
+
+The core owns everything else: placement and re-placement, turn and
+operation leases, request reservation and settlement, the credential load
+with one per-connection lock and `refresh_generation` fencing (the adapter
+only rotates), single-flight resolvers, health, quarantine, recovery and
+model cooldowns, the model catalog cache, usage observation persistence,
+waiter cleanup and v2 accepted authority.
+
+How the next sources fit without core changes:
+
+- SuperGrok: `oauth`, `usage_windows`; realtime client secrets,
+  transcription, image and video funding are operations on the shared
+  operation lease and request reservation (`capabilities.realtime`,
+  `fundsMedia`); the exhausted-quota refresh and the status probe are
+  operation fetches through the shared custody path.
+- Claude: `setup_token` (`refresh: null`, `autoRenews: false`, so an expired
+  token becomes needs-relogin instead of a refresh) or `oauth` with a
+  refresher; `cacheFacts` carries the exact cache TTL; response-header usage
+  observation and usage refresh feed the shared quota observation.
+- API-key connectors (OpenRouter, Vercel): `api_key`, `refresh: null`,
+  `quotaKind` `spend_budget` or `rate_limits`, `autoRenews: false`,
+  `quotaWindows: false`; their models (possibly many vendors') come from the
+  adapter's entitled-model catalog into the shared catalog cache. A refusal
+  the adapter classifies as rate-limited cools the model or source down
+  exactly as a subscription window does. A later step adds a fake API-key
+  adapter conformance test.
+
+Registry. `packages/db/src/subscription-core-providers.ts` is the only module,
+besides adapters, that enumerates providers: `SUBSCRIPTION_CORE_PROVIDERS`,
+`SUBSCRIPTION_CORE_ADAPTERS` and `subscriptionCoreProvider(id)` (throws for an
+unregistered id). Adding a provider is an adapter and binding module, one
+registry entry and its SQL registry row (§5.1.2).
+
+Guard. `bun run check:subscription-core-neutral` (chained into
+`check:subscription-contract`, with a unit test) fails when a shared module
+names a provider or vendor (code, SQL text or comments) or compares a
+provider id with a literal, and when the TypeScript registry and the SQL
+registry rows differ.
+
+Module map (old Codex module, its new shared home, and what stays Codex):
+
+| M3 module | Shared module | Kept in the Codex module |
+| --- | --- | --- |
+| `subscription-core-codex.ts` | `subscription-core/turns.ts`, `subscription-core/credential-resolver.ts` | credential mapping (ChatGPT account id, FedRAMP flag), the turn token resolver wrapper, every exported name |
+| `subscription-core-codex-operations.ts` | `subscription-core/operations.ts` | connection token resolver, candidate ordering, plan voice entitlement, usage endpoint fetch and decoding |
+| `subscription-core-codex-requests.ts` | `subscription-core/requests.ts` | Apps request reservation and settlement |
+| `subscription-core-codex-waiter-cleanup.ts` | `subscription-core/waiters.ts` | the Codex-named wrapper |
+| `subscription-core-placement-world.ts`, `-repository.ts`, `-acceptance-authority.ts` | same paths, provider-parameterized | Codex-named wrappers in `subscription-core-codex-bindings.ts` |
+| (new) | `subscription-core/provider.ts`, `subscription-core/errors.ts` | `subscription-core-codex-adapter.ts` (adapter and binding), `subscription-core-codex-errors.ts` (error classes) |
+
+Every existing export keeps its name, signature and behaviour; callers
+outside `packages/db` are unchanged. Still Codex-named and deferred to
+the next extraction PR: the settings, allocator, rename, primary, rotation
+and source projections (`subscription-core-codex-compat.ts`), connect and
+disconnect (`subscription-core-codex-connections.ts`) and catalog readiness
+(`subscription-core-codex-catalog.ts`). Codex Apps
+(`subscription-core-codex-apps.ts`) and reset credits stay Codex modules.
+In the pure package, `connectionUsesExtraCredits` (`eligibility.ts`) and the
+reference model's `spendsCredits` still test the Codex provider id; with
+Codex the only provider holding extra credits this is the same as the
+`extraCredits` capability, and the Claude/SuperGrok steps switch it to the
+capability when a second provider joins the core.
+
 ### 5.2 Legacy shape mapping
 
 | Legacy | New |
