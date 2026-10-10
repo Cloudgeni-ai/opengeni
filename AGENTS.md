@@ -539,6 +539,11 @@ Use [`docs/README.md`](docs/README.md) as the docs map. When you move or rename 
 
 ## Sandbox Notes
 
+Immediate Modal terminal pages without process persistence remain scoped to the
+synchronous collector until routing snapshots their trusted separate streams.
+Clear these transient receipts on return or rejection; never infer full output
+from a presentation banner or extend background-command retention to fix this.
+
 Daytona synchronous filesystem collection binds the registered client's exact
 native sandbox and framed original command. Routing awaits namespace cleanup
 after durable output settlement; deletion or absence never proves exit/EOF or

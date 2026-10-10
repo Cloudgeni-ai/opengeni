@@ -2,7 +2,11 @@ import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { truncateOutput } from "@openai/agents-core/sandbox/internal";
 import type { ChannelASession } from "../channel-a";
-import { aliasNativeSynchronousCommandOutput } from "../native-synchronous-collection";
+import {
+  aliasNativeSynchronousCommandOutput,
+  retainSynchronousTerminalProviderPage,
+  synchronousTerminalProviderPage,
+} from "../native-synchronous-collection";
 import { ModalProcessObservationUnavailableError } from "../errors";
 import { classifyProviderSandboxFailure } from "../provider-errors";
 import { markTypedExecHandleLoss, parseExecResponseBanner } from "../exec-banner";
@@ -185,6 +189,7 @@ export function installModalCommandSession(
     if (page.exitCode === null || entries.get(handle)?.persistence) {
       receipts.set(result, { handle, page });
     } else {
+      retainSynchronousTerminalProviderPage(session, result, page);
       entries.delete(handle);
     }
     return result;
@@ -333,7 +338,9 @@ export function installModalCommandSession(
     entries.set(handle, { command: structuredClone(command), persistence });
   };
   session.getProviderCommandOutput = (result) =>
-    typeof result === "string" ? (receipts.get(result)?.page ?? null) : null;
+    typeof result === "string"
+      ? (receipts.get(result)?.page ?? synchronousTerminalProviderPage(session, result))
+      : null;
   session.captureCommandOutput = async (result) => {
     const receipt = receipts.get(result);
     if (!receipt || receipt.page.command.kind !== "modal-router-v1") return false;

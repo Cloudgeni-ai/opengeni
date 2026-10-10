@@ -194,7 +194,9 @@ complete separate-stream pages and provider terminal/EOF proof. SDK-native
 collection in `sandbox/native-synchronous-collection.ts` begins before Start,
 on the original process streams, rather than parsing bounded shell presentation.
 Provider adapters own trusted page identities and cursors; routing captures
-those pages before acknowledging or settling the original process. Physical
+those pages before acknowledging or settling the original process. Immediate
+unretained Modal terminal pages use collector-scoped, session-bound receipts
+through that snapshot, cleared when the collector returns or rejects. Physical
 exit can settle process custody without proving complete output, but cannot
 authorize a successful filesystem result. Channel A and routing
 keep this separate from interactive/background shell execution; the worker
