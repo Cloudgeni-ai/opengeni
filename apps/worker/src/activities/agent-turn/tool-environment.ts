@@ -189,6 +189,8 @@ export type PrepareTurnToolRuntimeDeps = {
   runSettings: GovernanceModelOk["runSettings"];
   resolvedModel: GovernanceModelOk["resolvedModel"];
   lazyToolTransport: GovernanceModelOk["lazyToolTransport"];
+  /** The workspace allows Opengeni credits; paid web tools are omitted when not. */
+  workspaceCreditModelsAllowed: GovernanceModelOk["workspaceCreditModelsAllowed"];
   turnTools: ReturnType<typeof withFirstPartyTools>;
   connectionScope: { accountId: string; workspaceId: string };
   sandboxArtifactRuntime: ReturnType<typeof sandboxArtifactRuntimeAdmission>;
@@ -417,6 +419,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     runSettings: canonicalRunSettings,
     resolvedModel,
     lazyToolTransport,
+    workspaceCreditModelsAllowed,
     turnTools: canonicalTurnTools,
     sandboxArtifactRuntime,
     activeSandboxBackend,
@@ -907,7 +910,8 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   // when the session's agent configuration allows web search (filtered below).
   const webSearchTools = webSearchToolDefinitions({
     settings: runSettings,
-    tools: turnWebSearchPlan(resolvedModel, runSettings).providerTools,
+    tools: turnWebSearchPlan(resolvedModel, runSettings, workspaceCreditModelsAllowed)
+      .providerTools,
     scope: {
       accountId: input.accountId,
       workspaceId: input.workspaceId,

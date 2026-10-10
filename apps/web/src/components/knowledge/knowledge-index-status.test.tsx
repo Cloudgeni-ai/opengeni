@@ -12,9 +12,10 @@ import {
 import type { KnowledgeIndexStatus } from "@opengeni/sdk";
 
 let canBuy = false;
+let workspaceSettings: Record<string, unknown> = {};
 mock.module("@/context", () => ({
   useAppContext: () => ({
-    workspaces: [{ id: "workspace-a", accountId: "account-a" }],
+    workspaces: [{ id: "workspace-a", accountId: "account-a", settings: workspaceSettings }],
     accessContext: {
       mode: "managed",
       accountGrants: [{ accountId: "account-a", permissions: canBuy ? ["billing:manage"] : [] }],
@@ -69,6 +70,22 @@ test("funding wait states saved content and offers top-up only to billing manage
       await act(async () => root.unmount());
       container.remove();
     }
+  }
+});
+
+test("indexing parked by the credit switch never offers a top-up", async () => {
+  workspaceSettings = { allowCreditModels: false };
+  const { container, root } = await render("awaiting_funding", true);
+  try {
+    const notice = container.querySelector('[role="status"]');
+    expect(notice?.textContent).toContain("paused while Opengeni credits are off");
+    expect(notice?.textContent).toContain("turned back on");
+    expect(notice?.textContent).not.toContain("credits are added");
+    expect(container.querySelector("a")).toBeNull();
+  } finally {
+    workspaceSettings = {};
+    await act(async () => root.unmount());
+    container.remove();
   }
 });
 

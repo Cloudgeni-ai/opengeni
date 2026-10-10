@@ -214,6 +214,15 @@ test("credits turned off falls back to keyword search and refuses vector before 
         settings,
       ),
     ).rejects.toMatchObject({ code: "knowledge_vector_credits_disabled" });
+    // Keyword pagination keeps working instead of the paid-cursor rejection.
+    const nextPage = await searchKnowledgeEntries(
+      {} as never,
+      serviceContext,
+      { query: "paid", cursor: "keyword-cursor" },
+      provider,
+      settings,
+    );
+    expect(nextPage.fallbackReason).toBe("credits_disabled");
     expect(embedded).toBe(0);
     expect(debits.mock.calls.length).toBe(priorDebits);
     expect(usage.mock.calls.length).toBe(priorUsage);

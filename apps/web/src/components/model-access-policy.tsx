@@ -514,7 +514,7 @@ export function OpengeniCreditsSwitchRow({
     <>
       <SettingRow
         label="Use Opengeni credits"
-        description="Lets people run models paid with Opengeni credits. Off blocks them here, including ones added later; subscriptions and API keys keep working."
+        description="Lets this workspace spend Opengeni credits. Off blocks credit-billed models (including ones added later), paid web search and semantic Knowledge search; subscriptions and API keys keep working."
         control={
           <Switch
             checked={saved.allowCreditModels}

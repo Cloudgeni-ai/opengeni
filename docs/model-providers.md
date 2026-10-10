@@ -1394,15 +1394,18 @@ worker's post-resolution gate, which classifies the frozen turn with the same
 `cost` the claim bills. Credit-funded live voice and voice input honor it where
 credits are billed, and managed video generation is unavailable while it is
 off. The other credit meters honor it too, so a workspace with credits off is
-never debited: paid web search and web fetch are refused with a message naming
-the switch (free calls still run), knowledge search falls back to keyword
+never debited: paid web search and web fetch are not offered to new turns
+(free providers still are, and a call already offered is refused with a
+message naming the switch), knowledge search falls back to keyword
 results with `fallbackReason: "credits_disabled"` (`mode: "vector"` returns
 403), and paid knowledge indexing waits (`awaiting_funding`, no provider call,
 no retry attempt used) and resumes on its own once credits are turned back on.
 The one exception is sandbox warm time: the hosted deployment never bills it
 in credits (deploys pin `OPENGENI_SANDBOX_WARM_BILLING_MODE=usage_only`), but a
 deployment that sets it to `credits` still debits warm time while the switch is
-off, because every agent turn needs its sandbox. In the workspace catalog a
+off, because every agent turn needs its sandbox. The switch applies to new
+work: a model call or video already admitted when it turns off still settles.
+In the workspace catalog a
 credit model blocked only by the switch reports availability reason
 `credits_disabled` (labelled "Opengeni credits off" in the picker); when an
 allowlist also excludes it, the reason stays `policy_blocked`. The Settings

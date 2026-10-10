@@ -418,6 +418,34 @@ test("paid indexing in a workspace with Opengeni credits off waits without a pro
   const [ledgers] =
     await shared.admin`SELECT count(*)::int AS n FROM credit_ledger_entries WHERE source_type='knowledge_revision' AND source_id=${saved.revisionId}`;
   expect(ledgers?.n).toBe(1);
+
+  // Turning credits off mid-generation parks it at its checkpoint.
+  const large = await saveKnowledgeEntry(client.db, context, {
+    operationId: crypto.randomUUID(),
+    entryId: crypto.randomUUID(),
+    expectedVersion: 0,
+    scope: "workspace",
+    entry: { kind: "fact", title: "Large contract", content: "Large terms ".repeat(4500) },
+  });
+  expect((await worker.indexKnowledge()).advanced).toBe(1);
+  const [partial] =
+    await shared.admin`SELECT next_index FROM knowledge_index_jobs WHERE revision_id=${large.revisionId}`;
+  expect(Number(partial?.next_index)).toBeGreaterThan(0);
+  await shared.admin`UPDATE workspaces SET settings = settings || ${shared.admin.json({ allowCreditModels: false })} WHERE id=${workspaceId}`;
+  await shared.admin`UPDATE knowledge_index_jobs SET next_attempt_at=now()-interval '1 second' WHERE revision_id=${large.revisionId}`;
+  const callsBeforePause = calls;
+  expect((await worker.indexKnowledge()).deferred).toBe(1);
+  expect(calls).toBe(callsBeforePause);
+  const [paused] =
+    await shared.admin`SELECT next_index,attempts,last_failure FROM knowledge_index_jobs WHERE revision_id=${large.revisionId}`;
+  expect(paused).toMatchObject({ attempts: 0, last_failure: "waiting_for_funding" });
+  expect(Number(paused?.next_index)).toBe(Number(partial?.next_index));
+  await shared.admin`UPDATE workspaces SET settings = settings || ${shared.admin.json({ allowCreditModels: true })} WHERE id=${workspaceId}`;
+  await shared.admin`UPDATE knowledge_index_jobs SET next_attempt_at=now()-interval '1 second' WHERE revision_id=${large.revisionId}`;
+  expect((await worker.indexKnowledge()).completed).toBe(1);
+  const [largeLedgers] =
+    await shared.admin`SELECT count(*)::int AS n FROM credit_ledger_entries WHERE source_type='knowledge_revision' AND source_id=${large.revisionId}`;
+  expect(largeLedgers?.n).toBe(2);
 });
 
 test("a frozen paid generation pauses across a billing-mode rollback and resumes at its original tariff", async () => {

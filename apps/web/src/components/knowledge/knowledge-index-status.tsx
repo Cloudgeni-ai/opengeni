@@ -23,10 +23,25 @@ export function KnowledgeIndexNotice({
 }) {
   const context = useAppContext();
   if (!status) return null;
-  const accountId = context.workspaces.find((workspace) => workspace.id === workspaceId)?.accountId;
+  const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId);
+  const accountId = workspace?.accountId;
   const canBuy = Boolean(
     accountId && hasAccountPermission(context.accessContext, accountId, "billing:manage"),
   );
+  // The worker parks paid indexing the same way when the workspace turned
+  // credits off; adding credits would not resume it then.
+  if (status === "awaiting_funding" && workspace?.settings?.allowCreditModels === false) {
+    return (
+      <div role="status" className="text-sm text-fg-muted">
+        <span>Saved · indexing paused while Opengeni credits are off.</span>
+        <span>
+          {" "}
+          The original and keyword search remain available. Indexing resumes automatically when
+          Opengeni credits are turned back on for this workspace.
+        </span>
+      </div>
+    );
+  }
   return (
     <div role="status" className="text-sm text-fg-muted">
       <span>{labels[status]}.</span>
@@ -34,7 +49,7 @@ export function KnowledgeIndexNotice({
         <span>
           {" "}
           The original and keyword search remain available. Indexing resumes automatically after
-          credits are added, or when Opengeni credits are turned back on for this workspace.{" "}
+          credits are added.{" "}
           {canBuy ? (
             <Link
               to="/workspaces/$workspaceId/organization"

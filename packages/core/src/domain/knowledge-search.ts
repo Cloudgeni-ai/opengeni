@@ -103,6 +103,11 @@ export async function searchKnowledgeEntries(
   };
   const bytes = Buffer.byteLength(request.query, "utf8");
   const paidSettings = settings && paidDocumentEmbedding(settings) ? settings : undefined;
+  // A workspace that turned Opengeni credits off is never debited; it keeps
+  // keyword search (and keyword pagination) instead of paid semantic
+  // retrieval. Nothing is charged here, so no account lock is needed.
+  if (paidSettings && (await workspaceCreditsDisabled(db, context.workspaceId)))
+    return keywordFallback(db, new KnowledgeVectorCreditsDisabledError(), "credits_disabled");
   // Paid cursors would re-embed and re-charge on each page. Until a durable
   // vector cache exists, require explicit keyword mode to paginate instead.
   if (paidSettings && request.cursor)
@@ -201,14 +206,6 @@ export async function searchKnowledgeEntries(
     context.accountId,
     context.workspaceId,
     async (lockedDb) => {
-      // A workspace that turned Opengeni credits off is never debited; it
-      // keeps keyword search instead of paid semantic retrieval.
-      if (await workspaceCreditsDisabled(lockedDb, context.workspaceId))
-        return keywordFallback(
-          lockedDb,
-          new KnowledgeVectorCreditsDisabledError(),
-          "credits_disabled",
-        );
       const balance = await getSpendableCreditBalance(lockedDb, context.accountId);
       if (balance.balanceMicros <= 0)
         return keywordFallback(lockedDb, new KnowledgeVectorFundingError(), "awaiting_funding");

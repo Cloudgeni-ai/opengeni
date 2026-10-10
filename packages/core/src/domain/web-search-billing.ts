@@ -1,4 +1,4 @@
-import type { Settings } from "@opengeni/config";
+import { webSearchCreditBillingActive, type Settings } from "@opengeni/config";
 import {
   applyCreditDebitAfterUse,
   checkWorkspaceAllowance,
@@ -18,11 +18,7 @@ export const WEB_SEARCH_SOURCE_TYPE = "web_search";
 const WEB_SEARCH_BILLING_INITIATOR = "worker:web-search";
 
 /** Same rule as other deployment-funded resources: Stripe or managed limits. */
-export function webSearchCreditBillingActive(
-  settings: Pick<Settings, "billingMode" | "usageLimitsMode">,
-): boolean {
-  return settings.billingMode === "stripe" || settings.usageLimitsMode === "managed";
-}
+export { webSearchCreditBillingActive } from "@opengeni/config";
 
 /** Exact attempt that called the tool. Every charge is attributed to its turn. */
 export type WebSearchCallScope = {
@@ -65,7 +61,9 @@ export const WEB_SEARCH_CREDITS_DISABLED_MESSAGE =
  * reservation); settlement records a durable usage receipt and the idempotent
  * debit in one transaction. Calls that cost nothing (free providers, or
  * billing inactive) are never refused. A workspace that turned Opengeni
- * credits off is never debited, even when the switch flips mid-turn.
+ * credits off is refused paid calls, and settlement skips the debit (and the
+ * cost receipt) for a call that was in flight when the switch turned off or
+ * that was admitted as free but reported a provider cost.
  */
 export function createWebSearchBilling(deps: { db: Database; settings: Settings }) {
   const active = webSearchCreditBillingActive(deps.settings);
