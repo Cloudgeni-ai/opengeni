@@ -172,6 +172,7 @@ async function runMode(
     providerStarted?: boolean;
     baseMs?: number;
     accounts?: Awaited<ReturnType<typeof realtimeConnectionFixture>>;
+    ownerSubjectLabel?: string;
   } = {},
 ) {
   const baseMs = options.baseMs ?? Date.now();
@@ -266,6 +267,7 @@ async function runMode(
       ownerKey: owner.ownerKey,
       expectedVersion: started.mode.version,
       reason: "user_stop",
+      ...(options.ownerSubjectLabel ? { ownerSubjectLabel: options.ownerSubjectLabel } : {}),
       now: new Date(baseMs + 10),
     }),
   );
@@ -408,15 +410,19 @@ describe("session realtime transcript tail and continuity", () => {
   test("ending with transcript tail attaches the latest user message context to one canonical Steer", async () => {
     const value = await privateFixture();
     const userModelContext = "Current application context: organization profile revision 42.";
-    const mode = await runMode(value, [
-      transcript("user", "Please remember the final constraint", {}, userModelContext),
-      transcript(
-        "assistant",
-        "I will.",
-        {},
-        "Assistant-side context must not replace the latest user message context.",
-      ),
-    ]);
+    const mode = await runMode(
+      value,
+      [
+        transcript("user", "Please remember the final constraint", {}, userModelContext),
+        transcript(
+          "assistant",
+          "I will.",
+          {},
+          "Assistant-side context must not replace the latest user message context.",
+        ),
+      ],
+      { ownerSubjectLabel: "voice.owner@example.com" },
+    );
     const replay = await transaction(value.workspaceId, (tx) =>
       endSessionRealtimeInTransaction(tx, {
         workspaceId: value.workspaceId,
@@ -520,7 +526,11 @@ describe("session realtime transcript tail and continuity", () => {
       role: "user",
       content: [
         { type: "input_text", text: `${MODEL_CONTEXT_LABEL}\n${userModelContext}` },
-        { type: "input_text", text: renderMessageSentAtForModel(claim.turn.createdAt) },
+        // The person who ended the call is named, not the voice channel.
+        {
+          type: "input_text",
+          text: renderMessageSentAtForModel(claim.turn.createdAt, "voice.owner@example.com"),
+        },
         { type: "input_text", text: facts.projections[0]?.context },
       ],
     });

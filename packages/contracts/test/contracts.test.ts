@@ -70,6 +70,7 @@ import {
   renderTimelineAnnotationsForModel,
   renderSessionGoalContext,
   renderSessionSystemUpdateBatch,
+  renderMessageSentAtForModel,
   renderUserMessageContentForModel,
   formatModelContextTimestamp,
   sessionSystemUpdateBatchHistoryItem,
@@ -1812,6 +1813,39 @@ describe("contracts", () => {
     ]);
     // Legacy callers without a durable time render unchanged.
     expect(renderUserMessageContentForModel("Visible request", [], null)).toBe("Visible request");
+  });
+
+  test("names the person who sent a message so members can be told apart", () => {
+    const sentAt = new Date("2026-09-26T07:51:30Z");
+    expect(
+      renderUserMessageContentForModel(
+        "Ship it",
+        [],
+        null,
+        undefined,
+        sentAt,
+        "second.member@example.com",
+      ),
+    ).toEqual([
+      {
+        type: "input_text",
+        text: "[Message sent Saturday 2026-09-26 07:51 UTC by second.member@example.com]",
+      },
+      { type: "input_text", text: "Ship it" },
+    ]);
+    // The one-line part stays one line with no early closing bracket.
+    expect(renderMessageSentAtForModel(sentAt, " Ada]\n[Lovelace ")).toBe(
+      "[Message sent Saturday 2026-09-26 07:51 UTC by Ada Lovelace]",
+    );
+    expect(renderMessageSentAtForModel(sentAt, "x".repeat(500))).toHaveLength(
+      "[Message sent Saturday 2026-09-26 07:51 UTC by ]".length + 200,
+    );
+    expect(renderMessageSentAtForModel(sentAt, " ][ ")).toBe(
+      "[Message sent Saturday 2026-09-26 07:51 UTC]",
+    );
+    expect(renderMessageSentAtForModel(sentAt, null)).toBe(
+      "[Message sent Saturday 2026-09-26 07:51 UTC]",
+    );
   });
 
   test("states delivery and creation times on machine-input batches", () => {
