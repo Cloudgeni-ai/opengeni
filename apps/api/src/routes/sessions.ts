@@ -196,6 +196,7 @@ import {
   upsertSessionGoalWithEvent,
   updatePtySessionActivity,
   QueueCommandConflictError,
+  PersonalSessionInitiatorRequiredError,
   beginSessionRealtimeInTransaction,
   activateSessionRealtimeConnectionInTransaction,
   claimSessionRealtimeConnectionInTransaction,
@@ -6298,6 +6299,9 @@ function commandConflictResponse(c: Context, error: unknown): Response {
   }
   if (error instanceof SessionCommandIdempotencyError) {
     return c.json({ code: error.code, message: error.message }, 409);
+  }
+  if (error instanceof PersonalSessionInitiatorRequiredError) {
+    return c.json({ code: error.code, message: error.message }, 403);
   }
   throw error;
 }

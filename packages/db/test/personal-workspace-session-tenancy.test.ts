@@ -29,6 +29,7 @@ import {
   resolveCompanyBrainContextSelection,
   setSubjectRlsContext,
   submitHumanPromptInTransaction,
+  PersonalSessionInitiatorRequiredError,
   transitionSessionVisibility,
   updateOrganizationPrivateSessionSettings,
   withRlsContext,
@@ -548,6 +549,65 @@ describe("session tenancy SQL seams inside a managed human's own personal worksp
     },
     180_000,
   );
+
+  test("a service prompt without a verified owner is refused before a turn is accepted", async () => {
+    if (!shared || !client) return;
+    const human = await provisionManagedHuman();
+    const created = await createSessionWithIdempotencyKey(client.db, {
+      accountId: human.accountId,
+      workspaceId: human.personalWorkspaceId,
+      visibility: "user_private",
+      initialMessage: "private conversation",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId: human.subjectId },
+      subjectId: human.subjectId,
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      createIdempotencyKey: `private-service-${crypto.randomUUID()}`,
+    });
+    const [before] = await shared.admin<Array<{ count: number }>>`
+      select count(*)::integer as count from session_turns where session_id = ${created.session.id}`;
+    const submit = (actor: Parameters<typeof submitHumanPromptInTransaction>[1]["actor"]) =>
+      withWorkspaceSubjectSessionActivityRls(
+        client!.db,
+        human.personalWorkspaceId,
+        human.subjectId,
+        (db) =>
+          db.transaction((tx) =>
+            submitHumanPromptInTransaction(tx as unknown as typeof db, {
+              accountId: human.accountId,
+              workspaceId: human.personalWorkspaceId,
+              sessionId: created.session.id,
+              subjectId: human.subjectId,
+              actor,
+              operationKey: crypto.randomUUID(),
+              delivery: "send",
+              text: "check in",
+              resources: [],
+              model: "test-model",
+              reasoningEffort: "medium",
+              reasoningEffortFallback: "medium",
+              source: "user",
+            }),
+          ),
+      );
+
+    // Every attempt in this session must resolve its verified owner before the
+    // model runs; a service initiator has none, so acceptance must refuse.
+    await expect(
+      submit({ type: "service", subjectId: human.subjectId, subjectLabel: "Automation" }),
+    ).rejects.toBeInstanceOf(PersonalSessionInitiatorRequiredError);
+    const [after] = await shared.admin<Array<{ count: number }>>`
+      select count(*)::integer as count from session_turns where session_id = ${created.session.id}`;
+    expect(after?.count).toBe(before?.count);
+
+    // The owner still sends normally.
+    const accepted = await submit({ type: "human", subjectId: human.subjectId });
+    expect(accepted.turnId).toBeString();
+  }, 180_000);
 
   test("an exact private parent attempt creates a same-owner private child", async () => {
     if (!shared || !client) return;

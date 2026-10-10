@@ -46,6 +46,7 @@ import {
 import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import {
   withSessionRlsActorContext,
+  rawRows,
   setSubjectRlsContext,
   type Database,
   type SessionActivityDatabase,
@@ -125,6 +126,51 @@ export class QueueCommandConflictError extends Error {
   ) {
     super(message);
   }
+}
+
+/**
+ * A session that keeps personal memory (a private session, a user-scoped
+ * memory session, or any session in a personal workspace) can only run work
+ * caused by a verified human: its owner for a private session. Every turn
+ * resolves that owner before the model runs, so admitting a prompt without
+ * one only produces a turn that fails on start. Refuse it at admission with a
+ * reason the caller can act on.
+ */
+export class PersonalSessionInitiatorRequiredError extends Error {
+  readonly name = "PersonalSessionInitiatorRequiredError";
+  readonly code = "PERSONAL_SESSION_OWNER_REQUIRED";
+
+  constructor() {
+    super(
+      "This session keeps personal memory, so it only accepts messages sent by its owner. Send it as that person, or use a shared session.",
+    );
+  }
+}
+
+/** Mirrors the personal-destination guard every agent attempt applies on start. */
+async function assertPersonalSessionInitiatorInTransaction(
+  db: SessionActivityDatabase,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    session: { visibility: string; memoryScope: string; ownerSubjectId: string | null };
+    initiatingHumanSubjectId: string | null;
+  },
+): Promise<void> {
+  const subject = input.initiatingHumanSubjectId;
+  const ownerMismatch =
+    input.session.visibility === "user_private" && input.session.ownerSubjectId !== subject;
+  if (subject && !ownerMismatch) return;
+  let personal =
+    input.session.visibility === "user_private" || input.session.memoryScope === "user";
+  if (!personal) {
+    const [row] = await rawRows<{ kind: string | null }>(
+      db,
+      sql`select get_workspace_kind(${input.accountId}::uuid, ${input.workspaceId}::uuid) as kind`,
+    );
+    personal = row?.kind === "personal";
+  }
+  if (personal) throw new PersonalSessionInitiatorRequiredError();
 }
 
 export type ComposerDraftRow = typeof schema.composerDrafts.$inferSelect;
@@ -2096,6 +2142,12 @@ export async function submitHumanPromptInTransaction(
       (editedSourceTurn.initiatorKind === "subject" ? editedSourceTurn.initiatorSubjectId : null))
     : (frozenInitiator.initiatingHumanSubjectId ??
       (frozenInitiator.initiator.kind === "subject" ? frozenInitiator.initiator.subjectId : null));
+  await assertPersonalSessionInitiatorInTransaction(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    session: storedSession,
+    initiatingHumanSubjectId: acceptedInitiatingHumanSubjectId,
+  });
   if (
     (input.personalConnectionDelegations ?? []).length > 0 ||
     input.personalResourceAttachment !== undefined
