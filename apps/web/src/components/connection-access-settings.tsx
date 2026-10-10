@@ -343,15 +343,22 @@ export function ConnectionAccessFormPage({
                   });
                   return;
                 }
+                // From all workspaces, start from all of them; from people, from the
+                // saved workspaces (none when people were saved), never from all.
+                const savedWorkspaces = data.policy.allowedPeople
+                  ? []
+                  : (data.policy.allowedWorkspaces ?? []);
                 setDraft(
                   withoutPeople({
                     ...draft,
                     allowedWorkspaces:
                       value === "all"
                         ? null
-                        : data.workspaces
-                            .map((workspace) => workspace.id)
-                            .filter((id) => !local.includes(id)),
+                        : scope === "people"
+                          ? savedWorkspaces
+                          : data.workspaces
+                              .map((workspace) => workspace.id)
+                              .filter((id) => !local.includes(id)),
                   }),
                 );
               }}

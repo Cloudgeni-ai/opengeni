@@ -54,7 +54,8 @@ import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
 
 /**
  * Whether an organization account reaches a workspace, from its "Available
- * in" policy. Null while unknown (still loading, or the read failed).
+ * in" policy and the workspaces that connected it. Null while unknown (still
+ * loading, or the read failed) or when it is limited to chosen people.
  */
 export function reachesWorkspace(
   access: ModelConnectionAccessResponse | null,
@@ -62,8 +63,14 @@ export function reachesWorkspace(
 ): boolean | null {
   if (!access) return null;
   const { policy, personalWorkspacesSupported } = access;
+  // Chosen people use it wherever they work: not a property of the workspace.
+  if (policy.allowedPeople) return null;
   if (workspace.personal) return personalWorkspacesSupported && policy.allowPersonalWorkspaces;
-  return policy.allowedWorkspaces === null || policy.allowedWorkspaces.includes(workspace.id);
+  return (
+    policy.allowedWorkspaces === null ||
+    policy.allowedWorkspaces.includes(workspace.id) ||
+    (access.localWorkspaceIds ?? []).includes(workspace.id)
+  );
 }
 
 export interface OrgCodexPlaces {
@@ -227,8 +234,7 @@ function OrgCodexAccountDetail({
               }
             />
             {/* A workspace's account can't be the organization primary; shown once known. */}
-            {codex.accounts.length > 1 &&
-            (access.data ? !access.data.managedByWorkspaceId : Boolean(access.error)) ? (
+            {codex.accounts.length > 1 && access.data && !access.data.managedByWorkspaceId ? (
               <SettingRow
                 label="Primary account"
                 description="Used for new work when sharing is set to Primary only."

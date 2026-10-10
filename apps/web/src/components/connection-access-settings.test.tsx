@@ -623,14 +623,28 @@ test("a workspace's own account is an organization account: its workspace stays,
     expect(saveButton().disabled).toBe(false);
     await choose("Only selected people");
     expect(saveButton().disabled).toBe(true);
+    // From saved people, chosen workspaces start empty, never from all of them.
+    await choose("Only selected workspaces");
+    await save();
+    expect(writes.at(-1)).toEqual({
+      allowedModels: null,
+      allowedWorkspaces: [],
+      allowPersonalWorkspaces: false,
+      allowedPeople: null,
+      version: 3,
+    });
+
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await act(async () => root.render(<Page />));
+    await flush();
     await choose("All shared workspaces, including new ones");
     await save();
     expect(writes.at(-1)).toEqual({
       allowedModels: null,
       allowedWorkspaces: null,
       allowPersonalWorkspaces: false,
-      allowedPeople: null,
-      version: 3,
+      version: 4,
     });
   } finally {
     await act(async () => root.unmount());
