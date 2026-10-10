@@ -1132,7 +1132,7 @@ $body$
   $ddl$, data_schema);
   EXECUTE format($ddl$
     CREATE FUNCTION opengeni_private.read_subscription_core_connection_credential(p_provider text, p_account_id uuid, p_workspace_id uuid, p_connection_id uuid, p_operation_id uuid, p_attempt_id uuid, p_holder_id text, p_generation bigint)
-    RETURNS TABLE(status text, ownership text, refresh_generation bigint, credential_encrypted text, expires_at timestamp with time zone, last_refresh_at timestamp with time zone, provider_account_id text, plan_type text, is_fedramp boolean)
+    RETURNS TABLE(status text, ownership text, refresh_generation bigint, credential_encrypted text, expires_at timestamp with time zone, last_refresh_at timestamp with time zone, provider_account_id text, plan_type text, provider_state jsonb)
     LANGUAGE plpgsql
     SECURITY DEFINER
     SET search_path = pg_catalog, %1$I, opengeni_private, pg_temp
@@ -1154,7 +1154,9 @@ $body$
       last_refresh_at := target.last_refresh_at;
       provider_account_id := target.provider_account_id;
       plan_type := target.plan_type;
-      is_fedramp := coalesce((target.provider_state->>'isFedramp')::boolean, false);
+      -- Provider-owned facts stay opaque here; only the provider's adapter
+      -- interprets them (the provider-named routine decoded one flag).
+      provider_state := coalesce(target.provider_state, '{}'::jsonb);
       RETURN NEXT;
     END
     $body$

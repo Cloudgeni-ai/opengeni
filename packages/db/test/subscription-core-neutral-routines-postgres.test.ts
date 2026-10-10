@@ -629,21 +629,37 @@ describe("provider-neutral subscription-core routines (migration 0705)", () => {
           },
         });
       }
-      // The registered provider reads the same shared connection.
+      // The registered provider reads the same shared connection; provider
+      // facts stay opaque (`provider_state`), never decoded per provider.
       const registered = await withSubscriptionCoreAcceptedTurn(
         client!.db,
         state.identity,
-        async (tx) =>
-          (
-            await rawRows(
-              tx,
-              sql`select * from opengeni_private.read_subscription_core_connection_credential('codex',
+        async (tx) => {
+          const rows = await rawRows<Record<string, unknown>>(
+            tx,
+            sql`select * from opengeni_private.read_subscription_core_connection_credential('codex',
               ${state.accountId}::uuid, ${state.workspaceId}::uuid, ${state.connectionId}::uuid,
               null, null, null, null)`,
-            )
-          ).length,
+          );
+          return rows.map((row) => Object.keys(row).sort());
+        },
       );
-      expect(registered).toEqual({ status: "completed", value: 1 });
+      expect(registered).toEqual({
+        status: "completed",
+        value: [
+          [
+            "credential_encrypted",
+            "expires_at",
+            "last_refresh_at",
+            "ownership",
+            "plan_type",
+            "provider_account_id",
+            "provider_state",
+            "refresh_generation",
+            "status",
+          ],
+        ],
+      });
     },
     600_000,
   );

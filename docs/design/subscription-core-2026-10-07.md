@@ -2165,7 +2165,11 @@ a provider name.
   keys, so an old binary on the Codex-named routines and a new binary on the
   neutral ones serialize exactly as two old binaries do. Default relogin and
   refusal texts are provider-free; the runtime passes the provider's own text,
-  so stored Codex values are unchanged. The shared disconnect-admission trigger
+  so stored Codex values are unchanged. Neutral routines never decode a
+  provider fact: `read_subscription_core_connection_credential` returns the
+  opaque `provider_state` (the Codex-named routine returned a decoded
+  `is_fedramp`), and the Codex adapter reads its FedRAMP flag from it, as the
+  chat-turn credential load already did. The shared disconnect-admission trigger
   admits by registry membership instead of a provider literal.
 - Rolling compatibility and retirement. The Codex-named routines, kinds and
   policies stay unchanged for binaries that still call them (staging runs

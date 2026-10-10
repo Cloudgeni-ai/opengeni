@@ -459,11 +459,11 @@ export async function loadSubscriptionCoreCodexConnectionCredential(
       last_refresh_at: Date | string | null;
       provider_account_id: string | null;
       plan_type: string | null;
-      is_fedramp: boolean;
+      provider_state: Record<string, unknown> | null;
     }>(
       tx,
       sql`select status, refresh_generation, credential_encrypted, expires_at, last_refresh_at,
-          provider_account_id, plan_type, is_fedramp
+          provider_account_id, plan_type, provider_state
         from opengeni_private.read_subscription_core_connection_credential(${SUBSCRIPTION_CORE_CODEX_PROVIDER},
           ${routineArgs(scope, connectionId, ref)}
         )`,
@@ -481,7 +481,7 @@ export async function loadSubscriptionCoreCodexConnectionCredential(
       refreshGeneration: Number(row.refresh_generation),
       tokens: decodeTokens(key, row.credential_encrypted),
       chatgptAccountId: row.provider_account_id,
-      isFedramp: row.is_fedramp === true,
+      isFedramp: row.provider_state?.isFedramp === true,
       planType: row.plan_type,
       expiresAt: row.expires_at === null ? null : new Date(row.expires_at),
       lastRefreshAt: row.last_refresh_at === null ? null : new Date(row.last_refresh_at),
