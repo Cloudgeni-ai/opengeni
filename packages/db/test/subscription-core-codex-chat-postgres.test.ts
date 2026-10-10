@@ -2207,7 +2207,7 @@ describe.skipIf(!realDb)("a workspace-managed Codex account under organization r
       explicit: true,
     });
     await release(org, turn, managed);
-    const [row] = await shared!.admin<{ managed: string; refresh_generation: string }[]>`
+    const [row] = await shared!.admin<{ managed: string | null; refresh_generation: string }[]>`
       select managed_by_workspace_id::text as managed, refresh_generation::text as refresh_generation
       from subscription_connections where id = ${managed}::uuid`;
     expect(row).toEqual({ managed: null, refresh_generation: "1" });
