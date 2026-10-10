@@ -6320,7 +6320,10 @@ function isReviewedGptVisionModel(slug: string): boolean {
 }
 
 /** Repair missing reviewed capabilities in live/stored Codex definitions.
- * Explicit latency restrictions and every unrelated catalog field remain authoritative.
+ * GPT-6 models accept image input and JSON-schema output (`text.format`, as the
+ * Codex CLI's `--output-schema` sends it; verified live). Explicit latency and
+ * structured-output restrictions and every unrelated catalog field remain
+ * authoritative.
  */
 function reviewedCodexCatalogCapabilities(
   slug: string,
@@ -6333,6 +6336,10 @@ function reviewedCodexCatalogCapabilities(
   return normalizeCapabilities({
     ...capabilities,
     inputModalities: [...new Set([...capabilities.inputModalities, "image" as const])],
+    structuredOutput:
+      capabilities.structuredOutput.upstream === "unknown"
+        ? { upstream: "supported", runnable: true }
+        : capabilities.structuredOutput,
     latencyModes:
       fast && !capabilities.latencyModes.some((mode) => mode.id === "fast")
         ? [...capabilities.latencyModes, fast]
@@ -6756,6 +6763,47 @@ function matchesAdditiveCapabilityDefinitionVersion(
 }
 
 /**
+ * The model as accepted before runnable structured output was declared, or
+ * null when it is not declared. Agent turns never request structured output
+ * (only stateless single calls do), so enabling it from the exact unknown/off
+ * declaration cannot change an accepted turn's execution. Every definition
+ * compatibility check also runs against this one historical declaration;
+ * every other field still has to reproduce the frozen digest.
+ */
+function structuredOutputPreEnablementModel(
+  model: ConfiguredModel,
+  provider: ResolvedModelProvider,
+): ConfiguredModel | null {
+  if (!model.capabilities.structuredOutput.runnable) return null;
+  const { definitionVersion: _definitionVersion, ...modelWithoutVersion } = model;
+  const historical = {
+    ...modelWithoutVersion,
+    capabilities: {
+      ...model.capabilities,
+      structuredOutput: { upstream: "unknown" as const, runnable: false },
+    },
+  };
+  return { ...historical, definitionVersion: definitionVersionFor(historical, provider) };
+}
+
+/** Whether a frozen digest matches this model definition or one tolerated historical form of it. */
+function acceptedDefinitionVersionMatches(
+  model: ConfiguredModel,
+  provider: ResolvedModelProvider,
+  policy: TurnExecutionPolicyV1,
+): boolean {
+  return (
+    policy.definitionVersion === model.definitionVersion ||
+    policy.definitionVersion === legacyFrozenAutoCompactDefinitionVersionFor(model, provider) ||
+    policy.definitionVersion === legacyImplicitOpenAiDefinitionVersionFor(model, provider) ||
+    policy.definitionVersion ===
+      legacyCodexAstraImplicitCachingDefinitionVersionFor(model, provider) ||
+    matchesAdditiveCapabilityDefinitionVersion(model, provider, policy) ||
+    matchesWebSearchEnablementDefinitionVersion(model, provider, policy)
+  );
+}
+
+/**
  * Operator-change compatibility (an added capability or enabled web search)
  * also applies to a turn accepted before the compaction trigger left the
  * digest. This is the same single historical declaration in either digest
@@ -6956,7 +7004,7 @@ export function withCodexCatalogProvider(settings: Settings): Settings {
     models:
       catalogModels ??
       CODEX_FALLBACK_MODEL_SLUGS.map((slug) => {
-        const capabilities = {
+        const capabilities = reviewedCodexCatalogCapabilities(slug, {
           ...legacyModelCapabilities(settings, {
             reasoningEffort: true,
             hostedWebSearch: true,
@@ -6968,7 +7016,7 @@ export function withCodexCatalogProvider(settings: Settings): Settings {
               }
             : {}),
           latencyModes: builtinLatencyModesForModel(`${CODEX_MODEL_ID_PREFIX}${slug}`),
-        };
+        });
         return {
           id: `${CODEX_MODEL_ID_PREFIX}${slug}`,
           upstreamModelId: slug,
@@ -7722,20 +7770,17 @@ export function assertTurnExecutionPolicyMatchesConfigV1(
   // wireProfile was added to the definition digest after policies already
   // existed in durable in-flight turns. An omitted profile meant exactly
   // "openai", so accept that one legacy digest only; Azure and every other
-  // executable-definition change remain fail-closed.
-  const legacyImplicitOpenAiDefinitionVersion = legacyImplicitOpenAiDefinitionVersionFor(
+  // executable-definition change remain fail-closed. A model whose structured
+  // output was enabled after acceptance is also checked in its one
+  // pre-enablement form.
+  const structuredOutputHistorical = structuredOutputPreEnablementModel(
     resolved.model,
     resolved.provider,
   );
   const definitionVersionMatches =
-    parsed.definitionVersion === resolved.model.definitionVersion ||
-    parsed.definitionVersion ===
-      legacyFrozenAutoCompactDefinitionVersionFor(resolved.model, resolved.provider) ||
-    parsed.definitionVersion === legacyImplicitOpenAiDefinitionVersion ||
-    parsed.definitionVersion ===
-      legacyCodexAstraImplicitCachingDefinitionVersionFor(resolved.model, resolved.provider) ||
-    matchesAdditiveCapabilityDefinitionVersion(resolved.model, resolved.provider, parsed) ||
-    matchesWebSearchEnablementDefinitionVersion(resolved.model, resolved.provider, parsed);
+    acceptedDefinitionVersionMatches(resolved.model, resolved.provider, parsed) ||
+    (structuredOutputHistorical !== null &&
+      acceptedDefinitionVersionMatches(structuredOutputHistorical, resolved.provider, parsed));
   const identityMismatched =
     parsed.providerId !== resolved.provider.id ||
     parsed.upstreamModelId !== resolved.model.upstreamModelId ||
