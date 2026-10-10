@@ -22,11 +22,15 @@ const updateWorkspaceModelAccessPolicy = mock(
     allowedModels: ["codex/gpt-5.6-sol"],
   }),
 );
+const updateWorkspaceSettings = mock(
+  async (_workspaceId: string, _patch: { allowCreditModels?: boolean }) => ({}),
+);
 const context = {
   client: {
     getWorkspaceModelAccessPolicy,
     getWorkspaceModelCatalog,
     updateWorkspaceModelAccessPolicy,
+    updateWorkspaceSettings,
   },
 };
 
@@ -54,8 +58,26 @@ mock.module("@/components/ui/confirm-dialog", () => ({
     ) : null,
 }));
 
-const { AllowedModelsFormPage, modelAccessPolicyDraft, modelAccessPolicyRequest } =
-  await import("./model-access-policy");
+const {
+  AllowedModelsFormPage,
+  AllowedModelsRow,
+  OpengeniCreditsSwitchRow,
+  modelAccessPolicyDraft,
+  modelAccessPolicyRequest,
+  usableModelCount,
+  useModelAccessPolicy,
+} = await import("./model-access-policy");
+
+/** The Defaults rows of the Models page that read the policy. */
+function DefaultsRows({ canManage = true }: { canManage?: boolean }) {
+  const state = useModelAccessPolicy("workspace-a");
+  return (
+    <>
+      <AllowedModelsRow state={state} onEdit={() => undefined} />
+      <OpengeniCreditsSwitchRow state={state} canManage={canManage} />
+    </>
+  );
+}
 
 function ModelAccessPolicySection(props: { workspaceId: string; canManage: boolean }) {
   return <AllowedModelsFormPage {...props} onClose={() => undefined} />;
@@ -66,12 +88,14 @@ function model(
   provider: string,
   providerLabel: string,
   policyAllowed = true,
+  cost?: WorkspaceModelCatalogModel["cost"],
 ): WorkspaceModelCatalogModel {
   return {
     id,
     label: id,
     provider,
     providerLabel,
+    ...(cost ? { cost } : {}),
     api: "responses",
     credentialReadiness: {
       status: "ready",
@@ -132,6 +156,8 @@ beforeEach(() => {
   getWorkspaceModelAccessPolicy.mockClear();
   getWorkspaceModelCatalog.mockClear();
   updateWorkspaceModelAccessPolicy.mockClear();
+  updateWorkspaceSettings.mockClear();
+  updateWorkspaceSettings.mockImplementation(async () => ({}));
   getWorkspaceModelAccessPolicy.mockImplementation(async (_workspaceId: string) => ({
     allowedProviders: ["private-provider-id"],
     allowedModels: null,
@@ -380,5 +406,230 @@ describe("workspace model access policy editor", () => {
       await act(async () => root.unmount());
       container.remove();
     }
+  });
+});
+
+describe("Use Opengeni credits", () => {
+  const creditCatalog = [
+    model("codex/gpt-5.6-sol", "codex", "Codex", true, "subscription"),
+    model("gpt-6-sol", "openai", "Opengeni", true, "credits"),
+    model("gpt-6-luna", "openai", "Opengeni", true, "credits"),
+    model("opper/aws/claude-opus-5-5", "opper", "Opper", true, "credits"),
+  ];
+
+  async function render(node: ReactNode) {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(node);
+      await flush();
+    });
+    return {
+      container,
+      async cleanup() {
+        await act(async () => root.unmount());
+        container.remove();
+      },
+    };
+  }
+
+  /** The Defaults rows hold one switch: Use Opengeni credits. */
+  function creditSwitch(container: HTMLElement) {
+    return container.querySelector<HTMLButtonElement>('button[role="switch"]');
+  }
+
+  test("one switch turns every credit model off and leaves the allowlists alone", async () => {
+    let allowCreditModels = true;
+    getWorkspaceModelAccessPolicy.mockImplementation(async () => ({
+      allowedProviders: null,
+      allowedModels: ["codex/gpt-5.6-sol", "gpt-6-sol"],
+      allowCreditModels,
+    }));
+    getWorkspaceModelCatalog.mockImplementation(async () => ({ models: creditCatalog }));
+    updateWorkspaceSettings.mockImplementation(async (_workspaceId, patch) => {
+      allowCreditModels = patch.allowCreditModels ?? allowCreditModels;
+      return {};
+    });
+    const view = await render(<DefaultsRows />);
+    try {
+      expect(view.container.textContent).toContain("Use Opengeni credits");
+      const toggle = creditSwitch(view.container)!;
+      expect(toggle.getAttribute("aria-checked")).toBe("true");
+      // Codex is still allowed, so nothing to confirm: it saves at once.
+      await act(async () => {
+        toggle.click();
+        await flush();
+      });
+      expect(view.container.querySelector('[data-testid="confirm-dialog"]')).toBeNull();
+      // The switch is a workspace setting; the allowlist is never rewritten.
+      expect(updateWorkspaceSettings).toHaveBeenCalledTimes(1);
+      expect(updateWorkspaceSettings.mock.calls[0]).toEqual([
+        "workspace-a",
+        { allowCreditModels: false },
+      ]);
+      expect(updateWorkspaceModelAccessPolicy).not.toHaveBeenCalled();
+      expect(creditSwitch(view.container)!.getAttribute("aria-checked")).toBe("false");
+      // The listed credit model no longer counts toward the allowlist summary.
+      expect(view.container.textContent).toContain("1 model");
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  test("asks first when turning credits off would leave no model new work can run on", async () => {
+    getWorkspaceModelAccessPolicy.mockImplementation(async () => ({
+      allowedProviders: null,
+      allowedModels: ["gpt-6-sol", "gpt-6-luna"],
+      allowCreditModels: true,
+    }));
+    getWorkspaceModelCatalog.mockImplementation(async () => ({ models: creditCatalog }));
+    const view = await render(<DefaultsRows />);
+    try {
+      await act(async () => {
+        creditSwitch(view.container)!.click();
+        await flush();
+      });
+      expect(view.container.textContent).toContain("Turn off Opengeni credits?");
+      expect(updateWorkspaceSettings).not.toHaveBeenCalled();
+      const confirm = [...view.container.querySelectorAll("button")].find((button) =>
+        button.textContent?.includes("Confirm replacement"),
+      );
+      getWorkspaceModelAccessPolicy.mockImplementation(async () => ({
+        allowedProviders: null,
+        allowedModels: ["gpt-6-sol", "gpt-6-luna"],
+        allowCreditModels: false,
+      }));
+      await act(async () => {
+        confirm!.click();
+        await flush();
+      });
+      expect(updateWorkspaceSettings.mock.calls[0]![1]).toEqual({ allowCreditModels: false });
+      expect(updateWorkspaceModelAccessPolicy).not.toHaveBeenCalled();
+      expect(view.container.textContent).toContain(
+        "Opengeni credits are off and no other model can run, so new work can't start.",
+      );
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  test("hidden when no model here is paid with credits, shown again whenever it is off", async () => {
+    getWorkspaceModelAccessPolicy.mockImplementation(async () => ({
+      allowedProviders: null,
+      allowedModels: null,
+    }));
+    getWorkspaceModelCatalog.mockImplementation(async () => ({
+      models: [model("codex/gpt-5.6-sol", "codex", "Codex", true, "subscription")],
+    }));
+    let view = await render(<DefaultsRows />);
+    try {
+      expect(view.container.textContent).not.toContain("Use Opengeni credits");
+    } finally {
+      await view.cleanup();
+    }
+    getWorkspaceModelAccessPolicy.mockImplementation(async () => ({
+      allowedProviders: null,
+      allowedModels: null,
+      allowCreditModels: false,
+    }));
+    view = await render(<DefaultsRows />);
+    try {
+      expect(view.container.textContent).toContain("Use Opengeni credits");
+      expect(view.container.textContent).toContain("All except credits");
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  test("Allowed models mutes credit models while credits are off and never sends the switch", async () => {
+    getWorkspaceModelAccessPolicy.mockImplementation(async () => ({
+      allowedProviders: null,
+      allowedModels: null,
+      allowCreditModels: false,
+    }));
+    getWorkspaceModelCatalog.mockImplementation(async () => ({ models: creditCatalog }));
+    const view = await render(<ModelAccessPolicySection workspaceId="workspace-a" canManage />);
+    try {
+      expect(view.container.textContent).toContain("Opengeni credits are off");
+      await act(async () => everyModelSwitch(view.container)!.click());
+      const box = (label: string) =>
+        view.container.querySelector<HTMLInputElement>(`input[aria-label="${label}"]`)!;
+      expect(box("gpt-6-sol").disabled).toBe(true);
+      expect(box("codex/gpt-5.6-sol").disabled).toBe(false);
+      expect(view.container.textContent).toContain("Credits off");
+      // No group checkbox when credits lock every model in the group.
+      expect(view.container.querySelector('input[aria-label="All Opengeni models"]')).toBeNull();
+      // Unchecking the only usable model warns that nothing can run.
+      await act(async () => box("codex/gpt-5.6-sol").click());
+      expect(view.container.textContent).toContain("No model can run here");
+      const save = [...view.container.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Save",
+      );
+      await act(async () => {
+        save!.click();
+        await flush();
+      });
+      const request = updateWorkspaceModelAccessPolicy.mock.calls[0]![1];
+      expect(request).not.toHaveProperty("allowCreditModels");
+      expect(request.allowedModels).toEqual(
+        ["gpt-6-luna", "gpt-6-sol", "opper/aws/claude-opus-5-5"].sort(),
+      );
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  test("a group checkbox picks or clears every model of that provider at once", async () => {
+    getWorkspaceModelAccessPolicy.mockImplementation(async () => ({
+      allowedProviders: null,
+      allowedModels: ["gpt-6-sol"],
+      allowCreditModels: true,
+    }));
+    getWorkspaceModelCatalog.mockImplementation(async () => ({ models: creditCatalog }));
+    const view = await render(<ModelAccessPolicySection workspaceId="workspace-a" canManage />);
+    try {
+      const group = () =>
+        view.container.querySelector<HTMLInputElement>('input[aria-label="All Opengeni models"]')!;
+      const box = (label: string) =>
+        view.container.querySelector<HTMLInputElement>(`input[aria-label="${label}"]`)!;
+      expect(group().indeterminate).toBe(true);
+      await act(async () => group().click());
+      expect(box("gpt-6-sol").checked).toBe(true);
+      expect(box("gpt-6-luna").checked).toBe(true);
+      expect(group().checked).toBe(true);
+      await act(async () => group().click());
+      expect(box("gpt-6-sol").checked).toBe(false);
+      expect(box("gpt-6-luna").checked).toBe(false);
+      // Other groups are untouched; the group shows who pays.
+      expect(box("codex/gpt-5.6-sol").checked).toBe(false);
+      expect(view.container.textContent).toContain("Opengeni · Opengeni credits");
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  test("counts only ready, allowed models that credits don't block", () => {
+    const draft = modelAccessPolicyDraft(
+      { allowedProviders: null, allowedModels: null, allowCreditModels: false },
+      creditCatalog,
+    );
+    expect(draft.allowCreditModels).toBe(false);
+    expect(usableModelCount(creditCatalog, draft, false)).toBe(1);
+    expect(usableModelCount(creditCatalog, draft, true)).toBe(4);
+    expect(
+      usableModelCount(
+        creditCatalog.map((candidate) =>
+          candidate.cost === "subscription"
+            ? {
+                ...candidate,
+                credentialReadiness: { ...candidate.credentialReadiness, status: "not_ready" },
+              }
+            : candidate,
+        ),
+        draft,
+        false,
+      ),
+    ).toBe(0);
   });
 });

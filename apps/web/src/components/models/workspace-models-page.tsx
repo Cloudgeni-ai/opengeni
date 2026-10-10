@@ -31,6 +31,7 @@ import { DefaultSessionModelPreferenceRow } from "@/components/default-session-m
 import {
   AllowedModelsFormPage,
   AllowedModelsRow,
+  OpengeniCreditsSwitchRow,
   useModelAccessPolicy,
   type ModelAccessPolicyState,
 } from "@/components/model-access-policy";
@@ -1453,6 +1454,7 @@ export function WorkspaceDefaultsSection({
           onEdit={onEditAllowed}
           organizationName={organizationName}
         />
+        <OpengeniCreditsSwitchRow state={policy} canManage={canManage} />
         <SettingNavRow
           label="Context & compaction"
           description="When to summarize long conversations, by model."

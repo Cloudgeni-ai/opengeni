@@ -1,5 +1,6 @@
 import {
   isModelAvailableForNewSelection,
+  policyChargesCreditsForModel,
   policyProviderIdForModel,
   resolveModelProvider,
   runnableLatencyModesForModel,
@@ -51,17 +52,21 @@ export function goalContinuationModelDecision(input: {
       pausedReason: "model_unavailable",
     };
   }
-  if (
-    input.workspaceModelPolicy !== null &&
-    !evaluateWorkspaceModelPolicy(input.workspaceModelPolicy, {
-      providerId: policyProviderIdForModel(catalogSettings, model),
-      modelId: model,
-    }).allowed
-  ) {
+  const policyVerdict =
+    input.workspaceModelPolicy === null
+      ? null
+      : evaluateWorkspaceModelPolicy(input.workspaceModelPolicy, {
+          providerId: policyProviderIdForModel(catalogSettings, model),
+          modelId: model,
+          chargesCredits: policyChargesCreditsForModel(catalogSettings, model),
+        });
+  if (policyVerdict && !policyVerdict.allowed) {
     return {
       model,
       blocked:
-        "Workspace policy blocks the selected model. Choose an allowed model before resuming.",
+        policyVerdict.reason === "credits"
+          ? "Opengeni credits are turned off in this workspace. Choose a model paid by a subscription or API key before resuming."
+          : "Workspace policy blocks the selected model. Choose an allowed model before resuming.",
       pausedReason: "model_policy",
     };
   }

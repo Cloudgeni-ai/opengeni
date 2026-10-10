@@ -3,11 +3,13 @@ import {
   forwardRef,
   useContext,
   useId,
+  useLayoutEffect,
   useMemo,
+  useRef,
   type ComponentProps,
   type ReactNode,
 } from "react";
-import { CheckIcon, CircleAlertIcon } from "lucide-react";
+import { CheckIcon, CircleAlertIcon, MinusIcon } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 
@@ -231,28 +233,45 @@ export const TextArea = forwardRef<
 /**
  * The bare 16px checkbox, for rows that carry their own label (a model in
  * Allowed models). Wrap the row in a <label> so the whole row toggles it.
+ * `indeterminate` shows a dash for a group checkbox whose items are mixed;
+ * clicking it reports `checked: true` (select all).
  */
 export function Checkbox({
   onCheckedChange,
   className,
+  indeterminate = false,
   ...props
 }: Omit<ComponentProps<"input">, "type" | "onChange" | "className"> & {
   onCheckedChange?: (checked: boolean) => void;
   className?: string;
+  indeterminate?: boolean;
 }) {
+  const ref = useRef<HTMLInputElement>(null);
+  useLayoutEffect(() => {
+    if (ref.current) ref.current.indeterminate = indeterminate;
+  }, [indeterminate]);
   return (
     <span className={cn("relative grid size-4 shrink-0 place-items-center", className)}>
       <input
+        ref={ref}
         type="checkbox"
         {...props}
-        onChange={(event) => onCheckedChange?.(event.target.checked)}
-        className="peer size-4 appearance-none rounded-[4px]! border border-border-strong bg-surface transition-colors duration-[120ms] checked:border-brand-strong checked:bg-brand-strong hover:border-fg-subtle disabled:cursor-not-allowed pointer-coarse:after:absolute pointer-coarse:after:-inset-3.5 pointer-coarse:after:content-['']"
+        onChange={(event) => onCheckedChange?.(indeterminate ? true : event.target.checked)}
+        className="peer size-4 appearance-none rounded-[4px]! border border-border-strong bg-surface transition-colors duration-[120ms] checked:border-brand-strong checked:bg-brand-strong indeterminate:border-brand-strong indeterminate:bg-brand-strong hover:border-fg-subtle disabled:cursor-not-allowed pointer-coarse:after:absolute pointer-coarse:after:-inset-3.5 pointer-coarse:after:content-['']"
       />
-      <CheckIcon
-        aria-hidden="true"
-        strokeWidth={3}
-        className="pointer-events-none absolute size-3 text-brand-fg opacity-0 peer-checked:opacity-100"
-      />
+      {indeterminate ? (
+        <MinusIcon
+          aria-hidden="true"
+          strokeWidth={3}
+          className="pointer-events-none absolute size-3 text-brand-fg"
+        />
+      ) : (
+        <CheckIcon
+          aria-hidden="true"
+          strokeWidth={3}
+          className="pointer-events-none absolute size-3 text-brand-fg opacity-0 peer-checked:opacity-100"
+        />
+      )}
     </span>
   );
 }

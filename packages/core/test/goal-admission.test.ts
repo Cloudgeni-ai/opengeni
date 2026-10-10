@@ -129,6 +129,30 @@ test("Resume preserves policy denials instead of choosing a fallback model", asy
   expect(value.admission).not.toHaveBeenCalled();
 });
 
+test("Resume pauses a credit model when the workspace turned Opengeni credits off", async () => {
+  const value = fixture(testSettings().openaiModel);
+  value.policy.mockResolvedValue({
+    allowedProviders: null,
+    allowedModels: null,
+    allowCreditModels: false,
+  } as never);
+  await expect(value.resume()).rejects.toThrow("Opengeni credits are turned off");
+  expect(value.admission).not.toHaveBeenCalled();
+});
+
+test("Resume keeps a subscription model running when Opengeni credits are off", async () => {
+  const settings = withClaudeConnectionCatalog(testSettings({ claudeSubscriptionEnabled: true }), {
+    claude_subscription: { models: [{ upstreamModelId: "claude-fixture" }] },
+  });
+  const value = fixture("organization-claude-subscription/claude-fixture", settings);
+  value.policy.mockResolvedValue({
+    allowedProviders: null,
+    allowedModels: null,
+    allowCreditModels: false,
+  } as never);
+  await expect(value.resume()).resolves.toBeUndefined();
+});
+
 test("a host funding denial is neutral about the host's private balance and policy", async () => {
   const settings = testSettings();
   const value = fixture(settings.openaiModel, settings);
