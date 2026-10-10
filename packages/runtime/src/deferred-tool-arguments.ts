@@ -23,6 +23,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function parseFiniteJson(text: string): unknown {
+  return JSON.parse(text, (_key, value: unknown) => {
+    // JSON.parse accepts overflowing numeric literals, but JSON.stringify
+    // silently turns their Infinity values into null, even in nested containers.
+    if (typeof value === "number" && !Number.isFinite(value)) {
+      throw new Error("Non-finite JSON number");
+    }
+    return value;
+  });
+}
+
 /** Declared JSON types of a schema, including simple anyOf/oneOf unions; null when unknown. */
 function declaredTypes(schema: unknown): Set<string> | null {
   if (!isRecord(schema)) return null;
@@ -68,7 +79,7 @@ function coerceValue(value: unknown, schema: unknown, depth: number): unknown {
     }
     let parsed: unknown;
     try {
-      parsed = JSON.parse(value);
+      parsed = parseFiniteJson(value);
     } catch {
       return value;
     }
@@ -86,7 +97,9 @@ function coerceObject(
   if (!isRecord(schema) || !isRecord(schema.properties)) return value;
   const properties = schema.properties;
   let changed = false;
-  const next: Record<string, unknown> = {};
+  // Unknown own keys must survive for downstream validation. In particular,
+  // assigning __proto__ to a normal object would invoke its inherited setter.
+  const next: Record<string, unknown> = Object.create(null);
   for (const [key, current] of Object.entries(value)) {
     const coerced = Object.hasOwn(properties, key)
       ? coerceValue(current, properties[key], depth)
@@ -108,7 +121,7 @@ export function restoreDeferredToolArgumentTypes(
   if (!parameters) return null;
   let parsed: unknown;
   try {
-    parsed = JSON.parse(argumentsText);
+    parsed = parseFiniteJson(argumentsText);
   } catch {
     return null;
   }
