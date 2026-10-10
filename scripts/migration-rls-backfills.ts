@@ -237,8 +237,54 @@ export function splitStatements(sql: string): string[] {
   return out;
 }
 
-const stripComments = (text: string) =>
-  text.replace(/--[^\n]*/g, " ").replace(/\/\*[\s\S]*?\*\//g, " ");
+/**
+ * Remove SQL comments, keeping single-quoted literals (including E'' escapes)
+ * intact so a `--` inside a literal cannot swallow its closing quote.
+ * Dollar-quoted bodies are still lexed as code: DO blocks are dollar-quoted.
+ */
+export function stripComments(text: string): string {
+  let out = "";
+  let index = 0;
+  while (index < text.length) {
+    const char = text[index]!;
+    const next = text[index + 1];
+    if (char === "-" && next === "-") {
+      const end = text.indexOf("\n", index);
+      out += " ";
+      index = end === -1 ? text.length : end;
+      continue;
+    }
+    if (char === "/" && next === "*") {
+      const end = text.indexOf("*/", index + 2);
+      out += " ";
+      index = end === -1 ? text.length : end + 2;
+      continue;
+    }
+    if (char === "'") {
+      const escapes = /[eE]/.test(text[index - 1] ?? "") && !/\w/.test(text[index - 2] ?? "");
+      let end = index + 1;
+      for (; end < text.length; end += 1) {
+        if (escapes && text[end] === "\\") {
+          end += 1;
+          continue;
+        }
+        if (text[end] === "'") {
+          if (text[end + 1] === "'") {
+            end += 1;
+            continue;
+          }
+          break;
+        }
+      }
+      out += text.slice(index, end + 1);
+      index = end + 1;
+      continue;
+    }
+    out += char;
+    index += 1;
+  }
+  return out;
+}
 
 const TABLE_REF = (table: string) => `(?:"${table}"|${table})`;
 const NOT_IDENT = String.raw`(?![A-Za-z0-9_"])`;
@@ -309,7 +355,9 @@ function stripCatalogRoutinePatchLiterals(statement: string): string {
   // Chained replacements of a pg_get_functiondef result are also routine
   // source, provided the resulting definition is the block's sole dynamic
   // execution. Keep every other statement visible to the backfill analyzer.
-  const source = /\b([a-z_]\w*)\s*:=\s*pg_get_functiondef\s*\([\s\S]*?\)\s*;/gi;
+  // The built-ins may be schema-qualified with pg_catalog; no other schema.
+  const source =
+    /\b([a-z_]\w*)\s*:=\s*(?:pg_catalog\s*\.\s*)?pg_get_functiondef\s*\([\s\S]*?\)\s*;/gi;
   const sources = [...statement.matchAll(source)];
   if (sources.length === 1) {
     const variable = sources[0]![1]!;
@@ -321,7 +369,7 @@ function stripCatalogRoutinePatchLiterals(statement: string): string {
       const replacements: Array<{ start: number; end: number }> = [];
       let cursor = sources[0]!.index! + sources[0]![0].length;
       const assignment = new RegExp(
-        `\\b${variable}\\s*:=\\s*replace\\s*\\(\\s*${variable}\\s*,`,
+        `\\b${variable}\\s*:=\\s*(?:pg_catalog\\s*\\.\\s*)?replace\\s*\\(\\s*${variable}\\s*,`,
         "gi",
       );
       let match: RegExpExecArray | null;
