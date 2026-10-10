@@ -2976,6 +2976,7 @@ repository's complex-change review policy.
 | X4. SuperGrok legacy deletion | Removes the xAI selector arm, factory repository use, v1 xAI readers and writers, xAI use of `ScopedSubscriptionTurnLease`, the video envelope code and the shadow; extends the guard below to xAI. Merges only with the `compat:dependent_sources_without_record` copy-path test green. | rolling |
 | C1a, C1b, C2a, C2b, C3, C4. Claude | The same steps. C1b reads core turn-failure receipts in place of `claudeAuthRecovery`; C2a covers the usage routes; C2b covers the OAuth and setup-token writers; C3 converts live `claudeAuthRecovery` values and includes the combined-window ledger test; C4 deletes the Claude arm, `claude_subscription_account_usage` use and the dead connection-based usage code. | as X1a..X4 |
 | F. Fake API-key adapter conformance | A test-only adapter (`kind = api_key`, static credential, no quota windows, no refresh) driven through the same core placement, lease, failover and wait paths as subscriptions and compared with the reference model; scripted local upstream and a network-denial guard. No production table or route. | test only |
+| W. Workspace-managed connections as organization accounts | [§5.4](#54-workspace-managed-connections-as-organization-accounts): 0714 lets the provider-keyed reach setters accept a connection managed by a shared workspace; the organization access editor reads and saves its reach (people scope only for unmanaged accounts); the Accounts page change ships separately after owner approval. Applies to SuperGrok and Claude through X3 and C3, which map workspace credentials into the same shape. | rolling (no row changes) |
 | R. Retirement | A forward migration drops the retired SQL routines, triggers and policies listed below; `subscriptionPoolWorkerSubject` and its users are removed; posture inventories are updated. Historical migrations, legacy tables and columns, v1 CHECK validators and column-immutability triggers stay until M6. | maintenance (exact posture contract) |
 
 Retired in R, for both providers unless noted:
@@ -3465,10 +3466,17 @@ as "not an organization account":
    workspace of the organization manages, migration 0714) only
    admits a call older binaries never make. A maintenance migration would
    move zero rows, so its parity report would compare every table with itself;
-   the evidence is instead a real-PostgreSQL test that every core row is
-   byte-for-byte identical across the migration, plus the read-only
-   inventory the runbook compares before and after the release (the parity
-   check without a drain). It needs no window, and it can ship alone or in
+   the evidence is instead a real-PostgreSQL test
+   (`migration-0714-workspace-managed-organization-accounts.test.ts`) that
+   applies 0714 as the owner to a database migrated without it and finds
+   every subscription row identical (aliases, bindings, waiters, leases and
+   Apps designations included), plus the read-only inventory the runbook
+   compares before and after the release and a per-table digest for a
+   rehearsal on a restored backup (the parity check without a drain). A
+   managing workspace's plain assignment without policy rows, an older shape,
+   is also its own copy: organization saves keep it and add no
+   organization-pool row to it, which would make placement read it as the
+   organization's. It needs no window, and it can ship alone or in
    the same release as the SuperGrok and Claude cutovers, in either order.
 3. **The managing workspace keeps its copy.** The 0702 rule stands: a
    workspace's own copy (its `workspace`-pool assignment policy) keeps its

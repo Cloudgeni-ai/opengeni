@@ -489,28 +489,36 @@ export async function updateSubscriptionCoreConnectionAccess(
         : { sharedWorkspaces: false, personalWorkspaces: false };
     // A workspace with its own copy stays assigned whatever the organization
     // chooses, so that copy keeps its row (and serves again when the reach
-    // includes workspaces).
-    const local = (
-      await rawRows<{ workspace_id: string }>(
-        tx,
-        sql`select workspace_id::text as workspace_id
+    // includes workspaces). That includes the managing workspace's plain
+    // assignment without policy rows, which placement also reads as its own.
+    const local = await localWorkspaceIds(tx, target.accountId, current);
+    const withPolicy = new Set(
+      (
+        await rawRows<{ workspace_id: string }>(
+          tx,
+          sql`select workspace_id::text as workspace_id
           from subscription_connection_assignment_policies
           where account_id = ${target.accountId}::uuid and connection_id = ${id}::uuid
             and inference_pool = 'workspace'`,
-      )
-    ).map((row) => row.workspace_id);
+        )
+      ).map((row) => row.workspace_id),
+    );
+    // An organization-pool policy row on a plain own copy would make placement
+    // read the whole assignment as the organization's, so that copy gets none.
+    const plainLocal = new Set(local.filter((workspaceId) => !withPolicy.has(workspaceId)));
     // Organization scope admits every workspace; only a workspace that also
     // has its own copy needs explicit rows for both pools. People scope has no
     // organization-pool rows.
     const desired = new Set(
-      people !== null
+      (people !== null
         ? []
         : organizationScope
           ? local
           : [
               ...(policy.allowedWorkspaces ?? shared),
               ...(policy.allowPersonalWorkspaces ? personal : []),
-            ],
+            ]
+      ).filter((workspaceId) => !plainLocal.has(workspaceId)),
     );
     const [updated] = await rawRows<AccessRow>(
       tx,

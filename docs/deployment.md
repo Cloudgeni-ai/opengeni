@@ -4392,6 +4392,28 @@ GROUP BY connection.account_id, connection.provider
 ORDER BY connection.account_id, connection.provider;
 ```
 
+The inventory compares counts. To compare every subscription row, rehearse
+on a restored copy of the production backup (live traffic changes leases and
+waits, so a live before/after digest differs for unrelated reasons): run this
+block as a superuser before and after applying 0714 there; every digest must
+match.
+
+```sql
+DO $$
+DECLARE source record; digest text;
+BEGIN
+  FOR source IN SELECT table_schema, table_name FROM information_schema.columns
+    WHERE column_name = 'account_id' AND table_name LIKE 'subscription%'
+      AND table_schema IN ('public', 'opengeni_private')
+    ORDER BY 1, 2
+  LOOP
+    EXECUTE format('SELECT md5(coalesce(string_agg(to_jsonb(r)::text, %L ORDER BY to_jsonb(r)::text), %L)) FROM %I.%I r',
+      ',', '', source.table_schema, source.table_name) INTO digest;
+    RAISE NOTICE '%.%: %', source.table_schema, source.table_name, digest;
+  END LOOP;
+END $$;
+```
+
 **Rollout rule.** Do not limit any account to chosen people (`allowedPeople`)
 until every API pod runs this release. An older pod reads a people-scoped
 account as "no workspaces", and a save there would switch it back to
@@ -4400,21 +4422,28 @@ workspace scope. Workspace-managed accounts can't be limited to people at all
 administrators keep managing them; organizations whose member list exceeds
 1000 members are not offered people either.
 
-**Validation.** As an organization administrator, open a workspace-managed
-account's access on the organization route: it reads its workspace's own copy
-(`localWorkspaceIds`), its manager and no other workspace, and
-`peopleSupported` is false. Saving a reach
-changes only scope, assignments, organization-pool rows, people and the
-reach row; credentials, refresh generations, quota, bindings, leases and
-waiters are untouched, and the account-wide wake follows every save. Until
-the owner approves the Accounts page change, the page still lists these
-accounts under their workspace.
+**Validation.** As an organization administrator, call
+`GET /v1/organizations/<organization id>/model-connections/codex/<connection id>/access`
+for a workspace-managed account: it returns its workspace's own copy in
+`localWorkspaceIds`, its manager in `managedByWorkspaceId`,
+`allowedWorkspaces: []` and `peopleSupported: false`. Before this release the
+same call is refused. A `PUT` to the same path with the returned `version`
+and `allowedWorkspaces` naming another shared workspace makes the account
+available there; it changes only scope, assignments, organization-pool rows
+and the reach row. Credentials, refresh generations, quota, bindings, leases
+and waiters are untouched, and the account-wide wake follows every save. A
+`PUT` with `allowedPeople` for that account returns 422. Until the owner
+approves the Accounts page change, the page still lists these accounts under
+their workspace.
 
 **Fix forward.** The previous setter definitions are in 0713. If they
 misbehave, ship a forward migration restoring those definitions. Saves on
 managed accounts then fail (the setter's "not found" surfaces as a server
 error while this release's API is deployed) and write nothing; nothing else
-changes.
+changes. That includes narrowing: an account already given to more
+workspaces stays that way. Narrow such accounts back to their workspace
+(`allowedWorkspaces: []`) before restoring the setters, or restore only if
+a defect requires it.
 
 ### Slack API pilot activation (0597)
 

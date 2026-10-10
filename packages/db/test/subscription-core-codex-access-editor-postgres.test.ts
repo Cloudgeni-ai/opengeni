@@ -522,10 +522,12 @@ async function personalConnection(org: Org, owner: { subjectId: string; membersh
 async function source(
   org: Org,
   workspaceId: string,
-  inferenceSource: "workspace" | "organization",
+  inferenceSource: "workspace" | "organization" | "automatic",
 ) {
   await shared!.admin`delete from subscription_settings
     where account_id = ${org.accountId}::uuid and workspace_id = ${workspaceId}::uuid`;
+  // Automatic is the absence of a saved choice.
+  if (inferenceSource === "automatic") return;
   await shared!.admin`insert into subscription_settings (account_id, workspace_id, providers)
     values (${org.accountId}::uuid, ${workspaceId}::uuid,
       ${shared!.admin.json({ codex: { inferenceSource } })}::jsonb)`;
@@ -739,6 +741,74 @@ describe.skipIf(!realDb)("Workspace-managed Codex accounts are organization acco
       credential_encrypted: credentialBefore!.credential_encrypted,
       managed_by_workspace_id: org.sharedWorkspaceId,
     });
+  });
+
+  test("an older own copy without policy rows survives every organization save", async () => {
+    const org = await organization();
+    const id = await connection(org, "plain", { managedByWorkspaceId: org.sharedWorkspaceId });
+    // An older shape: the managing workspace's assignment without policy rows.
+    await shared!.admin`delete from subscription_connection_assignment_policies
+      where connection_id = ${id}::uuid`;
+    const target = organizationTarget(org, id);
+    await source(org, org.sharedWorkspaceId, "workspace");
+    expect(await servedIn(org, org.sharedWorkspaceId)).toEqual([id]);
+    expect(
+      (await readSubscriptionCoreCodexModelConnectionAccess(client!.db, target))?.localWorkspaceIds,
+    ).toEqual([org.sharedWorkspaceId]);
+
+    for (const [version, choice] of [
+      [1, { allowedWorkspaces: [org.otherWorkspaceId], allowPersonalWorkspaces: false }],
+      [2, { allowedWorkspaces: [org.sharedWorkspaceId], allowPersonalWorkspaces: false }],
+      [3, { allowedWorkspaces: null, allowPersonalWorkspaces: false }],
+      [4, { allowedWorkspaces: null, allowPersonalWorkspaces: true }],
+      [5, { allowedWorkspaces: [], allowPersonalWorkspaces: false }],
+    ] as const) {
+      expect(
+        await updateSubscriptionCoreCodexModelConnectionAccess(client!.db, target, {
+          allowedModels: null,
+          ...choice,
+          allowedWorkspaces: choice.allowedWorkspaces ? [...choice.allowedWorkspaces] : null,
+          version,
+        }),
+      ).toMatchObject({ version: version + 1 });
+      const state = await stored(org, id);
+      // The own copy keeps its assignment and stays policy-free, so placement
+      // still reads it as the workspace's own.
+      expect(state.workspaces).toContain(org.sharedWorkspaceId);
+      expect(state.policies.filter((row) => row.workspace_id === org.sharedWorkspaceId)).toEqual(
+        [],
+      );
+      expect(await servedIn(org, org.sharedWorkspaceId)).toEqual([id]);
+    }
+  });
+
+  test("automatic source mode keeps the workspace's own copy and follows the organization's reach", async () => {
+    const org = await organization();
+    const id = await connection(org, "automatic", { managedByWorkspaceId: org.sharedWorkspaceId });
+    const target = organizationTarget(org, id);
+    await source(org, org.sharedWorkspaceId, "automatic");
+    await source(org, org.otherWorkspaceId, "automatic");
+    expect(await servedIn(org, org.sharedWorkspaceId)).toEqual([id]);
+    expect(await servedIn(org, org.otherWorkspaceId)).toEqual([]);
+
+    await updateSubscriptionCoreCodexModelConnectionAccess(client!.db, target, {
+      allowedModels: null,
+      allowedWorkspaces: [org.otherWorkspaceId],
+      allowPersonalWorkspaces: false,
+      version: 1,
+    });
+    expect(await servedIn(org, org.sharedWorkspaceId)).toEqual([id]);
+    expect(await servedIn(org, org.otherWorkspaceId)).toEqual([id]);
+    expect(await servedIn(org, org.personalWorkspaceId, org.ownerSubjectId)).toEqual([]);
+
+    await updateSubscriptionCoreCodexModelConnectionAccess(client!.db, target, {
+      allowedModels: null,
+      allowedWorkspaces: [],
+      allowPersonalWorkspaces: false,
+      version: 2,
+    });
+    expect(await servedIn(org, org.sharedWorkspaceId)).toEqual([id]);
+    expect(await servedIn(org, org.otherWorkspaceId)).toEqual([]);
   });
 
   test("a workspace's delegated managers keep it: people scope is refused while a workspace manages it", async () => {
