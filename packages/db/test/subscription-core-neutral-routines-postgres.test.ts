@@ -30,6 +30,7 @@ import { ownerlessRefreshFixture, ownerlessRefreshKey } from "./fixtures/ownerle
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let database: OwnerMigratedTestDatabase | null = null;
 let client: DbClient | null = null;
+let appConnectionUrl = "";
 
 beforeAll(async () => {
   if (!realDb) return;
@@ -40,7 +41,8 @@ beforeAll(async () => {
   const appUrl = new URL(database.ownerUrl);
   appUrl.username = "opengeni_app";
   appUrl.password = database.appPassword;
-  client = createDb(appUrl.toString(), { max: 4 });
+  appConnectionUrl = appUrl.toString();
+  client = createDb(appConnectionUrl, { max: 4 });
 }, 600_000);
 
 afterAll(async () => {
@@ -800,8 +802,8 @@ describe("provider-neutral subscription-core routines (migration 0705)", () => {
         { admin: database!.admin, client: client! },
         false,
       );
-      const renew = (shadow: boolean) =>
-        withSubscriptionCoreAcceptedTurn(client!.db, state.identity, async (tx) => {
+      const renew = (shadow: boolean, db: DbClient["db"] = client!.db) =>
+        withSubscriptionCoreAcceptedTurn(db, state.identity, async (tx) => {
           if (shadow) {
             await tx.execute(sql`create temp table subscription_connections
               (account_id uuid, id uuid, disconnected_at timestamptz, status text) on commit drop`);
@@ -825,7 +827,12 @@ describe("provider-neutral subscription-core routines (migration 0705)", () => {
       await database!.admin`update subscription_connections set status = 'disabled'
         where id = ${state.connectionId}::uuid`;
       const refused = { error: expect.stringMatching(/source is disconnected or unavailable/) };
-      expect({ plain: await renew(false), shadowed: await renew(true) }).toMatchObject({
+      // The shadowed renewal is a fresh session's first use of the trigger, so
+      // no plan cached before the temporary table existed can hide a
+      // search-path defect.
+      const fresh = createDb(appConnectionUrl, { max: 1 });
+      const shadowed = await renew(true, fresh.db).finally(() => fresh.close());
+      expect({ plain: await renew(false), shadowed }).toMatchObject({
         plain: refused,
         shadowed: refused,
       });
@@ -910,6 +917,19 @@ describe("provider-neutral subscription-core routines (migration 0705)", () => {
                 ${state.accountId}::uuid, ${state.workspaceId}::uuid,
                 ${state.connectionId}::uuid, 'Not A Provider')`.then(() => "inserted"),
           );
+          await attempt("nullProviderKey", () =>
+            tx`insert into opengeni_private.subscription_runtime_capabilities
+              (backend_pid, transaction_id, capability_kind, account_id, workspace_id,
+               connection_id, provider)
+              values (pg_backend_pid(), pg_current_xact_id(), 'refresh_write',
+                ${state.accountId}::uuid, ${state.workspaceId}::uuid,
+                ${state.connectionId}::uuid, null)`.then(() => "inserted"),
+          );
+          await attempt("nullProviderGrant", () =>
+            tx`select opengeni_subscription_internal.grant_subscription_core_owner_capability(
+              null, 'connection_owner', ${state.accountId}::uuid, ${state.workspaceId}::uuid,
+              ${state.subjectId}, ${state.connectionId}::uuid)`.then(() => "granted"),
+          );
           await attempt("deleteProvider", () =>
             tx`delete from opengeni_private.subscription_core_providers where provider = 'codex'`.then(
               () => "deleted",
@@ -926,6 +946,23 @@ describe("provider-neutral subscription-core routines (migration 0705)", () => {
             tx`insert into opengeni_private.subscription_core_providers
               (provider, primary_setting_column)
               values ('neutral_probe_two', 'missing_primary_connection_id')`.then(() => "inserted"),
+          );
+          await attempt("foreignColumn", () =>
+            tx`insert into opengeni_private.subscription_core_providers
+              (provider, primary_setting_column)
+              values ('neutral_probe_two', 'codex_primary_connection_id')`.then(() => "inserted"),
+          );
+          await attempt("repointColumn", () =>
+            tx`update opengeni_private.subscription_core_providers
+              set primary_setting_column = 'claude_primary_connection_id'
+              where provider = 'codex'`.then(() => "updated"),
+          );
+          await attempt("ownColumn", () =>
+            tx`insert into opengeni_private.subscription_core_providers
+              (provider, primary_setting_column)
+              values ('claude', 'claude_primary_connection_id') returning provider`.then(
+              (rows) => rows.length,
+            ),
           );
           await attempt("flagUpdate", () =>
             tx`update opengeni_private.subscription_core_providers set extra_credits = extra_credits
@@ -945,10 +982,23 @@ describe("provider-neutral subscription-core routines (migration 0705)", () => {
         badProviderKey: {
           error: expect.stringMatching(/subscription_runtime_capabilities_provider_chk/),
         },
+        nullProviderKey: {
+          error: expect.stringMatching(/subscription_runtime_capabilities_provider_chk/),
+        },
+        nullProviderGrant: {
+          error: expect.stringMatching(/subscription_runtime_capabilities_provider_chk/),
+        },
         deleteProvider: { error: "subscription core providers are append-only" },
         renameProvider: { error: "subscription core providers are append-only" },
         truncate: { error: "subscription core providers are append-only" },
         missingColumn: { error: "subscription_settings primary column is missing" },
+        foreignColumn: {
+          error: expect.stringMatching(/subscription_core_providers_primary_column_chk/),
+        },
+        repointColumn: {
+          error: expect.stringMatching(/subscription_core_providers_primary_column_chk/),
+        },
+        ownColumn: { value: 1 },
         flagUpdate: { value: 1 },
       });
       const [registry] = await database!.admin<{ providers: string[] }[]>`

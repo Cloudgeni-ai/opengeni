@@ -10,15 +10,13 @@
  * connection's `refresh_generation`.
  */
 import type { Settings } from "@opengeni/config";
-import {
-  CODEX_REFRESH_FALLBACK_MS,
-  CODEX_REFRESH_WINDOW_MS,
-  CodexReloginRequired,
-  refreshCodexToken,
-} from "@opengeni/codex";
+import { CodexReloginRequired, refreshCodexToken } from "@opengeni/codex";
 import type { CodexCredentialTokenSnapshot } from "./codex-token-resolver";
 import type { Database } from "./database";
-import { buildSubscriptionCoreCredentialResolver } from "./subscription-core/credential-resolver";
+import {
+  buildSubscriptionCoreCredentialResolver,
+  subscriptionCoreRefreshPolicy,
+} from "./subscription-core/credential-resolver";
 import {
   subscriptionCoreTurns,
   type SubscriptionCoreCredential,
@@ -230,7 +228,7 @@ export function buildSubscriptionCoreCodexTokenResolver(
     flightNamespace: "turn",
     connectionId: lease.connectionId,
     holderKey: `${identity.turnId}:${lease.holderId}:${lease.generation}`,
-    policy: { windowMs: CODEX_REFRESH_WINDOW_MS, fallbackMs: CODEX_REFRESH_FALLBACK_MS },
+    policy: subscriptionCoreRefreshPolicy(SUBSCRIPTION_CORE_CODEX.adapter),
     load: () => loadCredential(db, settings, identity, lease),
     embeddedExpiry: (credential) =>
       SUBSCRIPTION_CORE_CODEX.adapter.credential.expiry(credential.tokens),

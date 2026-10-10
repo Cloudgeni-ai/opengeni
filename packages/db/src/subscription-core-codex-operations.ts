@@ -10,8 +10,6 @@ import { sql } from "drizzle-orm";
 import type { Settings } from "@opengeni/config";
 import {
   CODEX_CLIENT_VERSION,
-  CODEX_REFRESH_FALLBACK_MS,
-  CODEX_REFRESH_WINDOW_MS,
   CodexReloginRequired,
   codexPlanKey,
   fetchCodexUsage,
@@ -23,7 +21,10 @@ import {
 import type { SubscriptionQuota } from "@opengeni/subscriptions";
 import type { CodexCredentialTokenSnapshot } from "./codex-token-resolver";
 import { rawRows, type Database } from "./database";
-import { buildSubscriptionCoreCredentialResolver } from "./subscription-core/credential-resolver";
+import {
+  buildSubscriptionCoreCredentialResolver,
+  subscriptionCoreRefreshPolicy,
+} from "./subscription-core/credential-resolver";
 import {
   subscriptionCoreOperations,
   type SubscriptionCoreConnectionCredential,
@@ -242,7 +243,7 @@ export function buildSubscriptionCoreCodexConnectionTokenResolver(
     holderKey: ref
       ? `${ref.operationId}:${ref.holderId}:${ref.generation}`
       : `connection:${connectionId}`,
-    policy: { windowMs: CODEX_REFRESH_WINDOW_MS, fallbackMs: CODEX_REFRESH_FALLBACK_MS },
+    policy: subscriptionCoreRefreshPolicy(SUBSCRIPTION_CORE_CODEX.adapter),
     load: () => loadCredential(db, settings, scope, connectionId, ref),
     embeddedExpiry: (credential) =>
       SUBSCRIPTION_CORE_CODEX.adapter.credential.expiry(credential.tokens),

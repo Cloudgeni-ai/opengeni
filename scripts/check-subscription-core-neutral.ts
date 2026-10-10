@@ -5,37 +5,66 @@ import { join, relative } from "node:path";
  * Keeps the shared subscription core provider-neutral: one runtime for every
  * source of model access, with per-provider differences only in adapters.
  *
- * 1. Shared core modules name no provider (in code, SQL text or comments) and
- *    compare no provider id against a literal. Only adapters, the registry
- *    and provider-named modules may.
+ * 1. Shared core modules (the database core and the pure policy package)
+ *    name no provider (in code, SQL text or comments) and select no
+ *    behaviour by provider id (comparisons with literals or named
+ *    constants, switches, literal lookups). Only adapters, the registry and
+ *    provider-named modules may. The check is line-based: a conditional
+ *    split across lines can evade it, so review still applies.
  * 2. The TypeScript provider registry and the SQL registry rows
  *    (`opengeni_private.subscription_core_providers`) list the same providers.
  */
 
-export const SHARED_CORE_DIRECTORY = "packages/db/src/subscription-core";
-/** Shared core modules outside the directory (kept at their M3 paths). */
+/** Directories whose every module is shared: the database core and the pure policy package. */
+export const SHARED_CORE_DIRECTORIES = [
+  "packages/db/src/subscription-core",
+  "packages/subscriptions/src",
+] as const;
+/** Shared core modules outside those directories (kept at their M3 paths). */
 export const SHARED_CORE_MODULES = [
   "packages/db/src/subscription-core-placement-world.ts",
   "packages/db/src/subscription-core-repository.ts",
   "packages/db/src/subscription-core-acceptance-authority.ts",
-  "packages/subscriptions/src/adapter.ts",
 ] as const;
 
 /** Provider and vendor names a shared module must not contain (any case). */
 const PROVIDER_NAMES =
-  /codex|openai|chatgpt|fedramp|wham|claude|anthropic|grok|openrouter|vercel|(?<![a-z])xai(?![a-z])|Xai(?![a-z])|XAI/i;
-/** A provider id compared with a literal, in TypeScript or SQL text. */
-const PROVIDER_CONDITIONAL =
-  /\bprovider(?:Id)?\s*(?:===|!==|==|!=)\s*["'`][a-z]|\bprovider\s*(?:=|<>|!=)\s*'[a-z]|\bprovider\s+(?:not\s+)?in\s*\(\s*'[a-z]/i;
+  /codex|openai|chatgpt|fedramp|wham|claude|anthropic|grok|openrouter|vercel|(?<![a-z])xai(?![a-z])/i;
+/** The xAI vendor name in its other spellings (case-sensitive: `maxAiTokens` is not one). */
+const XAI_NAME = /(?<![A-Za-z])xAI|Xai(?![a-z])|(?<![A-Z])XAI(?![A-Z])/;
+/** An expression that names a provider id (`provider`, `providerId`, `row.provider`, `provider_id`). */
+const ID = String.raw`[\w.]*\bprovider(?:Id|_id)?\b`;
+/**
+ * A provider id compared with or selected by a literal or a named constant,
+ * in TypeScript or SQL text.
+ */
+const PROVIDER_CONDITIONALS: readonly RegExp[] = [
+  // provider === "acme", provider !== ACME_ID
+  new RegExp(String.raw`${ID}\s*(?:===|!==|==|!=)\s*(?:["'\`][a-z]|[A-Z][A-Z0-9_]{2,}\b)`),
+  // "acme" === provider
+  new RegExp(String.raw`["'\`][a-z][^"'\`]*["'\`]\s*(?:===|!==|==|!=)\s*${ID}`),
+  // switch (provider)
+  new RegExp(String.raw`\bswitch\s*\(\s*${ID}\s*\)`),
+  // ["acme"].includes(provider), { acme: true }[provider]
+  new RegExp(String.raw`\]\s*\.\s*(?:includes|indexOf|some)\s*\(\s*${ID}`),
+  new RegExp(String.raw`\}\s*\[\s*${ID}\s*\]`),
+  // provider.startsWith("ac")
+  new RegExp(String.raw`${ID}\s*\.\s*(?:startsWith|endsWith|includes|match|localeCompare)\s*\(`),
+  // SQL: provider = 'acme', provider <> 'acme', provider in ('acme'), provider = any('{acme}'),
+  // provider is [not] distinct from 'acme'
+  /\bprovider(?:_id)?\s*(?:=|<>|!=)\s*(?:'[a-z]|any\s*\(\s*')/i,
+  /\bprovider(?:_id)?\s+(?:not\s+)?in\s*\(\s*'[a-z]/i,
+  /\bprovider(?:_id)?\s+is\s+(?:not\s+)?distinct\s+from\s+'[a-z]/i,
+];
 
 export type NeutralityViolation = { path: string; line: number; text: string; rule: string };
 
 export function findViolations(path: string, source: string): NeutralityViolation[] {
   const violations: NeutralityViolation[] = [];
   source.split("\n").forEach((text, index) => {
-    if (PROVIDER_NAMES.test(text))
+    if (PROVIDER_NAMES.test(text) || XAI_NAME.test(text))
       violations.push({ path, line: index + 1, text: text.trim(), rule: "provider name" });
-    else if (PROVIDER_CONDITIONAL.test(text))
+    else if (PROVIDER_CONDITIONALS.some((pattern) => pattern.test(text)))
       violations.push({ path, line: index + 1, text: text.trim(), rule: "provider conditional" });
   });
   return violations;
@@ -50,7 +79,10 @@ function filesUnder(root: string, directory: string): string[] {
 }
 
 export function sharedCoreFiles(root: string): string[] {
-  return [...filesUnder(root, SHARED_CORE_DIRECTORY), ...SHARED_CORE_MODULES].sort();
+  return [
+    ...SHARED_CORE_DIRECTORIES.flatMap((directory) => filesUnder(root, directory)),
+    ...SHARED_CORE_MODULES,
+  ].sort();
 }
 
 /** Provider ids the migrations insert into the SQL registry. */
@@ -79,12 +111,10 @@ export async function checkSubscriptionCoreNeutral(root: string): Promise<string
       errors.push(`${violation.path}:${violation.line}: ${violation.rule}: ${violation.text}`);
     }
   }
-  const { SUBSCRIPTION_CORE_PROVIDERS } = await import(
+  const { subscriptionCoreProviderIds } = await import(
     join(root, "packages/db/src/subscription-core-providers.ts")
   );
-  const registered = [
-    ...(SUBSCRIPTION_CORE_PROVIDERS as ReadonlyMap<string, unknown>).keys(),
-  ].sort();
+  const registered = (subscriptionCoreProviderIds as () => string[])();
   const seeded = sqlRegistryProviders(root);
   if (JSON.stringify(registered) !== JSON.stringify(seeded)) {
     errors.push(

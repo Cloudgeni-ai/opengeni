@@ -50,6 +50,11 @@ export type SubscriptionConnection = {
   kind: ConnectionKind;
   ownership: ConnectionOwnership;
   health: ConnectionHealth;
+  /**
+   * Explicit consent to spend credits after the included allowance. Set only
+   * for a provider whose adapter declares the `extraCredits` capability (the
+   * database placement world clears it for any other provider).
+   */
   extraCreditsEnabled?: boolean;
   allocatorEnabled: boolean;
   /**
@@ -85,7 +90,7 @@ export type QuotaSource = "usage_endpoint" | "response_headers" | "refusal";
 
 export type SubscriptionQuota = {
   windows: readonly QuotaWindow[];
-  /** Per-model cooldowns (for example Claude model-specific limits). */
+  /** Per-model cooldowns (model-specific limits some providers report). */
   modelCooldowns: Readonly<Record<ModelId, number>>;
   exhaustedUntil: number | null;
   exhaustedKind: "quota" | "rate_limit" | null;
@@ -196,7 +201,7 @@ export type SessionBinding = {
   lastModelCallAt: number;
   /**
    * The exact prompt-cache lifetime Opengeni sent with the latest request on
-   * this binding (Claude: 5 minutes or 1 hour). Overrides the provider's cache
+   * this binding (for example 5 minutes or 1 hour). Overrides the provider's cache
    * facts when set (SUB-STICK-04).
    */
   cacheTtlMs?: number | null;
@@ -222,15 +227,15 @@ export type PlacementSession = {
   reselectionPoints: readonly ReselectionPoint[];
   personalAuthority: readonly PersonalAuthority[];
   /**
-   * Set while the session's compaction mode ties it to one provider (Codex
-   * remote compaction, SUB-FAIL-09): models of other providers are excluded.
+   * Set while the session's compaction mode ties it to one provider (remote
+   * history compaction, SUB-FAIL-09): models of other providers are excluded.
    */
   compactionProviderLock: ProviderId | null;
 };
 
 /** How the provider prompt cache expires (SUB-STICK-04, design 6.1). */
 export type CacheFacts =
-  /** Exact lifetime Opengeni sent with the request (Claude). */
+  /** Exact cache lifetime Opengeni sent with the request (exact-TTL providers). */
   | { kind: "exact_ttl"; ttlMs: number }
   /** Idle cut-off measured from model-call facts; null until measured. */
   | { kind: "measured_idle_cutoff"; cutoffMs: number | null };

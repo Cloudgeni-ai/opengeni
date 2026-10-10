@@ -2133,7 +2133,15 @@ a provider name.
   every neutral routine, even when its cutover row is enabled (fail closed).
   Codex is seeded. A provider joins the core by a migration that inserts its
   row and, where needed, widens the provider lists in existing CHECK
-  constraints; no routine changes.
+  constraints; the neutral routines need no change, while the deferred
+  routines listed below still carry per-provider branches that its step must
+  extend. A provider's registry row must land with or after its drained
+  cutover: the row alone turns on the shared disconnect-admission trigger for
+  that provider's lease and binding rows, whatever its cutover row says.
+  `primary_setting_column` must be NULL (a provider without a primary
+  setting, such as an API-key connector) or exactly
+  `<provider>_primary_connection_id`, so no provider can be pointed at another
+  provider's column.
   The registry is append-only (a trigger refuses DELETE, TRUNCATE and a
   changed key): removing or renaming a row would make the shared
   disconnect-admission trigger skip that provider's rows while older binaries
@@ -2144,14 +2152,15 @@ a provider name.
   an error, not a wrong write, if it does not).
 - Neutral capability kinds `refresh_authorized`, `refresh_write`,
   `connection_refresh_authorized` and `connection_owner` carry their provider
-  (format-checked like a registry key) and mirror the `codex_*` kinds one for
+  (required and format-checked like a registry key) and mirror the `codex_*` kinds one for
   one, with owner-only policies. On rows that carry a provider (connections,
   aliases, leases) a capability admits only rows of its own provider.
   Memberships, resource authorities, settings and Apps designations carry no
   provider; their policies admit the owner's own rows for any provider's
-  owner capability, pinned to the capability's account, subject and (for
-  authorities and designations) exact connection, exactly as the Codex-named
-  policies do. The capability key omits the provider, so the owner-capability
+  owner capability, pinned to the capability's account and, per table, to the
+  owner's subject (memberships, authority insert and read), the exact
+  connection (authority revoke, Apps designations) or the current workspace
+  (settings), exactly as the Codex-named policies do. The capability key omits the provider, so the owner-capability
   grant refuses a second provider's grant on an already held key instead of
   sharing the first provider's row.
 - Neutral routines (provider first) replace the Codex-named routines the
@@ -2267,6 +2276,23 @@ compatibility, refresh and quota decoding, §2.1):
   that never renew;
 - `reloginText(message)`: the stored needs-relogin text.
 
+`credentialKind`, `quotaKind` and `health.entitlementCooldownMs` are declared
+facts the Codex runtime does not read yet; they are reserved for the steps
+named below that wire API-key credentials, spend-budget quota and the shared
+settlement. The core reads `capabilities.extraCredits`: the placement world
+clears `extraCreditsEnabled` for a provider without it, so the pure policy
+(`eligibility.ts`, `reference-model.ts`) no longer tests a provider id.
+
+A credential that never renews (`refresh: null`) is refreshed by nobody. The
+shared resolver's policy (`subscriptionCoreRefreshPolicy(adapter)`) is then
+`null`: the credential is used until its known expiry, never refreshed early
+or because its age is unknown. Once it has expired, or after a forced refresh
+because the provider refused it, the shared refresh takes the same lock and
+generation fence as a rotation and then marks the connection needs-relogin
+through `fail_subscription_core_refresh` (or the connection-level twin) with
+`adapter.reloginText("")`, so the turn fails with the provider's relogin
+error instead of an access-lost error.
+
 The core owns everything else: placement and re-placement, turn and
 operation leases, request reservation and settlement, the credential load
 with one per-connection lock and `refresh_generation` fencing (the adapter
@@ -2274,7 +2300,9 @@ only rotates), single-flight resolvers, health, quarantine, recovery and
 model cooldowns, the model catalog cache, usage observation persistence,
 waiter cleanup and v2 accepted authority.
 
-How the next sources fit without core changes:
+How the next sources fit. The shared runtime above needs no change for them;
+each step adds its adapter and binding plus the pieces listed after this list,
+which are still Codex-named or missing today:
 
 - SuperGrok: `oauth`, `usage_windows`; realtime client secrets,
   transcription, image and video funding are operations on the shared
@@ -2293,17 +2321,50 @@ How the next sources fit without core changes:
   exactly as a subscription window does. A later step adds a fake API-key
   adapter conformance test.
 
+Still Codex-named or missing, and owned by the provider steps (or by the
+shared settlement step they share) rather than by this extraction:
+
+- worker settlement (`apps/worker/src/activities/agent-turn/codex-core-settlement.ts`):
+  refusal classification into quarantine, model cooldown and quota writes is
+  Codex-specific code in the worker; it moves behind an adapter
+  `classifyError` hook (unifying `SubscriptionCoreAdapter` with
+  `SubscriptionProviderAdapter.classifyError`);
+- capacity waits and wake delivery, the usage fetch, operation candidate
+  ordering and the API routes, which call Codex-named wrappers over the
+  shared core;
+- quota decoding: a `decodeQuota`/usage-probe hook on the adapter and a
+  spend-budget quota shape (`quotaKind` is only declared today);
+- a `video` operation kind (the 0691 operation-kind CHECK and
+  `SubscriptionOperationKind` list image, realtime and transcription);
+- per-model cache facts and model-policy provider ids for an adapter that
+  serves several vendors' models (`cacheFacts` and `modelPolicyProviderId`
+  are per adapter today).
+
 Registry. `packages/db/src/subscription-core-providers.ts` is the only module,
-besides adapters, that enumerates providers: `SUBSCRIPTION_CORE_PROVIDERS`,
-`SUBSCRIPTION_CORE_ADAPTERS` and `subscriptionCoreProvider(id)` (throws for an
-unregistered id). Adding a provider is an adapter and binding module, one
-registry entry and its SQL registry row (§5.1.2).
+besides adapters, that enumerates providers. Its bindings are a private frozen
+map behind `subscriptionCoreProviderIds()`, `subscriptionCoreProvider(id)` and
+`subscriptionCoreAdapter(id)`; the lookups throw for an unregistered id and
+assert the binding's adapter carries the id it is registered under. The core
+uses the registry at runtime: `memoByProvider` refuses to build a runtime for
+a binding whose provider id is not registered (test bindings of a registered
+provider, such as a non-renewing variant, still run), and the neutral entry
+points that take a provider id (v2 authority, refresh persistence, waiter
+cleanup) look it up first. Adding a provider is an adapter and binding module,
+one registry entry and its SQL registry row (§5.1.2).
 
 Guard. `bun run check:subscription-core-neutral` (chained into
-`check:subscription-contract`, with a unit test) fails when a shared module
-names a provider or vendor (code, SQL text or comments) or compares a
-provider id with a literal, and when the TypeScript registry and the SQL
-registry rows differ.
+`check:subscription-contract`, with a unit test) scans
+`packages/db/src/subscription-core/`, `packages/subscriptions/src/` (the whole pure package) and the three
+provider-parameterized M3 modules. It fails when a shared module names a
+provider or vendor (code, SQL text or comments; the all-caps `XAI` vendor name
+is matched case-sensitively) or branches on a provider: a comparison with a
+literal on either side or with a named constant, a `switch` or `case` on a
+provider, `[...].includes(provider)`, an object literal indexed by a provider,
+`startsWith` on a provider id, and SQL `= any('{...}')`, `is distinct from`
+or `provider_id` comparisons. It also fails when the TypeScript registry and
+the SQL registry rows differ. It is line-based: a conditional split across
+lines in an unusual shape can evade it, so review still checks for provider
+logic in shared modules.
 
 Module map (old Codex module, its new shared home, and what stays Codex):
 
@@ -2319,10 +2380,12 @@ Module map (old Codex module, its new shared home, and what stays Codex):
 | `subscription-core-placement-world.ts`, `-repository.ts`, `-acceptance-authority.ts` | same paths, provider-parameterized | Codex-named wrappers in `subscription-core-codex-bindings.ts` |
 | (new) | `subscription-core/provider.ts`, `subscription-core/errors.ts` | `subscription-core-codex-adapter.ts` (adapter and binding), `subscription-core-codex-errors.ts` (error classes) |
 
-Every existing export keeps its name, signature and behaviour; callers
-outside `packages/db` are unchanged. Provider-derived texts keep Codex's
-bytes: wake reasons are `core_<provider>_<event>`, the extra-credits audit
-action `<provider>.extra_credits.updated`, the Apps-cleared audit action
+Every `@opengeni/db` export that existed before this step keeps its name,
+signature and behaviour; callers outside `packages/db` are unchanged. The new
+shared runtimes are internal to `packages/db` (the package index exports none
+of the provider-parameterized entry points). Provider-derived texts keep
+Codex's bytes: wake reasons are `core_<provider>_<event>`, the extra-credits
+audit action `<provider>.extra_credits.updated`, the Apps-cleared audit action
 `<provider>_apps.cleared_on_disconnect` (only for a provider with the `apps`
 capability), the shared connect lock key
 `subscription-connect:<account>:<provider>:shared:<upstream account>`, and
@@ -2334,11 +2397,9 @@ modules, and so does the operation candidate list in
 (`set_subscription_codex_reach` over `subscription_codex_auto_assignments`,
 0702), which the binding's allocator hook calls; a second provider with
 organization reach needs a provider-keyed reach table and routine first.
-In the pure package, `connectionUsesExtraCredits` (`eligibility.ts`) and the
-reference model's `spendsCredits` still test the Codex provider id; with
-Codex the only provider holding extra credits this is the same as the
-`extraCredits` capability, and the Claude/SuperGrok steps switch it to the
-capability when a second provider joins the core.
+Codex Apps request reservation uses the shared
+`reserveSubscriptionCoreDesignatedRequest` (source lock, then insert; holder
+`<operationKind>-request:<uuid>`), taken under the Codex Apps settings lock.
 
 ### 5.2 Legacy shape mapping
 

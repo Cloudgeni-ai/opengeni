@@ -96,10 +96,10 @@ export function connectionUsesExtraCredits(
   connection: SubscriptionConnection,
 ): boolean {
   return (
-    connection.provider === "codex" &&
     connection.extraCreditsEnabled === true &&
     !(connection.quota?.exhaustedUntil != null && connection.quota.exhaustedUntil > input.now) &&
-    quotaCapacity(connection.quota, input.now, input.quotaStaleAfterMs?.codex).kind === "exhausted"
+    quotaCapacity(connection.quota, input.now, input.quotaStaleAfterMs?.[connection.provider])
+      .kind === "exhausted"
   );
 }
 

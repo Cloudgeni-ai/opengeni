@@ -126,8 +126,6 @@ export {
 export {
   assertSubscriptionCoreAcceptedTurn,
   withSubscriptionCoreAcceptedTurn,
-  withSubscriptionCoreProviderPlacementWorld,
-  withSubscriptionCoreRefreshLock,
   type SubscriptionCoreAcceptedTurnAccessResult,
   type SubscriptionCoreAcceptedTurnIdentity,
   type SubscriptionCoreRefreshResult,
@@ -352,13 +350,7 @@ import {
   codexSubscriptionAuthorityV2ForScheduledTaskInTransaction,
   codexSubscriptionAuthorityV2OrEmptyInTransaction,
 } from "./subscription-core-codex-bindings";
-export {
-  EMPTY_SUBSCRIPTION_AUTHORITY_V2,
-  subscriptionAuthorityV2ActiveInTransaction,
-  subscriptionAuthorityV2ForAcceptanceInTransaction,
-  subscriptionAuthorityV2ForScheduledTaskInTransaction,
-  subscriptionAuthorityV2OrEmptyInTransaction,
-} from "./subscription-core-acceptance-authority";
+export { EMPTY_SUBSCRIPTION_AUTHORITY_V2 } from "./subscription-core-acceptance-authority";
 export { SessionMessageSearchCursorError } from "./session-message-search";
 export * from "./artifact-catalog";
 export * from "./scheduled-slack-bot-messages";

@@ -52,7 +52,7 @@ export async function readSubscriptionCoreCutoverDisposition(
     async (tx) =>
       await readSubscriptionProviderCutoverState(tx, {
         accountId,
-        provider: provider.adapter.provider,
+        provider: subscriptionCoreProviderId(provider),
       }),
   );
   return state === "enabled" ? "core" : "maintenance";
@@ -509,7 +509,7 @@ async function visibleSharedConnection(
   const providerId = subscriptionCoreProviderId(provider);
   const connectionId = await resolveSubscriptionConnectionId(tx, {
     accountId: input.accountId,
-    provider: provider.adapter.provider,
+    provider: subscriptionCoreProviderId(provider),
     connectionId: rawId,
   });
   if (!connectionId) return null;

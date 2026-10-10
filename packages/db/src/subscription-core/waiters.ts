@@ -2,6 +2,7 @@ import { and, eq, inArray } from "drizzle-orm";
 import type { ProviderId } from "@opengeni/subscriptions";
 import type { Database, SessionActivityDatabase } from "../database";
 import * as schema from "../schema";
+import { subscriptionCoreProvider } from "../subscription-core-providers";
 
 /**
  * Delete the shared subscription core's waiters for one provider of turns
@@ -15,6 +16,7 @@ export async function deleteSubscriptionCoreWaitersForTurns(
   provider: ProviderId,
   input: { workspaceId: string; turnIds: readonly string[]; sessionId?: string },
 ): Promise<number> {
+  subscriptionCoreProvider(provider);
   if (input.turnIds.length === 0) return 0;
   const deleted = await db
     .delete(schema.subscriptionCapacityWaiters)

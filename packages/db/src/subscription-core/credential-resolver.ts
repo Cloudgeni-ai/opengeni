@@ -9,6 +9,25 @@
  * snapshot is built from it, and the errors it raises; this module decides
  * when to refresh and which outcomes may be shared between turns.
  */
+import type { SubscriptionCoreAdapter } from "@opengeni/subscriptions";
+
+/**
+ * When a credential is refreshed: this long before expiry, or `fallbackMs`
+ * after the last refresh when the expiry is unknown. `null` for a
+ * credential that never renews (`adapter.refresh === null`): it is refreshed
+ * only once its known expiry passed (or on a forced refresh after the
+ * provider refused it), and that refresh marks it needs-relogin.
+ */
+export type SubscriptionCoreRefreshPolicy = { windowMs: number; fallbackMs: number } | null;
+
+/** The refresh policy the provider's adapter declares. */
+export function subscriptionCoreRefreshPolicy<Credential>(
+  adapter: Pick<SubscriptionCoreAdapter<Credential>, "refresh">,
+): SubscriptionCoreRefreshPolicy {
+  return adapter.refresh === null
+    ? null
+    : { windowMs: adapter.refresh.windowMs, fallbackMs: adapter.refresh.fallbackMs };
+}
 
 /** What every loaded credential view exposes to the resolver. */
 export type SubscriptionCoreLoadedCredentialBase = {
@@ -56,8 +75,8 @@ export type SubscriptionCoreResolverInput<
   connectionId: string;
   /** The exact turn lease (turn, holder, generation) this resolver serves. */
   holderKey: string;
-  /** Refresh this long before expiry, or after `fallbackMs` when expiry is unknown. */
-  policy: { windowMs: number; fallbackMs: number };
+  /** The provider's refresh policy (`subscriptionCoreRefreshPolicy(adapter)`). */
+  policy: SubscriptionCoreRefreshPolicy;
   load(): Promise<SubscriptionCoreCredentialLoadOf<Loaded>>;
   /** The expiry embedded in the credential, used when the store records none. */
   embeddedExpiry(loaded: Loaded): Date | null;
@@ -175,13 +194,17 @@ export function buildSubscriptionCoreCredentialResolver<
   const resolve = async (force: boolean): Promise<Snapshot> => {
     const loaded = await load();
     const expiry = loaded.expiresAt ?? input.embeddedExpiry(loaded);
+    const policy = input.policy;
     const stale =
       force ||
-      (expiry
-        ? expiry.getTime() <= Date.now() + input.policy.windowMs
-        : loaded.lastRefreshAt
-          ? loaded.lastRefreshAt.getTime() < Date.now() - input.policy.fallbackMs
-          : true);
+      (policy === null
+        ? // A credential that never renews is used until its known expiry.
+          expiry !== null && expiry.getTime() <= Date.now()
+        : expiry
+          ? expiry.getTime() <= Date.now() + policy.windowMs
+          : loaded.lastRefreshAt
+            ? loaded.lastRefreshAt.getTime() < Date.now() - policy.fallbackMs
+            : true);
     return stale ? await doRefresh(loaded) : input.snapshot(loaded);
   };
   return { getToken: () => resolve(false), refresh: () => resolve(true) };

@@ -10,6 +10,7 @@ import type {
   SubscriptionSettingValues,
 } from "@opengeni/subscriptions";
 import { rawRows, type Database } from "./database";
+import { subscriptionCoreProvider } from "./subscription-core-providers";
 
 export type EffectiveSubscriptionSettingsRow = {
   values: SubscriptionSettingValues;
@@ -605,6 +606,7 @@ export async function persistSubscriptionCoreRefresh(
     lastRefreshAt: Date;
   },
 ): Promise<boolean> {
+  subscriptionCoreProvider(input.provider);
   assertPositiveGeneration(input.expectedRefreshGeneration);
   const [row] = await rawRows<{ persisted: boolean }>(
     db,
@@ -629,6 +631,7 @@ export async function persistSubscriptionCoreRefreshWithPlan(
   db: Database,
   input: Parameters<typeof persistSubscriptionCoreRefresh>[1] & { planType: string | null },
 ): Promise<boolean> {
+  subscriptionCoreProvider(input.provider);
   assertPositiveGeneration(input.expectedRefreshGeneration);
   const trimmed = input.planType?.trim() ?? "";
   const planType = /^[A-Za-z0-9_.-]{1,64}$/.test(trimmed) ? trimmed : null;
