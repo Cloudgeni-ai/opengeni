@@ -57,9 +57,12 @@ SET LOCAL lock_timeout = '5s';
 CREATE TABLE opengeni_private.subscription_core_providers (
   provider text PRIMARY KEY CHECK (provider ~ '^[a-z][a-z0-9_]{1,31}$'),
   extra_credits boolean NOT NULL DEFAULT false,
-  primary_setting_column text
-    CHECK (primary_setting_column ~ '^[a-z][a-z0-9_]{0,40}_primary_connection_id$'),
-  created_at timestamptz NOT NULL DEFAULT now()
+  primary_setting_column text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  -- A provider's primary column is its own: no row can point at another
+  -- provider's column.
+  CONSTRAINT subscription_core_providers_primary_column_chk
+    CHECK (primary_setting_column = provider || '_primary_connection_id')
 );
 REVOKE ALL ON TABLE opengeni_private.subscription_core_providers FROM PUBLIC;
 DO $registry_guard$
@@ -144,16 +147,16 @@ ALTER TABLE opengeni_private.subscription_runtime_capabilities
       AND provider = 'codex' AND session_id IS NULL AND turn_id IS NULL
       AND session_owner_subject_id IS NOT NULL AND turn_human_subject_id IS NULL)
     OR (capability_kind IN ('refresh_authorized', 'refresh_write')
-      AND provider ~ '^[a-z][a-z0-9_]{1,31}$' AND workspace_id IS NOT NULL
+      AND provider IS NOT NULL AND provider ~ '^[a-z][a-z0-9_]{1,31}$' AND workspace_id IS NOT NULL
       AND session_id IS NOT NULL AND turn_id IS NOT NULL
       AND ((session_owner_subject_id IS NOT NULL AND turn_human_subject_id IS NOT NULL)
         OR (session_owner_subject_id IS NULL AND turn_human_subject_id IS NULL)))
     OR (capability_kind IN ('connection_refresh_authorized', 'refresh_write')
-      AND provider ~ '^[a-z][a-z0-9_]{1,31}$' AND workspace_id IS NOT NULL
+      AND provider IS NOT NULL AND provider ~ '^[a-z][a-z0-9_]{1,31}$' AND workspace_id IS NOT NULL
       AND session_id IS NULL AND turn_id IS NULL
       AND session_owner_subject_id IS NULL AND turn_human_subject_id IS NULL)
     OR (capability_kind = 'connection_owner'
-      AND provider ~ '^[a-z][a-z0-9_]{1,31}$' AND session_id IS NULL AND turn_id IS NULL
+      AND provider IS NOT NULL AND provider ~ '^[a-z][a-z0-9_]{1,31}$' AND session_id IS NULL AND turn_id IS NULL
       AND session_owner_subject_id IS NOT NULL AND turn_human_subject_id IS NULL)
   );
 
@@ -1766,10 +1769,11 @@ $grant_neutral_routines$;
 -- provider (connections, aliases, leases) a capability admits only rows of
 -- the provider it was minted for. Memberships, authorities, settings and
 -- Apps designations carry no provider: they admit the owner's own rows for
--- any provider's owner capability, pinned to the capability's account,
--- subject and (for authorities and designations) exact connection, exactly
--- as the provider-named policies do. Every writer drops its capability
--- before returning.
+-- any provider's owner capability, pinned to the capability's account and,
+-- per table, to the owner's subject (memberships, authority insert and
+-- read), the exact connection (authority revoke, Apps designations) or the
+-- current workspace (settings), exactly as the provider-named policies do.
+-- Every writer drops its capability before returning.
 CREATE POLICY subscription_core_refresh_read ON subscription_connections FOR SELECT
   USING (opengeni_private.subscription_core_refresh_write_allowed(
     provider, account_id, nullif(current_setting('opengeni.workspace_id', true), '')::uuid, id));
