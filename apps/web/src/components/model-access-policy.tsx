@@ -226,7 +226,7 @@ export function useModelAccessPolicy(scopeOrWorkspaceId: string | ModelPolicySco
         organizationPolicy?.allowedModels,
       ])
     : "";
-  const client = useAppContext().client;
+  const { client, refreshWorkspace } = useAppContext();
   const [models, setModels] = useState<WorkspaceModelCatalogModel[]>([]);
   const [saved, setSaved] = useState<ModelAccessPolicyDraft | null>(null);
   const [loading, setLoading] = useState(true);
@@ -363,6 +363,9 @@ export function useModelAccessPolicy(scopeOrWorkspaceId: string | ModelPolicySco
       };
       // The row only shows when this server reports (and so enforces) the switch.
       await client.updateWorkspaceSettings(workspaceId, { allowCreditModels });
+      // Pages that read the cached workspace settings (the Knowledge index
+      // notice) follow the switch without a reload.
+      void refreshWorkspace(workspaceId).catch(() => undefined);
       if (!isCurrentScope()) return false;
       // The switch shows the saved value before the success toast. A failed
       // re-read shows on the page itself, never as a failed change.
@@ -375,7 +378,7 @@ export function useModelAccessPolicy(scopeOrWorkspaceId: string | ModelPolicySco
       );
       return true;
     },
-    [client, load, organizationDefaults, workspaceId],
+    [client, load, organizationDefaults, refreshWorkspace, workspaceId],
   );
 
   return {

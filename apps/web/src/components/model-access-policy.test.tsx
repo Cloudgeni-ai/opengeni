@@ -25,7 +25,9 @@ const updateWorkspaceModelAccessPolicy = mock(
 const updateWorkspaceSettings = mock(
   async (_workspaceId: string, _patch: { allowCreditModels?: boolean }) => ({}),
 );
+const refreshWorkspace = mock(async (_workspaceId: string) => undefined);
 const context = {
+  refreshWorkspace,
   client: {
     getWorkspaceModelAccessPolicy,
     getWorkspaceModelCatalog,
@@ -464,6 +466,8 @@ describe("Use Opengeni credits", () => {
       expect(view.container.querySelector('[data-testid="confirm-dialog"]')).toBeNull();
       // The switch is a workspace setting; the allowlist is never rewritten.
       expect(updateWorkspaceSettings).toHaveBeenCalledTimes(1);
+      // The cached workspace (read by other pages) follows the switch.
+      expect(refreshWorkspace).toHaveBeenCalledWith("workspace-a");
       expect(updateWorkspaceSettings.mock.calls[0]).toEqual([
         "workspace-a",
         { allowCreditModels: false },

@@ -29,7 +29,9 @@ export function KnowledgeIndexNotice({
     accountId && hasAccountPermission(context.accessContext, accountId, "billing:manage"),
   );
   // The worker parks paid indexing the same way when the workspace turned
-  // credits off; adding credits would not resume it then.
+  // credits off; adding credits would not resume it then. This reads the
+  // viewed workspace's switch, which is the billed one for workspace entries
+  // (personal and organization entries bill their own workspace).
   if (status === "awaiting_funding" && workspace?.settings?.allowCreditModels === false) {
     return (
       <div role="status" className="text-sm text-fg-muted">
