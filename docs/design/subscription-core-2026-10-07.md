@@ -2124,7 +2124,7 @@ The shared SQL is provider-neutral by construction: the provider is an
 argument, and any provider difference comes from data, never from a branch on
 a provider name.
 
-- `opengeni_private.subscription_core_providers` (migration 0706) lists the
+- `opengeni_private.subscription_core_providers` (migration 0707) lists the
   providers whose runtime runs on the core, with the per-provider data the
   shared routines need: `extra_credits` (whether `manage ... 'extra_credits'`
   is meaningful) and `primary_setting_column` (which `subscription_settings`
@@ -2208,13 +2208,13 @@ a provider name.
   DEFINER` subscription guard triggers (`guard_subscription_disconnect_admission`
   and `guard_subscription_designation_disconnect`) captured the migration
   session's search path, without `pg_temp`, so a session's temporary table
-  could shadow the connection, turn or lease rows they check. 0706 sets their
+  could shadow the connection, turn or lease rows they check. 0707 sets their
   search path to the data schema with `pg_temp` last.
 - Rolling compatibility and retirement. The Codex-named routines, kinds and
   policies stay unchanged for binaries that still call them (staging runs
   them since 0689/0700). They are dropped by the final M4 retirement step, or
   M6 if that step is merged first, in a migration that runs only once no
-  binary older than 0706 can start (a readiness check on the neutral routines
+  binary older than 0707 can start (a readiness check on the neutral routines
   already prevents an older database from serving a newer binary).
 - Genuinely Codex-only, and staying so: the Codex Apps routines and the
   reset-credit authority and fence.
@@ -2472,7 +2472,7 @@ reconciled here with what it delivered:
 - The generic logic of `packages/db/src/subscription-core-codex*.ts` moves to
   provider-neutral modules under `packages/db/src/subscription-core/`; Codex
   is an adapter and binding over them, with no behaviour change.
-- Codex-named generic SQL has provider-keyed equivalents (migration 0706,
+- Codex-named generic SQL has provider-keyed equivalents (migration 0707,
   §5.1.2) that the TypeScript core calls with `provider` as an argument: the
   turn and connection refresh seams, the connection credential read, the
   `refresh_write` and owner capabilities, the connection target and writer

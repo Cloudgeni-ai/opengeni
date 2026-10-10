@@ -1,6 +1,6 @@
 /**
  * Codex's provider id on the provider-neutral subscription-core routines
- * (migration 0706). The neutral routines take the provider as data; Codex
+ * (migration 0707). The neutral routines take the provider as data; Codex
  * passes this id.
  */
 export const SUBSCRIPTION_CORE_CODEX_PROVIDER = "codex";
