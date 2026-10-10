@@ -1484,7 +1484,7 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
     expect(live!.live).toBe(true);
   });
 
-  test("a disabled Codex cutover row refuses v1 personal authority; no row keeps v1", async () => {
+  test("personal access reads only the v2 entry, behind an enabled Codex cutover row (v1 snapshots grant nothing)", async () => {
     const org = await organization();
     const personal = await personalConnection(org, "v1-only");
     const turn = await runningTurn(org, { workspaceId: org.personalWorkspaceId });
@@ -1517,11 +1517,26 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
           },
         ),
       );
-    expect(await authorize()).toBe(true);
+    // Migration 0710 replaced 0668's legacy-generation branch: without a
+    // cutover row (unreachable for Codex after 0689) the v1 snapshot no
+    // longer authorizes anything.
+    expect(await authorize()).toBe(false);
     await enableCodexCutover(org.accountId, false);
     expect(await authorize()).toBe(false);
     // Enabled: only the v2 entry counts, and this turn has none.
     await enableCodexCutover(org.accountId, true);
+    expect(await authorize()).toBe(false);
+    await shared!.admin`
+      update session_turns set subscription_authority = ${shared!.admin.json({
+        version: 2,
+        personal: [
+          { provider: "codex", ownerMembershipId: org.ownerMembershipId, authorityGeneration: 1 },
+        ],
+      })}::jsonb
+      where account_id = ${org.accountId}::uuid and id = ${turn.identity.turnId}::uuid`;
+    expect(await authorize()).toBe(true);
+    // A disabled row grants nothing, even with the v2 entry.
+    await enableCodexCutover(org.accountId, false);
     expect(await authorize()).toBe(false);
   });
 

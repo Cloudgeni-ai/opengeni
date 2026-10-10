@@ -44,13 +44,15 @@ beforeAll(async () => {
   // 0707 (as a deployment is before it), apply 0707 alone, and evaluate the
   // full runtime posture as the runtime role before provisioning again.
   const neutral = "0707_subscription_core_neutral_routines.sql";
+  const precursor = "0710_subscription_core_generic_precursor.sql";
   const owner = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
-    await owner`insert into schema_migrations(name) values (${neutral})`;
+    // 0710 patches routines 0707 creates, so it is withheld and replayed with it.
+    await owner`insert into schema_migrations(name) values (${neutral}), (${precursor})`;
     await migrate(database.ownerUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
-    await owner`delete from schema_migrations where name = ${neutral}`;
+    await owner`delete from schema_migrations where name in (${neutral}, ${precursor})`;
     await migrate(database.ownerUrl);
     const [applied] = await owner<{ count: number }[]>`
       select count(*)::int as count from schema_migrations where name = ${neutral}`;

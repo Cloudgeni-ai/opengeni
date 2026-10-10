@@ -65,9 +65,9 @@ describe("shared credential resolver refresh policy", () => {
       capabilitiesFor: (format: string) => capabilities(format === "oauth_v1"),
       credential: {
         decode: (plaintext: string) => plaintext,
-        encode: (credential: string) => credential,
+        encode: (value: string) => value,
         expiry: () => null,
-        format: (credential: string) => credential,
+        format: (value: string) => value,
       },
       refresh,
     });

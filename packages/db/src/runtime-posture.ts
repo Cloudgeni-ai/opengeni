@@ -137,6 +137,10 @@ const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   "grant_subscription_core_owner_capability(text, text, uuid, uuid, text, uuid)",
   "drop_subscription_core_owner_capabilities(text, uuid)",
   "subscription_core_connection_target(text, uuid, uuid, uuid, uuid, uuid, text, bigint)",
+  // Migration 0710: owner-only trigger functions of the provider cutover
+  // receipts and the provider-neutral cutover-row identity.
+  "guard_subscription_provider_cutover_receipts()",
+  "keep_subscription_cutover_identity()",
   // Migration 0689: the owner-only Codex cutover receipt and the trigger that
   // seeds organizations created later onto the shared core.
   "subscription_codex_cutover_v1_active()",
@@ -734,14 +738,14 @@ export const SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES = [
 ] as const;
 
 /**
- * Migration 0709 (M4 generic precursor): the per-provider cutover receipt
+ * Migration 0710 (M4 generic precursor): the per-provider cutover receipt
  * reader. The runtime calls it for readiness and its RLS policies call it.
  */
 export const SUBSCRIPTION_CORE_PRECURSOR_PRIVATE_ROUTINES = [
   "subscription_provider_cutover_committed(text)",
 ] as const;
 
-/** Migration 0709: owner-only trigger functions in opengeni_subscription_internal. */
+/** Migration 0710: owner-only trigger functions in opengeni_subscription_internal. */
 export const SUBSCRIPTION_CORE_PRECURSOR_OWNER_ROUTINES = [
   "guard_subscription_provider_cutover_receipts()",
   "keep_subscription_cutover_identity()",
@@ -2041,7 +2045,7 @@ export type RuntimeDatabasePosture = {
   subscriptionCodexCutoverActivationPresent: boolean;
   /**
    * Providers of SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS whose cutover
-   * receipt the database holds (migration 0709's readiness function).
+   * receipt the database holds (migration 0710's readiness function).
    */
   subscriptionProviderCutoverReceipts: string[];
 };
