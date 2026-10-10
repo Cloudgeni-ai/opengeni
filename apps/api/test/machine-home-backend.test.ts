@@ -34,6 +34,7 @@ import {
   createEnrollment,
   createSandbox,
   claimEnrollmentConnection,
+  discardUninitializedSessionShell,
   type Database,
   type DbClient,
 } from "@opengeni/db";
@@ -402,6 +403,75 @@ describe("Stage-D honest label: machine-targeted home sandbox_backend", () => {
         and create_idempotency_key = ${idempotencyKey}`;
     expect(stored?.count).toBe(1);
     expect(capturedInitialTurns).toHaveLength(1);
+  }, 60_000);
+
+  test("a start that fails before its first turn leaves no queued session behind", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const bus = new MemoryEventBus();
+    const createInput = (options: { key?: string; failStart: boolean }) => ({
+      db,
+      bus,
+      workflowClient: stubWorkflowClient(),
+      accountId,
+      workspaceId,
+      initialMessage: "start me",
+      resources: [],
+      tools: [],
+      toolPolicy: { mode: "explicit" as const, inheritedFromSessionId: null },
+      model: settings.openaiModel,
+      reasoningEffort: settings.openaiReasoningEffort,
+      turnExecutionPolicy: resolveTurnExecutionPolicyV1(settings, {
+        modelId: settings.openaiModel,
+        requestedModelId: null,
+        modelSource: "deployment",
+        reasoningEffort: settings.openaiReasoningEffort,
+        reasoningSource: "deployment",
+      }),
+      sandboxBackend: "modal" as const,
+      metadata: {},
+      firstPartyMcpTools: [],
+      ...(options.key ? { createIdempotencyKey: options.key } : {}),
+      captureInitialTurnAuthority: async () => {
+        if (options.failStart) {
+          throw Object.assign(new Error("permission denied for initial turn authority"), {
+            code: "42501",
+          });
+        }
+      },
+    });
+    const sessionCount = async () => {
+      const [row] = await admin<{ count: number }[]>`
+        select count(*)::int as count from sessions where workspace_id = ${workspaceId}`;
+      return row?.count ?? -1;
+    };
+
+    await expect(
+      createAndStartSessionWithOutcome(createInput({ failStart: true })),
+    ).rejects.toThrow("permission denied for initial turn authority");
+    expect(await sessionCount()).toBe(0);
+
+    const key = crypto.randomUUID();
+    await expect(
+      createAndStartSessionWithOutcome(createInput({ key, failStart: true })),
+    ).rejects.toThrow("permission denied for initial turn authority");
+    expect(await sessionCount()).toBe(0);
+
+    // A keyed retry after the failure starts the session normally.
+    const retried = await createAndStartSessionWithOutcome(createInput({ key, failStart: false }));
+    expect(retried.outcome).toBe("created");
+    expect(retried.session.initialTurnId).toBeTruthy();
+    expect(await sessionCount()).toBe(1);
+
+    // An initialized session is never discarded.
+    expect(
+      await discardUninitializedSessionShell(db, {
+        accountId,
+        workspaceId,
+        sessionId: retried.session.id,
+      }),
+    ).toBe("initialized");
+    expect(await sessionCount()).toBe(1);
   }, 60_000);
 
   test("a direct terminal command without op-stream fails closed without a phantom lease", async () => {
