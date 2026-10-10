@@ -75,6 +75,35 @@ function waitAndSettle(turnId: string, reason: string): SessionEvent[] {
   ];
 }
 
+/** A cycle opened by an agent update with the given member kind and result. */
+function cycleFrom(
+  turnId: string,
+  kind: string,
+  classification: "success" | "failure" | "action_required" | "info",
+): SessionEvent[] {
+  return [
+    event(
+      "system.update.delivered",
+      {
+        count: 1,
+        members: [
+          {
+            id: `update-${turnId}`,
+            kind,
+            classification,
+            sourceId: WORKER,
+            summary: `Worker ${classification}.`,
+          },
+        ],
+      },
+      turnId,
+    ),
+    event("turn.started", {}, turnId),
+    ...tool(`${turnId}-check`, turnId),
+    ...waitAndSettle(turnId, `Waiting for the worker (${turnId}).`),
+  ];
+}
+
 /** Routine input, a few silent steps, then the wait is re-registered. */
 function quietCycle(turnId: string, reason = `Waiting for the worker (${turnId}).`) {
   return [
@@ -195,6 +224,80 @@ describe("quiet wait cycles", () => {
     }
   });
 
+  test("an agent that failed, paused or needs action is news, not a quiet cycle", () => {
+    for (const [kind, classification] of [
+      ["child_terminal_result", "failure"],
+      ["child_paused", "info"],
+      ["child_progress", "action_required"],
+    ] as const) {
+      const events = [
+        ...opening(),
+        ...quietCycle("turn-1"),
+        ...cycleFrom("turn-2", kind, classification),
+        ...quietCycle("turn-3"),
+        update("turn-4"),
+      ];
+      // The news input stays visible and splits the run into two single cycles.
+      expect(cycleRows(readable(events))).toHaveLength(0);
+    }
+  });
+
+  test("work that compacted context or recovered from a failure is not quiet", () => {
+    const compacted = [
+      ...opening(),
+      ...quietCycle("turn-1"),
+      update("turn-2"),
+      event("turn.started", {}, "turn-2"),
+      event("session.context.compaction.started", { trigger: "auto" }, "turn-2"),
+      event(
+        "session.context.compacted",
+        { trigger: "auto", estimatedTokensBefore: 600_000, estimatedTokensAfter: 20_000 },
+        "turn-2",
+      ),
+      ...tool("turn-2-check", "turn-2"),
+      ...waitAndSettle("turn-2", "Waiting for the worker (turn-2)."),
+      ...quietCycle("turn-3"),
+      update("turn-4"),
+    ];
+    expect(cycleRows(readable(compacted))).toHaveLength(0);
+    const recovered = [
+      ...opening(),
+      ...quietCycle("turn-1"),
+      update("turn-2"),
+      event("turn.started", {}, "turn-2"),
+      ...tool("turn-2-check", "turn-2"),
+      event("turn.failed", { error: "The model provider failed.", retryable: true }, "turn-2"),
+      event("turn.recovery.requested", { error: "The model provider failed." }, "turn-2"),
+      event("turn.started", {}, "turn-2"),
+      ...tool("turn-2-retry", "turn-2"),
+      ...waitAndSettle("turn-2", "Waiting for the worker (turn-2)."),
+      ...quietCycle("turn-3"),
+      update("turn-4"),
+    ];
+    expect(cycleRows(readable(recovered))).toHaveLength(0);
+  });
+
+  test("the turn answering a person stays visible behind a non-routine input", () => {
+    const events = [
+      ...opening(),
+      ...quietCycle("turn-1"),
+      event("user.message", { text: "Status?" }, null),
+      ...cycleFrom("turn-x", "child_requires_action", "action_required"),
+      ...quietCycle("turn-2"),
+      ...quietCycle("turn-3"),
+      update("turn-4"),
+    ];
+    const groups = readable(events);
+    const rows = cycleRows(groups);
+    // Only turn-2 and turn-3 fold; turn-x answered the person.
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.work!.cycles!.count).toBe(2);
+    const folded = rows[0]!.work!.details.flatMap((group) =>
+      group.kind === "activity" ? group.items.map((item) => item.turnId) : [],
+    );
+    expect(folded).not.toContain("turn-x");
+  });
+
   test("a visible reply ends the run and keeps its own work row", () => {
     const events = [
       ...opening(),
@@ -278,6 +381,50 @@ describe("quiet wait cycles", () => {
       // Nested work rows inside the fold never become sticky outer headers.
       const section = trigger!.closest("[data-og-work-section]")!;
       expect(section.querySelectorAll('[data-og-work-header="nested"]').length).toBe(2);
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("a search hit inside the fold opens only its own cycle", async () => {
+    const events = [
+      ...opening(),
+      ...quietCycle("turn-1"),
+      ...quietCycle("turn-2"),
+      ...quietCycle("turn-3"),
+      update("turn-4"),
+    ];
+    const hit = events.find(
+      (entry) =>
+        entry.type === "agent.toolCall.created" &&
+        (entry.payload as { id?: string }).id === "turn-2-check",
+    )!;
+    const view = await renderComponent(
+      <MessageTimeline
+        events={events}
+        status="idle"
+        autoFollow={false}
+        turnSummary={{ rolling: true }}
+        searchTarget={{ sequence: hit.sequence, query: "turn-2-check" }}
+      />,
+    );
+    try {
+      await flush(50);
+      // The wait-reason preview hides while the fold is open; find it by its label.
+      const header = [...view.container.querySelectorAll("[data-og-work-header]")].find((entry) =>
+        entry.textContent?.includes("3 updates over"),
+      )!;
+      const section = header.closest("[data-og-work-section]")!;
+      expect(section.querySelector("[data-og-work-header]")?.getAttribute("aria-expanded")).toBe(
+        "true",
+      );
+      const nested = [...section.querySelectorAll('[data-og-work-header="nested"]')];
+      expect(nested).toHaveLength(3);
+      expect(nested.map((row) => row.getAttribute("aria-expanded"))).toEqual([
+        "false",
+        "true",
+        "false",
+      ]);
     } finally {
       await view.unmount();
     }
