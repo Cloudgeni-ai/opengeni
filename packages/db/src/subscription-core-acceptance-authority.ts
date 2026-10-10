@@ -17,6 +17,7 @@
  * Claude and SuperGrok keep their v1 snapshots; v2 carries only Codex.
  */
 import { sql } from "drizzle-orm";
+import { SUBSCRIPTION_CORE_CODEX_PROVIDER } from "./subscription-core-codex-provider";
 import { SubscriptionPersonalAuthorityV2 } from "@opengeni/contracts";
 import { rawRows, type Database } from "./database";
 import { readSubscriptionProviderCutoverState } from "./subscription-core-repository";
@@ -38,7 +39,7 @@ async function codexAcceptanceWriterPresent(tx: Database): Promise<boolean> {
   const [row] = await rawRows<{ present: boolean }>(
     tx,
     sql`select to_regprocedure(
-        'opengeni_private.subscription_codex_acceptance_authority_v2(uuid,uuid,uuid,text)'
+        'opengeni_private.subscription_core_acceptance_authority_v2(text,uuid,uuid,uuid,text)'
       ) is not null as present`,
   );
   return row?.present === true;
@@ -64,7 +65,7 @@ export async function codexSubscriptionAuthorityV2ForAcceptanceInTransaction(
   if (cutover !== "enabled") return null;
   const [row] = await rawRows<{ authority: unknown }>(
     tx,
-    sql`select opengeni_private.subscription_codex_acceptance_authority_v2(
+    sql`select opengeni_private.subscription_core_acceptance_authority_v2(${SUBSCRIPTION_CORE_CODEX_PROVIDER},
         ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.sessionId}::uuid,
         ${input.acceptingSubjectId}
       ) as authority`,
@@ -112,7 +113,7 @@ export async function codexSubscriptionAuthorityV2OrEmptyInTransaction(
 
 /**
  * A scheduled task's frozen v2 value at creation (M3 PR 3b, EP-T15), from
- * `subscription_codex_task_authority_v2`: the acceptance rule for the exact
+ * `subscription_core_task_authority_v2` (provider `codex`): the acceptance rule for the exact
  * accepting human. `null` without an enabled cutover (or before 0688).
  */
 export async function codexSubscriptionAuthorityV2ForScheduledTaskInTransaction(
@@ -127,13 +128,13 @@ export async function codexSubscriptionAuthorityV2ForScheduledTaskInTransaction(
   const [present] = await rawRows<{ present: boolean }>(
     tx,
     sql`select to_regprocedure(
-        'opengeni_private.subscription_codex_task_authority_v2(uuid,uuid,uuid,text)'
+        'opengeni_private.subscription_core_task_authority_v2(text,uuid,uuid,uuid,text)'
       ) is not null as present`,
   );
   if (present?.present !== true) return null;
   const [row] = await rawRows<{ authority: unknown }>(
     tx,
-    sql`select opengeni_private.subscription_codex_task_authority_v2(
+    sql`select opengeni_private.subscription_core_task_authority_v2(${SUBSCRIPTION_CORE_CODEX_PROVIDER},
         ${input.accountId}::uuid, ${input.workspaceId}::uuid,
         ${input.reusableSessionId}::uuid, ${input.acceptingSubjectId}
       ) as authority`,

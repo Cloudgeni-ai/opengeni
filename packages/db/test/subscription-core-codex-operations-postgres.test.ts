@@ -148,6 +148,7 @@ async function sharedConnection(
     managedBy?: string | null;
     expiresAt?: Date;
     pool?: "workspace" | "organization";
+    fedramp?: boolean;
   } = {},
 ): Promise<string> {
   const [row] = await shared!.admin<{ id: string }[]>`
@@ -157,7 +158,7 @@ async function sharedConnection(
     ) values (
       ${org.accountId}::uuid, 'codex', 'subscription', ${encryptedTokens(label)},
       'shared', ${options.scope ?? "organization"}, ${`chatgpt-${label}`}, 'pro',
-      ${shared!.admin.json({ isFedramp: false, resetCreditAvailableCount: 2 })}::jsonb,
+      ${shared!.admin.json({ isFedramp: options.fedramp ?? false, resetCreditAvailableCount: 2 })}::jsonb,
       ${(options.expiresAt ?? new Date(Date.now() + 86_400_000)).toISOString()}::timestamptz,
       ${options.managedBy ?? null}::uuid, ${label}
     ) returning id::text as id`;
@@ -687,7 +688,7 @@ describe.skipIf(!realDb)("Codex operations on the shared core (M3 PR 2c)", () =>
     const other = await organization();
     await setCutover(org.accountId, true);
     await setCutover(other.accountId, true);
-    const organizationScoped = await sharedConnection(org, "ops-org");
+    const organizationScoped = await sharedConnection(org, "ops-org", { fedramp: true });
     const assignedHere = await sharedConnection(org, "ops-here", {
       scope: "workspaces",
       workspaces: [org.sharedWorkspaceId],
@@ -733,6 +734,29 @@ describe.skipIf(!realDb)("Codex operations on the shared core (M3 PR 2c)", () =>
     expect(await operationLeases(assignedHere)).toEqual([
       { operation_kind: "transcription", session_id: null, turn_id: null },
     ]);
+    // The operation credential read carries the connection's FedRAMP flag.
+    const fedrampLease = ref(organizationScoped, { operationKind: "transcription" });
+    expect(
+      (await acquireSubscriptionCoreCodexOperationLease(client!.db, scope, fedrampLease)).kind,
+    ).toBe("acquired");
+    const fedrampFlags = [];
+    for (const [connectionId, held] of [
+      [assignedHere, lease],
+      [organizationScoped, fedrampLease],
+    ] as const) {
+      const loaded = await loadSubscriptionCoreCodexConnectionCredential(
+        client!.db,
+        settings,
+        scope,
+        connectionId,
+        held,
+      );
+      fedrampFlags.push(loaded.kind === "loaded" ? loaded.credential.isFedramp : loaded.kind);
+    }
+    expect(fedrampFlags).toEqual([false, true]);
+    expect(await releaseSubscriptionCoreCodexOperationLease(client!.db, scope, fedrampLease)).toBe(
+      true,
+    );
     // Only a transcription may be sessionless.
     expect(
       (

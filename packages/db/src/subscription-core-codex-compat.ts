@@ -11,10 +11,11 @@
  * administrator for a connection or setting that workspace manages. Nothing
  * here reads or writes a legacy Codex table, and nothing returns credential
  * material. Personal connections are listed only to their owner, through the
- * owner-only reader (`subscription_codex_personal_connections`, M3 PR 3b):
+ * owner-only reader (`subscription_core_personal_connections`, provider `codex`):
  * in the owner's Personal-workspace list and their sessions' "Running on".
  */
 import { sql } from "drizzle-orm";
+import { SUBSCRIPTION_CORE_CODEX_PROVIDER } from "./subscription-core-codex-provider";
 import { auditEvents } from "./schema";
 import { withLosslessContentWriteVersion } from "./lossless-json";
 import { codexPlanKey } from "@opengeni/codex";
@@ -446,7 +447,7 @@ export async function listSubscriptionCoreCodexPersonalAccountsInTransaction(
         personal.quota, personal.quota_revision, personal.quota_observed_refresh_generation,
         personal.quota_updated_at, personal.extra_credits_enabled,
         personal.extra_credits_version, personal.extra_credits_updated_at
-      from opengeni_private.subscription_codex_personal_connections(
+      from opengeni_private.subscription_core_personal_connections(${SUBSCRIPTION_CORE_CODEX_PROVIDER},
         ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.subjectId}
       ) personal`,
   );
@@ -551,7 +552,7 @@ async function managePersonalConnection(
       | null;
   }>(
     tx,
-    sql`select opengeni_private.manage_subscription_codex_personal(
+    sql`select opengeni_private.manage_subscription_core_personal(${SUBSCRIPTION_CORE_CODEX_PROVIDER},
       ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.subjectId}, ${input.connectionId}::uuid,
       ${action}, ${label}, ${enabled}::boolean, ${expectedVersion}::integer) as result`,
   );
@@ -787,7 +788,7 @@ export async function setSubscriptionCoreCodexExtraCredits(
           | null;
       }>(
         tx,
-        sql`select opengeni_private.manage_subscription_codex_personal(
+        sql`select opengeni_private.manage_subscription_core_personal(${SUBSCRIPTION_CORE_CODEX_PROVIDER},
         ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.subjectId}, ${input.connectionId}::uuid,
         'extra_credits', null, ${input.enabled}, ${input.expectedVersion}::integer) as result`,
       );

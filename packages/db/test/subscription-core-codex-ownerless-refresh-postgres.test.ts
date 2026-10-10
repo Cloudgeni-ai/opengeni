@@ -59,10 +59,10 @@ describe.skipIf(!real)("ownerless shared Codex refresh after 0700", () => {
       const capabilities =
         await shared.admin`select capability_kind, session_owner_subject_id, turn_human_subject_id
         from opengeni_private.subscription_runtime_capabilities
-        where account_id = ${state.accountId}::uuid and capability_kind in ('personal_access', 'codex_refresh_authorized')`;
+        where account_id = ${state.accountId}::uuid and capability_kind in ('personal_access', 'refresh_authorized')`;
       expect(capabilities.map((row) => ({ ...row }))).toEqual([
         {
-          capability_kind: "codex_refresh_authorized",
+          capability_kind: "refresh_authorized",
           session_owner_subject_id: null,
           turn_human_subject_id: null,
         },
@@ -242,7 +242,7 @@ describe.skipIf(!real)("ownerless shared Codex refresh after 0700", () => {
           (tx) =>
             rawRows(
               tx,
-              sql`select * from opengeni_private.begin_subscription_codex_refresh(
+              sql`select * from opengeni_private.begin_subscription_core_refresh('codex',
         ${direct.accountId}::uuid, ${direct.workspaceId}::uuid, ${direct.identity.sessionId}::uuid,
         ${direct.identity.turnId}::uuid, null, ${direct.subjectId}, ${direct.connectionId}::uuid,
         ${direct.lease.holderId}, ${direct.lease.generation}::bigint)`,

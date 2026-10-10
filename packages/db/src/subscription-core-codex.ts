@@ -17,6 +17,10 @@
  * which advances on every persisted refresh and fences quota observations.
  */
 import { sql } from "drizzle-orm";
+import {
+  SUBSCRIPTION_CORE_CODEX_PROVIDER,
+  subscriptionCoreCodexReloginText,
+} from "./subscription-core-codex-provider";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
 import {
   accessTokenExpiry,
@@ -723,7 +727,7 @@ export async function recoverSubscriptionCoreCodexConnectionHealth(
     if (!(await codexCutoverEnabled(tx, identity.accountId))) return 0;
     const [row] = await rawRows<{ recovered: number | string }>(
       tx,
-      sql`select opengeni_private.recover_subscription_codex_connection_health(
+      sql`select opengeni_private.recover_subscription_core_connection_health(${SUBSCRIPTION_CORE_CODEX_PROVIDER},
           ${identity.accountId}::uuid, ${identity.workspaceId}::uuid,
           ${identity.sessionId}::uuid, ${identity.turnId}::uuid
         ) as recovered`,
@@ -761,7 +765,7 @@ export async function quarantineSubscriptionCoreCodexConnection(
   const access = await withLeasedCodexConnection(db, identity, lease, async (tx) => {
     const [row] = await rawRows<{ marked: boolean }>(
       tx,
-      sql`select opengeni_private.quarantine_subscription_codex_connection(
+      sql`select opengeni_private.quarantine_subscription_core_connection(${SUBSCRIPTION_CORE_CODEX_PROVIDER},
           ${identity.accountId}::uuid, ${identity.workspaceId}::uuid,
           ${identity.sessionId}::uuid, ${identity.turnId}::uuid,
           ${lease.connectionId}::uuid, ${lease.holderId}, ${lease.generation}::bigint,
@@ -1258,11 +1262,11 @@ export async function refreshSubscriptionCoreCodexCredential(
         if (error instanceof CodexReloginRequired) {
           const [marked] = await rawRows<{ marked: boolean }>(
             tx,
-            sql`select opengeni_private.fail_subscription_codex_refresh(
+            sql`select opengeni_private.fail_subscription_core_refresh(${SUBSCRIPTION_CORE_CODEX_PROVIDER},
                 ${identity.accountId}::uuid, ${identity.workspaceId}::uuid,
                 ${identity.sessionId}::uuid, ${identity.turnId}::uuid,
                 ${lease.connectionId}::uuid, ${credential.refreshGeneration}::bigint,
-                ${error.message}
+                ${subscriptionCoreCodexReloginText(error.message)}
               ) as marked`,
           );
           return { kind: "relogin", message: error.message, marked: marked?.marked === true };

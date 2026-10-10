@@ -28,6 +28,10 @@
  * shared with chat and Apps refresh.
  */
 import { sql } from "drizzle-orm";
+import {
+  SUBSCRIPTION_CORE_CODEX_PROVIDER,
+  subscriptionCoreCodexReloginText,
+} from "./subscription-core-codex-provider";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
 import {
   accessTokenExpiry,
@@ -335,7 +339,7 @@ export async function renewSubscriptionCoreCodexOperationLease(
     // lease, scope, personal authority and settings) before extending it.
     const [current] = await rawRows<{ status: string }>(
       tx,
-      sql`select status from opengeni_private.read_subscription_codex_connection_credential(
+      sql`select status from opengeni_private.read_subscription_core_connection_credential(${SUBSCRIPTION_CORE_CODEX_PROVIDER},
           ${routineArgs(scope, ref.connectionId, ref)}
         )`,
     );
@@ -455,12 +459,12 @@ export async function loadSubscriptionCoreCodexConnectionCredential(
       last_refresh_at: Date | string | null;
       provider_account_id: string | null;
       plan_type: string | null;
-      is_fedramp: boolean;
+      provider_state: Record<string, unknown> | null;
     }>(
       tx,
       sql`select status, refresh_generation, credential_encrypted, expires_at, last_refresh_at,
-          provider_account_id, plan_type, is_fedramp
-        from opengeni_private.read_subscription_codex_connection_credential(
+          provider_account_id, plan_type, provider_state
+        from opengeni_private.read_subscription_core_connection_credential(${SUBSCRIPTION_CORE_CODEX_PROVIDER},
           ${routineArgs(scope, connectionId, ref)}
         )`,
     );
@@ -477,7 +481,7 @@ export async function loadSubscriptionCoreCodexConnectionCredential(
       refreshGeneration: Number(row.refresh_generation),
       tokens: decodeTokens(key, row.credential_encrypted),
       chatgptAccountId: row.provider_account_id,
-      isFedramp: row.is_fedramp === true,
+      isFedramp: row.provider_state?.isFedramp === true,
       planType: row.plan_type,
       expiresAt: row.expires_at === null ? null : new Date(row.expires_at),
       lastRefreshAt: row.last_refresh_at === null ? null : new Date(row.last_refresh_at),
@@ -528,7 +532,7 @@ export async function refreshSubscriptionCoreCodexConnectionCredential(
       }>(
         tx,
         sql`select refresh_generation, credential_encrypted
-          from opengeni_private.begin_subscription_codex_connection_refresh(
+          from opengeni_private.begin_subscription_core_connection_refresh(${SUBSCRIPTION_CORE_CODEX_PROVIDER},
             ${routineArgs(scope, connectionId, ref)}
           )`,
       );
@@ -547,7 +551,7 @@ export async function refreshSubscriptionCoreCodexConnectionCredential(
         // would discard the only valid refresh token.
         const [persisted] = await rawRows<{ persisted: boolean }>(
           tx,
-          sql`select opengeni_private.persist_subscription_codex_connection_refresh(
+          sql`select opengeni_private.persist_subscription_core_connection_refresh(${SUBSCRIPTION_CORE_CODEX_PROVIDER},
               ${tenant.accountId}::uuid, ${tenant.workspaceId}::uuid, ${connectionId}::uuid,
               ${generation}::bigint,
               ${encryptEnvironmentValue(key, JSON.stringify(rotated))},
@@ -565,9 +569,9 @@ export async function refreshSubscriptionCoreCodexConnectionCredential(
         if (error instanceof CodexReloginRequired) {
           const [marked] = await rawRows<{ marked: boolean }>(
             tx,
-            sql`select opengeni_private.fail_subscription_codex_connection_refresh(
+            sql`select opengeni_private.fail_subscription_core_connection_refresh(${SUBSCRIPTION_CORE_CODEX_PROVIDER},
                 ${tenant.accountId}::uuid, ${tenant.workspaceId}::uuid, ${connectionId}::uuid,
-                ${generation}::bigint, ${error.message}
+                ${generation}::bigint, ${subscriptionCoreCodexReloginText(error.message)}
               ) as marked`,
           );
           return { kind: "relogin", message: error.message, marked: marked?.marked === true };
@@ -827,7 +831,7 @@ export async function recordSubscriptionCoreCodexModelCatalog(
     // personal accounts outside an exact accepted turn.
     const [connection] = await rawRows<{ refresh_generation: number | string }>(
       tx,
-      sql`select refresh_generation from opengeni_private.read_subscription_codex_connection_credential(
+      sql`select refresh_generation from opengeni_private.read_subscription_core_connection_credential(${SUBSCRIPTION_CORE_CODEX_PROVIDER},
         ${routineArgs(scope, connectionId, null)})`,
     );
     if (!connection || Number(connection.refresh_generation) !== observation.refreshGeneration)
@@ -875,7 +879,7 @@ export async function recordSubscriptionCoreCodexUsageObservation(
       return { applied: false, recovered: false };
     const [connection] = await rawRows<{ refresh_generation: number | string }>(
       tx,
-      sql`select refresh_generation from opengeni_private.read_subscription_codex_connection_credential(
+      sql`select refresh_generation from opengeni_private.read_subscription_core_connection_credential(${SUBSCRIPTION_CORE_CODEX_PROVIDER},
           ${routineArgs(scope, connectionId, null)}
         )`,
     );

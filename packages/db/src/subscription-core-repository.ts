@@ -1,4 +1,5 @@
 import { sql } from "drizzle-orm";
+import { SUBSCRIPTION_CORE_CODEX_PROVIDER } from "./subscription-core-codex-provider";
 import type {
   ConnectionHealth,
   ConnectionKind,
@@ -606,7 +607,7 @@ export async function persistSubscriptionCodexRefresh(
   assertPositiveGeneration(input.expectedRefreshGeneration);
   const [row] = await rawRows<{ persisted: boolean }>(
     db,
-    sql`select opengeni_private.persist_subscription_codex_refresh(
+    sql`select opengeni_private.persist_subscription_core_refresh(${SUBSCRIPTION_CORE_CODEX_PROVIDER},
       ${input.accountId}::uuid, ${input.workspaceId}::uuid,
       ${input.sessionId}::uuid, ${input.turnId}::uuid,
       ${input.connectionId}::uuid, ${input.expectedRefreshGeneration}::bigint,
@@ -632,7 +633,7 @@ export async function persistSubscriptionCodexRefreshWithPlan(
   const planType = /^[A-Za-z0-9_.-]{1,64}$/.test(trimmed) ? trimmed : null;
   const [row] = await rawRows<{ persisted: boolean }>(
     db,
-    sql`select opengeni_private.persist_subscription_codex_refresh_with_plan(
+    sql`select opengeni_private.persist_subscription_core_refresh_with_plan(${SUBSCRIPTION_CORE_CODEX_PROVIDER},
       ${input.accountId}::uuid, ${input.workspaceId}::uuid,
       ${input.sessionId}::uuid, ${input.turnId}::uuid,
       ${input.connectionId}::uuid, ${input.expectedRefreshGeneration}::bigint,

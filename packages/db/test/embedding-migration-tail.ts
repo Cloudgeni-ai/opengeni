@@ -173,4 +173,6 @@ export const embeddingMigrationTail = [
   // Patches the interaction reaper by its post-0345/0391 anchors; replay
   // after the fence graph it edits.
   "0705_idle_interaction_release.sql",
+  // Adds provider-neutral routines over the shared core tables from withheld 0642.
+  "0707_subscription_core_neutral_routines.sql",
 ];

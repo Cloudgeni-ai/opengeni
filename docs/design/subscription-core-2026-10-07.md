@@ -2105,6 +2105,154 @@ legacy fallback is possible after scrub. Table/column removal is still M6.
   throwaway PostgreSQL 17 cluster procedure. Never use real Codex credentials
   or live upstream endpoints.
 
+### 5.1.2 M4: one runtime, per-provider adapters
+
+Decision (unify first). Every source of model access (Codex, Claude and
+SuperGrok subscriptions now, API-key connectors such as OpenRouter and Vercel
+later) runs through one provider-neutral runtime: the same placement, leases,
+reservation and settlement, credential load and refresh orchestration, health,
+writers, settings projections, waiters and catalog cache. A provider differs
+only in a small adapter (§2.1): sign-in and credential format, refresh, usage
+or quota decoding, error classification, model catalog and capability flags.
+M3 shipped that runtime under Codex names; M4 first extracts it, so Claude and
+SuperGrok are added as adapters rather than copies. Copying the Codex modules
+per provider would multiply the authorization, fencing and lock-order surface
+that the M3 reviews verified once, and every later fix would need to land N
+times.
+
+The shared SQL is provider-neutral by construction: the provider is an
+argument, and any provider difference comes from data, never from a branch on
+a provider name.
+
+- `opengeni_private.subscription_core_providers` (migration 0707) lists the
+  providers whose runtime runs on the core, with the per-provider data the
+  shared routines need: `extra_credits` (whether `manage ... 'extra_credits'`
+  is meaningful) and `primary_setting_column` (which `subscription_settings`
+  column holds the provider's primary connection until settings are keyed by
+  provider). It is owner-only data; a provider without a row is refused by
+  every neutral routine, even when its cutover row is enabled (fail closed).
+  Codex is seeded. A provider joins the core by a migration that inserts its
+  row and, where needed, widens the provider lists in existing CHECK
+  constraints; the neutral routines need no change for another subscription
+  provider, while the deferred routines listed below still carry
+  per-provider branches that its step must extend. The neutral routines, like
+  their Codex twins, accept only `kind = 'subscription'` connections; an
+  API-key connector's step widens that filter from data (a registry column
+  naming the connection kind), never by a provider branch. A provider's
+  registry row must land with or after its drained
+  cutover: the row alone turns on the shared disconnect-admission trigger for
+  that provider's lease and binding rows, whatever its cutover row says.
+  `primary_setting_column` must be NULL (a provider without a primary
+  setting, such as an API-key connector) or exactly
+  `<provider>_primary_connection_id`, so no provider can be pointed at another
+  provider's column.
+  The registry is append-only (a trigger refuses DELETE, TRUNCATE and a
+  changed key): removing or renaming a row would make the shared
+  disconnect-admission trigger skip that provider's rows while older binaries
+  still call its provider-named routines. The same trigger checks on every
+  registry write that `primary_setting_column` is a real uuid column of
+  `subscription_settings`; a migration that drops or renames such a column
+  must update the registry first (the `manage ... 'primary'` write fails with
+  an error, not a wrong write, if it does not).
+- Neutral capability kinds `refresh_authorized`, `refresh_write`,
+  `connection_refresh_authorized` and `connection_owner` carry their provider
+  (required and format-checked like a registry key) and mirror the `codex_*`
+  kinds one for one, with owner-only policies. On rows that carry a provider
+  (connections, aliases, leases) a capability admits only rows of its own
+  provider.
+  Memberships, resource authorities, settings and Apps designations carry no
+  provider; their policies admit the owner's own rows for any provider's
+  owner capability, pinned to the capability's account and, per table, to the
+  owner's subject (memberships, authority insert and read), the exact
+  connection (authority revoke, Apps designations) or the current workspace
+  (settings), exactly as the Codex-named policies do. The capability key
+  omits the provider, so the owner-capability grant refuses a second
+  provider's grant on an already held key instead of
+  sharing the first provider's row.
+- Neutral routines (provider first) replace the Codex-named routines the
+  generic runtime calls, with identical authorization, lock keys and order,
+  fences, RLS posture and grants: the turn refresh seam
+  (`begin_/persist_/fail_subscription_core_refresh`,
+  `persist_subscription_core_refresh_with_plan`,
+  `subscription_core_refresh_write_allowed`), connection health
+  (`quarantine_subscription_core_connection`,
+  `recover_subscription_core_connection_health`), v2 accepted authority
+  (`subscription_core_acceptance_authority_v2`,
+  `subscription_core_task_authority_v2`,
+  `subscription_core_revision_authority_v2`), the connection credential seam
+  (`read_subscription_core_connection_credential`,
+  `begin_/persist_/fail_subscription_core_connection_refresh`, owner-only
+  `subscription_core_connection_target`), the personal writers
+  (`connect_subscription_core_personal`,
+  `disconnect_subscription_core_connection`,
+  `manage_subscription_core_personal`,
+  `subscription_core_personal_connections`) and their internals
+  (`subscription_core_owner_capability_held`,
+  `subscription_core_owner_membership_held`, owner-only
+  `subscription_core_writer_context`,
+  `grant_subscription_core_owner_capability`,
+  `drop_subscription_core_owner_capabilities`). Both families take the same
+  per-connection refresh key and the same connect and personal-authority
+  keys, so an old binary on the Codex-named routines and a new binary on the
+  neutral ones serialize exactly as two old binaries do. Default relogin and
+  refusal texts are provider-free; the runtime passes the provider's own text,
+  so stored Codex values are unchanged. Neutral routines never decode a
+  provider fact: `read_subscription_core_connection_credential` returns the
+  opaque `provider_state` (the Codex-named routine returned a decoded
+  `is_fedramp`), and the Codex adapter reads its FedRAMP flag from it, as the
+  chat-turn credential load already did. The shared disconnect-admission trigger
+  admits by registry membership instead of a provider literal.
+  Its "prior request outcome is unresolved" refusal text loses the provider
+  name (no caller matches the text).
+- Defect fixed in earlier merged work (migration 0691): the two `SECURITY
+  DEFINER` subscription guard triggers (`guard_subscription_disconnect_admission`
+  and `guard_subscription_designation_disconnect`) captured the migration
+  session's search path, without `pg_temp`, so a session's temporary table
+  could shadow the connection, turn or lease rows they check. 0707 sets their
+  search path to the data schema with `pg_temp` last.
+- Rolling compatibility and retirement. The Codex-named routines, kinds and
+  policies stay unchanged for binaries that still call them (staging runs
+  them since 0689/0700). They are dropped by the final M4 retirement step, or
+  M6 if that step is merged first, in a migration that runs only once no
+  binary older than 0707 can start (a readiness check on the neutral routines
+  already prevents an older database from serving a newer binary).
+- Genuinely Codex-only, and staying so: the Codex Apps routines and the
+  reset-credit authority and fence.
+- Left Codex-named by this extraction and made provider-keyed by §5.3's
+  generic precursor (PR 0), before the first SuperGrok cutover: the cutover
+  planner rules (`codex-subscription-core-cutover.ts`) and the 0689 cutover
+  machinery, the auto-assignment table
+  `opengeni_private.subscription_codex_auto_assignments` with its apply
+  routine and triggers, `record_subscription_codex_plan_change` and the
+  plan-change trigger, organization reach (`subscription_codex_reach`,
+  `set_subscription_codex_reach`; the shared TypeScript writers reach it only
+  through the Codex binding's allocator hook),
+  `list_organization_codex_workspace_ids`, the scope visibility and wake
+  routines, and 0691's operation-kind CHECK, which admits `model` and
+  `credential_request` only for Codex.
+- Deferred, with their provider branches recorded for the Claude and
+  SuperGrok steps: `authorize_subscription_personal_access` (v1 branches per
+  provider until each provider's drained cutover),
+  `subscription_effective_settings` (per-provider settings columns) and
+  `guard_subscription_designation_disconnect` (Apps designation).
+
+Fail-closed choices recorded for review: an unregistered provider is refused
+by every neutral routine even with an enabled cutover row; the neutral
+owner-capability drop removes only the neutral owner capability of the same
+provider, never the reset-credit fence; `manage ... 'primary'` is refused when
+the registry has no primary column, and `'extra_credits'` when the provider
+has no extra credits.
+
+Settings. Per-provider settings columns (`codex_primary_connection_id` and
+the `rotation`/`providers` JSON keys) stay as they are in M4. Older binaries
+still write the Codex column, and `subscription_effective_settings` projects
+it; moving to a provider-keyed shape while those binaries run would need a
+dual-write trigger over the same rows the 0689 cutover froze. The registry's
+`primary_setting_column` isolates the per-provider column for the shared
+writers, so the keyed shape (one row per provider with the primary
+connection, backfilled from the columns) is a drained step in M6, together
+with dropping the columns.
+
 ### 5.2 Legacy shape mapping
 
 | Legacy | New |
@@ -2169,27 +2317,28 @@ subjects `worker:xai-workspace` / `worker:claude-workspace`
 accepted authority (`{version:1, scope: workspace|organization}` or
 `{version:1, scope:"user", authorityGeneration}`).
 
-M4 builds on a separate provider-neutral extraction ("M4-A"), not yet open
-when this was written. Assumed shape, to be replaced by M4-A's actual names
-when it merges:
+M4 builds on the provider-neutral extraction ("M4-A", §5.1.2 and the
+TypeScript extraction that follows it), which was planned separately and is
+reconciled here with what it delivered:
 
 - The generic logic of `packages/db/src/subscription-core-codex*.ts` moves to
-  provider-neutral `subscription-core-*` modules; Codex becomes the first
-  implementation of `SubscriptionProviderAdapter`
-  (`packages/subscriptions/src/adapter.ts`), with no behaviour change.
-- Codex-named generic SQL becomes provider-keyed: `begin/persist/fail` refresh
-  and connection refresh, `read_subscription_codex_connection_credential`, the
-  `codex_refresh_write` capability, the connection target and writer context,
-  owner capability helpers, `list_organization_codex_workspace_ids`, scope
-  visibility and wake routines. This plan calls them by role (for example
-  "the core refresh seam") and passes `provider` as an argument.
-- The M3 cutover planner rules (`codex-subscription-core-cutover.ts`: scope
-  choice, assignment policies, delegated manager, dedupe and the policy
-  union) become a provider-keyed planner, and the auto-assignment table
-  `opengeni_private.subscription_codex_auto_assignments`, its apply routine
-  and triggers, `record_subscription_codex_plan_change`, and 0702's access
-  editor helpers `subscription_codex_reach` and `set_subscription_codex_reach`
-  become provider-keyed. If M4-A does not include them, PR 0 does.
+  provider-neutral modules under `packages/db/src/subscription-core/`; Codex
+  is an adapter and binding over them, with no behaviour change.
+- Codex-named generic SQL has provider-keyed equivalents (migration 0707,
+  §5.1.2) that the TypeScript core calls with `provider` as an argument: the
+  turn and connection refresh seams, the connection credential read, the
+  `refresh_write` and owner capabilities, the connection target and writer
+  context, health, v2 accepted authority and the personal writers. This plan
+  calls them by role (for example "the core refresh seam").
+- Not taken by M4-A, so PR 0 does them: `list_organization_codex_workspace_ids`
+  and the scope visibility and wake routines; the provider-keyed cutover
+  planner (`codex-subscription-core-cutover.ts`: scope choice, assignment
+  policies, delegated manager, dedupe and the policy union); the
+  auto-assignment table `opengeni_private.subscription_codex_auto_assignments`,
+  its apply routine and triggers; `record_subscription_codex_plan_change`;
+  and 0702's access editor helpers `subscription_codex_reach` and
+  `set_subscription_codex_reach`. The 0691 operation kinds below are also
+  still Codex-only.
 - A guard test rejects provider names and provider conditionals in shared
   core modules. Every M4 change below keeps that guard green: provider facts
   live in adapters and capability flags only.

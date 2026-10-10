@@ -200,7 +200,7 @@ describe("subscription-core accepted-turn guard", () => {
       expiresAt: null,
     });
     expect(
-      statements.some((statement) => statement.includes("begin_subscription_codex_refresh")),
+      statements.some((statement) => statement.includes("begin_subscription_core_refresh")),
     ).toBe(true);
     expect(statements.some((statement) => statement.includes("pg_advisory_xact_lock"))).toBe(true);
     expect(

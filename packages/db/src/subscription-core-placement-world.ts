@@ -1,4 +1,5 @@
 import { sql } from "drizzle-orm";
+import { SUBSCRIPTION_CORE_CODEX_PROVIDER } from "./subscription-core-codex-provider";
 import {
   evaluateWorkspaceModelPolicy,
   SubscriptionPersonalAuthorityV2,
@@ -405,7 +406,7 @@ export async function withSubscriptionCoreCodexRefreshLock<T>(
     }>(
       tx,
       sql`select refresh_generation, credential_encrypted, expires_at
-        from opengeni_private.begin_subscription_codex_refresh(
+        from opengeni_private.begin_subscription_core_refresh(${SUBSCRIPTION_CORE_CODEX_PROVIDER},
           ${request.accountId}::uuid, ${request.workspaceId}::uuid,
           ${request.sessionId}::uuid, ${request.turnId}::uuid,
           ${request.sessionOwnerSubjectId}, ${request.initiatingHumanSubjectId},

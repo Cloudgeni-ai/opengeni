@@ -29,6 +29,12 @@ import {
   type RuntimeTablePosture,
 } from "../src/runtime-posture";
 
+/** Write-allowed probes pin a fixed search path without the target schema. */
+const FIXED_SEARCH_PATH_PRIVATE_ROUTINES: ReadonlySet<string> = new Set([
+  "subscription_codex_refresh_write_allowed(uuid, uuid, uuid)",
+  "subscription_core_refresh_write_allowed(text, uuid, uuid, uuid)",
+]);
+
 const options: RuntimeDatabasePostureOptions = {
   rlsStrategy: "force",
   expectedRole: "opengeni_app",
@@ -554,7 +560,7 @@ function safePosture(): RuntimeDatabasePosture {
         publicExecute: false,
         securityDefiner: true,
         configuration: [
-          name === "subscription_codex_refresh_write_allowed(uuid, uuid, uuid)"
+          FIXED_SEARCH_PATH_PRIVATE_ROUTINES.has(name)
             ? "search_path=pg_catalog, opengeni_private, pg_temp"
             : "search_path=pg_catalog, public, opengeni_private, pg_temp",
         ],
@@ -1694,7 +1700,7 @@ describe("runtime database posture evaluator", () => {
         (SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES as readonly string[]).includes(
           privateRoutine.name,
         ) &&
-        privateRoutine.name !== "subscription_codex_refresh_write_allowed(uuid, uuid, uuid)"
+        !FIXED_SEARCH_PATH_PRIVATE_ROUTINES.has(privateRoutine.name)
       ) {
         privateRoutine.configuration = [
           "search_path=pg_catalog, tenantx, opengeni_private, pg_temp",
@@ -1710,7 +1716,7 @@ describe("runtime database posture evaluator", () => {
         (SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES as readonly string[]).includes(
           privateRoutine.name,
         ) &&
-        privateRoutine.name !== "subscription_codex_refresh_write_allowed(uuid, uuid, uuid)"
+        !FIXED_SEARCH_PATH_PRIVATE_ROUTINES.has(privateRoutine.name)
       ) {
         privateRoutine.configuration = [
           'search_path=pg_catalog, "Tenant Space", opengeni_private, pg_temp',
@@ -2095,7 +2101,7 @@ describe("runtime database posture evaluator", () => {
       if (
         (SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES as readonly string[]).includes(routine.name)
       ) {
-        if (routine.name !== "subscription_codex_refresh_write_allowed(uuid, uuid, uuid)") {
+        if (!FIXED_SEARCH_PATH_PRIVATE_ROUTINES.has(routine.name)) {
           routine.configuration = ["search_path=pg_catalog, tenantx, opengeni_private, pg_temp"];
         }
       }
