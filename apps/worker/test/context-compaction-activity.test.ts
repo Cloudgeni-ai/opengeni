@@ -2406,41 +2406,11 @@ describe("standalone context compaction execution", () => {
       lineage: { parentTurnId: spawningClaim.turn.id },
     });
     if (!newUpdate.added) throw new Error("new update was not inserted");
-    const heldClaim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
-      sessionId: session.id,
-      workflowId: `session-${session.id}`,
-      workflowRunId: crypto.randomUUID(),
-      attemptId: crypto.randomUUID(),
-      dispatchId: `dispatch-${crypto.randomUUID()}`,
-      trigger: { kind: "next" },
+    // Input committed after the failed compaction is newer truth: it makes one
+    // new attempt instead of waiting for a person (docs/context-compaction.md).
+    expect(await peekSessionWork(client.db, grant.workspaceId!, session.id)).toEqual({
+      kind: "runnable",
     });
-    expect(heldClaim).toEqual({ action: "unclaimed", reason: "no-work" });
-    expect(
-      (await listOutstandingSessionSystemUpdates(client.db, grant.workspaceId!, session.id)).map(
-        (update) => update.id,
-      ),
-    ).toEqual([newUpdate.update.id]);
-
-    await withWorkspaceSubjectSessionActivityRls(
-      client.db,
-      grant.workspaceId!,
-      grant.subjectId,
-      async (db) =>
-        await submitHumanPromptInTransaction(db, {
-          accountId: grant.accountId,
-          workspaceId: grant.workspaceId!,
-          sessionId: session.id,
-          subjectId: grant.subjectId,
-          actor: { type: "human", subjectId: grant.subjectId },
-          operationKey: crypto.randomUUID(),
-          delivery: "send",
-          text: "Retry after the compaction failure with new human input",
-          resources: [],
-          tools: [],
-          reasoningEffortFallback: "low",
-          source: "user",
-        }),
-    );
     const retryClaim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
       sessionId: session.id,
       workflowId: `session-${session.id}`,
@@ -2449,13 +2419,10 @@ describe("standalone context compaction execution", () => {
       dispatchId: `dispatch-${crypto.randomUUID()}`,
       trigger: { kind: "next" },
     });
-    expect(retryClaim).toMatchObject({
-      action: "claimed",
-      turn: { source: "user" },
-    });
-    if (retryClaim.action !== "claimed") throw new Error("human input did not wake the session");
-    // The notice carries this human's accepted spawning turn. The failed
-    // compaction cannot consume it; a new human Send can deliver it once.
+    if (retryClaim.action !== "claimed")
+      throw new Error("new child result did not wake the session");
+    // The failed compaction could not consume the notice; the new attempt
+    // delivers it exactly once.
     expect(
       (
         await listSessionSystemUpdatesForTurn(
