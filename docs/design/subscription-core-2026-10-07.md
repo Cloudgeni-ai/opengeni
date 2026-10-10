@@ -2517,15 +2517,23 @@ with these provider-neutral changes:
   recorded with `committed_at = '-infinity'`, so the time-based backstop never
   treats its existing work as pre-receipt (Codex work mostly carries no
   personal v2 entry and never gets a compatibility record); PR 0 tests that
-  Codex follow-up work accepted before PR 0 still runs after it. A binary requires the receipt of every
-  provider whose cutover migration is in its own ledger and refuses to start
-  otherwise.
+  Codex follow-up work accepted before PR 0 still runs after it. A binary
+  requires the receipt of every provider whose cutover migration is in its
+  own ledger and refuses to start otherwise. Readiness is answered by the SQL
+  readiness function (a boolean per provider); TypeScript never reads
+  `committed_at` as a date (the database driver turns `-infinity` into an
+  invalid date), and the readiness test includes the Codex row.
 - **Switch rows before the receipt.** Runtime roles may not insert, enable or
   delete a `subscription_provider_cutovers` row, nor insert core connections,
   for a provider without a receipt. With the receipt, the row is undeletable
   and cannot change provider or organization, disabled means fail-closed
   maintenance, and a provider-neutral trigger seeds new organizations for
-  every provider with a receipt.
+  every provider with a receipt. That trigger replaces 0689's Codex seed
+  trigger in the same PR 0 migration (both insert without `ON CONFLICT` into
+  unique tables, so keeping both would fail every organization creation),
+  seeds Codex exactly as 0689 does today (switch row and account-level
+  settings row), updates the posture inventories, and is tested by creating
+  an organization after PR 0.
 - **Parity report.** One relation
   `opengeni_private.subscription_cutover_report (provider, metric,
   account_id, legacy_count, core_count)`; each migration writes only its
