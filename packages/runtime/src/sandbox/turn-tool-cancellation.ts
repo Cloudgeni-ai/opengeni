@@ -47,9 +47,11 @@ const TURN_MAX_MODEL_WAIT_MS = 30_000;
  * Models request 60-300 s for builds and test suites; the silent 30-second cap
  * turned each such command into repeated empty `write_stdin` polls, each a
  * full-context model request. The wait still returns on exit and stays
- * cancellable between provider slices.
+ * cancellable between provider slices. The ceiling stays under the default
+ * 5-minute Claude prompt-cache TTL (and typical OpenAI in-memory retention) so
+ * the next request still reads the cached prefix instead of rewriting it.
  */
-const CUT_POLLING_MAX_MODEL_WAIT_MS = 600_000;
+const CUT_POLLING_MAX_MODEL_WAIT_MS = 240_000;
 /**
  * Under the experiment a long wait must not hold a dev server, watcher, tail or
  * REPL for minutes after it printed what the model needs. Once the ordinary
