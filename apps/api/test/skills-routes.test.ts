@@ -133,6 +133,60 @@ async function request(path: string, init: RequestInit = {}): Promise<Response> 
 }
 
 describe("portable Skill routes", () => {
+  test("a key-only deployment's operator saves and removes workspace Skills with its key", async () => {
+    if (!available || !shared || !client) throw new Error("PostgreSQL required");
+    // Configured mode without delegation: the deployment-key check runs in the
+    // global auth middleware, and routes see the operator's configured grant.
+    const configured = new Hono();
+    registerSkillRoutes(
+      configured,
+      {
+        db: client.db,
+        settings: testSettings({ productAccessMode: "configured", delegationSecret: undefined }),
+      } as ApiRouteDeps,
+      { github },
+    );
+    const context = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "opengeni:configured",
+      accountExternalId: "default",
+      accountName: "Configured",
+      workspaceExternalSource: "opengeni:configured",
+      workspaceExternalId: "default",
+      workspaceName: "Configured",
+      subjectId: "configured:key",
+      subjectLabel: "Configured key",
+    });
+    const grant = context.workspaceGrants[0]!;
+    expect(grant.principalKind).toBe("configured_key");
+    const call = async (path: string, body: unknown) =>
+      await configured.request(`http://x/v1/workspaces/${grant.workspaceId}${path}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    const skillId = crypto.randomUUID();
+    const created = await call("/skills/content/save", {
+      skillId,
+      operationId: crypto.randomUUID(),
+      expectedRevisionId: null,
+      expectedScopeVersion: 1,
+      scope: "workspace",
+      stableKey: `operator-${skillId}`,
+      files: [{ path: "SKILL.md", content: skillMarkdown }],
+      reason: "Operator fixture",
+    });
+    expect(created.status).toBe(200);
+    const saved = await created.json();
+    const removed = await call(`/skills/content/${skillId}/remove`, {
+      operationId: crypto.randomUUID(),
+      expectedRevisionId: saved.revisionId,
+      expectedScopeVersion: 1,
+      reason: "Operator removal",
+    });
+    expect(removed.status).toBe(200);
+    expect(await removed.json()).toMatchObject({ removed: true, outcome: "applied" });
+  });
+
   test("human removal rejects stale versions and replays after deleting saved Skills", async () => {
     if (!available || !shared) throw new Error("PostgreSQL required for removal verification");
     const skillId = crypto.randomUUID();

@@ -97,6 +97,7 @@ function requiredAttemptClaims(grant: AccessGrant): PreferenceRegistryAttemptCla
 
 function requireHumanMutation(access: AccessGrantAuthorization): void {
   const { grant } = access;
+  if (isDeploymentKeyOperator(access)) return;
   if (
     !access.contextIntegrity ||
     access.authenticatedSubjectId !== grant.subjectId ||
@@ -110,6 +111,23 @@ function requireHumanMutation(access: AccessGrantAuthorization): void {
       message: "Preference activation and scope mutation require a direct human-authorized request",
     });
   }
+}
+
+/**
+ * A key-only (configured) deployment has no Opengeni sign-in: whoever holds the
+ * deployment key is its operator, so a request made with the key itself counts
+ * as the person. Agents never hold the key and stay refused.
+ */
+function isDeploymentKeyOperator(access: AccessGrantAuthorization): boolean {
+  const { grant } = access;
+  return (
+    access.contextIntegrity &&
+    access.authenticatedSubjectId === grant.subjectId &&
+    grant.principalKind === "configured_key" &&
+    exactAttemptClaims(grant) === null &&
+    !grant.serviceInitiator &&
+    !grant.serviceInitiatorContext
+  );
 }
 
 export function authorizePreferenceRegistryScopeMutation(
