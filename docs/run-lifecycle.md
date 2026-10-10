@@ -1442,7 +1442,9 @@ durable history; it is never requeued or terminalized. Newly arriving machine
 updates remain pending. Without a newer actionable work wake, the workflow
 cannot synthesize another goal continuation from unchanged history. A later
 human/API prompt, Steer, explicitly requested Compact, or genuinely new machine
-input may create newer truth and make one new attempt.
+input may create newer truth and make one new attempt; machine input is new
+when its pending event follows the failure's `turn.failed` event (see
+[`context-compaction.md`](context-compaction.md)).
 
 Resolved model context metadata is authoritative on every model-facing path.
 For the Codex subscription catalog this means a 272,000-token raw window, a

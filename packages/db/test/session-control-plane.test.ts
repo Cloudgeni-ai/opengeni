@@ -4786,7 +4786,7 @@ describe("clean session control plane", () => {
     ).toEqual([second.update.id]);
   });
 
-  test("a compaction failure holds ordinary internal updates without blocking explicit Compact", async () => {
+  test("a compaction failure holds machine input already pending at the failure without blocking explicit Compact", async () => {
     const { grant, session } = await fixture();
     const first = await addSessionSystemUpdate(client.db, {
       accountId: grant.accountId,
@@ -4812,22 +4812,8 @@ describe("clean session control plane", () => {
       `session-${session.id}`,
       { attemptId: failedAttemptId },
     );
-    await applySessionTurnSettlement(client.db, grant.workspaceId!, {
-      sessionId: session.id,
-      turnId: failedTurn!.id,
-      triggerEventId: failedTurn!.triggerEventId,
-      attemptId: failedAttemptId,
-      turnStatus: "failed",
-      sessionStatus: "idle",
-      activeTurnId: null,
-      events: [
-        {
-          type: "turn.failed",
-          payload: { error: "checkpoint failed", code: "context_compaction_failed" },
-        },
-      ],
-    });
-
+    // This result arrives while the failing attempt runs, so it is pending at
+    // the failure: it saw no newer history and must not retry on its own.
     const held = await addSessionSystemUpdate(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId!,
@@ -4844,6 +4830,22 @@ describe("clean session control plane", () => {
       },
     });
     if (!held.added) throw new Error("held system update was not inserted");
+    await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      turnId: failedTurn!.id,
+      triggerEventId: failedTurn!.triggerEventId,
+      attemptId: failedAttemptId,
+      turnStatus: "failed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [
+        {
+          type: "turn.failed",
+          payload: { error: "checkpoint failed", code: "context_compaction_failed" },
+        },
+      ],
+    });
+
     expect(await peekSessionWork(client.db, grant.workspaceId!, session.id)).toEqual({
       kind: "idle",
     });
@@ -4881,6 +4883,94 @@ describe("clean session control plane", () => {
         (update) => update.id,
       ),
     ).toContain(held.update.id);
+  });
+
+  test("machine input committed after a compaction failure is newer truth and starts one attempt", async () => {
+    const { grant, session } = await fixture();
+    const childResult = (summary: string) => ({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      kind: "child_terminal_result" as const,
+      classification: "success" as const,
+      sourceId: crypto.randomUUID(),
+      dedupeKey: `child-${crypto.randomUUID()}`,
+      summary,
+      payload: {
+        type: "child_terminal_result" as const,
+        childSessionId: crypto.randomUUID(),
+        status: "idle" as const,
+      },
+    });
+    const first = await addSessionSystemUpdate(client.db, childResult("First child result"));
+    if (!first.added) throw new Error("first system update was not inserted");
+    const failedAttemptId = crypto.randomUUID();
+    const failedTurn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId: failedAttemptId },
+    );
+    const held = await addSessionSystemUpdate(client.db, childResult("Held child result"));
+    if (!held.added) throw new Error("held system update was not inserted");
+    await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      turnId: failedTurn!.id,
+      triggerEventId: failedTurn!.triggerEventId,
+      attemptId: failedAttemptId,
+      turnStatus: "failed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [
+        {
+          type: "turn.failed",
+          payload: { error: "checkpoint failed", code: "context_compaction_failed" },
+        },
+      ],
+    });
+    expect(await peekSessionWork(client.db, grant.workspaceId!, session.id)).toEqual({
+      kind: "idle",
+    });
+
+    const newer = await addSessionSystemUpdate(client.db, childResult("Newer child result"));
+    if (!newer.added) throw new Error("newer system update was not inserted");
+    expect(await peekSessionWork(client.db, grant.workspaceId!, session.id)).toEqual({
+      kind: "runnable",
+    });
+    const retryAttemptId = crypto.randomUUID();
+    const retryTurn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId: retryAttemptId },
+    );
+    expect(retryTurn).toMatchObject({ source: "system", status: "running" });
+    // Child results from different children claim in separate batches; the
+    // held backlog leads in canonical order and the newer result follows.
+    const delivered = async (turnId: string) =>
+      (
+        await listSessionSystemUpdatesForTurn(client.db, grant.workspaceId!, session.id, turnId)
+      ).map((entry) => entry.id);
+    expect(await delivered(retryTurn!.id)).toEqual([held.update.id]);
+    await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      turnId: retryTurn!.id,
+      triggerEventId: retryTurn!.triggerEventId,
+      attemptId: retryAttemptId,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [{ type: "turn.completed", payload: {} }],
+    });
+    const nextTurn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+    );
+    expect(await delivered(nextTurn!.id)).toEqual([newer.update.id]);
   });
 
   test("a model-visible goal-continuation notice remains delivered after turn failure", async () => {
@@ -6226,7 +6316,7 @@ describe("clean session control plane", () => {
   });
 
   describe("pending machine input at the final idle settlement fence", () => {
-    async function idleChild(compactionFailed = false) {
+    async function idleChild(compactionFailed = false, heldDirection = false) {
       const { grant, session: parent } = await fixture();
       const child = await createSession(client.db, {
         accountId: grant.accountId,
@@ -6250,6 +6340,22 @@ describe("clean session control plane", () => {
         { attemptId },
       );
       if (!turn) throw new Error("child turn was not claimed");
+      // Input accepted while the failing attempt runs is pending at the
+      // failure, so it saw no newer history and stays held.
+      const held = heldDirection
+        ? await addSessionSystemUpdate(client.db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId!,
+            sessionId: child.id,
+            classification: "info",
+            sourceId: crypto.randomUUID(),
+            dedupeKey: `idle-fence-held-${crypto.randomUUID()}`,
+            summary: "direction pending at the compaction failure",
+            kind: "agent_message",
+            payload: { type: "agent_message", text: "continue", operationId: crypto.randomUUID() },
+          })
+        : null;
+      if (held && !held.added) throw new Error("held machine input was not inserted");
       expect(
         await applySessionTurnSettlement(client.db, grant.workspaceId!, {
           sessionId: child.id,
@@ -6282,8 +6388,28 @@ describe("clean session control plane", () => {
               ),
             ),
         );
-      return { grant, child, idleNotices };
+      return { grant, child, idleNotices, heldUpdateId: held?.update.id ?? null };
     }
+
+    test("input already pending at a compaction failure does not hold idle settlement", async () => {
+      const { grant, child, idleNotices, heldUpdateId } = await idleChild(true, true);
+      // Ordinary input held behind compaction failure is not an autonomous
+      // retry; idle settlement must not acquire a new hold for it.
+      expect(
+        await claimTestSessionWork(client.db, grant.workspaceId!, child.id, `session-${child.id}`, {
+          attemptId: crypto.randomUUID(),
+        }),
+      ).toBeNull();
+      expect(
+        await settleSessionIdleWithParentOutbox(client.db, grant.workspaceId!, child.id),
+      ).toMatchObject({ action: "settled", notifyParent: true });
+      expect(await idleNotices()).toHaveLength(1);
+      expect(
+        (await listOutstandingSessionSystemUpdates(client.db, grant.workspaceId!, child.id)).map(
+          (update) => update.id,
+        ),
+      ).toContain(heldUpdateId!);
+    });
 
     for (const kind of ["agent_message", "agent_steer_instruction"] as const) {
       for (const compactionFailed of [false, true]) {
@@ -6308,22 +6434,8 @@ describe("clean session control plane", () => {
               attemptId,
             });
 
-          if (compactionFailed && kind === "agent_message") {
-            // Ordinary input held behind compaction failure is not an
-            // autonomous retry; idle settlement must not acquire a new hold.
-            expect(await claim()).toBeNull();
-            expect(
-              await settleSessionIdleWithParentOutbox(client.db, grant.workspaceId!, child.id),
-            ).toMatchObject({ action: "settled", notifyParent: true });
-            expect(await idleNotices()).toHaveLength(1);
-            expect(
-              (
-                await listOutstandingSessionSystemUpdates(client.db, grant.workspaceId!, child.id)
-              ).map((update) => update.id),
-            ).toContain(added.update.id);
-            return;
-          }
-
+          // Input committed after the final peek is newer than any compaction
+          // failure, so it reopens the episode exactly like without one.
           expect(
             await settleSessionIdleWithParentOutbox(client.db, grant.workspaceId!, child.id),
           ).toEqual({ action: "stale", episodeKey: null, events: [] });
