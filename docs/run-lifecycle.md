@@ -3184,7 +3184,10 @@ browser or desktop in use keeps all of them.
   epoch, instance and controller generation), and the browser checkpoint sweep
   captures the encrypted profile, commits the suspension, removes the local
   profile and releases the holder in one transaction. The orphan sweep keeps
-  the holder of that exact saved generation until cleanup. A save that fails
+  the holder of that exact saved generation until cleanup; if the box goes
+  away first, the reaper clears only the stale controller binding
+  (`list_orphaned_idle_browser_checkpoints`) so the saved profile resumes. Only
+  a tenant-scoped caller may prepare an idle save. A save that fails
   returns the browser to `active`; the next idle decision releases it without
   a second attempt.
 - Desktops, ephemeral browsers, browsers that cannot be saved, and every
@@ -3200,7 +3203,8 @@ legacy retained commands goes to idle command containment. A saved browser
 resumes on demand, from the person or the agent; when the desktop it was shown
 in has stopped, resume clears the link (`linked_computer_session_id`) and
 restores it as an ordinary browser. `opengeni_sandbox_idle_interaction_release_total{outcome}`
-counts inspections (`released`, `checkpointing`, `not_eligible`,
+counts inspections (`checkpointing` when browser saves were prepared,
+`released` when holders were released without a save, `not_eligible`,
 `inspection_failed`). A person returning exactly as the box is being released
 may see the browser `suspending`, then resume it.
 

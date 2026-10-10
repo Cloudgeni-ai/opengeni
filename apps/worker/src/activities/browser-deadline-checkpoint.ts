@@ -278,6 +278,7 @@ export function createBrowserDeadlineCheckpointActivities(
                 // The idle window already elapsed before this save began, so
                 // a box the saved browser was last to hold drains now.
                 idleGraceMs: target.reason === "idle" ? 0 : settings.sandboxIdleGraceMs,
+                preserveHoldersChangedAt: target.reason === "idle",
               });
             },
             undefined,

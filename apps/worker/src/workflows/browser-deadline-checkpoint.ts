@@ -32,8 +32,11 @@ export async function browserDeadlineCheckpointSweepWorkflow(): Promise<void> {
     targets.map(async (target) => {
       try {
         await startChild(browserDeadlineCheckpointWorkflow, {
-          // A target without a reason keeps its pre-idle id (replay-safe).
-          workflowId: `${target.reason === "idle" ? "browser-idle" : "browser-deadline"}:${target.browserSessionId}:${target.leaseEpoch}:${target.controllerGeneration}`,
+          // One id shape for both reasons: the id never depends on fields an
+          // older worker strips, so replay is deterministic across a rolling
+          // deploy. An idle and a deadline save of one controller generation
+          // are mutually exclusive in the database anyway.
+          workflowId: `browser-deadline:${target.browserSessionId}:${target.leaseEpoch}:${target.controllerGeneration}`,
           taskQueue: workflowInfo().taskQueue,
           workflowIdReusePolicy: WorkflowIdReusePolicy.ALLOW_DUPLICATE,
           parentClosePolicy: ParentClosePolicy.ABANDON,

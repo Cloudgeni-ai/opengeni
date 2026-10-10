@@ -232,11 +232,15 @@ BEGIN
         RETURN NULL;
       END IF;
       IF operation.operation_id IS NULL AND reason = 'idle' THEN
+        -- Only the reaper's tenant-scoped idle decision prepares an idle save
+        -- (it re-checked the whole sandbox group under the control fence).
         -- Someone using the browser (the live view's poll and heartbeat, a
         -- person's input, an agent tool call) is activity; a checkpoint never
         -- starts inside the idle window.
         idle_ms := (p_target->>'idleMs')::bigint;
-        IF idle_ms IS NULL OR idle_ms < 60000 OR greatest(browser.last_used_at,
+        IF current_setting('opengeni.account_id', true) IS DISTINCT FROM lease.account_id::text
+          OR current_setting('opengeni.workspace_id', true) IS DISTINCT FROM lease.workspace_id::text
+          OR idle_ms IS NULL OR idle_ms < 60000 OR greatest(browser.last_used_at,
             browser.controller_heartbeat_at, holder_heartbeat)
             >= now() - idle_ms * interval '1 millisecond' THEN
           PERFORM opengeni_private.close_session_tenancy_fenced_access(access_id);
@@ -333,6 +337,46 @@ BEGIN
     END $body$;
   $create$, data_schema);
 
+  -- Idle-saved browsers whose cleanup can no longer run: the profile commit
+  -- landed but the holder is gone (the box was lost, rotated or stopped
+  -- before cleanup). Their saved state is durable; only the obsolete
+  -- controller binding blocks resume, and the caller clears exactly it.
+  EXECUTE format($create$
+    CREATE OR REPLACE FUNCTION opengeni_private.list_orphaned_idle_browser_checkpoints(p_limit integer)
+    RETURNS TABLE(account_id uuid, workspace_id uuid, browser_session_id uuid, controller_generation text)
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, %1$I, pg_temp
+    AS $body$
+    DECLARE inventory_id uuid;
+    BEGIN
+      IF p_limit < 1 OR p_limit > 100 THEN RAISE EXCEPTION 'invalid idle checkpoint cleanup batch'; END IF;
+      inventory_id := opengeni_private.open_session_tenancy_fence_inventory(%1$I.session_tenancy_fence_target_schema());
+      RETURN QUERY SELECT browser.account_id, browser.workspace_id, browser.id, browser.controller_generation
+      FROM %1$I.browser_sessions browser
+      WHERE browser.lifecycle = 'suspended'
+        AND browser.private_checkpoint_artifact_id IS NOT NULL
+        AND browser.controller_generation IS NOT NULL
+        AND EXISTS (SELECT 1 FROM %1$I.interaction_operations operation
+          WHERE operation.workspace_id = browser.workspace_id
+            AND operation.resource_kind = 'browser_session' AND operation.resource_id = browser.id
+            AND operation.kind = 'suspend' AND operation.state = 'completed'
+            AND operation.actor_subject_id = 'system:sandbox-idle'
+            AND operation.controller_generation = browser.controller_generation)
+        AND NOT EXISTS (SELECT 1 FROM %1$I.interaction_operations operation
+          WHERE operation.workspace_id = browser.workspace_id
+            AND operation.resource_kind = 'browser_session' AND operation.resource_id = browser.id
+            AND operation.state IN ('prepared', 'dispatched'))
+        AND NOT EXISTS (SELECT 1 FROM %1$I.sandbox_lease_holders holder
+          WHERE holder.workspace_id = browser.workspace_id AND holder.kind = 'interaction'
+            AND holder.holder_id = 'browser-session:' || browser.id::text)
+      ORDER BY browser.updated_at, browser.id LIMIT p_limit;
+      PERFORM opengeni_private.close_session_tenancy_fence_inventory(inventory_id);
+    EXCEPTION WHEN OTHERS THEN
+      PERFORM opengeni_private.close_session_tenancy_fence_inventory(inventory_id);
+      RAISE;
+    END $body$;
+  $create$, data_schema);
+
+  REVOKE ALL ON FUNCTION opengeni_private.list_orphaned_idle_browser_checkpoints(integer) FROM PUBLIC;
   REVOKE ALL ON FUNCTION opengeni_private.browser_system_checkpoint_digest(text, uuid, uuid, uuid, bigint, text, text, text) FROM PUBLIC;
   REVOKE ALL ON FUNCTION opengeni_private.browser_system_checkpoint_operation_id(text) FROM PUBLIC;
   REVOKE ALL ON FUNCTION opengeni_private.list_browser_deadline_checkpoints(integer) FROM PUBLIC;
@@ -347,6 +391,7 @@ BEGIN
       'opengeni_private.reap_sandbox_leases(bigint,bigint,bigint,bigint)', 'EXECUTE')
   LOOP
     EXECUTE format('GRANT EXECUTE ON FUNCTION opengeni_private.list_idle_interaction_leases(integer, bigint) TO %I', role_name);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION opengeni_private.list_orphaned_idle_browser_checkpoints(integer) TO %I', role_name);
     EXECUTE format('GRANT EXECUTE ON FUNCTION opengeni_private.list_browser_deadline_checkpoints(integer) TO %I', role_name);
     EXECUTE format('GRANT EXECUTE ON FUNCTION opengeni_private.browser_deadline_checkpoint(jsonb, boolean, boolean) TO %I', role_name);
   END LOOP;
@@ -392,6 +437,12 @@ $condition$, current_schema());
   END IF;
 END
 $retain_idle_checkpoint_cleanup$;
+
+-- Saved browsers still bound to a controller are rare and short-lived; keep
+-- the orphaned idle checkpoint scan off the whole table.
+CREATE INDEX IF NOT EXISTS browser_sessions_suspended_controller_idx
+  ON browser_sessions (updated_at, id)
+  WHERE lifecycle = 'suspended' AND controller_generation IS NOT NULL;
 
 RESET statement_timeout;
 RESET lock_timeout;

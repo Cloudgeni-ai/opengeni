@@ -5,9 +5,11 @@
 // browser controller and the provider snapshot + stop are faked.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import postgres from "postgres";
 import { BROWSER_PROFILE_ARTIFACT_FORMAT } from "@opengeni/contracts";
 import {
+  browserDeadlineCheckpoint,
   claimSessionWorkForAttempt,
   createDb,
   createSession,
@@ -570,5 +572,158 @@ describe("idle browser and desktop release", () => {
       lifecycle: "lost",
       failure_code: "idle_released",
     });
+  }, 60_000);
+
+  test("the provider-deadline operation id is byte-identical to migration 0564", async () => {
+    const parts = {
+      account: crypto.randomUUID(),
+      workspace: crypto.randomUUID(),
+      lease: crypto.randomUUID(),
+      browser: crypto.randomUUID(),
+      generation: crypto.randomUUID(),
+    };
+    // 0564: sha256 of jsonb_build_array(tag, account, workspace, lease, epoch,
+    // instance, browser text, generation)::text, folded into a v4-shaped uuid.
+    const jsonbText = `[${[
+      "browser-provider-deadline.v1",
+      parts.account,
+      parts.workspace,
+      parts.lease,
+      EPOCH,
+      "box-1",
+      parts.browser,
+      parts.generation,
+    ]
+      .map((value) => JSON.stringify(value))
+      .join(", ")}]`;
+    const digest = createHash("sha256").update(jsonbText, "utf8").digest("hex");
+    const expected = `${digest.slice(0, 8)}-${digest.slice(8, 12)}-4${digest.slice(13, 16)}-8${digest.slice(17, 20)}-${digest.slice(20, 32)}`;
+    const [row] = await admin<{ id: string; idle: string }[]>`
+      select opengeni_private.browser_system_checkpoint_operation_id(
+          opengeni_private.browser_system_checkpoint_digest('provider_deadline',
+            ${parts.account}::uuid, ${parts.workspace}::uuid, ${parts.lease}::uuid,
+            ${EPOCH}::bigint, 'box-1', ${parts.browser}, ${parts.generation}))::text as id,
+        opengeni_private.browser_system_checkpoint_operation_id(
+          opengeni_private.browser_system_checkpoint_digest('idle',
+            ${parts.account}::uuid, ${parts.workspace}::uuid, ${parts.lease}::uuid,
+            ${EPOCH}::bigint, 'box-1', ${parts.browser}, ${parts.generation}))::text as idle`;
+    expect(row!.id).toBe(expected);
+    expect(row!.idle).not.toBe(expected);
+  }, 60_000);
+
+  test("an older worker that strips the idle reason cannot act on an idle save", async () => {
+    const f = await fixture();
+    await idleFor(f, 16);
+    await sweep();
+    const { controller, calls } = savingController();
+    const checkpoints = browserCheckpoints(controller);
+    const [target] = (await checkpoints.listDueBrowserCheckpoints()).filter(
+      (due) => due.browserSessionId === f.browserId,
+    );
+    const { reason: _reason, ...stripped } = target!;
+    expect(
+      await browserDeadlineCheckpoint(db, stripped, { prepare: true, touch: true }),
+    ).toBeNull();
+    expect(await checkpoints.checkpointBrowserBeforeDeadline(stripped)).toEqual({
+      status: "skipped",
+    });
+    expect(calls).toEqual({ captures: 0, cleanups: 0 });
+    // An idle save is prepared only by the tenant-scoped reaper decision.
+    const fresh = await fixture();
+    await idleFor(fresh, 16);
+    const [lease] = await admin<{ id: string }[]>`
+      select id from sandbox_leases where id = ${fresh.leaseId}`;
+    expect(
+      await browserDeadlineCheckpoint(
+        db,
+        {
+          accountId: fresh.accountId,
+          workspaceId: fresh.workspaceId,
+          sandboxGroupId: fresh.sandboxGroupId,
+          leaseId: lease!.id,
+          leaseEpoch: EPOCH,
+          instanceId: fresh.instanceId,
+          browserSessionId: fresh.browserId,
+          controllerGeneration: fresh.browserGeneration,
+          reason: "idle",
+          idleMs: IDLE_MS,
+        },
+        { prepare: true },
+      ),
+    ).toBeNull();
+    expect((await state(fresh)).browser.lifecycle).toBe("active");
+  }, 60_000);
+
+  test("the saved browser keeps its holder until cleanup, and resumes if the box goes first", async () => {
+    const f = await fixture();
+    await idleFor(f, 16);
+    await sweep();
+    let cleanupFails = true;
+    const checkpoints = browserCheckpoints({
+      captureState: async (input) => receipt(input),
+      endSession: async () => {
+        if (cleanupFails) throw new Error("synthetic cleanup failure");
+      },
+    });
+    const [target] = (await checkpoints.listDueBrowserCheckpoints()).filter(
+      (due) => due.browserSessionId === f.browserId,
+    );
+    await expect(checkpoints.checkpointBrowserBeforeDeadline(target!)).rejects.toThrow(
+      "synthetic cleanup failure",
+    );
+    let current = await state(f);
+    expect(current.browser.lifecycle).toBe("suspended");
+    expect(current.browser.controller_generation).not.toBeNull();
+    // The orphan sweep keeps the exact saved generation's holder for cleanup.
+    await sweep();
+    current = await state(f);
+    expect(current.holders).toEqual([`browser-session:${f.browserId}`]);
+    expect(current.lease.liveness).toBe("warm");
+
+    // The box is replaced before cleanup could run: the holder is an orphan,
+    // and only the stale controller binding is cleared so the profile resumes.
+    await admin`update sandbox_leases set lease_epoch = lease_epoch + 1 where id = ${f.leaseId}`;
+    await sweep();
+    current = await state(f);
+    expect(current.holders).toEqual([]);
+    expect(current.browser.lifecycle).toBe("suspended");
+    expect(current.browser.controller_generation).toBeNull();
+    expect(current.browser.private_checkpoint_artifact_id).not.toBeNull();
+    cleanupFails = false;
+    const resumed = await prepareBrowserSessionResume(db, {
+      accountId: f.accountId,
+      workspaceId: f.workspaceId,
+      browserSessionId: f.browserId,
+      operationId: crypto.randomUUID(),
+      actorSubjectId: "fixture-human",
+    });
+    expect(resumed.session.lifecycle).toBe("restoring");
+  }, 60_000);
+
+  test("an idle save's cleanup keeps the containment clock of a box with retained commands", async () => {
+    const f = await fixture();
+    await idleFor(f, 16);
+    await sweep();
+    // A viewer holder that outlives the browser keeps the box warm, as a
+    // retained command's holder would.
+    await admin`insert into sandbox_lease_holders (account_id, workspace_id, lease_id, kind,
+        holder_id, last_heartbeat_at)
+      values (${f.accountId}, ${f.workspaceId}, ${f.leaseId}, 'viewer', 'viewer:fixture', now())`;
+    await admin`update sandbox_leases set refcount = refcount + 1,
+      viewer_holders = viewer_holders + 1 where id = ${f.leaseId}`;
+    await admin`update sandbox_leases set holders_changed_at = now() - interval '40 minutes'
+      where id = ${f.leaseId}`;
+    const { controller } = savingController();
+    const checkpoints = browserCheckpoints(controller);
+    const [target] = (await checkpoints.listDueBrowserCheckpoints()).filter(
+      (due) => due.browserSessionId === f.browserId,
+    );
+    expect(await checkpoints.checkpointBrowserBeforeDeadline(target!)).toEqual({
+      status: "suspended",
+    });
+    const [lease] = await admin<{ liveness: string; old: boolean }[]>`
+      select liveness, holders_changed_at < now() - interval '39 minutes' as old
+      from sandbox_leases where id = ${f.leaseId}`;
+    expect(lease).toEqual({ liveness: "warm", old: true });
   }, 60_000);
 });

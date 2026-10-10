@@ -1736,8 +1736,8 @@ export function recordSubscriptionCoreShadowStuckLoad(
   });
 }
 
-/** Idle browser/desktop release inspections by fixed outcome: `released`
- * (the box drains now), `checkpointing` (idle browser saves prepared). */
+/** Idle browser/desktop release inspections by fixed outcome: `checkpointing`
+ * (idle browser saves prepared), `released` (holders released without a save). */
 export function recordSandboxIdleInteractionRelease(
   observability: Observability,
   outcome: IdleInteractionInspection,

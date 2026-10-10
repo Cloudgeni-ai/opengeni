@@ -2,6 +2,12 @@ export * from "./session-target";
 import { sessionRetentionFromRow } from "./session-archive";
 import { browserDeadlineCheckpoint } from "./browser-deadline-checkpoints";
 import {
+  BrowserSessionNotFoundError,
+  BrowserSessionOperationConflictError,
+  BrowserSessionStateError,
+  clearSuspendedBrowserSessionController,
+} from "./browser-sessions";
+import {
   buildOrganizationCodexConnectionTokenResolver,
   findOrganizationCodexConnection,
   readOrganizationCodexUsage,
@@ -50706,6 +50712,10 @@ export async function releaseLeaseHolder(
      * resolved, rejected, or been physically quiesced. A cancellation listener
      * that merely prevents a holder leak must leave this false. */
     workspaceWritersQuiesced?: boolean;
+    /** Keep the holder-set clock when the box stays warm: an idle save's
+     * cleanup is not use, so it must not restart retained-command
+     * containment's idle window. */
+    preserveHoldersChangedAt?: boolean;
   },
 ): Promise<{ liveness: SandboxLeaseLiveness; refcount: number } | null> {
   if (input.kind === "process") {
@@ -50772,6 +50782,14 @@ export async function releaseLeaseHolder(
       `);
         const row = rows[0];
         if (!row) return null; // already cold-and-reaped; release is an idempotent no-op
+        const priorHoldersChangedAt = input.preserveHoldersChangedAt
+          ? (
+              await rawRows<{ at: string }>(
+                tx,
+                sql`select holders_changed_at::text as at from sandbox_leases where id = ${row.id}`,
+              )
+            )[0]!.at
+          : null;
 
         // Cancellation can delete the holder before the shared rig coordinator
         // catches its abort. That coordinator must then fail closed because its
@@ -50834,6 +50852,13 @@ export async function releaseLeaseHolder(
         where id = ${row.id}
         returning *
       `);
+        if (input.preserveHoldersChangedAt && !enterDraining) {
+          // A separate statement: the counter trigger re-stamps the clock.
+          await tx.execute(sql`
+            update sandbox_leases set holders_changed_at = ${priorHoldersChangedAt}::timestamptz
+            where id = ${row.id}
+          `);
+        }
         return { liveness: updated[0]!.liveness, refcount: Number(c.total) };
       }),
   );
@@ -52729,9 +52754,42 @@ export async function reapStaleLeaseHoldersGlobal(
       });
       if (release === undefined) continue;
       input.onIdleInteractionRelease?.(
-        !release ? "not_eligible" : release.drainable ? "released" : "checkpointing",
+        !release ? "not_eligible" : release.checkpoints > 0 ? "checkpointing" : "released",
       );
       if (release?.drainable) pushDrainable(release.drainable);
+    }
+  }
+  {
+    // An idle-saved browser whose box went away before its local cleanup ran
+    // keeps a durable profile; clear only the stale controller so it resumes.
+    // Always on, so browsers saved before idle release was disabled resume.
+    const orphaned = await rawRows<{
+      account_id: string;
+      workspace_id: string;
+      browser_session_id: string;
+      controller_generation: string;
+    }>(db, sql`select * from opengeni_private.list_orphaned_idle_browser_checkpoints(32)`).catch(
+      (error) => {
+        reportContainmentError(error);
+        return [];
+      },
+    );
+    for (const browser of orphaned) {
+      await clearSuspendedBrowserSessionController(db, {
+        accountId: browser.account_id,
+        workspaceId: browser.workspace_id,
+        browserSessionId: browser.browser_session_id,
+        expectedControllerGeneration: browser.controller_generation,
+      }).catch((error: unknown) => {
+        // Ended, deleted or already cleared since the inventory: nothing to do.
+        if (
+          error instanceof BrowserSessionNotFoundError ||
+          error instanceof BrowserSessionStateError ||
+          error instanceof BrowserSessionOperationConflictError
+        )
+          return;
+        reportContainmentError(error);
+      });
     }
   }
   const candidates = await rawRows<{

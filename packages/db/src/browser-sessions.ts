@@ -1765,7 +1765,8 @@ async function prepareBrowserSessionLifecycleTransition(
           const now = new Date();
           // A saved browser outlives the desktop it was shown on: that desktop
           // stops with its box (idle release, provider deadline). Resume
-          // restores the profile headless instead of failing on a dead link.
+          // restores the profile on its own display instead of failing on a
+          // dead link.
           const unlinkStoppedComputer =
             !terminal &&
             transition.kind === "resume" &&
