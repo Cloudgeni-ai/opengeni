@@ -4270,6 +4270,53 @@ migration that is idempotent, alias-aware and parity-checked. Keep affected
 organizations switched off meanwhile. Never copy rows back to the legacy
 tables, drop aliases, reset refresh generations or clear waiters.
 
+### Shared subscription core generic precursor (0710)
+
+Migration `0710_subscription_core_generic_precursor.sql` is **rolling**: deploy
+it like any release, without draining. Design record:
+[subscription core, PR 0a](design/subscription-core-2026-10-07.md#pr-0a-receipts-restrictions-and-personal-helpers).
+It requires 0689 and acts on deploy:
+
+- Provider cutover receipts. Codex has one; SuperGrok (`xai`) and Claude get
+  theirs only from their own drained cutovers. A binary of this release
+  refuses to start against a database without the Codex receipt.
+- No role can insert or enable a `subscription_provider_cutovers` row, or
+  insert a `subscription_connections` row, for `xai` or `claude` before their
+  receipts, and no role can delete a cutover row. Disabling a row (Codex
+  containment) still works.
+- A settings primary that pointed at another provider's connection is cleared.
+- Codex connects emit the `model.connected` lifecycle fact again.
+
+Codex chat, connect, refresh and containment behave as before. SuperGrok and
+Claude keep running on their legacy path.
+
+**Inventory (before or after deploying).** Rows that the restrictions now
+block were never usable; list them so they are removed before the SuperGrok
+and Claude cutovers, which abort on them:
+
+```sql
+SELECT account_id, provider, enabled
+FROM subscription_provider_cutovers WHERE provider <> 'codex';
+SELECT account_id, provider, id, ownership, status
+FROM subscription_connections WHERE provider <> 'codex';
+```
+
+**Readiness report.** As the migration owner:
+
+```sql
+SELECT provider, metric, account_id, legacy_count, core_count
+FROM opengeni_private.subscription_cutover_report
+WHERE metric LIKE 'readiness:%' OR metric = 'disposition:primary_of_other_provider_cleared'
+ORDER BY provider, metric, account_id NULLS LAST;
+```
+
+`readiness:owners_with_multiple_current_personal_generations` counts Codex
+owners whose active personal connections carry more than one current
+authority generation (`core_count`; the row with a NULL `account_id` is the
+total). New work those owners accept gets no personal Codex access. If the
+total is not zero, raise it with the product owner; the repair is a separate
+decision and is not part of this migration.
+
 ### Slack API pilot activation (0597)
 
 Stop every old/new API, control worker, and turn worker before applying

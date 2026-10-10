@@ -409,17 +409,26 @@ CREATE TRIGGER product_lifecycle_fact_model_connected
 -- path (legacy factory tables, which never call these helpers). For Codex
 -- (receipt, rows seeded enabled and undeletable) nothing changes.
 DO $personal_access$
-DECLARE definition text; anchor text; replacement text;
+DECLARE definition text; previous text;
 BEGIN
   definition := pg_get_functiondef(
     'opengeni_private.authorize_subscription_personal_access(uuid,uuid,uuid,uuid,uuid,text,text,text)'::regprocedure);
-  FOR anchor, replacement IN VALUES
-    ($old$      accepted_snapshot jsonb;
-$old$, ''),
-    ($old$      codex_core boolean := false;
+  previous := definition;
+  definition := replace(definition, $old$      accepted_snapshot jsonb;
+$old$,
+    '');
+  IF definition = previous THEN
+    RAISE EXCEPTION 'subscription personal access source changed';
+  END IF;
+  previous := definition;
+  definition := replace(definition, $old$      codex_core boolean := false;
       codex_cutover_row boolean := false;$old$,
-     $new$      provider_core boolean := false;$new$),
-    ($old$      -- Codex reads its v2 entry only after its own cutover is enabled. A
+    $new$      provider_core boolean := false;$new$);
+  IF definition = previous THEN
+    RAISE EXCEPTION 'subscription personal access source changed';
+  END IF;
+  previous := definition;
+  definition := replace(definition, $old$      -- Codex reads its v2 entry only after its own cutover is enabled. A
       -- cutover row that exists but is disabled grants no personal authority
       -- at all: v1 stays authoritative only while no row exists.
       IF p_provider = 'codex' THEN
@@ -429,7 +438,7 @@ $old$, ''),
         codex_cutover_row := coalesce(codex_cutover_row, false);
         codex_core := coalesce(codex_core, false);
       END IF;$old$,
-     $new$      -- A provider reads its v2 entry only after its own receipt and with
+    $new$      -- A provider reads its v2 entry only after its own receipt and with
       -- an enabled cutover row. Without a receipt, without a row, or with a
       -- disabled row this grants nothing.
       IF opengeni_private.subscription_provider_cutover_committed(p_provider) THEN
@@ -437,28 +446,48 @@ $old$, ''),
         FROM subscription_provider_cutovers cutover
         WHERE cutover.account_id = p_account_id AND cutover.provider = p_provider;
         provider_core := coalesce(provider_core, false);
-      END IF;$new$),
-    ($old$      SELECT CASE p_provider
+      END IF;$new$);
+  IF definition = previous THEN
+    RAISE EXCEPTION 'subscription personal access source changed';
+  END IF;
+  previous := definition;
+  definition := replace(definition, $old$      SELECT CASE p_provider
           WHEN 'codex' THEN turn.codex_provider_account_authority_snapshot
           WHEN 'claude' THEN turn.claude_provider_account_authority_snapshot
           WHEN 'xai' THEN turn.xai_provider_account_authority_snapshot
         END,
         turn.subscription_authority, membership.id, connection.authority_generation
       INTO accepted_snapshot, v2_snapshot, owner_membership, connection_generation$old$,
-     $new$      SELECT turn.subscription_authority, membership.id, connection.authority_generation
-      INTO v2_snapshot, owner_membership, connection_generation$new$),
-    ($old$        AND (codex_core IS NOT TRUE
+    $new$      SELECT turn.subscription_authority, membership.id, connection.authority_generation
+      INTO v2_snapshot, owner_membership, connection_generation$new$);
+  IF definition = previous THEN
+    RAISE EXCEPTION 'subscription personal access source changed';
+  END IF;
+  previous := definition;
+  definition := replace(definition, $old$        AND (codex_core IS NOT TRUE
           OR session.owner_organization_membership_id = connection.owner_organization_membership_id)$old$,
-     $new$        AND session.owner_organization_membership_id = connection.owner_organization_membership_id$new$),
-    ($old$      IF codex_cutover_row AND NOT codex_core THEN
+    $new$        AND session.owner_organization_membership_id = connection.owner_organization_membership_id$new$);
+  IF definition = previous THEN
+    RAISE EXCEPTION 'subscription personal access source changed';
+  END IF;
+  previous := definition;
+  definition := replace(definition, $old$      IF codex_cutover_row AND NOT codex_core THEN
         authorized := false;
       ELSIF codex_core THEN$old$,
-     $new$      IF NOT provider_core THEN
+    $new$      IF NOT provider_core THEN
         authorized := false;
-      ELSE$new$),
-    ($old$            WHERE entry->>'provider' = 'codex'$old$,
-     $new$            WHERE entry->>'provider' = p_provider$new$),
-    ($old$      ELSE
+      ELSE$new$);
+  IF definition = previous THEN
+    RAISE EXCEPTION 'subscription personal access source changed';
+  END IF;
+  previous := definition;
+  definition := replace(definition, $old$            WHERE entry->>'provider' = 'codex'$old$,
+    $new$            WHERE entry->>'provider' = p_provider$new$);
+  IF definition = previous THEN
+    RAISE EXCEPTION 'subscription personal access source changed';
+  END IF;
+  previous := definition;
+  definition := replace(definition, $old$      ELSE
         -- Unchanged v1 check, including its three-valued NULL semantics.
         authorized := accepted_snapshot IS NOT NULL AND accepted_snapshot->>'scope' = 'user'
           AND accepted_snapshot->>'authorityGeneration' IS NOT DISTINCT FROM (
@@ -466,28 +495,31 @@ $old$, ''),
             WHERE account_id = p_account_id AND id = p_connection_id
           );
       END IF;$old$,
-     $new$      END IF;$new$)
-  LOOP
-    IF (length(definition) - length(replace(definition, anchor, ''))) <> length(anchor) THEN
-      RAISE EXCEPTION 'subscription personal access source changed';
-    END IF;
-    definition := replace(definition, anchor, replacement);
-  END LOOP;
-  IF position('codex' IN definition) > 0 THEN
+    $new$      END IF;$new$);
+  IF definition = previous THEN
+    RAISE EXCEPTION 'subscription personal access source changed';
+  END IF;
+  IF position('codex' IN definition) > 0 OR position('provider_account_authority_snapshot' IN definition) > 0 THEN
     RAISE EXCEPTION 'subscription personal access still names a provider';
   END IF;
   EXECUTE definition;
-
-  definition := pg_get_functiondef(
-    'opengeni_private.authorize_subscription_personal_placement_access(uuid,uuid,uuid,uuid,text,uuid,bigint,text,text)'::regprocedure);
-  anchor := $old$        OR p_provider NOT IN ('codex', 'claude', 'xai')$old$;
-  replacement := $new$        OR NOT coalesce(opengeni_private.subscription_provider_cutover_committed(p_provider), false)$new$;
-  IF (length(definition) - length(replace(definition, anchor, ''))) <> length(anchor) THEN
-    RAISE EXCEPTION 'subscription personal placement access source changed';
-  END IF;
-  EXECUTE replace(definition, anchor, replacement);
 END
 $personal_access$;
+
+DO $personal_placement$
+DECLARE definition text; previous text;
+BEGIN
+  definition := pg_get_functiondef(
+    'opengeni_private.authorize_subscription_personal_placement_access(uuid,uuid,uuid,uuid,text,uuid,bigint,text,text)'::regprocedure);
+  previous := definition;
+  definition := replace(definition, $old$        OR p_provider NOT IN ('codex', 'claude', 'xai')$old$,
+    $new$        OR NOT coalesce(opengeni_private.subscription_provider_cutover_committed(p_provider), false)$new$);
+  IF definition = previous THEN
+    RAISE EXCEPTION 'subscription personal placement access source changed';
+  END IF;
+  EXECUTE definition;
+END
+$personal_placement$;
 
 -- 9. A refresh never changes a credential's format. The provider-neutral
 -- persist routines (0707) wrote the encryption envelope's version into

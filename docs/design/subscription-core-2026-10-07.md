@@ -3005,6 +3005,79 @@ real-PostgreSQL posture test asserts that every retired routine is absent and
 that runtime roles hold no write grant on legacy tables. M4-A's shared-core
 guard keeps provider names out of shared modules.
 
+#### PR 0a: receipts, restrictions and personal helpers
+
+Migration 0710 (rolling) delivers the first part of row 0. Choices made where
+the plan left room, for reviewers:
+
+- **Receipts.** `opengeni_private.subscription_provider_cutover_receipts
+  (provider, migration, committed_at, seed_rotation)` is owner-only and
+  append-only (update, delete and truncate raise `55000`). Codex is recorded
+  with `committed_at = '-infinity'`. `seed_rotation` holds the provider's
+  rotation default for the organization seed, so the seed names no provider.
+  `opengeni_private.subscription_provider_cutover_committed(provider)` is
+  the only reader (SECURITY DEFINER, granted to the runtime role). The binary
+  lists `SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS` (Codex only) and refuses
+  to start without each receipt; a cutover PR adds its provider.
+- **Switch rows and connections.** Restrictive policies bind every role FORCE
+  RLS binds (runtime, owner and owner-run routines): no insert of a switch
+  row or core connection, and no enabling update, for a provider without a
+  receipt. A row may always be disabled. The runtime delete policy is
+  dropped for every provider, so no organization returns to "no row"; a
+  provider-neutral identity trigger keeps every row's organization and
+  provider. Rows that already exist for `xai` or `claude` stay, grant nothing
+  (below) and are listed by the runbook inventory.
+- **Seed.** 0689's seed function keeps its name; its body seeds an enabled row
+  per receipt provider and one settings row whose rotation is built from the
+  receipts. The seed-only policies are generalized
+  (`subscription_provider_cutovers_seed`, `subscription_settings_seed`,
+  setting `opengeni.subscription_cutover_seed`). Codex is seeded exactly as
+  before (tested by creating an organization on each side of 0710).
+- **Personal helpers.** 0668's legacy-generation branch is removed, not
+  generalized: `authorize_subscription_personal_access` grants only when the
+  provider has a receipt and an enabled row, and the frozen v2 entry, exact
+  owner membership, current generation and `personalConnectionsAllowed`
+  match. With no row it now grants nothing for Codex either; "no row" is
+  unreachable for Codex after 0689, so live behaviour is unchanged. The 0667
+  placement helper's provider list becomes the receipt check. Both return
+  false for `xai` and `claude` until their receipts. The compatibility-record
+  branch is added with the compatibility relation (PR 0b).
+- **Primaries.** Constant columns `{codex,claude,xai}_primary_provider` with
+  CHECKs carry the provider into composite foreign keys on
+  `(account_id, provider, id)`, `ON DELETE SET NULL` of the connection column
+  only. A primary pointing at another provider's connection is cleared and
+  counted as `disposition:primary_of_other_provider_cleared`.
+- **Report.** `opengeni_private.subscription_cutover_report (provider, metric,
+  account_id, legacy_count, core_count, recorded_at)` receives 0689's Codex
+  rows; 0689's relation stays read-only. PR 0 writes
+  `readiness:owners_with_multiple_current_personal_generations` for Codex
+  (one row per organization and a total row with `account_id` NULL;
+  `core_count` is the number of owners). The repair stays an owner decision.
+- **Kinds.** `video` is added; `model` and `credential_request` are admitted
+  for every provider; `apps` stays Codex-only. The unknown-outcome replay
+  fence was already keyed by the provider registry (0707).
+- **`model.connected`.** An `AFTER INSERT` trigger on
+  `subscription_connections` emits the fact with the legacy attribute
+  (`codex`, `supergrok`, `claude_subscription`), keyed by connection id and
+  without a workspace. A drained cutover sets
+  `opengeni.subscription_cutover_provider` for its own moves, which emit
+  nothing. Codex connects emit the fact again (they stopped at 0689).
+- **Credential format.** 0707's neutral refresh writers stored the encryption
+  envelope version in `credential_format`; they no longer touch it, so an
+  adapter format such as a setup token's survives refresh. Codex stores
+  `v1` either way. The neutral connect writer still writes `v1`; a provider
+  with another format passes it when its writer lands (X2b, C2b).
+- **Adapter.** `SubscriptionCoreAdapter.capabilitiesFor(format)` and
+  `credential.format(credential)` let `autoRenews` depend on the credential
+  format; the resolver and both refresh paths choose the refresher through
+  `subscriptionCoreCredentialRefresher`. Optional `fetchUsage` and
+  `liveModels`, a `modelId` on exhausted and rate-limited outcomes,
+  `modelCooldownFromOutcome`, the `video` operation kind and the wait reason
+  `accepted_authority_unavailable` are added.
+- **Rolling posture.** New owner-only trigger functions live in
+  `opengeni_subscription_internal`. The previous release's posture check
+  passes against the migrated schema before and after role provisioning.
+
 #### Verification plan
 
 - `bun install`; adapter conformance per provider without network (scripted
