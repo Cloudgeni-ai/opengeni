@@ -80,10 +80,34 @@ export const ToolDisplayMetadata = z
   .object({
     toolName: toolIdentifier,
     title: z.string().min(1).max(512).optional(),
+    /** Account to name beside the tool. Set only when the connector has more than one. */
     accountLabel: z.string().min(1).max(1024).optional(),
+    /** The connector the tool belongs to, e.g. "Linear". */
+    connector: z.string().min(1).max(512).optional(),
+    /** The connector's provider, so a host can draw its logo. */
+    providerDomain: z.string().min(1).max(253).optional(),
   })
   .strict();
 export type ToolDisplayMetadata = z.infer<typeof ToolDisplayMetadata>;
+
+/**
+ * How one connector account route is named. The model always gets the full
+ * account in tool descriptions; people see the connector, and the account only
+ * when there is more than one to tell apart.
+ */
+export type McpAccountRouteLabel = {
+  /** Model-facing account description. */
+  model: string;
+  connector: string;
+  providerDomain: string;
+  /** Present only when the connector has several accounts in the turn. */
+  account?: string | undefined;
+};
+
+/** The short account line for approvals: "Linear", or "Linear · alice@example.com". */
+export function mcpAccountRouteReviewLabel(label: McpAccountRouteLabel): string {
+  return label.account ? `${label.connector} · ${label.account}` : label.connector;
+}
 
 export const AttemptToolCatalogEntry = z
   .object({

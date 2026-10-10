@@ -36,8 +36,18 @@ describe("toolDisplayName", () => {
     ];
     const [item] = buildTimeline(JSON.parse(JSON.stringify(events)));
     expect(item).toMatchObject({ kind: "tool-call", name, display });
-    expect(toolDisplayName(name, display)).toBe(
-      "Search documents — Documents — Personal: alice@example.test",
+    // Older events carry the long route label on every account; the tool name reads better.
+    expect(toolDisplayName(name, display)).toBe("Search documents");
+  });
+  test("names a connector account only when the connector has several", () => {
+    const single = {
+      toolName: "list_issues",
+      connector: "Issues",
+      providerDomain: "issues.example.test",
+    };
+    expect(toolDisplayName("a".repeat(64), single)).toBe("List issues");
+    expect(toolDisplayName("a".repeat(64), { ...single, accountLabel: "alice@example.test" })).toBe(
+      "List issues · alice@example.test",
     );
   });
   test("strips the MCP server-id prefix and title-cases the leaf", () => {

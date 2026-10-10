@@ -139,6 +139,8 @@ import {
   type ToolGatewayCatalog,
   type ToolGatewayCatalogEntry,
   type ToolDisplayMetadata,
+  type McpAccountRouteLabel,
+  mcpAccountRouteReviewLabel,
   type ToolRef,
   type VideoGenerationCapabilities,
   type VideoGenerationToolResult,
@@ -3483,15 +3485,19 @@ function installMcpApprovalPolicy(
         continue;
       for (const descriptor of await server.listTools()) {
         if (identities.has(descriptor.name)) throw new Error("MCP model tool identity collision");
+        const display = server.toolDisplayMetadata(descriptor.name);
+        const accountLabel = display?.connector
+          ? display.accountLabel
+            ? `${display.connector} · ${display.accountLabel}`
+            : display.connector
+          : display?.accountLabel;
         identities.set(descriptor.name, {
           serverId: server.registryId,
           toolName: await server.unprefixedToolName(descriptor.name),
           inputSchema: descriptor.inputSchema,
           readReview: (name, args) => server.reviewContext(name, args),
           ...(descriptor.title ? { title: descriptor.title } : {}),
-          ...(server.toolDisplayMetadata(descriptor.name)?.accountLabel
-            ? { accountLabel: server.toolDisplayMetadata(descriptor.name)!.accountLabel }
-            : {}),
+          ...(accountLabel ? { accountLabel } : {}),
         });
       }
     }
@@ -4377,7 +4383,7 @@ export type PrepareToolsOptions = {
    */
   inputWaitReplyGuard?: () => Promise<string | null>;
   /** Frozen, explicitly selected account labels keyed by execution route, not provider. */
-  mcpAccountLabels?: ReadonlyMap<string, string>;
+  mcpAccountLabels?: ReadonlyMap<string, McpAccountRouteLabel>;
   /** Opt-in exact-attempt persistence; absence preserves ordinary MCP execution. */
   mcpOperationPersistence?: McpOperationPersistence;
   /** Live exact-owner control refresh; API remains read/observation authority. */
@@ -5611,7 +5617,7 @@ function installAttemptConnectorActionGatewayLifecycle(
   resolvedMcpConnectionIds: ReadonlyMap<string, string>,
   bindings: readonly AttemptConnectorActionBinding[],
   connectorActionPolicy?: ConnectorActionPolicyHooks,
-  accountLabels?: ReadonlyMap<string, string>,
+  accountLabels?: ReadonlyMap<string, McpAccountRouteLabel>,
   reviewReaders?: ReadonlyMap<string, ToolReviewReader>,
 ): AttemptToolDefinition[] {
   const byModelName = new Map<string, AttemptConnectorActionBinding>();
@@ -5694,7 +5700,11 @@ function installAttemptConnectorActionGatewayLifecycle(
                 : "generic",
             ...(definition.title ? { title: definition.title } : {}),
             ...(accountLabels?.get(definition.identity.serverId)
-              ? { accountLabel: accountLabels.get(definition.identity.serverId)! }
+              ? {
+                  accountLabel: mcpAccountRouteReviewLabel(
+                    accountLabels.get(definition.identity.serverId)!,
+                  ),
+                }
               : {}),
           }),
         }),
@@ -8035,7 +8045,7 @@ export class PrefixedMcpServer implements MCPServer {
     private readonly approvalAuthority?: unknown,
     private readonly inputWaitYield?: InputWaitYield,
     private readonly refreshOwnedCommand?: (commandId: string) => Promise<boolean>,
-    private readonly accountLabel?: string,
+    private readonly accountLabel?: McpAccountRouteLabel,
     private readonly runMcpCredentials?: RunMcpCredentials,
     private readonly effectAuthority?: LocalMcpServerRegistration["effectAuthority"],
     /**
@@ -8239,7 +8249,13 @@ export class PrefixedMcpServer implements MCPServer {
           const display: ToolDisplayMetadata = {
             toolName: tool.name,
             ...(tool.title ? { title: tool.title } : {}),
-            ...(this.accountLabel ? { accountLabel: this.accountLabel } : {}),
+            ...(this.accountLabel
+              ? {
+                  connector: this.accountLabel.connector,
+                  providerDomain: this.accountLabel.providerDomain,
+                  ...(this.accountLabel.account ? { accountLabel: this.accountLabel.account } : {}),
+                }
+              : {}),
           };
           this.displayMetadata.set(name, display);
           this.displayMetadata.set(legacyMcpToolDigest(this.registryId, tool.name), display);
@@ -8249,7 +8265,7 @@ export class PrefixedMcpServer implements MCPServer {
             ...(this.accountLabel
               ? {
                   description:
-                    `Account: ${this.accountLabel}. Use only this account; if the intended account for a write is unclear, ask before calling.\n${tool.description ?? ""}`.trimEnd(),
+                    `Account: ${this.accountLabel.model}. Use only this account; if the intended account for a write is unclear, ask before calling.\n${tool.description ?? ""}`.trimEnd(),
                 }
               : {}),
           };

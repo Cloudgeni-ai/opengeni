@@ -40,6 +40,7 @@ import {
 import { useContext, useState, type ReactNode } from "react";
 import { formatBytes, tryParseJson } from "../lib/format";
 import { useTimelineComputeLabel } from "./compute-label";
+import { ConnectorLogoIcon, useToolConnectorLogo } from "./provider-logo";
 import {
   generatedImageReceipt,
   mediaPreviewFact,
@@ -325,11 +326,18 @@ function WebSearchResults({ results }: { results: WebSearchResult[] | null }) {
 }
 
 /** Draw one shared-model row with the web disclosure primitives. */
-function PresentedToolRow({ presentation: p }: { presentation: ToolRowPresentation }) {
+function PresentedToolRow({
+  presentation: p,
+  logo = null,
+}: {
+  presentation: ToolRowPresentation;
+  /** A connector's logo, drawn in place of the row's icon. */
+  logo?: string | null;
+}) {
   const Icon = toolIcon(p.icon);
   return (
     <ActivityDisclosure
-      icon={<Icon className={ICON_SIZE} />}
+      icon={<ConnectorLogoIcon src={logo} fallback={<Icon className={ICON_SIZE} />} />}
       iconTone={p.iconTone}
       title={p.title}
       {...(p.titleMono ? { titleMono: true } : {})}
@@ -380,7 +388,8 @@ function RunOnRenderer({ item }: ToolRendererProps) {
  * JSON stays in the expandable body only.
  */
 function UnreviewedGenericRenderer({ item }: ToolRendererProps) {
-  return <PresentedToolRow presentation={genericToolPresentation(item)} />;
+  const logo = useToolConnectorLogo(item.display);
+  return <PresentedToolRow presentation={genericToolPresentation(item)} logo={logo} />;
 }
 
 /* ---- computer_call --------------------------------------------------------- */
@@ -1774,9 +1783,10 @@ const REVIEW_CHIP: Partial<Record<ToolReviewStatus, DisclosureChip>> = {
  */
 function ReviewedGenericRenderer({ item }: ToolRendererProps) {
   const { review, onViewDetails } = useRecordedToolReview(item.callId);
+  const logo = useToolConnectorLogo(item.display);
   if (!review) return <UnreviewedGenericRenderer item={item} />;
   const ReviewIcon = toolIcon(genericToolIconKind(item.name));
-  const icon = <ReviewIcon className={ICON_SIZE} />;
+  const icon = <ConnectorLogoIcon src={logo} fallback={<ReviewIcon className={ICON_SIZE} />} />;
   const waiting = review.status === "pending";
   const running =
     !waiting &&
@@ -1798,6 +1808,9 @@ function ReviewedGenericRenderer({ item }: ToolRendererProps) {
           "Waiting for your approval"
         ) : running ? (
           <RunningPreview>Running…</RunningPreview>
+        ) : item.display?.connector ? (
+          // The logo names the connector; only a second account needs words.
+          (item.display.accountLabel ?? undefined)
         ) : (
           (review.accountLabel ?? undefined)
         )
