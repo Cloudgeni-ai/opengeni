@@ -2395,13 +2395,18 @@ Writing:
   written after their carrier.
 - Inbox batching: the batch key (`systemUpdateExecutionAuthorityKey`), the
   receiver-context comparison and the 0608 fence add the provider's effective
-  authority (v2 entry, record or "post-receipt, none") after the receipt,
+  authority (v2 entry, record, "post-receipt, none", or "pre-receipt
+  source without either", which resolves to the waiting `missing` copy) after
+  the receipt,
   because the post-cutover v1 default equals a real pre-cutover `workspace`
   value; the deferred trigger checks every delivered update of a batch, so a
   narrowed and an unnarrowed update never share a delivering turn.
 - System updates and outbox rows store no human (0689 froze an empty v2 on
   them). Their record's owner is the human of their causal turn; when that
   turn has none, the narrowing rule above applies.
+- Archived-session imports (which backdate `sessions.created_at`) get a
+  post-receipt `authority_inserted_at` and therefore count as new
+  acceptances: no personal authority and no narrowing, never a record.
 - FORCE RLS; visibility follows the carrier's session or task. Parity metric
   `compat:dependent_sources_without_record` must be zero at the cutover, and
   X4/C4 (deleting the v1 readers) may merge only with a test proving it for
@@ -2449,14 +2454,17 @@ X4/C4's guard rejects readers. Runtime roles keep INSERT on these carrier
 columns until M6; the revoked write grants apply to the factory tables and
 legacy authorities only.
 
-The fences live in `admit_scheduled_agent_run_execution` (0478's body with
-in-place patches from 0416, 0447 and 0501),
+The fences live in `admit_scheduled_agent_run_execution` (0478 restated it
+with the 0416 and 0447 changes included; 0501 patches it in place after
+0478),
 `validate_scheduled_occurrence_accepted_execution`,
 `fence_scheduled_occurrence_update`, `fence_scheduled_turn_execution_update`
 and `fence_inbox_execution_context` (0608). The one v1 liveness check,
 `scheduled_xai_authority_changed` in
-`validate_scheduled_agent_run_live_authority` (0478; originally 0275, also
-patched by 0447, 0452 and 0459), is replaced at the receipt by the equivalent
+`validate_scheduled_agent_run_live_authority` (0478; originally 0275; called
+from 0447, 0452, 0459 and the scheduled path in `packages/db/src/index.ts`,
+which all inherit the new `scheduled_claude_authority_changed` refusal and
+are named in PR 0's inventory and tests), is replaced at the receipt by the equivalent
 core check on the revision's record or v2 entry (the personal entry's G is
 current for its membership and its connections are serviceable), returning
 the same code. PR 0 adds the missing Claude comparisons (finding below) and
@@ -2686,7 +2694,9 @@ guard keeps provider names out of shared modules.
   derived carrier committed without its record, or with a different one, is
   rejected at commit by the deferred trigger; a source the cutover missed
   yields a waiting `{personal: [], shared_pool: none}` copy;
-  `authority_inserted_at` cannot be supplied or changed; a mixed inbox batch of a narrowed
+  `authority_inserted_at` cannot be supplied or changed (a carrier derived
+  from a missed source commits only with the `missing` copy, and an explicit
+  `created_at` from an older binary is still accepted); a mixed inbox batch of a narrowed
   pre-cutover update and an unnarrowed post-cutover update is split.
 - Grants: after the cutover and a fresh `provision-roles`, runtime roles hold
   no write grant on the provider's legacy tables (posture contract).
@@ -2749,7 +2759,7 @@ guard keeps provider names out of shared modules.
 | --- | --- | --- |
 | Runtime roles acting as an organization administrator can insert or enable `subscription_provider_cutovers` rows for `xai` and `claude`, and insert their core connections, before any drained move. Inert in runtime code today (every reader passes `codex`), but the SQL placement helper (0667) and 0668's non-Codex branch already accept any provider and would act on such rows as soon as an X1a or C1a call site exists; 0668's branch also compares a legacy generation with a core one. Such rows would also abort the cutover preflight. | 0642 connection insert policy; 0689 cutover administrator policies; 0667; 0668 | PR 0, merged before any X1a or C1a call site; runbook inventory query |
 | §3.7 says the 0608 inbox fence compares Codex against v2, but no later migration redefines `fence_inbox_execution_context`, so receiver-context turns are not fenced on `subscription_authority` in SQL. Scheduled admission and occurrence functions do not compare v2 either; the 0688 revision trigger only fills a NULL revision value. Both need a v2 comparison. | 0608, 0275, 0478, 0688 | PR 0 |
-| §3.7 says Claude stays compared against its v1 columns, but scheduled admission (`admit_scheduled_agent_run_execution`, live as 0478's body patched in place by 0416, 0447 and 0501; `validate_scheduled_occurrence_accepted_execution`; `validate_scheduled_agent_run_live_authority`; the occurrence and turn-execution fences) never compares Claude: not the run's accepted Claude snapshot, the occurrence update, nor the generated session's `initial_claude`, and there is no Claude equivalent of `scheduled_xai_authority_changed`. Claude scheduled pools are fenced only in TypeScript. | 0275, 0416, 0447, 0478, 0501 | PR 0 |
+| §3.7 says Claude stays compared against its v1 columns, but scheduled admission (`admit_scheduled_agent_run_execution`, restated by 0478 with the 0416 and 0447 changes and patched in place by 0501; `validate_scheduled_occurrence_accepted_execution`; `validate_scheduled_agent_run_live_authority`; the occurrence and turn-execution fences) never compares Claude: not the run's accepted Claude snapshot, the occurrence update, nor the generated session's `initial_claude`, and there is no Claude equivalent of `scheduled_xai_authority_changed`. Claude scheduled pools are fenced only in TypeScript. | 0275, 0416, 0447, 0478, 0501 | PR 0 |
 | The `{codex,claude,xai}_primary_connection_id` foreign keys omit `provider`, so a primary can reference another provider's connection. | 0642 `subscription_settings` | PR 0, or M4-A's settings shape |
 | The non-Codex branch of `authorize_subscription_personal_access` compares the owner subject but neither requires the connection's owner membership id to equal the session owner's membership nor checks `personalConnectionsAllowed`. | 0668 | PR 0 |
 | `autoRenews` is a static adapter flag but is documented as false for setup tokens. | `packages/subscriptions/src/adapter.ts` | PR 0 |
