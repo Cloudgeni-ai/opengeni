@@ -61,8 +61,24 @@ describe("Slack bridge through the ordinary attempt gateway", () => {
         ...scope,
         connectorActionPolicy: hooks,
         mcpAccountLabels: new Map([
-          ["slack_personal", "Personal: Alice"],
-          ["slack_workspace", "Workspace: Team"],
+          [
+            "slack_personal",
+            {
+              model: "Personal: Alice",
+              connector: "Slack",
+              providerDomain: "slack.com",
+              account: "Alice",
+            },
+          ],
+          [
+            "slack_workspace",
+            {
+              model: "Workspace: Team",
+              connector: "Slack",
+              providerDomain: "slack.com",
+              account: "Team",
+            },
+          ],
         ]),
         resolveCredential: async (request) => {
           const selected = request.connectionRef.connectionId!;
