@@ -1095,8 +1095,8 @@ export function buildTimeline(
           id: event.id,
           tone: "waiting",
           text:
-            stringValue(payload.detail) ??
-            stringValue(payload.error) ??
+            stringValue(payload.detail) ||
+            stringValue(payload.error) ||
             "Waiting for Codex capacity.",
           occurredAt: event.occurredAt,
         });
