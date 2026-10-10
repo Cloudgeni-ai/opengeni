@@ -76,7 +76,7 @@ results also count as input tokens on later requests.
   receives all of them back exactly as returned, which Anthropic requires.
 - A search Claude defers behind Opengeni tool calls resumes on the next
   request. A paused turn (`pause_turn`) is continued inside the transport with
-  its content unchanged, at most eight times, and reported as one response.
+  its content unchanged, up to eight requests in total, and reported as one response.
 - A search Claude can no longer continue (an interrupted or steered turn), a
   result whose call was compacted away, or any search on a request without the
   search tool becomes a readable historical fact without encrypted data. These

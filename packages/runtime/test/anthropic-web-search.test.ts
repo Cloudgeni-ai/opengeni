@@ -8,7 +8,7 @@ import {
 } from "@openai/agents";
 import type { ResolvedModelProvider } from "@opengeni/config";
 import {
-  ANTHROPIC_PAUSE_TURN_MAX_CONTINUATIONS,
+  ANTHROPIC_PAUSE_TURN_MAX_REQUESTS,
   AnthropicMessagesModel,
   anthropicResponse,
   buildAnthropicRequest,
@@ -227,14 +227,14 @@ describe("Claude web search tool declaration", () => {
 });
 
 describe("Claude web search responses", () => {
-  test("a search, its results and cited text become a hosted search item and cited messages", () => {
+  test("a search, its results and cited text become a hosted search item and one cited answer", () => {
     const response = anthropicResponse(
       message("msg_1", searchedContent, "end_turn", {
         server_tool_use: { web_search_requests: 1 },
       }),
     );
-    const [intro, search, cited, plain] = response.output as any[];
-    expect(response.output).toHaveLength(4);
+    const [intro, search, answer] = response.output as any[];
+    expect(response.output).toHaveLength(3);
     expect(intro.content[0]).toEqual({ type: "output_text", text: "I'll look that up." });
     expect(search).toMatchObject({
       type: "hosted_tool_call",
@@ -256,13 +256,17 @@ describe("Claude web search responses", () => {
       },
     });
     expect(search.providerData.anthropic.blocks).toEqual([call, results]);
-    expect(cited.id).toBe("msg_1:3");
-    expect(cited.content[0]).toEqual({
-      type: "output_text",
-      text: "Version 2 adds search.",
-      providerData: { anthropic: { citations: [citation] } },
-    });
-    expect(plain.content[0].providerData).toBeUndefined();
+    // Claude splits a cited answer into adjacent text blocks: they stay one
+    // message, one part per block, each with its own citations.
+    expect(answer.id).toBe("msg_1:3");
+    expect(answer.content).toEqual([
+      {
+        type: "output_text",
+        text: "Version 2 adds search.",
+        providerData: { anthropic: { citations: [citation] } },
+      },
+      { type: "output_text", text: " Anything else?" },
+    ]);
     expect((response.providerData as any).anthropic.webSearchRequests).toBe(1);
   });
 
@@ -309,7 +313,7 @@ describe("Claude web search responses", () => {
     expect(done.response.providerData.anthropic.webSearchRequests).toBe(1);
     expect(
       events.filter((event) => event.type === "output_text_delta").map((event) => event.itemId),
-    ).toEqual(["msg_1:0", "msg_1:3", "msg_1:4"]);
+    ).toEqual(["msg_1:0", "msg_1:3", "msg_1:3"]);
   });
 });
 
@@ -369,7 +373,11 @@ describe("Claude web search replay", () => {
     const agent = new Agent({ name: "Test", model, tools: [webSearchTool()] });
     const runner = new Runner({ tracingDisabled: true });
     const first = await runner.run(agent, "What changed?");
-    expect(first.finalOutput).toBe(" Anything else?");
+    // The whole cited answer is the reply, not its last fragment.
+    expect(first.finalOutput).toBe("Version 2 adds search. Anything else?");
+    expect(first.newItems.filter((item: any) => item.type === "message_output_item")).toHaveLength(
+      2,
+    );
     expect(sent[0].tools).toEqual([
       { type: "web_search_20250305", name: "web_search", cache_control: expect.any(Object) },
     ]);
@@ -490,6 +498,25 @@ describe("Claude web search replay", () => {
     expect(compactedWire).not.toContain("web_search_tool_result");
     expect(compactedWire).not.toContain("ENC_");
     expect(compactedWire).toContain("https://example.com/notes");
+
+    // A later answer citing that earlier search loses its citations too.
+    const laterCited = anthropicResponse(
+      message("msg_4", [{ type: "text", text: "Still cited.", citations: [citation] }]),
+    ).output;
+    const afterward = buildAnthropicRequest(
+      request([
+        { role: "user", content: "Summary" },
+        ...orphan,
+        { role: "user", content: "Next" },
+        ...laterCited,
+        { role: "user", content: "And?" },
+      ]),
+      "claude",
+      provider,
+      false,
+    );
+    expect(JSON.stringify(afterward.messages)).not.toContain("citations");
+    expect(JSON.stringify(afterward.messages)).toContain("Still cited.");
   });
 });
 
@@ -522,8 +549,19 @@ describe("Claude paused search turns", () => {
     ]);
     expect(response.output.map((item: any) => item.id)).toEqual(["msg_1:0", "msg_1:1", "msg_1:3"]);
     expect((response.output[1] as any).providerData.anthropic.blocks).toEqual([call, results]);
+    // Both requests are billed; each re-sent the whole prefix, so the
+    // context size is the last request's input, not the sum.
     expect(response.usage.requests).toBe(2);
     expect(response.usage.inputTokens).toBe(320);
+    expect(
+      response.usage.requestUsageEntries?.map((entry) => [entry.inputTokens, entry.outputTokens]),
+    ).toEqual([
+      [110, 5],
+      [210, 5],
+    ]);
+    expect(response.usage.requestUsageEntries?.[1]?.inputTokensDetails).toMatchObject({
+      cached_tokens: 200,
+    });
     expect((response.providerData as any).anthropic.webSearchRequests).toBe(1);
     expect(response.requestId).toBe("req_2");
   });
@@ -549,6 +587,31 @@ describe("Claude paused search turns", () => {
     ]);
   });
 
+  test("an answer that continues across a pause streams and stays one message", async () => {
+    let calls = 0;
+    const model = new AnthropicMessagesModel(provider, "claude", (async () => {
+      calls += 1;
+      return calls === 1
+        ? stream(
+            frames("msg_1", [call, results, { type: "text", text: "Part one." }], "pause_turn"),
+          )
+        : stream(frames("msg_2", [{ type: "text", text: " Part two." }]));
+    }) as typeof fetch);
+    const events = await collect(model, request([{ role: "user", content: "Search" }]));
+    expect(
+      events.filter((event) => event.type === "output_text_delta").map((event) => event.itemId),
+    ).toEqual(["msg_1:2", "msg_1:2"]);
+    const output = events.at(-1).response.output;
+    expect(output.map((item: any) => item.id)).toEqual(["msg_1:0", "msg_1:2"]);
+    expect(output[1].content.map((part: any) => part.text)).toEqual(["Part one.", " Part two."]);
+  });
+
+  test("a single request reports no per-request entries", async () => {
+    const response = anthropicResponse(message("msg_1", [{ type: "text", text: "Hi" }]));
+    expect(response.usage.requests).toBe(1);
+    expect(response.usage.requestUsageEntries).toBeUndefined();
+  });
+
   test("continuations are bounded", async () => {
     let calls = 0;
     const model = new AnthropicMessagesModel(provider, "claude", (async () => {
@@ -560,7 +623,7 @@ describe("Claude paused search turns", () => {
     await expect(model.getResponse(request([{ role: "user", content: "Go" }]))).rejects.toThrow(
       "paused its web search",
     );
-    expect(calls).toBe(ANTHROPIC_PAUSE_TURN_MAX_CONTINUATIONS);
+    expect(calls).toBe(ANTHROPIC_PAUSE_TURN_MAX_REQUESTS);
   });
 });
 

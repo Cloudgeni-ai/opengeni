@@ -40,7 +40,7 @@ type Message = { role: "user" | "assistant" | "system"; content: Json[] };
  * paused content. Bounded like any retry loop so a misbehaving provider cannot
  * hold a turn forever.
  */
-export const ANTHROPIC_PAUSE_TURN_MAX_CONTINUATIONS = 8;
+export const ANTHROPIC_PAUSE_TURN_MAX_REQUESTS = 8;
 
 export class AnthropicProtocolError extends Error {
   readonly code = "anthropic_protocol_error";
@@ -429,9 +429,12 @@ function withoutUncontinuableSearches(messages: Message[]): void {
       )
     );
   };
+  // Citations index into search results, and a later answer can cite an
+  // earlier search. From the first result that became text onward, never
+  // send citations whose result may be gone.
+  let convertedResult = false;
   for (const [index, message] of messages.entries()) {
     if (message.role !== "assistant") continue;
-    let convertedResult = false;
     message.content = message.content.map((block, position) => {
       if (block.type === "server_tool_use" && block.name === ANTHROPIC_WEB_SEARCH_TOOL_NAME) {
         const answeredHere = message.content
@@ -452,7 +455,6 @@ function withoutUncontinuableSearches(messages: Message[]): void {
       }
       return block;
     });
-    // Citations index into search results; never send them without those results.
     if (convertedResult)
       message.content = message.content.map((block) => {
         if (block.type !== "text" || !("citations" in block)) return block;
@@ -669,7 +671,36 @@ function thinkingDropCounts(transformations: unknown): Record<string, number> | 
   return Object.keys(counts).length ? counts : undefined;
 }
 
-function normalizeUsage(raw: Json, requests = 1): Usage {
+/**
+ * Usage of one logical response. A paused turn's continuations are separate
+ * billed requests, each re-sending the whole prefix: the totals sum them for
+ * billing, and the per-request entries keep the final request's input as the
+ * real context size.
+ */
+function normalizeUsage(raw: Json, perRequest: Json[] = []): Usage {
+  const usage = requestUsage(raw);
+  if (perRequest.length < 2) return usage;
+  return new Usage({
+    requests: perRequest.length,
+    inputTokens: usage.inputTokens,
+    outputTokens: usage.outputTokens,
+    totalTokens: usage.totalTokens,
+    inputTokensDetails: usage.inputTokensDetails[0],
+    outputTokensDetails: usage.outputTokensDetails[0],
+    requestUsageEntries: perRequest.map((entry) => {
+      const request = requestUsage(entry);
+      return {
+        inputTokens: request.inputTokens,
+        outputTokens: request.outputTokens,
+        totalTokens: request.totalTokens,
+        inputTokensDetails: request.inputTokensDetails[0],
+        outputTokensDetails: request.outputTokensDetails[0],
+      };
+    }),
+  });
+}
+
+function requestUsage(raw: Json): Usage {
   const count = (value: unknown) =>
     typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
   const cached = count(raw.cache_read_input_tokens);
@@ -677,7 +708,7 @@ function normalizeUsage(raw: Json, requests = 1): Usage {
   const input = count(raw.input_tokens) + cached + written;
   const output = count(raw.output_tokens);
   return new Usage({
-    requests,
+    requests: 1,
     inputTokens: input,
     outputTokens: output,
     totalTokens: input + output,
@@ -700,7 +731,7 @@ export function anthropicResponse(
   requestId?: string,
   names = new Map<string, { name: string; namespace?: string }>(),
   searchQueries: ReadonlyMap<string, string> = new Map(),
-  requests = 1,
+  requestUsages: Json[] = [],
 ): ModelResponse {
   // A refused response can be HTTP 200 with no content blocks. It must not
   // become an empty successful response or admit a tool call from partial output.
@@ -726,21 +757,27 @@ export function anthropicResponse(
     switch (block.type) {
       case "text": {
         const citations = Array.isArray(block.citations) ? block.citations : [];
-        output.push({
-          type: "message",
-          role: "assistant",
-          id,
-          status: message.stop_reason === "max_tokens" ? "incomplete" : "completed",
-          content: [
-            {
-              type: "output_text",
-              text: text(block.text, "response text"),
-              ...(citations.length
-                ? { providerData: { anthropic: { citations: structuredClone(citations) } } }
-                : {}),
-            },
-          ],
-        });
+        const part = {
+          type: "output_text" as const,
+          text: text(block.text, "response text"),
+          ...(citations.length
+            ? { providerData: { anthropic: { citations: structuredClone(citations) } } }
+            : {}),
+        };
+        // Claude splits a cited answer into many adjacent text blocks. They
+        // are one message (one part per block, so replay sends the same
+        // blocks); separate messages would make the last fragment the reply.
+        const previous = output.at(-1);
+        if (content[index - 1]?.type === "text" && previous?.type === "message")
+          (previous.content as unknown[]).push(part);
+        else
+          output.push({
+            type: "message",
+            role: "assistant",
+            id,
+            status: message.stop_reason === "max_tokens" ? "incomplete" : "completed",
+            content: [part],
+          });
         break;
       }
       case "server_tool_use":
@@ -806,7 +843,7 @@ export function anthropicResponse(
   const webSearchRequests = message.usage?.server_tool_use?.web_search_requests;
   return {
     output,
-    usage: normalizeUsage(message.usage ?? {}, requests),
+    usage: normalizeUsage(message.usage ?? {}, requestUsages),
     responseId: message.id,
     ...(requestId ? { requestId } : {}),
     providerData: {
@@ -1064,7 +1101,7 @@ export class AnthropicMessagesModel implements Model {
       if (message.stop_reason !== "pause_turn") break;
       assertPauseContinuationAllowed(continuation);
     }
-    return anthropicResponse(merged!, requestId, names, searchQueries, merged!.requests);
+    return anthropicResponse(merged!, requestId, names, searchQueries, merged!.requestUsages);
   }
 
   async *getStreamedResponse(request: ModelRequest): AsyncIterable<ResponseStreamEvent> {
@@ -1080,13 +1117,20 @@ export class AnthropicMessagesModel implements Model {
         started: merged !== undefined,
         ...(merged ? { baseId: merged.id as string } : {}),
         offset: merged?.content.length ?? 0,
+        ...(merged ? trailingTextRunStart(merged.content) : {}),
       });
       requestId = streamed.requestId;
       merged = mergePausedMessage(merged, streamed.message);
       if (streamed.message.stop_reason !== "pause_turn") break;
       assertPauseContinuationAllowed(continuation);
     }
-    const result = anthropicResponse(merged!, requestId, names, searchQueries, merged!.requests);
+    const result = anthropicResponse(
+      merged!,
+      requestId,
+      names,
+      searchQueries,
+      merged!.requestUsages,
+    );
     yield protocol.StreamEventResponseCompleted.parse({
       type: "response_done",
       response: { id: result.responseId!, ...result },
@@ -1095,11 +1139,13 @@ export class AnthropicMessagesModel implements Model {
 
   private async *streamMessage(
     request: ModelRequest,
-    continuation: { started: boolean; baseId?: string; offset: number },
+    continuation: { started: boolean; baseId?: string; offset: number; textRunStart?: number },
   ): AsyncGenerator<ResponseStreamEvent, { message: Json; requestId: string | undefined }> {
     const response = await this.send(request, true);
     if (!response.body) throw new AnthropicProtocolError("Claude returned an empty stream");
-    const blocks = new Map<number, { block: Json; json: string; stopped: boolean }>();
+    // `item` is the merged response index of the message this block's text
+    // belongs to: adjacent text blocks share the first block's message.
+    const blocks = new Map<number, { block: Json; json: string; stopped: boolean; item: number }>();
     let message: Json | undefined;
     let finalDelta = false;
     for await (const event of anthropicSse(
@@ -1174,7 +1220,24 @@ export class AnthropicMessagesModel implements Model {
         case "content_block_start":
           if (!message || blocks.has(event.index) || finalDelta)
             throw new AnthropicProtocolError("Invalid Claude block start");
-          blocks.set(event.index, { block: object(event.content_block), json: "", stopped: false });
+          {
+            const block = object(event.content_block);
+            const previous = blocks.get(event.index - 1);
+            const runStart =
+              block.type !== "text"
+                ? undefined
+                : event.index === 0
+                  ? continuation.textRunStart
+                  : previous?.block.type === "text"
+                    ? previous.item
+                    : undefined;
+            blocks.set(event.index, {
+              block,
+              json: "",
+              stopped: false,
+              item: runStart ?? continuation.offset + event.index,
+            });
+          }
           break;
         case "content_block_delta": {
           const state = blocks.get(event.index);
@@ -1199,7 +1262,7 @@ export class AnthropicMessagesModel implements Model {
             state.block.text += text(delta.text, "text delta");
             yield {
               type: "output_text_delta",
-              itemId: `${continuation.baseId ?? message!.id}:${continuation.offset + event.index}`,
+              itemId: `${continuation.baseId ?? message!.id}:${state.item}`,
               delta: delta.text,
             };
           } else if (delta.type === "citations_delta") {
@@ -1260,10 +1323,17 @@ export class AnthropicMessagesModel implements Model {
 }
 
 function assertPauseContinuationAllowed(continuation: number): void {
-  if (continuation + 1 >= ANTHROPIC_PAUSE_TURN_MAX_CONTINUATIONS)
+  if (continuation + 1 >= ANTHROPIC_PAUSE_TURN_MAX_REQUESTS)
     throw new AnthropicProtocolError(
-      `Claude paused its web search ${ANTHROPIC_PAUSE_TURN_MAX_CONTINUATIONS} times without finishing`,
+      `Claude paused its web search ${ANTHROPIC_PAUSE_TURN_MAX_REQUESTS} times without finishing`,
     );
+}
+
+/** Index of the first block of the text run that ends `content`, if it ends in text. */
+function trailingTextRunStart(content: Json[]): { textRunStart?: number } {
+  let start = content.length;
+  while (start > 0 && content[start - 1]?.type === "text") start -= 1;
+  return start < content.length ? { textRunStart: start } : {};
 }
 
 /** Sums every numeric usage counter, keeping the latest non-numeric fields. */
@@ -1293,13 +1363,13 @@ function addUsage(previous: unknown, next: unknown): unknown {
 function mergePausedMessage(previous: Json | undefined, next: Json): Json {
   if (!Array.isArray(next.content))
     throw new AnthropicProtocolError("Claude response content must be an array");
-  if (!previous) return { ...next, content: [...next.content], requests: 1 };
+  if (!previous) return { ...next, content: [...next.content], requestUsages: [next.usage ?? {}] };
   return {
     ...next,
     id: previous.id,
     content: [...previous.content, ...next.content],
     usage: addUsage(previous.usage ?? {}, next.usage ?? {}),
-    requests: previous.requests + 1,
+    requestUsages: [...previous.requestUsages, next.usage ?? {}],
     ...(previous.input_transformations || next.input_transformations
       ? {
           input_transformations: [
