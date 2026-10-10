@@ -14,6 +14,8 @@ import { provisionRoles } from "../src/provision-roles";
 import { encryptEnvironmentValue } from "../src/environment-crypto";
 
 const migration = "0689_subscription_core_codex_cutover.sql";
+// 0711 requires the committed 0689 cutover, so it is held back with it.
+const precursor = "0711_subscription_core_generic_precursor.sql";
 const key = Buffer.alloc(32, 87);
 const cases: Array<{
   name: string;
@@ -71,9 +73,9 @@ for (const shape of ["workspace-workspace", "workspace-user"] as const) {
     }));
     try {
       await owner`CREATE TABLE schema_migrations(name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`;
-      await owner`INSERT INTO schema_migrations(name) VALUES (${migration})`;
+      await owner`INSERT INTO schema_migrations(name) VALUES (${migration}), (${precursor})`;
       await migrate(owned.ownerUrl, undefined, { applicationDatabaseRoles: ["opengeni_app"] });
-      await owner`DELETE FROM schema_migrations WHERE name = ${migration}`;
+      await owner`DELETE FROM schema_migrations WHERE name IN (${migration}, ${precursor})`;
       const seedTables = [
         "managed_accounts",
         "workspaces",
