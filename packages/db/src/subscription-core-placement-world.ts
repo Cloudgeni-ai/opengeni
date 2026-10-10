@@ -198,6 +198,8 @@ export async function withSubscriptionCoreProviderPlacementWorld<T>(
                       ? provider.adapter.modelPolicyProviderId
                       : model.provider,
                   modelId: model.id,
+                  // Subscription placement: these models never spend Opengeni credits.
+                  chargesCredits: false,
                 }).allowed,
             )
             .map((model) => model.id);

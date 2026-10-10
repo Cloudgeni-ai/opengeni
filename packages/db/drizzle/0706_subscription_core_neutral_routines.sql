@@ -1850,7 +1850,7 @@ BEGIN
     IF live_clause IS NULL
       OR pg_catalog.strpos(live_clause, 'subscription_codex_owner_capability_held') = 0
       OR pg_catalog.strpos(live_clause, 'subscription_core_owner_capability_held') <> 0 THEN
-      RAISE EXCEPTION '0705 % session policy drift', table_name USING ERRCODE = '55000';
+      RAISE EXCEPTION '0706 % session policy drift', table_name USING ERRCODE = '55000';
     END IF;
     core_clause := format(
       'current_user = pg_catalog.pg_get_userbyid((SELECT relowner FROM pg_catalog.pg_class WHERE oid = %L::regclass)) AND leased_until <= clock_timestamp() AND opengeni_private.subscription_core_owner_capability_held(provider, account_id, ARRAY[''connection_owner''], NULL, connection_id, false)', table_name);

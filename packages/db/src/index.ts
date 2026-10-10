@@ -1,5 +1,12 @@
 export * from "./session-target";
 import { sessionRetentionFromRow } from "./session-archive";
+import { browserDeadlineCheckpoint } from "./browser-deadline-checkpoints";
+import {
+  BrowserSessionNotFoundError,
+  BrowserSessionOperationConflictError,
+  BrowserSessionStateError,
+  clearSuspendedBrowserSessionController,
+} from "./browser-sessions";
 import {
   buildOrganizationCodexConnectionTokenResolver,
   findOrganizationCodexConnection,
@@ -46,6 +53,8 @@ import {
   CODEX_CREDENTIAL_POLICY_SNAPSHOT_METADATA_KEY,
   ToolReviewContext,
   WorkspaceModelCompactionThresholdsPatch,
+  cleanStoredSessionTitle,
+  workspaceSettingsAllowCreditModels,
 } from "@opengeni/contracts";
 import { recordToolApproval } from "@opengeni/observability";
 import { connectorActionFingerprint } from "./connector-action-fingerprint";
@@ -28225,6 +28234,17 @@ export type WorkspaceModelPolicy = {
   allowedModels: string[] | null;
 };
 
+/**
+ * The policy a workspace runs with: the allowlists it follows plus its own
+ * credit switch (`allowCreditModels`, the workspace setting). The switch is
+ * independent of where the allowlists come from, so following the
+ * organization's allowlists never turns credits back on.
+ */
+export type EffectiveWorkspaceModelPolicy = WorkspaceModelPolicy & {
+  /** False blocks every model billed in Opengeni credits, current and future. */
+  allowCreditModels: boolean;
+};
+
 function restrictsAnything(policy: WorkspaceModelPolicy | null | undefined): boolean {
   return Boolean(policy && (policy.allowedProviders !== null || policy.allowedModels !== null));
 }
@@ -28237,10 +28257,16 @@ function restrictsAnything(policy: WorkspaceModelPolicy | null | undefined): boo
 export async function getWorkspaceModelPolicyLayers(
   db: Database,
   workspaceId: string,
-): Promise<{ workspace: WorkspaceModelPolicy | null; organization: WorkspaceModelPolicy | null }> {
+): Promise<{
+  workspace: WorkspaceModelPolicy | null;
+  organization: WorkspaceModelPolicy | null;
+  /** The workspace's credit switch; true unless its setting is explicitly false. */
+  allowCreditModels: boolean;
+}> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb
       .select({
+        workspaceSettings: schema.workspaces.settings,
         workspaceAllowedProviders: schema.workspaceModelPolicies.allowedProviders,
         workspaceAllowedModels: schema.workspaceModelPolicies.allowedModels,
         workspacePolicyId: schema.workspaceModelPolicies.id,
@@ -28258,7 +28284,7 @@ export async function getWorkspaceModelPolicyLayers(
       )
       .where(eq(schema.workspaces.id, workspaceId))
       .limit(1);
-    if (!row) return { workspace: null, organization: null };
+    if (!row) return { workspace: null, organization: null, allowCreditModels: true };
     const organization = {
       allowedProviders: row.organizationAllowedProviders ?? null,
       allowedModels: row.organizationAllowedModels ?? null,
@@ -28271,20 +28297,28 @@ export async function getWorkspaceModelPolicyLayers(
           }
         : null,
       organization: restrictsAnything(organization) ? organization : null,
+      allowCreditModels: workspaceSettingsAllowCreditModels(row.workspaceSettings),
     };
   });
 }
 
 /**
- * The policy this workspace runs with: its own row, else its organization's
- * default, else null (unrestricted).
+ * The policy this workspace runs with: the allowlists of its own row, else of
+ * its organization's default, plus its credit switch. Null only when nothing
+ * is restricted (every model allowed and credits on).
  */
 export async function getWorkspaceModelPolicy(
   db: Database,
   workspaceId: string,
-): Promise<WorkspaceModelPolicy | null> {
+): Promise<EffectiveWorkspaceModelPolicy | null> {
   const layers = await getWorkspaceModelPolicyLayers(db, workspaceId);
-  return layers.workspace ?? layers.organization;
+  const allowlists = layers.workspace ?? layers.organization;
+  if (!allowlists && layers.allowCreditModels) return null;
+  return {
+    allowedProviders: allowlists?.allowedProviders ?? null,
+    allowedModels: allowlists?.allowedModels ?? null,
+    allowCreditModels: layers.allowCreditModels,
+  };
 }
 
 /** Remove the workspace's own policy so it follows its organization's default. */
@@ -50679,6 +50713,10 @@ export async function releaseLeaseHolder(
      * resolved, rejected, or been physically quiesced. A cancellation listener
      * that merely prevents a holder leak must leave this false. */
     workspaceWritersQuiesced?: boolean;
+    /** Keep the holder-set clock when the box stays warm: an idle save's
+     * cleanup is not use, so it must not restart retained-command
+     * containment's idle window. */
+    preserveHoldersChangedAt?: boolean;
   },
 ): Promise<{ liveness: SandboxLeaseLiveness; refcount: number } | null> {
   if (input.kind === "process") {
@@ -50745,6 +50783,14 @@ export async function releaseLeaseHolder(
       `);
         const row = rows[0];
         if (!row) return null; // already cold-and-reaped; release is an idempotent no-op
+        const priorHoldersChangedAt = input.preserveHoldersChangedAt
+          ? (
+              await rawRows<{ at: string }>(
+                tx,
+                sql`select holders_changed_at::text as at from sandbox_leases where id = ${row.id}`,
+              )
+            )[0]!.at
+          : null;
 
         // Cancellation can delete the holder before the shared rig coordinator
         // catches its abort. That coordinator must then fail closed because its
@@ -50807,6 +50853,13 @@ export async function releaseLeaseHolder(
         where id = ${row.id}
         returning *
       `);
+        if (input.preserveHoldersChangedAt && !enterDraining) {
+          // A separate statement: the counter trigger re-stamps the clock.
+          await tx.execute(sql`
+            update sandbox_leases set holders_changed_at = ${priorHoldersChangedAt}::timestamptz
+            where id = ${row.id}
+          `);
+        }
         return { liveness: updated[0]!.liveness, refcount: Number(c.total) };
       }),
   );
@@ -52189,6 +52242,319 @@ export async function enrollRetainedCommandContainment(
   });
 }
 
+/** Bounded per-candidate idle interaction outcomes (metric labels). */
+export type IdleInteractionInspection =
+  | "released"
+  | "checkpointing"
+  | "not_eligible"
+  | "inspection_failed";
+
+export type IdleInteractionRelease = {
+  /** Set when the box lost its last holder and drains now. */
+  drainable: ReapDrainable | null;
+  /** Browsers whose idle save was prepared; their holders stay until saved. */
+  checkpoints: number;
+  /** Browsers and desktops released without a save (marked lost). */
+  released: number;
+};
+
+/** Failure code of a browser or desktop stopped because nobody used it. */
+export const IDLE_INTERACTION_RELEASED = "idle_released";
+
+const INTERACTION_HOLDER_RESOURCE =
+  /^(browser-session|computer-session):([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
+
+/**
+ * An idle browser or desktop does not keep its Modal box warm. Activity is
+ * deliberate and durable: the newest of the interaction holder heartbeat and
+ * the resource's last use and controller heartbeat. Every controller request
+ * moves all three - an agent tool call, a person's input, and the live view's
+ * poll and heartbeat, which run only while the page is visible - so a hidden
+ * tab or a closed view stops counting within seconds. An in-flight lifecycle
+ * operation counts too. Interventions waiting for a person do not: a wait is
+ * not use (see `sandboxGroupIdleForCommandContainmentTx`).
+ *
+ * When every browser and desktop on the box, and the whole sandbox group by
+ * the general idle rule, have been unused for `idleMs` (the sandbox idle
+ * grace), all are released at once. A checkpoint-capable browser gets the
+ * system profile save (the provider-deadline checkpoint with an `idle`
+ * reason) and keeps its holder until that save is committed; anything else is
+ * marked lost with `idle_released` and its holder is deleted. With no holder
+ * left the box drains immediately: the ordinary drain saves /workspace and
+ * stops it, and the next acquire restores it.
+ *
+ * The workspace control fence and lease -> holder -> operation -> resource
+ * row locks serialize the decision with controller requests, which lock the
+ * lease and holder before touching their resource.
+ */
+export async function releaseIdleInteractionHolders(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    idleMs: number;
+    /** False when the worker cannot save browser profiles (no object storage,
+     * delegation secret or encryption key, or no Temporal checkpoint worker);
+     * browsers are then released like desktops. */
+    browserCheckpoints: boolean;
+  },
+): Promise<IdleInteractionRelease | null> {
+  if (!Number.isSafeInteger(input.idleMs) || input.idleMs < 60_000) {
+    throw new Error("Idle interaction release needs an idle window of at least one minute");
+  }
+  const screened = await withRlsContext(db, input, async (tx) => {
+    const lease = await readLease(tx, input.workspaceId, input.sandboxGroupId);
+    return (
+      lease !== null &&
+      lease.backend === "modal" &&
+      lease.liveness === "warm" &&
+      (await sandboxGroupIdleForCommandContainmentTx(tx, {
+        ...input,
+        leaseId: lease.id,
+        windowMs: input.idleMs,
+        writerMode: leaseCaptureIsPointInTime(lease.backend, lease.resumeState)
+          ? "containment"
+          : "physical",
+      }))
+    );
+  });
+  if (!screened) return null;
+  return await withRlsContext(db, input, async (tx) => {
+    await lockWorkspaceInferenceControl(tx, input.workspaceId, "update");
+    const [lease] = await rawRows<LeaseRow & { idle: boolean; prior_holders_changed_at: string }>(
+      tx,
+      sql`
+      select *, holders_changed_at::text as prior_holders_changed_at,
+        holders_changed_at < now() - (${input.idleMs}::bigint * interval '1 millisecond') as idle
+      from sandbox_leases
+      where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
+      for update
+    `,
+    );
+    if (
+      !lease ||
+      !lease.idle ||
+      lease.backend !== "modal" ||
+      lease.liveness !== "warm" ||
+      !lease.instance_id ||
+      lease.rotation_requested_at !== null ||
+      lease.archive_capture_id !== null ||
+      Boolean(lease.unobservable_command_drain_ids?.length) ||
+      (lease.reaper_hold_until && new Date(lease.reaper_hold_until).getTime() > Date.now())
+    )
+      return null;
+    const holders = await rawRows<{
+      id: string;
+      kind: string;
+      holder_id: string;
+      idle: boolean;
+    }>(
+      tx,
+      sql`
+      select id, kind, holder_id,
+        last_heartbeat_at < now() - (${input.idleMs}::bigint * interval '1 millisecond') as idle
+      from sandbox_lease_holders where lease_id = ${lease.id} order by id for update
+    `,
+    );
+    const interactions = holders.filter((holder) => holder.kind === "interaction");
+    if (
+      interactions.length === 0 ||
+      holders.some((holder) => holder.kind !== "interaction" && holder.kind !== "process") ||
+      interactions.some((holder) => !holder.idle)
+    )
+      return null;
+    if (
+      !(await sandboxGroupIdleForCommandContainmentTx(tx, {
+        ...input,
+        leaseId: lease.id,
+        windowMs: input.idleMs,
+        writerMode: leaseCaptureIsPointInTime(lease.backend, lease.resume_state)
+          ? "containment"
+          : "physical",
+      }))
+    )
+      return null;
+    const resources = interactions.map((holder) => {
+      const match = INTERACTION_HOLDER_RESOURCE.exec(holder.holder_id);
+      return {
+        holder,
+        kind:
+          match?.[1] === "browser-session"
+            ? ("browser_session" as const)
+            : match
+              ? ("computer_session" as const)
+              : null,
+        id: match?.[2] ?? null,
+      };
+    });
+    const browserIds = resources.filter((r) => r.kind === "browser_session").map((r) => r.id!);
+    const computerIds = resources.filter((r) => r.kind === "computer_session").map((r) => r.id!);
+    const uuidList = (ids: string[]) =>
+      ids.length
+        ? sql`(${sql.join(
+            ids.map((id) => sql`${id}::uuid`),
+            sql`, `,
+          )})`
+        : sql`(null::uuid)`;
+    const operations = await rawRows<{ operation_id: string }>(
+      tx,
+      sql`
+      select operation_id from interaction_operations
+      where workspace_id = ${input.workspaceId} and state in ('prepared', 'dispatched')
+        and ((resource_kind = 'browser_session' and resource_id in ${uuidList(browserIds)})
+          or (resource_kind = 'computer_session' and resource_id in ${uuidList(computerIds)}))
+      order by operation_id for update
+    `,
+    );
+    if (operations.length > 0) return null;
+    const idleBefore = sql`now() - (${input.idleMs}::bigint * interval '1 millisecond')`;
+    const browsers = await rawRows<{
+      id: string;
+      lifecycle: string;
+      idle: boolean;
+      checkpoint: boolean;
+      controller_generation: string | null;
+    }>(
+      tx,
+      sql`
+      select id, lifecycle, controller_generation,
+        coalesce(greatest(last_used_at, controller_heartbeat_at) < ${idleBefore}, true) as idle,
+        (placement_kind = 'sandbox_group'
+          and controller_host_sandbox_group_id = ${input.sandboxGroupId}
+          and placement_instance_id = ${lease.instance_id}
+          and controller_generation is not null and controller_id is not null
+          and capabilities->>'privateCheckpoint' = 'true') as checkpoint
+      from browser_sessions
+      where workspace_id = ${input.workspaceId} and account_id = ${input.accountId}
+        and id in ${uuidList(browserIds)}
+      order by id for update
+    `,
+    );
+    const computers = await rawRows<{ id: string; lifecycle: string; idle: boolean }>(
+      tx,
+      sql`
+      select id, lifecycle,
+        coalesce(greatest(last_used_at, controller_heartbeat_at) < ${idleBefore}, true) as idle
+      from computer_sessions
+      where workspace_id = ${input.workspaceId} and account_id = ${input.accountId}
+        and id in ${uuidList(computerIds)}
+      order by id for update
+    `,
+    );
+    const terminal = new Set(["ended", "failed", "lost"]);
+    // A transition (starting, suspending, restoring, ending) or a saved
+    // browser awaiting cleanup is not idle: the transition reaper and the
+    // checkpoint own them. Any recently used resource keeps the whole box.
+    if (
+      [...browsers, ...computers].some(
+        (resource) =>
+          !resource.idle || (resource.lifecycle !== "active" && !terminal.has(resource.lifecycle)),
+      )
+    )
+      return null;
+    const checkpointed = new Set<string>();
+    if (input.browserCheckpoints) {
+      for (const browser of browsers) {
+        if (browser.lifecycle !== "active" || !browser.checkpoint) continue;
+        // Null when an idle save of this exact controller generation already
+        // failed: the browser is then released without a second attempt.
+        const claim = await browserDeadlineCheckpoint(
+          tx,
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sandboxGroupId: input.sandboxGroupId,
+            leaseId: lease.id,
+            leaseEpoch: Number(lease.lease_epoch),
+            instanceId: lease.instance_id,
+            browserSessionId: browser.id,
+            controllerGeneration: browser.controller_generation!,
+            reason: "idle",
+            idleMs: input.idleMs,
+          },
+          { prepare: true },
+        );
+        if (claim?.state === "prepared") checkpointed.add(browser.id);
+      }
+    }
+    const lostBrowsers = browsers.filter(
+      (b) => b.lifecycle === "active" && !checkpointed.has(b.id),
+    );
+    const lostComputers = computers.filter((c) => c.lifecycle === "active");
+    if (lostBrowsers.length > 0) {
+      await tx.execute(sql`
+        update browser_sessions
+        set lifecycle = 'lost', failure_code = ${IDLE_INTERACTION_RELEASED}, updated_at = now()
+        where workspace_id = ${input.workspaceId}
+          and id in ${uuidList(lostBrowsers.map((b) => b.id))} and lifecycle = 'active'
+      `);
+    }
+    if (lostComputers.length > 0) {
+      await tx.execute(sql`
+        update computer_sessions
+        set lifecycle = 'lost', failure_code = ${IDLE_INTERACTION_RELEASED}, updated_at = now()
+        where workspace_id = ${input.workspaceId}
+          and id in ${uuidList(lostComputers.map((c) => c.id))} and lifecycle = 'active'
+      `);
+    }
+    const released = resources
+      .filter((r) => !(r.kind === "browser_session" && checkpointed.has(r.id!)))
+      .map((r) => r.holder.id);
+    if (released.length > 0) {
+      await tx.execute(sql`
+        delete from sandbox_lease_holders
+        where lease_id = ${lease.id} and id in ${uuidList(released)}
+      `);
+    }
+    if (lostBrowsers.length + lostComputers.length > 0) {
+      await tx.execute(sql`
+        update workspace_interaction_revisions set revision = revision + 1, updated_at = now()
+        where workspace_id = ${input.workspaceId}
+      `);
+    }
+    const [counts] = await rawRows<{ total: number; turns: number; viewers: number }>(
+      tx,
+      sql`
+      select count(*)::int as total,
+        count(*) filter (where kind = 'turn')::int as turns,
+        count(*) filter (where kind = 'viewer')::int as viewers
+      from sandbox_lease_holders where lease_id = ${lease.id}
+    `,
+    );
+    const drain = counts!.total === 0;
+    await tx.execute(sql`
+      update sandbox_leases set
+        refcount = ${counts!.total}, turn_holders = ${counts!.turns},
+        viewer_holders = ${counts!.viewers},
+        ${drain ? sql`liveness = 'draining', expires_at = now() - interval '1 millisecond',` : sql``}
+        updated_at = now()
+      where id = ${lease.id}
+    `);
+    if (!drain) {
+      // The holder-set clock measures use, not this release: a box left
+      // with legacy retained commands keeps its containment clock, so
+      // containment does not wait another full window because of it.
+      await tx.execute(sql`
+        update sandbox_leases set holders_changed_at = ${lease.prior_holders_changed_at}::timestamptz
+        where id = ${lease.id}
+      `);
+    }
+    return {
+      drainable: drain
+        ? {
+            workspaceId: input.workspaceId,
+            sandboxGroupId: input.sandboxGroupId,
+            instanceId: lease.instance_id,
+            leaseEpoch: Number(lease.lease_epoch),
+          }
+        : null,
+      checkpoints: checkpointed.size,
+      released: lostBrowsers.length + lostComputers.length,
+    };
+  });
+}
+
 export type IdleCheckpointCandidate = {
   accountId: string;
   workspaceId: string;
@@ -52291,6 +52657,13 @@ export async function reapStaleLeaseHoldersGlobal(
     deadlineMandatoryCaptureLeadMs?: number | undefined;
     onCommandContainment?: (outcome: CommandContainmentInspection) => void;
     onCommandContainmentError?: (error: unknown) => void;
+    /** The general sandbox idle grace. Browsers and desktops unused for this
+     * long stop holding their box (`releaseIdleInteractionHolders`). Omitted:
+     * interaction holders keep their box until the provider deadline. */
+    idleInteractionReleaseMs?: number | undefined;
+    /** Whether idle checkpoint-capable browsers are saved before release. */
+    idleBrowserCheckpoints?: boolean;
+    onIdleInteractionRelease?: (outcome: IdleInteractionInspection) => void;
   },
 ): Promise<ReapDrainable[]> {
   // Active interaction holders represent durable BrowserSession/ComputerSession
@@ -52344,6 +52717,82 @@ export async function reapStaleLeaseHoldersGlobal(
     ((error: unknown) => {
       console.warn("sandbox reaper: retained command containment inspection failed", error);
     });
+  const pushDrainable = (drainable: ReapDrainable) => {
+    if (
+      !ordinary.some(
+        (r) =>
+          r.workspaceId === drainable.workspaceId && r.sandboxGroupId === drainable.sandboxGroupId,
+      )
+    )
+      ordinary.push(drainable);
+  };
+  if (input.idleInteractionReleaseMs !== undefined) {
+    // Before containment: a box whose idle browsers and desktops are released
+    // here may be left with only legacy commands, which containment then sees.
+    const idleLeases = await rawRows<{
+      account_id: string;
+      workspace_id: string;
+      sandbox_group_id: string;
+    }>(
+      db,
+      sql`select * from opengeni_private.list_idle_interaction_leases(
+        32, ${input.idleInteractionReleaseMs}::bigint)`,
+    ).catch((error) => {
+      reportContainmentError(error);
+      return [];
+    });
+    for (const candidate of idleLeases) {
+      const release = await releaseIdleInteractionHolders(db, {
+        accountId: candidate.account_id,
+        workspaceId: candidate.workspace_id,
+        sandboxGroupId: candidate.sandbox_group_id,
+        idleMs: input.idleInteractionReleaseMs,
+        browserCheckpoints: input.idleBrowserCheckpoints === true,
+      }).catch((error: unknown) => {
+        reportContainmentError(error);
+        input.onIdleInteractionRelease?.("inspection_failed");
+        return undefined;
+      });
+      if (release === undefined) continue;
+      input.onIdleInteractionRelease?.(
+        !release ? "not_eligible" : release.checkpoints > 0 ? "checkpointing" : "released",
+      );
+      if (release?.drainable) pushDrainable(release.drainable);
+    }
+  }
+  {
+    // An idle-saved browser whose box went away before its local cleanup ran
+    // keeps a durable profile; clear only the stale controller so it resumes.
+    // Always on, so browsers saved before idle release was disabled resume.
+    const orphaned = await rawRows<{
+      account_id: string;
+      workspace_id: string;
+      browser_session_id: string;
+      controller_generation: string;
+    }>(db, sql`select * from opengeni_private.list_orphaned_idle_browser_checkpoints(32)`).catch(
+      (error) => {
+        reportContainmentError(error);
+        return [];
+      },
+    );
+    for (const browser of orphaned) {
+      await clearSuspendedBrowserSessionController(db, {
+        accountId: browser.account_id,
+        workspaceId: browser.workspace_id,
+        browserSessionId: browser.browser_session_id,
+        expectedControllerGeneration: browser.controller_generation,
+      }).catch((error: unknown) => {
+        // Ended, deleted or already cleared since the inventory: nothing to do.
+        if (
+          error instanceof BrowserSessionNotFoundError ||
+          error instanceof BrowserSessionStateError ||
+          error instanceof BrowserSessionOperationConflictError
+        )
+          return;
+        reportContainmentError(error);
+      });
+    }
+  }
   const candidates = await rawRows<{
     account_id: string;
     workspace_id: string;
@@ -52374,14 +52823,8 @@ export async function reapStaleLeaseHoldersGlobal(
     });
     if (enrolled === undefined) continue;
     input.onCommandContainment?.(enrolled ? `${enrolled.mode}_enrolled` : "not_eligible");
-    if (
-      enrolled &&
-      !ordinary.some(
-        (r) =>
-          r.workspaceId === enrolled.workspaceId && r.sandboxGroupId === enrolled.sandboxGroupId,
-      )
-    )
-      ordinary.push({
+    if (enrolled)
+      pushDrainable({
         workspaceId: enrolled.workspaceId,
         sandboxGroupId: enrolled.sandboxGroupId,
         instanceId: enrolled.instanceId,
@@ -84729,7 +85172,7 @@ function mapSession(
     retention: sessionRetentionFromRow(row),
     admissionBlock: projectSessionAdmissionBlock(row.admissionBlock),
     initialMessage: fromPostgresLosslessText(row.initialMessage, row.initialMessageCodecVersion),
-    title: row.title ?? null,
+    title: cleanStoredSessionTitle(row.title, row.titleSource),
     titleSource: (row.titleSource as "user" | "agent" | null) ?? null,
     instructions: row.instructions ?? null,
     policyRole: row.policyRole ?? null,

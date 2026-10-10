@@ -25236,6 +25236,7 @@
       "shape": {
         "$": "object",
         "$.agentHumanInputEnabled": "boolean?",
+        "$.allowCreditModels": "boolean?",
         "$.codeSearchEnabled": "boolean? null",
         "$.codexCompactionDefault": "ref(CodexCompactionMode)?",
         "$.defaultSandboxImage": "string? null",

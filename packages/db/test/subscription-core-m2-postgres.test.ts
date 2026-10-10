@@ -87,7 +87,7 @@ async function verifySubscriptionLifecycleRlsAsNonBypassOwner(connectionId: stri
       await tx.unsafe(
         `grant execute on function opengeni_private.subscription_codex_owner_capability_held(uuid,text[],text,uuid,boolean) to ${probeRole}`,
       );
-      // ... and their provider-neutral equivalents (migration 0705).
+      // ... and their provider-neutral equivalents (migration 0706).
       await tx.unsafe(
         `grant execute on function opengeni_private.subscription_core_refresh_write_allowed(text,uuid,uuid,uuid) to ${probeRole}`,
       );

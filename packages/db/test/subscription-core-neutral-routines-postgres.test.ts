@@ -1,4 +1,4 @@
-// Migration 0705: the provider-neutral subscription-core routines are exact
+// Migration 0706: the provider-neutral subscription-core routines are exact
 // equivalents of the provider-named routines they replace for the runtime.
 // Every case runs on a database migrated by the NOSUPERUSER, NOBYPASSRLS
 // owner (so FORCE RLS and the owner-only policies apply inside the routines)
@@ -11,6 +11,7 @@ import {
   type OwnerMigratedTestDatabase,
 } from "@opengeni/testing";
 import { sql } from "drizzle-orm";
+import postgres from "postgres";
 import {
   createDb,
   ensureManagedAccessForUser,
@@ -31,30 +32,48 @@ const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let database: OwnerMigratedTestDatabase | null = null;
 let client: DbClient | null = null;
 let appConnectionUrl = "";
-/** The 0705 private routines the runtime role cannot execute right after migrating, before provisioning. */
-let unprovisionedPrivateRoutines: string[] | null = null;
+/** Runtime posture violations right after applying 0706 to a provisioned database, before provisioning again. */
+let unprovisionedPostureViolations: string[] | null = null;
 
 beforeAll(async () => {
   if (!realDb) return;
   database = await acquireOwnerMigratedTestDatabase("subscription-core-neutral-routines");
   if (!database) throw new Error("Real PostgreSQL is required");
-  await migrate(database.ownerUrl);
   // A rolling migration must leave an older binary's runtime posture intact
-  // before roles are provisioned again: every private routine 0705 adds is
-  // executable by the runtime role (when that cluster role already exists).
-  const [appRole] = await database.admin<{ exists: boolean }[]>`
-    select exists (select 1 from pg_roles where rolname = 'opengeni_app') as exists`;
-  if (appRole?.exists) {
-    unprovisionedPrivateRoutines = (
-      await database.admin<{ name: string }[]>`
-        select proc.oid::regprocedure::text as name from pg_proc proc
-        join pg_namespace namespace on namespace.oid = proc.pronamespace
-        where namespace.nspname = 'opengeni_private'
-          and (proc.proname like '%subscription\_core\_%'
-            or proc.proname = 'guard_subscription_provider_registry')
-          and not has_function_privilege('opengeni_app', proc.oid, 'EXECUTE')
-        order by 1`
-    ).map((row) => row.name);
+  // until roles are provisioned again. Stage a provisioned database without
+  // 0706 (as a deployment is before it), apply 0706 alone, and evaluate the
+  // full runtime posture as the runtime role before provisioning again.
+  const neutral = "0706_subscription_core_neutral_routines.sql";
+  const owner = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
+  try {
+    await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
+    await owner`insert into schema_migrations(name) values (${neutral})`;
+    await migrate(database.ownerUrl);
+    await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
+    await owner`delete from schema_migrations where name = ${neutral}`;
+    await migrate(database.ownerUrl);
+    const [applied] = await owner<{ count: number }[]>`
+      select count(*)::int as count from schema_migrations where name = ${neutral}`;
+    if (applied?.count !== 1) throw new Error("0706 was not applied by the second migrate");
+  } finally {
+    await owner.end();
+  }
+  const stagedUrl = new URL(database.ownerUrl);
+  stagedUrl.username = "opengeni_app";
+  stagedUrl.password = database.appPassword;
+  const staged = createDb(stagedUrl.toString(), { max: 1 });
+  try {
+    const options = {
+      rlsStrategy: "force" as const,
+      expectedRole: "opengeni_app",
+      targetSchema: "public",
+    };
+    unprovisionedPostureViolations = evaluateRuntimeDatabasePosture(
+      await inspectRuntimeDatabasePosture(staged.db, options),
+      options,
+    );
+  } finally {
+    await staged.close();
   }
   await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
   const appUrl = new URL(database.ownerUrl);
@@ -293,7 +312,7 @@ async function writerScenario(family: Family): Promise<unknown> {
   return normalize(steps, names);
 }
 
-describe("provider-neutral subscription-core routines (migration 0705)", () => {
+describe("provider-neutral subscription-core routines (migration 0706)", () => {
   test.skipIf(!realDb)(
     "run as the restricted application role over a NOBYPASSRLS owner, with safe posture",
     async () => {
@@ -815,10 +834,9 @@ describe("provider-neutral subscription-core routines (migration 0705)", () => {
   );
 
   test.skipIf(!realDb)(
-    "before provisioning, the runtime role can execute every private routine 0705 adds",
+    "applied to a provisioned database, 0706 keeps the runtime posture clean before provisioning again",
     () => {
-      // Null only when the cluster had no runtime role yet at migration time.
-      expect(unprovisionedPrivateRoutines ?? []).toEqual([]);
+      expect(unprovisionedPostureViolations).toEqual([]);
     },
   );
 

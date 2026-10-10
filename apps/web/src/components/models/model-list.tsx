@@ -76,13 +76,29 @@ export function ModelSearchField({
 }
 
 /** A provider's models: a small heading over a divided list of rows. */
-export function ModelGroup({ label, children }: { label: string; children: ReactNode }) {
+export function ModelGroup({
+  label,
+  meta,
+  control,
+  children,
+}: {
+  label: string;
+  /** Muted text after the name, such as who pays for the group's models. */
+  meta?: string | undefined;
+  /** A control for the whole group, aligned with the row controls. */
+  control?: ReactNode;
+  children: ReactNode;
+}) {
   const id = useId();
   return (
     <section aria-labelledby={id} className="min-w-0">
-      <h3 id={id} className="pb-1 text-xs leading-4.5 font-medium text-fg">
-        {label}
-      </h3>
+      <div className="flex min-w-0 items-center gap-3 pb-1">
+        <h3 id={id} className="min-w-0 flex-1 truncate text-xs leading-4.5 font-medium text-fg">
+          {label}
+          {meta ? <span className="font-normal text-fg-muted"> · {meta}</span> : null}
+        </h3>
+        {control}
+      </div>
       <ul className="m-0 flex min-w-0 list-none flex-col divide-y divide-border p-0">{children}</ul>
     </section>
   );

@@ -1,5 +1,6 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import * as dbModule from "@opengeni/db";
+import { TranscriptionServiceError } from "@opengeni/core";
 import { testSettings } from "@opengeni/testing";
 import {
   createTranscriptionService,
@@ -299,6 +300,109 @@ describe("transcription providers", () => {
       expect(result.text).toBe("from-codex");
       expect(result.providerId).toBe("codex-subscription");
       expect(url).toContain("/backend-api/transcribe");
+    } finally {
+      for (const spy of [
+        disposition,
+        candidates,
+        acquired,
+        renewed,
+        released,
+        resolver,
+        operationFetch,
+      ])
+        spy.mockRestore();
+    }
+  });
+
+  test("a credit refusal before any audio is sent falls back to the connected Codex subscription", async () => {
+    const disposition = spyOn(dbModule, "readCodexCutoverDisposition").mockResolvedValue("core");
+    const candidates = spyOn(
+      dbModule,
+      "listSubscriptionCoreCodexOperationCandidates",
+    ).mockResolvedValue([{ connectionId: "connection-1" }] as never);
+    const acquired = spyOn(
+      dbModule,
+      "acquireSubscriptionCoreCodexOperationLease",
+    ).mockResolvedValue({ kind: "acquired" } as never);
+    const renewed = spyOn(dbModule, "renewSubscriptionCoreCodexOperationLease").mockResolvedValue(
+      true as never,
+    );
+    const released = spyOn(
+      dbModule,
+      "releaseSubscriptionCoreCodexOperationLease",
+    ).mockResolvedValue(true as never);
+    const resolver = spyOn(
+      dbModule,
+      "buildSubscriptionCoreCodexConnectionTokenResolver",
+    ).mockReturnValue({
+      getToken: async () => ({ accessToken: "access", chatgptAccountId: "acct" }),
+      refresh: async () => ({ accessToken: "access", chatgptAccountId: "acct" }),
+    } as never);
+    const operationFetch = spyOn(
+      dbModule,
+      "buildSubscriptionCoreCodexOperationFetch",
+    ).mockImplementation(
+      ((_db: unknown, _scope: unknown, _ref: unknown, _id: unknown, base: unknown) =>
+        base) as never,
+    );
+    try {
+      let openAiSends = 0;
+      let admits = 0;
+      const service = createTranscriptionService({
+        settings: testSettings({
+          billingMode: "stripe",
+          codexSubscriptionEnabled: true,
+          // The deployment-paid provider comes first, as a workspace may prefer it.
+          voiceInputProviderOrder: "openai,codex-subscription",
+        }),
+        db: {} as never,
+        normalizeAudio: async () => ({ bytes: audio, durationSeconds: 1 }),
+        billing: {
+          admit: async () => {
+            admits++;
+            // Opengeni credits are turned off in this workspace.
+            throw new TranscriptionServiceError({
+              code: "policy_blocked",
+              status: 403,
+              fallbackSafe: true,
+              message: "Opengeni credits are turned off in this workspace.",
+            });
+          },
+          settle: async () => {
+            throw new Error("a subscription transcript is never settled in credits");
+          },
+        },
+        codexFetch: async () => Response.json({ text: "from-codex", language: "en" }),
+        fetch: async () => {
+          openAiSends++;
+          return Response.json({ text: "from-openai", language: "en" });
+        },
+      });
+      const result = await service.transcribe({
+        workspaceId: "workspace",
+        accountId: "account",
+        audio,
+        mimeType: "audio/webm",
+        requestId: "request",
+        billing: { sourceId: "unit", attribution: { kind: "service" } },
+      });
+      expect(result.providerId).toBe("codex-subscription");
+      expect(result.text).toBe("from-codex");
+      expect(admits).toBe(1);
+      expect(openAiSends).toBe(0);
+      // An exact provider choice is never swapped for another one.
+      await expect(
+        service.transcribe({
+          workspaceId: "workspace",
+          accountId: "account",
+          audio,
+          mimeType: "audio/webm",
+          requestId: "request-exact",
+          providerId: "openai",
+          billing: { sourceId: "unit-exact", attribution: { kind: "service" } },
+        }),
+      ).rejects.toMatchObject({ code: "policy_blocked" });
+      expect(openAiSends).toBe(0);
     } finally {
       for (const spy of [
         disposition,

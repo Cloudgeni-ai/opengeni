@@ -25,9 +25,9 @@ test("a pre-writer personal-resource task retains its execution proof across mig
   const disconnect = "0691_subscription_core_codex_disconnect.sql";
   const explicitRetry = "0697_codex_retry_after_unknown_outcome.sql";
   const recovery = "0699_codex_recovery_after_interrupted_attempt.sql";
-  // 0705 replaces writer routines with provider-neutral equivalents and needs
+  // 0706 replaces writer routines with provider-neutral equivalents and needs
   // the 0688 writer schema, so it is deferred and replayed with the writer.
-  const neutral = "0705_subscription_core_neutral_routines.sql";
+  const neutral = "0706_subscription_core_neutral_routines.sql";
   try {
     // Stage the actual pre-writer ledger, including on the stacked cutover
     // branch. This is a rolling/gate-off regression, not cutover activation.

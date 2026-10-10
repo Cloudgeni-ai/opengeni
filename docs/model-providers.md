@@ -1377,6 +1377,27 @@ policy the workspace would follow; DELETE removes the workspace's own policy so
 it follows the organization again (`deleteWorkspaceModelAccessPolicy`). In the
 form, **Use <organization>'s allowed models** switches between the two.
 
+Each workspace also has a credit switch, the workspace setting
+`allowCreditModels` (default `true`; `PATCH /v1/workspaces/:workspaceId/settings`,
+SDK `updateWorkspaceSettings`). Workspace admins flip it from **Workspace
+settings → Models → Use Opengeni credits**. `false` blocks every model whose
+workspace-facing cost is `credits`, whatever the allowlists say, so credit
+models added to the catalog later stay blocked and the allowlists can stay
+unrestricted (an exact allowlist would also block subscription models connected
+later). It is independent of the allowlist layers: a workspace that follows its
+organization's allowlist keeps following it, and saving, deleting or following
+an allowlist never changes the switch. The model-policy `GET`, `PUT` and
+`DELETE` responses report it as `allowCreditModels`; `PUT` ignores the field if sent.
+It is enforced everywhere the allowlists are: the API edges (422, naming
+credits), the omitted-model default, goal resume and continuation, and the
+worker's post-resolution gate, which classifies the frozen turn with the same
+`cost` the claim bills. Credit-funded live voice and voice input honor it where
+credits are billed, and managed video generation is unavailable while it is
+off. Paid web search and knowledge embeddings are separate credit meters and
+are not affected. The Settings page asks before turning credits off when no
+other model could run, and Allowed models mutes credit models while the switch
+is off.
+
 Provider allowlists remain part of the API contract for advanced/operator use.
 The authenticated catalog exposes only a per-model `policyAllowed` verdict, not
 the provider identity that produced it. During a rolling upgrade, older API

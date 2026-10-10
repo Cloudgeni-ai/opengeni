@@ -939,6 +939,7 @@ export function resolveWorkspaceModelSelection(
         evaluateWorkspaceModelPolicy(input.policy, {
           providerId: model.providerId,
           modelId: model.id,
+          chargesCredits: model.cost === "credits",
         }).allowed && modelAllowedByConnections(input.connectionModelRestrictions ?? {}, model.id);
       const credentialReadiness = credentialReadinessFor({
         model,
