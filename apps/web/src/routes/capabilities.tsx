@@ -1132,15 +1132,22 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
 
   // --- Connect flows ---------------------------------------------------------
 
-  async function handleAction(action: ConnectAction) {
-    if (!selected || !selectedItem || busyId !== null || selectedSetupUnavailable) return;
+  async function handleAction(action: ConnectAction): Promise<boolean> {
+    // Removing one account is management of an existing row, never fresh setup.
+    if (
+      !selected ||
+      !selectedItem ||
+      busyId !== null ||
+      (selectedSetupUnavailable && action.type !== "remove_connection")
+    )
+      return false;
     // Social authorization starts a new provider attempt even when existing
     // rows are retained for management. Disconnect never needs this readiness.
     if (
       action.type === "social_oauth" &&
       !nativeProviderAvailable(nativeConnectCatalog, action.provider)
     )
-      return;
+      return false;
     setBusyId(selectedItem.id);
     setSheetError(null);
     try {
@@ -1164,8 +1171,11 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
         },
         action,
       );
+      if (action.type === "remove_connection") catalogConnectionAccounts.onRetry();
+      return true;
     } catch (error) {
       await refresh();
+      if (action.type === "remove_connection") catalogConnectionAccounts.onRetry();
       const copy = capabilityErrorToast(error, "Something went wrong");
       setSheetError(
         isMissingCredentialsError(error)
@@ -1173,6 +1183,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
           : copy.description,
       );
       toast.error(copy.title, { description: copy.description });
+      return false;
     } finally {
       setBusyId(null);
     }
@@ -1410,9 +1421,15 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
         return;
       }
       if (action === "reconnect") {
-        // Already enabled: the connection row was refreshed in place.
+        // Already enabled: the exact pinned row was refreshed in place, or a
+        // personal account (refreshed or newly added) joined the generic binding.
         onRuntimeChanged();
-        toast.success(`Reconnected ${item!.name}`);
+        catalogConnectionAccounts.onRetry();
+        toast.success(
+          item!.connectionRef?.connectionId === connectionId
+            ? `Reconnected ${item!.name}`
+            : `Connected ${item!.name}`,
+        );
         return;
       }
 
@@ -1445,8 +1462,13 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
       onRuntimeChanged();
       // An already-enabled item reached here only because its old connection row
       // was gone and OAuth minted a new one - that's a reconnect, not a first enable.
+      catalogConnectionAccounts.onRetry();
       toast.success(
-        item!.enabled ? `Reconnected ${item!.name}` : `Connected and enabled ${item!.name}`,
+        !item!.enabled
+          ? `Connected and enabled ${item!.name}`
+          : item!.connectionRef?.accountSelection === "all_eligible"
+            ? `Connected ${item!.name}`
+            : `Reconnected ${item!.name}`,
       );
     } catch (error) {
       const copy = capabilityErrorToast(error, "Couldn't finish connecting");
@@ -1607,6 +1629,12 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
         }}
         socialConnections={selectedSocialConnections}
         connectionAccounts={catalogConnectionAccounts}
+        accountManagement={{
+          viewerSubjectId: context.accessContext?.subjectId ?? null,
+          canWrite: hasWorkspacePermission(context.accessContext, workspaceId, "connections:write"),
+          onRemove: (connection) =>
+            handleAction({ type: "remove_connection", item: selectedItem, connection }),
+        }}
         canManageSocial={canManageSocial}
         socialSetupAvailable={selectedSocialSetupAvailable}
         canManageSkills={canManageSkills}

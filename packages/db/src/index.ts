@@ -3976,30 +3976,30 @@ export async function deleteWorkspaceIfQuiescent(
           // lifecycle) hold the control row before reaching the workspace row,
           // and the cascade below deletes the control row, so locking the
           // workspace row first would deadlock them.
-          let targetControlLocked = true;
+          // A missing control row (an unknown workspace, or one created
+          // without it) leaves only the exclusive advisory key held. No writer
+          // can hold a row that does not exist, so the deletion continues and
+          // the workspace lookup below decides whether it is not_found.
           try {
             await lockWorkspaceInferenceControl(tx, input.workspaceId, "update");
           } catch (error) {
             if (!(error instanceof SessionControlInvariantError)) throw error;
-            targetControlLocked = false;
           }
           // The target row FOR UPDATE then blocks concurrent child inserts
           // into this workspace through their workspace FK key-share locks.
           // Sibling rows only have to stay present for the only-workspace
           // check, so they take KEY SHARE, which blocks their deletion but not
           // ordinary writes in those workspaces.
-          const [target] = !targetControlLocked
-            ? []
-            : await tx
-                .select({ id: schema.workspaces.id })
-                .from(schema.workspaces)
-                .where(
-                  and(
-                    eq(schema.workspaces.id, input.workspaceId),
-                    eq(schema.workspaces.accountId, input.accountId),
-                  ),
-                )
-                .for("update");
+          const [target] = await tx
+            .select({ id: schema.workspaces.id })
+            .from(schema.workspaces)
+            .where(
+              and(
+                eq(schema.workspaces.id, input.workspaceId),
+                eq(schema.workspaces.accountId, input.accountId),
+              ),
+            )
+            .for("update");
           const accountWorkspaces = target
             ? await tx
                 .select({ id: schema.workspaces.id })

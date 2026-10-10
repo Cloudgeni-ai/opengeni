@@ -1,6 +1,13 @@
 import type { MachineView } from "@opengeni/react/machines";
 import type { NewSessionSelectionHistory, Rig } from "@opengeni/sdk";
-import { BoxIcon, LaptopIcon, LockIcon, ServerIcon, UsersIcon } from "lucide-react";
+import {
+  BoxIcon,
+  LaptopIcon,
+  LockIcon,
+  MessageSquareIcon,
+  ServerIcon,
+  UsersIcon,
+} from "lucide-react";
 import { useEffect, useRef, type ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -54,6 +61,12 @@ export type RunsOnChoices = {
   workspaceDefaultRigId: string | null;
   /** The deployment runs sessions only on connected machines. */
   selfhostedPrimary: boolean;
+  /**
+   * The deployment has no managed sandbox backend. A chat that does not run on
+   * a connected machine has no computer at all, so the choice reads as chat
+   * only and Sandbox Environments do not apply.
+   */
+  noManagedSandbox?: boolean;
   fleetLoadFailed: boolean;
   selectedChannelId: string | null;
   selectionHistory: NewSessionSelectionHistory;
@@ -61,13 +74,16 @@ export type RunsOnChoices = {
 
 /** Whether "Runs on" has anything to choose; otherwise the + menu omits it. */
 export function hasRunsOnChoices(
-  choices: Pick<RunsOnChoices, "machines" | "rigs" | "selfhostedPrimary" | "fleetLoadFailed">,
+  choices: Pick<
+    RunsOnChoices,
+    "machines" | "rigs" | "selfhostedPrimary" | "noManagedSandbox" | "fleetLoadFailed"
+  >,
 ): boolean {
   return (
     choices.selfhostedPrimary ||
     choices.fleetLoadFailed ||
     choices.machines.length > 0 ||
-    choices.rigs.length > 0
+    (!choices.noManagedSandbox && choices.rigs.length > 0)
   );
 }
 
@@ -81,6 +97,7 @@ export function runsOnSummary(choices: RunsOnChoices): string {
       "Choose a machine"
     );
   }
+  if (choices.noManagedSandbox) return NO_COMPUTER_LABEL;
   if (draft.rigId) {
     return choices.rigs.find((rig) => rig.id === draft.rigId)?.name ?? "Managed sandbox";
   }
@@ -156,6 +173,7 @@ export function RunsOnNotice(props: {
 }
 
 const SANDBOX_VALUE = "sandbox";
+const NO_COMPUTER_LABEL = "No computer";
 const machineValue = (sandboxId: string) => `machine:${sandboxId}`;
 
 /**
@@ -265,9 +283,9 @@ export function RunsOnMenuBody(
               <RadioRow
                 value={SANDBOX_VALUE}
                 disabled={props.disabled}
-                icon={<BoxIcon />}
-                label="Managed sandbox"
-                meta="Set up for you"
+                icon={props.noManagedSandbox ? <MessageSquareIcon /> : <BoxIcon />}
+                label={props.noManagedSandbox ? NO_COMPUTER_LABEL : "Managed sandbox"}
+                meta={props.noManagedSandbox ? "Chat only" : "Set up for you"}
                 onSelect={selectSandbox}
               />
             )}
@@ -293,7 +311,7 @@ export function RunsOnMenuBody(
           </RadioGroup>
         ) : null}
 
-        {compute.kind === "sandbox" && props.rigs.length > 0 ? (
+        {compute.kind === "sandbox" && !props.noManagedSandbox && props.rigs.length > 0 ? (
           <RadioGroup
             presentation={presentation}
             label="Sandbox environment"

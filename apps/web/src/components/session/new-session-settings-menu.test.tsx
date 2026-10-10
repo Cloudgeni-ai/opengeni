@@ -99,6 +99,51 @@ test("the row value names the environment or the machine", () => {
   expect(runsOnSummary(choices({ draft: onMachine }))).toBe("build-01");
 });
 
+test("without a managed sandbox backend, the non-machine choice is chat only and environments do not apply", async () => {
+  const none = choices({ noManagedSandbox: true });
+  expect(runsOnSummary(none)).toBe("No computer");
+  expect(hasRunsOnChoices(choices({ noManagedSandbox: true, machines: [] }))).toBe(false);
+  await act(async () =>
+    root.render(
+      <RunsOnMenuBody
+        {...none}
+        presentation="dialog"
+        disabled={false}
+        onChange={() => {}}
+        onComputeChange={() => {}}
+        onRetryMachines={() => {}}
+      />,
+    ),
+  );
+  const text = container.textContent ?? "";
+  expect(text).toContain("No computer");
+  expect(text).toContain("Chat only");
+  expect(text).toContain("build-01");
+  expect(text).not.toContain("Managed sandbox");
+  expect(text).not.toContain("Set up for you");
+  expect(text).not.toContain("Sandbox environment");
+  expect(text).not.toContain("Node 22");
+});
+
+test("with a managed sandbox backend, the managed sandbox and its environments stay offered", async () => {
+  await act(async () =>
+    root.render(
+      <RunsOnMenuBody
+        {...choices()}
+        presentation="dialog"
+        disabled={false}
+        onChange={() => {}}
+        onComputeChange={() => {}}
+        onRetryMachines={() => {}}
+      />,
+    ),
+  );
+  const text = container.textContent ?? "";
+  expect(text).toContain("Managed sandbox");
+  expect(text).toContain("Sandbox environment");
+  expect(text).not.toContain("No computer");
+});
+
 test("picking a machine goes through the explicit compute path; offline ones can't be picked", async () => {
   const onComputeChange = mock();
   await act(async () =>

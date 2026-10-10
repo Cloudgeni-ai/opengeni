@@ -12367,6 +12367,9 @@ export const OAuthStartRequest = z
     returnPath: z.string().min(1).optional(),
     returnUrl: z.string().min(1).max(4096).optional(),
     connectionId: z.string().uuid().optional(),
+    /** Sign in a further account instead of refreshing the caller's existing
+     * active account for this provider. Never combined with connectionId. */
+    newAccount: z.literal(true).optional(),
     ownership: ConnectionOwnership.optional(),
     oauthClient: z
       .object({
@@ -12381,6 +12384,10 @@ export const OAuthStartRequest = z
   .refine((value) => Boolean(value.mcpUrl ?? value.resource), {
     message: "mcpUrl is required",
     path: ["mcpUrl"],
+  })
+  .refine((value) => !(value.newAccount && value.connectionId), {
+    message: "newAccount cannot target an existing connection",
+    path: ["newAccount"],
   });
 export type OAuthStartRequest = z.infer<typeof OAuthStartRequest>;
 
