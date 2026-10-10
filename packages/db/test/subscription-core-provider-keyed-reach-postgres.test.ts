@@ -513,6 +513,20 @@ describe("provider-keyed reach on the shared subscription core (migration 0712)"
       ]);
       const posture = await inspectRuntimeDatabasePosture(client!.db, POSTURE_OPTIONS);
       expect(evaluateRuntimeDatabasePosture(posture, POSTURE_OPTIONS)).toEqual([]);
+      // Provisioning again leaves those grants exactly as the migration set
+      // them.
+      const provisionedAcl = [
+        ...(await database!.admin<{ routine: string; execute: boolean; publicExecute: boolean }[]>`
+          select proc.oid::regprocedure::text as routine,
+            has_function_privilege('opengeni_app', proc.oid, 'EXECUTE') as execute,
+            exists (select 1 from aclexplode(coalesce(proc.proacl, acldefault('f', proc.proowner))) acl
+              where acl.grantee = 0 and acl.privilege_type = 'EXECUTE') as "publicExecute"
+          from pg_proc proc
+          where proc.oid::regprocedure::text = any(${staged!.unprovisionedAcl.map(
+            (entry) => entry.routine,
+          )}::text[])`),
+      ].sort((left, right) => (left.routine < right.routine ? -1 : 1));
+      expect(provisionedAcl).toEqual(staged!.unprovisionedAcl);
       // The registry and the reach rows stay owner data.
       for (const table of [
         "opengeni_private.subscription_core_providers",
@@ -551,6 +565,16 @@ describe("provider-keyed reach on the shared subscription core (migration 0712)"
         "trigger subscription_connections.subscription_connections_core_plan_change_trg",
         "trigger workspaces.workspaces_subscription_core_auto_assign",
       ]);
+      // Every routine 0712 adds is SECURITY DEFINER with the data schema and
+      // opengeni_private on its search path and pg_temp last.
+      for (const entry of added.filter((name) => name.startsWith("routine "))) {
+        const [definer, config] = after.get(entry)!.split(" | ");
+        expect({ entry, definer, config }).toEqual({
+          entry,
+          definer: "true",
+          config: '{"search_path=pg_catalog, public, opengeni_private, pg_temp"}',
+        });
+      }
       expect(removed).toEqual([
         "relation opengeni_private.subscription_codex_auto_assignments",
         "relation opengeni_private.subscription_codex_auto_assignments_account_idx",

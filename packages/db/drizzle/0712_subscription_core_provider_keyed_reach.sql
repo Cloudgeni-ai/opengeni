@@ -402,7 +402,7 @@ BEGIN
     CREATE FUNCTION %1$I.list_organization_subscription_workspace_ids(p_account_id uuid)
     RETURNS TABLE (workspace_id uuid)
     LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path = pg_catalog, %1$I, pg_temp
+    SET search_path = pg_catalog, %1$I, opengeni_private, pg_temp
     AS $body$
     DECLARE
       previous_lifecycle text := current_setting('opengeni.organization_tenancy_lifecycle', true);
