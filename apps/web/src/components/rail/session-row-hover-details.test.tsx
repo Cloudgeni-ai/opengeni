@@ -136,6 +136,26 @@ describe("SessionRowHoverDetails", () => {
     expect(text).toContain("Waiting on you for 24 min");
   });
 
+  test("a session the runtime could not start is stuck, not waiting on you", () => {
+    const text =
+      render(
+        entry({
+          status: "requires_action",
+          requiresActionSince: minutesAgo(28),
+          admissionBlock: {
+            reason: "database_claim_rejected",
+            sqlState: "42501",
+            retryPolicy: "explicit_recheck",
+            blockedAt: minutesAgo(28),
+          },
+        }),
+      ).textContent ?? "";
+    expect(text).toContain("Stuck");
+    expect(text).toContain("Could not start its next step for 28 min");
+    expect(text).not.toContain("Needs you");
+    expect(text).not.toContain("Waiting on you");
+  });
+
   test("an out-of-turn wait shows the agent's reason and the next check", () => {
     const deadlineAt = new Date(NOW + 30 * 60_000).toISOString();
     const host = render(

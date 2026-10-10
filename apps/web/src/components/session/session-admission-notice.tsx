@@ -70,14 +70,24 @@ function admissionReason(session: Session): string | null {
   return "reason" in block && typeof block.reason === "string" ? block.reason : "unknown";
 }
 
-function reasonCopy(reason: string): string {
+function reasonCopy(reason: string): { body: string; next: string } {
   switch (reason) {
     case "initiator_membership_required":
-      return "The person who started this work needs active workspace access before it can continue.";
+      return {
+        body: "The person who started this work needs active workspace access before it can continue.",
+        next: "After the issue is resolved, recheck to try this work again. It will not retry automatically.",
+      };
     case "personal_resource_grant_required":
-      return "Access to a personal resource needed by this work must be restored before it can continue.";
+      return {
+        body: "Access to a personal resource needed by this work must be restored before it can continue.",
+        next: "After the issue is resolved, recheck to try this work again. It will not retry automatically.",
+      };
     default:
-      return "This work could not start because a required access or safety check did not pass.";
+      // Not a request of the person: the runtime refused to start the turn.
+      return {
+        body: "This work couldn't start its next step. Nothing is needed from you, and its work is kept.",
+        next: "Recheck to try again. It will not retry automatically.",
+      };
   }
 }
 
@@ -103,6 +113,7 @@ export function SessionAdmissionNotice({
   const [failed, setFailed] = useState(false);
   const reason = admissionReason(session);
   if (!reason) return null;
+  const copy = reasonCopy(reason);
 
   async function recheck() {
     if (pending.current || busy || (paused && !refreshRequired) || !canControl) return;
@@ -120,13 +131,10 @@ export function SessionAdmissionNotice({
   }
 
   return (
-    <Notice tone="waiting" title="Work needs attention">
+    <Notice tone="failed" title="Stuck">
       <div id={descriptionId} role="status" aria-live="polite">
-        <p>{reasonCopy(reason)}</p>
-        <p className="mt-1">
-          After the issue is resolved, recheck to try this work again. It will not retry
-          automatically.
-        </p>
+        <p>{copy.body}</p>
+        <p className="mt-1">{copy.next}</p>
       </div>
       {refreshRequired ? (
         <p className="mt-2">Session controls changed. Refresh the status before rechecking.</p>

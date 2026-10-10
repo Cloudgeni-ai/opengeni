@@ -3,6 +3,7 @@
 // rule — RUNNING sessions pinned to the very top, then most-recent activity
 // first within each recency group.
 import { formatWaitingSince } from "@/lib/format";
+import { awaitsPerson } from "./needs-you";
 import { sessionInputWait } from "./session-rail";
 import { sessionSiteOrigin, type SessionSiteOrigin } from "./session-site-origin";
 import type { SessionListTotals } from "@opengeni/sdk";
@@ -137,9 +138,8 @@ function ownRailStatusCounts(
   return {
     total: 1,
     sendFailed: localDeliveryAttention.get(session.id) ?? 0,
-    attention: session.status === "requires_action" ? 1 : 0,
-    attentionSince:
-      session.status === "requires_action" ? (session.requiresActionSince ?? null) : null,
+    attention: awaitsPerson(session) ? 1 : 0,
+    attentionSince: awaitsPerson(session) ? (session.requiresActionSince ?? null) : null,
     // Failed is a review signal in the rail, not a permanent copy of the
     // lifecycle badge. Opening the session (or a parent agent consuming its
     // result) acknowledges the failure together with the unread frontier.
@@ -920,7 +920,7 @@ function subtreeCounts(node: SessionTreeNode): RemovedCounts {
     running: active && (status === "running" || status === "recovering") ? 1 : 0,
     queued: active && (status === "queued" || status === "waiting_capacity") ? 1 : 0,
     waiting: sessionInputWait(node.session) ? 1 : 0,
-    attention: status === "requires_action" ? 1 : 0,
+    attention: awaitsPerson(node.session) ? 1 : 0,
     paused: node.session.effectiveControl?.state === "paused" ? 1 : 0,
     failed: status === "failed" ? 1 : 0,
     unreadFailed: status === "failed" && node.session.unread ? 1 : 0,

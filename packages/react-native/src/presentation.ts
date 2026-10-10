@@ -129,6 +129,8 @@ export interface OpenGeniNativeLabels {
   statusWaitingCapacity: string;
   statusIdle: string;
   statusRequiresAction: string;
+  /** The runtime could not start the next turn; nothing is asked of the person. */
+  statusBlocked: string;
   statusFailed: string;
   statusCancelled: string;
   relativeNow: string;
@@ -253,6 +255,7 @@ export const DEFAULT_OPENGENI_NATIVE_LABELS = {
   statusWaitingCapacity: "Limit reached",
   statusIdle: "Idle",
   statusRequiresAction: "Waiting on you",
+  statusBlocked: "Stuck",
   statusFailed: "Failed",
   statusCancelled: "Cancelled",
   relativeNow: "now",
