@@ -47,6 +47,74 @@ async function accountWithWorkspaces(count: number): Promise<{
   return { accountId: account!.id, workspaceIds };
 }
 
+/** Resolve once the deletion has finished or is parked on a row/advisory lock,
+ * so the writer's next lock request is ordered after the deletion's locks. */
+async function deletionSettledOrBlocked(settled: () => boolean, writerPid: number): Promise<void> {
+  const deadline = Date.now() + 15_000;
+  while (Date.now() < deadline && !settled()) {
+    const [row] = await admin<{ waiting: number }[]>`
+      select count(*)::int as waiting
+      from pg_stat_activity
+      where datname = current_database()
+        and wait_event_type = 'Lock'
+        and pid <> ${writerPid}`;
+    if ((row?.waiting ?? 0) > 0) return;
+    await Bun.sleep(20);
+  }
+  if (!settled()) throw new Error("deletion neither finished nor blocked on a lock");
+}
+
+/** Model a concurrent writer that takes `first`, lets the deletion run until it
+ * finishes or blocks, then takes `second` in the same transaction. */
+async function raceDeletionWithWriter(input: {
+  accountId: string;
+  workspaceId: string;
+  first: string;
+  second: string;
+}): Promise<{
+  deletion: PromiseSettledResult<Awaited<ReturnType<typeof deleteWorkspaceIfQuiescent>>>;
+  writer: PromiseSettledResult<string>;
+}> {
+  const writer = postgres(shared!.adminUrl, { max: 1 });
+  try {
+    let releaseWriter!: () => void;
+    const writerMayContinue = new Promise<void>((resolve) => {
+      releaseWriter = resolve;
+    });
+    let writerPid = 0;
+    let firstLockHeld!: () => void;
+    const firstLock = new Promise<void>((resolve) => {
+      firstLockHeld = resolve;
+    });
+    const writerResult = writer.begin(async (tx) => {
+      const [backend] = await tx<{ pid: number }[]>`select pg_backend_pid() as pid`;
+      writerPid = backend!.pid;
+      await tx.unsafe(input.first);
+      firstLockHeld();
+      await writerMayContinue;
+      await tx.unsafe(input.second);
+      return "committed";
+    });
+    await firstLock;
+    let deletionSettled = false;
+    const deletion = deleteWorkspaceIfQuiescent(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+    }).finally(() => {
+      deletionSettled = true;
+    });
+    try {
+      await deletionSettledOrBlocked(() => deletionSettled, writerPid);
+    } finally {
+      releaseWriter();
+    }
+    const [deletionResult, writerOutcome] = await Promise.allSettled([deletion, writerResult]);
+    return { deletion: deletionResult, writer: writerOutcome };
+  } finally {
+    await writer.end({ timeout: 5 });
+  }
+}
+
 describe("workspace deletion lock order (real PostgreSQL)", () => {
   test("does not deadlock with an ordinary writer in a sibling workspace", async () => {
     if (!available) return;
@@ -57,38 +125,38 @@ describe("workspace deletion lock order (real PostgreSQL)", () => {
     // check takes the sibling workspace row FOR KEY SHARE, and a later insert
     // in the same transaction takes the account row FOR KEY SHARE through its
     // account FK (session_events references both).
-    const writerName = `sibling-writer-${crypto.randomUUID().slice(0, 8)}`;
-    const writer = postgres(shared!.adminUrl, {
-      max: 1,
-      connection: { application_name: writerName },
+    const { deletion, writer } = await raceDeletionWithWriter({
+      accountId,
+      workspaceId: targetWorkspaceId,
+      first: `select 1 from workspaces where id = '${siblingWorkspaceId}' for key share`,
+      second: `select 1 from managed_accounts where id = '${accountId}' for key share`,
     });
-    try {
-      const writerResult = writer.begin(async (tx) => {
-        await tx.unsafe(
-          `select 1 from workspaces where id = '${siblingWorkspaceId}' for key share`,
-        );
-        // Let the deletion take its account and workspace locks first.
-        await Bun.sleep(300);
-        await tx.unsafe(`select 1 from managed_accounts where id = '${accountId}' for key share`);
-        return "committed" as const;
-      });
-
-      await Bun.sleep(100);
-      const deletion = deleteWorkspaceIfQuiescent(db, {
-        accountId,
-        workspaceId: targetWorkspaceId,
-      });
-
-      const [deleted, written] = await Promise.allSettled([deletion, writerResult]);
-      expect(deleted.status).toBe("fulfilled");
-      expect(written.status).toBe("fulfilled");
-      expect(deleted.status === "fulfilled" ? deleted.value.status : null).toBe("deleted");
-    } finally {
-      await writer.end({ timeout: 5 });
-    }
+    expect(deletion.status).toBe("fulfilled");
+    expect(writer.status).toBe("fulfilled");
+    expect(deletion.status === "fulfilled" ? deletion.value.status : null).toBe("deleted");
     const remaining = await admin<{ id: string }[]>`
       select id from workspaces where account_id = ${accountId}`;
     expect(remaining.map((row) => row.id)).toEqual([siblingWorkspaceId]);
+  }, 60_000);
+
+  test("does not deadlock with a writer holding the target's control row first", async () => {
+    if (!available) return;
+    const { accountId, workspaceIds } = await accountWithWorkspaces(2);
+    const [targetWorkspaceId] = workspaceIds as [string, string];
+
+    // The canonical writer prefix (and the organization membership lifecycle)
+    // takes the inference-control row before the workspace row. The deletion
+    // cascade removes that control row, so the deletion must not hold the
+    // workspace row while waiting for it.
+    const { deletion, writer } = await raceDeletionWithWriter({
+      accountId,
+      workspaceId: targetWorkspaceId,
+      first: `select 1 from workspace_inference_controls where workspace_id = '${targetWorkspaceId}' for share`,
+      second: `select 1 from workspaces where id = '${targetWorkspaceId}' for key share`,
+    });
+    expect(writer.status).toBe("fulfilled");
+    expect(deletion.status).toBe("fulfilled");
+    expect(deletion.status === "fulfilled" ? deletion.value.status : null).toBe("deleted");
   }, 60_000);
 
   test("still refuses to delete the account's last workspace under concurrency", async () => {
@@ -101,5 +169,15 @@ describe("workspace deletion lock order (real PostgreSQL)", () => {
     const [remaining] = await admin<{ count: number }[]>`
       select count(*)::int as count from workspaces where account_id = ${accountId}`;
     expect(remaining?.count).toBe(1);
+  }, 60_000);
+
+  test("a missing workspace is still not found", async () => {
+    if (!available) return;
+    const { accountId } = await accountWithWorkspaces(2);
+    const result = await deleteWorkspaceIfQuiescent(db, {
+      accountId,
+      workspaceId: crypto.randomUUID(),
+    });
+    expect(result.status).toBe("not_found");
   }, 60_000);
 });

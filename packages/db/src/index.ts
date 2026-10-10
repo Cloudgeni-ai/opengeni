@@ -3867,14 +3867,17 @@ async function authorizeOrganizationWorkspaceDeletion(
 /**
  * Atomically prove a workspace has no live runtime ownership and delete it.
  *
- * The target workspace row lock blocks concurrent child inserts into that
- * workspace through their foreign-key key-share locks. The account row and
- * sibling workspace rows take only the strength needed to serialize deletions
- * and the only-workspace check, so writers in other workspaces of the same
- * account are never blocked or deadlocked by a deletion. Existing session and lease rows are then
- * locked before their state is inspected, so a cold lease cannot become live
- * between a preflight count and the cascade. Schedule ids are copied under the
- * same fence and returned for post-commit Temporal cleanup.
+ * The target takes the canonical writer prefix exclusively (workspace-control
+ * advisory key and inference-control row, then the workspace row), which blocks
+ * concurrent child inserts into that workspace through their foreign-key
+ * key-share locks without inverting the order ordinary writers use. The account
+ * row and sibling workspace rows take only the strength needed to serialize
+ * deletions and the only-workspace check, so ordinary writers in other
+ * workspaces of the same account cannot deadlock with a deletion. Existing
+ * session and lease rows are then locked before their state is inspected, so a
+ * cold lease cannot become live between a preflight count and the cascade.
+ * Schedule ids are copied under the same fence and returned for post-commit
+ * Temporal cleanup.
  */
 export async function deleteWorkspaceIfQuiescent(
   db: Database,
@@ -3956,21 +3959,36 @@ export async function deleteWorkspaceIfQuiescent(
             return { status: "not_found" as const };
           }
 
-          // The target row is locked FOR UPDATE: that blocks concurrent child
-          // inserts into this workspace through their workspace FK key-share
-          // locks. Sibling rows only have to stay present for the
-          // only-workspace check, so they take KEY SHARE, which blocks their
-          // deletion but not ordinary writes in those workspaces.
-          const [target] = await tx
-            .select({ id: schema.workspaces.id })
-            .from(schema.workspaces)
-            .where(
-              and(
-                eq(schema.workspaces.id, input.workspaceId),
-                eq(schema.workspaces.accountId, input.accountId),
-              ),
-            )
-            .for("update");
+          // The target takes the canonical writer prefix exclusively: the
+          // workspace-control advisory key and inference-control row before
+          // the workspace row. Writers in this workspace (and the membership
+          // lifecycle) hold the control row before reaching the workspace row,
+          // and the cascade below deletes the control row, so locking the
+          // workspace row first would deadlock them (OPE-788).
+          let targetControlLocked = true;
+          try {
+            await lockWorkspaceInferenceControl(tx, input.workspaceId, "update");
+          } catch (error) {
+            if (!(error instanceof SessionControlInvariantError)) throw error;
+            targetControlLocked = false;
+          }
+          // The target row FOR UPDATE then blocks concurrent child inserts
+          // into this workspace through their workspace FK key-share locks.
+          // Sibling rows only have to stay present for the only-workspace
+          // check, so they take KEY SHARE, which blocks their deletion but not
+          // ordinary writes in those workspaces.
+          const [target] = !targetControlLocked
+            ? []
+            : await tx
+                .select({ id: schema.workspaces.id })
+                .from(schema.workspaces)
+                .where(
+                  and(
+                    eq(schema.workspaces.id, input.workspaceId),
+                    eq(schema.workspaces.accountId, input.accountId),
+                  ),
+                )
+                .for("update");
           const accountWorkspaces = target
             ? await tx
                 .select({ id: schema.workspaces.id })
