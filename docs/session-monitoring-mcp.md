@@ -130,10 +130,21 @@ repeatedly requesting the whole tail.
 The explicit `results` view selects final answers and actionable outcomes without
 duplicating an answer from both message and turn-completion records. `tools`
 provides compact tool receipts, with arguments/output requested explicitly and
-call-ID drill-down for detail. `debug` exposes explicitly requested audit and
+call-ID drill-down for detail; `toolName` with `includeOutput: true` returns up
+to three named calls with their results in one page (default one, the newest).
+`debug` exposes explicitly requested audit and
 diagnostic records, including retained deltas. The underlying audit records remain
 append-only; these views are read projections, not model-history reconstruction.
 Unclaimed queued prompts must not appear as conversation the agent has processed.
+
+Avoidable mistakes get refusals that name the corrected call. A cursor that was
+not issued unchanged is refused, never repaired; when its readable part still
+names a position, the refusal gives the equivalent cursor-free call
+(`before`/`after` plus the same selectors), which every page also exposes as
+`nextBefore`/`nextAfter`. An unknown event type lists the closest registered
+types and its dotted family. `callId` or `toolName` sent with a non-tools view
+reads `view: "tools"` and says so in `notice`; other mismatched selectors are
+refused with both plausible corrected calls.
 
 Use `session_get`/`session_wait` for status and joining workers, and
 `command_read`/`command_wait` for command-specific output. `session_events` does

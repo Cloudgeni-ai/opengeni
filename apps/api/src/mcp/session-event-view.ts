@@ -77,6 +77,101 @@ const bytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value, null, 
 const encode = (selection: Selection, sequence: number | null = null, offset = 0, v = 2) =>
   Buffer.from(JSON.stringify({ v, selection, sequence, offset })).toString("base64url");
 
+/**
+ * toolName with includeOutput reads each named call's result through the exact
+ * callId path, so one page carries at most this many call/result pairs inside
+ * the same 16 KiB envelope. An omitted limit means the newest (or oldest) one.
+ */
+export const SESSION_EVENT_NAMED_OUTPUT_MAX_CALLS = 3;
+// Below this many bytes an output read could not return a useful fragment.
+const NAMED_OUTPUT_MIN_BUDGET = 2048;
+
+const exampleCall = (args: Record<string, unknown>) =>
+  JSON.stringify(Object.fromEntries(Object.entries(args).filter(([, value]) => value != null)));
+
+/**
+ * Agents sometimes retype the opaque cursor and corrupt it. Read whatever
+ * position survives in the readable part so the refusal can name the exact
+ * cursor-free call. Recovered values are advice, never a continuation.
+ */
+function recoverCursorPosition(cursor: string): Record<string, unknown> | null {
+  const text = cursor.trimStart().startsWith("{")
+    ? cursor
+    : Buffer.from(cursor, "base64url").toString("utf8");
+  const pick = (pattern: RegExp) => pattern.exec(text)?.[1];
+  const number = (pattern: RegExp) => {
+    const value = pick(pattern);
+    return value === undefined || value.length > 15 ? undefined : Number(value);
+  };
+  const string = (key: string) => {
+    const value = pick(new RegExp(`"${key}"\\s*:\\s*"((?:[^"\\\\]|\\\\.){1,256})"`));
+    if (value === undefined) return undefined;
+    try {
+      return JSON.parse(`"${value}"`) as string;
+    } catch {
+      return undefined;
+    }
+  };
+  const view = pick(/"view"\s*:\s*"(conversation|results|tools)"/);
+  const direction = pick(/"direction"\s*:\s*"(before|after)"/) as
+    | Selection["direction"]
+    | undefined;
+  const sequence = number(/"seq[a-z]*"\s*:\s*(\d+)/i);
+  const after = number(/"after"\s*:\s*(\d+)/);
+  const before = number(/"before"\s*:\s*(\d+)/);
+  const limit = number(/"limit"\s*:\s*(\d+)/);
+  const resolvedDirection = direction ?? (before !== undefined ? "before" : undefined);
+  const position =
+    resolvedDirection === "after"
+      ? sequence !== undefined
+        ? { after: Math.max(0, sequence - 1) }
+        : after !== undefined
+          ? { after }
+          : null
+      : resolvedDirection === "before"
+        ? sequence !== undefined
+          ? { before: sequence + 1 }
+          : before !== undefined
+            ? { before }
+            : null
+        : null;
+  if (!position) return null;
+  return {
+    ...(view ? { view } : {}),
+    ...(string("toolName") ? { toolName: string("toolName") } : {}),
+    ...(string("callId") ? { callId: string("callId") } : {}),
+    ...(/"includeArguments"\s*:\s*true/.test(text) ? { includeArguments: true } : {}),
+    ...(/"includeOutput"\s*:\s*true/.test(text) ? { includeOutput: true } : {}),
+    direction: resolvedDirection,
+    ...position,
+    ...(limit !== undefined && limit >= 1 && limit <= 50 ? { limit } : {}),
+  };
+}
+
+function invalidCursorError(input: SessionEventViewInput): Error {
+  const recovered = recoverCursorPosition(input.cursor ?? "");
+  const prefix =
+    "Invalid session_events cursor: it was not issued by session_events or was altered when copied. Pass nextCursor byte-for-byte or not at all; never retype or build one.";
+  if (recovered) {
+    return new Error(
+      `${prefix} Its readable part names a position, so continue without a cursor: ${exampleCall({
+        sessionId: input.sessionId,
+        ...recovered,
+      })} (check the position against the previous page's nextBefore/nextAfter).`,
+    );
+  }
+  return new Error(
+    `${prefix} Continue without a cursor: repeat the previous call with the same view and selectors plus the last page's position, e.g. ${exampleCall(
+      {
+        sessionId: input.sessionId,
+        view: input.view,
+        direction: "before",
+        before: "<nextBefore>",
+      },
+    )} or ${exampleCall({ sessionId: input.sessionId, view: input.view, direction: "after", after: "<nextAfter>" })}.`,
+  );
+}
+
 /** A cursor is a bounded selector, never authority. The caller reauthorizes every read. */
 export function resolveSessionEventView(input: SessionEventViewInput) {
   let continuation: z.infer<typeof cursorSchema> | null = null;
@@ -88,7 +183,7 @@ export function resolveSessionEventView(input: SessionEventViewInput) {
         JSON.parse(Buffer.from(input.cursor, "base64url").toString()),
       );
     } catch {
-      throw new Error("Invalid session_events cursor");
+      throw invalidCursorError(input);
     }
     const previous = continuation.selection;
     for (const key of [
@@ -122,16 +217,7 @@ export function resolveSessionEventView(input: SessionEventViewInput) {
       after: input.after ?? 0,
       before: input.before ?? null,
     });
-  selection.limit = z
-    .number()
-    .int()
-    .min(1)
-    .max(50)
-    .parse(input.limit ?? selection.limit ?? 10);
-  if (selection.toolName && selection.includeOutput)
-    throw new Error(
-      "toolName selects named calls. Read a result with its callId and includeOutput=true.",
-    );
+  let notice: string | undefined;
   if (
     selection.view !== "tools" &&
     (selection.callId ||
@@ -139,8 +225,43 @@ export function resolveSessionEventView(input: SessionEventViewInput) {
       selection.includeArguments ||
       selection.includeOutput)
   ) {
-    throw new Error("callId/toolName/includeArguments/includeOutput require view=tools");
+    // callId and toolName name tool calls, which only view=tools returns, so
+    // the intent is unambiguous: read them there and say so.
+    if (!continuation && (selection.callId || selection.toolName)) {
+      notice = `view=${selection.view} does not return tool calls; this page is view=tools because callId/toolName select tool calls.`;
+      selection.view = "tools";
+    } else {
+      throw new Error(
+        `includeArguments/includeOutput only apply to view=tools. For a tool's result call ${exampleCall(
+          {
+            sessionId: selection.sessionId,
+            view: "tools",
+            toolName: "<exact tool name>",
+            includeOutput: true,
+            limit: 1,
+          },
+        )}; view=${selection.view} already returns complete text, so drop them: ${exampleCall({
+          sessionId: selection.sessionId,
+          view: selection.view,
+        })}.`,
+      );
+    }
   }
+  const namedOutputs = selection.toolName !== null && selection.includeOutput;
+  // Named outputs read one exact result per call, so the page size is the
+  // number of calls and is clamped rather than refused; effectiveLimit and
+  // nextCursor report the clamp.
+  selection.limit = z
+    .number()
+    .int()
+    .min(1)
+    .max(50)
+    .transform((value) =>
+      namedOutputs ? Math.min(value, SESSION_EVENT_NAMED_OUTPUT_MAX_CALLS) : value,
+    )
+    .parse(input.limit ?? selection.limit ?? (namedOutputs ? 1 : 10));
+  if (namedOutputs && continuation && continuation.sequence !== null)
+    throw new Error("Invalid session_events cursor position");
   if (
     continuation &&
     ((continuation.sequence === null && continuation.offset !== 0) ||
@@ -149,7 +270,7 @@ export function resolveSessionEventView(input: SessionEventViewInput) {
           (selection.before !== null && continuation.sequence >= selection.before))))
   )
     throw new Error("Invalid session_events cursor position");
-  return { selection, continuation };
+  return { selection, continuation, notice };
 }
 
 function project(event: SessionEvent, selection: Selection): Item | null {
@@ -208,7 +329,136 @@ function project(event: SessionEvent, selection: Selection): Item | null {
 
 /** Read-only projection over the existing RLS/audit query. No command observations. */
 export async function readSessionEventView(input: SessionEventViewInput, read: ReadPage) {
-  const { selection, continuation } = resolveSessionEventView(input);
+  const { selection, continuation, notice } = resolveSessionEventView(input);
+  const page =
+    selection.toolName !== null && selection.includeOutput
+      ? await readNamedCallOutputs(selection, read)
+      : await scanSessionEventView(selection, continuation, read);
+  return notice === undefined ? page : { ...page, notice };
+}
+
+type Continuation = ReturnType<typeof resolveSessionEventView>["continuation"];
+type ViewPage = Awaited<ReturnType<typeof scanSessionEventView>>;
+// An omitted structured value is final; only a text fragment continues.
+const incompleteFragment = (item: Item) => record(item.fragment).complete === false;
+
+/**
+ * toolName plus includeOutput: list the named calls, then read each call's
+ * result through the exact callId path. One call whose result does not fit
+ * keeps that path's lossless fragment continuation; later calls resume from a
+ * positional cursor instead of being dropped.
+ */
+async function readNamedCallOutputs(selection: Selection, read: ReadPage): Promise<ViewPage> {
+  const calls = await scanSessionEventView({ ...selection, includeOutput: false }, null, read);
+  if (calls.events.some(incompleteFragment)) return calls;
+  const ordered = selection.direction === "before" ? [...calls.events].reverse() : calls.events;
+  const events: Item[] = [];
+  let sourceLoss = calls.sourceLoss;
+  let stop: { position: number; cursor: string | null } | null = null;
+  const envelope = (items: Item[]) => bytes({ ...calls, events: items, nextCursor: null });
+  const empty = envelope([]);
+  for (const [index, call] of ordered.entries()) {
+    const used = envelope([...events, call]) - empty;
+    const lookup = selectionSchema.safeParse({
+      sessionId: selection.sessionId,
+      view: "tools",
+      includeArguments: false,
+      includeOutput: true,
+      callId: typeof call.callId === "string" ? call.callId : null,
+      toolName: null,
+      limit: 1,
+      direction: "after",
+      after: call.sequence,
+      before: null,
+    });
+    if (!lookup.success || lookup.data.callId === null) {
+      events.push({ ...call, outputFound: false });
+      continue;
+    }
+    if (SESSION_EVENT_VIEW_MAX_BYTES - 6000 - used < NAMED_OUTPUT_MIN_BUDGET) {
+      if (index > 0) {
+        stop = { position: call.sequence, cursor: null };
+        break;
+      }
+      // Huge arguments leave no room: return the call and name the exact read.
+      events.push({
+        ...call,
+        readOutput: {
+          view: "tools",
+          callId: lookup.data.callId,
+          includeOutput: true,
+        },
+      });
+      stop = {
+        position: selection.direction === "before" ? call.sequence - 1 : call.sequence + 1,
+        cursor: null,
+      };
+      break;
+    }
+    const output = await scanSessionEventView(lookup.data, null, read, used);
+    sourceLoss ??= output.sourceLoss;
+    const result = output.events.find((item) => item.kind === "result");
+    if (!result) {
+      events.push({
+        ...call,
+        outputFound: false,
+        ...(output.hasMore
+          ? {
+              readOutput: {
+                view: "tools",
+                callId: lookup.data.callId,
+                includeOutput: true,
+              },
+            }
+          : {}),
+      });
+      continue;
+    }
+    if (incompleteFragment(result) && index > 0) {
+      stop = { position: call.sequence, cursor: null };
+      break;
+    }
+    events.push(call, result);
+    if (incompleteFragment(result)) {
+      // The rest of this result continues through its exact callId cursor;
+      // nextBefore/nextAfter still locate the next named call.
+      stop = {
+        position: selection.direction === "before" ? call.sequence - 1 : call.sequence + 1,
+        cursor: output.nextCursor,
+      };
+      break;
+    }
+  }
+  events.sort((a, b) => a.sequence - b.sequence);
+  // stop.position is the first named call not yet returned (inclusive).
+  const position = stop
+    ? selection.direction === "before"
+      ? { after: selection.after, before: stop.position + 1 }
+      : { after: Math.max(0, stop.position - 1), before: selection.before }
+    : selection.direction === "before"
+      ? { after: selection.after, before: calls.nextBefore }
+      : { after: calls.nextAfter ?? selection.after, before: selection.before };
+  const hasMore = stop !== null || calls.hasMore;
+  const { sourceLoss: _callsLoss, ...base } = calls;
+  return {
+    ...base,
+    events,
+    nextAfter: selection.direction === "after" ? position.after : null,
+    nextBefore: selection.direction === "before" ? position.before : null,
+    hasMore,
+    nextCursor: stop?.cursor ?? (hasMore ? encode({ ...selection, ...position }) : null),
+    sourceExact: sourceLoss === undefined,
+    ...(sourceLoss ? { sourceLoss } : {}),
+  };
+}
+
+async function scanSessionEventView(
+  selection: Selection,
+  continuation: Continuation,
+  read: ReadPage,
+  // Bytes a caller already holds for the same envelope (named outputs).
+  reservedBytes = 0,
+) {
   const limit = selection.limit!;
   let after =
     continuation?.sequence && selection.direction === "after"
@@ -304,7 +554,7 @@ export async function readSessionEventView(input: SessionEventViewInput, read: R
         if (!slice && offset > 0 && item.text) item.text = item.text.slice(offset);
         events.push(item);
         // Reserve enough for the bounded cursor and fragment facts.
-        if (bytes(page()) > SESSION_EVENT_VIEW_MAX_BYTES - 4096) {
+        if (bytes(page()) > SESSION_EVENT_VIEW_MAX_BYTES - 4096 - reservedBytes) {
           events.pop();
           if (events.length > 0) {
             resume(event.sequence, offset);
@@ -317,7 +567,10 @@ export async function readSessionEventView(input: SessionEventViewInput, read: R
           let high = text.length;
           while (low < high) {
             const mid = Math.ceil((low + high) / 2);
-            if (bytes({ ...item, text: text.slice(0, mid) }) <= SESSION_EVENT_VIEW_MAX_BYTES - 6000)
+            if (
+              bytes({ ...item, text: text.slice(0, mid) }) <=
+              SESSION_EVENT_VIEW_MAX_BYTES - 6000 - reservedBytes
+            )
               low = mid;
             else high = mid - 1;
           }

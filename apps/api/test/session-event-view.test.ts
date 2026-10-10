@@ -75,12 +75,73 @@ describe("session event content views", () => {
       reader(rows),
     );
     expect(result.events.find((item) => item.kind === "result")?.text).toBe("Created");
-    await expect(
-      readSessionEventView(
-        { sessionId, view: "tools", toolName: "scheduled_tasks_create", includeOutput: true },
-        reader(rows),
-      ),
-    ).rejects.toThrow("callId");
+    const named = await readSessionEventView(
+      { sessionId, view: "tools", toolName: "scheduled_tasks_create", includeOutput: true },
+      reader(rows),
+    );
+    expect(named.events.map((item) => [item.kind, item.callId, item.text])).toEqual([
+      ["call", "create", undefined],
+      ["result", "create", "Created"],
+    ]);
+  });
+
+  test("named outputs report a call whose result is not recorded yet", async () => {
+    const page = await readSessionEventView(
+      { sessionId, view: "tools", toolName: "slow", includeOutput: true },
+      reader([event(1, "agent.toolCall.created", { callId: "pending", name: "slow" })]),
+    );
+    expect(page.events).toEqual([
+      {
+        sequence: 1,
+        turnId: "turn-1",
+        callId: "pending",
+        kind: "call",
+        name: "slow",
+        outputFound: false,
+      },
+    ]);
+    expect(page.hasMore).toBe(false);
+  });
+
+  test("named outputs stop before a result that does not fit and resume there", async () => {
+    const rows = [1, 2, 3].flatMap((n) => [
+      event(n * 10, "agent.toolCall.created", { callId: `c${n}`, name: "report" }),
+      event(n * 10 + 1, "agent.toolCall.output", { id: `c${n}`, output: `${n}`.repeat(5000) }),
+    ]);
+    const read = reader(rows);
+    const seen: string[] = [];
+    let page = await readSessionEventView(
+      { sessionId, view: "tools", toolName: "report", includeOutput: true, limit: 3 },
+      read,
+    );
+    for (let count = 0; ; count += 1) {
+      expect(count).toBeLessThan(10);
+      bounded(page);
+      for (const item of page.events) if (item.kind === "result") seen.push(String(item.callId));
+      if (!page.nextCursor) break;
+      page = await readSessionEventView({ sessionId, cursor: page.nextCursor }, read);
+    }
+    expect(seen.sort()).toEqual(["c1", "c2", "c3"]);
+  });
+
+  test("a retyped cursor refusal recovers its position", async () => {
+    const read = reader([event(1, "user.message", { text: "x".repeat(20000) })]);
+    const page = await readSessionEventView({ sessionId }, read);
+    const decoded = Buffer.from(page.nextCursor!, "base64url").toString();
+    expect(JSON.parse(decoded).sequence).toBe(1);
+    const retyped = Buffer.from(decoded.replace('"sequence"', '"sequeence"')).toString("base64url");
+    const error = await readSessionEventView({ sessionId, cursor: retyped }, read).catch(
+      (caught: Error) => caught,
+    );
+    expect(String(error)).toContain(
+      JSON.stringify({
+        sessionId,
+        view: "conversation",
+        direction: "before",
+        before: 2,
+        limit: 10,
+      }),
+    );
   });
 
   for (const direction of ["after", "before"] as const) {
