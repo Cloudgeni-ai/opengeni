@@ -825,7 +825,7 @@ describe("shared subscription core M2 PostgreSQL contracts", () => {
   );
 
   test.skipIf(process.env.OPENGENI_REQUIRE_REAL_DB !== "1")(
-    "SUB-OWN-04 and SUB-APPS-01: delegated managers cannot widen model scope and can clear out-of-scope Apps designations",
+    "SUB-OWN-04 and SUB-APPS-01: delegated managers change only the models, only from the managing workspace, and can clear out-of-scope Apps designations",
     async () => {
       const fixture = await organizationFixture();
       const managerSubject = `user:subscription-manager-${crypto.randomUUID()}`;
@@ -853,31 +853,65 @@ describe("shared subscription core M2 PostgreSQL contracts", () => {
       await shared!.admin`
       insert into subscription_connection_workspaces (account_id, connection_id, workspace_id)
       values (${fixture.accountId}, ${connection!.id}::uuid, ${fixture.workspaceId}::uuid)`;
-      let error: unknown;
-      try {
-        await withSessionRlsActorContext({ subjectId: managerSubject }, () =>
-          withRlsContext(
-            client!.db,
-            {
-              accountId: fixture.accountId,
-              workspaceId: fixture.workspaceId,
-            },
-            (db) =>
+      // Runs one update as the delegated manager in a workspace context and
+      // returns the PostgreSQL error code, or null when it was admitted.
+      const asManager = async (workspaceId: string, assignment: ReturnType<typeof sql>) => {
+        try {
+          await withSessionRlsActorContext({ subjectId: managerSubject }, () =>
+            withRlsContext(client!.db, { accountId: fixture.accountId, workspaceId }, (db) =>
               rawRows(
                 db,
-                sql`update subscription_connections
-          set allowed_model_ids = ARRAY['model-b']::text[]
-          where id = ${connection!.id}::uuid`,
+                sql`update subscription_connections set ${assignment}
+                  where id = ${connection!.id}::uuid`,
               ),
-          ),
-        );
-      } catch (caught) {
-        error = caught;
-      }
-      const pgCode =
-        (error as { code?: string; cause?: { code?: string } } | undefined)?.code ??
-        (error as { cause?: { code?: string } } | undefined)?.cause?.code;
-      expect(pgCode).toBe("42501");
+            ),
+          );
+          return null;
+        } catch (caught) {
+          const failure = caught as { code?: string; cause?: { code?: string } };
+          return failure.code ?? failure.cause?.code ?? "unknown";
+        }
+      };
+      const current = async () => {
+        const [row] = await shared!.admin<
+          { allowed_model_ids: string[] | null; scope_kind: string; allow_personal: boolean }[]
+        >`select allowed_model_ids, scope_kind, allow_personal_workspaces as allow_personal
+          from subscription_connections where id = ${connection!.id}::uuid`;
+        return row!;
+      };
+
+      // The managing workspace's admin chooses the models of its own account,
+      // as workspace accounts allowed before the shared core.
+      expect(
+        await asManager(fixture.workspaceId, sql`allowed_model_ids = ARRAY['model-b']::text[]`),
+      ).toBeNull();
+      expect((await current()).allowed_model_ids).toEqual(["model-b"]);
+      // Scope stays an organization administrator's decision.
+      expect(await asManager(fixture.workspaceId, sql`scope_kind = 'organization'`)).toBe("42501");
+      expect(await asManager(fixture.workspaceId, sql`allow_personal_workspaces = false`)).toBe(
+        "42501",
+      );
+      // The same person acting from another workspace cannot change the models.
+      const elsewhere = await asManager(
+        personalWorkspace!.id,
+        sql`allowed_model_ids = ARRAY['model-c']::text[]`,
+      );
+      expect(elsewhere === null || elsewhere === "42501").toBe(true);
+      // Nor can a member of the managing workspace who is not its admin.
+      await shared!.admin`update workspace_memberships set role = 'member'
+        where workspace_id = ${fixture.workspaceId}::uuid and subject_id = ${managerSubject}`;
+      const member = await asManager(
+        fixture.workspaceId,
+        sql`allowed_model_ids = ARRAY['model-d']::text[]`,
+      );
+      expect(member === null || member === "42501").toBe(true);
+      await shared!.admin`update workspace_memberships set role = 'admin'
+        where workspace_id = ${fixture.workspaceId}::uuid and subject_id = ${managerSubject}`;
+      expect(await current()).toEqual({
+        allowed_model_ids: ["model-b"],
+        scope_kind: "workspaces",
+        allow_personal: true,
+      });
 
       await shared!.admin`
         insert into subscription_apps_designations (account_id, workspace_id, connection_id, updated_by_subject_id)

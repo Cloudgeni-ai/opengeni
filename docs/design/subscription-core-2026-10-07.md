@@ -130,8 +130,9 @@ Every table is `ENABLE` + `FORCE ROW LEVEL SECURITY` and keyed by
   (people are organization memberships). Organization scope means every
   current and future workspace.
 - Management: `managed_by_workspace_id` (delegated management). Delegated
-  managers can reconnect, rename and toggle allocation; only organization
-  administrators change scope, ownership, or delete (SUB-OWN-04).
+  managers can reconnect, rename, toggle allocation and, from the managing
+  workspace, choose the connection's models (migration 0702); only
+  organization administrators change scope, ownership, or delete (SUB-OWN-04).
   `connected_by_subject_id` is audit only.
 - `provider_state` jsonb is adapter-owned (for example Codex reset-credit
   counts); core decisions never read it.
