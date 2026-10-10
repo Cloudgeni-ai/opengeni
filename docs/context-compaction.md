@@ -555,6 +555,20 @@ history is summarized. Durable turn-scoped operational notices remain at their
 original positions in the compaction input. The resulting summarized history is
 still a deliberate new prefix.
 
+### Claude checkpoint cache reuse (experiment)
+
+`OPENGENI_EXPERIMENT_COMPACTION_CACHE_REUSE=1` (default off) moves native Claude
+portable compaction onto the same prepared-prefix path as Responses: the
+checkpoint request reuses the turn's captured tools, instructions, thinking,
+effort, tool choice and prompt-cache key, and appends only the checkpoint
+instruction (with a no-tools note) after the history. It therefore reads the
+warm prompt cache instead of rewriting the whole history. Tool choice stays as
+on the turn because changing it invalidates the cached messages; a response that
+calls a tool or has no text is discarded (its usage still recorded) and the
+standalone tool-less request runs once instead. Responses portable and Codex
+remote v2 compaction already reuse the prepared prefix; Chat providers keep
+the standalone request.
+
 ### Reasoning effort updates (opt-in)
 
 `OPENGENI_REASONING_CONFIGURATION_UPDATES_ENABLED` defaults to false pending

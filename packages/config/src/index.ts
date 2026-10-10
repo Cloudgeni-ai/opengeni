@@ -629,6 +629,10 @@ const SettingsSchema = z.object({
   // cache is warm (incremental writes), "always_1h" on every request. Both
   // skip cache writes on the never-reused portable compaction request.
   experimentCacheTtlPolicy: z.enum(["off", "warm_1h", "always_1h"]).default("off"),
+  // Experiment (default off). Native Claude portable compaction reuses the
+  // turn's prepared request prefix (tools, system, thinking/effort, history)
+  // so the summary request reads the warm prompt cache instead of rewriting it.
+  experimentCompactionCacheReuse: EnvBoolean.default(false),
   // Provider-neutral fallback for canonical model-facing tool-result text.
   // The current stable Codex catalog policy is 10k tokens; the truncator adds
   // Codex's 1.2x JSON serialization allowance when applying it.
@@ -4522,6 +4526,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     contextAutoCompactThresholdTokens: optional("OPENGENI_CONTEXT_AUTO_COMPACT_THRESHOLD_TOKENS"),
     experimentCompactThresholdPolicy: optional("OPENGENI_EXPERIMENT_COMPACT_THRESHOLD_POLICY"),
     experimentCacheTtlPolicy: optional("OPENGENI_EXPERIMENT_CACHE_TTL_POLICY"),
+    experimentCompactionCacheReuse: optional("OPENGENI_EXPERIMENT_COMPACTION_CACHE_REUSE"),
     modelToolOutputTruncationTokens: optional("OPENGENI_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS"),
     authRequired: optional("OPENGENI_AUTH_REQUIRED"),
     accessKey: optional("OPENGENI_ACCESS_KEY"),

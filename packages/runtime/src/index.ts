@@ -8,7 +8,10 @@ import {
 } from "./prepared-compaction-request";
 export { preparedCompactionRequest, queuePreparedCompaction } from "./prepared-compaction-request";
 import { AnthropicMessagesModel } from "./anthropic-messages";
-import { anthropicCompactionRequest } from "./anthropic-compaction";
+import {
+  anthropicCacheReuseSummaryUsable,
+  anthropicCompactionRequest,
+} from "./anthropic-compaction";
 export {
   createAnthropicCompactionSizer,
   fitCompactionPrefix,
@@ -1392,28 +1395,49 @@ export async function summarizeForCompaction(
         ...(options.signal ? { signal: options.signal } : {}),
       };
   let response: unknown;
+  // A reused-prefix Claude checkpoint that did not produce a summary is still
+  // a billed request; its usage is recorded before the standalone retry's.
+  let discardedResponse: unknown;
+  const recordDiscardedUsage = async () => {
+    if (discardedResponse === undefined) return;
+    const discarded = modelResponseUsageFromResponse(discardedResponse);
+    if (discarded) await options.onUsage?.(discarded);
+  };
   try {
-    response =
-      provider.api === "anthropic-messages"
-        ? await new AnthropicMessagesModel(
-            provider,
-            model,
-            instrumentedModelFetch(provider.id, globalThis.fetch),
-            { cacheTtlPolicy: settings.experimentCacheTtlPolicy },
-          ).getResponse(
-            anthropicCompactionRequest(input, {
-              maxOutputTokens: maxTokens,
-              ...(options.systemInstructions
-                ? { systemInstructions: options.systemInstructions }
-                : {}),
-              ...(options.promptCacheKey ? { promptCacheKey: options.promptCacheKey } : {}),
-              ...(options.signal ? { signal: options.signal } : {}),
-            }),
-          )
-        : await new CompactionResponsesModel(client, model, provider).fetchResponse(request);
+    if (provider.api === "anthropic-messages") {
+      const transport = new AnthropicMessagesModel(
+        provider,
+        model,
+        instrumentedModelFetch(provider.id, globalThis.fetch),
+        { cacheTtlPolicy: settings.experimentCacheTtlPolicy },
+      );
+      const checkpointOptions = {
+        maxOutputTokens: maxTokens,
+        ...(options.systemInstructions ? { systemInstructions: options.systemInstructions } : {}),
+        ...(options.promptCacheKey ? { promptCacheKey: options.promptCacheKey } : {}),
+        ...(options.signal ? { signal: options.signal } : {}),
+      };
+      if (settings.experimentCompactionCacheReuse && options.preparedRequest) {
+        const reused = await transport.getResponse(
+          anthropicCompactionRequest(input, {
+            ...checkpointOptions,
+            preparedRequest: options.preparedRequest,
+          }),
+        );
+        if (anthropicCacheReuseSummaryUsable(reused)) response = reused;
+        else discardedResponse = reused;
+      }
+      response ??= await transport.getResponse(
+        anthropicCompactionRequest(input, checkpointOptions),
+      );
+    } else {
+      response = await new CompactionResponsesModel(client, model, provider).fetchResponse(request);
+    }
   } catch (error) {
+    await recordDiscardedUsage();
     throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(error), error);
   }
+  await recordDiscardedUsage();
   const usage = modelResponseUsageFromResponse(response);
   if (usage) {
     await options.onUsage?.(usage);

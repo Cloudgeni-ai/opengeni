@@ -45,6 +45,11 @@ describe("experiment flags", () => {
     const defaults = withEnv({}, () => getSettings());
     expect(defaults.experimentCompactThresholdPolicy).toBe("off");
     expect(defaults.experimentCacheTtlPolicy).toBe("off");
+    expect(defaults.experimentCompactionCacheReuse).toBe(false);
+    expect(
+      withEnv({ OPENGENI_EXPERIMENT_COMPACTION_CACHE_REUSE: "1" }, () => getSettings())
+        .experimentCompactionCacheReuse,
+    ).toBe(true);
     const enabled = withEnv(
       {
         OPENGENI_EXPERIMENT_COMPACT_THRESHOLD_POLICY: "cost",
