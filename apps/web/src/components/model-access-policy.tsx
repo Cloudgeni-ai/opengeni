@@ -255,7 +255,8 @@ export function useModelAccessPolicy(scopeOrWorkspaceId: string | ModelPolicySco
           ? client
               .getWorkspaceModelAccessPolicy(workspaceId)
               .then((hosting) => hosting.allowCreditModels === false)
-              .catch(() => false)
+              // Fail closed: an unknown switch hides "Choose exact models".
+              .catch(() => true)
           : Promise.resolve(false),
       ]);
       if (generation !== loadGeneration.current) return;
