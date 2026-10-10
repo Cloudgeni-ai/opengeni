@@ -34,6 +34,7 @@ import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config"
 import {
   applyQuotaObservation,
   quotaCapacity,
+  subscriptionCoreCredentialRefresher,
   type SubscriptionQuota,
 } from "@opengeni/subscriptions";
 
@@ -534,7 +535,6 @@ export const subscriptionCoreOperations = memoByProvider((provider: Subscription
   ): Promise<SubscriptionCoreConnectionRefreshOutcome> {
     assertRefMatches(connectionId, ref);
     const key = encryptionKey(settings);
-    const refresher = provider.adapter.refresh;
     const now = deps.now ?? (() => new Date());
     const tenant = scopeTenant(scope);
     const access = await withOperationScope(
@@ -555,6 +555,14 @@ export const subscriptionCoreOperations = memoByProvider((provider: Subscription
         if (!credential) return { kind: "refused" };
         const generation = Number(credential.refresh_generation);
         if (generation !== observedRefreshGeneration) return { kind: "superseded" };
+        let current: unknown;
+        try {
+          current = decodeCredential(key, credential.credential_encrypted);
+        } catch (error) {
+          return { kind: "error", error };
+        }
+        // Renewal depends on the credential's format, never on the provider.
+        const refresher = subscriptionCoreCredentialRefresher(provider.adapter, current);
         if (!refresher) {
           // A credential that never renews is refreshed only when it expired
           // or the provider refused it: only a new sign-in recovers.
@@ -569,7 +577,6 @@ export const subscriptionCoreOperations = memoByProvider((provider: Subscription
           return { kind: "relogin", message, marked: marked?.marked === true };
         }
         try {
-          const current = decodeCredential(key, credential.credential_encrypted);
           const rotated = await refresher.rotate(current);
           // Persist before any other fallible work: a rolled-back transaction
           // would discard the only valid refresh token.

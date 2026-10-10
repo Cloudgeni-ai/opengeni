@@ -3529,6 +3529,8 @@ function rememberPendingWaitOutcome(
 const ACTION_CAPACITY_WAIT_REASONS: ReadonlySet<string> = new Set([
   "pinned_account_ineligible",
   "model_not_allowed",
+  // Only sending the work again ends it (design 5.3 decision 4).
+  "accepted_authority_unavailable",
 ]);
 
 /**

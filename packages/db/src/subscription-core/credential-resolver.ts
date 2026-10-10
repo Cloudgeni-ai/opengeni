@@ -9,24 +9,30 @@
  * snapshot is built from it, and the errors it raises; this module decides
  * when to refresh and which outcomes may be shared between turns.
  */
-import type { SubscriptionCoreAdapter } from "@opengeni/subscriptions";
+import {
+  subscriptionCoreCredentialRefresher,
+  type SubscriptionCoreAdapter,
+} from "@opengeni/subscriptions";
 
 /**
  * When a credential is refreshed: this long before expiry, or `fallbackMs`
  * after the last refresh when the expiry is unknown. `null` for a
- * credential that never renews (`adapter.refresh === null`): it is refreshed
- * only once its known expiry passed (or on a forced refresh after the
- * provider refused it), and that refresh marks it needs-relogin.
+ * credential that never renews (no refresher, or a credential format whose
+ * `autoRenews` is false): it is refreshed only once its known expiry passed
+ * (or on a forced refresh after the provider refused it), and that refresh
+ * marks it needs-relogin.
  */
 export type SubscriptionCoreRefreshPolicy = { windowMs: number; fallbackMs: number } | null;
 
-/** The refresh policy the provider's adapter declares. */
+/** The refresh policy the provider's adapter declares for one decoded credential. */
 export function subscriptionCoreRefreshPolicy<Credential>(
-  adapter: Pick<SubscriptionCoreAdapter<Credential>, "refresh">,
+  adapter: Pick<SubscriptionCoreAdapter<Credential>, "capabilitiesFor" | "credential" | "refresh">,
+  credential: Credential,
 ): SubscriptionCoreRefreshPolicy {
-  return adapter.refresh === null
+  const refresher = subscriptionCoreCredentialRefresher(adapter, credential);
+  return refresher === null
     ? null
-    : { windowMs: adapter.refresh.windowMs, fallbackMs: adapter.refresh.fallbackMs };
+    : { windowMs: refresher.windowMs, fallbackMs: refresher.fallbackMs };
 }
 
 /** What every loaded credential view exposes to the resolver. */
@@ -75,8 +81,12 @@ export type SubscriptionCoreResolverInput<
   connectionId: string;
   /** The exact turn lease (turn, holder, generation) this resolver serves. */
   holderKey: string;
-  /** The provider's refresh policy (`subscriptionCoreRefreshPolicy(adapter)`). */
-  policy: SubscriptionCoreRefreshPolicy;
+  /**
+   * The refresh policy of a loaded credential
+   * (`subscriptionCoreRefreshPolicy(adapter, credential)`): it depends on the
+   * credential's format.
+   */
+  policy(loaded: Loaded): SubscriptionCoreRefreshPolicy;
   load(): Promise<SubscriptionCoreCredentialLoadOf<Loaded>>;
   /** The expiry embedded in the credential, used when the store records none. */
   embeddedExpiry(loaded: Loaded): Date | null;
@@ -194,7 +204,7 @@ export function buildSubscriptionCoreCredentialResolver<
   const resolve = async (force: boolean): Promise<Snapshot> => {
     const loaded = await load();
     const expiry = loaded.expiresAt ?? input.embeddedExpiry(loaded);
-    const policy = input.policy;
+    const policy = input.policy(loaded);
     const stale =
       force ||
       (policy === null

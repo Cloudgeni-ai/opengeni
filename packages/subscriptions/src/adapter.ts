@@ -5,7 +5,11 @@ import type { CacheFacts, ModelId, ProviderId, SubscriptionQuota } from "./types
  * shared code (SUB-PROV-02).
  */
 export type ProviderCapabilities = {
-  /** The credential renews itself through refresh (false for setup tokens). */
+  /**
+   * The credential renews itself through refresh. A provider whose credential
+   * formats differ (OAuth renews, a setup token or an API key does not)
+   * declares it per format through `capabilitiesFor`.
+   */
   autoRenews: boolean;
   resetCredits: boolean;
   /** Paid usage beyond the plan can be enabled per connection (consent-gated). */
@@ -18,10 +22,14 @@ export type ProviderCapabilities = {
   quotaWindows: boolean;
 };
 
-/** Shared error outcomes every adapter classifies into (SUB-PROV-01). */
+/**
+ * Shared error outcomes every adapter classifies into (SUB-PROV-01). A
+ * refusal that limits one model only carries its `modelId`; the core records
+ * it as that model's cooldown on the connection (`modelCooldownFromOutcome`).
+ */
 export type ProviderErrorOutcome =
-  | { kind: "exhausted"; resetAt: number | null }
-  | { kind: "rate_limited"; retryAfterMs: number | null }
+  | { kind: "exhausted"; resetAt: number | null; modelId?: ModelId }
+  | { kind: "rate_limited"; retryAfterMs: number | null; modelId?: ModelId }
   | { kind: "unauthorized" }
   | { kind: "forbidden" }
   | { kind: "entitlement_missing"; modelId: ModelId }
@@ -80,6 +88,13 @@ export interface ModelConnectionAdapter<Transport = unknown, ProviderError = unk
   classifyError(error: ProviderError): ProviderErrorOutcome | null;
   cacheFacts(input: { modelId: ModelId }): CacheFacts;
   historyCompatibility(): HistoryCompatibility;
+  /**
+   * Optional out-of-turn quota probe (a provider usage endpoint), decoded by
+   * the subscription adapter's `decodeQuota`.
+   */
+  fetchUsage?(transport: Transport): Promise<unknown>;
+  /** Optional live model catalog of the connection, cached per refresh generation. */
+  liveModels?(transport: Transport): Promise<readonly ModelId[]>;
 }
 
 /**
@@ -139,7 +154,14 @@ export interface SubscriptionCoreAdapter<Credential = unknown> {
   readonly provider: ProviderId;
   /** Product name used in operator-facing error texts (never in routing). */
   readonly displayName: string;
+  /** Capabilities of the provider's renewable credential format. */
   readonly capabilities: ProviderCapabilities;
+  /**
+   * Capabilities of one stored credential format (the `credential_format`
+   * column, which `credential.format` derives from a decoded secret). The core
+   * never calls `refresh` for a format whose `autoRenews` is false.
+   */
+  capabilitiesFor(credentialFormat: string): ProviderCapabilities;
   readonly credentialKind: CredentialKind;
   readonly quotaKind: QuotaKind;
   /** Provider identity used by workspace model policy for this provider's models. */
@@ -160,6 +182,8 @@ export interface SubscriptionCoreAdapter<Credential = unknown> {
     encode(credential: Credential): string;
     /** The expiry embedded in the credential (a JWT exp), used when the store has none. */
     expiry(credential: Credential): Date | null;
+    /** The stored `credential_format` of a decoded credential. */
+    format(credential: Credential): string;
   };
   /**
    * Credential renewal under the core's single per-connection lock. Null for
@@ -191,3 +215,39 @@ export type RotatedCredential<Credential> = {
   /** The plan the rotated credential reports, or null when it reports none. */
   planType: string | null;
 };
+
+/**
+ * The refresher the core may call for one decoded credential: the adapter's
+ * refresher when the credential's format renews, else null (the credential
+ * is used until it expires or is refused, then needs a new sign-in).
+ */
+export function subscriptionCoreCredentialRefresher<Credential>(
+  adapter: Pick<SubscriptionCoreAdapter<Credential>, "capabilitiesFor" | "credential" | "refresh">,
+  credential: Credential,
+): CredentialRefresher<Credential> | null {
+  if (adapter.refresh === null) return null;
+  return adapter.capabilitiesFor(adapter.credential.format(credential)).autoRenews
+    ? adapter.refresh
+    : null;
+}
+
+/**
+ * The model cooldown a refusal implies, or null when it limits the whole
+ * connection (no `modelId`) or carries no time. `rate_limited` without a
+ * known delay is not a cooldown: the connection's own rate-limit handling
+ * applies.
+ */
+export function modelCooldownFromOutcome(
+  outcome: ProviderErrorOutcome,
+  now: number,
+): { modelId: ModelId; until: number } | null {
+  if (outcome.kind === "rate_limited") {
+    if (outcome.modelId === undefined || outcome.retryAfterMs === null) return null;
+    return { modelId: outcome.modelId, until: now + Math.max(0, outcome.retryAfterMs) };
+  }
+  if (outcome.kind === "exhausted") {
+    if (outcome.modelId === undefined || outcome.resetAt === null) return null;
+    return outcome.resetAt > now ? { modelId: outcome.modelId, until: outcome.resetAt } : null;
+  }
+  return null;
+}

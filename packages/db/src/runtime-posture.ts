@@ -733,6 +733,30 @@ export const SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES = [
   "subscription_core_connection_target(text, uuid, uuid, uuid, uuid, uuid, text, bigint)",
 ] as const;
 
+/**
+ * Migration 0709 (M4 generic precursor): the per-provider cutover receipt
+ * reader. The runtime calls it for readiness and its RLS policies call it.
+ */
+export const SUBSCRIPTION_CORE_PRECURSOR_PRIVATE_ROUTINES = [
+  "subscription_provider_cutover_committed(text)",
+] as const;
+
+/** Migration 0709: owner-only trigger functions in opengeni_subscription_internal. */
+export const SUBSCRIPTION_CORE_PRECURSOR_OWNER_ROUTINES = [
+  "guard_subscription_provider_cutover_receipts()",
+  "keep_subscription_cutover_identity()",
+] as const;
+
+/**
+ * Every provider whose drained subscription-core cutover migration is in this
+ * binary's ledger. The binary refuses to start unless each has its receipt
+ * (`opengeni_private.subscription_provider_cutover_committed`). A provider's
+ * cutover PR adds its entry.
+ */
+export const SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS: Readonly<Record<string, string>> = {
+  codex: "0689_subscription_core_codex_cutover.sql",
+};
+
 export const SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES = [
   "authorize_subscription_ownerless_session_access(uuid, uuid, uuid, uuid)",
   "authorize_subscription_personal_placement_access(uuid, uuid, uuid, uuid, text, uuid, bigint, text, text)",
@@ -774,6 +798,7 @@ export const SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES = [
   "subscription_codex_owner_membership_held(uuid, uuid)",
   // Migration 0707: the provider-neutral equivalents the runtime calls.
   ...SUBSCRIPTION_CORE_NEUTRAL_PRIVATE_ROUTINES,
+  ...SUBSCRIPTION_CORE_PRECURSOR_PRIVATE_ROUTINES,
 ] as const;
 
 /** Owner-only private helpers the runtime role must never be able to execute. */
@@ -799,6 +824,7 @@ export const SUBSCRIPTION_M3_OWNER_ONLY_PRIVATE_ROUTINES = [
   "auto_assign_subscription_codex_workspace()",
   "auto_assign_subscription_codex_personal_workspace()",
   ...SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES,
+  ...SUBSCRIPTION_CORE_PRECURSOR_OWNER_ROUTINES,
 ] as const;
 
 const UNIFIED_KNOWLEDGE_ROUTINES = [
@@ -2013,6 +2039,11 @@ export type RuntimeDatabasePosture = {
   claudeSubscriptionPoolActivationPresent: boolean;
   /** Migration 0689: Codex runs on the shared subscription core. */
   subscriptionCodexCutoverActivationPresent: boolean;
+  /**
+   * Providers of SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS whose cutover
+   * receipt the database holds (migration 0709's readiness function).
+   */
+  subscriptionProviderCutoverReceipts: string[];
 };
 
 export class RuntimeDatabasePostureError extends Error {
@@ -2158,6 +2189,23 @@ export async function inspectRuntimeDatabasePosture(
       );
       const subscriptionCodexCutoverActivationPresent =
         codexCutoverActivationRows[0]?.present === true;
+      // The receipt is read through its boolean readiness function only:
+      // committed_at is never read as a date ('-infinity' for Codex).
+      const receiptReaderRows = resultRows<{ present: boolean }>(
+        await tx.execute(sql`select to_regprocedure(
+          'opengeni_private.subscription_provider_cutover_committed(text)'
+        ) is not null as present`),
+      );
+      const subscriptionProviderCutoverReceipts =
+        receiptReaderRows[0]?.present === true
+          ? resultRows<{ provider: string }>(
+              await tx.execute(sql`select provider from jsonb_array_elements_text(${JSON.stringify(
+                Object.keys(SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS),
+              )}::jsonb) provider
+                where opengeni_private.subscription_provider_cutover_committed(provider)
+                order by provider`),
+            ).map((row) => row.provider)
+          : [];
 
       // Scoped/embedded topology deliberately leaves ownership and isolation to
       // the host. Prove the connection identity is coherent, but do not impose
@@ -2176,6 +2224,7 @@ export async function inspectRuntimeDatabasePosture(
           sessionVariableSetAttachmentsCutoverPresent,
           claudeSubscriptionPoolActivationPresent,
           subscriptionCodexCutoverActivationPresent,
+          subscriptionProviderCutoverReceipts,
         };
       }
 
@@ -2507,6 +2556,7 @@ export async function inspectRuntimeDatabasePosture(
         sessionVariableSetAttachmentsCutoverPresent,
         claudeSubscriptionPoolActivationPresent,
         subscriptionCodexCutoverActivationPresent,
+        subscriptionProviderCutoverReceipts,
       };
     },
     { isolationLevel: "repeatable read", accessMode: "read only" },
@@ -2541,6 +2591,13 @@ export function evaluateRuntimeDatabasePosture(
     violations.push(
       "database is missing the 0689 Codex subscription-core cutover receipt; run the drained migration first",
     );
+  for (const [provider, migration] of Object.entries(SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS)) {
+    if (!posture.subscriptionProviderCutoverReceipts.includes(provider)) {
+      violations.push(
+        `database is missing the ${provider} subscription-core cutover receipt (${migration}); run the drained migration first`,
+      );
+    }
+  }
 
   if (!posture.sessionVariableSetAttachmentsCutoverPresent) {
     violations.push("database is missing the 0352 session Variable Set attachment runtime receipt");
@@ -2670,6 +2727,11 @@ export function evaluateRuntimeDatabasePosture(
         routine.name.startsWith("connect_subscription_core_personal("),
       )
         ? SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES
+        : []),
+      ...(posture.privateRoutines.some((routine) =>
+        routine.name.startsWith("subscription_provider_cutover_committed("),
+      )
+        ? SUBSCRIPTION_CORE_PRECURSOR_OWNER_ROUTINES
         : []),
     ];
     for (const signature of required) {

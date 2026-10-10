@@ -16,7 +16,7 @@ function resolverFor(policy: SubscriptionCoreRefreshPolicy, loaded: Loaded) {
     flightNamespace: `resolver-test-${crypto.randomUUID()}`,
     connectionId: crypto.randomUUID(),
     holderKey: "holder",
-    policy,
+    policy: () => policy,
     load: async () => ({ kind: "loaded", credential: loaded }),
     embeddedExpiry: () => null,
     refresh: async (current) => {
@@ -42,17 +42,41 @@ function credential(expiresAt: Date | null, lastRefreshAt: Date | null = null): 
 
 describe("shared credential resolver refresh policy", () => {
   test("the policy follows the adapter: none for a credential that never renews", () => {
-    expect(subscriptionCoreRefreshPolicy({ refresh: null })).toBeNull();
-    expect(
-      subscriptionCoreRefreshPolicy({
-        refresh: {
-          windowMs: 5,
-          fallbackMs: 7,
-          rotate: async () => ({}) as never,
-          reloginMessage: () => null,
-        },
-      }),
-    ).toEqual({ windowMs: 5, fallbackMs: 7 });
+    const capabilities = (autoRenews: boolean) => ({
+      autoRenews,
+      resetCredits: false,
+      extraCredits: false,
+      modelEntitlements: false,
+      realtime: false,
+      fundsMedia: false,
+      apps: false,
+      remoteCompaction: false,
+      quotaWindows: true,
+    });
+    const refresher = {
+      windowMs: 5,
+      fallbackMs: 7,
+      rotate: async () => ({}) as never,
+      reloginMessage: () => null,
+    };
+    // Renewal is decided per credential format (OAuth renews, a setup token
+    // does not), through the codec's format of the decoded credential.
+    const adapter = (refresh: typeof refresher | null) => ({
+      capabilitiesFor: (format: string) => capabilities(format === "oauth_v1"),
+      credential: {
+        decode: (plaintext: string) => plaintext,
+        encode: (credential: string) => credential,
+        expiry: () => null,
+        format: (credential: string) => credential,
+      },
+      refresh,
+    });
+    expect(subscriptionCoreRefreshPolicy(adapter(null), "oauth_v1")).toBeNull();
+    expect(subscriptionCoreRefreshPolicy(adapter(refresher), "oauth_v1")).toEqual({
+      windowMs: 5,
+      fallbackMs: 7,
+    });
+    expect(subscriptionCoreRefreshPolicy(adapter(refresher), "setup_token_v1")).toBeNull();
   });
 
   test("a renewing credential refreshes inside its window or when its age is unknown", async () => {
