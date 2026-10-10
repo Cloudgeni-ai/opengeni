@@ -196,6 +196,8 @@ export async function withSubscriptionCorePlacementWorld<T>(
                   // the subscription core's provider key is intentionally neutral.
                   providerId: model.provider === "codex" ? "codex-subscription" : model.provider,
                   modelId: model.id,
+                  // Subscription placement: these models never spend Opengeni credits.
+                  chargesCredits: false,
                 }).allowed,
             )
             .map((model) => model.id);

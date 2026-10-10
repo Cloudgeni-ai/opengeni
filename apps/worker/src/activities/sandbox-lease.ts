@@ -172,6 +172,7 @@ import {
   type SandboxIdleCheckpointPlan,
 } from "../sandbox-reaper-contract";
 import { CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES } from "../concurrency";
+import { browserCheckpointPrerequisites } from "./browser-deadline-checkpoint";
 import { assertSandboxDrainInputTiming, sandboxDrainTiming } from "../sandbox-reaper-timeout";
 import type { ControlActivityServices as ActivityServices } from "./types";
 import { reconcilePendingParentSystemUpdates } from "./parent-wake";
@@ -196,6 +197,7 @@ import {
   recordInteractionOnlyLeaseGauges,
   recordSandboxOrphansTerminated,
   recordSandboxCommandContainment,
+  recordSandboxIdleInteractionRelease,
   recordSandboxProviderMissingBeforeCapture,
   recordSandboxDockerWorkspaceRelease,
   recordSandboxRecoveryObservationGauges,
@@ -625,9 +627,18 @@ export function createSandboxLeaseActivities(
   async function prepareSandboxLeaseSweep(): Promise<SandboxLeaseSweepPlan> {
     const stopHeartbeat = startSandboxReaperHeartbeat({ phase: "prepare" });
     try {
-      const { db, settings, observability } = await services();
+      const { db, settings, observability, objectStorage } = await services();
       const timing = sandboxDrainTiming(settings);
       const commandContainment = {
+        // Browsers and desktops follow the general idle grace: unused for it,
+        // they stop holding the box (saved browsers resume on demand).
+        // Never under a minute, so a visible live view's 30 s heartbeat
+        // always lands inside the window.
+        idleInteractionReleaseMs: Math.max(settings.sandboxIdleGraceMs, 60_000),
+        idleBrowserCheckpoints: browserCheckpointPrerequisites(settings, objectStorage),
+        onIdleInteractionRelease: (
+          outcome: Parameters<typeof recordSandboxIdleInteractionRelease>[1],
+        ) => recordSandboxIdleInteractionRelease(observability, outcome),
         idleCommandContainmentMs: settings.sandboxIdleCommandContainmentMs,
         deadlineMandatoryCaptureLeadMs: sandboxDeadlineMandatoryCaptureLeadMs(settings),
         onCommandContainment: (outcome: Parameters<typeof recordSandboxCommandContainment>[1]) =>

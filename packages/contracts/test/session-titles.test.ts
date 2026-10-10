@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   AUTOMATIC_SESSION_TITLE_FALLBACK,
   AUTOMATIC_SESSION_TITLE_MAX_GRAPHEMES,
+  cleanStoredSessionTitle,
   deriveAutomaticSessionTitlePreview,
   deriveSessionDisplayTitle,
   normalizeAutomaticSessionTitle,
@@ -40,6 +41,28 @@ describe("automatic session titles", () => {
     expect(
       deriveSessionDisplayTitle({ title: "Use a <|pipe|> literally", titleSource: "user" }),
     ).toBe("Use a <|pipe|> literally");
+  });
+
+  test("cleans control tokens from stored automatic titles on read", () => {
+    expect(cleanStoredSessionTitle("iPhone Testing<|fim_suffix|>", "agent")).toBe("iPhone Testing");
+    expect(cleanStoredSessionTitle("<|im_start|>Release Plan<|im_end|>", null)).toBe(
+      "Release Plan",
+    );
+    expect(cleanStoredSessionTitle("<|endoftext|>", "agent")).toBeNull();
+    expect(cleanStoredSessionTitle("Use a <|pipe|> literally", "user")).toBe(
+      "Use a <|pipe|> literally",
+    );
+    // Titles without a token are returned byte for byte, including whitespace.
+    expect(cleanStoredSessionTitle("  Plain title ", "agent")).toBe("  Plain title ");
+    expect(cleanStoredSessionTitle(null, "agent")).toBeNull();
+    expect(
+      deriveSessionDisplayTitle({
+        id: "5f0c1d2e-3a4b-4c5d-8e6f-7a8b9c0d1e2f",
+        title: "<|endoftext|>",
+        titleSource: "agent",
+        initialMessage: "Plan the launch checklist",
+      }),
+    ).not.toContain("<|");
   });
 
   test("removes the closing quote or markdown mark of a wrapped title", () => {

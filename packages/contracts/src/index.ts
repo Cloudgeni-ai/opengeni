@@ -2623,9 +2623,22 @@ export const WorkspaceSettingsSchema = z
     // resolveWorkspaceAgentDefaults, so a value written by a newer release can
     // never fail this bag and revert unrelated settings; writes are strict.
     sessionAgentDefaults: z.unknown().optional(),
+    // The workspace credit switch: only an explicit false blocks every model
+    // billed in Opengeni credits (current and future); absent allows them.
+    // Read leniently so a malformed value never fails the whole bag.
+    allowCreditModels: z.boolean().optional().catch(undefined),
   })
   .passthrough();
 export type WorkspaceSettings = z.infer<typeof WorkspaceSettingsSchema>;
+
+/** Whether workspace settings allow models billed in Opengeni credits. */
+export function workspaceSettingsAllowCreditModels(settings: unknown): boolean {
+  return !(
+    settings !== null &&
+    typeof settings === "object" &&
+    (settings as { allowCreditModels?: unknown }).allowCreditModels === false
+  );
+}
 
 /** Explicit agent defaults for new sessions, or null when unset/unreadable. */
 export function resolveWorkspaceAgentDefaults(settings: unknown): WorkspaceAgentDefaults | null {
@@ -2806,6 +2819,8 @@ export const UpdateWorkspaceSettingsRequest = z
     defaultSandboxImage: WorkspaceDefaultSandboxImage.nullable().optional(),
     // Agent defaults for new sessions; null clears them.
     sessionAgentDefaults: WorkspaceAgentDefaults.nullable().optional(),
+    // False blocks every model billed in Opengeni credits in this workspace.
+    allowCreditModels: z.boolean().optional(),
   })
   .passthrough();
 export type UpdateWorkspaceSettingsRequest = z.infer<typeof UpdateWorkspaceSettingsRequest>;
@@ -2819,6 +2834,9 @@ export type SetWorkspaceDefaultRigRequest = z.infer<typeof SetWorkspaceDefaultRi
 // omitted) = unrestricted for that dimension; an EMPTY array is a valid,
 // explicit total block. Entries are provider ids / exact model ids as the
 // router resolves them (see evaluateWorkspaceModelPolicy).
+// The credit switch is not part of this body: it is the workspace setting
+// `allowCreditModels` (PATCH /v1/workspaces/:workspaceId/settings), so a PUT
+// never changes it and following the organization's allowlists keeps it.
 export const UpdateWorkspaceModelPolicyRequest = z.object({
   allowedProviders: z.array(z.string().min(1).max(128)).max(64).nullable().optional(),
   allowedModels: z.array(z.string().min(1).max(256)).max(256).nullable().optional(),
@@ -2841,6 +2859,12 @@ export const WorkspaceModelPolicyResponse = z.object({
       allowedModels: z.array(z.string()).nullable(),
     })
     .nullable(),
+  /**
+   * The workspace's credit switch (its `allowCreditModels` setting), whichever
+   * allowlist it follows. False blocks every model billed in Opengeni credits,
+   * including credit models added later.
+   */
+  allowCreditModels: z.boolean(),
 });
 export type WorkspaceModelPolicyResponse = z.infer<typeof WorkspaceModelPolicyResponse>;
 
@@ -19248,18 +19272,33 @@ export type HealthResponse = {
 export type WorkspaceModelPolicyContract = {
   allowedProviders: string[] | null;
   allowedModels: string[] | null;
+  /**
+   * False blocks every model whose workspace-facing cost is Opengeni credits
+   * (`cost: "credits"`), whatever the two allowlists say, so credit models
+   * added to the catalog later stay blocked too. Omitted reads as true.
+   */
+  allowCreditModels?: boolean;
 };
 
 export type WorkspaceModelPolicyVerdict =
   | { allowed: true }
-  | { allowed: false; reason: "provider" | "model" };
+  | { allowed: false; reason: "provider" | "model" | "credits" };
 
+/**
+ * `chargesCredits` is required on purpose: every enforcement point must say
+ * whether the candidate spends Opengeni credits (its configured `cost` is
+ * "credits"), so the credit switch cannot be skipped by a caller that only
+ * knows the provider and model ids.
+ */
 export function evaluateWorkspaceModelPolicy(
   policy: WorkspaceModelPolicyContract | null | undefined,
-  candidate: { providerId: string; modelId: string },
+  candidate: { providerId: string; modelId: string; chargesCredits: boolean },
 ): WorkspaceModelPolicyVerdict {
   if (!policy) {
     return { allowed: true };
+  }
+  if (policy.allowCreditModels === false && candidate.chargesCredits) {
+    return { allowed: false, reason: "credits" };
   }
   if (policy.allowedProviders !== null && !policy.allowedProviders.includes(candidate.providerId)) {
     return { allowed: false, reason: "provider" };
