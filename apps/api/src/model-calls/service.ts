@@ -59,7 +59,7 @@ import {
   SingleModelCallProviderError,
   SingleModelCallUnsupportedError,
   type SingleModelCallResult,
-} from "@opengeni/runtime";
+} from "@opengeni/runtime/model-call";
 import {
   XAI_CLIENT_VERSION,
   XAI_SUBSCRIPTION_MODEL_ID_PREFIX,
