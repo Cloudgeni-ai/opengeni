@@ -2134,10 +2134,26 @@ a provider name.
   Codex is seeded. A provider joins the core by a migration that inserts its
   row and, where needed, widens the provider lists in existing CHECK
   constraints; no routine changes.
+  The registry is append-only (a trigger refuses DELETE, TRUNCATE and a
+  changed key): removing or renaming a row would make the shared
+  disconnect-admission trigger skip that provider's rows while older binaries
+  still call its provider-named routines. The same trigger checks on every
+  registry write that `primary_setting_column` is a real uuid column of
+  `subscription_settings`; a migration that drops or renames such a column
+  must update the registry first (the `manage ... 'primary'` write fails with
+  an error, not a wrong write, if it does not).
 - Neutral capability kinds `refresh_authorized`, `refresh_write`,
   `connection_refresh_authorized` and `connection_owner` carry their provider
-  and mirror the `codex_*` kinds one for one, with owner-only policies that
-  admit them only for rows of the same provider.
+  (format-checked like a registry key) and mirror the `codex_*` kinds one for
+  one, with owner-only policies. On rows that carry a provider (connections,
+  aliases, leases) a capability admits only rows of its own provider.
+  Memberships, resource authorities, settings and Apps designations carry no
+  provider; their policies admit the owner's own rows for any provider's
+  owner capability, pinned to the capability's account, subject and (for
+  authorities and designations) exact connection, exactly as the Codex-named
+  policies do. The capability key omits the provider, so the owner-capability
+  grant refuses a second provider's grant on an already held key instead of
+  sharing the first provider's row.
 - Neutral routines (provider first) replace the Codex-named routines the
   generic runtime calls, with identical authorization, lock keys and order,
   fences, RLS posture and grants: the turn refresh seam
@@ -2171,6 +2187,14 @@ a provider name.
   `is_fedramp`), and the Codex adapter reads its FedRAMP flag from it, as the
   chat-turn credential load already did. The shared disconnect-admission trigger
   admits by registry membership instead of a provider literal.
+  Its "prior request outcome is unresolved" refusal text loses the provider
+  name (no caller matches the text).
+- Defect fixed in earlier merged work (migration 0691): the two `SECURITY
+  DEFINER` subscription guard triggers (`guard_subscription_disconnect_admission`
+  and `guard_subscription_designation_disconnect`) captured the migration
+  session's search path, without `pg_temp`, so a session's temporary table
+  could shadow the connection, turn or lease rows they check. 0705 sets their
+  search path to the data schema with `pg_temp` last.
 - Rolling compatibility and retirement. The Codex-named routines, kinds and
   policies stay unchanged for binaries that still call them (staging runs
   them since 0689/0700). They are dropped by the final M4 retirement step, or

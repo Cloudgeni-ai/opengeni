@@ -663,4 +663,299 @@ describe("provider-neutral subscription-core routines (migration 0705)", () => {
     },
     600_000,
   );
+
+  test.skipIf(!realDb)(
+    "connection health: quarantine and recover have the same fences and writes in both families",
+    async () => {
+      const results: Record<Family, unknown> = { codex: null, core: null };
+      for (const family of FAMILIES) {
+        const state = await ownerlessRefreshFixture(
+          { admin: database!.admin, client: client! },
+          false,
+        );
+        const [current] = await database!.admin<{ generation: string }[]>`
+          select refresh_generation::text as generation from subscription_connections
+          where id = ${state.connectionId}::uuid`;
+        const generation = Number(current!.generation);
+        const turn = async <T>(
+          work: (tx: Parameters<Parameters<typeof withRlsContext>[2]>[0]) => Promise<T>,
+        ) => await withSubscriptionCoreAcceptedTurn(client!.db, state.identity, work);
+        const quarantine = (
+          tx: Parameters<Parameters<typeof withRlsContext>[2]>[0],
+          input: {
+            leaseGeneration?: number;
+            refreshGeneration?: number;
+            status: string;
+            error: string;
+            retryInSeconds: number | null;
+          },
+        ) =>
+          rawRows<{ ok: boolean }>(
+            tx,
+            sql`select ${routine(family, "quarantine_subscription_codex_connection", "quarantine_subscription_core_connection")}
+              ${state.accountId}::uuid, ${state.workspaceId}::uuid, ${state.identity.sessionId}::uuid,
+              ${state.identity.turnId}::uuid, ${state.connectionId}::uuid, ${state.lease.holderId},
+              ${input.leaseGeneration ?? state.lease.generation}::bigint,
+              ${input.refreshGeneration ?? generation}::bigint, ${input.status}, ${input.error},
+              ${input.retryInSeconds === null ? null : sql`clock_timestamp() + make_interval(secs => ${input.retryInSeconds})`}) as ok`,
+          );
+        const recover = (tx: Parameters<Parameters<typeof withRlsContext>[2]>[0]) =>
+          rawRows<{ count: number }>(
+            tx,
+            sql`select ${routine(family, "recover_subscription_codex_connection_health", "recover_subscription_core_connection_health")}
+              ${state.accountId}::uuid, ${state.workspaceId}::uuid, ${state.identity.sessionId}::uuid,
+              ${state.identity.turnId}::uuid) as count`,
+          );
+        const row = async () => {
+          const [found] = await database!.admin`
+            select status, last_error, health_retry_at is not null as retry_set
+            from subscription_connections where id = ${state.connectionId}::uuid`;
+          return found;
+        };
+        const steps: Record<string, unknown> = {};
+        steps.wrongLease = await turn(
+          async (tx) =>
+            (
+              await quarantine(tx, {
+                leaseGeneration: state.lease.generation + 1,
+                status: "needs_relogin",
+                error: "x",
+                retryInSeconds: null,
+              })
+            )[0],
+        );
+        steps.staleRefresh = await turn(
+          async (tx) =>
+            (
+              await quarantine(tx, {
+                refreshGeneration: generation + 5,
+                status: "needs_relogin",
+                error: "x",
+                retryInSeconds: null,
+              })
+            )[0],
+        );
+        steps.badStatus = await turn(
+          async (tx) =>
+            (await quarantine(tx, { status: "disabled", error: "x", retryInSeconds: null }))[0],
+        );
+        steps.retryTooFar = await turn(
+          async (tx) =>
+            (await quarantine(tx, { status: "error", error: "x", retryInSeconds: 3 * 86_400 }))[0],
+        );
+        steps.notDue = await turn(async (tx) => (await recover(tx))[0]);
+        steps.quarantine = await turn(
+          async (tx) =>
+            (
+              await quarantine(tx, {
+                status: "error",
+                error: "upstream refused for now",
+                retryInSeconds: 3_600,
+              })
+            )[0],
+        );
+        steps.quarantined = await row();
+        steps.recoverEarly = await turn(async (tx) => (await recover(tx))[0]);
+        await database!.admin`update subscription_connections
+          set health_retry_at = clock_timestamp() - interval '1 second'
+          where id = ${state.connectionId}::uuid`;
+        steps.recover = await turn(async (tx) => (await recover(tx))[0]);
+        steps.recovered = await row();
+        steps.relogin = await turn(
+          async (tx) =>
+            (
+              await quarantine(tx, {
+                status: "needs_relogin",
+                error: "refresh token was revoked",
+                retryInSeconds: null,
+              })
+            )[0],
+        );
+        steps.reloginRow = await row();
+        results[family] = steps;
+      }
+      expect(results.core).toEqual(results.codex);
+      expect(results.codex).toMatchObject({
+        wrongLease: { status: "completed", value: { ok: false } },
+        staleRefresh: { status: "completed", value: { ok: false } },
+        badStatus: { status: "completed", value: { ok: false } },
+        retryTooFar: { status: "completed", value: { ok: false } },
+        notDue: { status: "completed", value: { count: 0 } },
+        quarantine: { status: "completed", value: { ok: true } },
+        quarantined: { status: "error", last_error: "upstream refused for now", retry_set: true },
+        recoverEarly: { status: "completed", value: { count: 0 } },
+        recover: { status: "completed", value: { count: 1 } },
+        recovered: { status: "active" },
+        relogin: { status: "completed", value: { ok: true } },
+        reloginRow: { status: "needs_relogin", last_error: "refresh token was revoked" },
+      });
+    },
+    600_000,
+  );
+
+  test.skipIf(!realDb)(
+    "disconnect admission still guards registered providers, and temporary tables cannot shadow it",
+    async () => {
+      const state = await ownerlessRefreshFixture(
+        { admin: database!.admin, client: client! },
+        false,
+      );
+      const renew = (shadow: boolean) =>
+        withSubscriptionCoreAcceptedTurn(client!.db, state.identity, async (tx) => {
+          if (shadow) {
+            await tx.execute(sql`create temp table subscription_connections
+              (account_id uuid, id uuid, disconnected_at timestamptz, status text) on commit drop`);
+            await tx.execute(sql`insert into pg_temp.subscription_connections
+              values (${state.accountId}::uuid, ${state.connectionId}::uuid, null, 'active')`);
+            await tx.execute(sql`grant select on pg_temp.subscription_connections to public`);
+          }
+          return (
+            await rawRows(
+              tx,
+              sql`update public.subscription_leases set holder_id = holder_id
+                where account_id = ${state.accountId}::uuid and turn_id = ${state.identity.turnId}::uuid
+                returning 1`,
+            )
+          ).length;
+        }).then(
+          (value) => ({ value }),
+          (error: unknown) => ({ error: String((error as { cause?: unknown }).cause ?? error) }),
+        );
+      expect(await renew(false)).toEqual({ value: { status: "completed", value: 1 } });
+      await database!.admin`update subscription_connections set status = 'disabled'
+        where id = ${state.connectionId}::uuid`;
+      const refused = { error: expect.stringMatching(/source is disconnected or unavailable/) };
+      expect({ plain: await renew(false), shadowed: await renew(true) }).toMatchObject({
+        plain: refused,
+        shadowed: refused,
+      });
+      const paths = await database!.admin<{ name: string; config: string[] }[]>`
+        select proc.proname as name, proc.proconfig as config from pg_proc proc
+        where proc.oid in ('opengeni_private.guard_subscription_disconnect_admission()'::regprocedure,
+          'opengeni_private.guard_subscription_designation_disconnect()'::regprocedure)
+        order by proc.proname`;
+      expect(paths.map((entry) => entry.config)).toEqual([
+        ["search_path=pg_catalog, public, pg_temp"],
+        ["search_path=pg_catalog, public, pg_temp"],
+      ]);
+    },
+    600_000,
+  );
+
+  test.skipIf(!realDb)(
+    "a second provider's capabilities admit no Codex rows; the registry is append-only",
+    async () => {
+      const state = await ownerlessRefreshFixture(
+        { admin: database!.admin, client: client! },
+        false,
+      );
+      const outcomes: Record<string, unknown> = {};
+      const rollback = new Error("rollback");
+      await database!.admin
+        .begin(async (tx) => {
+          const attempt = async (label: string, work: () => Promise<unknown>) => {
+            await tx`savepoint probe`;
+            try {
+              outcomes[label] = { value: await work() };
+            } catch (error) {
+              outcomes[label] = { error: (error as Error).message };
+            }
+            await tx`rollback to savepoint probe`;
+          };
+          await tx`insert into opengeni_private.subscription_core_providers (provider)
+            values ('neutral_probe')`;
+          await tx`select set_config('opengeni.account_id', ${state.accountId}, true),
+            set_config('opengeni.workspace_id', ${state.workspaceId}, true)`;
+          const refreshWrite = async (provider: string | null) => {
+            if (provider) {
+              await tx`insert into opengeni_private.subscription_runtime_capabilities
+                (backend_pid, transaction_id, capability_kind, account_id, workspace_id,
+                 connection_id, provider)
+                values (pg_backend_pid(), pg_current_xact_id(), 'refresh_write',
+                  ${state.accountId}::uuid, ${state.workspaceId}::uuid,
+                  ${state.connectionId}::uuid, ${provider})`;
+            }
+            await tx`set local role opengeni_app`;
+            const [role] = await tx<{ role: string; bypass: boolean }[]>`
+              select current_user as role, rolbypassrls as bypass from pg_roles
+              where rolname = current_user`;
+            const updated = await tx`update subscription_connections set updated_at = updated_at
+              where id = ${state.connectionId}::uuid returning 1`;
+            return { role: role!.role, bypass: role!.bypass, updated: updated.length };
+          };
+          await attempt("probeCapability", () => refreshWrite("neutral_probe"));
+          await attempt("codexCapability", () => refreshWrite("codex"));
+          await attempt("noCapability", () => refreshWrite(null));
+          await attempt("mismatchedGrant", async () => {
+            for (const provider of ["codex", "neutral_probe"]) {
+              await tx`select opengeni_subscription_internal.grant_subscription_core_owner_capability(
+                ${provider}, 'connection_owner', ${state.accountId}::uuid, ${state.workspaceId}::uuid,
+                ${state.subjectId}, ${state.connectionId}::uuid)`;
+            }
+            return "granted";
+          });
+          await attempt("regrantSameProvider", async () => {
+            for (let index = 0; index < 2; index += 1) {
+              await tx`select opengeni_subscription_internal.grant_subscription_core_owner_capability(
+                'codex', 'connection_owner', ${state.accountId}::uuid, ${state.workspaceId}::uuid,
+                ${state.subjectId}, ${state.connectionId}::uuid)`;
+            }
+            return "granted";
+          });
+          await attempt("badProviderKey", () =>
+            tx`insert into opengeni_private.subscription_runtime_capabilities
+              (backend_pid, transaction_id, capability_kind, account_id, workspace_id,
+               connection_id, provider)
+              values (pg_backend_pid(), pg_current_xact_id(), 'refresh_write',
+                ${state.accountId}::uuid, ${state.workspaceId}::uuid,
+                ${state.connectionId}::uuid, 'Not A Provider')`.then(() => "inserted"),
+          );
+          await attempt("deleteProvider", () =>
+            tx`delete from opengeni_private.subscription_core_providers where provider = 'codex'`.then(
+              () => "deleted",
+            ),
+          );
+          await attempt("renameProvider", () =>
+            tx`update opengeni_private.subscription_core_providers set provider = 'renamed'
+              where provider = 'codex'`.then(() => "renamed"),
+          );
+          await attempt("truncate", () =>
+            tx`truncate opengeni_private.subscription_core_providers`.then(() => "truncated"),
+          );
+          await attempt("missingColumn", () =>
+            tx`insert into opengeni_private.subscription_core_providers
+              (provider, primary_setting_column)
+              values ('neutral_probe_two', 'missing_primary_connection_id')`.then(() => "inserted"),
+          );
+          await attempt("flagUpdate", () =>
+            tx`update opengeni_private.subscription_core_providers set extra_credits = extra_credits
+              where provider = 'codex' returning provider`.then((rows) => rows.length),
+          );
+          throw rollback;
+        })
+        .catch((error: unknown) => {
+          if (error !== rollback) throw error;
+        });
+      expect(outcomes).toEqual({
+        probeCapability: { value: { role: "opengeni_app", bypass: false, updated: 0 } },
+        codexCapability: { value: { role: "opengeni_app", bypass: false, updated: 1 } },
+        noCapability: { value: { role: "opengeni_app", bypass: false, updated: 0 } },
+        mismatchedGrant: { error: "subscription capability is held for another provider" },
+        regrantSameProvider: { value: "granted" },
+        badProviderKey: {
+          error: expect.stringMatching(/subscription_runtime_capabilities_provider_chk/),
+        },
+        deleteProvider: { error: "subscription core providers are append-only" },
+        renameProvider: { error: "subscription core providers are append-only" },
+        truncate: { error: "subscription core providers are append-only" },
+        missingColumn: { error: "subscription_settings primary column is missing" },
+        flagUpdate: { value: 1 },
+      });
+      const [registry] = await database!.admin<{ providers: string[] }[]>`
+        select array_agg(provider order by provider) as providers
+        from opengeni_private.subscription_core_providers`;
+      expect(registry?.providers).toEqual(["codex"]);
+    },
+    600_000,
+  );
 });

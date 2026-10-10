@@ -11,7 +11,7 @@
  * administrator for a connection or setting that workspace manages. Nothing
  * here reads or writes a legacy Codex table, and nothing returns credential
  * material. Personal connections are listed only to their owner, through the
- * owner-only reader (`subscription_codex_personal_connections`, M3 PR 3b):
+ * owner-only reader (`subscription_core_personal_connections`, provider `codex`):
  * in the owner's Personal-workspace list and their sessions' "Running on".
  */
 import { sql } from "drizzle-orm";

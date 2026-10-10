@@ -43,6 +43,14 @@
 -- 4. The shared disconnect-admission trigger admits by registry membership
 --    instead of a provider literal; with the one registered provider this is
 --    the same rows and the same checks.
+-- 5. The registry is append-only (a removed or renamed provider would make
+--    the shared admission trigger skip that provider's rows while old
+--    binaries still call its provider-named routines), and every registered
+--    primary column is checked on each registry write.
+-- 6. The two SECURITY DEFINER subscription guard triggers resolve their
+--    unqualified tables with pg_temp last, so a session's temporary tables
+--    cannot shadow the connection, turn or lease rows they check (a defect
+--    in migration 0691, which captured the migration session's path).
 SET LOCAL lock_timeout = '5s';
 
 -- 1. The provider registry.
@@ -54,21 +62,45 @@ CREATE TABLE opengeni_private.subscription_core_providers (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 REVOKE ALL ON TABLE opengeni_private.subscription_core_providers FROM PUBLIC;
+DO $registry_guard$
+DECLARE data_schema text := current_schema();
+BEGIN
+  -- Append-only, and every registered primary column must be a real
+  -- subscription_settings uuid column.
+  EXECUTE format($ddl$
+    CREATE FUNCTION opengeni_private.guard_subscription_provider_registry()
+    RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path = pg_catalog, %1$I, pg_temp
+    AS $body$
+    BEGIN
+      IF TG_OP IN ('DELETE', 'TRUNCATE')
+        OR (TG_OP = 'UPDATE' AND NEW.provider IS DISTINCT FROM OLD.provider) THEN
+        RAISE EXCEPTION 'subscription core providers are append-only' USING ERRCODE = '55000';
+      END IF;
+      IF NEW.primary_setting_column IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM pg_catalog.pg_attribute attribute
+        WHERE attribute.attrelid = %2$L::regclass
+          AND attribute.attname = NEW.primary_setting_column
+          AND attribute.atttypid = 'uuid'::regtype AND NOT attribute.attisdropped
+      ) THEN
+        RAISE EXCEPTION 'subscription_settings primary column is missing' USING ERRCODE = '55000';
+      END IF;
+      RETURN NEW;
+    END
+    $body$
+  $ddl$, data_schema, format('%I.subscription_settings', data_schema));
+END
+$registry_guard$;
+REVOKE ALL ON FUNCTION opengeni_private.guard_subscription_provider_registry() FROM PUBLIC;
+CREATE TRIGGER subscription_core_providers_append_only
+  BEFORE INSERT OR UPDATE OR DELETE ON opengeni_private.subscription_core_providers
+  FOR EACH ROW EXECUTE FUNCTION opengeni_private.guard_subscription_provider_registry();
+CREATE TRIGGER subscription_core_providers_no_truncate
+  BEFORE TRUNCATE ON opengeni_private.subscription_core_providers
+  FOR EACH STATEMENT EXECUTE FUNCTION opengeni_private.guard_subscription_provider_registry();
 INSERT INTO opengeni_private.subscription_core_providers (provider, extra_credits, primary_setting_column)
 VALUES ('codex', true, 'codex_primary_connection_id');
-DO $registry_column$
-BEGIN
-  -- Every registered primary column must be a real subscription_settings uuid column.
-  IF EXISTS (SELECT 1 FROM opengeni_private.subscription_core_providers registry
-    WHERE registry.primary_setting_column IS NOT NULL
-      AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute attribute
-        WHERE attribute.attrelid = 'subscription_settings'::regclass
-          AND attribute.attname = registry.primary_setting_column
-          AND attribute.atttypid = 'uuid'::regtype AND NOT attribute.attisdropped)) THEN
-    RAISE EXCEPTION 'subscription_settings primary column is missing';
-  END IF;
-END
-$registry_column$;
 
 -- 2. Neutral capability kinds, bound to their provider.
 ALTER TABLE opengeni_private.subscription_runtime_capabilities
@@ -112,16 +144,16 @@ ALTER TABLE opengeni_private.subscription_runtime_capabilities
       AND provider = 'codex' AND session_id IS NULL AND turn_id IS NULL
       AND session_owner_subject_id IS NOT NULL AND turn_human_subject_id IS NULL)
     OR (capability_kind IN ('refresh_authorized', 'refresh_write')
-      AND provider IS NOT NULL AND workspace_id IS NOT NULL
+      AND provider ~ '^[a-z][a-z0-9_]{1,31}$' AND workspace_id IS NOT NULL
       AND session_id IS NOT NULL AND turn_id IS NOT NULL
       AND ((session_owner_subject_id IS NOT NULL AND turn_human_subject_id IS NOT NULL)
         OR (session_owner_subject_id IS NULL AND turn_human_subject_id IS NULL)))
     OR (capability_kind IN ('connection_refresh_authorized', 'refresh_write')
-      AND provider IS NOT NULL AND workspace_id IS NOT NULL
+      AND provider ~ '^[a-z][a-z0-9_]{1,31}$' AND workspace_id IS NOT NULL
       AND session_id IS NULL AND turn_id IS NULL
       AND session_owner_subject_id IS NULL AND turn_human_subject_id IS NULL)
     OR (capability_kind = 'connection_owner'
-      AND provider IS NOT NULL AND session_id IS NULL AND turn_id IS NULL
+      AND provider ~ '^[a-z][a-z0-9_]{1,31}$' AND session_id IS NULL AND turn_id IS NULL
       AND session_owner_subject_id IS NOT NULL AND turn_human_subject_id IS NULL)
   );
 
@@ -150,9 +182,12 @@ BEGIN
   EXECUTE format($ddl$
     CREATE FUNCTION opengeni_subscription_internal.grant_subscription_core_owner_capability(p_provider text, p_kind text, p_account_id uuid, p_workspace_id uuid, p_subject_id text, p_connection_id uuid)
     RETURNS void
-    LANGUAGE sql
+    LANGUAGE plpgsql
     SET search_path = pg_catalog, %1$I, pg_temp
     AS $body$
+    BEGIN
+      -- The capability key omits the provider; a second provider's grant on
+      -- the same key is refused rather than silently sharing the first row.
       INSERT INTO opengeni_private.subscription_runtime_capabilities (
         backend_pid, transaction_id, capability_kind, account_id, workspace_id, connection_id,
         provider, session_owner_subject_id
@@ -162,6 +197,11 @@ BEGIN
       ) ON CONFLICT (backend_pid, transaction_id, capability_kind, account_id, connection_id)
         DO UPDATE SET workspace_id = EXCLUDED.workspace_id,
           session_owner_subject_id = EXCLUDED.session_owner_subject_id
+        WHERE subscription_runtime_capabilities.provider = EXCLUDED.provider;
+      IF NOT FOUND THEN
+        RAISE EXCEPTION 'subscription capability is held for another provider' USING ERRCODE = '42501';
+      END IF;
+    END
     $body$
   $ddl$, data_schema);
   EXECUTE format($ddl$
@@ -1722,8 +1762,14 @@ END
 $grant_neutral_routines$;
 
 -- 2. Owner-only policies admitting the neutral kinds, one for one with the
--- provider-named policies of migrations 0667 and 0688. A capability admits
--- rows of the provider it was minted for.
+-- provider-named policies of migrations 0667 and 0688. On rows that carry a
+-- provider (connections, aliases, leases) a capability admits only rows of
+-- the provider it was minted for. Memberships, authorities, settings and
+-- Apps designations carry no provider: they admit the owner's own rows for
+-- any provider's owner capability, pinned to the capability's account,
+-- subject and (for authorities and designations) exact connection, exactly
+-- as the provider-named policies do. Every writer drops its capability
+-- before returning.
 CREATE POLICY subscription_core_refresh_read ON subscription_connections FOR SELECT
   USING (opengeni_private.subscription_core_refresh_write_allowed(
     provider, account_id, nullif(current_setting('opengeni.workspace_id', true), '')::uuid, id));
@@ -1855,3 +1901,13 @@ BEGIN
   EXECUTE definition;
 END
 $admission$;
+
+-- 6. Temporary tables must not shadow the rows the guard triggers check.
+DO $guard_paths$
+BEGIN
+  EXECUTE format('ALTER FUNCTION opengeni_private.guard_subscription_disconnect_admission() '
+    'SET search_path = pg_catalog, %I, pg_temp', current_schema());
+  EXECUTE format('ALTER FUNCTION opengeni_private.guard_subscription_designation_disconnect() '
+    'SET search_path = pg_catalog, %I, pg_temp', current_schema());
+END
+$guard_paths$;
