@@ -40,9 +40,15 @@ Each organization subscription account has its own page.
 - Usage: the page shows remaining usage and when it resets. When every eligible
   account is exhausted, new work waits for capacity and continues by itself when
   usage returns; it is not failed.
-- Usage limit resets: a plan may offer a reset. Only the person who connected
-  the account can redeem it, in their own browser. An agent can say that one is
-  available and what it does, but cannot redeem it.
+- Usage limit resets: a plan may offer resets that give the account a fresh
+  5-hour and weekly limit. The account's row shows how many are waiting, and
+  its page lists them under Usage limit resets with their expiry. Redeeming is
+  irreversible and done by a person in their own browser: an organization
+  account by an organization owner or admin, from Organization settings >
+  Models > the account's page, even when no workspace uses it; a workspace's
+  own account by the person who connected it, from that workspace's Models
+  page. An agent can read how many are available and when they expire, and
+  explain what one does, but cannot redeem it; send the person to that page.
 - Disconnect: workspaces stop using the account for new work, work already
   running finishes first, and reconnecting needs a new sign-in. Confirm with the
   person before disconnecting.

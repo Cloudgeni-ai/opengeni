@@ -56,12 +56,16 @@ import {
   withSessionRlsActorContext,
   claimCodexResetRedemption,
   assertOrganizationCodexAdministrator,
+  buildOrganizationCodexAdministratorTokenResolver,
   encryptEnvironmentValue,
+  findOrganizationCodexConnectionForAdministrator,
   fetchOrganizationCodexUsageForAccount,
   fenceCodexResetRedemptionSend,
   getCodexResetRedemptionAttempt,
+  getSubscriptionCoreOrganizationCodexProjection,
   nestedPostgresSqlState,
   releaseCodexResetRedemptionClaim,
+  resolveOrganizationCodexRedemptionWorkspace,
   activeCodexPlanExclusions,
   type CodexAccountStatus,
 } from "@opengeni/db";
@@ -866,6 +870,74 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.json(codexUsageJson(usage));
   });
 
+  // One organization account's usage and usage limit resets, for its page on
+  // the organization's Models page (any workspace use not required).
+  app.get("/v1/organizations/:organizationId/codex/accounts/:accountId/overview", async (c) => {
+    const organizationId = c.req.param("organizationId");
+    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+    return await coreOrganizationCodexOverview(
+      c,
+      deps,
+      organizationId,
+      human,
+      c.req.param("accountId"),
+    );
+  });
+
+  // Redeem an organization account's usage limit reset from the organization's
+  // Models page: the same HMAC confirmation, single-use ledger fences and
+  // ambiguous-outcome recovery as a workspace page, for an organization
+  // administrator in their own browser only.
+  app.post(
+    "/v1/organizations/:organizationId/codex/accounts/:accountId/reset-credits/prepare",
+    async (c) => {
+      const organizationId = c.req.param("organizationId");
+      const credentialId = c.req.param("accountId");
+      const { human, workspaceId } = await requireOrganizationRedemptionHuman(
+        c,
+        deps,
+        organizationId,
+      );
+      await codexRouteDisposition(deps, organizationId);
+      return await coreCodexResetPrepare(
+        c,
+        deps,
+        { human, accountId: organizationId, workspaceId, credentialId },
+        () =>
+          organizationRedemptionTarget(deps, {
+            organizationId,
+            subjectId: human.subjectId,
+            credentialId,
+          }),
+      );
+    },
+  );
+
+  app.post(
+    "/v1/organizations/:organizationId/codex/accounts/:accountId/reset-credits/redeem",
+    async (c) => {
+      const organizationId = c.req.param("organizationId");
+      const credentialId = c.req.param("accountId");
+      const { human, workspaceId } = await requireOrganizationRedemptionHuman(
+        c,
+        deps,
+        organizationId,
+      );
+      await codexRouteDisposition(deps, organizationId);
+      return await coreCodexResetRedeem(
+        c,
+        deps,
+        { human, accountId: organizationId, workspaceId, credentialId },
+        () =>
+          organizationRedemptionTarget(deps, {
+            organizationId,
+            subjectId: human.subjectId,
+            credentialId,
+          }),
+      );
+    },
+  );
+
   app.post("/v1/organizations/:organizationId/codex/connect/start", async (c) => {
     const organizationId = c.req.param("organizationId");
     requireSameOriginBrowserMutation(c, deps);
@@ -1506,8 +1578,28 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
 type CoreRedemptionInput = {
   human: ManagedCookieHuman;
   accountId: string;
+  /** The workspace whose redemption ledger files the attempt. */
   workspaceId: string;
   credentialId: string;
+};
+
+/**
+ * The account a redemption targets, and how its provider calls are made. A
+ * workspace page reaches it through the workspace's pool; the organization
+ * page reaches an organization-managed account directly, as an organization
+ * administrator, whether or not any workspace uses it.
+ */
+type RedemptionTarget = {
+  credentialId: string;
+  organizationManaged: boolean;
+  provider: () => {
+    getToken: () => Promise<{
+      accessToken: string;
+      chatgptAccountId: string | null;
+      isFedramp: boolean;
+    }>;
+    fetch: CodexFetch;
+  };
 };
 
 /** Ledger and authority reads run as the browser human, never the ambient actor. */
@@ -1534,10 +1626,227 @@ async function coreRedemptionTarget(deps: ApiRouteDeps, input: CoreRedemptionInp
   return { credentialId: canonical, account };
 }
 
+async function workspaceRedemptionTarget(
+  deps: ApiRouteDeps,
+  input: CoreRedemptionInput,
+): Promise<RedemptionTarget> {
+  const { credentialId, account } = await coreRedemptionTarget(deps, input);
+  const scope = coreCodexConnectionScope(input, input.human.subjectId);
+  return {
+    credentialId,
+    organizationManaged: account.source === "organization",
+    provider: () => ({
+      getToken: () =>
+        buildSubscriptionCoreCodexConnectionTokenResolver(
+          deps.db,
+          deps.settings,
+          scope,
+          credentialId,
+          null,
+        ).getToken(),
+      fetch: buildSubscriptionCoreCodexOperationFetch(
+        deps.db,
+        scope,
+        null,
+        credentialId,
+        (deps.codexFetch ?? fetch) as CodexFetch,
+      ),
+    }),
+  };
+}
+
+/** An organization-managed account, read by an organization administrator. */
+async function organizationRedemptionTarget(
+  deps: ApiRouteDeps,
+  input: { organizationId: string; subjectId: string; credentialId: string },
+): Promise<RedemptionTarget> {
+  const found = z.uuid().safeParse(input.credentialId).success
+    ? await findOrganizationCodexConnectionForAdministrator(deps.db, deps.settings, {
+        organizationId: input.organizationId,
+        actorSubjectId: input.subjectId,
+        credentialId: input.credentialId,
+      })
+    : null;
+  if (!found) throw new HTTPException(404, { message: "codex account not found" });
+  return {
+    credentialId: found.credentialId,
+    organizationManaged: true,
+    provider: () => ({
+      getToken: () =>
+        buildOrganizationCodexAdministratorTokenResolver(deps.db, deps.settings, {
+          organizationId: input.organizationId,
+          actorSubjectId: input.subjectId,
+          credentialId: found.credentialId,
+        }).getToken(),
+      fetch: (deps.codexFetch ?? fetch) as CodexFetch,
+    }),
+  };
+}
+
 function organizationManagedRedemption(): never {
   throw new HTTPException(409, {
     message: "organization Codex subscriptions are managed in Organization settings",
   });
+}
+
+/**
+ * An organization administrator redeeming from the organization's Models
+ * page: the person in their own managed browser (never an agent, an API key
+ * or a delegated bearer), and the workspace whose ledger files the attempt.
+ */
+async function requireOrganizationRedemptionHuman(
+  c: Context,
+  deps: ApiRouteDeps,
+  organizationId: string,
+): Promise<{ human: ManagedCookieHuman; workspaceId: string }> {
+  if (deps.settings.productAccessMode !== "managed") {
+    throw new HTTPException(403, { message: "reset redemption requires managed product mode" });
+  }
+  requireNotAgent(c, "Redeeming a usage limit reset");
+  if (c.req.header("authorization")) {
+    throw new HTTPException(403, {
+      message: "authorization bearer is not allowed for redemption",
+    });
+  }
+  requireSameOriginBrowserMutation(c, deps);
+  const browser = await managedCookieHuman(c, deps);
+  if (!browser) {
+    throw new HTTPException(401, { message: "managed browser session required" });
+  }
+  const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+  if (human.subjectId !== browser.subjectId) {
+    throw new HTTPException(403, { message: "managed browser identity mismatch" });
+  }
+  const workspaceId = await resolveOrganizationCodexRedemptionWorkspace(deps.db, {
+    organizationId,
+    actorSubjectId: browser.subjectId,
+  });
+  if (!workspaceId) {
+    throw new HTTPException(409, {
+      message: "create a workspace first: usage limit reset redemptions are recorded in one",
+    });
+  }
+  return { human: browser, workspaceId };
+}
+
+/**
+ * One organization-managed account's usage and usage limit resets on the
+ * organization's Models page, whether or not any workspace uses it. Anyone
+ * who may manage the organization's Codex accounts can read it (an agent
+ * acting as an administrator included); only an organization administrator
+ * in their own browser gets redemption flags and their recoverable attempts.
+ */
+async function coreOrganizationCodexOverview(
+  c: Context,
+  deps: ApiRouteDeps,
+  organizationId: string,
+  human: ManagedCookieHuman,
+  rawCredentialId: string,
+) {
+  c.header("cache-control", "no-store");
+  const mode = await codexRouteDisposition(deps, organizationId);
+  const target = await organizationRedemptionTarget(deps, {
+    organizationId,
+    subjectId: human.subjectId,
+    credentialId: rawCredentialId,
+  });
+  const credentialId = target.credentialId;
+  const { accounts } = await getSubscriptionCoreOrganizationCodexProjection(deps.db, {
+    organizationId,
+    subjectId: human.subjectId,
+  });
+  const row = accounts.find((account) => account.id === credentialId);
+  if (!row) throw new HTTPException(404, { message: "codex account not found" });
+  const browser = isAgentActingAsPerson(c) ? null : await managedCookieHuman(c, deps);
+  const browserHuman =
+    deps.settings.productAccessMode === "managed" && browser?.subjectId === human.subjectId
+      ? browser
+      : null;
+  const workspaceId = browserHuman
+    ? await resolveOrganizationCodexRedemptionWorkspace(deps.db, {
+        organizationId,
+        actorSubjectId: browserHuman.subjectId,
+      })
+    : null;
+  const authority =
+    browserHuman && workspaceId
+      ? await asRedemptionHuman(browserHuman, () =>
+          readSubscriptionCoreCodexResetAuthority(deps.db, {
+            accountId: organizationId,
+            workspaceId,
+            credentialId,
+            subjectId: browserHuman.subjectId,
+          }),
+        ).catch(() => null)
+      : null;
+  const canResumeRedemption = authority?.owned === true;
+  const redemptions =
+    canResumeRedemption && browserHuman && workspaceId
+      ? (
+          await asRedemptionHuman(browserHuman, () =>
+            listSubscriptionCoreCodexResetRedemptionRecoveries(deps.db, {
+              accountId: organizationId,
+              workspaceId,
+              subjectId: browserHuman.subjectId,
+            }),
+          )
+        ).filter((recovery) => recovery.credentialId === credentialId)
+      : [];
+  const redemptionAccess: CodexRedemptionAccess = {
+    ownership: !browserHuman
+      ? "managed_human_unavailable"
+      : canResumeRedemption
+        ? "current_human"
+        : "different_human",
+    canClaimUnownedViaReconnect: false,
+  };
+  const sources: CodexOverviewSources = {
+    usage: () =>
+      fetchOrganizationCodexUsageForAccount(
+        deps.db,
+        deps.settings,
+        { organizationId, actorSubjectId: human.subjectId, credentialId, mode },
+        deps.codexFetch ?? fetch,
+      ),
+    details: async () => {
+      const provider = target.provider();
+      let token;
+      try {
+        token = await provider.getToken();
+      } catch (error) {
+        return {
+          ok: false as const,
+          status: 0,
+          reason:
+            error instanceof CodexReloginRequired
+              ? ("needs_relogin" as const)
+              : ("network_error" as const),
+        };
+      }
+      return await fetchCodexRateLimitResetCredits(
+        {
+          accessToken: token.accessToken,
+          chatgptAccountId: token.chatgptAccountId,
+          isFedramp: token.isFedramp,
+          clientVersion: CODEX_CLIENT_VERSION,
+        },
+        provider.fetch,
+      );
+    },
+  };
+  return c.json(
+    await fetchCodexAccountOverview(
+      deps,
+      workspaceId ?? organizationId,
+      row,
+      redemptionAccess,
+      canResumeRedemption && row.status === "active",
+      canResumeRedemption,
+      redemptions,
+      createProviderCallLimiter(2),
+      sources,
+    ),
+  );
 }
 
 /** An agent acting as a person may not redeem on the core (design 6.3). */
@@ -1561,7 +1870,12 @@ function coreCodexConnectionScope(
   };
 }
 
-async function coreCodexResetPrepare(c: Context, deps: ApiRouteDeps, input: CoreRedemptionInput) {
+async function coreCodexResetPrepare(
+  c: Context,
+  deps: ApiRouteDeps,
+  input: CoreRedemptionInput,
+  resolveTarget: () => Promise<RedemptionTarget> = () => workspaceRedemptionTarget(deps, input),
+) {
   requireBrowserRedemption(c);
   c.header("cache-control", "no-store");
   const parsed = redemptionPrepareBody.safeParse(await c.req.json().catch(() => null));
@@ -1569,7 +1883,7 @@ async function coreCodexResetPrepare(c: Context, deps: ApiRouteDeps, input: Core
     throw new HTTPException(400, { message: "attemptId and creditId are required" });
   }
   const { human, accountId, workspaceId } = input;
-  const { credentialId, account } = await coreRedemptionTarget(deps, input);
+  const { credentialId, organizationManaged } = await resolveTarget();
   return await asRedemptionHuman(human, async () => {
     const authority = await readSubscriptionCoreCodexResetAuthority(deps.db, {
       accountId,
@@ -1577,7 +1891,7 @@ async function coreCodexResetPrepare(c: Context, deps: ApiRouteDeps, input: Core
       credentialId,
       subjectId: human.subjectId,
     });
-    if (account.source === "organization" && !authority?.owned) organizationManagedRedemption();
+    if (organizationManaged && !authority?.owned) organizationManagedRedemption();
     if (!authority) throw new HTTPException(404, { message: "codex account not found" });
     let existing = await getCodexResetRedemptionAttempt(
       deps.db,
@@ -1686,7 +2000,12 @@ async function coreCodexResetPrepare(c: Context, deps: ApiRouteDeps, input: Core
   });
 }
 
-async function coreCodexResetRedeem(c: Context, deps: ApiRouteDeps, input: CoreRedemptionInput) {
+async function coreCodexResetRedeem(
+  c: Context,
+  deps: ApiRouteDeps,
+  input: CoreRedemptionInput,
+  resolveTarget: () => Promise<RedemptionTarget> = () => workspaceRedemptionTarget(deps, input),
+) {
   requireBrowserRedemption(c);
   c.header("cache-control", "no-store");
   const parsed = redemptionBody.safeParse(await c.req.json().catch(() => null));
@@ -1698,7 +2017,8 @@ async function coreCodexResetRedeem(c: Context, deps: ApiRouteDeps, input: CoreR
     throw new HTTPException(503, { message: "managed browser confirmation is unavailable" });
   }
   const { human, accountId, workspaceId } = input;
-  const { credentialId, account } = await coreRedemptionTarget(deps, input);
+  const target = await resolveTarget();
+  const { credentialId } = target;
   const claims = await verifyCodexRedemptionConfirmation(secret, parsed.data.confirmationToken);
   if (
     !claims ||
@@ -1734,7 +2054,7 @@ async function coreCodexResetRedeem(c: Context, deps: ApiRouteDeps, input: CoreR
       throw new HTTPException(404, { message: "codex account not found" });
     }
     if (claimed.kind === "forbidden") {
-      if (account.source === "organization") organizationManagedRedemption();
+      if (target.organizationManaged) organizationManagedRedemption();
       throw new HTTPException(403, { message: "redemption owner or credential is unavailable" });
     }
     if (claimed.kind === "conflict") {
@@ -1748,19 +2068,11 @@ async function coreCodexResetRedeem(c: Context, deps: ApiRouteDeps, input: CoreR
     if (claimed.kind === "completed") return finishResponse(claimed.attempt.outcome!);
 
     const attempt = claimed.attempt;
-    const fetchImpl = (deps.codexFetch ?? fetch) as CodexFetch;
     const ledger = { accountId, workspaceId, attemptId: attempt.id, claimHolderId };
-    let token: Awaited<
-      ReturnType<ReturnType<typeof buildSubscriptionCoreCodexConnectionTokenResolver>["getToken"]>
-    >;
+    const provider = target.provider();
+    let token: Awaited<ReturnType<typeof provider.getToken>>;
     try {
-      token = await buildSubscriptionCoreCodexConnectionTokenResolver(
-        db,
-        deps.settings,
-        coreCodexConnectionScope(input, human.subjectId),
-        credentialId,
-        null,
-      ).getToken();
+      token = await provider.getToken();
     } catch {
       if (attempt.status === "processing") {
         await abandonCodexResetRedemptionBeforeProvider(db, ledger);
@@ -1784,13 +2096,7 @@ async function coreCodexResetRedeem(c: Context, deps: ApiRouteDeps, input: CoreR
       isFedramp: token.isFedramp,
       clientVersion: CODEX_CLIENT_VERSION,
     };
-    const requestFetch = buildSubscriptionCoreCodexOperationFetch(
-      db,
-      coreCodexConnectionScope(input, human.subjectId),
-      null,
-      credentialId,
-      fetchImpl,
-    );
+    const requestFetch = provider.fetch;
     if (attempt.status === "processing") {
       const details = await fetchCodexRateLimitResetCredits(auth, requestFetch);
       if (!details.ok) {
