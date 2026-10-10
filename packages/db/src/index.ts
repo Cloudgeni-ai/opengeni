@@ -61067,41 +61067,12 @@ export async function removeEnrollment(
           })),
         );
 
-        const activePointerTurn = activePointers.find((pointer) => pointer.activeTurnId !== null);
-        if (activePointerTurn) {
-          const result: MachineRemovalResult = {
-            ...baseResult,
-            outcome: "blocked",
-            removed: false,
-            code: "active_commands",
-            message: `Machine is selected by session ${activePointerTurn.title?.trim() || activePointerTurn.sessionId} while it has an active turn.`,
-            action: "Wait for or stop the active turn, then retry removal.",
-          };
-          await scopedDb.insert(schema.machineRemovalOperations).values({
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            enrollmentId: enrollment.id,
-            operationKey,
-            requestFingerprint,
-            outcome: result.outcome,
-            result,
-          });
-          await scopedDb.insert(schema.auditEvents).values({
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            subjectId: input.subjectId ?? null,
-            action: "connected_machine.removal_blocked",
-            targetType: "enrollment",
-            targetId: enrollment.id,
-            metadata: {
-              code: result.code,
-              sessionId: activePointerTurn.sessionId,
-              turnId: activePointerTurn.activeTurnId,
-              message: result.message,
-            },
-          });
-          return result;
-        }
+        // A conversation with a queued, paused or recovering turn is not work
+        // running on the machine; only the machine's lease below proves that.
+        // Such conversations are detached like idle ones: their next attempt
+        // finds no machine route and uses their managed sandbox instead.
+        // ("active_commands" remains a valid code in stored older results.)
+        const waitingTurns = activePointers.filter((pointer) => pointer.activeTurnId !== null);
 
         const [lease] = await scopedDb
           .select({
@@ -61209,6 +61180,9 @@ export async function removeEnrollment(
             targetId: enrollment.id,
             metadata: {
               sessionIds: detached.map((session) => session.sessionId),
+              // Turns that were waiting (queued, paused or recovering) when
+              // the machine was detached from their conversations.
+              waitingTurnIds: waitingTurns.map((pointer) => pointer.activeTurnId),
               replacementBackend: "none",
             },
           });
