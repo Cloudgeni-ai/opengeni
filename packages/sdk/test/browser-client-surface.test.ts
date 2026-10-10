@@ -95,6 +95,10 @@ const agentInteractionMethods = [
   "openBrowserTargetWithInventory",
 ];
 
+// Server-side integrations replace the Skills a session carries; the web
+// console does not call this method.
+const integrationMethods = ["updateSessionSkills"];
+
 // The native app exchanges its sign-in code, signs out and manages its push
 // device through the public client. The web app only starts the authorization.
 const nativeAppMethods = [
@@ -183,6 +187,7 @@ describe("browser client runtime surface", () => {
       [
         ...legacyBrowserUnusedMethods,
         ...agentInteractionMethods,
+        ...integrationMethods,
         ...nativeAppMethods,
         ...retiredSettingsMethods,
       ].sort(),
