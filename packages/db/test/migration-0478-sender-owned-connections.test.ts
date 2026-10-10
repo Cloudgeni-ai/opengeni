@@ -66,7 +66,7 @@ const withheldMigrations = [
   // Rewrites the inbox routines from the withheld inbox tail and reads its columns.
   "0708_inbox_member_notifications.sql",
   // Records receipts over withheld 0689 and patches the capture function from withheld 0478.
-  "0711_subscription_core_generic_precursor.sql",
+  "0712_subscription_core_generic_precursor.sql",
 ];
 let database: OwnerMigratedTestDatabase | null = null;
 

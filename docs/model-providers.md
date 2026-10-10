@@ -1770,6 +1770,18 @@ Gateway catalogue tests pin the exact Baseten/Wafer rates and caching claims;
 offline llm-prices coverage uses
 `scripts/fixtures/llm-prices-current-v1.sample.json`.
 
+### Single model calls
+
+Session titles and the public OpenAI-compatible Chat Completions endpoint share
+one provider-neutral request path, `runSingleModelCall` in
+`packages/runtime/src/single-model-call.ts`: one nonstreaming or streaming
+model request with no tools, on the model's own wire (Responses, Chat
+Completions or native Claude Messages). Usage settles through the same
+`settleModelUsage` pricing as turns. Subscription routes keep titles on the
+turn's account: Codex subscription turns title with `codex/gpt-6-luna`, and
+Claude subscription turns with Claude Haiku 5.5. Endpoint parameters, billing
+and subscription admission are in [`chat-completions.md`](chat-completions.md).
+
 ## Evidence-bounded Grok 4.5 support
 
 Grok 4.5 is supported only as an explicitly configured deployment through

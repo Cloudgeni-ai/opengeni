@@ -5,9 +5,13 @@ import {
   resolveAgentConfig,
 } from "@opengeni/contracts";
 import {
+  claudeProviderId,
   DEFAULT_OPENROUTER_MODEL_ID,
   ORGANIZATION_OPENROUTER_MODEL_ID_PREFIX,
   WORKSPACE_OPENROUTER_MODEL_ID_PREFIX,
+  withClaudeConnectionCatalog,
+  withClaudeConnectionCredential,
+  withCodexCatalogProvider,
   withOrganizationOpenRouterCredential,
   withWorkspaceOpenRouterCredential,
 } from "@opengeni/config";
@@ -15,11 +19,14 @@ import { resolveTurnModel } from "@opengeni/runtime";
 import { testSettings } from "@opengeni/testing";
 
 import {
+  CLAUDE_SESSION_TITLE_UPSTREAM_MODEL_ID,
+  CODEX_SESSION_TITLE_MODEL_ID,
   createSessionTitleAttemptToolDefinition,
   routeAllowsSessionTitleRequests,
   SESSION_TITLE_MODEL_TOOL_NAME,
   sessionTitleGenerationOptions,
   sessionTitleReasoningEffort,
+  sessionTitleRoute,
   sessionTitleToolPlan,
   shouldRequestMissingSessionTitle,
   startParallelSessionTitleGeneration,
@@ -563,5 +570,94 @@ describe("sessionTitleGenerationOptions", () => {
       signal,
     });
     expect(unresolved).toEqual({ modelName: "scripted-model", signal });
+  });
+});
+
+describe("sessionTitleRoute", () => {
+  const codexSettings = withCodexCatalogProvider(
+    testSettings({ sandboxBackend: "none", codexSubscriptionEnabled: true }),
+  );
+  const claudeSettings = withClaudeConnectionCredential(
+    withClaudeConnectionCatalog(
+      testSettings({ sandboxBackend: "none", claudeSubscriptionEnabled: true }),
+      { claude_subscription: { models: [{ upstreamModelId: "claude-opus-5-5" }] } },
+      "workspace",
+    ),
+    "claude_subscription",
+    "subscription-token",
+    "workspace",
+  );
+
+  test("Codex subscription turns title on Luna through the turn's account", () => {
+    const turn = resolveTurnModel(codexSettings, "codex/gpt-6-sol")!;
+    const route = sessionTitleRoute({
+      resolvedModel: turn,
+      modelName: turn.configured.upstreamModelId,
+      resolveTurnModel: (id) => resolveTurnModel(codexSettings, id),
+    });
+    expect(route.modelName).toBe("gpt-6-luna");
+    expect(route.usageModelId).toBe(CODEX_SESSION_TITLE_MODEL_ID);
+    expect(route.resolvedModel?.client).toBe(turn.client);
+    expect(route.resolvedModel?.provider).toBe(turn.provider);
+    expect(route.resolvedModel?.configured.id).toBe(CODEX_SESSION_TITLE_MODEL_ID);
+  });
+
+  test("a Luna turn and a catalog without Luna keep the turn's model", () => {
+    const luna = resolveTurnModel(codexSettings, CODEX_SESSION_TITLE_MODEL_ID)!;
+    expect(
+      sessionTitleRoute({
+        resolvedModel: luna,
+        modelName: "gpt-6-luna",
+        resolveTurnModel: (id) => resolveTurnModel(codexSettings, id),
+      }),
+    ).toEqual({ resolvedModel: luna, modelName: "gpt-6-luna", usageModelId: null });
+    const sol = resolveTurnModel(codexSettings, "codex/gpt-6-sol")!;
+    expect(
+      sessionTitleRoute({
+        resolvedModel: sol,
+        modelName: "gpt-6-sol",
+        resolveTurnModel: () => null,
+      }),
+    ).toEqual({ resolvedModel: sol, modelName: "gpt-6-sol", usageModelId: null });
+  });
+
+  test("Claude subscription turns title on Haiku on the same provider", () => {
+    const turnId = `${claudeProviderId("claude_subscription", "workspace")}/claude-opus-5-5`;
+    const turn = resolveTurnModel(claudeSettings, turnId)!;
+    expect(turn.provider.kind).toBe("claude-subscription-workspace");
+    const route = sessionTitleRoute({
+      resolvedModel: turn,
+      modelName: "claude-opus-5-5",
+      resolveTurnModel: (id) => resolveTurnModel(claudeSettings, id),
+    });
+    expect(route.modelName).toBe(CLAUDE_SESSION_TITLE_UPSTREAM_MODEL_ID);
+    expect(route.usageModelId).toBe(
+      `${claudeProviderId("claude_subscription", "workspace")}/claude-haiku-5-5`,
+    );
+    expect(route.resolvedModel?.provider).toBe(turn.provider);
+    expect(route.resolvedModel?.client).toBe(turn.client);
+    const options = sessionTitleGenerationOptions({
+      resolvedModel: route.resolvedModel,
+      modelName: route.modelName,
+      serviceTier: undefined,
+      signal: new AbortController().signal,
+    });
+    expect(options.modelName).toBe("claude-haiku-5-5");
+    expect(options.reasoningEffort).toBe("low");
+  });
+
+  test("other turns title on their own model", () => {
+    const settings = testSettings({ sandboxBackend: "none" });
+    const turn = resolveTurnModel(settings, "gpt-5.6-sol")!;
+    expect(
+      sessionTitleRoute({
+        resolvedModel: turn,
+        modelName: "gpt-5.6-sol",
+        resolveTurnModel: (id) => resolveTurnModel(settings, id),
+      }),
+    ).toEqual({ resolvedModel: turn, modelName: "gpt-5.6-sol", usageModelId: null });
+    expect(
+      sessionTitleRoute({ resolvedModel: null, modelName: "m", resolveTurnModel: () => null }),
+    ).toEqual({ resolvedModel: null, modelName: "m", usageModelId: null });
   });
 });

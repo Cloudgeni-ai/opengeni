@@ -12,6 +12,8 @@ import {
   SessionStatus as SessionStatusBadge,
   SESSION_STATUS_META,
   StatusDot,
+  sessionDisplayStatus,
+  type SessionDisplayStatus,
 } from "@opengeni/react";
 import { ModelMark, modelDisplayName, type SessionEventsConnectionState } from "@opengeni/react";
 import type { SessionSummary } from "@opengeni/sdk";
@@ -158,6 +160,11 @@ export function SessionHeader({
   policyLoading?: boolean;
 }) {
   const waiting = sessionInputWait({ ...session, status });
+  // A session the runtime could not start reads as stuck, not "Waiting on you".
+  const displayStatus = sessionDisplayStatus({
+    status,
+    admissionBlock: session.admissionBlock,
+  });
   const startup = useSessionStartup({ ...session, status });
   const startupLabel =
     startup === "starting"
@@ -241,7 +248,7 @@ export function SessionHeader({
           <CompactSessionStatus
             paused={sessionControlPaused(session)}
             waiting={Boolean(waiting)}
-            status={status}
+            status={displayStatus}
             label={startupLabel}
           />
           {accessSlot}
@@ -320,7 +327,7 @@ export function SessionHeader({
                 Waiting
               </span>
             ) : (
-              <SessionStatusBadge status={status} label={startupLabel} />
+              <SessionStatusBadge status={displayStatus} label={startupLabel} />
             )
           ) : (
             <WorkstreamControlIndicator session={session} />
@@ -463,7 +470,7 @@ function CompactSessionStatus({
 }: {
   paused: boolean;
   waiting: boolean;
-  status: Session["status"];
+  status: SessionDisplayStatus;
   label?: string;
 }) {
   if (paused) {

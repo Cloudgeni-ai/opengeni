@@ -3007,7 +3007,7 @@ guard keeps provider names out of shared modules.
 
 #### PR 0a: receipts, restrictions and personal helpers
 
-Migration 0711 (rolling) delivers the first part of row 0. Choices made where
+Migration 0712 (rolling) delivers the first part of row 0. Choices made where
 the plan left room, for reviewers:
 
 - **Receipts.** `opengeni_private.subscription_provider_cutover_receipts
@@ -3035,7 +3035,7 @@ the plan left room, for reviewers:
   receipts. The seed-only policies are generalized
   (`subscription_provider_cutovers_seed`, `subscription_settings_seed`,
   setting `opengeni.subscription_cutover_seed`). Codex is seeded exactly as
-  before (tested by creating an organization on each side of 0711).
+  before (tested by creating an organization on each side of 0712).
 - **Personal helpers.** 0668's legacy-generation branch is removed, not
   generalized: `authorize_subscription_personal_access` grants only when the
   provider has a receipt and an enabled row, and the frozen v2 entry, exact
@@ -3057,8 +3057,9 @@ the plan left room, for reviewers:
   (one row per organization and a total row with `account_id` NULL;
   `core_count` is the number of owners). The repair stays an owner decision.
 - **Kinds.** `video` is added; `model` and `credential_request` are admitted
-  for every provider; `apps` stays Codex-only. The unknown-outcome replay
-  fence was already keyed by the provider registry (0707).
+  for every provider; `apps` and 0711's `completion` stay Codex-only. The
+  unknown-outcome replay fence was already keyed by the provider registry
+  (0707).
 - **`model.connected`.** An `AFTER INSERT` trigger on
   `subscription_connections` emits the fact with the legacy attribute
   (`codex`, `supergrok`, `claude_subscription`), keyed by connection id and
@@ -3086,11 +3087,11 @@ the plan left room, for reviewers:
 - **Inventory.** The report also counts, per provider and organization,
   switch rows (`inventory:switch_rows_without_receipt`) and core connections
   (`inventory:connections_without_receipt`) of a provider without a receipt
-  at the time of 0711, so an operator sees them without a row-security
+  at the time of 0712, so an operator sees them without a row-security
   bypass.
 - **Known gap.** The operator-run lifecycle backfill (0565) reads only the
   legacy credential tables, so Codex connections created between 0689 and
-  0711 never get a `model.connected` fact. Extending that backfill to core
+  0712 never get a `model.connected` fact. Extending that backfill to core
   connections is not part of PR 0.
 
 #### PR 0b and PR 0c: the rest of row 0

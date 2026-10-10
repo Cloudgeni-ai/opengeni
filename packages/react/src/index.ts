@@ -637,6 +637,8 @@ export {
 export { CopyButton, CopyHoverFrame } from "./components/copy-button";
 export { copyTextToClipboard, tableElementToTsv } from "./lib/clipboard";
 export { SessionStatus, StatusDot, SESSION_STATUS_META } from "./components/session-status";
+export { sessionAdmissionBlocked, sessionDisplayStatus } from "./session-status-model";
+export type { SessionDisplayStatus } from "./session-status-model";
 export type {
   SessionStatusProps,
   StatusDotProps,

@@ -38,8 +38,8 @@ import { createHistoricalCodexCapacityPeek } from "../../apps/worker/test/fixtur
 
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const MIGRATION = "0689_subscription_core_codex_cutover.sql";
-// 0711 requires the committed 0689 cutover, so it is held back with it.
-const PRECURSOR = "0711_subscription_core_generic_precursor.sql";
+// 0712 requires the committed 0689 cutover, so it is held back with it.
+const PRECURSOR = "0712_subscription_core_generic_precursor.sql";
 const MODEL = "codex/gpt-5.5";
 const key = Buffer.alloc(32, 77);
 const settings = { environmentsEncryptionKey: key.toString("base64") } as never;

@@ -181,5 +181,5 @@ export const embeddingMigrationTail = [
   // Records the provider cutover receipts over withheld 0689, restricts the
   // shared core tables from withheld 0642 and patches the capture function
   // installed by withheld 0264/0275/0478; replay after them.
-  "0711_subscription_core_generic_precursor.sql",
+  "0712_subscription_core_generic_precursor.sql",
 ];

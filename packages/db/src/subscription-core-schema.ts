@@ -344,8 +344,8 @@ export const subscriptionOperationLeases = pgTable(
       .where(sql`${table.sessionId} is not null`),
     operationKindValid: check(
       "subscription_operation_leases_kind_chk",
-      sql`${table.operationKind} in ('image', 'realtime', 'transcription', 'model', 'credential_request', 'apps')
-        and (${table.operationKind} in ('image', 'realtime', 'transcription') or ${table.provider} = 'codex')`,
+      sql`${table.operationKind} in ('image', 'video', 'realtime', 'transcription', 'model', 'credential_request', 'apps', 'completion')
+        and (${table.operationKind} not in ('apps', 'completion') or ${table.provider} = 'codex')`,
     ),
     requestIdentity: uniqueIndex("subscription_operation_request_identity_uq")
       .on(table.accountId, table.requestId, table.transportAttempt)
@@ -363,7 +363,7 @@ export const subscriptionOperationLeases = pgTable(
     referenceShape: check(
       "subscription_operation_leases_reference_chk",
       sql`(${table.turnId} is null or ${table.sessionId} is not null)
-        and (${table.sessionId} is not null or (${table.turnId} is null and ${table.operationKind} in ('transcription', 'credential_request', 'apps')))
+        and (${table.sessionId} is not null or (${table.turnId} is null and ${table.operationKind} in ('transcription', 'credential_request', 'apps', 'completion')))
         and (${table.operationKind} <> 'model' or ${table.turnId} is not null)`,
     ),
   }),

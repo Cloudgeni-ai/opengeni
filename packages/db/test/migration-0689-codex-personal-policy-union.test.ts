@@ -14,8 +14,8 @@ import { provisionRoles } from "../src/provision-roles";
 import { encryptEnvironmentValue } from "../src/environment-crypto";
 
 const migration = "0689_subscription_core_codex_cutover.sql";
-// 0711 requires the committed 0689 cutover, so it is held back with it.
-const precursor = "0711_subscription_core_generic_precursor.sql";
+// 0712 requires the committed 0689 cutover, so it is held back with it.
+const precursor = "0712_subscription_core_generic_precursor.sql";
 const key = Buffer.alloc(32, 87);
 const cases: Array<{
   name: string;

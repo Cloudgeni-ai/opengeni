@@ -29,9 +29,9 @@ test("a pre-writer personal-resource task retains its execution proof across mig
   // 0707 replaces writer routines with provider-neutral equivalents and needs
   // the 0688 writer schema, so it is deferred and replayed with the writer.
   const neutral = "0707_subscription_core_neutral_routines.sql";
-  // 0711 records the provider cutover receipts and requires the 0689 cutover,
+  // 0712 records the provider cutover receipts and requires the 0689 cutover,
   // so both are deferred and replayed with the writer in ledger order.
-  const precursor = "0711_subscription_core_generic_precursor.sql";
+  const precursor = "0712_subscription_core_generic_precursor.sql";
   try {
     // Stage the actual pre-writer ledger, including on the stacked cutover
     // branch. This is a rolling/gate-off regression, not cutover activation.

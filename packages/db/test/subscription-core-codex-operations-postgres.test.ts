@@ -23,6 +23,8 @@ import {
   releaseSubscriptionCoreCodexOperationLease,
   requestSessionCompaction,
   renewSubscriptionCoreCodexOperationLease,
+  reserveSubscriptionCoreCodexOperationRequest,
+  settleSubscriptionCoreCodexOperationRequest,
   resolveSubscriptionCoreCodexConnectionId,
   withSessionRlsActorContext,
   type DbClient,
@@ -818,6 +820,40 @@ describe.skipIf(!realDb)("Codex operations on the shared core (M3 PR 2c)", () =>
         connectionId: assignedHere,
       }),
     ).toBeNull();
+    expect(await releaseSubscriptionCoreCodexOperationLease(client!.db, scope, lease)).toBe(true);
+  });
+
+  test("a sessionless completion holds its own lease and reserves each request in workspace scope", async () => {
+    const org = await organization();
+    await setCutover(org.accountId, true);
+    const connectionId = await sharedConnection(org, "ops-completion");
+    const scope = workspaceScope(org);
+    const lease = ref(connectionId, { operationKind: "completion" });
+    expect((await acquireSubscriptionCoreCodexOperationLease(client!.db, scope, lease)).kind).toBe(
+      "acquired",
+    );
+    expect(await operationLeases(connectionId)).toEqual([
+      { operation_kind: "completion", session_id: null, turn_id: null },
+    ]);
+    const reserved = await reserveSubscriptionCoreCodexOperationRequest(
+      client!.db,
+      scope,
+      lease,
+      connectionId,
+      { requestId: `completion:${lease.operationId}:1`, transportAttempt: 1 },
+    );
+    const [request] = await shared!.admin<{ operation_kind: string; request_outcome: string }[]>`
+      select operation_kind, request_outcome from subscription_operation_leases
+      where operation_id = ${reserved.operationId}::uuid`;
+    expect(request).toEqual({ operation_kind: "completion", request_outcome: "reserved" });
+    await settleSubscriptionCoreCodexOperationRequest(client!.db, scope, {
+      operationId: reserved.operationId,
+      outcome: "response_received",
+    });
+    const [settled] = await shared!.admin<{ request_outcome: string }[]>`
+      select request_outcome from subscription_operation_leases
+      where operation_id = ${reserved.operationId}::uuid`;
+    expect(settled).toEqual({ request_outcome: "response_received" });
     expect(await releaseSubscriptionCoreCodexOperationLease(client!.db, scope, lease)).toBe(true);
   });
 

@@ -49,7 +49,12 @@ import {
 // The session view — live timeline plus one compact prompt queue above the
 // composer. Enter queues and Cmd/Ctrl+Enter steers; failed sessions stay
 // honest (reason + retry history) and revivable from the same composer.
-import { LightboxProvider, type WorkspaceTab } from "@opengeni/react";
+import {
+  LightboxProvider,
+  sessionAdmissionBlocked,
+  sessionDisplayStatus,
+  type WorkspaceTab,
+} from "@opengeni/react";
 import { MACHINES_SESSION_POLL_MS } from "@opengeni/react/machines";
 import {
   ApprovalSurface,
@@ -2492,7 +2497,8 @@ function SessionChatPane(props: {
           : personalAttachment.requiresDecision
             ? "Finish the personal access choice in the composer first."
             : null,
-    awaitingHuman: props.session.status === "requires_action",
+    awaitingHuman:
+      props.session.status === "requires_action" && !sessionAdmissionBlocked(props.session),
     extras: {
       ...(composer.policy ?? {}),
       ...((props.queue.effectiveControl ?? props.session.effectiveControl)?.controlEtag
@@ -2775,7 +2781,7 @@ function SessionChatPane(props: {
     queue: props.queue.snapshot,
   });
   const timelineEmptyStateCopy = sessionTimelineEmptyStateCopy(
-    props.session.status,
+    sessionDisplayStatus(props.session),
     (props.queue.effectiveControl ?? props.session.effectiveControl).state === "paused",
   );
 

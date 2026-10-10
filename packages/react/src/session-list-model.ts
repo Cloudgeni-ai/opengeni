@@ -13,6 +13,7 @@ import {
 } from "@opengeni/sdk";
 import { modelDisplayName } from "@opengeni/sdk/model-display";
 import { findPickerRow, type PickerModelRow } from "./model-policy";
+import { sessionDisplayStatus, type SessionDisplayStatus } from "./session-status-model";
 
 /** A list row may be a compact page entry or a complete session response. */
 export type SessionListRow = Session | SessionListEntry;
@@ -255,12 +256,13 @@ export function isCodexProductModel(modelId: string): boolean {
 
 export type SessionStatusTone = "queued" | "running" | "waiting" | "idle" | "failed" | "cancelled";
 
-export const SESSION_STATUS_TONE: Record<SessionStatus, SessionStatusTone> = {
+export const SESSION_STATUS_TONE: Record<SessionDisplayStatus, SessionStatusTone> = {
   queued: "queued",
   running: "running",
   recovering: "running",
   waiting_capacity: "waiting",
   requires_action: "waiting",
+  blocked: "failed",
   idle: "idle",
   failed: "failed",
   cancelled: "cancelled",
@@ -268,11 +270,11 @@ export const SESSION_STATUS_TONE: Record<SessionStatus, SessionStatusTone> = {
 
 /** The status dot of a recent-session row: a background command reads as running. */
 export function recentSessionStatus(
-  session: Pick<SessionListRow, "status" | "backgroundCommandActivity">,
+  session: Pick<SessionListRow, "status" | "backgroundCommandActivity" | "admissionBlock">,
 ): { tone: SessionStatusTone; pulse: boolean } {
   const hasBackgroundCommand = session.backgroundCommandActivity !== undefined;
   return {
-    tone: hasBackgroundCommand ? "running" : SESSION_STATUS_TONE[session.status],
+    tone: hasBackgroundCommand ? "running" : SESSION_STATUS_TONE[sessionDisplayStatus(session)],
     pulse: hasBackgroundCommand || session.status === "running",
   };
 }

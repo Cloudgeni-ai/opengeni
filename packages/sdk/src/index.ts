@@ -1129,6 +1129,7 @@ export type {
   ScheduledTaskStatus,
   ScheduledTaskTriggerType,
   Session,
+  SessionAdmissionBlock,
   SessionBackgroundCommand,
   SessionBackgroundCommandReconciliation,
   SessionBackgroundCommandActivity,

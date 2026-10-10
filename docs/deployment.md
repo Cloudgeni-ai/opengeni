@@ -4270,9 +4270,9 @@ migration that is idempotent, alias-aware and parity-checked. Keep affected
 organizations switched off meanwhile. Never copy rows back to the legacy
 tables, drop aliases, reset refresh generations or clear waiters.
 
-### Shared subscription core generic precursor (0711)
+### Shared subscription core generic precursor (0712)
 
-Migration `0711_subscription_core_generic_precursor.sql` is **rolling**: deploy
+Migration `0712_subscription_core_generic_precursor.sql` is **rolling**: deploy
 it like any release, without draining. Design record:
 [subscription core, PR 0a](design/subscription-core-2026-10-07.md#pr-0a-receipts-restrictions-and-personal-helpers).
 It requires 0689 and acts on deploy. Like 0706, it grants to the configured
@@ -4296,7 +4296,7 @@ secret already does), or `migrate` stops before applying anything.
 Codex chat, connect, refresh and containment behave as before. SuperGrok and
 Claude keep running on their legacy path.
 
-Codex connections created between 0689 and 0711 have no `model.connected`
+Codex connections created between 0689 and 0712 have no `model.connected`
 fact; the operator-run lifecycle backfill does not read core connections.
 
 **Readiness report and inventory.** As the migration owner:
@@ -4311,7 +4311,7 @@ ORDER BY provider, metric, account_id NULLS LAST;
 
 `inventory:switch_rows_without_receipt` and
 `inventory:connections_without_receipt` count, per provider and organization,
-the `xai` and `claude` rows that existed at 0711. They were never usable and
+the `xai` and `claude` rows that existed at 0712. They were never usable and
 grant nothing, but the SuperGrok and Claude cutovers abort on them, so they
 must be removed before those cutovers. Row security hides them from the
 migration owner; inspect and remove them as a superuser (or another role with

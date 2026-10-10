@@ -1,4 +1,4 @@
-import type { SessionStatus } from "@opengeni/contracts";
+import type { SessionDisplayStatus } from "@opengeni/react/timeline-model";
 
 export type SessionTimelineEmptyStateCopy = {
   title: string;
@@ -7,7 +7,7 @@ export type SessionTimelineEmptyStateCopy = {
 
 /** Truthful zero-step copy from lifecycle facts already held by the client. */
 export function sessionTimelineEmptyStateCopy(
-  status: SessionStatus,
+  status: SessionDisplayStatus,
   paused: boolean,
 ): SessionTimelineEmptyStateCopy {
   if (paused) {
@@ -26,6 +26,11 @@ export function sessionTimelineEmptyStateCopy(
       return {
         title: "Starting the agent",
         description: "Preparing its tools, files, and conversation before the first step.",
+      };
+    case "blocked":
+      return {
+        title: "Could not start",
+        description: "Nothing is needed from you. Your prompt is kept; recheck below to try again.",
       };
     case "requires_action":
       return {

@@ -209,6 +209,9 @@ export function buildTimeline(
   // receipts have no row. Carry resume evidence on the attention landmarks so
   // grouping cannot mistake historical approval for a live wait.
   const presentationWaits = new Map<string | null, Array<NoticeItem | SessionStatusItem>>();
+  // Admission blocks hold the whole session, not one turn; any later status
+  // (a recheck, a new message, a pause) ends them.
+  let openAdmissionBlocks: SessionStatusItem[] = [];
   const presentationFailures = new Map<string | null, SessionStatusItem[]>();
   let presentationTurnId: string | null = null;
   const rememberPresentationWait = (
@@ -1078,6 +1081,11 @@ export function buildTimeline(
         if (!isSessionStatus(status)) {
           break;
         }
+        const blocked = status === "requires_action" && payload.code === "admission_blocked";
+        if (!blocked && openAdmissionBlocks.length > 0) {
+          for (const open of openAdmissionBlocks) open.resolvedAt = event.occurredAt;
+          openAdmissionBlocks = [];
+        }
         if (status === "running") resolvePresentationWait(event, turnId);
         // Only attention-worthy statuses earn a timeline divider. queued /
         // running / idle are machinery telemetry: the header pill carries the
@@ -1090,7 +1098,11 @@ export function buildTimeline(
         const previous = [...items]
           .reverse()
           .find((item): item is SessionStatusItem => item.kind === "session-status");
-        if (previous?.status === status && !previous.resolvedAt) {
+        if (
+          previous?.status === status &&
+          !previous.resolvedAt &&
+          Boolean(previous.blocked) === blocked
+        ) {
           break;
         }
         const item: SessionStatusItem = {
@@ -1098,8 +1110,12 @@ export function buildTimeline(
           id: event.id,
           status,
           occurredAt: event.occurredAt,
+          ...(blocked ? { blocked: true as const } : {}),
         };
-        if (status === "requires_action") rememberPresentationWait(item, turnId);
+        if (blocked) {
+          openAdmissionBlocks.push(item);
+          items.push(item);
+        } else if (status === "requires_action") rememberPresentationWait(item, turnId);
         else {
           items.push(item);
           if (status === "failed") {
@@ -2160,6 +2176,7 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
       const liveStatusWait =
         item.kind === "session-status" &&
         item.status === "requires_action" &&
+        !item.blocked &&
         !item.resolvedAt &&
         current !== undefined &&
         !current.endedAt;
@@ -2178,6 +2195,7 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
         } else if (
           item.kind === "session-status" &&
           item.status === "requires_action" &&
+          !item.blocked &&
           !item.resolvedAt
         ) {
           current.waiting = { label: "Waiting for you", since: item.occurredAt };

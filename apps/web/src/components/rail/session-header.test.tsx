@@ -184,6 +184,26 @@ test("narrow headers keep a compact lifecycle dot instead of hiding status", asy
       expect(compact()?.textContent).toBe(label);
       expect(compact()?.className).toContain("lg:hidden");
     }
+    // A session the runtime could not start is stuck, not waiting on you.
+    await act(async () =>
+      root.render(
+        render(
+          {
+            ...session,
+            admissionBlock: {
+              reason: "database_claim_rejected",
+              sqlState: "42501",
+              retryPolicy: "explicit_recheck",
+              blockedAt: "2026-09-25T12:00:00.000Z",
+            },
+          } as Session,
+          "requires_action",
+        ),
+      ),
+    );
+    expect(compact()?.dataset.compactSessionStatus).toBe("blocked");
+    expect(compact()?.textContent).toBe("Stuck");
+    expect(container.textContent).not.toContain("Waiting on you");
     await act(async () =>
       root.render(
         render(

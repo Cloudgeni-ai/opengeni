@@ -1,6 +1,10 @@
 import { hasPermission } from "@opengeni/core";
 import type { AttemptToolDefinition } from "@opengeni/codemode";
-import { isManagedOpenRouterFreeRoute, type ModelCapabilitiesV1 } from "@opengeni/config";
+import {
+  claudeNativeModelProfile,
+  isManagedOpenRouterFreeRoute,
+  type ModelCapabilitiesV1,
+} from "@opengeni/config";
 import type {
   GeneratedSessionTitle,
   GenerateSessionTitleOptions,
@@ -84,6 +88,82 @@ export function sessionTitleToolPlan(input: {
 }
 
 export const PARALLEL_SESSION_TITLE_TIMEOUT_MS = 15_000;
+
+/** Codex subscription turns title on this fast model of the same account. */
+export const CODEX_SESSION_TITLE_MODEL_ID = "codex/gpt-6-luna";
+/** Claude subscription turns title on this fast model of the same account. */
+export const CLAUDE_SESSION_TITLE_UPSTREAM_MODEL_ID = "claude-haiku-5-5";
+
+type ResolvedTitleModel = NonNullable<ReturnType<OpenGeniRuntime["resolveTurnModel"]>>;
+
+export type SessionTitleRoute = {
+  resolvedModel: ReturnType<OpenGeniRuntime["resolveTurnModel"]>;
+  /** Upstream model name sent to the provider. */
+  modelName: string;
+  /** Product model id the title usage is recorded under, when it differs from the turn's. */
+  usageModelId: string | null;
+};
+
+/**
+ * The model for the auxiliary title request. A subscription turn titles on a
+ * fast model of the same subscription account and request context, so the
+ * title costs the subscription little and never another rail: Codex turns use
+ * Luna and Claude subscription turns use Haiku. Other turns, and a
+ * subscription whose catalog lacks the title model, title on the turn's model.
+ */
+export function sessionTitleRoute(input: {
+  resolvedModel: ReturnType<OpenGeniRuntime["resolveTurnModel"]>;
+  modelName: string;
+  resolveTurnModel: (modelId: string) => ReturnType<OpenGeniRuntime["resolveTurnModel"]>;
+}): SessionTitleRoute {
+  const turnRoute = {
+    resolvedModel: input.resolvedModel,
+    modelName: input.modelName,
+    usageModelId: null,
+  };
+  const turn = input.resolvedModel;
+  if (!turn) return turnRoute;
+  const sameAccount = (title: ResolvedTitleModel): SessionTitleRoute => ({
+    // The turn's client and provider carry its account and credential binding.
+    resolvedModel: { ...title, client: turn.client, provider: turn.provider },
+    modelName: title.configured.upstreamModelId,
+    usageModelId: title.configured.id,
+  });
+  if (turn.provider.kind === "codex-subscription") {
+    if (turn.configured.id === CODEX_SESSION_TITLE_MODEL_ID) return turnRoute;
+    const title = input.resolveTurnModel(CODEX_SESSION_TITLE_MODEL_ID);
+    return title && title.provider.id === turn.provider.id ? sameAccount(title) : turnRoute;
+  }
+  if (turn.provider.kind?.startsWith("claude-subscription-")) {
+    if (turn.configured.upstreamModelId === CLAUDE_SESSION_TITLE_UPSTREAM_MODEL_ID)
+      return turnRoute;
+    const titleModelId = `${turn.provider.id}/${CLAUDE_SESSION_TITLE_UPSTREAM_MODEL_ID}`;
+    const listed = input.resolveTurnModel(titleModelId);
+    if (listed && listed.provider.id === turn.provider.id) return sameAccount(listed);
+    // Every Claude subscription can serve Haiku even when the connection's
+    // picker list omits it; the native profile supplies its reasoning range.
+    const profile = claudeNativeModelProfile(CLAUDE_SESSION_TITLE_UPSTREAM_MODEL_ID);
+    if (!profile) return turnRoute;
+    return sameAccount({
+      ...turn,
+      configured: {
+        ...turn.configured,
+        id: titleModelId,
+        upstreamModelId: CLAUDE_SESSION_TITLE_UPSTREAM_MODEL_ID,
+        capabilities: {
+          ...turn.configured.capabilities,
+          reasoning: {
+            ...turn.configured.capabilities.reasoning,
+            runnable: profile.efforts.length > 0,
+            efforts: [...profile.efforts],
+            defaultEffort: profile.defaultEffort,
+          },
+        },
+      },
+    });
+  }
+  return turnRoute;
+}
 
 /**
  * The lowest reasoning effort the resolved model can run, for the auxiliary

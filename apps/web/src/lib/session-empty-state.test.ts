@@ -16,6 +16,11 @@ describe("sessionTimelineEmptyStateCopy", () => {
     expect(sessionTimelineEmptyStateCopy("requires_action", false).title).toBe(
       "Waiting for your response",
     );
+    // The runtime could not start the first step: nothing to answer.
+    expect(sessionTimelineEmptyStateCopy("blocked", false)).toEqual({
+      title: "Could not start",
+      description: "Nothing is needed from you. Your prompt is kept; recheck below to try again.",
+    });
   });
 
   test("effective pause wins over a stale running status", () => {

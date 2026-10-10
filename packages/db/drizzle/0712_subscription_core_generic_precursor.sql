@@ -32,7 +32,7 @@ SET LOCAL lock_timeout = '5s';
 DO $receipt_prerequisite$
 BEGIN
   IF to_regprocedure('opengeni_private.subscription_codex_cutover_v1_active()') IS NULL THEN
-    RAISE EXCEPTION '0711 requires the committed 0689 Codex cutover' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0712 requires the committed 0689 Codex cutover' USING ERRCODE = '55000';
   END IF;
 END
 $receipt_prerequisite$;
@@ -403,13 +403,15 @@ ALTER TABLE subscription_settings
 -- 5. Operation kinds. `video` follows the `image` guard rules (a session is
 -- required; personal access needs the exact turn), which the reference guard
 -- already applies to every kind outside its explicit sessionless list.
--- `model` and `credential_request` are no longer Codex-only; `apps` is.
+-- `model` and `credential_request` are no longer Codex-only; `apps` and
+-- 0711's sessionless `completion` stay Codex-only (each widens with the
+-- adapter step that needs it).
 ALTER TABLE subscription_operation_leases
   DROP CONSTRAINT subscription_operation_leases_kind_chk,
   ADD CONSTRAINT subscription_operation_leases_kind_chk CHECK (
     operation_kind IN ('image', 'video', 'realtime', 'transcription', 'model',
-      'credential_request', 'apps')
-    AND (operation_kind <> 'apps' OR provider = 'codex')
+      'credential_request', 'apps', 'completion')
+    AND (operation_kind NOT IN ('apps', 'completion') OR provider = 'codex')
   ) NOT VALID;
 ALTER TABLE subscription_operation_leases VALIDATE CONSTRAINT subscription_operation_leases_kind_chk;
 

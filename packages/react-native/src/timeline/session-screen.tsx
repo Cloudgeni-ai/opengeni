@@ -234,6 +234,22 @@ function SessionScreenBody({
         }
         trailing={
           <>
+            {controller.admissionBlocked && !paused ? (
+              <StuckCard
+                needsAccess={
+                  controller.session.session?.admissionBlock?.reason ===
+                    "initiator_membership_required" ||
+                  controller.session.session?.admissionBlock?.reason ===
+                    "personal_resource_grant_required"
+                }
+                busy={composer.resuming || control.controlling}
+                onRetry={async () => {
+                  const result = await control.resume();
+                  await Promise.all([controller.session.refresh(), queue.refresh()]);
+                  if (!result) throw new Error("Resume was not accepted");
+                }}
+              />
+            ) : null}
             {waitingOnInput ? (
               <HumanInputCard
                 requests={humanInput.requests}
@@ -385,6 +401,77 @@ function LoadFailure({ message, onRetry }: { message?: string | undefined; onRet
         </Text>
       ) : null}
       <Button label={m.retry} onPress={onRetry} />
+    </View>
+  );
+}
+
+/**
+ * The runtime could not start this session's next step. It is not waiting on
+ * the person, so it says so plainly and offers one recheck (Resume), which
+ * starts the kept work again.
+ */
+function StuckCard({
+  busy,
+  needsAccess,
+  onRetry,
+}: {
+  busy: boolean;
+  needsAccess: boolean;
+  onRetry: () => Promise<void>;
+}) {
+  const theme = useNativeTimelineTheme();
+  const m = useNativeTimelineMessages();
+  const [failed, setFailed] = useState(false);
+  const c = theme.colors;
+  return (
+    <View
+      accessibilityRole="summary"
+      style={{
+        gap: 10,
+        padding: 14,
+        borderRadius: 14,
+        borderWidth: 1,
+        borderColor: withAlpha(c["status-failed"], 0.3),
+        backgroundColor: withAlpha(c["status-failed"], 0.08),
+      }}
+    >
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+        <Icon name="circle-alert" size={16} color={c["status-failed"]} />
+        <Text style={{ ...fontStyle(theme, 600), fontSize: 15, color: c.fg }}>{m.stuckTitle}</Text>
+      </View>
+      <Text
+        style={{
+          ...fontStyle(theme),
+          fontSize: 14,
+          lineHeight: 20,
+          color: c["fg-muted"],
+        }}
+      >
+        {needsAccess ? m.stuckAccessBody : m.stuckBody}
+      </Text>
+      {failed ? (
+        <Text
+          accessibilityLiveRegion="polite"
+          style={{
+            ...fontStyle(theme),
+            fontSize: 13,
+            color: c["status-failed"],
+          }}
+        >
+          {m.stuckRetryFailed}
+        </Text>
+      ) : null}
+      <Button
+        label={m.stuckRetry}
+        variant="primary"
+        busy={busy}
+        disabled={busy}
+        style={{ alignSelf: "flex-start" }}
+        onPress={() => {
+          setFailed(false);
+          onRetry().catch(() => setFailed(true));
+        }}
+      />
     </View>
   );
 }

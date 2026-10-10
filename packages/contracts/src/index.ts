@@ -14051,6 +14051,7 @@ export const SessionListEntry = /* @__PURE__ */ defineSkillContractSchema(() =>
     archiveVersion: true,
     treeStats: true,
     requiresActionSince: true,
+    admissionBlock: true,
     createdAt: true,
     updatedAt: true,
   }).extend({

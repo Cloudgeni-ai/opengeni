@@ -159,6 +159,7 @@ import {
 } from "./model-usage";
 import {
   sessionTitleGenerationOptions,
+  sessionTitleRoute,
   startParallelSessionTitleGeneration,
 } from "./session-title";
 import {
@@ -412,6 +413,7 @@ export async function runTurnStreamAttempt(
   let parallelSessionTitleFinished = false;
   let creditPolicyRevision: number | undefined;
   let titleCreditPolicyRevision: number | undefined;
+  let titleUsageModelId: string | null = null;
   const finishParallelSessionTitle = async (): Promise<void> => {
     if (parallelSessionTitleFinished) return;
     parallelSessionTitleFinished = true;
@@ -435,7 +437,7 @@ export async function runTurnStreamAttempt(
         turnAttemptId: input.attemptId,
         provider: resolvedModel?.provider.id ?? settings.openaiProvider,
         providerApi: resolvedModel?.provider.api ?? "responses",
-        model: resolvedModel?.configured.id ?? turn.model,
+        model: titleUsageModelId ?? resolvedModel?.configured.id ?? turn.model,
         externallyBilled: billingState.isExternallyBilledTurn,
         chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
         countsTowardTokenCap: billingState.countsTowardTokenCap,
@@ -2181,6 +2183,12 @@ export async function runTurnStreamAttempt(
       turnExecutionPolicy.latencyMode,
     );
     titleCreditPolicyRevision = creditPolicyRevision;
+    const titleRoute = sessionTitleRoute({
+      resolvedModel,
+      modelName: turnExecutionPolicy.upstreamModelId,
+      resolveTurnModel: (modelId) => runtime.resolveTurnModel(runSettings, modelId),
+    });
+    titleUsageModelId = titleRoute.usageModelId;
     parallelSessionTitle = startParallelSessionTitleGeneration({
       signal: runtimeCancellationSignal,
       generate: async (signal) =>
@@ -2189,8 +2197,8 @@ export async function runTurnStreamAttempt(
             runSettings,
             sessionTitlePrompt,
             sessionTitleGenerationOptions({
-              resolvedModel,
-              modelName: turnExecutionPolicy.upstreamModelId,
+              resolvedModel: titleRoute.resolvedModel,
+              modelName: titleRoute.modelName,
               serviceTier,
               signal,
             }),

@@ -39,4 +39,27 @@ describe("subagentAttentionHint", () => {
     expect(subagentAttentionHint({ status: "running" }, false, NOW)).toBeNull();
     expect(subagentAttentionHint({ status: "idle" }, false, NOW)).toBeNull();
   });
+
+  test("a child the runtime could not start is stuck, not waiting on you", () => {
+    expect(
+      subagentAttentionHint(
+        {
+          status: "requires_action",
+          requiresActionSince: hoursAgo(2),
+          admissionBlock: {
+            reason: "database_claim_rejected",
+            sqlState: "42501",
+            retryPolicy: "explicit_recheck",
+            blockedAt: hoursAgo(2),
+          },
+        },
+        false,
+        NOW,
+      ),
+    ).toEqual({
+      word: "Stuck",
+      waitingFor: "",
+      title: "Could not start its next step",
+    });
+  });
 });
