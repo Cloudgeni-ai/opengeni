@@ -1412,11 +1412,21 @@ describe("interaction attempt tools", () => {
     const observation = browserObservation(target);
     const image = Uint8Array.of(0xff, 0xd8, 0xff, 0xd9);
     let captures = 0;
+    let visual = false;
+    let releaseObservation: ((value: typeof observation) => void) | undefined;
     const definitions = createInteractionAttemptToolDefinitions({
       transport: partialTransport({
-        observeBrowserTarget: async () => observation,
+        observeBrowserTarget: async () =>
+          visual
+            ? await new Promise<typeof observation>((resolve) => {
+                releaseObservation = resolve;
+              })
+            : observation,
         captureBrowserTarget: async () => {
           captures += 1;
+          // The capture must start before the pending page read completes.
+          expect(releaseObservation).toBeDefined();
+          releaseObservation!(observation);
           return {
             frameId: "captured-browser-frame",
             browserSessionId,
@@ -1451,20 +1461,149 @@ describe("interaction attempt tools", () => {
     );
     expect(captures).toBe(0);
     expect(semantic.content).toHaveLength(1);
-    const visual = await definitions[0]!.execute(
+    visual = true;
+    const visualResult = await definitions[0]!.execute(
       { browserSessionId, targetId: target.id, includeScreenshot: true },
       context,
     );
     expect(captures).toBe(1);
-    expect(visual.content).toEqual([
-      { type: "text", text: JSON.stringify(visual.structuredContent) },
+    expect(visualResult.content).toEqual([
+      { type: "text", text: JSON.stringify(visualResult.structuredContent) },
       { type: "image", data: Buffer.from(image).toString("base64"), mimeType: "image/jpeg" },
     ]);
-    expect(visual.structuredContent).toMatchObject({
+    expect(visualResult.structuredContent).toMatchObject({
       semantic: null,
       agentView: { kind: "compact", sourceNodeCount: 0, omittedNodeCount: 0 },
     });
   });
+
+  test("a failed page read waits for the parallel capture to settle", async () => {
+    const started = Promise.withResolvers<void>();
+    const capture =
+      Promise.withResolvers<Awaited<ReturnType<InteractionTransport["captureBrowserTarget"]>>>();
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        observeBrowserTarget: async () => {
+          throw new Error("synthetic page failure");
+        },
+        captureBrowserTarget: async () => {
+          started.resolve();
+          return await capture.promise;
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_observe"],
+      permissions: ["sessions:read"],
+    });
+    let settled = false;
+    const pending = definitions[0]!.execute(
+      { browserSessionId, targetId: "tab", includeScreenshot: true },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+    );
+    void pending.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    await started.promise;
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    capture.reject(new Error("synthetic capture failure"));
+    await expect(pending).rejects.toThrow("synthetic page failure");
+    expect(settled).toBe(true);
+  });
+
+  test("a synchronous capture refusal still settles the outstanding page read", async () => {
+    const target = browserTarget();
+    const observed = Promise.withResolvers<BrowserObservation>();
+    const started = Promise.withResolvers<void>();
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        observeBrowserTarget: () => observed.promise,
+        captureBrowserTarget: () => {
+          started.resolve();
+          throw new Error("synthetic synchronous capture refusal");
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_observe"],
+      permissions: ["sessions:read"],
+    });
+    let settled = false;
+    const pending = definitions[0]!.execute(
+      { browserSessionId, targetId: target.id, includeScreenshot: true },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+    );
+    void pending.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    await started.promise;
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    observed.resolve(browserObservation(target));
+    await expect(pending).rejects.toThrow("synthetic synchronous capture refusal");
+    expect(settled).toBe(true);
+  });
+
+  test.each([true, false])(
+    "parallel visual reads retain generation reconciliation (stable=%s)",
+    async (stable) => {
+      const target = browserTarget();
+      let reads = 0;
+      const definitions = createInteractionAttemptToolDefinitions({
+        transport: partialTransport({
+          observeBrowserTarget: async () => {
+            reads++;
+            return browserObservation({
+              ...target,
+              documentGeneration: reads === 1 ? "before" : stable ? "captured" : "after",
+            });
+          },
+          captureBrowserTarget: async () => ({
+            frameId: "captured-frame",
+            browserSessionId,
+            controllerGeneration: target.controllerGeneration,
+            targetId: target.id,
+            targetGeneration: target.targetGeneration,
+            documentGeneration: "captured",
+            sequence: 1,
+            mediaType: "image/jpeg",
+            width: 1,
+            height: 1,
+            deviceScaleFactor: 1,
+            scrollX: 0,
+            scrollY: 0,
+            capturedAt: now,
+            data: Uint8Array.of(0xff, 0xd8, 0xff, 0xd9),
+          }),
+        }),
+        workspaceId,
+        sessionId,
+        selectedTools: ["browser_observe"],
+        permissions: ["sessions:read"],
+      });
+      const pending = definitions[0]!.execute(
+        { browserSessionId, targetId: target.id, includeScreenshot: true },
+        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+      );
+      if (stable)
+        expect((await pending).structuredContent).toMatchObject({
+          target: { documentGeneration: "captured" },
+        });
+      else await expect(pending).rejects.toThrow("browser target changed");
+      expect(reads).toBe(2);
+    },
+  );
 
   test("defaults to a bounded, explicit compact browser view and preserves an exact full mode", async () => {
     const target = browserTarget();
