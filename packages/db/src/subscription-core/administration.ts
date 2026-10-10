@@ -663,11 +663,11 @@ export async function setSubscriptionCoreAllocator(
               set allocator_enabled = ${input.enabled}, updated_at = clock_timestamp()
               where account_id = ${input.accountId}::uuid and connection_id = ${current.id}::uuid
                 and inference_pool = 'organization' and managed_by_workspace_id is null`);
-            await provider.organizationAllocatorChanged?.(
-              savepoint as unknown as Database,
-              input.accountId,
-              current.id,
-            );
+            // The reach row (if any) copies the policy for workspaces created
+            // later; a null reach refreshes it from the connection.
+            await savepoint.execute(sql`select opengeni_private.set_subscription_core_reach(
+              ${subscriptionCoreProviderId(provider)}, ${input.accountId}::uuid,
+              ${current.id}::uuid, null, null)`);
           } else {
             await savepoint.execute(sql`update subscription_connection_assignment_policies
               set allocator_enabled = ${input.enabled}, updated_at = clock_timestamp()

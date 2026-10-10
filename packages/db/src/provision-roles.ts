@@ -546,6 +546,7 @@ async function grantAppRoleIfSchemaExists(
     "capture_legacy_codex_turn_sources(uuid,uuid)",
     "list_organization_workspace_ids(uuid)",
     "list_organization_codex_workspace_ids(uuid)",
+    "list_organization_subscription_workspace_ids(uuid)",
     "organization_workspace_command(jsonb)",
     "authorize_organization_shared_workspace_administration(uuid,uuid,text)",
     "resolve_organization_workspace_removal_subject(uuid,text,uuid)",
@@ -2133,6 +2134,8 @@ BEGIN
       'disconnect_subscription_core_connection(text,uuid,uuid,text,uuid)',
       'manage_subscription_core_personal(text,uuid,uuid,text,uuid,text,text,boolean,integer)',
       'subscription_core_personal_connections(text,uuid,uuid,text)',
+      'subscription_core_reach(text,uuid,uuid)',
+      'set_subscription_core_reach(text,uuid,uuid,boolean,boolean)',
       'subscription_organization_admin(uuid)',
       'subscription_people_assignment_visible(uuid,uuid,uuid,text,text)',
       'subscription_person_preference_visible(uuid,uuid,text,text)',
@@ -2169,6 +2172,8 @@ BEGIN
     -- M3 PR 3b: the writers' caller check, capability internals and the
     -- revision-authority trigger function are owner-only. Migration 0680: the
     -- cutover receipt and its owner-run trigger functions are owner-only.
+    -- Migration 0711: the provider-keyed auto-assignment apply path and the
+    -- auto-assignment and plan-change trigger functions are owner-only.
     -- Triggers fire without the caller holding EXECUTE.
     FOREACH routine_signature IN ARRAY ARRAY[
       'subscription_codex_writer_context(uuid,uuid,text)',
@@ -2178,7 +2183,11 @@ BEGIN
       'subscription_core_writer_context(text,uuid,uuid,text)',
       'grant_subscription_core_owner_capability(text,text,uuid,uuid,text,uuid)',
       'drop_subscription_core_owner_capabilities(text,uuid)',
-      'subscription_core_connection_target(text,uuid,uuid,uuid,uuid,uuid,text,bigint)'
+      'subscription_core_connection_target(text,uuid,uuid,uuid,uuid,uuid,text,bigint)',
+      'apply_subscription_core_auto_assignments(text,uuid,uuid,boolean)',
+      'auto_assign_subscription_core_workspace()',
+      'auto_assign_subscription_core_personal_workspace()',
+      'record_subscription_core_plan_change()'
     ] LOOP
       IF to_regprocedure('opengeni_subscription_internal.' || routine_signature) IS NOT NULL THEN
         EXECUTE format(

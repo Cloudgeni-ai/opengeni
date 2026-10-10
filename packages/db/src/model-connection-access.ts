@@ -1,4 +1,5 @@
 import { sql, type SQL, type SQLWrapper } from "drizzle-orm";
+import type { ProviderId } from "@opengeni/subscriptions";
 import {
   withRlsContext,
   withWorkspaceSubjectRls,
@@ -6,7 +7,9 @@ import {
   rawRows,
   type Database,
 } from "./database";
+import { SUBSCRIPTION_CORE_CODEX_PROVIDER } from "./subscription-core-codex-provider";
 import { resolveSubscriptionConnectionId } from "./subscription-core-repository";
+import { subscriptionCoreProvider } from "./subscription-core-providers";
 
 export type ModelConnectionKind =
   | "codex"
@@ -138,7 +141,7 @@ export async function getModelConnectionAccess(
   });
 }
 
-type CoreCodexAccessRow = {
+type CoreAccessRow = {
   id: string;
   allowed_model_ids: string[] | null;
   scope_kind: "organization" | "workspaces" | "people";
@@ -147,26 +150,30 @@ type CoreCodexAccessRow = {
   access_version: number | string;
 };
 
-/** The shared Codex connection the route may edit: organization-managed or this workspace's. */
-async function coreCodexAccessConnection(
+/**
+ * The provider's shared connection the route may edit on the subscription
+ * core: organization-managed or this workspace's.
+ */
+async function coreAccessConnection(
   tx: Database,
+  provider: ProviderId,
   target: ModelConnectionTarget,
   lock: boolean,
-): Promise<CoreCodexAccessRow | null> {
+): Promise<CoreAccessRow | null> {
   const connectionId = await resolveSubscriptionConnectionId(tx, {
     accountId: target.accountId,
-    provider: "codex",
+    provider,
     connectionId: target.connectionId,
   });
   if (!connectionId) return null;
-  const [row] = await rawRows<CoreCodexAccessRow>(
+  const [row] = await rawRows<CoreAccessRow>(
     tx,
     sql`select connection.id::text as id, connection.allowed_model_ids, connection.scope_kind,
         connection.allow_personal_workspaces, connection.allocator_enabled, connection.access_version
       from subscription_connections connection
       where connection.account_id = ${target.accountId}::uuid
         and connection.id = ${connectionId}::uuid
-        and connection.provider = 'codex' and connection.kind = 'subscription'
+        and connection.provider = ${provider} and connection.kind = 'subscription'
         and connection.ownership = 'shared' and connection.disconnected_at is null
         and ${
           target.workspaceId === null
@@ -187,10 +194,11 @@ async function organizationSharedWorkspaceIds(tx: Database, accountId: string) {
   return new Set(rows.map((row) => row.workspace_id));
 }
 
-async function coreCodexAccessPolicy(
+async function coreAccessPolicy(
   tx: Database,
+  provider: ProviderId,
   target: ModelConnectionTarget,
-  connection: CoreCodexAccessRow,
+  connection: CoreAccessRow,
 ): Promise<ModelConnectionAccess> {
   const version = Number(connection.access_version);
   // A workspace's own account is never offered to other workspaces.
@@ -212,8 +220,8 @@ async function coreCodexAccessPolicy(
     reach: { sharedWorkspaces: boolean; personalWorkspaces: boolean } | null;
   }>(
     tx,
-    sql`select opengeni_private.subscription_codex_reach(
-      ${target.accountId}::uuid, ${connection.id}::uuid) as reach`,
+    sql`select opengeni_private.subscription_core_reach(
+      ${provider}, ${target.accountId}::uuid, ${connection.id}::uuid) as reach`,
   );
   let allowedWorkspaces: string[] | null = null;
   if (!reach?.reach?.sharedWorkspaces) {
@@ -251,21 +259,35 @@ async function coreCodexAccessPolicy(
 }
 
 /**
- * A shared Codex connection's access policy on the shared subscription core,
- * in the legacy shape. The organization route reads an organization-managed
- * connection, the workspace route one that workspace manages.
- * `allowedWorkspaces` is null when every shared workspace, including ones
- * created later, may use it.
+ * A shared connection's access policy on the shared subscription core, for
+ * any registered provider, in the legacy shape. The organization route reads
+ * an organization-managed connection, the workspace route one that workspace
+ * manages. `allowedWorkspaces` is null when every shared workspace, including
+ * ones created later, may use it.
  */
+export async function getSubscriptionCoreModelConnectionAccess(
+  db: Database,
+  provider: ProviderId,
+  target: ModelConnectionTarget,
+): Promise<ModelConnectionAccess | null> {
+  subscriptionCoreProvider(provider);
+  return await scoped(db, target, async (tx) => {
+    const connection = await coreAccessConnection(tx, provider, target, false);
+    return connection ? await coreAccessPolicy(tx, provider, target, connection) : null;
+  });
+}
+
+/** A shared Codex connection's access policy on the shared subscription core. */
 export async function getSubscriptionCoreCodexModelConnectionAccess(
   db: Database,
   target: ModelConnectionTarget,
 ): Promise<ModelConnectionAccess | null> {
   if (target.kind !== "codex") throw new Error("Only Codex connections are read from the core");
-  return await scoped(db, target, async (tx) => {
-    const connection = await coreCodexAccessConnection(tx, target, false);
-    return connection ? await coreCodexAccessPolicy(tx, target, connection) : null;
-  });
+  return await getSubscriptionCoreModelConnectionAccess(
+    db,
+    SUBSCRIPTION_CORE_CODEX_PROVIDER,
+    target,
+  );
 }
 
 function textArray(values: readonly string[] | null) {
@@ -279,8 +301,9 @@ function uuidArray(values: Iterable<string>) {
 }
 
 /**
- * Save what a shared Codex connection serves on the core. Null when the
- * connection is gone or its access changed since `policy.version` was read.
+ * Save what a shared connection of any registered provider serves on the
+ * core. Null when the connection is gone or its access changed since
+ * `policy.version` was read.
  *
  * At organization scope the connection's scope, its workspace assignments,
  * the organization-pool policy rows and the reach for workspaces created later
@@ -292,19 +315,20 @@ function uuidArray(values: Iterable<string>) {
  * A workspace's own local copy (its workspace-pool row) is never removed. In
  * a workspace, only the models of the account that workspace manages change.
  */
-export async function updateSubscriptionCoreCodexModelConnectionAccess(
+export async function updateSubscriptionCoreModelConnectionAccess(
   db: Database,
+  provider: ProviderId,
   target: ModelConnectionTarget,
   policy: ModelConnectionAccess,
 ): Promise<ModelConnectionAccess | null> {
-  if (target.kind !== "codex") throw new Error("Only Codex connections are written to the core");
+  subscriptionCoreProvider(provider);
   if (target.workspaceId !== null && policy.allowedWorkspaces !== null)
     throw new Error("Workspace connections cannot assign other workspaces");
   return await scoped(db, target, async (tx) => {
-    const current = await coreCodexAccessConnection(tx, target, true);
+    const current = await coreAccessConnection(tx, provider, target, true);
     if (!current) {
       // Locking needs the write policy: a readable row it hides is a refusal.
-      if (await coreCodexAccessConnection(tx, target, false))
+      if (await coreAccessConnection(tx, provider, target, false))
         throw new ModelConnectionAccessForbiddenError();
       return null;
     }
@@ -312,7 +336,7 @@ export async function updateSubscriptionCoreCodexModelConnectionAccess(
     const id = current.id;
     const models = textArray(policy.allowedModels);
     if (target.workspaceId !== null) {
-      const [updated] = await rawRows<CoreCodexAccessRow>(
+      const [updated] = await rawRows<CoreAccessRow>(
         tx,
         sql`update subscription_connections set allowed_model_ids = ${models},
             access_version = access_version + 1, updated_at = clock_timestamp()
@@ -325,7 +349,7 @@ export async function updateSubscriptionCoreCodexModelConnectionAccess(
         set allowed_model_ids = ${models}, updated_at = clock_timestamp()
         where account_id = ${target.accountId}::uuid and connection_id = ${id}::uuid
           and workspace_id = ${target.workspaceId}::uuid and inference_pool = 'workspace'`);
-      return await coreCodexAccessPolicy(tx, target, updated);
+      return await coreAccessPolicy(tx, provider, target, updated);
     }
 
     const shared = await organizationSharedWorkspaceIds(tx, target.accountId);
@@ -360,7 +384,7 @@ export async function updateSubscriptionCoreCodexModelConnectionAccess(
             ...(policy.allowPersonalWorkspaces ? personal : []),
           ],
     );
-    const [updated] = await rawRows<CoreCodexAccessRow>(
+    const [updated] = await rawRows<CoreAccessRow>(
       tx,
       sql`update subscription_connections set allowed_model_ids = ${models},
           scope_kind = ${organizationScope ? "organization" : "workspaces"},
@@ -402,12 +426,27 @@ export async function updateSubscriptionCoreCodexModelConnectionAccess(
       set allowed_model_ids = ${models}, updated_at = clock_timestamp()
       where account_id = ${target.accountId}::uuid and connection_id = ${id}::uuid
         and inference_pool = 'organization'`);
-    await tx.execute(sql`select opengeni_private.set_subscription_codex_reach(
-      ${target.accountId}::uuid, ${id}::uuid,
+    await tx.execute(sql`select opengeni_private.set_subscription_core_reach(
+      ${provider}, ${target.accountId}::uuid, ${id}::uuid,
       ${!organizationScope && policy.allowedWorkspaces === null}::boolean,
       ${!organizationScope && policy.allowPersonalWorkspaces}::boolean)`);
-    return await coreCodexAccessPolicy(tx, target, updated);
+    return await coreAccessPolicy(tx, provider, target, updated);
   });
+}
+
+/** Save what a shared Codex connection serves on the core. */
+export async function updateSubscriptionCoreCodexModelConnectionAccess(
+  db: Database,
+  target: ModelConnectionTarget,
+  policy: ModelConnectionAccess,
+): Promise<ModelConnectionAccess | null> {
+  if (target.kind !== "codex") throw new Error("Only Codex connections are written to the core");
+  return await updateSubscriptionCoreModelConnectionAccess(
+    db,
+    SUBSCRIPTION_CORE_CODEX_PROVIDER,
+    target,
+    policy,
+  );
 }
 
 export async function updateModelConnectionAccess(

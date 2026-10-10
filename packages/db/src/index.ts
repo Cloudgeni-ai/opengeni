@@ -359,6 +359,17 @@ import {
   writeSubscriptionSessionBinding as writeCoreSessionBinding,
 } from "./subscription-core-repository";
 import {
+  wakeSubscriptionCoreCapacityWaiters,
+  type SubscriptionCoreWakeScope,
+} from "./subscription-core/waiters";
+export {
+  wakeSubscriptionCoreCapacityWaiters,
+  type SubscriptionCoreCapacityWake,
+  type SubscriptionCoreSessionWorkflowWake,
+  type SubscriptionCoreWakeScope,
+} from "./subscription-core/waiters";
+import { SUBSCRIPTION_CORE_CODEX_PROVIDER } from "./subscription-core-codex-provider";
+import {
   codexSubscriptionAuthorityV2ForAcceptanceInTransaction,
   codexSubscriptionAuthorityV2ForScheduledTaskInTransaction,
   codexSubscriptionAuthorityV2OrEmptyInTransaction,
@@ -25782,18 +25793,16 @@ export async function withSubscriptionCapacityWakeOutboxScope<T>(
 }
 
 /** One workspace whose core waiters were woken; deliver its outbox after commit. */
-export type SubscriptionCoreCodexWakeScope = { accountId: string; workspaceId: string };
+export type SubscriptionCoreCodexWakeScope = SubscriptionCoreWakeScope;
 
 /**
  * Capacity changed for the account's Codex pool (a quota exhaustion ended, a
  * quarantine cleared, a plan changed, a binding or assignment changed):
  * advance every waiting core Codex waiter's wake revision, record the typed
  * wake in the provider-neutral outbox and the generic session workflow wake
- * in the same transaction. Wakes only request re-evaluation; each waiter
- * re-places under its own accepted turn. Runs in the trusted empty-subject
- * worker scope per workspace (the outbox's own policy), never through legacy
- * active pointers. Returns the workspaces whose outbox the caller should
- * drain after commit.
+ * in the same transaction. Codex's binding of the provider-neutral
+ * `wakeSubscriptionCoreCapacityWaiters`, with its own validation texts.
+ * Returns the workspaces whose outbox the caller should drain after commit.
  */
 export async function wakeSubscriptionCoreCodexCapacityWaiters(
   db: Database,
@@ -25813,80 +25822,11 @@ export async function wakeSubscriptionCoreCodexCapacityWaiters(
     throw new Error("Core Codex wake reason must be a bounded identifier");
   if (input.sessionIds !== undefined && input.workspaceIds?.length !== 1)
     throw new Error("A session-scoped core Codex wake names exactly one workspace");
-  const sessionIds = input.sessionIds ? [...new Set(input.sessionIds)] : null;
-  if (sessionIds !== null && sessionIds.length === 0) return [];
-  return await withRlsContext(db, { accountId: input.accountId, workspaceId: null }, async (tx) =>
-    withPoolWakeServiceScopeInTransaction(tx, async () => {
-      const cutover = await readCoreProviderCutoverState(tx, {
-        accountId: input.accountId,
-        provider: "codex",
-      });
-      if (cutover !== "enabled") return [];
-      const workspaceIds =
-        input.workspaceIds ??
-        (
-          await rawRows<{ workspace_id: string }>(
-            tx,
-            sql`select workspace_id::text as workspace_id
-              from list_organization_codex_workspace_ids(${input.accountId}::uuid)
-              order by workspace_id`,
-          )
-        ).map((row) => row.workspace_id);
-      const touched: SubscriptionCoreCodexWakeScope[] = [];
-      for (const workspaceId of workspaceIds) {
-        await setRlsContext(tx, { accountId: input.accountId, workspaceId });
-        await tx.execute(
-          sql`select set_config('opengeni.subject_id', '', true), set_config('opengeni.initiating_human_subject_id', '', true)`,
-        );
-        await tx.execute(
-          sql`select pg_advisory_xact_lock_shared(hashtextextended(${`session-tenancy:${workspaceId}`}, 0))`,
-        );
-        const woken = await rawRows<{
-          session_id: string;
-          waiter_id: string;
-          generation: number | string;
-          wake_revision: number | string;
-        }>(
-          tx,
-          sql`update subscription_capacity_waiters
-            set wake_revision = wake_revision + 1, last_wake_reason = ${input.reason},
-                updated_at = clock_timestamp()
-            where account_id = ${input.accountId}::uuid
-              and workspace_id = ${workspaceId}::uuid and provider = 'codex'
-              ${
-                sessionIds === null
-                  ? sql``
-                  : sql`and session_id in (${sql.join(
-                      sessionIds.map((id) => sql`${id}::uuid`),
-                      sql`, `,
-                    )})`
-              }
-            returning session_id::text as session_id, waiter_id::text as waiter_id,
-              generation, wake_revision`,
-        );
-        for (const row of woken) {
-          await tx.execute(sql`insert into subscription_capacity_wake_outbox (
-              account_id, workspace_id, session_id, waiter_id, generation, wake_revision
-            ) values (
-              ${input.accountId}::uuid, ${workspaceId}::uuid, ${row.session_id}::uuid,
-              ${row.waiter_id}::uuid, ${Number(row.generation)}, ${Number(row.wake_revision)}
-            ) on conflict (account_id, waiter_id, generation, wake_revision) do nothing`);
-          // The generic durable wake is the crash-safe backstop: the global
-          // dispatcher delivers it even if this outbox row's typed signal is
-          // never sent.
-          await enqueueSessionWorkflowWakeInTransaction(tx, {
-            accountId: input.accountId,
-            workspaceId,
-            sessionId: row.session_id,
-            temporalWorkflowId: `session-${row.session_id}`,
-            reason: "subscription_capacity",
-          });
-        }
-        if (woken.length > 0) touched.push({ accountId: input.accountId, workspaceId });
-      }
-      await setRlsContext(tx, { accountId: input.accountId, workspaceId: null });
-      return touched;
-    }),
+  return await wakeSubscriptionCoreCapacityWaiters(
+    db,
+    SUBSCRIPTION_CORE_CODEX_PROVIDER,
+    input,
+    enqueueSessionWorkflowWakeInTransaction,
   );
 }
 

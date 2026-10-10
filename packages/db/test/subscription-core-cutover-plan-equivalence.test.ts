@@ -282,7 +282,7 @@ describe("provider-neutral cutover planner", () => {
     const base = scenario(7);
     const row = { ...base.rows[0]!, authority_scope: "organization", status: "toString" };
     const input = { ...base, rows: [row] };
-    expect(frozenPlanCodexCutover(input).connections.map((entry) => entry.status)).toEqual([
+    expect(frozenPlanCodexCutover(input).connections.map((entry): string => entry.status)).toEqual([
       "toString",
     ]);
     expect(planCodexCutover(input)).toEqual({

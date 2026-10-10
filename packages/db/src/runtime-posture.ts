@@ -211,6 +211,7 @@ const ORGANIZATION_MEMBERSHIP_LIFECYCLE_ROUTINES = [
   "capture_legacy_codex_turn_sources(uuid, uuid)",
   "list_organization_workspace_ids(uuid)",
   "list_organization_codex_workspace_ids(uuid)",
+  "list_organization_subscription_workspace_ids(uuid)",
   "organization_workspace_command(jsonb)",
   "authorize_organization_shared_workspace_administration(uuid, uuid, text)",
   "resolve_organization_workspace_removal_subject(uuid, text, uuid)",
@@ -723,6 +724,10 @@ export const SUBSCRIPTION_CORE_NEUTRAL_PRIVATE_ROUTINES = [
   "disconnect_subscription_core_connection(text, uuid, uuid, text, uuid)",
   "manage_subscription_core_personal(text, uuid, uuid, text, uuid, text, text, boolean, integer)",
   "subscription_core_personal_connections(text, uuid, uuid, text)",
+  // Migration 0711: an organization connection's reach for workspaces
+  // created later, read and replaced by organization administrators.
+  "subscription_core_reach(text, uuid, uuid)",
+  "set_subscription_core_reach(text, uuid, uuid, boolean, boolean)",
 ] as const;
 
 /** Migration 0707: the neutral writers' owner-only internals. */
@@ -731,6 +736,13 @@ export const SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES = [
   "grant_subscription_core_owner_capability(text, text, uuid, uuid, text, uuid)",
   "drop_subscription_core_owner_capabilities(text, uuid)",
   "subscription_core_connection_target(text, uuid, uuid, uuid, uuid, uuid, text, bigint)",
+  // Migration 0711: the auto-assignment apply path, its two trigger
+  // functions and the plan-change trigger function. Triggers fire without
+  // the caller holding EXECUTE.
+  "apply_subscription_core_auto_assignments(text, uuid, uuid, boolean)",
+  "auto_assign_subscription_core_workspace()",
+  "auto_assign_subscription_core_personal_workspace()",
+  "record_subscription_core_plan_change()",
 ] as const;
 
 export const SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES = [
