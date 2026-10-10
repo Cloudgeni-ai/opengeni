@@ -25,6 +25,11 @@ const RAW_BODY_RESPONSES: Record<string, { count: number; userContent: boolean; 
     userContent: false,
     why: "operator-curated catalog asset; already sandboxed and embeddable by hosts",
   },
+  "chat-completions.ts": {
+    count: 1,
+    userContent: false,
+    why: "Chat Completions server-sent event stream of JSON chunks, never a rendered document",
+  },
   "company-brain.ts": { count: 1, userContent: true, why: "Company Brain export" },
   "computer-sessions.ts": { count: 1, userContent: true, why: "live computer frame" },
   "editable-artifacts.ts": { count: 1, userContent: true, why: "materialized export download" },
