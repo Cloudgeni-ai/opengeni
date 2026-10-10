@@ -188,7 +188,9 @@ export function usableModelCount(
       model.credentialReadiness.status === "ready" &&
       // Unrunnable for another reason (not entitled, unsupported, unhealthy).
       // A policy block is the saved list's verdict, which the draft replaces.
-      (model.availability.selectable || model.availability.reason === "policy_blocked") &&
+      (model.availability.selectable ||
+        model.availability.reason === "policy_blocked" ||
+        model.availability.reason === "credits_disabled") &&
       allowedByDraft(model, draft) &&
       (allowCreditModels || !modelUsesCredits(model)),
   ).length;
@@ -224,7 +226,7 @@ export function useModelAccessPolicy(scopeOrWorkspaceId: string | ModelPolicySco
         organizationPolicy?.allowedModels,
       ])
     : "";
-  const client = useAppContext().client;
+  const { client, refreshWorkspace } = useAppContext();
   const [models, setModels] = useState<WorkspaceModelCatalogModel[]>([]);
   const [saved, setSaved] = useState<ModelAccessPolicyDraft | null>(null);
   const [loading, setLoading] = useState(true);
@@ -361,6 +363,9 @@ export function useModelAccessPolicy(scopeOrWorkspaceId: string | ModelPolicySco
       };
       // The row only shows when this server reports (and so enforces) the switch.
       await client.updateWorkspaceSettings(workspaceId, { allowCreditModels });
+      // Pages that read the cached workspace settings (the Knowledge index
+      // notice) follow the switch without a reload.
+      void refreshWorkspace(workspaceId).catch(() => undefined);
       if (!isCurrentScope()) return false;
       // The switch shows the saved value before the success toast. A failed
       // re-read shows on the page itself, never as a failed change.
@@ -373,7 +378,7 @@ export function useModelAccessPolicy(scopeOrWorkspaceId: string | ModelPolicySco
       );
       return true;
     },
-    [client, load, organizationDefaults, workspaceId],
+    [client, load, organizationDefaults, refreshWorkspace, workspaceId],
   );
 
   return {
@@ -512,7 +517,7 @@ export function OpengeniCreditsSwitchRow({
     <>
       <SettingRow
         label="Use Opengeni credits"
-        description="Lets people run models paid with Opengeni credits. Off blocks them here, including ones added later; subscriptions and API keys keep working."
+        description="Lets this workspace spend Opengeni credits. Off blocks credit-billed models (including ones added later), paid web search and semantic Knowledge search; subscriptions and API keys keep working."
         control={
           <Switch
             checked={saved.allowCreditModels}

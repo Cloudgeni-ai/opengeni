@@ -52,6 +52,7 @@ const AVAILABILITY_REASON_LABELS: Record<string, string> = {
   provider_unhealthy: "Provider unavailable",
   policy_blocked: "Blocked by workspace policy",
   unsupported: "Unsupported",
+  credits_disabled: "Opengeni credits off",
 };
 
 export function billingClassForModel(model: ClientModel): PickerBillingClass {

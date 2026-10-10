@@ -696,6 +696,34 @@ describe("provider web search projection", () => {
     ]);
   });
 
+  test("a workspace with Opengeni credits off is not shown paid provider tools", () => {
+    const row = session("all", { model: "acme/no-search" });
+    // Tinyfish is free by default; an explicit price makes both tools billed.
+    const paid = {
+      billingMode: "stripe" as const,
+      webSearchPricingJson: JSON.stringify({ searchMicros: 5_000, fetchMicros: 1_000 }),
+    };
+    const billed = providerSettings(paid);
+    const creditsOff = { allowCreditModels: false };
+    expect(names(row, context({ settings: billed, workspaceSettings: creditsOff }))).toEqual([]);
+    // Replace mode falls back to the model's hosted search.
+    expect(
+      names(
+        session(),
+        context({
+          settings: providerSettings({ ...paid, webSearchProviderMode: "replace" }),
+          workspaceSettings: creditsOff,
+        }),
+      ),
+    ).toEqual([["web_search", "hosted", "upfront"]]);
+    expect(
+      names(row, context({ settings: billed, workspaceSettings: { allowCreditModels: true } })),
+    ).toEqual([
+      ["web_search", "runtime", "upfront"],
+      ["web_fetch", "runtime", "upfront"],
+    ]);
+  });
+
   test("unconfigured deployments and disabled web search offer nothing new", () => {
     const row = session("all", { model: "acme/no-search" });
     expect(

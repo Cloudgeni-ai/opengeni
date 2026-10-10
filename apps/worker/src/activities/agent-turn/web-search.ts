@@ -46,12 +46,15 @@ export function turnWebSearchPlan(
     provider: { kind?: string };
   } | null,
   settings: WebSearchSettings,
+  workspaceCreditModelsAllowed: boolean,
 ) {
   return webSearchToolPlan(settings, {
     hostedWebSearch: hostedWebSearchForTurn(resolvedModel, settings.webSearchEnabled),
     // SuperGrok's native search is added by its transport, not as an agent
     // tool, so provider tools would only duplicate it.
     transportHostedSearch: resolvedModel?.provider.kind === "xai-subscription",
+    // A workspace with Opengeni credits off is not offered paid provider tools.
+    creditsDisabled: !workspaceCreditModelsAllowed,
   });
 }
 

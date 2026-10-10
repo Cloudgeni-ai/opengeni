@@ -817,6 +817,8 @@ function availabilityFor(input: {
   model: ConfiguredModel;
   credentialReadiness: ModelCredentialReadinessV1;
   policyAllowed: boolean;
+  /** Blocked only because the workspace turned Opengeni credits off. */
+  creditsDisabled?: boolean;
   observation?: ModelAvailabilityObservation | undefined;
   nowMs: number;
   maxAgeMs: number;
@@ -846,7 +848,7 @@ function availabilityFor(input: {
     return {
       status: "unavailable",
       selectable: false,
-      reason: "policy_blocked",
+      reason: input.creditsDisabled ? "credits_disabled" : "policy_blocked",
       checkedAt: null,
     };
   }
@@ -935,12 +937,27 @@ export function resolveWorkspaceModelSelection(
     .filter((model) => isModelAvailableForNewSelection(catalogSettings, model.id))
     .map((model) => {
       const provider = providers.get(model.providerId);
-      const policyAllowed =
-        evaluateWorkspaceModelPolicy(input.policy, {
-          providerId: model.providerId,
-          modelId: model.id,
-          chargesCredits: model.cost === "credits",
-        }).allowed && modelAllowedByConnections(input.connectionModelRestrictions ?? {}, model.id);
+      const verdict = evaluateWorkspaceModelPolicy(input.policy, {
+        providerId: model.providerId,
+        modelId: model.id,
+        chargesCredits: model.cost === "credits",
+      });
+      const allowedByConnections = modelAllowedByConnections(
+        input.connectionModelRestrictions ?? {},
+        model.id,
+      );
+      const policyAllowed = verdict.allowed && allowedByConnections;
+      // Name the credit switch only when it is the sole reason; an allowlist
+      // or connection restriction keeps the generic policy reason.
+      const creditsDisabled =
+        !verdict.allowed &&
+        verdict.reason === "credits" &&
+        allowedByConnections &&
+        input.policy != null &&
+        evaluateWorkspaceModelPolicy(
+          { ...input.policy, allowCreditModels: true },
+          { providerId: model.providerId, modelId: model.id, chargesCredits: true },
+        ).allowed;
       const credentialReadiness = credentialReadinessFor({
         model,
         provider,
@@ -967,6 +984,7 @@ export function resolveWorkspaceModelSelection(
           model,
           credentialReadiness,
           policyAllowed,
+          creditsDisabled,
           observation: input.observations?.[model.definitionVersion],
           nowMs,
           maxAgeMs,

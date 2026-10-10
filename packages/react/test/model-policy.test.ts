@@ -492,6 +492,24 @@ describe("model-policy", () => {
     expect(rows[0]?.selectable).toBe(false);
     expect(rows[0]?.unavailableReason).toBe("Blocked by workspace policy");
   });
+
+  test("names the credit switch when it is the only reason a model is blocked", () => {
+    const rows = projectPickerRows([
+      catalogModel({
+        id: "paid",
+        label: "Paid",
+        cost: "credits",
+        availability: {
+          status: "unavailable",
+          selectable: false,
+          reason: "credits_disabled",
+          checkedAt: null,
+        },
+      }),
+    ]);
+    expect(rows[0]?.selectable).toBe(false);
+    expect(rows[0]?.unavailableReason).toBe("Opengeni credits off");
+  });
 });
 
 describe("model display across connection scopes", () => {

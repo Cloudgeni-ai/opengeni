@@ -259,7 +259,11 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
       : {};
   // Fallback mode (the default) keeps hosted search exactly as resolved; the
   // operator's `replace` mode withholds it in favour of provider tools.
-  const hostedWebSearch = turnWebSearchPlan(resolvedModel, runSettings).hostedWebSearch;
+  const hostedWebSearch = turnWebSearchPlan(
+    resolvedModel,
+    runSettings,
+    deps.workspaceCreditModelsAllowed,
+  ).hostedWebSearch;
   const resolveImageReferences = async (
     references: Parameters<typeof resolveImageGenerationReferencesForTool>[0]["references"],
   ) =>

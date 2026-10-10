@@ -69,27 +69,54 @@ describe("turn web search plan", () => {
   });
 
   test("models with hosted search keep it; others get provider tools", () => {
-    expect(turnWebSearchPlan(model(true), settings)).toEqual({
+    expect(turnWebSearchPlan(model(true), settings, true)).toEqual({
       hostedWebSearch: true,
       providerTools: [],
     });
-    expect(turnWebSearchPlan(model(false), settings)).toEqual({
+    expect(turnWebSearchPlan(model(false), settings, true)).toEqual({
       hostedWebSearch: false,
       providerTools: ["web_search", "web_fetch"],
     });
-    expect(turnWebSearchPlan(model(false), testSettings())).toEqual({
+    expect(turnWebSearchPlan(model(false), testSettings(), true)).toEqual({
       hostedWebSearch: false,
       providerTools: [],
     });
   });
 
-  test("replace mode never touches SuperGrok's native search", () => {
-    const replace = { ...settings, webSearchProviderMode: "replace" };
-    expect(turnWebSearchPlan(model(true), replace).providerTools).toEqual([
+  test("credits off withholds only the provider tools that would spend credits", () => {
+    const billed = { ...settings, billingMode: "stripe" as const };
+    expect(turnWebSearchPlan(model(false), billed, false)).toEqual({
+      hostedWebSearch: false,
+      providerTools: [],
+    });
+    // Replace mode hands hosted search back when the provider tool is withheld.
+    expect(
+      turnWebSearchPlan(model(true), { ...billed, webSearchProviderMode: "replace" }, false),
+    ).toEqual({ hostedWebSearch: true, providerTools: [] });
+    // Keyless (free) providers and unbilled deployments keep their tools.
+    const keyless = testSettings({
+      billingMode: "stripe",
+      webSearchProvider: "searxng",
+      webSearchBaseUrl: "http://searxng.internal",
+      webFetchProvider: "jina",
+    });
+    expect(turnWebSearchPlan(model(false), keyless, false).providerTools).toEqual([
       "web_search",
       "web_fetch",
     ]);
-    expect(turnWebSearchPlan(model(true, "xai-subscription"), replace)).toEqual({
+    expect(turnWebSearchPlan(model(false), settings, false).providerTools).toEqual([
+      "web_search",
+      "web_fetch",
+    ]);
+  });
+
+  test("replace mode never touches SuperGrok's native search", () => {
+    const replace = { ...settings, webSearchProviderMode: "replace" };
+    expect(turnWebSearchPlan(model(true), replace, true).providerTools).toEqual([
+      "web_search",
+      "web_fetch",
+    ]);
+    expect(turnWebSearchPlan(model(true, "xai-subscription"), replace, true)).toEqual({
       hostedWebSearch: true,
       providerTools: [],
     });
