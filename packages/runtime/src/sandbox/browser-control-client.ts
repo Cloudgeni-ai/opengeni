@@ -85,6 +85,7 @@ import {
   type EnsureBrowserControlServerResult,
 } from "./browser-control-server";
 import { parseExecResponseBanner } from "./exec-banner";
+import { controllerStreamRequest, parseControllerStreamResponse } from "./browser-control-stream";
 import {
   buildStreamUrl,
   exposedPortAllowsHostFetch,
@@ -121,6 +122,15 @@ type ExecResultLike = {
 };
 
 export type BrowserControlPlacementSession = {
+  /** Connected Machine command stdin is byte-exact and private. Optional so
+   * older placement adapters retain their existing file-based transport. */
+  execWithInput?: (args: {
+    cmd: string;
+    stdin: Uint8Array;
+    shell: string;
+    login: boolean;
+    workdir: string;
+  }) => Promise<ExecResultLike>;
   exec?: (args: {
     cmd: string;
     workdir?: string;
@@ -1154,6 +1164,34 @@ export class BrowserControlClient {
       );
     }
 
+    if (
+      this.session.execWithInput &&
+      (input.body === undefined || Buffer.byteLength(JSON.stringify(input.body)) <= 32 * 1024)
+    ) {
+      try {
+        const response = await this.requestStream(input, BROWSER_CONTROL_MAX_JSON_BYTES);
+        return parseEnvelope(
+          new TextDecoder("utf-8", { fatal: true }).decode(response.data),
+          response.status,
+        );
+      } catch (error) {
+        if (
+          retryNativeEndpoint &&
+          input.method === "GET" &&
+          this.nativeAuthority &&
+          this.session.ensureBrowserControl &&
+          error instanceof BrowserControlTransportError
+        ) {
+          nativeControllerPorts.delete(nativeControllerKey(this.nativeAuthority));
+          await this.controllerPort();
+          return await this.requestJson(input, false);
+        }
+        throw error;
+      } finally {
+        await this.session.finalizeOpStreamOps?.().catch(() => undefined);
+      }
+    }
+
     const controllerPort = await this.controllerPort();
     const directory = `${CLIENT_ROOT}/${randomUUID()}`;
     const configPath = `${directory}/curl.conf`;
@@ -1307,6 +1345,34 @@ export class BrowserControlClient {
       );
     }
 
+    if (this.session.execWithInput) {
+      try {
+        const response = await this.requestStream(
+          input,
+          input.surface === "browser" ? 24 * 1024 * 1024 : COMPUTER_SCREENSHOT_MAX_BYTES,
+        );
+        if (response.status < 200 || response.status >= 300) {
+          parseEnvelope(new TextDecoder().decode(response.data), response.status);
+          throw new BrowserControlProtocolError("browser controller image response is invalid");
+        }
+        return controllerImageFrame(response.data, response.headers, input);
+      } catch (error) {
+        if (
+          retryNativeEndpoint &&
+          this.nativeAuthority &&
+          this.session.ensureBrowserControl &&
+          error instanceof BrowserControlTransportError
+        ) {
+          nativeControllerPorts.delete(nativeControllerKey(this.nativeAuthority));
+          await this.controllerPort();
+          return await this.requestBytes(input, false);
+        }
+        throw error;
+      } finally {
+        await this.session.finalizeOpStreamOps?.().catch(() => undefined);
+      }
+    }
+
     const controllerPort = await this.controllerPort();
     const directory = `${CLIENT_ROOT}/${randomUUID()}`;
     const configPath = `${directory}/curl.conf`;
@@ -1396,6 +1462,39 @@ export class BrowserControlClient {
     } finally {
       await runBestEffort(this.session, `rm -rf -- ${shellQuote(directory)}`);
       await this.session.finalizeOpStreamOps?.().catch(() => undefined);
+    }
+  }
+
+  private async requestStream(
+    input: { method: string; path: string; token: string; body?: unknown; timeoutMs?: number },
+    maxBytes: number,
+  ): Promise<ReturnType<typeof parseControllerStreamResponse>> {
+    const port = await this.controllerPort();
+    const request = controllerStreamRequest({
+      method: input.method,
+      url: localControllerUrl(port, input.path),
+      token: requireToken(input.token, "browser controller token"),
+      ...(input.body === undefined ? {} : { body: JSON.stringify(input.body) }),
+      timeoutMs: boundedTimeout(input.timeoutMs ?? this.timeoutMs),
+      maxBytes,
+    });
+    try {
+      const result = await this.session.execWithInput!({
+        cmd: request.cmd,
+        stdin: request.stdin,
+        shell: "/bin/sh",
+        login: false,
+        workdir: placementControllerWorkdir(this.session),
+      });
+      if (result.exitCode !== 0 || result.stdout === undefined) {
+        throw new BrowserControlTransportError("browser controller command failed");
+      }
+      return parseControllerStreamResponse(result.stdout, request.marker, maxBytes);
+    } catch (error) {
+      if (error instanceof RangeError || error instanceof BrowserControlTransportError) throw error;
+      throw new BrowserControlTransportError("browser controller request transport failed", {
+        cause: error,
+      });
     }
   }
 
@@ -2932,7 +3031,11 @@ function requirePlacementRequestSurface(session: BrowserControlPlacementSession)
     typeof session.writePlacementPrivate === "function" ||
     typeof session.writeFile === "function" ||
     (hasExec && typeof session.writeStdin === "function");
-  if (typeof session.resolveExposedPort !== "function" && (!hasExec || !hasPrivateWrite)) {
+  if (
+    typeof session.execWithInput !== "function" &&
+    typeof session.resolveExposedPort !== "function" &&
+    (!hasExec || !hasPrivateWrite)
+  ) {
     throw new BrowserControlUnsupportedError(
       "browser placement requires a controller endpoint or exec and a private file transport",
     );
