@@ -3558,12 +3558,13 @@ as "not an organization account":
    page change would show each twice, once with a misleading reach.
    `organizationAdministeredConnection` (organization context only, through
    the shared-workspace inventory) is the one condition every organization
-   route uses, except the organization primary: it stays within the
-   organization pool (connections no workspace manages), because a former
-   workspace account keeps its `workspace` classification (decision 3) and
-   an organization primary outside the pool `organization` source mode
-   selects from would mean nothing. Making one the organization default
-   would need a reclassification, which is not part of this change.
+   route uses, except the organization primary: it keeps the legacy rule
+   (connections no workspace manages), failing closed. A former workspace
+   account the organization later shares serves other workspaces through
+   their organization-pool rows like any organization account, in spread or
+   behind the primary, but cannot itself be made the organization primary;
+   whether to allow that is an open question below.
+
 #### Target shape for the SuperGrok and Claude cutovers
 
 A legacy credential of either provider with `authority_scope = workspace` in
@@ -3590,9 +3591,10 @@ personal connections, outside the organization editor.
 Open questions for the product owner: whether sharing an account beyond its
 managing workspace should end or narrow that workspace's delegated management
 (decision 5); whether to restore per-workspace management of merged copies
-(finding above); and whether an organization administrator may designate a
+(finding above); whether an organization administrator may designate a
 workspace-managed account for Codex Apps in other workspaces it reaches
-(decision 8).
+(decision 8); and whether one may become the organization primary
+(decision 10).
 
 ## 6. Specific behaviours
 
