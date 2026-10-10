@@ -320,6 +320,11 @@ import {
 } from "./session-view";
 import { completeChildReadSequences } from "./child-read-evidence";
 import {
+  sessionEventAuditSelectorMessage,
+  addUnknownSessionEventTypeIssues,
+  unknownSessionEventTypeMessage,
+} from "./session-event-errors";
+import {
   acknowledgeConsumedChildEvents,
   listOutstandingSessionSystemUpdatesForAttempt,
   recordConsumedChildAnswers,
@@ -5180,7 +5185,7 @@ function registerWorkspaceOrchestrationTools(
       "session_events",
       {
         description:
-          "Read session history. Default view=conversation returns roughly ten complete user/assistant messages, including completed commentary, in a 16 KiB envelope; no token deltas or execution records. Prefer fewer complete messages; a single oversized message has fragment offsets and a lossless nextCursor continuation over retained source text, including large legacy rows. Fragment unit is codepoint for plain text or utf16 for codec text; pass the opaque v2 cursor unchanged (v1 cursors must restart). Pass cursor=nextCursor with sessionId, omitting other selectors; it preserves the view, detail, direction and page size. limit is 1–50 for content views; larger values are rejected. after/nextAfter and before/nextBefore only change position, never view or detail; use nextCursor when present to avoid skipping a message fragment. view=results returns final turn answers and actionable outcomes without duplicate message-completion text. view=tools returns compact call/result identities; toolName finds exact named calls across retained history, then use a returned callId to read its result. includeArguments/includeOutput opt into one text or JSON-encoded value, and callId selects an exact call (sparse scans can return an empty advancing page). sourceExact=false and sourceOmitted identify oversized structured values that were omitted, never partial JSON presented as complete; scalar text remains resumable. Conversation/results/tools omit never-claimed human/API prompts and stale duplicate events. view=debug exposes the existing authorized audit query with explicit type/class filters, mode=monitoring|forensic and payloadMode=none|summary|full; raw deltas and never-claimed prompts require mode=forensic. Explicit legacy audit selectors remain supported without view. latest is an exclusive semantic-class lookup; resultMode=compact requires latest. No read observes commands or changes append-only history. REST behavior is unchanged.",
+          "Read session history. Default view=conversation returns roughly ten complete user/assistant messages, including completed commentary, in a 16 KiB envelope; no token deltas or execution records. Prefer fewer complete messages; a single oversized message has fragment offsets and a lossless nextCursor continuation over retained source text, including large legacy rows. Fragment unit is codepoint for plain text or utf16 for codec text; pass the opaque v2 cursor unchanged (v1 cursors must restart). Pass cursor=nextCursor with sessionId, omitting other selectors; it preserves the view, detail, direction and page size. Copy nextCursor byte-for-byte, never retype or build one; when you cannot, repeat the call with before=nextBefore (or after=nextAfter) instead. limit is 1–50 for content views; larger values are rejected. after/nextAfter and before/nextBefore only change position, never view or detail; use nextCursor when present to avoid skipping a message fragment. view=results returns final turn answers and actionable outcomes without duplicate message-completion text. view=tools returns compact call/result identities; toolName finds exact named calls across retained history. includeArguments/includeOutput opt into one text or JSON-encoded value, and callId selects an exact call (sparse scans can return an empty advancing page). toolName with includeOutput=true returns each named call with its result, limit 1-3 (default 1, the newest unless direction=after). sourceExact=false and sourceOmitted identify oversized structured values that were omitted, never partial JSON presented as complete; scalar text remains resumable. Conversation/results/tools omit never-claimed human/API prompts and stale duplicate events. view=debug exposes the existing authorized audit query with explicit type/class filters, mode=monitoring|forensic and payloadMode=none|summary|full; raw deltas and never-claimed prompts require mode=forensic. Explicit legacy audit selectors remain supported without view. latest is an exclusive semantic-class lookup; resultMode=compact requires latest. No read observes commands or changes append-only history. REST behavior is unchanged.",
         inputSchema: {
           sessionId: z4.string().uuid(),
           view: z4.enum(["conversation", "results", "tools", "debug"]).optional(),
@@ -5192,7 +5197,7 @@ function registerWorkspaceOrchestrationTools(
             .max(256)
             .optional()
             .describe(
-              "Exact tool name; selects calls in view=tools. Use a returned callId for its result.",
+              "Exact tool name; selects calls in view=tools. With includeOutput=true each call carries its result.",
             ),
           includeArguments: z4.boolean().optional(),
           includeOutput: z4.boolean().optional(),
@@ -5209,29 +5214,29 @@ function registerWorkspaceOrchestrationTools(
           payloadMode: z4.enum(SessionEventPayloadMode.options).optional(),
           resultMode: z4.enum(SessionEventResultMode.options).optional(),
           includeTypes: z4
-            .array(
-              z4
-                .string()
-                .refine(
-                  (value) => SessionEventType.safeParse(value).success,
-                  "Unknown session event type",
-                ),
-            )
+            .array(z4.string())
             .max(100)
+            .superRefine((values, context) =>
+              addUnknownSessionEventTypeIssues(
+                values,
+                (value) => SessionEventType.safeParse(value).success,
+                (issue) => context.addIssue(issue),
+              ),
+            )
             .describe(
               "Debug audit event types, e.g. turn.completed, user.message, agent.message.completed, agent.toolCall.output. Validated against the canonical event-type registry.",
             )
             .optional(),
           excludeTypes: z4
-            .array(
-              z4
-                .string()
-                .refine(
-                  (value) => SessionEventType.safeParse(value).success,
-                  "Unknown session event type",
-                ),
-            )
+            .array(z4.string())
             .max(100)
+            .superRefine((values, context) =>
+              addUnknownSessionEventTypeIssues(
+                values,
+                (value) => SessionEventType.safeParse(value).success,
+                (issue) => context.addIssue(issue),
+              ),
+            )
             .describe(
               "Debug audit event types to exclude; validated against the canonical event-type registry.",
             )
@@ -5274,8 +5279,13 @@ function registerWorkspaceOrchestrationTools(
         await authorizeFirstPartySession(deps, grant, sessionId, "session.events.read");
         // Keep the model schema compact without weakening either MCP validation
         // or direct adapter calls: the canonical registry owns accepted types.
-        const includeTypes = requestedIncludeTypes?.map((type) => SessionEventType.parse(type));
-        const excludeTypes = requestedExcludeTypes?.map((type) => SessionEventType.parse(type));
+        const canonicalType = (type: string) => {
+          const parsed = SessionEventType.safeParse(type);
+          if (!parsed.success) throw new Error(unknownSessionEventTypeMessage(type));
+          return parsed.data;
+        };
+        const includeTypes = requestedIncludeTypes?.map(canonicalType);
+        const excludeTypes = requestedExcludeTypes?.map(canonicalType);
         const latestClass =
           latest === undefined ? undefined : sessionEventLatestClassToSemanticClass(latest);
         if (requestedResultMode === "compact" && latestClass === undefined) {
@@ -5294,7 +5304,22 @@ function registerWorkspaceOrchestrationTools(
         ].some((value) => value !== undefined);
         if (((view !== undefined && view !== "debug") || cursor !== undefined) && auditRequested) {
           throw new Error(
-            "Audit selectors require view=debug and cannot change a conversation cursor",
+            sessionEventAuditSelectorMessage({
+              sessionId,
+              view,
+              cursor,
+              audit: {
+                mode: requestedMode,
+                payloadMode: requestedPayloadMode,
+                resultMode: requestedResultMode,
+                includeTypes,
+                excludeTypes,
+                includeClasses,
+                excludeClasses,
+                latest,
+              },
+              position: { after, before, direction: requestedDirection, limit },
+            }),
           );
         }
         if (view !== "debug" && !auditRequested) {
@@ -5337,7 +5362,21 @@ function registerWorkspaceOrchestrationTools(
           includeOutput !== undefined
         ) {
           throw new Error(
-            "cursor/callId/toolName/includeArguments/includeOutput require a non-debug view",
+            `cursor/callId/toolName/includeArguments/includeOutput require a non-debug view; view=debug pages with after/before. Use ${JSON.stringify(
+              callId === undefined &&
+                toolName === undefined &&
+                includeArguments === undefined &&
+                includeOutput === undefined
+                ? { sessionId, cursor: "<nextCursor, unchanged>" }
+                : {
+                    sessionId,
+                    view: "tools",
+                    ...(callId !== undefined ? { callId } : {}),
+                    ...(toolName !== undefined ? { toolName } : {}),
+                    ...(includeArguments !== undefined ? { includeArguments } : {}),
+                    ...(includeOutput !== undefined ? { includeOutput } : {}),
+                  },
+            )} instead.`,
           );
         }
         if (
