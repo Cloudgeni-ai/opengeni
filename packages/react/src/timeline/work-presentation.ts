@@ -79,16 +79,33 @@ export function isPreparingWork(group: ActivityGroup, options: ReadableWorkOptio
   );
 }
 
-/** Status of a readable turn's work row, minus the host-rendered live preview. */
+/**
+ * Status of a readable turn's work row, minus the host-rendered live preview.
+ * Time spent waiting for model capacity is not work: the worked duration and
+ * the live working clock exclude it. A wait's `detail` is its one quiet
+ * secondary line.
+ */
 export function readableWorkStatus(
   group: ActivityGroup & { work: NonNullable<ActivityGroup["work"]> },
-): Omit<TurnSummaryStatus, "preview"> {
+): Omit<TurnSummaryStatus, "preview"> & { detail?: string | undefined } {
   const end = group.work.endedAt;
-  return end
-    ? { kind: "worked", durationMs: durationBetween(group.work.startedAt, end) }
-    : group.work.waiting
-      ? { kind: "waiting", ...group.work.waiting }
-      : { kind: "working", since: group.work.startedAt };
+  const pausedMs = group.work.pausedMs ?? 0;
+  if (end) {
+    const durationMs = durationBetween(group.work.startedAt, end);
+    return {
+      kind: "worked",
+      durationMs: durationMs === undefined ? undefined : Math.max(0, durationMs - pausedMs),
+    };
+  }
+  if (group.work.waiting) return { kind: "waiting", ...group.work.waiting };
+  const started = Date.parse(group.work.startedAt);
+  return {
+    kind: "working",
+    since:
+      pausedMs > 0 && Number.isFinite(started)
+        ? new Date(started + pausedMs).toISOString()
+        : group.work.startedAt,
+  };
 }
 
 /** Whether a readable turn's work fold starts expanded. */

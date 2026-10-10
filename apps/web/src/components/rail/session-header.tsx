@@ -490,8 +490,7 @@ function CompactSessionStatus({
       </span>
     );
   }
-  const name =
-    status === "waiting_capacity" ? "Waiting" : (label ?? SESSION_STATUS_META[status].label);
+  const name = label ?? SESSION_STATUS_META[status].label;
   return (
     <span
       data-compact-session-status={status}

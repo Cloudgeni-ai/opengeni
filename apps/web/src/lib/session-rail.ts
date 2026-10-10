@@ -8,7 +8,7 @@ export function sessionStatusLabel(status: Session["status"]): string {
     case "requires_action":
       return "Needs you";
     case "waiting_capacity":
-      return "Waiting for capacity";
+      return "Limit reached";
     case "recovering":
       return "Recovering";
     case "running":

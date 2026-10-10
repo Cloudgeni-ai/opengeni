@@ -250,7 +250,7 @@ export const DEFAULT_OPENGENI_NATIVE_LABELS = {
   statusRunning: "Running",
   statusComplete: "Complete",
   statusRecovering: "Recovering",
-  statusWaitingCapacity: "Waiting for capacity",
+  statusWaitingCapacity: "Limit reached",
   statusIdle: "Idle",
   statusRequiresAction: "Waiting on you",
   statusFailed: "Failed",

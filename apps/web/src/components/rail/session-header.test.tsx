@@ -177,7 +177,7 @@ test("narrow headers keep a compact lifecycle dot instead of hiding status", asy
       ["running", "Running"],
       ["failed", "Failed"],
       ["requires_action", "Waiting on you"],
-      ["waiting_capacity", "Waiting"],
+      ["waiting_capacity", "Limit reached"],
     ] as const) {
       await act(async () => root.render(render(session, status)));
       expect(compact()?.dataset.compactSessionStatus).toBe(status);
