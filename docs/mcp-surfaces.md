@@ -79,9 +79,12 @@ workspace, or selected ones). The connection then acts as that person:
   `workspace:admin` is one permission, never a wildcard for the ones left out.
   The person's own role still expands as usual, so Full access reaches
   everything the person can do.
-- Third-party provider sign-in (Codex, SuperGrok and Claude device or OAuth
-  steps, and integration OAuth starts) stays with the person in the browser;
-  calls return a hint to finish there. Actions no MCP caller can ever complete
+- Device-code subscription sign-in (Codex and SuperGrok, at workspace or
+  organization level) works for an agent: it starts the sign-in, gives the
+  person the short code and link, and polls until they approve at the
+  provider. Browser-bound provider OAuth (Claude subscription sign-in and
+  integration OAuth starts) stays with the person in the browser; calls
+  return a hint to finish there. Actions no MCP caller can ever complete
   because they need the person's own browser session (creating an
   organization, listing their organization memberships and invitations,
   accepting an invitation, organization recovery, and confirming an identity
@@ -123,8 +126,8 @@ organization actions, without connecting an outside client:
   role applies to the very next call.
 - They cover exactly the organization MCP server's catalog and run each
   action in process as the granter with Full access over all workspaces,
-  under the same rules (`browserOnly` actions, provider sign-in and agent
-  connection management stay with the person). Nothing of the agent's own
+  under the same rules (`browserOnly` actions, browser-bound provider OAuth
+  and agent connection management stay with the person). Nothing of the agent's own
   workspace scope carries into the action.
 
 Migration `0692` is rolling.

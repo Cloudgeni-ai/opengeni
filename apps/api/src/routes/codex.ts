@@ -868,9 +868,10 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/organizations/:organizationId/codex/connect/start", async (c) => {
     const organizationId = c.req.param("organizationId");
     requireSameOriginBrowserMutation(c, deps);
-    const human = await requireOrganizationCodexHuman(c, deps, organizationId, {
-      providerConsent: true,
-    });
+    // Device sign-in accepts an agent acting as an admin, as the workspace
+    // route does: the agent relays the short code and the person still
+    // approves at OpenAI themselves. The state binds the same person.
+    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
     // The device-code start touches no account state: public compatibility
     // (a disabled cutover still fails closed).
     await codexRouteDisposition(deps, organizationId);
@@ -899,9 +900,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/organizations/:organizationId/codex/connect/poll", async (c) => {
     const organizationId = c.req.param("organizationId");
     requireSameOriginBrowserMutation(c, deps);
-    const human = await requireOrganizationCodexHuman(c, deps, organizationId, {
-      providerConsent: true,
-    });
+    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
     await codexRouteDisposition(deps, organizationId);
     const { state } = (await c.req.json().catch(() => null)) as {
       state?: string;

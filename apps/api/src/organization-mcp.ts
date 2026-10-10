@@ -17,6 +17,7 @@ import { z } from "zod";
 
 import type { ActionCatalogEntry } from "./mcp/action-catalog-types";
 import { ACTION_CATALOG } from "./mcp/action-catalog.gen";
+import { actionDescription } from "./mcp/action-descriptions";
 
 /* ----------------------------------------------------------------------------
    The organization MCP server (`/v1/mcp`).
@@ -227,6 +228,9 @@ function words(value: string): string[] {
 
 /** Actions an MCP caller can complete: browser-only ones are left out. */
 const CALLABLE_ACTIONS = ACTION_CATALOG.filter((entry) => !entry.browserOnly);
+const DESCRIPTIONS = new Map(
+  CALLABLE_ACTIONS.map((entry) => [entry.id, actionDescription(entry)] as const),
+);
 
 export function searchActions(input: { query: string; limit: number; offset: number }) {
   // Singular and plural match ("workspace" finds listWorkspaces).
@@ -240,6 +244,9 @@ export function searchActions(input: { query: string; limit: number; offset: num
     // nearly every path contains "workspaces".
     const name = words(entry.id).map(stem);
     const path = [...words(entry.path.replace(/:\w+/g, "")), entry.method.toLowerCase()].map(stem);
+    // A described action also matches the words people use for it
+    // ("pause", "primary", "reset"), below a name match.
+    const described = words(DESCRIPTIONS.get(entry.id) ?? "").map(stem);
     const score = wanted.reduce(
       (total, word) =>
         total +
@@ -251,7 +258,9 @@ export function searchActions(input: { query: string; limit: number; offset: num
               ? 1
               : path.some((token) => token.startsWith(word))
                 ? 0.5
-                : 0),
+                : described.includes(word)
+                  ? 0.5
+                  : 0),
       0,
     );
     return {
@@ -271,11 +280,15 @@ export function searchActions(input: { query: string; limit: number; offset: num
   return {
     total: scored.length,
     offset: input.offset,
-    actions: scored.slice(input.offset, input.offset + input.limit).map(({ entry }) => ({
-      id: entry.id,
-      method: entry.method,
-      path: entry.path,
-    })),
+    actions: scored.slice(input.offset, input.offset + input.limit).map(({ entry }) => {
+      const description = DESCRIPTIONS.get(entry.id);
+      return {
+        id: entry.id,
+        method: entry.method,
+        path: entry.path,
+        ...(description ? { description } : {}),
+      };
+    }),
   };
 }
 
@@ -303,10 +316,12 @@ export function describeActionResult(id: string): CallToolResult {
 
 export function describeAction(entry: ActionCatalogEntry) {
   const reads = entry.method === "GET" || entry.method === "HEAD";
+  const description = actionDescription(entry);
   return {
     id: entry.id,
     method: entry.method,
     path: entry.path,
+    ...(description ? { description } : {}),
     pathParameters: pathParameters(entry.path),
     input: entry.request.map((name) => ({
       name,
