@@ -185,4 +185,8 @@ export const embeddingMigrationTail = [
   // shared core tables from withheld 0642 and patches the capture function
   // installed by withheld 0264/0275/0478; replay after them.
   "0712_subscription_core_generic_precursor.sql",
+  // Builds on 0712's receipts, adds a marker to the session and scheduled
+  // carrier tables and patches the personal helpers 0712 patched; replay
+  // after it.
+  "0713_subscription_authority_compat.sql",
 ];

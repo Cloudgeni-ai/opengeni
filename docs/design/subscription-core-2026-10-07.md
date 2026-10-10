@@ -3127,6 +3127,153 @@ M4-A hand-over are:
 
 No X1a or C1a call site merges before all three.
 
+#### PR 0b: authority compatibility and fences
+
+PR 0b ships as two rolling PRs. Part 1 (migration 0713) is inert: the
+marker, the compatibility relation, the per-path resolvers, the copy routine
+and reader, the commit-time check and the helpers' record branch act only
+for a provider whose own drained cutover wrote a receipt with a real commit
+time, which no provider has yet. Part 2 (stacked on part 1) adds the fences
+and comparisons, which act on deploy. Choices made where the plan left room,
+for reviewers:
+
+- **Relation.** `opengeni_private.subscription_authority_compat` belongs to
+  the migration owner; runtime roles hold no privilege on it. Besides the
+  planned columns it stores `workspace_id` (every carrier is workspace-bound,
+  so session, turn and update references are composite `(workspace_id, id)`
+  foreign keys) and `owner_subject_id`, the human whose personal authority
+  the record carries (a `user` record, or one with a personal entry; NULL
+  otherwise). Narrowing compares the causal human with this column, so a
+  copy never has to re-derive the owner from the source's lineage. A content
+  CHECK enforces the mapping table's shapes: `organization` has
+  `shared_pool = organization` and no entry, `workspace` has `workspace`,
+  `user` and `missing` have `none`, `missing` has no entry; at most one entry
+  with exactly `ownerMembershipId` (a UUID), `authorityGeneration` (a
+  positive safe integer) and 1 to 64 distinct connection UUIDs.
+- **Row security.** FORCE RLS with a SELECT and an INSERT policy: a record is
+  visible exactly when its carrier row is visible to the same account and
+  workspace under the reader's own row security (which carries session
+  visibility). There is no UPDATE or DELETE policy, so even the owner changes
+  nothing; a guard trigger rejects UPDATE and TRUNCATE for every role and
+  DELETE unless it runs inside a referential cascade from the carrier
+  (`pg_trigger_depth() > 1`), so session, task and organization deletion keep
+  working. INSERT requires the provider's receipt with a commit time later
+  than `-infinity` (`55000`): Codex and providers without a receipt never
+  hold records.
+- **Marker.** `authority_inserted_at` on `sessions`, `session_turns`,
+  `scheduled_tasks`, `scheduled_task_revision_authorities`,
+  `session_system_updates` and `session_system_update_outbox` (constant
+  default, metadata-only). The stamping trigger is named `zzz_…` so it runs
+  after every other `BEFORE INSERT` trigger and nothing can replace its
+  value; the immutability trigger fires only when the value changes. Both
+  bind every role, including the owner. The column adds and trigger creation
+  run under `SET LOCAL lock_timeout = '5s'`.
+- **Marker and the task digest.** The scheduled-task execution digest hashes
+  the task row as JSON, so the marker would change every task's digest on
+  its next rename or pause and invalidate run receipts holding the old one.
+  The digest function and its trigger now exclude `authority_inserted_at`
+  (the anchored replacement 0688 used for `subscription_authority`). The
+  unused `scheduled_task_execution_state` is left as it is.
+- **"Inserted by this transaction"** is the marker equal to
+  `transaction_timestamp()`. The copy routine copies only into a carrier its
+  own transaction inserted, and the receiver and compaction resolvers skip
+  turns the current transaction inserted (the writer resolved its source
+  before inserting them). Two transactions that start in the same
+  microsecond are indistinguishable here; the record content is still
+  computed from the verified source, never supplied.
+- **Resolvers.** One owner-only function,
+  `opengeni_subscription_internal.subscription_compat_carrier_sources(kind,
+  workspace, id, revision)`, returns each carrier's sources by path, with the
+  causal human used for narrowing:
+
+  | Carrier | Path | Source |
+  | --- | --- | --- |
+  | turn of a scheduled run | scheduled firing | The run's task revision (the task itself when the revision row is missing); personal only when the revision's authorizer is the task owner |
+  | `system` or `goal` turn | delivery | When every delivered update is a goal continuation: the goal's causal turn, only when its `initiating_human_subject_id` is the delivering turn's (else none, as the Codex v2 writer). Otherwise, with an execution context: the context turn and every delivered causal update (not Agent messages or child results, which 0608 checks by human only). Otherwise: each delivered update |
+  | `compaction` turn | compaction | The turn of the session's latest `turn.started` event (`latestStartedSessionTurnRow`), excluding turns this transaction inserted |
+  | `user` or `api` turn with `lineage.editedFromTurnId` | edit | The exact turn withdrawn for this edit (same session, `withdrawn_for_edit`, the same human); anything else is refused (`23514`). The copy is verbatim, as the queue writer copies v1, v2 and the human |
+  | `user` or `api` turn submitted by an agent attempt | agent prompt | The receiving session's source: execution-context turn, else latest accepted turn (both excluding this transaction's turns), else spawning parent turn, else `session_initial` |
+  | first `user` or `api` turn of a child or scheduler-created session | creation | The parent turn, or the occurrence's revision |
+  | any other turn (including the first turn of a human-created session, whose v2 the start computes afresh); archive-imported sessions | new acceptance | none |
+  | `session_initial` | creation | The parent turn of a child; the occurrence's revision for a scheduler-created session; else none |
+  | scheduled task | agent-created task | The creating turn (the last agent hop of the frozen creator context); personal only for an owner destination (Personal workspace, or the owner's private reusable session); else none |
+  | task revision | revision | The task; personal only when the authorizer is the task owner (0688's v2 derivation rule), so a clone on rename or pause yields what its predecessor yields |
+  | update of a scheduled run | scheduled occurrence | The run's revision |
+  | Agent Message or Steer update | receiver | The receiving session's source; personal only for the sender's causal human |
+  | child result update | child result | Its outbox row (same workspace, target session and dedupe key), else the `parentTurnId` turn |
+  | other updates | causal | The `causalTurnId` turn |
+  | outbox row | child outbox | The child's spawning parent turn |
+
+  The copy routine, the commit-time check and part 2's fences use only this
+  function.
+- **Edits.** The queue's Edit resubmits a withdrawn prompt and copies its v1
+  snapshots, v2 value and human verbatim, a copy path the table under
+  "Writing" does not list. Treating the resubmission as a new acceptance
+  would drop a source record's narrowing (a widening), so it is a path of
+  its own. No column linked the two turns (the draft's `source_turn_id` is
+  cleared in the submitting transaction), so the writer now records
+  `lineage.editedFromTurnId` on the resubmitted turn, and the resolver
+  verifies it. Older binaries omit the link; that matters only after a
+  provider's receipt, when they no longer run. The provider cutovers (X3,
+  C3) must also write records for turns withdrawn for edit that a composer
+  draft still references, or an edit submitted after the cutover waits with
+  the `missing` copy.
+- **Copy rule.** As "Writing" above: a source with the provider's v2 entry
+  yields no record; a source record is copied verbatim when it is `missing`,
+  ownerless, or its owner is the causal human; otherwise the entry is dropped
+  and a remaining `workspace` or `organization` narrowing is copied, and a
+  `user` record yields no record; a source with neither that predates the
+  receipt yields the `missing` copy. A carrier with several sources (a
+  delivery batch) requires them all to yield the same copy (`23514`
+  otherwise).
+- **Commit-time check.** A `DEFERRABLE INITIALLY DEFERRED` constraint trigger
+  (`zzz_subscription_authority_compat_check`, `AFTER INSERT`) on each carrier
+  table. It returns after one lookup in the receipts table while no receipt
+  has a real commit time. Otherwise, for each such provider, it requires the
+  stored record to equal the expected copy in every content column (or to be
+  absent when none is expected) and, when the source has a record or
+  predates the receipt, no v2 entry for the provider. A carrier deleted later
+  in the same transaction is skipped. The copy routine and the check resolve
+  under the carrier's own account and workspace with an empty subject, and
+  restore the caller's settings, so both see the same sources.
+- **Copy routine.** `opengeni_private.copy_subscription_authority_compat
+  (provider, carrier_kind, workspace_id, carrier_id,
+  task_authority_revision)` takes no content. It returns false without a
+  real-time receipt (inert), requires the caller's account and workspace
+  settings, a carrier visible to the caller and inserted by its own
+  transaction (`55000` otherwise), and is idempotent. It returns whether the
+  carrier now holds a record. Nothing in the runtime calls it yet; the
+  provider writers (X2b, C2b) will.
+- **Reader.** `opengeni_private.read_subscription_authority_compat` (same
+  arguments) returns `{authority: v1}` before the provider's receipt, `v2`
+  when the carrier holds the provider's entry, `record` with its content,
+  `missing` (`personal: []`, `sharedPool: none`: the work waits) for a
+  pre-receipt carrier with neither, `none` for post-receipt work with
+  neither, and NULL when the carrier is not visible to the caller.
+  The answer itself comes from the owner-only
+  `opengeni_subscription_internal.subscription_compat_effective` (same
+  arguments, no visibility check), which part 2's fences also use.
+  `opengeni_private.subscription_authority_compat_providers()` lists the
+  providers that can hold records (empty while only Codex is cut over).
+- **Personal helpers.** Both helpers read the turn's (`session_turn`) record
+  whose `owner_subject_id` is the session owner, only when the turn has no
+  v2 entry for the provider. `authorize_subscription_personal_access` then
+  requires the entry's membership to be the connection's owner membership
+  (which it already requires to be the session owner's active membership),
+  the entry's generation to be the connection's current generation, the
+  connection to be listed, and `personalConnectionsAllowed`. The placement
+  helper reads the record's connections for the requested membership and
+  generation; with none it refuses, and otherwise it mints capabilities and
+  checks visibility only for those connections. The v2 branches are
+  unchanged. Both patches are anchored replacements of the live definitions
+  (each anchor must occur exactly once).
+- **Grants and posture.** The copy routine, the reader and the provider list
+  are granted to every configured application role (0712's pattern); every
+  other new routine is owner-only in `opengeni_subscription_internal` with
+  `search_path = pg_catalog, <data schema>, opengeni_private, pg_temp`. The
+  previous release's posture check passes against the migrated schema before
+  and after role provisioning.
+
 #### Verification plan
 
 - `bun install`; adapter conformance per provider without network (scripted

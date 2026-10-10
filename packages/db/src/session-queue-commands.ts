@@ -2304,7 +2304,11 @@ export async function submitHumanPromptInTransaction(
           metadata: input.turnExecutionPolicy
             ? metadataWithTurnExecutionPolicyV1(input.turnMetadata ?? {}, input.turnExecutionPolicy)
             : (input.turnMetadata ?? {}),
-          lineage: { actor: input.actor.type },
+          // An edit names the exact withdrawn turn it copies, so the database
+          // resolves the same source for accepted authority (0713).
+          lineage: editedSourceTurn
+            ? { actor: input.actor.type, editedFromTurnId: editedSourceTurn.id }
+            : { actor: input.actor.type },
           ...initiatorColumns(frozenInitiator),
           initiatingHumanSubjectId: acceptedInitiatingHumanSubjectId,
           personalConnectionDelegations: editedSourceTurn

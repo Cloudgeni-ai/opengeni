@@ -69,6 +69,8 @@ const withheldMigrations = [
   "0711_subscription_codex_completion_operations.sql",
   // Records receipts over withheld 0689 and patches the capture function from withheld 0478.
   "0712_subscription_core_generic_precursor.sql",
+  // Builds on withheld 0712's receipts and patches the helpers it patched.
+  "0713_subscription_authority_compat.sql",
 ];
 let database: OwnerMigratedTestDatabase | null = null;
 

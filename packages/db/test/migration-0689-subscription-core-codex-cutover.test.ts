@@ -43,6 +43,8 @@ import {
 
 const MIGRATION = "0689_subscription_core_codex_cutover.sql";
 const PRECURSOR = "0712_subscription_core_generic_precursor.sql";
+// 0713 builds on 0712's receipts and patches its helpers; it follows 0712.
+const COMPAT = "0713_subscription_authority_compat.sql";
 const key = Buffer.alloc(32, 72);
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
@@ -700,9 +702,9 @@ describe.skipIf(!realDb)(
       await owner`CREATE TABLE schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`;
       // 0712 records the provider cutover receipts and requires the committed
       // 0689, so it is withheld with it and applied by the same cutover run.
-      await owner`INSERT INTO schema_migrations(name) VALUES(${MIGRATION}), (${PRECURSOR})`;
+      await owner`INSERT INTO schema_migrations(name) VALUES(${MIGRATION}), (${PRECURSOR}), (${COMPAT})`;
       await migrate(owned.ownerUrl, undefined, { applicationDatabaseRoles: ["opengeni_app"] });
-      await owner`DELETE FROM schema_migrations WHERE name IN (${MIGRATION}, ${PRECURSOR})`;
+      await owner`DELETE FROM schema_migrations WHERE name IN (${MIGRATION}, ${PRECURSOR}, ${COMPAT})`;
       await seed();
     }, 180_000);
 

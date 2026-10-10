@@ -139,8 +139,10 @@ describe("migration 0053 (Codex credential leases)", () => {
       await admin`
         insert into schema_migrations (name)
         values ('0689_subscription_core_codex_cutover.sql'),
-          -- 0712 requires the committed 0689 cutover; hold it back too.
-          ('0712_subscription_core_generic_precursor.sql') on conflict do nothing`;
+          -- 0712 requires the committed 0689 cutover and 0713 builds on 0712;
+          -- hold them back too.
+          ('0712_subscription_core_generic_precursor.sql'),
+          ('0713_subscription_authority_compat.sql') on conflict do nothing`;
       await migrate(databaseUrl);
       client = createDb(databaseUrl, { max: 2 });
 
