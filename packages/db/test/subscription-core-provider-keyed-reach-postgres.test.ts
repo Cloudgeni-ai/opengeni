@@ -583,7 +583,7 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
       // owner-only.
       const planChangeBefore = withoutBody(before.get(planChange));
       const planChangeAfter = withoutBody(after.get(planChange));
-      expect(planChangeBefore?.slice(0, 2)).toEqual(["false", '{"search_path=pg_catalog"}']);
+      expect(planChangeBefore?.slice(0, 2)).toEqual(["false", "{search_path=pg_catalog}"]);
       expect(planChangeAfter?.slice(0, 2)).toEqual([
         "true",
         '{"search_path=pg_catalog, public, opengeni_private, pg_temp"}',
