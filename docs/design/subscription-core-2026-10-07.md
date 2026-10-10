@@ -2143,6 +2143,364 @@ permissions or discarding a workspace's management boundary. Source mode
 controls inference selection, not connection visibility or non-inference
 consumers.
 
+### 5.3 M4 implementation plan
+
+This addendum is the implementation boundary for M4: SuperGrok (provider id
+`xai`), then Claude (`claude`), move onto the shared core as adapters, after
+which synthetic pool subjects and per-provider SQL decision functions are
+retired. It mirrors §5.1.1 and does not restate what the shared core already
+does for Codex: placement, chat and operation leases, the per-connection
+refresh lock and generation compare-and-swap, waiters and the wake outbox,
+turn failures, bindings, assignment policy, aliases, effective settings and
+the ownerless shared-only capability apply unchanged. Only provider-specific
+facts, data moves and the decisions M3 did not need are written here. No web
+UI redesign is in scope; any visible change stops for a product-owner preview
+with real components.
+
+#### Starting point and assumptions
+
+Written against `77853d772`. M3 is merged (Codex on the core, 0688/0689/0700;
+runtime-only legacy Codex deletion in M3 PR 4). Claude and SuperGrok still run
+on the factory tables (`{xai,claude}_subscription_credentials`,
+`_rotation_settings`, `_credential_leases`, `_session_account_pins`,
+`_capacity_waiters`, `claude_subscription_account_usage`), the synthetic
+subjects `worker:xai-workspace` / `worker:claude-workspace`
+(`subscriptionPoolWorkerSubject`), the 0234/0598 SQL functions and their v1
+accepted authority (`{version:1, scope: workspace|organization}` or
+`{version:1, scope:"user", authorityGeneration}`).
+
+M4 builds on a separate provider-neutral extraction ("M4-A"), not yet open
+when this was written. Assumed shape, to be replaced by M4-A's actual names
+when it merges:
+
+- The generic logic of `packages/db/src/subscription-core-codex*.ts` moves to
+  provider-neutral `subscription-core-*` modules; Codex becomes the first
+  implementation of `SubscriptionProviderAdapter`
+  (`packages/subscriptions/src/adapter.ts`), with no behaviour change.
+- Codex-named generic SQL becomes provider-keyed: `begin/persist/fail` refresh
+  and connection refresh, `read_subscription_codex_connection_credential`, the
+  `codex_refresh_write` capability, the connection target and writer context,
+  owner capability helpers, `list_organization_codex_workspace_ids`, scope
+  visibility and wake routines. This plan calls them by role (for example
+  "the core refresh seam") and passes `provider` as an argument.
+- A guard test rejects provider names and provider conditionals in shared
+  core modules. Every M4 change below keeps that guard green: provider facts
+  live in adapters and capability flags only.
+
+If M4-A is not merged when an M4 PR starts, that PR waits for it; M4 never
+adds `xai`- or `claude`-named copies of a Codex routine.
+
+#### Entry points
+
+Every SuperGrok and Claude entry point in the inventory moves to the path
+below. "Core" means the provider-neutral repository, SQL authority and the
+named adapter; no entry point keeps its own selector, pin writer, lease table
+or refresh call.
+
+| Inventory | Today (v1) | M4 path |
+| --- | --- | --- |
+| EP-T01, EP-T03 chat placement (both) | `selectScopedSubscriptionTurnCapacity` (`agent-turn/xai-capacity.ts`), `selectSubscriptionAccount`, factory pins, synthetic subject for shared pools | Core placement with `provider`, the turn's accepted authority (v2 entry or compatibility record, below), session owner and attempt fence, under `withSubscriptionPoolSessionAccess`; one session binding; core turn lease. xAI's pre-selection quota refresh becomes a core quota observation (adapter `fetchUsage`) through the connection seam, not a list-all refresh. |
+| EP-T04 materialization and refresh | Claude `resolveClaudeAccountCredential`; xAI `buildXaiTurnRequestAuthorization` / `materializeXaiCredentialForRun`; serialized legacy refresh | Core materialization and the core refresh seam (advisory key, exact turn and live lease, generation compare-and-swap); adapter `transport` and `refresh`. Claude's `user` snapshot is no longer labelled `workspace` in run settings; the run sees only a connection id. |
+| EP-T05 lease heartbeat and dispatch fence | `ScopedSubscriptionTurnLease` keyed by subject | Core `SubscriptionTurnLease` (already shared); `ScopedSubscriptionTurnLease` deleted. |
+| EP-T07 failure settlement | `failure-settlement.ts` Claude/xAI arm, `classifyXaiCredentialFailure`, `classifyClaudeCredentialFailure`, legacy arm and reconcile | Adapter `classifyError` into shared outcomes; core turn-failure receipts, quarantine, failover bound and wait. Claude's `claude_token_renewed` / `claude_credential_changed` recovery becomes the core rule "unauthorized: one forced refresh under the lock, then retry the same connection if the generation advanced". Claude 529 stays in the provider-overload lane (`overloaded`), never account rotation. |
+| EP-T08 finalization | Claude usage receipts; xAI per-turn quota fetch; factory lease release | Core lease release and binding clock. Claude header usage (EP-N25) is decoded by adapter `decodeQuota` and recorded against the leased connection with the observed refresh generation. The xAI per-turn billing call is removed; quota is observed on refusal and by the bounded out-of-turn probe. |
+| EP-T09, EP-T10 waits and wakes | `getCodexCapacityWait` probes the xAI then Claude factory waiters; `reconcileCodexCapacityWait` branches on `provider`; `wakeSubscriptionCapacityWaiters`, `wakeOrganizationPool` | Core waiter and wake outbox. Activity and signal names, the optional `provider` field and its "absent means Codex" meaning stay. A recorded `provider: "xai"` or `"claude"` reconciles against the core waiter with the same preserved waiter id and generation. Organization wakes use the provider-neutral workspace enumeration. |
+| EP-T11..T15, EP-N27 accepted authority, goals, children, inbox, schedules | v1 readers in `accepted-subscription-authority.ts`, `session-queue-commands.ts`, `child-outbox-authority.ts`, `parent-wake.ts`, `scheduled-tasks.ts` (xAI human from `createdBy`, Claude from `ownerSubjectId`) | After the provider's cutover: the v2 entry written at acceptance, else the copied compatibility record, else no personal authority, through one provider-neutral reader. Schedules use the revision's authorizing membership for every provider (ends the EP-N27 asymmetry). |
+| EP-T16 compaction | Same capacity phase; cancelled with `requestPreserved` when no account | Core compaction placement exactly as Codex PR 2c (cancel, never park). |
+| EP-T17, EP-N12 in-turn video funding and selection | Live acceptance for non-xAI turns, un-leased `selectXaiCredentialForUse`, writes a policy pin | Per-operation core placement under the turn's accepted xAI authority with a `video` operation lease keyed by turn and call; never reads or writes the chat binding. An xAI turn prefers its own live chat connection. |
+| EP-T18, EP-S25, EP-N26 model listing and readiness | `loadWorkspaceModelSelectionInput` with frozen v1 snapshots; `connectionRestrictionsAndXaiReadiness`, `loadWorkspaceClaudeSubscriptionReadiness` | The core eligibility projection used for Codex (shared pools; personal only through the owner-only reader in the owner's Personal workspace or for an exact accepted turn). |
+| EP-N03 SuperGrok transcription | Caller's live pool, personal wins, no lease | Codex PR 2c rule: sessionless `transcription` operation lease on a shared organization- or workspace-scoped connection; personal and people-scoped refused; once selected, failures are not retried through another provider. |
+| EP-N05, EP-N07, EP-S17 realtime | Caller's live pool, writes the session pin, no lease | Codex PR 2c rule: the session's recorded owner, shared capacity only, `realtime` operation lease through negotiation, refresh under the lock; never writes the binding. |
+| EP-N09, EP-N10 SuperGrok image | Turn credential; no dispatch-rejection hook | `image` operation lease keyed by turn and call; add `isProviderDispatchRejected` so a refused lease or fence returns the ledger row to `prepared` instead of outcome-unknown. |
+| EP-N11 video policy route | Saving administrator's live pool | "A shared xAI candidate exists for this workspace" (no viewer, no personal). |
+| EP-N13, EP-N14 video admission and reconciliation | Envelope with access and refresh token; organization scope rejected; direct `refreshXaiToken` outside the lock | The operation references the canonical connection; reconciliation reads the credential through the core connection seam under the operation's `video` lease and refreshes only under the core lock. No token envelope, so both defects disappear. |
+| EP-N19, EP-N20 funding and attribution | Static overlay for xAI and Claude | Core funding result with explicit workspace, owner, accepted authority and model (the Codex `isCodexBilledTurn` rule, provider-neutral); `model_call_facts.connection_id` attribution. |
+| EP-N22, EP-N23 xAI quota refresh and status probe | List-all refresh; a third auth-context copy | Core quota probe per connection with explicit context (adapter `fetchUsage`); the status route reads the effective primary through the connection seam and adapter `liveModels`. |
+| EP-N24, EP-S13 Claude usage | `refreshClaudeAccountUsage`, `claude_subscription_account_usage` | Same routes over the core quota row and connection seam; `scope_required` and `reconnect` stay response values. Dead connection-based usage code is deleted. |
+| EP-N28 and M1 shadow | Shadow for Claude and SuperGrok | Removed per provider at its legacy deletion. |
+| EP-S09, EP-S10 pool routes; EP-S11, EP-S12 Claude OAuth and setup token; EP-S14, EP-S15 SuperGrok connect and status; EP-S16 access policy | Factory repository, `create_*` / `disconnect_*` SQL, per-pool rotation and active pointer | Same paths, verbs and payloads as adapters over core connections and settings with alias translation (Codex PR 3b pattern). `scope: "user"` connects create a personal connection; workspace and organization connects create shared connections. "Activate" sets the provider's effective primary at the scope the caller administers; rotation maps to `spread` / `primary_first`. |
+| EP-S26..S31 SDK, React, web, events | `turn.capacity_waiting`, `session.status.changed` reasons `xai_capacity` / `claude_capacity`, child notices | Unchanged names and shapes, emitted as aliases of canonical subscription events; SDK methods and types kept. |
+| Fences: 0608 inbox, 0275/0478 scheduled admission, 0263 membership lifecycle | Compare the provider v1 snapshot columns; xAI subject in scheduled admission | The precursor extends the fences to also compare the v2 slot and compatibility records (all providers); v1 comparisons stay. 0263 already handles `claude_subscription` and `subscription_connection` (0642). |
+
+#### Adapters and shared-core additions
+
+| Member | SuperGrok adapter (`packages/xai-subscription`) | Claude adapter (Anthropic path in `packages/runtime`) |
+| --- | --- | --- |
+| Sign-in and credential format | Device code; `{version:1, accessToken?, refreshToken?, sessionToken?, cookie?}`; provider account id is the token identity subject; email from the identity. | OAuth paste code (`{version:1, token, identity{accountUuid, deviceId}, oauth{refreshToken, expiresAt, scopes}}`) or setup token (no `oauth`). Provider account id is `accountUuid`, else `oauth:`/`setup:` plus an HMAC; setup tokens have no email. |
+| Refresh | OAuth refresh; the refresh token rotates. | OAuth refresh; setup tokens do not renew. Legacy `version` does not move on refresh, so only `refresh_generation` fences observations. |
+| Quota | Billing endpoint (`fetchUsage`) and refusal facts. | `api/oauth/usage` (needs `user:profile`, else `scope_required`) and rate-limit response headers; per-model cooldowns. |
+| Error classification | 401, `unauthorized`, `invalid_token`: unauthorized; 403: forbidden; rate-limit terminals, including HTTP 200 SSE capacity terminals: rate_limited or exhausted. | Reconnect-required and 401: unauthorized; 429: rate_limited with the model; 529: overloaded; 403: fatal (legacy does not rotate on it). |
+| Catalog | Live model list (`liveModels`), cached per refresh generation. | Static product catalog; per-model cooldowns. |
+| Capabilities | `autoRenews`, `realtime`, `fundsMedia`, `quotaWindows`. | `autoRenews` by credential format, `quotaWindows`, `modelEntitlements` (model cooldowns). |
+| Cache facts | Measured idle cut-off. | Exact TTL (5 minutes by default, as Opengeni sets it). |
+
+Shared-core additions, all in the generic precursor:
+
+| Addition | Why it is provider-neutral |
+| --- | --- |
+| Capabilities may depend on `credential_format` (`capabilitiesFor(format)`); the core never calls `refresh` when `autoRenews` is false. | Any provider can offer renewable and non-renewable credentials (OAuth and setup token; API keys never renew). The static flag is documented as "false for setup tokens", which one adapter cannot express. |
+| `rate_limited` and `exhausted` outcomes carry an optional `modelId`, recorded as a model cooldown. | `modelCooldowns` is already in §2.2; the outcome type cannot reach it yet. |
+| Optional adapter members `fetchUsage(transport)` and `liveModels(transport)`. | Out-of-turn quota probes and live catalogs exist for Codex too, as Codex code paths. |
+| Operation kind `video` in `subscription_operation_leases`. | Any `fundsMedia` provider; guard rules are those of `image` (an exact turn for personal access). |
+| `subscription_authority_compat` relation, its reader and copy routines (below). | Keyed by provider and carrier; needed by every provider whose v1 snapshot predates its cutover. |
+| Provider-keyed cutover receipts, readiness and parity report (below). | Replaces per-provider receipt functions and report relations. |
+
+#### Accepted authority across the cutover
+
+Since 0689 every live accepted-work row carries a v2 value holding only
+Codex entries, and v2 is immutable, so a later provider cannot be backfilled
+into v2. Decision: the drained cutover writes one immutable compatibility
+record per live carrier and provider in `subscription_authority_compat
+(account_id, carrier_kind, carrier_id, provider, personal, shared_pool)`;
+`carrier_kind` is `session_turn`, `scheduled_task`, `scheduled_task_revision`,
+`session_system_update` or `session_system_update_outbox`.
+
+- `personal` is empty or one entry `{ownerMembershipId, authorityGeneration,
+  connectionIds}`. Unlike a v2 entry it lists the exact canonical
+  connections: a v1 `user` snapshot authorized only that person's credentials
+  in the session's workspace with that generation, and personal connections
+  are no longer workspace-bound.
+- `shared_pool` is `workspace`, `organization` or `none` and narrows shared
+  candidates to that `inference_pool` classification (the §5.2 assignment
+  relation) for this work only. Live eligibility still applies; the record
+  only narrows.
+- Reader rule after the provider's cutover: the v2 entry for that provider if
+  present, else the compatibility record, else no personal authority and no
+  narrowing. Before the cutover v1 stays authoritative and neither is read.
+  A carrier has at most one of the two: pre-cutover carriers get a record and
+  have no entry; post-cutover acceptance writes the v2 entry and no record.
+- Records are written only by the migration owner and by `SECURITY DEFINER`
+  copy routines that copy an existing record from the exact causal source
+  (goal continuation, child turn, compaction, inbox batch, scheduled revision
+  clone on rename or pause). A record is never derived from v1 after the
+  cutover; a new human acceptance writes v2.
+- An immutability trigger and FORCE RLS mirror the v2 slot; visibility follows
+  the carrier's session.
+
+| v1 snapshot | Compatibility record |
+| --- | --- |
+| `organization` | `personal: []`, `shared_pool: organization`. |
+| `workspace` in a shared workspace | `personal: []`, `shared_pool: workspace`. |
+| `workspace` in a Personal workspace whose workspace-scope credentials became the owner's personal connection | `shared_pool: workspace`; a personal entry for the owner with the newly minted generation only when the carrier is owner-caused (exact session owner, initiating human and active membership); otherwise `personal: []`. |
+| `user` with generation g | Owner membership from the exact initiating human (scheduled work: the revision's authorizing membership, cross-checked against the legacy causal field). The entry lists the canonical connections of that owner's legacy `user` credentials in that workspace whose verified, active authority had generation g and whose generation was carried; `shared_pool: none`. If none can be carried (revoked, stale, merged into a row with another generation, owner mismatch): `personal: []`, `shared_pool: none`, counted as a disposition. |
+| Any, non-human acceptance | `personal: []`; the shared pool as above. |
+
+#### Data mapping
+
+The mapping is the same for SuperGrok and Claude except where noted. Every
+move runs inside the drained owner window of that provider's cutover and
+touches only that provider's rows.
+
+| Legacy | Core |
+| --- | --- |
+| Credential, `authority_scope = workspace`, shared workspace | Shared connection, `workspaces` scope with that workspace, `managed_by_workspace_id` set to it; assignment policy `(workspace, inference_pool = workspace)` with the row's model allowlist, allocator state and manager. |
+| Credential, `workspace`, Personal workspace | Personal connection of the workspace owner; a new `subscription_connection` resource authority whose generation exceeds every prior generation of that membership and provider; §5.2 fallback settings (opt-in plus the workspace `personal_fallback_allowed` override; an organization lock of `false` stays and is a disposition). |
+| Credential, `authority_scope = user` | Personal connection with the same `owner_organization_membership_id`, not workspace-bound. The verified active legacy `xai_subscription` / `claude_subscription` authority generation transfers to the canonical connection and its new `subscription_connection` authority row; the legacy authority row is retired as 0689 retired `codex_subscription`. The row's model allowlist becomes the personal ceiling. The origin workspace stays as authority provenance. |
+| Credential, `authority_scope = organization` | Shared connection: `organization` scope when `allowed_workspace_ids` is NULL (later workspaces by auto-assignment), else `workspaces` scope with the same list; `allow_personal_workspaces` carried; assignment policy `inference_pool = organization`. |
+| Identity and dedupe | Group by organization, provider, provider account id, person and owner (personal membership or shared). xAI: the person is the token identity subject; a stored id that contradicts the decoded token aborts (`provider_identity_mismatch`). Claude: the person is `accountUuid`; `oauth:`/`setup:` HMAC ids are their own person key and never merge with another id, and OAuth and setup-token rows never merge. Rows without an id stay separate. Canonical row: active, error, needs_relogin, disabled, then freshest refresh, then id; the others become aliases. Model policies merge with the 0689 enabled-only union. Ambiguous owner or scope aborts before any write. |
+| Secret | Decrypted and re-encrypted in the codec stage, canonicalized to the adapter format, read back, digest parity, then the legacy ciphertext is blanked (one secret copy). `credential_format` is set per row (for example `xai_oauth_v1`, `claude_oauth_v1`, `claude_setup_token_v1`). |
+| Health and quota | Status 1:1. `refresh_generation` is the legacy `version` for both providers. xAI `quota_used_percent`, `quota_reset_at` and `exhausted_until` become one quota window and `exhaustedUntil` of kind `quota`. Claude usage windows and `model_cooldowns` move to the quota row; the observed generation is set only when the usage row's `credential_version` equals the credential `version`, else NULL (unknown, never exhausted). A usage `reconnect` flag stays a quota fact and does not change status. |
+| Rotation settings | Only pools in effect map: the organization row to organization `rotation.<provider>`, workspace rows to workspace overrides. Rotation on (also when no row exists) is `spread`; off is `primary_first` with the alias-resolved active pointer as the provider primary. User-pool rotation rows have no equivalent (disposition). |
+| Source | Legacy acceptance used the workspace pool when the workspace had its own credentials, else the organization pool. A workspace with workspace-scope credentials of the provider gets `inference_source = workspace`; other workspaces get no override (`automatic`, which today admits only organization connections). `enabled` stays true. |
+| Session pins | One binding per session, for the session's current model provider. Among that provider's pool rows, the row of the pool in the session's latest accepted v1 snapshot wins. A manual pin is `explicit` (owner-only, non-dispatching seam; kept when unhealthy); a policy pin, else the last account, is `automatic`. A personal target is kept only when the session owner owns it and the session is private or in their Personal workspace; otherwise disposition `pin_owner_ineligible`. An existing binding for the current provider is kept and this provider's rows become dispositions; a binding for another provider is replaced only when the session's current model provider is this one. `last_model_call_at` comes from the latest model-call fact. |
+| Leases | Live leases move with turn, holder, generation, expiry and the alias-resolved connection; parity compares exact tuples. Expired leases are a disposition; a live core lease on the same turn aborts (`lease_conflict`). |
+| Waiters | Only `waiting` rows whose blocked turn and generation equal the session's parked turn move; others collapse with a disposition. Preserve the legacy `id` as `waiter_id`, `generation`, `wake_revision`, `observed_wake_revision`, `next_check_at`, `earliest_reset_at`, `blocked_turn_generation`, the goal fence and `last_wake_reason`; `wait_reason` from the legacy code; `reset_kind` `quota` only when a reset is known. `workflow_id` must equal the session's workflow id, else abort. An existing core waiter for the session aborts unless exactly one of the two matches the parked turn. A pending wake (`wake_revision > observed_wake_revision`) gets a wake-outbox row. |
+| Accepted authority | Compatibility records as above on live carriers: non-terminal turns, live scheduled tasks and their current revision, pending system updates and outbox rows. v1 columns and existing v2 values are not modified. `sessions.initial_*` is consumed at creation and needs no record. |
+| Media and transcription ledgers | Non-terminal xAI video operations get the canonical connection and a `video` operation reference; their envelopes are blanked after parity. Non-terminal image operations keep their recorded identity and resolve the recorded credential through aliases; nothing is reissued after an uncertain write. Transcription holds no durable credential state. |
+| Read-only legacy | Factory tables, `claude_subscription_account_usage`, `opengeni_private.{xai,claude}_subscription_runtime_capabilities` and v1 columns stay read-only for forensics until M6; runtime roles lose write grants at the cutover. Claude's revoked legacy model connections stay; any non-revoked one aborts the Claude cutover. |
+
+#### Cutover protocol
+
+Each provider has one drained maintenance migration with a codec stage, as
+0689. The steps of §5.1.1 "Data move and cutover protocol" and of PR 3 apply,
+with these provider-neutral changes:
+
+- **Receipt and readiness.** The precursor adds
+  `opengeni_private.subscription_provider_cutover_receipts (provider,
+  migration, committed_at)` and one readiness function taking `provider`; the
+  Codex receipt function stays. A binary requires the receipt of every
+  provider whose cutover migration is in its own ledger and refuses to start
+  otherwise.
+- **Switch rows before the receipt.** Runtime roles may not insert, enable or
+  delete a `subscription_provider_cutovers` row, nor insert core connections,
+  for a provider without a receipt. With the receipt, the row is undeletable
+  and cannot change provider or organization, disabled means fail-closed
+  maintenance, and a provider-neutral trigger seeds new organizations for
+  every provider with a receipt.
+- **Parity report.** One relation
+  `opengeni_private.subscription_cutover_report (provider, metric,
+  account_id, legacy_count, core_count)`; each migration writes only its
+  provider. Metrics: credentials and secret readability per source scope,
+  identities, aliases, scopes and assignments, model policies, allocator,
+  managers, effective source and rotation, primaries, bindings, live lease
+  tuples, waiter ids, generations and revisions, compatibility records per
+  carrier kind, video operations, and dispositions (`disposition:*`).
+- **Aborts** (content-free, `55000`): drain check, undecodable credential,
+  identity or owner ambiguity, pre-existing core rows for the provider, lease
+  or waiter conflict, waiter workflow mismatch, a non-revoked Claude legacy
+  connection, any parity mismatch. Errors never carry statement parameters.
+
+Ordering decision: **explicitly ordered, data-independent.** The ledger places
+the SuperGrok cutover before the Claude cutover because the PRs merge in that
+order; accepting either order would need two migration variants. Each
+migration commits in its own transaction, touches only its provider's legacy
+rows and its provider's keys in shared relations (settings keys, primaries,
+cutover rows, compatibility records, report rows), and never reads the other
+provider's moved data. Therefore:
+
+- **One window:** drain, back up, upgrade straight to the Claude cutover
+  release; the migrator applies the SuperGrok then the Claude cutover;
+  provision roles; start; validate both reports.
+- **Separately:** upgrade to the SuperGrok cutover release in one window and
+  to the Claude cutover release in a later one.
+- If the Claude cutover aborts in a combined window, SuperGrok stays cut over.
+  The operator fixes the named rows and reruns, or starts the SuperGrok
+  cutover release. That is safe only because the Claude cutover release
+  contains nothing after the SuperGrok cutover ordinal except rolling
+  migrations and the Claude cutover; a ledger test in the Claude cutover PR
+  enforces this.
+
+Each cutover is the one-way point for its provider: no older binary restarts
+after its commit, there is no down migration, and recovery is fix-forward with
+an idempotent, alias-aware, parity-checked repair while affected
+organizations are held behind a disabled switch row. Never copy rows back,
+drop aliases, reset generations or clear waiters. Each cutover PR adds its own
+`docs/deployment.md` section ("SuperGrok on the shared subscription core" and
+"Claude on the shared subscription core", with the ordinal) mirroring the 0689
+runbook: inventory queries, drain with the complete runtime-login list,
+backup, migrate with `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES` and
+`OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`, provision roles, validate the report
+filtered by provider, containment, fix-forward and release notes.
+
+#### PR sequence
+
+Each PR is dormant behind the provider's switch until its cutover; without a
+receipt the legacy path runs unchanged after at most one receipt read.
+Migration ordinals are the next free ones at merge
+(`bun run migration:renumber`). Every implementation PR follows the
+repository's complex-change review policy.
+
+| PR | Content | Mode |
+| --- | --- | --- |
+| 0. Generic precursor | Receipt table and provider-keyed readiness; switch-row and core-connection restrictions before a receipt; compatibility relation, reader and copy routines (inert); `authorize_subscription_personal_access` generalized (a provider with an enabled cutover reads its v2 entry or compatibility record and requires the exact owner membership, the current generation and `personalConnectionsAllowed`; a disabled row grants nothing; no receipt keeps v1 byte-for-byte); fences 0608 and scheduled admission also compare v2 and compatibility records; provider-checked primaries; `video` operation kind; adapter interface additions; provider-keyed report relation. | rolling |
+| X1. SuperGrok adapter and chat | The xAI adapter; chat placement, materialization, refresh, settlement, waits, wakes, finalization, compaction, readiness, `list_models`, funding and attribution on the core with `provider = xai`. | rolling |
+| X2. SuperGrok remaining consumers and writers | Image, video (funding, selection, admission, reconciliation), transcription, realtime, status and quota probes, routes, access policy, SDK and event projections; connect, disconnect and personal writers; v2 entry writers and compatibility copies on every carrier. Lands before X3 so connect and disconnect work after the cutover. | rolling |
+| X3. SuperGrok drained cutover | Codec stage, data move, compatibility records, parity report, receipt, switch rows enabled; runbook section. | maintenance |
+| X4. SuperGrok legacy deletion | Removes the xAI selector arm, factory repository use, v1 xAI readers and writers, xAI use of `ScopedSubscriptionTurnLease`, the video envelope code and the shadow; extends the guard below to xAI. | rolling |
+| C1..C4. Claude | The same four steps. C2 also covers the OAuth and setup-token writers and usage routes; C3 includes the combined-window ledger test; C4 deletes the Claude arm, `claude_subscription_account_usage` use and the dead connection-based usage code. | as X1..X4 |
+| F. Fake API-key adapter conformance | A test-only adapter (`kind = api_key`, static credential, no quota windows, no refresh) driven through the same core placement, lease, failover and wait paths as subscriptions and compared with the reference model; scripted local upstream and a network-denial guard. No production table or route. | test only |
+| R. Retirement | A forward migration drops the retired SQL routines, triggers and policies listed below; `subscriptionPoolWorkerSubject` and its users are removed; posture inventories are updated. Historical migrations, legacy tables and columns, v1 CHECK validators and column-immutability triggers stay until M6. | maintenance (exact posture contract) |
+
+Retired in R, for both providers unless noted:
+`create_*_subscription_credential`, `disconnect_*_subscription_credential`,
+`resolve_*_authority_pool`, `revalidate_*_subscription_authority`,
+`*_subscription_authority_live`, `*_subscription_pool_visible`,
+`prevent_*_authority_mutation`,
+`opengeni_private.enforce_*_credential_pool_reference`,
+`opengeni_private.enforce_*_organization_runtime_update`,
+`opengeni_private.prevent_organization_*_live_disconnect`, the factory-table
+policies that call them (`*_subscription_scope`, `*_subscription_pool_scope`,
+`*_subscription_capability_read`, `*_subscription_capability_insert`) and the
+runtime-capability inserts of the 0234/0598 protocol.
+`opengeni_private.claude_subscription_pool_protocol_v1_active` stops being a
+readiness requirement. Kept: `*_provider_account_authority_snapshot_v1_valid`
+(CHECK constraints), `prevent_*_snapshot_mutation` (column immutability),
+`reject_legacy_claude_subscription_credentials` (guards the generic
+connections table) and every receipt function.
+
+Guard: `check:no-legacy-subscription-runtime` (the Codex check generalized and
+run by `check:subscription-contract`) rejects executable references to the
+factory tables, `claude_subscription_account_usage`, the synthetic subjects,
+the retired routine names and the v1 authority readers, outside exact
+declared exceptions (retained schema and foreign keys, deployed-schema posture
+inventories, codec stages, historical fixtures used only by tests). A
+real-PostgreSQL posture test asserts that every retired routine is absent and
+that runtime roles hold no write grant on legacy tables. M4-A's shared-core
+guard keeps provider names out of shared modules.
+
+#### Verification plan
+
+- `bun install`; adapter conformance per provider without network (scripted
+  upstreams for sign-in, refresh, usage, streams, refusals, malformed
+  responses, delays and connection loss) with a network-denial guard; the
+  fake API-key adapter runs the same suite.
+- Placement compared with the reference model on generated worlds with both
+  providers, compatibility narrowing, per-model cooldowns and non-renewable
+  credentials.
+- Migration tests on real PostgreSQL as the non-superuser, non-bypass
+  `opengeni_app` role with an owner-migrated harness and 180 000 ms budgets:
+  every scope and owner shape; duplicates (one person across workspaces,
+  different people, setup token and OAuth of one person, unknown ids);
+  secrets; aliases; pins (manual unhealthy, personal ineligible, other
+  provider); live leases; waiters with pending wakes; compatibility records
+  for every carrier kind and v1 shape; video and image ledgers. Assert exact
+  report parity, rollback on each abort class and FORCE-RLS blind-spot
+  probes; existing Codex rows and v2 values byte-for-byte unchanged; the
+  other provider's legacy rows untouched; both window plans, and a Claude
+  abort leaving SuperGrok cut over.
+- Authorization tests as `opengeni_app`: shared, private and Personal
+  sessions; ownerless sessions never reach personal or people-scoped rows;
+  service and non-human acceptance gain no personal authority; compatibility
+  records cannot be written or altered by the app role and are only copied
+  from the exact causal source; switch rows cannot be enabled before a
+  receipt; delegated managers; aliases; organization boundaries.
+- Temporal: replay existing SuperGrok and Claude capacity-wait histories (with
+  `provider` recorded and pre-provider-tagged), signal-before-peek,
+  peek-before-signal, continue-as-new, and the cutover seam where the legacy
+  peek completed before migration and reconciliation runs after it against
+  the preserved waiter id and generation.
+- Crash injection around commit, lease transfer, wake commit before signal,
+  refresh persistence, image dispatch and video reconciliation.
+- Static guards, focused package, API and worker suites, migration guards and
+  release-schema registration at all three sites.
+
+#### Decisions
+
+1. v1 accepted authority stays authoritative for a provider until that
+   provider's own drained cutover commits; before it, no M4 path reads v2 or
+   compatibility records for that provider.
+2. Ownerless sessions are shared-only (organization- or workspace-scoped
+   connections) for both providers on placement, renewal, dispatch, refresh
+   and waiter recovery; ownerless bindings stay denied.
+3. Personal connections serve only the owner's private sessions or Personal
+   workspace, with exact owner membership and a current authority generation,
+   as §3.8 enforces. An explicit selection by the owner does not widen this in
+   M4. Transcription and realtime never use personal connections (behaviour
+   change: legacy preferred the caller's personal SuperGrok pool).
+4. Background work keeps its accepted pool: compatibility records narrow
+   shared candidates to the legacy pool and pin personal authority to exact
+   connections, and continuations copy them without widening. Pre-cutover
+   `user`-pool work in a shared session, or whose authority cannot be carried,
+   waits with a typed reason instead of moving to shared capacity.
+5. A user-scoped credential becomes a personal connection usable in the
+   owner's private sessions in any workspace that allows personal connections
+   (reach widens for the owner only; release note). Its generation transfers
+   only from verified active authority; minted generations exceed every prior
+   generation of that membership and provider.
+6. Video, image, transcription and realtime never write the chat binding.
+   Video reconciliation without a usable connection ends at its recovery
+   deadline rather than refreshing outside the core lock.
+7. Claude 403 does not rotate accounts and 529 stays in the overload lane, as
+   today.
+8. The cutovers are explicitly ordered and data-independent (above).
+
+#### Findings in earlier merged work
+
+| Finding | Where | Fixed in |
+| --- | --- | --- |
+| Runtime roles acting as an organization administrator can insert or enable `subscription_provider_cutovers` rows for `xai` and `claude`, and insert their core connections, before any drained move. Inert today because nothing reads them, but it would activate dormant M4 code or abort the cutover preflight. | 0642 connection insert policy; 0689 cutover administrator policies | PR 0 |
+| §3.7 says the 0608 inbox fence compares Codex against v2, but no later migration redefines `fence_inbox_execution_context`, so receiver-context turns are not fenced on `subscription_authority` in SQL. Scheduled admission relies on the 0688 revision trigger; verify whether it also needs a comparison. | 0608, 0688 | PR 0 |
+| The `{codex,claude,xai}_primary_connection_id` foreign keys omit `provider`, so a primary can reference another provider's connection. | 0642 `subscription_settings` | PR 0, or M4-A's settings shape |
+| The non-Codex branch of `authorize_subscription_personal_access` checks neither the session's owner membership against the connection nor `personalConnectionsAllowed`. | 0668 | PR 0 |
+| `autoRenews` is a static adapter flag but is documented as false for setup tokens. | `packages/subscriptions/src/adapter.ts` | PR 0 |
+| EP-N13 (organization-scope video envelope rejected) and EP-N14 (direct refresh outside the lock) are still present. | `video-generation-credential.ts`, `video-generation-reconciliation.ts` | X2 |
+| Resolved since the inventory baseline: its open question on 0263 lacking `claude_subscription` (correct at `0d7075e`) no longer applies, because 0642 added `claude_subscription` and `subscription_connection` to the retention function. The inventory is a baseline record and is not edited. | inventory §4.2.4 | nothing to fix |
+
+Open questions for the product owner: whether owners may later choose their
+personal account in a shared session (an M5 widening this plan does not
+make), and whether anyone depends on personal-only SuperGrok transcription or
+realtime, which decision 3 removes.
+
 ## 6. Specific behaviours
 
 ### 6.1 Cache coldness (SUB-STICK-04)
