@@ -5,7 +5,7 @@ import {
   type SingleModelCallContentPart,
   type SingleModelCallMessage,
   type SingleModelCallResult,
-} from "@opengeni/runtime";
+} from "@opengeni/runtime/model-calls";
 import { z } from "zod";
 
 /**

@@ -52,6 +52,10 @@
     "./workspace-tool-gateway": {
       "types": "./src/workspace-tool-gateway.ts",
       "default": "./src/workspace-tool-gateway.ts"
+    },
+    "./model-calls": {
+      "types": "./src/model-calls.ts",
+      "default": "./src/model-calls.ts"
     }
   },
   "publishConfig": {

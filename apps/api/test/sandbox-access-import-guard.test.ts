@@ -29,6 +29,10 @@ const ALLOWED_RUNTIME_SUBPATHS = new Set([
   // an erased MCPServer type import; it does not import or execute the loop.
   "@opengeni/runtime/gmail-rest-mcp",
   "@opengeni/runtime/mcp-network",
+  // Stateless single model calls (OpenAI-compatible chat completions). This
+  // leaf re-exports the provider router, the one-shot call and usage
+  // normalisation from their own modules; it exports no Agent/run/sandbox API.
+  "@opengeni/runtime/model-calls",
   "@opengeni/runtime/sandbox",
   // Immutable curated Skill metadata/artifact reader. This leaf imports only
   // Node filesystem/crypto utilities and does not import the agent loop.
