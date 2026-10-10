@@ -167,4 +167,6 @@ export const embeddingMigrationTail = [
   // Extends the shared connection table created by withheld 0642 and replaces
   // its scope guard; replay after the cutover it edits.
   "0702_subscription_codex_access_editor.sql",
+  // Adds provider-neutral routines over the shared core tables from withheld 0642.
+  "0705_subscription_core_neutral_routines.sql",
 ];

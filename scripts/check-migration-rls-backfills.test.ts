@@ -117,6 +117,41 @@ describe("analyzeMigrationRlsBackfills", () => {
     ]);
   });
 
+  test("0704 catalog definition classification requires exact statement bytes", () => {
+    const patch = readFileSync(
+      new URL(
+        "../packages/db/drizzle/0704_inactive_inherited_personal_connections.sql",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+    const analyze = (sql: string) =>
+      analyzeMigrationRlsBackfills(
+        fixture({
+          "0001_base.sql": FORCED_TABLE.replaceAll(
+            "widgets",
+            "turn_connection_authority_snapshots",
+          ),
+          "0002_patch.sql": sql,
+        }),
+      );
+    expect(analyze(patch)).toEqual([]);
+    // Even comment-only drift inside the repair loses the exact classification.
+    expect(
+      analyze(
+        patch.replace(
+          "-- An exact owner account that lapsed",
+          "-- A changed owner account that lapsed",
+        ),
+      ),
+    ).toMatchObject([
+      { kind: "vacuous-guard", statement: 2, tables: ["turn_connection_authority_snapshots"] },
+    ]);
+    expect(analyze(`${patch}\nDELETE FROM turn_connection_authority_snapshots;`)).toMatchObject([
+      { kind: "write", statement: 3, tables: ["turn_connection_authority_snapshots"] },
+    ]);
+  });
+
   test("0494 resolver patch is runtime source while real snapshot preflights remain guarded", () => {
     const migration = readFileSync(
       new URL("../packages/db/drizzle/0494_mcp_account_bindings.sql", import.meta.url),

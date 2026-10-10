@@ -36,13 +36,18 @@ import { batchedBackfillTransactionLocalSetting } from "../packages/db/src/migra
 
 export const MIGRATIONS_DIR = "packages/db/drizzle";
 
-// The complete 0697 statement (including comments) only reads catalog source
-// and replaces a routine definition. Its embedded SELECT runs in that routine,
-// not during migration. Bind this classification to reviewed bytes: changed
-// statements keep conservative analysis, as do every adjacent statement and
-// all migration-time backfills. The grandfather lists below remain frozen.
-const REVIEWED_ROUTINE_SOURCE_PATCH_SHA256 =
-  "68249f30d87220cb0cdc78882a237613e32e481122beb96ca5cadde0c64f46e4";
+// The complete 0697 and 0704 repair statements (including comments) only read
+// catalog source and replace a routine definition. Their embedded SELECTs run
+// in that routine, not during migration. Bind this classification to reviewed
+// bytes: changed statements keep conservative analysis, as do every adjacent
+// statement and all migration-time backfills. The grandfather lists below
+// remain frozen.
+const REVIEWED_ROUTINE_SOURCE_PATCH_SHA256: ReadonlySet<string> = new Set([
+  // 0697_codex_retry_after_unknown_outcome.sql, statement 1.
+  "68249f30d87220cb0cdc78882a237613e32e481122beb96ca5cadde0c64f46e4",
+  // 0704_inactive_inherited_personal_connections.sql, statement 2.
+  "ed9746683d7a21ea50d2210659b3b33d81ff238a2c5883226d1625118d4c434b",
+]);
 
 /**
  * Migrations that shipped before this class was identified. Their bytes are
@@ -525,8 +530,9 @@ export function analyzeMigrationRlsBackfills(migrationsDir: string): BackfillFin
     for (const rawStatement of splitStatements(raw)) {
       statementNumber += 1;
       if (
-        createHash("sha256").update(rawStatement).digest("hex") ===
-        REVIEWED_ROUTINE_SOURCE_PATCH_SHA256
+        REVIEWED_ROUTINE_SOURCE_PATCH_SHA256.has(
+          createHash("sha256").update(rawStatement).digest("hex"),
+        )
       )
         continue;
       const statement = stripComments(rawStatement);

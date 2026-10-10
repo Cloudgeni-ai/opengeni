@@ -3,6 +3,7 @@
  * that a remote request failed, and neither permits replay of that request.
  */
 import { sql } from "drizzle-orm";
+import { SUBSCRIPTION_CORE_CODEX_PROVIDER } from "./subscription-core-codex-provider";
 import { rawRows, withRlsContext, withSessionRlsActorContext, type Database } from "./database";
 import {
   authorizeSubscriptionCoreFrozenPersonalCodex,
@@ -246,7 +247,7 @@ export async function reserveSubscriptionCoreCodexOperationRequest(
     const [authorized] = await rawRows<{ status: string }>(
       tx,
       sql`select status
-      from opengeni_private.read_subscription_codex_connection_credential(
+      from opengeni_private.read_subscription_core_connection_credential(${SUBSCRIPTION_CORE_CODEX_PROVIDER},
         ${accountId}::uuid, ${workspaceId}::uuid, ${connectionId}::uuid,
         ${ref?.operationId ?? null}::uuid, ${ref?.attemptId ?? null}::uuid,
         ${ref?.holderId ?? null}, ${ref?.generation ?? null}::bigint)`,

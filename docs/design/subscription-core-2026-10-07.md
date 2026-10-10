@@ -2105,6 +2105,100 @@ legacy fallback is possible after scrub. Table/column removal is still M6.
   throwaway PostgreSQL 17 cluster procedure. Never use real Codex credentials
   or live upstream endpoints.
 
+### 5.1.2 M4: one runtime, per-provider adapters
+
+Decision (unify first). Every source of model access (Codex, Claude and
+SuperGrok subscriptions now, API-key connectors such as OpenRouter and Vercel
+later) runs through one provider-neutral runtime: the same placement, leases,
+reservation and settlement, credential load and refresh orchestration, health,
+writers, settings projections, waiters and catalog cache. A provider differs
+only in a small adapter (§2.1): sign-in and credential format, refresh, usage
+or quota decoding, error classification, model catalog and capability flags.
+M3 shipped that runtime under Codex names; M4 first extracts it, so Claude and
+SuperGrok are added as adapters rather than copies. Copying the Codex modules
+per provider would multiply the authorization, fencing and lock-order surface
+that the M3 reviews verified once, and every later fix would need to land N
+times.
+
+The shared SQL is provider-neutral by construction: the provider is an
+argument, and any provider difference comes from data, never from a branch on
+a provider name.
+
+- `opengeni_private.subscription_core_providers` (migration 0705) lists the
+  providers whose runtime runs on the core, with the per-provider data the
+  shared routines need: `extra_credits` (whether `manage ... 'extra_credits'`
+  is meaningful) and `primary_setting_column` (which `subscription_settings`
+  column holds the provider's primary connection until settings are keyed by
+  provider). It is owner-only data; a provider without a row is refused by
+  every neutral routine, even when its cutover row is enabled (fail closed).
+  Codex is seeded. A provider joins the core by a migration that inserts its
+  row and, where needed, widens the provider lists in existing CHECK
+  constraints; no routine changes.
+- Neutral capability kinds `refresh_authorized`, `refresh_write`,
+  `connection_refresh_authorized` and `connection_owner` carry their provider
+  and mirror the `codex_*` kinds one for one, with owner-only policies that
+  admit them only for rows of the same provider.
+- Neutral routines (provider first) replace the Codex-named routines the
+  generic runtime calls, with identical authorization, lock keys and order,
+  fences, RLS posture and grants: the turn refresh seam
+  (`begin_/persist_/fail_subscription_core_refresh`,
+  `persist_subscription_core_refresh_with_plan`,
+  `subscription_core_refresh_write_allowed`), connection health
+  (`quarantine_subscription_core_connection`,
+  `recover_subscription_core_connection_health`), v2 accepted authority
+  (`subscription_core_acceptance_authority_v2`,
+  `subscription_core_task_authority_v2`,
+  `subscription_core_revision_authority_v2`), the connection credential seam
+  (`read_subscription_core_connection_credential`,
+  `begin_/persist_/fail_subscription_core_connection_refresh`, owner-only
+  `subscription_core_connection_target`), the personal writers
+  (`connect_subscription_core_personal`,
+  `disconnect_subscription_core_connection`,
+  `manage_subscription_core_personal`,
+  `subscription_core_personal_connections`) and their internals
+  (`subscription_core_owner_capability_held`,
+  `subscription_core_owner_membership_held`, owner-only
+  `subscription_core_writer_context`,
+  `grant_subscription_core_owner_capability`,
+  `drop_subscription_core_owner_capabilities`). Both families take the same
+  per-connection refresh key and the same connect and personal-authority
+  keys, so an old binary on the Codex-named routines and a new binary on the
+  neutral ones serialize exactly as two old binaries do. Default relogin and
+  refusal texts are provider-free; the runtime passes the provider's own text,
+  so stored Codex values are unchanged. The shared disconnect-admission trigger
+  admits by registry membership instead of a provider literal.
+- Rolling compatibility and retirement. The Codex-named routines, kinds and
+  policies stay unchanged for binaries that still call them (staging runs
+  them since 0689/0700). They are dropped by the final M4 retirement step, or
+  M6 if that step is merged first, in a migration that runs only once no
+  binary older than 0705 can start (a readiness check on the neutral routines
+  already prevents an older database from serving a newer binary).
+- Kept provider-specific (not generic): the Codex Apps routines, reset-credit
+  authority and fence, organization reach (`subscription_codex_reach`,
+  `set_subscription_codex_reach`), the 0689 cutover machinery and the
+  plan-change trigger. Deferred, with their provider branches recorded for the
+  Claude and SuperGrok steps: `authorize_subscription_personal_access` (v1
+  branches per provider until each provider's drained cutover),
+  `subscription_effective_settings` (per-provider settings columns) and
+  `guard_subscription_designation_disconnect` (Apps designation).
+
+Fail-closed choices recorded for review: an unregistered provider is refused
+by every neutral routine even with an enabled cutover row; the neutral
+owner-capability drop removes only the neutral owner capability of the same
+provider, never the reset-credit fence; `manage ... 'primary'` is refused when
+the registry has no primary column, and `'extra_credits'` when the provider
+has no extra credits.
+
+Settings. Per-provider settings columns (`codex_primary_connection_id` and
+the `rotation`/`providers` JSON keys) stay as they are in M4. Older binaries
+still write the Codex column, and `subscription_effective_settings` projects
+it; moving to a provider-keyed shape while those binaries run would need a
+dual-write trigger over the same rows the 0689 cutover froze. The registry's
+`primary_setting_column` isolates the per-provider column for the shared
+writers, so the keyed shape (one row per provider with the primary
+connection, backfilled from the columns) is a drained step in M6, together
+with dropping the columns.
+
 ### 5.2 Legacy shape mapping
 
 | Legacy | New |

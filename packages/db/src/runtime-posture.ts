@@ -132,6 +132,11 @@ const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   "grant_subscription_codex_owner_capability(text, uuid, uuid, text, uuid)",
   "drop_subscription_codex_owner_capabilities(uuid)",
   "derive_scheduled_revision_subscription_authority()",
+  // Migration 0705: the provider-neutral writers' owner-only internals.
+  "subscription_core_writer_context(text, uuid, uuid, text)",
+  "grant_subscription_core_owner_capability(text, text, uuid, uuid, text, uuid)",
+  "drop_subscription_core_owner_capabilities(text, uuid)",
+  "subscription_core_connection_target(text, uuid, uuid, uuid, uuid, uuid, text, bigint)",
   // Migration 0689: the owner-only Codex cutover receipt and the trigger that
   // seeds organizations created later onto the shared core.
   "subscription_codex_cutover_v1_active()",
@@ -692,6 +697,42 @@ export const SUBSCRIPTION_ACCOUNT_CAPABILITY_ROUTINES = [
   ...CLAUDE_SUBSCRIPTION_CAPABILITY_ROUTINES,
 ];
 const CLAUDE_AUTHORITY_ROUTINE_SET = new Set(CLAUDE_AUTHORITY_ROUTINES);
+/**
+ * Migration 0705: the provider-neutral subscription-core routines (the
+ * provider is their first argument). The runtime requires them; each is a
+ * SECURITY DEFINER routine the runtime role executes and PUBLIC does not.
+ */
+export const SUBSCRIPTION_CORE_NEUTRAL_PRIVATE_ROUTINES = [
+  "subscription_core_owner_capability_held(text, uuid, text[], text, uuid, boolean)",
+  "subscription_core_owner_membership_held(uuid, uuid)",
+  "subscription_core_refresh_write_allowed(text, uuid, uuid, uuid)",
+  "begin_subscription_core_refresh(text, uuid, uuid, uuid, uuid, text, text, uuid, text, bigint)",
+  "persist_subscription_core_refresh(text, uuid, uuid, uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone)",
+  "persist_subscription_core_refresh_with_plan(text, uuid, uuid, uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone, text)",
+  "fail_subscription_core_refresh(text, uuid, uuid, uuid, uuid, uuid, bigint, text)",
+  "quarantine_subscription_core_connection(text, uuid, uuid, uuid, uuid, uuid, text, bigint, bigint, text, text, timestamp with time zone)",
+  "recover_subscription_core_connection_health(text, uuid, uuid, uuid, uuid)",
+  "subscription_core_acceptance_authority_v2(text, uuid, uuid, uuid, text)",
+  "subscription_core_task_authority_v2(text, uuid, uuid, uuid, text)",
+  "subscription_core_revision_authority_v2(uuid, uuid, uuid, bigint)",
+  "read_subscription_core_connection_credential(text, uuid, uuid, uuid, uuid, uuid, text, bigint)",
+  "begin_subscription_core_connection_refresh(text, uuid, uuid, uuid, uuid, uuid, text, bigint)",
+  "persist_subscription_core_connection_refresh(text, uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone)",
+  "fail_subscription_core_connection_refresh(text, uuid, uuid, uuid, bigint, text)",
+  "connect_subscription_core_personal(text, uuid, uuid, text, text, text, text, text, jsonb, timestamp with time zone, timestamp with time zone, text, text, text)",
+  "disconnect_subscription_core_connection(text, uuid, uuid, text, uuid)",
+  "manage_subscription_core_personal(text, uuid, uuid, text, uuid, text, text, boolean, integer)",
+  "subscription_core_personal_connections(text, uuid, uuid, text)",
+] as const;
+
+/** Migration 0705: the neutral writers' owner-only internals. */
+export const SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES = [
+  "subscription_core_writer_context(text, uuid, uuid, text)",
+  "grant_subscription_core_owner_capability(text, text, uuid, uuid, text, uuid)",
+  "drop_subscription_core_owner_capabilities(text, uuid)",
+  "subscription_core_connection_target(text, uuid, uuid, uuid, uuid, uuid, text, bigint)",
+] as const;
+
 export const SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES = [
   "authorize_subscription_ownerless_session_access(uuid, uuid, uuid, uuid)",
   "authorize_subscription_personal_placement_access(uuid, uuid, uuid, uuid, text, uuid, bigint, text, text)",
@@ -731,6 +772,8 @@ export const SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES = [
   "set_subscription_codex_reach(uuid, uuid, boolean, boolean)",
   "subscription_codex_owner_capability_held(uuid, text[], text, uuid, boolean)",
   "subscription_codex_owner_membership_held(uuid, uuid)",
+  // Migration 0705: the provider-neutral equivalents the runtime calls.
+  ...SUBSCRIPTION_CORE_NEUTRAL_PRIVATE_ROUTINES,
 ] as const;
 
 /** Owner-only private helpers the runtime role must never be able to execute. */
@@ -755,6 +798,7 @@ export const SUBSCRIPTION_M3_OWNER_ONLY_PRIVATE_ROUTINES = [
   "apply_subscription_codex_auto_assignments(uuid, uuid, boolean)",
   "auto_assign_subscription_codex_workspace()",
   "auto_assign_subscription_codex_personal_workspace()",
+  ...SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES,
 ] as const;
 
 const UNIFIED_KNOWLEDGE_ROUTINES = [
@@ -2586,7 +2630,8 @@ export function evaluateRuntimeDatabasePosture(
   for (const expectedRoutine of SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES) {
     const matches = posture.privateRoutines.filter((routine) => routine.name === expectedRoutine);
     const safeSearchPath = (routine: RuntimeRoutinePosture) =>
-      routine.name === "subscription_codex_refresh_write_allowed(uuid, uuid, uuid)"
+      routine.name === "subscription_codex_refresh_write_allowed(uuid, uuid, uuid)" ||
+      routine.name === "subscription_core_refresh_write_allowed(text, uuid, uuid, uuid)"
         ? routine.configuration?.includes("search_path=pg_catalog, opengeni_private, pg_temp")
         : routine.configuration?.some((configuration) => precursorSearchPaths.has(configuration));
     if (
@@ -2621,6 +2666,11 @@ export function evaluateRuntimeDatabasePosture(
       "grant_subscription_codex_owner_capability(text, uuid, uuid, text, uuid)",
       "drop_subscription_codex_owner_capabilities(uuid)",
       "derive_scheduled_revision_subscription_authority()",
+      ...(posture.privateRoutines.some((routine) =>
+        routine.name.startsWith("connect_subscription_core_personal("),
+      )
+        ? SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES
+        : []),
     ];
     for (const signature of required) {
       const matches = posture.subscriptionOwnerRoutines.filter(

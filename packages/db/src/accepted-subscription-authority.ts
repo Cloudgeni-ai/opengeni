@@ -332,7 +332,7 @@ export async function getScheduledTaskSubscriptionAuthority(
       .select({
         accountId: schema.scheduledTasks.accountId,
         ownerSubjectId: schema.scheduledTasks.ownerSubjectId,
-        subscriptionAuthority: sql<unknown>`opengeni_private.subscription_codex_revision_authority_v2(
+        subscriptionAuthority: sql<unknown>`opengeni_private.subscription_core_revision_authority_v2(
           ${schema.scheduledTasks.accountId}, ${schema.scheduledTasks.workspaceId},
           ${schema.scheduledTasks.id}, coalesce(${input.taskAuthorityRevision ?? null}::bigint, ${schema.scheduledTasks.authorityRevision}))`,
       })

@@ -1,12 +1,13 @@
 import { expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
+import { sql } from "drizzle-orm";
 import postgres from "postgres";
 import { acquireOwnerMigratedTestDatabase } from "@opengeni/testing";
 import { createDb, refreshSubscriptionCoreCodexCredential, type DbClient } from "../src";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 import { runtimeDatabaseReadyCheck } from "../src/runtime-posture";
-import { withSubscriptionCoreCodexRefreshLock } from "../src/subscription-core-placement-world";
+import { withSubscriptionCoreAcceptedTurn } from "../src/subscription-core-placement-world";
 import {
   ownerlessRefreshFixture,
   ownerlessRefreshSettings,
@@ -68,20 +69,23 @@ test.skipIf(process.env.OPENGENI_REQUIRE_REAL_DB !== "1")(
           ownerlessRefreshFixture({ admin: database.admin, client: client! }, human),
         ),
       );
+      // The pre-0700 Codex-named routine still refuses the ownerless person
+      // turn. The runtime now calls the provider-neutral routine (0705), so
+      // the Codex-named routine is exercised directly here.
       for (const [index, state] of states.entries()) {
-        let callbacks = 0;
-        const old = await withSubscriptionCoreCodexRefreshLock(
+        const old = await withSubscriptionCoreAcceptedTurn(
           client.db,
-          { ...state.identity, ...state.lease },
-          async () => {
-            callbacks++;
-            return "control";
-          },
+          state.identity,
+          async (tx) =>
+            (
+              await tx.execute(sql`select refresh_generation from opengeni_private.begin_subscription_codex_refresh(
+              ${state.accountId}::uuid, ${state.workspaceId}::uuid, ${state.identity.sessionId}::uuid,
+              ${state.identity.turnId}::uuid, ${state.identity.sessionOwnerSubjectId ?? null},
+              ${state.identity.initiatingHumanSubjectId ?? null}, ${state.connectionId}::uuid,
+              ${state.lease.holderId}, ${state.lease.generation}::bigint)`)
+            ).length,
         );
-        expect(old).toEqual(
-          index === 0 ? { status: "completed", value: "control" } : { status: "refused" },
-        );
-        expect(callbacks).toBe(index === 0 ? 1 : 0);
+        expect(old).toEqual({ status: "completed", value: index === 0 ? 1 : 0 });
       }
 
       // Existing application connections remain open while the rolling DDL

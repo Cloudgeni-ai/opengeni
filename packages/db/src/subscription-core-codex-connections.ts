@@ -27,6 +27,7 @@
  * (`subscription-refresh:<id>`) before its row lock.
  */
 import { sql } from "drizzle-orm";
+import { SUBSCRIPTION_CORE_CODEX_PROVIDER } from "./subscription-core-codex-provider";
 import { rawRows, setSubjectRlsContext, withRlsContext, type Database } from "./database";
 import { withLosslessContentWriteVersion } from "./lossless-json";
 import * as schema from "./schema";
@@ -152,7 +153,7 @@ async function connectPersonal(
   const [row] = await rawRows<{ outcome: string; connection_id: string | null; is_new: boolean }>(
     tx,
     sql`select outcome, connection_id::text as connection_id, is_new
-      from opengeni_private.connect_subscription_codex_personal(
+      from opengeni_private.connect_subscription_core_personal(${SUBSCRIPTION_CORE_CODEX_PROVIDER},
         ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.subjectId},
         ${input.credentialEncrypted}, ${input.providerAccountId}, ${input.providerSubjectId}, ${input.planType},
         ${JSON.stringify(providerState(input))}::jsonb, ${iso(input.expiresAt)}::timestamptz,
@@ -376,7 +377,7 @@ async function disconnectInTransaction(
   );
   const [row] = await rawRows<{ outcome: string }>(
     tx,
-    sql`select opengeni_private.disconnect_subscription_codex_connection(
+    sql`select opengeni_private.disconnect_subscription_core_connection(${SUBSCRIPTION_CORE_CODEX_PROVIDER},
         ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.subjectId},
         ${connectionId}::uuid
       ) as outcome`,
@@ -452,7 +453,7 @@ async function disconnectTarget(
     // RLS deliberately hides personal aliases, including from administrators.
     const [personal] = await rawRows<{ resolved: { id: string } | null }>(
       tx,
-      sql`select opengeni_private.manage_subscription_codex_personal(
+      sql`select opengeni_private.manage_subscription_core_personal(${SUBSCRIPTION_CORE_CODEX_PROVIDER},
         ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.subjectId}, ${rawId}::uuid,
         'resolve', null, null, null) as resolved`,
     );

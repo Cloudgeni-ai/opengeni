@@ -774,6 +774,7 @@ describe("embedded worker lifecycle contract", () => {
           "set_subscription_codex_reach(uuid, uuid, boolean, boolean)",
           "subscription_codex_owner_capability_held(uuid, text[], text, uuid, boolean)",
           "subscription_codex_owner_membership_held(uuid, uuid)",
+          ...opengeniDb.SUBSCRIPTION_CORE_NEUTRAL_PRIVATE_ROUTINES,
         ].map((name) => ({
           name,
           owner: "opengeni_migrator",
@@ -781,7 +782,8 @@ describe("embedded worker lifecycle contract", () => {
           public_execute: false,
           security_definer: true,
           configuration: [
-            name === "subscription_codex_refresh_write_allowed(uuid, uuid, uuid)"
+            name === "subscription_codex_refresh_write_allowed(uuid, uuid, uuid)" ||
+            name === "subscription_core_refresh_write_allowed(text, uuid, uuid, uuid)"
               ? "search_path=pg_catalog, opengeni_private, pg_temp"
               : "search_path=pg_catalog, public, opengeni_private, pg_temp",
           ],
@@ -792,6 +794,7 @@ describe("embedded worker lifecycle contract", () => {
         "grant_subscription_codex_owner_capability(text, uuid, uuid, text, uuid)",
         "drop_subscription_codex_owner_capabilities(uuid)",
         "derive_scheduled_revision_subscription_authority()",
+        ...opengeniDb.SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES,
       ].map((name) => ({
         name,
         owner: "opengeni_migrator",
