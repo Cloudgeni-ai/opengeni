@@ -1118,13 +1118,14 @@ describe.skipIf(!realDb)("0713 subscription authority compatibility", () => {
 
       // Several continuations delivered together: the first in delivery order
       // (created_at, then id) names the source, as the writer copies its v2.
-      const deliveredRecords = async (update: string) =>
-        database!.admin<{ legacy_scope: string; personal: unknown }[]>`
+      const deliveredRecords = async (update: string) => [
+        ...(await database!.admin<{ legacy_scope: string; personal: unknown }[]>`
           select record.legacy_scope, record.personal
           from session_system_updates update_row
           join opengeni_private.subscription_authority_compat record
             on record.turn_id = update_row.delivered_turn_id and record.provider = 'claude'
-          where update_row.id = ${update}::uuid`;
+          where update_row.id = ${update}::uuid`),
+      ];
       const recorded = await asOwner((db) =>
         insertGoalContinuation(db, narrowed, narrowed.turnId, true),
       );
