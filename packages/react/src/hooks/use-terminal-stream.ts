@@ -30,8 +30,12 @@ export type UseTerminalStreamOptions = {
   /** The Terminal cell of the negotiated capabilities (`capabilities.Terminal`).
    *  The stream connects ONLY when `transport === "pty-ws"` and `url` is set; on a
    *  cold box (`transport === "sse-events"` / no url) it stays idle and the caller
-   *  falls back to the Channel-A read-only firehose. */
-  capability: Pick<TerminalCapability, "transport" | "url" | "token" | "expiresAt"> | null;
+   *  falls back to the Channel-A firehose. Explicit PTY-capable cold cells may
+   *  buffer input, but cannot connect or flush until the grant arrives. */
+  capability:
+    | (Pick<TerminalCapability, "transport" | "url" | "token" | "expiresAt"> &
+        Partial<Pick<TerminalCapability, "ptyCapable" | "reason">>)
+    | null;
   /** Called for each OUTPUT payload from ttyd (write verbatim into xterm). */
   onOutput?: ((data: string) => void) | undefined;
   /** Called when ttyd sends a SET_WINDOW_TITLE frame. */
@@ -219,6 +223,14 @@ export function useTerminalStream(options: UseTerminalStreamOptions): UseTermina
   const expiresAt = capability?.expiresAt ?? null;
   const transportRef = useRef(transport);
   transportRef.current = transport;
+  // A cold, explicitly PTY-capable cell may collect input before its viewer
+  // grant arrives. This is not a socket credential or a readiness assertion.
+  const acquiringPty =
+    transport === "sse-events" &&
+    capability?.ptyCapable === true &&
+    (capability.reason === "lease_cold" || capability.reason === "not_provisioned");
+  const acquiringPtyRef = useRef(acquiringPty);
+  acquiringPtyRef.current = acquiringPty;
 
   useEffect(() => {
     manuallyDisconnectedRef.current = false;
@@ -238,6 +250,7 @@ export function useTerminalStream(options: UseTerminalStreamOptions): UseTermina
       reconnectAttemptRef.current = 0;
       credentialIdentityRef.current = null;
       refreshRequestedRef.current = false;
+      socketFailedRef.current = false;
       setStatus("closed");
       return;
     }
@@ -537,7 +550,7 @@ export function useTerminalStream(options: UseTerminalStreamOptions): UseTermina
     };
     // A url/token change (rotation) re-runs this effect → close old, open new.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [transport, url, token, expiresAt, reconnectGeneration]);
+  }, [transport, url, token, expiresAt, acquiringPty, reconnectGeneration]);
 
   const write = useCallback((data: string) => {
     const currentTransport = transportRef.current;
@@ -572,7 +585,9 @@ export function useTerminalStream(options: UseTerminalStreamOptions): UseTermina
         closeSocket(ws);
       }
     } else if (
-      (currentTransport === "pty-ws" || currentTransport === "relay-pty") &&
+      (currentTransport === "pty-ws" ||
+        currentTransport === "relay-pty" ||
+        acquiringPtyRef.current) &&
       !socketFailedRef.current
     ) {
       const nextSize = pendingInputRef.current.length + data.length;
