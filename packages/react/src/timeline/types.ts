@@ -22,6 +22,13 @@ import type {
    and the component demo.
    -------------------------------------------------------------------------- */
 
+/** The person who sent a message: their subject and the label frozen with it. */
+export type MessageSender = {
+  subjectId: string;
+  /** What the deployment knew them as when the message was accepted, such as an email. */
+  label: string | null;
+};
+
 export type TimelineAnnotationSourceDescriptor = Omit<
   TimelineAnnotationSource,
   "startOffset" | "endOffset" | "contextBefore" | "contextAfter"
@@ -51,6 +58,11 @@ export type UserMessageItem = {
   resources: ResourceRef[];
   /** Tools requested for the turn this message starts. */
   tools: ToolRef[];
+  /**
+   * The person who sent this message, as frozen when it was accepted. Absent
+   * for messages from agents, services and schedules, and for older messages.
+   */
+  sender?: MessageSender | undefined;
   occurredAt: string;
   /** Local-only delivery projection; absent for authoritative durable events. */
   delivery?:

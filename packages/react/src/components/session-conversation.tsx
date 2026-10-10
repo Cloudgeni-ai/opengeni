@@ -114,7 +114,10 @@ export type SessionConversationProps = ClientOverride &
     toolRegistry?: MessageTimelineProps["toolRegistry"];
     /** Host presentation without replacing native history, navigation or annotations. */
     timelineProps?:
-      | Pick<MessageTimelineProps, "turnSummary" | "renderAuthNeeded" | "emptyState">
+      | Pick<
+          MessageTimelineProps,
+          "turnSummary" | "renderAuthNeeded" | "emptyState" | "renderMessageSender"
+        >
       | undefined;
     /**
      * Replace the "usage limit reached" row for an `allowance_exhausted`
@@ -503,6 +506,7 @@ function ConversationView({
           turnSummary={timelineProps?.turnSummary ?? { rolling: true }}
           renderAuthNeeded={timelineProps?.renderAuthNeeded}
           emptyState={timelineProps?.emptyState}
+          renderMessageSender={timelineProps?.renderMessageSender}
           status={status}
           hasOlder={feed.hasOlder}
           loadingOlder={feed.loadingOlder}

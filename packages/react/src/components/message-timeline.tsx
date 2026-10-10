@@ -71,6 +71,11 @@ import {
   type ReactNode,
 } from "react";
 import { cn } from "../lib/cn";
+import {
+  MessageSenderContext,
+  MessageSenderSlot,
+  type RenderMessageSender,
+} from "../timeline/message-sender";
 import { formatClockTime, formatRelativeTime, truncate } from "../lib/format";
 import { prefersReducedMotion } from "../lib/motion";
 import {
@@ -205,6 +210,12 @@ export type MessageTimelineProps = {
   status?: SessionStatus | null | undefined;
   /** Host-owned controls beside Copy and the timestamp on settled message rows. */
   renderMessageActions?: ((item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
+  /**
+   * Who sent a person's message, drawn above its bubble. Called only for
+   * messages that carry a sender; return null for the viewer's own messages
+   * or when the host has no identity to show. Omit to show no senders.
+   */
+  renderMessageSender?: RenderMessageSender | undefined;
   /** Plug a markdown renderer for message bodies (e.g. streamdown). */
   renderMessageText?:
     | ((
@@ -595,6 +606,7 @@ export function MessageTimeline({
   items,
   status: _status,
   renderMessageActions,
+  renderMessageSender,
   renderMessageText,
   onOpenSession,
   resolveSessionTitle,
@@ -3019,13 +3031,15 @@ export function MessageTimeline({
   // Agent-authored object links resolve through the host, never the console.
   return (
     <OpenGeniLinkProvider resolveLink={resolveLink}>
-      <AgentIdentityProvider
-        items={resolvedItems}
-        resolveSessionTitle={resolveSessionTitle}
-        onOpenSession={onOpenSession}
-      >
-        {timeline}
-      </AgentIdentityProvider>
+      <MessageSenderContext.Provider value={renderMessageSender}>
+        <AgentIdentityProvider
+          items={resolvedItems}
+          resolveSessionTitle={resolveSessionTitle}
+          onOpenSession={onOpenSession}
+        >
+          {timeline}
+        </AgentIdentityProvider>
+      </MessageSenderContext.Provider>
     </OpenGeniLinkProvider>
   );
 }
@@ -4267,6 +4281,7 @@ function UserMessageRow({
   return (
     <div className={cn(enter && "animate-og-enter", "flex justify-end")}>
       <div className="flex max-w-[85%] min-w-0 flex-col items-end gap-1">
+        <MessageSenderSlot item={item} />
         <CopyHoverFrame
           copyText={
             item.text ||
