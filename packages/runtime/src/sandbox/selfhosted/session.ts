@@ -950,9 +950,21 @@ export class SelfhostedSession {
     return await this.execInternal(args, false);
   }
 
+  /** Internal controller transport: stream private request bytes over the
+   * existing command channel, never through argv, environment or host files. */
+  async execWithInput(
+    args: SelfhostedExecArgs & { stdin: Uint8Array },
+  ): Promise<SelfhostedExecResult> {
+    if (args.stdin.byteLength > SELFHOSTED_PLACEMENT_PRIVATE_MAX_BYTES) {
+      throw new RangeError("controller command input is too large");
+    }
+    return await this.execInternal(args, false, args.stdin.slice());
+  }
+
   private async execInternal(
     args: SelfhostedExecArgs,
     allowBackground: boolean,
+    stdin: Uint8Array = new Uint8Array(0),
   ): Promise<SelfhostedExecResult> {
     // Mint once before local preflight so a proven refusal can settle exactly
     // this command's turn registration, including SDK-rendered error paths.
@@ -985,7 +997,7 @@ export class SelfhostedSession {
         // Only attempt-local values explicitly supplied by the worker cross here;
         // snapshot now so a later renewal cannot mutate an in-flight request.
         env: { ...(this.transientExecEnvironment?.() ?? {}) },
-        stdin: new Uint8Array(0),
+        stdin,
         timeoutMs: executionTimeoutMs,
       };
       opStreamClient = this.opStreamClientFor(admission);
