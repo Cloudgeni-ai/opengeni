@@ -57,7 +57,6 @@ import {
   acquireSubscriptionOperationLease,
   decodeSubscriptionQuota,
   readSubscriptionProviderCutoverState,
-  readSubscriptionSessionBinding,
   releaseSubscriptionOperationLease,
   renewSubscriptionOperationLease,
   resolveSubscriptionConnectionId,

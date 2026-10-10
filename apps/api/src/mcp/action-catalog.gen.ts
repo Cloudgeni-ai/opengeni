@@ -2480,6 +2480,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "getMemberNotifications",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/inbox/member-notifications",
+    "request": [],
+    "response": [
+      "MemberNotificationsSetting"
+    ]
+  },
+  {
     "id": "getMemorySlackPublicationConfiguration",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/memory-slack-publications/configuration",
@@ -6663,6 +6672,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "MachineOperationPolicy"
+    ]
+  },
+  {
+    "id": "updateMemberNotifications",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/inbox/member-notifications",
+    "request": [
+      "MemberNotificationsSetting"
+    ],
+    "response": [
+      "MemberNotificationsSetting"
     ]
   },
   {
