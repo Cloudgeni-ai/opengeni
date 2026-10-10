@@ -622,6 +622,9 @@ function ConversationView({
                     loading={catalog.loading}
                     error={catalog.error?.message}
                     disabled={terminal}
+                    // A session frozen on Codex remote compaction refuses
+                    // other providers' models; offer them only as disabled.
+                    codexOnly={detail.session?.codexCompactionMode === "remote_v2"}
                     sessionKey={sessionId}
                     onOpenChange={(open) => {
                       if (open) void catalog.refresh();
