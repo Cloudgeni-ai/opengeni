@@ -79,6 +79,7 @@ const view = params.get("view") ?? "idle";
 const theme = params.get("theme") === "light" ? "light" : "dark";
 const fail = params.get("fail");
 const readinessView = view === "readiness";
+const coldAcquisition = readinessView && params.get("cold") === "1";
 const readinessMode = params.get("mode");
 const fixtureMode =
   readinessMode === "silent" || readinessMode === "manual" || readinessMode === "legacy"
@@ -103,6 +104,7 @@ if (fail) (globalThis as { __OG_FORCE_RENDERER_FAIL__?: string }).__OG_FORCE_REN
 };
 
 function App() {
+  const [grantReady, setGrantReady] = useState(!coldAcquisition);
   // For the handoff view we start read-only (firehose) then flip to interactive
   // (write fn) WITHOUT remounting — proving screen preservation (E5). Toggled by
   // the evidence script via `window.__ogFlipInteractive()`.
@@ -142,6 +144,22 @@ function App() {
       data-og-theme={theme === "light" ? "light" : undefined}
     >
       <div className="mx-auto flex h-full max-w-4xl flex-col overflow-hidden rounded-og-lg border border-og-border bg-og-bg shadow-og-md">
+        {readinessFixture && coldAcquisition && !grantReady && (
+          <button
+            className="border-b border-og-border px-3 py-2 text-og-sm text-og-fg"
+            onClick={() => setGrantReady(true)}
+          >
+            Grant synthetic PTY
+          </button>
+        )}
+        {readinessFixture && grantReady && (
+          <button
+            className="border-b border-og-border px-3 py-2 text-og-sm text-og-fg"
+            onClick={() => readinessFixture.reconnect()}
+          >
+            Reconnect synthetic transport
+          </button>
+        )}
         {readinessFixture && fixtureMode !== "legacy" && fixtureMode !== "manual" && (
           <button
             className="border-b border-og-border px-3 py-2 text-og-sm text-og-fg"
@@ -155,13 +173,13 @@ function App() {
           terminalCapability={
             readinessView
               ? {
-                  transport: "pty-ws",
+                  transport: grantReady ? "pty-ws" : "sse-events",
                   ptyCapable: true,
                   shell: "/bin/bash",
-                  url: livePty ?? "https://terminal.example",
+                  url: grantReady ? (livePty ?? "https://terminal.example") : null,
                   token: null,
                   expiresAt: null,
-                  reason: null,
+                  reason: grantReady ? null : "lease_cold",
                 }
               : undefined
           }

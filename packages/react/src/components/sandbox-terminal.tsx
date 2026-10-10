@@ -289,6 +289,8 @@ export function SandboxTerminal({
             url: ptyDescriptor ? terminalCapability!.url : null,
             token: ptyDescriptor ? terminalCapability!.token : null,
             expiresAt: ptyDescriptor ? terminalCapability!.expiresAt : null,
+            ptyCapable: terminalCapability!.ptyCapable,
+            reason: terminalCapability!.reason,
           }
         : null,
     onOutput: (data) => {

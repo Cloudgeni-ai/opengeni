@@ -69,6 +69,10 @@ export function installTerminalReadinessFixture(mode: "ready" | "silent" | "manu
   });
   const fixture = {
     executions,
+    reconnect() {
+      ready = false;
+      socket?.close();
+    },
     ready() {
       ready = true;
       socket?.output((mode === "silent" ? "" : "$ ") + control("ready"));
