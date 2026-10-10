@@ -45,6 +45,13 @@ export interface NativeTimelineMessages {
   previewUnavailable: (name: string) => string;
   loadFailedTitle: string;
   connectionFailed: string;
+  /** A session whose next step the runtime could not start (an admission block). */
+  stuckTitle: string;
+  stuckBody: string;
+  /** The block clears only once someone restores access the work needs. */
+  stuckAccessBody: string;
+  stuckRetry: string;
+  stuckRetryFailed: string;
   retry: string;
   cancel: string;
   save: string;
@@ -125,6 +132,13 @@ export const defaultNativeTimelineMessages: NativeTimelineMessages = {
   previewUnavailable: (name) => `${name} (preview unavailable)`,
   loadFailedTitle: "Couldn't load this session",
   connectionFailed: "Couldn't connect. Check your connection; this retries automatically.",
+  stuckTitle: "Stuck",
+  stuckBody:
+    "This chat couldn't start its next step. Nothing is needed from you, and its work is kept. Try again to continue.",
+  stuckAccessBody:
+    "This chat can't continue until access it needs is restored. Its work is kept; try again once that's sorted.",
+  stuckRetry: "Try again",
+  stuckRetryFailed: "That didn't go through. Try again in a moment.",
   retry: "Retry",
   cancel: "Cancel",
   save: "Save",

@@ -1,5 +1,9 @@
-import type { ClientModel, Session, SessionStatus } from "@opengeni/sdk";
-import { SESSION_STATUS_BADGE, SESSION_STATUS_PRESENTATION } from "@opengeni/react/timeline-model";
+import type { ClientModel, Session } from "@opengeni/sdk";
+import {
+  SESSION_STATUS_BADGE,
+  SESSION_STATUS_PRESENTATION,
+  type SessionDisplayStatus,
+} from "@opengeni/react/timeline-model";
 import { MODEL_MARK_PATHS, modelMarkVendor } from "@opengeni/react/model-mark-paths";
 import { projectClientModelRows } from "@opengeni/react/model-policy";
 import {
@@ -236,7 +240,13 @@ export function SessionRowList(props: {
 }
 
 /** The web session status badge: tinted pill, breathing dot for live states. */
-export function SessionStatusBadge({ status, label }: { status: SessionStatus; label?: string }) {
+export function SessionStatusBadge({
+  status,
+  label,
+}: {
+  status: SessionDisplayStatus;
+  label?: string;
+}) {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
   const presentation = SESSION_STATUS_PRESENTATION[status];
@@ -281,7 +291,8 @@ export function SessionHeaderTitle({
   sideInset = 116,
 }: {
   title: string;
-  status: SessionStatus | null;
+  /** The display status: pass `blocked` for an admission-blocked session. */
+  status: SessionDisplayStatus | null;
   /** Override the label ("Paused" for a paused workstream). */
   statusLabel?: string | undefined;
   align?: "center" | "left";

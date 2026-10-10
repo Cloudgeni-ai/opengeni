@@ -4649,10 +4649,16 @@ function WorkerCompletionRow({
 function SessionStatusRow({
   item,
 }: {
-  item: { status: SessionStatus; occurredAt: string; resolvedAt?: string };
+  item: {
+    status: SessionStatus;
+    blocked?: true;
+    occurredAt: string;
+    resolvedAt?: string;
+  };
 }) {
   const enter = useEntranceAnimation();
-  const meta = SESSION_STATUS_META[item.status];
+  const status = item.blocked ? "blocked" : item.status;
+  const meta = SESSION_STATUS_META[status];
   return (
     <div
       className={cn(
@@ -4663,7 +4669,7 @@ function SessionStatusRow({
     >
       <span className="h-px flex-1 bg-og-border" />
       <span className="inline-flex items-center gap-1.5">
-        {item.resolvedAt ? null : <StatusDot status={item.status} className="size-1" />}
+        {item.resolvedAt ? null : <StatusDot status={status} className="size-1" />}
         {item.resolvedAt ? "work resumed" : meta.label.toLowerCase()} ·{" "}
         {formatRelativeTime(item.resolvedAt ?? item.occurredAt)}
       </span>

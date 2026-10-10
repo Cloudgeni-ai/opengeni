@@ -1,10 +1,13 @@
+import { sessionDisplayStatus, type SessionDisplayStatus } from "@opengeni/react/timeline-model";
 import type { RailSession as Session } from "./session-list-entry";
 
 export const DEFAULT_VISIBLE_TREE_LEVELS = 3;
 export const MAX_VISUAL_TREE_DEPTH = 3;
 
-export function sessionStatusLabel(status: Session["status"]): string {
+export function sessionStatusLabel(status: SessionDisplayStatus): string {
   switch (status) {
+    case "blocked":
+      return "Stuck";
     case "requires_action":
       return "Needs you";
     case "waiting_capacity":
@@ -69,7 +72,7 @@ export function sessionStateLabel(session: Session): string {
   const waiting = sessionInputWait(session);
   const lifecycle = waiting
     ? sessionWaitLabel(waiting.deadlineAt, Date.now(), true)
-    : sessionStatusLabel(session.status);
+    : sessionStatusLabel(sessionDisplayStatus(session));
   const attentionOrTerminal =
     session.status === "requires_action" ||
     session.status === "failed" ||
