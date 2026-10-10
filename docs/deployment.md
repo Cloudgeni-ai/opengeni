@@ -3185,22 +3185,23 @@ Sandbox file mount support is also backend-specific:
 
 Models without hosted web search (Claude, Gemini, DeepSeek, GLM and other
 registry models) get `web_search` / `web_fetch` agent tools only when the
-deployment names a search provider. It is off by default and needs no
-migration. The worker calls the provider; keys never reach a sandbox.
+deployment configures a search provider. TinyFish (free) is the default
+provider and turns on once its key is set; it needs no migration. The worker
+calls the provider; keys never reach a sandbox.
 
 ```bash
-OPENGENI_WEB_SEARCH_PROVIDER=tinyfish        # tinyfish | exa | tavily | firecrawl | brave | jina | searxng | none
-OPENGENI_WEB_SEARCH_API_KEY=...              # not needed for searxng
-# Optional: OPENGENI_WEB_SEARCH_BASE_URL (required for searxng),
-# OPENGENI_WEB_FETCH_PROVIDER / _API_KEY / _BASE_URL (a separate page reader),
-# OPENGENI_WEB_SEARCH_PROVIDER_MODE=fallback|replace,
+OPENGENI_WEB_TINYFISH_API_KEY=...            # free key; TinyFish is the default provider
+# Optional: OPENGENI_WEB_SEARCH_PROVIDER / OPENGENI_WEB_FETCH_PROVIDER as
+# comma-separated failover lists (tinyfish, parallel, perplexity, exa, tavily,
+# firecrawl, brave, jina, searxng; or none), OPENGENI_WEB_<PROVIDER>_API_KEY and
+# _BASE_URL per provider (searxng needs a base URL), OPENGENI_WEB_SEARCH_PREFER=native|provider,
 # OPENGENI_WEB_SEARCH_PRICING_JSON, OPENGENI_WEB_SEARCH_REQUEST_TIMEOUT_MS.
 ```
 
 Set them on both the API and the worker (the API projects the effective tool
 list; the worker runs the tools). With credit billing active, priced calls are
 billed at provider cost + 5%. [Web search](web-search.md) owns the provider
-table, modes, URL rules, prices and the evaluation script.
+table, failover, URL rules, prices and the evaluation script.
 
 ## Terraform Registry MCP Docs
 
