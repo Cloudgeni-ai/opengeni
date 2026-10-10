@@ -2166,7 +2166,7 @@ polls use the exact process-control route and never create another model turn or
 workspace mutation admission. The requested window is capped at 30 seconds (10
 seconds when omitted). The benchmark-only experiment flag
 `OPENGENI_EXPERIMENT_CUT_POLLING=1` (worker environment, default off; OPE-550)
-raises that cap to 10 minutes so a build or test run the model asked to wait for
+raises that cap to 4 minutes (under the 5-minute Claude prompt-cache TTL) so a build or test run the model asked to wait for
 returns its terminal result in one tool call instead of repeated empty
 `write_stdin` polls; the prompt and tool schemas are unchanged. So a dev
 server, watcher, tail or REPL does not hold the turn for minutes, the call still

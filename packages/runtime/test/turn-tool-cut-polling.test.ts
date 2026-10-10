@@ -139,13 +139,14 @@ describe("cut-polling experiment flag", () => {
     expect(cutPollingExperimentEnabled({ [FLAG]: "1" })).toBe(true);
   });
 
-  test("default keeps the 30-second cap; the experiment honors requests up to 10 minutes", () => {
+  test("default keeps the 30-second cap; the experiment honors requests up to 4 minutes", () => {
     expect(modelWaitMs(undefined, false)).toBe(10_000);
     expect(modelWaitMs(undefined, true)).toBe(10_000);
     expect(modelWaitMs(5_000, true)).toBe(5_000);
     expect(modelWaitMs(290_000, false)).toBe(30_000);
-    expect(modelWaitMs(290_000, true)).toBe(290_000);
-    expect(modelWaitMs(1_200_000, true)).toBe(600_000);
+    expect(modelWaitMs(200_000, true)).toBe(200_000);
+    expect(modelWaitMs(290_000, true)).toBe(240_000);
+    expect(modelWaitMs(1_200_000, true)).toBe(240_000);
     expect(modelWaitMs(-1, true)).toBe(10_000);
   });
 
@@ -236,7 +237,7 @@ describe("cut-polling experiment flag", () => {
     }
   });
 
-  test("flag on: a command that never exits returns control at the 10-minute ceiling", async () => {
+  test("flag on: a command that never exits returns control at the 4-minute ceiling", async () => {
     process.env[FLAG] = "1";
     const fake = virtualCommand(null, 60_000);
     try {
@@ -250,7 +251,7 @@ describe("cut-polling experiment flag", () => {
         JSON.stringify({ cmd: "git clone big", yield_time_ms: 1_200_000 }),
       );
       expect(result).toContain("Process running with session ID 7");
-      expect(fake.state.reads).toBe(10);
+      expect(fake.state.reads).toBe(4);
       expect(fake.state.adoptions).toBe(1);
     } finally {
       fake.restore();
@@ -286,7 +287,7 @@ describe("cut-polling quiet return for servers, watchers and prompts", () => {
     }
   });
 
-  test("a dev server that printed ready returns at the default window, not the requested 5 minutes", async () => {
+  test("a dev server that printed ready returns at the default window, not the requested 4 minutes", async () => {
     process.env[FLAG] = "1";
     const fake = scriptedCommand(
       (now) =>
