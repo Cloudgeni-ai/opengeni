@@ -4,9 +4,9 @@ import { PgDialect } from "drizzle-orm/pg-core";
 import {
   assertSubscriptionCoreAcceptedTurn,
   withSubscriptionCoreAcceptedTurn,
-  withSubscriptionCoreCodexRefreshLock,
   type SubscriptionCoreAcceptedTurnIdentity,
 } from "../src/subscription-core-placement-world";
+import { withSubscriptionCoreCodexRefreshLock } from "../src/subscription-core-codex-bindings";
 import type { Database } from "../src/database";
 import * as database from "../src/database";
 

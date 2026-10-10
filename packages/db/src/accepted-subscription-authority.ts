@@ -6,11 +6,11 @@ import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import { resolveClaudeSharedPoolAuthoritySnapshotInTransaction } from "./claude-subscription-accounts";
 import { withWorkspaceRls, type Database } from "./database";
 import * as schema from "./schema";
+import { EMPTY_SUBSCRIPTION_AUTHORITY_V2 } from "./subscription-core-acceptance-authority";
 import {
   codexSubscriptionAuthorityV2ActiveInTransaction,
   codexSubscriptionAuthorityV2OrEmptyInTransaction,
-  EMPTY_SUBSCRIPTION_AUTHORITY_V2,
-} from "./subscription-core-acceptance-authority";
+} from "./subscription-core-codex-bindings";
 import { resolveXaiSharedPoolAuthoritySnapshotInTransaction } from "./xai-subscription";
 
 type SubscriptionProvider = "xai" | "claude";

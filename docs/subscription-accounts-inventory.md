@@ -4,6 +4,15 @@
 > shadow producer. Their references below now point to test-only historical
 > fixtures; they are not current runtime authority. Current deployment requires
 > the drained, codec-aware 0689 receipt/readiness gate.
+>
+> M4: the Codex turn-time and operation entry points on the shared core
+> (placement, leases, credential load and refresh, health, request
+> reservation, waiter cleanup; EP-T02, EP-T04 to EP-T06, EP-T09, EP-N
+> operations) now run in the provider-neutral modules under
+> `packages/db/src/subscription-core/` through the Codex adapter
+> (`packages/db/src/subscription-core-codex-adapter.ts`); the Codex-named
+> exports remain as thin bindings. Module map:
+> [design §5.1.3](design/subscription-core-2026-10-07.md#513-m4-shared-typescript-core-and-the-adapter-interface).
 
 
 Baseline: `origin/main` at `0d7075e` (7 October 2026). Research and documentation only; no product code was changed.

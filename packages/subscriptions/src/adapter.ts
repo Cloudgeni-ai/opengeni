@@ -8,6 +8,8 @@ export type ProviderCapabilities = {
   /** The credential renews itself through refresh (false for setup tokens). */
   autoRenews: boolean;
   resetCredits: boolean;
+  /** Paid usage beyond the plan can be enabled per connection (consent-gated). */
+  extraCredits: boolean;
   modelEntitlements: boolean;
   realtime: boolean;
   fundsMedia: boolean;
@@ -107,3 +109,85 @@ export interface SubscriptionProviderAdapter<
     refreshGeneration: number;
   }): Omit<SubscriptionQuota, "revision">;
 }
+
+/**
+ * How a provider's credential is obtained and kept valid. `oauth` renews
+ * through refresh; `setup_token` is pasted once and may not renew; `api_key`
+ * is a static key with no refresh (API-key connectors).
+ */
+export type CredentialKind = "oauth" | "setup_token" | "api_key";
+
+/** How a provider reports usage limits to the shared quota model. */
+export type QuotaKind =
+  /** Rolling usage windows with reset times (subscriptions). */
+  | "usage_windows"
+  /** A spend budget in currency units (API-key connectors). */
+  | "spend_budget"
+  /** Request or token rate limits only, observed from refusals or headers. */
+  | "rate_limits";
+
+/**
+ * The provider facts the shared subscription runtime needs, beyond the
+ * connection surface: everything the core does is identical for every
+ * provider, and these members are the only per-provider inputs. Shared core
+ * modules receive an adapter as data and never branch on its `provider`.
+ *
+ * `Credential` is the decoded secret (OAuth tokens, a setup token, an API
+ * key). The core stores only its encrypted encoding and never inspects it.
+ */
+export interface SubscriptionCoreAdapter<Credential = unknown> {
+  readonly provider: ProviderId;
+  /** Product name used in operator-facing error texts (never in routing). */
+  readonly displayName: string;
+  readonly capabilities: ProviderCapabilities;
+  readonly credentialKind: CredentialKind;
+  readonly quotaKind: QuotaKind;
+  /** Provider identity used by workspace model policy for this provider's models. */
+  readonly modelPolicyProviderId: string;
+  /** Cache behaviour used by placement (exact TTL or a measured idle cut-off). */
+  readonly cacheFacts: CacheFacts;
+  /** Health policy applied to this provider's connections. */
+  readonly health: {
+    /** How long a connection the provider refused (forbidden) stays quarantined. */
+    readonly forbiddenQuarantineMs: number;
+    /** How long a model the plan is not entitled to stays cooled down. */
+    readonly entitlementCooldownMs: number;
+  };
+  /** Plaintext codec for the encrypted credential column. */
+  readonly credential: {
+    /** Parse decrypted plaintext; throw fixed text (never echo the plaintext). */
+    decode(plaintext: string): Credential;
+    encode(credential: Credential): string;
+    /** The expiry embedded in the credential (a JWT exp), used when the store has none. */
+    expiry(credential: Credential): Date | null;
+  };
+  /**
+   * Credential renewal under the core's single per-connection lock. Null for
+   * credentials that never renew (API keys, setup tokens without OAuth).
+   */
+  readonly refresh: CredentialRefresher<Credential> | null;
+  /** Stored needs-relogin text for a provider message (fills an empty one). */
+  reloginText(message: string): string;
+}
+
+/** Renewal of one credential; the core persists the result before anything else. */
+export type CredentialRefresher<Credential> = {
+  /** Refresh this long before the credential expires. */
+  readonly windowMs: number;
+  /** Refresh after this long when the expiry is unknown. */
+  readonly fallbackMs: number;
+  /** Call the provider and return the rotated credential. */
+  rotate(credential: Credential): Promise<RotatedCredential<Credential>>;
+  /**
+   * The needs-relogin message when `error` is a permanent refusal of the
+   * credential (revoked or expired refresh token), else null.
+   */
+  reloginMessage(error: unknown): string | null;
+};
+
+export type RotatedCredential<Credential> = {
+  credential: Credential;
+  expiresAt: Date | null;
+  /** The plan the rotated credential reports, or null when it reports none. */
+  planType: string | null;
+};

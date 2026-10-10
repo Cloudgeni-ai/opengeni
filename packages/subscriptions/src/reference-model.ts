@@ -67,10 +67,10 @@ export type Connection = {
     allocatorEnabled: boolean;
     managedByWorkspaceId?: string | null;
   }[];
-  /** Per-model cooldowns (Claude reports model-specific limits). */
+  /** Per-model cooldowns (some providers report model-specific limits). */
   modelCooldowns?: Readonly<Record<ModelId, number>>;
   quota: Quota;
-  /** Explicit consent to spend credits after the included Codex allowance. */
+  /** Explicit consent to spend credits after the included allowance (extra-credits providers only). */
   extraCreditsEnabled?: boolean;
   /** A provider refusal blocks even paid credits until this deadline. */
   refusalUntil?: number | null;
@@ -209,7 +209,6 @@ function hasCapacity(connection: Connection, now: number): boolean {
 
 function spendsCredits(connection: Connection, now: number): boolean {
   return (
-    connection.provider === "codex" &&
     connection.extraCreditsEnabled === true &&
     (connection.refusalUntil == null || connection.refusalUntil <= now) &&
     connection.quota.kind === "exhausted" &&

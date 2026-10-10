@@ -1,5 +1,4 @@
 import { sql } from "drizzle-orm";
-import { SUBSCRIPTION_CORE_CODEX_PROVIDER } from "./subscription-core-codex-provider";
 import type {
   ConnectionHealth,
   ConnectionKind,
@@ -11,6 +10,7 @@ import type {
   SubscriptionSettingValues,
 } from "@opengeni/subscriptions";
 import { rawRows, type Database } from "./database";
+import { subscriptionCoreProvider } from "./subscription-core-providers";
 
 export type EffectiveSubscriptionSettingsRow = {
   values: SubscriptionSettingValues;
@@ -582,17 +582,19 @@ export async function acquireSubscriptionTurnLease(
 }
 
 /**
- * Persist one successful Codex token refresh through the private database
- * seam. Call only inside withSubscriptionCoreCodexRefreshLock, immediately
- * after the provider returns. SQL consumes the one-shot authorization that
- * begin_subscription_codex_refresh minted in the same transaction and writes
+ * Persist one successful token refresh through the private database seam.
+ * Call only inside withSubscriptionCoreRefreshLock for the same provider,
+ * immediately after the provider returns. SQL consumes the one-shot
+ * authorization that begin_subscription_core_refresh minted in the same
+ * transaction and writes
  * under the refresh lock and refresh-generation compare-and-swap, so a caller
  * cannot turn the helper into a general credential update API, and a rotated
  * token is not discarded because the lease or visibility changed meanwhile.
  */
-export async function persistSubscriptionCodexRefresh(
+export async function persistSubscriptionCoreRefresh(
   db: Database,
   input: {
+    provider: ProviderId;
     accountId: string;
     workspaceId: string;
     sessionId: string;
@@ -604,10 +606,11 @@ export async function persistSubscriptionCodexRefresh(
     lastRefreshAt: Date;
   },
 ): Promise<boolean> {
+  subscriptionCoreProvider(input.provider);
   assertPositiveGeneration(input.expectedRefreshGeneration);
   const [row] = await rawRows<{ persisted: boolean }>(
     db,
-    sql`select opengeni_private.persist_subscription_core_refresh(${SUBSCRIPTION_CORE_CODEX_PROVIDER},
+    sql`select opengeni_private.persist_subscription_core_refresh(${input.provider},
       ${input.accountId}::uuid, ${input.workspaceId}::uuid,
       ${input.sessionId}::uuid, ${input.turnId}::uuid,
       ${input.connectionId}::uuid, ${input.expectedRefreshGeneration}::bigint,
@@ -619,21 +622,22 @@ export async function persistSubscriptionCodexRefresh(
 }
 
 /**
- * persistSubscriptionCodexRefresh plus the plan the rotated id_token carries
+ * persistSubscriptionCoreRefresh plus the plan the rotated credential reports
  * (M3 PR 2a). Same one-shot authorization, advisory lock and
  * refresh-generation compare-and-swap; a NULL plan keeps the recorded plan,
  * and a changed plan clears the connection's model cooldowns.
  */
-export async function persistSubscriptionCodexRefreshWithPlan(
+export async function persistSubscriptionCoreRefreshWithPlan(
   db: Database,
-  input: Parameters<typeof persistSubscriptionCodexRefresh>[1] & { planType: string | null },
+  input: Parameters<typeof persistSubscriptionCoreRefresh>[1] & { planType: string | null },
 ): Promise<boolean> {
+  subscriptionCoreProvider(input.provider);
   assertPositiveGeneration(input.expectedRefreshGeneration);
   const trimmed = input.planType?.trim() ?? "";
   const planType = /^[A-Za-z0-9_.-]{1,64}$/.test(trimmed) ? trimmed : null;
   const [row] = await rawRows<{ persisted: boolean }>(
     db,
-    sql`select opengeni_private.persist_subscription_core_refresh_with_plan(${SUBSCRIPTION_CORE_CODEX_PROVIDER},
+    sql`select opengeni_private.persist_subscription_core_refresh_with_plan(${input.provider},
       ${input.accountId}::uuid, ${input.workspaceId}::uuid,
       ${input.sessionId}::uuid, ${input.turnId}::uuid,
       ${input.connectionId}::uuid, ${input.expectedRefreshGeneration}::bigint,

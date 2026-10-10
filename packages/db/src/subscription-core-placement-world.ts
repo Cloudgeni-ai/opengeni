@@ -1,10 +1,5 @@
 import { sql } from "drizzle-orm";
-import { SUBSCRIPTION_CORE_CODEX_PROVIDER } from "./subscription-core-codex-provider";
-import {
-  evaluateWorkspaceModelPolicy,
-  SubscriptionPersonalAuthorityV2,
-  subscriptionPersonalAuthorityForProviderV2,
-} from "@opengeni/contracts";
+import { evaluateWorkspaceModelPolicy, SubscriptionPersonalAuthorityV2 } from "@opengeni/contracts";
 import type { ModelDescriptor, PlacementInput, ReselectionPoint } from "@opengeni/subscriptions";
 import { rawRows, withRlsContext, withSessionRlsActorContext, type Database } from "./database";
 import {
@@ -13,6 +8,10 @@ import {
   readSubscriptionEffectiveSettings,
   readSubscriptionSessionBinding,
 } from "./subscription-core-repository";
+import {
+  subscriptionCoreProviderId,
+  type SubscriptionCoreProvider,
+} from "./subscription-core/provider";
 
 const CORE_SUBSCRIPTION_SUBJECT = "service:subscription-core";
 
@@ -52,14 +51,14 @@ export type SubscriptionCoreAcceptedTurnAccessResult<T> =
   | { status: "not_visible" }
   | { status: "completed"; value: T };
 
-export type SubscriptionCoreCodexRefreshResult<T> =
+export type SubscriptionCoreRefreshResult<T> =
   | { status: "not_visible" }
   | { status: "lease_lost" }
   | { status: "refused" }
   | { status: "completed"; value: T };
 
 /** The credential a refresh callback rotates, read under the refresh lock. */
-export type SubscriptionCoreCodexRefreshCredential = {
+export type SubscriptionCoreRefreshCredential = {
   refreshGeneration: number;
   credentialEncrypted: string;
   expiresAt: Date | null;
@@ -70,23 +69,25 @@ type SessionPlacementRow = {
   owner_membership_id: string | null;
   initiating_human_subject_id: string | null;
   visibility: string;
-  codex_compaction_mode: string;
+  compaction_locked: boolean;
   workspace_kind: string;
   allowed_providers: string[] | null;
   allowed_models: string[] | null;
 };
 
 /**
- * Load a single Codex placement world and run the caller's placement/lease
+ * Load one provider's placement world and run the caller's placement/lease
  * operation in the same tenant- and session-scoped transaction. Database
  * authorization functions establish access from the exact accepted turn;
  * callers cannot use this as a general account or session reader.
  */
-export async function withSubscriptionCorePlacementWorld<T>(
+export async function withSubscriptionCoreProviderPlacementWorld<T>(
   db: Database,
+  provider: SubscriptionCoreProvider,
   request: SubscriptionCorePlacementWorldRequest,
   operation: (tx: Database, input: PlacementInput) => Promise<T>,
 ): Promise<SubscriptionCorePlacementWorldResult<T>> {
+  const providerId = subscriptionCoreProviderId(provider);
   const acceptedAuthority = SubscriptionPersonalAuthorityV2.parse(request.acceptedAuthorityV2);
   return await withSubscriptionCoreAcceptedTurn(db, request, async (tx) => {
     const [session] = await rawRows<SessionPlacementRow>(
@@ -95,7 +96,7 @@ export async function withSubscriptionCorePlacementWorld<T>(
                 session.owner_organization_membership_id::text as owner_membership_id,
                 turn.initiating_human_subject_id,
                 session.visibility,
-                session.codex_compaction_mode,
+                ${provider.sessionCompactionLock ?? sql`false`} as compaction_locked,
                 get_workspace_kind(workspace.account_id, workspace.id) as workspace_kind,
                 -- The workspace's own policy, else its organization's default.
                 case when policy.workspace_id is not null then policy.allowed_providers
@@ -119,10 +120,8 @@ export async function withSubscriptionCorePlacementWorld<T>(
     if (!session) {
       throw new Error("Accepted subscription session disappeared during placement");
     }
-    const personalAuthority = subscriptionPersonalAuthorityForProviderV2(
-      acceptedAuthority,
-      "codex",
-    );
+    const personalAuthority =
+      acceptedAuthority.personal.find((authority) => authority.provider === providerId) ?? null;
     let personalAuthorityAuthorized = false;
     if (
       personalAuthority &&
@@ -134,7 +133,7 @@ export async function withSubscriptionCorePlacementWorld<T>(
         tx,
         sql`select opengeni_private.authorize_subscription_personal_placement_access(
                 ${request.accountId}::uuid, ${request.workspaceId}::uuid,
-                ${request.sessionId}::uuid, ${request.turnId}::uuid, 'codex',
+                ${request.sessionId}::uuid, ${request.turnId}::uuid, ${providerId},
                 ${personalAuthority.ownerMembershipId}::uuid,
                 ${personalAuthority.authorityGeneration}::bigint,
                 ${session.owner_subject_id}, ${request.initiatingHumanSubjectId}
@@ -156,7 +155,7 @@ export async function withSubscriptionCorePlacementWorld<T>(
       listSubscriptionConnectionsForPlacement(tx, {
         accountId: request.accountId,
         workspaceId: request.workspaceId,
-        provider: "codex",
+        provider: providerId,
         now: request.now,
       }),
     ]);
@@ -194,7 +193,10 @@ export async function withSubscriptionCorePlacementWorld<T>(
                 evaluateWorkspaceModelPolicy(workspacePolicy, {
                   // Workspace model policy uses the resolved provider identity;
                   // the subscription core's provider key is intentionally neutral.
-                  providerId: model.provider === "codex" ? "codex-subscription" : model.provider,
+                  providerId:
+                    model.provider === providerId
+                      ? provider.adapter.modelPolicyProviderId
+                      : model.provider,
                   modelId: model.id,
                   // Subscription placement: these models never spend Opengeni credits.
                   chargesCredits: false,
@@ -236,15 +238,19 @@ export async function withSubscriptionCorePlacementWorld<T>(
                 },
               ]
             : [],
-        compactionProviderLock: session.codex_compaction_mode === "remote_v2" ? "codex" : null,
+        compactionProviderLock: session.compaction_locked ? providerId : null,
       },
       settings: effectiveSettings.values,
       people,
       // Keep the complete catalog so a disallowed preferred model does not
       // erase provider metadata needed to evaluate same-provider fallback.
       models: request.models,
-      connections: connectionRows,
-      cacheFacts: { codex: { kind: "measured_idle_cutoff", cutoffMs: null } },
+      // Credit consent counts only for a provider whose adapter declares
+      // extra credits; any other provider's stored flag is ignored.
+      connections: provider.adapter.capabilities.extraCredits
+        ? connectionRows
+        : connectionRows.map((row) => ({ ...row, extraCreditsEnabled: false })),
+      cacheFacts: { [providerId]: provider.adapter.cacheFacts },
     };
     return await operation(tx, input);
   });
@@ -350,33 +356,35 @@ export async function withSubscriptionCoreAcceptedTurn<T>(
 }
 
 /**
- * Serialize one Codex connection's rotating OAuth refresh token under the
- * canonical connection lock, while requiring both exact accepted-turn access
- * and its live lease generation in the same RLS transaction.
+ * Serialize one connection's credential refresh under the canonical
+ * per-connection lock, while requiring both exact accepted-turn access and
+ * its live lease generation in the same RLS transaction.
  *
  * Authorization happens once, before the callback's provider call, through
- * begin_subscription_codex_refresh. The callback receives the credential to
- * rotate and must call persistSubscriptionCodexRefresh as soon as the
+ * begin_subscription_core_refresh. The callback receives the credential to
+ * rotate and must call persistSubscriptionCoreRefresh as soon as the
  * provider returns, before any other fallible work: a rolled-back
- * transaction discards the rotated token. Persistence no longer depends on
- * the lease or visibility surviving the provider call.
+ * transaction discards the rotated credential. Persistence no longer depends
+ * on the lease or visibility surviving the provider call.
  */
-export async function withSubscriptionCoreCodexRefreshLock<T>(
+export async function withSubscriptionCoreRefreshLock<T>(
   db: Database,
+  provider: SubscriptionCoreProvider,
   request: SubscriptionCoreAcceptedTurnIdentity & {
     connectionId: string;
     holderId: string;
     generation: number;
   },
-  operation: (tx: Database, credential: SubscriptionCoreCodexRefreshCredential) => Promise<T>,
-): Promise<SubscriptionCoreCodexRefreshResult<T>> {
+  operation: (tx: Database, credential: SubscriptionCoreRefreshCredential) => Promise<T>,
+): Promise<SubscriptionCoreRefreshResult<T>> {
+  const providerId = subscriptionCoreProviderId(provider);
   const access = await withSubscriptionCoreAcceptedTurn(db, request, async (tx) => {
     const leaseIsCurrent = await assertSubscriptionTurnLeaseCurrent(tx, {
       accountId: request.accountId,
       workspaceId: request.workspaceId,
       sessionId: request.sessionId,
       turnId: request.turnId,
-      provider: "codex",
+      provider: providerId,
       connectionId: request.connectionId,
       holderId: request.holderId,
       generation: request.generation,
@@ -393,7 +401,7 @@ export async function withSubscriptionCoreCodexRefreshLock<T>(
       workspaceId: request.workspaceId,
       sessionId: request.sessionId,
       turnId: request.turnId,
-      provider: "codex",
+      provider: providerId,
       connectionId: request.connectionId,
       holderId: request.holderId,
       generation: request.generation,
@@ -406,7 +414,7 @@ export async function withSubscriptionCoreCodexRefreshLock<T>(
     }>(
       tx,
       sql`select refresh_generation, credential_encrypted, expires_at
-        from opengeni_private.begin_subscription_core_refresh(${SUBSCRIPTION_CORE_CODEX_PROVIDER},
+        from opengeni_private.begin_subscription_core_refresh(${providerId},
           ${request.accountId}::uuid, ${request.workspaceId}::uuid,
           ${request.sessionId}::uuid, ${request.turnId}::uuid,
           ${request.sessionOwnerSubjectId}, ${request.initiatingHumanSubjectId},

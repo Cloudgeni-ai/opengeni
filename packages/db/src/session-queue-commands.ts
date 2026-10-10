@@ -94,7 +94,7 @@ import {
   type FrozenTurnInitiator,
 } from "./turn-initiator";
 import { resolveXaiProviderAccountAuthoritySnapshotForAcceptanceInTransaction } from "./xai-subscription";
-import { codexSubscriptionAuthorityV2ForAcceptanceInTransaction } from "./subscription-core-acceptance-authority";
+import { codexSubscriptionAuthorityV2ForAcceptanceInTransaction } from "./subscription-core-codex-bindings";
 import { assertActiveManagedHumanOrganizationMembership } from "./organization-membership-lifecycle";
 import { acceptTurnPersonalResourceAttachmentInTransaction } from "./user-resource-authority";
 

@@ -46,6 +46,8 @@ import {
   type SubscriptionCoreTurnIdentity,
 } from "../src";
 import { rawRows } from "../src/database";
+import { subscriptionCoreCodexProvider } from "../src/subscription-core-codex-adapter";
+import { subscriptionCoreTurns } from "../src/subscription-core/turns";
 import { encryptEnvironmentValue, decryptEnvironmentValue } from "../src/environment-crypto";
 
 setDefaultTimeout(180_000);
@@ -1259,6 +1261,57 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
         ),
     );
     expect(direct!.marked).toBe(false);
+  });
+
+  test("a credential that never renews is not rotated: its refresh marks the connection needs-relogin", async () => {
+    const org = await organization();
+    await enableCodexCutover(org.accountId);
+    const connectionId = await sharedConnection(org, {
+      workspaceId: org.sharedWorkspaceId,
+      label: "non-renewing",
+      expiresAt: new Date(Date.now() - 60_000),
+    });
+    const turn = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
+    expect(await place(turn)).toMatchObject({ kind: "run", connectionId });
+    // A binding of the registered provider whose adapter declares no refresh,
+    // the shape of a setup token or an API key.
+    const codex = subscriptionCoreCodexProvider();
+    const nonRenewing = { ...codex, adapter: { ...codex.adapter, refresh: null } };
+    const turns = subscriptionCoreTurns(nonRenewing);
+    // A superseded generation is reported before anything is written.
+    expect(
+      await turns.refreshSubscriptionCoreCredential(
+        client!.db,
+        settings,
+        turn.identity,
+        leaseOf(turn, connectionId),
+        2,
+      ),
+    ).toEqual({ kind: "superseded" });
+    const message = codex.adapter.reloginText("");
+    expect(
+      await turns.refreshSubscriptionCoreCredential(
+        client!.db,
+        settings,
+        turn.identity,
+        leaseOf(turn, connectionId),
+        1,
+      ),
+    ).toEqual({ kind: "relogin", message, marked: true });
+    const [row] = await shared!.admin<
+      { status: string; last_error: string | null; refresh_generation: string }[]
+    >`
+      select status, last_error, refresh_generation::text as refresh_generation
+      from subscription_connections where id = ${connectionId}::uuid`;
+    expect(row).toEqual({ status: "needs_relogin", last_error: message, refresh_generation: "1" });
+    expect(
+      await loadSubscriptionCoreCodexCredential(
+        client!.db,
+        settings,
+        turn.identity,
+        leaseOf(turn, connectionId),
+      ),
+    ).toEqual({ kind: "needs_relogin" });
   });
 
   test("quota observations and failure receipts are fenced to the leased connection", async () => {
