@@ -13,6 +13,7 @@ import {
 } from "@opengeni/contracts/editable-artifacts";
 
 import packageJson from "../package.json" with { type: "json" };
+import { inflateBoundedZipEntry, parseBoundedZip } from "../src/bounded-zip";
 import { NativeSpreadsheetSession } from "../src/native";
 import { canonicalArtifactRuntimeReleaseManifestBytes } from "../src/runtime-cli";
 import {
@@ -141,6 +142,67 @@ describe("compiled native artifact materializer", () => {
         semanticHash: output.metadata.semanticHash,
       },
       payload: new Uint8Array(0),
+    });
+  }, 60_000);
+
+  test("materializes a never-edited spreadsheet at head sequence zero", async () => {
+    // A newly created artifact has no durable operations yet, so its pinned
+    // version targets head sequence 0. Exporting it must still produce XLSX.
+    const empty = emptyFixture();
+    const materialized = await invoke(
+      fixture,
+      MATERIALIZE,
+      framed(INPUT_MAGIC, manifestFor(empty), empty.snapshot),
+    );
+    expect(materialized.stderr).toBe("");
+    const output = parseFrame(materialized.stdout);
+    expect(output.metadata).toMatchObject({
+      protocol: "OGAMR001",
+      stateHash: empty.stateHash,
+      headSequence: 0,
+      format: "xlsx",
+      contentHash: sha256(output.payload),
+    });
+    expect(output.magic).toBe(OUTPUT_MAGIC);
+    expect(materialized.exitCode).toBe(0);
+    // XLSX cannot represent a sheetless workbook, so the export carries one
+    // blank sheet that Office applications can open.
+    const workbookXml = await zipEntryText(output.payload, "xl/workbook.xml");
+    expect(workbookXml).toMatch(/<sheets><sheet [^>]*name="Sheet1"/);
+    const imported = await SpreadsheetXlsxCodec.importXlsx(output.payload, {
+      unsupportedContent: "error",
+    });
+    expect(imported.worksheets.items.map((sheet) => sheet.name)).toEqual(["Sheet1"]);
+    expect([...imported.worksheets.getItem("Sheet1").cellEntries()]).toEqual([]);
+
+    const verified = await invoke(
+      fixture,
+      VERIFY,
+      framed(
+        VERIFY_INPUT_MAGIC,
+        {
+          codecId: "opengeni.xlsx",
+          codecVersion: codecVersion(),
+          expectedSemanticHash: output.metadata.semanticHash,
+          format: "xlsx",
+          protocol: "OGAVJ001",
+        },
+        output.payload,
+      ),
+    );
+    expect(verified.exitCode).toBe(0);
+    expect(parseFrame(verified.stdout).magic).toBe(VERIFY_OUTPUT_MAGIC);
+  }, 60_000);
+
+  test("rejects a negative target head sequence", async () => {
+    const rejected = await invoke(
+      fixture,
+      MATERIALIZE,
+      framed(INPUT_MAGIC, manifest({ targetHeadSequence: -1 }), fixture.snapshot),
+    );
+    expect(parseFrame(rejected.stdout)).toMatchObject({
+      magic: ERROR_MAGIC,
+      metadata: { code: "source_identity_mismatch", protocol: "OGAMERR1" },
     });
   }, 60_000);
 
@@ -626,6 +688,20 @@ function dimensionFixture(width: number, reset = false, height = 48): Fixture {
   }
 }
 
+function emptyFixture(): Fixture {
+  const source = NativeSpreadsheetSession.create(productionTestRuntime(), 0x0123456789abcdefn);
+  try {
+    return {
+      ...fixture,
+      snapshot: source.snapshot(),
+      stateHash: source.stateHash(),
+      headSequence: 0,
+    };
+  } finally {
+    source.dispose();
+  }
+}
+
 function manifestFor(source: Fixture): Readonly<Record<string, unknown>> {
   return manifest({
     stateHash: source.stateHash,
@@ -749,6 +825,24 @@ function descriptor(path: string, value: Uint8Array) {
 
 function sha256(value: Uint8Array): `sha256:${string}` {
   return `sha256:${createHash("sha256").update(value).digest("hex")}`;
+}
+
+async function zipEntryText(archive: Uint8Array, name: string): Promise<string> {
+  const limits = {
+    entries: 1_000,
+    compressedEntryBytes: 16 * 1024 * 1024,
+    expandedEntryBytes: 16 * 1024 * 1024,
+    expandedBytes: 64 * 1024 * 1024,
+    compressionRatio: 1_000,
+  } as const;
+  const fail = (_kind: string, message: string): never => {
+    throw new Error(message);
+  };
+  const entry = parseBoundedZip(archive, limits, fail).find((item) => item.name === name);
+  if (!entry) throw new Error(`XLSX part missing: ${name}`);
+  return new TextDecoder().decode(
+    await inflateBoundedZipEntry(archive, entry, limits.expandedEntryBytes, fail),
+  );
 }
 
 function text(value: string): Uint8Array {

@@ -254,6 +254,8 @@ async function verifyMaterialization(
   );
 }
 
+const EMPTY_WORKBOOK_SHEET_NAME = "Sheet1";
+
 function projectSpreadsheet(
   runtime: ArtifactKernelRuntime,
   source: Uint8Array,
@@ -341,6 +343,16 @@ function projectSpreadsheet(
         name: sheet.name,
         cells,
         ...semanticDimensions(sheet.rowHeights ?? [], sheet.columnWidths ?? []),
+      });
+    }
+    // OOXML requires at least one <sheet>, and Excel rejects a sheetless
+    // workbook as corrupt. A never-edited spreadsheet has no sheets yet, so it
+    // exports as the single blank sheet a new workbook opens with.
+    if (semanticSheets.length === 0) {
+      semanticSheets.push({
+        name: EMPTY_WORKBOOK_SHEET_NAME,
+        cells: [],
+        ...semanticDimensions([], []),
       });
     }
     const semantic: SemanticWorkbook = Object.freeze({ version: 1, sheets: semanticSheets });
@@ -584,7 +596,8 @@ function decodeManifest(value: Uint8Array): MaterializationManifest {
   if (
     record.protocol !== "OGAMJ001" ||
     !positiveInteger(record.sourceByteSize) ||
-    !positiveInteger(record.targetHeadSequence) ||
+    // A never-edited artifact is pinned at head sequence 0, so zero is valid.
+    !nonNegativeInteger(record.targetHeadSequence) ||
     !isHash(record.sourceContentHash) ||
     !isHash(record.stateHash) ||
     !isHash(record.optionsHash) ||
@@ -752,6 +765,10 @@ function plainRecord(value: unknown): value is Record<string, unknown> {
 
 function positiveInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+
+function nonNegativeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
 function isHash(value: unknown): value is string {
