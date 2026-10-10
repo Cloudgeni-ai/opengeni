@@ -347,7 +347,9 @@ function projectSpreadsheet(
     }
     // OOXML requires at least one <sheet>, and Excel rejects a sheetless
     // workbook as corrupt. A never-edited spreadsheet has no sheets yet, so it
-    // exports as the single blank sheet a new workbook opens with.
+    // exports as the single blank sheet a new workbook opens with. The
+    // semantic hash then treats "no sheets" and "one blank Sheet1" alike,
+    // which is safe because only this process and its verifier compare it.
     if (semanticSheets.length === 0) {
       semanticSheets.push({
         name: EMPTY_WORKBOOK_SHEET_NAME,

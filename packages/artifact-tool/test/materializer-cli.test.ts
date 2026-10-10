@@ -194,16 +194,18 @@ describe("compiled native artifact materializer", () => {
     expect(parseFrame(verified.stdout).magic).toBe(VERIFY_OUTPUT_MAGIC);
   }, 60_000);
 
-  test("rejects a negative target head sequence", async () => {
-    const rejected = await invoke(
-      fixture,
-      MATERIALIZE,
-      framed(INPUT_MAGIC, manifest({ targetHeadSequence: -1 }), fixture.snapshot),
-    );
-    expect(parseFrame(rejected.stdout)).toMatchObject({
-      magic: ERROR_MAGIC,
-      metadata: { code: "source_identity_mismatch", protocol: "OGAMERR1" },
-    });
+  test("rejects a negative or fractional target head sequence", async () => {
+    for (const targetHeadSequence of [-1, 0.5]) {
+      const rejected = await invoke(
+        fixture,
+        MATERIALIZE,
+        framed(INPUT_MAGIC, manifest({ targetHeadSequence }), fixture.snapshot),
+      );
+      expect(parseFrame(rejected.stdout)).toMatchObject({
+        magic: ERROR_MAGIC,
+        metadata: { code: "source_identity_mismatch", protocol: "OGAMERR1" },
+      });
+    }
   }, 60_000);
 
   test("materializes and independently verifies dimensions outside cell bounds", async () => {
