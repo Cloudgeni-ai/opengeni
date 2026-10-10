@@ -5163,6 +5163,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "PUT /v1/workspaces/:workspaceId/sessions/:sessionId/skills",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/skills",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "PUT /v1/workspaces/:workspaceId/slack-task-policy",
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/slack-task-policy",
