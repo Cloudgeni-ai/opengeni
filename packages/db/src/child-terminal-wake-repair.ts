@@ -1,6 +1,7 @@
 import { SessionSystemUpdatePayload } from "@opengeni/contracts";
 import { and, eq, sql } from "drizzle-orm";
 import { rawRows, withSessionActivityRlsContext, type Database } from "./database";
+import { compactionFailureHoldSequenceTx } from "./compaction-failure-hold";
 import { fromPostgresLosslessJson } from "./lossless-json";
 import { sessionAttemptPendingWritersSql } from "./session-attempt-writers";
 import {
@@ -87,6 +88,14 @@ async function repairCandidate(db: Database, candidate: Candidate): Promise<bool
         ) as pending`,
       );
       if (blocked?.pending) return false;
+      // A terminal compaction failure holds the input that was already pending;
+      // re-registering a wake for it would only re-signal a workflow with
+      // nothing admissible. Newer results still repair normally.
+      const holdSequence = await compactionFailureHoldSequenceTx(
+        tx as unknown as Database,
+        candidate.workspaceId,
+        candidate.sessionId,
+      );
       const pending = await rawRows<{
         source_id: string;
         child_id: string;
@@ -115,6 +124,14 @@ async function repairCandidate(db: Database, candidate: Candidate): Promise<bool
           and input.kind = 'child_terminal_result'
           and input.payload ->> 'childSessionId' = input.source_id
           and input.lineage ->> 'parentSessionId' = input.session_id::text
+          and (${holdSequence}::bigint is null or exists (
+            select 1 from session_events pending_event
+            where pending_event.workspace_id = input.workspace_id
+              and pending_event.session_id = input.session_id
+              and pending_event.type = 'system.update.pending'
+              and pending_event.sequence > ${holdSequence}::bigint
+              and pending_event.payload ->> 'updateId' = input.id::text
+          ))
         limit 100`,
       );
       if (
