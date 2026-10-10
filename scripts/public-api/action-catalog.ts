@@ -98,6 +98,63 @@ export function actionCatalogBrowserOnlyReason(method: string, path: string): st
 export type RegisteredRoute = { method: string; path: string };
 
 /**
+ * Request bodies the public surface manifest can't name because the SDK sends
+ * them inline, matched against "METHOD /path". Without a name, describe shows
+ * an agent no input and it has to guess the body. Each names a schema exported
+ * by @opengeni/contracts that the route accepts.
+ */
+export const ACTION_REQUEST_SCHEMAS: ReadonlyArray<{ pattern: RegExp; request: string }> = [
+  {
+    pattern:
+      /^PUT \/v1\/(organizations|workspaces)\/:scopeId\/model-connections\/:kind\/:connectionId\/access$/,
+    request: "ModelConnectionAccessPolicy",
+  },
+  {
+    pattern: /^PATCH \/v1\/\w+\/:\w+\/(codex|claude|supergrok)\/accounts\/:accountId$/,
+    request: "SubscriptionAccountRenameRequest",
+  },
+  {
+    pattern:
+      /^PATCH \/v1\/\w+\/:\w+\/(codex|claude|supergrok)\/accounts\/:accountId\/(allocator|extra-credits)$/,
+    request: "SubscriptionAccountToggleRequest",
+  },
+  {
+    pattern: /^PATCH \/v1\/\w+\/:\w+\/(codex|claude|supergrok)\/settings$/,
+    request: "SubscriptionRotationSettingsRequest",
+  },
+  {
+    pattern: /^POST \/v1\/\w+\/:\w+\/(codex|supergrok)\/connect\/poll$/,
+    request: "SubscriptionConnectPollRequest",
+  },
+  {
+    pattern: /^POST \/v1\/workspaces\/:workspaceId\/supergrok\/connect\/start$/,
+    request: "SupergrokConnectStartRequest",
+  },
+  {
+    pattern: /^PATCH \/v1\/workspaces\/:workspaceId\/codex\/source$/,
+    request: "CodexSourceRequest",
+  },
+  {
+    pattern: /^POST \/v1\/workspaces\/:workspaceId\/codex\/apps$/,
+    request: "CodexAppsDesignationRequest",
+  },
+  {
+    pattern: /^POST \/v1\/workspaces\/:workspaceId\/sessions\/:sessionId\/codex-account$/,
+    request: "SessionCodexAccountPinRequest",
+  },
+  {
+    pattern: /^PUT \/v1\/workspaces\/:workspaceId\/model-policy$/,
+    request: "UpdateWorkspaceModelPolicyRequest",
+  },
+];
+
+function inlineRequestSchemas(method: string, path: string): string[] {
+  const key = `${method} ${path}`;
+  const match = ACTION_REQUEST_SCHEMAS.find((rule) => rule.pattern.test(key));
+  return match ? [match.request] : [];
+}
+
+/**
  * Every callable /v1 route the API registers, with every route-gating flag on,
  * in both managed and configured deployments. Middleware and catch-all mounts
  * (including the MCP servers themselves) are not actions.
@@ -172,11 +229,12 @@ export function buildActionCatalog(
     .map((key) => {
       const [method, path] = [key.slice(0, key.indexOf(" ")), key.slice(key.indexOf(" ") + 1)];
       const route = described.get(key);
+      const request = route?.request ?? [];
       return {
         method,
         path,
         sdk: route?.sdk ?? [],
-        request: route?.request ?? [],
+        request: request.length > 0 ? request : inlineRequestSchemas(method, path),
         response: route?.response ?? [],
       };
     })

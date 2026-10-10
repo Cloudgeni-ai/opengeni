@@ -18,19 +18,20 @@ import type {
 import { requireAccessGrant, type ApiRouteDeps } from "@opengeni/core";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import * as z from "zod/v4";
+import {
+  SubscriptionAccountRenameRequest,
+  SubscriptionAccountToggleRequest,
+  SubscriptionRotationSettingsRequest,
+} from "@opengeni/contracts";
 import { requireOrganizationCodexHuman } from "./codex";
 import {
   requirePrivateSubscriptionHuman,
   requireSameOriginBrowserMutation,
   requireSubscriptionScopeMutation,
 } from "./subscription-pool-access";
-const allocatorBody = z.object({
-  enabled: z.boolean(),
-  expectedVersion: z.number().int().positive(),
-});
-const settingsBody = z.object({ rotationEnabled: z.boolean() });
-const renameBody = z.object({ label: z.string().trim().max(200).nullable() });
+const allocatorBody = SubscriptionAccountToggleRequest;
+const settingsBody = SubscriptionRotationSettingsRequest;
+const renameBody = SubscriptionAccountRenameRequest;
 
 type PoolRepository = {
   listOrganizationSubscriptions: typeof listOrganizationXaiSubscriptions;

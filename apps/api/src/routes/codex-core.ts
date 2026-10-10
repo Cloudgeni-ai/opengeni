@@ -8,6 +8,7 @@
 import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import * as z from "zod/v4";
+import { CodexAppsDesignationRequest } from "@opengeni/contracts";
 import { hasPermission, requireAccessGrant, type ApiRouteDeps } from "@opengeni/core";
 import { ApiHttpError } from "../http/api-error";
 import {
@@ -393,9 +394,7 @@ export async function coreCodexDesignateApps(
   if (!deps.settings.codexConnectedAppsEnabled) {
     throw new HTTPException(409, { message: "Codex Apps is disabled for this deployment" });
   }
-  const parsed = z
-    .object({ accountId: z.string().uuid(), expectedVersion: z.number().int().nonnegative() })
-    .safeParse(await c.req.json().catch(() => null));
+  const parsed = CodexAppsDesignationRequest.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) {
     throw new HTTPException(400, { message: "accountId and expectedVersion are required" });
   }
