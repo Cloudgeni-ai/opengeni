@@ -88,9 +88,10 @@ test("provider failures and queued work never ask for credits", async () => {
   }
 });
 
-test("hybrid keyword fallback distinguishes funding, quota and provider issues", async () => {
+test("hybrid keyword fallback distinguishes funding, the credit switch, quota and provider issues", async () => {
   for (const [reason, expected] of [
     ["awaiting_funding", "needs credits"],
+    ["credits_disabled", "Opengeni credits, which are off"],
     ["quota", "quota reached"],
     ["provider_unavailable", "provider unavailable"],
   ] as const) {

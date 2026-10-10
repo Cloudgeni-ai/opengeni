@@ -17,7 +17,6 @@ import {
   creditDebitAttributionMetadata,
   existingUsageEventIdempotencyKeys,
   getSpendableCreditBalance,
-  getWorkspaceModelPolicy,
   loadSessionRealtimeBillingFacts,
   recordUsageEvent,
   sumUsageQuantity,
@@ -27,6 +26,7 @@ import {
   type Database,
 } from "@opengeni/db";
 import { TranscriptionBillingRefusedError } from "../transcription";
+import { workspaceCreditsDisabled } from "./workspace-credits";
 
 /** Credit debit type and usage source for deployment-funded live voice. */
 export const REALTIME_VOICE_DEBIT_TYPE = "voice_realtime_debit";
@@ -111,16 +111,7 @@ export type RealtimeVoiceUnavailableCode =
 export const WORKSPACE_CREDITS_DISABLED_VOICE_MESSAGE =
   "Opengeni credits are turned off in this workspace.";
 
-/**
- * True when the workspace model policy turned Opengeni credits off. Voice
- * paid with credits honors the same switch as credit-billed chat models.
- */
-export async function workspaceCreditsDisabled(
-  db: Database,
-  workspaceId: string,
-): Promise<boolean> {
-  return (await getWorkspaceModelPolicy(db, workspaceId))?.allowCreditModels === false;
-}
+export { workspaceCreditsDisabled } from "./workspace-credits";
 
 /** The deployment cannot offer this live-voice model at all (not a credit refusal). */
 export class RealtimeVoiceUnavailableError extends Error {

@@ -326,6 +326,100 @@ test("paid indexing waits for funding, settles accepted batches and finishes a f
   expect(calls).toBe(2);
 });
 
+test("paid indexing in a workspace with Opengeni credits off waits without a provider call or debit", async () => {
+  const accountId = crypto.randomUUID();
+  const workspaceId = crypto.randomUUID();
+  fixtureAccounts.push(accountId);
+  await shared.admin`INSERT INTO managed_accounts(id,name) VALUES(${accountId},'Credits-off index account')`;
+  await shared.admin`INSERT INTO workspaces(id,account_id,name,settings) VALUES(${workspaceId},${accountId},'Credits-off index workspace',${shared.admin.json({ allowCreditModels: false })})`;
+  await shared.admin`INSERT INTO credit_ledger_entries(account_id,workspace_id,type,amount_micros,source_type,source_id,idempotency_key) VALUES (${accountId},NULL,'grant',10000000,'test',${workspaceId},${`credits-off-index:${workspaceId}`})`;
+  const context: KnowledgeContext = {
+    accountId,
+    workspaceId,
+    actor: {
+      kind: "human",
+      principalKind: "human_session",
+      subjectId: "user:credits-off-index-owner",
+      writeScopes: ["workspace"],
+      settingsScopes: ["workspace"],
+      review: true,
+    },
+  };
+  let calls = 0;
+  const embedder: DocumentServices["embedder"] = {
+    model: "paid-knowledge-index",
+    dimensions: 3,
+    embedMany: async (inputs) => {
+      calls++;
+      return inputs.map(() => [1, 0, 0]);
+    },
+    embedQuery: async () => {
+      calls++;
+      return [1, 0, 0];
+    },
+  };
+  const settings = {
+    billingMode: "stripe",
+    usageLimitsMode: "managed",
+    staticUsageLimitsJson: "{}",
+    documentEmbeddingProvider: "openai",
+    documentEmbeddingBillingMode: "credits",
+    documentEmbeddingCreditsActivatedAt: "2026-01-01T00:00:00Z",
+    documentEmbeddingRateMicrosPerMillionBytes: 1_000_000,
+  } as Settings;
+  const worker = createKnowledgeIndexingActivities(
+    async () =>
+      ({
+        db: client.db,
+        settings,
+        observability: { warn: () => undefined },
+      }) as ControlActivityServices,
+    async () => ({ embedder }) as DocumentServices,
+  );
+  expect((await worker.indexKnowledge()).completed).toBe(0);
+  const saved = await saveKnowledgeEntry(client.db, context, {
+    operationId: crypto.randomUUID(),
+    entryId: crypto.randomUUID(),
+    expectedVersion: 0,
+    scope: "workspace",
+    entry: {
+      kind: "fact",
+      title: "Credits-off contract",
+      content: "Credits-off terms ".repeat(200),
+    },
+  });
+  expect((await worker.indexKnowledge()).deferred).toBe(1);
+  expect(calls).toBe(0);
+  const [waiting] =
+    await shared.admin`SELECT next_index,attempts,last_failure FROM knowledge_index_jobs WHERE revision_id=${saved.revisionId}`;
+  // Waiting does not burn retry attempts, so the generation resumes intact.
+  expect(waiting).toMatchObject({
+    next_index: 0,
+    attempts: 0,
+    last_failure: "waiting_for_funding",
+  });
+  const hybrid = await searchKnowledgeEntries(
+    client.db,
+    context,
+    { query: "Credits-off" },
+    () => embedder,
+    settings,
+  );
+  expect(hybrid).toMatchObject({ searchMode: "keyword", fallbackReason: "credits_disabled" });
+  expect(hybrid.entries).toHaveLength(1);
+  expect(calls).toBe(0);
+  const [charges] =
+    await shared.admin`SELECT count(*)::int AS n FROM credit_ledger_entries WHERE account_id=${accountId} AND type<>'grant'`;
+  expect(charges?.n).toBe(0);
+  await shared.admin`UPDATE workspaces SET settings = settings || ${shared.admin.json({ allowCreditModels: true })} WHERE id=${workspaceId}`;
+  await shared.admin`UPDATE knowledge_index_jobs SET next_attempt_at=now()-interval '1 second' WHERE revision_id=${saved.revisionId}`;
+  expect((await worker.indexKnowledge()).completed).toBe(1);
+  expect(calls).toBeGreaterThan(0);
+  const [ledgers] =
+    await shared.admin`SELECT count(*)::int AS n FROM credit_ledger_entries WHERE source_type='knowledge_revision' AND source_id=${saved.revisionId}`;
+  expect(ledgers?.n).toBe(1);
+});
+
 test("a frozen paid generation pauses across a billing-mode rollback and resumes at its original tariff", async () => {
   const accountId = crypto.randomUUID();
   const workspaceId = crypto.randomUUID();

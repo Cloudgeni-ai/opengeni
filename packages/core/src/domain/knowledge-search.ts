@@ -16,6 +16,7 @@ import {
 import type { DocumentEmbedder } from "@opengeni/documents";
 import type { z } from "zod";
 import { documentEmbeddingCostMicros, paidDocumentEmbedding } from "../billing/limits";
+import { workspaceCreditsDisabled } from "./workspace-credits";
 
 // Safety ceilings, not a commercial tariff. Paid queries have no durable
 // reusable vector cache, so each bounded request consumes the provider once.
@@ -31,6 +32,16 @@ export class KnowledgeVectorFundingError extends Error {
   constructor() {
     super("Knowledge vector search needs Opengeni credits; keyword search remains available.");
     this.name = "KnowledgeVectorFundingError";
+  }
+}
+
+export class KnowledgeVectorCreditsDisabledError extends Error {
+  readonly code = "knowledge_vector_credits_disabled";
+  constructor() {
+    super(
+      "Knowledge vector search uses Opengeni credits, which are turned off in this workspace; keyword search remains available.",
+    );
+    this.name = "KnowledgeVectorCreditsDisabledError";
   }
 }
 
@@ -81,7 +92,7 @@ export async function searchKnowledgeEntries(
   const keywordFallback = async (
     queryDb: Database,
     error: unknown,
-    fallbackReason: "awaiting_funding" | "quota" | "provider_unavailable" | "query_limit",
+    fallbackReason: NonNullable<KnowledgeEntryListResponse["fallbackReason"]>,
   ) => {
     if (request.mode === "vector") throw error;
     return {
@@ -190,6 +201,14 @@ export async function searchKnowledgeEntries(
     context.accountId,
     context.workspaceId,
     async (lockedDb) => {
+      // A workspace that turned Opengeni credits off is never debited; it
+      // keeps keyword search instead of paid semantic retrieval.
+      if (await workspaceCreditsDisabled(lockedDb, context.workspaceId))
+        return keywordFallback(
+          lockedDb,
+          new KnowledgeVectorCreditsDisabledError(),
+          "credits_disabled",
+        );
       const balance = await getSpendableCreditBalance(lockedDb, context.accountId);
       if (balance.balanceMicros <= 0)
         return keywordFallback(lockedDb, new KnowledgeVectorFundingError(), "awaiting_funding");

@@ -16,6 +16,7 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import {
+  WEB_SEARCH_CREDITS_DISABLED_MESSAGE,
   WEB_SEARCH_DEBIT_TYPE,
   WebSearchBillingRefusedError,
   createWebSearchBilling,
@@ -220,6 +221,49 @@ describe("web search credit billing", () => {
     });
     const exhausted = await billing.admit(limited.scope, 1_000).catch((error: unknown) => error);
     expect((exhausted as WebSearchBillingRefusedError).code).toBe("allowance_exhausted");
+  }, 180_000);
+
+  test("a workspace that turned Opengeni credits off is refused paid calls and never debited", async () => {
+    const { scope } = await fixture({ credits: 1_000_000 });
+    const setCredits = async (allow: boolean) =>
+      await shared.admin`update workspaces
+        set settings = settings || ${shared.admin.json({ allowCreditModels: allow })}
+        where id=${scope.workspaceId}`;
+    await setCredits(false);
+    const billing = createWebSearchBilling({ db: client.db, settings: billed });
+    const refusal = await billing.admit(scope, 5_000).catch((error: unknown) => error);
+    expect(refusal).toBeInstanceOf(WebSearchBillingRefusedError);
+    expect((refusal as WebSearchBillingRefusedError).code).toBe("credits_disabled");
+    expect((refusal as Error).message).toBe(WEB_SEARCH_CREDITS_DISABLED_MESSAGE);
+    // Free providers stay available with credits off.
+    await billing.admit(scope, 0);
+    // A call admitted before the switch flipped (or priced only by the
+    // provider's reported cost) settles without a debit.
+    const cost = {
+      operationId: crypto.randomUUID(),
+      operation: "search" as const,
+      provider: "brave",
+      providerMicros: 5_000,
+      creditMicros: 5_250,
+      marginBps: 500,
+      basis: "provider_reported" as const,
+    };
+    await billing.settle(scope, cost);
+    const usage = await shared.admin<{ event_type: string }[]>`
+        select event_type from usage_events where account_id=${scope.accountId}
+          and source_resource_type='web_search'`;
+    expect(usage.map((row) => row.event_type)).toEqual(["web_search.search_requests"]);
+    const debits = await shared.admin`select 1 from credit_ledger_entries
+        where account_id=${scope.accountId} and type=${WEB_SEARCH_DEBIT_TYPE}`;
+    expect(debits).toHaveLength(0);
+
+    // Turning credits back on restores paid search.
+    await setCredits(true);
+    await billing.admit(scope, 5_000);
+    await billing.settle(scope, { ...cost, operationId: crypto.randomUUID() });
+    const after = await shared.admin`select 1 from credit_ledger_entries
+        where account_id=${scope.accountId} and type=${WEB_SEARCH_DEBIT_TYPE}`;
+    expect(after).toHaveLength(1);
   }, 180_000);
 
   test("deployments without credit billing record request counts only", async () => {

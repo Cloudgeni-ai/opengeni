@@ -188,7 +188,9 @@ export function usableModelCount(
       model.credentialReadiness.status === "ready" &&
       // Unrunnable for another reason (not entitled, unsupported, unhealthy).
       // A policy block is the saved list's verdict, which the draft replaces.
-      (model.availability.selectable || model.availability.reason === "policy_blocked") &&
+      (model.availability.selectable ||
+        model.availability.reason === "policy_blocked" ||
+        model.availability.reason === "credits_disabled") &&
       allowedByDraft(model, draft) &&
       (allowCreditModels || !modelUsesCredits(model)),
   ).length;

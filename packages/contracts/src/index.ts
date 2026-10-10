@@ -18995,6 +18995,8 @@ export const ModelAvailabilityV1 = /* @__PURE__ */ defineModelContractSchema(() 
         "provider_unhealthy",
         "policy_blocked",
         "unsupported",
+        // The workspace turned Opengeni credits off and this model spends them.
+        "credits_disabled",
       ])
       .nullable(),
     checkedAt: z.string().datetime().nullable(),

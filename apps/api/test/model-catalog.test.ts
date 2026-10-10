@@ -418,6 +418,39 @@ describe("workspace model catalog availability", () => {
     });
   });
 
+  test("credits turned off reports credits_disabled only when credits are the sole blocker", () => {
+    const settings = testSettings({ codexSubscriptionEnabled: false });
+    const find = (policy: Parameters<typeof buildWorkspaceModelCatalog>[0]["policy"]) =>
+      buildWorkspaceModelCatalog({ settings, policy, codexSubscriptionActive: false }).models;
+    const creditModel = find(null).find((candidate) => candidate.cost === "credits")!;
+    expect(creditModel).toBeDefined();
+
+    const creditsOff = find({
+      allowedProviders: null,
+      allowedModels: null,
+      allowCreditModels: false,
+    });
+    expect(creditsOff.find((candidate) => candidate.id === creditModel.id)!.availability).toEqual({
+      status: "unavailable",
+      selectable: false,
+      reason: "credits_disabled",
+      checkedAt: null,
+    });
+    // Models that do not spend credits stay selectable.
+    for (const model of creditsOff.filter((candidate) => candidate.cost !== "credits")) {
+      expect(model.availability.reason).not.toBe("credits_disabled");
+    }
+
+    // An allowlist that also excludes the model keeps the generic reason, so
+    // turning credits back on is never suggested as the fix.
+    const alsoBlocked = find({
+      allowedProviders: [],
+      allowedModels: null,
+      allowCreditModels: false,
+    }).find((candidate) => candidate.id === creditModel.id)!;
+    expect(alsoBlocked.availability.reason).toBe("policy_blocked");
+  });
+
   test("XAI Grok availability requires fresh successful health evidence", () => {
     const settings = testSettings({
       codexSubscriptionEnabled: false,

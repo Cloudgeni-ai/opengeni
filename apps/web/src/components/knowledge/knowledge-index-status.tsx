@@ -34,7 +34,7 @@ export function KnowledgeIndexNotice({
         <span>
           {" "}
           The original and keyword search remain available. Indexing resumes automatically after
-          credits are added.{" "}
+          credits are added, or when Opengeni credits are turned back on for this workspace.{" "}
           {canBuy ? (
             <Link
               to="/workspaces/$workspaceId/organization"
@@ -77,6 +77,8 @@ export function KnowledgeSearchFallback({
   const message = {
     awaiting_funding:
       "Semantic search needs credits. Showing keyword results; saved sources remain available.",
+    credits_disabled:
+      "Semantic search uses Opengeni credits, which are off in this workspace. Showing keyword results.",
     quota: "Semantic search quota reached. Showing keyword results.",
     provider_unavailable: "Semantic search provider unavailable. Showing keyword results.",
     query_limit: "Query exceeds the semantic search limit. Showing keyword results.",

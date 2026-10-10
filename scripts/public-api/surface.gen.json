@@ -11292,7 +11292,7 @@
         "$.legacyModelFallback": "object?",
         "$.legacyModelFallback.availability": "object!",
         "$.legacyModelFallback.availability.checkedAt": "string! null",
-        "$.legacyModelFallback.availability.reason": "enum! null=[\"\\\"credential_not_ready\\\"\",\"\\\"missing_credential\\\"\",\"\\\"needs_reauth\\\"\",\"\\\"not_entitled\\\"\",\"\\\"policy_blocked\\\"\",\"\\\"provider_unhealthy\\\"\",\"\\\"unsupported\\\"\"]",
+        "$.legacyModelFallback.availability.reason": "enum! null=[\"\\\"credential_not_ready\\\"\",\"\\\"credits_disabled\\\"\",\"\\\"missing_credential\\\"\",\"\\\"needs_reauth\\\"\",\"\\\"not_entitled\\\"\",\"\\\"policy_blocked\\\"\",\"\\\"provider_unhealthy\\\"\",\"\\\"unsupported\\\"\"]",
         "$.legacyModelFallback.availability.selectable": "const!=[\"false\"]",
         "$.legacyModelFallback.availability.status": "const!=[\"\\\"unavailable\\\"\"]",
         "$.legacyModelFallback.id": "string!",
@@ -16859,7 +16859,7 @@
         "$": "object",
         "$.entries": "array!",
         "$.entries[]": "ref(KnowledgeEntrySummary)",
-        "$.fallbackReason": "enum?=[\"\\\"awaiting_funding\\\"\",\"\\\"provider_unavailable\\\"\",\"\\\"query_limit\\\"\",\"\\\"quota\\\"\"]",
+        "$.fallbackReason": "enum?=[\"\\\"awaiting_funding\\\"\",\"\\\"credits_disabled\\\"\",\"\\\"provider_unavailable\\\"\",\"\\\"query_limit\\\"\",\"\\\"quota\\\"\"]",
         "$.nextCursor": "string! null",
         "$.searchMode": "enum?=[\"\\\"hybrid\\\"\",\"\\\"keyword\\\"\",\"\\\"vector\\\"\"]"
       }
@@ -18037,7 +18037,7 @@
       "shape": {
         "$": "object",
         "$.checkedAt": "string! null",
-        "$.reason": "enum! null=[\"\\\"credential_not_ready\\\"\",\"\\\"missing_credential\\\"\",\"\\\"needs_reauth\\\"\",\"\\\"not_entitled\\\"\",\"\\\"policy_blocked\\\"\",\"\\\"provider_unhealthy\\\"\",\"\\\"unsupported\\\"\"]",
+        "$.reason": "enum! null=[\"\\\"credential_not_ready\\\"\",\"\\\"credits_disabled\\\"\",\"\\\"missing_credential\\\"\",\"\\\"needs_reauth\\\"\",\"\\\"not_entitled\\\"\",\"\\\"policy_blocked\\\"\",\"\\\"provider_unhealthy\\\"\",\"\\\"unsupported\\\"\"]",
         "$.selectable": "boolean!",
         "$.status": "enum!=[\"\\\"available\\\"\",\"\\\"degraded\\\"\",\"\\\"unavailable\\\"\",\"\\\"unknown\\\"\"]"
       }
