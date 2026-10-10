@@ -1,6 +1,10 @@
 export { managedUserEmailAllowed } from "./managed-user-admission";
 export * from "./realtime-voice-pricing";
 export * from "./web-search";
+import {
+  WebSearchProviderCredentialsSchema,
+  webSearchProviderCredentialsFromEnv,
+} from "./web-search";
 import { EnvCreditPromotionPolicy } from "./credit-promotions";
 export {
   CreditPromotionPolicy,
@@ -957,12 +961,15 @@ const SettingsSchema = z.object({
   // and the sandbox capability tools, never replacing them.
   webSearchEnabled: EnvBoolean.default(true),
   // Provider-agnostic web search (`web_search` / `web_fetch` agent tools,
-  // see ./web-search.ts). Inert until a provider is named; validated lazily so
-  // a misconfiguration withholds the tools instead of failing boot.
+  // see ./web-search.ts). Inert until a provider and its key are set; validated
+  // lazily so a misconfiguration withholds the tools instead of failing boot.
   webSearchProvider: z.string().optional(),
+  webFetchProvider: z.string().optional(),
+  webSearchPrefer: z.string().optional(),
+  webSearchProviderCredentials: WebSearchProviderCredentialsSchema,
+  // Earlier single-provider settings, applied to the first provider of a slot.
   webSearchApiKey: z.string().optional(),
   webSearchBaseUrl: z.string().optional(),
-  webFetchProvider: z.string().optional(),
   webFetchApiKey: z.string().optional(),
   webFetchBaseUrl: z.string().optional(),
   webSearchProviderMode: z.string().optional(),
@@ -4626,6 +4633,8 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     openaiMaxRetries: optional("OPENGENI_OPENAI_MAX_RETRIES"),
     webSearchEnabled: optional("OPENGENI_WEB_SEARCH_ENABLED"),
     webSearchProvider: optional("OPENGENI_WEB_SEARCH_PROVIDER"),
+    webSearchPrefer: optional("OPENGENI_WEB_SEARCH_PREFER"),
+    webSearchProviderCredentials: webSearchProviderCredentialsFromEnv(source),
     webSearchApiKey: optional("OPENGENI_WEB_SEARCH_API_KEY"),
     webSearchBaseUrl: optional("OPENGENI_WEB_SEARCH_BASE_URL"),
     webFetchProvider: optional("OPENGENI_WEB_FETCH_PROVIDER"),

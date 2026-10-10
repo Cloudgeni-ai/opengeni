@@ -14,7 +14,11 @@ Opengeni gives agents web search in one of two ways for each turn:
   and `web_fetch`. Any model with function calling can use them, including
   Gemini, DeepSeek, GLM and Kimi.
 
-Provider search is off until an operator names a provider. With no provider,
+Provider search has two slots, **search** and **page reading**. Each slot is
+an ordered list of providers: a call goes to the first healthy provider and
+moves to the next one when a provider fails. The default is TinyFish for both
+slots, which is free, but it stays off until the operator sets a TinyFish key
+(`OPENGENI_WEB_TINYFISH_API_KEY`) or names other providers. With no provider,
 nothing changes: models without hosted search have no web search tool.
 
 ## Which turns get which
@@ -24,12 +28,15 @@ The worker (`apps/worker/src/activities/agent-turn/web-search.ts`) and the API's
 effective-tools projection (`packages/core/src/domain/session-tool-policy.ts`)
 both call it, so the tools a session reports are the tools it gets.
 
-| `OPENGENI_WEB_SEARCH_PROVIDER_MODE` | Model with hosted search | Model without hosted search |
+| `OPENGENI_WEB_SEARCH_PREFER` | Model with hosted search | Model without hosted search |
 | --- | --- | --- |
-| `fallback` (default) | hosted `web_search` only | provider `web_search` + `web_fetch` |
-| `replace` | provider tools instead of hosted search | provider `web_search` + `web_fetch` |
+| `native` (default) | hosted `web_search` only | provider `web_search` + `web_fetch` |
+| `provider` | provider tools instead of hosted search | provider `web_search` + `web_fetch` |
 
-SuperGrok keeps its native search in both modes, because its transport adds
+The earlier `OPENGENI_WEB_SEARCH_PROVIDER_MODE=fallback|replace` is still read
+as `native|provider` when `OPENGENI_WEB_SEARCH_PREFER` is unset.
+
+SuperGrok keeps its native search either way, because its transport adds
 that search rather than Opengeni's tool list.
 
 Every other rule still applies:
@@ -39,8 +46,10 @@ Every other rule still applies:
 - The session's agent configuration must allow the **Web search** capability.
   Provider tools have the same capability as hosted search (`webSearch` in
   `AGENT_FUNCTION_TOOL_CAPABILITIES`).
-- A search-only provider (Brave, SearXNG) offers `web_search` alone unless
-  `OPENGENI_WEB_FETCH_PROVIDER` names a reader.
+- A search-only provider (Perplexity, Brave, SearXNG) offers `web_search`
+  alone unless `OPENGENI_WEB_FETCH_PROVIDER` names a reader.
+- In a workspace that turned Opengeni credits off, a tool is offered only if
+  one of its providers is free, and only free providers are called.
 
 Both tools are in the always-visible first-request set
 (`packages/runtime/src/lazy-tool-transport.ts`). Hosted search is never
@@ -56,7 +65,7 @@ are attempt tools, so Codemode programs can call them too.
 - The tool list is part of the cached prompt prefix, so existing sessions keep
   their prefix.
 
-`replace` exists so an operator can A/B the two (see the eval below) or route
+`provider` exists so an operator can A/B the two (see the eval below) or route
 every model through one audited provider.
 
 ### Claude's server-side search
@@ -136,30 +145,60 @@ the request, not the worker. These refusals protect a self-hosted reader that
 may sit inside a private network.
 
 Provider failures, timeouts, rate limits and billing refusals come back as tool
-errors with a short reason, never as a failed turn. The provider key never
-reaches a sandbox or a Connected Machine.
+errors with a short reason, never as a failed turn, and only after every
+provider of the slot failed. The provider key never reaches a sandbox or a
+Connected Machine.
+
+## Failover
+
+Each call tries the slot's providers in order and returns the first answer.
+A provider that fails in a way that will repeat moves behind the healthy
+providers of its slot for a while:
+
+- HTTP 401, 402 or 403 (rejected key or exhausted quota): 10 minutes;
+- a rate limit (429), a 5xx, a timeout or an unreachable provider: 1 minute.
+
+Other failures, such as a page a reader could not extract, move that one call
+to the next provider without a cooldown. Health is kept per worker process.
+A cooling provider is never skipped outright: when every provider is cooling,
+they are tried in their configured order.
+
+A typical paid setup puts a free provider first and a paid one behind it, so
+the paid provider is only called (and billed) when the free one is rate
+limited or down:
+
+```bash
+OPENGENI_WEB_SEARCH_PROVIDER=tinyfish,parallel
+OPENGENI_WEB_FETCH_PROVIDER=tinyfish,parallel
+```
 
 ## Providers
 
 Adapters live in `packages/runtime/src/web-search/providers.ts`. Each one maps
 its API to `WebSearchProvider` and `WebFetchProvider`
-(`packages/runtime/src/web-search/types.ts`).
+(`packages/runtime/src/web-search/types.ts`). The provider catalog
+(`WEB_SEARCH_PROVIDER_CATALOG` in `packages/config/src/web-search.ts`) records
+what each provider can do, its default endpoints and its list prices.
 
 To add a provider:
 
-1. Write one search adapter, and optionally one fetch adapter.
-2. Add its traits and list price in `packages/config/src/web-search.ts`.
+1. Add its catalog entry and id in `packages/config/src/web-search.ts`.
+2. Write one search adapter, and optionally one fetch adapter.
+3. Add its `OPENGENI_WEB_<PROVIDER>_API_KEY` and `_BASE_URL` to
+   `WEB_SEARCH_PROVIDER_PASSTHROUGH_ENV` in `packages/deployment`.
 
-Prices were checked on 2026-10-05.
+Prices were checked on 2026-10-10.
 
 | Provider | Search | Fetch | Key | Built-in list price (search / fetch) | Free tier |
 | --- | --- | --- | --- | --- | --- |
-| `tinyfish` | yes | yes | required | $0 / $0 | Free at any balance; per key 30 searches/min and 500/hour, 150 fetches/min and 1,000/day |
+| `tinyfish` | yes | yes | required | $0 / $0 | Free at any balance, no paid tier; per account 30 searches/min and 500/hour, 150 fetches/min and 1,000/day; higher limits by contract |
+| `parallel` | yes (`fast` mode) | yes (`/v1/extract`, full content) | required | $1 / $1 per 1k | 5,000 requests/month |
+| `perplexity` | yes (Search API, `search_type: fast`) | no | required | $1 per 1k | none |
 | `exa` | yes (`auto`, highlights) | yes (`/contents`) | required | $8 / $1 per 1k; reported `costDollars` is billed when present | $10 credit/month |
 | `tavily` | yes (`basic`) | yes (`/extract`) | required | $8 / $1.60 per 1k; reported `usage.credits` × $0.008 is billed | 1,000 credits/month |
 | `firecrawl` | yes (`/v2/search`) | yes (`/v2/scrape`) | required | $6.40 / $3.20 per 1k (Hobby; set the price JSON for your plan) | 1,000 credits/month |
 | `brave` | yes | no | required | $5 per 1k | $5 credit/month, card required |
-| `jina` | yes (`s.jina.ai`, key required) | yes (`r.jina.ai`, keyless allowed) | search only | $0.50 / $0.25 per 1k; keyless fetch $0 | 10M tokens per new key |
+| `jina` | yes (`s.jina.ai`, key required) | yes (`r.jina.ai` or a self-hosted reader, keyless allowed) | search only | $0.50 / $0.25 per 1k; keyless fetch $0 | 10M tokens per new key |
 | `searxng` | yes (self-hosted JSON API) | no | none | $0 | Self-hosted |
 
 Brave's terms forbid storing results beyond transient use without an
@@ -168,20 +207,20 @@ before choosing Brave.
 
 ### Recommended default
 
-Use **TinyFish** for search and fetch. It is free at any balance and covers
-both tools with one key, so the deployment pays nothing and needs no credit
-billing.
+Set a free **TinyFish** key: it is the default provider for search and fetch,
+so the deployment pays nothing and needs no credit billing.
 
-TinyFish's free limits are per key: 30 searches a minute and 500 an hour, and
-150 fetches a minute and 1,000 a day. Over a limit the tool returns a
-retryable error to the model; the turn continues. When a deployment outgrows
-the fetch limit, keep TinyFish search and set `OPENGENI_WEB_FETCH_PROVIDER=exa`
-(about $1 per 1,000 pages, billed at cost + 5%), or move both to a paid plan.
+TinyFish's free limits are per account: 30 searches a minute and 500 an hour,
+and 150 fetches a minute and 1,000 a day. When a deployment outgrows them, add
+a $1-per-1,000 provider behind it (Parallel for both slots, or Perplexity for
+search), so the paid provider only takes the overflow and outages. Exa and
+Tavily cost more per call but report their exact cost.
 
-For more independence, Exa or Tavily are the paid alternatives. Both report
-their exact cost per call and have a no-card free tier. Self-hosters who want
-zero external accounts can run SearXNG with `OPENGENI_WEB_FETCH_PROVIDER=jina`.
-Keyless Jina reading is limited to about 20 requests per minute per IP.
+Self-hosters who want zero external accounts can run SearXNG for search and
+the open-source Jina reader for pages (`ghcr.io/jina-ai/reader:oss`, Apache
+2.0, a headless Chrome service; point `OPENGENI_WEB_JINA_BASE_URL` at it).
+Hosted keyless Jina reading also works but is limited to about 20 requests per
+minute per IP.
 
 ## Configuration
 
@@ -191,32 +230,42 @@ in `packages/deployment`).
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `OPENGENI_WEB_SEARCH_PROVIDER` | `none` | `tinyfish`, `exa`, `tavily`, `firecrawl`, `brave`, `jina`, `searxng`, or `none` |
-| `OPENGENI_WEB_SEARCH_API_KEY` | unset | Search provider key |
-| `OPENGENI_WEB_SEARCH_BASE_URL` | provider default | Required for `searxng`; optional proxy for others |
-| `OPENGENI_WEB_FETCH_PROVIDER` | the search provider when it can fetch | A different reader (`tinyfish`, `exa`, `tavily`, `firecrawl`, `jina`), or `none` |
-| `OPENGENI_WEB_FETCH_API_KEY` | search key when the provider is the same | Reader key (optional for `jina`) |
-| `OPENGENI_WEB_FETCH_BASE_URL` | provider default | Reader base URL |
-| `OPENGENI_WEB_SEARCH_PROVIDER_MODE` | `fallback` | `fallback` or `replace` |
-| `OPENGENI_WEB_SEARCH_PRICING_JSON` | built-in | `{"searchMicros":5000,"fetchMicros":1000,"marginBps":500}` (USD micros per call) |
+| `OPENGENI_WEB_SEARCH_PROVIDER` | `tinyfish` (on once its key is set) | Comma-separated failover list from `tinyfish`, `parallel`, `perplexity`, `exa`, `tavily`, `firecrawl`, `brave`, `jina`, `searxng`; or `none` |
+| `OPENGENI_WEB_FETCH_PROVIDER` | the search providers that can read pages | Comma-separated list from `tinyfish`, `parallel`, `exa`, `tavily`, `firecrawl`, `jina`; or `none` |
+| `OPENGENI_WEB_<PROVIDER>_API_KEY` | unset | That provider's key, for example `OPENGENI_WEB_TINYFISH_API_KEY` (optional for `jina` reading and `searxng`) |
+| `OPENGENI_WEB_<PROVIDER>_BASE_URL` | provider default | Required for `searxng`; a self-hosted Jina reader or a proxy for others |
+| `OPENGENI_WEB_SEARCH_PREFER` | `native` | `native` or `provider` |
+| `OPENGENI_WEB_SEARCH_PRICING_JSON` | built-in | One price for every provider, `{"searchMicros":5000,"fetchMicros":1000,"marginBps":500}`, or per provider, `{"parallel":{"searchMicros":1000,"fetchMicros":1000}}` (USD micros per call) |
 | `OPENGENI_WEB_SEARCH_REQUEST_TIMEOUT_MS` | `20000` | Per provider request |
 
+The earlier single-provider variables still work: `OPENGENI_WEB_SEARCH_API_KEY`
+and `OPENGENI_WEB_SEARCH_BASE_URL` configure the first named search provider,
+and `OPENGENI_WEB_FETCH_API_KEY` and `OPENGENI_WEB_FETCH_BASE_URL` the first
+named reader. A per-provider variable wins over them.
+
 A provider that is named but cannot work keeps the tools unoffered. For
-example, a missing key, a SearXNG URL that is not http(s), or malformed pricing
-JSON. The worker logs `web search provider is misconfigured` with the reason at
-startup. It never offers a tool that cannot run.
+example, a missing key for any listed provider, a SearXNG URL that is not
+http(s), or malformed pricing JSON. The worker logs `web search provider is
+misconfigured` with the reason at startup. It never offers a tool that cannot
+run.
 
 Examples:
 
 ```bash
-# Recommended: free search and fetch.
-OPENGENI_WEB_SEARCH_PROVIDER=tinyfish
-OPENGENI_WEB_SEARCH_API_KEY=...
+# Recommended: free search and fetch (TinyFish is the default provider).
+OPENGENI_WEB_TINYFISH_API_KEY=...
 
-# No external account: self-hosted SearXNG plus keyless Jina reading.
+# Free first, $1 per 1,000 calls when TinyFish is rate limited or down.
+OPENGENI_WEB_SEARCH_PROVIDER=tinyfish,parallel
+OPENGENI_WEB_FETCH_PROVIDER=tinyfish,parallel
+OPENGENI_WEB_TINYFISH_API_KEY=...
+OPENGENI_WEB_PARALLEL_API_KEY=...
+
+# No external account: self-hosted SearXNG and a self-hosted Jina reader.
 OPENGENI_WEB_SEARCH_PROVIDER=searxng
-OPENGENI_WEB_SEARCH_BASE_URL=http://searxng.internal:8080
+OPENGENI_WEB_SEARXNG_BASE_URL=http://searxng.internal:8080
 OPENGENI_WEB_FETCH_PROVIDER=jina
+OPENGENI_WEB_JINA_BASE_URL=http://jina-reader.internal:8080
 ```
 
 SearXNG must have the JSON format enabled (`search.formats: [html, json]` in
@@ -233,8 +282,10 @@ by billing:
   (an unexpected exception);
 - `opengeni_web_search_call_duration_seconds{operation, provider}`.
 
-Labels never include the query, URL or session. A provider failure also logs
-`web search provider call failed` with the provider, HTTP status and message.
+A call that fails over is counted once per provider it reached. Labels never
+include the query, URL or session. A provider failure also logs `web search
+provider call failed` with the provider, HTTP status, message, and whether
+another provider was tried next.
 
 ## Billing
 
@@ -242,11 +293,14 @@ Credit billing is active when `OPENGENI_BILLING_MODE=stripe` or
 `OPENGENI_USAGE_LIMITS_MODE=managed`. `packages/core/src/domain/web-search-billing.ts`
 follows the same pattern as paid Knowledge queries and voice input.
 
-**Admission.** A call with a positive price needs a positive general credit
-balance. It also needs the workspace and initiating member allowances to have
-room. Admission is a read, not a reservation. Free calls are never refused.
+**Admission.** Each provider is admitted for its own price just before it is
+called. A call with a positive price needs a positive general credit balance.
+It also needs the workspace and initiating member allowances to have room.
+Admission is a read, not a reservation. Free calls are never refused; a
+refused paid provider is skipped and the next provider is tried.
 
-**Settlement.** After the provider answers, one transaction records:
+**Settlement.** Only the provider that answered is billed. After it answers,
+one transaction records:
 
 - a `web_search.cost` usage receipt with the session, turn and attempt;
 - an idempotent `web_search_debit` ledger entry (source `web_search`,
@@ -284,7 +338,7 @@ search cost:
 ```bash
 OPENGENI_AZURE_OPENAI_BASE_URL=https://<resource>.openai.azure.com/openai/v1 \
 OPENGENI_AZURE_OPENAI_API_KEY=... \
-OPENGENI_WEB_SEARCH_PROVIDER=tinyfish OPENGENI_WEB_SEARCH_API_KEY=... \
+OPENGENI_WEB_TINYFISH_API_KEY=... \
 bun scripts/web-search-eval.ts --model gpt-5.6-sol --json eval.json
 ```
 
@@ -303,6 +357,28 @@ On 2026-10-05, a local SearXNG with keyless Jina fetch produced these results:
 - Search latency was 0.4–1.9 s.
 - Fetch latency was about 1–10 s per page.
 - Rendered results were about 1.1–1.7 KB, roughly 300–450 tokens.
+
+A larger retrieval run on 2026-10-10 used 32 dated questions (versions,
+fresh news, pricing pages, Norwegian-language queries and multi-hop facts)
+and 24 hard pages for readers (JavaScript-heavy pricing pages, PDFs, forums,
+package registries, social posts, news). Every search provider surfaced the
+answer in its top five results or top three pages for nearly every question,
+so the choice between them is mostly price, limits and reliability:
+
+| Search | Answer in result 1 | Answer in top 5 | Median latency |
+| --- | --- | --- | --- |
+| TinyFish | 72% | 100% | 1.5 s |
+| Exa | 81% | 97% | 1.5 s |
+| You.com | 69% | 94% | 1.0 s |
+| SearXNG (self-hosted) | 66% | 97% | 0.9 s |
+
+| Reader | Pages read correctly | Median latency |
+| --- | --- | --- |
+| Exa | 21/24 | 0.3 s |
+| TinyFish | 20/24 | 1.3 s |
+| Jina reader, self-hosted | 20/24 | 3.6 s |
+| Jina reader, hosted keyless | 19/24 | 0.6 s |
+| Readability (local, no browser) | 16/24 | 0.4 s |
 
 The model arms (hosted against provider search, graded by a judge) have not
 been run yet. They need two things:
