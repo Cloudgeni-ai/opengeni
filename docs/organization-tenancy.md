@@ -567,6 +567,20 @@ existing permissions and concurrency preconditions; DELETE does not perform
 them. There is currently no supported workspace archive/retirement endpoint,
 so this containment does not remove the retained workspace from inventory.
 Do not delete audit/history rows or weaken their foreign keys to force cleanup.
+Editable documents, spreadsheets, and presentations are such retained records:
+their immutable version history references the workspace with `ON DELETE
+RESTRICT`, so a workspace that ever held one returns that `409` (the message names
+them) until the organization retention lifecycle erases them.
+
+Deletion must not invert the canonical writer prefix described under the 0299
+lock order below. `deleteWorkspaceIfQuiescent` locks the organization row only
+`FOR NO KEY UPDATE`, the target workspace `FOR UPDATE`, and its sibling
+workspaces only `FOR KEY SHARE`. That still serializes concurrent deletions and
+the only-workspace check, while writers in sibling workspaces, which hold their
+own `workspaces` row and then reach `managed_accounts` through an account FK
+check, are neither blocked nor deadlocked. Locking the organization or sibling
+rows `FOR UPDATE` turned ordinary deletions into `40P01` victims, surfaced as
+retryable `503 DATABASE_CONTENTION`.
 
 The organization overview, organization/shared-workspace metadata, member
 inventory, retention, and organization Codex routes require either a direct

@@ -3867,8 +3867,11 @@ async function authorizeOrganizationWorkspaceDeletion(
 /**
  * Atomically prove a workspace has no live runtime ownership and delete it.
  *
- * The account/workspace parent locks block concurrent child inserts through
- * their foreign-key key-share locks. Existing session and lease rows are then
+ * The target workspace row lock blocks concurrent child inserts into that
+ * workspace through their foreign-key key-share locks. The account row and
+ * sibling workspace rows take only the strength needed to serialize deletions
+ * and the only-workspace check, so writers in other workspaces of the same
+ * account are never blocked or deadlocked by a deletion. Existing session and lease rows are then
  * locked before their state is inspected, so a cold lease cannot become live
  * between a preflight count and the cascade. Schedule ids are copied under the
  * same fence and returned for post-commit Temporal cleanup.
@@ -3914,7 +3917,7 @@ export async function deleteWorkspaceIfQuiescent(
           // already-started cross-workspace adoption. It must also precede the
           // organization-administration seam: that seam takes the account row
           // FOR KEY SHARE, while ordinary deletion takes this lifecycle lock
-          // before upgrading the account row to FOR UPDATE.
+          // before upgrading the account row to FOR NO KEY UPDATE.
           const lifecycleLockStartedAt = performance.now();
           await lockBackgroundCommandWorkspaceLifecycle(tx, [input.workspaceId], "update");
           observeWorkspaceDeletePhase(input.observer, {
@@ -3932,11 +3935,17 @@ export async function deleteWorkspaceIfQuiescent(
           }
 
           const accountWorkspaceLockStartedAt = performance.now();
+          // NO KEY UPDATE serializes concurrent deletions in one account (the
+          // only-workspace check below) without blocking ordinary writers.
+          // Every account-scoped insert takes this row FOR KEY SHARE through
+          // its account FK, often while already holding its own workspace row
+          // the same way; FOR UPDATE here deadlocked those writers against the
+          // workspace locks below (OPE-788).
           const [account] = await tx
             .select({ id: schema.managedAccounts.id })
             .from(schema.managedAccounts)
             .where(eq(schema.managedAccounts.id, input.accountId))
-            .for("update")
+            .for("no key update")
             .limit(1);
           if (!account) {
             observeWorkspaceDeletePhase(input.observer, {
@@ -3947,12 +3956,32 @@ export async function deleteWorkspaceIfQuiescent(
             return { status: "not_found" as const };
           }
 
-          const accountWorkspaces = await tx
+          // The target row is locked FOR UPDATE: that blocks concurrent child
+          // inserts into this workspace through their workspace FK key-share
+          // locks. Sibling rows only have to stay present for the
+          // only-workspace check, so they take KEY SHARE, which blocks their
+          // deletion but not ordinary writes in those workspaces.
+          const [target] = await tx
             .select({ id: schema.workspaces.id })
             .from(schema.workspaces)
-            .where(eq(schema.workspaces.accountId, input.accountId))
+            .where(
+              and(
+                eq(schema.workspaces.id, input.workspaceId),
+                eq(schema.workspaces.accountId, input.accountId),
+              ),
+            )
             .for("update");
-          if (!accountWorkspaces.some((workspace) => workspace.id === input.workspaceId)) {
+          const accountWorkspaces = target
+            ? await tx
+                .select({ id: schema.workspaces.id })
+                .from(schema.workspaces)
+                .where(eq(schema.workspaces.accountId, input.accountId))
+                .for("key share")
+            : [];
+          if (
+            !target ||
+            !accountWorkspaces.some((workspace) => workspace.id === input.workspaceId)
+          ) {
             observeWorkspaceDeletePhase(input.observer, {
               phase: "account_workspace_lock",
               outcome: "not_found",
