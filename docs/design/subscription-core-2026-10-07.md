@@ -2217,7 +2217,7 @@ or refresh call.
 | EP-T11..T15, EP-N27 accepted authority, goals, children, inbox, schedules | v1 readers in `accepted-subscription-authority.ts`, `session-queue-commands.ts`, `child-outbox-authority.ts`, `parent-wake.ts`, `scheduled-tasks.ts` (xAI human from `createdBy`, Claude from `ownerSubjectId`) | After the provider's cutover: the v2 entry written at acceptance, else the copied compatibility record, else no personal authority, through one provider-neutral reader. Schedules use the revision's authorizing membership for every provider (ends the EP-N27 asymmetry). |
 | EP-T16 compaction | Same capacity phase; cancelled with `requestPreserved` when no account | Core compaction placement exactly as Codex PR 2c (cancel, never park). |
 | EP-T17, EP-N12 in-turn video funding and selection | Live acceptance for non-xAI turns, un-leased `selectXaiCredentialForUse`, writes a policy pin | Per-operation core placement under the turn's accepted xAI authority with a `video` operation lease keyed by turn and call; never reads or writes the chat binding. An xAI turn prefers its own live chat connection. |
-| Claude custom-model admission (`organization-model-providers.ts`) | Reads `sessions.initial_claude` (or the caller's snapshot) and admits only `organization` | After C3: the session's accepted Claude authority through the provider-neutral reader (`session_initial` record, else v2); admits when the record's `shared_pool` is `organization`, or, for post-cutover acceptance, when the workspace's effective Claude source admits organization connections. |
+| Claude custom-model admission (`organization-model-providers.ts`) | Session creation reads the new session's `initial_claude`; fresh prompts pass the snapshot computed at acceptance; scheduled-task updates pass the task's frozen snapshot (`domain/scheduled-tasks.ts`). Admits only `organization` with a live organization Claude account (`workspaceClaudeSubscriptionActiveForAuthority`) | After C3: session creation and fresh prompts are always new acceptances and admit when the workspace's effective Claude source admits organization connections and a serviceable organization-scoped Claude connection exists. Scheduled-task updates read the task's `scheduled_task` record (admit only when `shared_pool` is `organization`) or, for post-cutover tasks, apply the same source rule; the liveness requirement stays in both cases. |
 | EP-T18, EP-S25, EP-N26 model listing and readiness | `loadWorkspaceModelSelectionInput` with frozen v1 snapshots; `connectionRestrictionsAndXaiReadiness`, `loadWorkspaceClaudeSubscriptionReadiness` | The core eligibility projection used for Codex (shared pools; personal only through the owner-only reader in the owner's Personal workspace or for an exact accepted turn). |
 | EP-N03 SuperGrok transcription | Caller's live pool, personal wins, no lease | Codex PR 2c rule: sessionless `transcription` operation lease on a shared organization- or workspace-scoped connection; personal and people-scoped refused; once selected, failures are not retried through another provider. |
 | EP-N05, EP-N07, EP-S17 realtime | Caller's live pool, writes the session pin, no lease | Codex PR 2c rule: the session's recorded owner, shared capacity only, `realtime` operation lease through negotiation, refresh under the lock; never writes the binding. |
@@ -2336,32 +2336,44 @@ Writing:
   from the verified exact source and accept no caller-supplied content (the
   0688 revision-trigger pattern of keeping a caller-supplied value is not
   reused).
-- One copy routine per v2 copy path of §5.1.1 "v2 writers at acceptance":
-  scheduled firing (from the revision slot, with its authorizer check) and
-  agent-created tasks (from the causal turn, narrowed to the same owner);
-  Agent Message, Agent Steer and agent-submitted prompts (from the receiving
-  source, only when its owner is the causal human); child-result notices
-  through the outbox (from the spawning parent turn); background results and
-  wait timeouts (from the causal turn); the internal delivering turn (from
-  the receiving context turn for informational input, else the update); plus
-  goal continuations, child creation, compaction, and scheduled revision
-  clones on rename or pause. A record is never derived from v1 after the
-  cutover; a new human acceptance writes v2.
+- One SQL source resolver per carrier path, shared by the copy routine, the
+  deferred trigger below and PR 0's v2 fence comparisons. The sources are
+  those today's code uses for v1 and Codex v2:
+
+  | Path | Source |
+  | --- | --- |
+  | Agent Message, Agent Steer, agent-submitted prompts | The receiving session's source (`accepted-subscription-authority.ts`): its execution-context turn, else its latest accepted turn, else its spawning parent turn, else `session_initial`. Not the sender's `callerTurnId`, which 0608 uses only for its human-equality check. |
+  | Informational delivery into a context | The receiving context turn. |
+  | Causal delivery (child results through the outbox, background results, wait timeouts) | The delivered update or outbox row, whose own record came from its causal turn (the spawning parent turn for child results). |
+  | Pure goal continuation | The goal's causal turn when it has the same human (`index.ts` goal continuation path), not the context turn or the update. |
+  | Child creation | The parent turn. |
+  | Compaction | The compacted turn. |
+  | Scheduled firing | The task and its current revision, with the authorizer check. |
+  | Agent-created tasks; revision clones on rename or pause | The causal turn; the previous revision. |
+
+- Narrowing: a copy keeps the personal entry only when the source's owner is
+  the causal human of the new carrier (as `accepted-subscription-authority.ts`
+  does today); otherwise it drops it. If dropping it leaves a record whose
+  `shared_pool` is `workspace` or `organization`, that narrowed record is
+  written. If the source was `user`-derived (`shared_pool: none`), no record
+  is written: the carrier is post-receipt work with no personal authority and
+  no narrowing, which with the Source mapping row equals today's fallback to
+  the receiving workspace's shared pool (and what an empty Codex v2 means).
+  Such work therefore never waits on `accepted_authority_unavailable`. A
+  record is never derived from v1 after the cutover; a new human acceptance
+  writes v2.
 - Commit-time enforcement: a `DEFERRABLE INITIALLY DEFERRED` constraint
   trigger on each carrier table (`session_turns`, `sessions`,
   `scheduled_tasks`, the revision relation, `session_system_updates` and the
-  outbox) fires when the provider has a receipt and the new carrier's exact
-  causal source has a record. The causal source follows the 0608 lineage
-  rules (execution-context turn, `callerTurnId`, `parentTurnId`,
-  `causalTurnId`); for scheduled runs it is the task and its current
-  revision. The trigger requires an identical record (same provider,
-  byte-equal `personal` and `shared_pool`) and no v2 entry for that
+  outbox) fires when the provider has a receipt and the path's resolved
+  source has a record. It recomputes the resolver's result (the source
+  record, its narrowing, or no record) and requires the carrier's record to
+  equal it byte for byte, and that the carrier has no v2 entry for that
   provider. The `BEFORE INSERT` fences cannot do this because records are
   written after their carrier.
 - System updates and outbox rows store no human (0689 froze an empty v2 on
-  them). Their record takes its owner from the human of the exact lineage
-  causal turn, derived as 0608 derives it; otherwise `personal: []` with the
-  source's `shared_pool` kept.
+  them). Their record's owner is the human of their causal turn; when that
+  turn has none, the narrowing rule above applies.
 - FORCE RLS; visibility follows the carrier's session or task. Parity metric
   `compat:dependent_sources_without_record` must be zero at the cutover, and
   X4/C4 (deleting the v1 readers) may merge only with a test proving it for
@@ -2399,21 +2411,33 @@ The v1 columns on turns, tasks, revisions, system updates, outbox rows and
 inbox fence and the 0275/0478 scheduled-admission and occurrence fences. Rule:
 after a provider's receipt, no code computes that provider's v1 value from
 live state. A new acceptance writes the column default (the constant
-`workspace` snapshot, never read), and every derived row copies its exact
-source's v1 value verbatim, which is what those equality fences already
-require. The values are never read for that provider after its receipt, and
+`workspace` snapshot, never read), and every derived row copies the stored v1
+value of the same source today's code uses (the per-path resolver above)
+verbatim instead of recomputing it, which is what those equality fences
+already require. The values are never read for that provider after its receipt, and
 X4/C4's guard rejects readers. Runtime roles keep INSERT on these carrier
 columns until M6; the revoked write grants apply to the factory tables and
-legacy authorities only. The one v1 liveness check, 0478's
-`scheduled_xai_authority_changed` (legacy authority still active at
-generation g), is replaced at the receipt by the equivalent core check on the
-revision's record or v2 entry (the personal entry's G is current for its
-membership and its connections are serviceable), returning the same code. PR 0
-adds the missing Claude comparisons (finding below) and the matching
-`scheduled_claude_authority_changed` check, with the same receipt switch.
-Tested: scheduled tasks created before the cutover on Codex, Claude and xAI
-models still admit occurrences after X3, X4, C3 and C4, and an inbox batch is
-still delivered into a pre-cutover execution context after each step.
+legacy authorities only.
+
+The fences live in `admit_scheduled_agent_run_execution` (0478's body with
+in-place patches from 0416, 0447 and 0501),
+`validate_scheduled_occurrence_accepted_execution`,
+`fence_scheduled_occurrence_update`, `fence_scheduled_turn_execution_update`
+and `fence_inbox_execution_context` (0608). The one v1 liveness check,
+`scheduled_xai_authority_changed` in
+`validate_scheduled_agent_run_live_authority` (0478; originally 0275, also
+patched by 0447, 0452 and 0459), is replaced at the receipt by the equivalent
+core check on the revision's record or v2 entry (the personal entry's G is
+current for its membership and its connections are serviceable), returning
+the same code. PR 0 adds the missing Claude comparisons (finding below) and
+the matching `scheduled_claude_authority_changed` check, with the same
+receipt switch. PR 0 changes these functions by patching the live definition
+with the drift-checked `pg_get_functiondef` plus anchored `replace` pattern
+the earlier patches use, never by restating an older body. Tested after PR 0
+(existing runs, occurrences, generated sessions and inbox deliveries written
+by older binaries) and after X3, X4, C3 and C4: scheduled tasks created before
+the cutover on Codex, Claude and xAI models still admit occurrences, and an
+inbox batch is still delivered into a pre-cutover execution context.
 
 #### Data mapping
 
@@ -2508,8 +2532,14 @@ filtered by provider, containment, fix-forward and release notes.
 
 #### PR sequence
 
-Each PR is dormant behind the provider's switch until its cutover; without a
-receipt the legacy path runs unchanged after at most one receipt read.
+Each X and C PR is dormant behind the provider's switch until its cutover;
+without a receipt the legacy path runs unchanged after at most one receipt
+read. PR 0 is not dormant: its v2 fence comparisons (live for Codex, which is
+cut over), its Claude scheduled comparisons and its replacement of 0668's
+non-Codex branch act on deploy. Its v2 comparison for each delivery kind uses
+the per-path resolver (a pure goal continuation compares with the goal's
+causal turn, not the context turn), and its PR records a pre-merge count of
+existing rows that the new Claude comparisons would reject.
 Migration ordinals are the next free ones at merge
 (`bun run migration:renumber`). Every implementation PR follows the
 repository's complex-change review policy.
@@ -2565,8 +2595,8 @@ declared exceptions (retained schema and foreign keys, deployed-schema posture
 inventories, historical fixtures used only by tests). The X3/C3 codec
 stages and the legacy secret decoders they call
 (`packages/db/src/xai-subscription.ts`, the `ClaudeSubscriptionCredential`
-decoder) are exact exceptions through X4/C4 and R, because a fresh install and
-a one-window upgrade still run those migrations. A
+decoder) stay exact exceptions for as long as those migrations ship, because
+a fresh install and a one-window upgrade still run them. A
 real-PostgreSQL posture test asserts that every retired routine is absent and
 that runtime roles hold no write grant on legacy tables. M4-A's shared-core
 guard keeps provider names out of shared modules.
@@ -2604,8 +2634,11 @@ guard keeps provider names out of shared modules.
 - Idle sources after the cutover: an Agent message and a child result
   delivered into a session that was idle at the cutover, a goal continuation
   after idle, a child session spawned before the cutover with no turn yet,
-  and Claude custom-model admission all use the copied record; a source
-  without one waits and then fails with the typed failure.
+  and a scheduled-task update's Claude custom-model admission use the
+  resolver's record; a source without one waits and then fails with the
+  typed failure. Per path, a real-PostgreSQL test where the sender's and the
+  receiver's records differ, and one where another human causes work from a
+  `user` source (no record, shared capacity, no wait).
 - Generations: one owner with `user` credentials in two workspaces plus a
   Personal-workspace credential ends with exactly one current generation per
   provider; a workspace-A record does not reach the owner's workspace-B
@@ -2681,18 +2714,20 @@ guard keeps provider names out of shared modules.
 | --- | --- | --- |
 | Runtime roles acting as an organization administrator can insert or enable `subscription_provider_cutovers` rows for `xai` and `claude`, and insert their core connections, before any drained move. Inert in runtime code today (every reader passes `codex`), but the SQL placement helper (0667) and 0668's non-Codex branch already accept any provider and would act on such rows as soon as an X1a or C1a call site exists; 0668's branch also compares a legacy generation with a core one. Such rows would also abort the cutover preflight. | 0642 connection insert policy; 0689 cutover administrator policies; 0667; 0668 | PR 0, merged before any X1a or C1a call site; runbook inventory query |
 | §3.7 says the 0608 inbox fence compares Codex against v2, but no later migration redefines `fence_inbox_execution_context`, so receiver-context turns are not fenced on `subscription_authority` in SQL. Scheduled admission and occurrence functions do not compare v2 either; the 0688 revision trigger only fills a NULL revision value. Both need a v2 comparison. | 0608, 0275, 0478, 0688 | PR 0 |
-| §3.7 says Claude stays compared against its v1 columns, but scheduled admission (`admit_scheduled_agent_run_execution`, `validate_scheduled_occurrence_accepted_execution`, the occurrence and turn-execution fences, defined only in 0275 and 0478) never compares Claude: not the run's accepted Claude snapshot, the occurrence update, nor the generated session's `initial_claude`, and there is no Claude equivalent of `scheduled_xai_authority_changed`. Claude scheduled pools are fenced only in TypeScript. | 0275, 0478 | PR 0 |
+| §3.7 says Claude stays compared against its v1 columns, but scheduled admission (`admit_scheduled_agent_run_execution`, live as 0478's body patched in place by 0416, 0447 and 0501; `validate_scheduled_occurrence_accepted_execution`; `validate_scheduled_agent_run_live_authority`; the occurrence and turn-execution fences) never compares Claude: not the run's accepted Claude snapshot, the occurrence update, nor the generated session's `initial_claude`, and there is no Claude equivalent of `scheduled_xai_authority_changed`. Claude scheduled pools are fenced only in TypeScript. | 0275, 0416, 0447, 0478, 0501 | PR 0 |
 | The `{codex,claude,xai}_primary_connection_id` foreign keys omit `provider`, so a primary can reference another provider's connection. | 0642 `subscription_settings` | PR 0, or M4-A's settings shape |
 | The non-Codex branch of `authorize_subscription_personal_access` compares the owner subject but neither requires the connection's owner membership id to equal the session owner's membership nor checks `personalConnectionsAllowed`. | 0668 | PR 0 |
 | `autoRenews` is a static adapter flag but is documented as false for setup tokens. | `packages/subscriptions/src/adapter.ts` | PR 0 |
 | EP-N13 (organization-scope video envelope rejected) and EP-N14 (direct refresh outside the lock) are still present. | `video-generation-credential.ts`, `video-generation-reconciliation.ts` | X2a |
+| The M3 Codex cutover kept each verified `user` row's legacy generation and gave Personal-workspace rows generation 1 (`codex-subscription-core-cutover.ts`, 0689), the ambiguity "Personal authority generations" avoids. An owner left with more than one current Codex generation gets an empty personal v2 entry on every new acceptance (0669, 0688), silently losing personal Codex access; the 0688 connect writer assumes one generation. | `codex-subscription-core-cutover.ts`, 0669, 0688, 0689 | PR 0 adds the count (owners whose active, serviceable personal Codex connections carry more than one current generation) to the readiness report and runbook. The repair, one fresh generation per affected owner as in M4, is an owner decision (open question), because older frozen v2 entries then lose personal reach. |
 | The `model.connected` lifecycle fact is emitted only by triggers on the legacy credential tables, so Codex connects stopped producing it after the 0689 cutover. | 0565, 0598, 0602 triggers | PR 0 (provider-keyed fact on core connection insert) |
 | Resolved since the inventory baseline: its open question on 0263 lacking `claude_subscription` (correct at `0d7075e`) no longer applies, because 0642 added `claude_subscription` and `subscription_connection` to the retention function. The inventory is a baseline record and is not edited. | inventory §4.2.4 | nothing to fix |
 
 Open questions for the product owner: whether owners may later choose their
 personal account in a shared session (an M5 widening this plan does not
-make), and whether anyone depends on personal-only SuperGrok transcription or
-realtime, which decision 3 removes.
+make); whether anyone depends on personal-only SuperGrok transcription or
+realtime, which decision 3 removes; and whether to repair Codex owners with
+several current generations (finding above) if the count is not zero.
 
 ## 6. Specific behaviours
 
