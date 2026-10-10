@@ -487,6 +487,12 @@ describe("embedded worker lifecycle contract", () => {
       [{ present: true }],
       [{ present: true }],
       [{ present: true }],
+      // Migration 0712: the provider cutover receipt reader exists and the
+      // database holds every receipt this binary's ledger requires.
+      [{ present: true }],
+      Object.keys(opengeniDb.SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS).map((provider) => ({
+        provider,
+      })),
       [],
       [
         { name: "opengeni_private", owner: "opengeni_migrator", usage: true, create: false },
@@ -775,6 +781,7 @@ describe("embedded worker lifecycle contract", () => {
           "subscription_codex_owner_capability_held(uuid, text[], text, uuid, boolean)",
           "subscription_codex_owner_membership_held(uuid, uuid)",
           ...opengeniDb.SUBSCRIPTION_CORE_NEUTRAL_PRIVATE_ROUTINES,
+          ...opengeniDb.SUBSCRIPTION_CORE_PRECURSOR_PRIVATE_ROUTINES,
         ].map((name) => ({
           name,
           owner: "opengeni_migrator",
@@ -795,6 +802,7 @@ describe("embedded worker lifecycle contract", () => {
         "drop_subscription_codex_owner_capabilities(uuid)",
         "derive_scheduled_revision_subscription_authority()",
         ...opengeniDb.SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES,
+        ...opengeniDb.SUBSCRIPTION_CORE_PRECURSOR_OWNER_ROUTINES,
       ].map((name) => ({
         name,
         owner: "opengeni_migrator",
@@ -859,7 +867,7 @@ describe("embedded worker lifecycle contract", () => {
         "session_tenancy_additional_organization_activation_evidence",
       ],
     })();
-    expect((catalogResults[10] as Array<{ name: string }>).map((routine) => routine.name)).toEqual([
+    expect((catalogResults[12] as Array<{ name: string }>).map((routine) => routine.name)).toEqual([
       ...RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
       ...RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES,
     ]);
@@ -877,6 +885,10 @@ describe("embedded worker lifecycle contract", () => {
       variableSetCutoverPresent = true,
       claudePoolActivationPresent = true,
       codexCutoverActivationPresent = true,
+      // Migration 0712's cutover receipts; null when its reader is missing.
+      providerCutoverReceipts: string[] | null = Object.keys(
+        opengeniDb.SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS,
+      ),
     ) => {
       const results: unknown[] = [
         [
@@ -899,6 +911,10 @@ describe("embedded worker lifecycle contract", () => {
         [{ present: variableSetCutoverPresent }],
         [{ present: claudePoolActivationPresent }],
         [{ present: codexCutoverActivationPresent }],
+        [{ present: providerCutoverReceipts !== null }],
+        ...(providerCutoverReceipts === null
+          ? []
+          : [providerCutoverReceipts.map((provider) => ({ provider }))]),
       ];
       let index = 0;
       return {
@@ -926,6 +942,12 @@ describe("embedded worker lifecycle contract", () => {
     );
     await expect(dbReadyCheck(embeddedDb(true, true, false), options)()).rejects.toThrow(
       /missing the 0689 Codex subscription-core cutover receipt/,
+    );
+    await expect(dbReadyCheck(embeddedDb(true, true, true, []), options)()).rejects.toThrow(
+      /missing the codex subscription-core cutover receipt \(0689_subscription_core_codex_cutover\.sql\)/,
+    );
+    await expect(dbReadyCheck(embeddedDb(true, true, true, null), options)()).rejects.toThrow(
+      /missing the codex subscription-core cutover receipt/,
     );
   });
 

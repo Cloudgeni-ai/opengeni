@@ -3143,6 +3143,7 @@ M4-A hand-over are:
   routines.
 
 No X1a or C1a call site merges before all three.
+
 #### PR 0c: provider-keyed cutover planner and organization reach
 
 PR 0c is the slice of PR 0 that makes the M3 cutover planner rules and the
@@ -3272,7 +3273,7 @@ Decisions, each the strictest fail-closed reading of the plan and contract:
   (until X4 and C4).
 - **Migration tests.** Tests that withhold 0689 also withhold 0713, which
   renames objects 0689 creates, and replay it after 0689; the neutral-routine
-  test replays 0707 and 0713 together.
+  test replays 0707, 0712 and 0713 together.
 
 #### Verification plan
 
