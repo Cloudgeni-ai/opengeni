@@ -63,6 +63,8 @@ const withheldMigrations = [
   "0704_inactive_inherited_personal_connections.sql",
   // Adds provider-neutral routines over the shared core tables from withheld 0642.
   "0707_subscription_core_neutral_routines.sql",
+  // Rewrites the inbox routines from the withheld inbox tail and reads its columns.
+  "0708_inbox_member_notifications.sql",
 ];
 let database: OwnerMigratedTestDatabase | null = null;
 

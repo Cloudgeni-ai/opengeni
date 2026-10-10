@@ -19,7 +19,6 @@ import { SUBSCRIPTION_CORE_CODEX_PROVIDER } from "./subscription-core-codex-prov
 import {
   withSubscriptionCoreProviderPlacementWorld,
   withSubscriptionCoreRefreshLock,
-  type SubscriptionCoreAcceptedTurnIdentity,
   type SubscriptionCorePlacementWorldRequest,
   type SubscriptionCorePlacementWorldResult,
   type SubscriptionCoreRefreshCredential,
