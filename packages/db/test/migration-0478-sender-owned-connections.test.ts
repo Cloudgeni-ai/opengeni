@@ -62,7 +62,7 @@ const withheldMigrations = [
   // Patches the capture function installed by withheld 0478 and patched by 0608.
   "0704_inactive_inherited_personal_connections.sql",
   // Adds provider-neutral routines over the shared core tables from withheld 0642.
-  "0705_subscription_core_neutral_routines.sql",
+  "0706_subscription_core_neutral_routines.sql",
 ];
 let database: OwnerMigratedTestDatabase | null = null;
 

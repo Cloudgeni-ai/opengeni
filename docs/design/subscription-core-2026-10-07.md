@@ -2124,7 +2124,7 @@ The shared SQL is provider-neutral by construction: the provider is an
 argument, and any provider difference comes from data, never from a branch on
 a provider name.
 
-- `opengeni_private.subscription_core_providers` (migration 0705) lists the
+- `opengeni_private.subscription_core_providers` (migration 0706) lists the
   providers whose runtime runs on the core, with the per-provider data the
   shared routines need: `extra_credits` (whether `manage ... 'extra_credits'`
   is meaningful) and `primary_setting_column` (which `subscription_settings`
@@ -2158,8 +2158,8 @@ a provider name.
   `connection_refresh_authorized` and `connection_owner` carry their provider
   (required and format-checked like a registry key) and mirror the `codex_*`
   kinds one for one, with owner-only policies. On rows that carry a provider
-  (connections,
-  aliases, leases) a capability admits only rows of its own provider.
+  (connections, aliases, leases) a capability admits only rows of its own
+  provider.
   Memberships, resource authorities, settings and Apps designations carry no
   provider; their policies admit the owner's own rows for any provider's
   owner capability, pinned to the capability's account and, per table, to the
@@ -2208,20 +2208,31 @@ a provider name.
   DEFINER` subscription guard triggers (`guard_subscription_disconnect_admission`
   and `guard_subscription_designation_disconnect`) captured the migration
   session's search path, without `pg_temp`, so a session's temporary table
-  could shadow the connection, turn or lease rows they check. 0705 sets their
+  could shadow the connection, turn or lease rows they check. 0706 sets their
   search path to the data schema with `pg_temp` last.
 - Rolling compatibility and retirement. The Codex-named routines, kinds and
   policies stay unchanged for binaries that still call them (staging runs
   them since 0689/0700). They are dropped by the final M4 retirement step, or
   M6 if that step is merged first, in a migration that runs only once no
-  binary older than 0705 can start (a readiness check on the neutral routines
+  binary older than 0706 can start (a readiness check on the neutral routines
   already prevents an older database from serving a newer binary).
-- Kept provider-specific (not generic): the Codex Apps routines, reset-credit
-  authority and fence, organization reach (`subscription_codex_reach`,
-  `set_subscription_codex_reach`), the 0689 cutover machinery and the
-  plan-change trigger. Deferred, with their provider branches recorded for the
-  Claude and SuperGrok steps: `authorize_subscription_personal_access` (v1
-  branches per provider until each provider's drained cutover),
+- Genuinely Codex-only, and staying so: the Codex Apps routines and the
+  reset-credit authority and fence.
+- Left Codex-named by this extraction and made provider-keyed by §5.3's
+  generic precursor (PR 0), before the first SuperGrok cutover: the cutover
+  planner rules (`codex-subscription-core-cutover.ts`) and the 0689 cutover
+  machinery, the auto-assignment table
+  `opengeni_private.subscription_codex_auto_assignments` with its apply
+  routine and triggers, `record_subscription_codex_plan_change` and the
+  plan-change trigger, organization reach (`subscription_codex_reach`,
+  `set_subscription_codex_reach`; the shared TypeScript writers reach it only
+  through the Codex binding's allocator hook),
+  `list_organization_codex_workspace_ids`, the scope visibility and wake
+  routines, and 0691's operation-kind CHECK, which admits `model` and
+  `credential_request` only for Codex.
+- Deferred, with their provider branches recorded for the Claude and
+  SuperGrok steps: `authorize_subscription_personal_access` (v1 branches per
+  provider until each provider's drained cutover),
   `subscription_effective_settings` (per-provider settings columns) and
   `guard_subscription_designation_disconnect` (Apps designation).
 
@@ -2306,27 +2317,28 @@ subjects `worker:xai-workspace` / `worker:claude-workspace`
 accepted authority (`{version:1, scope: workspace|organization}` or
 `{version:1, scope:"user", authorityGeneration}`).
 
-M4 builds on a separate provider-neutral extraction ("M4-A"), not yet open
-when this was written. Assumed shape, to be replaced by M4-A's actual names
-when it merges:
+M4 builds on the provider-neutral extraction ("M4-A", §5.1.2 and the
+TypeScript extraction that follows it), which was planned separately and is
+reconciled here with what it delivered:
 
 - The generic logic of `packages/db/src/subscription-core-codex*.ts` moves to
-  provider-neutral `subscription-core-*` modules; Codex becomes the first
-  implementation of `SubscriptionProviderAdapter`
-  (`packages/subscriptions/src/adapter.ts`), with no behaviour change.
-- Codex-named generic SQL becomes provider-keyed: `begin/persist/fail` refresh
-  and connection refresh, `read_subscription_codex_connection_credential`, the
-  `codex_refresh_write` capability, the connection target and writer context,
-  owner capability helpers, `list_organization_codex_workspace_ids`, scope
-  visibility and wake routines. This plan calls them by role (for example
-  "the core refresh seam") and passes `provider` as an argument.
-- The M3 cutover planner rules (`codex-subscription-core-cutover.ts`: scope
-  choice, assignment policies, delegated manager, dedupe and the policy
-  union) become a provider-keyed planner, and the auto-assignment table
-  `opengeni_private.subscription_codex_auto_assignments`, its apply routine
-  and triggers, `record_subscription_codex_plan_change`, and 0702's access
-  editor helpers `subscription_codex_reach` and `set_subscription_codex_reach`
-  become provider-keyed. If M4-A does not include them, PR 0 does.
+  provider-neutral modules under `packages/db/src/subscription-core/`; Codex
+  is an adapter and binding over them, with no behaviour change.
+- Codex-named generic SQL has provider-keyed equivalents (migration 0706,
+  §5.1.2) that the TypeScript core calls with `provider` as an argument: the
+  turn and connection refresh seams, the connection credential read, the
+  `refresh_write` and owner capabilities, the connection target and writer
+  context, health, v2 accepted authority and the personal writers. This plan
+  calls them by role (for example "the core refresh seam").
+- Not taken by M4-A, so PR 0 does them: `list_organization_codex_workspace_ids`
+  and the scope visibility and wake routines; the provider-keyed cutover
+  planner (`codex-subscription-core-cutover.ts`: scope choice, assignment
+  policies, delegated manager, dedupe and the policy union); the
+  auto-assignment table `opengeni_private.subscription_codex_auto_assignments`,
+  its apply routine and triggers; `record_subscription_codex_plan_change`;
+  and 0702's access editor helpers `subscription_codex_reach` and
+  `set_subscription_codex_reach`. The 0691 operation kinds below are also
+  still Codex-only.
 - A guard test rejects provider names and provider conditionals in shared
   core modules. Every M4 change below keeps that guard green: provider facts
   live in adapters and capability flags only.

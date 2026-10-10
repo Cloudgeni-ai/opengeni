@@ -180,7 +180,7 @@ async function fixture(connectionKind: "subscription" | "api_key" = "subscriptio
 
 /**
  * Run work with the refresh seam (the provider-named routines and their
- * provider-neutral equivalents from migration 0705) owned by a NOSUPERUSER,
+ * provider-neutral equivalents from migration 0706) owned by a NOSUPERUSER,
  * NOBYPASSRLS role, as in production. The shared test database's objects are
  * owned by a superuser, which ignores FORCE RLS and would hide a missing
  * refresh policy.
