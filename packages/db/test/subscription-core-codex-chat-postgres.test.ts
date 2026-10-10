@@ -1517,7 +1517,7 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
           },
         ),
       );
-    // Migration 0710 replaced 0668's legacy-generation branch: without a
+    // Migration 0711 replaced 0668's legacy-generation branch: without a
     // cutover row (unreachable for Codex after 0689) the v1 snapshot no
     // longer authorizes anything.
     expect(await authorize()).toBe(false);

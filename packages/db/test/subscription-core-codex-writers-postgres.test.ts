@@ -1714,7 +1714,7 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
       const posture = await inspectRuntimeDatabasePosture(ownerClient!.db, options);
       expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
       // Four Codex writer internals, four neutral ones (0707) and the two
-      // cutover-receipt and cutover-identity triggers (0710).
+      // cutover-receipt and cutover-identity triggers (0711).
       expect(posture.subscriptionOwnerRoutines).toHaveLength(10);
       await disconnectDesignationCase();
       for (const routine of posture.subscriptionOwnerRoutines!) {

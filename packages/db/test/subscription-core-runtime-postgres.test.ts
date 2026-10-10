@@ -1166,9 +1166,9 @@ describe("provider-neutral subscription runtime persistence", () => {
       expect(String(uppercaseAuthorityError)).toContain(
         "session_turns_subscription_authority_v2_chk",
       );
-      // Claude has no cutover receipt (migration 0710): the application role
+      // Claude has no cutover receipt (migration 0711): the application role
       // can neither create nor enable its switch row, and a row that already
-      // exists (possible before 0710) with a matching v2 entry still grants
+      // exists (possible before 0711) with a matching v2 entry still grants
       // no personal placement. Its personal access is decided by its v1 path.
       const claudeRowError = await runAccessCase({
         cutover: "enabled",
@@ -2990,7 +2990,7 @@ describe("provider-neutral subscription runtime persistence", () => {
           set personal_connections_allowed = true`;
       // The accepted turn froze the owner's personal Codex authority in its v2
       // entry, which the helper reads once the Codex cutover row is enabled
-      // (migration 0710 removed the legacy-generation v1 branch). Accepted
+      // (migration 0711 removed the legacy-generation v1 branch). Accepted
       // authority is immutable to the application role; the fixture writes it
       // as the table owner.
       await shared!.admin`

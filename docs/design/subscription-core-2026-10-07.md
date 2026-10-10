@@ -3007,7 +3007,7 @@ guard keeps provider names out of shared modules.
 
 #### PR 0a: receipts, restrictions and personal helpers
 
-Migration 0710 (rolling) delivers the first part of row 0. Choices made where
+Migration 0711 (rolling) delivers the first part of row 0. Choices made where
 the plan left room, for reviewers:
 
 - **Receipts.** `opengeni_private.subscription_provider_cutover_receipts
@@ -3032,7 +3032,7 @@ the plan left room, for reviewers:
   receipts. The seed-only policies are generalized
   (`subscription_provider_cutovers_seed`, `subscription_settings_seed`,
   setting `opengeni.subscription_cutover_seed`). Codex is seeded exactly as
-  before (tested by creating an organization on each side of 0710).
+  before (tested by creating an organization on each side of 0711).
 - **Personal helpers.** 0668's legacy-generation branch is removed, not
   generalized: `authorize_subscription_personal_access` grants only when the
   provider has a receipt and an enabled row, and the frozen v2 entry, exact

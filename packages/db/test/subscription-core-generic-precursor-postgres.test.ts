@@ -1,10 +1,10 @@
-// Migration 0710: the M4 generic precursor of the shared subscription core
+// Migration 0711: the M4 generic precursor of the shared subscription core
 // (design docs/design/subscription-core-2026-10-07.md, 5.3 "PR sequence" row
 // 0). The database is migrated by the NOSUPERUSER, NOBYPASSRLS owner, so FORCE
 // RLS binds the owner and owner-run routines; runtime calls run as the
-// restricted application role. Fixtures that must exist before 0710 (a
+// restricted application role. Fixtures that must exist before 0711 (a
 // cross-provider primary, a pre-existing Claude switch row, a Codex owner with
-// two current personal generations) are written before 0710 is applied.
+// two current personal generations) are written before 0711 is applied.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   acquireOwnerMigratedTestDatabase,
@@ -28,11 +28,11 @@ import { provisionRoles } from "../src/provision-roles";
 import { ownerlessRefreshFixture, ownerlessRefreshKey } from "./fixtures/ownerless-codex-refresh";
 
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
-const PRECURSOR = "0710_subscription_core_generic_precursor.sql";
+const PRECURSOR = "0711_subscription_core_generic_precursor.sql";
 let database: OwnerMigratedTestDatabase | null = null;
 let client: DbClient | null = null;
 let appUrl = "";
-/** Runtime posture right after applying 0710 to a provisioned database, before provisioning again. */
+/** Runtime posture right after applying 0711 to a provisioned database, before provisioning again. */
 let unprovisionedPostureViolations: string[] | null = null;
 
 type Org = {
@@ -42,7 +42,7 @@ type Org = {
   personalWorkspaceId: string;
 };
 
-/** Fixtures written before 0710 is applied. */
+/** Fixtures written before 0711 is applied. */
 let before: {
   org: Org;
   codexShared: string;
@@ -159,7 +159,7 @@ beforeAll(async () => {
   if (!realDb) return;
   database = await acquireOwnerMigratedTestDatabase("subscription-core-generic-precursor");
   if (!database) throw new Error("Real PostgreSQL is required");
-  // Stage a provisioned database without 0710 (as a deployment is before it).
+  // Stage a provisioned database without 0711 (as a deployment is before it).
   const owner = postgres(database.ownerUrl, {
     max: 1,
     onnotice: () => undefined,
@@ -184,7 +184,7 @@ beforeAll(async () => {
     const seeded = await seededRows(org.accountId);
     const codexShared = await sharedConnection(org, "codex", "codex-shared");
     const xaiShared = await sharedConnection(org, "xai", "xai-shared");
-    // Before 0710 a primary could reference another provider's connection.
+    // Before 0711 a primary could reference another provider's connection.
     await database.admin`
       update subscription_settings
       set codex_primary_connection_id = ${xaiShared}::uuid,
@@ -202,7 +202,7 @@ beforeAll(async () => {
     await staged.close();
   }
   // A rolling migration must leave the runtime posture intact until roles are
-  // provisioned again: apply 0710 alone and evaluate as the runtime role.
+  // provisioned again: apply 0711 alone and evaluate as the runtime role.
   const ownerAgain = postgres(database.ownerUrl, {
     max: 1,
     onnotice: () => undefined,
@@ -212,7 +212,7 @@ beforeAll(async () => {
     await migrate(database.ownerUrl);
     const [applied] = await ownerAgain<{ count: number }[]>`
       select count(*)::int as count from schema_migrations where name = ${PRECURSOR}`;
-    if (applied?.count !== 1) throw new Error("0710 was not applied by the second migrate");
+    if (applied?.count !== 1) throw new Error("0711 was not applied by the second migrate");
   } finally {
     await ownerAgain.end();
   }
@@ -241,7 +241,7 @@ afterAll(async () => {
   await database?.release();
 }, 180_000);
 
-describe.skipIf(!realDb)("subscription-core generic precursor (migration 0710)", () => {
+describe.skipIf(!realDb)("subscription-core generic precursor (migration 0711)", () => {
   test("runs as the restricted application role over a NOBYPASSRLS owner, with safe rolling posture", async () => {
     const [roles] = await database!.admin<
       {
@@ -466,7 +466,7 @@ describe.skipIf(!realDb)("subscription-core generic precursor (migration 0710)",
           ),
         ),
       ).toContain(
-        // 0689's Codex trigger fires first on a Codex row; 0710's on every other.
+        // 0689's Codex trigger fires first on a Codex row; 0711's on every other.
         provider === "codex"
           ? "a Codex cutover row keeps its organization and provider"
           : "a subscription cutover row keeps its organization and provider",
@@ -509,7 +509,7 @@ describe.skipIf(!realDb)("subscription-core generic precursor (migration 0710)",
     }
   });
 
-  test("an organization created after 0710 is seeded exactly as before it, and only for Codex", async () => {
+  test("an organization created after 0711 is seeded exactly as before it, and only for Codex", async () => {
     const after = await organization(client!, "after");
     const seeded = await seededRows(after.accountId);
     expect(seeded).toEqual(before!.seeded as typeof seeded);

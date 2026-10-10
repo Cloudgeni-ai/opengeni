@@ -4270,9 +4270,9 @@ migration that is idempotent, alias-aware and parity-checked. Keep affected
 organizations switched off meanwhile. Never copy rows back to the legacy
 tables, drop aliases, reset refresh generations or clear waiters.
 
-### Shared subscription core generic precursor (0710)
+### Shared subscription core generic precursor (0711)
 
-Migration `0710_subscription_core_generic_precursor.sql` is **rolling**: deploy
+Migration `0711_subscription_core_generic_precursor.sql` is **rolling**: deploy
 it like any release, without draining. Design record:
 [subscription core, PR 0a](design/subscription-core-2026-10-07.md#pr-0a-receipts-restrictions-and-personal-helpers).
 It requires 0689 and acts on deploy:
