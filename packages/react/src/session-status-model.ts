@@ -11,7 +11,8 @@ export const SESSION_STATUS_PRESENTATION: Record<
   queued: { label: "Queued", tone: "queued", pulse: false },
   running: { label: "Running", tone: "running", pulse: true },
   recovering: { label: "Recovering", tone: "running", pulse: true },
-  waiting_capacity: { label: "Waiting for capacity", tone: "waiting", pulse: true },
+  // Model subscription capacity is exhausted; the turn continues by itself.
+  waiting_capacity: { label: "Limit reached", tone: "waiting", pulse: true },
   idle: { label: "Idle", tone: "idle", pulse: false },
   requires_action: { label: "Waiting on you", tone: "waiting", pulse: true },
   failed: { label: "Failed", tone: "failed", pulse: false },

@@ -228,6 +228,26 @@ export function buildTimeline(
     for (const item of presentationWaits.get(key) ?? []) item.resolvedAt = event.occurredAt;
     presentationWaits.delete(key);
   };
+  // Live model-capacity waits. Later lifecycle evidence that the turn is no
+  // longer blocked (resume, a non-waiting status, its settlement) resolves
+  // them, so a recovered wait never lingers as a warning.
+  let openCapacityWaits: NoticeItem[] = [];
+  const resolveCapacityWaits = (event: SessionEvent, payload: Record<string, unknown>) => {
+    if (openCapacityWaits.length === 0 || !endsCapacityWait(event, payload)) return;
+    const eventTurnId = event.turnId ?? null;
+    openCapacityWaits = openCapacityWaits.filter((item) => {
+      const waitTurnId = item.capacityWait?.turnId ?? null;
+      // Status changes are session-wide; a turn settlement ends only its own wait
+      // (a queued follow-up being cancelled does not unblock the waiting turn).
+      const ends =
+        event.type === "session.status.changed" ||
+        eventTurnId === null ||
+        waitTurnId === null ||
+        eventTurnId === waitTurnId;
+      if (ends) item.resolvedAt = event.occurredAt;
+      return !ends;
+    });
+  };
   const queuedAtByTurn = new Map<string, string>();
   const startupRecoveryRevisionByTurn = new Map<string, number>();
   const startupPhases = new Map<string, readonly [StartupPhaseItem, string | null, number]>();
@@ -385,6 +405,7 @@ export function buildTimeline(
   for (const event of ordered) {
     const payload = asRecord(event.payload);
     const turnId = event.turnId ?? null;
+    resolveCapacityWaits(event, payload);
     if (
       turnId &&
       (event.type === "turn.started" ||
@@ -1089,17 +1110,29 @@ export function buildTimeline(
         break;
       }
 
-      case "codex.capacity.waiting": {
-        items.push({
+      case "codex.capacity.waiting":
+      case "turn.capacity_waiting": {
+        const capacityWait = capacityWaitPresentation(event.type, payload, turnId);
+        const item: NoticeItem = {
           kind: "notice",
           id: event.id,
           tone: "waiting",
-          text:
-            stringValue(payload.detail) ||
-            stringValue(payload.error) ||
-            "Waiting for Codex capacity.",
+          text: capacityWait.text,
+          capacityWait: {
+            turnId: capacityWait.turnId,
+            label: capacityWait.label,
+            detail: capacityWait.detail,
+          },
           occurredAt: event.occurredAt,
+        };
+        // A re-armed wait continues the same blocked span; one live wait per turn.
+        openCapacityWaits = openCapacityWaits.filter((open) => {
+          if ((open.capacityWait?.turnId ?? null) !== turnId) return true;
+          open.resolvedAt = event.occurredAt;
+          return false;
         });
+        items.push(item);
+        openCapacityWaits.push(item);
         break;
       }
 
@@ -1885,6 +1918,8 @@ export function groupTimeline(
   if (options.readableTurns || options.foldExchanges) return groupReadableTurns(items);
   const groups: TimelineGroup[] = [];
   for (const item of items) {
+    // A recovered capacity wait is over; it leaves no warning behind.
+    if (item.kind === "notice" && item.capacityWait && item.resolvedAt) continue;
     if (isActivityItem(item)) {
       const open = groups[groups.length - 1];
       if (open?.kind === "activity" && open.outcome === undefined) {
@@ -1922,6 +1957,10 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
   >();
   const compactionTurns = new Map<ContextCompactionItem, string>();
   const messages = new Map<string, AgentMessageItem[]>();
+  // Capacity waits per turn: their spans are not work, and a live one is
+  // carried by the turn's work row instead of a separate warning.
+  const capacityPauses = new Map<string, Array<{ startedAt: string; endedAt?: string }>>();
+  const liveCapacityWaits = new Map<string, NoticeItem>();
   const inputs = new Map<string, Extract<TimelineItem, { kind: "machine-input-batch" }>>();
   const itemOrder = new Map(items.map((item, index) => [item.id, index]));
   // Turns that answer a person's message: the first turn after it, and a live
@@ -1944,7 +1983,15 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
         steeredTurn = currentTurn;
       }
     }
-    const key = ("turnId" in item && item.turnId) || legacyTurn;
+    // A capacity wait belongs to the turn it blocks, even before that turn's
+    // first step.
+    const itemTurnId =
+      item.kind === "notice" && item.capacityWait
+        ? item.capacityWait.turnId
+        : "turnId" in item
+          ? item.turnId
+          : null;
+    const key = itemTurnId || legacyTurn;
     if (
       steeredTurn !== undefined &&
       key === steeredTurn &&
@@ -1955,11 +2002,7 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
     }
     // Legacy work still establishes a boundary using its prompt key.
     // A human message alone does not: it may be steering the existing turn.
-    if (
-      ("turnId" in item && item.turnId) ||
-      isActivityItem(item) ||
-      (item.kind === "agent-message" && item.text.trim())
-    ) {
+    if (itemTurnId || isActivityItem(item) || (item.kind === "agent-message" && item.text.trim())) {
       if (key !== currentTurn && !seenTurns.has(key)) {
         const previous = turns.get(currentTurn);
         if (!settlements.has(currentTurn)) {
@@ -2028,6 +2071,20 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
       else
         group.work!.details.push({ kind: "activity", id: `work-item-${item.id}`, items: [item] });
       delete group.work!.waiting;
+    } else if (item.kind === "notice" && item.capacityWait) {
+      const pauses = capacityPauses.get(key) ?? [];
+      pauses.push({
+        startedAt: item.occurredAt,
+        ...(item.resolvedAt ? { endedAt: item.resolvedAt } : {}),
+      });
+      capacityPauses.set(key, pauses);
+      if (!item.resolvedAt) {
+        if (settlements.has(key)) groups.push({ kind: "item", item });
+        else {
+          workForTurn();
+          liveCapacityWaits.set(key, item);
+        }
+      }
     } else if (item.kind === "turn-end") {
       if (!item.resumedAt) {
         settlements.set(key, {
@@ -2144,6 +2201,31 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
           workForTurn();
       }
     }
+  }
+  for (const [key, group] of turns) {
+    const work = group.work!;
+    const live = liveCapacityWaits.get(key);
+    // Re-assert after the loop: a late receipt for the blocked turn must not
+    // turn "Limit reached" back into "Working" while the wait is still open.
+    if (live?.capacityWait && !work.endedAt) {
+      work.waiting = {
+        label: live.capacityWait.label,
+        since: live.occurredAt,
+        detail: live.capacityWait.detail,
+      };
+    }
+    const pausedMs = (capacityPauses.get(key) ?? []).reduce((total, pause) => {
+      if (!pause.endedAt) return total;
+      const start = Math.max(Date.parse(work.startedAt), Date.parse(pause.startedAt));
+      const end = Math.min(
+        work.endedAt ? Date.parse(work.endedAt) : Number.POSITIVE_INFINITY,
+        Date.parse(pause.endedAt),
+      );
+      return Number.isFinite(start) && Number.isFinite(end) && end > start
+        ? total + end - start
+        : total;
+    }, 0);
+    if (pausedMs > 0) work.pausedMs = pausedMs;
   }
   groups = groups.filter((entry) => {
     if (entry.kind !== "item" || entry.item.kind !== "context-compaction") return true;
@@ -3237,6 +3319,67 @@ function rememberPendingWaitOutcome(
   const turnId =
     eventTurnId || stringValue(payload.waitTurnId) || stringValue(payload.turnId) || null;
   pending.set(turnId, { id: event.id, reason, occurredAt: event.occurredAt });
+}
+
+/** Wait reasons that need a person or a policy change, not only time. */
+const ACTION_CAPACITY_WAIT_REASONS: ReadonlySet<string> = new Set([
+  "pinned_account_ineligible",
+  "model_not_allowed",
+]);
+
+/**
+ * Recorded wait codes, for any subscription provider, that a person must
+ * resolve: every account disabled for allocation, or the serving account
+ * needing reconnection or refusing the request. None of them is a limit.
+ */
+const ACTION_CAPACITY_WAIT_CODE = /_(?:allocator_disabled|relogin_required|account_forbidden)$/;
+
+/**
+ * A capacity wait reads as "Limit reached" with one plain secondary line. Only
+ * a wait that time alone will not end keeps its recorded, actionable reason.
+ */
+function capacityWaitPresentation(
+  type: string,
+  payload: Record<string, unknown>,
+  turnId: string | null,
+): { turnId: string | null; label: string; detail: string; text: string } {
+  if (
+    ACTION_CAPACITY_WAIT_REASONS.has(stringValue(payload.waitReason)) ||
+    ACTION_CAPACITY_WAIT_CODE.test(stringValue(payload.code))
+  ) {
+    // Claude/SuperGrok waits record the readable sentence as `error` and an
+    // internal note as `detail`; Codex waits keep their recorded order.
+    const [first, second] =
+      type === "turn.capacity_waiting"
+        ? [payload.error, payload.detail]
+        : [payload.detail, payload.error];
+    const detail = stringValue(first) || stringValue(second) || "Waiting for an account.";
+    return { turnId, label: "Waiting", detail, text: detail };
+  }
+  const detail =
+    payload.waitReason === "pinned_account_unavailable"
+      ? "Continues automatically when the chosen account is available."
+      : "Continues automatically when capacity is available.";
+  return { turnId, label: "Limit reached", detail, text: `Limit reached. ${detail}` };
+}
+
+/** Lifecycle evidence that a capacity wait is over. */
+function endsCapacityWait(event: SessionEvent, payload: Record<string, unknown>): boolean {
+  if (event.duplicateOfEventId || (event.turnAssociation && event.turnAssociation !== "current"))
+    return false;
+  switch (event.type) {
+    case "codex.capacity.resumed":
+    case "codex.capacity.superseded":
+    case "turn.completed":
+    case "turn.failed":
+    case "turn.cancelled":
+    case "turn.superseded":
+      return true;
+    case "session.status.changed":
+      return isSessionStatus(payload.status) && payload.status !== "waiting_capacity";
+    default:
+      return false;
+  }
 }
 
 function waitingOutcomeText(reason: string): string {

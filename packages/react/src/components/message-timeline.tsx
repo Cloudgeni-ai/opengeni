@@ -3494,7 +3494,23 @@ const TimelineGroupView = memo(function TimelineGroupView({
                   />
                 ) : undefined,
               }
-            : workStatus;
+            : workStatus.kind === "waiting"
+              ? {
+                  kind: "waiting",
+                  label: workStatus.label,
+                  since: workStatus.since,
+                  // One quiet line under the row, e.g. that a limit wait
+                  // continues by itself; never a second warning banner.
+                  preview: workStatus.detail ? (
+                    <span
+                      data-og-exchange-wait-detail=""
+                      className="block truncate text-og-sm text-og-fg-subtle"
+                    >
+                      {workStatus.detail}
+                    </span>
+                  ) : undefined,
+                }
+              : workStatus;
         return (
           // Marks this work row for the live-note fold (list keys can be carried
           // over from an earlier row, so they are not the work id).

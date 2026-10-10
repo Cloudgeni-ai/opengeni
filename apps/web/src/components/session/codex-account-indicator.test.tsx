@@ -160,7 +160,7 @@ test("shows the blocked account instead of a healthy default and permits repeati
       ),
     );
     const trigger = container.querySelector("button")!;
-    expect(trigger.getAttribute("aria-label")).toContain("Waiting for capacity · Blocked account");
+    expect(trigger.getAttribute("aria-label")).toContain("Limit reached · Blocked account");
     await act(async () =>
       trigger.dispatchEvent(
         new MouseEvent("pointerdown", { bubbles: true, button: 0, ctrlKey: false }),

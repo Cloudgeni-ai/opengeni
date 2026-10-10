@@ -506,6 +506,19 @@ type GroupContext = {
   onCopy?: ((text: string) => void) | undefined;
 };
 
+/** A wait's one quiet secondary line under its work row. */
+function WaitDetail({ text }: { text: string }) {
+  const theme = useNativeTimelineTheme();
+  return (
+    <Text
+      numberOfLines={2}
+      style={{ ...fontStyle(theme), fontSize: theme.size.sm, color: theme.colors["fg-subtle"] }}
+    >
+      {text}
+    </Text>
+  );
+}
+
 function groupKey(group: TimelineGroup): string {
   switch (group.kind) {
     case "item":
@@ -550,7 +563,12 @@ function TimelineGroupView({
                 ) : undefined,
               }
             : base.kind === "waiting"
-              ? { kind: "waiting", since: base.since, label: base.label }
+              ? {
+                  kind: "waiting",
+                  since: base.since,
+                  label: base.label,
+                  preview: base.detail ? <WaitDetail text={base.detail} /> : undefined,
+                }
               : { kind: "worked", durationMs: base.durationMs, label: base.label };
         return (
           <TurnSummary

@@ -252,27 +252,188 @@ describe("buildTimeline", () => {
       kind: "notice",
       tone: "waiting",
       text: "waiting for a credential policy mutation",
+      capacityWait: { label: "Waiting", detail: "waiting for a credential policy mutation" },
     });
   });
 
   test.each([
-    [{ reason: "no_eligible_capacity" }, "Waiting for Codex capacity."],
-    [{ detail: null, error: null }, "Waiting for Codex capacity."],
-    [{ detail: 42, error: {} }, "Waiting for Codex capacity."],
-    [{ detail: "", error: "" }, "Waiting for Codex capacity."],
-    [{ error: "Capacity is temporarily unavailable." }, "Capacity is temporarily unavailable."],
+    [{ reason: "no_eligible_capacity" }],
+    [{ detail: null, error: null }],
+    [{ detail: 42, error: {} }],
+    [{ detail: "", error: "" }],
     [
-      { detail: "", error: "Capacity is temporarily unavailable." },
-      "Capacity is temporarily unavailable.",
+      {
+        waitReason: "no_eligible_capacity",
+        error:
+          "No Codex subscription has capacity for this turn right now. It continues automatically when an account is available.",
+      },
     ],
-    [
-      { detail: "Waiting for capacity to reset.", error: "Unused fallback" },
-      "Waiting for capacity to reset.",
-    ],
-  ] as const)("keeps capacity wait notices readable for %j", (payload, text) => {
+    [{ waitReason: "compaction_provider_locked", error: "Provider has no capacity." }],
+  ] as const)("a capacity wait for %j reads as a short limit-reached state", (payload) => {
     reset();
     const [item] = buildTimeline([event("codex.capacity.waiting", payload)]);
-    expect(item).toMatchObject({ kind: "notice", tone: "waiting", text });
+    expect(item).toMatchObject({
+      kind: "notice",
+      tone: "waiting",
+      text: "Limit reached. Continues automatically when capacity is available.",
+      capacityWait: {
+        turnId: "turn-1",
+        label: "Limit reached",
+        detail: "Continues automatically when capacity is available.",
+      },
+    });
+  });
+
+  test("a wait that needs a person keeps its recorded, actionable reason", () => {
+    reset();
+    const error =
+      "The Codex account chosen for this session can no longer serve this work. This turn continues once another account is chosen or the session is switched back to automatic.";
+    const [item] = buildTimeline([
+      event("codex.capacity.waiting", { waitReason: "pinned_account_ineligible", error }),
+    ]);
+    expect(item).toMatchObject({
+      kind: "notice",
+      text: error,
+      capacityWait: { label: "Waiting", detail: error },
+    });
+  });
+
+  test.each([
+    [
+      "xai_allocator_disabled",
+      "All connected SuperGrok subscription accounts are disabled for allocation",
+      "waiting for an eligible account, reconnect, pin change, or quota reset",
+    ],
+    [
+      "claude_relogin_required",
+      "The serving Claude account requires reconnection",
+      "the same accepted turn is waiting for another eligible account",
+    ],
+    [
+      "claude_account_forbidden",
+      "The serving Claude account is not authorized for this request",
+      "the same accepted turn is waiting for another eligible account",
+    ],
+  ] as const)("a %s wait needs a person and is not a reached limit", (code, error, detail) => {
+    reset();
+    const [item] = buildTimeline([
+      event("turn.capacity_waiting", { provider: "claude", code, error, detail }),
+    ]);
+    expect(item).toMatchObject({
+      kind: "notice",
+      text: error,
+      capacityWait: { label: "Waiting", detail: error },
+    });
+    expect(JSON.stringify(item)).not.toContain("Limit reached");
+  });
+
+  test("a rate-limited subscription account wait reads as a reached limit", () => {
+    reset();
+    const [item] = buildTimeline([
+      event("turn.capacity_waiting", {
+        provider: "claude",
+        code: "claude_account_rate_limited",
+        error: "The serving Claude account is temporarily rate limited",
+        detail: "the same accepted turn is waiting for another eligible account",
+      }),
+    ]);
+    expect(item).toMatchObject({
+      text: "Limit reached. Continues automatically when capacity is available.",
+      capacityWait: { label: "Limit reached" },
+    });
+  });
+
+  test.each([
+    ["codex.capacity.resumed", {}],
+    ["session.status.changed", { status: "recovering" }],
+    ["session.status.changed", { status: "running" }],
+    ["turn.completed", {}],
+    ["turn.failed", { error: "stopped" }],
+  ] as const)("%s %j resolves an open capacity wait", (type, payload) => {
+    reset();
+    const items = buildTimeline([
+      event("turn.capacity_waiting", { provider: "claude", error: "No Claude capacity." }),
+      event("session.status.changed", { status: "waiting_capacity" }),
+      event(type, payload),
+    ]);
+    const wait = items.find((item) => item.kind === "notice" && item.capacityWait);
+    expect(wait).toMatchObject({
+      text: "Limit reached. Continues automatically when capacity is available.",
+    });
+    expect(wait && "resolvedAt" in wait ? wait.resolvedAt : undefined).toBe(
+      new Date(1718000000000 + 3000).toISOString(),
+    );
+  });
+
+  test("cancelling a queued follow-up does not end another turn's capacity wait", () => {
+    reset();
+    const items = buildTimeline([
+      event("codex.capacity.waiting", { waitReason: "no_eligible_capacity" }),
+      event("session.status.changed", { status: "waiting_capacity" }),
+      event("turn.cancelled", {}, { turnId: "turn-queued" }),
+      event("session.status.changed", { status: "waiting_capacity" }, { turnId: null }),
+    ]);
+    const wait = items.find((item) => item.kind === "notice" && item.capacityWait);
+    expect(wait).toBeDefined();
+    expect(wait).not.toHaveProperty("resolvedAt");
+  });
+
+  test("a recovered capacity wait leaves no row in either grouping", () => {
+    reset();
+    const items = buildTimeline([
+      event("turn.started", {}),
+      event("codex.capacity.waiting", { waitReason: "no_eligible_capacity" }),
+      event("session.status.changed", { status: "waiting_capacity" }),
+      event("codex.capacity.resumed", {}),
+      event("session.status.changed", { status: "running" }),
+      event("agent.message.completed", { text: "You're welcome!", phase: "final_answer" }),
+      event("turn.completed", {}),
+    ]);
+    for (const groups of [groupTimeline(items), groupTimeline(items, { readableTurns: true })]) {
+      expect(JSON.stringify(groups)).not.toContain("Limit reached");
+      expect(JSON.stringify(groups)).toContain("You're welcome!");
+    }
+  });
+
+  test("readable work carries a live wait and excludes settled wait time from work", () => {
+    reset();
+    const at = (seconds: number, value: SessionEvent): SessionEvent => ({
+      ...value,
+      occurredAt: new Date(1718000000000 + seconds * 1000).toISOString(),
+    });
+    const blocked = [
+      at(0, event("turn.queued", { turnId: "turn-1" })),
+      at(1, event("turn.started", {})),
+      at(2, event("codex.capacity.waiting", { waitReason: "no_eligible_capacity" })),
+      at(2, event("session.status.changed", { status: "waiting_capacity" })),
+    ];
+    const live = groupTimeline(buildTimeline(blocked), { readableTurns: true });
+    const liveWork = live.find((group) => group.kind === "activity" && group.work);
+    expect(live.some((group) => group.kind === "item" && group.item.kind === "notice")).toBe(false);
+    expect(liveWork && liveWork.kind === "activity" ? liveWork.work?.waiting : null).toEqual({
+      label: "Limit reached",
+      since: new Date(1718000000000 + 2000).toISOString(),
+      detail: "Continues automatically when capacity is available.",
+    });
+
+    const hours = 4 * 3600;
+    const settled = groupTimeline(
+      buildTimeline([
+        ...blocked,
+        at(hours, event("codex.capacity.resumed", {})),
+        at(hours, event("session.status.changed", { status: "recovering" })),
+        at(hours + 1, event("session.status.changed", { status: "running" })),
+        at(hours + 1, event("turn.started", {})),
+        at(hours + 10, event("agent.toolCall.created", { id: "t", name: "exec", arguments: {} })),
+        at(hours + 20, event("agent.toolCall.output", { id: "t", output: "ok" })),
+        at(hours + 30, event("agent.message.completed", { text: "Done", phase: "final_answer" })),
+        at(hours + 31, event("turn.completed", {})),
+      ]),
+      { readableTurns: true },
+    );
+    const work = settled.find((group) => group.kind === "activity" && group.work);
+    expect(work && work.kind === "activity" ? work.work?.pausedMs : null).toBe((hours - 2) * 1000);
+    expect(JSON.stringify(settled)).not.toContain("Limit reached");
   });
 
   test("accepts every typed admission reason with its matching event semantics", () => {

@@ -39,8 +39,8 @@ export function sessionTimelineEmptyStateCopy(
       };
     case "waiting_capacity":
       return {
-        title: "Waiting for capacity",
-        description: "Your work is saved and will start when a worker becomes available.",
+        title: "Limit reached",
+        description: "Your work is saved and continues automatically when capacity is available.",
       };
     case "failed":
       return {

@@ -395,6 +395,13 @@ export type NoticeItem = {
   text: string;
   /** Presentation-only evidence that a historical approval wait resumed. */
   resolvedAt?: string;
+  /**
+   * A model-capacity wait (no subscription capacity for the turn). Live, the
+   * turn's work row carries it as `label` with `detail` as one quiet secondary
+   * line; once `resolvedAt` is set it leaves no row, and its span is excluded
+   * from the turn's worked duration.
+   */
+  capacityWait?: { turnId: string | null; label: string; detail: string };
   /** A preserved turn-end outcome, not a claim about current session state. */
   recordedOutcome?: true;
   /**
@@ -595,7 +602,12 @@ export type TimelineGroup =
         startedAt: string;
         endedAt?: string;
         responseStartedAt?: string;
-        waiting?: { label: string; since: string };
+        waiting?: { label: string; since: string; detail?: string };
+        /**
+         * Settled capacity-wait time inside this work span. It is not work:
+         * the worked duration and the live working clock exclude it.
+         */
+        pausedMs?: number;
         details: TimelineGroup[];
         /**
          * While the turn is live, its progress notes stay readable above the
