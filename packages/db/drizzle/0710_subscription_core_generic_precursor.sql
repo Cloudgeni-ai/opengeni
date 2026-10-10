@@ -32,7 +32,7 @@ SET LOCAL lock_timeout = '5s';
 DO $receipt_prerequisite$
 BEGIN
   IF to_regprocedure('opengeni_private.subscription_codex_cutover_v1_active()') IS NULL THEN
-    RAISE EXCEPTION '0709 requires the committed 0689 Codex cutover' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0710 requires the committed 0689 Codex cutover' USING ERRCODE = '55000';
   END IF;
 END
 $receipt_prerequisite$;
