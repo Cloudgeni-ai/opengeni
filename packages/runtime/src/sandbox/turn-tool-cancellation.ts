@@ -41,6 +41,15 @@ import { withNativeSynchronousCommandCollection } from "./native-synchronous-col
 const TURN_PROVIDER_YIELD_SLICE_MS = 250;
 const TURN_DEFAULT_MODEL_WAIT_MS = 10_000;
 const TURN_MAX_MODEL_WAIT_MS = 30_000;
+/**
+ * Experiment (OPE-550, `OPENGENI_EXPERIMENT_CUT_POLLING=1`): honor the model's
+ * requested foreground wait up to this ceiling instead of the 30-second cap.
+ * Models request 60-300 s for builds and test suites; the silent 30-second cap
+ * turned each such command into repeated empty `write_stdin` polls, each a
+ * full-context model request. The wait still returns on exit and stays
+ * cancellable between provider slices.
+ */
+const CUT_POLLING_MAX_MODEL_WAIT_MS = 600_000;
 const SHELL_HELPER_YIELD_MS = 1_000;
 const SHELL_GRACEFUL_POLLS = 2;
 const SHELL_POLL_MS = 100;
@@ -306,9 +315,19 @@ function cappedYield(value: unknown, cap: number): number {
     : cap;
 }
 
-function modelWaitMs(value: unknown): number {
+export function cutPollingExperimentEnabled(
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  return env.OPENGENI_EXPERIMENT_CUT_POLLING === "1";
+}
+
+export function modelWaitMs(
+  value: unknown,
+  cutPolling: boolean = cutPollingExperimentEnabled(),
+): number {
+  const max = cutPolling ? CUT_POLLING_MAX_MODEL_WAIT_MS : TURN_MAX_MODEL_WAIT_MS;
   return typeof value === "number" && Number.isInteger(value) && value >= 0
-    ? Math.min(value, TURN_MAX_MODEL_WAIT_MS)
+    ? Math.min(value, max)
     : TURN_DEFAULT_MODEL_WAIT_MS;
 }
 
