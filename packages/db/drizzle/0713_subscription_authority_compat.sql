@@ -403,8 +403,10 @@ $body$;
 
 -- Path: delivery of internal updates into one turn (index.ts, internal turn
 -- acceptance). A pure goal continuation (every delivered update is one) reads
--- the goal's causal turn when that turn has the delivering turn's human, not
--- the context turn or the update; otherwise it has no source. Delivery into
+-- the goal's causal turn of the first continuation in delivery order
+-- (created_at, then id), as the writer does, when that turn has the
+-- delivering turn's human, not the context turn or the update; otherwise it
+-- has no source. Delivery into
 -- a receiving context reads the context turn, and every causal update
 -- delivered with it (not Agent messages or child results, which 0608 checks
 -- by human only) must yield the same copy. Any other delivery reads every
@@ -417,20 +419,25 @@ RETURNS TABLE (path text, source_kind text, source_id uuid)
 LANGUAGE sql STABLE
 AS $body$
   WITH delivered AS (
-    SELECT update_row.id, update_row.kind, update_row.lineage
+    SELECT update_row.id, update_row.kind, update_row.lineage, update_row.created_at
     FROM session_system_updates update_row
     WHERE update_row.workspace_id = p_workspace_id AND update_row.session_id = p_session_id
       AND update_row.delivered_turn_id = p_turn_id AND update_row.state = 'delivered'
   ), shape AS (
     SELECT count(*) > 0 AND bool_and(delivered.kind = 'goal_continuation') AS pure_goal
     FROM delivered
+  ), first_delivered AS (
+    -- The writer takes the first continuation in delivery order.
+    SELECT delivered.lineage FROM delivered
+    ORDER BY delivered.created_at, delivered.id
+    LIMIT 1
   )
   SELECT 'pure_goal_continuation', 'session_turn', causal.id
-  FROM delivered
+  FROM first_delivered
   CROSS JOIN shape
   JOIN session_turns causal ON causal.workspace_id = p_workspace_id
     AND causal.session_id = p_session_id
-    AND causal.id::text = lower(delivered.lineage->>'causalTurnId')
+    AND causal.id::text = lower(first_delivered.lineage->>'causalTurnId')
   WHERE shape.pure_goal AND p_initiating_human_subject_id IS NOT NULL
     AND causal.initiating_human_subject_id = p_initiating_human_subject_id
   UNION ALL
