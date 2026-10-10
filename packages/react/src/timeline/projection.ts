@@ -2358,7 +2358,7 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
     }
   }
   // The work of every turn that answers a person stays visible even when it
-  // said nothing (OPE-736); quiet-cycle folding must never take it.
+  // said nothing; quiet-cycle folding must never take it.
   const personWork = new Set<TimelineGroup>(
     [...answersPerson].flatMap((key) => {
       const work = turns.get(key);
