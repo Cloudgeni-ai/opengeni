@@ -260,6 +260,10 @@ export async function flushSessionRealtimeTranscriptTailInTransaction(
     text: row.text === null ? null : fromPostgresLosslessText(row.text, row.textCodecVersion),
     payload: fromPostgresLosslessJson(row.payload, row.payloadCodecVersion),
   }));
+  // Voice-assistant chatter alone ("Still checking.") is not a new request. Steering it into
+  // the session would supersede a running turn or wake an idle one for nothing, so only a
+  // tail with at least one finalized user transcript is handed off.
+  if (!decodedRows.some((entry) => entry.role === "user")) return null;
   const rendered = renderSessionRealtimeTail(decodedRows);
   if (!rendered.context) return null;
   const renderedRows = decodedRows.slice(decodedRows.length - rendered.includedEntryCount);
