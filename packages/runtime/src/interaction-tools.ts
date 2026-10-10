@@ -860,18 +860,29 @@ export function createInteractionAttemptToolDefinitions(
     readOnly: true,
     idempotent: true,
     execute: async (value) => {
-      let observation = await input.transport.observeBrowserTarget(
+      const observationRequest = input.transport.observeBrowserTarget(
         input.workspaceId,
         value.browserSessionId,
         value.targetId,
       );
       if (!value.includeScreenshot)
-        return projectBrowserObservation(observation, value.view ?? "compact");
-      const frame = await input.transport.captureBrowserTarget(
-        input.workspaceId,
-        value.browserSessionId,
-        value.targetId,
-      );
+        return projectBrowserObservation(await observationRequest, value.view ?? "compact");
+      // These are independent reads. Settle both before returning an error so
+      // the tool never leaves an outstanding capture behind after a failed read.
+      const [observed, captured] = await Promise.allSettled([
+        observationRequest,
+        Promise.resolve().then(() =>
+          input.transport.captureBrowserTarget(
+            input.workspaceId,
+            value.browserSessionId,
+            value.targetId,
+          ),
+        ),
+      ]);
+      if (observed.status === "rejected") throw observed.reason;
+      if (captured.status === "rejected") throw captured.reason;
+      let observation = observed.value;
+      const frame = captured.value;
       if (
         observation.target.targetGeneration !== frame.targetGeneration ||
         observation.target.documentGeneration !== frame.documentGeneration
