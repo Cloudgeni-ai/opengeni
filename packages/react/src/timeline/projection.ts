@@ -2471,7 +2471,9 @@ function isRoutineInput(group: TimelineGroup): boolean {
       (member) =>
         member.kind !== "child_paused" &&
         member.classification !== "failure" &&
-        member.classification !== "action_required",
+        // A parent's direction is always recorded as action_required for the
+        // agent; it is routine orchestration, not something a person must do.
+        (member.classification !== "action_required" || member.kind === "agent_steer_instruction"),
     )
   );
 }

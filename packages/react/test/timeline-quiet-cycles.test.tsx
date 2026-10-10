@@ -242,6 +242,19 @@ describe("quiet wait cycles", () => {
     }
   });
 
+  test("a parent's direction stays routine although it is recorded as action_required", () => {
+    const events = [
+      ...opening(),
+      ...quietCycle("turn-1"),
+      ...cycleFrom("turn-2", "agent_steer_instruction", "action_required"),
+      ...quietCycle("turn-3"),
+      update("turn-4"),
+    ];
+    const rows = cycleRows(readable(events));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.work?.cycles?.count).toBe(3);
+  });
+
   test("work that compacted context or recovered from a failure is not quiet", () => {
     const compacted = [
       ...opening(),

@@ -3812,7 +3812,6 @@ type FoldedGroupBehavior = {
   turnSummary?: TurnSummaryOptions | undefined;
 };
 
-/** Children of a folded turn or exchange, each on the shared rail. */
 /**
  * A search hit inside a nested work row opens that row only. The reveal key
  * is provided per top-level group, so without narrowing every nested row of
