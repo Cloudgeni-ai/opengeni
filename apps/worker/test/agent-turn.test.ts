@@ -3691,6 +3691,19 @@ describe("lazy sandbox provisioner single-flight", () => {
         new SandboxExecReadinessError("modal", "exec_probe_failed", 60_000, 1, "sb-1"),
       ),
     ).toMatchObject({ category: "exec_readiness", code: "exec_probe_failed" });
+    // Provider exec-state loss on the probe is a typed readiness failure (not
+    // "create_failed"), with unchanged retry semantics.
+    expect(
+      classifySandboxLogicalProvisionFailure(
+        "modal",
+        new SandboxExecReadinessError("modal", "exec_probe_lost", 60_000, null, "sb-1"),
+      ),
+    ).toMatchObject({ category: "exec_readiness", code: "exec_probe_lost", retryable: false });
+    expect(
+      isLazySandboxProvisionRetryable(
+        new SandboxExecReadinessError("modal", "exec_probe_lost", 60_000, null, "sb-1"),
+      ),
+    ).toBe(false);
     expect(
       classifySandboxLogicalProvisionFailure(
         "modal",
