@@ -8,6 +8,7 @@ import {
   createClaudeSubscriptionAccount,
   createDb,
   getOrganizationModelProviderCatalogForWorkspace,
+  getOrganizationModelProviderCustomModelForExecution,
   getWorkspaceProviderApiKeyConnectionMetadata,
   listConnectionsMetadata,
   listClaudeSubscriptionAccountsMetadata,
@@ -465,4 +466,120 @@ test("the limit belongs to each provider, including an overflowing later provide
   await expect(
     listWorkspaceProviderCustomModels(client.db, { ...input, providerKind: "claude_subscription" }),
   ).rejects.toThrow("Workspace Claude custom model limit reached");
+});
+
+test("an organization Claude subscription allowed in personal workspaces offers its models there", async () => {
+  const access = await bootstrapWorkspace(client.db, {
+    accountExternalSource: "test",
+    accountExternalId: crypto.randomUUID(),
+    accountName: "Catalog fixture personal Claude",
+    workspaceExternalSource: "test",
+    workspaceExternalId: crypto.randomUUID(),
+    workspaceName: "Catalog fixture personal Claude",
+    subjectId: actor,
+  });
+  const accountId = access.workspaceGrants[0]!.accountId;
+  const sharedWorkspaceId = access.workspaceGrants[0]!.workspaceId;
+  const [personal] = await shared!.admin<{ id: string }[]>`
+    insert into workspaces (account_id, name)
+    values (${accountId}, 'Personal Claude fixture') returning id`;
+  const personalWorkspaceId = personal!.id;
+  await shared!.admin`
+    insert into organization_memberships (account_id, subject_id, role, status, personal_workspace_id)
+    values (${accountId}, ${actor}, 'owner', 'active', ${personalWorkspaceId})`;
+  const secret = claudeSecret();
+  const organization = await upsertOrganizationClaudeSubscription(client.db, {
+    organizationId: accountId,
+    actorSubjectId: actor,
+    encryptionKey,
+    secret,
+    providerAccountId: secret.identity.accountUuid,
+    label: null,
+    accountEmail: null,
+    expiresAt: null,
+  });
+  const setPersonal = async (allowPersonalWorkspaces: boolean, version: number) =>
+    await updateModelConnectionAccess(
+      client.db,
+      {
+        accountId,
+        workspaceId: null,
+        subjectId: actor,
+        kind: "claude_subscription",
+        connectionId: organization.account.id,
+      },
+      {
+        allowedModels: null,
+        allowedWorkspaces: [sharedWorkspaceId],
+        allowPersonalWorkspaces,
+        version,
+      },
+    );
+  expect(await setPersonal(true, 1)).toMatchObject({ allowPersonalWorkspaces: true });
+  // An organization API key that also allows personal workspaces keeps the
+  // rule that organization API keys never serve them.
+  await shared!.admin`
+    insert into organization_model_provider_connections
+      (account_id, provider_kind, credential_encrypted, operation_id, request_hash,
+       updated_by_subject_id, allowed_workspace_ids, allow_personal_workspaces)
+    values (${accountId}, 'anthropic', 'fixture-ciphertext-not-a-key',
+      ${crypto.randomUUID()}, ${hash}, ${actor}, array[${sharedWorkspaceId}::uuid], true)`;
+  for (const providerKind of ["claude_subscription", "anthropic"] as const) {
+    await shared!.admin`
+      insert into organization_model_provider_custom_models
+        (account_id, provider_kind, upstream_model_id, create_operation_id, create_request_hash,
+         created_by_subject_id)
+      values (${accountId}, ${providerKind}, 'personal-fixture',
+        ${crypto.randomUUID()}, ${hash}, ${actor})`;
+  }
+  const ready = async () =>
+    await workspaceClaudeSubscriptionActiveForAuthority(
+      client.db,
+      { claudeSubscriptionEnabled: true },
+      {
+        workspaceId: personalWorkspaceId,
+        subjectId: actor,
+        authoritySnapshot: { version: 1, scope: "organization" },
+      },
+    );
+  const input = {
+    accountId,
+    workspaceId: personalWorkspaceId,
+    providerKinds: ["claude_subscription", "anthropic"] as const,
+  };
+  expect(await ready()).toBe(true);
+  const catalog = await getOrganizationModelProviderCatalogForWorkspace(client.db, input);
+  expect(catalog.claude_subscription.models.map((model) => model.upstreamModelId)).toEqual([
+    "personal-fixture",
+  ]);
+  expect(catalog.anthropic).toEqual({ active: false, models: [] });
+  for (const [providerKind, visible] of [
+    ["claude_subscription", true],
+    ["anthropic", false],
+  ] as const) {
+    const model = await getOrganizationModelProviderCustomModelForExecution(client.db, {
+      accountId,
+      workspaceId: personalWorkspaceId,
+      providerKind,
+      upstreamModelId: "personal-fixture",
+    });
+    expect(model !== null).toBe(visible);
+  }
+  // The rows are definitions only: the subscription's own access still decides.
+  await setPersonal(false, 2);
+  expect(await ready()).toBe(false);
+  // Model definitions stay writable only through the organization scope.
+  await expect(
+    shared!.admin.begin(async (tx) => {
+      await tx`set local role opengeni_app`;
+      await tx`select set_config('opengeni.account_id', ${accountId}, true),
+        set_config('opengeni.workspace_id', ${personalWorkspaceId}, true)`;
+      await tx`
+        update organization_model_provider_custom_models set updated_at = now()
+        where account_id = ${accountId} and provider_kind = 'claude_subscription'
+        returning id`.then((rows) => {
+        if (rows.length > 0) throw new Error("personal workspace updated a model");
+      });
+    }),
+  ).resolves.toBeUndefined();
 });
