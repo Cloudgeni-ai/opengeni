@@ -8,6 +8,7 @@ import { type Context, type Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { hashCodexBrowserSession } from "../codex-redemption-security";
+import { isConfiguredDeploymentKeyRequest } from "../http/auth";
 import {
   startClaudeSubscriptionOAuth,
   completeClaudeSubscriptionOAuth,
@@ -34,7 +35,10 @@ export function registerClaudeSubscriptionOAuthRoutes(
       throw new HTTPException(404, {
         message: "Claude subscriptions are not enabled",
       });
-    requireSameOriginBrowserMutation(c, deps);
+    // A key-only deployment has no Opengeni sign-in, so its operator connects
+    // Claude with the deployment key itself (console or API).
+    const deploymentKey = !organization && isConfiguredDeploymentKeyRequest(c, deps.settings);
+    if (!deploymentKey) requireSameOriginBrowserMutation(c, deps);
     const id = z
       .string()
       .uuid()
@@ -64,6 +68,13 @@ export function registerClaudeSubscriptionOAuthRoutes(
         workspaceId: id.data,
         actorSubjectId: human.subjectId,
         browserSessionHash: human.browserSessionHash,
+      };
+    if (deploymentKey && grant.principalKind === "configured_key" && grant.subjectId)
+      return {
+        accountId: grant.accountId,
+        workspaceId: id.data,
+        actorSubjectId: grant.subjectId,
+        browserSessionHash: await hashCodexBrowserSession("configured:" + grant.subjectId),
       };
     if (
       deps.settings.productAccessMode === "local" &&
