@@ -16,6 +16,7 @@ import {
   searchToolPool,
 } from "./codex-tool-search";
 import { MCP_MAX_TOOL_SEARCH_DISCLOSURE_BYTES } from "./mcp-network";
+import { restoreDeferredToolArgumentTypes } from "./deferred-tool-arguments";
 import {
   beforeModelRequest,
   modelResponseSettlement,
@@ -379,6 +380,11 @@ export class LazyToolRuntime {
 
   resolveFunctionTool(name: string): Tool | undefined {
     return this.functionTools.get(name);
+  }
+
+  /** True for a tool disclosed through search rather than sent on every request. */
+  isDeferredFunctionTool(name: string): boolean {
+    return this.searchableToolNames.has(name);
   }
 
   inspectSearchableTools(): ReadonlyArray<{
@@ -830,7 +836,7 @@ function transformGenericDispatchCall(candidate: unknown, runtime: LazyToolRunti
     ];
   }
   if (candidate.name !== TOOL_INVOKE_NAME || typeof candidate.arguments !== "string") {
-    return [candidate];
+    return [restoreDirectDeferredCallArgumentTypes(candidate, runtime)];
   }
   const dispatch = parseJsonObject(candidate.arguments);
   const name = dispatch && typeof dispatch.name === "string" ? dispatch.name : null;
@@ -857,6 +863,25 @@ function transformGenericDispatchCall(candidate: unknown, runtime: LazyToolRunti
       },
     } as unknown as FunctionCallItem,
   ];
+}
+
+/**
+ * A direct call by exact name to a search-disclosed tool reaches the provider
+ * without that tool's schema, so its scalar, array and object values can
+ * arrive as strings. Restore the declared types before Runner dispatches it.
+ */
+function restoreDirectDeferredCallArgumentTypes(
+  candidate: Record<string, unknown>,
+  runtime: LazyToolRuntime,
+): Record<string, unknown> {
+  if (typeof candidate.name !== "string" || typeof candidate.arguments !== "string") {
+    return candidate;
+  }
+  if (!runtime.isDeferredFunctionTool(candidate.name)) return candidate;
+  const tool = runtime.resolveFunctionTool(candidate.name);
+  if (!tool || !isFunctionTool(tool)) return candidate;
+  const restored = restoreDeferredToolArgumentTypes(candidate.arguments, tool.parameters);
+  return restored === null ? candidate : { ...candidate, arguments: restored };
 }
 
 export function transformGenericDispatchResponse(

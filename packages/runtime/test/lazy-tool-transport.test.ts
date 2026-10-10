@@ -1033,6 +1033,73 @@ describe("generic lazy tool dispatch", () => {
     expect(JSON.stringify(model.requests[1]!.input)).toContain(WEATHER_TOOL);
   });
 
+  test("restores argument types on a direct call to a search-disclosed tool", async () => {
+    let releasePreparation!: () => void;
+    let preparationSettled = false;
+    const preparation = new Promise<void>((resolve) => {
+      releasePreparation = () => {
+        preparationSettled = true;
+        resolve();
+      };
+    });
+    const received: unknown[] = [];
+    const deferredTool = tool({
+      name: `${SERVER_ID}__history_page`,
+      description: "Read a page of history",
+      parameters: {
+        type: "object",
+        properties: {
+          sessionId: { type: "string" },
+          limit: { type: "integer" },
+          includeOutput: { type: "boolean" },
+          facts: { type: "array", items: { type: "string" } },
+        },
+        required: ["sessionId"],
+        additionalProperties: false,
+      },
+      strict: false,
+      execute: (input) => (received.push(input), "ok"),
+    }) as unknown as Tool;
+    const agent = agentWith(deferredTool);
+    const baseGetAllTools = agent.getAllTools.bind(agent);
+    agent.getAllTools = async (runContext) =>
+      preparationSettled ? await baseGetAllTools(runContext) : [];
+    const runtime = installLazyToolRuntime(
+      agent,
+      "generic_dispatch",
+      new Set([SERVER_ID]),
+      preparation,
+      new Set([SERVER_ID]),
+    );
+    // The schema was never sent to the provider, so it decoded every value as text.
+    const model = new ScriptedStreamingModel([
+      [
+        {
+          type: "function_call",
+          callId: "remembered-direct-untyped",
+          name: `${SERVER_ID}__history_page`,
+          arguments: JSON.stringify({
+            sessionId: "42",
+            limit: "3",
+            includeOutput: "true",
+            facts: '["a","b"]',
+          }),
+        },
+      ],
+      [finalMessage("done")],
+    ]);
+
+    const running = runStreamed(agent, model, runtime);
+    await Bun.sleep(0);
+    releasePreparation();
+    const result = await running;
+
+    expect(result.finalOutput).toBe("done");
+    expect(received).toEqual([
+      { sessionId: "42", limit: 3, includeOutput: true, facts: ["a", "b"] },
+    ]);
+  });
+
   test("recovers a direct remembered tool call after deferred preparation", async () => {
     let releasePreparation!: () => void;
     let preparationSettled = false;
