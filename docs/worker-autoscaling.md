@@ -2,15 +2,18 @@
 
 The public chart's `worker.turns.autoscaling.queueDemand` is a **default-off**
 schema-v1 source contract. Enabling it is not evidence of production safety,
-mixed-activity throughput or savings. Private production overlays keep their
-own bounds (currently 14 minimum / 28 maximum); this feature changes neither
-resource requests/limits nor application admission settings. The public Azure
-example's 2/20 bounds are examples, not accepted production floors.
+mixed-activity throughput or savings. Private desired bounds are 2 minimum /
+28 maximum for production and 2 minimum / 16 maximum for staging. These are
+source targets, not observed live worker counts or runtime qualification;
+this feature changes neither resource requests/limits nor application admission
+settings. Public defaults remain 4/20 and the Azure example remains 2/20 with
+queue demand off; neither example establishes an accepted production floor.
 
 ## Opt-in and policy
 
 Merge the following with an operator-controlled values file and its existing
-Prometheus selectors. Do not lower the existing minimum when opting in.
+Prometheus selectors. Keep floor changes separate from queue-demand opt-in;
+they still require runtime and lifecycle qualification.
 
 ```yaml
 worker:
@@ -59,8 +62,9 @@ maximum; agent-only inflight is not added to R.
 Scale-up: zero stabilization, `selectPolicy: Max`, at most four Pods per 30
 seconds. Scale-down: 600-second stabilization and one Pod per 300 seconds are
 retained as policy fields, but `selectPolicy: Disabled` prevents downscale.
-Downscale enablement and any future 2- or 4-pod production floor are separate,
-recovery-qualified changes. A downscale-disabled HPA may still increase to its
+The desired two-pod minimum does not enable downscale or qualify recovery.
+Downscale enablement and live floor reduction remain separate, recovery-qualified
+changes. A downscale-disabled HPA may still increase to its
 ceiling and stay there; no savings claim follows from this source change.
 
 ## Raw metric and scrape contract
