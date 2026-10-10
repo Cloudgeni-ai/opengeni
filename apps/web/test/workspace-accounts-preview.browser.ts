@@ -122,14 +122,21 @@ try {
     await page.getByText("2 people").waitFor();
     await shot("7-former-workspace-account-people");
 
-    // Design's own page lists it once, as Design's own; the organization's other
-    // account is set aside there.
+    // Design's own page (automatic: both pools listed) lists it once, as Design's own.
     await open("workspace=00000000-0000-4000-8000-0000000000d1");
     await page.getByText("Acme Pro").waitFor();
+    await page.getByText("Design team plan").waitFor();
     assert((await page.getByText("Design team plan").count()) === 1, "listed twice on Design");
-    await page.getByText("Set aside while this workspace has its own").waitFor();
     await noOverflow();
     await shot("8-workspace-page");
+
+    // Design set to the organization's accounts: its own is only in the set-aside row.
+    await open("workspace=00000000-0000-4000-8000-0000000000d1&designSource=organization");
+    await page.getByText("Set aside while the organization's are used").waitFor();
+    await page.getByText("Acme Pro").waitFor();
+    assert((await page.getByText("Design team plan").count()) === 0, "listed twice on Design");
+    await noOverflow();
+    await shot("9-workspace-page-organization-source");
     assert(errors.length === 0, errors.join("\n"));
     await page.close();
   }

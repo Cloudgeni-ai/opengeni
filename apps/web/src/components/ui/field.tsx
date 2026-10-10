@@ -302,13 +302,11 @@ export function CheckboxField({
 }) {
   const id = useId();
   const descriptionId = `${id}-description`;
+  // A disabled choice dims, but its description (often the reason) stays legible.
   return (
     <div
       data-disabled={disabled || undefined}
-      className={cn(
-        "flex min-w-0 items-start gap-3 data-[disabled]:opacity-60 pointer-coarse:py-1",
-        className,
-      )}
+      className={cn("flex min-w-0 items-start gap-3 pointer-coarse:py-1", className)}
     >
       <Checkbox
         id={id}
@@ -318,10 +316,13 @@ export function CheckboxField({
         disabled={disabled}
         aria-describedby={description ? descriptionId : undefined}
         onCheckedChange={onCheckedChange}
-        className="mt-0.5"
+        className={cn("mt-0.5", disabled && "opacity-60")}
       />
       <span className="min-w-0">
-        <label htmlFor={id} className="block text-sm font-medium text-fg">
+        <label
+          htmlFor={id}
+          className={cn("block text-sm font-medium text-fg", disabled && "opacity-60")}
+        >
           {label}
         </label>
         {description ? (

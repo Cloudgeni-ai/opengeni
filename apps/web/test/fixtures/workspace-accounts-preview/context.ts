@@ -20,6 +20,8 @@ const DESIGN_PLAN = "00000000-0000-4000-8000-0000000000c2";
 const params = new URLSearchParams(window.location.search);
 /** `reach=people` or `reach=all` starts the former workspace account shared that way. */
 const initialReach = params.get("reach");
+/** `designSource=organization`: Design is set to use the organization's accounts. */
+const designSource = params.get("designSource") === "organization" ? "organization" : "automatic";
 
 const weekly = (remaining: number) => ({
   used: 100 - remaining,
@@ -160,11 +162,12 @@ const methods: Record<string, (...args: never[]) => Promise<unknown>> = {
     return {};
   },
   async listCodexAccounts(workspaceId: string) {
-    // Each workspace reads the accounts it uses; Design's own is the former workspace account.
-    const reaches = (id: string) => {
+    // As the workspace pool projection lists them: shared accounts whose scope
+    // includes the workspace (people-scoped ones are in no workspace's pool),
+    // its own copies classified "workspace"; automatic lists both pools, a
+    // workspace set to the organization's lists only organization ones.
+    const inScope = (id: string) => {
       const policy = policies[id]!;
-      // A people-scoped account is in no workspace's pool (the workspace pool
-      // projection lists organization and workspaces scope only).
       if (policy.allowedPeople) return false;
       return (
         local[id]?.includes(workspaceId) ||
@@ -172,27 +175,25 @@ const methods: Record<string, (...args: never[]) => Promise<unknown>> = {
         policy.allowedWorkspaces.includes(workspaceId)
       );
     };
-    // A workspace with its own account uses only its own (source "workspace").
-    const own = organizationAccounts.filter(
-      (entry) => reaches(entry.id) && local[entry.id]?.includes(workspaceId),
-    );
+    const rows = organizationAccounts
+      .filter((entry) => workspaceId !== WORKSPACES.personal.id && inScope(entry.id))
+      .map((entry) => ({ entry, local: local[entry.id]?.includes(workspaceId) ?? false }));
+    const mode = workspaceId === WORKSPACES.design.id ? designSource : "automatic";
+    const workspaceAvailable = rows.some((row) => row.local);
     return {
-      accounts: organizationAccounts
-        .filter((entry) => workspaceId !== WORKSPACES.personal.id && reaches(entry.id))
-        .filter((entry) => own.length === 0 || own.includes(entry))
-        .map((entry) => ({
-          ...entry,
-          source: local[entry.id]?.includes(workspaceId) ? "workspace" : "organization",
-        })),
+      accounts: rows
+        .filter((row) => mode === "automatic" || !row.local)
+        .map((row) => ({ ...row.entry, source: row.local ? "workspace" : "organization" })),
       activeAccountId: ACME_PRO,
       source: {
         accountId: ORG,
         workspaceId,
         workspaceKind: workspaceId === WORKSPACES.personal.id ? "personal" : "shared",
-        mode: "automatic",
-        effectiveSource: own.length > 0 ? "workspace" : "organization",
-        workspaceAvailable: true,
-        organizationAvailable: true,
+        mode,
+        effectiveSource:
+          mode === "automatic" && workspaceAvailable ? "workspace" : "organization",
+        workspaceAvailable,
+        organizationAvailable: rows.some((row) => !row.local),
       },
       settings: {
         rotationEnabled: true,
@@ -222,7 +223,14 @@ const methods: Record<string, (...args: never[]) => Promise<unknown>> = {
   },
   async updateModelConnectionAccess(target: { connectionId: string }, policy: Policy) {
     receipts.push({ access: target.connectionId, policy });
-    policies[target.connectionId] = { ...policy, version: policy.version + 1 };
+    // Returned in the response schema's key order, as the API does.
+    policies[target.connectionId] = {
+      allowedModels: policy.allowedModels,
+      allowedWorkspaces: policy.allowedWorkspaces,
+      allowPersonalWorkspaces: policy.allowPersonalWorkspaces,
+      ...(policy.allowedPeople === undefined ? {} : { allowedPeople: policy.allowedPeople }),
+      version: policy.version + 1,
+    };
     return policies[target.connectionId];
   },
   async getOrganizationAdministrationOverview() {

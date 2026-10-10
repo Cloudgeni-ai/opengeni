@@ -351,9 +351,15 @@ export function ConnectionAccessFormPage({
                     data.workspaces
                       .map((workspace) => workspace.id)
                       .filter((id) => !local.includes(id)));
+                // Leaving people restores the saved Personal choice too.
+                const allowPersonalWorkspaces =
+                  draft.allowedPeople && !data.policy.allowedPeople
+                    ? data.policy.allowPersonalWorkspaces
+                    : draft.allowPersonalWorkspaces;
                 setDraft(
                   withoutPeople({
                     ...draft,
+                    allowPersonalWorkspaces,
                     allowedWorkspaces: value === "all" ? null : savedWorkspaces,
                   }),
                 );

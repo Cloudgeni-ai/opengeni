@@ -528,7 +528,14 @@ test("a workspace's own account is an organization account: its workspace stays,
     requestJson: async (method: string, _path: string, body: Policy) => {
       if (method === "PUT") {
         writes.push(structuredClone(body));
-        policy = { ...body, version: policy.version + 1 };
+        // Stored and returned in the response schema's key order, as the API does.
+        policy = {
+          allowedModels: body.allowedModels,
+          allowedWorkspaces: body.allowedWorkspaces,
+          allowPersonalWorkspaces: body.allowPersonalWorkspaces,
+          ...(body.allowedPeople === undefined ? {} : { allowedPeople: body.allowedPeople }),
+          version: policy.version + 1,
+        };
         return policy;
       }
       return response();
@@ -660,6 +667,31 @@ test("a workspace's own account is an organization account: its workspace stays,
       allowPersonalWorkspaces: false,
       version: 4,
     });
+
+    // From all, chosen workspaces start from every shared one except its own.
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await act(async () => root.render(<Page />));
+    await flush();
+    await choose("Only selected workspaces");
+    await choose("Personal workspaces");
+    await save();
+    expect(writes.at(-1)).toEqual({
+      allowedModels: null,
+      allowedWorkspaces: ["workspace-b"],
+      allowPersonalWorkspaces: true,
+      version: 5,
+    });
+
+    // Through people and back restores the saved Personal choice: no change.
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await act(async () => root.render(<Page />));
+    await flush();
+    await choose("Only selected people");
+    expect(saveButton().disabled).toBe(false);
+    await choose("Only selected workspaces");
+    expect(saveButton().disabled).toBe(true);
   } finally {
     await act(async () => root.unmount());
     container.remove();
