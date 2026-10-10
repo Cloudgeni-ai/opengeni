@@ -18530,6 +18530,7 @@
         "$": "object",
         "$.connectionId": "string?",
         "$.mcpUrl": "string?",
+        "$.newAccount": "const?=[\"true\"]",
         "$.oauthClient": "object?",
         "$.oauthClient.clientId": "string!",
         "$.oauthClient.clientSecret": "string?",
