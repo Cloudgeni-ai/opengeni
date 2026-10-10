@@ -1713,7 +1713,7 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
       };
       const posture = await inspectRuntimeDatabasePosture(ownerClient!.db, options);
       expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
-      // M3's and 0707's owner-only writer internals, and 0712's provider-keyed
+      // M3's and 0707's owner-only writer internals, and 0713's provider-keyed
       // auto-assignment apply path and trigger functions.
       expect(posture.subscriptionOwnerRoutines).toHaveLength(12);
       await disconnectDesignationCase();

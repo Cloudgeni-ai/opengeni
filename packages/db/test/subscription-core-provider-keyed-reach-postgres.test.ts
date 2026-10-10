@@ -1,9 +1,9 @@
-// Migration 0712: an organization connection's reach for workspaces created
+// Migration 0713: an organization connection's reach for workspaces created
 // later, the auto-assignment that applies it, plan-change history and the
 // organization workspace inventory are provider-keyed on the shared
 // subscription core. Codex behaviour is unchanged: the database is staged
-// as a deployment is before 0712 (provisioned, Codex reach written through
-// the Codex-named routine an older binary calls), 0712 is applied, and the
+// as a deployment is before 0713 (provisioned, Codex reach written through
+// the Codex-named routine an older binary calls), 0713 is applied, and the
 // same workspace-creation scenario must leave the same rows before and
 // after. A second registered provider then uses the same rows and routines
 // with no routine of its own. Runs on a database migrated by the
@@ -35,7 +35,7 @@ import { encryptEnvironmentValue } from "../src/environment-crypto";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 
-const REACH_MIGRATION = "0712_subscription_core_provider_keyed_reach.sql";
+const REACH_MIGRATION = "0713_subscription_core_provider_keyed_reach.sql";
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const key = Buffer.alloc(32, 71);
 const MODEL = "codex/gpt-5.5";
@@ -60,11 +60,11 @@ type ReachRow = {
 type Staged = {
   catalogBefore: Catalog;
   catalogAfter: Catalog;
-  /** Runtime posture right after 0712, before roles are provisioned again. */
+  /** Runtime posture right after 0713, before roles are provisioned again. */
   unprovisionedPosture: string[];
-  /** Who may execute each routine 0712 adds, before roles are provisioned again. */
+  /** Who may execute each routine 0713 adds, before roles are provisioned again. */
   unprovisionedAcl: Array<{ routine: string; execute: boolean; publicExecute: boolean }>;
-  /** The Codex reach rows an older binary wrote, read before 0712. */
+  /** The Codex reach rows an older binary wrote, read before 0713. */
   legacyRows: ReachRow[];
   /** The workspace-creation scenario run on the Codex objects 0689 and 0702 shipped. */
   legacyScenario: Scenario;
@@ -78,7 +78,7 @@ function appUrl(): string {
   return url.toString();
 }
 
-/** Routines, policies, triggers and relations of the schemas 0712 touches. */
+/** Routines, policies, triggers and relations of the schemas 0713 touches. */
 async function catalog(): Promise<Catalog> {
   const admin = database!.admin;
   const entries = new Map<string, string>();
@@ -376,7 +376,7 @@ beforeAll(async () => {
   if (!realDb) return;
   database = await acquireOwnerMigratedTestDatabase("subscription-core-provider-keyed-reach");
   if (!database) throw new Error("Real PostgreSQL is required");
-  // A provisioned database without 0712, as a deployment is before it.
+  // A provisioned database without 0713, as a deployment is before it.
   const owner = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
@@ -401,7 +401,7 @@ beforeAll(async () => {
     await migrate(database.ownerUrl);
     const [applied] = await applying<{ count: number }[]>`
       select count(*)::int as count from schema_migrations where name = ${REACH_MIGRATION}`;
-    if (applied?.count !== 1) throw new Error("0712 was not applied by the second migrate");
+    if (applied?.count !== 1) throw new Error("0713 was not applied by the second migrate");
   } finally {
     await applying.end();
   }
@@ -446,7 +446,7 @@ afterAll(async () => {
   await database?.release();
 }, 180_000);
 
-describe("provider-keyed reach on the shared subscription core (migration 0712)", () => {
+describe("provider-keyed reach on the shared subscription core (migration 0713)", () => {
   test.skipIf(!realDb)(
     "applies to a provisioned database without breaking any binary's runtime posture",
     async () => {
@@ -468,7 +468,7 @@ describe("provider-keyed reach on the shared subscription core (migration 0712)"
       );
       expect(current?.role).toBe("opengeni_app");
       expect(staged!.unprovisionedPosture).toEqual([]);
-      // Every runtime routine 0712 adds is executable before provisioning,
+      // Every runtime routine 0713 adds is executable before provisioning,
       // which a previous binary's readiness requires of any opengeni_private
       // routine it does not know; its owner-only routines live outside
       // opengeni_private. Nobody else may execute any of them.
@@ -565,7 +565,7 @@ describe("provider-keyed reach on the shared subscription core (migration 0712)"
         "trigger subscription_connections.subscription_connections_core_plan_change_trg",
         "trigger workspaces.workspaces_subscription_core_auto_assign",
       ]);
-      // Every routine 0712 adds is SECURITY DEFINER with the data schema and
+      // Every routine 0713 adds is SECURITY DEFINER with the data schema and
       // opengeni_private on its search path and pg_temp last.
       for (const entry of added.filter((name) => name.startsWith("routine "))) {
         const [definer, config] = after.get(entry)!.split(" | ");

@@ -178,7 +178,10 @@ export const embeddingMigrationTail = [
   // Rewrites the inbox projection, list and push routines from withheld
   // 0664/0678 and reads their columns; replay after them so its bodies win.
   "0708_inbox_member_notifications.sql",
+  // Rewrites the operation-lease constraints and guard created by withheld
+  // 0671; replay after it.
+  "0711_subscription_codex_completion_operations.sql",
   // Renames and rekeys the auto-assignment table, triggers and reach routines
   // withheld 0689 and 0702 create; replay after them.
-  "0712_subscription_core_provider_keyed_reach.sql",
+  "0713_subscription_core_provider_keyed_reach.sql",
 ];

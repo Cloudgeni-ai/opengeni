@@ -2237,7 +2237,7 @@ a provider name.
   routines, and 0691's operation-kind CHECK, which admits `model` and
   `credential_request` only for Codex.
   §5.3 "PR 0c: provider-keyed cutover planner and organization reach"
-  (migration 0712) made the planner rules, the auto-assignment table, its
+  (migration 0713) made the planner rules, the auto-assignment table, its
   apply routine and triggers, plan-change history, organization reach, the
   workspace inventory and the capacity wake provider-keyed, and removed the
   allocator hook; the shared core's wake and organization paths use none of
@@ -2441,7 +2441,7 @@ modules, and so does the operation candidate list in
 `subscription-core-codex-operations.ts`. Organization reach is
 provider-keyed since §5.3 PR 0c (`subscription_core_reach` /
 `set_subscription_core_reach` over `subscription_core_auto_assignments`,
-migration 0712), which the shared core calls with the binding's provider;
+migration 0713), which the shared core calls with the binding's provider;
 Codex's 0702 pair wraps it.
 Codex Apps request reservation uses the shared
 `reserveSubscriptionCoreDesignatedRequest` (source lock, then insert; holder
@@ -3026,7 +3026,7 @@ guard keeps provider names out of shared modules.
 
 PR 0c is the slice of PR 0 that makes the M3 cutover planner rules and the
 organization-reach machinery provider-keyed (everything "Not taken by M4-A"
-above except 0691's operation kinds). Rolling migration 0712. Codex
+above except 0691's operation kinds). Rolling migration 0713. Codex
 behaviour is unchanged, and every Codex-named routine keeps its name,
 signature, owner, grants, security mode, search path and texts for the
 binaries that still call it. A later SuperGrok or Claude cutover calls these
@@ -3134,10 +3134,10 @@ Decisions, each the strictest fail-closed reading of the plan and contract:
   `codex_organization_admin_visible` are called only by legacy factory-table
   policies, 0424's access guards on the API-key connection tables and 0492's
   legacy Codex source check, all left as they are.
-- **Rolling posture.** On a provisioned database without 0712, the previous
+- **Rolling posture.** On a provisioned database without 0713, the previous
   release's evaluator, run as the runtime role, reports nothing missing
-  before 0712, after it and after provisioning again; the new evaluator
-  reports exactly the seven new routines before 0712 and nothing after it.
+  before 0713, after it and after provisioning again; the new evaluator
+  reports exactly the seven new routines before 0713 and nothing after it.
   The migration grants the three runtime routines to the application roles,
   PUBLIC holds none of the seven, and provisioning again leaves those grants
   as the migration set them.
@@ -3149,9 +3149,9 @@ Decisions, each the strictest fail-closed reading of the plan and contract:
   compatibility and retirement"). `list_organization_codex_workspace_ids`
   stays while the legacy SuperGrok and Claude organization wakes call it
   (until X4 and C4).
-- **Migration tests.** Tests that withhold 0689 also withhold 0712, which
+- **Migration tests.** Tests that withhold 0689 also withhold 0713, which
   renames objects 0689 creates, and replay it after 0689; the neutral-routine
-  test replays 0707 and 0712 together.
+  test replays 0707 and 0713 together.
 
 #### Verification plan
 

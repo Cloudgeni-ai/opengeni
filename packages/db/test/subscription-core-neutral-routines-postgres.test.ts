@@ -42,10 +42,10 @@ beforeAll(async () => {
   // A rolling migration must leave an older binary's runtime posture intact
   // until roles are provisioned again. Stage a provisioned database without
   // 0707 (as a deployment is before it), apply 0707 alone, and evaluate the
-  // full runtime posture as the runtime role before provisioning again. 0712
+  // full runtime posture as the runtime role before provisioning again. 0713
   // builds on 0707's registry, so it is withheld and applied with it.
   const neutral = "0707_subscription_core_neutral_routines.sql";
-  const withheld = [neutral, "0712_subscription_core_provider_keyed_reach.sql"];
+  const withheld = [neutral, "0713_subscription_core_provider_keyed_reach.sql"];
   const owner = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
@@ -57,7 +57,7 @@ beforeAll(async () => {
     const [applied] = await owner<{ count: number }[]>`
       select count(*)::int as count from schema_migrations where name in ${owner(withheld)}`;
     if (applied?.count !== withheld.length)
-      throw new Error("0707 and 0712 were not applied by the second migrate");
+      throw new Error("0707 and 0713 were not applied by the second migrate");
   } finally {
     await owner.end();
   }
@@ -991,7 +991,7 @@ describe("provider-neutral subscription-core routines (migration 0707)", () => {
           await attempt("truncate", () =>
             tx`truncate opengeni_private.subscription_core_providers`.then(() => "truncated"),
           );
-          // 0712's reach rows reference the registry, so a plain TRUNCATE is
+          // 0713's reach rows reference the registry, so a plain TRUNCATE is
           // refused by that key first; with CASCADE the append-only guard
           // still refuses it.
           await attempt("truncateCascade", () =>
