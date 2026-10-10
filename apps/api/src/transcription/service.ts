@@ -256,11 +256,35 @@ export function createTranscriptionService(input: {
             message: "Transcription billing is not configured.",
           });
         }
-        await billing.admit({
-          accountId: request.accountId,
-          workspaceId: request.workspaceId,
-          attribution: request.billing.attribution,
-        });
+        try {
+          await billing.admit({
+            accountId: request.accountId,
+            workspaceId: request.workspaceId,
+            attribution: request.billing.attribution,
+          });
+        } catch (error) {
+          // Nothing was sent yet: a fallback-safe refusal (Opengeni credits
+          // turned off here) lets the next provider, such as a connected
+          // subscription, serve the request.
+          if (
+            error instanceof TranscriptionServiceError &&
+            error.fallbackSafe &&
+            !request.providerId &&
+            request.fallbackEnabled !== false &&
+            !request.signal?.aborted
+          ) {
+            const excludedProviders = [...(request.excludedProviders ?? []), provider.id];
+            if (
+              await firstAvailable(
+                orderedProviders(providers, { ...request, excludedProviders }),
+                request,
+              )
+            ) {
+              return await this.transcribe({ ...request, excludedProviders });
+            }
+          }
+          throw error;
+        }
       }
       let audio = request.audio;
       let providerMimeType = mimeType;

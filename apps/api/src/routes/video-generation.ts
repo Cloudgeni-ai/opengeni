@@ -8,6 +8,7 @@ import {
   getVideoGenerationOperationSummary,
   withSessionRlsActorContext,
   getWorkspaceVercelAiGatewayConnectionMetadata,
+  getWorkspaceModelPolicy,
   getWorkspaceVideoGenerationPolicy,
   updateWorkspaceVideoGenerationPolicy,
   VideoGenerationConflictError,
@@ -31,13 +32,15 @@ export function registerVideoGenerationRoutes(app: Hono, deps: ApiRouteDeps): vo
   app.get("/v1/workspaces/:workspaceId/video-generation", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
-    const [policy, connection, supergrokConfigured] = await Promise.all([
+    const [policy, connection, supergrokConfigured, modelPolicy] = await Promise.all([
       getWorkspaceVideoGenerationPolicy(deps.db, workspaceId),
       getWorkspaceVercelAiGatewayConnectionMetadata(deps.db, workspaceId),
       workspaceXaiSubscriptionActive(deps.db, deps.settings, workspaceId, grant.subjectId),
+      getWorkspaceModelPolicy(deps.db, workspaceId),
     ]);
     const fundingOptions = videoGenerationFundingOptions({
       managedConfigured: managedVideoGenerationConfigured(deps),
+      creditsDisabled: modelPolicy?.allowCreditModels === false,
       workspaceGatewayConfigured: connection !== null,
       supergrokConfigured,
     });
@@ -65,12 +68,14 @@ export function registerVideoGenerationRoutes(app: Hono, deps: ApiRouteDeps): vo
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
     const payload = await parseRequestJson(c, UpdateVideoGenerationPolicyRequest);
-    const [connection, supergrokConfigured] = await Promise.all([
+    const [connection, supergrokConfigured, modelPolicy] = await Promise.all([
       getWorkspaceVercelAiGatewayConnectionMetadata(deps.db, workspaceId),
       workspaceXaiSubscriptionActive(deps.db, deps.settings, workspaceId, grant.subjectId),
+      getWorkspaceModelPolicy(deps.db, workspaceId),
     ]);
     const fundingOptions = videoGenerationFundingOptions({
       managedConfigured: managedVideoGenerationConfigured(deps),
+      creditsDisabled: modelPolicy?.allowCreditModels === false,
       workspaceGatewayConfigured: connection !== null,
       supergrokConfigured,
     });
@@ -131,6 +136,8 @@ function managedVideoGenerationConfigured(deps: ApiRouteDeps): boolean {
 
 function videoGenerationFundingOptions(input: {
   managedConfigured: boolean;
+  /** The workspace turned Opengeni credits off (model policy). */
+  creditsDisabled: boolean;
   workspaceGatewayConfigured: boolean;
   supergrokConfigured: boolean;
 }) {
@@ -139,10 +146,12 @@ function videoGenerationFundingOptions(input: {
       source: "opengeni_credits" as const,
       label: "Opengeni",
       description: "Uses Opengeni credits through the managed Gateway route.",
-      available: input.managedConfigured,
-      unavailableReason: input.managedConfigured
-        ? null
-        : "Opengeni-managed video generation is not configured.",
+      available: input.managedConfigured && !input.creditsDisabled,
+      unavailableReason: !input.managedConfigured
+        ? "Opengeni-managed video generation is not configured."
+        : input.creditsDisabled
+          ? "Opengeni credits are turned off in this workspace."
+          : null,
     },
     {
       source: "supergrok_subscription" as const,

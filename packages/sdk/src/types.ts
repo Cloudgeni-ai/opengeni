@@ -3990,6 +3990,12 @@ export type WorkspaceModelAccessPolicy = {
   source?: "workspace" | "organization" | "none" | undefined;
   /** The organization default the workspace follows without its own policy. */
   organization?: { allowedProviders: string[] | null; allowedModels: string[] | null } | null;
+  /**
+   * The workspace's credit switch (its `allowCreditModels` setting). False
+   * blocks every model billed in Opengeni credits, including ones added later,
+   * whichever allowlist applies. Absent from older servers; treat as true.
+   */
+  allowCreditModels?: boolean | undefined;
 };
 
 /**
@@ -5259,6 +5265,8 @@ export type WorkspaceSettings = {
   slackReactionSummon?: WorkspaceSlackReactionSummonSettings | undefined;
   /** Slack orchestration notices; both default off when absent or invalid. */
   slackOrchestrationNotices?: WorkspaceSlackOrchestrationNoticeSettings | undefined;
+  /** False blocks every model billed in Opengeni credits; absent allows them. */
+  allowCreditModels?: boolean | undefined;
   [key: string]: unknown;
 };
 
@@ -5358,6 +5366,11 @@ export type UpdateWorkspaceSettingsRequest = {
   defaultSandboxImage?: string | null | undefined;
   /** Agent defaults for new sessions; null clears. Requires the admission switch. */
   sessionAgentDefaults?: WorkspaceAgentDefaults | null | undefined;
+  /**
+   * False blocks every model billed in Opengeni credits in this workspace,
+   * including ones added later; true allows them again.
+   */
+  allowCreditModels?: boolean | undefined;
   [key: string]: unknown;
 };
 

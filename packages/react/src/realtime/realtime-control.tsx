@@ -82,6 +82,8 @@ function realtimeRefusalLabel(code: string | null | undefined): string | null {
       return "Usage limit reached";
     case "realtime_voice_unavailable":
       return "Voice unavailable";
+    case "credits_disabled":
+      return "Credits off";
     default:
       return null;
   }

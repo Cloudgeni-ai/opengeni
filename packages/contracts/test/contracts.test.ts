@@ -3040,6 +3040,7 @@ describe("evaluateWorkspaceModelPolicy", () => {
       evaluateWorkspaceModelPolicy(null, {
         providerId: "azure",
         modelId: "gpt-5.6-sol",
+        chargesCredits: true,
       }),
     ).toEqual({ allowed: true });
   });
@@ -3048,7 +3049,7 @@ describe("evaluateWorkspaceModelPolicy", () => {
     expect(
       evaluateWorkspaceModelPolicy(
         { allowedProviders: null, allowedModels: null },
-        { providerId: "azure", modelId: "gpt-5.6-sol" },
+        { providerId: "azure", modelId: "gpt-5.6-sol", chargesCredits: true },
       ),
     ).toEqual({ allowed: true });
   });
@@ -3062,12 +3063,14 @@ describe("evaluateWorkspaceModelPolicy", () => {
       evaluateWorkspaceModelPolicy(policy, {
         providerId: "azure",
         modelId: "gpt-5.6-sol",
+        chargesCredits: true,
       }),
     ).toEqual({ allowed: false, reason: "provider" });
     expect(
       evaluateWorkspaceModelPolicy(policy, {
         providerId: "codex-subscription",
         modelId: "codex/gpt-5.6-sol",
+        chargesCredits: false,
       }),
     ).toEqual({ allowed: true });
   });
@@ -3081,12 +3084,14 @@ describe("evaluateWorkspaceModelPolicy", () => {
       evaluateWorkspaceModelPolicy(policy, {
         providerId: "codex-subscription",
         modelId: "codex/gpt-5.6-luna",
+        chargesCredits: false,
       }),
     ).toEqual({ allowed: false, reason: "model" });
     expect(
       evaluateWorkspaceModelPolicy(policy, {
         providerId: "codex-subscription",
         modelId: "codex/gpt-5.6-sol",
+        chargesCredits: false,
       }),
     ).toEqual({ allowed: true });
   });
@@ -3095,8 +3100,55 @@ describe("evaluateWorkspaceModelPolicy", () => {
     expect(
       evaluateWorkspaceModelPolicy(
         { allowedProviders: [], allowedModels: null },
-        { providerId: "codex-subscription", modelId: "codex/gpt-5.6-sol" },
+        { providerId: "codex-subscription", modelId: "codex/gpt-5.6-sol", chargesCredits: false },
       ),
     ).toEqual({ allowed: false, reason: "provider" });
+  });
+  test("the credit switch blocks every credit-billed model, whatever the allowlists say", () => {
+    const policy = { allowedProviders: null, allowedModels: null, allowCreditModels: false };
+    expect(
+      evaluateWorkspaceModelPolicy(policy, {
+        providerId: "azure",
+        modelId: "gpt-5.6-sol",
+        chargesCredits: true,
+      }),
+    ).toEqual({ allowed: false, reason: "credits" });
+    // A credit model added to the catalog later is blocked without an edit.
+    expect(
+      evaluateWorkspaceModelPolicy(policy, {
+        providerId: "opper",
+        modelId: "opper/aws/claude-opus-5-5",
+        chargesCredits: true,
+      }),
+    ).toEqual({ allowed: false, reason: "credits" });
+    expect(
+      evaluateWorkspaceModelPolicy(policy, {
+        providerId: "codex-subscription",
+        modelId: "codex/gpt-5.6-sol",
+        chargesCredits: false,
+      }),
+    ).toEqual({ allowed: true });
+    // An explicit allowlist entry does not override the switch.
+    expect(
+      evaluateWorkspaceModelPolicy(
+        { allowedProviders: null, allowedModels: ["gpt-5.6-sol"], allowCreditModels: false },
+        { providerId: "azure", modelId: "gpt-5.6-sol", chargesCredits: true },
+      ),
+    ).toEqual({ allowed: false, reason: "credits" });
+  });
+
+  test("an omitted or true credit switch leaves credit models to the allowlists", () => {
+    for (const allowCreditModels of [undefined, true]) {
+      expect(
+        evaluateWorkspaceModelPolicy(
+          {
+            allowedProviders: null,
+            allowedModels: null,
+            ...(allowCreditModels === undefined ? {} : { allowCreditModels }),
+          },
+          { providerId: "azure", modelId: "gpt-5.6-sol", chargesCredits: true },
+        ),
+      ).toEqual({ allowed: true });
+    }
   });
 });

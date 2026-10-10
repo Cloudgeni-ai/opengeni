@@ -120,6 +120,7 @@ export type BuildTurnAgentDeps = {
   workspaceAgentIdentity: GovernanceModelOk["workspaceAgentIdentity"];
   workspaceGovernance: GovernanceModelOk["workspaceGovernance"];
   structuredWorkspacePolicyActive: GovernanceModelOk["structuredWorkspacePolicyActive"];
+  workspaceCreditModelsAllowed: GovernanceModelOk["workspaceCreditModelsAllowed"];
   workspaceMemory: GovernanceModelOk["workspaceMemory"];
   rigVersion: GovernanceModelOk["rigVersion"];
   rigName: GovernanceModelOk["rigName"];
@@ -464,7 +465,12 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
   let videoGenerationCredential: VideoGenerationCredentialLease | null = null;
   if (objectStorage && videoGenerationEnabled && resolveAgentToolFamilies(session.agent).media) {
     if (videoGenerationPolicy.fundingSource === "opengeni_credits") {
-      videoGenerationCredential = managedVideoGenerationCredentialLease(eventing.modelRunSettings);
+      // Credit-funded video honors the workspace switch that turns Opengeni
+      // credits off: no credential, so the tool is never offered.
+      videoGenerationCredential =
+        deps.workspaceCreditModelsAllowed === false
+          ? null
+          : managedVideoGenerationCredentialLease(eventing.modelRunSettings);
     } else if (videoGenerationPolicy.fundingSource === "workspace_gateway") {
       const workspaceCredential = await loadWorkspaceVercelAiGatewayCredentialLease(
         db,

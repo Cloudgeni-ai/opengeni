@@ -47,6 +47,7 @@ import {
   ToolReviewContext,
   WorkspaceModelCompactionThresholdsPatch,
   cleanStoredSessionTitle,
+  workspaceSettingsAllowCreditModels,
 } from "@opengeni/contracts";
 import { recordToolApproval } from "@opengeni/observability";
 import { connectorActionFingerprint } from "./connector-action-fingerprint";
@@ -28225,6 +28226,17 @@ export type WorkspaceModelPolicy = {
   allowedModels: string[] | null;
 };
 
+/**
+ * The policy a workspace runs with: the allowlists it follows plus its own
+ * credit switch (`allowCreditModels`, the workspace setting). The switch is
+ * independent of where the allowlists come from, so following the
+ * organization's allowlists never turns credits back on.
+ */
+export type EffectiveWorkspaceModelPolicy = WorkspaceModelPolicy & {
+  /** False blocks every model billed in Opengeni credits, current and future. */
+  allowCreditModels: boolean;
+};
+
 function restrictsAnything(policy: WorkspaceModelPolicy | null | undefined): boolean {
   return Boolean(policy && (policy.allowedProviders !== null || policy.allowedModels !== null));
 }
@@ -28237,10 +28249,16 @@ function restrictsAnything(policy: WorkspaceModelPolicy | null | undefined): boo
 export async function getWorkspaceModelPolicyLayers(
   db: Database,
   workspaceId: string,
-): Promise<{ workspace: WorkspaceModelPolicy | null; organization: WorkspaceModelPolicy | null }> {
+): Promise<{
+  workspace: WorkspaceModelPolicy | null;
+  organization: WorkspaceModelPolicy | null;
+  /** The workspace's credit switch; true unless its setting is explicitly false. */
+  allowCreditModels: boolean;
+}> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb
       .select({
+        workspaceSettings: schema.workspaces.settings,
         workspaceAllowedProviders: schema.workspaceModelPolicies.allowedProviders,
         workspaceAllowedModels: schema.workspaceModelPolicies.allowedModels,
         workspacePolicyId: schema.workspaceModelPolicies.id,
@@ -28258,7 +28276,7 @@ export async function getWorkspaceModelPolicyLayers(
       )
       .where(eq(schema.workspaces.id, workspaceId))
       .limit(1);
-    if (!row) return { workspace: null, organization: null };
+    if (!row) return { workspace: null, organization: null, allowCreditModels: true };
     const organization = {
       allowedProviders: row.organizationAllowedProviders ?? null,
       allowedModels: row.organizationAllowedModels ?? null,
@@ -28271,20 +28289,28 @@ export async function getWorkspaceModelPolicyLayers(
           }
         : null,
       organization: restrictsAnything(organization) ? organization : null,
+      allowCreditModels: workspaceSettingsAllowCreditModels(row.workspaceSettings),
     };
   });
 }
 
 /**
- * The policy this workspace runs with: its own row, else its organization's
- * default, else null (unrestricted).
+ * The policy this workspace runs with: the allowlists of its own row, else of
+ * its organization's default, plus its credit switch. Null only when nothing
+ * is restricted (every model allowed and credits on).
  */
 export async function getWorkspaceModelPolicy(
   db: Database,
   workspaceId: string,
-): Promise<WorkspaceModelPolicy | null> {
+): Promise<EffectiveWorkspaceModelPolicy | null> {
   const layers = await getWorkspaceModelPolicyLayers(db, workspaceId);
-  return layers.workspace ?? layers.organization;
+  const allowlists = layers.workspace ?? layers.organization;
+  if (!allowlists && layers.allowCreditModels) return null;
+  return {
+    allowedProviders: allowlists?.allowedProviders ?? null,
+    allowedModels: allowlists?.allowedModels ?? null,
+    allowCreditModels: layers.allowCreditModels,
+  };
 }
 
 /** Remove the workspace's own policy so it follows its organization's default. */
