@@ -241,6 +241,8 @@ export function splitStatements(sql: string): string[] {
  * Remove SQL comments, keeping single-quoted literals (including E'' escapes)
  * intact so a `--` inside a literal cannot swallow its closing quote.
  * Dollar-quoted bodies are still lexed as code: DO blocks are dollar-quoted.
+ * An apostrophe inside a nested dollar-quoted string can therefore keep later
+ * comment text visible, so suppressors also consult `stripAllCommentText`.
  */
 export function stripComments(text: string): string {
   let out = "";
@@ -285,6 +287,12 @@ export function stripComments(text: string): string {
   }
   return out;
 }
+
+/** Literal-unaware stripping: removes every `--`/`/* *\/` run, even in
+ * literals. Suppressing tokens must survive this too, so comment text can
+ * never suppress a finding. */
+const stripAllCommentText = (text: string) =>
+  text.replace(/--[^\n]*/g, " ").replace(/\/\*[\s\S]*?\*\//g, " ");
 
 const TABLE_REF = (table: string) => `(?:"${table}"|${table})`;
 const NOT_IDENT = String.raw`(?![A-Za-z0-9_"])`;
@@ -578,6 +586,7 @@ export function analyzeMigrationRlsBackfills(migrationsDir: string): BackfillFin
       )
         continue;
       const statement = stripComments(rawStatement);
+      const commentFreeStatement = stripAllCommentText(rawStatement);
       const head = statement.trim().replace(/\s+/g, " ");
 
       const createdPolicy = ownerCapabilityPolicy(statement);
@@ -599,7 +608,8 @@ export function analyzeMigrationRlsBackfills(migrationsDir: string): BackfillFin
       // backfill" is exactly the shape this repo's authority migrations take.
       if (
         !DDL_ONLY.test(head) &&
-        /set_config\s*\(\s*'opengeni\.(account_id|workspace_id)'/i.test(statement)
+        /set_config\s*\(\s*'opengeni\.(account_id|workspace_id)'/i.test(statement) &&
+        /set_config\s*\(\s*'opengeni\.(account_id|workspace_id)'/i.test(commentFreeStatement)
       ) {
         tenantGuc = true;
       }
@@ -661,21 +671,35 @@ export function analyzeMigrationRlsBackfills(migrationsDir: string): BackfillFin
       if (tenantGuc) continue;
 
       const executable = isBlock ? stripRoutineBodies(statement) : statement;
-      const ownerVisible = activatedOwnerCapabilityTables(
-        executable,
+      const commentFreeExecutable = isBlock
+        ? stripRoutineBodies(commentFreeStatement)
+        : commentFreeStatement;
+      const commentFreeOwnerVisible = activatedOwnerCapabilityTables(
+        commentFreeExecutable,
         ownerCapabilityPolicies,
         runnerCapabilityGuc,
       );
+      const ownerVisible = new Set(
+        [
+          ...activatedOwnerCapabilityTables(
+            executable,
+            ownerCapabilityPolicies,
+            runnerCapabilityGuc,
+          ),
+        ].filter((table) => commentFreeOwnerVisible.has(table)),
+      );
+      const relaxesPosture = (table: string, text: string) =>
+        new RegExp(
+          String.raw`ALTER TABLE\s+${TABLE_REF(table)}\s+(NO FORCE|DISABLE) ROW LEVEL SECURITY`,
+          "i",
+        ).test(text);
       const opaque = [...forced].filter(
         (table) =>
           enabled.has(table) &&
           !unforced.has(table) &&
           !ownerVisible.has(table) &&
           // A DO block that relaxes the posture itself is protected.
-          !new RegExp(
-            String.raw`ALTER TABLE\s+${TABLE_REF(table)}\s+(NO FORCE|DISABLE) ROW LEVEL SECURITY`,
-            "i",
-          ).test(executable),
+          !(relaxesPosture(table, executable) && relaxesPosture(table, commentFreeExecutable)),
       );
 
       const written = opaque.filter((table) => writesTable(executable, table)).sort();

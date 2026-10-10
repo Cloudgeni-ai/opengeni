@@ -221,6 +221,27 @@ END $patch$;`;
     expect(stripComments("DO $b$ BEGIN -- gone\nUPDATE widgets SET id = id; END $b$")).toBe(
       "DO $b$ BEGIN  \nUPDATE widgets SET id = id; END $b$",
     );
+    // Comment text can never suppress a finding, even after an apostrophe in a
+    // nested dollar-quoted string keeps that comment visible to the lexer.
+    const analyzeOne = (sql: string) =>
+      analyzeMigrationRlsBackfills(fixture({ "0001_base.sql": FORCED_TABLE, "0002_x.sql": sql }));
+    const nested = `DO $b$ BEGIN
+RAISE NOTICE '%', $m$it's a backfill$m$;
+-- SUPPRESSOR
+UPDATE widgets SET id = id;
+END $b$;`;
+    for (const suppressor of [
+      "TODO: ALTER TABLE widgets NO FORCE ROW LEVEL SECURITY first",
+      "TODO: ALTER TABLE widgets DISABLE ROW LEVEL SECURITY first",
+      "PERFORM set_config('opengeni.workspace_id', 'x', true);",
+    ]) {
+      expect(analyzeOne(nested.replace("SUPPRESSOR", suppressor))).toMatchObject([
+        { kind: "write", tables: ["widgets"] },
+      ]);
+    }
+    expect(
+      analyzeOne("DO $b$ BEGIN PERFORM '--'; UPDATE widgets SET id = id; END $b$;"),
+    ).toMatchObject([{ kind: "write", tables: ["widgets"] }]);
     const patch = `DO $patch$ DECLARE target regprocedure; definition text;
 BEGIN
 target := pg_catalog.to_regprocedure('example()');
