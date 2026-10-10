@@ -3437,7 +3437,7 @@ as "not an organization account":
 
 | Layer | Gate |
 | --- | --- |
-| SQL | `set_subscription_codex_reach` (0702) accepts only `managed_by_workspace_id IS NULL`, so saving any organization choice failed for a managed connection. |
+| SQL | `set_subscription_codex_reach` (0702) and, from PR 0c (0713), the provider-keyed `set_subscription_core_reach` it delegates to accept only `managed_by_workspace_id IS NULL`, so saving any organization choice failed for a managed connection. |
 | Access editor | The organization target of `getSubscriptionCoreCodexModelConnectionAccess` / `update…` selected only connections no workspace manages (404 otherwise), and its projection listed only organization-pool assignments, so a workspace's own copy was invisible to it. |
 | Organization routes | Allocation, rename, primary, extra credits, disconnect, usage and reset-credit inspection on the organization route resolved only connections no workspace manages (the primary keeps that rule, decision 10). |
 | Organization pool list and web | `readSubscriptionCoreOrganizationPool` lists only those connections; the Accounts page lists a workspace's own accounts as "<workspace> only" rows that open the workspace's page, where no reach can be chosen. A connection 0689 deduplicated across two workspaces (manager NULL, two local copies) appeared twice: once as an organization account and once per workspace. |
@@ -3461,7 +3461,8 @@ as "not an organization account":
    parity-checked move like 0689; that protocol exists to move and re-encrypt
    rows that old binaries would otherwise write concurrently. Here nothing is
    rewritten, old binaries read the same rows with the same meaning, and the
-   one SQL change (the reach helper also accepting a managed connection) only
+   one SQL change (the two reach setters also accepting a connection a shared
+   workspace of the organization manages, migration 0714) only
    admits a call older binaries never make. A maintenance migration would
    move zero rows, so its parity report would compare every table with itself;
    the evidence is instead a real-PostgreSQL test that every core row is

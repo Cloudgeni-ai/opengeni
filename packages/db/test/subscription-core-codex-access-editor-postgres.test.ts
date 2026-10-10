@@ -583,13 +583,13 @@ describe.skipIf(!realDb)("Workspace-managed Codex accounts are organization acco
     await personalConnection(org, personalOwner);
     await source(org, org.sharedWorkspaceId, "workspace");
     const before = await coreSnapshot(org.accountId);
-    expect(Object.keys(before)).toContain("opengeni_private.subscription_codex_auto_assignments");
+    expect(Object.keys(before)).toContain("opengeni_private.subscription_core_auto_assignments");
     const migration = await readFile(
       join(
         import.meta.dir,
         "..",
         "drizzle",
-        "0713_subscription_workspace_managed_organization_accounts.sql",
+        "0714_subscription_workspace_managed_organization_accounts.sql",
       ),
       "utf8",
     );

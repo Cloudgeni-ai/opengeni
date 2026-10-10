@@ -50,6 +50,8 @@ beforeAll(async () => {
     neutral,
     "0712_subscription_core_generic_precursor.sql",
     "0713_subscription_core_provider_keyed_reach.sql",
+    // Redefines 0713's reach setters.
+    "0714_subscription_workspace_managed_organization_accounts.sql",
   ];
   const owner = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
@@ -62,7 +64,7 @@ beforeAll(async () => {
     const [applied] = await owner<{ count: number }[]>`
       select count(*)::int as count from schema_migrations where name in ${owner(withheld)}`;
     if (applied?.count !== withheld.length)
-      throw new Error("0707, 0712 and 0713 were not applied by the second migrate");
+      throw new Error("0707, 0712, 0713 and 0714 were not applied by the second migrate");
   } finally {
     await owner.end();
   }

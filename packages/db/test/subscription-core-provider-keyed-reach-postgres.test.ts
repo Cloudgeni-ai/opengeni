@@ -36,6 +36,8 @@ import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 
 const REACH_MIGRATION = "0713_subscription_core_provider_keyed_reach.sql";
+// 0714 redefines 0713's reach setters, so it is withheld and applied with it.
+const LATER_MIGRATIONS = ["0714_subscription_workspace_managed_organization_accounts.sql"];
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const key = Buffer.alloc(32, 71);
 const MODEL = "codex/gpt-5.5";
@@ -381,6 +383,8 @@ beforeAll(async () => {
   try {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
     await owner`insert into schema_migrations(name) values (${REACH_MIGRATION})`;
+    for (const later of LATER_MIGRATIONS)
+      await owner`insert into schema_migrations(name) values (${later})`;
     await migrate(database.ownerUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
   } finally {
@@ -398,6 +402,8 @@ beforeAll(async () => {
   const applying = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
     await applying`delete from schema_migrations where name = ${REACH_MIGRATION}`;
+    for (const later of LATER_MIGRATIONS)
+      await applying`delete from schema_migrations where name = ${later}`;
     await migrate(database.ownerUrl);
     const [applied] = await applying<{ count: number }[]>`
       select count(*)::int as count from schema_migrations where name = ${REACH_MIGRATION}`;
@@ -749,6 +755,11 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
       const local = await connection(org, "codex", "workspace-managed", {
         managedByWorkspaceId: org.sharedWorkspaceId,
       });
+      // A shared connection managed by a Personal workspace is no
+      // organization account (0714 admits only a shared-workspace manager).
+      const personalManaged = await connection(org, "codex", "personal-managed", {
+        managedByWorkspaceId: memberPersonal,
+      });
       const missing = crypto.randomUUID();
       const refusals = {
         codexReadNotAdmin: await reachOf(org, "codex-named", id, memberSubjectId),
@@ -767,6 +778,8 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
         coreSetMissing: await setReach(org, "codex", missing, [true, true]),
         codexSetWorkspaceManaged: await setReach(org, "codex-named", local, [true, true]),
         coreSetWorkspaceManaged: await setReach(org, "codex", local, [true, true]),
+        codexSetPersonalManaged: await setReach(org, "codex-named", personalManaged, [true, true]),
+        coreSetPersonalManaged: await setReach(org, "codex", personalManaged, [true, true]),
       };
       const readNotAdmin = (provider: string) => ({
         code: "42501",
@@ -804,16 +817,23 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
           code: "P0002",
           message: "organization subscription connection not found",
         },
-        codexSetWorkspaceManaged: {
+        // 0714: a shared workspace's account is an organization account.
+        codexSetWorkspaceManaged: { value: "set" },
+        coreSetWorkspaceManaged: { value: "set" },
+        codexSetPersonalManaged: {
           code: "P0002",
           message: "organization Codex connection not found",
         },
-        coreSetWorkspaceManaged: {
+        coreSetPersonalManaged: {
           code: "P0002",
           message: "organization subscription connection not found",
         },
       });
       expect(await reachOf(org, "codex", id)).toEqual({ value: null });
+      expect(await reachOf(org, "codex", local)).toEqual({
+        value: { sharedWorkspaces: true, personalWorkspaces: true },
+      });
+      expect(await reachOf(org, "codex", personalManaged)).toEqual({ value: null });
     },
     180_000,
   );

@@ -51,6 +51,8 @@ const subscriptionCoreMigrations = [
   "0712_subscription_core_generic_precursor.sql",
   // Renames and redefines the auto-assignment objects the withheld 0689 creates.
   "0713_subscription_core_provider_keyed_reach.sql",
+  // Redefines the reach setters withheld 0713 creates.
+  "0714_subscription_workspace_managed_organization_accounts.sql",
 ] as const;
 const key = Buffer.alloc(32, 67);
 const ids = {
