@@ -170,4 +170,7 @@ export const embeddingMigrationTail = [
   // Patches the capture function installed by withheld 0264/0275/0478 and
   // patched by withheld 0608; replay after them.
   "0704_inactive_inherited_personal_connections.sql",
+  // Patches the interaction reaper by its post-0345/0391 anchors; replay
+  // after the fence graph it edits.
+  "0705_idle_interaction_release.sql",
 ];
