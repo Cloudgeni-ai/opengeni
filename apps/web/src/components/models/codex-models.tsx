@@ -142,16 +142,20 @@ function poolState(codex: CodexSubscriptions) {
 /**
  * The organization's accounts other than this workspace's own. An account a
  * shared workspace connected is also an organization account (design 5.4);
- * on that workspace's page it is listed once, as its own.
+ * on that workspace's page it is listed once, as its own (or in the "set
+ * aside" row of its own accounts while the organization's are used).
  */
 export function organizationOnlyCodexAccounts(
   organizationAccounts: readonly CodexAccount[],
   codex: CodexSubscriptions,
+  workspaceId: string,
 ): CodexAccount[] {
   const own = new Set(
     codex.accounts.filter((account) => account.source !== "organization").map((a) => a.id),
   );
-  return organizationAccounts.filter((account) => !own.has(account.id));
+  return organizationAccounts.filter(
+    (account) => !own.has(account.id) && !account.ownInWorkspaceIds?.includes(workspaceId),
+  );
 }
 
 /** How many rows Codex adds to the Accounts list once loaded. */
@@ -164,7 +168,8 @@ export function codexListedCount(
   const pool = poolState(codex);
   const own = codex.accounts.filter((account) => account.source !== "organization").length;
   const shared = organization
-    ? organizationOnlyCodexAccounts(organization.codex.accounts, codex).length
+    ? organizationOnlyCodexAccounts(organization.codex.accounts, codex, organization.workspace.id)
+        .length
     : codex.accounts.length - own + (pool.organizationSetAside ? 1 : 0);
   return own + shared + (codex.pending ? 1 : 0) + (pool.workspaceSetAside ? 1 : 0);
 }
@@ -282,7 +287,11 @@ export function CodexAccountRows({
     }
     return (
       <>
-        {organizationOnlyCodexAccounts(organization.codex.accounts, codex).map((account) => {
+        {organizationOnlyCodexAccounts(
+          organization.codex.accounts,
+          codex,
+          organization.workspace.id,
+        ).map((account) => {
           const live = sharedInUse.find((candidate) => candidate.id === account.id);
           return live ? (
             <SharedCodexInUseRow
@@ -393,9 +402,6 @@ function SharedCodexSetAsideRow({
     connectionId: account.id,
   });
   const reaches = ownInUse ? true : reachesWorkspace(access.data, organization.workspace);
-  // This workspace's own account (it connected it): listed with its own
-  // accounts, or in their "set aside" row while it uses the organization's.
-  if (access.data?.localWorkspaceIds?.includes(organization.workspace.id)) return null;
   const reason = ownInUse
     ? "Set aside while this workspace has its own"
     : reaches === false

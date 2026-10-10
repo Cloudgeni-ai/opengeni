@@ -26,6 +26,11 @@ export type WorkspaceCodexSubscriptionSource = {
 
 export type CodexAccountStatus = {
   allowedModelIds?: string[] | null;
+  /**
+   * Organization list only: shared workspaces that list the account among
+   * their own (it was connected there).
+   */
+  ownInWorkspaceIds?: string[];
   id: string;
   source: Exclude<EffectiveCodexSubscriptionSource, "disabled">;
   chatgptAccountId: string | null;

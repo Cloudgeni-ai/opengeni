@@ -395,6 +395,12 @@ export async function readSubscriptionCoreOrganizationPool(
   input: { organizationId: string; subjectId: string },
 ): Promise<{
   rows: SubscriptionCoreConnectionRow[];
+  /**
+   * Per connection, the shared workspaces whose own accounts include it: its
+   * workspace pool lists it there (scope reaches the workspace) classified as
+   * the workspace's own, as `readSubscriptionCoreWorkspacePool` classifies it.
+   */
+  ownInWorkspaceIds: Map<string, string[]>;
   primaryConnectionId: string | null;
   rotationMode: "spread" | "primary_first";
 } | null> {
@@ -430,8 +436,43 @@ export async function readSubscriptionCoreOrganizationPool(
       order by connection.created_at, connection.id`,
       );
       if (!rows.some((row) => row.id === primaryConnectionId)) primaryConnectionId = null;
+      // A workspace-pool row makes it the workspace's own; a world without
+      // policy rows for that pair classifies by management.
+      const own = await rawRows<{ connection_id: string; workspace_id: string }>(
+        tx,
+        sql`select connection.id::text as connection_id, workspace.workspace_id::text as workspace_id
+        from subscription_connections connection
+        cross join list_organization_workspace_ids(${input.organizationId}::uuid) workspace
+        where connection.account_id = ${input.organizationId}::uuid
+          and connection.provider = ${providerId} and connection.kind = 'subscription'
+          and connection.disconnected_at is null and connection.ownership = 'shared'
+          and (connection.scope_kind = 'organization'
+            or (connection.scope_kind = 'workspaces' and exists (
+              select 1 from subscription_connection_workspaces assignment
+              where assignment.account_id = connection.account_id
+                and assignment.connection_id = connection.id
+                and assignment.workspace_id = workspace.workspace_id)))
+          and case when exists (select 1 from subscription_connection_assignment_policies policy
+              where policy.account_id = connection.account_id
+                and policy.connection_id = connection.id
+                and policy.workspace_id = workspace.workspace_id)
+            then exists (select 1 from subscription_connection_assignment_policies policy
+              where policy.account_id = connection.account_id
+                and policy.connection_id = connection.id
+                and policy.workspace_id = workspace.workspace_id
+                and policy.inference_pool = 'workspace')
+            else connection.managed_by_workspace_id = workspace.workspace_id end
+        order by 1, 2`,
+      );
+      const ownInWorkspaceIds = new Map<string, string[]>();
+      for (const row of own)
+        ownInWorkspaceIds.set(row.connection_id, [
+          ...(ownInWorkspaceIds.get(row.connection_id) ?? []),
+          row.workspace_id,
+        ]);
       return {
         rows,
+        ownInWorkspaceIds,
         primaryConnectionId,
         rotationMode: (org?.mode ?? "spread") === "primary_first" ? "primary_first" : "spread",
       };

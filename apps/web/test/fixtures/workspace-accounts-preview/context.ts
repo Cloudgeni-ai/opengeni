@@ -18,7 +18,7 @@ const ACME_PRO = "00000000-0000-4000-8000-0000000000c1";
 const DESIGN_PLAN = "00000000-0000-4000-8000-0000000000c2";
 
 const params = new URLSearchParams(window.location.search);
-/** `reach=people` or `reach=all` starts the former workspace account shared that way. */
+/** `reach=people`: Acme Pro limited to people; `reach=all`: the Design plan in every shared workspace. */
 const initialReach = params.get("reach");
 /** `designSource=organization`: Design is set to use the organization's accounts. */
 const designSource = params.get("designSource") === "organization" ? "organization" : "automatic";
@@ -63,14 +63,8 @@ type Policy = {
   version: number;
 };
 const policies: Record<string, Policy> = {
-  [ACME_PRO]: {
-    allowedModels: null,
-    allowedWorkspaces: null,
-    allowPersonalWorkspaces: true,
-    version: 1,
-  },
-  // Its reach today: only the workspace that connected it.
-  [DESIGN_PLAN]:
+  // `reach=people`: the organization's own account limited to two people.
+  [ACME_PRO]:
     initialReach === "people"
       ? {
           allowedModels: null,
@@ -81,10 +75,17 @@ const policies: Record<string, Policy> = {
         }
       : {
           allowedModels: null,
-          allowedWorkspaces: initialReach === "all" ? null : [],
-          allowPersonalWorkspaces: false,
+          allowedWorkspaces: null,
+          allowPersonalWorkspaces: true,
           version: 1,
         },
+  // Its reach today: only the workspace that connected it (`reach=all`: every shared one).
+  [DESIGN_PLAN]: {
+    allowedModels: null,
+    allowedWorkspaces: initialReach === "all" ? null : [],
+    allowPersonalWorkspaces: false,
+    version: 1,
+  },
 };
 const local: Record<string, string[]> = { [DESIGN_PLAN]: [WORKSPACES.design.id] };
 const managedBy: Record<string, string | null> = {
@@ -114,7 +115,11 @@ const methods: Record<string, (...args: never[]) => Promise<unknown>> = {
   async requestJson(method: string, path: string, body?: unknown) {
     if (method === "GET" && path === `/v1/organizations/${ORG}/codex/accounts`) {
       return {
-        accounts: organizationAccounts,
+        // The workspaces whose pool lists it as their own (none under people scope).
+        accounts: organizationAccounts.map((entry) => ({
+          ...entry,
+          ownInWorkspaceIds: policies[entry.id]!.allowedPeople ? [] : (local[entry.id] ?? []),
+        })),
         activeAccountId: ACME_PRO,
         settings: {
           rotationEnabled: true,
@@ -166,23 +171,25 @@ const methods: Record<string, (...args: never[]) => Promise<unknown>> = {
     // includes the workspace (people-scoped ones are in no workspace's pool),
     // its own copies classified "workspace"; automatic lists both pools, a
     // workspace set to the organization's lists only organization ones.
-    const inScope = (id: string) => {
-      const policy = policies[id]!;
-      if (policy.allowedPeople) return false;
-      return (
-        local[id]?.includes(workspaceId) ||
-        policy.allowedWorkspaces === null ||
-        policy.allowedWorkspaces.includes(workspaceId)
-      );
-    };
+    // A workspace's own copy is its workspace-pool entry; a grant to the
+    // workspace is an organization-pool entry (both when "all" includes it).
     const rows = organizationAccounts
-      .filter((entry) => workspaceId !== WORKSPACES.personal.id && inScope(entry.id))
-      .map((entry) => ({ entry, local: local[entry.id]?.includes(workspaceId) ?? false }));
+      .filter((entry) => workspaceId !== WORKSPACES.personal.id && !policies[entry.id]!.allowedPeople)
+      .map((entry) => {
+        const policy = policies[entry.id]!;
+        return {
+          entry,
+          local: local[entry.id]?.includes(workspaceId) ?? false,
+          organization:
+            policy.allowedWorkspaces === null || policy.allowedWorkspaces.includes(workspaceId),
+        };
+      })
+      .filter((row) => row.local || row.organization);
     const mode = workspaceId === WORKSPACES.design.id ? designSource : "automatic";
     const workspaceAvailable = rows.some((row) => row.local);
     return {
       accounts: rows
-        .filter((row) => mode === "automatic" || !row.local)
+        .filter((row) => mode === "automatic" || row.organization)
         .map((row) => ({ ...row.entry, source: row.local ? "workspace" : "organization" })),
       activeAccountId: ACME_PRO,
       source: {
@@ -193,7 +200,7 @@ const methods: Record<string, (...args: never[]) => Promise<unknown>> = {
         effectiveSource:
           mode === "automatic" && workspaceAvailable ? "workspace" : "organization",
         workspaceAvailable,
-        organizationAvailable: rows.some((row) => !row.local),
+        organizationAvailable: rows.some((row) => row.organization),
       },
       settings: {
         rotationEnabled: true,
@@ -215,8 +222,9 @@ const methods: Record<string, (...args: never[]) => Promise<unknown>> = {
       ],
       workspaces: [WORKSPACES.design, WORKSPACES.platform, WORKSPACES.research],
       personalWorkspacesSupported: true,
-      peopleSupported: true,
-      people: PEOPLE,
+      // People scope only for an account no workspace manages (design 5.4, decision 5).
+      peopleSupported: !managedBy[id],
+      ...(managedBy[id] ? {} : { people: PEOPLE }),
       localWorkspaceIds: local[id] ?? [],
       managedByWorkspaceId: managedBy[id] ?? null,
     };

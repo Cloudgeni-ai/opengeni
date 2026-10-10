@@ -287,13 +287,14 @@ export async function getSubscriptionCoreOrganizationCodexProjection(
   const pool = await readSubscriptionCoreOrganizationPool(db, SUBSCRIPTION_CORE_CODEX, input);
   if (!pool) return { accounts: [], rotation: rotationSettings(null, false) };
   return {
-    accounts: pool.rows.map((row) =>
-      projectAccount(row, {
+    accounts: pool.rows.map((row) => ({
+      ...projectAccount(row, {
         source: "organization",
         primaryConnectionId: pool.primaryConnectionId,
         poolAllocatorEnabled: true,
       }),
-    ),
+      ownInWorkspaceIds: pool.ownInWorkspaceIds.get(row.id) ?? [],
+    })),
     rotation: rotationSettings(pool.primaryConnectionId, pool.rotationMode === "spread"),
   };
 }

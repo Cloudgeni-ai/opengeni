@@ -966,6 +966,11 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
       subjectId: org.ownerSubjectId,
     });
     expect(orgProjection.accounts.map((account) => account.id)).toEqual([first, second]);
+    // Each says which shared workspaces list it as their own.
+    expect(orgProjection.accounts.map((account) => account.ownInWorkspaceIds)).toEqual([
+      [],
+      [org.sharedWorkspaceId],
+    ]);
     expect(
       (
         await getSubscriptionCoreOrganizationCodexProjection(client!.db, {

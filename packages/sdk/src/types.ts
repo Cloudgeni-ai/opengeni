@@ -4183,6 +4183,11 @@ export type CodexPlanExcludedModel = {
 export type CodexAccount = {
   id: string;
   source?: "workspace" | "organization";
+  /**
+   * Organization list only: shared workspaces that list the account among
+   * their own (it was connected there).
+   */
+  ownInWorkspaceIds?: string[];
   chatgptAccountId?: string | null;
   label?: string | null;
   email?: string | null;

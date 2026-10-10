@@ -393,7 +393,7 @@ export function ConnectionAccessFormPage({
                     <CheckboxField
                       key={workspace.id}
                       label={workspace.name}
-                      description="Connected in this workspace, so it can't be removed."
+                      description="Connected in this workspace, so it stays included."
                       disabled
                       checked
                     />

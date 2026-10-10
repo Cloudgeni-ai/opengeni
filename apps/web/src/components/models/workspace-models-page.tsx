@@ -1097,7 +1097,7 @@ export function WorkspaceModelsPageBody({
                 places={codexPlaces}
                 organizationAccountCount={
                   organizationAdmin
-                    ? organizationOnlyCodexAccounts(orgCodex.accounts, codex).length
+                    ? organizationOnlyCodexAccounts(orgCodex.accounts, codex, here.id).length
                     : undefined
                 }
               />

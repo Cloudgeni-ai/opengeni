@@ -1737,7 +1737,10 @@ describe("One Models page for the organization and the workspace", () => {
 
   // Design 5.4: an account a shared workspace connected is also an organization account.
   describe("a workspace's own account is an organization account", () => {
-    const workspaceOwn = codexAccount({ id: "acct-1", label: "Team plan", source: "organization" });
+    const workspaceOwn = {
+      ...codexAccount({ id: "acct-1", label: "Team plan", source: "organization" }),
+      ownInWorkspaceIds: ["workspace-a"],
+    };
     const rowsNamed = (container: HTMLElement, name: string) =>
       [...container.querySelectorAll<HTMLElement>("[data-slot=list-row]")].filter(
         (row) => row.querySelector("[data-row-action]")?.textContent?.includes(name) ?? false,
@@ -1839,6 +1842,43 @@ describe("One Models page for the organization and the workspace", () => {
         expect(rowsNamed(view.container, "Team plan")).toHaveLength(0);
         expect(rowsNamed(view.container, "Company plan")).toHaveLength(1);
         expect(view.container.textContent).toContain("Set aside");
+      } finally {
+        await cleanup(view);
+      }
+    });
+
+    test("limited to chosen people, its workspace no longer lists it as its own, so it shows as the organization's", async () => {
+      organizationAdmin = true;
+      accounts = {
+        ...accounts,
+        accounts: [codexAccount({ id: "org-1", label: "Company plan", source: "organization" })],
+        activeAccountId: "org-1",
+      };
+      client.requestJson.mockImplementation(async (method: string, path: string) => {
+        if (method === "GET" && path === "/v1/organizations/organization-a/codex/accounts") {
+          return {
+            ...orgAccounts,
+            accounts: [...orgAccounts.accounts, { ...workspaceOwn, ownInWorkspaceIds: [] }],
+          };
+        }
+        if (method === "GET") throw new Error(`unexpected read ${path}`);
+        return {};
+      });
+      client.getModelConnectionAccess.mockImplementation(async (...args: unknown[]) => {
+        const access = managedAccess((args[0] as { connectionId: string }).connectionId);
+        return (args[0] as { connectionId: string }).connectionId === "acct-1"
+          ? {
+              ...access,
+              policy: { ...access.policy, allowedPeople: ["person-a"] },
+              managedByWorkspaceId: null,
+            }
+          : access;
+      });
+      const view = await render();
+      try {
+        await flush();
+        expect(rowsNamed(view.container, "Team plan")).toHaveLength(1);
+        expect(rowsNamed(view.container, "Team plan")[0]!.textContent).toContain("Selected people");
       } finally {
         await cleanup(view);
       }

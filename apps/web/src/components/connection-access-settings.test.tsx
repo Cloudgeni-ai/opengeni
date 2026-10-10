@@ -496,6 +496,7 @@ test("a workspace's own account is an organization account: its workspace stays,
     workspaces: [
       { id: "workspace-a", name: "Engineering" },
       { id: "workspace-b", name: "Finance" },
+      { id: "workspace-c", name: "Legal" },
     ],
     personalWorkspacesSupported: true,
     peopleSupported: true,
@@ -586,7 +587,7 @@ test("a workspace's own account is an organization account: its workspace stays,
     await act(async () => root.render(<Page />));
     await flush();
     // Its workspace is shown included and can't be cleared.
-    expect(container.textContent).toContain("Connected in this workspace, so it can't be removed.");
+    expect(container.textContent).toContain("Connected in this workspace, so it stays included.");
     expect(container.textContent).not.toContain("No workspace can use it");
     await choose("Finance");
     await save();
@@ -674,6 +675,7 @@ test("a workspace's own account is an organization account: its workspace stays,
     await act(async () => root.render(<Page />));
     await flush();
     await choose("Only selected workspaces");
+    await choose("Legal");
     await choose("Personal workspaces");
     await save();
     expect(writes.at(-1)).toEqual({

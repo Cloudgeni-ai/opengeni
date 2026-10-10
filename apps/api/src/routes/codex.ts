@@ -132,6 +132,7 @@ export function codexAccountJson(
     resetCreditsCheckedAt: row.resetCreditsCheckedAt,
     // P3 rotation cooldown: when set and in the future, this account is cooling-down.
     exhaustedUntil: row.exhaustedUntil,
+    ...(row.ownInWorkspaceIds ? { ownInWorkspaceIds: row.ownInWorkspaceIds } : {}),
     appsDesignated: options.appsCredentialId === row.id,
     canEnableApps:
       row.source === "workspace" &&
