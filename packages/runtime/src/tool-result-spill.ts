@@ -8,6 +8,10 @@ import {
 } from "@opengeni/contracts";
 import { projectKnowledgeToolResultForModel } from "./knowledge-model-projection";
 import { MCP_MAX_TOOL_RESULT_BYTES, mcpSerializedSizeBytes } from "./mcp-network";
+import {
+  projectFirstPartyToolResultSizeForModel,
+  toolResultSizeExperimentEnabled,
+} from "./tool-result-size-projection";
 
 export type SpillOversizedModelToolResult = (input: {
   operationId: string;
@@ -51,11 +55,23 @@ export function modelToolResultFits(result: AttemptToolResultValue): boolean {
   return mcpSerializedSizeBytes(result) <= MCP_MAX_TOOL_RESULT_BYTES;
 }
 
+function projectModelVisibleToolResult(
+  identity: AttemptToolIdentity,
+  result: AttemptToolResultValue,
+): AttemptToolResultValue {
+  const knowledge = projectKnowledgeToolResultForModel(identity, result);
+  return toolResultSizeExperimentEnabled()
+    ? projectFirstPartyToolResultSizeForModel(identity, knowledge)
+    : knowledge;
+}
+
 /**
  * The single per-caller seam over one executor result. Codemode receives the
  * exact result. The model receives its model-visible projection (compact
- * Knowledge discovery output for the exact tool identity) when that fits in
- * 1 MiB; otherwise the exact result is spilled to a file, as for any tool.
+ * Knowledge discovery output for the exact tool identity, and under
+ * `OPENGENI_EXPERIMENT_TOOL_RESULT_SIZE=1` the compact first-party copy) when
+ * that fits in 1 MiB; otherwise the exact result is spilled to a file, as for
+ * any tool.
  * MCP-backed exact results are bounded only by the 8 MiB MCP transport cap
  * before this seam runs, so a large MCP read spills here like any other tool
  * instead of failing after the provider already returned it.
@@ -70,7 +86,7 @@ export async function projectAttemptToolResultForCaller(
     case "codemode":
       return result;
     case "model": {
-      const visible = identity ? projectKnowledgeToolResultForModel(identity, result) : result;
+      const visible = identity ? projectModelVisibleToolResult(identity, result) : result;
       if (modelToolResultFits(visible)) return visible;
       if (!spill) return modelToolResultOverflowError();
       try {

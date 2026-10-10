@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { z } from "zod";
 import {
   assistantMessagePhase,
@@ -75,7 +76,86 @@ const record = (value: unknown): Record<string, unknown> =>
     : {};
 const bytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value, null, 2), "utf8");
 const encode = (selection: Selection, sequence: number | null = null, offset = 0, v = 2) =>
-  Buffer.from(JSON.stringify({ v, selection, sequence, offset })).toString("base64url");
+  Buffer.from(
+    JSON.stringify(
+      v === 2 && compactCursorsEnabled()
+        ? compactCursor(selection, sequence, offset)
+        : { v, selection, sequence, offset },
+    ),
+  ).toString("base64url");
+
+/**
+ * Experiment (`OPENGENI_EXPERIMENT_TOOL_RESULT_SIZE=1`, default off): emit a
+ * compact v3 cursor. Version 2 nests the whole selection, including the
+ * 36-character session id the caller must resend anyway, so its cursor runs
+ * to roughly 300 characters; models truncate or alter such opaque strings.
+ * Version 3 is a positional array of the same selection and position, with a
+ * session-id fingerprint so a cursor still cannot move to another session.
+ * Decoding always accepts every version, so the flag only changes emission;
+ * enable it after every API replica decodes v3.
+ */
+const compactCursorsEnabled = () => process.env.OPENGENI_EXPERIMENT_TOOL_RESULT_SIZE === "1";
+const VIEW_CODES = { conversation: "c", results: "r", tools: "t" } as const;
+const DIRECTION_CODES = { before: "b", after: "a" } as const;
+/** 48 bits of the full id: a guard against reusing a cursor across sessions, not authority. */
+const sessionFingerprint = (sessionId: string) =>
+  createHash("sha256").update(sessionId).digest("base64url").slice(0, 8);
+const codeOf = <T extends string>(codes: Record<T, string>, code: unknown): T | undefined =>
+  (Object.keys(codes) as T[]).find((key) => codes[key] === code);
+
+function compactCursor(selection: Selection, sequence: number | null, offset: number) {
+  const flags = (selection.includeArguments ? 1 : 0) | (selection.includeOutput ? 2 : 0);
+  const cursor: unknown[] = [
+    3,
+    sessionFingerprint(selection.sessionId),
+    VIEW_CODES[selection.view],
+    DIRECTION_CODES[selection.direction],
+    selection.after,
+    selection.before,
+    selection.limit ?? null,
+    flags,
+    sequence,
+    offset,
+    selection.callId,
+    selection.toolName,
+  ];
+  while (cursor.length > 10 && cursor.at(-1) === null) cursor.pop();
+  return cursor;
+}
+
+const SESSION_MISMATCH = Symbol("session_events cursor session mismatch");
+
+/** Expand a v3 cursor to the v2 shape; `cursorSchema` then validates it as usual. */
+function expandCompactCursor(value: unknown, sessionId: string): unknown {
+  if (!Array.isArray(value) || value[0] !== 3) return value;
+  const [, fingerprint, view, direction, after, before, limit, flags, sequence, offset] = value;
+  if (
+    value.length > 12 ||
+    typeof fingerprint !== "string" ||
+    !Number.isInteger(flags) ||
+    flags < 0 ||
+    flags > 3
+  )
+    return null;
+  if (fingerprint !== sessionFingerprint(sessionId)) return SESSION_MISMATCH;
+  return {
+    v: 2,
+    selection: {
+      sessionId,
+      view: codeOf(VIEW_CODES, view),
+      includeArguments: (flags & 1) !== 0,
+      includeOutput: (flags & 2) !== 0,
+      callId: value[10] ?? null,
+      toolName: value[11] ?? null,
+      ...(limit === null ? {} : { limit }),
+      direction: codeOf(DIRECTION_CODES, direction),
+      after,
+      before,
+    },
+    sequence,
+    offset,
+  };
+}
 
 /** A cursor is a bounded selector, never authority. The caller reauthorizes every read. */
 export function resolveSessionEventView(input: SessionEventViewInput) {
@@ -83,13 +163,18 @@ export function resolveSessionEventView(input: SessionEventViewInput) {
   if (input.cursor !== undefined) {
     if (input.cursor.length > 4096)
       throw new Error("session_events cursor exceeds 4096 characters");
+    let decoded: unknown;
     try {
-      continuation = cursorSchema.parse(
-        JSON.parse(Buffer.from(input.cursor, "base64url").toString()),
-      );
+      decoded = JSON.parse(Buffer.from(input.cursor, "base64url").toString());
     } catch {
       throw new Error("Invalid session_events cursor");
     }
+    const expanded = expandCompactCursor(decoded, input.sessionId);
+    if (expanded === SESSION_MISMATCH)
+      throw new Error("session_events cursor cannot change sessionId");
+    const parsed = cursorSchema.safeParse(expanded);
+    if (!parsed.success) throw new Error("Invalid session_events cursor");
+    continuation = parsed.data;
     const previous = continuation.selection;
     for (const key of [
       "sessionId",

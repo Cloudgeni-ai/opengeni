@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import type { SessionEvent } from "@opengeni/contracts";
 import type { ListSessionEventPageOptions, SessionEventPage } from "@opengeni/db";
 import { readSessionEventView, SESSION_EVENT_VIEW_MAX_BYTES } from "../src/mcp/session-event-view";
@@ -323,6 +323,108 @@ describe("session event content views", () => {
           read,
         ),
       ).rejects.toThrow("Invalid");
+    }
+  });
+});
+
+describe("compact v3 cursors (OPENGENI_EXPERIMENT_TOOL_RESULT_SIZE=1)", () => {
+  const FLAG = "OPENGENI_EXPERIMENT_TOOL_RESULT_SIZE";
+  const previous = process.env[FLAG];
+  afterEach(() => {
+    if (previous === undefined) delete process.env[FLAG];
+    else process.env[FLAG] = previous;
+  });
+  const rows = Array.from({ length: 30 }, (_, n) =>
+    n % 2 === 0
+      ? event(n + 1, "agent.toolCall.created", {
+          callId: `call-${n}`,
+          name: "exec_command",
+          arguments: { cmd: "ls" },
+        })
+      : event(n + 1, "agent.toolCall.output", { callId: `call-${n - 1}`, output: "ok" }),
+  );
+  const pages = async (cursorFlag: boolean) => {
+    if (cursorFlag) process.env[FLAG] = "1";
+    else delete process.env[FLAG];
+    const seen: number[][] = [];
+    const cursors: string[] = [];
+    let page = await readSessionEventView(
+      { sessionId, view: "tools", includeArguments: true, limit: 4 },
+      reader(rows),
+    );
+    seen.push(page.events.map((item) => item.sequence));
+    while (page.nextCursor) {
+      cursors.push(page.nextCursor);
+      page = await readSessionEventView({ sessionId, cursor: page.nextCursor }, reader(rows));
+      seen.push(page.events.map((item) => item.sequence));
+    }
+    return { seen, cursors };
+  };
+
+  test("pages identically to v2 with much shorter cursors", async () => {
+    const legacy = await pages(false);
+    const compact = await pages(true);
+    expect(compact.seen).toEqual(legacy.seen);
+    expect(compact.cursors.length).toBeGreaterThan(1);
+    for (const [index, cursor] of compact.cursors.entries()) {
+      expect(JSON.parse(Buffer.from(cursor, "base64url").toString())[0]).toBe(3);
+      expect(cursor.length * 3).toBeLessThan(legacy.cursors[index]!.length);
+    }
+  });
+
+  test("v2 cursors stay valid when v3 is emitted, and v3 decodes with the flag off", async () => {
+    const legacy = await pages(false);
+    process.env[FLAG] = "1";
+    const fromLegacy = await readSessionEventView(
+      { sessionId, cursor: legacy.cursors[0]! },
+      reader(rows),
+    );
+    const compact = await pages(true);
+    delete process.env[FLAG];
+    const fromCompact = await readSessionEventView(
+      { sessionId, cursor: compact.cursors[0]! },
+      reader(rows),
+    );
+    expect(fromCompact.events).toEqual(fromLegacy.events);
+  });
+
+  test("keeps the selection fences: session, view, details and malformed tokens", async () => {
+    process.env[FLAG] = "1";
+    const read = reader(rows);
+    const page = await readSessionEventView(
+      { sessionId, view: "tools", includeArguments: true, limit: 2 },
+      read,
+    );
+    const cursor = page.nextCursor!;
+    await expect(
+      readSessionEventView({ sessionId: "00000000-0000-4000-8000-000000000002", cursor }, read),
+    ).rejects.toThrow("cannot change sessionId");
+    for (const changes of [{ view: "results" as const }, { includeArguments: false }]) {
+      await expect(readSessionEventView({ sessionId, cursor, ...changes }, read)).rejects.toThrow(
+        "cannot change",
+      );
+    }
+    const decoded = JSON.parse(Buffer.from(cursor, "base64url").toString()) as unknown[];
+    const mutate = (index: number, value: unknown) => {
+      const copy = [...decoded];
+      copy[index] = value;
+      return Buffer.from(JSON.stringify(copy)).toString("base64url");
+    };
+    for (const malformed of [
+      mutate(2, "x"),
+      mutate(3, "x"),
+      mutate(4, -1),
+      mutate(7, "1"),
+      mutate(7, 4),
+      mutate(7, 1.5),
+      Buffer.from(JSON.stringify([...decoded, null, null, "extra"])).toString("base64url"),
+      mutate(9, -1),
+      Buffer.from(JSON.stringify(decoded.slice(0, 5))).toString("base64url"),
+      Buffer.from(JSON.stringify([3])).toString("base64url"),
+    ]) {
+      await expect(readSessionEventView({ sessionId, cursor: malformed }, read)).rejects.toThrow(
+        "Invalid",
+      );
     }
   });
 });
