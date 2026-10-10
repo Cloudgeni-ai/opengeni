@@ -313,27 +313,34 @@ export function OrganizationModelsList({
     );
   const loadingWorkspaces = Object.values(snapshots).some((value) => value === "loading");
 
-  /* Each workspace's own accounts, tagged with the workspace. */
+  /* Each workspace's own accounts, tagged with the workspace. A shared
+     workspace's Codex account is an organization account, listed (and its
+     reach edited) with the organization's; it isn't listed twice. */
+  const organizationCodexIds = new Set(
+    administrator ? orgCodex.accounts.map((account) => account.id) : [],
+  );
   const ownRows = ready.flatMap(({ workspace, snapshot }) => {
     const tag = workspace.personal ? "Personal workspace only" : `${workspace.name} only`;
     return [
-      ...snapshot.codexOwn.map((account) => (
-        <ListRow
-          key={`${workspace.id}:codex:${account.id}`}
-          leading={<ProviderTile provider="codex" size="lg" />}
-          title={codexAccountName(account)}
-          meta={[
-            tag,
-            planLabel(account.plan, "ChatGPT"),
-            account.appsDesignated ? "Codex Apps" : null,
-          ]}
-          cells={snapshot.codexOff ? { usage: NOT_IN_USE } : { usage: cachedCodexUsage(account) }}
-          indicator={
-            account.status !== "active" ? { kind: "attention", label: "Needs reconnect" } : "open"
-          }
-          onOpen={() => onOpenWorkspace(workspace.id, accountKey("codex", account.id))}
-        />
-      )),
+      ...snapshot.codexOwn
+        .filter((account) => !organizationCodexIds.has(account.id))
+        .map((account) => (
+          <ListRow
+            key={`${workspace.id}:codex:${account.id}`}
+            leading={<ProviderTile provider="codex" size="lg" />}
+            title={codexAccountName(account)}
+            meta={[
+              tag,
+              planLabel(account.plan, "ChatGPT"),
+              account.appsDesignated ? "Codex Apps" : null,
+            ]}
+            cells={snapshot.codexOff ? { usage: NOT_IN_USE } : { usage: cachedCodexUsage(account) }}
+            indicator={
+              account.status !== "active" ? { kind: "attention", label: "Needs reconnect" } : "open"
+            }
+            onOpen={() => onOpenWorkspace(workspace.id, accountKey("codex", account.id))}
+          />
+        )),
       ...snapshot.grokOwn.map((account) => (
         <ListRow
           key={`${workspace.id}:supergrok:${account.id}`}

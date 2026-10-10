@@ -959,12 +959,13 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
     expect((await connectionRow(second)).label).toBe("Team");
     expect((await connectionRow(first)).label).toBe("projection-a");
 
-    // Organization projection: administrators see unmanaged shared accounts.
+    // Organization projection: administrators see every organization account,
+    // including the one a shared workspace manages (design 5.4).
     const orgProjection = await getSubscriptionCoreOrganizationCodexProjection(client!.db, {
       organizationId: org.accountId,
       subjectId: org.ownerSubjectId,
     });
-    expect(orgProjection.accounts.map((account) => account.id)).toEqual([first]);
+    expect(orgProjection.accounts.map((account) => account.id)).toEqual([first, second]);
     expect(
       (
         await getSubscriptionCoreOrganizationCodexProjection(client!.db, {

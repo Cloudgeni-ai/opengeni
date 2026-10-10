@@ -425,7 +425,7 @@ export async function readSubscriptionCoreOrganizationPool(
       where connection.account_id = ${input.organizationId}::uuid
         and connection.provider = ${providerId} and connection.kind = 'subscription'
         and connection.disconnected_at is null
-        and connection.ownership = 'shared' and connection.managed_by_workspace_id is null
+        and connection.ownership = 'shared' and ${organizationAdministeredConnection("connection")}
       order by connection.created_at, connection.id`,
       );
       if (!rows.some((row) => row.id === primaryConnectionId)) primaryConnectionId = null;

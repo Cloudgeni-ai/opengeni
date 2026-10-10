@@ -226,7 +226,8 @@ function OrgCodexAccountDetail({
                 />
               }
             />
-            {codex.accounts.length > 1 ? (
+            {/* A workspace's account can't be the organization primary. */}
+            {codex.accounts.length > 1 && !access.data?.managedByWorkspaceId ? (
               <SettingRow
                 label="Primary account"
                 description="Used for new work when sharing is set to Primary only."

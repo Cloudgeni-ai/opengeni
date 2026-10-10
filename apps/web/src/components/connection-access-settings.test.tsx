@@ -12,7 +12,7 @@ GlobalRegistrator.register();
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
   true;
 
-const { ConnectionAccessFormPage, ConnectionAccessRows, useConnectionAccess } =
+const { ConnectionAccessFormPage, ConnectionAccessRows, useConnectionAccess, workspacesShort } =
   await import("./connection-access-settings");
 const { modelsScopeLabels, organizationReachLabel } = await import("./models/models-ui");
 
@@ -335,9 +335,8 @@ test("an organization account no workspace can use says so, on its tag, row and 
   });
   const labels = modelsScopeLabels("Acme", false);
   expect(organizationReachLabel(labels, access(null, true))).toBe("Everyone in Acme");
-  expect(organizationReachLabel(labels, access(["workspace-a"], false))).toBe(
-    "Selected workspaces",
-  );
+  // One workspace is named, as the Accounts list tags a workspace's own account.
+  expect(organizationReachLabel(labels, access(["workspace-a"], false))).toBe("Engineering only");
   expect(organizationReachLabel(labels, access([], true))).toBe("Selected workspaces");
   expect(organizationReachLabel(labels, access([], false))).toBe("No workspaces");
   expect(organizationReachLabel(labels, null)).toBe("Shared by Acme");
@@ -466,6 +465,156 @@ test("a refused or failed read says what to do, never the raw API error", async 
     expect(buttons()).toContain("Try again");
     expect(container.textContent).toContain("Technical details");
     expect(container.textContent).not.toContain("Opengeni API");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("a workspace's own account is an organization account: its workspace stays, people can be chosen", async () => {
+  type Policy = {
+    allowedModels: string[] | null;
+    allowedWorkspaces: string[] | null;
+    allowPersonalWorkspaces: boolean;
+    allowedPeople?: string[] | null;
+    version: number;
+  };
+  // Connected in Engineering: today only Engineering uses it.
+  let policy: Policy = {
+    allowedModels: null,
+    allowedWorkspaces: [],
+    allowPersonalWorkspaces: false,
+    version: 1,
+  };
+  const writes: Policy[] = [];
+  const response = () => ({
+    policy,
+    models: [{ id: "model-a", label: "Model A" }],
+    workspaces: [
+      { id: "workspace-a", name: "Engineering" },
+      { id: "workspace-b", name: "Finance" },
+    ],
+    personalWorkspacesSupported: true,
+    peopleSupported: true,
+    people: [
+      { id: "person-a", name: "Alex Morgan", email: "alex@example.com" },
+      { id: "person-b", name: null, email: "sam@example.com" },
+    ],
+    localWorkspaceIds: ["workspace-a"],
+    managedByWorkspaceId: "workspace-a",
+  });
+  const labels = modelsScopeLabels("Acme", false);
+  expect(organizationReachLabel(labels, response())).toBe("Engineering only");
+  expect(workspacesShort(policy, true, ["workspace-a"])).toBe("1 workspace");
+  expect(
+    workspacesShort({ ...policy, allowedPeople: ["person-a", "person-b"] }, true, ["workspace-a"]),
+  ).toBe("2 people");
+  expect(
+    organizationReachLabel(labels, {
+      ...response(),
+      policy: { ...policy, allowedPeople: ["person-a"] },
+    }),
+  ).toBe("Selected people");
+
+  const client = Object.assign(new OpenGeniBrowserClient({ baseUrl: "http://localhost" }), {
+    requestJson: async (method: string, _path: string, body: Policy) => {
+      if (method === "PUT") {
+        writes.push(structuredClone(body));
+        policy = { ...body, version: policy.version + 1 };
+        return policy;
+      }
+      return response();
+    },
+  });
+  function Page() {
+    const access = useConnectionAccess({
+      client,
+      organizationId: "org",
+      kind: "codex",
+      connectionId: "account",
+    });
+    return (
+      <ConnectionAccessFormPage
+        access={access}
+        organization
+        canManage
+        name="Team plan"
+        onClose={() => undefined}
+      />
+    );
+  }
+  const container = document.createElement("div");
+  document.body.append(container);
+  let root = createRoot(container);
+  const flush = () => act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+  const choose = async (text: string) =>
+    act(async () => {
+      const radio = [...container.querySelectorAll<HTMLElement>('[role="radio"]')].find(
+        (candidate) => candidate.textContent?.includes(text),
+      );
+      const label = [...container.querySelectorAll("label")].find(
+        (candidate) => candidate.textContent === text,
+      );
+      const target =
+        radio ?? (label ? (document.getElementById(label.htmlFor) ?? undefined) : undefined);
+      expect(target).toBeDefined();
+      target!.click();
+    });
+  const save = async () => {
+    const button = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+      (candidate) => candidate.textContent === "Save",
+    )!;
+    await act(async () => button.closest("form")!.requestSubmit());
+    await flush();
+  };
+  try {
+    await act(async () => root.render(<Page />));
+    await flush();
+    // Its workspace is shown included and can't be cleared.
+    expect(container.textContent).toContain("Connected here, so always included.");
+    expect(container.textContent).not.toContain("No workspace can use it");
+    await choose("Finance");
+    await save();
+    expect(writes.at(-1)).toEqual({
+      allowedModels: null,
+      allowedWorkspaces: ["workspace-b"],
+      allowPersonalWorkspaces: false,
+      version: 1,
+    });
+
+    // Chosen people replace workspaces; Personal is not a separate choice then.
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await act(async () => root.render(<Page />));
+    await flush();
+    await choose("Only selected people");
+    expect(container.textContent).not.toContain("Personal workspaces");
+    expect(container.textContent).toContain("No one can use it.");
+    await choose("Alex Morgan");
+    await choose("sam@example.com");
+    await save();
+    expect(writes.at(-1)).toEqual({
+      allowedModels: null,
+      allowedWorkspaces: [],
+      allowPersonalWorkspaces: false,
+      allowedPeople: ["person-a", "person-b"],
+      version: 2,
+    });
+
+    // Going back to workspaces clears the people explicitly.
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await act(async () => root.render(<Page />));
+    await flush();
+    await choose("All shared workspaces, including new ones");
+    await save();
+    expect(writes.at(-1)).toEqual({
+      allowedModels: null,
+      allowedWorkspaces: null,
+      allowPersonalWorkspaces: false,
+      allowedPeople: null,
+      version: 3,
+    });
   } finally {
     await act(async () => root.unmount());
     container.remove();
