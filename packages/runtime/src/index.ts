@@ -193,6 +193,11 @@ import {
 
 import { McpResultCustomDataBridge, unwrapSdkMcpResultProjection } from "./mcp-result-custom-data";
 import {
+  compactToolOutputEnabled,
+  withCompactShellToolOutput,
+  type ShellOutputPolicyState,
+} from "./sandbox/compact-tool-output";
+import {
   ConnectorAttachmentTransferError,
   projectConnectorAttachmentTransfers,
   type ConnectorAttachmentMaterializer,
@@ -4289,8 +4294,27 @@ function buildAgentCapabilitiesFromComposition(
       });
     };
   }
+  // Experiment (OPENGENI_EXPERIMENT_COMPACT_TOOL_OUTPUT=1, default off): compact
+  // the final model-visible shell result once, outside every execution fence.
+  if (compactToolOutputEnabled()) {
+    for (const capability of caps) {
+      const target = capability as unknown as { tools(): Tool<unknown>[] };
+      const original = target.tools;
+      target.tools = function () {
+        let state = shellOutputPolicyStates.get(this);
+        if (!state) {
+          state = new Map();
+          shellOutputPolicyStates.set(this, state);
+        }
+        return withCompactShellToolOutput(original.call(this), state);
+      };
+    }
+  }
   return caps;
 }
+
+/** Shell output policy per bound capability instance (see compact-tool-output). */
+const shellOutputPolicyStates = new WeakMap<object, ShellOutputPolicyState>();
 
 export function sandboxRunAs(_settings: Settings): string | undefined {
   return undefined;

@@ -1,0 +1,81 @@
+{
+ "grep-rn": {
+  "source": "ab7-main/abs-stepped-slices",
+  "tool": "exec_command",
+  "args": {
+   "cmd": "mkdir -p /workspace && cd /workspace && git clone -q https://github.com/abs-lang/abs repo && cd repo && git checkout -q cb1b3b671d0ee9fa9da9f7b02f86967953ffd10a && git checkout -qb stepped-slices && grep -rn \"IndexExpression\\|index ranges can only\" --include=*.go . | grep -v _test | head -50; go version",
+   "workdir": "/workspace",
+   "shell": "bash",
+   "login": false,
+   "tty": false,
+   "yield_time_ms": 30000,
+   "max_output_tokens": 4000
+  },
+  "output": "Process exited with code 127\n\nOutput:\n./evaluator/evaluator.go:207:\tcase *ast.IndexExpression:\n./evaluator/evaluator.go:208:\t\treturn evalIndexExpression(node, env)\n./evaluator/evaluator.go:324:\tcase *ast.IndexExpression:\n./evaluator/evaluator.go:438:func evalIndexAssignment(iex *ast.IndexExpression, expr object.Object, env *object.Environment) object.Object {\n./evaluator/evaluator.go:1202:\t\treturn evalHashIndexExpression(obj.Token, obj, &object.String{Token: pe.Token, Value: pe.Property.String()})\n./evaluator/evaluator.go:1306:func evalIndexExpression(node *ast.IndexExpression, env *object.Environment) object.Object {\n./evaluator/evaluator.go:1323:\t\treturn evalArrayIndexExpression(tok, left, index, end, node.IsRange)\n./evaluator/evaluator.go:1325:\t\treturn evalHashIndexExpression(tok, left, index)\n./evaluator/evaluator.go:1327:\t\treturn evalStringIndexExpression(tok, left, index, end, node.IsRange)\n./evaluator/evaluator.go:1333:func evalStringIndexExpression(tok token.Token, array, index object.Object, end object.Object, isRange bool) object.Object {\n./evaluator/evaluator.go:1335:\t// evalStringIndexExpression and evalArrayIndexExpression\n./evaluator/evaluator.go:1362:\t\t\treturn newError(tok, `index ranges can only be numerical: got \"%s\" (type %s)`, end.Inspect(), end.Type())\n./evaluator/evaluator.go:1396:func evalArrayIndexExpression(tok token.Token, array, index object.Object, end object.Object, isRange bool) object.Object {\n./evaluator/evaluator.go:1421:\t\t\treturn newError(tok, `index ranges can only be numerical: got \"%s\" (type %s)`, end.Inspect(), end.Type())\n./evaluator/evaluator.go:1484:func evalHashIndexExpression(tok token.Token, hash, index object.Object) object.Object {\n./parser/parser.go:81:\tprevIndexExpression *ast.IndexExpression\n./parser/parser.go:162:\tp.registerInfix(token.LBRACKET, p.parseIndexExpression)\n./parser/parser.go:310:\t\tif p.prevIndexExpression != nil {\n./parser/parser.go:312:\t\t\tstmt.Index = p.prevIndexExpression\n./parser/parser.go:315:\t\t\t// consume the IndexExpression\n./parser/parser.go:316:\t\t\tp.prevIndexExpression = nil\n./parser/parser.go:558:\t\tp.prevIndexExpression = nil\n./parser/parser.go:1004:func (p *Parser) parseIndexExpression(left ast.Expression) ast.Expression {\n./parser/parser.go:1005:\texp := &ast.IndexExpression{Token: p.curToken, Left: left}\n./parser/parser.go:1031:\tp.prevIndexExpression = exp\n./ast/ast.go:78:\tIndex    *IndexExpression    // support assignment to indexed expressions: a[0] = 1, h[\"a\"] = 1\n./ast/ast.go:565:// IndexExpression allows accessing a single index, or a range,\n./ast/ast.go:571:type IndexExpression struct {\n./ast/ast.go:579:func (ie *IndexExpression) expressionNode()      {}\n./ast/ast.go:580:func (ie *IndexExpression) TokenLiteral() string { return ie.Token.Literal }\n./ast/ast.go:581:func (ie *IndexExpression) String() string {\nbash: line 191: go: command not found\n"
+ },
+ "go-downloading": {
+  "source": "ab7-main/helm-array-merge-strategies",
+  "tool": "exec_command",
+  "args": {
+   "cmd": "cd /workspace/repo && cat > pkg/chart/common/util/merge_strategy.go <<'EOF'\n/*\nCopyright The Helm Authors.\n\nLicensed under the Apache License, Version 2.0 (the \"License\");\nyou may not use this file ex ... ons\n}\n\nfunc (r *%sAccessor) Deprecated() bool {'''%(t,t))\nopen(p,'w').write(s)\nEOF\nexport PATH=/tmp/gosdk/go/bin:$PATH; go build ./... 2>&1 | head -20",
+   "workdir": "/workspace",
+   "shell": "bash",
+   "login": false,
+   "tty": false,
+   "yield_time_ms": 180000,
+   "max_output_tokens": 6000
+  },
+  "output": "Process exited with code 0\n\nOutput:\ngo: downloading k8s.io/client-go v0.35.1\ngo: downloading github.com/Masterminds/semver/v3 v3.4.0\ngo: downloading github.com/fatih/color v1.18.0\ngo: downloading github.com/asaskevich/govalidator v0.0.0-20230301143203-a9d515a09cc2\ngo: downloading k8s.io/apimachinery v0.35.1\ngo: downloading github.com/cyphar/filepath-securejoin v0.6.1\ngo: downloading github.com/Masterminds/vcs v1.13.3\ngo: downloading github.com/fluxcd/cli-utils v0.37.2-flux.1\ngo: downloading sigs.k8s.io/yaml v1.6.0\ngo: downloading github.com/ProtonMail/go-crypto v1.3.0\ngo: downloading github.com/extism/go-sdk v1.7.1\ngo: downloading k8s.io/api v0.35.1\ngo: downloading github.com/tetratelabs/wazero v1.11.0\ngo: downloading github.com/Masterminds/sprig/v3 v3.3.0\ngo: downloading k8s.io/apiextensions-apiserver v0.35.1\ngo: downloading go.yaml.in/yaml/v3 v3.0.4\ngo: downloading github.com/gosuri/uitable v0.0.4\ngo: downloading k8s.io/apiserver v0.35.1\ngo: downloading golang.org/x/term v0.41.0\ngo: downloading github.com/santhosh-tekuri/jsonschema/v6 v6.0.2\n"
+ },
+ "go-test-ok-poll": {
+  "source": "ab7-main/helm-array-merge-strategies",
+  "tool": "write_stdin",
+  "args": {
+   "session_id": 7,
+   "chars": "",
+   "yield_time_ms": 280000,
+   "max_output_tokens": 6000
+  },
+  "output": "Process exited with code 0\n\nOutput:\ngo: downloading github.com/mattn/go-shellwords v1.0.12\n?   \thelm.sh/helm/v4/pkg/chart\t[no test files]\nok  \thelm.sh/helm/v4/pkg/chart/common\t0.023s\nok  \thelm.sh/helm/v4/pkg/chart/common/util\t0.028s\nok  \thelm.sh/helm/v4/pkg/chart/loader\t0.019s\nok  \thelm.sh/helm/v4/pkg/chart/loader/archive\t0.008s\nok  \thelm.sh/helm/v4/pkg/chart/v2\t0.017s\nok  \thelm.sh/helm/v4/pkg/chart/v2/lint\t0.087s\nok  \thelm.sh/helm/v4/pkg/chart/v2/lint/rules\t0.070s\nok  \thelm.sh/helm/v4/pkg/chart/v2/lint/support\t0.003s\nok  \thelm.sh/helm/v4/pkg/chart/v2/loader\t0.058s\nok  \thelm.sh/helm/v4/pkg/chart/v2/util\t0.198s\nok  \thelm.sh/helm/v4/internal/chart/v3\t0.012s\nok  \thelm.sh/helm/v4/internal/chart/v3/lint\t0.081s\nok  \thelm.sh/helm/v4/internal/chart/v3/lint/rules\t0.087s\nok  \thelm.sh/helm/v4/internal/chart/v3/lint/support\t0.002s\nok  \thelm.sh/helm/v4/internal/chart/v3/loader\t0.082s\nok  \thelm.sh/helm/v4/internal/chart/v3/util\t0.230s\nok  \thelm.sh/helm/v4/pkg/action\t29.443s\nok  \thelm.sh/helm/v4/pkg/cmd\t16.106s\nok  \thelm.sh/helm/v4/pkg/cmd/require\t0.001s\nok  \thelm.sh/helm/v4/pkg/cmd/search\t0.010s\n"
+ },
+ "vitest-tsc-color-poll": {
+  "source": "ab7-main/dynamodb-toolbox-conditional-attribute-requirements",
+  "tool": "write_stdin",
+  "args": {
+   "session_id": 10,
+   "chars": "",
+   "yield_time_ms": 290000,
+   "max_output_tokens": 6000
+  },
+  "output": "Process running with session ID 10\n\nOutput:\n\u001b[96msrc/schema/requiredIf.unit.test.ts\u001b[0m:\u001b[93m70\u001b[0m:\u001b[93m31\u001b[0m - \u001b[91merror\u001b[0m\u001b[90m TS2339: \u001b[0mProperty 'build' does not exist on type 'ItemSchema<ItemAttributes>'.\n\n\u001b[7m70\u001b[0m     expect(fromSchemaDTO(dto).build(SchemaDTO).toJSON()).toStrictEqual(dto)\n\u001b[7m  \u001b[0m \u001b[91m                              ~~~~~\u001b[0m\n\n\nFound 1 error in src/schema/requiredIf.unit.test.ts\u001b[90m:70\u001b[0m\n\n ✓ src/utils/validation/isBinary.unit.test.ts  (2 tests) 14ms\n ✓ src/utils/validation/isBigInt.unit.test.ts  (2 tests) 3ms\n ✓ src/entity/actions/get/getItemCommand.unit.test.ts  (1 test) 36ms\n ✓ src/utils/validation/isObject.unit.test.ts  (2 tests) 11ms\n ✓ src/entity/utils/doesSchemaValidateTableSchema.unit.test.ts  (6 tests) 15ms\n ✓ src/utils/validation/isBoolean.unit.test.ts  (2 tests) 13ms\n ✓ src/utils/validation/isString.unit.test.ts  (2 tests) 5ms\n ✓ src/utils/validation/isArray.unit.test.ts  (2 tests) 5ms\n ✓ src/utils/validation/isSet.unit.test.ts  (2 tests) 5ms\n\n Test Files  120 passed (120)\n      Tests  1283 passed (1283)\n   Start at  12:28:54\n   Duration  11.79s (transform 6.73s, setup 21ms, collect 64.63s, tests 2.83s, environment 57ms, prepare 19.32s)\n\n\nThis process is turn-scoped; it will stop when this turn ends or is interrupted.\n"
+ },
+ "progress-bars": {
+  "source": "ab7-main/sqlite-utils-safe-import-checkpoints",
+  "tool": "exec_command",
+  "args": {
+   "cmd": "cd /tmp && rm -f t.db && cat > t.py <<'EOF'\nfrom sqlite_utils import Database\nimport sqlite_utils.db as d, pytest\ndb=Database(memory=True)\ndb[\"t\"].insert({\"id\":1,\"a\":5},pk=\"id\")\ntry: db.create_import_ ... }]' | $S bulk t.db \"update t set a=:a where id=:id\" - --safe-mode; echo $?; $S rows t.db t\ncd /workspace/repo && python -m pytest -q -x 2>&1 | tail -5",
+   "yield_time_ms": 120000,
+   "max_output_tokens": 4000
+  },
+  "output": "Process exited with code 0\n\nOutput:\nok\r\n[{'id': 'fdb8c439026d4fb0930caf1ce7b9ec15', 'expression': 'a > 0'}, {'id': '24a49ef7a61f49878a5a63029ab2bd85', 'expression': 'SELECT COUNT(*) < 5 FROM t'}]\r\n{'success': True}\r\n{'success': False, 'checkpoint_id': '19e46969f71449f9bfc1e9f206546c0f', 'failures': [], 'error_report': 'Import failed and was rolled back: table t has no column named newcol'} {'id': <class 'int'>, 'a': <class 'int'>}\r\nFalse [{'id': 1, 'a': 5}, {'id': 2, 'a': 3}]\r\nFalse\r\n[Index(seq=0, name='idx_t_a', unique=0, origin='c', partial=0, columns=['a'])]\r\nna\r\n{'success': True} {'success': True}\r\nImportValidationError('Import validation failed - invariants violated: a > 0 (Invariant evaluated to false); SELECT COUNT(*) < 5 FROM t (Invariant evaluated to false)')\r\n\r\u001b[?25l  [------------------------------------]    0%\r\u001b[?25l  [####################################]  100%\u001b[?25h\r\n0\r\nda1133d012214d709ca810f8e4a7fbf3: a > 0\r\n\r\u001b[?25l  [------------------------------------]    0%\r\u001b[?25l  [############------------------------]   35%\r\u001b[?25l  [#######################-------------]   64%\r\u001b[?25l  [####################################]  100%\u001b[?25h\r\nError: UNIQUE constraint failed: t.id\r\n\r\nsql = INSERT INTO \"t\" (\"a\", \"id\") VALUES (?, ?), (?, ?)\r\nparameters = ['2', '1', '-5', '2']\r\n1\r\n[{\"id\": 1, \"a\": 2}]\r\nValidation passed: all invariants are valid\r\n0\r\nError: Import validation failed - rolled back. Failed invariants:\r\n  da1133d012214d709ca810f8e4a7fbf3: a > 0 (Invariant evaluated to false) [t]\r\n1\r\n[{\"id\": 1, \"a\": 2}]\r\nE   ModuleNotFoundError: No module named 'hypothesis'\r\n=========================== short test summary info ============================\r\nERROR tests/test_hypothesis.py\r\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!\r\n1 error in 0.59s\r\n"
+ },
+ "vitest-git-status-crlf": {
+  "source": "ab7-main/superjson-error-stack-serialization",
+  "tool": "exec_command",
+  "args": {
+   "cmd": "cd /workspace/repo && bun x tsc --noEmit 2>&1 | head -20; bun x vitest run 2>&1 | tail -15; git status --short",
+   "yield_time_ms": 90000
+  },
+  "output": "Process exited with code 0\n\nOutput:\n ✓ src/pathstringifier.test.ts  (13 tests) 9ms\r\n ✓ src/registry.test.ts  (1 test) 4ms\r\n ✓ src/accessDeep.test.ts  (2 tests) 5ms\r\n ✓ src/transformer.test.ts  (1 test) 6ms\r\n ✓ src/plainer.spec.ts  (1 test) 5ms\r\n ✓ src/index.test.ts  (61 tests | 2 skipped) 434ms\r\nstderr | src/index.test.ts > stringify & parse > regression #65: BigInt on Safari v13\r\nPlease add a BigInt polyfill.\r\n\r\n\r\n Test Files  7 passed (7)\r\n      Tests  82 passed | 1 skipped | 1 todo (84)\r\n   Start at  12:20:07\r\n   Duration  1.32s (transform 619ms, setup 0ms, collect 1.46s, tests 471ms, environment 2ms, prepare 910ms)\r\n\r\n \u001b[31mM\u001b[m src/index.ts\r\n \u001b[31mM\u001b[m src/transformer.ts\r\n\u001b[31m??\u001b[m bun.lock\r\n\u001b[31m??\u001b[m src/error-class-registry.ts\r\n\u001b[31m??\u001b[m src/error-options.ts\r\n\u001b[31m??\u001b[m src/error-sanitizer.ts\r\n\u001b[31m??\u001b[m src/error-stack.ts\r\n"
+ },
+ "sed-read-crlf": {
+  "source": "ab7-main/sqlite-utils-safe-import-checkpoints",
+  "tool": "exec_command",
+  "args": {
+   "cmd": "cd /workspace/repo && sed -n 895,1500p sqlite_utils/cli.py; sed -n 755,805p sqlite_utils/cli.py",
+   "yield_time_ms": 5000,
+   "max_output_tokens": 20000
+  },
+  "output": "Chunk ID: c1efe5\nWall time: 0.0650 seconds\nProcess exited with code 0\nOutput:\ndef import_options(fn):\r\n    for decorator in reversed(_import_options):\r\n        fn = decorator(fn)\r\n    return fn\r\n\r\n\r\ndef insert_upsert_options(*, require_pk=False):\r\n    def inner(fn):\r\n        for decorator in reversed(\r\n            (\r\n                click.argument(\r\n                    \"path\",\r\n                    type=click.Path(file_okay=True, dir_okay=False, allow_dash=False),\r\n                    required=True,\r\n                ),\r\n                click.argument(\"table\"),\r\n                click.argument(\"file\", type=click.File(\"rb\", lazy=True), required=True),\r\n                click.option(\r\n                    \"--pk\",\r\n                    help=\"Columns to use as the primary key, e.g. id\",\r\n                    multiple=True,\r\n                    required=require_pk,\r\n                ),\r\n            )\r\n            + _import_options\r\n            + (\r\n                click.option(\r\n                    \"--batch-size\", type=int, default=100, help=\"Commit every X records\"\r\n                ),\r\n                click.option(\"--stop-after\", type=int, help=\"Stop after X records\"),\r\n                click.option(\r\n                    \"--alter\",\r\n                    is_flag=True,\r\n                    help=\"Alter existing table to add any missing columns\",\r\n                ),\r\n                click.option(\r\n                    \"--not-null\",\r\n                    multiple=True,\r\n                    help=\"Columns that should be created as NOT NULL\",\r\n                ),\r\n                click.option(\r\n                    \"--default\",\r\n                    multiple=True,\r\n                    type=(str, str),\r\n                    help=\"Default value that should be set for a column\",\r\n                ),\r\n                click.option(\r\n                    \"-d\",\r\n                    \"--detect-types\",\r\n                    is_flag=True,\r\n                    help=\"Detect types for columns in CSV/TSV data (default)\",\r\n                ),\r\n                click.option(\r\n                    \"--no-detect-types\",\r\n                    is_flag=True,\r\n                    help=\"Treat all CSV/TSV columns as TEXT\",\r\n                ),\r\n                click.option(\r\n                    \"--analyze\",\r\n                    is_flag=True,\r\n                    help=\"Run ANALYZE at the end of this operation\",\r\n                ),\r\n                load_extension_option,\r\n                click.option(\"--silent\", is_flag=True, help=\"Do not show progress bar\"),\r\n                click.option(\r\n                    \"--strict\",\r\n                    is_flag=True,\r\n                    default=False,\r\n                    help=\"Apply STRICT mode to created table\",\r\n                ),\r\n            )\r\n        ):\r\n            fn = decorator(fn)\r\n        return fn\r\n\r\n    return inner\r\n\r\n\r\ndef insert_upsert_implementation(\r\n    path,\r\n    table,\r\n    file,\r\n    pk,\r\n    flatten,\r\n    nl,\r\n    csv,\r\n    tsv,\r\n    empty_null,path:\r\n        db = sqlite_utils.Database(path_)\r\n        _register_db_for_cleanup(db)\r\n        _load_extensions(db, load_extension)\r\n        db.disable_wal()\r\n\r\n\r\n@cli.command(name=\"enable-counts\")\r\n"
+ }
+}
