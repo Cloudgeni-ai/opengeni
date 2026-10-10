@@ -529,7 +529,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "codexConnectPoll",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/codex/connect/poll",
-    "request": [],
+    "request": [
+      "SubscriptionConnectPollRequest"
+    ],
     "response": []
   },
   {
@@ -1491,7 +1493,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "designateCodexAppsAccount",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/codex/apps",
-    "request": [],
+    "request": [
+      "CodexAppsDesignationRequest"
+    ],
     "response": []
   },
   {
@@ -4567,7 +4571,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "organizationSupergrokConnectPoll",
     "method": "POST",
     "path": "/v1/organizations/:organizationId/supergrok/connect/poll",
-    "request": [],
+    "request": [
+      "SubscriptionConnectPollRequest"
+    ],
     "response": []
   },
   {
@@ -4581,42 +4587,54 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "PATCH /v1/organizations/:organizationId/codex/accounts/:accountId",
     "method": "PATCH",
     "path": "/v1/organizations/:organizationId/codex/accounts/:accountId",
-    "request": [],
+    "request": [
+      "SubscriptionAccountRenameRequest"
+    ],
     "response": []
   },
   {
     "id": "PATCH /v1/organizations/:organizationId/codex/accounts/:accountId/allocator",
     "method": "PATCH",
     "path": "/v1/organizations/:organizationId/codex/accounts/:accountId/allocator",
-    "request": [],
+    "request": [
+      "SubscriptionAccountToggleRequest"
+    ],
     "response": []
   },
   {
     "id": "PATCH /v1/organizations/:organizationId/codex/accounts/:accountId/extra-credits",
     "method": "PATCH",
     "path": "/v1/organizations/:organizationId/codex/accounts/:accountId/extra-credits",
-    "request": [],
+    "request": [
+      "SubscriptionAccountToggleRequest"
+    ],
     "response": []
   },
   {
     "id": "PATCH /v1/organizations/:organizationId/codex/settings",
     "method": "PATCH",
     "path": "/v1/organizations/:organizationId/codex/settings",
-    "request": [],
+    "request": [
+      "SubscriptionRotationSettingsRequest"
+    ],
     "response": []
   },
   {
     "id": "PATCH /v1/workspaces/:workspaceId/codex/accounts/:accountId/extra-credits",
     "method": "PATCH",
     "path": "/v1/workspaces/:workspaceId/codex/accounts/:accountId/extra-credits",
-    "request": [],
+    "request": [
+      "SubscriptionAccountToggleRequest"
+    ],
     "response": []
   },
   {
     "id": "PATCH /v1/workspaces/:workspaceId/codex/source",
     "method": "PATCH",
     "path": "/v1/workspaces/:workspaceId/codex/source",
-    "request": [],
+    "request": [
+      "CodexSourceRequest"
+    ],
     "response": []
   },
   {
@@ -4655,7 +4673,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "pinSessionCodexAccount",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/codex-account",
-    "request": [],
+    "request": [
+      "SessionCodexAccountPinRequest"
+    ],
     "response": []
   },
   {
@@ -4669,7 +4689,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "POST /v1/organizations/:organizationId/codex/connect/poll",
     "method": "POST",
     "path": "/v1/organizations/:organizationId/codex/connect/poll",
-    "request": [],
+    "request": [
+      "SubscriptionConnectPollRequest"
+    ],
     "response": []
   },
   {
@@ -5091,14 +5113,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "PUT /v1/organizations/:scopeId/model-connections/:kind/:connectionId/access",
     "method": "PUT",
     "path": "/v1/organizations/:scopeId/model-connections/:kind/:connectionId/access",
-    "request": [],
+    "request": [
+      "ModelConnectionAccessPolicy"
+    ],
     "response": []
   },
   {
     "id": "PUT /v1/workspaces/:scopeId/model-connections/:kind/:connectionId/access",
     "method": "PUT",
     "path": "/v1/workspaces/:scopeId/model-connections/:kind/:connectionId/access",
-    "request": [],
+    "request": [
+      "ModelConnectionAccessPolicy"
+    ],
     "response": []
   },
   {
@@ -5395,7 +5421,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "renameClaudeSubscriptionAccount",
     "method": "PATCH",
     "path": "/v1/workspaces/:workspaceId/claude/accounts/:accountId",
-    "request": [],
+    "request": [
+      "SubscriptionAccountRenameRequest"
+    ],
     "response": [
       "ClaudeSubscriptionAccount"
     ]
@@ -5404,28 +5432,36 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "renameCodexAccount",
     "method": "PATCH",
     "path": "/v1/workspaces/:workspaceId/codex/accounts/:accountId",
-    "request": [],
+    "request": [
+      "SubscriptionAccountRenameRequest"
+    ],
     "response": []
   },
   {
     "id": "renameOrganizationClaudeSubscriptionAccount",
     "method": "PATCH",
     "path": "/v1/organizations/:organizationId/claude/accounts/:accountId",
-    "request": [],
+    "request": [
+      "SubscriptionAccountRenameRequest"
+    ],
     "response": []
   },
   {
     "id": "renameOrganizationSuperGrokAccount",
     "method": "PATCH",
     "path": "/v1/organizations/:organizationId/supergrok/accounts/:accountId",
-    "request": [],
+    "request": [
+      "SubscriptionAccountRenameRequest"
+    ],
     "response": []
   },
   {
     "id": "renameSuperGrokAccount",
     "method": "PATCH",
     "path": "/v1/workspaces/:workspaceId/supergrok/accounts/:accountId",
-    "request": [],
+    "request": [
+      "SubscriptionAccountRenameRequest"
+    ],
     "response": []
   },
   {
@@ -5876,14 +5912,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "setClaudeSubscriptionAccountAllocator",
     "method": "PATCH",
     "path": "/v1/workspaces/:workspaceId/claude/accounts/:accountId/allocator",
-    "request": [],
+    "request": [
+      "SubscriptionAccountToggleRequest"
+    ],
     "response": []
   },
   {
     "id": "setClaudeSubscriptionRotationSettings",
     "method": "PATCH",
     "path": "/v1/workspaces/:workspaceId/claude/settings",
-    "request": [],
+    "request": [
+      "SubscriptionRotationSettingsRequest"
+    ],
     "response": [
       "SubscriptionPoolSettings"
     ]
@@ -5892,14 +5932,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "setCodexAccountAllocator",
     "method": "PATCH",
     "path": "/v1/workspaces/:workspaceId/codex/accounts/:accountId/allocator",
-    "request": [],
+    "request": [
+      "SubscriptionAccountToggleRequest"
+    ],
     "response": []
   },
   {
     "id": "setCodexRotationSettings",
     "method": "PATCH",
     "path": "/v1/workspaces/:workspaceId/codex/settings",
-    "request": [],
+    "request": [
+      "SubscriptionRotationSettingsRequest"
+    ],
     "response": []
   },
   {
@@ -5928,14 +5972,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "setOrganizationClaudeSubscriptionAccountAllocator",
     "method": "PATCH",
     "path": "/v1/organizations/:organizationId/claude/accounts/:accountId/allocator",
-    "request": [],
+    "request": [
+      "SubscriptionAccountToggleRequest"
+    ],
     "response": []
   },
   {
     "id": "setOrganizationClaudeSubscriptionRotationSettings",
     "method": "PATCH",
     "path": "/v1/organizations/:organizationId/claude/settings",
-    "request": [],
+    "request": [
+      "SubscriptionRotationSettingsRequest"
+    ],
     "response": [
       "SubscriptionPoolSettings"
     ]
@@ -5944,14 +5992,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "setOrganizationSuperGrokAccountAllocator",
     "method": "PATCH",
     "path": "/v1/organizations/:organizationId/supergrok/accounts/:accountId/allocator",
-    "request": [],
+    "request": [
+      "SubscriptionAccountToggleRequest"
+    ],
     "response": []
   },
   {
     "id": "setOrganizationSuperGrokRotationSettings",
     "method": "PATCH",
     "path": "/v1/organizations/:organizationId/supergrok/settings",
-    "request": [],
+    "request": [
+      "SubscriptionRotationSettingsRequest"
+    ],
     "response": []
   },
   {
@@ -5970,14 +6022,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "setSuperGrokAccountAllocator",
     "method": "PATCH",
     "path": "/v1/workspaces/:workspaceId/supergrok/accounts/:accountId/allocator",
-    "request": [],
+    "request": [
+      "SubscriptionAccountToggleRequest"
+    ],
     "response": []
   },
   {
     "id": "setSuperGrokRotationSettings",
     "method": "PATCH",
     "path": "/v1/workspaces/:workspaceId/supergrok/settings",
-    "request": [],
+    "request": [
+      "SubscriptionRotationSettingsRequest"
+    ],
     "response": []
   },
   {
@@ -6184,14 +6240,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "supergrokConnectPoll",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/supergrok/connect/poll",
-    "request": [],
+    "request": [
+      "SubscriptionConnectPollRequest"
+    ],
     "response": []
   },
   {
     "id": "supergrokConnectStart",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/supergrok/connect/start",
-    "request": [],
+    "request": [
+      "SupergrokConnectStartRequest"
+    ],
     "response": []
   },
   {
@@ -6983,7 +7043,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "updateWorkspaceModelAccessPolicy",
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/model-policy",
-    "request": [],
+    "request": [
+      "UpdateWorkspaceModelPolicyRequest"
+    ],
     "response": []
   },
   {

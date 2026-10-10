@@ -263,6 +263,11 @@ import {
 } from "../http/acting-person";
 import * as z from "zod/v4";
 import {
+  CodexSourceRequest,
+  SubscriptionAccountToggleRequest,
+  SubscriptionRotationSettingsRequest,
+} from "@opengeni/contracts";
+import {
   hashCodexBrowserSession,
   signCodexRedemptionConfirmation,
   verifyCodexRedemptionConfirmation,
@@ -815,11 +820,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.patch("/v1/workspaces/:workspaceId/codex/source", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
-    const parsed = z
-      .object({
-        mode: z.enum(["automatic", "workspace", "organization", "disabled"]),
-      })
-      .safeParse(await c.req.json().catch(() => null));
+    const parsed = CodexSourceRequest.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
       throw new HTTPException(400, {
         message: "a valid Codex source mode is required",
@@ -1004,9 +1005,9 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     const organizationId = c.req.param("organizationId");
     requireSameOriginBrowserMutation(c, deps);
     const human = await requireOrganizationCodexHuman(c, deps, organizationId);
-    const parsed = z
-      .object({ rotationEnabled: z.boolean() })
-      .safeParse(await c.req.json().catch(() => null));
+    const parsed = SubscriptionRotationSettingsRequest.safeParse(
+      await c.req.json().catch(() => null),
+    );
     if (!parsed.success) {
       throw new HTTPException(400, { message: "rotationEnabled is required" });
     }
@@ -1024,12 +1025,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     const organizationId = c.req.param("organizationId");
     requireSameOriginBrowserMutation(c, deps);
     const human = await requireOrganizationCodexHuman(c, deps, organizationId);
-    const parsed = z
-      .object({
-        enabled: z.boolean(),
-        expectedVersion: z.number().int().positive(),
-      })
-      .safeParse(await c.req.json().catch(() => null));
+    const parsed = SubscriptionAccountToggleRequest.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
       throw new HTTPException(400, { message: "enabled and expectedVersion are required" });
     }
@@ -1045,12 +1041,9 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       const organizationId = c.req.param("organizationId");
       requireSameOriginBrowserMutation(c, deps);
       const human = await requireOrganizationCodexHuman(c, deps, organizationId);
-      const parsed = z
-        .object({
-          enabled: z.boolean(),
-          expectedVersion: z.number().int().positive(),
-        })
-        .safeParse(await c.req.json().catch(() => null));
+      const parsed = SubscriptionAccountToggleRequest.safeParse(
+        await c.req.json().catch(() => null),
+      );
       if (!parsed.success) {
         throw new HTTPException(400, { message: "enabled and expectedVersion are required" });
       }
@@ -1353,12 +1346,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
     await codexRouteDisposition(deps, grant.accountId);
 
-    const parsed = z
-      .object({
-        enabled: z.boolean(),
-        expectedVersion: z.number().int().positive(),
-      })
-      .safeParse(await c.req.json().catch(() => null));
+    const parsed = SubscriptionAccountToggleRequest.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
       throw new HTTPException(400, {
         message: "enabled and expectedVersion are required",
@@ -1379,12 +1367,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
     await codexRouteDisposition(deps, grant.accountId);
 
-    const parsed = z
-      .object({
-        enabled: z.boolean(),
-        expectedVersion: z.number().int().positive(),
-      })
-      .safeParse(await c.req.json().catch(() => null));
+    const parsed = SubscriptionAccountToggleRequest.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
       throw new HTTPException(400, {
         message: "enabled and expectedVersion are required",

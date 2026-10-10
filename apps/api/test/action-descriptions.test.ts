@@ -40,4 +40,36 @@ describe("action descriptions", () => {
     )!;
     expect(describeAction(entry).description).toContain("which models");
   });
+
+  // Actions that change something but take no body: the path says it all.
+  const BODYLESS =
+    /\/(activate|usage\/refresh|refresh|connect\/start|reset-credits\/(prepare|redeem))$|\/organizations\/:organizationId\/(codex|supergrok)\/connect\/start$/;
+
+  test("every subscription and model settings change shows the body to send", () => {
+    const missing = ACTION_CATALOG.filter(
+      (entry) =>
+        DESCRIBED_ACTION_PATH.test(entry.path) &&
+        (entry.method === "POST" || entry.method === "PUT" || entry.method === "PATCH") &&
+        !BODYLESS.test(entry.path) &&
+        !describeAction(entry).input.some((input) => input.schema),
+    ).map((entry) => `${entry.method} ${entry.path}`);
+    expect(missing).toEqual([]);
+  });
+
+  test("describe gives the model access body its fields", () => {
+    const entry = ACTION_CATALOG.find(
+      (candidate) =>
+        candidate.method === "PUT" &&
+        candidate.path ===
+          "/v1/organizations/:scopeId/model-connections/:kind/:connectionId/access",
+    )!;
+    const input = describeAction(entry).input[0]!;
+    expect(input.in).toBe("body");
+    expect(Object.keys((input.schema as { properties: object }).properties).sort()).toEqual([
+      "allowPersonalWorkspaces",
+      "allowedModels",
+      "allowedWorkspaces",
+      "version",
+    ]);
+  });
 });

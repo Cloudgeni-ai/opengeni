@@ -17,7 +17,11 @@ import {
   environmentsEncryptionKeyBytes,
   withXaiSubscriptionCatalogProvider,
 } from "@opengeni/config";
-import type { XaiProviderAccountAuthoritySnapshotV1 } from "@opengeni/contracts";
+import {
+  SubscriptionConnectPollRequest,
+  SupergrokConnectStartRequest,
+  type XaiProviderAccountAuthoritySnapshotV1,
+} from "@opengeni/contracts";
 import {
   disconnectXaiSubscriptionCredentialAndRepick,
   ensureXaiRotationSettings,
@@ -59,7 +63,6 @@ import {
 } from "@opengeni/xai-subscription";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import * as z from "zod/v4";
 import { projectClientModel } from "../model-catalog";
 import { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
 import { requireConnectOwnerAuthority } from "../integrations/connect-authority";
@@ -77,10 +80,8 @@ type SuperGrokConnectState = {
   iat: number;
 };
 
-const connectStartBody = z.object({
-  scope: z.enum(["workspace", "user"]).default("workspace"),
-});
-const connectPollBody = z.object({ state: z.string().min(1).max(16_384) });
+const connectStartBody = SupergrokConnectStartRequest;
+const connectPollBody = SubscriptionConnectPollRequest;
 
 function requireEnabled(deps: ApiRouteDeps): void {
   if (!deps.settings.supergrokSubscriptionEnabled) {
