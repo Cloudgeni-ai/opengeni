@@ -175,11 +175,16 @@ const asOwner = <T>(org: Org, fn: () => Promise<T>) =>
 describe("subscription-core binding gates (pure)", () => {
   test("unregistered providers and another provider's primary column are refused", () => {
     expect(subscriptionCoreProviderId(registered())).toBe("codex");
+    // The unregistered binding has no primary column, so only the registry
+    // check can refuse it.
     expect(() =>
       subscriptionCoreProviderId(
-        variant((base) => ({ adapter: { ...base.adapter, provider: "unregistered-provider" } })),
+        variant((base) => ({
+          adapter: { ...base.adapter, provider: "unregistered-provider" },
+          settings: { primaryColumn: null },
+        })),
       ),
-    ).toThrow();
+    ).toThrow("No subscription-core provider is registered for this id");
     expect(() =>
       subscriptionCoreProviderId(
         variant(() => ({ settings: { primaryColumn: "other_primary_connection_id" } })),
@@ -204,6 +209,7 @@ describe("subscription-core binding gates (pure)", () => {
   });
 
   test("the Codex source refusal keeps its one-argument constructor", () => {
+    expect(SubscriptionCoreCodexSourceRefusedError.length).toBe(1);
     expect(
       new SubscriptionCoreCodexSourceRefusedError(
         "Codex source modes are not available for personal workspaces",
@@ -250,10 +256,21 @@ describe.skipIf(!realDb)("subscription-core binding gates (PostgreSQL)", () => {
   test("writers refuse an unregistered provider or a foreign primary column and write nothing", async () => {
     const org = await organization();
     const before = await settingsRow(org, null);
-    for (const binding of [
-      variant((base) => ({ adapter: { ...base.adapter, provider: "unregistered-provider" } })),
-      variant(() => ({ settings: { primaryColumn: "other_primary_connection_id" } })),
-    ]) {
+    // Each binding trips exactly one gate: the unregistered one has no
+    // primary column, and the foreign column belongs to a registered provider.
+    for (const [binding, message] of [
+      [
+        variant((base) => ({
+          adapter: { ...base.adapter, provider: "unregistered-provider" },
+          settings: { primaryColumn: null },
+        })),
+        "No subscription-core provider is registered for this id",
+      ],
+      [
+        variant(() => ({ settings: { primaryColumn: "other_primary_connection_id" } })),
+        "another provider's primary column",
+      ],
+    ] as const) {
       await expect(
         asOwner(org, () =>
           setSubscriptionCoreRotation(client!.db, binding, {
@@ -263,7 +280,7 @@ describe.skipIf(!realDb)("subscription-core binding gates (PostgreSQL)", () => {
             rotationEnabled: false,
           }),
         ),
-      ).rejects.toThrow();
+      ).rejects.toThrow(message);
     }
     expect(await settingsRow(org, null)).toEqual(before);
   });
