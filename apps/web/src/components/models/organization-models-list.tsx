@@ -1,7 +1,12 @@
 import { SubscriptionAccountRow } from "./subscription-account-ui";
 import { subscriptionAccountName } from "./use-subscription-account-pool";
 import type { ClaudeSubscriptions } from "./use-claude-subscriptions";
-import { ClaudeAccountRows, ClaudeSettingRows, claudePlan } from "./claude-subscription-models";
+import {
+  ClaudeAccountRows,
+  ClaudeSettingRows,
+  claudePlan,
+  claudeUsageCell,
+} from "./claude-subscription-models";
 import type {
   CodexAccount,
   ConnectionMetadata,
@@ -349,6 +354,7 @@ export function OrganizationModelsList({
           email={account.email}
           primary={account.active}
           meta={[account.scope === "user" ? tag + " · only you" : tag, claudePlan(account)]}
+          cells={{ usage: claudeUsageCell(account) }}
           indicator={
             account.status !== "active" ? { kind: "attention", label: "Needs reconnect" } : "open"
           }
@@ -488,7 +494,8 @@ export function OrganizationModelsList({
         )}
         {administrator ? null : (
           <p className="m-0 pt-2 pb-3 text-sm leading-5 text-fg-muted">
-            Only organization owners and admins can add accounts.
+            To connect your own account, open one of your workspaces. Only organization owners and
+            admins add accounts for everyone.
           </p>
         )}
       </Section>
@@ -693,6 +700,7 @@ function sharedAccountRows(
         title={subscriptionAccountName(account)}
         email={account.email}
         meta={[labels.organization, usedIn(where), claudePlan(account)]}
+        cells={{ usage: claudeUsageCell(account) }}
       />
     )),
     ...[...keys.entries()].map(([id, { models, where }]) => (
