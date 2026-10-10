@@ -215,6 +215,30 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
                 : withOrganizationOpenRouterCatalogProvider(settings, models);
         }
       }
+      // The people an administrator can choose, or null when the account
+      // can't be limited to people or the organization has more members than
+      // its member list shows (people are then not offered).
+      const people =
+        organizationCore && coreAccess?.peopleSupported
+          ? await listOrganizationAdministrationMembers(deps.db, {
+              organizationId: connection.accountId,
+              actorSubjectId: connection.subjectId,
+            }).then(
+              (members) =>
+                members
+                  .filter(
+                    (member) =>
+                      member.status === "active" &&
+                      member.revokedAt === null &&
+                      member.subjectId.startsWith("user:"),
+                  )
+                  .map(({ id, name, email }) => ({ id, name, email })),
+              (error: unknown) => {
+                if (error instanceof z.ZodError) return null;
+                throw error;
+              },
+            )
+          : null;
       return c.json(
         ModelConnectionAccessResponse.parse({
           policy,
@@ -229,24 +253,7 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
               connection.kind === "claude_subscription"),
           ...(organizationCore
             ? {
-                peopleSupported: coreAccess.peopleSupported,
-                ...(coreAccess.peopleSupported
-                  ? {
-                      people: (
-                        await listOrganizationAdministrationMembers(deps.db, {
-                          organizationId: connection.accountId,
-                          actorSubjectId: connection.subjectId,
-                        })
-                      )
-                        .filter(
-                          (member) =>
-                            member.status === "active" &&
-                            member.revokedAt === null &&
-                            member.subjectId.startsWith("user:"),
-                        )
-                        .map(({ id, name, email }) => ({ id, name, email })),
-                    }
-                  : {}),
+                ...(people ? { peopleSupported: true, people } : { peopleSupported: false }),
                 localWorkspaceIds: coreAccess.localWorkspaceIds,
                 managedByWorkspaceId: coreAccess.managedByWorkspaceId,
               }

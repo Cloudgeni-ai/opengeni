@@ -429,7 +429,12 @@ export async function updateSubscriptionCoreConnectionAccess(
     }
     if (Number(current.access_version) !== policy.version) return null;
     // A form that never saw people (an older client) must not replace them.
-    if (current.scope_kind === "people" && policy.allowedPeople === undefined) return null;
+    if (
+      target.workspaceId === null &&
+      current.scope_kind === "people" &&
+      policy.allowedPeople === undefined
+    )
+      return null;
     const id = current.id;
     const models = textArray(policy.allowedModels);
     if (target.workspaceId !== null) {

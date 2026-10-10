@@ -4360,9 +4360,11 @@ managed connection and read the same rows with the same meaning. It can ship
 alone or in the same release as the SuperGrok and Claude cutovers. It must
 run after 0713 (ordinal order guarantees it).
 
-**Parity check.** Run this read-only inventory as the migration owner before
-and after the release; the counts must be identical (the migration writes no
-row), and `personal_managed` must be 0 (a shared connection managed by a
+**Parity check.** Run this read-only inventory before and after the release
+as a superuser or another role with `BYPASSRLS` (row security hides these
+tables from the migration owner, so as that role every count reads 0); the
+counts must be identical (the migration writes no row), and
+`personal_managed` must be 0 (a shared connection managed by a
 Personal workspace is not an organization account; investigate before any
 repair). On a database without 0713 yet, the reach table is still named
 `opengeni_private.subscription_codex_auto_assignments`:
@@ -4390,9 +4392,18 @@ GROUP BY connection.account_id, connection.provider
 ORDER BY connection.account_id, connection.provider;
 ```
 
+**Rollout rule.** Do not limit any account to chosen people (`allowedPeople`)
+until every API pod runs this release. An older pod reads a people-scoped
+account as "no workspaces", and a save there would switch it back to
+workspace scope. Workspace-managed accounts can't be limited to people at all
+(`peopleSupported: false`, refused with 422) so their workspace's
+administrators keep managing them; organizations whose member list exceeds
+1000 members are not offered people either.
+
 **Validation.** As an organization administrator, open a workspace-managed
 account's access on the organization route: it reads its workspace's own copy
-(`localWorkspaceIds`), its manager and no other workspace. Saving a reach
+(`localWorkspaceIds`), its manager and no other workspace, and
+`peopleSupported` is false. Saving a reach
 changes only scope, assignments, organization-pool rows, people and the
 reach row; credentials, refresh generations, quota, bindings, leases and
 waiters are untouched, and the account-wide wake follows every save. Until
@@ -4400,8 +4411,10 @@ the owner approves the Accounts page change, the page still lists these
 accounts under their workspace.
 
 **Fix forward.** The previous setter definitions are in 0713. If they
-misbehave, ship a forward migration restoring those definitions; saves on
-managed accounts then fail with "not found" again, and nothing else changes.
+misbehave, ship a forward migration restoring those definitions. Saves on
+managed accounts then fail (the setter's "not found" surfaces as a server
+error while this release's API is deployed) and write nothing; nothing else
+changes.
 
 ### Slack API pilot activation (0597)
 

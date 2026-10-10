@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
+import { z } from "zod";
 import {
   codexAppsRequestAuthForDesignation,
   resolveCodexAppsCredentialIdForRun,
@@ -1204,6 +1205,16 @@ describe("the organization access editor for a workspace-managed Codex account",
       localWorkspaceIds: [MANAGER],
       managedByWorkspaceId: null,
     });
+
+    // Beyond what the member list can show, people are not offered; the editor still works.
+    mock("listOrganizationAdministrationMembers", async () => {
+      throw new z.ZodError([]);
+    });
+    const large = await app().fetch(organizationAdminRequest(path));
+    expect(large.status).toBe(200);
+    const largeBody = await large.json();
+    expect(largeBody.peopleSupported).toBe(false);
+    expect(largeBody.people).toBeUndefined();
   });
 
   test("a person outside the organization or a mixed choice is a 422, never a write", async () => {

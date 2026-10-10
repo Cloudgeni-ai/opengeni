@@ -3499,6 +3499,11 @@ as "not an organization account":
    people's sessions in that workspace can use the account. A save without
    `allowedPeople` while the scope is people is refused as a stale form
    (409), so an older form cannot silently replace people with workspaces.
+   That guard lives in the API, so older API pods during a rollout bypass it:
+   the runbook forbids people choices until every pod runs the release.
+   People are offered only when the organization's member list can be read
+   (at most 1000 members, its existing limit); otherwise the editor works
+   without the people choice.
 5. **Delegated management is unchanged.** The managing workspace's
    administrators keep exactly what they can do today: reconnect, rename,
    allocation, the models of the account from their workspace (0702), the
