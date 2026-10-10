@@ -46,6 +46,12 @@ use the workspace default for new work. A model the caller cannot use returns
   for models that declare structured output. `text` is accepted as a no-op.
 - `stream: true`, with `stream_options.include_usage` for a final usage chunk.
 
+Some backends do not take every control. The Codex subscription backend
+ignores `temperature`, `top_p` and the output-token limits (its request
+allowlist drops them, as for agent turns) and honors `json_schema` output on
+reviewed GPT-6 models. A provider that cannot apply `stop` refuses it with
+`400 unsupported_parameter`.
+
 Refused with `400 unsupported_parameter` naming the parameter: `tools`,
 `tool_choice`, `functions`, `function_call`, `web_search_options`, `audio`,
 `prediction`, `tool`/`function` messages and assistant `tool_calls`,
