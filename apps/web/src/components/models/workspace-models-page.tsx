@@ -510,6 +510,13 @@ export function WorkspaceModelsPageBody({
   const workspaceStep = step && !step.organization ? step : null;
   if (workspaceStep && reconnecting(workspaceStep.provider)) reconnectStep.current = view ?? null;
   const reconnectAllowed = Boolean(workspaceStep && reconnectStep.current === view);
+  // Anyone who can manage connections here may connect their own account on a
+  // workspace's page: in their Personal workspace, or as "Only me" in a shared
+  // one. Workspace admins may also add a key for the whole workspace.
+  // Accounts for everyone in the organization stay with its owners and admins.
+  const memberConnects = !organizationAdmin && workspacePage && canManageConnections;
+  // A member who isn't a workspace admin connects for themselves only.
+  const onlyMe = memberConnects && !personal && !canManageSettings;
   const listLabel = workspacePage
     ? personal
       ? "Your Personal workspace"
@@ -582,20 +589,55 @@ export function WorkspaceModelsPageBody({
   } else if (
     (view === "connect" || view === "connect-workspace" || workspaceStep) &&
     !organizationAdmin &&
-    !reconnectAllowed
+    !reconnectAllowed &&
+    !memberConnects
   ) {
-    // Only owners and admins add accounts. Anyone else who can change this
-    // workspace's own accounts may still sign one in again or replace its key.
+    // Only owners and admins add accounts for everyone. Anyone else who can
+    // change this workspace's own accounts may still sign one in again or
+    // replace its key, and connect their own on a workspace's page.
     page = (
       <DetailPage
         back={{ label: listLabel, onClick: backToList }}
         className={FLUSH_DETAIL_PAGE_CLASS}
       >
-        <DetailPageHeader title="Only organization owners and admins can add accounts" />
+        <DetailPageHeader
+          title={
+            workspacePage
+              ? "You can't add accounts here"
+              : "Only organization owners and admins can add accounts"
+          }
+        />
         <p className="mt-2 text-sm text-fg-muted">
-          {`Ask an owner or admin of ${organizationName} to connect a subscription or an API key.`}
+          {workspacePage
+            ? `Ask an admin of ${workspaceName} or of ${organizationName} to connect a subscription or an API key.`
+            : `To connect your own subscription, open one of your workspaces. Ask an owner or admin of ${organizationName} to connect one for everyone.`}
         </p>
       </DetailPage>
+    );
+  } else if ((view === "connect" || view === "connect-workspace") && memberConnects) {
+    // Your own account, for this workspace.
+    page = (
+      <ConnectPickerPage
+        target="workspace"
+        title={onlyMe ? "Connect your own subscription" : "Connect account"}
+        subtitle={
+          personal
+            ? "It pays for models in your Personal workspace, so only you use it."
+            : onlyMe
+              ? `Only work you start in ${workspaceName} uses it. Nobody else here can.`
+              : `Connect your own subscription, or a key for everyone in ${workspaceName}.`
+        }
+        codexAvailable={personal}
+        // A Personal workspace can't hold its own SuperGrok account.
+        grok={grok.unavailable || personal ? "hidden" : "available"}
+        claude={claudeEnabled ? "available" : "hidden"}
+        gateways={onlyMe ? undefined : gateways}
+        personal={personal}
+        backLabel={listLabel}
+        onClose={backToList}
+        onPick={(provider) => nav.openView(`connect:${provider}`)}
+        onOpenConnected={(provider) => nav.openAccount(accountKey("gateway", provider))}
+      />
     );
   } else if (view === "connect" || view === "connect-workspace") {
     // Owners and admins connect for the organization and choose the
@@ -780,16 +822,27 @@ export function WorkspaceModelsPageBody({
       <p className="m-0 text-sm leading-5 text-fg-muted">
         {workspaceOwnedNote(provider, { workspaceName, personal })}
       </p>
+    ) : onlyMe ? (
+      <p className="m-0 text-sm leading-5 text-fg-muted">
+        {`Only work you start in ${workspaceName} uses it. Nobody else here can.`}
+      </p>
     ) : undefined;
     page =
       provider === "codex" ? (
         <CodexConnectPage codex={codex} places={codexPlaces} onClose={backToList} fields={note} />
       ) : provider === "supergrok" ? (
-        <SuperGrokConnectPage grok={grok} places={grokPlaces} onClose={backToList} fields={note} />
+        <SuperGrokConnectPage
+          grok={grok}
+          places={grokPlaces}
+          onClose={backToList}
+          fields={note}
+          scope={onlyMe ? "user" : undefined}
+        />
       ) : provider === "claude_subscription" ? (
         <ClaudeConnectPage
           claude={claude}
           reconnectAccountId={key?.provider === "claude" ? key.id : undefined}
+          scope={onlyMe && key?.provider !== "claude" ? "user" : undefined}
           scopeName={workspaceName}
           allowPrivate={!personal}
           onClose={account ? () => nav.openAccount(account) : backToList}
@@ -1005,8 +1058,8 @@ export function WorkspaceModelsPageBody({
       (organizationAdmin && orgCodex.loading) ||
       (!organizationAdmin && catalog.loading) ||
       GATEWAYS.some((id) => !gateways[id].hidden && !gateways[id].settled);
-    // Only owners and admins add accounts.
-    const canConnect = organizationAdmin;
+    // Owners and admins add accounts for everyone; others their own (see memberConnects).
+    const canConnect = organizationAdmin || memberConnects;
     page = (
       <DetailPage
         back={{ label: "Models", onClick: () => nav.openWorkspace(undefined) }}
@@ -1031,7 +1084,9 @@ export function WorkspaceModelsPageBody({
                 grokFromOrganization: grok.inherited,
               })
             }
-            whoCanConnect={canConnect ? null : <WhoCanConnect />}
+            whoCanConnect={
+              canConnect ? null : <WhoCanConnect organizationName={organizationName} />
+            }
             onEditAllowed={() => nav.openView("allowed-models")}
             onEditCompaction={() => nav.openView("compaction")}
             onConnect={() => nav.openView("connect")}
@@ -1312,10 +1367,10 @@ function WorkspaceKeyFootnote({
 }
 
 /** For people who can't add accounts: who can, in one calm line. */
-function WhoCanConnect() {
+function WhoCanConnect({ organizationName }: { organizationName: string }) {
   return (
     <p className="m-0 pt-2 pb-3 text-sm leading-5 text-fg-muted">
-      Only organization owners and admins can add accounts.
+      {`Only admins of this workspace or ${organizationName} can add accounts.`}
     </p>
   );
 }

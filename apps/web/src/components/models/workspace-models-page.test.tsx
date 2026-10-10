@@ -421,6 +421,7 @@ beforeEach(() => {
   organizationList = false;
   organizationWorkspaces = [];
   personalWorkspace = false;
+  workspaceSettingsAdmin = undefined;
   for (const fn of Object.values(client)) fn.mockClear();
   accounts = {
     accounts: [codexAccount({ weekly: cachedWindow })],
@@ -476,6 +477,8 @@ let personalWorkspace = false;
 let organizationWorkspaces: ModelsWorkspace[] = [];
 
 let organizationList = false;
+/** Whether the person administers this workspace; defaults to `canManage`. */
+let workspaceSettingsAdmin: boolean | undefined;
 
 function Harness({ canManage, organizationId }: { canManage: boolean; organizationId?: string }) {
   const [search, setSearch] = useState<{ account?: string; view?: ModelsView; workspace?: string }>(
@@ -496,7 +499,7 @@ function Harness({ canManage, organizationId }: { canManage: boolean; organizati
       personal={personalWorkspace}
       organizationId={organizationId ?? (organizationAdmin ? "organization-a" : undefined)}
       organizationName="Acme"
-      canManageSettings={canManage}
+      canManageSettings={workspaceSettingsAdmin ?? canManage}
       canManageConnections={canManage}
       canManageOrganizationModels={organizationAdmin}
       account={search.account}
@@ -607,11 +610,8 @@ describe("Codex rows", () => {
       expect(client.listCodexAccounts).toHaveBeenCalledTimes(2);
       expect(view.container.textContent).not.toContain("Couldn't load Codex accounts.");
       expect(view.container.textContent).toContain("No accounts connected");
-      // Only organization owners and admins add accounts, even for a workspace admin.
-      expect(button(view.container, "Connect account")).toBeUndefined();
-      expect(view.container.textContent).toContain(
-        "Only organization owners and admins can add accounts.",
-      );
+      // A workspace admin adds accounts for this workspace.
+      expect(button(view.container, /Connect account/)).toBeDefined();
     } finally {
       await cleanup(view);
     }
@@ -1494,21 +1494,62 @@ describe("One Models page for the organization and the workspace", () => {
     }
   });
 
-  test("a member's Personal workspace says who adds accounts, and Connect URLs refuse", async () => {
+  test("a member connects their own account in their Personal workspace", async () => {
     personalWorkspace = true;
     const view = await render();
     try {
-      expect(button(view.container, "Connect account")).toBeUndefined();
+      expect(button(view.container, /Connect account/)).toBeDefined();
+      expect(view.container.textContent).not.toContain("can add accounts");
+      await act(async () => navigateTo({ view: "connect" }));
+      await flush();
+      expect(view.container.querySelector("h1")?.textContent).toBe("Connect account");
       expect(view.container.textContent).toContain(
-        "Only organization owners and admins can add accounts.",
+        "It pays for models in your Personal workspace, so only you use it.",
       );
-      for (const target of ["connect", "connect:supergrok", "connect:openrouter"] as const) {
-        await act(async () => navigateTo({ view: target }));
-        await flush();
-        expect(view.container.querySelector("h1")?.textContent).toBe(
-          "Only organization owners and admins can add accounts",
-        );
-      }
+      // A Personal workspace can't hold its own SuperGrok account.
+      expect(view.container.textContent).not.toContain("SuperGrok");
+      await act(async () => navigateTo({ view: "connect:codex" }));
+      await flush();
+      expect(view.container.querySelector("h1")?.textContent).toBe("Connect Codex");
+      // Organization pages still refuse.
+      await act(async () => navigateTo({ view: "connect-org:codex" }));
+      await flush();
+      expect(view.container.querySelector("h1")?.textContent).not.toBe("Connect Codex");
+    } finally {
+      await cleanup(view);
+    }
+  });
+
+  test("a shared workspace's member who isn't its admin connects for themselves only", async () => {
+    workspaceSettingsAdmin = false;
+    context.clientConfig.claudeSubscriptionEnabled = true;
+    const view = await render();
+    try {
+      await act(async () => button(view.container, /Connect account/)!.click());
+      await flush();
+      expect(view.container.querySelector("h1")?.textContent).toBe("Connect your own subscription");
+      const text = view.container.textContent ?? "";
+      expect(text).toContain("Only work you start in Design preview uses it.");
+      // No keys for the whole workspace, and Codex only in a Personal workspace.
+      expect(text).not.toContain("OpenRouter");
+      await act(async () => navigateTo({ view: "connect:claude_subscription" }));
+      await flush();
+      expect(view.container.querySelector("h1")?.textContent).toBe("Connect Claude subscription");
+      expect(view.container.textContent).toContain(
+        "Only work you start in Design preview uses it. Nobody else here can.",
+      );
+    } finally {
+      await cleanup(view);
+    }
+  });
+
+  test("someone who can't change connections still can't add accounts", async () => {
+    const view = await render(false);
+    try {
+      expect(button(view.container, /Connect account/)).toBeUndefined();
+      await act(async () => navigateTo({ view: "connect" }));
+      await flush();
+      expect(view.container.querySelector("h1")?.textContent).toBe("You can't add accounts here");
     } finally {
       await cleanup(view);
     }
@@ -1534,7 +1575,7 @@ describe("One Models page for the organization and the workspace", () => {
     try {
       const text = view.container.textContent ?? "";
       expect(button(view.container, "Connect account")).toBeUndefined();
-      expect(text).toContain("Only organization owners and admins can add accounts.");
+      expect(text).toContain("Only admins of this workspace or Acme can add accounts.");
       expect(client.requestJson).not.toHaveBeenCalledWith(
         "GET",
         "/v1/organizations/organization-a/codex/accounts",
@@ -1696,6 +1737,47 @@ describe("One Models page for the organization and the workspace", () => {
 
   test("a workspace admin sees their workspaces and what they use, read-only", async () => {
     organizationList = true;
+    context.clientConfig.claudeSubscriptionEnabled = true;
+    client.listClaudeSubscriptionAccounts.mockImplementation(async () => ({
+      accounts: [
+        {
+          id: "22222222-2222-4222-8222-222222222222",
+          scope: "organization",
+          subject: "fixture-account",
+          email: "team@example.test",
+          label: "Claude subscription",
+          plan: "claude_max",
+          status: "active",
+          active: true,
+          allocatorEnabled: true,
+          allocatorVersion: 1,
+          version: 1,
+          expiresAt: null,
+          lastRefreshAt: null,
+          lastError: null,
+          usage: {
+            connected: true,
+            credentialVersion: 1,
+            windows: [
+              {
+                id: "seven_day",
+                usedPercent: 30,
+                resetsAt: "2099-10-03T22:00:00Z",
+                status: "allowed",
+                observedAt: "2026-09-30T14:00:00Z",
+              },
+            ],
+            observedAt: "2026-09-30T14:00:00Z",
+            source: "response_headers",
+            refreshStatus: "not_checked",
+            refreshCheckedAt: null,
+          },
+        },
+      ],
+      activeAccountId: "22222222-2222-4222-8222-222222222222",
+      source: "organization",
+      settings: { rotationEnabled: true, rotationStrategy: "sharded", activeCredentialId: null },
+    }));
     organizationWorkspaces = [
       {
         id: "workspace-a",
@@ -1709,7 +1791,14 @@ describe("One Models page for the organization and the workspace", () => {
     try {
       const text = view.container.textContent ?? "";
       expect(text).toContain("Team plan");
-      expect(text).toContain("Only organization owners and admins can add accounts.");
+      // The organization's Claude account shows its usage, like its Codex one.
+      const claudeRow = [
+        ...view.container.querySelectorAll<HTMLElement>("[data-slot=list-row]"),
+      ].find((row) => row.textContent?.includes("team@example.test"))!;
+      expect(claudeRow.textContent).toContain("70%");
+      expect(text).toContain(
+        "To connect your own account, open one of your workspaces. Only organization owners and admins add accounts for everyone.",
+      );
       expect(button(view.container, /Connect account/)).toBeUndefined();
       // The organization's own accounts are never read for them.
       expect(client.requestJson).not.toHaveBeenCalledWith(
