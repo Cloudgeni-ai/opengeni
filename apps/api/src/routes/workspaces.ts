@@ -1188,28 +1188,38 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
           ? model.id === AZURE_LIVE_MODEL_ID
           : true,
       );
-    const creditStanding =
+    const realtimeVoiceBilling = createRealtimeVoiceBilling({
+      db: deps.db,
+      settings: deps.settings,
+    });
+    const [creditStanding, creditsDisabled] =
       managedCandidates.length > 0
-        ? await createRealtimeVoiceBilling({
-            db: deps.db,
-            settings: deps.settings,
-          }).creditStanding(grant.accountId)
-        : "none";
+        ? await Promise.all([
+            realtimeVoiceBilling.creditStanding(grant.accountId),
+            realtimeVoiceBilling.creditsDisabled(workspaceId),
+          ])
+        : (["none", false] as const);
     const hasCredits = creditStanding === "spendable";
     const models = [
       ...managedCandidates.map((model, index) => ({
         ...model,
         provider: "OpenGeni" as const,
-        ...(hasCredits
-          ? { available: true, unavailableReason: null, unavailableCode: null }
-          : {
+        ...(creditsDisabled
+          ? {
               available: false,
-              unavailableReason:
-                creditStanding === "promotional_only"
-                  ? "Promotional credits don't cover live voice. Add credits to use it."
-                  : "Add Opengeni credits to use live voice",
-              unavailableCode: "insufficient_credits",
-            }),
+              unavailableReason: "Opengeni credits are turned off in this workspace",
+              unavailableCode: "credits_disabled",
+            }
+          : hasCredits
+            ? { available: true, unavailableReason: null, unavailableCode: null }
+            : {
+                available: false,
+                unavailableReason:
+                  creditStanding === "promotional_only"
+                    ? "Promotional credits don't cover live voice. Add credits to use it."
+                    : "Add Opengeni credits to use live voice",
+                unavailableCode: "insufficient_credits",
+              }),
         recommended: index === 0,
       })),
       {
@@ -1258,7 +1268,8 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
   });
 
   // Full replace (PUT, not merge): null/omitted = unrestricted for that
-  // dimension; an empty array is a valid explicit total block. Settings access
+  // dimension; an empty array is a valid explicit total block. The credit
+  // switch is a workspace setting and never changes here. Settings access
   // admits workspace administrators and the verified Personal owner, without
   // widening membership or API-key delegation authority.
   app.put("/v1/workspaces/:workspaceId/model-policy", async (c) => {
@@ -1583,6 +1594,7 @@ async function workspaceModelPolicyResponse(
     allowedModels: effective?.allowedModels ?? null,
     source: layers.workspace ? "workspace" : layers.organization ? "organization" : "none",
     organization: layers.organization,
+    allowCreditModels: layers.allowCreditModels,
   });
 }
 

@@ -362,7 +362,13 @@ export async function loadLegacySubscriptionPlacementWorld(
                 allowedProviders: session.allowed_providers,
                 allowedModels: session.allowed_models,
               },
-              { providerId: request.modelPolicyProviderId, modelId: request.productModelId },
+              {
+                providerId: request.modelPolicyProviderId,
+                modelId: request.productModelId,
+                // Placement only runs for connected-subscription models, which
+                // never spend Opengeni credits, so the credit switch never applies.
+                chargesCredits: false,
+              },
             ).allowed
           ? "allows"
           : "excludes";

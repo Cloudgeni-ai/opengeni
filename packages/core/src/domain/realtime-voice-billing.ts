@@ -17,6 +17,7 @@ import {
   creditDebitAttributionMetadata,
   existingUsageEventIdempotencyKeys,
   getSpendableCreditBalance,
+  getWorkspaceModelPolicy,
   loadSessionRealtimeBillingFacts,
   recordUsageEvent,
   sumUsageQuantity,
@@ -101,7 +102,25 @@ export function deploymentRealtimeVoice(
   return null;
 }
 
-export type RealtimeVoiceUnavailableCode = "not_configured" | "pricing_unconfigured";
+export type RealtimeVoiceUnavailableCode =
+  | "not_configured"
+  | "pricing_unconfigured"
+  | "credits_disabled";
+
+/** Copy for deployment-funded voice in a workspace that turned Opengeni credits off. */
+export const WORKSPACE_CREDITS_DISABLED_VOICE_MESSAGE =
+  "Opengeni credits are turned off in this workspace.";
+
+/**
+ * True when the workspace model policy turned Opengeni credits off. Voice
+ * paid with credits honors the same switch as credit-billed chat models.
+ */
+export async function workspaceCreditsDisabled(
+  db: Database,
+  workspaceId: string,
+): Promise<boolean> {
+  return (await getWorkspaceModelPolicy(db, workspaceId))?.allowCreditModels === false;
+}
 
 /** The deployment cannot offer this live-voice model at all (not a credit refusal). */
 export class RealtimeVoiceUnavailableError extends Error {
@@ -204,7 +223,13 @@ export function createRealtimeVoiceBilling(deps: { db: Database; settings: Setti
     workspaceId: string;
     attribution: CreditDebitAttribution;
     now: Date;
-  }): Promise<TranscriptionBillingRefusedError | null> {
+  }): Promise<TranscriptionBillingRefusedError | RealtimeVoiceUnavailableError | null> {
+    if (await workspaceCreditsDisabled(deps.db, input.workspaceId)) {
+      return new RealtimeVoiceUnavailableError(
+        "credits_disabled",
+        WORKSPACE_CREDITS_DISABLED_VOICE_MESSAGE,
+      );
+    }
     const balance = await getSpendableCreditBalance(deps.db, input.accountId, VOICE_CREDIT_USAGE);
     if (balance.balanceMicros <= 0) {
       return new TranscriptionBillingRefusedError({
@@ -267,6 +292,15 @@ export function createRealtimeVoiceBilling(deps: { db: Database; settings: Setti
       if (!billingActive()) return;
       const refused = await refusal({ ...input, now: input.now ?? new Date() });
       if (refused) throw refused;
+    },
+
+    /**
+     * The workspace turned Opengeni credits off while credits are enforced:
+     * deployment-funded live voice is unavailable there.
+     */
+    async creditsDisabled(workspaceId: string): Promise<boolean> {
+      if (!billingActive()) return false;
+      return await workspaceCreditsDisabled(deps.db, workspaceId);
     },
 
     /** Spendable credits are positive (always true when credits are not enforced). */

@@ -7090,6 +7090,60 @@ export function policyProviderIdForModel(settings: Settings, modelId: string): s
   return configured?.providerId ?? builtinProviderId(settings);
 }
 
+/**
+ * Provider ids whose models are never paid with Opengeni credits: connected
+ * subscriptions and workspace/organization-owned API keys. A model id under
+ * one of these prefixes is attributed to its own payer even against BASE
+ * settings, where the per-workspace overlay that defines it is not injected.
+ */
+const NON_CREDIT_POLICY_PROVIDER_IDS = new Set<string>([
+  CODEX_PROVIDER_ID,
+  XAI_SUBSCRIPTION_PROVIDER_ID,
+  WORKSPACE_GATEWAY_PROVIDER_ID,
+  ORGANIZATION_GATEWAY_PROVIDER_ID,
+  WORKSPACE_OPENROUTER_PROVIDER_ID,
+  ORGANIZATION_OPENROUTER_PROVIDER_ID,
+  WORKSPACE_OPPER_PROVIDER_ID,
+  ORGANIZATION_OPPER_PROVIDER_ID,
+  "workspace-anthropic",
+  "organization-anthropic",
+  "workspace-claude-subscription",
+  "organization-claude-subscription",
+]);
+
+/**
+ * Whether a model id spends Opengeni credits, for the workspace model
+ * policy's credit switch. MUST agree with the cost the worker bills
+ * (`ConfiguredModel.cost === "credits"`):
+ *   - a configured model → its own cost class;
+ *   - `codex/…`, `xai…/`, and workspace/organization connection ids → never;
+ *   - anything else → the legacy built-in fallback, which the deployment pays
+ *     and bills in credits unless the cost policy marks that exact id free.
+ *     Failing closed here keeps an unknown id from slipping past a workspace
+ *     that turned credits off.
+ */
+export function policyChargesCreditsForModel(settings: Settings, modelId: string): boolean {
+  const canonicalModelId = canonicalizeConfiguredModelId(settings, modelId);
+  const configured = configuredModels(settings).find((model) => model.id === canonicalModelId);
+  if (configured) return configured.cost === "credits";
+  if (canonicalModelId.startsWith(CODEX_MODEL_ID_PREFIX)) return false;
+  if (canonicalModelId.startsWith(XAI_SUBSCRIPTION_MODEL_ID_PREFIX)) return false;
+  const slash = canonicalModelId.indexOf("/");
+  const providerPrefix = slash > 0 ? canonicalModelId.slice(0, slash) : "";
+  if (
+    NON_CREDIT_POLICY_PROVIDER_IDS.has(providerPrefix) ||
+    // Direct workspace OpenAI / Azure OpenAI keys (`workspace-openai-<id>/…`).
+    providerPrefix.startsWith("workspace-openai-") ||
+    providerPrefix.startsWith("workspace-azure-openai-")
+  ) {
+    return false;
+  }
+  return (
+    (parseModelCostPolicyJson(settings.modelCostPolicyJson)[canonicalModelId] ?? "credits") ===
+    "credits"
+  );
+}
+
 function resolvedExecutionLimits(
   settings: Settings,
   model: {

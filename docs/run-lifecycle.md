@@ -3147,6 +3147,67 @@ an owner workflow wake. Admission and the quiescence receipt stay fenced until
 physical settlement and exact reconciliation; missing output or an elapsed
 observation window is never substituted for termination proof.
 
+**Idle browsers and desktops.** A BrowserSession or ComputerSession holds its
+box through a non-expiring interaction holder, so before migration 0705 an
+open browser or desktop that nobody used kept its Modal box warm until the
+provider deadline. They now follow the general idle grace
+(`OPENGENI_SANDBOX_IDLE_GRACE_MS`, default 15 minutes, never under one minute);
+there is no separate window.
+
+Activity is deliberate and durable: the newest of the interaction holder's
+`last_heartbeat_at` and the resource's `last_used_at` and
+`controller_heartbeat_at`. Every controller request moves all three: an agent
+tool call, a person's input, and the live view's 2 s poll and 30 s heartbeat.
+The live view polls and heartbeats only while its page is visible, so a hidden
+tab or a closed view stops counting within seconds, and a view that stopped
+heartbeating never keeps the box. An in-flight lifecycle operation (create,
+suspend, resume, end) counts as use. A pending intervention waiting for a
+person does not: a wait is not use, as for commands below. Known limit: a
+visible tab left open on an unattended screen keeps polling and keeps the box
+warm, as a visible terminal tab does.
+
+The reaper lists warm Modal leases held only by interaction and process
+holders, with no requested rotation, capture, enrolled containment or reaper
+hold, whose interaction resources and holder set have all been unused for the
+grace (`list_idle_interaction_leases`, migration 0705). Exact release
+(`releaseIdleInteractionHolders`) re-checks under the workspace control fence
+and the lease -> holder -> operation -> resource row locks, which controller
+requests also take before touching their resource, and applies the general
+idle rule to the whole sandbox group (no open turn, attempt, quiescence or
+recent turn finish; a wait is not use). It is all or nothing per box: one
+browser or desktop in use keeps all of them.
+
+- A checkpoint-capable browser (private checkpoint) is saved through the
+  system browser checkpoint that the provider deadline uses, with an `idle`
+  reason: the release prepares its `suspend` operation (actor
+  `system:sandbox-idle`, operation id derived from `browser-idle.v1`, lease
+  epoch, instance and controller generation), and the browser checkpoint sweep
+  captures the encrypted profile, commits the suspension, removes the local
+  profile and releases the holder in one transaction. The orphan sweep keeps
+  the holder of that exact saved generation until cleanup; if the box goes
+  away first, the reaper clears only the stale controller binding
+  (`list_orphaned_idle_browser_checkpoints`) so the saved profile resumes. Only
+  a tenant-scoped caller may prepare an idle save. A save that fails
+  returns the browser to `active`; the next idle decision releases it without
+  a second attempt.
+- Desktops, ephemeral browsers, browsers that cannot be saved, and every
+  browser when the worker cannot save profiles (no object storage, delegation
+  secret or environments key) become `lost` with failure code `idle_released`
+  and their holders are deleted. The UI says the browser or desktop stopped
+  after it went unused.
+
+When the last holder leaves, the lease drains immediately (the grace already
+elapsed): the ordinary drain saves `/workspace` and stops the box, and the next
+turn or viewer restores it (about 5 s at p50 on staging). A box left with only
+legacy retained commands goes to idle command containment. A saved browser
+resumes on demand, from the person or the agent; when the desktop it was shown
+in has stopped, resume clears the link (`linked_computer_session_id`) and
+restores it as an ordinary browser. `opengeni_sandbox_idle_interaction_release_total{outcome}`
+counts inspections (`checkpointing` when browser saves were prepared,
+`released` when holders were released without a save, `not_eligible`,
+`inspection_failed`). A person returning exactly as the box is being released
+may see the browser `suspending`, then resume it.
+
 **Idle command containment.** A legacy retained command keeps its Modal box
 warm through a non-expiring process holder, so the zero-holder idle drain never
 runs for it and the box would stay up until the provider deadline kills it

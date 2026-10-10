@@ -1308,9 +1308,11 @@ function BrowserUnavailableNotice({ session }: { session: BrowserSession }) {
       ? "The computer running it reached its time limit."
       : session.failureCode === "source_placement_changed"
         ? "This chat moved to another computer."
-        : session.lifecycle === "failed"
-          ? "It stopped unexpectedly."
-          : "The connection to it was lost.";
+        : session.failureCode === "idle_released"
+          ? "It stopped after it went unused."
+          : session.lifecycle === "failed"
+            ? "It stopped unexpectedly."
+            : "The connection to it was lost.";
   return (
     <div role="status">
       <p className="mt-3 text-og-menu font-medium text-og-fg">Browser unavailable</p>

@@ -70,7 +70,7 @@ test.skipIf(process.env.OPENGENI_REQUIRE_REAL_DB !== "1")(
         ),
       );
       // The pre-0700 Codex-named routine still refuses the ownerless person
-      // turn. The runtime now calls the provider-neutral routine (0705), so
+      // turn. The runtime now calls the provider-neutral routine (0707), so
       // the Codex-named routine is exercised directly here.
       for (const [index, state] of states.entries()) {
         const old = await withSubscriptionCoreAcceptedTurn(

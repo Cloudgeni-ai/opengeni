@@ -132,7 +132,7 @@ const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   "grant_subscription_codex_owner_capability(text, uuid, uuid, text, uuid)",
   "drop_subscription_codex_owner_capabilities(uuid)",
   "derive_scheduled_revision_subscription_authority()",
-  // Migration 0705: the provider-neutral writers' owner-only internals.
+  // Migration 0707: the provider-neutral writers' owner-only internals.
   "subscription_core_writer_context(text, uuid, uuid, text)",
   "grant_subscription_core_owner_capability(text, text, uuid, uuid, text, uuid)",
   "drop_subscription_core_owner_capabilities(text, uuid)",
@@ -698,7 +698,7 @@ export const SUBSCRIPTION_ACCOUNT_CAPABILITY_ROUTINES = [
 ];
 const CLAUDE_AUTHORITY_ROUTINE_SET = new Set(CLAUDE_AUTHORITY_ROUTINES);
 /**
- * Migration 0705: the provider-neutral subscription-core routines (the
+ * Migration 0707: the provider-neutral subscription-core routines (the
  * provider is their first argument). The runtime requires them; each is a
  * SECURITY DEFINER routine the runtime role executes and PUBLIC does not.
  */
@@ -725,7 +725,7 @@ export const SUBSCRIPTION_CORE_NEUTRAL_PRIVATE_ROUTINES = [
   "subscription_core_personal_connections(text, uuid, uuid, text)",
 ] as const;
 
-/** Migration 0705: the neutral writers' owner-only internals. */
+/** Migration 0707: the neutral writers' owner-only internals. */
 export const SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES = [
   "subscription_core_writer_context(text, uuid, uuid, text)",
   "grant_subscription_core_owner_capability(text, text, uuid, uuid, text, uuid)",
@@ -772,7 +772,7 @@ export const SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES = [
   "set_subscription_codex_reach(uuid, uuid, boolean, boolean)",
   "subscription_codex_owner_capability_held(uuid, text[], text, uuid, boolean)",
   "subscription_codex_owner_membership_held(uuid, uuid)",
-  // Migration 0705: the provider-neutral equivalents the runtime calls.
+  // Migration 0707: the provider-neutral equivalents the runtime calls.
   ...SUBSCRIPTION_CORE_NEUTRAL_PRIVATE_ROUTINES,
 ] as const;
 

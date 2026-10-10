@@ -44,7 +44,7 @@ const subscriptionCoreMigrations = [
   // Replaces the scope guard on the shared connection table from withheld 0642.
   "0702_subscription_codex_access_editor.sql",
   // Adds provider-neutral routines over the shared core tables from withheld 0642.
-  "0705_subscription_core_neutral_routines.sql",
+  "0707_subscription_core_neutral_routines.sql",
 ] as const;
 const key = Buffer.alloc(32, 67);
 const ids = {

@@ -359,7 +359,11 @@ export async function loadLegacySubscriptionPlacementWorld(
                 allowedProviders: session.allowed_providers,
                 allowedModels: session.allowed_models,
               },
-              { providerId: request.modelPolicyProviderId, modelId: request.productModelId },
+              {
+                providerId: request.modelPolicyProviderId,
+                modelId: request.productModelId,
+                chargesCredits: false,
+              },
             ).allowed
           ? "allows"
           : "excludes";
