@@ -5104,7 +5104,14 @@ describe("runtime event normalization", () => {
     expect(result.usage?.responseId).toBe("resp-title-1");
     expect(requests).toHaveLength(1);
     expect(requests[0].systemInstructions).toBe(SESSION_TITLE_GENERATION_INSTRUCTIONS);
-    expect(requests[0].input).toHaveLength(SESSION_TITLE_GENERATION_INPUT_MAX_CHARACTERS);
+    expect(requests[0].input).toEqual([
+      {
+        role: "user",
+        content: [
+          { type: "input_text", text: "x".repeat(SESSION_TITLE_GENERATION_INPUT_MAX_CHARACTERS) },
+        ],
+      },
+    ]);
     expect(requests[0].tools).toEqual([]);
     expect(requests[0].toolsExplicitlyProvided).toBe(true);
     expect(requests[0].signal).toBeUndefined();

@@ -1,4 +1,8 @@
-import { deleteWorkspaceIfQuiescent, nestedPostgresSqlState } from "@opengeni/db";
+import {
+  deleteWorkspaceIfQuiescent,
+  nestedPostgresSqlState,
+  safeDatabaseErrorFacts,
+} from "@opengeni/db";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { HTTPException } from "hono/http-exception";
 
@@ -32,9 +36,15 @@ export async function deleteWorkspaceForRequest(
       // Retention and linked-record FKs are intentional deletion boundaries.
       // The failed transaction has rolled back: do not erase history, retry
       // the cascade, or dispatch any external schedule cleanup.
+      // Editable documents, spreadsheets, and presentations keep immutable
+      // version history that only the organization retention lifecycle may
+      // erase, so name that cause without exposing the constraint itself.
+      const constraint = safeDatabaseErrorFacts(error).constraint ?? "";
+      const retainedRecords = constraint.startsWith("editable_artifact")
+        ? "the workspace's editable documents, spreadsheets, or presentations, whose version history is retained"
+        : "retained or linked records";
       throw new HTTPException(409, {
-        message:
-          "workspace deletion is blocked by retained or linked records; keep the workspace, revoke access, and disable scheduled work instead",
+        message: `workspace deletion is blocked by ${retainedRecords}; keep the workspace, revoke access, and disable scheduled work instead`,
       });
     }
     throw error;
