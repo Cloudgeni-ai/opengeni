@@ -59,6 +59,8 @@ const withheldMigrations = [
   "0700_codex_ownerless_person_refresh.sql",
   // Replaces the scope guard on the shared connection table from withheld 0642.
   "0702_subscription_codex_access_editor.sql",
+  // Patches the capture function installed by withheld 0478 and patched by 0608.
+  "0704_inactive_inherited_personal_connections.sql",
 ];
 let database: OwnerMigratedTestDatabase | null = null;
 

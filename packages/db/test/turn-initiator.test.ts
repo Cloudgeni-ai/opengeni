@@ -1223,9 +1223,8 @@ describe("immutable session turn initiators", () => {
       },
       { type: "input_text", text: "Keep this human task authoritative." },
     ]);
-    expect(String((attachedHistory[0]?.item.content as { text: string }[])[0]?.text)).toEndWith(
-      " by Scheduled attachment sender]",
-    );
+    const attachedContent = attachedHistory[0]?.item.content as { text: string }[] | undefined;
+    expect(String(attachedContent?.[0]?.text)).toEndWith(" by Scheduled attachment sender]");
     expect(
       await listOutstandingSessionSystemUpdates(client.db, grant.workspaceId!, attachedTarget.id),
     ).toMatchObject([{ state: "pending" }]);
