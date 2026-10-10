@@ -4275,7 +4275,11 @@ tables, drop aliases, reset refresh generations or clear waiters.
 Migration `0711_subscription_core_generic_precursor.sql` is **rolling**: deploy
 it like any release, without draining. Design record:
 [subscription core, PR 0a](design/subscription-core-2026-10-07.md#pr-0a-receipts-restrictions-and-personal-helpers).
-It requires 0689 and acts on deploy:
+It requires 0689 and acts on deploy. Like 0706, it grants to the configured
+application roles: a deployment whose runtime role is not `opengeni_app`
+(dedicated schema or custom role) must pass them through
+`OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES` (the Helm chart's migration
+secret already does), or `migrate` stops before applying anything.
 
 - Provider cutover receipts. Codex has one; SuperGrok (`xai`) and Claude get
   theirs only from their own drained cutovers. A binary of this release

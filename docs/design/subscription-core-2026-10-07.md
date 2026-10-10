@@ -3110,8 +3110,13 @@ M4-A hand-over are:
   deferred triggers; fences 0608 and scheduled admission comparing the v2
   slot, the Claude scheduled comparisons and
   `scheduled_claude_authority_changed`; the v1 liveness check switching to
-  the core check at the provider's receipt; and the pre-merge inventory of
-  the functions it patches.
+  the core check at the provider's receipt; and the pre-merge inventories
+  the plan requires: the functions it patches, the existing rows the new
+  Claude comparisons would reject (including live scheduled tasks whose
+  Claude snapshots already disagree), resolved before the comparisons go
+  live, and the callers of `validate_scheduled_agent_run_live_authority`
+  (0447, 0452, 0459 and the scheduled path in `packages/db/src/index.ts`),
+  which inherit the `scheduled_claude_authority_changed` refusal.
 - **PR 0c (Codex-named administration routines):** the provider-keyed
   cutover planner (the `codex-subscription-core-cutover.ts` rules), the
   auto-assignments table with its apply routine and triggers,
