@@ -1919,3 +1919,69 @@ for (const mode of [
     30_000,
   );
 }
+
+chromiumE2e(
+  "a crashed tab fails fast with a non-retryable error and a new tab keeps working",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-crashed-tab-");
+    const runner = await AgentBrowserJsonRunner.create({
+      namespace: `crash_${randomUUID().slice(0, 8)}`,
+      sessionName: "s",
+      socketDirectory: join(directory, "s"),
+      profileDirectory: join(directory, "profile"),
+      downloadDirectory: join(directory, "downloads"),
+      screenshotDirectory: join(directory, "screenshots"),
+      headed: process.env.OPENGENI_BROWSERD_HEADED_E2E === "1",
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+      binary: await resolvePinnedAgentBrowserBinary(
+        process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY
+          ? { binaryPath: process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY }
+          : {},
+      ),
+    });
+    const driver = new AgentBrowserDriver({
+      browserSessionId: randomUUID(),
+      controllerGeneration: randomUUID(),
+      runner,
+    });
+    let cdp: CdpConnection | null = null;
+    try {
+      const initial = await driver.start(dataUrl("<!doctype html><h1>Before the crash</h1>"));
+      expect(names(await driver.observe(initial.target.id))).toContain("Before the crash");
+
+      // Kill the tab's renderer the way a real crash or kill would.
+      const endpoint = await runner.run<{ cdpUrl: string }>(["get", "cdp-url"]);
+      cdp = await CdpConnection.connect(endpoint.cdpUrl);
+      const attached = await cdp.send<{ sessionId: string }>("Target.attachToTarget", {
+        targetId: initial.target.id,
+        flatten: true,
+      });
+      await cdp.send("Page.crash", {}, { sessionId: attached.sessionId }).catch(() => undefined);
+
+      // Both the live attachment and a fresh re-attachment report the crash at once.
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const started = Date.now();
+        const failure = await driver.observe(initial.target.id).then(
+          () => null,
+          (error: unknown) => error,
+        );
+        expect(Date.now() - started).toBeLessThan(5_000);
+        expect(failure).toMatchObject({ code: "resource_unavailable", retryable: false });
+        expect(String((failure as Error).message)).toContain("crashed");
+      }
+
+      // The browser itself is fine: a new tab works and the crashed one closes.
+      const fresh = await driver.openTarget(dataUrl("<!doctype html><h1>After the crash</h1>"));
+      expect(names(fresh)).toContain("After the crash");
+      const remaining = await driver.closeTarget(initial.target.id);
+      expect(remaining.map((target) => target.id)).not.toContain(initial.target.id);
+    } finally {
+      cdp?.close();
+      await driver.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  60_000,
+);
