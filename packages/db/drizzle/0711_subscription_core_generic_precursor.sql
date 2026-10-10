@@ -102,12 +102,28 @@ BEGIN
 END
 $receipt_reader$;
 REVOKE ALL ON FUNCTION opengeni_private.subscription_provider_cutover_committed(text) FROM PUBLIC;
+-- Every configured application role (not only the default name) can run the
+-- reader before provision-roles: the restrictive policies below call it for
+-- every role they bind, so a missing grant would refuse the previous
+-- release's connection inserts and switch-row updates (0706's pattern).
 DO $receipt_reader_grant$
+DECLARE
+  application_role text;
 BEGIN
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
-    GRANT EXECUTE ON FUNCTION opengeni_private.subscription_provider_cutover_committed(text)
-      TO opengeni_app;
-  END IF;
+  FOR application_role IN
+    SELECT role_value.rolname
+    FROM pg_catalog.jsonb_array_elements_text(
+      coalesce(nullif(current_setting('opengeni.migration_application_roles', true), ''), '[]')::jsonb
+    ) configured(value)
+    JOIN pg_catalog.pg_roles role_value ON role_value.rolname = configured.value
+    UNION SELECT 'opengeni_app'
+      WHERE EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'opengeni_app')
+  LOOP
+    EXECUTE format(
+      'GRANT EXECUTE ON FUNCTION opengeni_private.subscription_provider_cutover_committed(text) TO %I',
+      application_role
+    );
+  END LOOP;
 END
 $receipt_reader_grant$;
 
@@ -267,6 +283,7 @@ FROM opengeni_private.subscription_codex_cutover_report report;
 ALTER TABLE subscription_settings NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE subscription_connections NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE organization_user_resource_authorities NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE subscription_provider_cutovers NO FORCE ROW LEVEL SECURITY;
 WITH mismatched AS (
   SELECT settings.id, settings.account_id,
     settings.codex_primary_connection_id IS NOT NULL AND NOT EXISTS (
@@ -337,6 +354,26 @@ FROM owners GROUP BY owners.account_id
 UNION ALL
 SELECT 'codex', 'readiness:owners_with_multiple_current_personal_generations',
   NULL, 0, (SELECT count(*) FROM owners);
+
+-- Inventory (finding 1 of 5.3): switch rows and core connections of a
+-- provider without a receipt. They grant nothing, the restrictions above keep
+-- new ones from appearing, and that provider's cutover aborts on them; the
+-- report lets an operator see them without a row-security bypass.
+INSERT INTO opengeni_private.subscription_cutover_report (
+  provider, metric, account_id, legacy_count, core_count
+)
+SELECT cutover.provider, 'inventory:switch_rows_without_receipt', cutover.account_id, 0, count(*)
+FROM subscription_provider_cutovers cutover
+WHERE NOT EXISTS (SELECT 1 FROM opengeni_private.subscription_provider_cutover_receipts receipt
+  WHERE receipt.provider = cutover.provider)
+GROUP BY cutover.provider, cutover.account_id
+UNION ALL
+SELECT connection.provider, 'inventory:connections_without_receipt', connection.account_id, 0, count(*)
+FROM subscription_connections connection
+WHERE NOT EXISTS (SELECT 1 FROM opengeni_private.subscription_provider_cutover_receipts receipt
+  WHERE receipt.provider = connection.provider)
+GROUP BY connection.provider, connection.account_id;
+ALTER TABLE subscription_provider_cutovers FORCE ROW LEVEL SECURITY;
 ALTER TABLE organization_user_resource_authorities FORCE ROW LEVEL SECURITY;
 ALTER TABLE subscription_connections FORCE ROW LEVEL SECURITY;
 ALTER TABLE subscription_settings FORCE ROW LEVEL SECURITY;

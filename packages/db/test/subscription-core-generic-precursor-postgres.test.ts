@@ -34,6 +34,11 @@ let client: DbClient | null = null;
 let appUrl = "";
 /** Runtime posture right after applying 0711 to a provisioned database, before provisioning again. */
 let unprovisionedPostureViolations: string[] | null = null;
+// A deployment's own application role (not named opengeni_app), configured for
+// the migration, and whether it could run the receipt reader before roles were
+// provisioned again (the restrictive policies call the reader for every role).
+const customApplicationRole = `og_pr0_custom_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
+let customRoleReaderBeforeProvision: boolean | null = null;
 
 type Org = {
   accountId: string;
@@ -209,7 +214,16 @@ beforeAll(async () => {
   });
   try {
     await ownerAgain`delete from schema_migrations where name = ${PRECURSOR}`;
-    await migrate(database.ownerUrl);
+    await database.admin.unsafe(
+      `CREATE ROLE "${customApplicationRole}" NOLOGIN NOSUPERUSER NOBYPASSRLS`,
+    );
+    await migrate(database.ownerUrl, undefined, {
+      applicationDatabaseRoles: ["opengeni_app", customApplicationRole],
+    });
+    const [customReader] = await database.admin<{ allowed: boolean }[]>`
+      select has_function_privilege(${customApplicationRole},
+        'opengeni_private.subscription_provider_cutover_committed(text)', 'EXECUTE') as allowed`;
+    customRoleReaderBeforeProvision = customReader?.allowed ?? null;
     const [applied] = await ownerAgain<{ count: number }[]>`
       select count(*)::int as count from schema_migrations where name = ${PRECURSOR}`;
     if (applied?.count !== 1) throw new Error("0711 was not applied by the second migrate");
@@ -238,6 +252,12 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await client?.close();
+  if (database) {
+    await database.admin.unsafe(`DROP OWNED BY "${customApplicationRole}"`).catch(() => undefined);
+    await database.admin
+      .unsafe(`DROP ROLE IF EXISTS "${customApplicationRole}"`)
+      .catch(() => undefined);
+  }
   await database?.release();
 }, 180_000);
 
@@ -261,6 +281,9 @@ describe.skipIf(!realDb)("subscription-core generic precursor (migration 0711)",
       app_bypass: false,
     });
     expect(unprovisionedPostureViolations).toEqual([]);
+    // A configured application role with another name can run the reader the
+    // restrictive policies call, before provision-roles.
+    expect(customRoleReaderBeforeProvision).toBe(true);
     const options = {
       rlsStrategy: "force" as const,
       expectedRole: "opengeni_app",
@@ -626,6 +649,7 @@ describe.skipIf(!realDb)("subscription-core generic precursor (migration 0711)",
       select (select count(*)::int from opengeni_private.subscription_codex_cutover_report) as legacy,
         (select count(*)::int from opengeni_private.subscription_cutover_report
           where provider = 'codex' and metric not like 'readiness:%'
+            and metric not like 'inventory:%'
             and metric <> 'disposition:primary_of_other_provider_cleared') as moved`;
     expect(copied!.moved).toBe(copied!.legacy);
     const readiness = await database!.admin`
@@ -637,6 +661,27 @@ describe.skipIf(!realDb)("subscription-core generic precursor (migration 0711)",
     expect([...readiness]).toEqual([
       { account_id: before!.org.accountId, legacy_count: 0, core_count: 1 },
       { account_id: null, legacy_count: 0, core_count: 1 },
+    ]);
+    // The rows a provider without a receipt already had are inventoried, so an
+    // operator sees them without a row-security bypass.
+    const inventory = await database!.admin`
+      select provider, metric, account_id::text as account_id, core_count::int
+      from opengeni_private.subscription_cutover_report
+      where metric like 'inventory:%'
+      order by provider, metric`;
+    expect([...inventory]).toEqual([
+      {
+        provider: "claude",
+        metric: "inventory:switch_rows_without_receipt",
+        account_id: before!.org.accountId,
+        core_count: 1,
+      },
+      {
+        provider: "xai",
+        metric: "inventory:connections_without_receipt",
+        account_id: before!.org.accountId,
+        core_count: 1,
+      },
     ]);
   });
 

@@ -24,8 +24,10 @@ export type ProviderCapabilities = {
 
 /**
  * Shared error outcomes every adapter classifies into (SUB-PROV-01). A
- * refusal that limits one model only carries its `modelId`; the core records
- * it as that model's cooldown on the connection (`modelCooldownFromOutcome`).
+ * refusal that limits one model only carries its `modelId`, so the core can
+ * record it as that model's cooldown on the connection
+ * (`modelCooldownFromOutcome`). No settlement path records it yet; the first
+ * adapter that classifies per-model refusals wires it (X1b, C1b).
  */
 export type ProviderErrorOutcome =
   | { kind: "exhausted"; resetAt: number | null; modelId?: ModelId }

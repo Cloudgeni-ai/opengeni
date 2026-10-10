@@ -4280,35 +4280,46 @@ It requires 0689 and acts on deploy:
 - Provider cutover receipts. Codex has one; SuperGrok (`xai`) and Claude get
   theirs only from their own drained cutovers. A binary of this release
   refuses to start against a database without the Codex receipt.
-- No role can insert or enable a `subscription_provider_cutovers` row, or
-  insert a `subscription_connections` row, for `xai` or `claude` before their
-  receipts, and no role can delete a cutover row. No cutover row or
-  connection can change its organization or provider. Disabling a row (Codex
-  containment) still works.
+- No runtime or migration-owner role can insert or enable a
+  `subscription_provider_cutovers` row, or insert a `subscription_connections`
+  row, for `xai` or `claude` before their receipts, and none can delete a
+  cutover row (superusers bypass row security). No cutover row or connection
+  can change its organization or provider, whoever updates it. Disabling a row
+  (Codex containment) still works.
 - A settings primary that pointed at another provider's connection is cleared.
 - Codex connects emit the `model.connected` lifecycle fact again.
 
 Codex chat, connect, refresh and containment behave as before. SuperGrok and
 Claude keep running on their legacy path.
 
-**Inventory (before or after deploying).** Rows that the restrictions now
-block were never usable; list them so they are removed before the SuperGrok
-and Claude cutovers, which abort on them:
+Codex connections created between 0689 and 0711 have no `model.connected`
+fact; the operator-run lifecycle backfill does not read core connections.
 
-```sql
-SELECT account_id, provider, enabled
-FROM subscription_provider_cutovers WHERE provider <> 'codex';
-SELECT account_id, provider, id, ownership, status
-FROM subscription_connections WHERE provider <> 'codex';
-```
-
-**Readiness report.** As the migration owner:
+**Readiness report and inventory.** As the migration owner:
 
 ```sql
 SELECT provider, metric, account_id, legacy_count, core_count
 FROM opengeni_private.subscription_cutover_report
-WHERE metric LIKE 'readiness:%' OR metric = 'disposition:primary_of_other_provider_cleared'
+WHERE metric LIKE 'readiness:%' OR metric LIKE 'inventory:%'
+  OR metric = 'disposition:primary_of_other_provider_cleared'
 ORDER BY provider, metric, account_id NULLS LAST;
+```
+
+`inventory:switch_rows_without_receipt` and
+`inventory:connections_without_receipt` count, per provider and organization,
+the `xai` and `claude` rows that existed at 0711. They were never usable and
+grant nothing, but the SuperGrok and Claude cutovers abort on them, so they
+must be removed before those cutovers. Row security hides them from the
+migration owner; inspect and remove them as a superuser (or another role with
+`BYPASSRLS`), after checking each connection is not in use:
+
+```sql
+SELECT account_id, provider, enabled
+FROM subscription_provider_cutovers WHERE provider IN ('xai', 'claude');
+SELECT account_id, provider, id, ownership, status
+FROM subscription_connections WHERE provider IN ('xai', 'claude');
+DELETE FROM subscription_provider_cutovers WHERE provider IN ('xai', 'claude');
+DELETE FROM subscription_connections WHERE provider IN ('xai', 'claude');
 ```
 
 `readiness:owners_with_multiple_current_personal_generations` counts Codex

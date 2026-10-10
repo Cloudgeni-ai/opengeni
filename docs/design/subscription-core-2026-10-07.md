@@ -3080,6 +3080,46 @@ the plan left room, for reviewers:
 - **Rolling posture.** New owner-only trigger functions live in
   `opengeni_subscription_internal`. The previous release's posture check
   passes against the migrated schema before and after role provisioning.
+  The receipt reader is granted to every configured application role (not
+  only `opengeni_app`), because the restrictive policies call it for every
+  role they bind.
+- **Inventory.** The report also counts, per provider and organization,
+  switch rows (`inventory:switch_rows_without_receipt`) and core connections
+  (`inventory:connections_without_receipt`) of a provider without a receipt
+  at the time of 0711, so an operator sees them without a row-security
+  bypass.
+- **Known gap.** The operator-run lifecycle backfill (0565) reads only the
+  legacy credential tables, so Codex connections created between 0689 and
+  0711 never get a `model.connected` fact. Extending that backfill to core
+  connections is not part of PR 0.
+
+#### PR 0b and PR 0c: the rest of row 0
+
+Row 0 is split into three rolling PRs. PR 0a (above) delivers the receipts
+and readiness, the switch-row and connection restrictions, the personal
+helpers' receipt, enabled-row, v2, owner and generation checks, the
+provider-checked primaries, the operation kinds, the wait reason, the
+`model.connected` fact, the adapter interface additions and the
+provider-keyed report relation. The remaining items of row 0 and of the
+M4-A hand-over are:
+
+- **PR 0b (accepted authority across a cutover):** the compatibility
+  relation, reader and copy routines (inert); the server-owned
+  `authority_inserted_at` marker on carrier tables; the compatibility-record
+  branch of both personal helpers (`connectionIds`); the compatibility
+  deferred triggers; fences 0608 and scheduled admission comparing the v2
+  slot, the Claude scheduled comparisons and
+  `scheduled_claude_authority_changed`; the v1 liveness check switching to
+  the core check at the provider's receipt; and the pre-merge inventory of
+  the functions it patches.
+- **PR 0c (Codex-named administration routines):** the provider-keyed
+  cutover planner (the `codex-subscription-core-cutover.ts` rules), the
+  auto-assignments table with its apply routine and triggers,
+  `record_subscription_codex_plan_change`, the 0702 reach helpers,
+  `list_organization_codex_workspace_ids`, and the scope visibility and wake
+  routines.
+
+No X1a or C1a call site merges before all three.
 
 #### Verification plan
 
