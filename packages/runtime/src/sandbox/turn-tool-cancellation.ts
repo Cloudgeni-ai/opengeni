@@ -41,6 +41,29 @@ import { withNativeSynchronousCommandCollection } from "./native-synchronous-col
 const TURN_PROVIDER_YIELD_SLICE_MS = 250;
 const TURN_DEFAULT_MODEL_WAIT_MS = 10_000;
 const TURN_MAX_MODEL_WAIT_MS = 30_000;
+/**
+ * Experiment (OPE-550, `OPENGENI_EXPERIMENT_CUT_POLLING=1`): honor the model's
+ * requested foreground wait up to this ceiling instead of the 30-second cap.
+ * Models request 60-300 s for builds and test suites; the silent 30-second cap
+ * turned each such command into repeated empty `write_stdin` polls, each a
+ * full-context model request. The wait still returns on exit and stays
+ * cancellable between provider slices. The ceiling stays under the default
+ * 5-minute Claude prompt-cache TTL (and typical OpenAI in-memory retention) so
+ * the next request still reads the cached prefix instead of rewriting it.
+ */
+const CUT_POLLING_MAX_MODEL_WAIT_MS = 240_000;
+/**
+ * Under the experiment a long wait must not hold a dev server, watcher, tail or
+ * REPL for minutes after it printed what the model needs. Once the ordinary
+ * (30-second) window has passed, a command that produced output during this
+ * call and then stayed quiet this long returns control. The 30-second floor
+ * keeps the result identical to the default for every command the default
+ * already returned inline: in DeepSWE runs, output-then-silence gaps of 5-30 s
+ * are common in builds and tests, and a shorter floor would add model polls.
+ */
+const CUT_POLLING_OUTPUT_QUIET_MS = 5_000;
+/** Output that ends in an input prompt returns after this much silence. */
+const CUT_POLLING_PROMPT_QUIET_MS = 2_000;
 const SHELL_HELPER_YIELD_MS = 1_000;
 const SHELL_GRACEFUL_POLLS = 2;
 const SHELL_POLL_MS = 100;
@@ -306,9 +329,19 @@ function cappedYield(value: unknown, cap: number): number {
     : cap;
 }
 
-function modelWaitMs(value: unknown): number {
+export function cutPollingExperimentEnabled(
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  return env.OPENGENI_EXPERIMENT_CUT_POLLING === "1";
+}
+
+export function modelWaitMs(
+  value: unknown,
+  cutPolling: boolean = cutPollingExperimentEnabled(),
+): number {
+  const max = cutPolling ? CUT_POLLING_MAX_MODEL_WAIT_MS : TURN_MAX_MODEL_WAIT_MS;
   return typeof value === "number" && Number.isInteger(value) && value >= 0
-    ? Math.min(value, TURN_MAX_MODEL_WAIT_MS)
+    ? Math.min(value, max)
     : TURN_DEFAULT_MODEL_WAIT_MS;
 }
 
@@ -331,6 +364,29 @@ export function isBareInteractiveShellCommand(command: string): boolean {
     .filter((step) => step.length > 0 && !step.startsWith("#"));
   const last = steps.at(-1);
   return last !== undefined && BARE_INTERACTIVE_SHELL.test(last);
+}
+
+// oxlint-disable-next-line no-control-regex
+const ANSI_ESCAPE = /\u001b\[[0-?]*[ -/]*[@-~]|\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g;
+const INPUT_PROMPT_TAIL = /(?:[?:>$#]|\[[yn]\/[yn]\]|\((?:y|yes)\/(?:n|no)\))[ \t]?$/i;
+
+/**
+ * True when the visible last line of command output looks like a prompt that
+ * is waiting for input (a REPL `>>> `/`> `, a shell `$ `, `Password: `,
+ * `Continue? [y/N] `): non-empty, not newline-terminated, short, and ending in a
+ * prompt marker. Progress output (`.....`, `[ 45%]`) does not match.
+ */
+export function looksLikeInputPrompt(output: string): boolean {
+  if (output.length === 0 || output.endsWith("\n")) return false;
+  const lastLine = output.slice(output.lastIndexOf("\n") + 1);
+  const visible = lastLine.slice(lastLine.lastIndexOf("\r") + 1).replace(ANSI_ESCAPE, "");
+  return visible.trim().length > 0 && visible.length <= 200 && INPUT_PROMPT_TAIL.test(visible);
+}
+
+/** Model-facing foreground wait for one exec/read call. */
+function foregroundWait(value: unknown): { waitMs: number; quietReturnAfterMs?: number } {
+  if (!cutPollingExperimentEnabled()) return { waitMs: modelWaitMs(value, false) };
+  return { waitMs: modelWaitMs(value, true), quietReturnAfterMs: modelWaitMs(value, false) };
 }
 
 function execOutput(raw: string): string {
@@ -1627,7 +1683,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                 state,
                 initialOutput: output,
                 startedAt,
-                waitMs: modelWaitMs(parsed.yield_time_ms),
+                ...foregroundWait(parsed.yield_time_ms),
                 maxOutputTokens:
                   typeof parsed.max_output_tokens === "number" ? parsed.max_output_tokens : 20_000,
               });
@@ -1752,7 +1808,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                   initialOutput: output,
                   ...(initialObservationFailure ? { initialObservationFailure } : {}),
                   startedAt,
-                  waitMs: modelWaitMs(parsed?.yield_time_ms),
+                  ...foregroundWait(parsed?.yield_time_ms),
                   maxOutputTokens:
                     typeof parsed?.max_output_tokens === "number"
                       ? parsed.max_output_tokens
@@ -1776,9 +1832,14 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     initialObservationFailure?: ProviderCommandObservationUnavailableError;
     startedAt: number;
     waitMs: number;
+    /**
+     * Experiment only: after this much of the wait, return once output produced
+     * during this call has gone quiet (see CUT_POLLING_OUTPUT_QUIET_MS).
+     */
+    quietReturnAfterMs?: number;
     maxOutputTokens: number;
   }): Promise<string> {
-    const { state, startedAt, waitMs, maxOutputTokens } = input;
+    const { state, startedAt, waitMs, quietReturnAfterMs, maxOutputTokens } = input;
     const canAdoptInBackground =
       state.turnScoped !== true &&
       (state.processSession?.canAdoptRetainedProcessAsBackgroundCommand?.(state.sessionId) ?? true);
@@ -1799,11 +1860,18 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     }
 
     let output = appendBoundedOutput("", execOutput(input.initialOutput), maxOutputTokens);
+    let lastOutputAt: number | null = output ? performance.now() : null;
     let observationFailure: ProviderCommandObservationUnavailableError | null =
       input.initialObservationFailure ?? null;
     for (;;) {
       if (observationFailure?.readRetryAllowed === false) break;
       if (performance.now() - startedAt >= waitMs) break;
+      if (quietReturnAfterMs !== undefined && lastOutputAt !== null) {
+        const now = performance.now();
+        const quietMs = now - lastOutputAt;
+        if (quietMs >= CUT_POLLING_PROMPT_QUIET_MS && looksLikeInputPrompt(output)) break;
+        if (now - startedAt >= quietReturnAfterMs && quietMs >= CUT_POLLING_OUTPUT_QUIET_MS) break;
+      }
       if (this.cancelled) throw cancellationError(this.reason);
       if (
         !state.writeInvoke &&
@@ -1862,7 +1930,10 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
         return next;
       }
       const nextOutput = execOutput(next);
-      if (nextOutput) output = appendBoundedOutput(output, nextOutput, maxOutputTokens);
+      if (nextOutput) {
+        output = appendBoundedOutput(output, nextOutput, maxOutputTokens);
+        lastOutputAt = performance.now();
+      }
       const exitCode = parseExecBannerExitCode(next);
       if (exitCode !== null) {
         this.shellSessions.delete(state.sessionId);
