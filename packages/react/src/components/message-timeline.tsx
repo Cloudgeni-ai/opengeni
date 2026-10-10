@@ -177,6 +177,7 @@ import {
   noticeTone,
 } from "../timeline/notice-presentation";
 import { TimelineComputeLabelProvider } from "../timeline/compute-label";
+import { ProviderLogoProvider } from "../timeline/provider-logo";
 import { EntranceAnimationProvider, useEntranceAnimation } from "../timeline/entrance";
 import {
   AllowanceExhaustedRow,
@@ -3037,7 +3038,7 @@ export function MessageTimeline({
           resolveSessionTitle={resolveSessionTitle}
           onOpenSession={onOpenSession}
         >
-          {timeline}
+          <ProviderLogoProvider value={resolveProviderLogo}>{timeline}</ProviderLogoProvider>
         </AgentIdentityProvider>
       </MessageSenderContext.Provider>
     </OpenGeniLinkProvider>
