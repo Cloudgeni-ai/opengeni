@@ -49,6 +49,21 @@ If a model has no explicit automatic limit, Opengeni uses
 0.9 and is clamped to 0.3–0.9. An explicit limit is capped at 90% of the raw
 window, matching Codex core.
 
+### Cost-aware thresholds (experiment)
+
+`OPENGENI_EXPERIMENT_COMPACT_THRESHOLD_POLICY=cost` (default `off`) lowers each
+model's default trigger to a price-derived value from
+`costAwareCompactionThresholdTokens` in `packages/config/src/index.ts`. Context
+grows about 2k tokens per request from about 40k retained after compaction, so
+the cached re-read cost per request grows with the trigger while each compaction
+costs a prompt write, the summary output and a rewrite of the retained prefix.
+The trigger is 1.5x past that cost optimum (fewer, less lossy compactions),
+at least 100k and below 90% of the first long-context price tier. With list
+prices this is 190k for Opus and Sonnet 5.5 and GPT-6.1 Sol, 90k for Haiku 5.5
+and 146k for GPT-6 Sol, Astra and Luna. The policy only lowers a default; it
+never raises one, and organization and workspace thresholds still win. Set the
+variable on the API too so settings show the same defaults.
+
 ### Organization and workspace preferences
 
 Organization owners and admins set limits once for every workspace under

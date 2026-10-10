@@ -384,6 +384,7 @@ export function buildAnthropicRequest(
   model: string,
   provider: Pick<ResolvedModelProvider, "anthropic"> & Partial<Pick<ResolvedModelProvider, "kind">>,
   stream: boolean,
+  cacheTtl: AnthropicCacheTtl = provider.anthropic?.cacheTtl ?? "5m",
 ): Json {
   if (request.previousResponseId || request.conversationId)
     throw new AnthropicProtocolError(
@@ -439,8 +440,8 @@ export function buildAnthropicRequest(
     });
   // Up to four breakpoints: tools, instructions, previous request, current history.
   // No TTL mixing, no global scope, and no marker on signed thinking blocks.
-  if (provider.anthropic?.cacheTtl !== "off") {
-    const cache = { type: "ephemeral", ttl: provider.anthropic?.cacheTtl ?? "5m" };
+  if (cacheTtl !== "off") {
+    const cache = { type: "ephemeral", ttl: cacheTtl };
     if (tools.length) tools.at(-1)!.cache_control = { ...cache };
     if (system.length) system.at(-1)!.cache_control = { ...cache };
     // Anthropic searches only a bounded number of blocks before a breakpoint.
@@ -643,6 +644,87 @@ export function anthropicResponse(
   };
 }
 
+export type AnthropicCacheTtl = "5m" | "1h" | "off";
+/** Mirrors Settings.experimentCacheTtlPolicy. */
+export type AnthropicCacheTtlPolicy = "off" | "warm_1h" | "always_1h";
+
+const CACHE_TTL_MS = { "5m": 5 * 60_000, "1h": 60 * 60_000 } as const;
+// An entry counts as warm only comfortably inside its lifetime, which runs
+// from the start of the request that last wrote or read it.
+const CACHE_WARM_MARGIN_MS = 30_000;
+const CACHE_STATE_MAX_ENTRIES = 10_000;
+const cacheEntries = new Map<string, { startedAt: number; ttl: "5m" | "1h" }>();
+
+/** Test hook: forget every remembered prompt-cache entry. */
+export function resetAnthropicCacheTtlState(): void {
+  cacheEntries.clear();
+}
+
+function firstPartyNativeClaude(provider: ResolvedModelProvider, model: string): boolean {
+  if (!claudeNativeModelProfile(model)) return false;
+  if (
+    provider.kind === "anthropic-workspace" ||
+    provider.kind === "anthropic-organization" ||
+    provider.kind === "claude-subscription-workspace" ||
+    provider.kind === "claude-subscription-organization"
+  )
+    return true;
+  return (
+    provider.kind === "api-key" &&
+    (provider.baseUrl ?? "").replace(/\/$/, "") === "https://api.anthropic.com/v1"
+  );
+}
+
+/**
+ * Per-request prompt-cache TTL under the experimental policy. Only first-party
+ * native Claude routes with the default 5-minute TTL change: their usage
+ * reports writes per TTL and list pricing prices each class, while Bedrock,
+ * gateways and operator-chosen TTLs keep their static configuration.
+ *
+ * "warm_1h" pays the 2x write price only on incremental writes: a request
+ * whose session cache this process knows is still alive marks its breakpoints
+ * 1h, so the entry survives idle gaps (waiting on children, background
+ * commands, users) of up to an hour. A request with an unknown or expired
+ * cache rewrites the whole prefix and stays at 5m (1.25x). "always_1h" marks
+ * every request. The portable compaction prompt is never reused, so it writes
+ * no cache entry at all under either policy.
+ */
+export function anthropicCacheTtlForRequest(input: {
+  policy: AnthropicCacheTtlPolicy;
+  provider: ResolvedModelProvider;
+  model: string;
+  request: ModelRequest;
+  now: number;
+}): { ttl: AnthropicCacheTtl; stateKey?: string } {
+  const configured = input.provider.anthropic?.cacheTtl ?? "5m";
+  if (
+    input.policy === "off" ||
+    configured !== "5m" ||
+    !firstPartyNativeClaude(input.provider, input.model)
+  )
+    return { ttl: configured };
+  const providerData = input.request.modelSettings.providerData;
+  if (providerData?.opengeni_portable_compaction === true) return { ttl: "off" };
+  if (input.policy === "always_1h") return { ttl: "1h" };
+  const session = providerData?.prompt_cache_key;
+  if (typeof session !== "string" || !session) return { ttl: "5m" };
+  const stateKey = `${input.provider.id}\u0000${input.model}\u0000${session}`;
+  const entry = cacheEntries.get(stateKey);
+  const warm =
+    entry !== undefined &&
+    input.now - entry.startedAt < CACHE_TTL_MS[entry.ttl] - CACHE_WARM_MARGIN_MS;
+  return { ttl: warm ? "1h" : "5m", stateKey };
+}
+
+function rememberAnthropicCacheEntry(stateKey: string, startedAt: number, ttl: "5m" | "1h") {
+  cacheEntries.delete(stateKey);
+  cacheEntries.set(stateKey, { startedAt, ttl });
+  if (cacheEntries.size > CACHE_STATE_MAX_ENTRIES) {
+    const oldest = cacheEntries.keys().next().value;
+    if (oldest !== undefined) cacheEntries.delete(oldest);
+  }
+}
+
 /** Native Messages transport; retries are owned by the worker, never hidden here. */
 export class AnthropicMessagesModel implements Model {
   private readonly fallbackSessionId = randomUUID();
@@ -655,6 +737,7 @@ export class AnthropicMessagesModel implements Model {
     readonly provider: ResolvedModelProvider,
     readonly model: string,
     private readonly fetch: typeof globalThis.fetch = globalThis.fetch,
+    private readonly options: { cacheTtlPolicy?: AnthropicCacheTtlPolicy } = {},
   ) {}
 
   /** Project inline images only; never fetch arbitrary URLs or edit stored history. */
@@ -695,9 +778,16 @@ export class AnthropicMessagesModel implements Model {
     return result;
   }
 
-  private async prepare(request: ModelRequest, stream: boolean) {
+  private async prepare(request: ModelRequest, stream: boolean, now = Date.now()) {
     request.signal?.throwIfAborted();
-    const body = buildAnthropicRequest(request, this.model, this.provider, stream);
+    const cache = anthropicCacheTtlForRequest({
+      policy: this.options.cacheTtlPolicy ?? "off",
+      provider: this.provider,
+      model: this.model,
+      request,
+      now,
+    });
+    const body = buildAnthropicRequest(request, this.model, this.provider, stream, cache.ttl);
     const projection = { resized: false };
     for (const message of body.messages) {
       message.content = await this.sizeImageBlocks(message.content, projection, request.signal);
@@ -775,7 +865,7 @@ export class AnthropicMessagesModel implements Model {
       });
     }
     const serialized = JSON.stringify(body);
-    return { url, headers, serialized, size: anthropicRequestSize(body, serialized) };
+    return { url, headers, serialized, size: anthropicRequestSize(body, serialized), cache };
   }
 
   /** Uses the same final serialization as dispatch, but performs no network I/O. */
@@ -784,7 +874,12 @@ export class AnthropicMessagesModel implements Model {
   }
 
   private async send(request: ModelRequest, stream: boolean): Promise<Response> {
-    const { url, headers, serialized, size } = await this.prepare(request, stream);
+    const startedAt = Date.now();
+    const { url, headers, serialized, size, cache } = await this.prepare(
+      request,
+      stream,
+      startedAt,
+    );
     if (size.requestBytes > ANTHROPIC_REQUEST_MAX_BYTES)
       throw new AnthropicRequestSizeError(size, "preflight");
     request.signal?.throwIfAborted();
@@ -848,6 +943,10 @@ export class AnthropicMessagesModel implements Model {
       );
     }
     this.previousRequestId = response.headers.get("request-id") ?? undefined;
+    // An accepted request has read or written its prefix; the entry's lifetime
+    // runs from this request's start.
+    if (cache.stateKey && cache.ttl !== "off")
+      rememberAnthropicCacheEntry(cache.stateKey, startedAt, cache.ttl);
     return response;
   }
 

@@ -1399,6 +1399,7 @@ export async function summarizeForCompaction(
             provider,
             model,
             instrumentedModelFetch(provider.id, globalThis.fetch),
+            { cacheTtlPolicy: settings.experimentCacheTtlPolicy },
           ).getResponse(
             anthropicCompactionRequest(input, {
               maxOutputTokens: maxTokens,

@@ -10,7 +10,7 @@ import {
   type ResponseStreamEvent,
 } from "@openai/agents";
 import OpenAI, { APIError } from "openai";
-import { AnthropicMessagesModel } from "./anthropic-messages";
+import { AnthropicMessagesModel, type AnthropicCacheTtlPolicy } from "./anthropic-messages";
 import { projectChatToolImages } from "./chat-tool-images";
 import { projectHistoryForProvider } from "./provider-history-adapter";
 import {
@@ -290,12 +290,14 @@ export function buildModelInstance(
   provider: ResolvedModelProvider,
   client: OpenAI,
   modelId: string,
+  options: { anthropicCacheTtlPolicy?: AnthropicCacheTtlPolicy } = {},
 ): Model {
   if (provider.api === "anthropic-messages")
     return new AnthropicMessagesModel(
       provider,
       modelId,
       instrumentedModelFetch(provider.id, globalThis.fetch),
+      { cacheTtlPolicy: options.anthropicCacheTtlPolicy ?? "off" },
     );
   return provider.api === "chat"
     ? new OpenGeniChatCompletionsModel(client, modelId)
@@ -327,7 +329,9 @@ export function resolveTurnModel(
   return {
     provider: resolved.provider,
     client,
-    model: buildModelInstance(resolved.provider, client, resolved.model.upstreamModelId),
+    model: buildModelInstance(resolved.provider, client, resolved.model.upstreamModelId, {
+      anthropicCacheTtlPolicy: settings.experimentCacheTtlPolicy,
+    }),
     configured: resolved.model,
   };
 }

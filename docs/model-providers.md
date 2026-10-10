@@ -1897,6 +1897,16 @@ durable telemetry and UI currently show aggregate writes. Registry pricing has o
 cache-write rate, which must match its configured TTL (do not use a 5-minute write
 price with `cacheTtl: "1h"`). Managed connections use 5-minute caching and external
 billing; Opengeni does not debit these tokens as credits.
+`OPENGENI_EXPERIMENT_CACHE_TTL_POLICY` (default `off`) changes cache TTLs per
+request on first-party native Claude routes whose TTL is the default 5m (managed
+Anthropic and Claude subscription connections, and registry providers on
+`https://api.anthropic.com/v1`). `warm_1h` marks a request 1h only when this
+worker saw a successful request for the same session and model inside the cache
+lifetime, so 1h writes (2x input) cover only incremental tokens and the cache
+survives idle gaps of up to an hour; a cold request rewrites at 5m (1.25x).
+`always_1h` marks every request. Under either value the portable compaction
+summary request writes no cache. Usage reports 5m and 1h writes separately and
+list pricing prices each class.
 Managed Claude connections use per-model native profiles from
 `claudeNativeModelProfile` in `packages/config/src/index.ts`. Opus, Sonnet and Haiku 5.5
 expose low, medium, high, xhigh and max, with medium as the new-selection default.

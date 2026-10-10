@@ -620,6 +620,15 @@ const SettingsSchema = z.object({
   // Model-catalog auto-compact limit. When present it is clamped to
   // 90% of the raw window, matching Codex core's auto_compact_token_limit().
   contextAutoCompactThresholdTokens: z.coerce.number().int().positive().optional(),
+  // Experiment (default off). "cost" lowers each priced model's default
+  // compaction trigger to costAwareCompactionThresholdTokens(); workspace and
+  // organization preferences still win and the usual clamps still apply.
+  experimentCompactThresholdPolicy: z.enum(["off", "cost"]).default("off"),
+  // Experiment (default off). Native first-party Claude prompt-cache TTL:
+  // "warm_1h" writes 1-hour entries only while this worker knows the session's
+  // cache is warm (incremental writes), "always_1h" on every request. Both
+  // skip cache writes on the never-reused portable compaction request.
+  experimentCacheTtlPolicy: z.enum(["off", "warm_1h", "always_1h"]).default("off"),
   // Provider-neutral fallback for canonical model-facing tool-result text.
   // The current stable Codex catalog policy is 10k tokens; the truncator adds
   // Codex's 1.2x JSON serialization allowance when applying it.
@@ -4511,6 +4520,8 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     contextCompactionThresholdRatio: optional("OPENGENI_COMPACTION_THRESHOLD_RATIO"),
     contextReservedOutputTokens: optional("OPENGENI_CONTEXT_RESERVED_OUTPUT_TOKENS"),
     contextAutoCompactThresholdTokens: optional("OPENGENI_CONTEXT_AUTO_COMPACT_THRESHOLD_TOKENS"),
+    experimentCompactThresholdPolicy: optional("OPENGENI_EXPERIMENT_COMPACT_THRESHOLD_POLICY"),
+    experimentCacheTtlPolicy: optional("OPENGENI_EXPERIMENT_CACHE_TTL_POLICY"),
     modelToolOutputTruncationTokens: optional("OPENGENI_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS"),
     authRequired: optional("OPENGENI_AUTH_REQUIRED"),
     accessKey: optional("OPENGENI_ACCESS_KEY"),
@@ -7982,6 +7993,18 @@ export function settingsWithResolvedModelContext(
       ? {}
       : { modelToolOutputTruncationTokens: model.toolOutputTruncationTokens }),
   };
+  if (settings.experimentCompactThresholdPolicy === "cost" && model.id) {
+    const schedule = cachedModelListPricingSchedules(settings)[model.id];
+    const costTokens = schedule ? costAwareCompactionThresholdTokens(schedule) : undefined;
+    if (costTokens !== undefined) {
+      const current =
+        resolved.contextAutoCompactThresholdTokens ??
+        resolved.contextWindowTokens *
+          Math.max(0.3, Math.min(0.9, resolved.contextCompactionThresholdRatio));
+      // Only ever lowers a default; operator and catalog limits below it stay.
+      resolved.contextAutoCompactThresholdTokens = Math.floor(Math.min(current, costTokens));
+    }
+  }
   if (workspaceSettings === undefined || !model.id) return resolved;
   return {
     ...resolved,
@@ -7992,6 +8015,74 @@ export function settingsWithResolvedModelContext(
       organizationDefaults,
     ).effectiveTokens,
   };
+}
+
+/**
+ * Assumptions behind the experimental cost-aware compaction trigger, measured
+ * on a week of staging agent traffic: context grows ~2k tokens per model
+ * request, a compaction leaves ~40k tokens (tools, instructions, retained
+ * messages and summary) and writes a ~5k-token summary.
+ */
+export const COST_AWARE_COMPACTION_ASSUMPTIONS = {
+  growthTokensPerRequest: 2_000,
+  retainedTokens: 40_000,
+  summaryOutputTokens: 5_000,
+  // Compact later than the pure cost optimum: the per-request cost of the
+  // context-dependent terms is then at most ~10% above that optimum, while
+  // compactions (and the detail they lose) are ~1.5x rarer.
+  qualityBias: 1.5,
+  minimumTokens: 100_000,
+  // Stay this far below the first long-context tier that raises input price.
+  tierHeadroom: 0.9,
+} as const;
+
+/**
+ * Cost-optimal compaction trigger from a model's list prices. Context grows
+ * from R (retained) to T, so the cached re-read cost per request is about
+ * read * (T + R) / 2, and each compaction costs a full prompt write of T plus
+ * the summary output plus re-writing R, amortized over (T - R) / g requests.
+ * Minimizing over x = T - R gives x* = sqrt(2 * g * (write*R + output*S +
+ * write*R) / read). The compaction prompt is priced as a full cache write,
+ * which matches the portable Claude summarizer today and overstates Codex
+ * remote compaction (mostly cache reads), so it errs toward compacting later.
+ * Returns undefined when the schedule has no usable input or read price.
+ */
+export function costAwareCompactionThresholdTokens(
+  schedule: ModelPricingScheduleV1,
+): number | undefined {
+  const a = COST_AWARE_COMPACTION_ASSUMPTIONS;
+  const price = schedule.default;
+  const input = price.inputMicrosPerMillionTokens;
+  const read = price.cachedInputMicrosPerMillionTokens ?? input;
+  const write = price.cacheWriteMicrosPerMillionTokens ?? input;
+  const output = price.outputMicrosPerMillionTokens;
+  if (!(input > 0) || !(read > 0) || !Number.isFinite(write) || !Number.isFinite(output))
+    return undefined;
+  const fixed =
+    write * a.retainedTokens + output * a.summaryOutputTokens + write * a.retainedTokens;
+  const interval = Math.sqrt((2 * a.growthTokensPerRequest * fixed) / read);
+  let tokens = Math.max(a.minimumTokens, a.retainedTokens + a.qualityBias * interval);
+  const tier = schedule.inputTokenTiers?.find(
+    (candidate) => candidate.pricing.inputMicrosPerMillionTokens > input,
+  );
+  if (tier) tokens = Math.min(tokens, tier.minimumInputTokens * a.tierHeadroom);
+  return Math.floor(tokens / 1_000) * 1_000;
+}
+
+const modelListPricingSchedulesBySettings = new WeakMap<
+  Settings,
+  Record<string, ModelPricingScheduleV1>
+>();
+
+function cachedModelListPricingSchedules(
+  settings: Settings,
+): Record<string, ModelPricingScheduleV1> {
+  let schedules = modelListPricingSchedulesBySettings.get(settings);
+  if (!schedules) {
+    schedules = configuredModelListPricingSchedules(settings);
+    modelListPricingSchedulesBySettings.set(settings, schedules);
+  }
+  return schedules;
 }
 
 /**
