@@ -82816,6 +82816,7 @@ function sessionMutationAdvancesActivity(update: {
   firstPartyMcpTools?: FirstPartyMcpToolName[];
   agentConfig?: ResolvedAgentConfig | null;
   instructions?: string | null;
+  skills?: SessionSkill[];
   toolPolicy?: SessionToolPolicy;
   toolPolicyVersion?: number;
   expectedToolPolicyVersion?: number;
@@ -84355,6 +84356,8 @@ type LockedSessionUpdateResult = {
     agentConfig?: ResolvedAgentConfig | null;
     /** Session instructions (the `agent.instructions` alias). */
     instructions?: string | null;
+    /** The Skills the session carries itself; written with the tool-policy CAS. */
+    skills?: SessionSkill[];
     toolPolicy?: SessionToolPolicy;
     toolPolicyVersion?: number;
     expectedToolPolicyVersion?: number;
@@ -84524,6 +84527,7 @@ export async function appendSessionEventsWithLockedSessionUpdate(
               : {}),
             ...(update.agentConfig !== undefined ? { agentConfig: update.agentConfig } : {}),
             ...(update.instructions !== undefined ? { instructions: update.instructions } : {}),
+            ...(update.skills !== undefined ? { skills: update.skills } : {}),
             ...(update.toolPolicy !== undefined ? { toolPolicy: update.toolPolicy } : {}),
             ...(update.toolPolicyVersion !== undefined
               ? { toolPolicyVersion: update.toolPolicyVersion }

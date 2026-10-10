@@ -11663,6 +11663,20 @@ export const StoredSessionSkills = /* @__PURE__ */ defineSkillContractSchema(() 
   z.preprocess(projectStoredSkillMetadata, SessionSkills),
 );
 
+/**
+ * `PUT /v1/workspaces/:workspaceId/sessions/:sessionId/skills`: replace the
+ * Skills a session carries itself. Each entry is validated like a session
+ * create Skill (SKILL.md owns name and description). Uses the session's
+ * `toolPolicyVersion` (shared CAS) and applies from the next attempt.
+ */
+export const UpdateSessionSkillsRequest = /* @__PURE__ */ z
+  .object({
+    skills: z.array(z.unknown()).max(32),
+    expectedVersion: z.number().int().positive(),
+  })
+  .strict();
+export type UpdateSessionSkillsRequest = z.infer<typeof UpdateSessionSkillsRequest>;
+
 function projectStoredSkillMetadata(value: unknown): unknown {
   if (!Array.isArray(value)) return value;
   return value.map((skill: unknown) => {
@@ -14215,6 +14229,8 @@ export const SessionEventType = z.enum([
   "session.mcp.approval_policy.updated",
   "session.tool_policy.updated",
   "session.agent.updated",
+  // The Skills a session carries itself were replaced (names only).
+  "session.skills.updated",
   // Multi-account Codex (P1): the account a session's turn runs on changed
   // (manual switch in P1; failover/rotation in P3 reuse the same event). Drives
   // the in-session "Running on:" indicator's live flip.
@@ -14456,6 +14472,7 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
     "session.mcp.approval_policy.updated",
     "session.tool_policy.updated",
     "session.agent.updated",
+    "session.skills.updated",
     "session.model_settings.updated",
   ],
   terminal: [

@@ -2291,6 +2291,7 @@ export const SESSION_EVENT_TYPES = [
   "session.mcp.approval_policy.updated",
   "session.tool_policy.updated",
   "session.agent.updated",
+  "session.skills.updated",
   "session.model_settings.updated",
   // Multi-account Codex (P1): the session's inference account changed.
   "codex.account.switched",
@@ -9602,6 +9603,16 @@ export type AgentEffectiveTools = {
     capability: AgentCapabilityId | "runtime" | "product";
     toolsKnown: boolean;
   }>;
+};
+
+/**
+ * `PUT .../sessions/:id/skills`. Replaces every Skill the session carries
+ * itself; an empty list removes them all.
+ */
+export type UpdateSessionSkillsRequest = {
+  skills: SessionSkillInput[];
+  /** The session's current `toolPolicyVersion` (shared CAS). */
+  expectedVersion: number;
 };
 
 /** `PUT .../sessions/:id/agent`. Omitted agent fields keep their current values. */
