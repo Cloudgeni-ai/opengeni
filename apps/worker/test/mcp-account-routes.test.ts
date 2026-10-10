@@ -202,20 +202,66 @@ test("duplicate aliases, canonical collisions and fabricated workspace owners fa
   }
 });
 
-test("provider changes never rebind an accepted route", () => {
-  expect(() =>
+test("provider changes never rebind an accepted route; the stale route is dropped", () => {
+  const moved = {
+    ...personal,
+    providerDomain: "other.test",
+    connectionRef: { ...personal.connectionRef, providerDomain: "other.test" },
+  };
+  const onlyStale = expandMcpAccountRoutes({
+    settings: settings(),
+    tools: [{ kind: "mcp", id: "mail" }],
+    bindings: [moved],
+  });
+  expect(onlyStale.tools).toEqual([]);
+  expect(onlyStale.settings.mcpServers).toEqual([]);
+
+  const mixed = expandMcpAccountRoutes({
+    settings: settings(),
+    tools: [{ kind: "mcp", id: "mail" }],
+    bindings: [moved, workspace],
+  });
+  expect(mixed.tools.map((tool) => tool.id)).toEqual([workspace.serverId]);
+  expect(mixed.settings.mcpServers.map((server) => server.connectionRef)).toEqual([
+    workspace.connectionRef,
+  ]);
+
+  const kindChanged = expandMcpAccountRoutes({
+    settings: settings(),
+    tools: [{ kind: "mcp", id: "mail" }],
+    bindings: [
+      {
+        ...personal,
+        kind: "api_key",
+        connectionRef: { ...personal.connectionRef, kind: "api_key" },
+      },
+    ],
+  });
+  expect(kindChanged.tools).toEqual([]);
+});
+
+test("a connector removed or made public after acceptance drops its account routes", () => {
+  const removed = settings();
+  removed.mcpServers = [];
+  expect(
     expandMcpAccountRoutes({
-      settings: settings(),
+      settings: removed,
       tools: [{ kind: "mcp", id: "mail" }],
-      bindings: [
-        {
-          ...personal,
-          providerDomain: "other.test",
-          connectionRef: { ...personal.connectionRef, providerDomain: "other.test" },
-        },
-      ],
-    }),
-  ).toThrow("does not match canonical provider");
+      bindings: [personal],
+    }).settings.mcpServers,
+  ).toEqual([]);
+
+  const madePublic = settings();
+  delete madePublic.mcpServers[0]!.connectionRef;
+  const result = expandMcpAccountRoutes({
+    settings: madePublic,
+    tools: [{ kind: "mcp", id: "mail" }],
+    bindings: [personal],
+  });
+  expect(result.tools.map((tool) => tool.id)).toEqual(["mail"]);
+  expect(result.settings.mcpServers.every((server) => server.connectionRef === undefined)).toBe(
+    true,
+  );
 });
 
 test("account refs retain frozen resource restrictions without copying another account config", () => {
