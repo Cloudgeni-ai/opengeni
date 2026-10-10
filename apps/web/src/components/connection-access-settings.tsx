@@ -343,22 +343,18 @@ export function ConnectionAccessFormPage({
                   });
                   return;
                 }
-                // From all workspaces, start from all of them; from people, from the
-                // saved workspaces (none when people were saved), never from all.
+                // Chosen workspaces start from the saved ones: none when people
+                // were saved, every shared workspace only when all were saved.
                 const savedWorkspaces = data.policy.allowedPeople
                   ? []
-                  : (data.policy.allowedWorkspaces ?? []);
+                  : (data.policy.allowedWorkspaces ??
+                    data.workspaces
+                      .map((workspace) => workspace.id)
+                      .filter((id) => !local.includes(id)));
                 setDraft(
                   withoutPeople({
                     ...draft,
-                    allowedWorkspaces:
-                      value === "all"
-                        ? null
-                        : scope === "people"
-                          ? savedWorkspaces
-                          : data.workspaces
-                              .map((workspace) => workspace.id)
-                              .filter((id) => !local.includes(id)),
+                    allowedWorkspaces: value === "all" ? null : savedWorkspaces,
                   }),
                 );
               }}
@@ -391,7 +387,7 @@ export function ConnectionAccessFormPage({
                     <CheckboxField
                       key={workspace.id}
                       label={workspace.name}
-                      description="Connected in this workspace, so always included."
+                      description="Connected in this workspace, so it can't be removed."
                       disabled
                       checked
                     />

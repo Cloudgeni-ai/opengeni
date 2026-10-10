@@ -393,6 +393,9 @@ function SharedCodexSetAsideRow({
     connectionId: account.id,
   });
   const reaches = ownInUse ? true : reachesWorkspace(access.data, organization.workspace);
+  // This workspace's own account (it connected it): listed with its own
+  // accounts, or in their "set aside" row while it uses the organization's.
+  if (access.data?.localWorkspaceIds?.includes(organization.workspace.id)) return null;
   const reason = ownInUse
     ? "Set aside while this workspace has its own"
     : reaches === false

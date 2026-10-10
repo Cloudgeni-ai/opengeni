@@ -319,6 +319,17 @@ export function OrganizationModelsList({
   const organizationCodexIds = new Set(
     administrator ? orgCodex.accounts.map((account) => account.id) : [],
   );
+  /* For a workspace admin: where else their workspace's own account is used,
+     once the organization shares it. It stays one row, opened as their own. */
+  const sharedCodexWhere = new Map<string, string[]>();
+  if (!administrator)
+    for (const { workspace, snapshot } of ready)
+      for (const account of snapshot.codexShared)
+        sharedCodexWhere.set(account.id, [
+          ...(sharedCodexWhere.get(account.id) ?? []),
+          workspace.personal ? "your Personal workspace" : workspace.name,
+        ]);
+  const ownCodexIds = new Set(ready.flatMap(({ snapshot }) => snapshot.codexOwn.map((a) => a.id)));
   const ownRows = ready.flatMap(({ workspace, snapshot }) => {
     const tag = workspace.personal ? "Personal workspace only" : `${workspace.name} only`;
     return [
@@ -330,7 +341,9 @@ export function OrganizationModelsList({
             leading={<ProviderTile provider="codex" size="lg" />}
             title={codexAccountName(account)}
             meta={[
-              tag,
+              sharedCodexWhere.has(account.id)
+                ? `Used in ${[workspace.name, ...sharedCodexWhere.get(account.id)!].join(", ")}`
+                : tag,
               planLabel(account.plan, "ChatGPT"),
               account.appsDesignated ? "Codex Apps" : null,
             ]}
@@ -382,7 +395,7 @@ export function OrganizationModelsList({
   });
 
   /* What the organization shares, as the workspaces of a workspace admin use it. */
-  const sharedRows = administrator ? [] : sharedAccountRows(ready, labels);
+  const sharedRows = administrator ? [] : sharedAccountRows(ready, labels, ownCodexIds);
 
   const orgRows = administrator ? (
     <>
@@ -653,6 +666,8 @@ function cachedCodexUsage(account: CodexAccount): ReactNode {
 function sharedAccountRows(
   ready: { workspace: ModelsWorkspace; snapshot: WorkspaceModelsSnapshot }[],
   labels: ModelsScopeLabels,
+  /** Accounts already listed as one of these workspaces' own. */
+  ownCodexIds: ReadonlySet<string> = new Set(),
 ): ReactNode[] {
   const codex = new Map<string, { account: CodexAccount; where: string[] }>();
   const grok = new Map<string, { account: SuperGrokAccount; where: string[] }>();
@@ -661,6 +676,7 @@ function sharedAccountRows(
   for (const { workspace, snapshot } of ready) {
     const where = workspace.personal ? "your Personal workspace" : workspace.name;
     for (const account of snapshot.codexShared) {
+      if (ownCodexIds.has(account.id)) continue;
       const entry = codex.get(account.id) ?? { account, where: [] };
       entry.where.push(where);
       codex.set(account.id, entry);

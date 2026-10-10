@@ -579,7 +579,7 @@ test("a workspace's own account is an organization account: its workspace stays,
     await act(async () => root.render(<Page />));
     await flush();
     // Its workspace is shown included and can't be cleared.
-    expect(container.textContent).toContain("Connected in this workspace, so always included.");
+    expect(container.textContent).toContain("Connected in this workspace, so it can't be removed.");
     expect(container.textContent).not.toContain("No workspace can use it");
     await choose("Finance");
     await save();
@@ -589,6 +589,20 @@ test("a workspace's own account is an organization account: its workspace stays,
       allowPersonalWorkspaces: false,
       version: 1,
     });
+
+    // "All" and back to chosen workspaces restores the saved choice, not all.
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await act(async () => root.render(<Page />));
+    await flush();
+    const saveDisabled = () =>
+      [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+        (candidate) => candidate.textContent === "Save",
+      )!.disabled;
+    await choose("All shared workspaces, including new ones");
+    expect(saveDisabled()).toBe(false);
+    await choose("Only selected workspaces");
+    expect(saveDisabled()).toBe(true);
 
     // Chosen people replace workspaces; Personal is not a separate choice then.
     await act(async () => root.unmount());

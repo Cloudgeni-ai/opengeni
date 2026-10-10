@@ -163,6 +163,9 @@ const methods: Record<string, (...args: never[]) => Promise<unknown>> = {
     // Each workspace reads the accounts it uses; Design's own is the former workspace account.
     const reaches = (id: string) => {
       const policy = policies[id]!;
+      // A people-scoped account is in no workspace's pool (the workspace pool
+      // projection lists organization and workspaces scope only).
+      if (policy.allowedPeople) return false;
       return (
         local[id]?.includes(workspaceId) ||
         policy.allowedWorkspaces === null ||
@@ -170,7 +173,9 @@ const methods: Record<string, (...args: never[]) => Promise<unknown>> = {
       );
     };
     // A workspace with its own account uses only its own (source "workspace").
-    const own = organizationAccounts.filter((entry) => local[entry.id]?.includes(workspaceId));
+    const own = organizationAccounts.filter(
+      (entry) => reaches(entry.id) && local[entry.id]?.includes(workspaceId),
+    );
     return {
       accounts: organizationAccounts
         .filter((entry) => workspaceId !== WORKSPACES.personal.id && reaches(entry.id))

@@ -66,7 +66,7 @@ try {
 
     // The access editor opens on its current reach: Design, which connected it.
     await page.getByText("Available in").click();
-    await page.getByText("Connected in this workspace, so always included.").waitFor();
+    await page.getByText("Connected in this workspace, so it can't be removed.").waitFor();
     await noOverflow();
     await shot("3-editor-workspaces");
 

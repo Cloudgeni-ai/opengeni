@@ -1814,6 +1814,66 @@ describe("One Models page for the organization and the workspace", () => {
         await cleanup(view);
       }
     });
+
+    test("while its workspace uses the organization's accounts, it isn't listed as one of them", async () => {
+      organizationAdmin = true;
+      accounts = {
+        ...accounts,
+        accounts: [codexAccount({ id: "org-1", label: "Company plan", source: "organization" })],
+        activeAccountId: "org-1",
+        source: {
+          ...source,
+          mode: "organization",
+          effectiveSource: "organization",
+          workspaceAvailable: true,
+        },
+      };
+      routeBoth();
+      client.getModelConnectionAccess.mockImplementation(async (...args: unknown[]) =>
+        managedAccess((args[0] as { connectionId: string }).connectionId),
+      );
+      const view = await render();
+      try {
+        await flush();
+        // Its own accounts are in their "set aside" row, this one included.
+        expect(rowsNamed(view.container, "Team plan")).toHaveLength(0);
+        expect(rowsNamed(view.container, "Company plan")).toHaveLength(1);
+        expect(view.container.textContent).toContain("Set aside");
+      } finally {
+        await cleanup(view);
+      }
+    });
+
+    test("an account no workspace manages keeps the organization Primary row", async () => {
+      organizationAdmin = true;
+      organizationList = true;
+      routeBoth();
+      client.getModelConnectionAccess.mockImplementation(async (...args: unknown[]) =>
+        managedAccess((args[0] as { connectionId: string }).connectionId),
+      );
+      organizationWorkspaces = [
+        {
+          id: "workspace-a",
+          name: "Design preview",
+          personal: false,
+          canManage: true,
+          savedDefaultModel: null,
+        },
+      ];
+      const view = await render();
+      try {
+        await act(async () =>
+          rowsNamed(view.container, "Company plan")[0]!
+            .querySelector<HTMLElement>("[data-row-action]")!
+            .click(),
+        );
+        await flush();
+        expect(view.container.querySelector("h1")?.textContent).toBe("Company plan");
+        expect(view.container.textContent).toContain("Primary account");
+      } finally {
+        await cleanup(view);
+      }
+    });
   });
 
   test("a workspace admin sees their workspaces and what they use, read-only", async () => {
@@ -1886,6 +1946,52 @@ describe("One Models page for the organization and the workspace", () => {
         "GET",
         "/v1/organizations/organization-a/codex/accounts",
       );
+    } finally {
+      await cleanup(view);
+    }
+  });
+
+  test("a workspace admin sees their own account once after the organization shares it", async () => {
+    organizationList = true;
+    // Design connected it; the organization also gave it to Research.
+    client.listCodexAccounts.mockImplementation(async (workspaceId: string) => ({
+      ...accounts,
+      accounts: [
+        codexAccount({
+          id: "acct-1",
+          label: "Team plan",
+          source: workspaceId === "workspace-a" ? "workspace" : "organization",
+        }),
+      ],
+      source: {
+        ...source,
+        workspaceId,
+        effectiveSource: workspaceId === "workspace-a" ? "workspace" : "organization",
+      },
+    }));
+    organizationWorkspaces = [
+      {
+        id: "workspace-a",
+        name: "Design preview",
+        personal: false,
+        canManage: true,
+        savedDefaultModel: null,
+      },
+      {
+        id: "workspace-b",
+        name: "Research",
+        personal: false,
+        canManage: true,
+        savedDefaultModel: null,
+      },
+    ];
+    const view = await render();
+    try {
+      const rows = [...view.container.querySelectorAll<HTMLElement>("[data-slot=list-row]")].filter(
+        (row) => row.textContent?.includes("Team plan"),
+      );
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.textContent).toContain("Used in Design preview, Research");
     } finally {
       await cleanup(view);
     }
