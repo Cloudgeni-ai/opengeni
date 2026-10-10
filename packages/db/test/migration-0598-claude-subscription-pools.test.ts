@@ -46,7 +46,7 @@ const subscriptionCoreMigrations = [
   // Adds provider-neutral routines over the shared core tables from withheld 0642.
   "0707_subscription_core_neutral_routines.sql",
   // Renames and redefines the auto-assignment objects the withheld 0689 creates.
-  "0711_subscription_core_provider_keyed_reach.sql",
+  "0712_subscription_core_provider_keyed_reach.sql",
 ] as const;
 const key = Buffer.alloc(32, 67);
 const ids = {

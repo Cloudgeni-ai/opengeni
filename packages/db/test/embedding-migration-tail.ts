@@ -180,5 +180,5 @@ export const embeddingMigrationTail = [
   "0708_inbox_member_notifications.sql",
   // Renames and rekeys the auto-assignment table, triggers and reach routines
   // withheld 0689 and 0702 create; replay after them.
-  "0711_subscription_core_provider_keyed_reach.sql",
+  "0712_subscription_core_provider_keyed_reach.sql",
 ];

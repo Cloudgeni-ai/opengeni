@@ -149,7 +149,8 @@ function LiveSession(props: {
   const effort = policy?.reasoningEffort ?? session?.reasoningEffort ?? null;
   // The web composer's phone-width pill: compact model name, effort when it is a choice.
   const pill = model ? compactModelPill(props.models, model, effort ?? undefined) : null;
-  const status = controller.sessionStatus;
+  // A session the runtime could not start reads as stuck, never "Waiting on you".
+  const status = controller.displayStatus;
   const paused = controller.queue.effectiveControl?.state === "paused";
   // Web header: the status badge beside the title (a paused workstream says so).
   const refreshSession = controller.session.refresh;

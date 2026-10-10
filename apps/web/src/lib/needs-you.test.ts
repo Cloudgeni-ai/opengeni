@@ -16,6 +16,17 @@ function session(overrides: Partial<Session> & { id: string }): Session {
 }
 
 describe("needs you", () => {
+  test("a session the runtime could not start is stuck, not waiting on the person", () => {
+    const stuck = session({
+      id: "a",
+      status: "requires_action",
+      admissionBlock: { code: "database_claim_rejected" },
+    } as never);
+    expect(rootNeedsYou(stuck)).toBe(false);
+    expect(countNeedsYou([stuck])).toBe(0);
+    expect(filterNeedsYou([stuck])).toEqual([]);
+  });
+
   test("a root needs you when it, or a spawned agent, waits on a person or failed", () => {
     expect(rootNeedsYou(session({ id: "a", status: "requires_action" }))).toBe(true);
     expect(rootNeedsYou(session({ id: "a", status: "failed" }))).toBe(true);

@@ -1883,7 +1883,7 @@ describe("turn execution policy V1", () => {
     };
     const newer = resolveTurnExecutionPolicyV1(current, input);
     expect(newer.definitionVersion).toBe(
-      "sha256:1cb2d7e4bbc82292681b2a53e20848c4c6702b953c6e0668ca49020ce4c05708",
+      "sha256:e5abc1c2cc619db0827f47241011aa90eeca0fe700071973b64f9ed3c32d7952",
     );
     // The same current definition accepted before the compaction trigger left
     // the digest.

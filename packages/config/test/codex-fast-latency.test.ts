@@ -54,6 +54,10 @@ describe("Codex live and resolved catalog fast capabilities", () => {
           (candidate) => candidate.id === model.id,
         )!;
         expect(actual.capabilities.inputModalities).toEqual(["text", "image"]);
+        expect(actual.capabilities.structuredOutput).toEqual({
+          upstream: "supported",
+          runnable: true,
+        });
         expect(actual.capabilities.latencyModes).toContainEqual(
           expect.objectContaining({ id: "fast", upstream: "supported", runnable: true }),
         );
@@ -78,6 +82,7 @@ describe("Codex live and resolved catalog fast capabilities", () => {
   test("does not broaden unknown models, explicit fast restrictions, or retired membership", () => {
     const restricted = {
       ...legacyCapabilities,
+      structuredOutput: { upstream: "unsupported" as const, runnable: false },
       latencyModes: [
         ...legacyCapabilities.latencyModes,
         { id: "fast" as const, upstream: "unsupported" as const, runnable: false },
@@ -95,8 +100,12 @@ describe("Codex live and resolved catalog fast capabilities", () => {
     const models = configuredModels(withCodexCatalogProvider(settings));
     expect(models.find((model) => model.id === "codex/unknown-model")?.capabilities).toMatchObject({
       inputModalities: ["text"],
+      structuredOutput: { upstream: "unknown", runnable: false },
       latencyModes: legacyCapabilities.latencyModes,
     });
+    expect(
+      models.find((model) => model.id === "codex/gpt-6-luna")?.capabilities.structuredOutput,
+    ).toEqual({ upstream: "unsupported", runnable: false });
     expect(() => policy(settings, "codex/gpt-6-luna", "fast")).toThrow(UnsupportedLatencyModeError);
     expect(() => policy(settings, "codex/unknown-model", "priority")).toThrow(
       UnsupportedLatencyModeError,

@@ -1393,10 +1393,24 @@ credits), the omitted-model default, goal resume and continuation, and the
 worker's post-resolution gate, which classifies the frozen turn with the same
 `cost` the claim bills. Credit-funded live voice and voice input honor it where
 credits are billed, and managed video generation is unavailable while it is
-off. Paid web search and knowledge embeddings are separate credit meters and
-are not affected. The Settings page asks before turning credits off when no
-other model could run, and Allowed models mutes credit models while the switch
-is off.
+off. The other credit meters honor it too, so a workspace with credits off is
+never debited: paid web search and web fetch are not offered to new turns
+(free providers still are, and a call already offered is refused with a
+message naming the switch), knowledge search falls back to keyword
+results with `fallbackReason: "credits_disabled"` (`mode: "vector"` returns
+403), and paid knowledge indexing waits (`awaiting_funding`, no provider call,
+no retry attempt used) and resumes on its own once credits are turned back on.
+The one exception is sandbox warm time: the hosted deployment never bills it
+in credits (deploys pin `OPENGENI_SANDBOX_WARM_BILLING_MODE=usage_only`), but a
+deployment that sets it to `credits` still debits warm time while the switch is
+off, because every agent turn needs its sandbox. The switch applies to new
+work: a model call or video already admitted when it turns off still settles.
+In the workspace catalog a
+credit model blocked only by the switch reports availability reason
+`credits_disabled` (labelled "Opengeni credits off" in the picker); when an
+allowlist also excludes it, the reason stays `policy_blocked`. The Settings
+page asks before turning credits off when no other model could run, and
+Allowed models mutes credit models while the switch is off.
 
 Provider allowlists remain part of the API contract for advanced/operator use.
 The authenticated catalog exposes only a per-model `policyAllowed` verdict, not
@@ -1755,6 +1769,18 @@ Gateway snapshots, and the `marginBps` markup.
 Gateway catalogue tests pin the exact Baseten/Wafer rates and caching claims;
 offline llm-prices coverage uses
 `scripts/fixtures/llm-prices-current-v1.sample.json`.
+
+### Single model calls
+
+Session titles and the public OpenAI-compatible Chat Completions endpoint share
+one provider-neutral request path, `runSingleModelCall` in
+`packages/runtime/src/single-model-call.ts`: one nonstreaming or streaming
+model request with no tools, on the model's own wire (Responses, Chat
+Completions or native Claude Messages). Usage settles through the same
+`settleModelUsage` pricing as turns. Subscription routes keep titles on the
+turn's account: Codex subscription turns title with `codex/gpt-6-luna`, and
+Claude subscription turns with Claude Haiku 5.5. Endpoint parameters, billing
+and subscription admission are in [`chat-completions.md`](chat-completions.md).
 
 ## Evidence-bounded Grok 4.5 support
 

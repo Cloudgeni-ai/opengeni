@@ -1,5 +1,6 @@
 import { modelDisplayName } from "@opengeni/react";
 import { labelReasoningEffort } from "@opengeni/react/model-policy";
+import { sessionAdmissionBlocked, sessionDisplayStatus } from "@opengeni/react/timeline-model";
 
 import type { SemanticTone } from "@/components/ui/status-dot";
 import { formatAbsoluteTime, inSentence } from "@/components/ui/relative-time";
@@ -60,7 +61,9 @@ export function nextCheckLabel(deadlineAt: string, now: number): string | null {
 }
 
 function lifecycleStatus(session: RailSession, waiting: boolean): SessionHoverFacts["status"] {
-  switch (session.status) {
+  switch (sessionDisplayStatus(session)) {
+    case "blocked":
+      return { label: "Stuck", tone: "danger", live: false };
     case "requires_action":
       return { label: "Needs you", tone: "attention", live: false };
     case "failed":
@@ -184,7 +187,13 @@ export function sessionHoverFacts(
   const context: string[] = [];
   if (session.status === "requires_action" && session.requiresActionSince) {
     const waited = formatWaitDuration(session.requiresActionSince, now);
-    if (waited) context.push(`Waiting on you for ${waited}`);
+    if (waited) {
+      context.push(
+        sessionAdmissionBlocked(session)
+          ? `Could not start its next step for ${waited}`
+          : `Waiting on you for ${waited}`,
+      );
+    }
   }
   if (wait) {
     const nextCheck = nextCheckLabel(wait.deadlineAt, now);

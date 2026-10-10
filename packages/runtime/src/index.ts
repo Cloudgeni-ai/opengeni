@@ -15,6 +15,20 @@ export {
   compactionPrefixCuts,
 } from "./anthropic-compaction";
 export { AnthropicProviderRejection } from "./anthropic-messages";
+import { runSingleModelCall, type SingleModelCallTarget } from "./single-model-call";
+export {
+  runSingleModelCall,
+  SingleModelCallProviderError,
+  SingleModelCallUnsupportedError,
+  type SingleModelCallContentPart,
+  type SingleModelCallFinishReason,
+  type SingleModelCallMessage,
+  type SingleModelCallOptions,
+  type SingleModelCallOutputFormat,
+  type SingleModelCallRequest,
+  type SingleModelCallResult,
+  type SingleModelCallTarget,
+} from "./single-model-call";
 import { instrumentedModelFetch } from "./model-provider-client";
 import type { ModelProviderApi, ResolvedModelProvider, Settings } from "@opengeni/config";
 import { isRunMcpCredentialError, RunMcpCredentials } from "./mcp-run-credentials";
@@ -1111,114 +1125,31 @@ export async function generateSessionTitle(
   }
 
   const modelName = options.modelName ?? settings.openaiModel;
-  // The SDK Model.getResponse() is runner-facing and throws outside an agent
-  // trace, so every provider route sends one direct request. Only a runtime
-  // model override (tests) has no provider client and keeps getResponse().
+  // Only a runtime model override (tests) has no provider client.
   const binding =
     options.client && options.provider
       ? { client: options.client, provider: options.provider, modelId: modelName }
       : options.model
         ? null
         : new MultiProviderModelProvider(settings).resolveBinding(modelName);
-  if (binding?.provider.api === "chat") {
-    return await generateChatSessionTitle(binding.client, binding.modelId, boundedPrompt, options);
-  }
-  const wireProvider = binding?.provider ?? options.provider;
-  const azureWire = wireProvider
-    ? wireProvider.wireProfile === "azure-openai"
-    : settings.openaiProvider === "azure";
-  const request: ModelRequest = {
-    systemInstructions: SESSION_TITLE_GENERATION_INSTRUCTIONS,
-    input: boundedPrompt,
-    modelSettings: {
-      maxTokens: SESSION_TITLE_GENERATION_MAX_OUTPUT_TOKENS,
-      ...(options.reasoningEffort ? { reasoning: { effort: options.reasoningEffort } } : {}),
-      text: { verbosity: "low" },
-      ...(azureWire ? {} : { store: false }),
-      ...(options.serviceTier ? { providerData: { service_tier: options.serviceTier } } : {}),
-    },
-    tools: [],
-    toolsExplicitlyProvided: true,
-    outputType: "text",
-    handoffs: [],
-    tracing: false,
+  const target: SingleModelCallTarget = binding
+    ? { client: binding.client, provider: binding.provider, modelId: binding.modelId }
+    : { model: options.model! };
+  const result = await runSingleModelCall(target, {
+    messages: [
+      { role: "system", content: SESSION_TITLE_GENERATION_INSTRUCTIONS },
+      { role: "user", content: boundedPrompt },
+    ],
+    maxOutputTokens: SESSION_TITLE_GENERATION_MAX_OUTPUT_TOKENS,
+    ...(options.reasoningEffort ? { reasoningEffort: options.reasoningEffort } : {}),
+    verbosity: "low",
+    ...(options.serviceTier ? { serviceTier: options.serviceTier } : {}),
     ...(options.signal ? { signal: options.signal } : {}),
-  };
-
-  const response =
-    binding?.provider.api === "anthropic-messages"
-      ? await new AnthropicMessagesModel(
-          binding.provider,
-          binding.modelId,
-          instrumentedModelFetch(binding.provider.id, globalThis.fetch),
-        ).getResponse(request)
-      : binding
-        ? await new CompactionResponsesModel(
-            binding.client,
-            binding.modelId,
-            binding.provider,
-          ).fetchResponse(request)
-        : await options.model!.getResponse(request);
+  });
   return {
-    title: normalizeGeneratedSessionTitle(
-      extractResponseOutputText(response),
-      responseStoppedAtOutputLimit(response),
-    ),
-    usage: modelResponseUsageFromResponse(response),
+    title: normalizeGeneratedSessionTitle(result.text, result.finishReason === "length"),
+    usage: result.usage,
   };
-}
-
-/**
- * Chat-completions providers (such as OpenRouter connections) use one direct,
- * trace-free request. The SDK chat model's getResponse() is runner-facing and
- * opens a tracing span, which throws outside an agent run. The worker sends no
- * title request on the managed OpenRouter free route.
- */
-async function generateChatSessionTitle(
-  client: OpenAI,
-  modelName: string,
-  prompt: string,
-  options: GenerateSessionTitleOptions,
-): Promise<GeneratedSessionTitle> {
-  const completion = await client.chat.completions.create(
-    {
-      model: modelName,
-      max_tokens: SESSION_TITLE_GENERATION_MAX_OUTPUT_TOKENS,
-      messages: [
-        { role: "system", content: SESSION_TITLE_GENERATION_INSTRUCTIONS },
-        { role: "user", content: prompt },
-      ],
-      ...(options.reasoningEffort ? { reasoning_effort: options.reasoningEffort } : {}),
-      ...(options.serviceTier ? { service_tier: options.serviceTier } : {}),
-    } as any,
-    options.signal ? { signal: options.signal } : undefined,
-  );
-  const choice = (
-    completion as {
-      choices?: Array<{ finish_reason?: unknown; message?: { content?: unknown } }>;
-    }
-  ).choices?.[0];
-  const content = choice?.message?.content;
-  return {
-    title: normalizeGeneratedSessionTitle(
-      typeof content === "string" ? content : "",
-      choice?.finish_reason === "length",
-    ),
-    usage: modelResponseUsageFromResponse(completion),
-  };
-}
-
-/**
- * Whether a non-streamed Responses reply stopped at the output limit. The
- * streamed subscription transports reject an incomplete terminal before any
- * response exists, so that title attempt fails and a later turn retries.
- */
-function responseStoppedAtOutputLimit(response: unknown): boolean {
-  if (!response || typeof response !== "object") return false;
-  return (
-    (response as { status?: unknown }).status === "incomplete" ||
-    (response as ModelResponse).providerData?.anthropic?.stopReason === "max_tokens"
-  );
 }
 
 const INLINE_REASONING_CLOSE_TAG = /<\/(?:think|thinking|reasoning)>/giu;

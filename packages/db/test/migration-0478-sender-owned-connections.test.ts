@@ -66,7 +66,7 @@ const withheldMigrations = [
   // Rewrites the inbox routines from the withheld inbox tail and reads its columns.
   "0708_inbox_member_notifications.sql",
   // Renames and redefines the auto-assignment objects the withheld 0689 creates.
-  "0711_subscription_core_provider_keyed_reach.sql",
+  "0712_subscription_core_provider_keyed_reach.sql",
 ];
 let database: OwnerMigratedTestDatabase | null = null;
 

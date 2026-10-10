@@ -14,8 +14,8 @@ import { provisionRoles } from "../src/provision-roles";
 import { encryptEnvironmentValue } from "../src/environment-crypto";
 
 const migration = "0689_subscription_core_codex_cutover.sql";
-// 0711 renames objects 0689 creates: held back and replayed right after it.
-const providerKeyedReach = "0711_subscription_core_provider_keyed_reach.sql";
+// 0712 renames objects 0689 creates: held back and replayed right after it.
+const providerKeyedReach = "0712_subscription_core_provider_keyed_reach.sql";
 const key = Buffer.alloc(32, 87);
 const cases: Array<{
   name: string;

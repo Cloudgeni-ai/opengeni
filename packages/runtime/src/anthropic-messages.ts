@@ -507,6 +507,14 @@ export function buildAnthropicRequest(
     };
   } else if (settings.temperature !== undefined) body.temperature = settings.temperature;
   if (settings.topP !== undefined && !body.thinking) body.top_p = settings.topP;
+  // Single model calls pass caller stop sequences; agent turns never set them.
+  const stopSequences = settings.providerData?.stop_sequences;
+  if (
+    Array.isArray(stopSequences) &&
+    stopSequences.length > 0 &&
+    stopSequences.every((value) => typeof value === "string")
+  )
+    body.stop_sequences = [...stopSequences];
   if (request.outputType !== "text")
     body.output_config = {
       ...body.output_config,

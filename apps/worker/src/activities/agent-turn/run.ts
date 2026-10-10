@@ -1594,6 +1594,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             runSettings,
             resolvedModel,
             lazyToolTransport,
+            workspaceCreditModelsAllowed,
             turnTools,
             connectionScope,
             sandboxArtifactRuntime,

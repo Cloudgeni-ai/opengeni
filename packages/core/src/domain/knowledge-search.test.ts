@@ -29,6 +29,7 @@ let queryRateMicros = 0;
 let failNextRetrieval = false;
 let failSettlement = false;
 let allowanceRefusal: Record<string, unknown> | null = null;
+let creditPolicy: { allowCreditModels: boolean } | null = null;
 const allowanceChecks = mock(async (_db: unknown, _input: unknown) => allowanceRefusal);
 const debits = mock(async (_db: unknown, input: { amountMicros: number }) => {
   if (failSettlement) throw new Error("settlement unavailable");
@@ -56,6 +57,7 @@ mock.module("@opengeni/db", () => ({
     fn: (db: unknown) => Promise<unknown>,
   ) => fn(_db),
   isCodexBilledTurn: async () => false,
+  getWorkspaceModelPolicy: async () => creditPolicy,
   sumUsageQuantity: async (_db: unknown, input: { eventType: string }) =>
     input.eventType === "document.query_embedding_bytes"
       ? queryRateBytes
@@ -171,6 +173,92 @@ test("paid vector queries check funding, debit post-use, and preserve hybrid key
   );
   expect(embedded).toBe(1);
   expect(usage.mock.calls.length).toBe(priorUsage);
+});
+
+test("credits turned off falls back to keyword search and refuses vector before the provider", async () => {
+  const settings = {
+    documentEmbeddingProvider: "openai",
+    documentEmbeddingBillingMode: "credits",
+    documentEmbeddingRateMicrosPerMillionBytes: 1_000_000,
+  } as Settings;
+  let embedded = 0;
+  const provider = () =>
+    ({
+      model: "test",
+      dimensions: 3,
+      embedQuery: async () => {
+        embedded++;
+        return [1, 0, 0];
+      },
+    }) as never;
+  balance = 1_000_000;
+  creditPolicy = { allowCreditModels: false };
+  const priorDebits = debits.mock.calls.length;
+  const priorUsage = usage.mock.calls.length;
+  try {
+    const hybrid = await searchKnowledgeEntries(
+      {} as never,
+      serviceContext,
+      { query: "paid" },
+      provider,
+      settings,
+    );
+    expect(hybrid.searchMode).toBe("keyword");
+    expect(hybrid.fallbackReason).toBe("credits_disabled");
+    await expect(
+      searchKnowledgeEntries(
+        {} as never,
+        serviceContext,
+        { query: "paid", mode: "vector" },
+        provider,
+        settings,
+      ),
+    ).rejects.toMatchObject({ code: "knowledge_vector_credits_disabled" });
+    // Keyword pagination keeps working instead of the paid-cursor rejection.
+    const nextPage = await searchKnowledgeEntries(
+      {} as never,
+      serviceContext,
+      { query: "paid", cursor: "keyword-cursor" },
+      provider,
+      settings,
+    );
+    expect(nextPage.fallbackReason).toBe("credits_disabled");
+    expect(embedded).toBe(0);
+    expect(debits.mock.calls.length).toBe(priorDebits);
+    expect(usage.mock.calls.length).toBe(priorUsage);
+    creditPolicy = { allowCreditModels: true };
+    const paid = await searchKnowledgeEntries(
+      {} as never,
+      serviceContext,
+      { query: "paid", mode: "vector" },
+      provider,
+      settings,
+    );
+    expect(paid.searchMode).toBe("vector");
+    expect(embedded).toBe(1);
+    expect(debits.mock.calls.length).toBe(priorDebits + 1);
+  } finally {
+    creditPolicy = null;
+  }
+});
+
+test("credits turned off leaves unpriced query embeddings untouched", async () => {
+  creditPolicy = { allowCreditModels: false };
+  try {
+    const result = await searchKnowledgeEntries(
+      {} as never,
+      serviceContext,
+      { query: "free", mode: "vector" },
+      () => ({ model: "test", dimensions: 3, embedQuery: async () => [1, 0, 0] }) as never,
+      {
+        documentEmbeddingProvider: "deterministic",
+        documentEmbeddingBillingMode: "credits",
+      } as Settings,
+    );
+    expect(result.searchMode).toBe("vector");
+  } finally {
+    creditPolicy = null;
+  }
 });
 
 test("shadow query usage meters bytes without checking or consuming credits", async () => {

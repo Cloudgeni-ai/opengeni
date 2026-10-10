@@ -23,6 +23,7 @@ import {
   type TimelineGroup,
   type TimelineItem,
 } from "@opengeni/react/session";
+import { sessionAdmissionBlocked, type SessionDisplayStatus } from "@opengeni/react/timeline-model";
 import { useNativeFileAttachments, type NativeFileAttachmentsResult } from "./attachments";
 import { useOpenGeniReactNativeEnvironment } from "./environment";
 import {
@@ -64,6 +65,13 @@ export interface OpenGeniNativeSessionController {
   /** Spawned sub-agent sessions, refreshed by spawn and completion events. */
   lineage: ReturnType<typeof useSessionLineage>;
   active: boolean;
+  /**
+   * The runtime refused to start the next turn (an admission block). Nothing
+   * is asked of the person; Resume rechecks and starts the kept work again.
+   */
+  admissionBlocked: boolean;
+  /** `sessionStatus` as a person should read it: `blocked` instead of "Waiting on you". */
+  displayStatus: SessionDisplayStatus | null;
   runActive: boolean;
   error: Error | null;
   refresh(): Promise<void>;
@@ -77,6 +85,21 @@ function sessionRunActive(status: SessionStatus | null): boolean {
     status === "waiting_capacity" ||
     status === "requires_action"
   );
+}
+
+/** The newest loaded status change, and whether the runtime blocked admission there. */
+function latestStatusChange(
+  events: readonly SessionEvent[],
+): { sequence: number; blocked: boolean } | null {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]!;
+    if (event.type !== "session.status.changed") continue;
+    return {
+      sequence: event.sequence,
+      blocked: (event.payload as { code?: unknown } | undefined)?.code === "admission_blocked",
+    };
+  }
+  return null;
 }
 
 export function useOpenGeniNativeSession(input: {
@@ -179,6 +202,23 @@ export function useOpenGeniNativeSession(input: {
     ]);
   }, [events, humanInput, mcpApprovalPolicy, queue, session]);
 
+  const detail = session.session ?? null;
+  const latestChange = latestStatusChange(events.events);
+  // A recheck (Resume) clears an admission block and restores the earlier
+  // status without a status event, so once the detail read is as fresh as the
+  // block event it is the truth. Until it lands, the block event is.
+  const detailCurrent =
+    detail !== null &&
+    latestChange?.blocked === true &&
+    detail.lastSequence >= latestChange.sequence;
+  const sessionStatus = detailCurrent
+    ? detail.status
+    : (events.sessionStatus ?? detail?.status ?? null);
+  const admissionBlocked = detailCurrent
+    ? sessionAdmissionBlocked(detail)
+    : sessionStatus === "requires_action" &&
+      (latestChange?.blocked === true || (detail !== null && sessionAdmissionBlocked(detail)));
+
   return {
     sessionId: input.sessionId,
     workspaceId: input.workspaceId,
@@ -187,7 +227,9 @@ export function useOpenGeniNativeSession(input: {
     timeline: events.timeline,
     timelineGroups,
     connectionState: events.connectionState,
-    sessionStatus: events.sessionStatus ?? session.session?.status ?? null,
+    sessionStatus,
+    admissionBlocked,
+    displayStatus: admissionBlocked ? "blocked" : sessionStatus,
     initialLoading: events.initialLoading || session.loading,
     hasOlder: events.hasOlder,
     loadingOlder: events.loadingOlder,
@@ -202,7 +244,8 @@ export function useOpenGeniNativeSession(input: {
     goal,
     lineage,
     active: environment.active,
-    runActive: sessionRunActive(events.sessionStatus ?? session.session?.status ?? null),
+    // A blocked session runs nothing: the composer offers Send, not Stop.
+    runActive: !admissionBlocked && sessionRunActive(sessionStatus),
     error:
       events.error ??
       session.error ??

@@ -25,7 +25,9 @@ const updateWorkspaceModelAccessPolicy = mock(
 const updateWorkspaceSettings = mock(
   async (_workspaceId: string, _patch: { allowCreditModels?: boolean }) => ({}),
 );
+const refreshWorkspace = mock(async (_workspaceId: string) => undefined);
 const context = {
+  refreshWorkspace,
   client: {
     getWorkspaceModelAccessPolicy,
     getWorkspaceModelCatalog,
@@ -464,6 +466,8 @@ describe("Use Opengeni credits", () => {
       expect(view.container.querySelector('[data-testid="confirm-dialog"]')).toBeNull();
       // The switch is a workspace setting; the allowlist is never rewritten.
       expect(updateWorkspaceSettings).toHaveBeenCalledTimes(1);
+      // The cached workspace (read by other pages) follows the switch.
+      expect(refreshWorkspace).toHaveBeenCalledWith("workspace-a");
       expect(updateWorkspaceSettings.mock.calls[0]).toEqual([
         "workspace-a",
         { allowCreditModels: false },
@@ -673,6 +677,23 @@ describe("Use Opengeni credits", () => {
     expect(draft.allowCreditModels).toBe(false);
     expect(usableModelCount(creditCatalog, draft, false)).toBe(1);
     expect(usableModelCount(creditCatalog, draft, true)).toBe(4);
+    // A saved credits-off policy marks credit models credits_disabled; turning
+    // the switch back on in the draft makes them count again.
+    const savedCreditsOff = creditCatalog.map((candidate) =>
+      candidate.cost === "credits"
+        ? {
+            ...candidate,
+            availability: {
+              status: "unavailable" as const,
+              selectable: false,
+              reason: "credits_disabled" as const,
+              checkedAt: null,
+            },
+          }
+        : candidate,
+    );
+    expect(usableModelCount(savedCreditsOff, draft, false)).toBe(1);
+    expect(usableModelCount(savedCreditsOff, draft, true)).toBe(4);
     expect(
       usableModelCount(
         creditCatalog.map((candidate) =>

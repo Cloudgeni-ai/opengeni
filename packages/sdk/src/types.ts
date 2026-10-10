@@ -1565,6 +1565,17 @@ export type CancelSessionBackgroundCommandResult = {
   accepted: boolean;
 };
 
+/** Why the runtime refused to start a session's next turn. */
+export type SessionAdmissionBlock = {
+  reason:
+    | "database_claim_rejected"
+    | "initiator_membership_required"
+    | "personal_resource_grant_required";
+  sqlState: string | null;
+  retryPolicy: "explicit_recheck";
+  blockedAt: string;
+};
+
 export type Session = {
   /** Detail-only dispatch evidence; delivery does not prove turn execution. */
   dispatchWait?:
@@ -1736,6 +1747,12 @@ export type Session = {
    * list and lineage reads for `requires_action` sessions; null otherwise.
    */
   requiresActionSince?: string | null | undefined;
+  /**
+   * Set while the runtime refuses to start this session's next turn (status
+   * `requires_action`, but nothing is asked of a person). Accepted work is
+   * kept; Resume or a new Send/Steer rechecks admission. Absent on older servers.
+   */
+  admissionBlock?: SessionAdmissionBlock | null | undefined;
   /** Agent access scope; absent on servers before the agent-access release. */
   agentAccess?: SessionAgentAccess | undefined;
   /** Opaque end-user label; null when the session carries none. */
@@ -1787,6 +1804,7 @@ export type SessionListEntry = Pick<
   | "archiveVersion"
   | "treeStats"
   | "requiresActionSince"
+  | "admissionBlock"
   | "createdAt"
   | "updatedAt"
 > & {
@@ -3789,6 +3807,7 @@ export type ModelAvailabilityV1 = {
     | "provider_unhealthy"
     | "policy_blocked"
     | "unsupported"
+    | "credits_disabled"
     | null;
   checkedAt: string | null;
 };

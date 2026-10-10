@@ -686,7 +686,7 @@ function TimelineRow({ item, context }: { item: TimelineItem; context: GroupCont
     case "human-input":
       return <HumanInputRow item={item} onCopy={context.onCopy} />;
     case "session-status": {
-      const meta = SESSION_STATUS_PRESENTATION[item.status];
+      const meta = SESSION_STATUS_PRESENTATION[item.blocked ? "blocked" : item.status];
       return (
         <SeparatorRow
           dot={item.resolvedAt ? undefined : theme.colors[`status-${meta.tone}`]}

@@ -20,6 +20,9 @@ workspaces, external users) in [`product-integration.md`](product-integration.md
   [`application-observability.md`](application-observability.md#web-client-errors))
 - `POST /v1/analytics-consent` (public, content-free count of analytics banner
   answers; see [`application-observability.md`](application-observability.md#analytics-consent))
+- `POST /v1/workspaces/:workspaceId/chat/completions` and
+  `GET /v1/workspaces/:workspaceId/models` (stateless OpenAI-compatible single
+  model calls without tools; see [`chat-completions.md`](chat-completions.md))
 - `GET /v1/access/me`
 - `GET /v1/organization-memberships` (managed-human self membership and personal-workspace identity)
 - `POST /v1/organizations/additional` (managed-human creation of another isolated organization with its first shared workspace)

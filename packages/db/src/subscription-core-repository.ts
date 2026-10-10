@@ -716,7 +716,7 @@ function turnLeaseWhere(input: SubscriptionTurnLeaseIdentity) {
     and generation = ${input.generation}`;
 }
 
-export type SubscriptionOperationKind = "image" | "realtime" | "transcription";
+export type SubscriptionOperationKind = "image" | "realtime" | "transcription" | "completion";
 
 export type SubscriptionOperationLeaseIdentity = {
   accountId: string;

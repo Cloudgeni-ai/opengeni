@@ -379,6 +379,11 @@ export type SessionStatusItem = {
   kind: "session-status";
   id: string;
   status: SessionStatus;
+  /**
+   * The runtime refused to start the next turn (an admission block). Nothing
+   * is asked of the person, so it reads as stuck, not "waiting on you".
+   */
+  blocked?: true;
   /** Presentation-only evidence that this historical attention state resumed. */
   resolvedAt?: string;
   occurredAt: string;

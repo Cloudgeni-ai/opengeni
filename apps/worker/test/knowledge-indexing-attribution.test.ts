@@ -11,6 +11,7 @@ const embed = mock(async () => [[1, 0, 0]]);
 mock.module("@opengeni/core", () => ({
   paidDocumentEmbedding: () => true,
   documentEmbeddingCostMicros: () => 20,
+  workspaceCreditsDisabled: async () => false,
 }));
 mock.module("@opengeni/documents", () => ({
   knowledgeIndexChunks: function* () {

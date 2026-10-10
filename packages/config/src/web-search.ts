@@ -130,6 +130,9 @@ export type WebSearchSettings = {
   webSearchProviderMode?: string | undefined;
   webSearchPricingJson?: string | undefined;
   webSearchRequestTimeoutMs?: number | undefined;
+  /** Credit billing is active for this deployment (see webSearchCreditBillingActive). */
+  billingMode?: string | undefined;
+  usageLimitsMode?: string | undefined;
 };
 
 export type WebSearchProviderResolution =
@@ -300,7 +303,16 @@ export function webSearchProviderConfig(
  */
 export function webSearchToolPlan(
   settings: WebSearchSettings,
-  turn: { hostedWebSearch: boolean; transportHostedSearch?: boolean },
+  turn: {
+    hostedWebSearch: boolean;
+    transportHostedSearch?: boolean;
+    /**
+     * The workspace turned Opengeni credits off: provider tools whose calls
+     * would spend credits are not offered (admission still refuses them if
+     * the switch flips mid-turn).
+     */
+    creditsDisabled?: boolean;
+  },
 ): { hostedWebSearch: boolean; providerTools: WebSearchProviderToolName[] } {
   const config = webSearchProviderConfig(settings);
   if (!config || turn.transportHostedSearch) {
@@ -309,12 +321,38 @@ export function webSearchToolPlan(
   if (config.mode === "fallback" && turn.hostedWebSearch) {
     return { hostedWebSearch: true, providerTools: [] };
   }
+  const offered: WebSearchProviderToolName[] = config.fetch
+    ? [WEB_SEARCH_TOOL_NAME, WEB_FETCH_TOOL_NAME]
+    : [WEB_SEARCH_TOOL_NAME];
+  const providerTools = turn.creditsDisabled
+    ? offered.filter((tool) => !webSearchToolSpendsCredits(settings, config, tool))
+    : offered;
   return {
-    hostedWebSearch: false,
-    providerTools: config.fetch
-      ? [WEB_SEARCH_TOOL_NAME, WEB_FETCH_TOOL_NAME]
-      : [WEB_SEARCH_TOOL_NAME],
+    // `replace` withholds hosted search only in favour of a provider tool the
+    // turn actually gets.
+    hostedWebSearch: turn.hostedWebSearch && !providerTools.includes(WEB_SEARCH_TOOL_NAME),
+    providerTools,
   };
+}
+
+/** Whether this deployment bills web search and fetch in Opengeni credits. */
+export function webSearchCreditBillingActive(
+  settings: Pick<WebSearchSettings, "billingMode" | "usageLimitsMode">,
+): boolean {
+  return settings.billingMode === "stripe" || settings.usageLimitsMode === "managed";
+}
+
+/** Whether one call of this provider tool would spend Opengeni credits. */
+export function webSearchToolSpendsCredits(
+  settings: WebSearchSettings,
+  config: WebSearchProviderConfig,
+  tool: WebSearchProviderToolName,
+): boolean {
+  return (
+    webSearchCreditBillingActive(settings) &&
+    webSearchCallPricing(config, tool === WEB_SEARCH_TOOL_NAME ? "search" : "fetch")
+      .providerMicros > 0
+  );
 }
 
 /** Upstream price for one call before any provider-reported cost. */

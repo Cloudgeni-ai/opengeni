@@ -2172,7 +2172,7 @@ BEGIN
     -- M3 PR 3b: the writers' caller check, capability internals and the
     -- revision-authority trigger function are owner-only. Migration 0680: the
     -- cutover receipt and its owner-run trigger functions are owner-only.
-    -- Migration 0711: the provider-keyed auto-assignment apply path and the
+    -- Migration 0712: the provider-keyed auto-assignment apply path and the
     -- auto-assignment and plan-change trigger functions are owner-only.
     -- Triggers fire without the caller holding EXECUTE.
     FOREACH routine_signature IN ARRAY ARRAY[
