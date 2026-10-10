@@ -962,6 +962,9 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
               destinationPath: save.destinationPath,
               overwrite: save.overwrite,
               mayReplaceExisting: save.overwrite && dispatched.dispatchedNow,
+              // Missing folders on the relative destination are created; the
+              // import still confines every existing ancestor to the workspace.
+              createParents: true,
               sizeBytes: save.download.receivedBytes,
               sha256: save.download.sha256!,
               source: {
