@@ -581,17 +581,17 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
       // The plan-change trigger function now reads owner data, so it runs as
       // its owner with a pinned search path (pg_temp last); its grants stay
       // owner-only.
-      expect(withoutBody(before.get(planChange))).toEqual([
-        "false",
-        '{"search_path=pg_catalog"}',
-        withoutBody(after.get(planChange))![2],
-      ]);
-      expect(withoutBody(after.get(planChange))!.slice(0, 2)).toEqual([
+      const planChangeBefore = withoutBody(before.get(planChange));
+      const planChangeAfter = withoutBody(after.get(planChange));
+      expect(planChangeBefore?.slice(0, 2)).toEqual(["false", '{"search_path=pg_catalog"}']);
+      expect(planChangeAfter?.slice(0, 2)).toEqual([
         "true",
         '{"search_path=pg_catalog, public, opengeni_private, pg_temp"}',
       ]);
-      expect(withoutBody(after.get(planChange))![2]).not.toContain("opengeni_app");
-      expect(withoutBody(after.get(planChange))![2]).not.toMatch(/(^|[{,])=/);
+      const planChangeGrants = planChangeAfter?.[2] ?? "";
+      expect(planChangeGrants).toBe(planChangeBefore?.[2] ?? "");
+      expect(planChangeGrants).not.toContain("opengeni_app");
+      expect(planChangeGrants).not.toMatch(/(^|[{,])=/);
     },
     180_000,
   );

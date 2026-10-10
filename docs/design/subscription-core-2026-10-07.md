@@ -1818,8 +1818,8 @@ Steps, as implemented:
    every workspace the legacy rows admit today is enumerated as a `workspaces`
    scope, and the organization source's reach over workspaces created later
    is kept by `opengeni_private.subscription_codex_auto_assignments`
-   (provider-keyed as `opengeni_private.subscription_core_auto_assignments`
-   since §5.3 PR 0c)
+   (keyed by provider since §5.3 PR 0c; its provider-free name comes at
+   retirement)
    (disposition `organization_reach_auto_assigned`): a NULL legacy allowlist
    assigns every new shared workspace, `allow_personal_workspaces` every new
    Personal workspace, each with the organization source's own allocator and
@@ -2440,7 +2440,8 @@ Codex Apps (`subscription-core-codex-apps.ts`) and reset credits stay Codex
 modules, and so does the operation candidate list in
 `subscription-core-codex-operations.ts`. Organization reach is
 provider-keyed since §5.3 PR 0c (`subscription_core_reach` /
-`set_subscription_core_reach` over `subscription_core_auto_assignments`,
+`set_subscription_core_reach` over the provider-keyed
+`subscription_codex_auto_assignments` rows,
 migration 0713), which the shared core and its access editor
 (`subscription-core/access-editor.ts`) call with the provider; Codex's 0702
 pair wraps it.

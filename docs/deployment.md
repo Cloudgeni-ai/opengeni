@@ -4344,6 +4344,38 @@ total). New work those owners accept gets no personal Codex access. If the
 total is not zero, raise it with the product owner; the repair is a separate
 decision and is not part of this migration.
 
+### Provider-keyed reach (0713)
+
+Migration `0713_subscription_core_provider_keyed_reach.sql` is **rolling**:
+deploy it like any release, without draining. Design record:
+[subscription core, PR 0c](design/subscription-core-2026-10-07.md#pr-0c-provider-keyed-cutover-planner-and-organization-reach).
+It requires 0689 and acts on deploy. Like 0712, it grants its three new
+runtime routines to the configured application roles: a deployment whose
+runtime role is not `opengeni_app` must pass them through
+`OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES` (the Helm chart's migration
+secret already does).
+
+- The reach rows that assign an organization connection to workspaces created
+  later (`opengeni_private.subscription_codex_auto_assignments`) gain a
+  `provider` column; every existing row is a Codex row and is kept exactly.
+- Applying reach on workspace and Personal-workspace creation, reading and
+  setting reach, plan-change history and the organization workspace inventory
+  take the provider as data, so a later SuperGrok or Claude cutover adds rows,
+  not routines.
+- Codex behaves as before, and older binaries keep working: every Codex-named
+  routine keeps its name, signature and grants and acts on the same rows.
+
+**Locks.** 0713 locks owner data only, first and in this order: the reach
+table `ACCESS EXCLUSIVE`, then the provider registry `SHARE ROW EXCLUSIVE`,
+which no runtime lock conflicts with. It locks no workspace, membership,
+connection or assignment table, so it cannot deadlock with runtime work.
+While it runs, workspace and Personal-workspace creation and access-editor
+reach changes wait for it briefly. If a transaction already using the reach
+table keeps it past the runner's 5-second `lock_timeout`, the Job fails
+without recording 0713 and changes nothing; retry the Job.
+
+Nothing else needs an operator.
+
 ### Slack API pilot activation (0597)
 
 Stop every old/new API, control worker, and turn worker before applying
