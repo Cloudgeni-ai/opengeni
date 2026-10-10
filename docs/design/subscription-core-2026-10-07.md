@@ -2133,7 +2133,15 @@ a provider name.
   every neutral routine, even when its cutover row is enabled (fail closed).
   Codex is seeded. A provider joins the core by a migration that inserts its
   row and, where needed, widens the provider lists in existing CHECK
-  constraints; no routine changes.
+  constraints; the neutral routines need no change, while the deferred
+  routines listed below still carry per-provider branches that its step must
+  extend. A provider's registry row must land with or after its drained
+  cutover: the row alone turns on the shared disconnect-admission trigger for
+  that provider's lease and binding rows, whatever its cutover row says.
+  `primary_setting_column` must be NULL (a provider without a primary
+  setting, such as an API-key connector) or exactly
+  `<provider>_primary_connection_id`, so no provider can be pointed at another
+  provider's column.
   The registry is append-only (a trigger refuses DELETE, TRUNCATE and a
   changed key): removing or renaming a row would make the shared
   disconnect-admission trigger skip that provider's rows while older binaries
@@ -2144,14 +2152,15 @@ a provider name.
   an error, not a wrong write, if it does not).
 - Neutral capability kinds `refresh_authorized`, `refresh_write`,
   `connection_refresh_authorized` and `connection_owner` carry their provider
-  (format-checked like a registry key) and mirror the `codex_*` kinds one for
+  (required and format-checked like a registry key) and mirror the `codex_*` kinds one for
   one, with owner-only policies. On rows that carry a provider (connections,
   aliases, leases) a capability admits only rows of its own provider.
   Memberships, resource authorities, settings and Apps designations carry no
   provider; their policies admit the owner's own rows for any provider's
-  owner capability, pinned to the capability's account, subject and (for
-  authorities and designations) exact connection, exactly as the Codex-named
-  policies do. The capability key omits the provider, so the owner-capability
+  owner capability, pinned to the capability's account and, per table, to the
+  owner's subject (memberships, authority insert and read), the exact
+  connection (authority revoke, Apps designations) or the current workspace
+  (settings), exactly as the Codex-named policies do. The capability key omits the provider, so the owner-capability
   grant refuses a second provider's grant on an already held key instead of
   sharing the first provider's row.
 - Neutral routines (provider first) replace the Codex-named routines the
