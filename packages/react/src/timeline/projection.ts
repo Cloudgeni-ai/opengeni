@@ -1112,7 +1112,7 @@ export function buildTimeline(
 
       case "codex.capacity.waiting":
       case "turn.capacity_waiting": {
-        const capacityWait = capacityWaitPresentation(payload, turnId);
+        const capacityWait = capacityWaitPresentation(event.type, payload, turnId);
         const item: NoticeItem = {
           kind: "notice",
           id: event.id,
@@ -3328,19 +3328,32 @@ const ACTION_CAPACITY_WAIT_REASONS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * Recorded wait codes, for any subscription provider, that a person must
+ * resolve: every account disabled for allocation, or the serving account
+ * needing reconnection or refusing the request. None of them is a limit.
+ */
+const ACTION_CAPACITY_WAIT_CODE = /_(?:allocator_disabled|relogin_required|account_forbidden)$/;
+
+/**
  * A capacity wait reads as "Limit reached" with one plain secondary line. Only
  * a wait that time alone will not end keeps its recorded, actionable reason.
  */
 function capacityWaitPresentation(
+  type: string,
   payload: Record<string, unknown>,
   turnId: string | null,
 ): { turnId: string | null; label: string; detail: string; text: string } {
   if (
     ACTION_CAPACITY_WAIT_REASONS.has(stringValue(payload.waitReason)) ||
-    payload.code === "codex_allocator_disabled"
+    ACTION_CAPACITY_WAIT_CODE.test(stringValue(payload.code))
   ) {
-    const detail =
-      stringValue(payload.detail) || stringValue(payload.error) || "Waiting for an account.";
+    // Claude/SuperGrok waits record the readable sentence as `error` and an
+    // internal note as `detail`; Codex waits keep their recorded order.
+    const [first, second] =
+      type === "turn.capacity_waiting"
+        ? [payload.error, payload.detail]
+        : [payload.detail, payload.error];
+    const detail = stringValue(first) || stringValue(second) || "Waiting for an account.";
     return { turnId, label: "Waiting", detail, text: detail };
   }
   const detail =

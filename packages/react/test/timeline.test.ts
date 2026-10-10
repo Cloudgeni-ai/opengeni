@@ -299,6 +299,51 @@ describe("buildTimeline", () => {
   });
 
   test.each([
+    [
+      "xai_allocator_disabled",
+      "All connected SuperGrok subscription accounts are disabled for allocation",
+      "waiting for an eligible account, reconnect, pin change, or quota reset",
+    ],
+    [
+      "claude_relogin_required",
+      "The serving Claude account requires reconnection",
+      "the same accepted turn is waiting for another eligible account",
+    ],
+    [
+      "claude_account_forbidden",
+      "The serving Claude account is not authorized for this request",
+      "the same accepted turn is waiting for another eligible account",
+    ],
+  ] as const)("a %s wait needs a person and is not a reached limit", (code, error, detail) => {
+    reset();
+    const [item] = buildTimeline([
+      event("turn.capacity_waiting", { provider: "claude", code, error, detail }),
+    ]);
+    expect(item).toMatchObject({
+      kind: "notice",
+      text: error,
+      capacityWait: { label: "Waiting", detail: error },
+    });
+    expect(JSON.stringify(item)).not.toContain("Limit reached");
+  });
+
+  test("a rate-limited subscription account wait reads as a reached limit", () => {
+    reset();
+    const [item] = buildTimeline([
+      event("turn.capacity_waiting", {
+        provider: "claude",
+        code: "claude_account_rate_limited",
+        error: "The serving Claude account is temporarily rate limited",
+        detail: "the same accepted turn is waiting for another eligible account",
+      }),
+    ]);
+    expect(item).toMatchObject({
+      text: "Limit reached. Continues automatically when capacity is available.",
+      capacityWait: { label: "Limit reached" },
+    });
+  });
+
+  test.each([
     ["codex.capacity.resumed", {}],
     ["session.status.changed", { status: "recovering" }],
     ["session.status.changed", { status: "running" }],
