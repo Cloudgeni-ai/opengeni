@@ -4270,6 +4270,79 @@ migration that is idempotent, alias-aware and parity-checked. Keep affected
 organizations switched off meanwhile. Never copy rows back to the legacy
 tables, drop aliases, reset refresh generations or clear waiters.
 
+### Shared subscription core generic precursor (0712)
+
+Migration `0712_subscription_core_generic_precursor.sql` is **rolling**: deploy
+it like any release, without draining. Design record:
+[subscription core, PR 0a](design/subscription-core-2026-10-07.md#pr-0a-receipts-restrictions-and-personal-helpers).
+It requires 0689 and acts on deploy. Like 0706, it grants to the configured
+application roles: a deployment whose runtime role is not `opengeni_app`
+(dedicated schema or custom role) must pass them through
+`OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES` (the Helm chart's migration
+secret already does), or `migrate` stops before applying anything.
+
+- Provider cutover receipts. Codex has one; SuperGrok (`xai`) and Claude get
+  theirs only from their own drained cutovers. A binary of this release
+  refuses to start against a database without the Codex receipt.
+- No runtime or migration-owner role can insert or enable a
+  `subscription_provider_cutovers` row, or insert a `subscription_connections`
+  row, for `xai` or `claude` before their receipts, and none can delete a
+  cutover row (superusers bypass row security). No cutover row or connection
+  can change its organization or provider, whoever updates it. Disabling a row
+  (Codex containment) still works.
+- A settings primary that pointed at another provider's connection is cleared.
+- Codex connects emit the `model.connected` lifecycle fact again.
+
+Codex chat, connect, refresh and containment behave as before. SuperGrok and
+Claude keep running on their legacy path.
+
+Codex connections created between 0689 and 0712 have no `model.connected`
+fact; the operator-run lifecycle backfill does not read core connections.
+
+**Readiness report and inventory.** As the migration owner:
+
+```sql
+SELECT provider, metric, account_id, legacy_count, core_count
+FROM opengeni_private.subscription_cutover_report
+WHERE metric LIKE 'readiness:%' OR metric LIKE 'inventory:%'
+  OR metric = 'disposition:primary_of_other_provider_cleared'
+ORDER BY provider, metric, account_id NULLS LAST;
+```
+
+`inventory:switch_rows_without_receipt` and
+`inventory:connections_without_receipt` count, per provider and organization,
+the `xai` and `claude` rows that existed at 0712. They were never usable and
+grant nothing, but the SuperGrok and Claude cutovers abort on them, so they
+must be removed before those cutovers. Row security hides them from the
+migration owner; inspect and remove them as a superuser (or another role with
+`BYPASSRLS`), after checking each connection is not in use:
+
+```sql
+-- Only providers without a receipt: never run this for a provider whose
+-- cutover has committed (its rows are live).
+SELECT account_id, provider, enabled
+FROM subscription_provider_cutovers cutover
+WHERE NOT EXISTS (SELECT 1 FROM opengeni_private.subscription_provider_cutover_receipts receipt
+  WHERE receipt.provider = cutover.provider);
+SELECT account_id, provider, id, ownership, status
+FROM subscription_connections connection
+WHERE NOT EXISTS (SELECT 1 FROM opengeni_private.subscription_provider_cutover_receipts receipt
+  WHERE receipt.provider = connection.provider);
+DELETE FROM subscription_provider_cutovers cutover
+WHERE NOT EXISTS (SELECT 1 FROM opengeni_private.subscription_provider_cutover_receipts receipt
+  WHERE receipt.provider = cutover.provider);
+DELETE FROM subscription_connections connection
+WHERE NOT EXISTS (SELECT 1 FROM opengeni_private.subscription_provider_cutover_receipts receipt
+  WHERE receipt.provider = connection.provider);
+```
+
+`readiness:owners_with_multiple_current_personal_generations` counts Codex
+owners whose active personal connections carry more than one current
+authority generation (`core_count`; the row with a NULL `account_id` is the
+total). New work those owners accept gets no personal Codex access. If the
+total is not zero, raise it with the product owner; the repair is a separate
+decision and is not part of this migration.
+
 ### Slack API pilot activation (0597)
 
 Stop every old/new API, control worker, and turn worker before applying

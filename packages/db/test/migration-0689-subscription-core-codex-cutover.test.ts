@@ -42,6 +42,7 @@ import {
 } from "../src";
 
 const MIGRATION = "0689_subscription_core_codex_cutover.sql";
+const PRECURSOR = "0712_subscription_core_generic_precursor.sql";
 const key = Buffer.alloc(32, 72);
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
@@ -697,9 +698,11 @@ describe.skipIf(!realDb)(
       owned = fixture;
       owner = postgres(owned.ownerUrl, { max: 1 });
       await owner`CREATE TABLE schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`;
-      await owner`INSERT INTO schema_migrations(name) VALUES(${MIGRATION})`;
+      // 0712 records the provider cutover receipts and requires the committed
+      // 0689, so it is withheld with it and applied by the same cutover run.
+      await owner`INSERT INTO schema_migrations(name) VALUES(${MIGRATION}), (${PRECURSOR})`;
       await migrate(owned.ownerUrl, undefined, { applicationDatabaseRoles: ["opengeni_app"] });
-      await owner`DELETE FROM schema_migrations WHERE name = ${MIGRATION}`;
+      await owner`DELETE FROM schema_migrations WHERE name IN (${MIGRATION}, ${PRECURSOR})`;
       await seed();
     }, 180_000);
 

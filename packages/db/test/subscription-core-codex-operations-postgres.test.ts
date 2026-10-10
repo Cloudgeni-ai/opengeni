@@ -857,26 +857,76 @@ describe.skipIf(!realDb)("Codex operations on the shared core (M3 PR 2c)", () =>
     expect(await releaseSubscriptionCoreCodexOperationLease(client!.db, scope, lease)).toBe(true);
   });
 
-  test("a connection credential that never renews is marked needs-relogin, only under an enabled cutover", async () => {
-    const org = await organization();
-    const connectionId = await sharedConnection(org, "ops-non-renewing", {
-      expiresAt: new Date(Date.now() - 60_000),
-    });
-    const scope = workspaceScope(org);
-    // A binding of the registered provider whose adapter declares no refresh.
-    const codex = subscriptionCoreCodexProvider();
-    const operations = subscriptionCoreOperations({
-      ...codex,
-      adapter: { ...codex.adapter, refresh: null },
-    });
-    const statusOf = async () =>
-      (
-        await shared!.admin<{ status: string; last_error: string | null }[]>`
+  // No refresher at all (an API key), or a refresher the credential's format
+  // does not use (a setup token next to renewable OAuth credentials).
+  test.each(["no refresher", "format does not renew"] as const)(
+    "a connection credential that never renews is marked needs-relogin, only under an enabled cutover (%s)",
+    async (shape) => {
+      const org = await organization();
+      const connectionId = await sharedConnection(
+        org,
+        `ops-non-renewing-${shape.replaceAll(" ", "-")}`,
+        {
+          expiresAt: new Date(Date.now() - 60_000),
+        },
+      );
+      const scope = workspaceScope(org);
+      // A binding of the registered provider whose adapter never renews this credential.
+      const codex = subscriptionCoreCodexProvider();
+      let rotations = 0;
+      const operations = subscriptionCoreOperations(
+        shape === "no refresher"
+          ? { ...codex, adapter: { ...codex.adapter, refresh: null } }
+          : {
+              ...codex,
+              adapter: {
+                ...codex.adapter,
+                capabilitiesFor: (format: string) => ({
+                  ...codex.adapter.capabilitiesFor(format),
+                  autoRenews: false,
+                }),
+                refresh: {
+                  ...codex.adapter.refresh!,
+                  rotate: async () => {
+                    rotations += 1;
+                    throw new Error("a non-renewing format must not be rotated");
+                  },
+                },
+              },
+            },
+      );
+      const statusOf = async () =>
+        (
+          await shared!.admin<{ status: string; last_error: string | null }[]>`
           select status, last_error from subscription_connections where id = ${connectionId}::uuid`
-      )[0];
-    // Without an enabled cutover nothing is written.
-    expect(
-      (
+        )[0];
+      // Without an enabled cutover nothing is written.
+      expect(
+        (
+          await operations.refreshSubscriptionCoreConnectionCredential(
+            client!.db,
+            settings,
+            scope,
+            connectionId,
+            null,
+            1,
+          )
+        ).kind,
+      ).toBe("refused");
+      expect(await statusOf()).toEqual({ status: "active", last_error: null });
+      await setCutover(org.accountId, true);
+      const message = codex.adapter.reloginText("");
+      expect(
+        await operations.refreshSubscriptionCoreConnectionCredential(
+          client!.db,
+          settings,
+          scope,
+          connectionId,
+          null,
+          2,
+        ),
+      ).toEqual({ kind: "superseded" });
+      expect(
         await operations.refreshSubscriptionCoreConnectionCredential(
           client!.db,
           settings,
@@ -884,34 +934,12 @@ describe.skipIf(!realDb)("Codex operations on the shared core (M3 PR 2c)", () =>
           connectionId,
           null,
           1,
-        )
-      ).kind,
-    ).toBe("refused");
-    expect(await statusOf()).toEqual({ status: "active", last_error: null });
-    await setCutover(org.accountId, true);
-    const message = codex.adapter.reloginText("");
-    expect(
-      await operations.refreshSubscriptionCoreConnectionCredential(
-        client!.db,
-        settings,
-        scope,
-        connectionId,
-        null,
-        2,
-      ),
-    ).toEqual({ kind: "superseded" });
-    expect(
-      await operations.refreshSubscriptionCoreConnectionCredential(
-        client!.db,
-        settings,
-        scope,
-        connectionId,
-        null,
-        1,
-      ),
-    ).toEqual({ kind: "relogin", message, marked: true });
-    expect(await statusOf()).toEqual({ status: "needs_relogin", last_error: message });
-  });
+        ),
+      ).toEqual({ kind: "relogin", message, marked: true });
+      expect(await statusOf()).toEqual({ status: "needs_relogin", last_error: message });
+      expect(rotations).toBe(0);
+    },
+  );
 
   test("realtime leases are session-bound: owner context for owned sessions, shared-only for ownerless ones", async () => {
     const org = await organization();

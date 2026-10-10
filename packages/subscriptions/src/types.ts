@@ -296,7 +296,14 @@ export type WaitReason =
    * The session's compaction mode keeps it on its provider until it converts,
    * and that is what keeps a usable model away (SUB-FAIL-09).
    */
-  | "compaction_provider_locked";
+  | "compaction_provider_locked"
+  /**
+   * The work's accepted authority cannot be used (design 5.3 decision 4): it
+   * was accepted before its provider's account move and its access could not
+   * be carried. It ends at the capacity-wait deadline; the remedy is to send
+   * the work again.
+   */
+  | "accepted_authority_unavailable";
 
 export type PlacementDecision =
   | {

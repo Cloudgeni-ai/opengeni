@@ -1263,56 +1263,87 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
     expect(direct!.marked).toBe(false);
   });
 
-  test("a credential that never renews is not rotated: its refresh marks the connection needs-relogin", async () => {
-    const org = await organization();
-    await enableCodexCutover(org.accountId);
-    const connectionId = await sharedConnection(org, {
-      workspaceId: org.sharedWorkspaceId,
-      label: "non-renewing",
-      expiresAt: new Date(Date.now() - 60_000),
-    });
-    const turn = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
-    expect(await place(turn)).toMatchObject({ kind: "run", connectionId });
-    // A binding of the registered provider whose adapter declares no refresh,
-    // the shape of a setup token or an API key.
-    const codex = subscriptionCoreCodexProvider();
-    const nonRenewing = { ...codex, adapter: { ...codex.adapter, refresh: null } };
-    const turns = subscriptionCoreTurns(nonRenewing);
-    // A superseded generation is reported before anything is written.
-    expect(
-      await turns.refreshSubscriptionCoreCredential(
-        client!.db,
-        settings,
-        turn.identity,
-        leaseOf(turn, connectionId),
-        2,
-      ),
-    ).toEqual({ kind: "superseded" });
-    const message = codex.adapter.reloginText("");
-    expect(
-      await turns.refreshSubscriptionCoreCredential(
-        client!.db,
-        settings,
-        turn.identity,
-        leaseOf(turn, connectionId),
-        1,
-      ),
-    ).toEqual({ kind: "relogin", message, marked: true });
-    const [row] = await shared!.admin<
-      { status: string; last_error: string | null; refresh_generation: string }[]
-    >`
+  // Two adapter shapes of a credential that never renews: no refresher at all
+  // (an API key), and a refresher the credential's format does not use (a
+  // setup token next to renewable OAuth credentials of the same provider).
+  test.each(["no refresher", "format does not renew"] as const)(
+    "a credential that never renews is not rotated: its refresh marks the connection needs-relogin (%s)",
+    async (shape) => {
+      const org = await organization();
+      await enableCodexCutover(org.accountId);
+      const connectionId = await sharedConnection(org, {
+        workspaceId: org.sharedWorkspaceId,
+        label: "non-renewing",
+        expiresAt: new Date(Date.now() - 60_000),
+      });
+      const turn = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
+      expect(await place(turn)).toMatchObject({ kind: "run", connectionId });
+      // A binding of the registered provider whose adapter declares no refresh,
+      // the shape of a setup token or an API key.
+      const codex = subscriptionCoreCodexProvider();
+      let rotations = 0;
+      const nonRenewing =
+        shape === "no refresher"
+          ? { ...codex, adapter: { ...codex.adapter, refresh: null } }
+          : {
+              ...codex,
+              adapter: {
+                ...codex.adapter,
+                capabilitiesFor: (format: string) => ({
+                  ...codex.adapter.capabilitiesFor(format),
+                  autoRenews: false,
+                }),
+                refresh: {
+                  ...codex.adapter.refresh!,
+                  rotate: async () => {
+                    rotations += 1;
+                    throw new Error("a non-renewing format must not be rotated");
+                  },
+                },
+              },
+            };
+      const turns = subscriptionCoreTurns(nonRenewing);
+      // A superseded generation is reported before anything is written.
+      expect(
+        await turns.refreshSubscriptionCoreCredential(
+          client!.db,
+          settings,
+          turn.identity,
+          leaseOf(turn, connectionId),
+          2,
+        ),
+      ).toEqual({ kind: "superseded" });
+      const message = codex.adapter.reloginText("");
+      expect(
+        await turns.refreshSubscriptionCoreCredential(
+          client!.db,
+          settings,
+          turn.identity,
+          leaseOf(turn, connectionId),
+          1,
+        ),
+      ).toEqual({ kind: "relogin", message, marked: true });
+      const [row] = await shared!.admin<
+        { status: string; last_error: string | null; refresh_generation: string }[]
+      >`
       select status, last_error, refresh_generation::text as refresh_generation
       from subscription_connections where id = ${connectionId}::uuid`;
-    expect(row).toEqual({ status: "needs_relogin", last_error: message, refresh_generation: "1" });
-    expect(
-      await loadSubscriptionCoreCodexCredential(
-        client!.db,
-        settings,
-        turn.identity,
-        leaseOf(turn, connectionId),
-      ),
-    ).toEqual({ kind: "needs_relogin" });
-  });
+      expect(row).toEqual({
+        status: "needs_relogin",
+        last_error: message,
+        refresh_generation: "1",
+      });
+      expect(rotations).toBe(0);
+      expect(
+        await loadSubscriptionCoreCodexCredential(
+          client!.db,
+          settings,
+          turn.identity,
+          leaseOf(turn, connectionId),
+        ),
+      ).toEqual({ kind: "needs_relogin" });
+    },
+  );
 
   test("quota observations and failure receipts are fenced to the leased connection", async () => {
     const org = await organization();
@@ -1484,7 +1515,7 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
     expect(live!.live).toBe(true);
   });
 
-  test("a disabled Codex cutover row refuses v1 personal authority; no row keeps v1", async () => {
+  test("personal access reads only the v2 entry, behind an enabled Codex cutover row (v1 snapshots grant nothing)", async () => {
     const org = await organization();
     const personal = await personalConnection(org, "v1-only");
     const turn = await runningTurn(org, { workspaceId: org.personalWorkspaceId });
@@ -1517,12 +1548,71 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
           },
         ),
       );
-    expect(await authorize()).toBe(true);
+    // Migration 0712 replaced 0668's legacy-generation branch: without a
+    // cutover row (unreachable for Codex after 0689) the v1 snapshot no
+    // longer authorizes anything.
+    expect(await authorize()).toBe(false);
     await enableCodexCutover(org.accountId, false);
     expect(await authorize()).toBe(false);
     // Enabled: only the v2 entry counts, and this turn has none.
     await enableCodexCutover(org.accountId, true);
     expect(await authorize()).toBe(false);
+    await shared!.admin`
+      update session_turns set subscription_authority = ${shared!.admin.json({
+        version: 2,
+        personal: [
+          { provider: "codex", ownerMembershipId: org.ownerMembershipId, authorityGeneration: 1 },
+        ],
+      })}::jsonb
+      where account_id = ${org.accountId}::uuid and id = ${turn.identity.turnId}::uuid`;
+    expect(await authorize()).toBe(true);
+    // A disabled row grants nothing, even with the v2 entry.
+    await enableCodexCutover(org.accountId, false);
+    expect(await authorize()).toBe(false);
+    await enableCodexCutover(org.accountId, true);
+    expect(await authorize()).toBe(true);
+    // The same grant for a provider without a cutover receipt (SuperGrok,
+    // Claude) is refused: an enabled switch row, a v2 entry, the exact owner
+    // and the current generation are not enough before that provider's
+    // receipt, so its personal access stays decided by its v1 path alone.
+    for (const provider of ["claude", "xai"]) {
+      await shared!.admin.begin(async (owner) => {
+        // Fixture only: move this connection and its v2 entry to the provider
+        // and give it an enabled switch row, bypassing the guards that keep
+        // such rows from appearing.
+        await owner`set local session_replication_role = replica`;
+        await owner`update subscription_connections set provider = ${provider}
+          where id = ${personal}::uuid`;
+        await owner`insert into subscription_provider_cutovers (account_id, provider, enabled)
+          values (${org.accountId}::uuid, ${provider}, true)
+          on conflict (account_id, provider) do update set enabled = true`;
+        await owner`update session_turns set subscription_authority = ${owner.json({
+          version: 2,
+          personal: [
+            { provider, ownerMembershipId: org.ownerMembershipId, authorityGeneration: 1 },
+          ],
+        })}::jsonb
+          where account_id = ${org.accountId}::uuid and id = ${turn.identity.turnId}::uuid`;
+      });
+      const [granted] = await withSessionRlsActorContext(
+        subscriptionCoreTurnActor(turn.identity),
+        () =>
+          withRlsContext(
+            client!.db,
+            { accountId: org.accountId, workspaceId: org.personalWorkspaceId },
+            (db) =>
+              rawRows<{ authorized: boolean }>(
+                db,
+                sql`select opengeni_private.authorize_subscription_personal_access(
+                  ${org.accountId}::uuid, ${org.personalWorkspaceId}::uuid,
+                  ${turn.identity.sessionId}::uuid, ${turn.identity.turnId}::uuid,
+                  ${personal}::uuid, ${provider}, ${org.ownerSubjectId}, ${org.ownerSubjectId}
+                ) as authorized`,
+              ),
+          ),
+      );
+      expect(granted!.authorized).toBe(false);
+    }
   });
 
   test("turn recovery stores the shared-core lease-busy chain on the turn", async () => {

@@ -134,7 +134,9 @@ export type WaitReason =
   /** The explicit choice can never serve this work until a person changes something (D-24). */
   | "pinned_account_ineligible"
   | "no_eligible_capacity"
-  | "model_not_allowed";
+  | "model_not_allowed"
+  /** Decided before placement (an unusable accepted authority); never produced here. */
+  | "accepted_authority_unavailable";
 
 export type Decision =
   | {

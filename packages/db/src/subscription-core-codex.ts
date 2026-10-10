@@ -228,7 +228,8 @@ export function buildSubscriptionCoreCodexTokenResolver(
     flightNamespace: "turn",
     connectionId: lease.connectionId,
     holderKey: `${identity.turnId}:${lease.holderId}:${lease.generation}`,
-    policy: subscriptionCoreRefreshPolicy(SUBSCRIPTION_CORE_CODEX.adapter),
+    policy: (credential) =>
+      subscriptionCoreRefreshPolicy(SUBSCRIPTION_CORE_CODEX.adapter, credential.tokens),
     load: () => loadCredential(db, settings, identity, lease),
     embeddedExpiry: (credential) =>
       SUBSCRIPTION_CORE_CODEX.adapter.credential.expiry(credential.tokens),

@@ -22,12 +22,19 @@ test("a pre-writer personal-resource task retains its execution proof across mig
   let client: ReturnType<typeof createDb> | undefined;
   const owner = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   const writer = "0688_subscription_core_codex_writers.sql";
+  const cutover = "0689_subscription_core_codex_cutover.sql";
   const disconnect = "0691_subscription_core_codex_disconnect.sql";
   const explicitRetry = "0697_codex_retry_after_unknown_outcome.sql";
   const recovery = "0699_codex_recovery_after_interrupted_attempt.sql";
   // 0707 replaces writer routines with provider-neutral equivalents and needs
   // the 0688 writer schema, so it is deferred and replayed with the writer.
   const neutral = "0707_subscription_core_neutral_routines.sql";
+  // 0711 rewrites the operation-lease kind constraint the deferred writers
+  // define, so it is deferred and replayed with them.
+  const completion = "0711_subscription_codex_completion_operations.sql";
+  // 0712 records the provider cutover receipts and requires the 0689 cutover,
+  // so both are deferred and replayed with the writer in ledger order.
+  const precursor = "0712_subscription_core_generic_precursor.sql";
   try {
     // Stage the actual pre-writer ledger, including on the stacked cutover
     // branch. This is a rolling/gate-off regression, not cutover activation.
@@ -36,7 +43,7 @@ test("a pre-writer personal-resource task retains its execution proof across mig
     // rewrite its admission guard. Defer all with their prerequisite while constructing
     // the genuine pre-writer fixture, then replay them in ledger order below.
     await database.admin`insert into schema_migrations(name) values (${writer}),
-      ('0689_subscription_core_codex_cutover.sql'), (${disconnect}), (${explicitRetry}), (${recovery}), (${neutral})`;
+      (${cutover}), (${disconnect}), (${explicitRetry}), (${recovery}), (${neutral}), (${completion}), (${precursor})`;
     await migrate(database.adminUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
     const appUrl = new URL(database.ownerUrl);
@@ -90,7 +97,7 @@ test("a pre-writer personal-resource task retains its execution proof across mig
       await database.admin`select execution_digest, authority_revision from scheduled_tasks where id = ${taskId}::uuid`;
     await client.close();
     client = undefined;
-    await database.admin`delete from schema_migrations where name in (${writer}, ${disconnect}, ${explicitRetry}, ${recovery}, ${neutral})`;
+    await database.admin`delete from schema_migrations where name in (${writer}, ${cutover}, ${disconnect}, ${explicitRetry}, ${recovery}, ${neutral}, ${completion}, ${precursor})`;
     await migrate(database.adminUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
     client = createDb(appUrl.toString());
