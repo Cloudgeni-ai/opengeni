@@ -156,8 +156,10 @@ export interface CodeSearchConfig {
     leadsNotFollowed: number;
     /** A trimmed passage must keep at least this many lines. */
     minTrimLines: number;
-    /** File-diversity penalty: a second passage of one file must beat the first passage of another by this margin. */
+    /** File-diversity penalty: a passage of a file that already has filePenaltyFree passages must beat the next passage of another file by this margin per extra passage. */
     filePenalty: number;
+    /** Passages per file that take no diversity penalty (0 = every passage after the first is penalized). */
+    filePenaltyFree: number;
     /** Passages whose rendered block is longer are trimmed around their hits to this many chars (0 = off). */
     maxPassageChars: number;
     /** Multiplier on the rel used for pack ORDERING of release-note passages; 1 = off. */
@@ -299,6 +301,8 @@ export const DEFAULT_CODE_SEARCH_CONFIG: Readonly<CodeSearchConfig> = deepFreeze
     leadsNotFollowed: 8,
     minTrimLines: 15,
     filePenalty: 0.1,
+    // dev split 2026-10-01: 1 shows 113 strong regions vs 112 at 0, no search worse; 2 and 3 regress one each
+    filePenaltyFree: 1,
     maxPassageChars: 3200,
     changelogPrior: 0.5,
     docPrior: 0.85,

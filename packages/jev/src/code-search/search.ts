@@ -86,7 +86,7 @@ import {
 import type { CodeSearchWorkspace } from "./workspace";
 
 /** Engine version: scout-0.3.1 (the validated research port) plus symbol discovery, tiling, callers and the adaptive, gap-reporting pack. */
-export const CODE_SEARCH_ENGINE_VERSION = "scout-0.4.0";
+export const CODE_SEARCH_ENGINE_VERSION = "scout-0.4.1";
 export const CODE_SEARCH_DEFAULT_BUDGET_TOKENS = 12_000;
 
 export interface CodeSearchInput {
