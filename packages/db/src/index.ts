@@ -46,6 +46,7 @@ import {
   CODEX_CREDENTIAL_POLICY_SNAPSHOT_METADATA_KEY,
   ToolReviewContext,
   WorkspaceModelCompactionThresholdsPatch,
+  cleanStoredSessionTitle,
 } from "@opengeni/contracts";
 import { recordToolApproval } from "@opengeni/observability";
 import { connectorActionFingerprint } from "./connector-action-fingerprint";
@@ -84728,7 +84729,7 @@ function mapSession(
     retention: sessionRetentionFromRow(row),
     admissionBlock: projectSessionAdmissionBlock(row.admissionBlock),
     initialMessage: fromPostgresLosslessText(row.initialMessage, row.initialMessageCodecVersion),
-    title: row.title ?? null,
+    title: cleanStoredSessionTitle(row.title, row.titleSource),
     titleSource: (row.titleSource as "user" | "agent" | null) ?? null,
     instructions: row.instructions ?? null,
     policyRole: row.policyRole ?? null,
