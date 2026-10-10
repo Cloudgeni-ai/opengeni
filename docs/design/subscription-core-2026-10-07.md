@@ -2534,6 +2534,24 @@ with these provider-neutral changes:
   seeds Codex exactly as 0689 does today (switch row and account-level
   settings row), updates the posture inventories, and is tested by creating
   an organization after PR 0.
+  0689's seed-only insert policies (`subscription_provider_cutovers_codex_seed`,
+  `subscription_settings_codex_seed`) and their setting
+  (`opengeni.subscription_codex_cutover_seed`) are generalized in the same
+  migration: they keep the owner, per-organization, enabled-row and
+  organization-level checks and replace `provider = 'codex'` with "this
+  provider has a receipt", so the seed path can never create an enabled row
+  for a provider before its receipt. The account-level settings row is
+  unique per organization, so it is inserted once with the defaults of every
+  provider that has a receipt.
+- **Owner-only routines in rolling migrations.** PR 0 and every later rolling
+  M4 migration put new owner-only routines (the seed, the
+  `authority_inserted_at` triggers, the deferred compatibility triggers, the
+  copy routines' implementations) in `opengeni_subscription_internal`, as M3
+  did (§5.1.1), not in `opengeni_private`, where the previous release's
+  runtime-posture readiness would reject a routine the runtime role cannot
+  execute and does not list as owner-only. The replacement seed may instead
+  keep 0689's seed function name and replace its body. Each such PR tests the
+  previous release's posture check against its schema.
 - **Parity report.** One relation
   `opengeni_private.subscription_cutover_report (provider, metric,
   account_id, legacy_count, core_count)`; each migration writes only its
