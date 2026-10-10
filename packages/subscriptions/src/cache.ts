@@ -19,7 +19,7 @@ export function cacheLifetimeMs(facts: CacheFacts | undefined): number {
  * provider's cache lifetime (SUB-STICK-04). Idle time is measured from the
  * latest completed model call, not the turn start, so a long turn is not
  * mistaken for a cold cache. An exact lifetime sent with the latest request
- * (Claude) takes precedence over the provider's facts.
+ * (an exact cache TTL) takes precedence over the provider's facts.
  */
 export function isCacheWarm(
   binding: Pick<SessionBinding, "lastModelCallAt" | "cacheTtlMs">,

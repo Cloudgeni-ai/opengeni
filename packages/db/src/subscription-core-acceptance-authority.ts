@@ -1,25 +1,27 @@
 /**
- * The v2 accepted-authority writer for Codex at acceptance (M3 PR 2a,
- * inventory EP-T11..T15). Inert until the account's Codex cutover is enabled:
- * the database function returns NULL and the turn keeps no v2 value, so v1
- * stays authoritative. With the cutover enabled it returns the immutable v2
- * value to freeze on the accepted turn:
+ * The v2 accepted-authority writer at acceptance (M3 PR 2a, inventory
+ * EP-T11..T15), for one provider on the shared core. Inert until the
+ * account's cutover for that provider is enabled: the database function
+ * returns NULL and the turn keeps no v2 value, so v1 stays authoritative.
+ * With the cutover enabled it returns the immutable v2 value to freeze on the
+ * accepted turn:
  *
- * - a Codex personal entry only for exact owner-caused acceptance (the
- *   authenticated request subject, or the session's frozen creator in the
- *   trusted session-start context, is the session owner) in the owner's
+ * - a personal entry for the provider only for exact owner-caused acceptance
+ *   (the authenticated request subject, or the session's frozen creator in
+ *   the trusted session-start context, is the session owner) in the owner's
  *   private session or Personal workspace, with the owner's one current
  *   active authority generation;
  * - an empty v2 value for everything else (shared sessions, co-members,
  *   service, API-key and agent acceptance, ownerless sessions, an ambiguous
  *   generation set).
  *
- * Claude and SuperGrok keep their v1 snapshots; v2 carries only Codex.
+ * Providers not yet on the core keep their v1 snapshots.
  */
 import { sql } from "drizzle-orm";
-import { SUBSCRIPTION_CORE_CODEX_PROVIDER } from "./subscription-core-codex-provider";
 import { SubscriptionPersonalAuthorityV2 } from "@opengeni/contracts";
+import type { ProviderId } from "@opengeni/subscriptions";
 import { rawRows, type Database } from "./database";
+import { subscriptionCoreProvider } from "./subscription-core-providers";
 import { readSubscriptionProviderCutoverState } from "./subscription-core-repository";
 
 /**
@@ -35,7 +37,7 @@ import { readSubscriptionProviderCutoverState } from "./subscription-core-reposi
  * migration comes after the cutover relation's, so its presence also proves
  * the relation.
  */
-async function codexAcceptanceWriterPresent(tx: Database): Promise<boolean> {
+async function acceptanceWriterPresent(tx: Database): Promise<boolean> {
   const [row] = await rawRows<{ present: boolean }>(
     tx,
     sql`select to_regprocedure(
@@ -45,8 +47,9 @@ async function codexAcceptanceWriterPresent(tx: Database): Promise<boolean> {
   return row?.present === true;
 }
 
-export async function codexSubscriptionAuthorityV2ForAcceptanceInTransaction(
+export async function subscriptionAuthorityV2ForAcceptanceInTransaction(
   tx: Database,
+  provider: ProviderId,
   input: {
     accountId: string;
     workspaceId: string;
@@ -55,17 +58,18 @@ export async function codexSubscriptionAuthorityV2ForAcceptanceInTransaction(
     acceptingSubjectId: string | null;
   },
 ): Promise<SubscriptionPersonalAuthorityV2 | null> {
-  // The common case (no enabled Codex cutover) writes nothing and never
+  subscriptionCoreProvider(provider);
+  // The common case (no enabled cutover) writes nothing and never
   // reaches the database routine; it rechecks the gate itself.
-  if (!(await codexAcceptanceWriterPresent(tx))) return null;
+  if (!(await acceptanceWriterPresent(tx))) return null;
   const cutover = await readSubscriptionProviderCutoverState(tx, {
     accountId: input.accountId,
-    provider: "codex",
+    provider,
   });
   if (cutover !== "enabled") return null;
   const [row] = await rawRows<{ authority: unknown }>(
     tx,
-    sql`select opengeni_private.subscription_core_acceptance_authority_v2(${SUBSCRIPTION_CORE_CODEX_PROVIDER},
+    sql`select opengeni_private.subscription_core_acceptance_authority_v2(${provider},
         ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.sessionId}::uuid,
         ${input.acceptingSubjectId}
       ) as authority`,
@@ -81,18 +85,19 @@ export const EMPTY_SUBSCRIPTION_AUTHORITY_V2: SubscriptionPersonalAuthorityV2 = 
 }) as SubscriptionPersonalAuthorityV2;
 
 /**
- * Whether accepted work in this organization carries a Codex v2 value: the
+ * Whether accepted work in this organization carries a v2 value for the
+ * provider: the
  * acceptance writer exists and the cutover is enabled. Carriers write nothing
  * otherwise (v1 stays authoritative).
  */
-export async function codexSubscriptionAuthorityV2ActiveInTransaction(
+export async function subscriptionAuthorityV2ActiveInTransaction(
   tx: Database,
+  provider: ProviderId,
   accountId: string,
 ): Promise<boolean> {
-  if (!(await codexAcceptanceWriterPresent(tx))) return false;
-  return (
-    (await readSubscriptionProviderCutoverState(tx, { accountId, provider: "codex" })) === "enabled"
-  );
+  subscriptionCoreProvider(provider);
+  if (!(await acceptanceWriterPresent(tx))) return false;
+  return (await readSubscriptionProviderCutoverState(tx, { accountId, provider })) === "enabled";
 }
 
 /**
@@ -100,24 +105,27 @@ export async function codexSubscriptionAuthorityV2ActiveInTransaction(
  * when it froze none: work accepted after the cutover always carries v2, and
  * a missing value never widens to personal authority.
  */
-export async function codexSubscriptionAuthorityV2OrEmptyInTransaction(
+export async function subscriptionAuthorityV2OrEmptyInTransaction(
   tx: Database,
+  provider: ProviderId,
   accountId: string,
   frozen: SubscriptionPersonalAuthorityV2 | null | undefined,
 ): Promise<SubscriptionPersonalAuthorityV2 | null> {
+  subscriptionCoreProvider(provider);
   if (frozen !== null && frozen !== undefined) return frozen;
-  return (await codexSubscriptionAuthorityV2ActiveInTransaction(tx, accountId))
+  return (await subscriptionAuthorityV2ActiveInTransaction(tx, provider, accountId))
     ? EMPTY_SUBSCRIPTION_AUTHORITY_V2
     : null;
 }
 
 /**
  * A scheduled task's frozen v2 value at creation (M3 PR 3b, EP-T15), from
- * `subscription_core_task_authority_v2` (provider `codex`): the acceptance rule for the exact
+ * `subscription_core_task_authority_v2`: the acceptance rule for the exact
  * accepting human. `null` without an enabled cutover (or before 0688).
  */
-export async function codexSubscriptionAuthorityV2ForScheduledTaskInTransaction(
+export async function subscriptionAuthorityV2ForScheduledTaskInTransaction(
   tx: Database,
+  provider: ProviderId,
   input: {
     accountId: string;
     workspaceId: string;
@@ -125,6 +133,7 @@ export async function codexSubscriptionAuthorityV2ForScheduledTaskInTransaction(
     acceptingSubjectId: string | null;
   },
 ): Promise<SubscriptionPersonalAuthorityV2 | null> {
+  subscriptionCoreProvider(provider);
   const [present] = await rawRows<{ present: boolean }>(
     tx,
     sql`select to_regprocedure(
@@ -134,7 +143,7 @@ export async function codexSubscriptionAuthorityV2ForScheduledTaskInTransaction(
   if (present?.present !== true) return null;
   const [row] = await rawRows<{ authority: unknown }>(
     tx,
-    sql`select opengeni_private.subscription_core_task_authority_v2(${SUBSCRIPTION_CORE_CODEX_PROVIDER},
+    sql`select opengeni_private.subscription_core_task_authority_v2(${provider},
         ${input.accountId}::uuid, ${input.workspaceId}::uuid,
         ${input.reusableSessionId}::uuid, ${input.acceptingSubjectId}
       ) as authority`,

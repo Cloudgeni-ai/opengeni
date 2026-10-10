@@ -106,8 +106,6 @@ export {
   listDueSubscriptionCapacityWaiters,
   markSubscriptionCapacityWakeDelivered,
   observeSubscriptionCapacityWaiterWake,
-  persistSubscriptionCodexRefresh,
-  persistSubscriptionCodexRefreshWithPlan,
   readSubscriptionEffectiveSettings,
   readSubscriptionProviderCutoverState,
   readSubscriptionSessionBinding,
@@ -141,14 +139,23 @@ export {
 export {
   assertSubscriptionCoreAcceptedTurn,
   withSubscriptionCoreAcceptedTurn,
-  withSubscriptionCoreCodexRefreshLock,
-  withSubscriptionCorePlacementWorld,
   type SubscriptionCoreAcceptedTurnAccessResult,
   type SubscriptionCoreAcceptedTurnIdentity,
-  type SubscriptionCoreCodexRefreshResult,
+  type SubscriptionCoreRefreshResult,
   type SubscriptionCorePlacementWorldRequest,
   type SubscriptionCorePlacementWorldResult,
 } from "./subscription-core-placement-world";
+export {
+  codexSubscriptionAuthorityV2ActiveInTransaction,
+  codexSubscriptionAuthorityV2ForAcceptanceInTransaction,
+  codexSubscriptionAuthorityV2ForScheduledTaskInTransaction,
+  codexSubscriptionAuthorityV2OrEmptyInTransaction,
+  persistSubscriptionCodexRefresh,
+  persistSubscriptionCodexRefreshWithPlan,
+  withSubscriptionCoreCodexRefreshLock,
+  withSubscriptionCorePlacementWorld,
+  type SubscriptionCoreCodexRefreshResult,
+} from "./subscription-core-codex-bindings";
 import type { GoalAdmissionPausedReason } from "@opengeni/contracts";
 import { SubscriptionPersonalAuthorityV2 } from "@opengeni/contracts";
 import {
@@ -355,14 +362,8 @@ import {
   codexSubscriptionAuthorityV2ForAcceptanceInTransaction,
   codexSubscriptionAuthorityV2ForScheduledTaskInTransaction,
   codexSubscriptionAuthorityV2OrEmptyInTransaction,
-} from "./subscription-core-acceptance-authority";
-export {
-  codexSubscriptionAuthorityV2ActiveInTransaction,
-  codexSubscriptionAuthorityV2ForAcceptanceInTransaction,
-  codexSubscriptionAuthorityV2ForScheduledTaskInTransaction,
-  codexSubscriptionAuthorityV2OrEmptyInTransaction,
-  EMPTY_SUBSCRIPTION_AUTHORITY_V2,
-} from "./subscription-core-acceptance-authority";
+} from "./subscription-core-codex-bindings";
+export { EMPTY_SUBSCRIPTION_AUTHORITY_V2 } from "./subscription-core-acceptance-authority";
 export { SessionMessageSearchCursorError } from "./session-message-search";
 export * from "./artifact-catalog";
 export * from "./scheduled-slack-bot-messages";
