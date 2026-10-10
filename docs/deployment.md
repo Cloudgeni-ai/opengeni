@@ -4282,7 +4282,8 @@ It requires 0689 and acts on deploy:
   refuses to start against a database without the Codex receipt.
 - No role can insert or enable a `subscription_provider_cutovers` row, or
   insert a `subscription_connections` row, for `xai` or `claude` before their
-  receipts, and no role can delete a cutover row. Disabling a row (Codex
+  receipts, and no role can delete a cutover row. No cutover row or
+  connection can change its organization or provider. Disabling a row (Codex
   containment) still works.
 - A settings primary that pointed at another provider's connection is cleared.
 - Codex connects emit the `model.connected` lifecycle fact again.

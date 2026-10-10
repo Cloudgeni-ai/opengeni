@@ -428,6 +428,40 @@ describe.skipIf(!realDb)("subscription-core generic precursor (migration 0711)",
         ),
       ).toContain('"subscription_connections_receipt_insert"');
     }
+    // Nor can an administrator (whom 0702's scope guard lets change a
+    // connection's scope) move a Codex connection to another provider or
+    // organization: that would bypass the insert restriction.
+    const [codexConnection] = await asOrganizationOwner(org, (db) =>
+      rawRows<{ id: string }>(
+        db,
+        sql`insert into subscription_connections (
+          account_id, provider, kind, credential_encrypted, ownership, scope_kind
+        ) values (${org.accountId}::uuid, 'codex', 'subscription', 'v1:x', 'shared', 'organization')
+        returning id::text as id`,
+      ),
+    );
+    const otherOrganization = await organization(client!, "connection-identity-other");
+    for (const change of [
+      sql`provider = 'xai'`,
+      sql`provider = 'claude'`,
+      sql`account_id = ${otherOrganization.accountId}::uuid`,
+    ]) {
+      expect(
+        await failure(() =>
+          asOrganizationOwner(org, (db) =>
+            rawRows(
+              db,
+              sql`update subscription_connections set ${change}
+              where id = ${codexConnection!.id}::uuid`,
+            ),
+          ),
+        ),
+      ).toContain("a subscription connection keeps its organization and provider");
+    }
+    const [unchanged] = await database!.admin<{ provider: string; account_id: string }[]>`
+      select provider, account_id::text as account_id from subscription_connections
+      where id = ${codexConnection!.id}::uuid`;
+    expect(unchanged).toEqual({ provider: "codex", account_id: org.accountId });
     // A pre-existing Claude row can be disabled (fail-closed maintenance) but
     // never enabled again before Claude's receipt.
     expect(

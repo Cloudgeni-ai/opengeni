@@ -3024,9 +3024,12 @@ the plan left room, for reviewers:
   row or core connection, and no enabling update, for a provider without a
   receipt. A row may always be disabled. The runtime delete policy is
   dropped for every provider, so no organization returns to "no row"; a
-  provider-neutral identity trigger keeps every row's organization and
-  provider. Rows that already exist for `xai` or `claude` stay, grant nothing
-  (below) and are listed by the runbook inventory.
+  provider-neutral identity trigger keeps every switch row's and every core
+  connection's organization and provider, for every role (0702's scope guard
+  let organization administrators change a connection's provider, which
+  would have bypassed the insert restriction). Rows that already exist for
+  `xai` or `claude` stay, grant nothing (below) and are listed by the runbook
+  inventory.
 - **Seed.** 0689's seed function keeps its name; its body seeds an enabled row
   per receipt provider and one settings row whose rotation is built from the
   receipts. The seed-only policies are generalized

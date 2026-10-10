@@ -132,8 +132,11 @@ CREATE POLICY subscription_connections_receipt_insert ON subscription_connection
 -- not subject to row security).
 DROP POLICY subscription_provider_cutovers_admin_delete ON subscription_provider_cutovers;
 
--- No cutover row changes organization or provider, whatever its provider
--- (0689 kept only Codex rows fixed). 0689's Codex trigger stays (a subset).
+-- No cutover row and no core connection changes organization or provider,
+-- whatever its provider and whoever updates it (0689 kept only Codex cutover
+-- rows fixed; 0702's scope guard let organization administrators change a
+-- connection's provider, which would bypass the receipt insert restriction).
+-- 0689's Codex trigger stays (a subset).
 DO $cutover_identity$
 DECLARE data_schema text := current_schema();
 BEGIN
@@ -147,7 +150,7 @@ BEGIN
       IF NEW.provider IS DISTINCT FROM OLD.provider
         OR NEW.account_id IS DISTINCT FROM OLD.account_id
       THEN
-        RAISE EXCEPTION 'a subscription cutover row keeps its organization and provider'
+        RAISE EXCEPTION 'a subscription %% keeps its organization and provider', TG_ARGV[0]
           USING ERRCODE = '42501';
       END IF;
       RETURN NEW;
@@ -159,7 +162,10 @@ $cutover_identity$;
 REVOKE ALL ON FUNCTION opengeni_subscription_internal.keep_subscription_cutover_identity() FROM PUBLIC;
 CREATE TRIGGER subscription_provider_cutovers_identity
   BEFORE UPDATE ON subscription_provider_cutovers
-  FOR EACH ROW EXECUTE FUNCTION opengeni_subscription_internal.keep_subscription_cutover_identity();
+  FOR EACH ROW EXECUTE FUNCTION opengeni_subscription_internal.keep_subscription_cutover_identity('cutover row');
+CREATE TRIGGER subscription_connections_identity
+  BEFORE UPDATE OF account_id, provider ON subscription_connections
+  FOR EACH ROW EXECUTE FUNCTION opengeni_subscription_internal.keep_subscription_cutover_identity('connection');
 
 -- 3. The organization seed, for every provider with a receipt. 0689's seed
 -- trigger keeps its name and function name; its body is replaced (two seeds

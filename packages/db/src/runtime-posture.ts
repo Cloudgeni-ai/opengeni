@@ -2598,7 +2598,7 @@ export function evaluateRuntimeDatabasePosture(
   for (const [provider, migration] of Object.entries(SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS)) {
     if (!posture.subscriptionProviderCutoverReceipts.includes(provider)) {
       violations.push(
-        `database is missing the ${provider} subscription-core cutover receipt (${migration}); run the drained migration first`,
+        `database is missing the ${provider} subscription-core cutover receipt (${migration}); apply the pending migrations first`,
       );
     }
   }

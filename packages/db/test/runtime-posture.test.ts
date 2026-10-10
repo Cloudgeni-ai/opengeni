@@ -706,7 +706,7 @@ describe("runtime database posture evaluator", () => {
     const posture = safePosture();
     posture.subscriptionProviderCutoverReceipts = [];
     expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
-      "database is missing the codex subscription-core cutover receipt (0689_subscription_core_codex_cutover.sql); run the drained migration first",
+      "database is missing the codex subscription-core cutover receipt (0689_subscription_core_codex_cutover.sql); apply the pending migrations first",
     );
     // Each listed cutover migration is in this binary's ledger.
     for (const migration of Object.values(SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS)) {
