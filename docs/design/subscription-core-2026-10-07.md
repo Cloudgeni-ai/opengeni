@@ -3155,16 +3155,18 @@ organization-reach machinery provider-keyed (everything "Not taken by M4-A"
 above except 0691's operation kinds and the Codex scope-visibility helpers,
 which the shared core does not call). Rolling migration 0713. Codex
 behaviour is unchanged, and every Codex-named routine keeps its name,
-signature, owner, grants, security mode, search path and texts for the
-binaries that still call it. A later SuperGrok or Claude cutover calls these
-with its provider as data and needs no routine of its own:
+signature, owner, grants and texts for the binaries that still call it, and
+its security mode and search path too except 0689's plan-change trigger
+function (below). Nothing is renamed, detached or dropped. A later SuperGrok
+or Claude cutover calls these with its provider as data and needs no
+routine of its own:
 
 | Need | Provider-keyed entry point | Codex entry point kept |
 | --- | --- | --- |
 | Cutover plan | `planSubscriptionCoreCutover(rules, input)` with `SubscriptionCutoverRules` (`packages/db/src/subscription-core/cutover-plan.ts`) | `planCodexCutover(input)`: the same call with `CODEX_CUTOVER_RULES` |
-| Reach rows for workspaces created later | `opengeni_private.subscription_core_auto_assignments` (owner-only, with `provider`) | renamed in place from `subscription_codex_auto_assignments` |
-| Applying reach to a new shared or Personal workspace | `opengeni_subscription_internal.apply_subscription_core_auto_assignments(provider, account, workspace, personal)`, run by provider-free triggers | `opengeni_private.apply_subscription_codex_auto_assignments` delegates with `codex` |
-| Plan-change history | registry flag `records_plan_change`; trigger function `opengeni_subscription_internal.record_subscription_core_plan_change()` | `record_subscription_codex_plan_change()` kept, detached |
+| Reach rows for workspaces created later | `opengeni_private.subscription_codex_auto_assignments` (owner-only), now with `provider` keyed by the registry | the same table; its provider-free name comes at retirement |
+| Applying reach to a new shared or Personal workspace | `opengeni_subscription_internal.apply_subscription_core_auto_assignments(provider, account, workspace, personal)`, run for every provider by 0689's two trigger functions | `opengeni_private.apply_subscription_codex_auto_assignments` delegates with `codex` |
+| Plan-change history | owner-only table `opengeni_private.subscription_core_plan_change_providers` (only `codex`) | 0689's `record_subscription_codex_plan_change()`, redefined in place to test it, still attached |
 | Reading and setting reach | `opengeni_private.subscription_core_reach(provider, account, connection)`, `opengeni_private.set_subscription_core_reach(provider, account, connection, shared, personal)` | the 0702 pair, its own checks first, then the neutral routine |
 | Organization workspace inventory | `list_organization_subscription_workspace_ids(account)` | `list_organization_codex_workspace_ids` unchanged |
 | Capacity wake | `wakeSubscriptionCoreCapacityWaiters(db, provider, input, enqueue)` (`subscription-core/waiters.ts`) | `wakeSubscriptionCoreCodexCapacityWaiters` wraps it |
@@ -3207,39 +3209,60 @@ Decisions, each the strictest fail-closed reading of the plan and contract:
   neutral rules read own keys only and report `unrepresentable_status`, which
   aborts the cutover with a content-free conflict instead. Only the reason
   for that abort changes; every other input plans exactly as before.
-- **Reach rows renamed in place, keyed by provider.** The table keeps its
-  rows, owner-only grants and RLS mode and gains `provider` (every existing
-  row is Codex's, written by 0689's cutover or 0702's helper). Two keys
-  replace 0689's `(account_id, connection_id)` key: `provider` references
-  the registry, and `(account_id, provider, connection_id)` references the
-  connection's `(account_id, provider, id)` with `ON DELETE CASCADE`. A row
-  therefore carries its own connection's provider, a row of an unregistered
-  provider cannot exist, and any other existing row would abort the
-  migration. There is no compatibility view: runtime roles never read the
-  table, and every routine that does is redefined in the same transaction.
-  The registry stays untruncatable: a plain TRUNCATE is now refused by the
-  reach rows' key, and TRUNCATE ... CASCADE by its append-only guard.
-  PostgreSQL's initial validation of a new foreign key runs as the table
-  owner without exempting it from FORCE ROW LEVEL SECURITY, so it would see
-  no connection rows and report a false violation; an owner-only NO FORCE
-  window wraps that one statement (`check:migration-rls-backfills`).
+- **Reach rows keyed by provider, in place.** The table keeps its name,
+  rows, owner-only grants, RLS mode and 0689's `(account_id, connection_id)`
+  key to the connection, and gains `provider` (NOT NULL, no default),
+  keyed by the registry, so a row of an unregistered provider cannot exist.
+  Every existing row was written for a Codex connection (0689's cutover and
+  0702's Codex helper write no other), so the column is filled with `codex`
+  and its default dropped in the same transaction. The one writer,
+  `set_subscription_core_reach`, accepts only its provider's own
+  connection. A key from `(account_id, provider, connection_id)` to the
+  connection's `(account_id, provider, id)` would lock
+  `subscription_connections` (see "Lock set and order"), so it comes with
+  the provider-free name at retirement. No FORCE-RLS backfill runs, so there
+  is no NO FORCE window. The registry stays untruncatable: a plain TRUNCATE
+  is refused by the keys that reference it, and TRUNCATE ... CASCADE by its
+  append-only guard.
 - **One apply path.** 0689's apply body with the provider as data, in
   `opengeni_subscription_internal` (owner-only routines stay out of
   `opengeni_private`, whose unknown routines a previous binary's readiness
-  rejects). Its writes are admitted by two owner-only policies keyed on the
-  provider-free setting `opengeni.subscription_core_auto_assign`, one for
-  one with 0689's Codex policies, which stay, unused, until retirement. The
-  provider-free triggers `workspaces_subscription_core_auto_assign` and
-  `organization_memberships_subscription_core_auto_assign` replace 0689's
-  two Codex triggers on the same events, sort into the same place among each
-  table's triggers, and apply the reach of every provider with rows in the
-  organization, in provider order. 0689's trigger functions stay, detached.
-- **Plan-change history by registry flag.** `records_plan_change` (true only
-  for Codex) replaces the provider test. The provider-free `BEFORE UPDATE OF
-  plan_type` trigger `subscription_connections_core_plan_change_trg`
-  replaces 0689's; its function is `SECURITY DEFINER` (0689's was invoker)
-  because the registry is owner data, and it only edits `NEW`. Codex records
-  the same keys as before.
+  rejects). 0689's trigger functions `auto_assign_subscription_codex_workspace`
+  and `auto_assign_subscription_codex_personal_workspace` are redefined in
+  place (same owner, grants, security mode and search path) and stay
+  attached to 0689's triggers `workspaces_subscription_codex_auto_assign`
+  and `organization_memberships_subscription_codex_auto_assign`; they apply
+  the reach of every provider with rows in the organization, in provider
+  order. 0689's owner-only policies on both assignment tables already admit
+  these writes for the organization named by their setting
+  `opengeni.subscription_codex_auto_assign` (an organization, not a
+  provider), so there is no new trigger, policy or setting.
+- **Plan-change history by table.** The owner-only table
+  `subscription_core_plan_change_providers` (only `codex`, keyed by the
+  registry) replaces the provider test in 0689's trigger function, which is
+  redefined in place and stays attached to 0689's `BEFORE UPDATE OF
+  plan_type` trigger. It now reads owner data, so it runs as its owner
+  (`SECURITY DEFINER`, search path pinned with `pg_temp` last; 0689's was
+  invoker) and still only edits `NEW`. Codex records the same keys as before.
+  A registry column would have locked the registry ACCESS EXCLUSIVE, which
+  runtime transactions read after the workspace prefix.
+- **Lock set and order.** Runtime transactions take the workspace prefix
+  first and the subscription tables after it, and workspace or
+  Personal-workspace creation holds its new row while 0689's trigger reads
+  the reach table. 0713 therefore locks owner data only, first and in this
+  order: the reach table ACCESS EXCLUSIVE (read only by 0689's triggers and
+  0702's helpers), then the registry SHARE ROW EXCLUSIVE, which conflicts
+  with no runtime lock (runtime roles only read it or check keys against
+  it). It locks no workspace, membership, connection or assignment table:
+  every other statement acts on those two tables, creates a table, or
+  creates or replaces a routine.
+  While it waits for its first lock it holds nothing, and afterwards it
+  waits for no lock a runtime transaction holds, so it cannot close a lock
+  cycle with runtime work (the 40P01 shape 0299 fixed). Renaming the table,
+  replacing the triggers or adding the connection key would lock hot tables
+  and wait for runtime work, so those come with the maintenance retirement
+  migration. `migration-0713-provider-keyed-reach-lock-order.test.ts` races
+  0713 against those runtime shapes as the application role.
 - **Organization reach.** The neutral pair is 0702's helpers with the
   provider as data: runtime-callable `SECURITY DEFINER` routines (search path
   `pg_catalog`, data schema, `opengeni_private`, `pg_temp` last) granted to
@@ -3279,16 +3302,19 @@ Decisions, each the strictest fail-closed reading of the plan and contract:
 - **Rolling posture.** On a provisioned database without 0713, the previous
   release's evaluator, run as the runtime role, reports nothing missing
   before 0713, after it and after provisioning again; the new evaluator
-  reports exactly the seven new routines before 0713 and nothing after it.
+  reports exactly the four new routines before 0713 and nothing after it.
   The migration grants the three runtime routines to the application roles,
-  PUBLIC holds none of the seven, and provisioning again leaves those grants
+  PUBLIC holds none of the four, and provisioning again leaves those grants
   as the migration set them.
-- **Kept until retirement.** The Codex-named reach pair, apply routine and
-  detached trigger functions (`auto_assign_subscription_codex_workspace`,
-  `auto_assign_subscription_codex_personal_workspace`,
-  `record_subscription_codex_plan_change`) and 0689's `*_codex_auto_assign`
-  policies are dropped with the other Codex-named routines (§5.1.2, "Rolling
-  compatibility and retirement"). `list_organization_codex_workspace_ids`
+- **Kept until retirement.** The Codex-named reach pair and apply routine
+  are dropped with the other Codex-named routines (§5.1.2, "Rolling
+  compatibility and retirement"). The same maintenance migration gives the
+  reach table, 0689's two auto-assignment triggers and their functions, the
+  plan-change trigger and its function, 0689's `*_codex_auto_assign`
+  policies and their setting provider-free names, and adds the reach rows'
+  connection-and-provider key; none of that can run while a rolling
+  migration must stay off the workspace, membership and connection tables.
+  `list_organization_codex_workspace_ids`
   stays while the legacy SuperGrok and Claude organization wakes call it
   (until X4 and C4). The Codex scope-visibility helpers stay as well. Most
   of their callers are legacy (the credential-table policies of 0381 and
@@ -3300,7 +3326,7 @@ Decisions, each the strictest fail-closed reading of the plan and contract:
   `codex_organization_admin_visible`. Generalizing those uses belongs with
   the API-key connectors.
 - **Migration tests.** Tests that withhold 0689 also withhold 0713, which
-  renames objects 0689 creates, and replay it after 0689; the neutral-routine
+  alters objects 0689 creates, and replay it after 0689; the neutral-routine
   test replays 0707, 0712 and 0713 together.
 
 #### Verification plan

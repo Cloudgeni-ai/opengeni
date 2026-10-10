@@ -151,12 +151,9 @@ const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   "auto_assign_subscription_codex_workspace()",
   "auto_assign_subscription_codex_personal_workspace()",
   "read_sender_connection(uuid, uuid, uuid, text)",
-  // Migration 0713: the provider-keyed auto-assignment apply path, its two
-  // trigger functions and the plan-change trigger function.
+  // Migration 0713: the provider-keyed auto-assignment apply path, run by
+  // 0689's two auto-assignment trigger functions as their owner.
   "apply_subscription_core_auto_assignments(text, uuid, uuid, boolean)",
-  "auto_assign_subscription_core_workspace()",
-  "auto_assign_subscription_core_personal_workspace()",
-  "record_subscription_core_plan_change()",
   // Lifecycle fact writers (migrations 0532 and 0565): owner-run trigger
   // functions and the migration-owner backfill. Runtime roles may still hold
   // EXECUTE until a follow-up migration revokes it once no pre-0565 binary
@@ -746,13 +743,10 @@ export const SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES = [
   "grant_subscription_core_owner_capability(text, text, uuid, uuid, text, uuid)",
   "drop_subscription_core_owner_capabilities(text, uuid)",
   "subscription_core_connection_target(text, uuid, uuid, uuid, uuid, uuid, text, bigint)",
-  // Migration 0713: the auto-assignment apply path, its two trigger
-  // functions and the plan-change trigger function. Triggers fire without
-  // the caller holding EXECUTE.
+  // Migration 0713: the auto-assignment apply path, run only by 0689's two
+  // auto-assignment trigger functions (triggers fire without the caller
+  // holding EXECUTE).
   "apply_subscription_core_auto_assignments(text, uuid, uuid, boolean)",
-  "auto_assign_subscription_core_workspace()",
-  "auto_assign_subscription_core_personal_workspace()",
-  "record_subscription_core_plan_change()",
 ] as const;
 
 /**

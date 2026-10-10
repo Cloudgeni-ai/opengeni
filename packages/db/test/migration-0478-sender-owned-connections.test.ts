@@ -69,7 +69,7 @@ const withheldMigrations = [
   "0711_subscription_codex_completion_operations.sql",
   // Records receipts over withheld 0689 and patches the capture function from withheld 0478.
   "0712_subscription_core_generic_precursor.sql",
-  // Renames and redefines the auto-assignment objects the withheld 0689 creates.
+  // Keys and redefines the auto-assignment objects the withheld 0689 creates.
   "0713_subscription_core_provider_keyed_reach.sql",
 ];
 let database: OwnerMigratedTestDatabase | null = null;
