@@ -4314,12 +4314,22 @@ migration owner; inspect and remove them as a superuser (or another role with
 `BYPASSRLS`), after checking each connection is not in use:
 
 ```sql
+-- Only providers without a receipt: never run this for a provider whose
+-- cutover has committed (its rows are live).
 SELECT account_id, provider, enabled
-FROM subscription_provider_cutovers WHERE provider IN ('xai', 'claude');
+FROM subscription_provider_cutovers cutover
+WHERE NOT EXISTS (SELECT 1 FROM opengeni_private.subscription_provider_cutover_receipts receipt
+  WHERE receipt.provider = cutover.provider);
 SELECT account_id, provider, id, ownership, status
-FROM subscription_connections WHERE provider IN ('xai', 'claude');
-DELETE FROM subscription_provider_cutovers WHERE provider IN ('xai', 'claude');
-DELETE FROM subscription_connections WHERE provider IN ('xai', 'claude');
+FROM subscription_connections connection
+WHERE NOT EXISTS (SELECT 1 FROM opengeni_private.subscription_provider_cutover_receipts receipt
+  WHERE receipt.provider = connection.provider);
+DELETE FROM subscription_provider_cutovers cutover
+WHERE NOT EXISTS (SELECT 1 FROM opengeni_private.subscription_provider_cutover_receipts receipt
+  WHERE receipt.provider = cutover.provider);
+DELETE FROM subscription_connections connection
+WHERE NOT EXISTS (SELECT 1 FROM opengeni_private.subscription_provider_cutover_receipts receipt
+  WHERE receipt.provider = connection.provider);
 ```
 
 `readiness:owners_with_multiple_current_personal_generations` counts Codex
