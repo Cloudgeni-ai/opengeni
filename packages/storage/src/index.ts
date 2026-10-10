@@ -896,13 +896,9 @@ function createAzureBlobObjectStorage(settings: ObjectStorageSettings): ObjectSt
     },
     async headObject(key) {
       try {
-        const properties = await requestContainerClient.getBlobClient(key).getProperties();
-        return objectHead({
-          contentLength: properties.contentLength,
-          contentType: properties.contentType,
-          metadata: properties.metadata,
-          versionToken: properties.etag,
-        });
+        return azureHeadToObjectHead(
+          await requestContainerClient.getBlobClient(key).getProperties(),
+        );
       } catch (error) {
         if (isAzureNotFound(error)) return null;
         throw error;
