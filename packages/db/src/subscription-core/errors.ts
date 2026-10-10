@@ -15,6 +15,10 @@ export type SubscriptionCoreErrors = {
   requestOutcomeUnknown(): Error;
   /** An operation lost its lease, its scope or the enabled cutover. */
   operationUnavailable(): Error;
+  /** A workspace source change was refused (personal workspace or no permission). */
+  sourceRefused(message: string): Error;
+  /** A workspace route named an organization-managed connection. */
+  organizationManaged(): Error;
 };
 
 export class SubscriptionCoreError extends Error {
@@ -54,6 +58,13 @@ export function subscriptionCoreDefaultErrors(displayName: string): Subscription
       new SubscriptionCoreError(
         "subscription_core_operation_unavailable",
         `This ${displayName} operation can no longer use its subscription`,
+      ),
+    sourceRefused: (message) =>
+      new SubscriptionCoreError("subscription_core_source_refused", message),
+    organizationManaged: () =>
+      new SubscriptionCoreError(
+        "subscription_core_organization_managed",
+        `organization ${displayName} subscriptions are managed in Organization settings`,
       ),
   };
 }

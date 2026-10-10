@@ -53,3 +53,18 @@ export class SubscriptionCoreCodexOperationUnavailableError extends Error {
     this.name = "SubscriptionCoreCodexOperationUnavailableError";
   }
 }
+
+/** A workspace source change was refused (personal workspace or no permission). */
+export class SubscriptionCoreCodexSourceRefusedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SubscriptionCoreCodexSourceRefusedError";
+  }
+}
+
+/** A workspace route named an organization-managed Codex account (legacy 409). */
+export class SubscriptionCoreCodexOrganizationManagedError extends Error {
+  constructor() {
+    super("organization Codex subscriptions are managed in Organization settings");
+  }
+}

@@ -10,6 +10,7 @@
  */
 import type { SQL } from "drizzle-orm";
 import type { SubscriptionCoreAdapter } from "@opengeni/subscriptions";
+import type { Database } from "../database";
 import type { SubscriptionCoreErrors } from "./errors";
 
 export type SubscriptionCoreProvider<Credential = unknown> = {
@@ -22,6 +23,22 @@ export type SubscriptionCoreProvider<Credential = unknown> = {
   readonly sessionCompactionLock: SQL | null;
   /** The errors the core raises to this provider's callers. */
   readonly errors: SubscriptionCoreErrors;
+  readonly settings: {
+    /**
+     * The `subscription_settings` column holding this provider's primary
+     * connection, as in the provider's SQL registry row, until settings are
+     * keyed by provider (design 5.1.2).
+     */
+    readonly primaryColumn: string;
+  };
+  /**
+   * Runs inside an organization-route allocator change of a shared
+   * connection, after the organization pool's copy changed (for example the
+   * provider's organization reach for workspaces created later), or null.
+   */
+  readonly organizationAllocatorChanged:
+    | ((tx: Database, accountId: string, connectionId: string) => Promise<void>)
+    | null;
 };
 
 /** The provider id the database stores for this provider's rows. */

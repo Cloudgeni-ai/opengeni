@@ -2236,9 +2236,15 @@ the provider as data. Shared modules live in `packages/db/src/subscription-core/
 `subscription-core-acceptance-authority.ts`). They take a
 `SubscriptionCoreProvider` binding (`subscription-core/provider.ts`): the
 provider's adapter, the SQL expression for its remote-compaction session lock
-(or null), and the error classes its callers expect. Each shared runtime is a
-factory memoized per binding (`subscriptionCoreTurns(provider)`,
-`subscriptionCoreOperations(provider)`, `subscriptionCoreRequests(provider)`).
+(or null), the error classes its callers expect, the settings column that
+holds its primary connection (the `primary_setting_column` of its SQL registry
+row, until settings are keyed by provider) and an optional hook run when an
+organization allocator switch changes (Codex keeps its organization reach for
+workspaces created later there). Each shared runtime is a factory memoized
+per binding (`subscriptionCoreTurns(provider)`,
+`subscriptionCoreOperations(provider)`, `subscriptionCoreRequests(provider)`);
+administration, connections and catalog are plain functions taking the
+binding.
 
 Adapter interface (`packages/subscriptions/src/adapter.ts`, pure types).
 `SubscriptionCoreAdapter` is what the shared runtime reads, next to the
@@ -2307,16 +2313,27 @@ Module map (old Codex module, its new shared home, and what stays Codex):
 | `subscription-core-codex-operations.ts` | `subscription-core/operations.ts` | connection token resolver, candidate ordering, plan voice entitlement, usage endpoint fetch and decoding |
 | `subscription-core-codex-requests.ts` | `subscription-core/requests.ts` | Apps request reservation and settlement |
 | `subscription-core-codex-waiter-cleanup.ts` | `subscription-core/waiters.ts` | the Codex-named wrapper |
+| `subscription-core-codex-compat.ts` | `subscription-core/administration.ts` (cutover disposition, workspace and organization pools, personal rows, allocator, extra credits, rename, primary, rotation, workspace source) | the legacy Codex account projection (ChatGPT account id, reset credits, plan history, plan-entitlement exclusions), rotation shape, every exported name |
+| `subscription-core-codex-connections.ts` | `subscription-core/connections.ts` (connect personal and shared, disconnect, disconnect all) | the FedRAMP flag as provider state, every exported name |
+| `subscription-core-codex-catalog.ts` | `subscription-core/catalog.ts` (serving connections, model admission, readiness) | every exported name |
 | `subscription-core-placement-world.ts`, `-repository.ts`, `-acceptance-authority.ts` | same paths, provider-parameterized | Codex-named wrappers in `subscription-core-codex-bindings.ts` |
 | (new) | `subscription-core/provider.ts`, `subscription-core/errors.ts` | `subscription-core-codex-adapter.ts` (adapter and binding), `subscription-core-codex-errors.ts` (error classes) |
 
 Every existing export keeps its name, signature and behaviour; callers
-outside `packages/db` are unchanged. Still Codex-named and deferred to
-the next extraction PR: the settings, allocator, rename, primary, rotation
-and source projections (`subscription-core-codex-compat.ts`), connect and
-disconnect (`subscription-core-codex-connections.ts`) and catalog readiness
-(`subscription-core-codex-catalog.ts`). Codex Apps
-(`subscription-core-codex-apps.ts`) and reset credits stay Codex modules.
+outside `packages/db` are unchanged. Provider-derived texts keep Codex's
+bytes: wake reasons are `core_<provider>_<event>`, the extra-credits audit
+action `<provider>.extra_credits.updated`, the Apps-cleared audit action
+`<provider>_apps.cleared_on_disconnect` (only for a provider with the `apps`
+capability), the shared connect lock key
+`subscription-connect:<account>:<provider>:shared:<upstream account>`, and
+source-refusal texts use the adapter's display name. Extra credits are
+writable only for a provider with the `extraCredits` capability.
+Codex Apps (`subscription-core-codex-apps.ts`) and reset credits stay Codex
+modules, and so does the operation candidate list in
+`subscription-core-codex-operations.ts` and Codex's organization reach
+(`set_subscription_codex_reach` over `subscription_codex_auto_assignments`,
+0702), which the binding's allocator hook calls; a second provider with
+organization reach needs a provider-keyed reach table and routine first.
 In the pure package, `connectionUsesExtraCredits` (`eligibility.ts`) and the
 reference model's `spendsCredits` still test the Codex provider id; with
 Codex the only provider holding extra credits this is the same as the
