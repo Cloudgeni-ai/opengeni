@@ -2357,14 +2357,207 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
       }
     }
   }
-  return groups.flatMap((group) => {
-    if (group.kind === "activity" && movedRows.has(group)) return [];
-    const hidden =
-      group.kind === "item" && group.item.kind === "agent-message" && foldedProse.has(group.item);
-    const before = beforeRows.get(group);
-    const after = afterRows.get(group);
-    return [...(before ? [before] : []), ...(hidden ? [] : [group]), ...(after ? [after] : [])];
-  });
+  // The work of every turn that answers a person stays visible even when it
+  // said nothing (OPE-736); quiet-cycle folding must never take it.
+  const personWork = new Set<TimelineGroup>(
+    [...answersPerson].flatMap((key) => {
+      const work = turns.get(key);
+      return work ? [work] : [];
+    }),
+  );
+  return compactQuietCycles(
+    groups.flatMap((group) => {
+      if (group.kind === "activity" && movedRows.has(group)) return [];
+      const hidden =
+        group.kind === "item" && group.item.kind === "agent-message" && foldedProse.has(group.item);
+      const before = beforeRows.get(group);
+      const after = afterRows.get(group);
+      return [...(before ? [before] : []), ...(hidden ? [] : [group]), ...(after ? [after] : [])];
+    }),
+    personWork,
+  );
+}
+
+type WorkGroup = Extract<TimelineGroup, { kind: "activity" }> & {
+  work: NonNullable<Extract<TimelineGroup, { kind: "activity" }>["work"]>;
+};
+
+/**
+ * Settled, successful work whose turn left no visible reply, image or blocker.
+ * A failure it recovered from, a failed startup phase or a context compaction
+ * is something to see, so that work is not quiet either.
+ */
+function isQuietWork(group: TimelineGroup): group is WorkGroup {
+  if (group.kind !== "activity" || !group.work?.endedAt || group.work.waiting) return false;
+  if (group.work.cycles || (group.outcome && group.outcome !== "complete")) return false;
+  if (
+    group.items.some(
+      (item) =>
+        item.kind === "startup-phase" && (item.status === "failed" || item.status === "cancelled"),
+    )
+  ) {
+    return false;
+  }
+  const quiet = (entry: TimelineGroup): boolean =>
+    entry.kind === "item"
+      ? entry.item.kind !== "auth-needed" &&
+        entry.item.kind !== "context-compaction" &&
+        entry.item.kind !== "human-input" &&
+        !(entry.item.kind === "notice" && entry.item.tone !== "waiting") &&
+        !(entry.item.kind === "agent-message" && entry.item.text.includes("!["))
+      : entry.kind === "activity"
+        ? isQuietDetail(entry, quiet)
+        : false;
+  return !publishesOutput(group) && group.work.details.every(quiet);
+}
+
+function isQuietDetail(
+  group: Extract<TimelineGroup, { kind: "activity" }>,
+  quiet: (entry: TimelineGroup) => boolean,
+): boolean {
+  return (
+    (!group.outcome || group.outcome === "complete") && (group.work?.details ?? []).every(quiet)
+  );
+}
+
+/**
+ * Work that generated an image or published a file produced output worth
+ * seeing. Checked by tool name only, so the projection stays free of the
+ * renderer's image presentation rules.
+ */
+function publishesOutput(group: TimelineGroup): boolean {
+  if (group.kind !== "activity") return false;
+  return (
+    group.items.some((item) => {
+      if (item.kind !== "tool-call") return false;
+      const name = mcpToolLeaf(item.name);
+      return (
+        name === "generate_image" ||
+        name === "image_generation_call" ||
+        name === "sandbox_file_publish"
+      );
+    }) || (group.work?.details ?? []).some(publishesOutput)
+  );
+}
+
+/**
+ * Whether the work at `index` follows a person's message or answer with only
+ * routine input in between. Complements the turn bookkeeping for legacy rows.
+ */
+function answersPersonAt(groups: TimelineGroup[], index: number): boolean {
+  for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
+    const group = groups[cursor]!;
+    if (
+      group.kind === "item" &&
+      (group.item.kind === "user-message" || group.item.kind === "human-input")
+    ) {
+      return true;
+    }
+    if (!isRoutineInput(group)) return false;
+  }
+  return false;
+}
+
+/**
+ * A routine machine input (agent update, child result, wait timeout, ...). An
+ * agent that failed, paused or needs action is news, not routine.
+ */
+function isRoutineInput(group: TimelineGroup): boolean {
+  return (
+    group.kind === "item" &&
+    group.item.kind === "machine-input-batch" &&
+    !!group.item.compact &&
+    group.item.members.every(
+      (member) =>
+        member.kind !== "child_paused" &&
+        member.classification !== "failure" &&
+        // A parent's direction is always recorded as action_required for the
+        // agent; it is routine orchestration, not something a person must do.
+        (member.classification !== "action_required" || member.kind === "agent_steer_instruction"),
+    )
+  );
+}
+
+/** A recorded wait that later input already ended. */
+function isFinishedWait(group: TimelineGroup): group is Extract<TimelineGroup, { kind: "item" }> & {
+  item: NoticeItem;
+} {
+  return (
+    group.kind === "item" &&
+    group.item.kind === "notice" &&
+    group.item.tone === "waiting" &&
+    !!group.item.recordedOutcome &&
+    !!group.item.waitEndedAt
+  );
+}
+
+/**
+ * Long orchestration runs repeat "agent update / worked / waited" many times
+ * without saying anything. Fold two or more such consecutive quiet cycles into
+ * one work row: "7 updates over 6h 12m", with the latest wait reason under it.
+ * Expanding it shows the original rows unchanged. Visible replies, people's
+ * messages, failures, approvals, live work and the current wait are never folded
+ * and end a run.
+ */
+function compactQuietCycles(
+  groups: TimelineGroup[],
+  personWork: ReadonlySet<TimelineGroup>,
+): TimelineGroup[] {
+  const result: TimelineGroup[] = [];
+  let index = 0;
+  while (index < groups.length) {
+    // A run starts at routine input, never at a leading wait (it belongs to
+    // the reply before it) or at bare work (it belongs to the visible row
+    // before it, such as an agent's failure). Later cycles may lack input,
+    // for example after a wait timeout.
+    let end = index;
+    let lastCycleEnd = index;
+    let cycles = 0;
+    while (end < groups.length) {
+      const input = isRoutineInput(groups[end]!) ? end : -1;
+      if (input < 0 && cycles === 0) break;
+      const workIndex = input >= 0 ? end + 1 : end;
+      const work = groups[workIndex];
+      if (!work || !isQuietWork(work)) break;
+      // Work that follows a person's message is that message's turn, even
+      // when it said nothing; it stays visible.
+      if (personWork.has(work) || answersPersonAt(groups, workIndex)) break;
+      const next = groups[workIndex + 1];
+      // Work directly followed by its reply is not quiet.
+      if (next?.kind === "item" && next.item.kind === "agent-message") break;
+      if (!next || !isFinishedWait(next)) break;
+      cycles += 1;
+      end = workIndex + 2;
+      lastCycleEnd = end;
+    }
+    if (cycles < 2) {
+      result.push(groups[index]!);
+      index += 1;
+      continue;
+    }
+    const run = groups.slice(index, lastCycleEnd);
+    const works = run.filter((group): group is WorkGroup => isQuietWork(group));
+    const waits = run.filter(isFinishedWait);
+    const first = works[0]!;
+    const lastWait = waits.at(-1)!;
+    result.push({
+      kind: "activity",
+      id: `cycles-${first.id}`,
+      items: works.flatMap((group) => group.items),
+      outcome: "complete",
+      work: {
+        startedAt: first.work.startedAt,
+        endedAt: lastWait.item.waitEndedAt!,
+        details: run,
+        cycles: {
+          count: cycles,
+          ...(lastWait.item.text.trim() ? { summary: lastWait.item.text.trim() } : {}),
+        },
+      },
+    });
+    index = lastCycleEnd;
+  }
+  return result;
 }
 
 /** Machine inputs that continue the current exchange rather than start one. */

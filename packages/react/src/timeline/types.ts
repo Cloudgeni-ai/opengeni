@@ -615,6 +615,12 @@ export type TimelineGroup =
          * so an expanded work disclosure can fold the outside copies away.
          */
         liveNoteIds?: string[];
+        /**
+         * Set when this row folds several quiet wake-work-wait cycles (routine
+         * input, work without a visible reply, a finished wait) into one row.
+         * `summary` is the latest wait reason, shown under the collapsed row.
+         */
+        cycles?: { count: number; summary?: string };
       };
     }
   | {

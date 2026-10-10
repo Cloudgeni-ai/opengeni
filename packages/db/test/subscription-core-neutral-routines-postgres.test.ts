@@ -833,8 +833,9 @@ describe("provider-neutral subscription-core routines (migration 0705)", () => {
       const fresh = createDb(appConnectionUrl, { max: 1 });
       const shadowed = await renew(true, fresh.db).finally(() => fresh.close());
       expect({ plain: await renew(false), shadowed }).toMatchObject({
-        plain: refused,
-        shadowed: refused,
+        // Separate objects: a reused expected object is compared only once.
+        plain: { ...refused },
+        shadowed: { ...refused },
       });
       const paths = await database!.admin<{ name: string; config: string[] }[]>`
         select proc.proname as name, proc.proconfig as config from pg_proc proc
