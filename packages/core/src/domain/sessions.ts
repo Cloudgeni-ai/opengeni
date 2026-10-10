@@ -167,6 +167,7 @@ import {
   getWorkspaceModelPolicy,
   requireWorkspace,
   initializeSessionStartAtomically,
+  discardUninitializedSessionShell,
   listSessionTurns,
   listSessionMcpServersForChildInheritance,
   requireSession,
@@ -1291,7 +1292,7 @@ export async function createAndStartSessionWithOutcome(input: {
         changed: finished.changed,
       };
     }
-    const finished = await finishStartSession(
+    const finished = await finishNewlyCreatedSession(
       targetSeededBeforeCreateCommit ? { ...input, seedTargetSandbox: null } : input,
       keyed,
     );
@@ -1376,7 +1377,7 @@ export async function createAndStartSessionWithOutcome(input: {
     }
     throw error;
   }
-  const finished = await finishStartSession(
+  const finished = await finishNewlyCreatedSession(
     targetSeededBeforeCreateCommit ? { ...input, seedTargetSandbox: null } : input,
     session,
   );
@@ -1387,6 +1388,33 @@ export async function createAndStartSessionWithOutcome(input: {
     replay: false,
     changed: true,
   };
+}
+
+/**
+ * Start a shell this call just inserted. If the start fails before the first
+ * event or turn commits, the caller gets the error and no session, so the bare
+ * shell is discarded instead of lingering as a queued session nothing runs.
+ * A shell that did initialize (including an outcome-unknown commit) is kept.
+ */
+async function finishNewlyCreatedSession(
+  input: Parameters<typeof finishStartSession>[0],
+  session: Session,
+): Promise<Awaited<ReturnType<typeof finishStartSession>>> {
+  try {
+    return await finishStartSession(input, session);
+  } catch (error) {
+    try {
+      await discardUninitializedSessionShell(input.db, {
+        accountId: session.accountId,
+        workspaceId: session.workspaceId,
+        sessionId: session.id,
+      });
+    } catch {
+      // The original start failure is the actionable error; a shell that
+      // cannot be discarded now is no worse than before this cleanup ran.
+    }
+    throw error;
+  }
 }
 
 function recordCreatedSessionUsage(input: {

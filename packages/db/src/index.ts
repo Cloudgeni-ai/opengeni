@@ -32036,6 +32036,140 @@ export async function getSession(
   });
 }
 
+export type DiscardUninitializedSessionShellResult =
+  | "discarded"
+  | "initialized"
+  | "not_found"
+  | "referenced";
+
+/**
+ * Remove a just-created session shell whose start failed before the atomic
+ * initializer committed its first event or turn.
+ *
+ * Session creation commits the shell first and initializes it in a later
+ * transaction. When that second step fails, the caller receives an error and
+ * has no session, so the bare row must not stay visible as a queued session
+ * that nothing will ever run. The row lock serializes with the initializer:
+ * a shell that gained any event or turn is left untouched, so an outcome-
+ * unknown initializer commit or a concurrent keyed repair always wins. A
+ * keyed retry after discard simply creates the session again.
+ */
+export async function discardUninitializedSessionShell(
+  db: Database,
+  input: { accountId: string; workspaceId: string; sessionId: string },
+): Promise<DiscardUninitializedSessionShellResult> {
+  try {
+    return await withSessionActivityRlsContext(
+      db,
+      { accountId: input.accountId, workspaceId: input.workspaceId },
+      async (scopedDb) =>
+        await scopedDb.transaction(async (txRaw) => {
+          const tx = txRaw as unknown as Database;
+          await lockWorkspaceInferenceControl(tx, input.workspaceId, "share");
+          const [keyed] = await tx
+            .select({ createIdempotencyKey: schema.sessions.createIdempotencyKey })
+            .from(schema.sessions)
+            .where(
+              and(
+                eq(schema.sessions.workspaceId, input.workspaceId),
+                eq(schema.sessions.id, input.sessionId),
+              ),
+            )
+            .limit(1);
+          const createIdempotencyKey = keyed?.createIdempotencyKey ?? null;
+          if (createIdempotencyKey !== null) {
+            // The keyed admission lock, taken before the row lock as keyed
+            // creates do, so a concurrent replay of this key serializes here.
+            await tx.execute(sql`select pg_advisory_xact_lock(
+              hashtext(${`session-create:${input.workspaceId}:${createIdempotencyKey}`}))`);
+          }
+          const [shell] = await tx
+            .select({
+              id: schema.sessions.id,
+              lastSequence: schema.sessions.lastSequence,
+              createIdempotencyKey: schema.sessions.createIdempotencyKey,
+            })
+            .from(schema.sessions)
+            .where(
+              and(
+                eq(schema.sessions.workspaceId, input.workspaceId),
+                eq(schema.sessions.id, input.sessionId),
+              ),
+            )
+            .for("update")
+            .limit(1);
+          if (!shell) return "not_found" as const;
+          if (shell.lastSequence !== 0 || shell.createIdempotencyKey !== createIdempotencyKey) {
+            return "initialized" as const;
+          }
+          const [[event], [turn], [child]] = await Promise.all([
+            tx
+              .select({ id: schema.sessionEvents.id })
+              .from(schema.sessionEvents)
+              .where(
+                and(
+                  eq(schema.sessionEvents.workspaceId, input.workspaceId),
+                  eq(schema.sessionEvents.sessionId, input.sessionId),
+                ),
+              )
+              .limit(1),
+            tx
+              .select({ id: schema.sessionTurns.id })
+              .from(schema.sessionTurns)
+              .where(
+                and(
+                  eq(schema.sessionTurns.workspaceId, input.workspaceId),
+                  eq(schema.sessionTurns.sessionId, input.sessionId),
+                ),
+              )
+              .limit(1),
+            tx
+              .select({ id: schema.sessions.id })
+              .from(schema.sessions)
+              .where(
+                and(
+                  eq(schema.sessions.workspaceId, input.workspaceId),
+                  eq(schema.sessions.parentSessionId, input.sessionId),
+                ),
+              )
+              .limit(1),
+          ]);
+          if (event || turn || child) return "initialized" as const;
+          const deleted = await tx
+            .delete(schema.sessions)
+            .where(
+              and(
+                eq(schema.sessions.workspaceId, input.workspaceId),
+                eq(schema.sessions.id, input.sessionId),
+              ),
+            )
+            .returning({ id: schema.sessions.id });
+          if (deleted.length !== 1) return "not_found" as const;
+          if (createIdempotencyKey !== null) {
+            // Release the key's durable winner so a retry with the same key
+            // creates the session instead of replaying a row that is gone.
+            await tx.execute(sql`select opengeni_private.release_discarded_session_create_key_v1(
+              ${input.workspaceId}::uuid, ${createIdempotencyKey}, ${input.sessionId}::uuid)`);
+          }
+          return "discarded" as const;
+        }),
+    );
+  } catch (error) {
+    // A durable reference that deliberately restricts deletion (for example a
+    // scheduled run bound to this session) keeps the shell; its owner settles it.
+    const code =
+      typeof error === "object" && error && "code" in error
+        ? (error as { code?: unknown }).code
+        : undefined;
+    const causeCode =
+      typeof error === "object" && error && "cause" in error
+        ? ((error as { cause?: { code?: unknown } }).cause?.code ?? undefined)
+        : undefined;
+    if (code === "23503" || causeCode === "23503") return "referenced";
+    throw error;
+  }
+}
+
 export type DeleteSessionTreeIfQuiescentResult =
   | { status: "deleted"; deletedSessionCount: number }
   | {
