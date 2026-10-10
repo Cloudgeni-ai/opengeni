@@ -10838,11 +10838,13 @@ export function withClaudeConnectionCatalog(
                   ? "Claude Haiku 5.5"
                   : model.upstreamModelId),
           reasoningEffort: adaptiveThinking,
-          hostedWebSearch: false,
+          // Claude's server-side web search runs on every Claude route (API
+          // key and subscription) under the deployment's web search switch.
+          hostedWebSearch: settings.webSearchEnabled,
           capabilities: {
             ...legacyModelCapabilities(settings, {
               reasoningEffort: adaptiveThinking,
-              hostedWebSearch: false,
+              hostedWebSearch: settings.webSearchEnabled,
               vision: true,
             }),
             inputFileMediaTypes: [],

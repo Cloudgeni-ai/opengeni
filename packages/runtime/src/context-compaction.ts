@@ -1552,8 +1552,8 @@ export function prepareCompactionPromptInput(
   maxInputTokens: number,
 ): PreparedCompactionPromptInput {
   const budget = Math.max(0, Math.floor(maxInputTokens));
-  let history = omitOpaqueArtifactsFromPortableCompactionHistory(items).map(
-    projectHostedSearchEvidence,
+  let history = omitOpaqueArtifactsFromPortableCompactionHistory(items).map((item) =>
+    projectHostedSearchEvidence(item),
   );
   let estimatedInputTokens = estimateTokens(buildCompactionPromptInput(history));
   let rewrittenToolOutputs = 0;
@@ -2005,7 +2005,10 @@ function messageText(item: CompactionItem): string {
 }
 
 export function renderCompactionPromptInputForChat(input: readonly CompactionItem[]): string {
-  return input.map(projectHostedSearchEvidence).map(renderItem).join("\n");
+  return input
+    .map((item) => projectHostedSearchEvidence(item))
+    .map(renderItem)
+    .join("\n");
 }
 
 function renderItem(item: CompactionItem): string {

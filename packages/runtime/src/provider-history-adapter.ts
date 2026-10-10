@@ -227,9 +227,34 @@ export function projectHistoryForProvider(
   items: Array<Record<string, unknown>>,
   providerApi: HistoryProviderApi,
 ): Array<Record<string, unknown>> {
-  const projected = items.map(projectHostedSearchEvidence);
+  const nativeClaude = providerApi === "anthropic-messages";
+  const projected = items.map((item) => {
+    const evidence = projectHostedSearchEvidence(item, { preserveAnthropicNative: nativeClaude });
+    return nativeClaude ? evidence : withoutClaudeCitationMetadata(evidence);
+  });
   const input = projected.every((item, index) => item === items[index]) ? items : projected;
   return projectWireHistory(withWireValidFunctionCallArguments(input), providerApi);
+}
+
+/**
+ * Claude citations ride on assistant text parts as `providerData.anthropic`.
+ * The Responses and Chat converters would serialize that metadata onto the
+ * wire, so other providers get the plain text. Canonical history keeps it for
+ * a later switch back to Claude, which must replay it exactly.
+ */
+function withoutClaudeCitationMetadata(item: Record<string, unknown>): Record<string, unknown> {
+  if (item.type !== "message" || item.role !== "assistant" || !Array.isArray(item.content))
+    return item;
+  let changed = false;
+  const content = item.content.map((part) => {
+    const metadata = part?.providerData;
+    if (!metadata || typeof metadata !== "object" || !("anthropic" in metadata)) return part;
+    changed = true;
+    const { anthropic: _anthropic, ...rest } = metadata as Record<string, unknown>;
+    const { providerData: _providerData, ...plain } = part;
+    return Object.keys(rest).length ? { ...plain, providerData: rest } : plain;
+  });
+  return changed ? { ...item, content } : item;
 }
 
 /** Bound on the raw text carried by a request-local invalid-arguments wrapper. */
