@@ -14697,6 +14697,16 @@ export const SessionNotificationPostedPayload = z
     urgency: NotificationUrgency.default("normal"),
     /** True when this post replaced an earlier one with the same key (no new alert). */
     replaced: z.boolean().default(false),
+    /**
+     * Another member of the workspace to notify instead of the person the
+     * session works for. They must allow other members' agents to notify them.
+     */
+    recipientSubjectId: z.string().min(1).max(300).optional(),
+    /** Who it comes from (the person the session works for), shown to that member. */
+    sender: z
+      .object({ subjectId: z.string().min(1).max(300), label: z.string().min(1).max(200) })
+      .strict()
+      .optional(),
   })
   .strict();
 export type SessionNotificationPostedPayload = z.infer<typeof SessionNotificationPostedPayload>;
@@ -14706,6 +14716,8 @@ export const SessionNotificationWithdrawnPayload = z
     key: NotificationKey,
     /** The session that withdrew it, when another session tidied the inbox. */
     bySessionId: z.string().uuid().optional(),
+    /** Withdraw only this member's copy; without it every copy of the key goes. */
+    recipientSubjectId: z.string().min(1).max(300).optional(),
   })
   .strict();
 export type SessionNotificationWithdrawnPayload = z.infer<
@@ -14768,6 +14780,13 @@ export const InboxItem = z.object({
   createdAt: z.string(),
   updatedAt: z.string(),
   resolvedAt: z.string().nullable(),
+  /** Another member whose agent sent this notification; null for the person's own. */
+  sender: z.object({ subjectId: z.string(), label: z.string() }).nullable().default(null),
+  /**
+   * Whether the person can open the session the item came from. False for
+   * another member's private session: the item then shows no session link.
+   */
+  sessionAvailable: z.boolean().default(true),
 });
 export type InboxItem = z.infer<typeof InboxItem>;
 
@@ -14828,6 +14847,13 @@ export const InboxSettings = z.object({
   replies: z.boolean().optional(),
 });
 export type InboxSettings = z.infer<typeof InboxSettings>;
+
+/**
+ * Whether other members' agents may notify this person in one workspace.
+ * Each person decides for themselves; off by default.
+ */
+export const MemberNotificationsSetting = z.object({ allowOthers: z.boolean() }).strict();
+export type MemberNotificationsSetting = z.infer<typeof MemberNotificationsSetting>;
 
 /** The fixed subject of a local install's one built-in human (`productAccessMode` local). */
 export const LOCAL_HUMAN_SUBJECT_ID = "dev";

@@ -4336,6 +4336,32 @@
       ]
     },
     {
+      "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/inbox/member-notifications",
+      "sdk": [
+        "OpenGeniClient.getMemberNotifications",
+        "createSessionProxyHandler"
+      ],
+      "request": [],
+      "response": [
+        "MemberNotificationsSetting"
+      ]
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/workspaces/:workspaceId/inbox/member-notifications",
+      "sdk": [
+        "OpenGeniClient.updateMemberNotifications",
+        "createSessionProxyHandler"
+      ],
+      "request": [
+        "MemberNotificationsSetting"
+      ],
+      "response": [
+        "MemberNotificationsSetting"
+      ]
+    },
+    {
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/inference-control",
       "sdk": [
@@ -15484,6 +15510,10 @@
         "$.link.label": "string!",
         "$.link.url": "string!",
         "$.resolvedAt": "string! null",
+        "$.sender": "object? null",
+        "$.sender.label": "string!",
+        "$.sender.subjectId": "string!",
+        "$.sessionAvailable": "boolean?",
         "$.sessionId": "string!",
         "$.sessionTitle": "string! null",
         "$.snoozedUntil": "string! null",
@@ -17819,6 +17849,16 @@
         "$.subjectId": "string!",
         "$.used": "integer!",
         "$.version": "integer!"
+      }
+    },
+    "MemberNotificationsSetting": {
+      "io": [
+        "input",
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.allowOthers": "boolean!"
       }
     },
     "MemorySlackImportance": {
@@ -27862,6 +27902,7 @@
       "InboxItemFact": "type",
       "InboxItemKind": "type",
       "InboxItemLink": "type",
+      "InboxItemSender": "type",
       "InboxSettings": "type",
       "InboxTidyPolicy": "type",
       "InitiatingHuman": "type",
@@ -28033,6 +28074,7 @@
       "MemberAllowanceDefault": "type",
       "MemberAllowanceRule": "type",
       "MemberAllowanceUsage": "type",
+      "MemberNotificationsSetting": "type",
       "MemorySlackImportance": "type",
       "MemorySlackPublication": "type",
       "MemorySlackPublicationActionRequest": "type",
@@ -30184,6 +30226,8 @@
       "McpConnectionCardProps": "type",
       "MediaEmpty": "value",
       "MediaSkeleton": "value",
+      "MessageSender": "type",
+      "MessageSenderLabel": "value",
       "MessageTimeline": "value",
       "MessageTimelineProps": "type",
       "METRIC_WINDOWS": "value",
@@ -30288,6 +30332,7 @@
       "registerPierreDiffs": "value",
       "registerSandboxTerminal": "value",
       "RenderAllowanceExhausted": "type",
+      "RenderMessageSender": "type",
       "ResponsiveBasis": "type",
       "RetainedArtifactLoader": "type",
       "RetainedArtifactLoaderClient": "type",
@@ -32273,6 +32318,7 @@
       "getLatestEventResult",
       "getLatestStartedTurn",
       "getMcpConnectionRequest",
+      "getMemberNotifications",
       "getModelConnectionAccess",
       "getNativeComputerToolReceipt",
       "getNativePushDevice",
@@ -32656,6 +32702,7 @@
       "updateInboxSettings",
       "updateMachineAgent",
       "updateMachineOperationPolicy",
+      "updateMemberNotifications",
       "updateModelConnectionAccess",
       "updateNetworkRoute",
       "updateOpenGeniSlackChannelRoutes",
@@ -32923,6 +32970,7 @@
       "getLatestEventResult",
       "getLatestStartedTurn",
       "getMcpConnectionRequest",
+      "getMemberNotifications",
       "getModelConnectionAccess",
       "getNativeComputerToolReceipt",
       "getNativePushDevice",
@@ -33301,6 +33349,7 @@
       "updateInboxSettings",
       "updateMachineAgent",
       "updateMachineOperationPolicy",
+      "updateMemberNotifications",
       "updateModelConnectionAccess",
       "updateNetworkRoute",
       "updateOpenGeniSlackChannelRoutes",
@@ -33588,6 +33637,7 @@
       "getLatestEventResult",
       "getLatestStartedTurn",
       "getMcpConnectionRequest",
+      "getMemberNotifications",
       "getModelConnectionAccess",
       "getMyUsage",
       "getNativeComputerToolReceipt",
@@ -33989,6 +34039,7 @@
       "updateInboxSettings",
       "updateMachineAgent",
       "updateMachineOperationPolicy",
+      "updateMemberNotifications",
       "updateModelConnectionAccess",
       "updateNetworkRoute",
       "updateOpenGeniSlackChannelRoutes",
@@ -35194,6 +35245,9 @@
       ],
       "getMcpConnectionRequest": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"McpConnectionRequest\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "getMemberNotifications": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"MemberNotificationsSetting\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "getModelConnectionAccess": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"scope\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"organizations\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"workspaces\"},\"type\":\"TSLiteralType\"}]}},{\"computed\":false,\"key\":{\"name\":\"scopeId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"kind\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ModelConnectionAccessKind\",\"optional\":false,\"type\":\"Identifier\"}}},{\"computed\":false,\"key\":{\"name\":\"connectionId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ModelConnectionAccessResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}",
@@ -36401,6 +36455,9 @@
       "updateMachineOperationPolicy": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateMachineOperationPolicyRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"MachineOperationPolicy\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "updateMemberNotifications": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"MemberNotificationsSetting\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"MemberNotificationsSetting\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "updateModelConnectionAccess": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"scope\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"organizations\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"workspaces\"},\"type\":\"TSLiteralType\"}]}},{\"computed\":false,\"key\":{\"name\":\"scopeId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"kind\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ModelConnectionAccessKind\",\"optional\":false,\"type\":\"Identifier\"}}},{\"computed\":false,\"key\":{\"name\":\"connectionId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ModelConnectionAccessPolicy\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ModelConnectionAccessPolicy\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}",
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"scope\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"organizations\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"workspaces\"},\"type\":\"TSLiteralType\"}]}},{\"computed\":false,\"key\":{\"name\":\"scopeId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"kind\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"anthropic\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"claude_subscription\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"codex\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"openrouter\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"supergrok\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"vercel_gateway\"},\"type\":\"TSLiteralType\"}]}},{\"computed\":false,\"key\":{\"name\":\"connectionId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ModelConnectionAccessPolicy\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ModelConnectionAccessPolicy\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -37398,6 +37455,9 @@
       ],
       "getMcpConnectionRequest": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"McpConnectionRequest\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "getMemberNotifications": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"MemberNotificationsSetting\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "getModelConnectionAccess": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"scope\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"organizations\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"workspaces\"},\"type\":\"TSLiteralType\"}]}},{\"computed\":false,\"key\":{\"name\":\"scopeId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"kind\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ModelConnectionAccessKind\",\"optional\":false,\"type\":\"Identifier\"}}},{\"computed\":false,\"key\":{\"name\":\"connectionId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ModelConnectionAccessResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}",
@@ -38551,6 +38611,9 @@
       "updateMachineOperationPolicy": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateMachineOperationPolicyRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"MachineOperationPolicy\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "updateMemberNotifications": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"MemberNotificationsSetting\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"MemberNotificationsSetting\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "updateModelConnectionAccess": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"scope\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"organizations\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"workspaces\"},\"type\":\"TSLiteralType\"}]}},{\"computed\":false,\"key\":{\"name\":\"scopeId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"kind\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ModelConnectionAccessKind\",\"optional\":false,\"type\":\"Identifier\"}}},{\"computed\":false,\"key\":{\"name\":\"connectionId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ModelConnectionAccessPolicy\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ModelConnectionAccessPolicy\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}",
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"scope\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"organizations\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"workspaces\"},\"type\":\"TSLiteralType\"}]}},{\"computed\":false,\"key\":{\"name\":\"scopeId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"kind\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"anthropic\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"claude_subscription\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"codex\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"openrouter\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"supergrok\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"vercel_gateway\"},\"type\":\"TSLiteralType\"}]}},{\"computed\":false,\"key\":{\"name\":\"connectionId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ModelConnectionAccessPolicy\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ModelConnectionAccessPolicy\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -39433,6 +39496,9 @@
       ],
       "getMcpConnectionRequest": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"McpConnectionRequest\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "getMemberNotifications": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"MemberNotificationsSetting\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "getModelConnectionAccess": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"scope\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"organizations\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"workspaces\"},\"type\":\"TSLiteralType\"}]}},{\"computed\":false,\"key\":{\"name\":\"scopeId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"kind\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ModelConnectionAccessKind\",\"optional\":false,\"type\":\"Identifier\"}}},{\"computed\":false,\"key\":{\"name\":\"connectionId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ModelConnectionAccessResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}",
@@ -40540,6 +40606,9 @@
       ],
       "updateMachineOperationPolicy": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateMachineOperationPolicyRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"MachineOperationPolicy\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "updateMemberNotifications": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"MemberNotificationsSetting\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"MemberNotificationsSetting\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "updateModelConnectionAccess": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"scope\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"organizations\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"workspaces\"},\"type\":\"TSLiteralType\"}]}},{\"computed\":false,\"key\":{\"name\":\"scopeId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"kind\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ModelConnectionAccessKind\",\"optional\":false,\"type\":\"Identifier\"}}},{\"computed\":false,\"key\":{\"name\":\"connectionId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ModelConnectionAccessPolicy\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ModelConnectionAccessPolicy\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}",
@@ -41601,6 +41670,9 @@
       "getMcpConnectionRequest": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"McpConnectionRequest\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "getMemberNotifications": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"MemberNotificationsSetting\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "getModelConnectionAccess": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"scope\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"organizations\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"workspaces\"},\"type\":\"TSLiteralType\"}]}},{\"computed\":false,\"key\":{\"name\":\"scopeId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"kind\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ModelConnectionAccessKind\",\"optional\":false,\"type\":\"Identifier\"}}},{\"computed\":false,\"key\":{\"name\":\"connectionId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ModelConnectionAccessResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}",
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"scope\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"organizations\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"workspaces\"},\"type\":\"TSLiteralType\"}]}},{\"computed\":false,\"key\":{\"name\":\"scopeId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"kind\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"anthropic\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"claude_subscription\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"codex\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"openrouter\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"supergrok\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"vercel_gateway\"},\"type\":\"TSLiteralType\"}]}},{\"computed\":false,\"key\":{\"name\":\"connectionId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ModelConnectionAccessResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -42737,6 +42809,9 @@
       ],
       "updateMachineOperationPolicy": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateMachineOperationPolicyRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"MachineOperationPolicy\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "updateMemberNotifications": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"MemberNotificationsSetting\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"MemberNotificationsSetting\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "updateModelConnectionAccess": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"scope\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"organizations\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"workspaces\"},\"type\":\"TSLiteralType\"}]}},{\"computed\":false,\"key\":{\"name\":\"scopeId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"kind\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ModelConnectionAccessKind\",\"optional\":false,\"type\":\"Identifier\"}}},{\"computed\":false,\"key\":{\"name\":\"connectionId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ModelConnectionAccessPolicy\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ModelConnectionAccessPolicy\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}",
@@ -43620,6 +43695,9 @@
       "getMcpConnectionRequest": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"McpConnectionRequest\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "getMemberNotifications": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"MemberNotificationsSetting\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "getModelConnectionAccess": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"scope\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"organizations\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"workspaces\"},\"type\":\"TSLiteralType\"}]}},{\"computed\":false,\"key\":{\"name\":\"scopeId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"kind\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ModelConnectionAccessKind\",\"optional\":false,\"type\":\"Identifier\"}}},{\"computed\":false,\"key\":{\"name\":\"connectionId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ModelConnectionAccessResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}",
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"scope\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"organizations\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"workspaces\"},\"type\":\"TSLiteralType\"}]}},{\"computed\":false,\"key\":{\"name\":\"scopeId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"kind\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"anthropic\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"claude_subscription\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"codex\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"openrouter\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"supergrok\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"vercel_gateway\"},\"type\":\"TSLiteralType\"}]}},{\"computed\":false,\"key\":{\"name\":\"connectionId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ModelConnectionAccessResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -44756,6 +44834,9 @@
       ],
       "updateMachineOperationPolicy": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateMachineOperationPolicyRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"MachineOperationPolicy\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "updateMemberNotifications": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"MemberNotificationsSetting\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"MemberNotificationsSetting\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "updateModelConnectionAccess": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"scope\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"organizations\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"workspaces\"},\"type\":\"TSLiteralType\"}]}},{\"computed\":false,\"key\":{\"name\":\"scopeId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"kind\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ModelConnectionAccessKind\",\"optional\":false,\"type\":\"Identifier\"}}},{\"computed\":false,\"key\":{\"name\":\"connectionId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ModelConnectionAccessPolicy\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ModelConnectionAccessPolicy\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}",

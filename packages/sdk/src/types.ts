@@ -5636,7 +5636,17 @@ export type InboxItem = {
   createdAt: string;
   updatedAt: string;
   resolvedAt: string | null;
+  /** Another workspace member whose agent sent this notification; null for the person's own. */
+  sender?: InboxItemSender | null;
+  /**
+   * Whether the person can open the session the item came from. False for
+   * another member's private session: show no session link then.
+   */
+  sessionAvailable?: boolean;
 };
+
+/** The member an agent notified the person for. */
+export type InboxItemSender = { subjectId: string; label: string };
 
 /** A short label and value an agent attached to a notification. */
 export type InboxItemFact = { label: string; value: string };
@@ -5691,6 +5701,14 @@ export type InboxSettings = {
  */
 export type SessionInboxMute = {
   repliesMuted: boolean;
+};
+
+/**
+ * Whether other members' agents may notify the signed-in person in one
+ * workspace. Each person decides for themselves; off by default.
+ */
+export type MemberNotificationsSetting = {
+  allowOthers: boolean;
 };
 
 // --- Native app sign-in (authorization code + PKCE over the app's scheme) ----------------------
