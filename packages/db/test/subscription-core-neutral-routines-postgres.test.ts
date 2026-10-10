@@ -31,12 +31,31 @@ const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let database: OwnerMigratedTestDatabase | null = null;
 let client: DbClient | null = null;
 let appConnectionUrl = "";
+/** The 0705 private routines the runtime role cannot execute right after migrating, before provisioning. */
+let unprovisionedPrivateRoutines: string[] | null = null;
 
 beforeAll(async () => {
   if (!realDb) return;
   database = await acquireOwnerMigratedTestDatabase("subscription-core-neutral-routines");
   if (!database) throw new Error("Real PostgreSQL is required");
   await migrate(database.ownerUrl);
+  // A rolling migration must leave an older binary's runtime posture intact
+  // before roles are provisioned again: every private routine 0705 adds is
+  // executable by the runtime role (when that cluster role already exists).
+  const [appRole] = await database.admin<{ exists: boolean }[]>`
+    select exists (select 1 from pg_roles where rolname = 'opengeni_app') as exists`;
+  if (appRole?.exists) {
+    unprovisionedPrivateRoutines = (
+      await database.admin<{ name: string }[]>`
+        select proc.oid::regprocedure::text as name from pg_proc proc
+        join pg_namespace namespace on namespace.oid = proc.pronamespace
+        where namespace.nspname = 'opengeni_private'
+          and (proc.proname like '%subscription\_core\_%'
+            or proc.proname = 'guard_subscription_provider_registry')
+          and not has_function_privilege('opengeni_app', proc.oid, 'EXECUTE')
+        order by 1`
+    ).map((row) => row.name);
+  }
   await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
   const appUrl = new URL(database.ownerUrl);
   appUrl.username = "opengeni_app";
@@ -793,6 +812,14 @@ describe("provider-neutral subscription-core routines (migration 0705)", () => {
       });
     },
     600_000,
+  );
+
+  test.skipIf(!realDb)(
+    "before provisioning, the runtime role can execute every private routine 0705 adds",
+    () => {
+      // Null only when the cluster had no runtime role yet at migration time.
+      expect(unprovisionedPrivateRoutines ?? []).toEqual([]);
+    },
   );
 
   test.skipIf(!realDb)(

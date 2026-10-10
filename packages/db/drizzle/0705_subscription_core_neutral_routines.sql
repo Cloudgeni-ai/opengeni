@@ -1753,7 +1753,10 @@ BEGIN
     'connect_subscription_core_personal(text,uuid,uuid,text,text,text,text,text,jsonb,timestamptz,timestamptz,text,text,text)',
     'disconnect_subscription_core_connection(text,uuid,uuid,text,uuid)',
     'manage_subscription_core_personal(text,uuid,uuid,text,uuid,text,text,boolean,integer)',
-    'subscription_core_personal_connections(text,uuid,uuid,text)'
+    'subscription_core_personal_connections(text,uuid,uuid,text)',
+    -- Only ever fired by the registry triggers (the runtime cannot write the
+    -- registry), but runtime posture requires EXECUTE on every private routine.
+    'guard_subscription_provider_registry()'
   ] LOOP
     EXECUTE format('REVOKE ALL ON FUNCTION opengeni_private.%s FROM PUBLIC', routine_signature);
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
