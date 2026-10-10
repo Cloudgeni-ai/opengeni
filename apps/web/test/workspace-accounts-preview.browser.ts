@@ -27,7 +27,7 @@ const receipts = async (page: Page) =>
 
 try {
   for (const width of [1100, 390]) {
-    const page = await browser.newPage({ viewport: { width, height: 1000 } });
+    const page = await browser.newPage({ viewport: { width, height: 1600 } });
     const errors: string[] = [];
     page.on("pageerror", (error) => errors.push(error.message));
     const open = async (query: string) => {
@@ -37,7 +37,7 @@ try {
       await page.getByText("PREVIEW WITH SAMPLE DATA").waitFor({ timeout: 60_000 });
     };
     const shot = async (name: string) => {
-      await page.waitForTimeout(400); // let checkbox and card transitions settle
+      await page.waitForTimeout(1000); // let checkbox, card and section transitions settle
       await page.screenshot({ path: `${output}/${width}-${name}.png`, fullPage: true });
     };
     const noOverflow = async () =>
@@ -66,7 +66,7 @@ try {
 
     // The access editor opens on its current reach: Design, which connected it.
     await page.getByText("Available in").click();
-    await page.getByText("Connected here, so always included.").waitFor();
+    await page.getByText("Connected in this workspace, so always included.").waitFor();
     await noOverflow();
     await shot("3-editor-workspaces");
 
@@ -90,11 +90,27 @@ try {
     await shot("5-editor-people");
     await page.getByRole("button", { name: "Save" }).click();
     await page.waitForFunction(() =>
-      JSON.stringify((window as unknown as { accessReceipts: unknown[] }).accessReceipts).includes(
-        '"allowedPeople":["00000000-0000-4000-8000-0000000000e1","00000000-0000-4000-8000-0000000000e2"]',
+      (window as unknown as { accessReceipts: { access?: string }[] }).accessReceipts.some(
+        (receipt) => receipt.access,
       ),
     );
-    assert((await receipts(page)).includes('"allowedWorkspaces":[]'), "people save shape");
+    const saved = (
+      JSON.parse(await receipts(page)) as { access?: string; policy?: unknown }[]
+    ).find((receipt) => receipt.access);
+    assert(
+      JSON.stringify(saved?.policy) ===
+        JSON.stringify({
+          allowedModels: null,
+          allowedWorkspaces: [],
+          allowPersonalWorkspaces: false,
+          version: 1,
+          allowedPeople: [
+            "00000000-0000-4000-8000-0000000000e1",
+            "00000000-0000-4000-8000-0000000000e2",
+          ],
+        }),
+      `people save shape: ${JSON.stringify(saved)}`,
+    );
 
     // Back on the list, the account now says who can use it.
     await open("reach=people");
@@ -105,6 +121,15 @@ try {
     await open(`reach=people&account=${DESIGN_PLAN}`);
     await page.getByText("2 people").waitFor();
     await shot("7-former-workspace-account-people");
+
+    // Design's own page lists it once, as Design's own; the organization's other
+    // account is set aside there.
+    await open("workspace=00000000-0000-4000-8000-0000000000d1");
+    await page.getByText("Acme Pro").waitFor();
+    assert((await page.getByText("Design team plan").count()) === 1, "listed twice on Design");
+    await page.getByText("Set aside while this workspace has its own").waitFor();
+    await noOverflow();
+    await shot("8-workspace-page");
     assert(errors.length === 0, errors.join("\n"));
     await page.close();
   }

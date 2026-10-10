@@ -384,8 +384,9 @@ export async function listSubscriptionCorePersonalConnectionRowsInTransaction(
 }
 
 /**
- * The organization's own connections of this provider (shared connections
- * no workspace manages) and its rotation, for an organization administrator.
+ * The organization's accounts of this provider (every shared connection the
+ * organization administers, including ones a shared workspace manages,
+ * design 5.4) and its rotation, for an organization administrator.
  * `null` for anyone else: the connection policy hides every row.
  */
 export async function readSubscriptionCoreOrganizationPool(

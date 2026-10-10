@@ -31,6 +31,7 @@ function Harness() {
   const [search, setSearch] = useState<Search>({
     ...(params.get("account") ? { account: params.get("account")! } : {}),
     ...(params.get("view") ? { view: params.get("view") as ModelsView } : {}),
+    ...(params.get("workspace") ? { workspace: params.get("workspace")! } : {}),
   });
   setNavigate((next) => setSearch(next as Search));
   return (

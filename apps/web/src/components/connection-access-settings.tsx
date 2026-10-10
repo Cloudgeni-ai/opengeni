@@ -133,6 +133,18 @@ function saveFailure(caught: unknown): ReactNode {
   );
 }
 
+/** Same choices, whatever the key order; a missing `allowedPeople` is none. */
+function samePolicy(a: ModelConnectionAccessPolicy, b: ModelConnectionAccessPolicy): boolean {
+  const list = (value: readonly string[] | null | undefined) =>
+    value == null ? null : JSON.stringify([...value].sort());
+  return (
+    list(a.allowedModels) === list(b.allowedModels) &&
+    list(a.allowedWorkspaces) === list(b.allowedWorkspaces) &&
+    a.allowPersonalWorkspaces === b.allowPersonalWorkspaces &&
+    list(a.allowedPeople) === list(b.allowedPeople)
+  );
+}
+
 /** "1 person", "3 people". */
 function peopleCount(count: number): string {
   return count === 1 ? "1 person" : `${count} people`;
@@ -267,7 +279,7 @@ export function ConnectionAccessFormPage({
   useEffect(() => {
     if (data && !draft) setDraft(data.policy);
   }, [data, draft]);
-  const dirty = Boolean(draft && data && JSON.stringify(draft) !== JSON.stringify(data.policy));
+  const dirty = Boolean(draft && data && !samePolicy(draft, data.policy));
   const disabled = !canManage;
   // Workspaces that use the account as their own keep it for any workspace choice.
   const local = data?.localWorkspaceIds ?? [];
@@ -372,7 +384,7 @@ export function ConnectionAccessFormPage({
                     <CheckboxField
                       key={workspace.id}
                       label={workspace.name}
-                      description="Connected here, so always included."
+                      description="Connected in this workspace, so always included."
                       disabled
                       checked
                     />

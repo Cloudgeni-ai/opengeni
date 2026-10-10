@@ -275,8 +275,9 @@ export async function listSubscriptionCoreCodexPersonalAccountsInTransaction(
 }
 
 /**
- * The organization's own Codex accounts (shared connections no workspace
- * manages) and its rotation, for an organization administrator. A
+ * The organization's Codex accounts (every shared connection it
+ * administers, including ones a shared workspace manages) and its rotation,
+ * for an organization administrator. A
  * non-administrator sees nothing: the connection policy hides every row.
  */
 export async function getSubscriptionCoreOrganizationCodexProjection(

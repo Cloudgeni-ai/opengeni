@@ -169,9 +169,12 @@ const methods: Record<string, (...args: never[]) => Promise<unknown>> = {
         policy.allowedWorkspaces.includes(workspaceId)
       );
     };
+    // A workspace with its own account uses only its own (source "workspace").
+    const own = organizationAccounts.filter((entry) => local[entry.id]?.includes(workspaceId));
     return {
       accounts: organizationAccounts
         .filter((entry) => workspaceId !== WORKSPACES.personal.id && reaches(entry.id))
+        .filter((entry) => own.length === 0 || own.includes(entry))
         .map((entry) => ({
           ...entry,
           source: local[entry.id]?.includes(workspaceId) ? "workspace" : "organization",
@@ -182,7 +185,7 @@ const methods: Record<string, (...args: never[]) => Promise<unknown>> = {
         workspaceId,
         workspaceKind: workspaceId === WORKSPACES.personal.id ? "personal" : "shared",
         mode: "automatic",
-        effectiveSource: workspaceId === WORKSPACES.design.id ? "workspace" : "organization",
+        effectiveSource: own.length > 0 ? "workspace" : "organization",
         workspaceAvailable: true,
         organizationAvailable: true,
       },
@@ -246,7 +249,35 @@ const methods: Record<string, (...args: never[]) => Promise<unknown>> = {
     return [];
   },
   async getWorkspaceModelCatalog() {
-    return { models: [] };
+    return {
+      models: [
+        {
+          id: "codex/gpt-6-astra",
+          label: "GPT-6 Astra",
+          api: "openai-responses",
+          provider: "codex",
+          providerLabel: "Codex",
+          reasoningEffort: true,
+          reasoningEfforts: ["low", "medium", "high"],
+          hostedWebSearch: false,
+          cost: "subscription",
+          billing: { upstreamPayer: "connected_subscription", metering: "external" },
+          credentialReadiness: {
+            status: "ready",
+            reason: null,
+            basis: "connection",
+            checkedAt: null,
+          },
+          availability: { status: "available", selectable: true, reason: null, checkedAt: null },
+          policyAllowed: true,
+        },
+      ],
+      defaultSelection: {
+        model: "codex/gpt-6-astra",
+        reasoningEffort: "medium",
+        source: "deployment",
+      },
+    };
   },
   async getWorkspaceModelAccessPolicy() {
     return { allowedProviders: null, allowedModels: null, source: "organization" };

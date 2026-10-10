@@ -1735,6 +1735,87 @@ describe("One Models page for the organization and the workspace", () => {
     }
   });
 
+  // Design 5.4: an account a shared workspace connected is also an organization account.
+  describe("a workspace's own account is an organization account", () => {
+    const workspaceOwn = codexAccount({ id: "acct-1", label: "Team plan", source: "organization" });
+    const rowsNamed = (container: HTMLElement, name: string) =>
+      [...container.querySelectorAll<HTMLElement>("[data-slot=list-row]")].filter(
+        (row) => row.querySelector("[data-row-action]")?.textContent?.includes(name) ?? false,
+      );
+    const routeBoth = () =>
+      client.requestJson.mockImplementation(async (method: string, path: string) => {
+        if (method === "GET" && path === "/v1/organizations/organization-a/codex/accounts") {
+          return { ...orgAccounts, accounts: [...orgAccounts.accounts, workspaceOwn] };
+        }
+        if (method === "GET") throw new Error(`unexpected read ${path}`);
+        return {};
+      });
+    const managedAccess = (id: string) => ({
+      policy:
+        id === "acct-1"
+          ? { ...openPolicy, allowedWorkspaces: [], allowPersonalWorkspaces: false }
+          : openPolicy,
+      workspaces: [{ id: "workspace-a", name: "Design preview" }],
+      models: [],
+      personalWorkspacesSupported: true,
+      localWorkspaceIds: id === "acct-1" ? ["workspace-a"] : [],
+      managedByWorkspaceId: id === "acct-1" ? "workspace-a" : null,
+    });
+
+    test("the organization's list shows it once, tagged with its workspace, without a Primary row", async () => {
+      organizationAdmin = true;
+      organizationList = true;
+      routeBoth();
+      client.getModelConnectionAccess.mockImplementation(async (...args: unknown[]) =>
+        managedAccess((args[0] as { connectionId: string }).connectionId),
+      );
+      organizationWorkspaces = [
+        {
+          id: "workspace-a",
+          name: "Design preview",
+          personal: false,
+          canManage: true,
+          savedDefaultModel: null,
+        },
+      ];
+      const view = await render();
+      try {
+        expect(rowsNamed(view.container, "Team plan")).toHaveLength(1);
+        expect(rowsNamed(view.container, "Team plan")[0]!.textContent).toContain(
+          "Design preview only",
+        );
+        // Its page is the organization's; the organization primary isn't offered for it.
+        await act(async () =>
+          rowsNamed(view.container, "Team plan")[0]!
+            .querySelector<HTMLElement>("[data-row-action]")!
+            .click(),
+        );
+        await flush();
+        expect(view.container.querySelector("h1")?.textContent).toBe("Team plan");
+        expect(view.container.textContent).toContain("Available in");
+        expect(view.container.textContent).not.toContain("Primary account");
+      } finally {
+        await cleanup(view);
+      }
+    });
+
+    test("its workspace's page lists it once, as the workspace's own", async () => {
+      organizationAdmin = true;
+      routeBoth();
+      client.getModelConnectionAccess.mockImplementation(async (...args: unknown[]) =>
+        managedAccess((args[0] as { connectionId: string }).connectionId),
+      );
+      const view = await render();
+      try {
+        expect(rowsNamed(view.container, "Team plan")).toHaveLength(1);
+        expect(rowsNamed(view.container, "Company plan")).toHaveLength(1);
+        expect(view.container.textContent).not.toMatch(/Team plan[^]*Set aside/);
+      } finally {
+        await cleanup(view);
+      }
+    });
+  });
+
   test("a workspace admin sees their workspaces and what they use, read-only", async () => {
     organizationList = true;
     context.clientConfig.claudeSubscriptionEnabled = true;

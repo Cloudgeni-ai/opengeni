@@ -297,6 +297,9 @@ for (const kind of ["codex", "supergrok", "vercel_gateway", "openrouter", "opper
       await act(async () => root.render(<Page editing />));
       await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
       expect(container.textContent).not.toContain("Engineering");
+      // A response without the people fields keeps the workspace-only form.
+      expect(container.textContent).toContain("Which workspaces can use it");
+      expect(container.textContent).not.toContain("Only selected people");
       await choose("Only selected workspaces");
       expect(container.textContent).toContain("Finance");
       await choose("Finance");
@@ -515,6 +518,11 @@ test("a workspace's own account is an organization account: its workspace stays,
       policy: { ...policy, allowedPeople: ["person-a"] },
     }),
   ).toBe("Selected people");
+  // Nobody chosen says so, like an account no workspace can use.
+  expect(
+    organizationReachLabel(labels, { ...response(), policy: { ...policy, allowedPeople: [] } }),
+  ).toBe("No one");
+  expect(workspacesShort({ ...policy, allowedPeople: [] }, true)).toBe("No one");
 
   const client = Object.assign(new OpenGeniBrowserClient({ baseUrl: "http://localhost" }), {
     requestJson: async (method: string, _path: string, body: Policy) => {
@@ -571,7 +579,7 @@ test("a workspace's own account is an organization account: its workspace stays,
     await act(async () => root.render(<Page />));
     await flush();
     // Its workspace is shown included and can't be cleared.
-    expect(container.textContent).toContain("Connected here, so always included.");
+    expect(container.textContent).toContain("Connected in this workspace, so always included.");
     expect(container.textContent).not.toContain("No workspace can use it");
     await choose("Finance");
     await save();
@@ -606,6 +614,15 @@ test("a workspace's own account is an organization account: its workspace stays,
     root = createRoot(container);
     await act(async () => root.render(<Page />));
     await flush();
+    // Leaving and returning to the same people is no change.
+    const saveButton = () =>
+      [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+        (candidate) => candidate.textContent === "Save",
+      )!;
+    await choose("All shared workspaces, including new ones");
+    expect(saveButton().disabled).toBe(false);
+    await choose("Only selected people");
+    expect(saveButton().disabled).toBe(true);
     await choose("All shared workspaces, including new ones");
     await save();
     expect(writes.at(-1)).toEqual({

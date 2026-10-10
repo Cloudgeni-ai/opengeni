@@ -139,6 +139,21 @@ function poolState(codex: CodexSubscriptions) {
   };
 }
 
+/**
+ * The organization's accounts other than this workspace's own. An account a
+ * shared workspace connected is also an organization account (design 5.4);
+ * on that workspace's page it is listed once, as its own.
+ */
+export function organizationOnlyCodexAccounts(
+  organizationAccounts: readonly CodexAccount[],
+  codex: CodexSubscriptions,
+): CodexAccount[] {
+  const own = new Set(
+    codex.accounts.filter((account) => account.source !== "organization").map((a) => a.id),
+  );
+  return organizationAccounts.filter((account) => !own.has(account.id));
+}
+
 /** How many rows Codex adds to the Accounts list once loaded. */
 export function codexListedCount(
   codex: CodexSubscriptions,
@@ -149,7 +164,7 @@ export function codexListedCount(
   const pool = poolState(codex);
   const own = codex.accounts.filter((account) => account.source !== "organization").length;
   const shared = organization
-    ? organization.codex.accounts.length
+    ? organizationOnlyCodexAccounts(organization.codex.accounts, codex).length
     : codex.accounts.length - own + (pool.organizationSetAside ? 1 : 0);
   return own + shared + (codex.pending ? 1 : 0) + (pool.workspaceSetAside ? 1 : 0);
 }
@@ -267,7 +282,7 @@ export function CodexAccountRows({
     }
     return (
       <>
-        {organization.codex.accounts.map((account) => {
+        {organizationOnlyCodexAccounts(organization.codex.accounts, codex).map((account) => {
           const live = sharedInUse.find((candidate) => candidate.id === account.id);
           return live ? (
             <SharedCodexInUseRow

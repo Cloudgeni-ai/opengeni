@@ -97,7 +97,7 @@ export function organizationReachLabel(
 ): string {
   if (!access) return labels.organization;
   const { policy, personalWorkspacesSupported } = access;
-  if (policy.allowedPeople) return "Selected people";
+  if (policy.allowedPeople) return policy.allowedPeople.length ? "Selected people" : "No one";
   const personal = personalWorkspacesSupported && policy.allowPersonalWorkspaces;
   if (policy.allowedWorkspaces === null && (!personalWorkspacesSupported || personal))
     return labels.everyone;
