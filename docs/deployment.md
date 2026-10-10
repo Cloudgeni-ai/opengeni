@@ -4343,6 +4343,28 @@ total). New work those owners accept gets no personal Codex access. If the
 total is not zero, raise it with the product owner; the repair is a separate
 decision and is not part of this migration.
 
+### Accepted authority compatibility (0713)
+
+Migration `0713_subscription_authority_compat.sql` is **rolling** and inert on
+deploy. Design record:
+[subscription core, PR 0b](design/subscription-core-2026-10-07.md#pr-0b-authority-compatibility-and-fences).
+It requires 0712 and, like 0712, grants to the configured application roles
+(`OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`).
+
+- It adds the server-owned `authority_inserted_at` column (constant default,
+  no table rewrite) and two triggers to `sessions`, `session_turns`,
+  `scheduled_tasks`, `scheduled_task_revision_authorities`,
+  `session_system_updates` and `session_system_update_outbox`, plus a
+  commit-time check trigger on each. Each lock waits at most 5 seconds; on a
+  busy database the Job can fail with a lock timeout, which rolls the whole
+  migration back, and is safe to retry.
+- The compatibility relation stays empty, and the copy routine, the
+  commit-time check and the personal helpers' record branch do nothing, until
+  SuperGrok's or Claude's own drained cutover records its receipt. Codex and
+  every other provider behave as before.
+- The scheduled-task execution digest ignores the new column, so existing run
+  receipts stay valid.
+
 ### Slack API pilot activation (0597)
 
 Stop every old/new API, control worker, and turn worker before applying
