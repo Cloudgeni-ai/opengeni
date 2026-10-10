@@ -36,6 +36,8 @@ import type {
 import {
   SESSION_EVENT_SEMANTIC_CLASS_TYPES,
   SESSION_SYSTEM_UPDATE_WAKE_CLASS,
+  DEFERRED_AGENT_MESSAGE_WAKE_KEY,
+  isDeferredAgentMessage,
   compactSessionEventResult,
   isStreamedAssistantMessageCompletion,
   turnCompletedReply,
@@ -156,8 +158,18 @@ export const SESSION_WAIT_OWN_PENDING_EVENT_TYPE =
  * child notices are reported but do not end the wait by themselves.
  */
 export function ownPendingKindWakes(kind: string): boolean {
+  if (kind === DEFERRED_AGENT_MESSAGE_WAKE_KEY) return false;
   const wakeClass = SESSION_SYSTEM_UPDATE_WAKE_CLASS[kind as SessionSystemUpdateKind];
   return wakeClass === undefined || wakeClass === "immediate";
+}
+
+/**
+ * The own-pending label of one exact row: its kind, except a deferred Agent
+ * message, which reports as `DEFERRED_AGENT_MESSAGE_WAKE_KEY` so it is counted
+ * in `ownPendingUpdates` but never ends the wait.
+ */
+export function ownPendingUpdateWakeKey(update: { kind: string; payload?: unknown }): string {
+  return isDeferredAgentMessage(update) ? DEFERRED_AGENT_MESSAGE_WAKE_KEY : update.kind;
 }
 
 function ownPendingUpdateFacts(

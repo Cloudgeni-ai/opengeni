@@ -197,6 +197,7 @@ function sendAgentMessage(
   targetSessionId: string,
   caller: Awaited<ReturnType<typeof startSession>>,
   text: string,
+  options: { wake?: "immediate" | "deferred"; operationKey?: string } = {},
 ) {
   return withWorkspaceSessionActivityRls(client.db, grant.workspaceId, (db) =>
     db.transaction((tx) =>
@@ -211,8 +212,9 @@ function sendAgentMessage(
           attemptId: caller.attemptId,
           executionGeneration: caller.turn.executionGeneration,
         },
-        operationKey: crypto.randomUUID(),
+        operationKey: options.operationKey ?? crypto.randomUUID(),
         text,
+        ...(options.wake ? { wake: options.wake } : {}),
       }),
     ),
   );
@@ -327,5 +329,76 @@ describe("internal update wake signal", () => {
     expect(batch.map((update) => update.id).sort()).toEqual(
       [first.updateId, second.updateId].sort(),
     );
+  });
+
+  test("a deferred Agent message leaves a parked wait alone and rides its next claim", async () => {
+    const grant = await workspace();
+    const target = await parkedSession(grant);
+    const deadline = await wakeRow(target.session.id);
+    const caller = await startSession(grant, "peer caller");
+    const operationKey = crypto.randomUUID();
+
+    const fyi = await sendAgentMessage(grant, target.session.id, caller, "tests still running", {
+      wake: "deferred",
+      operationKey,
+    });
+    expect(fyi.replay).toBe(false);
+    expect(fyi.shouldSignal).toBe(false);
+    expect(fyi.wakeRevision).toBeNull();
+    // The durable deadline wake is untouched: same revision, reason and time.
+    expect(await wakeRow(target.session.id)).toEqual(deadline);
+    expect((await peekSessionWork(client.db, grant.workspaceId, target.session.id)).kind).not.toBe(
+      "runnable",
+    );
+    const [row] = await shared.admin<Array<{ status: string; wake: string | null }>>`
+      select s.status, u.payload ->> 'wake' as wake
+      from session_system_updates u join sessions s on s.id = u.session_id
+      where u.id = ${fyi.updateId}`;
+    expect(row).toEqual({ status: "idle", wake: "deferred" });
+
+    // A retry with the same operation key replays the same row.
+    const replay = await sendAgentMessage(grant, target.session.id, caller, "tests still running", {
+      wake: "deferred",
+      operationKey,
+    });
+    expect(replay.replay).toBe(true);
+    expect(replay.updateId).toBe(fyi.updateId);
+
+    // An immediate message still ends the wait now, and one claim takes both.
+    const question = await sendAgentMessage(grant, target.session.id, caller, "which branch?");
+    expect(question.shouldSignal).toBe(true);
+    expect(question.wakeRevision).toBe(deadline.wakeRevision);
+    expect(await peekSessionWork(client.db, grant.workspaceId, target.session.id)).toEqual({
+      kind: "runnable",
+    });
+    const consumed = await claim(grant, target.session.id);
+    const batch = await listSessionSystemUpdatesForTurn(
+      client.db,
+      grant.workspaceId,
+      target.session.id,
+      consumed.turn.id,
+    );
+    expect(batch.map((update) => update.id).sort()).toEqual(
+      [fyi.updateId, question.updateId].sort(),
+    );
+  });
+
+  test("a deferred Agent message to an idle session registers no wake", async () => {
+    const grant = await workspace();
+    const target = await startSession(grant, "no wait");
+    await settleIdle(grant, target.session.id, target);
+    await markWakeDelivered(target.session.id);
+    const settled = await wakeRow(target.session.id);
+    const caller = await startSession(grant, "peer caller");
+
+    const fyi = await sendAgentMessage(grant, target.session.id, caller, "progress note", {
+      wake: "deferred",
+    });
+    expect(fyi.shouldSignal).toBe(false);
+    expect(fyi.wakeRevision).toBeNull();
+    expect(await wakeRow(target.session.id)).toEqual(settled);
+    const [session] = await shared.admin<Array<{ status: string }>>`
+      select status from sessions where id = ${target.session.id}`;
+    expect(session?.status).toBe("idle");
   });
 });

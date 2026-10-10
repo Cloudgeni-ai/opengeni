@@ -42,6 +42,8 @@ import {
   type TurnExecutionPolicyV1,
   type TimelineAnnotation,
   type PersonalResourceAttachmentIntent,
+  type AgentMessageWake,
+  AGENT_MESSAGE_DEFERRED_WAKE,
 } from "@opengeni/contracts";
 import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import {
@@ -2725,6 +2727,14 @@ export async function sendAgentMessageInTransaction(
     actor: Extract<SessionCommandActor, { type: "agent_attempt" }>;
     operationKey: string;
     text: string;
+    /**
+     * `deferred` (OPE-550, produced only behind
+     * `OPENGENI_EXPERIMENT_AGENT_WAKEUPS`): insert the pending row and its
+     * event only. No workflow wake, no goal auto-resume, no `queued` status;
+     * the message rides the receiver's next claim and does not end a held
+     * `wait_for_input`. Omitted or `immediate` keeps the kind's behaviour.
+     */
+    wake?: AgentMessageWake;
     /** Fresh admission only, after receipt replay and exact caller authority. */
     assertFreshAdmission?: (tx: SessionActivityDatabase) => Promise<void>;
     /**
@@ -2734,6 +2744,7 @@ export async function sendAgentMessageInTransaction(
     controlLockTimeoutMs?: number;
   },
 ): Promise<AgentInternalUpdateCommandResult> {
+  const deferred = input.wake === AGENT_MESSAGE_DEFERRED_WAKE;
   const workspaceControl = await lockWorkspaceInferenceControl(db, input.workspaceId, "share", {
     ...(input.controlLockTimeoutMs !== undefined
       ? { lockTimeoutMs: input.controlLockTimeoutMs }
@@ -2746,7 +2757,10 @@ export async function sendAgentMessageInTransaction(
     turnIds: [input.actor.turnId],
     attemptIds: [input.actor.attemptId],
   });
-  const requestHash = canonicalSessionCommandHash({ text: input.text });
+  // An immediate message keeps its historical hash so existing receipts replay.
+  const requestHash = canonicalSessionCommandHash(
+    deferred ? { text: input.text, wake: AGENT_MESSAGE_DEFERRED_WAKE } : { text: input.text },
+  );
   const reserved = await reserveSessionCommandReceipt(db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
@@ -2855,6 +2869,7 @@ export async function sendAgentMessageInTransaction(
               type: "agent_message",
               text: input.text,
               operationId: reserved.receipt.id,
+              ...(deferred ? { wake: AGENT_MESSAGE_DEFERRED_WAKE } : {}),
             },
             lineage: {
               callerSessionId: input.actor.sessionId,
@@ -2897,12 +2912,16 @@ export async function sendAgentMessageInTransaction(
   // only by its continuation ceiling (`max_auto_continuations`, pacing rather
   // than intent) resumes in this same commit; any other pause stays. Goal row
   // FOR UPDATE follows the session lock above, the goal tools' order.
-  const goalAutoResumed = await autoResumeGoalPausedByCapInTransaction(db, {
-    workspaceId: input.workspaceId,
-    sessionId: input.targetSessionId,
-    cause: { kind: "agent_message", updateId: update.id },
-    now,
-  });
+  // A deferred message is not a wake, so it must not resume a goal either: a
+  // goal resumed without a workflow wake would strand its obligation.
+  const goalAutoResumed = deferred
+    ? null
+    : await autoResumeGoalPausedByCapInTransaction(db, {
+        workspaceId: input.workspaceId,
+        sessionId: input.targetSessionId,
+        cause: { kind: "agent_message", updateId: update.id },
+        now,
+      });
   const eventValues: SessionEventInsertWithPayload[] = [
     {
       accountId: input.accountId,
@@ -2914,6 +2933,7 @@ export async function sendAgentMessageInTransaction(
         updateId: update.id,
         kind: "agent_message",
         sourceSessionId: input.actor.sessionId,
+        ...(deferred ? { wake: AGENT_MESSAGE_DEFERRED_WAKE } : {}),
       },
       occurredAt: now,
     },
@@ -2941,6 +2961,7 @@ export async function sendAgentMessageInTransaction(
   const eventIds = insertedEvents.map((event) => event.id);
   const workflowId = session.temporalWorkflowId ?? `session-${session.id}`;
   const runnable =
+    !deferred &&
     !session.admissionBlock &&
     !realtimeActive &&
     session.activeTurnId === null &&
@@ -2972,6 +2993,7 @@ export async function sendAgentMessageInTransaction(
         targetId: input.targetSessionId,
         metadata: {
           operationId: reserved.receipt.id,
+          ...(deferred ? { wake: AGENT_MESSAGE_DEFERRED_WAKE } : {}),
           callerSessionId: input.actor.sessionId,
           callerTurnId: input.actor.turnId,
           callerAttemptId: input.actor.attemptId,

@@ -6,6 +6,10 @@ import {
   ToolGatewayInputValidationError,
 } from "@opengeni/tool-gateway";
 import * as z from "zod/v4";
+import {
+  AGENT_WAKEUPS_EXPERIMENT_FLAG,
+  SESSION_SEND_MESSAGE_AGENT_WAKEUPS_GUIDANCE,
+} from "../src/mcp/agent-wakeups";
 import { assertDescribedToolInput, contractToolInput } from "../src/mcp/contract-input";
 import {
   resolveScheduledTaskCreateInput,
@@ -44,6 +48,33 @@ describe("first-party tool input discovery and validation", () => {
       expect(schemas.get("session_send_message")).toContain("headers");
       expect(schemas.get("session_human_input_respond")).toContain("questionId");
     });
+  });
+
+  test("session_send_message advertises wake only behind the agent wakeups experiment", async () => {
+    const sendMessageTool = () =>
+      withClient(async (client) => {
+        const { tools } = await client.listTools();
+        return tools.find((tool) => tool.name === "session_send_message")!;
+      });
+    const previous = process.env[AGENT_WAKEUPS_EXPERIMENT_FLAG];
+    try {
+      delete process.env[AGENT_WAKEUPS_EXPERIMENT_FLAG];
+      const off = await sendMessageTool();
+      expect(off.inputSchema.properties).not.toHaveProperty("wake");
+      expect(off.description).not.toContain("wake=deferred");
+      expect(off.description).toStartWith("To continue related work");
+
+      process.env[AGENT_WAKEUPS_EXPERIMENT_FLAG] = "1";
+      const on = await sendMessageTool();
+      assertDescribedToolInput(on.inputSchema, on.name);
+      expect(JSON.stringify(on.inputSchema.properties?.wake)).toContain("deferred");
+      expect(on.description).toStartWith(SESSION_SEND_MESSAGE_AGENT_WAKEUPS_GUIDANCE);
+      // The base guidance stays word for word after the experiment's prefix.
+      expect(on.description).toEndWith(off.description!);
+    } finally {
+      if (previous === undefined) delete process.env[AGENT_WAKEUPS_EXPERIMENT_FLAG];
+      else process.env[AGENT_WAKEUPS_EXPERIMENT_FLAG] = previous;
+    }
   });
 
   test("the advertised schedule preserves exact chat and separate-agent intent through the gateway", async () => {

@@ -8765,6 +8765,54 @@ export const SESSION_SYSTEM_UPDATE_WAKE_CLASS: Record<
 };
 
 /**
+ * Sender-chosen delivery for one Agent message (`payload.wake`). Absent means
+ * `immediate`, the kind's class. `deferred` is the one per-row override of the
+ * kind map: the row is an ordinary pending `agent_message` that registers no
+ * workflow wake, does not resume a cap-paused goal, does not end a held
+ * `wait_for_input` or `session_wait`, and rides the receiver's next claim.
+ * Produced only behind `OPENGENI_EXPERIMENT_AGENT_WAKEUPS` (OPE-550); every
+ * reader classifies it unconditionally, and an image that predates the field
+ * treats the row as an ordinary immediate message, so rollback only restores
+ * the old wake behaviour.
+ */
+export const AgentMessageWake = z.enum(["immediate", "deferred"]);
+export type AgentMessageWake = z.infer<typeof AgentMessageWake>;
+
+/** Payload marker of a deferred Agent message; SQL readers mirror it. */
+export const AGENT_MESSAGE_DEFERRED_WAKE = "deferred" as const satisfies AgentMessageWake;
+
+/**
+ * Pending-input label for a deferred Agent message in `session_wait` facts
+ * (`ownPendingDeferredUpdateKinds`), distinct from the immediate kind name.
+ */
+export const DEFERRED_AGENT_MESSAGE_WAKE_KEY = "agent_message_deferred" as const;
+
+/** Whether this exact row is an Agent message its sender marked deferred. */
+export function isDeferredAgentMessage(update: { kind: string; payload?: unknown }): boolean {
+  if (update.kind !== "agent_message") return false;
+  const payload = update.payload;
+  return (
+    payload !== null &&
+    typeof payload === "object" &&
+    !Array.isArray(payload) &&
+    (payload as Record<string, unknown>).wake === AGENT_MESSAGE_DEFERRED_WAKE
+  );
+}
+
+/**
+ * Wake class of one exact row: the kind's class, except a deferred Agent
+ * message. Readers that hold the row (or its payload) use this instead of the
+ * kind map so the override cannot drift between them.
+ */
+export function sessionSystemUpdateWakeClass(update: {
+  kind: string;
+  payload?: unknown;
+}): SessionSystemUpdateWakeClass {
+  if (isDeferredAgentMessage(update)) return "deferred";
+  return SESSION_SYSTEM_UPDATE_WAKE_CLASS[update.kind as SessionSystemUpdateKind] ?? "immediate";
+}
+
+/**
  * Kinds a child session's lifecycle produces for its parent. Every one of them
  * travels through `session_system_update_outbox`, and none of them may
  * autonomously wake a parent whose goal is not active.
@@ -9115,6 +9163,8 @@ export const SessionSystemUpdatePayload = z.discriminatedUnion("type", [
       type: z.literal("agent_message"),
       text: z.string().min(1),
       operationId: z.string().uuid(),
+      /** Absent on every immediate message; see `AgentMessageWake`. */
+      wake: z.literal(AGENT_MESSAGE_DEFERRED_WAKE).optional(),
     })
     .passthrough(),
   z

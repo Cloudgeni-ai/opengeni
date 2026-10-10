@@ -335,7 +335,13 @@ import {
   sessionWaitCompletionEventMatches,
   waitForSessionChanges,
   withOwnPendingUpdateKinds,
+  ownPendingUpdateWakeKey,
 } from "./session-wait";
+import {
+  agentWakeupsExperimentEnabled,
+  SESSION_SEND_MESSAGE_WAKE_FIELD_DESCRIPTION,
+  sessionSendMessageDescription,
+} from "./agent-wakeups";
 import {
   mcpMutationReceipt,
   sessionControlMutationReceipt,
@@ -5522,7 +5528,9 @@ function registerWorkspaceOrchestrationTools(
               ownSessionId === null
                 ? null
                 : async () =>
-                    (await listOwnPendingUpdates(ownSessionId)).map((update) => update.kind),
+                    (await listOwnPendingUpdates(ownSessionId)).map((update) =>
+                      ownPendingUpdateWakeKey(update),
+                    ),
             subscribe: (targetSessionId, onEvents) =>
               deps.bus.subscribe(workspaceId, targetSessionId, onEvents),
           },
@@ -5545,7 +5553,7 @@ function registerWorkspaceOrchestrationTools(
               return json(
                 withOwnPendingUpdateKinds(
                   result,
-                  pending.map((update) => update.kind),
+                  pending.map((update) => ownPendingUpdateWakeKey(update)),
                 ),
               );
             }
@@ -5659,11 +5667,17 @@ function registerWorkspaceOrchestrationTools(
   }
 
   if (can("sessions:control")) {
+    // OPE-550 experiment: sender-chosen deferred delivery plus plain-prose and
+    // wake guidance. Off by default; the schema and description are unchanged
+    // when off, so the prompt-cache prefix is identical.
+    const agentWakeups = agentWakeupsExperimentEnabled();
     server.registerTool(
       "session_send_message",
       {
-        description:
+        description: sessionSendMessageDescription(
           "To continue related work, by default message a worker you already spawned instead of spawning a new one; it keeps its context. Acceptance is not execution. Keep resource.id: for agent messages, match that ID in payload.updateIds from session_events view=debug, includeTypes=[system.update.delivered], payloadMode=full; retain the event turnId and read its relevant result. An unrelated in-flight turn completing does not prove delivery. Explicit user requests and applicable Skill guidance for independent review or fresh workers override that default within existing authority. Do not resend an unconsumed message; inspect blockers. Worker messages are coalescible machine input, added to history when claimed. Sessionless operator calls append a human/API prompt and resource.id is its turn ID. Use your last consumed event sequence. Report stalled delivery if it cannot safely progress.",
+          agentWakeups,
+        ),
         inputSchema: {
           sessionId: z4.string().uuid(),
           text: z4.string().min(1),
@@ -5671,9 +5685,24 @@ function registerWorkspaceOrchestrationTools(
           // Header-value rotation only. URL/name/tool settings are immutable
           // after create; core enforces mcp_servers:attach on this field.
           mcpCredentialUpdates: z4.array(SessionMcpCredentialUpdateInput).optional(),
+          ...(agentWakeups
+            ? {
+                wake: z4
+                  .enum(["immediate", "deferred"])
+                  .optional()
+                  .describe(SESSION_SEND_MESSAGE_WAKE_FIELD_DESCRIPTION),
+              }
+            : {}),
         },
       },
-      async ({ sessionId: targetSessionId, text, idempotencyKey, mcpCredentialUpdates }) => {
+      async (args) => {
+        const { sessionId: targetSessionId, text, idempotencyKey, mcpCredentialUpdates } = args;
+        // Only the flagged schema admits the field; a stray value without the
+        // flag is ignored rather than producing a row old images misread.
+        const wake =
+          agentWakeups && (args as { wake?: unknown }).wake === "deferred"
+            ? ("deferred" as const)
+            : undefined;
         try {
           await authorizeFirstPartySession(deps, grant, targetSessionId, "session.append");
           if (callerSessionId !== null) {
@@ -5685,7 +5714,7 @@ function registerWorkspaceOrchestrationTools(
             const result = await sendAgentSessionMessage(
               deps,
               exactAgentCommandContext(grant, callerSessionId),
-              { targetSessionId, text, idempotencyKey },
+              { targetSessionId, text, idempotencyKey, ...(wake ? { wake } : {}) },
             );
             return json(
               mcpMutationReceipt({
@@ -5705,11 +5734,18 @@ function registerWorkspaceOrchestrationTools(
                   delivery: "coalesced_internal_update",
                   wakeRequested: result.wakeRevision !== null,
                   resumeRequired: result.effectiveState === "paused",
+                  ...(agentWakeups ? { wake: wake ?? "immediate" } : {}),
                 },
-                nextAction: {
-                  tool: "session_get",
-                  arguments: { sessionId: targetSessionId },
-                },
+                // A deferred message is not expected to start work, so there is
+                // nothing to check; the experiment drops the status-poll hint.
+                ...(agentWakeups
+                  ? {}
+                  : {
+                      nextAction: {
+                        tool: "session_get",
+                        arguments: { sessionId: targetSessionId },
+                      },
+                    }),
               }),
             );
           }

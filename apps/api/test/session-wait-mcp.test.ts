@@ -603,6 +603,83 @@ describe("session_wait and command_wait MCP tools (real PostgreSQL, in-memory ev
     expect(woke.ownPendingUpdateKinds).toEqual(["child_progress", "child_requires_action"]);
   }, 30_000);
 
+  test("reports a deferred agent message without ending the wait on it", async () => {
+    const cursor = await lastSequence(childSessionId);
+    const ownSession = await newSession(workspaceId, "deferred agent message owner");
+    const deferred = await addSessionSystemUpdate(client.db, {
+      accountId,
+      workspaceId,
+      sessionId: ownSession,
+      kind: "agent_message",
+      classification: "info",
+      sourceId: childSessionId,
+      dedupeKey: `session-wait:${crypto.randomUUID()}`,
+      summary: "Worker status",
+      payload: {
+        type: "agent_message",
+        text: "Tests are still running.",
+        operationId: crypto.randomUUID(),
+        wake: "deferred",
+      },
+    });
+    expect(deferred.added).toBe(true);
+    if (deferred.reason === "added") expect(deferred.shouldWake).toBe(false);
+    const ownServer = buildOpenGeniMcpServer(fakeDeps(bus), {
+      ...grant,
+      metadata: { ...grant.metadata, sessionId: ownSession },
+    });
+    const result = (await callSessionWait(
+      {
+        targets: [{ sessionId: childSessionId, afterSequence: cursor }],
+        maxWaitSeconds: 1,
+      },
+      {},
+      ownServer,
+    )) as SessionWaitResult & {
+      ownPendingImmediateUpdates: number;
+      ownPendingDeferredUpdateKinds: string[];
+    };
+    expect(result.timedOut).toBe(true);
+    expect(result.ownPendingUpdates).toBe(1);
+    expect(result.ownPendingUpdateKinds).toEqual(["agent_message_deferred"]);
+    expect(result.ownPendingImmediateUpdates).toBe(0);
+    expect(result.ownPendingDeferredUpdateKinds).toEqual(["agent_message_deferred"]);
+
+    // An ordinary Agent message still ends the wait at once.
+    const immediate = await addSessionSystemUpdate(client.db, {
+      accountId,
+      workspaceId,
+      sessionId: ownSession,
+      kind: "agent_message",
+      classification: "info",
+      sourceId: childSessionId,
+      dedupeKey: `session-wait:${crypto.randomUUID()}`,
+      summary: "Worker question",
+      payload: {
+        type: "agent_message",
+        text: "Which branch should I use?",
+        operationId: crypto.randomUUID(),
+      },
+    });
+    expect(immediate.added).toBe(true);
+    if (immediate.reason === "added") expect(immediate.shouldWake).toBe(true);
+    const woke = (await callSessionWait(
+      {
+        targets: [{ sessionId: childSessionId, afterSequence: cursor }],
+        maxWaitSeconds: SESSION_WAIT_MAX_SECONDS,
+      },
+      {},
+      ownServer,
+    )) as SessionWaitResult & { ownPendingImmediateUpdates: number };
+    expect(woke.timedOut).toBe(false);
+    expect(woke.ownPendingUpdates).toBe(2);
+    expect(woke.ownPendingImmediateUpdates).toBe(1);
+    expect([...woke.ownPendingUpdateKinds].sort()).toEqual([
+      "agent_message",
+      "agent_message_deferred",
+    ]);
+  }, 30_000);
+
   test("refuses an unauthorized target before subscribing to any live fanout", async () => {
     const before = subscribeCalls;
     await expect(

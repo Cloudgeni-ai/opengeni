@@ -449,6 +449,8 @@ import {
   SESSION_GOAL_TEXT_MAX_BYTES,
   SESSION_SYSTEM_UPDATE_WAKE_CLASS,
   SessionSystemUpdateKind as SessionSystemUpdateKindSchema,
+  AGENT_MESSAGE_DEFERRED_WAKE,
+  sessionSystemUpdateWakeClass,
   isChildLifecycleSystemUpdateKind,
   type ChildLifecycleSystemUpdateKind,
   type ChildRequiresActionResolvedOutcome,
@@ -33117,6 +33119,10 @@ function sessionInputWaitDecidingTurnSql(
         SESSION_INPUT_WAIT_RETIRING_UPDATE_KINDS.map((kind) => sql`${kind}`),
         sql`, `,
       )})
+      and not ${deferredAgentMessageSql({
+        kind: sql`consumed.kind`,
+        payload: sql`consumed.payload`,
+      })}
   ) or (
     ${turn.finishedAt} >= ${waitDeclaredAt}
     and exists (
@@ -74293,6 +74299,22 @@ function passiveCommandNoticeSql() {
     and ${schema.sessionSystemUpdates.payload} ->> 'reason' = ${IDLE_COMMAND_CONTAINMENT_REASON})`;
 }
 
+/**
+ * A pending Agent message its sender marked `deferred` (`payload.wake`,
+ * OPE-550). It rides the next claim but, like a deferred kind, never registers
+ * a wake, never ends a held wait, and never retires one when a person's turn
+ * coalesces it. `isDeferredAgentMessage` in contracts is the in-memory twin.
+ */
+export function deferredAgentMessageSql(
+  table: { kind: SQLWrapper; payload: SQLWrapper } = {
+    kind: schema.sessionSystemUpdates.kind,
+    payload: schema.sessionSystemUpdates.payload,
+  },
+) {
+  return sql<boolean>`(${table.kind} = 'agent_message'
+    and coalesce(${table.payload} ->> 'wake', '') = ${AGENT_MESSAGE_DEFERRED_WAKE})`;
+}
+
 /** The in-memory twin of `passiveCommandNoticeSql`, for updates already read. */
 function isPassiveCommandNotice(update: { kind: string; payload: Record<string, unknown> }) {
   return (
@@ -74319,6 +74341,7 @@ async function pendingSystemUpdateWakeClassesTx(
     .selectDistinct({
       kind: schema.sessionSystemUpdates.kind,
       passive: passiveCommandNoticeSql(),
+      deferredMessage: deferredAgentMessageSql(),
     })
     .from(schema.sessionSystemUpdates)
     .where(
@@ -74336,8 +74359,9 @@ async function pendingSystemUpdateWakeClassesTx(
       if (!row.passive) command = true;
       continue;
     }
-    const wakeClass =
-      SESSION_SYSTEM_UPDATE_WAKE_CLASS[row.kind as SessionSystemUpdateKind] ?? "immediate";
+    const wakeClass = row.deferredMessage
+      ? "deferred"
+      : (SESSION_SYSTEM_UPDATE_WAKE_CLASS[row.kind as SessionSystemUpdateKind] ?? "immediate");
     if (wakeClass === "deferred") deferred = true;
     else immediate = true;
   }
@@ -76438,7 +76462,10 @@ export async function settleSessionIdleWithParentOutbox(
       // reserves new work when its producer queued the session; active goals
       // and held/due waits are independently protected below.
       const pendingInputs = await tx
-        .selectDistinct({ kind: schema.sessionSystemUpdates.kind })
+        .selectDistinct({
+          kind: schema.sessionSystemUpdates.kind,
+          deferredMessage: deferredAgentMessageSql(),
+        })
         .from(schema.sessionSystemUpdates)
         .where(
           and(
@@ -76449,7 +76476,8 @@ export async function settleSessionIdleWithParentOutbox(
         );
       const pendingSteer = pendingInputs.some(({ kind }) => kind === "agent_steer_instruction");
       const pendingImmediate = pendingInputs.some(
-        ({ kind }) =>
+        ({ kind, deferredMessage }) =>
+          !deferredMessage &&
           SESSION_SYSTEM_UPDATE_WAKE_CLASS[kind as SessionSystemUpdateKind] === "immediate" &&
           kind !== "background_command_result" &&
           (!isChildLifecycleSystemUpdateKind(kind as SessionSystemUpdateKind) ||
@@ -81149,6 +81177,7 @@ export async function markSessionWorkflowWakeDelivered(
                 .selectDistinct({
                   kind: schema.sessionSystemUpdates.kind,
                   passive: passiveCommandNoticeSql(),
+                  deferredMessage: deferredAgentMessageSql(),
                 })
                 .from(schema.sessionSystemUpdates)
                 .where(
@@ -81170,8 +81199,9 @@ export async function markSessionWorkflowWakeDelivered(
                 .limit(1);
               if (
                 pending.some(
-                  ({ kind, passive }) =>
+                  ({ kind, passive, deferredMessage }) =>
                     !passive &&
+                    !deferredMessage &&
                     SESSION_SYSTEM_UPDATE_WAKE_CLASS[kind as SessionSystemUpdateKind] ===
                       "immediate" &&
                     (kind !== "background_command_result" || wait.disposition === "held") &&
@@ -81913,7 +81943,10 @@ export async function addSessionSystemUpdateWithSourceMutation<
         // Wake class: only an `immediate` kind may register a workflow wake or
         // resume a cap-paused goal in this commit; a `deferred` kind is a
         // durable pending row that the next claim delivers coalesced.
-        const wakeClass = SESSION_SYSTEM_UPDATE_WAKE_CLASS[input.kind];
+        const wakeClass = sessionSystemUpdateWakeClass({
+          kind: input.kind,
+          payload: input.payload,
+        });
         const childLifecycleKind = isChildLifecycleSystemUpdateKind(input.kind);
         const commandMayWake =
           input.kind !== "background_command_result" ||

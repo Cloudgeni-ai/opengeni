@@ -373,3 +373,66 @@ test("paused Send stays pending without implicit resume; explicit Steer uses the
     }),
   ).toMatchObject({ delivery: "delivered", turnId: claimed.turn.id });
 });
+
+test("agent wakeups experiment: a deferred message registers no wake and rides the next claim", async () => {
+  const previous = process.env.OPENGENI_EXPERIMENT_AGENT_WAKEUPS;
+  try {
+    const f = await fixture();
+    // Off: a stray wake argument is ignored and the receipt is unchanged.
+    delete process.env.OPENGENI_EXPERIMENT_AGENT_WAKEUPS;
+    const stray = await f.makeCall()("session_send_message", {
+      sessionId: f.target.id,
+      text: "Stray deferred request",
+      idempotencyKey: crypto.randomUUID(),
+      wake: "deferred",
+    });
+    expect(stray.facts).not.toHaveProperty("wake");
+    expect(stray.nextAction).toMatchObject({ tool: "session_get" });
+    const pendingOff = await listOutstandingSessionSystemUpdates(
+      client.db,
+      f.owner.workspaceId,
+      f.target.id,
+    );
+    expect(
+      pendingOff.find((update) => update.id === stray.resource.id)?.payload,
+    ).not.toHaveProperty("wake");
+    await f.settle(await f.claim(f.target.id), "consumed the stray message");
+
+    process.env.OPENGENI_EXPERIMENT_AGENT_WAKEUPS = "1";
+    const call = f.makeCall();
+    const fyi = await call("session_send_message", {
+      sessionId: f.target.id,
+      text: "Progress: the first half of the tests passed.",
+      idempotencyKey: crypto.randomUUID(),
+      wake: "deferred",
+    });
+    expect(fyi.facts).toMatchObject({ wake: "deferred", wakeRequested: false });
+    expect(fyi).not.toHaveProperty("nextAction");
+    const [pending] = await listOutstandingSessionSystemUpdates(
+      client.db,
+      f.owner.workspaceId,
+      f.target.id,
+    );
+    expect(pending).toMatchObject({ id: fyi.resource.id, kind: "agent_message" });
+    expect(pending!.payload).toMatchObject({ wake: "deferred" });
+    expect(
+      await call("session_message_status", { sessionId: f.target.id, updateId: fyi.resource.id }),
+    ).toMatchObject({ delivery: "pending", turnId: null });
+
+    const question = await call("session_send_message", {
+      sessionId: f.target.id,
+      text: "Which branch should the fix go on?",
+      idempotencyKey: crypto.randomUUID(),
+    });
+    expect(question.facts).toMatchObject({ wake: "immediate", wakeRequested: true });
+    const claimed = await f.claim(f.target.id);
+    for (const updateId of [fyi.resource.id, question.resource.id]) {
+      expect(
+        await call("session_message_status", { sessionId: f.target.id, updateId }),
+      ).toMatchObject({ delivery: "delivered", turnId: claimed.turn.id });
+    }
+  } finally {
+    if (previous === undefined) delete process.env.OPENGENI_EXPERIMENT_AGENT_WAKEUPS;
+    else process.env.OPENGENI_EXPERIMENT_AGENT_WAKEUPS = previous;
+  }
+});

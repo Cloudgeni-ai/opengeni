@@ -71,8 +71,8 @@ turn, reason, set time, and absolute PostgreSQL deadline. An `immediate` update
 (a child terminal/action notice, Agent message or Steer, schedule, media result,
 or background-command result) makes the session runnable. The next claim
 delivers the batch, and that newer finished turn retires the wait with
-`session.wait.finished{outcome:"input"}`. `deferred` child notices remain
-pending without ending a current wait; they are delivered when the wait times
+`session.wait.finished{outcome:"input"}`. `deferred` child notices and deferred
+Agent messages remain pending without ending a current wait; they are delivered when the wait times
 out, is superseded, or immediate input arrives. When the database deadline
 passes unchanged, settlement clears the wait and atomically queues one typed
 `session_wait_timeout` input plus its workflow wake.
@@ -90,7 +90,7 @@ result (its answer or a goal continuation it reports) that was superseded as
 `consumed_by_parent_read`: the result never wakes the parent, so the read
 retires the wait. Re-reading only parts that a completed attempt had already
 read when the wait was declared leaves it held. Coalesced `deferred` notices
-alone do not retire it.
+and deferred Agent messages alone do not retire it.
 This is what lets a status question asked while a child runs get its answer and
 still leave the child's later result able to wake a goalless parent; without
 it, the answer turn retired the wait and the result stayed pending with nothing
@@ -152,6 +152,18 @@ durable pending row and its `system.update.pending` event; the next claim
 delivers them coalesced, `session_wait` reports them without ending the wait
 (`ownPendingImmediateUpdates` vs `ownPendingDeferredUpdateKinds`), and they
 never resume a goal by themselves.
+
+One per-row override exists: an `agent_message` whose payload carries
+`wake: "deferred"` (`isDeferredAgentMessage`, SQL `deferredAgentMessageSql`)
+is classified `deferred` everywhere the kind map is read. `session_send_message`
+produces it only behind `OPENGENI_EXPERIMENT_AGENT_WAKEUPS=1` (OPE-550): the
+row and its pending event are written, with no workflow wake, no `queued`
+status, and no goal auto-resume, and `session_wait` reports it as
+`agent_message_deferred`. Readers classify it unconditionally, so a flag-off
+image still delivers rows written while the flag was on. An image that predates
+the field reads such a row as an ordinary immediate message, so a rollback only
+restores the old wake behaviour. The request hash includes `wake` only for a
+deferred send, so receipts of immediate sends replay unchanged.
 
 A child session reports its lifecycle to its parent through typed notices, each
 produced inside the child's own lifecycle transaction as one dedupe-keyed

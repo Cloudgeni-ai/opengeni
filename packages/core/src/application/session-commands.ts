@@ -16,7 +16,7 @@ import type {
   WorkspaceInferenceControlRequest,
   WorkspaceInferenceControlResponse,
 } from "@opengeni/contracts";
-import { DraftTimelineAnnotations } from "@opengeni/contracts";
+import { DraftTimelineAnnotations, type AgentMessageWake } from "@opengeni/contracts";
 import type { Settings } from "@opengeni/config";
 import { HTTPException } from "hono/http-exception";
 import {
@@ -399,7 +399,13 @@ export async function sendAgentSessionMessage(
     sessionAuthorization?: SessionAuthorizationPort | null;
   } & SessionCommandPostCommitDeps,
   context: AgentSessionCommandContext,
-  input: { targetSessionId: string; text: string; idempotencyKey: string },
+  input: {
+    targetSessionId: string;
+    text: string;
+    idempotencyKey: string;
+    /** See `sendAgentMessageInTransaction`; omitted keeps the immediate wake. */
+    wake?: AgentMessageWake;
+  },
 ) {
   await authorizeAgentSessionCommand(deps, context, input.targetSessionId, "session.append");
   const result = await runSessionCommandPersistenceTransaction(
@@ -416,6 +422,7 @@ export async function sendAgentSessionMessage(
           actor: agentActor(context),
           operationKey: input.idempotencyKey,
           text: input.text,
+          ...(input.wake ? { wake: input.wake } : {}),
           assertFreshAdmission: (scoped) =>
             assertFreshAgentCommandAllowance(scoped, deps, context, input.targetSessionId),
           controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
