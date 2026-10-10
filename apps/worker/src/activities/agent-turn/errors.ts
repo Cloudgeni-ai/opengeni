@@ -1170,6 +1170,12 @@ export function isCompactionSummaryFailure(error: unknown): boolean {
 export function shouldRecoverCompactionProviderFailure(error: unknown): boolean {
   if (!(error instanceof CompactionProviderResponseError)) return false;
   if (isCodexTransportError(error) && classifyCodexUsageLimitError(error)) return true;
+  // A Claude subscription refusal (rate limit or reconnect) on the checkpoint
+  // request recovers exactly like one on an ordinary request: failure
+  // settlement rotates to another account or waits for capacity on the same
+  // logical turn. Its wording or retry hint never makes it a terminal quota.
+  if (isClaudeSubscriptionTransportError(error) && classifyClaudeCredentialFailure(error))
+    return true;
   // Codex may reject an opaque artifact it minted itself on the compaction
   // request exactly as it can on an ordinary request. Failure settlement
   // invalidates only the exact participating artifacts and recovers the same
@@ -1411,14 +1417,30 @@ function hasCodexUsageLimitType(error: unknown): boolean {
  * ordinary per-minute rate limit. Retrying within the bounded same-turn budget
  * cannot succeed, so the turn fails promptly instead. Subscription transports
  * own their quota semantics through credential rotation and durable capacity
- * waits, so a Codex or SuperGrok transport error never classifies here.
+ * waits, so a Codex, SuperGrok or Claude subscription transport error never
+ * classifies here.
  */
 export function classifyProviderQuotaExhaustionError(
   error: unknown,
 ): ProviderQuotaExhaustion | null {
-  if (isCodexTransportError(error) || isXaiSubscriptionTransportError(error)) return null;
+  if (
+    isCodexTransportError(error) ||
+    isXaiSubscriptionTransportError(error) ||
+    isClaudeSubscriptionTransportError(error)
+  )
+    return null;
   // The same reader the OpenAI SDK retry veto uses, so the two never disagree.
   return classifyProviderQuotaError(error);
+}
+
+/** A refusal raised by a Claude subscription (OAuth) transport, at any wrapper depth. */
+export function isClaudeSubscriptionTransportError(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth < 6 && current instanceof Error; depth++) {
+    if (current instanceof AnthropicRequestError && current.subscription) return true;
+    current = current.cause;
+  }
+  return false;
 }
 
 export type XaiCredentialFailure = {
