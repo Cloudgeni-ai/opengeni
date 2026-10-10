@@ -2013,7 +2013,9 @@ describe.skipIf(!realDb)("durable model catalog observations", () => {
 });
 
 describe.skipIf(!realDb)("a workspace-managed Codex account under organization reach", () => {
-  async function managedConnection(org: Org, label: string): Promise<string> {
+  /** `managed: false`: a workspace's own copy that no workspace manages (copies 0689 merged). */
+  async function managedConnection(org: Org, label: string, managed = true): Promise<string> {
+    const manager = managed ? org.sharedWorkspaceId : null;
     const [row] = await shared!.admin<{ id: string }[]>`
       insert into subscription_connections (
         account_id, provider, kind, credential_encrypted, ownership, scope_kind,
@@ -2024,7 +2026,7 @@ describe.skipIf(!realDb)("a workspace-managed Codex account under organization r
         'shared', 'workspaces', false, ${`chatgpt-${label}`}, 'pro',
         ${shared!.admin.json({ isFedramp: false })}::jsonb,
         ${new Date(Date.now() + 86_400_000).toISOString()}::timestamptz,
-        ${org.sharedWorkspaceId}::uuid
+        ${manager}::uuid
       ) returning id::text as id`;
     await shared!.admin`insert into subscription_connection_workspaces
       (account_id, connection_id, workspace_id)
@@ -2032,7 +2034,7 @@ describe.skipIf(!realDb)("a workspace-managed Codex account under organization r
     await shared!.admin`insert into subscription_connection_assignment_policies (
         account_id, connection_id, workspace_id, inference_pool, managed_by_workspace_id
       ) values (${org.accountId}::uuid, ${row!.id}::uuid, ${org.sharedWorkspaceId}::uuid,
-        'workspace', ${org.sharedWorkspaceId}::uuid)`;
+        'workspace', ${manager}::uuid)`;
     return row!.id;
   }
 
@@ -2051,10 +2053,71 @@ describe.skipIf(!realDb)("a workspace-managed Codex account under organization r
     );
   }
 
+  test("a managed account keeps serving its pin across organization reach edits; people are refused", async () => {
+    const org = await organization();
+    await enableCodexCutover(org.accountId);
+    const managed = await managedConnection(org, "managed-pin");
+    const admin = {
+      kind: "codex" as const,
+      connectionId: managed,
+      accountId: org.accountId,
+      workspaceId: null,
+      subjectId: org.ownerSubjectId,
+    };
+    const turn = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
+    expect(
+      (
+        await pinSubscriptionCoreSessionCodexAccount(client!.db, {
+          accountId: org.accountId,
+          workspaceId: org.sharedWorkspaceId,
+          sessionId: turn.identity.sessionId,
+          connectionId: managed,
+          subjectId: org.ownerSubjectId,
+        })
+      ).result.changed,
+    ).toBe(true);
+    expect(await place(turn)).toMatchObject({ kind: "run", connectionId: managed, explicit: true });
+    await release(org, turn, managed);
+
+    await expect(
+      updateSubscriptionCoreCodexModelConnectionAccess(client!.db, admin, {
+        allowedModels: null,
+        allowedWorkspaces: [],
+        allowPersonalWorkspaces: false,
+        allowedPeople: [org.ownerMembershipId],
+        version: 1,
+      }),
+    ).rejects.toThrow("cannot be limited to people");
+    for (const [version, allowedWorkspaces] of [
+      [1, null],
+      [2, []],
+    ] as const) {
+      expect(
+        await updateSubscriptionCoreCodexModelConnectionAccess(client!.db, admin, {
+          allowedModels: null,
+          allowedWorkspaces: allowedWorkspaces ? [] : null,
+          allowPersonalWorkspaces: false,
+          version,
+        }),
+      ).toMatchObject({ version: version + 1 });
+      expect(await place(turn)).toMatchObject({
+        kind: "run",
+        connectionId: managed,
+        explicit: true,
+      });
+      await release(org, turn, managed);
+    }
+    const [row] = await shared!.admin<{ managed: string; refresh_generation: string }[]>`
+      select managed_by_workspace_id::text as managed, refresh_generation::text as refresh_generation
+      from subscription_connections where id = ${managed}::uuid`;
+    expect(row).toEqual({ managed: org.sharedWorkspaceId, refresh_generation: "1" });
+  });
+
   test("people scope is evaluated against the session owner, and an excluded pin waits", async () => {
     const org = await organization();
     await enableCodexCutover(org.accountId);
-    const managed = await managedConnection(org, "managed-reach");
+    // People scope is offered only while no workspace manages the account.
+    const managed = await managedConnection(org, "managed-reach", false);
     const [otherPersonal] = await shared!.admin<{ id: string }[]>`
       insert into workspaces (account_id, name) values (${org.accountId}::uuid, 'Personal workspace')
       returning id::text as id`;
@@ -2147,7 +2210,7 @@ describe.skipIf(!realDb)("a workspace-managed Codex account under organization r
     const [row] = await shared!.admin<{ managed: string; refresh_generation: string }[]>`
       select managed_by_workspace_id::text as managed, refresh_generation::text as refresh_generation
       from subscription_connections where id = ${managed}::uuid`;
-    expect(row).toEqual({ managed: org.sharedWorkspaceId, refresh_generation: "1" });
+    expect(row).toEqual({ managed: null, refresh_generation: "1" });
 
     // The organization can also disconnect it.
     expect(
