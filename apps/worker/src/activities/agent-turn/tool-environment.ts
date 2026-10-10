@@ -123,7 +123,11 @@ import { createListModelsAttemptToolDefinition } from "./list-models";
 import { createRefreshCredentialsAttemptToolDefinition } from "./refresh-credentials";
 import { codeSearchToolDefinitions, codeSearchWorkspaceFromChannel } from "./code-search";
 import { turnWebSearchPlan, webSearchToolDefinitions } from "./web-search";
-import { createWorkspaceSkillTools } from "./skill-tools";
+import {
+  createWorkspaceSkillTools,
+  sessionShadowedSkillNames,
+  withoutSessionShadowedSkills,
+} from "./skill-tools";
 import { loadConfiguredBundledSkills } from "./skill-selection";
 import { guardSkillFilesystem } from "./skill-transfer";
 import { turnCredentialRestriction } from "./credential-restriction";
@@ -695,13 +699,14 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     toolFamilies.skills === false
       ? []
       : [
-          ...sharedSkillDescriptors
-            .filter((entry) => entry.activationMode === "workspace_managed")
-            .map((entry) => ({
-              id: entry.id,
-              name: entry.title,
-              description: entry.description,
-            })),
+          ...withoutSessionShadowedSkills(
+            sharedSkillDescriptors.filter((entry) => entry.activationMode === "workspace_managed"),
+            sessionShadowedSkillNames(selectedSkills),
+          ).map((entry) => ({
+            id: entry.id,
+            name: entry.title,
+            description: entry.description,
+          })),
           ...selectedSkills.map((entry) => ({
             id: entry.id,
             name: entry.artifact.name,
