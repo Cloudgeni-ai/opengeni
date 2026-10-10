@@ -92,9 +92,15 @@ async function organization(): Promise<Org> {
 async function connection(
   org: Org,
   label: string,
-  options: { managedByWorkspaceId?: string } = {},
+  /**
+   * `managedByWorkspaceId`: a former workspace account (0689) the workspace
+   * manages. `localWorkspaceId`: a workspace's own copy no workspace manages
+   * (copies 0689 merged).
+   */
+  options: { managedByWorkspaceId?: string; localWorkspaceId?: string } = {},
 ): Promise<string> {
-  const scope = options.managedByWorkspaceId ? "workspaces" : "organization";
+  const local = options.managedByWorkspaceId ?? options.localWorkspaceId;
+  const scope = local ? "workspaces" : "organization";
   const [row] = await shared!.admin<{ id: string }[]>`
     insert into subscription_connections (
       account_id, provider, kind, credential_encrypted, ownership, scope_kind,
@@ -103,19 +109,19 @@ async function connection(
     ) values (
       ${org.accountId}::uuid, 'codex', 'subscription',
       ${encryptEnvironmentValue(key, JSON.stringify({ access_token: label, refresh_token: label }))},
-      'shared', ${scope}, ${!options.managedByWorkspaceId}, ${`chatgpt-${label}`}, 'pro',
+      'shared', ${scope}, ${!local}, ${`chatgpt-${label}`}, 'pro',
       ${shared!.admin.json({ isFedramp: false })}::jsonb,
       ${new Date(Date.now() + 86_400_000).toISOString()}::timestamptz,
       ${label}, ${options.managedByWorkspaceId ?? null}::uuid
     ) returning id::text as id`;
-  if (options.managedByWorkspaceId) {
+  if (local) {
     await shared!.admin`insert into subscription_connection_workspaces
       (account_id, connection_id, workspace_id)
-      values (${org.accountId}::uuid, ${row!.id}::uuid, ${options.managedByWorkspaceId}::uuid)`;
+      values (${org.accountId}::uuid, ${row!.id}::uuid, ${local}::uuid)`;
     await shared!.admin`insert into subscription_connection_assignment_policies (
         account_id, connection_id, workspace_id, inference_pool, managed_by_workspace_id
-      ) values (${org.accountId}::uuid, ${row!.id}::uuid, ${options.managedByWorkspaceId}::uuid,
-        'workspace', ${options.managedByWorkspaceId}::uuid)`;
+      ) values (${org.accountId}::uuid, ${row!.id}::uuid, ${local}::uuid,
+        'workspace', ${options.managedByWorkspaceId ?? null}::uuid)`;
   }
   return row!.id;
 }
@@ -616,6 +622,7 @@ describe.skipIf(!realDb)("Workspace-managed Codex accounts are organization acco
       },
       localWorkspaceIds: [org.sharedWorkspaceId],
       managedByWorkspaceId: org.sharedWorkspaceId,
+      peopleSupported: false,
     });
     // Explicit sources select exactly what they selected before any edit.
     await source(org, org.sharedWorkspaceId, "workspace");
@@ -734,10 +741,41 @@ describe.skipIf(!realDb)("Workspace-managed Codex accounts are organization acco
     });
   });
 
+  test("a workspace's delegated managers keep it: people scope is refused while a workspace manages it", async () => {
+    const org = await organization();
+    const id = await connection(org, "managed", { managedByWorkspaceId: org.sharedWorkspaceId });
+    const target = organizationTarget(org, id);
+    const person = await member(org);
+    expect(
+      (await readSubscriptionCoreCodexModelConnectionAccess(client!.db, target))?.peopleSupported,
+    ).toBe(false);
+    await expect(
+      updateSubscriptionCoreCodexModelConnectionAccess(client!.db, target, {
+        allowedModels: null,
+        allowedWorkspaces: [],
+        allowPersonalWorkspaces: false,
+        allowedPeople: [person.membershipId],
+        version: 1,
+      }),
+    ).rejects.toBeInstanceOf(SubscriptionCoreAccessInvalidError);
+    expect(await stored(org, id)).toMatchObject({
+      scope_kind: "workspaces",
+      workspaces: [org.sharedWorkspaceId],
+      reach: null,
+    });
+    const [chosen] = await shared!.admin<{ count: number }[]>`
+      select count(*)::int as count from subscription_connection_people where connection_id = ${id}::uuid`;
+    expect(chosen?.count).toBe(0);
+  });
+
   test("chosen people: active members only, workspaces cleared, and an older form cannot replace them", async () => {
     const org = await organization();
-    const id = await connection(org, "people", { managedByWorkspaceId: org.sharedWorkspaceId });
+    // A workspace's own copy that no workspace manages (copies 0689 merged).
+    const id = await connection(org, "people", { localWorkspaceId: org.sharedWorkspaceId });
     const target = organizationTarget(org, id);
+    expect(
+      (await readSubscriptionCoreCodexModelConnectionAccess(client!.db, target))?.peopleSupported,
+    ).toBe(true);
     const person = await member(org);
     const [owner] = await shared!.admin<{ id: string }[]>`
       select id::text as id from organization_memberships
@@ -792,7 +830,7 @@ describe.skipIf(!realDb)("Workspace-managed Codex accounts are organization acco
       allow_personal_workspaces: false,
       reach: null,
     });
-    // No organization-pool row is left; the managing workspace's own copy stays.
+    // No organization-pool row is left; the workspace's own copy stays.
     expect(row.policies).toEqual([
       { workspace_id: org.sharedWorkspaceId, inference_pool: "workspace", allowed_model_ids: null },
     ]);
@@ -878,6 +916,7 @@ describe.skipIf(!realDb)("Workspace-managed Codex accounts are organization acco
       },
       localWorkspaceIds: [],
       managedByWorkspaceId: null,
+      peopleSupported: false,
     });
     await expect(
       updateSubscriptionCoreCodexModelConnectionAccess(client!.db, workspaceTarget, {

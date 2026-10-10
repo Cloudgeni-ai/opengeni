@@ -27,7 +27,11 @@ export const ModelConnectionAccessResponse = z.object({
   models: z.array(z.object({ id: z.string(), label: z.string() })),
   workspaces: z.array(z.object({ id: z.string().uuid(), name: z.string() })),
   personalWorkspacesSupported: z.boolean(),
-  /** The account can be limited to chosen people (`allowedPeople`). */
+  /**
+   * The account can be limited to chosen people (`allowedPeople`): an
+   * organization account no workspace manages (people scope would hide it
+   * from a managing workspace's administrators).
+   */
   peopleSupported: z.boolean().optional(),
   /** The people an administrator can choose: active members of the organization. */
   people: z

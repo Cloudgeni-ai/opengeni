@@ -3482,8 +3482,10 @@ as "not an organization account":
    `organization` then also uses it: the administrator granted it. Explicit
    `workspace` and `organization` source modes therefore select exactly the
    same accounts as before until an administrator changes the reach.
-4. **Chosen people.** The editor gains the third scope of SUB-OWN-02:
-   `allowedPeople` (organization membership ids of active people, read
+4. **Chosen people.** The editor gains the third scope of SUB-OWN-02 for
+   organization accounts no workspace manages (decision 5 explains why a
+   managed one is not offered it): `allowedPeople` (organization membership
+   ids of active people, read
    through the administrators' member list; adding a service account or a
    person who has left is refused, while a person already chosen who has
    since left may stay listed and is not served, since people scope admits
@@ -3516,6 +3518,16 @@ as "not an organization account":
    never widen it; extra credits are the exception, since they are one
    per-connection switch. Whether sharing beyond the managing workspace
    should narrow the delegation is an open question below.
+   People scope is therefore not offered (`peopleSupported: false`) and is
+   refused (422) for a connection a workspace manages: the managing
+   workspace's administrators see and manage the connection through its
+   workspace assignment (connection visibility for `people` scope requires a
+   chosen person's session), so limiting it to people would take reconnect,
+   rename, allocation and models away from them. Copies 0689 merged (no
+   manager) can be limited to people; their workspaces keep their own copy
+   rows, used only by chosen people's sessions while the scope is people.
+   Whether people scope should be allowed for managed connections, and what
+   then happens to the delegation, is an owner decision (open question below).
 6. **Personal accounts are untouched.** Personal connections are never
    listed, read or written by the organization editor (it selects `shared`
    rows only, and the scope guard forbids changing `ownership`); widening a
@@ -3591,7 +3603,9 @@ personal connections, outside the organization editor.
 
 Open questions for the product owner: whether sharing an account beyond its
 managing workspace should end or narrow that workspace's delegated management
-(decision 5); whether to restore per-workspace management of merged copies
+(decision 5); whether a workspace-managed account may be limited to chosen
+people, and what then happens to the delegation (decision 5; refused until
+decided); whether to restore per-workspace management of merged copies
 (finding above); whether an organization administrator may designate a
 workspace-managed account for Codex Apps in other workspaces it reaches
 (decision 8); and whether one may become the organization primary

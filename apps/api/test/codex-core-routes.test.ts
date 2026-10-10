@@ -1153,7 +1153,7 @@ describe("the organization access editor for a workspace-managed Codex account",
     ]);
   }
 
-  test("reads its reach, the managing workspace's own copy and the people to choose", async () => {
+  test("reads its reach and the managing workspace's own copy; people only when no workspace manages it", async () => {
     editor();
     mock("readSubscriptionCoreCodexModelConnectionAccess", async () => ({
       policy: {
@@ -1165,6 +1165,7 @@ describe("the organization access editor for a workspace-managed Codex account",
       },
       localWorkspaceIds: [MANAGER],
       managedByWorkspaceId: MANAGER,
+      peopleSupported: false,
     }));
     const response = await app().fetch(organizationAdminRequest(path));
     expect(response.status).toBe(200);
@@ -1177,10 +1178,31 @@ describe("the organization access editor for a workspace-managed Codex account",
       version: 1,
     });
     expect(body).toMatchObject({
+      peopleSupported: false,
+      localWorkspaceIds: [MANAGER],
+      managedByWorkspaceId: MANAGER,
+    });
+    expect(body.people).toBeUndefined();
+
+    // A workspace's own copy no workspace manages can be limited to people.
+    mock("readSubscriptionCoreCodexModelConnectionAccess", async () => ({
+      policy: {
+        allowedModels: null,
+        allowedWorkspaces: [],
+        allowPersonalWorkspaces: false,
+        allowedPeople: null,
+        version: 1,
+      },
+      localWorkspaceIds: [MANAGER],
+      managedByWorkspaceId: null,
+      peopleSupported: true,
+    }));
+    const unmanaged = await (await app().fetch(organizationAdminRequest(path))).json();
+    expect(unmanaged).toMatchObject({
       peopleSupported: true,
       people: [{ id: PERSON, name: "user:ada", email: null }],
       localWorkspaceIds: [MANAGER],
-      managedByWorkspaceId: MANAGER,
+      managedByWorkspaceId: null,
     });
   });
 

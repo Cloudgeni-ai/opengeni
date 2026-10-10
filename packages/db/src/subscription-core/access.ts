@@ -50,6 +50,12 @@ export type SubscriptionCoreAccess = {
   localWorkspaceIds: string[];
   /** The workspace that also manages the connection, if any (organization route only). */
   managedByWorkspaceId: string | null;
+  /**
+   * Whether the connection may be limited to chosen people (organization
+   * route, no managing workspace: people scope would hide it from its
+   * delegated managers, design 5.4 decision 5).
+   */
+  peopleSupported: boolean;
 };
 
 /** A requested access policy names a workspace outside the organization's shared workspaces. */
@@ -232,6 +238,7 @@ async function projection(
       },
       localWorkspaceIds: [],
       managedByWorkspaceId: null,
+      peopleSupported: false,
     };
   const shared = await organizationSharedWorkspaceIds(tx, target.accountId);
   const local = (await localWorkspaceIds(tx, target.accountId, connection)).filter((id) =>
@@ -240,6 +247,7 @@ async function projection(
   const base = {
     localWorkspaceIds: local,
     managedByWorkspaceId: connection.managed_by_workspace_id,
+    peopleSupported: connection.managed_by_workspace_id === null,
   };
   if (connection.scope_kind === "organization")
     return {
@@ -440,6 +448,13 @@ export async function updateSubscriptionCoreConnectionAccess(
       return await projection(tx, provider, target, updated);
     }
 
+    // People scope hides a connection from its delegated managers (they see
+    // it only through a workspace assignment), so it is refused while a
+    // workspace manages it; that would take an ability away (decision 5).
+    if (people !== null && current.managed_by_workspace_id !== null)
+      throw new SubscriptionCoreAccessInvalidError(
+        "An account a workspace manages cannot be limited to people",
+      );
     const shared = await organizationSharedWorkspaceIds(tx, target.accountId);
     if (policy.allowedWorkspaces?.some((workspaceId) => !shared.has(workspaceId)))
       throw new SubscriptionCoreAccessWorkspaceNotInOrganizationError();

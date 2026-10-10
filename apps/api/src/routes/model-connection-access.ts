@@ -229,20 +229,24 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
               connection.kind === "claude_subscription"),
           ...(organizationCore
             ? {
-                peopleSupported: true,
-                people: (
-                  await listOrganizationAdministrationMembers(deps.db, {
-                    organizationId: connection.accountId,
-                    actorSubjectId: connection.subjectId,
-                  })
-                )
-                  .filter(
-                    (member) =>
-                      member.status === "active" &&
-                      member.revokedAt === null &&
-                      member.subjectId.startsWith("user:"),
-                  )
-                  .map(({ id, name, email }) => ({ id, name, email })),
+                peopleSupported: coreAccess.peopleSupported,
+                ...(coreAccess.peopleSupported
+                  ? {
+                      people: (
+                        await listOrganizationAdministrationMembers(deps.db, {
+                          organizationId: connection.accountId,
+                          actorSubjectId: connection.subjectId,
+                        })
+                      )
+                        .filter(
+                          (member) =>
+                            member.status === "active" &&
+                            member.revokedAt === null &&
+                            member.subjectId.startsWith("user:"),
+                        )
+                        .map(({ id, name, email }) => ({ id, name, email })),
+                    }
+                  : {}),
                 localWorkspaceIds: coreAccess.localWorkspaceIds,
                 managedByWorkspaceId: coreAccess.managedByWorkspaceId,
               }
