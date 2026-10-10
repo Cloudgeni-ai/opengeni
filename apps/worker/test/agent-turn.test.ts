@@ -668,6 +668,34 @@ describe("turn exact-content boundaries", () => {
     },
   );
 
+  test.each([
+    {
+      status: "failed",
+      providerData: { type: "web_search_call", error: { code: "max_uses_exceeded" } },
+    },
+    { status: "in_progress", providerData: { type: "web_search_call" } },
+    { status: "failed", providerData: undefined },
+  ])(
+    "does not register a finished or provider-run hosted search ($status) as a pending call",
+    ({ status, providerData }) => {
+      expect(
+        pendingToolCallFromSdkEvent({
+          type: "run_item_stream_event",
+          item: {
+            type: "tool_call_item",
+            rawItem: {
+              type: "hosted_tool_call",
+              id: "msg_1:1",
+              name: "web_search_call",
+              status,
+              ...(providerData ? { providerData } : {}),
+            },
+          },
+        }),
+      ).toBeNull();
+    },
+  );
+
   test("preserves hosted approval requests instead of treating them as completed provider work", () => {
     expect(
       pendingToolCallFromSdkEvent({
@@ -1882,6 +1910,90 @@ describe("production model-response usage callback authority", () => {
       const metricsAfterRestart = await observability.prometheusMetrics();
       expect(metricsAfterRestart).toMatch(
         /opengeni_model_input_tokens_count\{[^}]*provider="codex-subscription"[^}]*\} 1\b/,
+      );
+    } finally {
+      recordUsageSpy.mockRestore();
+    }
+  });
+
+  test("a response continued across requests binds context to its last request and counts its searches", async () => {
+    // Claude continues a paused search turn with a second request that
+    // re-sends the whole prefix: billing sums both, context is the last one.
+    const terminal = new RunRawModelStreamEvent({
+      type: "response_done",
+      response: {
+        id: "msg_paused",
+        output: [],
+        usage: {
+          requests: 2,
+          inputTokens: 30_000,
+          outputTokens: 40,
+          totalTokens: 30_040,
+          inputTokensDetails: { cached_tokens: 25_000 },
+          requestUsageEntries: [
+            { inputTokens: 14_000, outputTokens: 10, totalTokens: 14_010 },
+            {
+              inputTokens: 16_000,
+              outputTokens: 30,
+              totalTokens: 16_030,
+              inputTokensDetails: { cached_tokens: 15_000 },
+            },
+          ],
+        },
+        providerData: { anthropic: { webSearchRequests: 3 } },
+      },
+    } as any);
+    const observability = createObservability(testSettings(), { component: "worker" });
+    const recordUsageSpy = spyOn(opengeniDb, "recordUsageEvent").mockImplementation(
+      async () => undefined,
+    );
+    try {
+      const fencedInputs: Array<number | null> = [];
+      const state = createModelResponseEventState();
+      const result = await processModelResponseTerminalEvent({
+        event: terminal,
+        state,
+        dispatchId: "activity-A",
+        settings: testSettings(),
+        db: {} as any,
+        observability,
+        publish: (async (batch: any[]) => ({
+          accepted: true,
+          events: batch.map((event) => ({
+            ...event,
+            id: crypto.randomUUID(),
+            turnAssociation: "current" as const,
+          })),
+        })) as any,
+        accountId: "acct-1",
+        workspaceId: "ws-1",
+        sessionId: "sess-1",
+        turnId: "turn-1",
+        turnAttemptId: "attempt-1",
+        provider: "claude-subscription",
+        providerApi: "anthropic-messages",
+        model: "claude-opus-5-5",
+        metricProvider: "claude-subscription",
+        externallyBilled: true,
+        servingCredentialId: "credential-1",
+        priorSessionCredentialId: "credential-1",
+        emittedSourceKeys: new Set<string>(),
+        renewLease: async () => undefined,
+        leaseLost: () => false,
+        leaseLostMessage: "lease lost",
+        setLastInputTokens: async (tokens) => {
+          fencedInputs.push(tokens);
+        },
+      });
+      expect(result).toMatchObject({ status: "processed", authoritative: true });
+      expect(state.contextSignal).toEqual({ revision: 1, totalTokens: 16_030 });
+      expect(fencedInputs).toEqual([16_000]);
+      const metrics = await observability.prometheusMetrics();
+      expect(metrics).toMatch(
+        /opengeni_model_web_search_requests_total\{[^}]*provider="claude-subscription"[^}]*\} 3\b/,
+      );
+      expect(metrics).toMatch(
+        /opengeni_model_tokens_total\{[^}]*provider="claude-subscription"[^}]*type="input"[^}]*\} 30000\b/,
       );
     } finally {
       recordUsageSpy.mockRestore();

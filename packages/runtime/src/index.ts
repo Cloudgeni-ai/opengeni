@@ -1641,13 +1641,16 @@ function isFailedCompactionProviderResponse(response: unknown): boolean {
 function compactionResponseCalledTool(response: unknown): boolean {
   if (!response || typeof response !== "object") return false;
   const output = (response as { output?: unknown }).output;
+  // A provider-run search (Claude keeps its web search tool for the cached
+  // prefix) is a tool call too: the summary must come from a tool-free reply.
   return (
     Array.isArray(output) &&
     output.some(
       (item) =>
         Boolean(item) &&
         typeof item === "object" &&
-        (item as { type?: unknown }).type === "function_call",
+        ((item as { type?: unknown }).type === "function_call" ||
+          (item as { type?: unknown }).type === "hosted_tool_call"),
     )
   );
 }

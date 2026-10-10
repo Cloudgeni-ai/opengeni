@@ -207,3 +207,81 @@ test("text beside a tool call never becomes the checkpoint", async () => {
 
   await expect(summarize()).rejects.toBeInstanceOf(EmptyCompactionSummaryError);
 });
+
+test("with Claude web search, the checkpoint keeps the search tool and stored searches cached", async () => {
+  const search = [
+    { type: "server_tool_use", id: "srvtoolu_1", name: "web_search", input: { query: "q" } },
+    {
+      type: "web_search_tool_result",
+      tool_use_id: "srvtoolu_1",
+      content: [
+        {
+          type: "web_search_result",
+          url: "https://example.com",
+          title: "T",
+          encrypted_content: "E",
+        },
+      ],
+    },
+  ];
+  const searchedHistory = [
+    ...history.slice(0, -1),
+    {
+      type: "hosted_tool_call",
+      name: "web_search_call",
+      status: "completed",
+      providerData: {
+        type: "web_search_call",
+        call_id: "srvtoolu_1",
+        action: { type: "search", query: "q" },
+        anthropic: { blocks: search },
+      },
+    },
+    history.at(-1)!,
+  ];
+  const withSearch = {
+    ...prepared,
+    tools: [
+      ...prepared.tools,
+      { type: "hosted_tool" as const, name: "web_search", providerData: { type: "web_search" } },
+    ],
+  };
+  let ordinary: any;
+  await new AnthropicMessagesModel(provider, MODEL, (async (_url, init) => {
+    ordinary = JSON.parse(String(init?.body));
+    return new Response(JSON.stringify(message([{ type: "text", text: "ok" }])));
+  }) as typeof fetch).getResponse({
+    ...withSearch,
+    input: searchedHistory as ModelRequest["input"],
+  });
+  expect(ordinary.tools.at(-1)).toMatchObject({ type: "web_search_20250305", name: "web_search" });
+  expect(JSON.stringify(ordinary.messages)).toContain("server_tool_use");
+
+  // A checkpoint reply that searched is a tool call too: retried tool-free.
+  const bodies = captureCompaction([
+    [...search, { type: "text", text: "Looked it up." }],
+    [{ type: "text", text: "Checkpoint summary" }],
+  ]);
+  const summary = await summarizeForCompaction(
+    testSettings(),
+    buildCompactionPromptInput(searchedHistory as any),
+    {
+      provider,
+      api: "anthropic-messages",
+      model: MODEL,
+      maxOutputTokens: 4_000,
+      preparedRequest: withSearch,
+    },
+  );
+  expect(summary).toBe("Checkpoint summary");
+  expect(bodies).toHaveLength(2);
+  expect(bodies[1].tool_choice).toEqual({ type: "none" });
+  for (const body of bodies) {
+    expect(body.tools).toEqual(ordinary.tools);
+    expect(body.system).toEqual(ordinary.system);
+    const last = ordinary.messages.length - 1;
+    expect(withoutCacheMarkers(body.messages.slice(0, last))).toEqual(
+      withoutCacheMarkers(ordinary.messages.slice(0, last)),
+    );
+  }
+});

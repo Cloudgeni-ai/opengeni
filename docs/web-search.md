@@ -5,13 +5,14 @@ Opengeni gives agents web search in one of two ways for each turn:
 - **Hosted search.** The model provider runs the search. Opengeni attaches the
   provider's `web_search` tool when the model catalog declares
   `capabilities.hostedTools.webSearch.runnable`. Today that means the GPT models
-  on OpenAI/Azure Responses, the Codex models, and SuperGrok (which also adds
+  on OpenAI/Azure Responses, the Codex models, Claude on its native Messages
+  route (API key and Claude subscription), and SuperGrok (which also adds
   `x_search` at its transport). See
   [model providers](model-providers.md#native-web-search-is-a-runtime-capability).
 - **Provider search.** Opengeni runs the search from the worker through a
   configured search API and offers two ordinary function tools, `web_search`
   and `web_fetch`. Any model with function calling can use them, including
-  Claude, Gemini, DeepSeek, GLM and Kimi.
+  Gemini, DeepSeek, GLM and Kimi.
 
 Provider search is off until an operator names a provider. With no provider,
 nothing changes: models without hosted search have no web search tool.
@@ -57,6 +58,33 @@ are attempt tools, so Codemode programs can call them too.
 
 `replace` exists so an operator can A/B the two (see the eval below) or route
 every model through one audited provider.
+
+### Claude's server-side search
+
+Claude models declare hosted search runnable whenever
+`OPENGENI_WEB_SEARCH_ENABLED` is on. The Claude transport
+(`packages/runtime/src/anthropic-messages.ts`) turns the agent's hosted
+`web_search` tool into Anthropic's `web_search_20250305` server tool at the
+same position in the tool list, so the tool list stays part of one stable cache
+prefix. Anthropic bills each search on API-key accounts (see its pricing);
+results also count as input tokens on later requests.
+
+- Each search is stored as a hosted `web_search_call` item. Its
+  `providerData.anthropic.blocks` keep Anthropic's `server_tool_use` and
+  `web_search_tool_result` blocks, including the encrypted page content, and
+  cited text keeps its citations in `providerData.anthropic.citations`. Claude
+  receives all of them back exactly as returned, which Anthropic requires.
+- A search Claude defers behind Opengeni tool calls resumes on the next
+  request. A paused turn (`pause_turn`) is continued inside the transport with
+  its content unchanged, up to eight requests in total, and reported as one response.
+- A search Claude can no longer continue (an interrupted or steered turn), a
+  result whose call was compacted away, or any search on a request without the
+  search tool becomes a readable historical fact without encrypted data. These
+  decisions depend only on the history, so later requests keep the same prefix.
+- Other providers and the compaction transcript see the query, URLs, titles
+  and page age, never the encrypted content.
+- An organization whose admin turned web search off in the Claude Console
+  fails with the `anthropic_web_search_disabled` error.
 
 ### Hosted evidence across tool calls
 
