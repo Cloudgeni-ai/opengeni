@@ -23,10 +23,8 @@ describe("model display", () => {
         "organization-claude-subscription",
         "organization-claude-subscription/claude-opus-5-5",
       ),
-    ).toBe("Claude Opus 5.5");
-    expect(modelDisplayName("opengeni-gateway", "anthropic/claude-sonnet-4.6")).toBe(
-      "Claude Sonnet 4.6",
-    );
+    ).toBe("Opus 5.5");
+    expect(modelDisplayName("opengeni-gateway", "anthropic/claude-sonnet-4.6")).toBe("Sonnet 4.6");
     expect(modelDisplayName("supergrok-subscription", "grok-4.6")).toBe("Grok 4.6");
   });
 
@@ -179,7 +177,7 @@ describe("breakdown rows", () => {
       ],
     });
     expect(rows).toHaveLength(1);
-    expect(rows[0]?.label).toBe("Claude Opus 5.5");
+    expect(rows[0]?.label).toBe("Opus 5.5");
     expect(rows[0]?.measures.calls).toBe(2);
     expect(rows[0]?.filter?.values).toEqual([
       "organization-claude-subscription/claude-opus-5-5",

@@ -1389,7 +1389,7 @@ describe("model identity outside settings", () => {
       </>,
     );
     const names = [...container.querySelectorAll("span[title]")].map((node) => node.textContent);
-    expect(names).toEqual(["Claude Opus 5.5", "Claude Opus 5.5", "GPT-6.1 Sol"]);
+    expect(names).toEqual(["Opus 5.5", "Opus 5.5", "GPT-6.1 Sol"]);
     expect(
       [...container.querySelectorAll("[data-model-vendor]")].map((node) =>
         node.getAttribute("data-model-vendor"),
@@ -1420,7 +1420,7 @@ describe("model identity outside settings", () => {
       />,
     );
     const trigger = container.querySelector('button[aria-label="Model and effort"]')!;
-    expect(trigger.textContent).toContain("Claude Haiku 4.5");
+    expect(trigger.textContent).toContain("Haiku 4.5");
     expect(trigger.textContent).not.toContain("claude-haiku");
     expect(trigger.querySelector('[data-model-vendor="anthropic"]')).not.toBeNull();
     expect(trigger.querySelector('[data-testid^="billing-class-icon-"]')).toBeNull();

@@ -248,7 +248,7 @@ test("names the model cleanly for org- and workspace-connected copies alike", as
     ]) {
       await act(async () => root.render(render(model)));
       const text = container.querySelector("header")?.textContent ?? "";
-      expect(text).toContain("Claude Opus 5.5");
+      expect(text).toContain("Opus 5.5");
       expect(text).not.toContain("claude-subscription");
       expect(container.querySelector('[data-model-vendor="anthropic"]')).not.toBeNull();
       seen.push(container.querySelector("[data-model-vendor]")?.parentElement?.textContent ?? "");

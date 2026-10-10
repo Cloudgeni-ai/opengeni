@@ -85,7 +85,7 @@ describe("api errors in product words", () => {
       apiErrorAdvice(
         apiError(422, "model is not available: organization-claude-subscription/claude-opus-5-5"),
       ),
-    ).toBe("Claude Opus 5.5 isn't available here. Choose another model.");
+    ).toBe("Opus 5.5 isn't available here. Choose another model.");
   });
 
   test("keeps the app's own messages and maps network failures", () => {

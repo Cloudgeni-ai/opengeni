@@ -295,16 +295,15 @@ function organizationProviderPayerSummary(model: ClientModel): string {
 }
 
 /**
- * The curated compact label, else a derived one for narrow triggers: the
- * family-free name for Claude models ("Opus 5.5", the maker's mark beside it
- * already says Claude), or the name without trailing access and release-stage
- * qualifiers ("Muse Spark 1.3 Contributor Free" → "Muse Spark 1.3"), which the
- * picker's groups and descriptions already carry.
+ * The curated compact label, else a derived one for narrow triggers: the name
+ * without trailing access and release-stage qualifiers ("Muse Spark 1.3
+ * Contributor Free" → "Muse Spark 1.3"), which the picker's groups and
+ * descriptions already carry. Claude names are already family-free
+ * ("Opus 5.5") in the shared display name.
  */
 function compactLabel(catalog: ClientModel): { shortLabel?: string } {
   if (catalog.shortLabel) return { shortLabel: catalog.shortLabel };
   const name = modelDisplayName(catalog);
-  if (name.startsWith("Claude ")) return { shortLabel: name.slice("Claude ".length) };
   const trimmed = withoutTrailingQualifiers(name);
   return trimmed !== name ? { shortLabel: trimmed } : {};
 }
