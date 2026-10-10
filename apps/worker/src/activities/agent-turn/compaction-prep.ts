@@ -19,7 +19,7 @@ import {
   compactionSummaryOutputTokens,
   type ModelResponseUsage,
 } from "@opengeni/runtime";
-import { type Settings } from "@opengeni/config";
+import { type ModelProviderApi, type Settings } from "@opengeni/config";
 import { maybeCompactContext, settleFailedContextCompactionLandmark } from "../context-compaction";
 import type { CompactionSummarizer, RemoteCompactionV2Requester } from "../context-compaction";
 import { TurnAttemptFencedError } from "../turn-attempt-fenced";
@@ -64,6 +64,17 @@ import type {
 export type RemoteCompactionPrefix = {
   agent: ReturnType<ActivityServices["runtime"]["buildAgent"]> | null;
 };
+
+/**
+ * Portable compaction on these wire APIs waits for the ordinary request this
+ * agent prepares (tools, instructions and settings) and summarizes on exactly
+ * that prefix, so the checkpoint call reads the warm prompt cache instead of
+ * rewriting the whole conversation. Chat Completions providers keep the
+ * standalone summary request.
+ */
+export function portableCompactionUsesPreparedPrefix(api: ModelProviderApi | undefined): boolean {
+  return api === "responses" || api === "anthropic-messages";
+}
 
 export type CompactionPrepDeps = {
   input: RunAgentTurnInput;
@@ -230,8 +241,8 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
   const remotePrefix: RemoteCompactionPrefix = {
     agent: null,
   };
-  const portableResponsesNeedsAgentPrefix =
-    resolvedModel?.provider.api === "responses" &&
+  const portableNeedsAgentPrefix =
+    portableCompactionUsesPreparedPrefix(resolvedModel?.provider.api) &&
     !(billingState.isCodexTurn && session.codexCompactionMode === "remote_v2");
   const preparedPortableRequest = () => {
     if (!remotePrefix.agent) throw new Error("Compaction agent is unavailable");
@@ -286,9 +297,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
               onUsage: recordCompactionUsage,
               ...(systemInstructions ? { systemInstructions } : {}),
               ...(promptCacheKey ? { promptCacheKey } : {}),
-              ...(portableResponsesNeedsAgentPrefix
-                ? { preparedRequest: preparedPortableRequest() }
-                : {}),
+              ...(portableNeedsAgentPrefix ? { preparedRequest: preparedPortableRequest() } : {}),
             }),
           )
       : (s: Settings, m: Array<Record<string, unknown>>) =>
@@ -319,7 +328,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
       if (resolvedModel?.provider.api === "chat") {
         return estimateSerializedValueTokens(systemInstructions ?? "");
       }
-      const prepared = portableResponsesNeedsAgentPrefix ? preparedPortableRequest() : null;
+      const prepared = portableNeedsAgentPrefix ? preparedPortableRequest() : null;
       return (
         estimateSerializedValueTokens(prepared?.systemInstructions ?? systemInstructions ?? "") +
         (prepared ? estimateSerializedValueTokens(prepared.tools) : 0)
@@ -336,6 +345,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
           ...(systemInstructions ? { systemInstructions } : {}),
           ...(promptCacheKey ? { promptCacheKey } : {}),
           ...(cancellationSignal ? { signal: cancellationSignal } : {}),
+          ...(portableNeedsAgentPrefix ? { preparedRequest: preparedPortableRequest() } : {}),
         });
     }
     return summarize;
@@ -397,9 +407,9 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
     ...(remoteCompactionRequester ? { requestRemoteCompactionV2: remoteCompactionRequester } : {}),
   } as const;
 
-  // Responses compaction, portable or remote, prepares the ordinary agent
-  // request first so tool schemas and instructions match the warm cache prefix.
-  // Chat providers keep the standalone portable maintenance path.
+  // Responses and Claude compaction prepare the ordinary agent request first so
+  // tool schemas, instructions and settings match the warm cache prefix. Chat
+  // providers keep the standalone portable maintenance path.
   const compactionOnlyTurn = turn.source === "compaction";
   const remoteV2CompactionNeedsAgentPrefix =
     Boolean(remoteCompactionRequester) && session.codexCompactionMode === "remote_v2";
@@ -436,11 +446,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
     control.activityStatus = "idle";
     return claimedResult({ status: "idle" });
   };
-  if (
-    compactionOnlyTurn &&
-    !remoteV2CompactionNeedsAgentPrefix &&
-    !portableResponsesNeedsAgentPrefix
-  ) {
+  if (compactionOnlyTurn && !remoteV2CompactionNeedsAgentPrefix && !portableNeedsAgentPrefix) {
     const compactionInstructions = standaloneCompactionInstructions({
       settings: eventing.modelRunSettings,
       session,
@@ -608,7 +614,7 @@ export async function runPostAgentCompaction(
 
   const agentInstructions = typeof agent.instructions === "string" ? agent.instructions : "";
   const preparedPortable =
-    resolvedModel?.provider.api === "responses" &&
+    portableCompactionUsesPreparedPrefix(resolvedModel?.provider.api) &&
     !(remoteCompactionRequester && session.codexCompactionMode === "remote_v2");
   const compactSummarizer = compactionSummarizerFor(
     agentInstructions.trim() ? agentInstructions : undefined,
