@@ -10,6 +10,7 @@ import {
   createDb,
   designateSubscriptionCoreCodexApps,
   ensureManagedAccessForUser,
+  SubscriptionCoreCodexSourceRefusedError,
   withSessionRlsActorContext,
   type DbClient,
 } from "../src";
@@ -158,6 +159,16 @@ async function settingsRow(org: Org, workspaceId: string | null) {
   return row ?? null;
 }
 
+/** A database handle that fails the test if a writer touches it. */
+const untouchable = new Proxy(
+  {},
+  {
+    get() {
+      throw new Error("the database must not be used");
+    },
+  },
+) as never;
+
 const asOwner = <T>(org: Org, fn: () => Promise<T>) =>
   withSessionRlsActorContext({ subjectId: org.ownerSubjectId }, fn);
 
@@ -180,14 +191,6 @@ describe("subscription-core binding gates (pure)", () => {
   });
 
   test("without the extraCredits capability the writer refuses before any query", async () => {
-    const untouchable = new Proxy(
-      {},
-      {
-        get() {
-          throw new Error("the database must not be used");
-        },
-      },
-    ) as never;
     await expect(
       setSubscriptionCoreExtraCredits(untouchable, withCapabilities({ extraCredits: false }), {
         accountId: crypto.randomUUID(),
@@ -198,6 +201,35 @@ describe("subscription-core binding gates (pure)", () => {
         expectedVersion: 0,
       }),
     ).resolves.toEqual({ result: { kind: "not_found" }, wake: null });
+  });
+
+  test("the Codex source refusal keeps its one-argument constructor", () => {
+    expect(
+      new SubscriptionCoreCodexSourceRefusedError(
+        "Codex source modes are not available for personal workspaces",
+      ).reason,
+    ).toBe("personal_workspace");
+    expect(new SubscriptionCoreCodexSourceRefusedError("missing permission").reason).toBe(
+      "forbidden",
+    );
+    expect(
+      new SubscriptionCoreCodexSourceRefusedError("any text", "personal_workspace").reason,
+    ).toBe("personal_workspace");
+  });
+
+  test("without a primary column a primary write is refused before any query", async () => {
+    await expect(
+      setSubscriptionCorePrimary(
+        untouchable,
+        variant(() => ({ settings: { primaryColumn: null } })),
+        {
+          accountId: crypto.randomUUID(),
+          workspaceId: crypto.randomUUID(),
+          subjectId: "user:nobody",
+          connectionId: crypto.randomUUID(),
+        },
+      ),
+    ).rejects.toMatchObject({ code: "subscription_core_primary_unsupported" });
   });
 });
 
@@ -213,6 +245,27 @@ describe.skipIf(!realDb)("subscription-core binding gates (PostgreSQL)", () => {
       expect(binding.settings.primaryColumn).toBe(row.primary_setting_column);
       expect(binding.adapter.capabilities.extraCredits).toBe(row.extra_credits);
     }
+  });
+
+  test("writers refuse an unregistered provider or a foreign primary column and write nothing", async () => {
+    const org = await organization();
+    const before = await settingsRow(org, null);
+    for (const binding of [
+      variant((base) => ({ adapter: { ...base.adapter, provider: "unregistered-provider" } })),
+      variant(() => ({ settings: { primaryColumn: "other_primary_connection_id" } })),
+    ]) {
+      await expect(
+        asOwner(org, () =>
+          setSubscriptionCoreRotation(client!.db, binding, {
+            accountId: org.accountId,
+            workspaceId: null,
+            subjectId: org.ownerSubjectId,
+            rotationEnabled: false,
+          }),
+        ),
+      ).rejects.toThrow();
+    }
+    expect(await settingsRow(org, null)).toEqual(before);
   });
 
   test("a provider without a primary column writes rotation but never a primary", async () => {
@@ -273,44 +326,61 @@ describe.skipIf(!realDb)("subscription-core binding gates (PostgreSQL)", () => {
       asOwner(org, () =>
         setSubscriptionCorePrimary(client!.db, noPrimary, { ...organizationRoute, connectionId }),
       ),
-    ).rejects.toThrow("no primary connection setting");
+    ).rejects.toMatchObject({ code: "subscription_core_primary_unsupported" });
     expect((await settingsRow(org, null))?.primary_id).toBe(connectionId);
   });
 
   test("the organization allocator hook is optional and receives the organization switch", async () => {
     const org = await organization();
     const connectionId = await connectOrganizationConnection(org, "allocator-gate");
+    // Codex keeps a reach row for workspaces created later; its hook refreshes
+    // the row's allocator copy on an organization switch.
+    await shared!.admin`
+      insert into opengeni_private.subscription_codex_auto_assignments (
+        account_id, connection_id, shared_workspaces, personal_workspaces,
+        allocator_enabled, allowed_model_ids
+      ) values (${org.accountId}::uuid, ${connectionId}::uuid, true, false, true, null)`;
+    const reachAllocator = async () => {
+      const [row] = await shared!.admin<{ allocator_enabled: boolean }[]>`
+        select allocator_enabled from opengeni_private.subscription_codex_auto_assignments
+        where connection_id = ${connectionId}::uuid`;
+      return row?.allocator_enabled ?? null;
+    };
+    const switchWith = (
+      binding: SubscriptionCoreProvider,
+      enabled: boolean,
+      expectedVersion: number,
+    ) =>
+      asOwner(org, () =>
+        setSubscriptionCoreAllocator(client!.db, binding, {
+          accountId: org.accountId,
+          workspaceId: null,
+          subjectId: org.ownerSubjectId,
+          connectionId,
+          enabled,
+          expectedVersion,
+        }),
+      );
+
+    const viaHook = await switchWith(registered(), false, 1);
+    expect(viaHook.result).toMatchObject({ kind: "updated", allocatorEnabled: false });
+    expect(await reachAllocator()).toBe(false);
+
+    // Without a hook the switch still applies, and nothing touches the reach.
+    const withoutHook = variant(() => ({ organizationAllocatorChanged: null }));
+    const again = await switchWith(withoutHook, true, 2);
+    expect(again.result).toMatchObject({ kind: "updated", allocatorEnabled: true });
+    expect(await reachAllocator()).toBe(false);
+
     const calls: Array<[string, string]> = [];
     const recording = variant(() => ({
       organizationAllocatorChanged: async (_tx, accountId, changed) => {
         calls.push([accountId, changed]);
       },
     }));
-    const switched = await asOwner(org, () =>
-      setSubscriptionCoreAllocator(client!.db, recording, {
-        accountId: org.accountId,
-        workspaceId: null,
-        subjectId: org.ownerSubjectId,
-        connectionId,
-        enabled: false,
-        expectedVersion: 1,
-      }),
-    );
-    expect(switched.result).toMatchObject({ kind: "updated", allocatorEnabled: false });
+    const recorded = await switchWith(recording, false, 3);
+    expect(recorded.result).toMatchObject({ kind: "updated", allocatorEnabled: false });
     expect(calls).toEqual([[org.accountId, connectionId]]);
-
-    const withoutHook = variant(() => ({ organizationAllocatorChanged: null }));
-    const again = await asOwner(org, () =>
-      setSubscriptionCoreAllocator(client!.db, withoutHook, {
-        accountId: org.accountId,
-        workspaceId: null,
-        subjectId: org.ownerSubjectId,
-        connectionId,
-        enabled: true,
-        expectedVersion: 2,
-      }),
-    );
-    expect(again.result).toMatchObject({ kind: "updated", allocatorEnabled: true });
   });
 
   test("only a provider with the apps capability reports the Apps designations a disconnect clears", async () => {

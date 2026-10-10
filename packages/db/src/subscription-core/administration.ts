@@ -26,6 +26,7 @@ import {
   readSubscriptionProviderCutoverState,
   resolveSubscriptionConnectionId,
 } from "../subscription-core-repository";
+import { SubscriptionCoreError } from "./errors";
 import { subscriptionCoreProviderId, type SubscriptionCoreProvider } from "./provider";
 
 /**
@@ -150,6 +151,14 @@ export function subscriptionCoreProviderSettings(
 function primaryColumn(provider: SubscriptionCoreProvider) {
   const column = provider.settings.primaryColumn;
   return column === null ? null : sql.identifier(column);
+}
+
+/** Refusal of a primary write for a provider without a primary setting. */
+function primaryUnsupported(provider: SubscriptionCoreProvider) {
+  return new SubscriptionCoreError(
+    "subscription_core_primary_unsupported",
+    `${provider.adapter.displayName} has no primary connection setting`,
+  );
 }
 
 /** The primary column as a select expression (NULL for a provider without one). */
@@ -943,9 +952,7 @@ async function writeSettingsRow(
       : JSON.stringify({ [providerId]: patch.providerSettings });
   const clearProvider = patch.providerSettings === null;
   const setPrimary = patch.primaryConnectionId !== undefined;
-  if (setPrimary && primary_column === null) {
-    throw new Error("This subscription provider has no primary connection setting");
-  }
+  if (setPrimary && primary_column === null) throw primaryUnsupported(provider);
   const primary = setPrimary ? (patch.primaryConnectionId ?? null) : null;
   const primaryAssignment =
     primary_column === null
@@ -1040,6 +1047,10 @@ export async function setSubscriptionCorePrimary(
   provider: SubscriptionCoreProvider,
   input: SubscriptionCoreAdministration & { connectionId: string },
 ): Promise<{ activated: string | null; wake: SubscriptionCoreWake | null }> {
+  // Refused up front, before any lock or read, for personal and shared
+  // connections alike (after the binding's own checks).
+  subscriptionCoreProviderId(provider);
+  if (provider.settings.primaryColumn === null) throw primaryUnsupported(provider);
   return await withAdministration(db, input, async (tx) => {
     const personal = await managePersonalConnection(tx, provider, input, "primary");
     if (personal)

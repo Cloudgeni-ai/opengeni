@@ -58,11 +58,16 @@ export class SubscriptionCoreCodexOperationUnavailableError extends Error {
 
 /** A workspace source change was refused (personal workspace or no permission). */
 export class SubscriptionCoreCodexSourceRefusedError extends Error {
-  constructor(
-    message: string,
-    readonly reason: SubscriptionCoreSourceRefusal,
-  ) {
+  readonly reason: SubscriptionCoreSourceRefusal;
+  /**
+   * `reason` is optional so the M3 one-argument constructor keeps working;
+   * without it the reason follows the M3 message (personal workspaces or
+   * not). The shared core always passes it.
+   */
+  constructor(message: string, reason?: SubscriptionCoreSourceRefusal) {
     super(message);
+    this.reason =
+      reason ?? (message.includes("personal workspaces") ? "personal_workspace" : "forbidden");
     this.name = "SubscriptionCoreCodexSourceRefusedError";
   }
 }
