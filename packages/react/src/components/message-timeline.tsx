@@ -3510,7 +3510,21 @@ const TimelineGroupView = memo(function TimelineGroupView({
                     </span>
                   ) : undefined,
                 }
-              : workStatus;
+              : group.work.cycles?.summary
+                ? {
+                    ...workStatus,
+                    // Folded quiet cycles say what the agent is waiting on.
+                    preview: (
+                      <p
+                        data-og-cycles-summary=""
+                        className="truncate text-og-sm text-og-fg-subtle"
+                        title={group.work.cycles.summary}
+                      >
+                        {group.work.cycles.summary}
+                      </p>
+                    ),
+                  }
+                : workStatus;
         return (
           // Marks this work row for the live-note fold (list keys can be carried
           // over from an earlier row, so they are not the work id).
@@ -3518,6 +3532,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
             <TurnSummary
               key="work"
               items={group.items}
+              bare={insideTurn || undefined}
               status={status}
               outcome={group.outcome}
               failureText={group.failureText}
@@ -3797,7 +3812,30 @@ type FoldedGroupBehavior = {
   turnSummary?: TurnSummaryOptions | undefined;
 };
 
-/** Children of a folded turn or exchange, each on the shared rail. */
+/**
+ * A search hit inside a nested work row opens that row only. The reveal key
+ * is provided per top-level group, so without narrowing every nested row of
+ * a folded quiet-cycle run would open at once.
+ */
+function NestedSearchReveal({ group, children }: { group: TimelineGroup; children: ReactNode }) {
+  const revealKey = useContext(TimelineSearchRevealContext);
+  const itemId = useMemo(() => {
+    if (!revealKey) return null;
+    try {
+      const [id] = JSON.parse(revealKey) as unknown[];
+      return typeof id === "string" ? id : null;
+    } catch {
+      return null;
+    }
+  }, [revealKey]);
+  const value = itemId && timelineGroupItemIds(group).includes(itemId) ? revealKey : null;
+  return (
+    <TimelineSearchRevealContext.Provider value={value}>
+      {children}
+    </TimelineSearchRevealContext.Provider>
+  );
+}
+
 function renderFoldedGroups(
   groups: readonly TimelineGroup[],
   behavior: FoldedGroupBehavior,
@@ -3834,7 +3872,9 @@ function renderFoldedGroups(
               : undefined
           }
         >
-          <TimelineGroupView {...behavior} group={child} insideTurn startupDismissed />
+          <NestedSearchReveal group={child}>
+            <TimelineGroupView {...behavior} group={child} insideTurn startupDismissed />
+          </NestedSearchReveal>
         </div>
       ) : (
         <TimelineGroupView {...behavior} group={child} insideTurn nestClusterChips={nestClusters} />

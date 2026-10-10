@@ -460,7 +460,7 @@ that delegation, renders a bounded Codex-style XML tail, and submits it through
 the canonical ordinary `Steer` path. The associated
 `session_realtime_context_projections` row is idempotency/audit provenance for
 that durable tail turn; workers perform no hidden next-turn injection. An empty
-tail creates no turn. A later voice call receives both bounded durable session
+tail, or one with no finalized user transcript (assistant-only voice chatter), creates no turn. A later voice call receives both bounded durable session
 history and bounded prior finalized voice turns as inert, role-labeled startup
 context with an explicit silence instruction. Canonical:
 `packages/sdk/src/codex-realtime-v3.ts`,
