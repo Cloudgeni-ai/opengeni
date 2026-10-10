@@ -11,8 +11,10 @@ import { HTTPException } from "hono/http-exception";
    The person's live role is still checked by the route, exactly as for the
    browser.
 
-   Only Opengeni sign-in, approving a connection, third-party provider consent
-   and account recovery stay in the browser; those routes don't call this.
+   Only Opengeni sign-in, approving a connection, browser-bound provider OAuth
+   (Claude, integration OAuth) and account recovery stay in the browser;
+   those routes don't call this. Device-code sign-in (Codex, SuperGrok) is
+   allowed: the agent relays the code and the person approves at the provider.
    -------------------------------------------------------------------------- */
 
 export type ActingPerson = { subjectId: string };

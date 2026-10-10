@@ -110,6 +110,14 @@ https://chromewebstore.google.com/detail/opengeni-browser/phpmmcbeelfkcinjfbbgge
 Chrome requires the person to click "Add to Chrome"; an agent cannot install it.
 `interaction_discover` with `scope: "attached_browsers"` shows when it is linked.
 
+## Models and subscription settings
+
+For questions about model providers, subscription accounts (Codex, Claude,
+SuperGrok), which workspaces and models an account serves, usage limits and
+resets, workspace Codex options, or Context & compaction, read
+`references/models-and-subscriptions.md`. It explains each setting in the
+interface's words and how an agent with admin access changes them safely.
+
 ## Cost questions
 
 Read the installed SDK's reply types and formatter, then the relevant accounting

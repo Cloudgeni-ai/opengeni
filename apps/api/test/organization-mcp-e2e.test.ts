@@ -312,7 +312,38 @@ describe("organization MCP server end to end", () => {
       pathParameters: { organizationId: crypto.randomUUID() },
     });
     expect(elsewhere.value).toMatchObject({ status: 404 });
-    // Provider sign-in stays with the person in the browser.
+    // Device-code subscription sign-in works for the agent: it starts the
+    // sign-in and relays the short code; the person approves at the provider.
+    const realFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = (async (input, init) => {
+        const url = String(input instanceof Request ? input.url : input);
+        if (url.includes("/deviceauth/usercode"))
+          return Response.json({ device_auth_id: "agent-device", user_code: "AGNT-1234" });
+        if (url.includes("/deviceauth/token")) return new Response("{}", { status: 403 });
+        return realFetch(input, init);
+      }) as typeof fetch;
+      const deviceStart = await mcp("opengeni_action_call", {
+        id: "POST /v1/organizations/:organizationId/codex/connect/start",
+        pathParameters: { organizationId },
+        body: {},
+      });
+      expect(deviceStart.value).toMatchObject({ status: 200 });
+      expect(deviceStart.text).toContain("AGNT-1234");
+      const startedState = (deviceStart.value as { body?: { state?: string } }).body?.state;
+      expect(typeof startedState).toBe("string");
+      const devicePoll = await mcp("opengeni_action_call", {
+        id: "POST /v1/organizations/:organizationId/codex/connect/poll",
+        pathParameters: { organizationId },
+        body: { state: startedState },
+      });
+      expect(devicePoll.value).toMatchObject({ status: 200 });
+      expect(devicePoll.text).toContain("pending");
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+
+    // Browser-bound provider OAuth stays with the person in the browser.
     const providerSignIn = await mcp("opengeni_action_call", {
       id: "POST /v1/organizations/:organizationId/model-providers/claude_subscription/oauth/start",
       pathParameters: { organizationId },

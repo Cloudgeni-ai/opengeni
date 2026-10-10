@@ -281,15 +281,17 @@ export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db } = deps;
 
   const organizationPath = "/v1/organizations/:organizationId/supergrok";
-  const organizationActor = async (c: Context, mutation = false, providerConsent = false) => {
+  // Device sign-in (start/poll) accepts an agent acting as an admin: the agent
+  // relays the short code, and the person still approves at xAI themselves.
+  const organizationActor = async (c: Context, mutation = false) => {
     requireEnabled(deps);
     if (mutation) requireSameOriginBrowserMutation(c, deps);
     const organizationId = c.req.param("organizationId")!;
-    const human = await requireOrganizationCodexHuman(c, deps, organizationId, { providerConsent });
+    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
     return { organizationId, actorSubjectId: human.subjectId };
   };
   app.post(`${organizationPath}/connect/start`, async (c) => {
-    const actor = await organizationActor(c, true, true);
+    const actor = await organizationActor(c, true);
     try {
       const start = await requestXaiDeviceCode({ fetch: (deps.xaiFetch ?? fetch) as XaiFetch });
       const expiresAt = Math.floor(Date.now() / 1000) + start.expiresInSeconds;
@@ -309,7 +311,7 @@ export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
   });
   app.post(`${organizationPath}/connect/poll`, async (c) => {
-    const actor = await organizationActor(c, true, true);
+    const actor = await organizationActor(c, true);
     const parsed = connectPollBody.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) throw new HTTPException(400, { message: "SuperGrok state is required" });
     const state = readSignedState(parsed.data.state, deps.githubStateSecret) as {
