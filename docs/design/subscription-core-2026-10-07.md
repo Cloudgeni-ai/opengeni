@@ -2313,18 +2313,24 @@ Reading:
   v2 entry and no record.
 - Fail-closed rule: "no personal authority and no narrowing" applies only to
   work accepted after the provider's receipt. A carrier or receiver source
-  created before the receipt (`created_at` earlier than the receipt's
-  `committed_at`; the cutover is drained, so no row is created during it)
+  created before the receipt (`authority_inserted_at`, below, earlier than
+  the receipt's `committed_at`; the cutover is drained, so no row is created during it)
   that has neither yields `personal: []`, `shared_pool: none`, and the work
   waits with `accepted_authority_unavailable`. It never falls back to no
   narrowing. The same holds for work derived after the cutover from such a
   source: its copy routine writes `{personal: [], shared_pool: none,
   legacy_scope: missing}`, and
   the deferred trigger fires whenever the resolved source predates the
-  receipt, not only when the source has a record. PR 0 makes `created_at` on
-  every carrier table immutable and, for runtime roles, transaction-assigned
-  (an explicit value other than the transaction timestamp is rejected), so
-  the comparison cannot be forged.
+  receipt, not only when the source has a record. "Created before the
+  receipt" is decided by a server-owned marker, not by `created_at` (which
+  current and older binaries set from the application clock and which some
+  ordering relies on): PR 0 adds `authority_inserted_at timestamptz NOT NULL
+  DEFAULT transaction_timestamp()` to every carrier table (a metadata-only
+  change; existing rows get the PR 0 time, before any receipt), a `BEFORE
+  INSERT` trigger that overwrites any supplied value with
+  `transaction_timestamp()`, and a `BEFORE UPDATE` trigger that rejects
+  changing it. Explicit values are replaced, never rejected, so rolling
+  inserts keep working.
 - That wait, and every wait caused by a record with `personal: []` and
   `shared_pool: none`, ends at the existing capacity-wait deadline with a
   typed turn failure the session owner sees ("this work was accepted before
@@ -2382,7 +2388,7 @@ Writing:
   trigger on each carrier table (`session_turns`, `sessions`,
   `scheduled_tasks`, the revision relation, `session_system_updates` and the
   outbox) fires when the provider has a receipt and the path's resolved
-  source has a record. It recomputes the resolver's result (the source
+  source has a record or predates the receipt. It recomputes the resolver's result (the source
   record, its narrowing, or no record) and requires the carrier's record to
   equal it byte for byte, and that the carrier has no v2 entry for that
   provider. The `BEFORE INSERT` fences cannot do this because records are
@@ -2572,7 +2578,7 @@ repository's complex-change review policy.
 
 | PR | Content | Mode |
 | --- | --- | --- |
-| 0. Generic precursor | Receipt table and provider-keyed readiness; switch-row and core-connection restrictions before a receipt; compatibility relation, reader and copy routines (inert); `authorize_subscription_personal_access` (0668's legacy-generation v1 branch replaced, not generalized) and the 0667 placement helper: a provider with an enabled cutover reads its v2 entry or compatibility record and requires the exact owner membership, the current generation, `personalConnectionsAllowed` and, for records, `connectionIds`; a disabled row grants nothing; until a provider's receipt both helpers return false for that provider (`xai`, `claude`), whose personal access is decided only by its v1 path. Fences 0608 and scheduled admission also compare v2, the Claude scheduled comparisons and `scheduled_claude_authority_changed` are added, the v1 liveness check switches at the receipt, and the compatibility deferred triggers are installed. PR 0 merges before any X1a or C1a call site, because 0667 and 0668 already accept any provider; provider-checked primaries; `video` operation kind; `model` and `credential_request` kinds and the unknown-outcome replay fence widened beyond Codex; wait reason `accepted_authority_unavailable`; provider-keyed `model.connected` lifecycle fact on core connection insert; provider-keyed cutover planner and auto-assignment if M4-A lacks them; adapter interface additions; provider-keyed report relation. | rolling |
+| 0. Generic precursor | Receipt table and provider-keyed readiness; switch-row and core-connection restrictions before a receipt; compatibility relation, reader and copy routines (inert); the server-owned `authority_inserted_at` marker on carrier tables; `authorize_subscription_personal_access` (0668's legacy-generation v1 branch replaced, not generalized) and the 0667 placement helper: a provider with an enabled cutover reads its v2 entry or compatibility record and requires the exact owner membership, the current generation, `personalConnectionsAllowed` and, for records, `connectionIds`; a disabled row grants nothing; until a provider's receipt both helpers return false for that provider (`xai`, `claude`), whose personal access is decided only by its v1 path. Fences 0608 and scheduled admission also compare v2, the Claude scheduled comparisons and `scheduled_claude_authority_changed` are added, the v1 liveness check switches at the receipt, and the compatibility deferred triggers are installed. PR 0 merges before any X1a or C1a call site, because 0667 and 0668 already accept any provider; provider-checked primaries; `video` operation kind; `model` and `credential_request` kinds and the unknown-outcome replay fence widened beyond Codex; wait reason `accepted_authority_unavailable`; provider-keyed `model.connected` lifecycle fact on core connection insert; provider-keyed cutover planner and auto-assignment if M4-A lacks them; adapter interface additions; provider-keyed report relation. | rolling |
 | X1a. SuperGrok adapter and chat placement | The xAI adapter and its conformance suite; chat placement, materialization, refresh, request custody (`model` / `credential_request` rows, including hosted-search continuations), session-title requests, readiness, `list_models`, funding and attribution on the core with `provider = xai`. | rolling |
 | X1b. SuperGrok settlement and waits | Failure settlement through adapter `classifyError`, finalization, waits, wakes, Temporal reconciliation by waiter id, compaction. | rolling |
 | X2a. SuperGrok media and probes | Image, video (funding, selection, admission, reconciliation), transcription, realtime, status and quota probes. | rolling |
@@ -2679,8 +2685,8 @@ guard keeps provider names out of shared modules.
 - Record writes: the app role cannot insert, update or delete records; a
   derived carrier committed without its record, or with a different one, is
   rejected at commit by the deferred trigger; a source the cutover missed
-  yields a waiting `{personal: [], shared_pool: none}` copy; `created_at`
-  cannot be backdated or changed; a mixed inbox batch of a narrowed
+  yields a waiting `{personal: [], shared_pool: none}` copy;
+  `authority_inserted_at` cannot be supplied or changed; a mixed inbox batch of a narrowed
   pre-cutover update and an unnarrowed post-cutover update is split.
 - Grants: after the cutover and a fresh `provision-roles`, runtime roles hold
   no write grant on the provider's legacy tables (posture contract).
