@@ -1,4 +1,4 @@
-// Migration 0706: the provider-neutral subscription-core routines are exact
+// Migration 0707: the provider-neutral subscription-core routines are exact
 // equivalents of the provider-named routines they replace for the runtime.
 // Every case runs on a database migrated by the NOSUPERUSER, NOBYPASSRLS
 // owner (so FORCE RLS and the owner-only policies apply inside the routines)
@@ -32,7 +32,7 @@ const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let database: OwnerMigratedTestDatabase | null = null;
 let client: DbClient | null = null;
 let appConnectionUrl = "";
-/** Runtime posture violations right after applying 0706 to a provisioned database, before provisioning again. */
+/** Runtime posture violations right after applying 0707 to a provisioned database, before provisioning again. */
 let unprovisionedPostureViolations: string[] | null = null;
 
 beforeAll(async () => {
@@ -41,9 +41,9 @@ beforeAll(async () => {
   if (!database) throw new Error("Real PostgreSQL is required");
   // A rolling migration must leave an older binary's runtime posture intact
   // until roles are provisioned again. Stage a provisioned database without
-  // 0706 (as a deployment is before it), apply 0706 alone, and evaluate the
+  // 0707 (as a deployment is before it), apply 0707 alone, and evaluate the
   // full runtime posture as the runtime role before provisioning again.
-  const neutral = "0706_subscription_core_neutral_routines.sql";
+  const neutral = "0707_subscription_core_neutral_routines.sql";
   const owner = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
@@ -54,7 +54,7 @@ beforeAll(async () => {
     await migrate(database.ownerUrl);
     const [applied] = await owner<{ count: number }[]>`
       select count(*)::int as count from schema_migrations where name = ${neutral}`;
-    if (applied?.count !== 1) throw new Error("0706 was not applied by the second migrate");
+    if (applied?.count !== 1) throw new Error("0707 was not applied by the second migrate");
   } finally {
     await owner.end();
   }
@@ -312,7 +312,7 @@ async function writerScenario(family: Family): Promise<unknown> {
   return normalize(steps, names);
 }
 
-describe("provider-neutral subscription-core routines (migration 0706)", () => {
+describe("provider-neutral subscription-core routines (migration 0707)", () => {
   test.skipIf(!realDb)(
     "run as the restricted application role over a NOBYPASSRLS owner, with safe posture",
     async () => {
@@ -834,7 +834,7 @@ describe("provider-neutral subscription-core routines (migration 0706)", () => {
   );
 
   test.skipIf(!realDb)(
-    "applied to a provisioned database, 0706 keeps the runtime posture clean before provisioning again",
+    "applied to a provisioned database, 0707 keeps the runtime posture clean before provisioning again",
     () => {
       expect(unprovisionedPostureViolations).toEqual([]);
     },
