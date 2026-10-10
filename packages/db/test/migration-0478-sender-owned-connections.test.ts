@@ -59,6 +59,8 @@ const withheldMigrations = [
   "0700_codex_ownerless_person_refresh.sql",
   // Replaces the scope guard on the shared connection table from withheld 0642.
   "0702_subscription_codex_access_editor.sql",
+  // Patches the connection capture from withheld 0264 after 0608 rewrote it.
+  "0704_inactive_inherited_personal_connections.sql",
   // Adds provider-neutral routines over the shared core tables from withheld 0642.
   "0705_subscription_core_neutral_routines.sql",
 ];
