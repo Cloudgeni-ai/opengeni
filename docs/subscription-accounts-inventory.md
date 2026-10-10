@@ -8,7 +8,11 @@
 > M4: the Codex turn-time and operation entry points on the shared core
 > (placement, leases, credential load and refresh, health, request
 > reservation, waiter cleanup; EP-T02, EP-T04 to EP-T06, EP-T09, EP-N
-> operations) now run in the provider-neutral modules under
+> operations), and the Codex administration entry points (workspace and
+> organization pools, allocator, extra credits, rename, primary, rotation,
+> source, connect, disconnect and catalog readiness behind the Codex
+> routes; Apps and reset credits stay Codex modules), now run in the
+> provider-neutral modules under
 > `packages/db/src/subscription-core/` through the Codex adapter
 > (`packages/db/src/subscription-core-codex-adapter.ts`); the Codex-named
 > exports remain as thin bindings. Module map:

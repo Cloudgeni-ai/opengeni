@@ -2262,9 +2262,21 @@ the provider as data. Shared modules live in `packages/db/src/subscription-core/
 `subscription-core-acceptance-authority.ts`). They take a
 `SubscriptionCoreProvider` binding (`subscription-core/provider.ts`): the
 provider's adapter, the SQL expression for its remote-compaction session lock
-(or null), and the error classes its callers expect. Each shared runtime is a
-factory memoized per binding (`subscriptionCoreTurns(provider)`,
-`subscriptionCoreOperations(provider)`, `subscriptionCoreRequests(provider)`).
+(or null), the error classes its callers expect, the settings column that
+holds its primary connection and an optional hook run when an organization
+allocator switch changes (Codex keeps its organization reach for workspaces
+created later there). The primary column is the `primary_setting_column` of
+the provider's SQL registry row until settings are keyed by provider: always
+`<provider>_primary_connection_id` (checked when the binding is used, as the
+SQL CHECK does), or null for a provider without a primary setting, whose
+rotation and source writes leave every primary column alone and whose primary
+writes are refused. A test checks that the TypeScript bindings and the SQL
+registry rows agree. A refused workspace source change carries a typed reason
+(`personal_workspace` or `forbidden`) so routes never parse its message. Each shared runtime is a factory memoized
+per binding (`subscriptionCoreTurns(provider)`,
+`subscriptionCoreOperations(provider)`, `subscriptionCoreRequests(provider)`);
+administration, connections and catalog are plain functions taking the
+binding.
 
 Adapter interface (`packages/subscriptions/src/adapter.ts`, pure types).
 `SubscriptionCoreAdapter` is what the shared runtime reads, next to the
@@ -2349,7 +2361,15 @@ shared settlement step they share) rather than by this extraction:
   `SubscriptionOperationKind` list image, realtime and transcription);
 - per-model cache facts and model-policy provider ids for an adapter that
   serves several vendors' models (`cacheFacts` and `modelPolicyProviderId`
-  are per adapter today).
+  are per adapter today);
+- connection administration for API-key connectors: the shared writers
+  (administration, connect and disconnect) and the neutral SQL routines only
+  manage `kind = 'subscription'` rows, and the shared connect requires an
+  upstream account id and person id to tell logins apart, which an API key
+  does not have. Placement and the serving catalog already read rows of
+  both kinds, so the API-key step either widens the writers' kind filter
+  with an identity rule for keys (for example a key fingerprint) or keeps
+  API-key rows out of the core until it does.
 
 Registry. `packages/db/src/subscription-core-providers.ts` is the only module,
 besides adapters, that enumerates providers. Its bindings are a private frozen
@@ -2385,18 +2405,29 @@ Module map (old Codex module, its new shared home, and what stays Codex):
 | `subscription-core-codex-operations.ts` | `subscription-core/operations.ts` | connection token resolver, candidate ordering, plan voice entitlement, usage endpoint fetch and decoding |
 | `subscription-core-codex-requests.ts` | `subscription-core/requests.ts` | Apps request reservation and settlement |
 | `subscription-core-codex-waiter-cleanup.ts` | `subscription-core/waiters.ts` | the Codex-named wrapper |
+| `subscription-core-codex-compat.ts` | `subscription-core/administration.ts` (cutover disposition, workspace and organization pools, personal rows, allocator, extra credits, rename, primary, rotation, workspace source) | the legacy Codex account projection (ChatGPT account id, reset credits, plan history, plan-entitlement exclusions), rotation shape, every exported name |
+| `subscription-core-codex-connections.ts` | `subscription-core/connections.ts` (connect personal and shared, disconnect, disconnect all) | the FedRAMP flag as provider state, every exported name |
+| `subscription-core-codex-catalog.ts` | `subscription-core/catalog.ts` (serving connections, model admission, readiness) | every exported name |
 | `subscription-core-placement-world.ts`, `-repository.ts`, `-acceptance-authority.ts` | same paths, provider-parameterized | Codex-named wrappers in `subscription-core-codex-bindings.ts` |
 | (new) | `subscription-core/provider.ts`, `subscription-core/errors.ts` | `subscription-core-codex-adapter.ts` (adapter and binding), `subscription-core-codex-errors.ts` (error classes) |
 
 Every `@opengeni/db` export that existed before this step keeps its name,
 signature and behaviour; callers outside `packages/db` are unchanged. The new
 shared runtimes are internal to `packages/db` (the package index exports none
-of the provider-parameterized entry points). Still Codex-named and deferred to
-the next extraction PR: the settings, allocator, rename, primary, rotation
-and source projections (`subscription-core-codex-compat.ts`), connect and
-disconnect (`subscription-core-codex-connections.ts`) and catalog readiness
-(`subscription-core-codex-catalog.ts`). Codex Apps
-(`subscription-core-codex-apps.ts`) and reset credits stay Codex modules.
+of the provider-parameterized entry points). Provider-derived texts keep
+Codex's bytes: wake reasons are `core_<provider>_<event>`, the extra-credits
+audit action `<provider>.extra_credits.updated`, the Apps-cleared audit action
+`<provider>_apps.cleared_on_disconnect` (only for a provider with the `apps`
+capability), the shared connect lock key
+`subscription-connect:<account>:<provider>:shared:<upstream account>`, and
+source-refusal texts use the adapter's display name. Extra credits are
+writable only for a provider with the `extraCredits` capability.
+Codex Apps (`subscription-core-codex-apps.ts`) and reset credits stay Codex
+modules, and so does the operation candidate list in
+`subscription-core-codex-operations.ts` and Codex's organization reach
+(`set_subscription_codex_reach` over `subscription_codex_auto_assignments`,
+0702), which the binding's allocator hook calls; a second provider with
+organization reach needs a provider-keyed reach table and routine first.
 Codex Apps request reservation uses the shared
 `reserveSubscriptionCoreDesignatedRequest` (source lock, then insert; holder
 `<operationKind>-request:<uuid>`), taken under the Codex Apps settings lock.

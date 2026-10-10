@@ -351,6 +351,7 @@ describe("PATCH /codex/source — core source refusal", () => {
     const mutation = spyOn(opengeniDb, "setSubscriptionCoreWorkspaceCodexSource").mockRejectedValue(
       new opengeniDb.SubscriptionCoreCodexSourceRefusedError(
         "Codex source cannot change in personal workspaces",
+        "personal_workspace",
       ),
     );
     restores.push(() => mutation.mockRestore());
@@ -372,5 +373,26 @@ describe("PATCH /codex/source — core source refusal", () => {
         status: 409,
       },
     });
+  });
+
+  test("maps a permission source refusal to 403", async () => {
+    const mutation = spyOn(opengeniDb, "setSubscriptionCoreWorkspaceCodexSource").mockRejectedValue(
+      new opengeniDb.SubscriptionCoreCodexSourceRefusedError(
+        "missing permission to change this workspace's Codex source",
+        "forbidden",
+      ),
+    );
+    restores.push(() => mutation.mockRestore());
+
+    const res = await app().request(`/v1/workspaces/${WS}/codex/source`, {
+      method: "PATCH",
+      headers: {
+        authorization: await bearer(["connections:write"]),
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ mode: "organization" }),
+    });
+
+    expect(res.status).toBe(403);
   });
 });

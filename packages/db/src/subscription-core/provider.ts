@@ -10,6 +10,7 @@
  */
 import type { SQL } from "drizzle-orm";
 import type { SubscriptionCoreAdapter } from "@opengeni/subscriptions";
+import type { Database } from "../database";
 import { subscriptionCoreProvider } from "../subscription-core-providers";
 import type { SubscriptionCoreErrors } from "./errors";
 
@@ -23,11 +24,41 @@ export type SubscriptionCoreProvider<Credential = unknown> = {
   readonly sessionCompactionLock: SQL | null;
   /** The errors the core raises to this provider's callers. */
   readonly errors: SubscriptionCoreErrors;
+  readonly settings: {
+    /**
+     * The `subscription_settings` column holding this provider's primary
+     * connection, as in the provider's SQL registry row, until settings are
+     * keyed by provider (design 5.1.2): `<provider>_primary_connection_id`,
+     * or null for a provider without a primary setting (its rotation and
+     * source writes still work; setting a primary is refused).
+     */
+    readonly primaryColumn: string | null;
+  };
+  /**
+   * Runs inside an organization-route allocator change of a shared
+   * connection, after the organization pool's copy changed (for example the
+   * provider's organization reach for workspaces created later), or null.
+   */
+  readonly organizationAllocatorChanged:
+    | ((tx: Database, accountId: string, connectionId: string) => Promise<void>)
+    | null;
 };
 
-/** The provider id the database stores for this provider's rows. */
+/**
+ * The provider id the database stores for this provider's rows. Throws for a
+ * binding of an unregistered provider, so every shared entry point that
+ * derives the id from its binding fails closed.
+ */
 export function subscriptionCoreProviderId(provider: SubscriptionCoreProvider): string {
-  return provider.adapter.provider;
+  const id = provider.adapter.provider;
+  subscriptionCoreProvider(id);
+  // The same rule as the SQL registry's primary-column CHECK: a binding can
+  // never point at another provider's column.
+  const column = provider.settings.primaryColumn;
+  if (column !== null && column !== `${id}_primary_connection_id`) {
+    throw new Error("A subscription-core binding names another provider's primary column");
+  }
+  return id;
 }
 
 /**
@@ -45,7 +76,7 @@ export function memoByProvider<Runtime>(
     if (existing) return existing;
     // Fail closed for a binding of an unregistered provider (compared by id,
     // so test bindings of a registered provider still run).
-    subscriptionCoreProvider(subscriptionCoreProviderId(provider));
+    subscriptionCoreProviderId(provider);
     const created = factory(provider);
     instances.set(provider, created);
     return created;

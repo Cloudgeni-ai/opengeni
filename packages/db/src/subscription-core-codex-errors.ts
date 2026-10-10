@@ -4,6 +4,8 @@
  * Codex binding supplies them to the core (`SubscriptionCoreProvider.errors`).
  */
 
+import type { SubscriptionCoreSourceRefusal } from "./subscription-core/errors";
+
 /** Raised when the turn no longer holds its core lease; dispatch must stop. */
 export class SubscriptionCoreCodexLeaseLostError extends Error {
   readonly code = "codex_credential_lease_lost";
@@ -51,5 +53,33 @@ export class SubscriptionCoreCodexOperationUnavailableError extends Error {
   constructor() {
     super("This Codex operation can no longer use its subscription");
     this.name = "SubscriptionCoreCodexOperationUnavailableError";
+  }
+}
+
+/** A workspace source change was refused (personal workspace or no permission). */
+export class SubscriptionCoreCodexSourceRefusedError extends Error {
+  readonly reason: SubscriptionCoreSourceRefusal;
+  /**
+   * `reason` is optional so the M3 one-argument constructor keeps working;
+   * without it the reason follows the M3 message (personal workspaces or
+   * not). The shared core always passes it. A default (not `?`) keeps the
+   * constructor's `length` at 1, as in M3.
+   */
+  constructor(
+    message: string,
+    reason: SubscriptionCoreSourceRefusal = message.includes("personal workspaces")
+      ? "personal_workspace"
+      : "forbidden",
+  ) {
+    super(message);
+    this.reason = reason;
+    this.name = "SubscriptionCoreCodexSourceRefusedError";
+  }
+}
+
+/** A workspace route named an organization-managed Codex account (legacy 409). */
+export class SubscriptionCoreCodexOrganizationManagedError extends Error {
+  constructor() {
+    super("organization Codex subscriptions are managed in Organization settings");
   }
 }

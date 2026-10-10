@@ -435,6 +435,37 @@ describe.skipIf(!realDb)("Codex readiness on the shared core after the cutover",
         })}::jsonb, 1, 1)`;
     const [cooled] = await serving(org, org.personalWorkspaceId, org.ownerSubjectId);
     expect(cooled?.cooledDownModelIds).toEqual([MODEL]);
+    // Expired cooldowns drop out and live ones are listed by model id.
+    await shared!.admin`
+      update subscription_connection_quota
+      set quota = ${shared!.admin.json({
+        windows: [],
+        modelCooldowns: {
+          "codex/zz-later": Date.now() + 3_600_000,
+          [MODEL]: Date.now() + 3_600_000,
+          "codex/expired": Date.now() - 60_000,
+          "codex/a-earlier": Date.now() + 60_000,
+        },
+        exhaustedUntil: null,
+        exhaustedKind: null,
+        source: "refusal",
+      })}::jsonb, revision = revision + 1
+      where connection_id = ${personal}::uuid`;
+    const [ordered] = await serving(org, org.personalWorkspaceId, org.ownerSubjectId);
+    expect(ordered?.cooledDownModelIds).toEqual(["codex/a-earlier", MODEL, "codex/zz-later"]);
+    // Once every cooldown has passed, none is listed.
+    await shared!.admin`
+      update subscription_connection_quota
+      set quota = ${shared!.admin.json({
+        windows: [],
+        modelCooldowns: { [MODEL]: Date.now() - 1 },
+        exhaustedUntil: null,
+        exhaustedKind: null,
+        source: "refusal",
+      })}::jsonb, revision = revision + 1
+      where connection_id = ${personal}::uuid`;
+    const [expired] = await serving(org, org.personalWorkspaceId, org.ownerSubjectId);
+    expect(expired?.cooledDownModelIds).toEqual([]);
   });
 
   test("a session's current Codex selection comes from its core lease or explicit choice", async () => {

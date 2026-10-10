@@ -834,7 +834,10 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
     ).toBe("automatic");
     await expect(
       setSubscriptionCoreWorkspaceCodexSource(client!.db, { ...stranger, mode: "workspace" }),
-    ).rejects.toThrow("missing permission");
+    ).rejects.toMatchObject({
+      message: expect.stringContaining("missing permission"),
+      reason: "forbidden",
+    });
     await expect(
       setSubscriptionCoreWorkspaceCodexSource(client!.db, {
         accountId: org.accountId,
@@ -842,7 +845,10 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
         subjectId: org.ownerSubjectId,
         mode: "workspace",
       }),
-    ).rejects.toThrow("personal workspaces");
+    ).rejects.toMatchObject({
+      message: expect.stringContaining("personal workspaces"),
+      reason: "personal_workspace",
+    });
 
     // Allocator: legacy optimistic concurrency; strangers see nothing.
     expect(

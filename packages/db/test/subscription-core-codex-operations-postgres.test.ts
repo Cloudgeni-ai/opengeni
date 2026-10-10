@@ -31,6 +31,8 @@ import {
   type SubscriptionCoreTurnIdentity,
 } from "../src";
 import { rawRows } from "../src/database";
+import { subscriptionCoreCodexProvider } from "../src/subscription-core-codex-adapter";
+import { subscriptionCoreOperations } from "../src/subscription-core/operations";
 import { encryptEnvironmentValue } from "../src/environment-crypto";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
@@ -817,6 +819,62 @@ describe.skipIf(!realDb)("Codex operations on the shared core (M3 PR 2c)", () =>
       }),
     ).toBeNull();
     expect(await releaseSubscriptionCoreCodexOperationLease(client!.db, scope, lease)).toBe(true);
+  });
+
+  test("a connection credential that never renews is marked needs-relogin, only under an enabled cutover", async () => {
+    const org = await organization();
+    const connectionId = await sharedConnection(org, "ops-non-renewing", {
+      expiresAt: new Date(Date.now() - 60_000),
+    });
+    const scope = workspaceScope(org);
+    // A binding of the registered provider whose adapter declares no refresh.
+    const codex = subscriptionCoreCodexProvider();
+    const operations = subscriptionCoreOperations({
+      ...codex,
+      adapter: { ...codex.adapter, refresh: null },
+    });
+    const statusOf = async () =>
+      (
+        await shared!.admin<{ status: string; last_error: string | null }[]>`
+          select status, last_error from subscription_connections where id = ${connectionId}::uuid`
+      )[0];
+    // Without an enabled cutover nothing is written.
+    expect(
+      (
+        await operations.refreshSubscriptionCoreConnectionCredential(
+          client!.db,
+          settings,
+          scope,
+          connectionId,
+          null,
+          1,
+        )
+      ).kind,
+    ).toBe("refused");
+    expect(await statusOf()).toEqual({ status: "active", last_error: null });
+    await setCutover(org.accountId, true);
+    const message = codex.adapter.reloginText("");
+    expect(
+      await operations.refreshSubscriptionCoreConnectionCredential(
+        client!.db,
+        settings,
+        scope,
+        connectionId,
+        null,
+        2,
+      ),
+    ).toEqual({ kind: "superseded" });
+    expect(
+      await operations.refreshSubscriptionCoreConnectionCredential(
+        client!.db,
+        settings,
+        scope,
+        connectionId,
+        null,
+        1,
+      ),
+    ).toEqual({ kind: "relogin", message, marked: true });
+    expect(await statusOf()).toEqual({ status: "needs_relogin", last_error: message });
   });
 
   test("realtime leases are session-bound: owner context for owned sessions, shared-only for ownerless ones", async () => {
