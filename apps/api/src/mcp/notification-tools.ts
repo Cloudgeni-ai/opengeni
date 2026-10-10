@@ -5,6 +5,10 @@
 // notifications and, as the person allows, tidy others' or look after the whole
 // inbox (see, snooze and dismiss any item) — but never answer a question or
 // decide an approval on the person's behalf.
+//
+// An agent can also notify another member of its workspace, when that member
+// allows other people's agents to (per workspace, off by default). It shows
+// them who it came from: the person the session works for.
 import {
   NOTIFICATION_BODY_MAX_CHARS,
   NOTIFICATION_FACT_LABEL_MAX_CHARS,
@@ -22,10 +26,14 @@ import type { ApiRouteDeps } from "@opengeni/core";
 import {
   dismissInboxNotification,
   getInboxTidyPolicy,
+  getManagedUserByEmail,
+  getManagedUserProfilesByIds,
+  getMemberNotificationsAllowed,
   getSession,
   getSessionInboxRecipient,
   getSessionTitles,
   listInboxItems,
+  listWorkspaceMembers,
   updateInboxItemAttention,
   type InboxItemRow,
 } from "@opengeni/db";
@@ -83,6 +91,59 @@ async function isSelfOrAncestor(
   return false;
 }
 
+type Member = { subjectId: string; label: string };
+
+/**
+ * The workspace member a `recipient` names: their subject id, their email or
+ * their member name (case-insensitive). Null when it names nobody in the
+ * workspace, or more than one person.
+ */
+async function resolveMember(
+  deps: ApiRouteDeps,
+  workspaceId: string,
+  recipient: string,
+): Promise<Member | null> {
+  const members = await listWorkspaceMembers(deps.db, workspaceId);
+  const wanted = recipient.trim();
+  const lowered = wanted.toLowerCase();
+  const toMember = (member: (typeof members)[number]): Member => ({
+    subjectId: member.subjectId,
+    label: member.subjectLabel?.trim() || member.subjectId,
+  });
+  const byId = members.find((member) => member.subjectId === wanted);
+  if (byId) return toMember(byId);
+  if (wanted.includes("@")) {
+    const userId = await getManagedUserByEmail(deps.db, wanted).catch(() => null);
+    const byEmail = userId
+      ? members.find((member) => member.subjectId === `user:${userId}`)
+      : members.find((member) => member.subjectLabel?.trim().toLowerCase() === lowered);
+    if (byEmail) return toMember(byEmail);
+  }
+  const byName = members.filter((member) => member.subjectLabel?.trim().toLowerCase() === lowered);
+  return byName.length === 1 ? toMember(byName[0]!) : null;
+}
+
+/** How a person is named to other members: their member name, else their profile. */
+async function personLabel(
+  deps: ApiRouteDeps,
+  workspaceId: string,
+  subjectId: string,
+): Promise<string> {
+  const member = (await listWorkspaceMembers(deps.db, workspaceId)).find(
+    (each) => each.subjectId === subjectId,
+  );
+  const named = member?.subjectLabel?.trim();
+  if (named) return named.slice(0, 200);
+  if (subjectId.startsWith("user:")) {
+    const [profile] = await getManagedUserProfilesByIds(deps.db, [subjectId.slice(5)]).catch(
+      () => [],
+    );
+    const fromProfile = profile?.name?.trim() || profile?.email?.trim();
+    if (fromProfile) return fromProfile.slice(0, 200);
+  }
+  return "A teammate";
+}
+
 export function registerNotificationTools(input: RegisterNotificationToolsInput): void {
   const { server, deps, grant, sessionId, authorize, attempt, json } = input;
 
@@ -111,6 +172,7 @@ export function registerNotificationTools(input: RegisterNotificationToolsInput)
         "Use it sparingly, for something they would want to know while away: a long task finished, a result is ready, or you are blocked on them. Questions and approvals already reach them; don't duplicate those.",
         "Write it like a good phone notification. title: what happened, a few words ('Release 2.4 is live'). subtitle (optional): what it's about ('Billing service'). message (optional): one or two short sentences or up to four '- ' bullets; **bold**, `code` and [links](https://…) render in the inbox and become plain text on the lock screen. facts (optional): up to four short label/value pairs for the numbers that matter ('Tests' / '412 passed'). link (optional): one https place outside the session worth opening, such as a pull request or dashboard. Keep secrets out.",
         "Give each notification a stable key: posting the same key again updates it in place without a new alert (for progress such as '7 of 10 done'). urgency time_sensitive breaks through Focus on their phone; use it only for what cannot wait. Withdraw it with notification_withdraw when it no longer applies.",
+        "recipient (optional): notify another member of this workspace instead, by their email or name. They see who it came from (the person this session works for). It only reaches people who allow other members' agents to notify them; otherwise you get an error saying so. Don't retry then: tell the person you work for.",
       ].join(" "),
       inputSchema: {
         title: z.string().trim().min(1).max(NOTIFICATION_TITLE_MAX_CHARS),
@@ -137,17 +199,54 @@ export function registerNotificationTools(input: RegisterNotificationToolsInput)
           .optional()
           .describe("Stable id for this notification, e.g. 'migration' or 'report-ready'."),
         urgency: z.enum(["normal", "time_sensitive"]).default("normal"),
+        recipient: z
+          .string()
+          .trim()
+          .min(1)
+          .max(320)
+          .optional()
+          .describe(
+            "Another workspace member to notify, by email or name. Omit to notify the person you work for.",
+          ),
       },
     },
-    async ({ title, subtitle, message, facts, link, key, urgency }) => {
+    async ({ title, subtitle, message, facts, link, key, urgency, recipient }) => {
       await authorize();
       const resolvedKey = NotificationKey.parse(key ?? `n-${crypto.randomUUID().slice(0, 8)}`);
       const owner = await sessionOwner(deps, grant.workspaceId, sessionId);
-      const existing = owner
+      let member: Member | null = null;
+      if (recipient) {
+        // Only a session that works for a person can speak for them to others.
+        if (!owner) {
+          throw new Error(
+            "This session works for no person, so it cannot notify other members of the workspace.",
+          );
+        }
+        member = await resolveMember(deps, grant.workspaceId, recipient);
+        if (!member) {
+          throw new Error(
+            `${recipient} is not a member of this workspace (or the name matches more than one member). Use their email.`,
+          );
+        }
+        if (member.subjectId === owner.subjectId) {
+          member = null;
+        } else if (
+          !(await getMemberNotificationsAllowed(deps.db, {
+            workspaceId: grant.workspaceId,
+            subjectId: member.subjectId,
+          }))
+        ) {
+          throw new Error(
+            `${member.label} hasn't allowed other people's agents to notify them in this workspace. They can turn it on in their inbox settings; until then, tell the person you work for instead.`,
+          );
+        }
+      }
+      const target = member?.subjectId ?? owner?.subjectId ?? null;
+      const existing = target
         ? (
             await listInboxItems(deps.db, {
               accountId: grant.accountId,
-              subjectId: owner.subjectId,
+              subjectId: target,
             })
           ).find(
             (item) =>
@@ -165,6 +264,15 @@ export function registerNotificationTools(input: RegisterNotificationToolsInput)
         ...(link ? { link } : {}),
         urgency,
         replaced: Boolean(existing),
+        ...(member && owner
+          ? {
+              recipientSubjectId: member.subjectId,
+              sender: {
+                subjectId: owner.subjectId,
+                label: await personLabel(deps, grant.workspaceId, owner.subjectId),
+              },
+            }
+          : {}),
       });
       if (!parsed.success) {
         const issue = parsed.error.issues[0];
@@ -178,7 +286,8 @@ export function registerNotificationTools(input: RegisterNotificationToolsInput)
         ok: true,
         key: resolvedKey,
         // No person owns this session (a key or service started it): nobody is notified.
-        delivered: owner !== null,
+        delivered: target !== null,
+        ...(member ? { recipient: member.label } : {}),
         updatedInPlace: Boolean(existing),
       });
     },
@@ -188,13 +297,23 @@ export function registerNotificationTools(input: RegisterNotificationToolsInput)
     "notification_withdraw",
     {
       description:
-        "Withdraw a notification this session posted (by its key) once it no longer applies, for example when you are no longer blocked. It leaves the person's inbox and their phone.",
-      inputSchema: { key: z.string().min(1).max(120) },
+        "Withdraw a notification this session posted (by its key) once it no longer applies, for example when you are no longer blocked. It leaves the inbox and phone of everyone it reached; pass recipient to withdraw only the copy sent to that member.",
+      inputSchema: {
+        key: z.string().min(1).max(120),
+        recipient: z.string().trim().min(1).max(320).optional(),
+      },
     },
-    async ({ key }) => {
+    async ({ key, recipient }) => {
       await authorize();
+      let recipientSubjectId: string | undefined;
+      if (recipient) {
+        const member = await resolveMember(deps, grant.workspaceId, recipient);
+        // Someone who has since left can still have their copy withdrawn by id.
+        recipientSubjectId = member?.subjectId ?? recipient;
+      }
       const payload = SessionNotificationWithdrawnPayload.parse({
         key: NotificationKey.parse(key),
+        ...(recipientSubjectId ? { recipientSubjectId } : {}),
       });
       await appendOwn([{ type: "session.notification.withdrawn", payload }]);
       return json({ ok: true, key: payload.key });
@@ -265,6 +384,8 @@ export function registerNotificationTools(input: RegisterNotificationToolsInput)
               payload: SessionNotificationWithdrawnPayload.parse({
                 key: item.sourceKey,
                 ...(item.sessionId === sessionId ? {} : { bySessionId: sessionId }),
+                // Only this person's copy: the same key may also have reached others.
+                recipientSubjectId: owner.subjectId,
               }),
             },
           ] as Parameters<typeof appendAndPublishEvents>[4]);

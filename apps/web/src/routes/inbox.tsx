@@ -232,6 +232,8 @@ function InboxRow(props: {
   actions?: ReactNode;
   menu: ReactNode;
   onOpen: () => void;
+  /** False when the person can't open the session (another member's private one). */
+  canOpen?: boolean;
 }) {
   return (
     <li className="relative min-w-0">
@@ -244,7 +246,7 @@ function InboxRow(props: {
         <button
           type="button"
           data-row-open
-          aria-label={`${props.title}. Open session`}
+          aria-label={props.canOpen === false ? props.title : `${props.title}. Open session`}
           className="absolute inset-0 z-0 cursor-pointer rounded-[10px] outline-none"
           onClick={props.onOpen}
         />
@@ -381,6 +383,7 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
       );
       void context.client.updateInboxItem(item.id, { seen: true }).catch(() => undefined);
     }
+    if (item.sessionAvailable === false) return;
     void navigate({
       to: "/workspaces/$workspaceId/sessions/$sessionId",
       params: { workspaceId: item.workspaceId, sessionId: item.sessionId },
@@ -475,6 +478,8 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
   // Where it comes from. The kind word is left out where the row already says it.
   const meta = (item: InboxItem): string[] => {
     const parts: string[] = [];
+    // Another member's agent sent it: say who, first.
+    if (item.sender) parts.push(`From ${item.sender.label}`);
     if (item.kind === "notification" && item.urgency === "time_sensitive") {
       parts.push("Time-sensitive");
     }
@@ -482,7 +487,7 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
       parts.push(KIND_WORD[item.kind]);
     }
     if (item.kind === "approval" && !item.body) parts.push(KIND_WORD.approval);
-    parts.push(item.sessionTitle ?? "Untitled session");
+    if (item.sessionAvailable !== false) parts.push(item.sessionTitle ?? "Untitled session");
     if (scope === "all" && workspacesWithItems.size > 1) {
       const name = workspaceNames.get(item.workspaceId);
       if (name) parts.push(name);
@@ -554,10 +559,15 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
         when={item.updatedAt}
         actions={control(item)}
         onOpen={() => openSession(item)}
+        canOpen={item.sessionAvailable !== false}
         menu={
           <>
-            <DropdownMenuItem onSelect={() => openSession(item)}>Open session</DropdownMenuItem>
-            <DropdownMenuSeparator />
+            {item.sessionAvailable !== false ? (
+              <>
+                <DropdownMenuItem onSelect={() => openSession(item)}>Open session</DropdownMenuItem>
+                <DropdownMenuSeparator />
+              </>
+            ) : null}
             {isSnoozed(item, now) ? (
               <DropdownMenuItem onSelect={() => snooze(item, null)}>Unsnooze</DropdownMenuItem>
             ) : (
@@ -678,7 +688,12 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
           ) : null}
           <SectionStack>
             {body}
-            {personal ? <InboxSettingsSections /> : null}
+            {personal ? (
+              <InboxSettingsSections
+                workspaceId={workspaceId}
+                workspaceName={workspaceNames.get(workspaceId) ?? "this workspace"}
+              />
+            ) : null}
           </SectionStack>
         </div>
       </div>
@@ -700,10 +715,17 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
  * session. The tidy policy decides which agents may remove items; answering
  * and approving stay with the person either way.
  */
-function InboxSettingsSections() {
+function InboxSettingsSections({
+  workspaceId,
+  workspaceName,
+}: {
+  workspaceId: string;
+  workspaceName: string;
+}) {
   const context = useAppContext();
   const [settings, setSettings] = useState<InboxSettings | null>(null);
   const [saving, setSaving] = useState(false);
+  const members = useMemberNotifications(workspaceId);
   useEffect(() => {
     let current = true;
     void context.client
@@ -767,6 +789,19 @@ function InboxSettingsSections() {
                 />
               }
             />
+            {members.shared ? (
+              <SettingRow
+                label="From teammates' agents"
+                description={`Let agents working for other members of ${workspaceName} notify you. You'll see who each one is from.`}
+                control={
+                  <Switch
+                    checked={members.allowOthers ?? false}
+                    pending={members.saving || members.allowOthers === null}
+                    onCheckedChange={(checked) => void members.change(checked)}
+                  />
+                }
+              />
+            ) : null}
           </SettingRowGroup>
         )}
       </Section>
@@ -807,6 +842,60 @@ function InboxSettingsSections() {
       </Section>
     </>
   );
+}
+
+/**
+ * The person's own choice, per workspace, to let other members' agents notify
+ * them (off by default). Only offered where there are other members to hear from.
+ */
+function useMemberNotifications(workspaceId: string) {
+  const context = useAppContext();
+  const [state, setState] = useState<{
+    workspaceId: string;
+    shared: boolean;
+    allowOthers: boolean | null;
+  } | null>(null);
+  const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    let current = true;
+    void Promise.all([
+      context.client
+        .listWorkspaceMembers(workspaceId)
+        .then((members) => members.length > 1)
+        // Unknown membership: still offer the setting.
+        .catch(() => true),
+      context.client
+        .getMemberNotifications(workspaceId)
+        .then((setting) => setting.allowOthers)
+        .catch(() => null),
+    ]).then(([shared, allowOthers]) => {
+      if (current) setState({ workspaceId, shared: shared && allowOthers !== null, allowOthers });
+    });
+    return () => {
+      current = false;
+    };
+  }, [context.client, workspaceId]);
+  const loaded = state?.workspaceId === workspaceId ? state : null;
+  const change = async (allowOthers: boolean) => {
+    if (!loaded) return;
+    setState({ ...loaded, allowOthers });
+    setSaving(true);
+    try {
+      const saved = await context.client.updateMemberNotifications(workspaceId, { allowOthers });
+      setState({ ...loaded, allowOthers: saved.allowOthers });
+    } catch (error) {
+      setState(loaded);
+      toast.error(userErrorText(error, "Couldn't save that. Try again."));
+    } finally {
+      setSaving(false);
+    }
+  };
+  return {
+    shared: loaded?.shared ?? false,
+    allowOthers: loaded?.allowOthers ?? null,
+    saving,
+    change,
+  };
 }
 
 /** Answer a question without leaving the inbox: the same form as in the session. */

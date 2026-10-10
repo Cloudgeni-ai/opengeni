@@ -5,8 +5,10 @@
 import {
   InboxSettings,
   ListInboxResponse,
+  MemberNotificationsSetting,
   SessionInboxMute,
   UpdateInboxItemRequest,
+  type AccessGrant,
   type AccessContext,
   type InboxItem,
 } from "@opengeni/contracts";
@@ -23,13 +25,16 @@ import {
 import {
   getInboxItem,
   getInboxSettings,
+  getMemberNotificationsAllowed,
   getSessionRepliesMuted,
   getSessionTitles,
   listInboxItems,
   listWorkspacesForSubject,
   setInboxSettings,
+  setMemberNotificationsAllowed,
   setSessionRepliesMuted,
   updateInboxItemAttention,
+  type InboxItemRow,
 } from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
@@ -64,19 +69,64 @@ async function readableWorkspaces(
   c: Context,
   deps: ApiRouteDeps,
   workspaceIds: Iterable<string>,
-): Promise<Set<string>> {
-  const readable = new Set<string>();
+): Promise<Map<string, AccessGrant>> {
+  const readable = new Map<string, AccessGrant>();
   await Promise.all(
     [...new Set(workspaceIds)].map(async (workspaceId) => {
       try {
-        await requireAccessGrant(c, deps, workspaceId, "sessions:read");
-        readable.add(workspaceId);
+        readable.set(workspaceId, await requireAccessGrant(c, deps, workspaceId, "sessions:read"));
       } catch {
         // No longer reachable: its items stay hidden until access returns.
       }
     }),
   );
   return readable;
+}
+
+/** Whether the person may open this session; any refusal or failure counts as no. */
+async function sessionReadable(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  sessionId: string,
+): Promise<boolean> {
+  try {
+    await requireSessionAuthorization(deps, grant, {
+      sessionId,
+      operation: "session.read",
+      surface: "http",
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The items another member's agent sent from a session the person cannot
+ * open (such as that member's private session). Those show no session: no
+ * title and no link. The person's own items are never checked here.
+ */
+export async function itemsWithUnavailableSession(
+  rows: readonly InboxItemRow[],
+  canRead: (row: InboxItemRow) => Promise<boolean>,
+): Promise<Set<string>> {
+  const unavailable = new Set<string>();
+  // One at a time: each check opens nested RLS reads (few items have a sender).
+  for (const row of rows) {
+    if (row.sender && !(await canRead(row))) unavailable.add(row.id);
+  }
+  return unavailable;
+}
+
+/** An inbox row as the person sees it. */
+export function presentInboxItem(
+  row: InboxItemRow,
+  sessionTitle: string | null,
+  sessionAvailable: boolean,
+): InboxItem {
+  return sessionAvailable
+    ? { ...row, sessionTitle, sessionAvailable: true }
+    : { ...row, sessionTitle: null, eventSequence: null, sessionAvailable: false };
 }
 
 function isNeedsYou(kind: InboxItem["kind"]): boolean {
@@ -113,10 +163,15 @@ export function registerInboxRoutes(app: Hono, deps: ApiRouteDeps): void {
       rows.map((row) => row.workspaceId),
     );
     const visible = rows.filter((row) => readable.has(row.workspaceId));
+    const unavailable = await itemsWithUnavailableSession(visible, (row) =>
+      sessionReadable(deps, readable.get(row.workspaceId)!, row.sessionId),
+    );
     const titles = new Map<string, string | null>();
     await Promise.all(
-      [...readable].map(async (workspaceId) => {
-        const ids = visible.filter((row) => row.workspaceId === workspaceId);
+      [...readable.keys()].map(async (workspaceId) => {
+        const ids = visible.filter(
+          (row) => row.workspaceId === workspaceId && !unavailable.has(row.id),
+        );
         const found = await getSessionTitles(
           deps.db,
           workspaceId,
@@ -127,7 +182,9 @@ export function registerInboxRoutes(app: Hono, deps: ApiRouteDeps): void {
     );
     const now = Date.now();
     const items: InboxItem[] = visible
-      .map((row) => ({ ...row, sessionTitle: titles.get(row.sessionId) ?? null }))
+      .map((row) =>
+        presentInboxItem(row, titles.get(row.sessionId) ?? null, !unavailable.has(row.id)),
+      )
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
     const awake = items.filter(
       (item) => item.snoozedUntil === null || Date.parse(item.snoozedUntil) <= now,
@@ -204,6 +261,42 @@ export function registerInboxRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
     }
     return c.json(InboxSettings.parse(settings));
+  });
+
+  // Whether other members' agents may notify this person in one workspace.
+  // Each person decides for themselves; off by default.
+  app.get("/v1/workspaces/:workspaceId/inbox/member-notifications", async (c) => {
+    const context = await requireAccessContext(c, deps);
+    const subjectId = requirePerson(context);
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    c.header("cache-control", "private, no-store");
+    return c.json(
+      MemberNotificationsSetting.parse({
+        allowOthers: await getMemberNotificationsAllowed(deps.db, { workspaceId, subjectId }),
+      }),
+    );
+  });
+
+  app.put("/v1/workspaces/:workspaceId/inbox/member-notifications", async (c) => {
+    const context = await requireAccessContext(c, deps);
+    const subjectId = requirePerson(context);
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    const parsed = MemberNotificationsSetting.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: "Invalid member notification setting" });
+    }
+    return c.json(
+      MemberNotificationsSetting.parse({
+        allowOthers: await setMemberNotificationsAllowed(deps.db, {
+          accountId: grant.accountId,
+          workspaceId,
+          subjectId,
+          allowed: parsed.data.allowOthers,
+        }),
+      }),
+    );
   });
 
   // The person's own mute on one session: its replies stop reaching their

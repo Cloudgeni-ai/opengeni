@@ -27,6 +27,8 @@ export type InboxItemRow = {
   createdAt: string;
   updatedAt: string;
   resolvedAt: string | null;
+  /** Another member whose agent sent this notification (0708); null for the person's own. */
+  sender: { subjectId: string; label: string } | null;
 };
 
 type InboxItemRecord = {
@@ -49,6 +51,8 @@ type InboxItemRecord = {
   created_at: Date | string;
   updated_at: Date | string;
   resolved_at: Date | string | null;
+  sender_subject_id: string | null;
+  sender_label: string | null;
 };
 
 function iso(value: Date | string): string {
@@ -101,7 +105,7 @@ export async function listInboxItems(
 ): Promise<InboxItemRow[]> {
   const rows = await rawRows<InboxItemRecord>(
     db,
-    sql`select * from opengeni_private.list_inbox_items_v2(
+    sql`select * from opengeni_private.list_inbox_items_v3(
       ${input.accountId}::uuid, ${input.subjectId}::text
     )`,
   );
@@ -125,6 +129,9 @@ export async function listInboxItems(
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at),
     resolvedAt: isoOrNull(row.resolved_at),
+    sender: row.sender_subject_id
+      ? { subjectId: row.sender_subject_id, label: row.sender_label ?? "A teammate" }
+      : null,
   }));
 }
 
@@ -407,6 +414,38 @@ async function sessionAccount(
       .limit(1);
     return row?.accountId ?? null;
   });
+}
+
+/**
+ * Whether this person lets other members' agents notify them in this
+ * workspace (0708). Off unless they turned it on.
+ */
+export async function getMemberNotificationsAllowed(
+  db: Database,
+  input: { workspaceId: string; subjectId: string },
+): Promise<boolean> {
+  const [row] = await rawRows<{ allowed: boolean }>(
+    db,
+    sql`select opengeni_private.member_notifications_allowed_v1(
+      ${input.workspaceId}::uuid, ${input.subjectId}::text
+    ) as allowed`,
+  );
+  return row?.allowed ?? false;
+}
+
+/** Turn other members' agent notifications on or off for this person in this workspace. */
+export async function setMemberNotificationsAllowed(
+  db: Database,
+  input: { accountId: string; workspaceId: string; subjectId: string; allowed: boolean },
+): Promise<boolean> {
+  const [row] = await rawRows<{ allowed: boolean }>(
+    db,
+    sql`select opengeni_private.set_member_notifications_allowed_v1(
+      ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.subjectId}::text,
+      ${input.allowed}::boolean
+    ) as allowed`,
+  );
+  return row?.allowed ?? input.allowed;
 }
 
 /**

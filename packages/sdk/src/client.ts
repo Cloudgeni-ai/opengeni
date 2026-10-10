@@ -332,6 +332,7 @@ import type {
   NativeAppToken,
   InboxItem,
   InboxSettings,
+  MemberNotificationsSetting,
   SessionInboxMute,
   ListInboxResponse,
   UpdateInboxItemInput,
@@ -9130,6 +9131,26 @@ export class OpenGeniClient {
 
   async updateInboxSettings(input: InboxSettings): Promise<InboxSettings> {
     return await this.requestJson<InboxSettings>("PUT", "/v1/inbox/settings", input);
+  }
+
+  /** Whether other members' agents may notify the signed-in person in this workspace. */
+  async getMemberNotifications(workspaceId: string): Promise<MemberNotificationsSetting> {
+    return await this.requestJson<MemberNotificationsSetting>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/inbox/member-notifications`,
+    );
+  }
+
+  /** Let other members' agents notify the signed-in person in this workspace, or stop them. */
+  async updateMemberNotifications(
+    workspaceId: string,
+    input: MemberNotificationsSetting,
+  ): Promise<MemberNotificationsSetting> {
+    return await this.requestJson<MemberNotificationsSetting>(
+      "PUT",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/inbox/member-notifications`,
+      input,
+    );
   }
 
   /** Whether the signed-in person muted this session's replies. */

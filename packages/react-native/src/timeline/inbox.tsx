@@ -523,6 +523,8 @@ export function NativeInboxList({
       );
       void client.updateInboxItem(item.id, { seen: true }).catch(() => undefined);
     }
+    // Another member's private session would not open for this person.
+    if (item.sessionAvailable === false) return;
     onOpenSession(item);
   };
 
@@ -648,6 +650,8 @@ export function NativeInboxList({
   // Where it comes from; the time sits apart so a long session title never hides it.
   const meta = (item: InboxItem): string => {
     const parts: string[] = [];
+    // Another member's agent sent it: say who, first.
+    if (item.sender) parts.push(`From ${item.sender.label}`);
     if (item.kind === "notification" && item.urgency === "time_sensitive") {
       parts.push("Time-sensitive");
     }
@@ -655,7 +659,7 @@ export function NativeInboxList({
     if (item.kind === "goal_paused") parts.push("Goal paused");
     if (item.kind === "reply") parts.push("Reply");
     if (item.kind === "approval" && !item.body) parts.push("Approval");
-    parts.push(item.sessionTitle ?? "Untitled session");
+    if (item.sessionAvailable !== false) parts.push(item.sessionTitle ?? "Untitled session");
     const workspace = spansWorkspaces ? workspaceNames?.get(item.workspaceId) : undefined;
     if (workspace) parts.push(workspace);
     if (item.kind === "question" && item.body) parts.push(item.body);
