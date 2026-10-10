@@ -4,6 +4,8 @@
  * Codex binding supplies them to the core (`SubscriptionCoreProvider.errors`).
  */
 
+import type { SubscriptionCoreSourceRefusal } from "./subscription-core/errors";
+
 /** Raised when the turn no longer holds its core lease; dispatch must stop. */
 export class SubscriptionCoreCodexLeaseLostError extends Error {
   readonly code = "codex_credential_lease_lost";
@@ -56,7 +58,10 @@ export class SubscriptionCoreCodexOperationUnavailableError extends Error {
 
 /** A workspace source change was refused (personal workspace or no permission). */
 export class SubscriptionCoreCodexSourceRefusedError extends Error {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    readonly reason: SubscriptionCoreSourceRefusal,
+  ) {
     super(message);
     this.name = "SubscriptionCoreCodexSourceRefusedError";
   }

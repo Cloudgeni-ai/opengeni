@@ -266,7 +266,7 @@ export async function coreCodexSetSource(
     result = await setSubscriptionCoreWorkspaceCodexSource(deps.db, input);
   } catch (error) {
     if (error instanceof SubscriptionCoreCodexSourceRefusedError) {
-      throw new HTTPException(error.message.includes("personal workspaces") ? 409 : 403, {
+      throw new HTTPException(error.reason === "personal_workspace" ? 409 : 403, {
         message: error.message,
       });
     }

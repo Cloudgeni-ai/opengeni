@@ -162,7 +162,8 @@ export function subscriptionCoreCodexProvider(
       sourceDisconnected: () => new SubscriptionCoreCodexSourceDisconnectedError(),
       requestOutcomeUnknown: () => new SubscriptionCoreCodexRequestOutcomeUnknownError(),
       operationUnavailable: () => new SubscriptionCoreCodexOperationUnavailableError(),
-      sourceRefused: (message) => new SubscriptionCoreCodexSourceRefusedError(message),
+      sourceRefused: (reason, message) =>
+        new SubscriptionCoreCodexSourceRefusedError(message, reason),
       organizationManaged: () => new SubscriptionCoreCodexOrganizationManagedError(),
     },
     settings: { primaryColumn: "codex_primary_connection_id" },

@@ -146,8 +146,15 @@ export function subscriptionCoreProviderSettings(
   };
 }
 
+/** The provider's primary column, or null for a provider without a primary setting. */
 function primaryColumn(provider: SubscriptionCoreProvider) {
-  return sql.identifier(provider.settings.primaryColumn);
+  const column = provider.settings.primaryColumn;
+  return column === null ? null : sql.identifier(column);
+}
+
+/** The primary column as a select expression (NULL for a provider without one). */
+function primarySelect(provider: SubscriptionCoreProvider) {
+  return primaryColumn(provider) ?? sql`null`;
 }
 
 export async function readSubscriptionCorePrimaryConnectionId(
@@ -158,7 +165,7 @@ export async function readSubscriptionCorePrimaryConnectionId(
 ): Promise<string | null> {
   const [row] = await rawRows<{ primary_id: string | null }>(
     tx,
-    sql`select ${primaryColumn(provider)}::text as primary_id from subscription_settings
+    sql`select ${primarySelect(provider)}::text as primary_id from subscription_settings
       where account_id = ${accountId}::uuid
         and workspace_id is not distinct from ${workspaceId}::uuid`,
   );
@@ -394,7 +401,7 @@ export async function readSubscriptionCoreOrganizationPool(
       const [org] = await rawRows<{ mode: string | null; primary_id: string | null }>(
         tx,
         sql`select rotation->(${providerId}::text)->>'mode' as mode,
-          ${primaryColumn(provider)}::text as primary_id
+          ${primarySelect(provider)}::text as primary_id
         from subscription_settings
         where account_id = ${input.organizationId}::uuid and workspace_id is null`,
       );
@@ -936,7 +943,17 @@ async function writeSettingsRow(
       : JSON.stringify({ [providerId]: patch.providerSettings });
   const clearProvider = patch.providerSettings === null;
   const setPrimary = patch.primaryConnectionId !== undefined;
+  if (setPrimary && primary_column === null) {
+    throw new Error("This subscription provider has no primary connection setting");
+  }
   const primary = setPrimary ? (patch.primaryConnectionId ?? null) : null;
+  const primaryAssignment =
+    primary_column === null
+      ? sql``
+      : sql`${primary_column} = case when ${setPrimary}
+            then ${primary}::uuid else ${primary_column} end,`;
+  const primaryInsertColumn = primary_column === null ? sql`` : sql`${primary_column},`;
+  const primaryInsertValue = primary_column === null ? sql`` : sql`${primary}::uuid,`;
   const organizationRow = input.workspaceId === null;
   const update = async (db: Database) =>
     await rawRows<{ id: string }>(
@@ -948,8 +965,7 @@ async function writeSettingsRow(
             when ${clearProvider} then providers - (${providerId}::text)
             when ${providerJson}::jsonb is null then providers
             else coalesce(providers, '{}'::jsonb) || ${providerJson}::jsonb end,
-          ${primary_column} = case when ${setPrimary}
-            then ${primary}::uuid else ${primary_column} end,
+          ${primaryAssignment}
           version = version + 1,
           updated_by_subject_id = ${input.subjectId},
           updated_at = clock_timestamp()
@@ -964,7 +980,7 @@ async function writeSettingsRow(
       const inserted = await rawRows<{ id: string }>(
         scoped,
         sql`insert into subscription_settings (
-            account_id, workspace_id, rotation, providers, ${primary_column},
+            account_id, workspace_id, rotation, providers, ${primaryInsertColumn}
             cross_provider_failover, fallback_order, personal_connections_allowed,
             personal_fallback_allowed, updated_by_subject_id, updated_at
           ) values (
@@ -973,7 +989,7 @@ async function writeSettingsRow(
               else ${rotationJson}::jsonb end,
             case when ${organizationRow} then coalesce(${providerJson}::jsonb, '{}'::jsonb)
               else ${providerJson}::jsonb end,
-            ${primary}::uuid,
+            ${primaryInsertValue}
             case when ${organizationRow} then false end,
             case when ${organizationRow} then '{}'::jsonb end,
             case when ${organizationRow} then true end,
@@ -1050,7 +1066,8 @@ async function inheritedPrimaryForOverride(
   provider: SubscriptionCoreProvider,
   input: SubscriptionCoreAdministration,
 ): Promise<{ primaryConnectionId: string | null } | Record<string, never>> {
-  if (!input.workspaceId) return {};
+  // A provider without a primary setting has nothing to carry.
+  if (!input.workspaceId || provider.settings.primaryColumn === null) return {};
   const settings = subscriptionCoreProviderSettings(
     provider,
     await readSubscriptionEffectiveSettings(tx, input.accountId, input.workspaceId),
@@ -1119,6 +1136,7 @@ export async function setSubscriptionCoreWorkspaceSource(
     );
     if (workspace?.workspace_kind === "personal" && input.mode !== "automatic") {
       throw provider.errors.sourceRefused(
+        "personal_workspace",
         `${provider.adapter.displayName} source modes are not available for personal workspaces`,
       );
     }
@@ -1132,6 +1150,7 @@ export async function setSubscriptionCoreWorkspaceSource(
     });
     if (!written) {
       throw provider.errors.sourceRefused(
+        "forbidden",
         `missing permission to change this workspace's ${provider.adapter.displayName} source`,
       );
     }

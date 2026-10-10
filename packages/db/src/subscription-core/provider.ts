@@ -28,9 +28,11 @@ export type SubscriptionCoreProvider<Credential = unknown> = {
     /**
      * The `subscription_settings` column holding this provider's primary
      * connection, as in the provider's SQL registry row, until settings are
-     * keyed by provider (design 5.1.2).
+     * keyed by provider (design 5.1.2): `<provider>_primary_connection_id`,
+     * or null for a provider without a primary setting (its rotation and
+     * source writes still work; setting a primary is refused).
      */
-    readonly primaryColumn: string;
+    readonly primaryColumn: string | null;
   };
   /**
    * Runs inside an organization-route allocator change of a shared
@@ -50,6 +52,12 @@ export type SubscriptionCoreProvider<Credential = unknown> = {
 export function subscriptionCoreProviderId(provider: SubscriptionCoreProvider): string {
   const id = provider.adapter.provider;
   subscriptionCoreProvider(id);
+  // The same rule as the SQL registry's primary-column CHECK: a binding can
+  // never point at another provider's column.
+  const column = provider.settings.primaryColumn;
+  if (column !== null && column !== `${id}_primary_connection_id`) {
+    throw new Error("A subscription-core binding names another provider's primary column");
+  }
   return id;
 }
 

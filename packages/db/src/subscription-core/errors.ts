@@ -4,6 +4,9 @@
  * provider can keep the error classes its callers already match; a new
  * provider can use `subscriptionCoreDefaultErrors`.
  */
+/** Why a workspace source change was refused. */
+export type SubscriptionCoreSourceRefusal = "personal_workspace" | "forbidden";
+
 export type SubscriptionCoreErrors = {
   /** The turn no longer holds its core lease; dispatch must stop. */
   leaseLost(): Error;
@@ -16,7 +19,7 @@ export type SubscriptionCoreErrors = {
   /** An operation lost its lease, its scope or the enabled cutover. */
   operationUnavailable(): Error;
   /** A workspace source change was refused (personal workspace or no permission). */
-  sourceRefused(message: string): Error;
+  sourceRefused(reason: SubscriptionCoreSourceRefusal, message: string): Error;
   /** A workspace route named an organization-managed connection. */
   organizationManaged(): Error;
 };
@@ -59,8 +62,13 @@ export function subscriptionCoreDefaultErrors(displayName: string): Subscription
         "subscription_core_operation_unavailable",
         `This ${displayName} operation can no longer use its subscription`,
       ),
-    sourceRefused: (message) =>
-      new SubscriptionCoreError("subscription_core_source_refused", message),
+    sourceRefused: (reason, message) =>
+      new SubscriptionCoreError(
+        reason === "personal_workspace"
+          ? "subscription_core_source_personal_workspace"
+          : "subscription_core_source_forbidden",
+        message,
+      ),
     organizationManaged: () =>
       new SubscriptionCoreError(
         "subscription_core_organization_managed",
