@@ -633,7 +633,76 @@ export async function runMigrations(
   await migrate(adminConnection, targetSchema, runtimeOptions);
 }
 
+export type MigrationDeploymentMode = "historical" | "rolling" | "maintenance" | "unclassified";
+
+/**
+ * The reviewed production path a migration declares on its first line.
+ * `historical` covers the early chain (0001–0062) that predates the directive;
+ * a later file without one is `unclassified` and is treated as needing a drain.
+ */
+export function migrationDeploymentMode(file: string, sqlText: string): MigrationDeploymentMode {
+  const firstLine = sqlText.replaceAll("\r\n", "\n").split("\n", 1)[0]?.trim();
+  if (firstLine === "-- deployment-mode: rolling") return "rolling";
+  if (firstLine === "-- deployment-mode: maintenance") return "maintenance";
+  const ordinal = /^(\d{4})_/.exec(file)?.[1];
+  return ordinal && Number(ordinal) < 63 ? "historical" : "unclassified";
+}
+
+export interface MigrationPlan {
+  /** Shipped migrations this database has not applied yet, in apply order. */
+  pending: { name: string; deploymentMode: MigrationDeploymentMode }[];
+  /**
+   * True when any pending migration is not `rolling`. Rolling migrations run
+   * while the previous release keeps serving; anything else needs every
+   * API/control/turn process drained before the migration job runs.
+   */
+  requiresDrain: boolean;
+}
+
+/**
+ * Read-only: compare the shipped migration chain with the database's applied
+ * list. Takes no lock and creates nothing, so it is safe to run against a live
+ * deployment before deciding whether an upgrade needs a drain.
+ */
+export async function planMigrations(
+  databaseUrl = process.env.OPENGENI_MIGRATIONS_DATABASE_URL ??
+    process.env.OPENGENI_DATABASE_URL ??
+    DEFAULT_DATABASE_URL,
+  schema: string | undefined = process.env.OPENGENI_DB_SCHEMA?.trim() || undefined,
+): Promise<MigrationPlan> {
+  const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
+  const files = (await readdir(migrationsDir)).filter((file) => file.endsWith(".sql")).sort();
+  const sql = postgres(databaseUrl, { max: 1 });
+  let applied: Set<string>;
+  try {
+    if (schema) assertIdentifier("OPENGENI_DB_SCHEMA", schema);
+    const qualified = `"${schema ?? "public"}"."schema_migrations"`;
+    const [table] = await sql`SELECT to_regclass(${qualified}) IS NOT NULL AS present`;
+    applied = table?.present
+      ? new Set(
+          (await sql.unsafe(`SELECT "name" FROM ${qualified}`)).map((row) => row.name as string),
+        )
+      : new Set();
+  } finally {
+    await sql.end();
+  }
+  const pending: MigrationPlan["pending"] = [];
+  for (const file of files) {
+    if (applied.has(file)) continue;
+    const sqlText = await readFile(join(migrationsDir, file), "utf8");
+    pending.push({ name: file, deploymentMode: migrationDeploymentMode(file, sqlText) });
+  }
+  return {
+    pending,
+    requiresDrain: pending.some((migration) => migration.deploymentMode !== "rolling"),
+  };
+}
+
 if (import.meta.main) {
-  await migrate();
-  console.log("Applied Drizzle SQL migrations.");
+  if (process.argv.includes("--plan")) {
+    console.log(JSON.stringify(await planMigrations(), null, 2));
+  } else {
+    await migrate();
+    console.log("Applied Drizzle SQL migrations.");
+  }
 }

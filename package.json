@@ -34,6 +34,7 @@
     "dev:web": "set -a; [ -f .env ] && . ./.env; [ -f .env.runtime ] && . ./.env.runtime; set +a; cd apps/web && bun run dev",
     "debug:realtime": "set -a; [ -f .env ] && . ./.env; [ -f .env.runtime ] && . ./.env.runtime; set +a; bun scripts/realtime-debug.ts",
     "db:migrate": "set -a; [ -f .env ] && . ./.env; [ -f .env.runtime ] && . ./.env.runtime; set +a; cd packages/db && bun run migrate",
+    "db:migrate-plan": "set -a; [ -f .env ] && . ./.env; [ -f .env.runtime ] && . ./.env.runtime; set +a; cd packages/db && bun run migrate:plan",
     "db:provision-roles": "set -a; [ -f .env ] && . ./.env; [ -f .env.runtime ] && . ./.env.runtime; set +a; cd packages/db && bun run provision-roles",
     "db:backfill-lifecycle-facts": "set -a; [ -f .env ] && . ./.env; [ -f .env.runtime ] && . ./.env.runtime; set +a; cd packages/db && bun run backfill-lifecycle-facts",
     "model-catalog:upsert": "bun scripts/upsert-model-catalog.ts",
