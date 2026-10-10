@@ -3943,7 +3943,7 @@ export async function deleteWorkspaceIfQuiescent(
           // Every account-scoped insert takes this row FOR KEY SHARE through
           // its account FK, often while already holding its own workspace row
           // the same way; FOR UPDATE here deadlocked those writers against the
-          // workspace locks below (OPE-788).
+          // workspace locks below.
           const [account] = await tx
             .select({ id: schema.managedAccounts.id })
             .from(schema.managedAccounts)
@@ -3964,7 +3964,7 @@ export async function deleteWorkspaceIfQuiescent(
           // the workspace row. Writers in this workspace (and the membership
           // lifecycle) hold the control row before reaching the workspace row,
           // and the cascade below deletes the control row, so locking the
-          // workspace row first would deadlock them (OPE-788).
+          // workspace row first would deadlock them.
           let targetControlLocked = true;
           try {
             await lockWorkspaceInferenceControl(tx, input.workspaceId, "update");
