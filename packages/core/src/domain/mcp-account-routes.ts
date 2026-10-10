@@ -44,13 +44,14 @@ export function expandMcpAccountRoutes(input: {
   const accountLabels = new Map<string, string>();
   for (const tool of input.tools) {
     const bindings = byCanonical.get(tool.id);
-    if (!bindings) {
-      if (!configured.get(tool.id)?.connectionRef) tools.push(tool);
-      continue;
-    }
     const canonical = configured.get(tool.id);
-    if (!canonical?.connectionRef) {
-      throw new Error("Accepted MCP account route has no canonical connection configuration");
+    // A connector reconfigured after acceptance (removed, made public, or moved
+    // to another provider) drops its frozen account routes. The route is
+    // never rebound to the new configuration, and the rest of the turn keeps
+    // its other tools instead of failing on one stale connector.
+    if (!bindings || !canonical?.connectionRef) {
+      if (!canonical?.connectionRef) tools.push(tool);
+      continue;
     }
     for (const binding of bindings) {
       if (
@@ -58,7 +59,7 @@ export function expandMcpAccountRoutes(input: {
         canonical.connectionRef.providerDomain !== binding.providerDomain ||
         (canonical.connectionRef.kind && canonical.connectionRef.kind !== binding.kind)
       ) {
-        throw new Error("Accepted MCP account route does not match canonical provider");
+        continue;
       }
       // Static headers can belong to the formerly selected account. Credentials
       // for account-qualified routes come exclusively from the native resolver.
