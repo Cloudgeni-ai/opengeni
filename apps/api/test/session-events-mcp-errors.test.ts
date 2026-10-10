@@ -263,6 +263,22 @@ describe("session_events avoidable agent errors (real MCP client, PostgreSQL)", 
     expect(goal.text).toContain("goal.completed");
   });
 
+  test("many guessed event types stay cheap: suggestions for the first few, one count for the rest", async () => {
+    const guesses = Array.from(
+      { length: 100 },
+      (_, index) => `agent.guess${index}.${"x".repeat(500)}`,
+    );
+    const started = performance.now();
+    const refused = await call({ sessionId, view: "debug", includeTypes: guesses });
+    const elapsed = performance.now() - started;
+    expect(refused.isError).toBe(true);
+    expect(refused.text.match(/Closest valid types/g)).toHaveLength(3);
+    expect(refused.text).toContain("97 more unknown session event types");
+    expect(refused.text.length).toBeLessThan(8 * 1024);
+    // Before the bound, 100 such values took over a quarter second.
+    expect(elapsed).toBeLessThan(200);
+  });
+
   test("tool selectors on view=results read view=tools; ambiguous flags get an example", async () => {
     const corrected = await page({
       sessionId,

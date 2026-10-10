@@ -2,6 +2,11 @@ import { SessionEventSemanticClass, SessionEventType } from "@opengeni/contracts
 
 const FAMILY_LIMIT = 12;
 const CLOSEST_LIMIT = 3;
+// Registered types are under 40 characters; longer guesses compare on a prefix.
+const COMPARE_LENGTH = 40;
+// Suggestions cost an edit-distance pass over the registry, so only the first
+// few unknown values in one request get them.
+const SUGGESTED_VALUES = 3;
 
 function editDistance(left: string, right: string): number {
   let previous = Array.from({ length: right.length + 1 }, (_, index) => index);
@@ -26,9 +31,10 @@ function editDistance(left: string, right: string): number {
  */
 export function unknownSessionEventTypeMessage(value: string): string {
   const all = SessionEventType.options as readonly string[];
-  const shown = JSON.stringify(value.length > 120 ? `${value.slice(0, 120)}...` : value);
-  // Bound the comparison work; no registered type is anywhere near this long.
-  const lower = value.slice(0, 128).toLowerCase();
+  const shown = JSON.stringify(
+    value.length > COMPARE_LENGTH ? `${value.slice(0, COMPARE_LENGTH)}...` : value,
+  );
+  const lower = value.slice(0, COMPARE_LENGTH).toLowerCase();
   const closest = [...all]
     .map((type) => ({
       type,
@@ -50,6 +56,34 @@ export function unknownSessionEventTypeMessage(value: string): string {
       }.`
     : "";
   return `Unknown session event type ${shown}. Closest valid types: ${closest.join(", ")}.${familyText} For a family of events, includeClasses (${SessionEventSemanticClass.options.join(", ")}) avoids guessing type names.`;
+}
+
+/**
+ * Validate an event-type list against the canonical registry. The first few
+ * unknown values carry suggestions; the rest are counted in one issue so a long
+ * list of guesses stays cheap to check and short to read.
+ */
+export function addUnknownSessionEventTypeIssues(
+  values: readonly string[],
+  isKnown: (value: string) => boolean,
+  addIssue: (issue: { code: "custom"; message: string; path: number[] }) => void,
+): void {
+  const unknown = values.flatMap((value, index) => (isKnown(value) ? [] : [index]));
+  for (const index of unknown.slice(0, SUGGESTED_VALUES)) {
+    addIssue({
+      code: "custom",
+      message: unknownSessionEventTypeMessage(values[index]!),
+      path: [index],
+    });
+  }
+  const rest = unknown.slice(SUGGESTED_VALUES);
+  if (rest.length > 0) {
+    addIssue({
+      code: "custom",
+      message: `${rest.length} more unknown session event types (indexes ${rest.slice(0, 10).join(", ")}${rest.length > 10 ? ", ..." : ""}); fix the ones above or use includeClasses.`,
+      path: [rest[0]!],
+    });
+  }
 }
 
 const defined = (values: Record<string, unknown>) =>

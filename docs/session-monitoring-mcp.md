@@ -132,6 +132,10 @@ duplicating an answer from both message and turn-completion records. `tools`
 provides compact tool receipts, with arguments/output requested explicitly and
 call-ID drill-down for detail; `toolName` with `includeOutput: true` returns up
 to three named calls with their results in one page (default one, the newest).
+Arguments or a result too large for one page continue losslessly through
+`nextCursor`, which returns to the named calls once that value is complete; a
+call whose result could not be included names the exact read in `readOutput`,
+and `outputUnavailable` says why a result cannot be matched to its call.
 `debug` exposes explicitly requested audit and
 diagnostic records, including retained deltas. The underlying audit records remain
 append-only; these views are read projections, not model-history reconstruction.

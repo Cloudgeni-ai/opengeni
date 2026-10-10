@@ -321,6 +321,7 @@ import {
 import { completeChildReadSequences } from "./child-read-evidence";
 import {
   sessionEventAuditSelectorMessage,
+  addUnknownSessionEventTypeIssues,
   unknownSessionEventTypeMessage,
 } from "./session-event-errors";
 import {
@@ -5213,31 +5214,29 @@ function registerWorkspaceOrchestrationTools(
           payloadMode: z4.enum(SessionEventPayloadMode.options).optional(),
           resultMode: z4.enum(SessionEventResultMode.options).optional(),
           includeTypes: z4
-            .array(
-              z4.string().superRefine((value, context) => {
-                if (!SessionEventType.safeParse(value).success)
-                  context.addIssue({
-                    code: "custom",
-                    message: unknownSessionEventTypeMessage(value),
-                  });
-              }),
-            )
+            .array(z4.string())
             .max(100)
+            .superRefine((values, context) =>
+              addUnknownSessionEventTypeIssues(
+                values,
+                (value) => SessionEventType.safeParse(value).success,
+                (issue) => context.addIssue(issue),
+              ),
+            )
             .describe(
               "Debug audit event types, e.g. turn.completed, user.message, agent.message.completed, agent.toolCall.output. Validated against the canonical event-type registry.",
             )
             .optional(),
           excludeTypes: z4
-            .array(
-              z4.string().superRefine((value, context) => {
-                if (!SessionEventType.safeParse(value).success)
-                  context.addIssue({
-                    code: "custom",
-                    message: unknownSessionEventTypeMessage(value),
-                  });
-              }),
-            )
+            .array(z4.string())
             .max(100)
+            .superRefine((values, context) =>
+              addUnknownSessionEventTypeIssues(
+                values,
+                (value) => SessionEventType.safeParse(value).success,
+                (issue) => context.addIssue(issue),
+              ),
+            )
             .describe(
               "Debug audit event types to exclude; validated against the canonical event-type registry.",
             )

@@ -10,6 +10,24 @@ import type {
 } from "@opengeni/db/session-event-slices";
 
 export const SESSION_EVENT_VIEW_MAX_BYTES = 16 * 1024;
+/**
+ * toolName with includeOutput reads each named call's result through the exact
+ * callId path, so one page carries at most this many call/result pairs inside
+ * the same 16 KiB envelope. An omitted limit means the newest (or oldest) one.
+ */
+export const SESSION_EVENT_NAMED_OUTPUT_MAX_CALLS = 3;
+const directionSchema = z.enum(["before", "after"]);
+// A fragment continuation issued by a named-output page carries the named
+// stream's next position, so finishing the fragment returns to that stream.
+const namedResumeSchema = z.object({
+  toolName: z.string().min(1).max(256),
+  includeArguments: z.boolean(),
+  limit: z.number().int().min(1).max(SESSION_EVENT_NAMED_OUTPUT_MAX_CALLS),
+  direction: directionSchema,
+  after: z.number().int().nonnegative(),
+  before: z.number().int().positive().nullable(),
+  more: z.boolean(),
+});
 const selectionSchema = z.object({
   sessionId: z.string().uuid(),
   view: z.enum(["conversation", "results", "tools"]),
@@ -34,9 +52,10 @@ const selectionSchema = z.object({
     .nullable()
     .default(null),
   limit: z.number().int().min(1).max(50).optional(),
-  direction: z.enum(["before", "after"]),
+  direction: directionSchema,
   after: z.number().int().nonnegative(),
   before: z.number().int().positive().nullable(),
+  named: namedResumeSchema.optional(),
 });
 const cursorSchema = z.object({
   v: z.union([z.literal(1), z.literal(2)]),
@@ -77,12 +96,7 @@ const bytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value, null, 
 const encode = (selection: Selection, sequence: number | null = null, offset = 0, v = 2) =>
   Buffer.from(JSON.stringify({ v, selection, sequence, offset })).toString("base64url");
 
-/**
- * toolName with includeOutput reads each named call's result through the exact
- * callId path, so one page carries at most this many call/result pairs inside
- * the same 16 KiB envelope. An omitted limit means the newest (or oldest) one.
- */
-export const SESSION_EVENT_NAMED_OUTPUT_MAX_CALLS = 3;
+const MAX_CURSOR_LENGTH = 4096;
 // Below this many bytes an output read could not return a useful fragment.
 const NAMED_OUTPUT_MIN_BUDGET = 2048;
 
@@ -176,7 +190,7 @@ function invalidCursorError(input: SessionEventViewInput): Error {
 export function resolveSessionEventView(input: SessionEventViewInput) {
   let continuation: z.infer<typeof cursorSchema> | null = null;
   if (input.cursor !== undefined) {
-    if (input.cursor.length > 4096)
+    if (input.cursor.length > MAX_CURSOR_LENGTH)
       throw new Error("session_events cursor exceeds 4096 characters");
     try {
       continuation = cursorSchema.parse(
@@ -330,35 +344,98 @@ function project(event: SessionEvent, selection: Selection): Item | null {
 /** Read-only projection over the existing RLS/audit query. No command observations. */
 export async function readSessionEventView(input: SessionEventViewInput, read: ReadPage) {
   const { selection, continuation, notice } = resolveSessionEventView(input);
-  const page =
+  const scanned =
     selection.toolName !== null && selection.includeOutput
       ? await readNamedCallOutputs(selection, read)
       : await scanSessionEventView(selection, continuation, read);
+  const page = selection.named ? returnToNamedStream(scanned, selection) : scanned;
   return notice === undefined ? page : { ...page, notice };
 }
 
 type Continuation = ReturnType<typeof resolveSessionEventView>["continuation"];
 type ViewPage = Awaited<ReturnType<typeof scanSessionEventView>>;
+type NamedResume = z.infer<typeof namedResumeSchema>;
 // An omitted structured value is final; only a text fragment continues.
 const incompleteFragment = (item: Item) => record(item.fragment).complete === false;
 
+const namedSelection = (selection: Selection, named: NamedResume): Selection => ({
+  sessionId: selection.sessionId,
+  view: "tools",
+  includeArguments: named.includeArguments,
+  includeOutput: true,
+  callId: null,
+  toolName: named.toolName,
+  limit: named.limit,
+  direction: named.direction,
+  after: named.after,
+  before: named.before,
+});
+
+/**
+ * A fragment continuation issued by a named-output page reports the named
+ * stream's position, and once the fragment is complete its nextCursor returns
+ * to that stream instead of ending the read.
+ */
+function returnToNamedStream(page: ViewPage, selection: Selection): ViewPage {
+  const named = selection.named!;
+  const position = {
+    view: "tools" as const,
+    effectiveLimit: named.limit,
+    direction: named.direction,
+    nextAfter: named.direction === "after" ? named.after : null,
+    nextBefore: named.direction === "before" ? named.before : null,
+  };
+  if (page.events.some(incompleteFragment)) return { ...page, ...position };
+  return {
+    ...page,
+    ...position,
+    hasMore: named.more,
+    nextCursor: named.more ? encode(namedSelection(selection, named)) : null,
+  };
+}
+
+/** Re-issue a fragment cursor so it carries the named stream it came from. */
+function withNamedResume(cursor: string, named: NamedResume, limit?: number): string | null {
+  const decoded = cursorSchema.parse(JSON.parse(Buffer.from(cursor, "base64url").toString()));
+  const encoded = encode(
+    { ...decoded.selection, ...(limit === undefined ? {} : { limit }), named },
+    decoded.sequence,
+    decoded.offset,
+    decoded.v,
+  );
+  return encoded.length <= MAX_CURSOR_LENGTH ? encoded : null;
+}
+
 /**
  * toolName plus includeOutput: list the named calls, then read each call's
- * result through the exact callId path. One call whose result does not fit
- * keeps that path's lossless fragment continuation; later calls resume from a
- * positional cursor instead of being dropped.
+ * result through the exact callId path. One call whose arguments or result do
+ * not fit keeps that path's lossless fragment continuation, which returns to
+ * the named stream when complete; later calls resume from a positional cursor
+ * instead of being dropped.
  */
 async function readNamedCallOutputs(selection: Selection, read: ReadPage): Promise<ViewPage> {
   const calls = await scanSessionEventView({ ...selection, includeOutput: false }, null, read);
-  if (calls.events.some(incompleteFragment)) return calls;
   const ordered = selection.direction === "before" ? [...calls.events].reverse() : calls.events;
   const events: Item[] = [];
   let sourceLoss = calls.sourceLoss;
   let stop: { position: number; cursor: string | null } | null = null;
   const envelope = (items: Item[]) => bytes({ ...calls, events: items, nextCursor: null });
   const empty = envelope([]);
+  // The named stream continues past `sequence`, the call just returned.
+  const resumePast = (sequence: number, more: boolean): NamedResume => ({
+    toolName: selection.toolName!,
+    includeArguments: selection.includeArguments,
+    limit: selection.limit!,
+    direction: selection.direction,
+    after: selection.direction === "after" ? sequence : selection.after,
+    before: selection.direction === "before" ? sequence : selection.before,
+    more,
+  });
+  // stop.position is the first named call not yet returned (inclusive).
+  const pastCall = (call: Item) =>
+    selection.direction === "before" ? call.sequence - 1 : call.sequence + 1;
   for (const [index, call] of ordered.entries()) {
-    const used = envelope([...events, call]) - empty;
+    const later = index + 1 < ordered.length || calls.hasMore;
     const lookup = selectionSchema.safeParse({
       sessionId: selection.sessionId,
       view: "tools",
@@ -371,66 +448,71 @@ async function readNamedCallOutputs(selection: Selection, read: ReadPage): Promi
       after: call.sequence,
       before: null,
     });
+    const readOutput =
+      lookup.success && lookup.data.callId !== null
+        ? { readOutput: { view: "tools", callId: lookup.data.callId, includeOutput: true } }
+        : {};
+    if (incompleteFragment(call)) {
+      if (index > 0) {
+        stop = { position: call.sequence, cursor: null };
+        break;
+      }
+      // Arguments larger than a page continue losslessly one call at a time
+      // and then return to the named stream; the result is one exact read.
+      events.push({ ...call, ...readOutput });
+      stop = {
+        position: pastCall(call),
+        cursor:
+          withNamedResume(calls.nextCursor!, resumePast(call.sequence, true), 1) ??
+          calls.nextCursor,
+      };
+      break;
+    }
     if (!lookup.success || lookup.data.callId === null) {
-      events.push({ ...call, outputFound: false });
+      events.push({
+        ...call,
+        outputUnavailable:
+          call.identityOmitted === true || typeof call.callId !== "string"
+            ? "call_identity_omitted"
+            : "call_id_exceeds_lookup_budget",
+      });
       continue;
     }
-    if (SESSION_EVENT_VIEW_MAX_BYTES - 6000 - used < NAMED_OUTPUT_MIN_BUDGET) {
+    const used = envelope([...events, call]) - empty;
+    // The result repeats the call's identity, so budget for it plus some text.
+    const { text: _arguments, ...identity } = call;
+    if (SESSION_EVENT_VIEW_MAX_BYTES - 6000 - used < NAMED_OUTPUT_MIN_BUDGET + bytes(identity)) {
       if (index > 0) {
         stop = { position: call.sequence, cursor: null };
         break;
       }
       // Huge arguments leave no room: return the call and name the exact read.
-      events.push({
-        ...call,
-        readOutput: {
-          view: "tools",
-          callId: lookup.data.callId,
-          includeOutput: true,
-        },
-      });
-      stop = {
-        position: selection.direction === "before" ? call.sequence - 1 : call.sequence + 1,
-        cursor: null,
-      };
+      events.push({ ...call, ...readOutput });
+      stop = { position: pastCall(call), cursor: null };
       break;
     }
     const output = await scanSessionEventView(lookup.data, null, read, used);
     sourceLoss ??= output.sourceLoss;
     const result = output.events.find((item) => item.kind === "result");
     if (!result) {
-      events.push({
-        ...call,
-        outputFound: false,
-        ...(output.hasMore
-          ? {
-              readOutput: {
-                view: "tools",
-                callId: lookup.data.callId,
-                includeOutput: true,
-              },
-            }
-          : {}),
-      });
+      events.push({ ...call, outputFound: false, ...(output.hasMore ? readOutput : {}) });
       continue;
     }
-    if (incompleteFragment(result) && index > 0) {
-      stop = { position: call.sequence, cursor: null };
+    if (incompleteFragment(result)) {
+      if (index > 0) {
+        stop = { position: call.sequence, cursor: null };
+        break;
+      }
+      // The rest of this result continues through its exact callId cursor,
+      // which returns to the named stream when the result is complete.
+      const cursor = withNamedResume(output.nextCursor!, resumePast(call.sequence, later));
+      events.push(...(cursor ? [call, result] : [{ ...call, ...readOutput }]));
+      stop = { position: pastCall(call), cursor };
       break;
     }
     events.push(call, result);
-    if (incompleteFragment(result)) {
-      // The rest of this result continues through its exact callId cursor;
-      // nextBefore/nextAfter still locate the next named call.
-      stop = {
-        position: selection.direction === "before" ? call.sequence - 1 : call.sequence + 1,
-        cursor: output.nextCursor,
-      };
-      break;
-    }
   }
   events.sort((a, b) => a.sequence - b.sequence);
-  // stop.position is the first named call not yet returned (inclusive).
   const position = stop
     ? selection.direction === "before"
       ? { after: selection.after, before: stop.position + 1 }
