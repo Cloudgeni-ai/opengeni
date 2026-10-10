@@ -991,6 +991,14 @@ describe("provider-neutral subscription-core routines (migration 0707)", () => {
           await attempt("truncate", () =>
             tx`truncate opengeni_private.subscription_core_providers`.then(() => "truncated"),
           );
+          // 0712's reach rows reference the registry, so a plain TRUNCATE is
+          // refused by that key first; with CASCADE the append-only guard
+          // still refuses it.
+          await attempt("truncateCascade", () =>
+            tx`truncate opengeni_private.subscription_core_providers cascade`.then(
+              () => "truncated",
+            ),
+          );
           await attempt("missingColumn", () =>
             tx`insert into opengeni_private.subscription_core_providers
               (provider, primary_setting_column)
@@ -1039,7 +1047,8 @@ describe("provider-neutral subscription-core routines (migration 0707)", () => {
         },
         deleteProvider: { error: "subscription core providers are append-only" },
         renameProvider: { error: "subscription core providers are append-only" },
-        truncate: { error: "subscription core providers are append-only" },
+        truncate: { error: "cannot truncate a table referenced in a foreign key constraint" },
+        truncateCascade: { error: "subscription core providers are append-only" },
         missingColumn: { error: "subscription_settings primary column is missing" },
         foreignColumn: {
           error: expect.stringMatching(/subscription_core_providers_primary_column_chk/),

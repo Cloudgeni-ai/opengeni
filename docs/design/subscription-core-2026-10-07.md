@@ -3086,6 +3086,8 @@ Decisions, each the strictest fail-closed reading of the plan and contract:
   provider cannot exist, and any other existing row would abort the
   migration. There is no compatibility view: runtime roles never read the
   table, and every routine that does is redefined in the same transaction.
+  The registry stays untruncatable: a plain TRUNCATE is now refused by the
+  reach rows' key, and TRUNCATE ... CASCADE by its append-only guard.
   PostgreSQL's initial validation of a new foreign key runs as the table
   owner without exempting it from FORCE ROW LEVEL SECURITY, so it would see
   no connection rows and report a false violation; an owner-only NO FORCE
