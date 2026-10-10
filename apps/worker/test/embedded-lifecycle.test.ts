@@ -487,6 +487,9 @@ describe("embedded worker lifecycle contract", () => {
       [{ present: true }],
       [{ present: true }],
       [{ present: true }],
+      // Migration 0712: the cutover receipt reader exists and Codex holds its receipt.
+      [{ present: true }],
+      [{ provider: "codex" }],
       [],
       [
         { name: "opengeni_private", owner: "opengeni_migrator", usage: true, create: false },
@@ -775,6 +778,7 @@ describe("embedded worker lifecycle contract", () => {
           "subscription_codex_owner_capability_held(uuid, text[], text, uuid, boolean)",
           "subscription_codex_owner_membership_held(uuid, uuid)",
           ...opengeniDb.SUBSCRIPTION_CORE_NEUTRAL_PRIVATE_ROUTINES,
+          ...opengeniDb.SUBSCRIPTION_CORE_PRECURSOR_PRIVATE_ROUTINES,
         ].map((name) => ({
           name,
           owner: "opengeni_migrator",
@@ -795,6 +799,7 @@ describe("embedded worker lifecycle contract", () => {
         "drop_subscription_codex_owner_capabilities(uuid)",
         "derive_scheduled_revision_subscription_authority()",
         ...opengeniDb.SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES,
+        ...opengeniDb.SUBSCRIPTION_CORE_PRECURSOR_OWNER_ROUTINES,
       ].map((name) => ({
         name,
         owner: "opengeni_migrator",
@@ -859,7 +864,7 @@ describe("embedded worker lifecycle contract", () => {
         "session_tenancy_additional_organization_activation_evidence",
       ],
     })();
-    expect((catalogResults[10] as Array<{ name: string }>).map((routine) => routine.name)).toEqual([
+    expect((catalogResults[12] as Array<{ name: string }>).map((routine) => routine.name)).toEqual([
       ...RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
       ...RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES,
     ]);
@@ -899,6 +904,8 @@ describe("embedded worker lifecycle contract", () => {
         [{ present: variableSetCutoverPresent }],
         [{ present: claudePoolActivationPresent }],
         [{ present: codexCutoverActivationPresent }],
+        [{ present: true }],
+        [{ provider: "codex" }],
       ];
       let index = 0;
       return {
