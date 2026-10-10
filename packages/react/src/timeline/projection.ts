@@ -522,6 +522,7 @@ export function buildTimeline(
           break;
         }
         const voiceMessage = realtimeVoiceMessage(payload);
+        const sender = messageSender(payload.initiator);
         items.push({
           kind: "user-message",
           id: event.id,
@@ -541,6 +542,7 @@ export function buildTimeline(
           ...(voiceMessage ? { presentation: voiceMessage.presentation } : {}),
           resources: resourceRefs(payload.resources),
           tools: toolRefs(payload.tools),
+          ...(sender ? { sender } : {}),
           occurredAt: event.occurredAt,
         });
         break;
@@ -3294,6 +3296,15 @@ function resourceRefs(value: unknown): import("@opengeni/sdk").ResourceRef[] {
     }
     return record.kind === "file" && typeof record.fileId === "string";
   });
+}
+
+/** The person behind a message, when its initiator is a signed-in subject. */
+function messageSender(value: unknown): import("./types").MessageSender | undefined {
+  const record = asRecord(value);
+  if (record.kind !== "subject" || typeof record.subjectId !== "string" || !record.subjectId)
+    return undefined;
+  const label = typeof record.label === "string" && record.label.trim() ? record.label : null;
+  return { subjectId: record.subjectId, label };
 }
 
 function timelineAnnotations(value: unknown): TimelineAnnotation[] {

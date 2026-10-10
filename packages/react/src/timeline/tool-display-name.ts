@@ -26,7 +26,9 @@ export function toolMatchesLeaf(wireName: string, leaf: string): boolean {
 
 /**
  * Readable label for a tool call ("session_create" / "opengeni__session_create"
- * → "Session create"). Title-cases the first character of the leaf phrase.
+ * → "Session create"). Title-cases the first character of the leaf phrase. A
+ * connector account is named only when the connector has several ("List
+ * issues · alice@example.com"); the connector itself shows as its logo.
  */
 export function toolDisplayName(name: string, display?: ToolDisplayMetadata): string {
   if (!display && /^[a-f0-9]{64}$/.test(name)) return "Tool call";
@@ -37,5 +39,9 @@ export function toolDisplayName(name: string, display?: ToolDisplayMetadata): st
     .replace(/^batch\s+(?=\S)/i, "");
   const title =
     display?.title ?? (phrase ? phrase.charAt(0).toUpperCase() + phrase.slice(1) : name);
-  return display?.accountLabel ? `${title} — ${display.accountLabel}` : title;
+  // Older events carry the full "Connector — Personal: account · Only me" route
+  // label for every account route without saying whether there were several.
+  // The tool name alone reads better than that.
+  if (!display?.connector) return title;
+  return display.accountLabel ? `${title} · ${display.accountLabel}` : title;
 }

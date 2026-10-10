@@ -25,6 +25,7 @@ import { getComposerSendBlocker } from "@/lib/composer-send-blocking";
 import { isEditableArtifactKind } from "@/lib/artifact-catalog";
 import type { NativeConnectRequest } from "@/components/capabilities/native-connect-setup";
 import { FailureRecoveryBoundary } from "@/components/session/failure-recovery-boundary";
+import { useMessageSenderRenderer } from "@/components/session/message-senders";
 import { createFailedSessionRetry, type FailedSessionRetryInput } from "@/lib/failed-session-retry";
 import { useSessionStartupTimeline } from "@/lib/session-startup-timeline";
 import { failedSessionCopy } from "@/lib/failed-session-copy";
@@ -2791,6 +2792,11 @@ function SessionChatPane(props: {
   const workspaceAccountId = context.workspaces.find(
     (candidate) => candidate.id === props.session.workspaceId,
   )?.accountId;
+  const renderMessageSender = useMessageSenderRenderer(
+    context.client,
+    props.session.workspaceId,
+    context.accessContext.subjectId,
+  );
   const commandContext = useMemo(
     () => ({
       client: context.client,
@@ -3121,6 +3127,7 @@ function SessionChatPane(props: {
                   >
                     <MessageTimeline
                       resolveLink={consoleLinkResolver}
+                      renderMessageSender={renderMessageSender}
                       allowanceExhaustedLabels={CONSOLE_TIMELINE_ALLOWANCE_LABELS}
                       trailingState={
                         <>

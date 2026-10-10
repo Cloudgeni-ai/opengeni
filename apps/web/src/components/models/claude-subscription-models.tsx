@@ -33,6 +33,23 @@ export function claudePlan(account: ClaudeSubscriptionAccount) {
   const words = account.plan.replace(/^claude_/, "").replaceAll("_", " ");
   return "Claude " + words.charAt(0).toUpperCase() + words.slice(1);
 }
+/** The usage cell of a Claude account row, from the usage its listing carries. */
+export function claudeUsageCell(account: ClaudeSubscriptionAccount): React.ReactNode {
+  if (account.status !== "active") return null;
+  if (!account.allocatorEnabled) return <StatusBadge status="paused" variant="dot" />;
+  return (
+    <ClaudeUsageReadout
+      state={{
+        value: account.usage ?? null,
+        loading: false,
+        refreshing: false,
+        error: false,
+        canRefresh: false,
+        refresh: async () => {},
+      }}
+    />
+  );
+}
 export function ClaudeRow({
   claude,
   account,
@@ -46,14 +63,6 @@ export function ClaudeRow({
   onOpen: () => void;
   scopeLabel?: string;
 }) {
-  const usage = {
-    value: account.usage ?? null,
-    loading: false,
-    refreshing: false,
-    error: false,
-    canRefresh: false,
-    refresh: async () => {},
-  };
   return (
     <SubscriptionAccountRow
       provider="claude_subscription"
@@ -69,14 +78,7 @@ export function ClaudeRow({
               : places.scope.workspace),
         claudePlan(account),
       ]}
-      cells={{
-        usage:
-          account.status !== "active" ? null : !account.allocatorEnabled ? (
-            <StatusBadge status="paused" variant="dot" />
-          ) : (
-            <ClaudeUsageReadout state={usage} />
-          ),
-      }}
+      cells={{ usage: claudeUsageCell(account) }}
       indicator={
         account.status !== "active" ? { kind: "attention", label: "Needs reconnect" } : "open"
       }

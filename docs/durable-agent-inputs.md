@@ -123,12 +123,19 @@ background-command settlement registers the same wake but does not signal from
 its settlement callers, so the dispatcher delivers it. Claim, supersession, and
 explicit control remain authoritative; deferred notices and late child results
 for completed/paused goals without a held wait do not create new work.
+"Eligible" includes the compaction-failure hold: when the newest finished turn
+failed with `context_compaction_failed`, only an input whose pending event is
+newer than that failure (or an Agent Steer) is eligible, so held-only input is
+acknowledged instead of re-signalling a workflow that has nothing to claim,
+and a new input after the failure wakes the session and carries the held
+backlog. See [`context-compaction.md`](context-compaction.md).
 
 The workflow-wake reaper also inventories authentic pending child terminal
 results for idle parents with no goal and a fully acknowledged old wake. A
 bounded keyset scan returns identities only; scoped repair rechecks effective
 control, the child-parent producer ledger, ownership and both writer gates,
-then reserves the pending batch and registers one wake atomically. It never
+then reserves the pending batch and registers one wake atomically. A result
+held by a compaction failure is not repaired until newer input arrives. It never
 replays child/provider work or fabricates output. Completed/paused goals remain
 settled; paused or busy candidates cannot starve later inventory pages.
 

@@ -1,6 +1,17 @@
 import type { Settings } from "@opengeni/config";
-import type { McpConnectionAccountBinding, ToolRef } from "@opengeni/contracts";
+import type {
+  McpAccountRouteLabel,
+  McpConnectionAccountBinding,
+  ToolRef,
+} from "@opengeni/contracts";
 import type { ApiIntegrationRuntime } from "@opengeni/db";
+
+const ACCOUNT_SCOPE_SUFFIX = / · (?:Only me|This workspace)$/u;
+
+/** "alice@example.com · Only me" → "alice@example.com". */
+function accountIdentity(binding: McpConnectionAccountBinding): string {
+  return binding.accountLabel.replace(ACCOUNT_SCOPE_SUFFIX, "") || binding.accountLabel;
+}
 
 /** Expand only after canonical tool-policy admission. Aliases are execution
  * identities, never an alternate way to gain admission to a connector. */
@@ -8,7 +19,11 @@ export function expandMcpAccountRoutes(input: {
   settings: Settings;
   tools: ToolRef[];
   bindings: readonly McpConnectionAccountBinding[] | null | undefined;
-}): { settings: Settings; tools: ToolRef[]; accountLabels: ReadonlyMap<string, string> } {
+}): {
+  settings: Settings;
+  tools: ToolRef[];
+  accountLabels: ReadonlyMap<string, McpAccountRouteLabel>;
+} {
   // Only historical work has no binding snapshot. A present empty snapshot is
   // an explicit lack of account authority, never a request for current defaults.
   if (input.bindings == null) {
@@ -41,7 +56,7 @@ export function expandMcpAccountRoutes(input: {
   }
   const servers: Settings["mcpServers"] = [];
   const tools: ToolRef[] = [];
-  const accountLabels = new Map<string, string>();
+  const accountLabels = new Map<string, McpAccountRouteLabel>();
   for (const tool of input.tools) {
     const bindings = byCanonical.get(tool.id);
     const canonical = configured.get(tool.id);
@@ -53,18 +68,28 @@ export function expandMcpAccountRoutes(input: {
       if (!canonical?.connectionRef) tools.push(tool);
       continue;
     }
-    for (const binding of bindings) {
-      if (
-        canonical.connectionRef.authoritySource === "host" ||
-        canonical.connectionRef.providerDomain !== binding.providerDomain ||
-        (canonical.connectionRef.kind && canonical.connectionRef.kind !== binding.kind)
-      ) {
-        continue;
-      }
+    const usable = bindings.filter(
+      (binding) =>
+        canonical.connectionRef!.authoritySource !== "host" &&
+        canonical.connectionRef!.providerDomain === binding.providerDomain &&
+        (!canonical.connectionRef!.kind || canonical.connectionRef!.kind === binding.kind),
+    );
+    const connector = canonical.name ?? canonical.id;
+    // People only need the account to tell several apart. Two accounts with the
+    // same identity (personal and workspace) keep their scope to stay distinct.
+    const identities = usable.map(accountIdentity);
+    for (const [index, binding] of usable.entries()) {
       // Static headers can belong to the formerly selected account. Credentials
       // for account-qualified routes come exclusively from the native resolver.
       const { headers: _headers, ...config } = canonical;
-      const label = `${canonical.name ?? canonical.id} — ${binding.subjectScope === "subject" ? "Personal" : "Workspace"}: ${binding.accountLabel}`;
+      const label = `${connector} — ${binding.subjectScope === "subject" ? "Personal" : "Workspace"}: ${binding.accountLabel}`;
+      const identity = identities[index]!;
+      const account =
+        usable.length < 2
+          ? undefined
+          : identities.indexOf(identity) === identities.lastIndexOf(identity)
+            ? identity
+            : binding.accountLabel;
       servers.push({
         ...config,
         id: binding.serverId,
@@ -72,7 +97,12 @@ export function expandMcpAccountRoutes(input: {
         connectionRef: structuredClone(binding.connectionRef),
       });
       tools.push({ ...tool, id: binding.serverId });
-      accountLabels.set(binding.serverId, label);
+      accountLabels.set(binding.serverId, {
+        model: label,
+        connector,
+        providerDomain: binding.providerDomain,
+        ...(account ? { account } : {}),
+      });
     }
   }
   return {

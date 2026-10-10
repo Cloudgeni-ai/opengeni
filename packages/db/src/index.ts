@@ -81,6 +81,10 @@ import {
   inboxOrigin,
 } from "./inbox-execution-context";
 import { parentOutboxAuthorityTx } from "./child-outbox-authority";
+import {
+  compactionFailureHoldSequenceTx,
+  systemUpdatePendingAfterSequenceSql,
+} from "./compaction-failure-hold";
 export {
   lockLiveNativeOriginalOriginTx,
   type ModalNativeLiveOriginScope,
@@ -67207,33 +67211,6 @@ async function turnHasFailureCodeTx(
   return Boolean(failure);
 }
 
-async function latestFinishedTurnHasFailureCodeTx(
-  tx: Database,
-  workspaceId: string,
-  sessionId: string,
-  code: string,
-): Promise<boolean> {
-  const [latestFinished] = await tx
-    .select({ id: schema.sessionTurns.id })
-    .from(schema.sessionTurns)
-    .where(
-      and(
-        eq(schema.sessionTurns.workspaceId, workspaceId),
-        eq(schema.sessionTurns.sessionId, sessionId),
-        sql`${schema.sessionTurns.finishedAt} is not null`,
-      ),
-    )
-    .orderBy(
-      desc(schema.sessionTurns.finishedAt),
-      desc(schema.sessionTurns.position),
-      desc(schema.sessionTurns.createdAt),
-    )
-    .limit(1);
-  return latestFinished
-    ? await turnHasFailureCodeTx(tx, workspaceId, sessionId, latestFinished.id, code)
-    : false;
-}
-
 /**
  * Core continuation decision, taken in one transaction with the goal row
  * locked. Queued work always wins; any non-terminal turn (queued, running, or
@@ -67750,20 +67727,26 @@ export async function materializeGoalContinuation(
         // Pending machine input is real model input that the next claim
         // delivers. The workflow evaluates a session-level wait before calling
         // this goal materializer, so any pending update reaching this locked
-        // boundary wins over a synthesized continuation.
-        const pendingMachineInput = await pendingSystemUpdateWakeClassesTx(
+        // boundary wins over a synthesized continuation. After a terminal
+        // compaction failure only input committed after that failure (or an
+        // Agent Steer) is new truth; the held backlog alone leaves the goal
+        // inert below instead of retrying unchanged state.
+        const compactionHoldSequence = await compactionFailureHoldSequenceTx(
           tx,
           input.workspaceId,
           input.sessionId,
         );
+        const pendingMachineInput = await pendingSystemUpdateWakeClassesTx(
+          tx,
+          input.workspaceId,
+          input.sessionId,
+          { pendingAfterSequence: compactionHoldSequence },
+        );
         if (
-          (pendingMachineInput.immediate || pendingMachineInput.deferred) &&
-          !(await latestFinishedTurnHasFailureCodeTx(
-            tx,
-            input.workspaceId,
-            input.sessionId,
-            "context_compaction_failed",
-          ))
+          pendingMachineInput.immediate ||
+          pendingMachineInput.deferred ||
+          (compactionHoldSequence !== null &&
+            (await pendingAgentSteerExistsTx(tx, input.workspaceId, input.sessionId)))
         ) {
           return { action: "queue", events: [] } as const;
         }
@@ -72407,23 +72390,22 @@ export async function claimSessionWorkForAttempt(
             };
           }
 
-          if (
-            !pendingAgentSteer &&
-            (await latestFinishedTurnHasFailureCodeTx(
-              tx as unknown as Database,
-              workspaceId,
-              sessionId,
-              "context_compaction_failed",
-            ))
-          ) {
-            // Ordinary machine updates must not turn one failed compaction into
-            // an autonomous retry loop. They remain pending and will attach to
-            // the next human/API, Steer, or explicitly requested Compact run.
-            return { action: "unclaimed", reason: "no-work" };
-          }
-
+          // Machine updates that were already pending at a terminal compaction
+          // failure must not turn it into an autonomous retry loop: they stay
+          // held and attach to the next human/API, Steer, explicitly requested
+          // Compact, or newer machine input. Input committed after the failure
+          // is new truth; it makes one attempt and the held backlog rides along.
+          const compactionHoldSequence = pendingAgentSteer
+            ? null
+            : await compactionFailureHoldSequenceTx(
+                tx as unknown as Database,
+                workspaceId,
+                sessionId,
+              );
           const commandWait = await sessionInputWaitStateTx(tx, workspaceId, sessionId, session);
-          const wakeClasses = await pendingSystemUpdateWakeClassesTx(tx, workspaceId, sessionId);
+          const wakeClasses = await pendingSystemUpdateWakeClassesTx(tx, workspaceId, sessionId, {
+            pendingAfterSequence: compactionHoldSequence,
+          });
           if (
             !wakeClasses.immediate &&
             !wakeClasses.deferred &&
@@ -74746,6 +74728,26 @@ function isPassiveCommandNotice(update: { kind: string; payload: Record<string, 
   );
 }
 
+async function pendingAgentSteerExistsTx(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<boolean> {
+  const [row] = await db
+    .select({ id: schema.sessionSystemUpdates.id })
+    .from(schema.sessionSystemUpdates)
+    .where(
+      and(
+        eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
+        eq(schema.sessionSystemUpdates.sessionId, sessionId),
+        eq(schema.sessionSystemUpdates.state, "pending"),
+        eq(schema.sessionSystemUpdates.kind, "agent_steer_instruction"),
+      ),
+    )
+    .limit(1);
+  return row !== undefined;
+}
+
 /** Read durable session state without reserving a turn-worker slot or mutating it. */
 /**
  * Which wake classes are represented among a session's pending machine inputs.
@@ -74753,12 +74755,16 @@ function isPassiveCommandNotice(update: { kind: string; payload: Record<string, 
  * `wait_for_input` declaration; deferred child notices only do so without one.
  * Command results are separate: only a current explicit wait lets them wake,
  * and an idle-containment notice never does (see `passiveCommandNoticeSql`).
+ * `pendingAfterSequence` limits the answer to inputs whose pending event is
+ * newer than a compaction-failure hold (`compactionFailureHoldSequenceTx`).
  */
 async function pendingSystemUpdateWakeClassesTx(
   db: Database,
   workspaceId: string,
   sessionId: string,
+  options: { pendingAfterSequence?: number | null } = {},
 ): Promise<{ immediate: boolean; deferred: boolean; command: boolean }> {
+  const pendingAfterSequence = options.pendingAfterSequence ?? null;
   const rows = await db
     .selectDistinct({
       kind: schema.sessionSystemUpdates.kind,
@@ -74770,6 +74776,9 @@ async function pendingSystemUpdateWakeClassesTx(
         eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
         eq(schema.sessionSystemUpdates.sessionId, sessionId),
         eq(schema.sessionSystemUpdates.state, "pending"),
+        pendingAfterSequence === null
+          ? undefined
+          : systemUpdatePendingAfterSequenceSql(db, workspaceId, sessionId, pendingAfterSequence),
       ),
     );
   let immediate = false;
@@ -75278,36 +75287,26 @@ export async function peekSessionWork(
       )
       .limit(1);
     if (!pendingUpdate) return inputWaitPeek ?? { kind: "idle" };
+    // After a terminal compaction failure, inputs that were already pending
+    // saw the unchanged history and stay held; only an Agent Steer or input
+    // committed after the failure is new truth that may start one attempt.
+    const holdSequence = await compactionFailureHoldSequenceTx(scopedDb, workspaceId, sessionId);
     if (
-      !(await latestFinishedTurnHasFailureCodeTx(
-        scopedDb,
-        workspaceId,
-        sessionId,
-        "context_compaction_failed",
-      ))
+      holdSequence !== null &&
+      (await pendingAgentSteerExistsTx(scopedDb, workspaceId, sessionId))
     ) {
-      // Immediate machine input wakes a wait and becomes the next turn. Deferred
-      // child status notices stay parked until the wait times out, is superseded
-      // by newer input, or an immediate input arrives.
-      const wakeClasses = await pendingSystemUpdateWakeClassesTx(scopedDb, workspaceId, sessionId);
-      if (wakeClasses.immediate || (wakeClasses.command && waitState.disposition === "held")) {
-        return runnable;
-      }
-      return inputWaitPeek ?? (wakeClasses.deferred ? runnable : { kind: "idle" });
+      return runnable;
     }
-    const [pendingAgentSteer] = await scopedDb
-      .select({ id: schema.sessionSystemUpdates.id })
-      .from(schema.sessionSystemUpdates)
-      .where(
-        and(
-          eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
-          eq(schema.sessionSystemUpdates.sessionId, sessionId),
-          eq(schema.sessionSystemUpdates.state, "pending"),
-          eq(schema.sessionSystemUpdates.kind, "agent_steer_instruction"),
-        ),
-      )
-      .limit(1);
-    return pendingAgentSteer ? runnable : (inputWaitPeek ?? { kind: "idle" });
+    // Immediate machine input wakes a wait and becomes the next turn. Deferred
+    // child status notices stay parked until the wait times out, is superseded
+    // by newer input, or an immediate input arrives.
+    const wakeClasses = await pendingSystemUpdateWakeClassesTx(scopedDb, workspaceId, sessionId, {
+      pendingAfterSequence: holdSequence,
+    });
+    if (wakeClasses.immediate || (wakeClasses.command && waitState.disposition === "held")) {
+      return runnable;
+    }
+    return inputWaitPeek ?? (wakeClasses.deferred ? runnable : { kind: "idle" });
   };
   return observerAccountId
     ? await withRlsContext(db, { accountId: observerAccountId, workspaceId }, observe)
@@ -75914,17 +75913,15 @@ export async function failSessionWorkBeforeAttemptClaim(
               return { action: "stale", turnId: null, events: [] } as const;
             }
           } else if (!session.compactRequested) {
-            if (
-              !pendingAgentSteer &&
-              (await latestFinishedTurnHasFailureCodeTx(
-                tx as unknown as Database,
-                workspaceId,
-                input.sessionId,
-                "context_compaction_failed",
-              ))
-            ) {
-              return { action: "stale", turnId: null, events: [] } as const;
-            }
+            // Mirrors the claim: input held by a terminal compaction failure
+            // is not runnable work unless an Agent Steer or newer input exists.
+            const compactionHoldSequence = pendingAgentSteer
+              ? null
+              : await compactionFailureHoldSequenceTx(
+                  tx as unknown as Database,
+                  workspaceId,
+                  input.sessionId,
+                );
             const [pendingUpdate] = await tx
               .select({ id: schema.sessionSystemUpdates.id })
               .from(schema.sessionSystemUpdates)
@@ -75933,6 +75930,14 @@ export async function failSessionWorkBeforeAttemptClaim(
                   eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
                   eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
                   eq(schema.sessionSystemUpdates.state, "pending"),
+                  compactionHoldSequence === null
+                    ? undefined
+                    : systemUpdatePendingAfterSequenceSql(
+                        tx as unknown as Database,
+                        workspaceId,
+                        input.sessionId,
+                        compactionHoldSequence,
+                      ),
                 ),
               )
               .limit(1)
@@ -76881,8 +76886,27 @@ export async function settleSessionIdleWithParentOutbox(
       // results do not reopen finished work. A late child notice likewise only
       // reserves new work when its producer queued the session; active goals
       // and held/due waits are independently protected below.
+      // After a terminal compaction failure only input committed after that
+      // failure is runnable (`compactionFailureHoldSequenceTx`); the held
+      // backlog does not reopen the episode on its own.
+      const compactionHoldSequence = await compactionFailureHoldSequenceTx(
+        tx as unknown as Database,
+        workspaceId,
+        sessionId,
+      );
       const pendingInputs = await tx
-        .selectDistinct({ kind: schema.sessionSystemUpdates.kind })
+        .selectDistinct({
+          kind: schema.sessionSystemUpdates.kind,
+          runnable:
+            compactionHoldSequence === null
+              ? sql<boolean>`true`
+              : sql<boolean>`${systemUpdatePendingAfterSequenceSql(
+                  tx as unknown as Database,
+                  workspaceId,
+                  sessionId,
+                  compactionHoldSequence,
+                )}`,
+        })
         .from(schema.sessionSystemUpdates)
         .where(
           and(
@@ -76893,22 +76917,14 @@ export async function settleSessionIdleWithParentOutbox(
         );
       const pendingSteer = pendingInputs.some(({ kind }) => kind === "agent_steer_instruction");
       const pendingImmediate = pendingInputs.some(
-        ({ kind }) =>
+        ({ kind, runnable }) =>
+          runnable &&
           SESSION_SYSTEM_UPDATE_WAKE_CLASS[kind as SessionSystemUpdateKind] === "immediate" &&
           kind !== "background_command_result" &&
           (!isChildLifecycleSystemUpdateKind(kind as SessionSystemUpdateKind) ||
             session.status === "queued"),
       );
-      if (
-        pendingSteer ||
-        (pendingImmediate &&
-          !(await latestFinishedTurnHasFailureCodeTx(
-            tx as unknown as Database,
-            workspaceId,
-            sessionId,
-            "context_compaction_failed",
-          )))
-      ) {
+      if (pendingSteer || pendingImmediate) {
         return { action: "stale", episodeKey: null, events: [] } as const;
       }
       const [{ episodeSequence } = { episodeSequence: 0 }] = await tx
@@ -81589,6 +81605,15 @@ export async function markSessionWorkflowWakeDelivered(
                 input.sessionId,
                 session,
               );
+              // Input held by a terminal compaction failure is not admissible
+              // until newer truth arrives (see `peekSessionWork`); keeping the
+              // wake open for it would only re-signal a workflow that has
+              // nothing to claim, forever.
+              const compactionHoldSequence = await compactionFailureHoldSequenceTx(
+                tx as unknown as Database,
+                input.workspaceId,
+                input.sessionId,
+              );
               const pending = await tx
                 .selectDistinct({
                   kind: schema.sessionSystemUpdates.kind,
@@ -81600,6 +81625,14 @@ export async function markSessionWorkflowWakeDelivered(
                     eq(schema.sessionSystemUpdates.workspaceId, input.workspaceId),
                     eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
                     eq(schema.sessionSystemUpdates.state, "pending"),
+                    compactionHoldSequence === null
+                      ? undefined
+                      : systemUpdatePendingAfterSequenceSql(
+                          tx as unknown as Database,
+                          input.workspaceId,
+                          input.sessionId,
+                          compactionHoldSequence,
+                        ),
                   ),
                 );
               const [goal] = await tx

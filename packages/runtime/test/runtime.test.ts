@@ -53,6 +53,7 @@ import {
   OPEN_SUFFIX_RUN_STATE_BLOB,
   sessionSystemUpdateBatchHistoryItem,
   skillReviewHumanInput,
+  type McpAccountRouteLabel,
   type ToolAuthNeededPayload,
   verifyDelegatedAccessToken,
 } from "@opengeni/contracts";
@@ -2666,7 +2667,7 @@ describe("runtime event normalization", () => {
       alreadyApproved?: boolean;
       previewReview?: boolean;
       serverId?: string;
-      accountLabel?: string;
+      accountLabel?: McpAccountRouteLabel;
       lazyToolTransport?: "codex_native" | "generic_dispatch";
       legacyApproval?: boolean;
       withoutConnection?: boolean;
@@ -2895,7 +2896,12 @@ describe("runtime event normalization", () => {
 
     test("prepared account display facts enrich event copies without changing catalog authority", async () => {
       const serverId = `account-${"a".repeat(64)}`;
-      const accountLabel = "Documents — Personal: alice@example.test";
+      const accountLabel: McpAccountRouteLabel = {
+        model: "Documents — Personal: alice@example.test",
+        connector: "Documents",
+        providerDomain: "docs.example.test",
+        account: "alice@example.test",
+      };
       const fixture = await connectorPolicyFixture({
         connectorDecision: "ask",
         serverId,
@@ -2905,7 +2911,13 @@ describe("runtime event normalization", () => {
         const name = prefixedMcpToolName(serverId, "search_documents");
         const requestsBefore = fixture.mcp.requests.length;
         const call = { id: "display-call", name, arguments: { query: "example" } };
-        const display = { toolName: "search_documents", accountLabel };
+        // People get the connector and the short account; the model keeps the full one.
+        const display = {
+          toolName: "search_documents",
+          connector: "Documents",
+          providerDomain: "docs.example.test",
+          accountLabel: "alice@example.test",
+        };
         expect(withMcpToolDisplayMetadata(fixture.prepared.mcpServers, call)).toMatchObject({
           ...call,
           display,

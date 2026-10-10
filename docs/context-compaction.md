@@ -439,13 +439,27 @@ bounded status/code/request identifiers, never the provider message or model
 input.
 
 When the latest finished inference has `code="context_compaction_failed"`, an
-active goal remains active and ordinary pending system/child/schedule updates
-remain durable, but neither may start another inference against the unchanged
-history. A queued human/API prompt or Agent Steer instruction remains runnable
-and receives the pending updates at its normal boundary. Explicit `/compact`
-also remains runnable; it does not consume those updates, but a successful
-checkpoint supplies newer finished-turn truth so the existing pending batch can
-run next. This gate neither creates queue work nor consumes a goal
+active goal remains active and the machine inputs that were already pending at
+that failure remain durable, but neither may start another inference against
+the unchanged history. The hold is bounded by the exact `turn.failed` event
+sequence (`compactionFailureHoldSequenceTx` in
+`packages/db/src/compaction-failure-hold.ts`): an input whose own
+`system.update.pending` event is newer than that sequence is genuinely new
+truth. Under the ordinary wake-class rules it makes one new attempt, and the
+held backlog rides along in canonical order (a batch that cannot coalesce
+claims first and the newer input follows). A queued human/API prompt or Agent
+Steer instruction, of any age, remains runnable and receives the pending
+updates at its normal boundary. Explicit `/compact` also remains runnable; it
+does not consume those updates, but a successful checkpoint supplies newer
+finished-turn truth so the existing pending batch can run next. Every reader
+of runnable work applies the same hold: work peek, claim, pre-claim failure,
+goal materialization, final idle settlement, the workflow-wake delivery ACK and
+the child-result wake repair. Held-only input therefore neither keeps a wake
+revision open (the dispatcher would otherwise re-signal a closed workflow
+forever) nor wakes a session, while a sender's new message after the failure
+always wakes it. A further compaction failure starts a new hold at its own
+sequence, so every retry needs another external input and there is no
+self-sustaining loop. This gate neither creates queue work nor consumes a goal
 continuation counter.
 
 Manual `/compact` sets one durable idempotent request. During active inference,
