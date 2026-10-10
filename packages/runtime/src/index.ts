@@ -4896,7 +4896,7 @@ export async function prepareAgentTools(
             optional,
             eager: tool.eager === true,
             joinsFirstRequestBarrier: tool.eager === true,
-            timeoutMs: config.timeoutMs,
+            timeoutMs: mcpSetupTimeoutMs(config),
           };
         }
         const url =
@@ -5059,12 +5059,8 @@ export async function prepareAgentTools(
             // also captures each tool's original connector namespace (P4 Part B.1).
             fetch: fetchImpl,
             ...(await mcpServerRequestInit(settings, config)),
-            ...(config.timeoutMs
-              ? {
-                  timeout: config.timeoutMs,
-                  clientSessionTimeoutSeconds: Math.ceil(config.timeoutMs / 1000),
-                }
-              : {}),
+            ...(config.timeoutMs ? { timeout: config.timeoutMs } : {}),
+            ...mcpSessionTimeoutOptions(config),
           });
         if (bridge) options.runMcpCredentials?.excludeLocalTarget(config.id);
         const server = configureMcpOperationRecovery(
@@ -5106,7 +5102,7 @@ export async function prepareAgentTools(
             (firstParty &&
               config.id === HARNESS_CONTROL_MCP_SERVER_ID &&
               harnessControlToolsPossible),
-          timeoutMs: config.timeoutMs,
+          timeoutMs: mcpSetupTimeoutMs(config),
         };
       }),
   );
@@ -7562,6 +7558,26 @@ function isFirstPartyMcpServer(
     return false;
   }
   return firstPartyMcpUrls(settings).some((candidate) => candidate === url);
+}
+
+/**
+ * The bound for one server's setup requests (initialize, tools/list): the
+ * longer of its call timeout and its setup timeout. Undefined keeps the
+ * client default.
+ */
+function mcpSetupTimeoutMs(config: Settings["mcpServers"][number]): number | undefined {
+  const timeoutMs = Math.max(config.timeoutMs ?? 0, config.setupTimeoutMs ?? 0);
+  return timeoutMs > 0 ? timeoutMs : undefined;
+}
+
+/** Session-request options for the streamable HTTP client; tool calls keep `timeout`. */
+export function mcpSessionTimeoutOptions(config: Settings["mcpServers"][number]): {
+  clientSessionTimeoutSeconds?: number;
+} {
+  const timeoutMs = mcpSetupTimeoutMs(config);
+  return timeoutMs === undefined
+    ? {}
+    : { clientSessionTimeoutSeconds: Math.ceil(timeoutMs / 1000) };
 }
 
 function firstPartyMcpServerUrlForRun(

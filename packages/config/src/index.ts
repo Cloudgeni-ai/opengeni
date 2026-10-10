@@ -1602,6 +1602,12 @@ const SettingsSchema = z.object({
         url: z.string().url(),
         allowedTools: z.array(z.string().min(1)).optional(),
         timeoutMs: z.number().int().positive().optional(),
+        /**
+         * Bound for session setup requests only (initialize and tools/list),
+         * when it should be longer than the client's default. Tool calls keep
+         * `timeoutMs` (or the client default) unchanged.
+         */
+        setupTimeoutMs: z.number().int().positive().optional(),
         cacheToolsList: z.boolean().default(false),
         /** Runtime approval policy, overlaid from an attempt-frozen session snapshot. */
         requireApproval: SessionMcpApprovalPolicy.optional(),
@@ -9236,6 +9242,13 @@ function positiveInt(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
 }
 
+/**
+ * Setup bound for Opengeni's own MCP servers. They are the deployment's API,
+ * which is briefly slow while it restarts or is under load; the client's
+ * 5-second default turned that into failed turns. Tool calls are unaffected.
+ */
+export const FIRST_PARTY_MCP_SETUP_TIMEOUT_MS = 30_000;
+
 function ensureBuiltInMcpServers(settings: Settings): Settings["mcpServers"] {
   const existing = settings.mcpServers.filter((server) => server.id !== "opengeni");
   const firstPartyMcpUrl = firstPartyMcpServerUrl(settings);
@@ -9260,6 +9273,7 @@ function ensureBuiltInMcpServers(settings: Settings): Settings["mcpServers"] {
       // permission-invariant tool and docs is already uncached, so both stay
       // safe to cache / leave as-is.)
       cacheToolsList: false,
+      setupTimeoutMs: FIRST_PARTY_MCP_SETUP_TIMEOUT_MS,
     },
     ...(hasFiles
       ? []
@@ -9270,6 +9284,7 @@ function ensureBuiltInMcpServers(settings: Settings): Settings["mcpServers"] {
             url: firstPartyFilesMcpUrl,
             allowedTools: ["files_get_download_url"],
             cacheToolsList: true,
+            setupTimeoutMs: FIRST_PARTY_MCP_SETUP_TIMEOUT_MS,
           },
         ]),
     ...(hasDocs
@@ -9281,6 +9296,7 @@ function ensureBuiltInMcpServers(settings: Settings): Settings["mcpServers"] {
             url: firstPartyDocsMcpUrl,
             allowedTools: ["knowledge_search", "knowledge_get", "knowledge_browse"],
             cacheToolsList: false,
+            setupTimeoutMs: FIRST_PARTY_MCP_SETUP_TIMEOUT_MS,
           },
         ]),
     ...existing,

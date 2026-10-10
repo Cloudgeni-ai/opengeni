@@ -7,6 +7,7 @@ import {
 } from "@opengeni/contracts";
 import {
   DEFAULT_MODAL_IMAGE_REF,
+  FIRST_PARTY_MCP_SETUP_TIMEOUT_MS,
   DEFAULT_GOAL_IDLE_BACKOFF_MAX_MS,
   DEFAULT_GOAL_IDLE_BACKOFF_MS,
   collectGitIdentityEnvironment,
@@ -1666,6 +1667,15 @@ describe("sandbox preparation profiles", () => {
       allowedTools: ["knowledge_search", "knowledge_get", "knowledge_browse"],
       cacheToolsList: false,
     });
+    // The built-in servers are this deployment's own API, which is briefly
+    // slow while it restarts or is busy. Their setup must outlast the
+    // client's 5-second default instead of failing the turn.
+    for (const id of ["opengeni", "files", "docs"]) {
+      expect(settings.mcpServers.find((server) => server.id === id)).toMatchObject({
+        setupTimeoutMs: FIRST_PARTY_MCP_SETUP_TIMEOUT_MS,
+      });
+    }
+    expect(FIRST_PARTY_MCP_SETUP_TIMEOUT_MS).toBeGreaterThanOrEqual(30_000);
   });
 
   test("derives built-in document MCP URL from OPENGENI_MCP_URL", () => {
