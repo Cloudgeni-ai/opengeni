@@ -1106,8 +1106,9 @@ tools (`opengeni__goal_*` lifecycle, `opengeni__command_read`/`command_wait`,
 joins the first-request barrier. Other non-MCP functions/non-eager MCP schemas require search.
 
 Web search is hosted by the model provider where the catalog declares it, or
-worker-run through one deployment-configured search API (`web_search` /
-`web_fetch`) where it does not. One shared plan (`webSearchToolPlan`) decides
+worker-run through deployment-configured search and page-reading providers
+(`web_search` / `web_fetch`, each an ordered failover list from one provider
+catalog) where it does not. One shared plan (`webSearchToolPlan`) decides
 both the worker's tools and the API's effective-tools projection; provider
 calls are credit-billed per call when billing is active. See
 [web search](web-search.md).

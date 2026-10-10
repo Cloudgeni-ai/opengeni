@@ -1182,8 +1182,10 @@ the session uses workspace defaults or an explicit/inherited MCP policy.
 Changing a session's connected or Opengeni tools therefore cannot silently
 disable web search.
 
-Models without hosted search (Claude, Gemini, DeepSeek, GLM and other
-registry models) can instead receive Opengeni's provider-agnostic `web_search`
+Claude models use Anthropic's server-side search through the same hosted
+capability (see [web search](web-search.md#claudes-server-side-search)).
+Models without hosted search (Gemini, DeepSeek, GLM and other registry models)
+can instead receive Opengeni's provider-agnostic `web_search`
 and `web_fetch` function tools when the deployment configures a search
 provider. Hosted search stays the default wherever it exists. See
 [web search](web-search.md).
