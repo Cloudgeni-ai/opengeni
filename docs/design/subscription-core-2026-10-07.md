@@ -2187,8 +2187,9 @@ when it merges:
   choice, assignment policies, delegated manager, dedupe and the policy
   union) become a provider-keyed planner, and the auto-assignment table
   `opengeni_private.subscription_codex_auto_assignments`, its apply routine
-  and triggers and `record_subscription_codex_plan_change` become
-  provider-keyed. If M4-A does not include them, PR 0 does.
+  and triggers, `record_subscription_codex_plan_change`, and 0702's access
+  editor helpers `subscription_codex_reach` and `set_subscription_codex_reach`
+  become provider-keyed. If M4-A does not include them, PR 0 does.
 - A guard test rejects provider names and provider conditionals in shared
   core modules. Every M4 change below keeps that guard green: provider facts
   live in adapters and capability flags only.
@@ -2272,7 +2273,9 @@ with its own foreign key and `ON DELETE CASCADE` (`session_id` for
 task_authority_revision` for `scheduled_task_revision`; `system_update_id`
 and `outbox_id` for `session_system_update` and
 `session_system_update_outbox`), a CHECK that exactly the kind's columns are
-set, a unique key per carrier and provider, `personal` and `shared_pool`.
+set, a unique key per carrier and provider, `personal`, `shared_pool` and
+`legacy_scope` (`organization`, `workspace`, `user`, or `missing` for the
+fail-closed backstop below; copied unchanged).
 UPDATE is always rejected; DELETE happens only by cascade from the carrier,
 so session, task and organization retention keep working.
 
@@ -2314,14 +2317,24 @@ Reading:
   `committed_at`; the cutover is drained, so no row is created during it)
   that has neither yields `personal: []`, `shared_pool: none`, and the work
   waits with `accepted_authority_unavailable`. It never falls back to no
-  narrowing.
+  narrowing. The same holds for work derived after the cutover from such a
+  source: its copy routine writes `{personal: [], shared_pool: none,
+  legacy_scope: missing}`, and
+  the deferred trigger fires whenever the resolved source predates the
+  receipt, not only when the source has a record. PR 0 makes `created_at` on
+  every carrier table immutable and, for runtime roles, transaction-assigned
+  (an explicit value other than the transaction timestamp is rejected), so
+  the comparison cannot be forged.
 - That wait, and every wait caused by a record with `personal: []` and
   `shared_pool: none`, ends at the existing capacity-wait deadline with a
   typed turn failure the session owner sees ("this work was accepted before
   the account move and its account access could not be carried; send it
   again"). A new message is accepted afresh and writes v2. The parity report
   counts these carriers (`compat:carriers_that_will_wait`) so operators see
-  the impact before the window.
+  the impact before the window: records with `personal: []` and
+  `shared_pool: none`, `user` records whose session is neither private nor
+  in the owner's Personal workspace (both helpers refuse them), and
+  non-owner-caused `workspace` records in a Personal workspace.
 - `authorize_subscription_personal_access` and
   `authorize_subscription_personal_placement_access` (0667) both require
   `connection.id = ANY(connectionIds)` for record-based authority; the
@@ -2355,11 +2368,14 @@ Writing:
   the causal human of the new carrier (as `accepted-subscription-authority.ts`
   does today); otherwise it drops it. If dropping it leaves a record whose
   `shared_pool` is `workspace` or `organization`, that narrowed record is
-  written. If the source was `user`-derived (`shared_pool: none`), no record
-  is written: the carrier is post-receipt work with no personal authority and
-  no narrowing, which with the Source mapping row equals today's fallback to
-  the receiving workspace's shared pool (and what an empty Codex v2 means).
-  Such work therefore never waits on `accepted_authority_unavailable`. A
+  written. If the source record has `legacy_scope = user` and the copy is
+  not owner-caused, no record is written: the carrier is post-receipt work
+  with no personal authority and no narrowing, which with the Source mapping
+  row equals today's fallback to the receiving workspace's shared pool (and
+  what an empty Codex v2 means), so it never waits on
+  `accepted_authority_unavailable`. An owner-caused copy of a `user` record,
+  and any copy of a `missing` record, is written verbatim and stays fail
+  closed. A
   record is never derived from v1 after the cutover; a new human acceptance
   writes v2.
 - Commit-time enforcement: a `DEFERRABLE INITIALLY DEFERRED` constraint
@@ -2371,6 +2387,12 @@ Writing:
   equal it byte for byte, and that the carrier has no v2 entry for that
   provider. The `BEFORE INSERT` fences cannot do this because records are
   written after their carrier.
+- Inbox batching: the batch key (`systemUpdateExecutionAuthorityKey`), the
+  receiver-context comparison and the 0608 fence add the provider's effective
+  authority (v2 entry, record or "post-receipt, none") after the receipt,
+  because the post-cutover v1 default equals a real pre-cutover `workspace`
+  value; the deferred trigger checks every delivered update of a batch, so a
+  narrowed and an unnarrowed update never share a delivering turn.
 - System updates and outbox rows store no human (0689 froze an empty v2 on
   them). Their record's owner is the human of their causal turn; when that
   turn has none, the narrowing rule above applies.
@@ -2414,7 +2436,9 @@ live state. A new acceptance writes the column default (the constant
 `workspace` snapshot, never read), and every derived row copies the stored v1
 value of the same source today's code uses (the per-path resolver above)
 verbatim instead of recomputing it, which is what those equality fences
-already require. The values are never read for that provider after its receipt, and
+already require. A copied `user` v1 value is copied together with its
+lineage subject fields, which `frozenSubscriptionExecutionAuthority` requires
+alongside it. The values are never read for that provider after its receipt, and
 X4/C4's guard rejects readers. Runtime roles keep INSERT on these carrier
 columns until M6; the revoked write grants apply to the factory tables and
 legacy authorities only.
@@ -2538,15 +2562,17 @@ read. PR 0 is not dormant: its v2 fence comparisons (live for Codex, which is
 cut over), its Claude scheduled comparisons and its replacement of 0668's
 non-Codex branch act on deploy. Its v2 comparison for each delivery kind uses
 the per-path resolver (a pure goal continuation compares with the goal's
-causal turn, not the context turn), and its PR records a pre-merge count of
-existing rows that the new Claude comparisons would reject.
+causal turn, not the context turn), and its PR records a pre-merge inventory of
+existing rows that the new Claude comparisons would reject, including live
+scheduled tasks whose Claude snapshots already disagree, so they are resolved
+before the comparisons go live.
 Migration ordinals are the next free ones at merge
 (`bun run migration:renumber`). Every implementation PR follows the
 repository's complex-change review policy.
 
 | PR | Content | Mode |
 | --- | --- | --- |
-| 0. Generic precursor | Receipt table and provider-keyed readiness; switch-row and core-connection restrictions before a receipt; compatibility relation, reader and copy routines (inert); `authorize_subscription_personal_access` (0668's legacy-generation v1 branch replaced, not generalized) and the 0667 placement helper: a provider with an enabled cutover reads its v2 entry or compatibility record and requires the exact owner membership, the current generation, `personalConnectionsAllowed` and, for records, `connectionIds`; a disabled row grants nothing; no receipt keeps the v1 decision. Fences 0608 and scheduled admission also compare v2, the Claude scheduled comparisons and `scheduled_claude_authority_changed` are added, the v1 liveness check switches at the receipt, and the compatibility deferred triggers are installed. PR 0 merges before any X1a or C1a call site, because 0667 and 0668 already accept any provider; provider-checked primaries; `video` operation kind; `model` and `credential_request` kinds and the unknown-outcome replay fence widened beyond Codex; wait reason `accepted_authority_unavailable`; provider-keyed `model.connected` lifecycle fact on core connection insert; provider-keyed cutover planner and auto-assignment if M4-A lacks them; adapter interface additions; provider-keyed report relation. | rolling |
+| 0. Generic precursor | Receipt table and provider-keyed readiness; switch-row and core-connection restrictions before a receipt; compatibility relation, reader and copy routines (inert); `authorize_subscription_personal_access` (0668's legacy-generation v1 branch replaced, not generalized) and the 0667 placement helper: a provider with an enabled cutover reads its v2 entry or compatibility record and requires the exact owner membership, the current generation, `personalConnectionsAllowed` and, for records, `connectionIds`; a disabled row grants nothing; until a provider's receipt both helpers return false for that provider (`xai`, `claude`), whose personal access is decided only by its v1 path. Fences 0608 and scheduled admission also compare v2, the Claude scheduled comparisons and `scheduled_claude_authority_changed` are added, the v1 liveness check switches at the receipt, and the compatibility deferred triggers are installed. PR 0 merges before any X1a or C1a call site, because 0667 and 0668 already accept any provider; provider-checked primaries; `video` operation kind; `model` and `credential_request` kinds and the unknown-outcome replay fence widened beyond Codex; wait reason `accepted_authority_unavailable`; provider-keyed `model.connected` lifecycle fact on core connection insert; provider-keyed cutover planner and auto-assignment if M4-A lacks them; adapter interface additions; provider-keyed report relation. | rolling |
 | X1a. SuperGrok adapter and chat placement | The xAI adapter and its conformance suite; chat placement, materialization, refresh, request custody (`model` / `credential_request` rows, including hosted-search continuations), session-title requests, readiness, `list_models`, funding and attribution on the core with `provider = xai`. | rolling |
 | X1b. SuperGrok settlement and waits | Failure settlement through adapter `classifyError`, finalization, waits, wakes, Temporal reconciliation by waiter id, compaction. | rolling |
 | X2a. SuperGrok media and probes | Image, video (funding, selection, admission, reconciliation), transcription, realtime, status and quota probes. | rolling |
@@ -2652,7 +2678,10 @@ guard keeps provider names out of shared modules.
   `scheduled_claude_authority_changed`.
 - Record writes: the app role cannot insert, update or delete records; a
   derived carrier committed without its record, or with a different one, is
-  rejected at commit by the deferred trigger.
+  rejected at commit by the deferred trigger; a source the cutover missed
+  yields a waiting `{personal: [], shared_pool: none}` copy; `created_at`
+  cannot be backdated or changed; a mixed inbox batch of a narrowed
+  pre-cutover update and an unnarrowed post-cutover update is split.
 - Grants: after the cutover and a fresh `provision-roles`, runtime roles hold
   no write grant on the provider's legacy tables (posture contract).
 - Lifecycle facts: a core connect emits one `model.connected` fact with the
