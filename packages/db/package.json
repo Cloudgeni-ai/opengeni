@@ -107,6 +107,7 @@
   "scripts": {
     "generate": "drizzle-kit generate",
     "migrate": "bun src/migrate.ts",
+    "migrate:plan": "bun src/migrate.ts --plan",
     "provision-roles": "bun src/provision-roles.ts",
     "backfill-lifecycle-facts": "bun src/lifecycle-fact-backfill.ts",
     "compact-session-content": "bun src/session-content-compaction.ts",

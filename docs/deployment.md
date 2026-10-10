@@ -2472,6 +2472,22 @@ helm upgrade --install opengeni "$OPENGENI_CHART_OCI" \
   --set secret.existingSecret=opengeni-runtime
 ```
 
+Every migration declares `-- deployment-mode: rolling` or
+`-- deployment-mode: maintenance`. Rolling migrations apply while the previous
+release keeps serving; a maintenance migration needs every API, control and
+turn worker database login drained first. Before an upgrade, run the
+read-only plan from the new release's API image against the live database to
+decide whether the rollout needs a drain:
+
+```bash
+bun run db:migrate-plan
+# { "pending": [{ "name": "0703_….sql", "deploymentMode": "rolling" }], "requiresDrain": false }
+```
+
+It takes no lock and writes nothing. When `requiresDrain` is `false`, let the
+normal pre-upgrade migration hook and surge rollout run without scaling the
+runtime to zero; drain only when it is `true`.
+
 Use the repo checkout chart path only for development, chart edits, local
 rendering, or smoke tests against locally built images. `deploy/helm/opengeni`
 keeps the canonical product release identity in the exact SemVer
