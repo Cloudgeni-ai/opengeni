@@ -1100,6 +1100,58 @@ describe("generic lazy tool dispatch", () => {
     ]);
   });
 
+  test("direct deferred restoration preserves validation inputs and leaves other boundaries alone", async () => {
+    const parameters = {
+      type: "object",
+      properties: { limit: { type: ["number", "null"] } },
+      additionalProperties: false,
+    };
+    const deferredName = `${SERVER_ID}__bounded_page`;
+    const makeTool = (name: string) =>
+      tool({
+        name,
+        description: "Synthetic bounded page",
+        parameters,
+        strict: false,
+        execute: () => {
+          throw new Error("No execution expected");
+        },
+      }) as unknown as Tool;
+    const deferred = makeTool(deferredName);
+    const eager = makeTool("exec_command");
+    const agent = agentWith(deferred);
+    agent.tools.push(eager);
+    const runtime = installLazyToolRuntime(agent, "generic_dispatch", new Set([SERVER_ID]));
+    await agent.getAllTools();
+    const project = (name: string, argumentsText: string) =>
+      transformGenericDispatchResponse(
+        {
+          usage: new Usage(),
+          output: [{ type: "function_call", callId: "fixture", name, arguments: argumentsText }],
+        },
+        runtime,
+      ).output[0] as { arguments: string };
+
+    const unknownKey = '{"limit":"3","__proto__":{"unused":true}}';
+    const restored = JSON.parse(project(deferredName, unknownKey).arguments);
+    expect(restored.limit).toBe(3);
+    expect(Object.keys(restored)).toEqual(["limit", "__proto__"]);
+    // additionalProperties:false still sees the unknown own key; it is not sanitized away.
+    expect(
+      Object.keys(restored).filter((key) => !Object.hasOwn(parameters.properties, key)),
+    ).toEqual(["__proto__"]);
+    for (const args of ['{"limit":"1e309"}', '{"limit":"3","unknown":[1e309]}']) {
+      expect(project(deferredName, args).arguments).toBe(args);
+    }
+    expect(project("exec_command", '{"limit":"3"}').arguments).toBe('{"limit":"3"}');
+    expect(project("not_authorized", '{"limit":"3"}').arguments).toBe('{"limit":"3"}');
+    const invoked = project(
+      "tool_invoke",
+      JSON.stringify({ name: deferredName, arguments: { limit: "3" } }),
+    );
+    expect(JSON.parse(invoked.arguments)).toEqual({ limit: "3" });
+  });
+
   test("recovers a direct remembered tool call after deferred preparation", async () => {
     let releasePreparation!: () => void;
     let preparationSettled = false;
