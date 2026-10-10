@@ -53,6 +53,11 @@ export type ModelAccessPolicyDraft = {
   follow: boolean;
   /** The saved credit switch. Read-only here: only the switch row changes it. */
   allowCreditModels: boolean;
+  /**
+   * The catalog's `policyAllowed` verdicts come from a workspace with credits
+   * off, so they mix the credit block into the allowlist's own verdict.
+   */
+  verdictBlocksCredits: boolean;
 };
 
 /** Whose list a page edits: one workspace's, or the organization's default. */
@@ -70,6 +75,7 @@ const UNRESTRICTED = { allowedProviders: null, allowedModels: null } as const;
 export function modelAccessPolicyDraft(
   policy: WorkspaceModelAccessPolicy,
   models: readonly WorkspaceModelCatalogModel[],
+  verdictBlocksCredits = policy.allowCreditModels === false,
 ): ModelAccessPolicyDraft {
   // Older servers don't say where a policy comes from; treat it as the workspace's own.
   const follow = policy.source === "organization" || policy.source === "none";
@@ -83,6 +89,7 @@ export function modelAccessPolicyDraft(
       policyVerdictComplete: true,
       follow,
       allowCreditModels,
+      verdictBlocksCredits,
     };
   }
 
@@ -102,6 +109,7 @@ export function modelAccessPolicyDraft(
       policyVerdictComplete,
       follow,
       allowCreditModels,
+      verdictBlocksCredits,
     };
   }
 
@@ -112,6 +120,7 @@ export function modelAccessPolicyDraft(
     policyVerdictComplete: true,
     follow,
     allowCreditModels,
+    verdictBlocksCredits,
   };
 }
 
@@ -128,6 +137,7 @@ function organizationDraft(
     ),
     originalPolicy: saved.originalPolicy,
     allowCreditModels: saved.allowCreditModels,
+    verdictBlocksCredits: saved.verdictBlocksCredits,
   };
 }
 
@@ -176,17 +186,24 @@ export function usableModelCount(
   return models.filter(
     (model) =>
       model.credentialReadiness.status === "ready" &&
+      // Unrunnable for another reason (not entitled, unsupported, unhealthy).
+      // A policy block is the saved list's verdict, which the draft replaces.
+      (model.availability.selectable || model.availability.reason === "policy_blocked") &&
       allowedByDraft(model, draft) &&
       (allowCreditModels || !modelUsesCredits(model)),
   ).length;
 }
 
-/** The credit switch shows when credits pay for any model here, or it is already off. */
+/**
+ * The credit switch shows when credits pay for any model here, or it is
+ * already off. A server that doesn't report the switch can't enforce it, so it
+ * never shows there: saving it would store a value nothing honours yet.
+ */
 export function creditSwitchVisible(
   models: readonly WorkspaceModelCatalogModel[],
   draft: ModelAccessPolicyDraft | null,
 ): boolean {
-  if (!draft) return false;
+  if (!draft || typeof draft.originalPolicy.allowCreditModels !== "boolean") return false;
   return !draft.allowCreditModels || models.some((model) => modelUsesCredits(model));
 }
 
@@ -222,7 +239,7 @@ export function useModelAccessPolicy(scopeOrWorkspaceId: string | ModelPolicySco
     // The organization's list arrives with its defaults; wait for them.
     if (organizationDefaults?.loading) return;
     try {
-      const [policy, catalog] = await Promise.all([
+      const [policy, catalog, hostCreditsOff] = await Promise.all([
         organizationDefaults
           ? Promise.resolve<WorkspaceModelAccessPolicy | null>(
               organizationPolicy && {
@@ -232,10 +249,26 @@ export function useModelAccessPolicy(scopeOrWorkspaceId: string | ModelPolicySco
             )
           : client.getWorkspaceModelAccessPolicy(workspaceId),
         client.getWorkspaceModelCatalog(workspaceId),
+        // The organization's list is shown through this workspace's catalog,
+        // whose verdicts include this workspace's own credit switch.
+        organizationDefaults
+          ? client
+              .getWorkspaceModelAccessPolicy(workspaceId)
+              .then((hosting) => hosting.allowCreditModels === false)
+              .catch(() => false)
+          : Promise.resolve(false),
       ]);
       if (generation !== loadGeneration.current) return;
       setModels(catalog.models);
-      setSaved(policy ? modelAccessPolicyDraft(policy, catalog.models) : null);
+      setSaved(
+        policy
+          ? modelAccessPolicyDraft(
+              policy,
+              catalog.models,
+              organizationDefaults ? hostCreditsOff : undefined,
+            )
+          : null,
+      );
       if (!policy && organizationDefaults?.error) throw organizationDefaults.error;
     } catch (caught) {
       if (generation !== loadGeneration.current) return;
@@ -325,24 +358,21 @@ export function useModelAccessPolicy(scopeOrWorkspaceId: string | ModelPolicySco
           current.workspaceId === saveScope.workspaceId
         );
       };
+      // The row only shows when this server reports (and so enforces) the switch.
       await client.updateWorkspaceSettings(workspaceId, { allowCreditModels });
       if (!isCurrentScope()) return false;
-      const policy = await client.getWorkspaceModelAccessPolicy(workspaceId);
+      // The switch shows the saved value before the success toast. A failed
+      // re-read shows on the page itself, never as a failed change.
+      await load();
       if (!isCurrentScope()) return false;
-      // A server from before the switch doesn't report or enforce it yet: say so.
-      if (policy.allowCreditModels === undefined) {
-        throw new Error(
-          "This server can't turn Opengeni credits off yet. Refresh after the update finishes.",
-        );
-      }
-      // This page and every model picker on it re-read the policy and catalog.
+      // Every other model picker on the page re-reads the policy and catalog.
       window.dispatchEvent(new Event("model-connections-changed"));
       toast.success(
         allowCreditModels ? "Opengeni credits turned on" : "Opengeni credits turned off",
       );
       return true;
     },
-    [client, organizationDefaults, workspaceId],
+    [client, load, organizationDefaults, workspaceId],
   );
 
   return {
@@ -370,7 +400,7 @@ export function allowedModelsSummary(
   }
   if (draft.mode === "provider") {
     // With credits off, the verdict mixes in the credit block: no count.
-    if (!draft.policyVerdictComplete || !draft.allowCreditModels) return "Limited by provider";
+    if (!draft.policyVerdictComplete || draft.verdictBlocksCredits) return "Limited by provider";
     const allowed = state.models.filter((model) => model.policyAllowed).length;
     return `${allowed} of ${state.models.length} models`;
   }
@@ -682,20 +712,27 @@ export function AllowedModelsFormPage({
               >
                 Allow all instead
               </Button>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => setPendingReplacementMode("selected")}
-              >
-                Choose exact models
-              </Button>
+              {/* This workspace's credit block is mixed into the verdicts, so an
+                  exact list built from them would drop every credit model. */}
+              {draft.verdictBlocksCredits ? null : (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setPendingReplacementMode("selected")}
+                >
+                  Choose exact models
+                </Button>
+              )}
             </div>
           ) : undefined
         }
       >
         {organizationLabel} allows models by provider, including future models from the same
         providers. It was set through the API; the providers themselves aren't shown here.
+        {draft.verdictBlocksCredits
+          ? " Opengeni credits are off in this workspace, so choose exact models from a workspace with credits on."
+          : null}
       </Notice>
     );
   } else if (draft?.mode === "provider") {
@@ -717,7 +754,7 @@ export function AllowedModelsFormPage({
               {/* With credits off the server's verdict can't tell a provider
                   block from a credit block, so an exact list built from it
                   would silently drop credit models. */}
-              {creditsOff ? null : (
+              {draft.verdictBlocksCredits ? null : (
                 <Button
                   type="button"
                   variant="outline"

@@ -1387,7 +1387,7 @@ unrestricted (an exact allowlist would also block subscription models connected
 later). It is independent of the allowlist layers: a workspace that follows its
 organization's allowlist keeps following it, and saving, deleting or following
 an allowlist never changes the switch. The model-policy `GET`, `PUT` and
-`DELETE` responses report it as `allowCreditModels`; `PUT` does not accept it.
+`DELETE` responses report it as `allowCreditModels`; `PUT` ignores the field if sent.
 It is enforced everywhere the allowlists are: the API edges (422, naming
 credits), the omitted-model default, goal resume and continuation, and the
 worker's post-resolution gate, which classifies the frozen turn with the same

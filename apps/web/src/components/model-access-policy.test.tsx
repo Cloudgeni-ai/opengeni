@@ -542,6 +542,62 @@ describe("Use Opengeni credits", () => {
     }
   });
 
+  test("hidden on a server that doesn't report the switch, so nothing is saved it can't enforce", async () => {
+    getWorkspaceModelAccessPolicy.mockImplementation(async () => ({
+      allowedProviders: null,
+      allowedModels: null,
+    }));
+    getWorkspaceModelCatalog.mockImplementation(async () => ({ models: creditCatalog }));
+    const view = await render(<DefaultsRows />);
+    try {
+      expect(view.container.textContent).toContain("All models");
+      expect(view.container.textContent).not.toContain("Use Opengeni credits");
+      expect(updateWorkspaceSettings).not.toHaveBeenCalled();
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  test("the organization's provider list can't be turned into an exact list from a workspace with credits off", async () => {
+    // The hosting workspace has credits off, so its catalog verdicts block credit models.
+    getWorkspaceModelAccessPolicy.mockImplementation(async () => ({
+      allowedProviders: null,
+      allowedModels: null,
+      allowCreditModels: false,
+    }));
+    getWorkspaceModelCatalog.mockImplementation(async () => ({
+      models: creditCatalog.map((candidate) => ({
+        ...candidate,
+        policyAllowed: candidate.cost !== "credits",
+      })),
+    }));
+    const organizationDefaults = {
+      defaults: { allowedProviders: ["private-provider-id"], allowedModels: null },
+      loading: false,
+      error: null,
+      reload: async () => undefined,
+      update: async () => {
+        throw new Error("unexpected save");
+      },
+    } as never;
+    const view = await render(
+      <AllowedModelsFormPage
+        workspaceId="workspace-a"
+        canManage
+        onClose={() => undefined}
+        organizationDefaults={organizationDefaults}
+      />,
+    );
+    try {
+      expect(view.container.textContent).toContain("Limited to whole providers");
+      expect(view.container.textContent).toContain("Allow all instead");
+      expect(view.container.textContent).not.toContain("Choose exact models");
+      expect(view.container.textContent).toContain("Opengeni credits are off in this workspace");
+    } finally {
+      await view.cleanup();
+    }
+  });
+
   test("Allowed models mutes credit models while credits are off and never sends the switch", async () => {
     getWorkspaceModelAccessPolicy.mockImplementation(async () => ({
       allowedProviders: null,
