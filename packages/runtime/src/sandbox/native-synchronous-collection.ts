@@ -12,6 +12,7 @@ import { RunloopSandboxSession } from "@openai/agents-extensions/sandbox/runloop
 import { DaytonaSandboxSession } from "@openai/agents-extensions/sandbox/daytona";
 import { CloudflareSandboxSession } from "@openai/agents-extensions/sandbox/cloudflare";
 import type { ChannelASession } from "./channel-a";
+import type { ProviderCommandOutput } from "./provider-command-session";
 import { parseExecResponseBanner } from "./exec-banner";
 import {
   SynchronousCommandOutcomeUnknownError,
@@ -46,6 +47,38 @@ type Adapter = {
 type Scope = { adapter: Adapter; captures: Set<Capture> };
 const adapters = new WeakMap<object, Adapter>();
 const scopes = new AsyncLocalStorage<Scope>();
+type TerminalProviderScope = {
+  session: object;
+  pages: Map<string, ProviderCommandOutput>;
+  parent: TerminalProviderScope | undefined;
+  closed: boolean;
+};
+const terminalProviderPages = new AsyncLocalStorage<TerminalProviderScope>();
+
+function terminalProviderScope(session: object): TerminalProviderScope | undefined {
+  // Routing nests its collector proxy inside the exact backend's scope.
+  for (let scope = terminalProviderPages.getStore(); scope; scope = scope.parent)
+    if (!scope.closed && scope.session === session) return scope;
+  return undefined;
+}
+
+/** Keep an unretained terminal page only through this synchronous collector's
+ * snapshot/settlement. Never turn its presentation banner into output proof. */
+export function retainSynchronousTerminalProviderPage(
+  session: object,
+  result: string,
+  page: ProviderCommandOutput,
+): void {
+  const scope = terminalProviderScope(session);
+  if (scope && page.exitCode !== null) scope.pages.set(result, page);
+}
+
+export function synchronousTerminalProviderPage(
+  session: object,
+  result: string,
+): ProviderCommandOutput | null {
+  return terminalProviderScope(session)?.pages.get(result) ?? null;
+}
 const launches = new AsyncLocalStorage<Capture>();
 const remoteStarts = new AsyncLocalStorage<Capture>();
 const formattedStarts = new AsyncLocalStorage<{
@@ -884,7 +917,7 @@ class NativeCollectionAccess extends UnixLocalSandboxSession {
 /** Existing exact control helpers are not a new filesystem execution. Keep
  * their ordinary provider route even when cancellation runs inside a scope. */
 export function withoutNativeSynchronousCommandCollection<T>(run: () => T): T {
-  return scopes.exit(run);
+  return terminalProviderPages.exit(() => scopes.exit(run));
 }
 
 /** Opt in before the one SDK Start. Worker synchronous runners use the same
@@ -894,6 +927,22 @@ export async function withNativeSynchronousCommandCollection<T>(
   session: ChannelASession,
   run: () => Promise<T>,
 ): Promise<T> {
+  if (!terminalProviderScope(session)) {
+    const terminal: TerminalProviderScope = {
+      session,
+      pages: new Map<string, ProviderCommandOutput>(),
+      parent: terminalProviderPages.getStore(),
+      closed: false,
+    };
+    return await terminalProviderPages.run(terminal, async () => {
+      try {
+        return await withNativeSynchronousCommandCollection(session, run);
+      } finally {
+        terminal.closed = true;
+        terminal.pages.clear();
+      }
+    });
+  }
   const adapter =
     session instanceof UnixLocalSandboxSession
       ? NativeCollectionAccess.install(session)

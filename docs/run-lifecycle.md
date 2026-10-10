@@ -2183,7 +2183,12 @@ cursors; a truncated or merged presentation banner is not a collection receipt.
 The SDK-native collection scope starts before dispatch and tees the original
 process streams without replacing its child, handle, or ordinary shell behavior.
 Shared terminal reads and custody retries preserve the trusted page until
-capture and settlement succeed. A status query may prove physical quiescence
+capture and settlement succeed. An immediate Modal exit without retained-process
+persistence keeps its trusted page inside the synchronous collection scope,
+including nested routing snapshots. That session-bound transient receipt is
+cleared on return or rejection; running and durably retained pages keep their
+existing capture/acknowledgment lifetime. No completed-command timer or global
+output cache is introduced. A status query may prove physical quiescence
 after stream loss, but must not turn incomplete output into filesystem success.
 
 Daytona filesystem collection uses a runtime-owned binding to the registered
