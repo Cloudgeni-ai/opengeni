@@ -21,6 +21,7 @@ import { sql } from "drizzle-orm";
 import { SubscriptionPersonalAuthorityV2 } from "@opengeni/contracts";
 import type { ProviderId } from "@opengeni/subscriptions";
 import { rawRows, type Database } from "./database";
+import { subscriptionCoreProvider } from "./subscription-core-providers";
 import { readSubscriptionProviderCutoverState } from "./subscription-core-repository";
 
 /**
@@ -57,6 +58,7 @@ export async function subscriptionAuthorityV2ForAcceptanceInTransaction(
     acceptingSubjectId: string | null;
   },
 ): Promise<SubscriptionPersonalAuthorityV2 | null> {
+  subscriptionCoreProvider(provider);
   // The common case (no enabled cutover) writes nothing and never
   // reaches the database routine; it rechecks the gate itself.
   if (!(await acceptanceWriterPresent(tx))) return null;
@@ -93,10 +95,9 @@ export async function subscriptionAuthorityV2ActiveInTransaction(
   provider: ProviderId,
   accountId: string,
 ): Promise<boolean> {
+  subscriptionCoreProvider(provider);
   if (!(await acceptanceWriterPresent(tx))) return false;
-  return (
-    (await readSubscriptionProviderCutoverState(tx, { accountId, provider })) === "enabled"
-  );
+  return (await readSubscriptionProviderCutoverState(tx, { accountId, provider })) === "enabled";
 }
 
 /**
@@ -110,6 +111,7 @@ export async function subscriptionAuthorityV2OrEmptyInTransaction(
   accountId: string,
   frozen: SubscriptionPersonalAuthorityV2 | null | undefined,
 ): Promise<SubscriptionPersonalAuthorityV2 | null> {
+  subscriptionCoreProvider(provider);
   if (frozen !== null && frozen !== undefined) return frozen;
   return (await subscriptionAuthorityV2ActiveInTransaction(tx, provider, accountId))
     ? EMPTY_SUBSCRIPTION_AUTHORITY_V2
@@ -131,6 +133,7 @@ export async function subscriptionAuthorityV2ForScheduledTaskInTransaction(
     acceptingSubjectId: string | null;
   },
 ): Promise<SubscriptionPersonalAuthorityV2 | null> {
+  subscriptionCoreProvider(provider);
   const [present] = await rawRows<{ present: boolean }>(
     tx,
     sql`select to_regprocedure(

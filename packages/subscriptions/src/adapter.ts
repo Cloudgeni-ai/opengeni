@@ -191,6 +191,3 @@ export type RotatedCredential<Credential> = {
   /** The plan the rotated credential reports, or null when it reports none. */
   planType: string | null;
 };
-
-/** Registered adapters by provider id; the only place provider ids are enumerated. */
-export type SubscriptionCoreAdapterRegistry = ReadonlyMap<ProviderId, SubscriptionCoreAdapter>;

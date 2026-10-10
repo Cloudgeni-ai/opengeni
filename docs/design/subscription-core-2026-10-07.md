@@ -2261,6 +2261,23 @@ compatibility, refresh and quota decoding, §2.1):
   that never renew;
 - `reloginText(message)`: the stored needs-relogin text.
 
+`credentialKind`, `quotaKind` and `health.entitlementCooldownMs` are declared
+facts the Codex runtime does not read yet; they are reserved for the steps
+named below that wire API-key credentials, spend-budget quota and the shared
+settlement. The core reads `capabilities.extraCredits`: the placement world
+clears `extraCreditsEnabled` for a provider without it, so the pure policy
+(`eligibility.ts`, `reference-model.ts`) no longer tests a provider id.
+
+A credential that never renews (`refresh: null`) is refreshed by nobody. The
+shared resolver's policy (`subscriptionCoreRefreshPolicy(adapter)`) is then
+`null`: the credential is used until its known expiry, never refreshed early
+or because its age is unknown. Once it has expired, or after a forced refresh
+because the provider refused it, the shared refresh takes the same lock and
+generation fence as a rotation and then marks the connection needs-relogin
+through `fail_subscription_core_refresh` (or the connection-level twin) with
+`adapter.reloginText("")`, so the turn fails with the provider's relogin
+error instead of an access-lost error.
+
 The core owns everything else: placement and re-placement, turn and
 operation leases, request reservation and settlement, the credential load
 with one per-connection lock and `refresh_generation` fencing (the adapter
@@ -2268,7 +2285,9 @@ only rotates), single-flight resolvers, health, quarantine, recovery and
 model cooldowns, the model catalog cache, usage observation persistence,
 waiter cleanup and v2 accepted authority.
 
-How the next sources fit without core changes:
+How the next sources fit. The shared runtime above needs no change for them;
+each step adds its adapter and binding plus the pieces listed after this list,
+which are still Codex-named or missing today:
 
 - SuperGrok: `oauth`, `usage_windows`; realtime client secrets,
   transcription, image and video funding are operations on the shared
@@ -2287,17 +2306,50 @@ How the next sources fit without core changes:
   exactly as a subscription window does. A later step adds a fake API-key
   adapter conformance test.
 
+Still Codex-named or missing, and owned by the provider steps (or by the
+shared settlement step they share) rather than by this extraction:
+
+- worker settlement (`apps/worker/src/activities/agent-turn/codex-core-settlement.ts`):
+  refusal classification into quarantine, model cooldown and quota writes is
+  Codex-specific code in the worker; it moves behind an adapter
+  `classifyError` hook (unifying `SubscriptionCoreAdapter` with
+  `SubscriptionProviderAdapter.classifyError`);
+- capacity waits and wake delivery, the usage fetch, operation candidate
+  ordering and the API routes, which call Codex-named wrappers over the
+  shared core;
+- quota decoding: a `decodeQuota`/usage-probe hook on the adapter and a
+  spend-budget quota shape (`quotaKind` is only declared today);
+- a `video` operation kind (the 0691 operation-kind CHECK and
+  `SubscriptionOperationKind` list image, realtime and transcription);
+- per-model cache facts and model-policy provider ids for an adapter that
+  serves several vendors' models (`cacheFacts` and `modelPolicyProviderId`
+  are per adapter today).
+
 Registry. `packages/db/src/subscription-core-providers.ts` is the only module,
-besides adapters, that enumerates providers: `SUBSCRIPTION_CORE_PROVIDERS`,
-`SUBSCRIPTION_CORE_ADAPTERS` and `subscriptionCoreProvider(id)` (throws for an
-unregistered id). Adding a provider is an adapter and binding module, one
-registry entry and its SQL registry row (§5.1.2).
+besides adapters, that enumerates providers. Its bindings are a private frozen
+map behind `subscriptionCoreProviderIds()`, `subscriptionCoreProvider(id)` and
+`subscriptionCoreAdapter(id)`; the lookups throw for an unregistered id and
+assert the binding's adapter carries the id it is registered under. The core
+uses the registry at runtime: `memoByProvider` refuses to build a runtime for
+a binding whose provider id is not registered (test bindings of a registered
+provider, such as a non-renewing variant, still run), and the neutral entry
+points that take a provider id (v2 authority, refresh persistence, waiter
+cleanup) look it up first. Adding a provider is an adapter and binding module,
+one registry entry and its SQL registry row (§5.1.2).
 
 Guard. `bun run check:subscription-core-neutral` (chained into
-`check:subscription-contract`, with a unit test) fails when a shared module
-names a provider or vendor (code, SQL text or comments) or compares a
-provider id with a literal, and when the TypeScript registry and the SQL
-registry rows differ.
+`check:subscription-contract`, with a unit test) scans
+`packages/db/src/subscription-core/`, `packages/subscriptions/src/` (the whole pure package) and the three
+provider-parameterized M3 modules. It fails when a shared module names a
+provider or vendor (code, SQL text or comments; the all-caps `XAI` vendor name
+is matched case-sensitively) or branches on a provider: a comparison with a
+literal on either side or with a named constant, a `switch` or `case` on a
+provider, `[...].includes(provider)`, an object literal indexed by a provider,
+`startsWith` on a provider id, and SQL `= any('{...}')`, `is distinct from`
+or `provider_id` comparisons. It also fails when the TypeScript registry and
+the SQL registry rows differ. It is line-based: a conditional split across
+lines in an unusual shape can evade it, so review still checks for provider
+logic in shared modules.
 
 Module map (old Codex module, its new shared home, and what stays Codex):
 
@@ -2310,18 +2362,18 @@ Module map (old Codex module, its new shared home, and what stays Codex):
 | `subscription-core-placement-world.ts`, `-repository.ts`, `-acceptance-authority.ts` | same paths, provider-parameterized | Codex-named wrappers in `subscription-core-codex-bindings.ts` |
 | (new) | `subscription-core/provider.ts`, `subscription-core/errors.ts` | `subscription-core-codex-adapter.ts` (adapter and binding), `subscription-core-codex-errors.ts` (error classes) |
 
-Every existing export keeps its name, signature and behaviour; callers
-outside `packages/db` are unchanged. Still Codex-named and deferred to
+Every `@opengeni/db` export that existed before this step keeps its name,
+signature and behaviour; callers outside `packages/db` are unchanged. The new
+shared runtimes are internal to `packages/db` (the package index exports none
+of the provider-parameterized entry points). Still Codex-named and deferred to
 the next extraction PR: the settings, allocator, rename, primary, rotation
 and source projections (`subscription-core-codex-compat.ts`), connect and
 disconnect (`subscription-core-codex-connections.ts`) and catalog readiness
 (`subscription-core-codex-catalog.ts`). Codex Apps
 (`subscription-core-codex-apps.ts`) and reset credits stay Codex modules.
-In the pure package, `connectionUsesExtraCredits` (`eligibility.ts`) and the
-reference model's `spendsCredits` still test the Codex provider id; with
-Codex the only provider holding extra credits this is the same as the
-`extraCredits` capability, and the Claude/SuperGrok steps switch it to the
-capability when a second provider joins the core.
+Codex Apps request reservation uses the shared
+`reserveSubscriptionCoreDesignatedRequest` (source lock, then insert; holder
+`<operationKind>-request:<uuid>`), taken under the Codex Apps settings lock.
 
 ### 5.2 Legacy shape mapping
 

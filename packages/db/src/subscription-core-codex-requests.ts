@@ -44,15 +44,10 @@ export async function reserveSubscriptionCoreCodexAppsRequest(
   return withRlsContext(db, target, async (tx) => {
     await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(
       ${`codex-apps-settings:${target.workspaceId}`}, 0))`);
-    await core.lockRequestSource(tx, target.accountId, target.connectionId);
-    // The native operation-reference + disconnect guards recheck designation,
-    // scope, cutover and active connection without minting personal authority.
-    return core.insertRequestReservation(tx, { ...target, kind: "apps" }, target.connectionId, {
-      ...request,
+    return core.reserveSubscriptionCoreDesignatedRequest(tx, target, {
+      requestId: request.requestId,
+      transportAttempt: request.transportAttempt,
       operationKind: "apps",
-      attemptId: crypto.randomUUID(),
-      holderId: `apps-request:${crypto.randomUUID()}`,
-      generation: 1,
     });
   });
 }

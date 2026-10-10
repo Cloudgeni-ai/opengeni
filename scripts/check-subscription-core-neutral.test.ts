@@ -15,6 +15,8 @@ describe("subscription-core neutrality guard", () => {
     const files = sharedCoreFiles(root);
     expect(files).toContain("packages/db/src/subscription-core/turns.ts");
     expect(files).toContain("packages/db/src/subscription-core-placement-world.ts");
+    expect(files).toContain("packages/subscriptions/src/eligibility.ts");
+    expect(files).toContain("packages/subscriptions/src/adapter.ts");
     expect(files.some((path) => path.includes("codex"))).toBe(false);
     expect(sqlRegistryProviders(root)).toEqual(["codex"]);
   }, 60_000);
@@ -27,6 +29,8 @@ describe("subscription-core neutrality guard", () => {
       "const grokRealtime = true;",
       "xai_primary_connection_id",
       "XaiSubscription",
+      "the xAI realtime API",
+      "XAI_API_KEY",
       "OpenRouter spend budget",
     ]) {
       expect(findViolations("x.ts", line)).toHaveLength(1);
@@ -39,6 +43,16 @@ describe("subscription-core neutrality guard", () => {
       "if (providerId !== 'acme') return;",
       "sql`where provider = 'acme'`",
       "and provider in ('acme', 'other')",
+      'if ("acme" === providerId) return;',
+      "switch (providerId) {",
+      "switch (connection.provider) {",
+      '["acme"].includes(providerId)',
+      "const enabled = { acme: true }[providerId];",
+      'if (providerId.startsWith("ac")) return;',
+      "if (providerId === ACME_ID) return;",
+      "where provider = any('{acme}')",
+      "where provider is distinct from 'acme'",
+      "where provider_id = 'acme'",
     ]) {
       expect(findViolations("x.ts", line)).toEqual([
         expect.objectContaining({ rule: "provider conditional" }),
@@ -52,6 +66,10 @@ describe("subscription-core neutrality guard", () => {
       "if (row.provider !== providerId) throw new Error();",
       "const maxAttempts = 3;",
       "provider.adapter.displayName",
+      "const maxAiTokens = taxAid;",
+      "quotaStaleAfterMs?.[connection.provider]",
+      'case "turn":',
+      "values.providers?.[id]",
     ]) {
       expect(findViolations("x.ts", line)).toEqual([]);
     }

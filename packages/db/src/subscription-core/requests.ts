@@ -31,14 +31,17 @@ type Request = { requestId: string; transportAttempt: number };
 
 type TurnRequest = Request & { attemptId: string; executionGeneration: number };
 
-/** A designated (provider-feature) request scope: an explicit workspace target, no turn. */
-export type SubscriptionCoreDesignatedScope = {
-  kind: "apps";
+/**
+ * A designated request scope: a provider feature's explicit workspace target
+ * (for example an Apps designation), with no turn or borrowed human.
+ */
+type DesignatedScope = {
+  kind: "designated";
   accountId: string;
   workspaceId: string;
 };
 
-function tenant(scope: SubscriptionCoreOperationScope | SubscriptionCoreDesignatedScope) {
+function tenant(scope: SubscriptionCoreOperationScope | DesignatedScope) {
   return scope.kind === "turn" ? scope.identity : scope;
 }
 
@@ -94,7 +97,7 @@ export const subscriptionCoreRequests = memoByProvider((provider: SubscriptionCo
 
   async function insertRequestReservation(
     tx: Database,
-    scope: SubscriptionCoreOperationScope | SubscriptionCoreDesignatedScope,
+    scope: SubscriptionCoreOperationScope | DesignatedScope,
     connectionId: string,
     input: Request & {
       attemptId: string;
@@ -329,9 +332,38 @@ export const subscriptionCoreRequests = memoByProvider((provider: SubscriptionCo
     });
   }
 
+  /**
+   * Reserve one physical request of a provider feature that runs under an
+   * explicit workspace designation (no turn). Requires the workspace RLS
+   * context on `tx`; the caller takes its own feature lock first. Takes the
+   * source lock (refresh key, then the live source and cutover check) before
+   * inserting, and the native operation-reference and disconnect guards
+   * recheck designation, scope, cutover and the active connection without
+   * minting personal authority.
+   */
+  async function reserveSubscriptionCoreDesignatedRequest(
+    tx: Database,
+    target: { accountId: string; workspaceId: string; connectionId: string },
+    request: Request & { operationKind: string },
+  ): Promise<{ operationId: string }> {
+    await lockRequestSource(tx, target.accountId, target.connectionId);
+    return insertRequestReservation(
+      tx,
+      { kind: "designated", accountId: target.accountId, workspaceId: target.workspaceId },
+      target.connectionId,
+      {
+        requestId: request.requestId,
+        transportAttempt: request.transportAttempt,
+        operationKind: request.operationKind,
+        attemptId: crypto.randomUUID(),
+        holderId: `${request.operationKind}-request:${crypto.randomUUID()}`,
+        generation: 1,
+      },
+    );
+  }
+
   return {
-    lockRequestSource,
-    insertRequestReservation,
+    reserveSubscriptionCoreDesignatedRequest,
     reserveSubscriptionCoreRequest,
     reserveSubscriptionCoreTurnCredentialRequest,
     reserveSubscriptionCoreOperationRequest,

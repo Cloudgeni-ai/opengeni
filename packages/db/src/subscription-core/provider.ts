@@ -10,6 +10,7 @@
  */
 import type { SQL } from "drizzle-orm";
 import type { SubscriptionCoreAdapter } from "@opengeni/subscriptions";
+import { subscriptionCoreProvider } from "../subscription-core-providers";
 import type { SubscriptionCoreErrors } from "./errors";
 
 export type SubscriptionCoreProvider<Credential = unknown> = {
@@ -42,6 +43,9 @@ export function memoByProvider<Runtime>(
   return (provider) => {
     const existing = instances.get(provider);
     if (existing) return existing;
+    // Fail closed for a binding of an unregistered provider (compared by id,
+    // so test bindings of a registered provider still run).
+    subscriptionCoreProvider(subscriptionCoreProviderId(provider));
     const created = factory(provider);
     instances.set(provider, created);
     return created;

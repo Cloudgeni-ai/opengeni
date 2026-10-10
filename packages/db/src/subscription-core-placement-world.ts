@@ -8,7 +8,10 @@ import {
   readSubscriptionEffectiveSettings,
   readSubscriptionSessionBinding,
 } from "./subscription-core-repository";
-import { subscriptionCoreProviderId, type SubscriptionCoreProvider } from "./subscription-core/provider";
+import {
+  subscriptionCoreProviderId,
+  type SubscriptionCoreProvider,
+} from "./subscription-core/provider";
 
 const CORE_SUBSCRIPTION_SUBJECT = "service:subscription-core";
 
@@ -240,7 +243,11 @@ export async function withSubscriptionCoreProviderPlacementWorld<T>(
       // Keep the complete catalog so a disallowed preferred model does not
       // erase provider metadata needed to evaluate same-provider fallback.
       models: request.models,
-      connections: connectionRows,
+      // Credit consent counts only for a provider whose adapter declares
+      // extra credits; any other provider's stored flag is ignored.
+      connections: provider.adapter.capabilities.extraCredits
+        ? connectionRows
+        : connectionRows.map((row) => ({ ...row, extraCreditsEnabled: false })),
       cacheFacts: { [providerId]: provider.adapter.cacheFacts },
     };
     return await operation(tx, input);

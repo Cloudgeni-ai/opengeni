@@ -1214,9 +1214,6 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
   ): Promise<SubscriptionCoreRefreshOutcome> {
     const key = encryptionKey(settings);
     const refresher = provider.adapter.refresh;
-    // A credential that never renews (an API key, a setup token) is never
-    // rotated here: fail closed before any lock or provider call.
-    if (!refresher) return { kind: "refused" };
     const now = deps.now ?? (() => new Date());
     const result = await withSubscriptionCoreRefreshLock(
       db,
@@ -1232,6 +1229,23 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
         if (!(await cutoverEnabled(tx, identity.accountId))) return { kind: "refused" };
         if (credential.refreshGeneration !== observedRefreshGeneration)
           return { kind: "superseded" };
+        if (!refresher) {
+          // A credential that never renews (an API key, a setup token) is
+          // refreshed only when it expired or the provider refused it: only a
+          // new sign-in recovers, so mark the connection needs-relogin under
+          // the same one-shot authorization a permanent refusal uses.
+          const message = provider.adapter.reloginText("");
+          const [marked] = await rawRows<{ marked: boolean }>(
+            tx,
+            sql`select opengeni_private.fail_subscription_core_refresh(${providerId},
+              ${identity.accountId}::uuid, ${identity.workspaceId}::uuid,
+              ${identity.sessionId}::uuid, ${identity.turnId}::uuid,
+              ${lease.connectionId}::uuid, ${credential.refreshGeneration}::bigint,
+              ${message}
+            ) as marked`,
+          );
+          return { kind: "relogin", message, marked: marked?.marked === true };
+        }
         try {
           const current = decodeCredential(key, credential.credentialEncrypted);
           const rotated = await refresher.rotate(current);
