@@ -362,12 +362,6 @@ import {
   wakeSubscriptionCoreCapacityWaiters,
   type SubscriptionCoreWakeScope,
 } from "./subscription-core/waiters";
-export {
-  wakeSubscriptionCoreCapacityWaiters,
-  type SubscriptionCoreCapacityWake,
-  type SubscriptionCoreSessionWorkflowWake,
-  type SubscriptionCoreWakeScope,
-} from "./subscription-core/waiters";
 import { SUBSCRIPTION_CORE_CODEX_PROVIDER } from "./subscription-core-codex-provider";
 import {
   codexSubscriptionAuthorityV2ForAcceptanceInTransaction,

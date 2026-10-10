@@ -19,14 +19,14 @@ import postgres from "postgres";
 import {
   createDb,
   createOrganizationWorkspace,
+  createSession,
+  enqueueSessionTurn,
   ensureManagedAccessForUser,
   evaluateRuntimeDatabasePosture,
   getSubscriptionCoreCodexModelConnectionAccess,
-  getSubscriptionCoreModelConnectionAccess,
   inspectRuntimeDatabasePosture,
-  updateSubscriptionCoreModelConnectionAccess,
-  wakeSubscriptionCoreCapacityWaiters,
   wakeSubscriptionCoreCodexCapacityWaiters,
+  withSessionRlsActorContext,
   type DbClient,
   type ModelConnectionTarget,
 } from "../src";
@@ -34,6 +34,12 @@ import { rawRows, setSubjectRlsContext, withRlsContext } from "../src/database";
 import { encryptEnvironmentValue } from "../src/environment-crypto";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
+// The provider-parameterized entry points are internal to the package.
+import {
+  getSubscriptionCoreModelConnectionAccess,
+  updateSubscriptionCoreModelConnectionAccess,
+} from "../src/subscription-core/access-editor";
+import { wakeSubscriptionCoreCapacityWaiters } from "../src/subscription-core/waiters";
 
 const REACH_MIGRATION = "0713_subscription_core_provider_keyed_reach.sql";
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
@@ -947,7 +953,10 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
     "capacity wakes run through the provider-keyed wake with each entry point's own texts",
     async () => {
       const org = await organization();
-      const enqueue = async () => undefined;
+      const enqueued: string[] = [];
+      const enqueue = async (_tx: unknown, wake: { sessionId: string }) => {
+        enqueued.push(wake.sessionId);
+      };
       await expect(
         wakeSubscriptionCoreCapacityWaiters(
           client!.db,
@@ -978,9 +987,73 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
           enqueue,
         ),
       ).rejects.toThrow("A session-scoped subscription-core wake names exactly one workspace");
+      // One waiting turn of each of two providers in the same workspace.
+      const waiter = async (provider: "codex" | "xai") => {
+        const actor = { subjectId: org.ownerSubjectId };
+        const session = await withSessionRlsActorContext(actor, () =>
+          createSession(client!.db, {
+            accountId: org.accountId,
+            workspaceId: org.sharedWorkspaceId,
+            initialMessage: "provider-keyed wake fixture",
+            resources: [],
+            metadata: {},
+            model: MODEL,
+            reasoningEffort: "medium",
+            latencyMode: "standard",
+            sandboxBackend: "none",
+            subjectId: org.ownerSubjectId,
+            createdBy: { kind: "subject" as const, subjectId: org.ownerSubjectId },
+            createdByContext: {},
+          }),
+        );
+        const turn = await withSessionRlsActorContext(actor, () =>
+          enqueueSessionTurn(client!.db, {
+            accountId: org.accountId,
+            workspaceId: org.sharedWorkspaceId,
+            sessionId: session.id,
+            triggerEventId: crypto.randomUUID(),
+            temporalWorkflowId: `session-${session.id}`,
+            source: "user",
+            prompt: "provider-keyed wake fixture",
+            resources: [],
+            tools: [],
+            model: MODEL,
+            reasoningEffort: "medium",
+            sandboxBackend: "none",
+            metadata: {},
+            initiator: { kind: "subject", subjectId: org.ownerSubjectId },
+          }),
+        );
+        const [row] = await database!.admin<{ waiter_id: string }[]>`
+          insert into subscription_capacity_waiters
+            (account_id, workspace_id, session_id, turn_id, provider, wait_reason)
+          values (${org.accountId}::uuid, ${org.sharedWorkspaceId}::uuid, ${session.id}::uuid,
+            ${turn.id}::uuid, ${provider}, 'capacity')
+          returning waiter_id::text as waiter_id`;
+        return { sessionId: session.id, waiterId: row!.waiter_id };
+      };
+      const codexWaiter = await waiter("codex");
+      const otherWaiter = await waiter("xai");
+      // A waiter's wake revision, last wake reason and typed wake deliveries.
+      const woken = async (waiterId: string) => {
+        const [row] = await database!.admin<
+          { wake_revision: string; last_wake_reason: string | null; deliveries: number }[]
+        >`select waiter.wake_revision::text as wake_revision, waiter.last_wake_reason,
+            (select count(*)::int from subscription_capacity_wake_outbox outbox
+              where outbox.account_id = waiter.account_id
+                and outbox.waiter_id = waiter.waiter_id) as deliveries
+          from subscription_capacity_waiters waiter where waiter.waiter_id = ${waiterId}::uuid`;
+        return {
+          revision: Number(row!.wake_revision),
+          reason: row!.last_wake_reason,
+          deliveries: row!.deliveries,
+        };
+      };
+      const unwoken = { revision: 1, reason: null, deliveries: 0 };
       // Without an enabled cutover nothing is woken; with one, the
       // organization's workspaces are listed through the provider-free
-      // inventory in the trusted wake scope (no waiter is waiting here).
+      // inventory in the trusted wake scope, and only the waking provider's
+      // waiters advance.
       const cutover = (enabled: boolean) => database!.admin`
         insert into subscription_provider_cutovers (account_id, provider, enabled)
         values (${org.accountId}::uuid, 'codex', ${enabled})
@@ -994,14 +1067,29 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
         );
       await cutover(false);
       expect(await wake()).toEqual([]);
+      expect(await woken(codexWaiter.waiterId)).toEqual(unwoken);
       await cutover(true);
-      expect(await wake()).toEqual([]);
+      const touched = [{ accountId: org.accountId, workspaceId: org.sharedWorkspaceId }];
+      expect(await wake()).toEqual(touched);
+      expect(await woken(codexWaiter.waiterId)).toEqual({
+        revision: 2,
+        reason: "fixture_wake",
+        deliveries: 1,
+      });
+      expect(await woken(otherWaiter.waiterId)).toEqual(unwoken);
+      expect(enqueued).toEqual([codexWaiter.sessionId]);
       expect(
         await wakeSubscriptionCoreCodexCapacityWaiters(client!.db, {
           accountId: org.accountId,
           reason: "fixture_wake",
         }),
-      ).toEqual([]);
+      ).toEqual(touched);
+      expect(await woken(codexWaiter.waiterId)).toEqual({
+        revision: 3,
+        reason: "fixture_wake",
+        deliveries: 2,
+      });
+      expect(await woken(otherWaiter.waiterId)).toEqual(unwoken);
     },
     180_000,
   );
@@ -1015,8 +1103,11 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
       const org = await organization();
       const codex = await connection(org, "codex", "second-codex", { allowedModelIds: [MODEL] });
       const xai = await connection(org, "xai", "second-xai", { allocatorEnabled: false });
+      // Reaches Personal workspaces only, so only the Personal rule assigns it.
+      const xaiPersonal = await connection(org, "xai", "second-xai-personal");
       expect(await setReach(org, "codex", codex, [true, false])).toEqual({ value: "set" });
       expect(await setReach(org, "xai", xai, [true, true])).toEqual({ value: "set" });
+      expect(await setReach(org, "xai", xaiPersonal, [false, true])).toEqual({ value: "set" });
       expect(await reachOf(org, "xai", xai)).toEqual({
         value: { sharedWorkspaces: true, personalWorkspaces: true },
       });
@@ -1072,18 +1163,36 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
         select connection_id::text as connection_id from subscription_connection_workspaces
         where workspace_id = ${created.id}::uuid order by connection_id`;
       expect(assigned.map((row) => row.connection_id)).toEqual([codex, xai].sort());
-      // A Personal workspace follows each provider's Personal rule.
+      // A Personal workspace follows each provider's Personal rule: created
+      // as a shared workspace it gets the shared rules; claimed as someone's
+      // Personal workspace, the shared-only Codex connection leaves and the
+      // Personal-only connection of the second provider arrives.
+      const assignedTo = async (workspaceId: string) =>
+        (
+          await database!.admin<{ connection_id: string; inference_pool: string | null }[]>`
+            select assignment.connection_id::text as connection_id, policy.inference_pool
+            from subscription_connection_workspaces assignment
+            left join subscription_connection_assignment_policies policy
+              on policy.account_id = assignment.account_id
+              and policy.connection_id = assignment.connection_id
+              and policy.workspace_id = assignment.workspace_id
+            where assignment.workspace_id = ${workspaceId}::uuid`
+        )
+          .map((row) => `${row.connection_id} ${row.inference_pool}`)
+          .sort();
       const [personal] = await database!.admin<{ id: string }[]>`
         insert into workspaces (account_id, name) values (${org.accountId}::uuid, 'Personal for both')
         returning id::text as id`;
+      expect(await assignedTo(personal!.id)).toEqual(
+        [`${codex} organization`, `${xai} organization`].sort(),
+      );
       await database!.admin`insert into organization_memberships
         (account_id, subject_id, role, status, personal_workspace_id)
         values (${org.accountId}::uuid, ${`user:core-reach-second-${crypto.randomUUID()}`},
           'member', 'active', ${personal!.id}::uuid)`;
-      const personalAssigned = await database!.admin<{ connection_id: string }[]>`
-        select connection_id::text as connection_id from subscription_connection_workspaces
-        where workspace_id = ${personal!.id}::uuid order by connection_id`;
-      expect(personalAssigned.map((row) => row.connection_id)).toEqual([xai]);
+      expect(await assignedTo(personal!.id)).toEqual(
+        [`${xai} organization`, `${xaiPersonal} organization`].sort(),
+      );
 
       // Plan-change history is the registry's flag, not a provider name.
       const planState = async () => {
@@ -1104,7 +1213,6 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
       // core's TypeScript entry points refuse it.
       await expect(
         getSubscriptionCoreModelConnectionAccess(client!.db, "xai", {
-          kind: "codex",
           connectionId: xai,
           accountId: org.accountId,
           workspaceId: null,

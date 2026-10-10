@@ -2441,8 +2441,9 @@ modules, and so does the operation candidate list in
 `subscription-core-codex-operations.ts`. Organization reach is
 provider-keyed since §5.3 PR 0c (`subscription_core_reach` /
 `set_subscription_core_reach` over `subscription_core_auto_assignments`,
-migration 0713), which the shared core calls with the binding's provider;
-Codex's 0702 pair wraps it.
+migration 0713), which the shared core and its access editor
+(`subscription-core/access-editor.ts`) call with the provider; Codex's 0702
+pair wraps it.
 Codex Apps request reservation uses the shared
 `reserveSubscriptionCoreDesignatedRequest` (source lock, then insert; holder
 `<operationKind>-request:<uuid>`), taken under the Codex Apps settings lock.
@@ -2534,7 +2535,10 @@ reconciled here with what it delivered:
   `set_subscription_codex_reach`. The 0691 operation kinds below are also
   still Codex-only. PR 0c ("PR 0c: provider-keyed cutover planner and
   organization reach", below) makes all of these provider-keyed except the
-  operation kinds.
+  operation kinds and the two Codex scope-visibility helpers
+  (`codex_organization_scope_visible` and `codex_organization_admin_visible`),
+  which the shared core does not call; they stay with the legacy policies
+  and guards that use them.
 - A guard test rejects provider names and provider conditionals in shared
   core modules. Every M4 change below keeps that guard green: provider facts
   live in adapters and capability flags only.
@@ -3148,7 +3152,8 @@ No X1a or C1a call site merges before all three.
 
 PR 0c is the slice of PR 0 that makes the M3 cutover planner rules and the
 organization-reach machinery provider-keyed (everything "Not taken by M4-A"
-above except 0691's operation kinds). Rolling migration 0713. Codex
+above except 0691's operation kinds and the Codex scope-visibility helpers,
+which the shared core does not call). Rolling migration 0713. Codex
 behaviour is unchanged, and every Codex-named routine keeps its name,
 signature, owner, grants, security mode, search path and texts for the
 binaries that still call it. A later SuperGrok or Claude cutover calls these
@@ -3163,7 +3168,11 @@ with its provider as data and needs no routine of its own:
 | Reading and setting reach | `opengeni_private.subscription_core_reach(provider, account, connection)`, `opengeni_private.set_subscription_core_reach(provider, account, connection, shared, personal)` | the 0702 pair, its own checks first, then the neutral routine |
 | Organization workspace inventory | `list_organization_subscription_workspace_ids(account)` | `list_organization_codex_workspace_ids` unchanged |
 | Capacity wake | `wakeSubscriptionCoreCapacityWaiters(db, provider, input, enqueue)` (`subscription-core/waiters.ts`) | `wakeSubscriptionCoreCodexCapacityWaiters` wraps it |
-| Access editor | `getSubscriptionCoreModelConnectionAccess` / `updateSubscriptionCoreModelConnectionAccess(db, provider, ...)` | the Codex pair wraps them |
+| Access editor | `getSubscriptionCoreModelConnectionAccess` / `updateSubscriptionCoreModelConnectionAccess(db, provider, ...)` (`subscription-core/access-editor.ts`) | the Codex pair wraps them |
+
+The TypeScript entry points are internal to `packages/db`, as §5.1.3
+requires: the package index exports only the Codex wrappers, and a later
+provider's binding imports the neutral functions from their modules.
 
 Decisions, each the strictest fail-closed reading of the plan and contract:
 
@@ -3256,6 +3265,17 @@ Decisions, each the strictest fail-closed reading of the plan and contract:
   `codex_organization_admin_visible` are called only by legacy factory-table
   policies, 0424's access guards on the API-key connection tables and 0492's
   legacy Codex source check, all left as they are.
+- **Neutral entry points stay internal and guarded.** The
+  provider-parameterized TypeScript entry points (the planner, the capacity
+  wake and the access editor pair) live in shared modules under
+  `packages/db/src/subscription-core/`, which the neutrality guard scans,
+  and the package index exports none of them (§5.1.3). The access editor
+  module also owns what the legacy editor shares with it: the policy shape
+  `ModelConnectionAccess`, its two errors and the route scope
+  (`withModelConnectionAccessScope`). `model-connection-access.ts` keeps the
+  legacy connection kinds and the Codex pair, imports those, and re-exports
+  the shape and errors under their existing names, so the modules form no
+  import cycle and the package's exports are unchanged.
 - **Rolling posture.** On a provisioned database without 0713, the previous
   release's evaluator, run as the runtime role, reports nothing missing
   before 0713, after it and after provisioning again; the new evaluator
@@ -3270,7 +3290,15 @@ Decisions, each the strictest fail-closed reading of the plan and contract:
   policies are dropped with the other Codex-named routines (§5.1.2, "Rolling
   compatibility and retirement"). `list_organization_codex_workspace_ids`
   stays while the legacy SuperGrok and Claude organization wakes call it
-  (until X4 and C4).
+  (until X4 and C4). The Codex scope-visibility helpers stay as well. Most
+  of their callers are legacy (the credential-table policies of 0381 and
+  0423, 0492's legacy Codex source check) and are left as they are, but
+  0424's access-update guard on the API-key connection tables
+  (`organization_model_provider_connections` and `connections`) and its
+  `model_connection_workspace_access` read policy on
+  `organization_model_provider_connections` also call
+  `codex_organization_admin_visible`. Generalizing those uses belongs with
+  the API-key connectors.
 - **Migration tests.** Tests that withhold 0689 also withhold 0713, which
   renames objects 0689 creates, and replay it after 0689; the neutral-routine
   test replays 0707, 0712 and 0713 together.
