@@ -390,6 +390,7 @@ function SharedCodexSetAsideRow({
       meta={[
         organizationReachLabel(places.scope, access.data),
         planLabel(account.plan, "ChatGPT"),
+        resetsLabel(account.resetCreditAvailableCount),
         reason,
       ]}
       cells={{ usage: NOT_IN_USE }}
@@ -726,8 +727,8 @@ function CodexRow({
         scopeLabel ?? (organizationAccount ? places.scope.organization : places.scope.workspace),
         planLabel(account.plan, "ChatGPT"),
         account.appsDesignated ? "Codex Apps" : null,
-        // Resets can only be redeemed on the account's own page, which org accounts don't have here.
-        organizationAccount ? null : resetsLabel(resets),
+        // An organization account's resets are redeemed on its page in Organization settings.
+        resetsLabel(resets ?? account.resetCreditAvailableCount),
       ]}
       cells={{
         usage:

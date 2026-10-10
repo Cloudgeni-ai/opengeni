@@ -214,13 +214,19 @@ const RULES: Rule[] = [
     method: "POST",
     pattern: /\/codex\/accounts\/:accountId\/reset-credits\/prepare$/,
     text: () =>
-      "Prepare redeeming one ChatGPT usage-limit reset for a Codex account. Redeeming is irreversible and only the person who connected the account can do it, in their browser.",
+      "Prepare redeeming one ChatGPT usage-limit reset for a Codex account. Person only: redeeming is irreversible, so it is done in the Opengeni app in a browser, on the account's page under Usage limit resets. A workspace's own account is redeemed by the person who connected it; an organization account by an organization owner or admin, from Organization settings > Models, even if no workspace uses it. An agent can't call it; read the resets with the account's overview and send the person there.",
   },
   {
     method: "POST",
     pattern: /\/codex\/accounts\/:accountId\/reset-credits\/redeem$/,
     text: () =>
-      "Redeem a prepared ChatGPT usage-limit reset. Irreversible; needs the person's browser confirmation.",
+      "Redeem a prepared ChatGPT usage-limit reset. Person only: irreversible, and needs the person's confirmation in their browser. An agent can't call it.",
+  },
+  {
+    method: "GET",
+    pattern: /\/organizations\/:organizationId\/codex\/accounts\/:accountId\/overview$/,
+    text: () =>
+      "Read one organization Codex (ChatGPT) account's live usage and its usage-limit resets (each with its expiry), even when no workspace uses the account. Redeeming them is a person-only step on the account's page.",
   },
   {
     method: "GET",

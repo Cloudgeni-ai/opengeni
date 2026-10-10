@@ -1836,6 +1836,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "GET /v1/organizations/:organizationId/codex/accounts/:accountId/overview",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/codex/accounts/:accountId/overview",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "GET /v1/organizations/:scopeId/model-connections/:kind/:connectionId/access",
     "method": "GET",
     "path": "/v1/organizations/:scopeId/model-connections/:kind/:connectionId/access",
@@ -4682,6 +4689,20 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "POST /v1/organizations/:organizationId/codex/accounts/:accountId/activate",
     "method": "POST",
     "path": "/v1/organizations/:organizationId/codex/accounts/:accountId/activate",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "POST /v1/organizations/:organizationId/codex/accounts/:accountId/reset-credits/prepare",
+    "method": "POST",
+    "path": "/v1/organizations/:organizationId/codex/accounts/:accountId/reset-credits/prepare",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "POST /v1/organizations/:organizationId/codex/accounts/:accountId/reset-credits/redeem",
+    "method": "POST",
+    "path": "/v1/organizations/:organizationId/codex/accounts/:accountId/reset-credits/redeem",
     "request": [],
     "response": []
   },

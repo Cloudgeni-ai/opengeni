@@ -1,6 +1,10 @@
 export * from "./session-target";
 import { sessionRetentionFromRow } from "./session-archive";
-import { readOrganizationCodexUsage } from "./organization-codex-usage";
+import {
+  buildOrganizationCodexConnectionTokenResolver,
+  findOrganizationCodexConnection,
+  readOrganizationCodexUsage,
+} from "./organization-codex-usage";
 export * from "./organization-slack-bots";
 export * from "./voice-transcription-settlement";
 import {
@@ -1019,7 +1023,10 @@ export * from "./insights-model-bundle";
 export * from "./insights-usage-bundle";
 export * from "./insights-unified";
 export * from "./organization-membership-lifecycle";
-import { assertActiveManagedHumanOrganizationMembership } from "./organization-membership-lifecycle";
+import {
+  assertActiveManagedHumanOrganizationMembership,
+  getOrganizationAdministrationOverview,
+} from "./organization-membership-lifecycle";
 // Deliberately NOT `export *`: `accountIdInRlsScope` is an internal convenience
 // for seams already inside an RLS scope, and publishing it would put a helper
 // that trivially satisfies the in-scope resolver's consistency check on the
@@ -24166,6 +24173,62 @@ export async function fetchOrganizationCodexUsageForAccount(
     fetchImpl,
     refresh,
   );
+}
+
+/**
+ * One organization-managed Codex connection (canonical id or legacy alias)
+ * for an organization administrator; null when the id is not one.
+ */
+export async function findOrganizationCodexConnectionForAdministrator(
+  db: Database,
+  settings: Settings,
+  input: { organizationId: string; actorSubjectId: string; credentialId: string },
+) {
+  return await findOrganizationCodexConnection(db, settings, input, (targetDb, use) =>
+    withOrganizationCodexAdministrator(targetDb, input, use),
+  );
+}
+
+/**
+ * The bearer of one organization-managed Codex connection for an
+ * organization administrator (usage limit resets on the organization page).
+ */
+export function buildOrganizationCodexAdministratorTokenResolver(
+  db: Database,
+  settings: Settings,
+  input: { organizationId: string; actorSubjectId: string; credentialId: string },
+  refresh?: CodexAuthDeps["refresh"],
+) {
+  return buildOrganizationCodexConnectionTokenResolver(
+    db,
+    settings,
+    input,
+    (targetDb, use) => withOrganizationCodexAdministrator(targetDb, input, use),
+    refresh,
+  );
+}
+
+/**
+ * The workspace that files an organization administrator's usage limit reset
+ * redemptions for organization-managed accounts (the redemption ledger is
+ * kept per workspace): the oldest workspace they belong to, else the
+ * organization's oldest. The choice is stable, so prepare, redeem and the
+ * overview's recovery read all see the same attempts; the cross-workspace
+ * credit fence still keeps one logical redemption per provider credit.
+ */
+export async function resolveOrganizationCodexRedemptionWorkspace(
+  db: Database,
+  input: { organizationId: string; actorSubjectId: string },
+): Promise<string | null> {
+  const { workspaces } = await getOrganizationAdministrationOverview(db, input);
+  const ordered = [...workspaces].sort(
+    (left, right) =>
+      left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id),
+  );
+  const own = ordered.find((workspace) =>
+    workspace.members.some((member) => member.subjectId === input.actorSubjectId),
+  );
+  return (own ?? ordered[0])?.id ?? null;
 }
 
 /**

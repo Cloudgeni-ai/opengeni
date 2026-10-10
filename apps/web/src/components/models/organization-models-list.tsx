@@ -37,6 +37,7 @@ import {
   ProviderTile,
   organizationReachLabel,
   payerShortLabel,
+  resetsLabel,
   type ModelsScopeLabels,
 } from "@/components/models/models-ui";
 import { OpenGeniCreditsRow, type OpenGeniCredits } from "@/components/models/opengeni-credits-row";
@@ -783,7 +784,11 @@ function OrganizationCodexRow({
       leading={<ProviderTile provider="codex" size="lg" />}
       title={codexAccountName(account)}
       titleAddon={primary ? <MetaChip variant="outline">Primary</MetaChip> : null}
-      meta={[organizationReachLabel(labels, access.data), planLabel(account.plan, "ChatGPT")]}
+      meta={[
+        organizationReachLabel(labels, access.data),
+        planLabel(account.plan, "ChatGPT"),
+        resetsLabel(account.resetCreditAvailableCount),
+      ]}
       cells={{
         usage: reconnect ? null : !account.allocatorEnabled ? (
           <StatusBadge status="paused" variant="dot" />

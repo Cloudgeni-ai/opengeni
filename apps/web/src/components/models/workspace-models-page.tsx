@@ -881,26 +881,7 @@ export function WorkspaceModelsPageBody({
         );
     }
   } else if (key?.provider === "codex" && key.organization) {
-    page = (
-      <OrgCodexAccountPage
-        codex={orgCodex}
-        accountId={key.id}
-        places={orgCodexPlaces}
-        resets={
-          (codex.overviewMap[key.id]?.resetCredits.availableCount ?? 0) > 0 ? (
-            <OrganizationResetsNote
-              count={codex.overviewMap[key.id]?.resetCredits.availableCount ?? null}
-              workspaceName={personal ? "your Personal workspace" : workspaceName}
-              onConnect={
-                organizationAdmin && canManageConnections
-                  ? () => nav.openWorkspace(workspaceId, undefined, "connect:codex")
-                  : undefined
-              }
-            />
-          ) : undefined
-        }
-      />
-    );
+    page = <OrgCodexAccountPage codex={orgCodex} accountId={key.id} places={orgCodexPlaces} />;
   } else if (key?.provider === "codex") {
     page = <CodexAccountPage codex={codex} accountId={key.id} places={codexPlaces} />;
   } else if (key?.provider === "supergrok") {
@@ -1301,30 +1282,6 @@ function workspaceOwnedNote(
     return "This key will belong to your Personal workspace, so only you use it. Organization API keys can't be used in Personal workspaces.";
   }
   return `This ${provider === "supergrok" || provider === "claude_subscription" ? "account" : "key"} will belong to ${here} only, for a team that pays with its own. To share one with other workspaces, connect it from Connect account.`;
-}
-
-/**
- * On an organization Codex account's page: its usage limit resets, which
- * only an account owned by a workspace can redeem.
- */
-function OrganizationResetsNote({
-  count,
-  workspaceName,
-  onConnect,
-}: {
-  count: number | null;
-  workspaceName: string;
-  onConnect?: (() => void) | undefined;
-}) {
-  if (!count || count <= 0) return null;
-  return (
-    <div className="flex min-w-0 flex-wrap items-center justify-between gap-3">
-      <p className="m-0 min-w-0 flex-1 basis-64 text-sm leading-5 text-fg-muted">
-        {`${count === 1 ? "1 usage limit reset is" : `${count} usage limit resets are`} waiting on this ChatGPT account. Resets can only be redeemed from an account owned by a workspace: connect the same ChatGPT account for ${workspaceName} to redeem them.`}
-      </p>
-      {onConnect ? <RowButton onClick={onConnect}>Connect for this workspace</RowButton> : null}
-    </div>
-  );
 }
 
 /** On an organization key's page: when a key owned by this workspace is the right tool. */

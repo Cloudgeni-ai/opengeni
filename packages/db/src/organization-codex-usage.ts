@@ -145,7 +145,142 @@ export async function readOrganizationCodexUsage(
   fetchImpl: CodexFetch = fetch,
   refresh: CodexAuthDeps["refresh"] = refreshCodexToken,
 ): Promise<CodexUsagePayload> {
+  const access = organizationCodexCredentialAccess(
+    settings,
+    input.organizationId,
+    input.credentialId,
+    withAdministrator,
+    refresh,
+  );
+  const { deps, scoped } = access;
   let credentialId = input.credentialId;
+  try {
+    {
+      input.signal?.throwIfAborted();
+      joinedTransport(fetchImpl);
+      // Resolve under current administrator authority, then freeze this exact
+      // identity for reads, refresh locking and generation-fenced writes.
+      const canonical = await scoped(db, (tx) =>
+        resolveSubscriptionConnectionId(tx, {
+          accountId: input.organizationId,
+          provider: "codex",
+          connectionId: input.credentialId,
+        }),
+      );
+      if (!canonical) throw new CodexReloginRequired("Sign in to ChatGPT again");
+      credentialId = canonical;
+      access.setCredentialId(canonical);
+    }
+    const resolver = buildCodexTokenResolver(
+      db,
+      settings,
+      input.organizationId,
+      credentialId,
+      deps,
+    );
+    {
+      const probe = (expectedGeneration: number) => {
+        // Anchor before administrator/source-lock admission, not after its last
+        // awaited credential read. A suspended worker may outlive PostgreSQL's
+        // orphan-transaction backstop; resuming it must not restart this budget.
+        const timeoutMs = Number.isFinite(input.requestTimeoutMs)
+          ? Math.min(CORE_USAGE_TIMEOUT_MS, Math.max(1, input.requestTimeoutMs!))
+          : CORE_USAGE_TIMEOUT_MS;
+        const deadline = performance.now() + timeoutMs;
+        return scoped(db, async (tx) => {
+          remainingCoreUsageBudget(deadline);
+          // The read-only exception holds the source lock through the finite GET.
+          // A dead worker cannot leave an idle transaction retaining this lock.
+          await tx.execute(sql`set local idle_in_transaction_session_timeout = '10s'`);
+          remainingCoreUsageBudget(deadline);
+          await tx.execute(sql`set local statement_timeout = '10s'`);
+          remainingCoreUsageBudget(deadline);
+          await tx.execute(sql`set local lock_timeout = '5s'`);
+          remainingCoreUsageBudget(deadline);
+          await tx.execute(
+            sql`select pg_advisory_xact_lock(hashtextextended(${`subscription-refresh:${credentialId}`}, 0))`,
+          );
+          remainingCoreUsageBudget(deadline);
+          // Re-enter native administration/cutover checks AFTER the source lock.
+          // Never send the resolver's previously cached bearer or return this one.
+          const current = await deps.loadCredential(
+            tx,
+            settings,
+            input.organizationId,
+            credentialId,
+          );
+          remainingCoreUsageBudget(deadline);
+          if (!current) throw new CodexReloginRequired("Sign in to ChatGPT again");
+          if (current.version !== expectedGeneration) return null;
+          return await fetchCoreUsageJoined(
+            {
+              accessToken: current.tokens.accessToken,
+              chatgptAccountId: current.chatgptAccountId,
+              isFedramp: current.isFedramp,
+              clientVersion: CODEX_CLIENT_VERSION,
+            },
+            fetchImpl,
+            {
+              deadline,
+              ...(input.signal ? { signal: input.signal } : {}),
+            },
+          );
+        });
+      };
+      let generation = (await resolver.getToken()).credentialVersion;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        let result = await probe(generation);
+        if (!result) {
+          generation = (await resolver.getToken()).credentialVersion;
+          result = await probe(generation);
+          if (!result) throw new Error("Codex account changed while checking usage");
+        }
+        if (result.status !== 401) return normalizeCodexUsage(result.status, result.payload);
+        if (attempt === 1) {
+          const marked = await deps.setStatus(db, input.organizationId, "needs_relogin", null, {
+            id: credentialId,
+            version: generation,
+          });
+          if (marked) throw new CodexReloginRequired("Sign in to ChatGPT again");
+          throw new Error("Codex account changed while checking usage");
+        }
+        const latest = await deps.loadCredential(db, settings, input.organizationId, credentialId);
+        if (!latest) throw new CodexReloginRequired("Sign in to ChatGPT again");
+        generation = (
+          latest.version !== generation ? await resolver.getToken() : await resolver.refresh()
+        ).credentialVersion;
+      }
+      throw new Error("Codex usage retry exhausted");
+    }
+  } catch (error) {
+    return {
+      status: "error",
+      planType: null,
+      fiveHour: null,
+      weekly: null,
+      limitReached: false,
+      fetchedAt: new Date().toISOString(),
+      rateLimitResetCredits: null,
+      ...(error instanceof CodexReloginRequired ? { reason: "needs_relogin" as const } : {}),
+    };
+  }
+}
+
+/**
+ * An organization administrator's access to one organization-managed Codex
+ * connection: its credential row, the per-connection refresh lock and the
+ * generation-fenced refresh writes. Shared by usage inspection and usage
+ * limit reset redemption; it never changes quota, allocation or assignments.
+ */
+function organizationCodexCredentialAccess(
+  settings: Settings,
+  organizationId: string,
+  initialCredentialId: string,
+  withAdministrator: AdministratorScope,
+  refresh: CodexAuthDeps["refresh"],
+) {
+  const input = { organizationId };
+  let credentialId = initialCredentialId;
   const condition = () =>
     sql`account_id = ${input.organizationId}::uuid and id = ${credentialId}::uuid
         and provider = 'codex' and kind = 'subscription' and ownership = 'shared'
@@ -255,113 +390,74 @@ export async function readOrganizationCodexUsage(
         return rows.length > 0;
       }),
   };
-  try {
-    {
-      input.signal?.throwIfAborted();
-      joinedTransport(fetchImpl);
-      // Resolve under current administrator authority, then freeze this exact
-      // identity for reads, refresh locking and generation-fenced writes.
-      const canonical = await scoped(db, (tx) =>
-        resolveSubscriptionConnectionId(tx, {
-          accountId: input.organizationId,
-          provider: "codex",
-          connectionId: input.credentialId,
-        }),
-      );
-      if (!canonical) throw new CodexReloginRequired("Sign in to ChatGPT again");
-      credentialId = canonical;
-    }
-    const resolver = buildCodexTokenResolver(
-      db,
-      settings,
-      input.organizationId,
-      credentialId,
-      deps,
+  return {
+    deps,
+    scoped,
+    condition,
+    setCredentialId: (next: string) => {
+      credentialId = next;
+    },
+  };
+}
+
+/**
+ * One active-or-not organization-managed Codex connection, by canonical id or
+ * legacy alias, as an organization administrator sees it. Null when the id is
+ * not an organization-managed shared Codex subscription.
+ */
+export async function findOrganizationCodexConnection(
+  db: Database,
+  settings: Settings,
+  input: { organizationId: string; credentialId: string },
+  withAdministrator: AdministratorScope,
+): Promise<{ credentialId: string; status: string } | null> {
+  const access = organizationCodexCredentialAccess(
+    settings,
+    input.organizationId,
+    input.credentialId,
+    withAdministrator,
+    refreshCodexToken,
+  );
+  return await access.scoped(db, async (tx) => {
+    const canonical = await resolveSubscriptionConnectionId(tx, {
+      accountId: input.organizationId,
+      provider: "codex",
+      connectionId: input.credentialId,
+    });
+    if (!canonical) return null;
+    access.setCredentialId(canonical);
+    const [row] = await rawRows<{ status: string }>(
+      tx,
+      sql`select status from subscription_connections where ${access.condition()}`,
     );
-    {
-      const probe = (expectedGeneration: number) => {
-        // Anchor before administrator/source-lock admission, not after its last
-        // awaited credential read. A suspended worker may outlive PostgreSQL's
-        // orphan-transaction backstop; resuming it must not restart this budget.
-        const timeoutMs = Number.isFinite(input.requestTimeoutMs)
-          ? Math.min(CORE_USAGE_TIMEOUT_MS, Math.max(1, input.requestTimeoutMs!))
-          : CORE_USAGE_TIMEOUT_MS;
-        const deadline = performance.now() + timeoutMs;
-        return scoped(db, async (tx) => {
-          remainingCoreUsageBudget(deadline);
-          // The read-only exception holds the source lock through the finite GET.
-          // A dead worker cannot leave an idle transaction retaining this lock.
-          await tx.execute(sql`set local idle_in_transaction_session_timeout = '10s'`);
-          remainingCoreUsageBudget(deadline);
-          await tx.execute(sql`set local statement_timeout = '10s'`);
-          remainingCoreUsageBudget(deadline);
-          await tx.execute(sql`set local lock_timeout = '5s'`);
-          remainingCoreUsageBudget(deadline);
-          await tx.execute(
-            sql`select pg_advisory_xact_lock(hashtextextended(${`subscription-refresh:${credentialId}`}, 0))`,
-          );
-          remainingCoreUsageBudget(deadline);
-          // Re-enter native administration/cutover checks AFTER the source lock.
-          // Never send the resolver's previously cached bearer or return this one.
-          const current = await deps.loadCredential(
-            tx,
-            settings,
-            input.organizationId,
-            credentialId,
-          );
-          remainingCoreUsageBudget(deadline);
-          if (!current) throw new CodexReloginRequired("Sign in to ChatGPT again");
-          if (current.version !== expectedGeneration) return null;
-          return await fetchCoreUsageJoined(
-            {
-              accessToken: current.tokens.accessToken,
-              chatgptAccountId: current.chatgptAccountId,
-              isFedramp: current.isFedramp,
-              clientVersion: CODEX_CLIENT_VERSION,
-            },
-            fetchImpl,
-            {
-              deadline,
-              ...(input.signal ? { signal: input.signal } : {}),
-            },
-          );
-        });
-      };
-      let generation = (await resolver.getToken()).credentialVersion;
-      for (let attempt = 0; attempt < 2; attempt += 1) {
-        let result = await probe(generation);
-        if (!result) {
-          generation = (await resolver.getToken()).credentialVersion;
-          result = await probe(generation);
-          if (!result) throw new Error("Codex account changed while checking usage");
-        }
-        if (result.status !== 401) return normalizeCodexUsage(result.status, result.payload);
-        if (attempt === 1) {
-          const marked = await deps.setStatus(db, input.organizationId, "needs_relogin", null, {
-            id: credentialId,
-            version: generation,
-          });
-          if (marked) throw new CodexReloginRequired("Sign in to ChatGPT again");
-          throw new Error("Codex account changed while checking usage");
-        }
-        const latest = await deps.loadCredential(db, settings, input.organizationId, credentialId);
-        if (!latest) throw new CodexReloginRequired("Sign in to ChatGPT again");
-        generation = (
-          latest.version !== generation ? await resolver.getToken() : await resolver.refresh()
-        ).credentialVersion;
-      }
-      throw new Error("Codex usage retry exhausted");
-    }
-  } catch (error) {
-    return {
-      status: "error",
-      planType: null,
-      fiveHour: null,
-      weekly: null,
-      limitReached: false,
-      fetchedAt: new Date().toISOString(),
-      rateLimitResetCredits: null,
-      ...(error instanceof CodexReloginRequired ? { reason: "needs_relogin" as const } : {}),
-    };
-  }
+    return row ? { credentialId: canonical, status: String(row.status) } : null;
+  });
+}
+
+/**
+ * The bearer of one organization-managed Codex connection (canonical id) for
+ * an organization administrator, with the usage path's staleness refresh under
+ * the same per-connection refresh lock and generation fence.
+ */
+export function buildOrganizationCodexConnectionTokenResolver(
+  db: Database,
+  settings: Settings,
+  input: { organizationId: string; credentialId: string },
+  withAdministrator: AdministratorScope,
+  refresh: CodexAuthDeps["refresh"] = refreshCodexToken,
+) {
+  const access = organizationCodexCredentialAccess(
+    settings,
+    input.organizationId,
+    input.credentialId,
+    withAdministrator,
+    refresh,
+  );
+  return buildCodexTokenResolver(
+    db,
+    settings,
+    input.organizationId,
+    input.credentialId,
+    access.deps,
+  );
 }

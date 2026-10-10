@@ -1103,6 +1103,39 @@ export async function redeemCodexResetCredit(
   );
 }
 
+/**
+ * The same browser-only preparation for an organization account, from the
+ * organization's Models page: an organization administrator in their own
+ * browser, whether or not any workspace uses the account.
+ */
+export async function prepareOrganizationCodexResetRedemption(
+  organizationId: string,
+  accountId: string,
+  input: { attemptId: string; creditId: string },
+): Promise<CodexResetRedemptionPreparation> {
+  return await managedBrowserMutation<CodexResetRedemptionPreparation>(
+    `/v1/organizations/${encodeURIComponent(organizationId)}/codex/accounts/${encodeURIComponent(accountId)}/reset-credits/prepare`,
+    input,
+  );
+}
+
+/** Redeems one organization account's reset credit, browser cookie only. */
+export async function redeemOrganizationCodexResetCredit(
+  organizationId: string,
+  accountId: string,
+  input: {
+    attemptId: string;
+    creditId: string;
+    confirmationToken: string;
+    confirmation: "REDEEM_USAGE_LIMIT_RESET";
+  },
+): Promise<CodexResetRedemptionResult> {
+  return await managedBrowserMutation<CodexResetRedemptionResult>(
+    `/v1/organizations/${encodeURIComponent(organizationId)}/codex/accounts/${encodeURIComponent(accountId)}/reset-credits/redeem`,
+    input,
+  );
+}
+
 async function managedBrowserMutation<T>(path: string, body: unknown): Promise<T> {
   const response = await managedActorFetch(`${apiBaseUrl}${path}`, {
     method: "POST",

@@ -1,8 +1,20 @@
-import type { CodexAccount, ModelConnectionAccessResponse } from "@opengeni/sdk";
+import type {
+  CodexAccount,
+  CodexAccountOverview,
+  ModelConnectionAccessResponse,
+} from "@opengeni/sdk";
 import { CheckIcon, PencilIcon, UnplugIcon } from "lucide-react";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 
-import { CodexDeviceCodePanel, codexAccountName, planLabel } from "@/components/codex-connection";
+import {
+  CodexDeviceCodePanel,
+  CodexRedemptionDialog,
+  ResetCreditInventory,
+  codexAccountName,
+  hasResetInventory,
+  planLabel,
+  useCodexResetRedemption,
+} from "@/components/codex-connection";
 import {
   ConnectionAccessFormPage,
   ConnectionAccessRows,
@@ -69,13 +81,10 @@ export function OrgCodexAccountPage({
   codex,
   accountId,
   places,
-  resets,
 }: {
   codex: OrganizationCodexSubscriptions;
   accountId: string;
   places: OrgCodexPlaces;
-  /** Its usage limit resets, which only an account owned by a workspace can redeem. */
-  resets?: ReactNode;
 }) {
   const listLabel = useModelsListLabel();
   const account = codex.accounts.find((candidate) => candidate.id === accountId) ?? null;
@@ -100,23 +109,23 @@ export function OrgCodexAccountPage({
       </DetailPage>
     );
   }
-  return <OrgCodexAccountDetail codex={codex} account={account} places={places} resets={resets} />;
+  return <OrgCodexAccountDetail codex={codex} account={account} places={places} />;
 }
 
 function OrgCodexAccountDetail({
   codex,
   account,
   places,
-  resets,
 }: {
   codex: OrganizationCodexSubscriptions;
   account: CodexAccount;
   places: OrgCodexPlaces;
-  resets: ReactNode;
 }) {
   const listLabel = useModelsListLabel();
   const [renaming, setRenaming] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
+  // Bumped after a reset is redeemed, so the usage above reads the fresh limits.
+  const [usageEpoch, setUsageEpoch] = useState(0);
   const name = codexAccountName(account);
   const access = useConnectionAccess({
     client: codex.client,
@@ -182,7 +191,7 @@ function OrgCodexAccountDetail({
         ) : null}
         <DetailSection title="Usage">
           <OrganizationCodexUsage
-            key={`${codex.organizationId}:${account.id}`}
+            key={`${codex.organizationId}:${account.id}:${usageEpoch}`}
             client={codex.client}
             organizationId={codex.organizationId}
             account={account}
@@ -246,7 +255,13 @@ function OrgCodexAccountDetail({
             />
           </SettingRowGroup>
         </DetailSection>
-        {resets ? <DetailSection title="Usage limit resets">{resets}</DetailSection> : null}
+        <OrgCodexResets
+          codex={codex}
+          account={account}
+          busy={codex.busy}
+          onReconnect={() => places.openConnect(account.id)}
+          onRedeemed={() => setUsageEpoch((epoch) => epoch + 1)}
+        />
       </DetailPageBody>
       <RenameAccountDialog
         open={renaming}
@@ -273,6 +288,78 @@ function OrgCodexAccountDetail({
         }}
       />
     </DetailPage>
+  );
+}
+
+/**
+ * An organization account's usage limit resets, on its page in Organization
+ * settings: its owners and admins redeem them here, whether or not any
+ * workspace uses the account. Redeeming is done by the person in their own
+ * browser, never by an agent.
+ */
+function OrgCodexResets({
+  codex,
+  account,
+  busy,
+  onReconnect,
+  onRedeemed,
+}: {
+  codex: OrganizationCodexSubscriptions;
+  account: CodexAccount;
+  busy: boolean;
+  onReconnect: () => void;
+  onRedeemed: () => void;
+}) {
+  const { client, organizationId } = codex;
+  const [overview, setOverview] = useState<CodexAccountOverview | undefined>(undefined);
+  const generation = useRef(0);
+  const load = useCallback(async () => {
+    const current = ++generation.current;
+    try {
+      const result = await client.requestJson<CodexAccountOverview>(
+        "GET",
+        `/v1/organizations/${encodeURIComponent(organizationId)}/codex/accounts/${encodeURIComponent(account.id)}/overview`,
+      );
+      if (generation.current === current) setOverview(result);
+    } catch {
+      // Usage above already says when the account can't be read; resets stay hidden.
+      if (generation.current === current) setOverview(undefined);
+    }
+  }, [client, organizationId, account.id]);
+  useEffect(() => {
+    setOverview(undefined);
+    if (account.status === "active") void load();
+    return () => {
+      generation.current += 1;
+    };
+  }, [load, account.status]);
+  const afterRedemption = useCallback(async () => {
+    await load();
+    onRedeemed();
+  }, [load, onRedeemed]);
+  const resets = useCodexResetRedemption("organization", organizationId, afterRedemption);
+  const attempts = resets.redemptionAttempts(account.id, overview);
+  if (!overview || !hasResetInventory(overview, attempts)) return null;
+  const count = overview.resetCredits.availableCount ?? 0;
+  return (
+    <DetailSection title={count > 0 ? `Usage limit resets (${count})` : "Usage limit resets"}>
+      <ResetCreditInventory
+        organization
+        overview={overview}
+        busy={busy || resets.preparingReset != null}
+        recoveryAttempts={attempts}
+        onRedeem={(credit, recovery) => void resets.beginRedemption(account.id, credit, recovery)}
+        onReconnectSameAccount={onReconnect}
+      />
+      <CodexRedemptionDialog
+        codex={{
+          redemption: resets.redemption,
+          now: Date.now(),
+          closeRedemption: resets.closeRedemption,
+          confirmRedemption: resets.confirmRedemption,
+        }}
+      />
+    </DetailSection>
   );
 }
 
