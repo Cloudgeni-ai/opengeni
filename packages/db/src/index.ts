@@ -412,6 +412,11 @@ import {
   getWorkspaceConnectionModelRestrictions as resolveWorkspaceConnectionModelRestrictions,
 } from "./workspace-model-connection-access";
 export * from "./model-connection-access";
+export {
+  SubscriptionCoreAccessInvalidError,
+  SubscriptionCoreAccessPersonNotInOrganizationError,
+  type SubscriptionCoreAccess,
+} from "./subscription-core/access";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import {
   SCHEDULED_HUMAN_WAIT_TIMEOUT_CLIENT_EVENT_PREFIX,

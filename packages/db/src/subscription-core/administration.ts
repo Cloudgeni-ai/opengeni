@@ -26,6 +26,7 @@ import {
   readSubscriptionProviderCutoverState,
   resolveSubscriptionConnectionId,
 } from "../subscription-core-repository";
+import { organizationAdministeredConnection } from "./access";
 import { SubscriptionCoreError } from "./errors";
 import { subscriptionCoreProviderId, type SubscriptionCoreProvider } from "./provider";
 
@@ -513,7 +514,10 @@ async function withAdministration<T>(
  * this provider the route may manage, checked before anything is written. A
  * workspace route may name only a connection in the workspace's projected
  * pool (`readSubscriptionCoreWorkspacePool`), as legacy did; an organization
- * route only an organization account (shared, managed by no workspace).
+ * route any organization account (shared, managed by no workspace or by a
+ * shared workspace, design 5.4). `organizationPoolOnly` keeps the organization
+ * route to accounts no workspace manages, for settings that belong to the
+ * organization pool itself (its primary).
  * Management authority itself is still the core tables' write policies.
  */
 async function visibleSharedConnection(
@@ -521,6 +525,7 @@ async function visibleSharedConnection(
   provider: SubscriptionCoreProvider,
   input: SubscriptionCoreAdministration,
   rawId: string,
+  options: { organizationPoolOnly?: boolean } = {},
 ): Promise<{ id: string; allocatorEnabled: boolean; allocatorVersion: number } | null> {
   const providerId = subscriptionCoreProviderId(provider);
   const connectionId = await resolveSubscriptionConnectionId(tx, {
@@ -539,7 +544,13 @@ async function visibleSharedConnection(
       where account_id = ${input.accountId}::uuid and provider = ${providerId} and kind = 'subscription'
         and ownership = 'shared' and id = ${connectionId}::uuid
         and disconnected_at is null
-        and (${input.workspaceId}::uuid is not null or managed_by_workspace_id is null)`,
+        and ${
+          input.workspaceId !== null
+            ? sql`true`
+            : options.organizationPoolOnly
+              ? sql`managed_by_workspace_id is null`
+              : organizationAdministeredConnection()
+        }`,
   );
   if (!row) return null;
   if (input.workspaceId !== null) {
@@ -1055,7 +1066,11 @@ export async function setSubscriptionCorePrimary(
     const personal = await managePersonalConnection(tx, provider, input, "primary");
     if (personal)
       return { activated: personal.id, wake: wakeFor(provider, input, "primary_changed") };
-    const current = await visibleSharedConnection(tx, provider, input, input.connectionId);
+    // The organization primary stays within the organization pool: a
+    // workspace-managed account keeps its workspace classification (5.4).
+    const current = await visibleSharedConnection(tx, provider, input, input.connectionId, {
+      organizationPoolOnly: true,
+    });
     if (!current) return { activated: null, wake: null };
     const written = await writeSettingsRow(tx, provider, input, {
       rotationMode: await effectiveRotationMode(tx, provider, input),

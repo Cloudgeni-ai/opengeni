@@ -3410,6 +3410,190 @@ make); whether anyone depends on personal-only SuperGrok transcription or
 realtime, which decision 3 removes; and whether to repair Codex owners with
 several current generations (finding above) if the count is not zero.
 
+### 5.4 Workspace-managed connections as organization accounts
+
+Owner request (M4 addition): an account connected in a workspace, which the
+organization Accounts page shows as "<workspace> only", becomes an
+organization account like any other, so an organization administrator can
+give it to the whole organization, chosen workspaces or chosen people through
+the access editor (0702), without reconnecting. Credentials, pins, settings
+and live waits are preserved, and nothing widens access to private sessions
+or personal accounts.
+
+#### What blocked it
+
+The data is already organization-owned. Since 0689 (§5.2, first row) a
+legacy workspace credential in a shared workspace is a `shared` connection of
+the organization (`account_id`), with `scope_kind = workspaces` over that
+workspace, one assignment-policy row `(workspace, inference_pool = workspace)`
+carrying its allocator, model allowlist and manager, and
+`managed_by_workspace_id` naming the workspace; a core connect from a shared
+workspace creates the same shape (an organization administrator's decision,
+SUB-OWN-01). `managed_by_workspace_id` is delegated management (SUB-OWN-04,
+§3.1), not ownership, and `connected_by_subject_id` is audit only
+(SUB-OWN-07). What kept such a connection out of the organization's reach
+editor were projections and route filters that read "managed by a workspace"
+as "not an organization account":
+
+| Layer | Gate |
+| --- | --- |
+| SQL | `set_subscription_codex_reach` (0702) accepts only `managed_by_workspace_id IS NULL`, so saving any organization choice failed for a managed connection. |
+| Access editor | The organization target of `getSubscriptionCoreCodexModelConnectionAccess` / `update…` selected only connections no workspace manages (404 otherwise), and its projection listed only organization-pool assignments, so a workspace's own copy was invisible to it. |
+| Organization routes | Allocation, rename, primary, extra credits, disconnect, usage and reset-credit inspection on the organization route resolved only connections no workspace manages (the primary keeps that rule, decision 10). |
+| Organization pool list and web | `readSubscriptionCoreOrganizationPool` lists only those connections; the Accounts page lists a workspace's own accounts as "<workspace> only" rows that open the workspace's page, where no reach can be chosen. A connection 0689 deduplicated across two workspaces (manager NULL, two local copies) appeared twice: once as an organization account and once per workspace. |
+
+#### Decisions
+
+1. **Organization-owned means administered by the organization.** Every
+   shared subscription connection, whether or not a workspace manages it, is
+   an organization account: listed among the organization's accounts, opened
+   on its organization page and edited through the same access editor. Only
+   the organization routes and projections change; ownership, scope and
+   management columns keep their meaning.
+2. **No row moves; the change is rolling.** The former workspace account is
+   already in the target shape, so its initial reach equals its current reach
+   with zero writes: `workspaces` scope over its workspace, no Personal
+   workspaces, its local assignment policy (classification `workspace`, its
+   allocator and models, its manager), no reach for workspaces created later.
+   Credentials, refresh generations, quota, aliases, bindings and pins,
+   leases, waiters, wake revisions, settings, primaries, Apps designations and
+   accepted authority are not touched. The owner asked for a drained,
+   parity-checked move like 0689; that protocol exists to move and re-encrypt
+   rows that old binaries would otherwise write concurrently. Here nothing is
+   rewritten, old binaries read the same rows with the same meaning, and the
+   one SQL change (the reach helper also accepting a managed connection) only
+   admits a call older binaries never make. A maintenance migration would
+   move zero rows, so its parity report would compare every table with itself;
+   the evidence is instead a real-PostgreSQL test that every core row is
+   byte-for-byte identical across the migration, plus the read-only
+   inventory the runbook compares before and after the release (the parity
+   check without a drain). It needs no window, and it can ship alone or in
+   the same release as the SuperGrok and Claude cutovers, in either order.
+3. **The managing workspace keeps its copy.** The 0702 rule stands: a
+   workspace's own copy (its `workspace`-pool assignment policy) keeps its
+   assignment and row whatever the organization chooses for workspaces. The
+   editor reports these workspaces (`localWorkspaceIds`) so the form shows
+   them as included and cannot clear them; `allowedWorkspaces` keeps meaning
+   organization-pool grants only, so an older form that never saw the field
+   saves exactly what it saves today. Choosing "all workspaces" or the whole
+   organization adds an organization-pool row for the managing workspace
+   too, as for any mixed connection after 0689, so a workspace whose source is
+   `organization` then also uses it: the administrator granted it. Explicit
+   `workspace` and `organization` source modes therefore select exactly the
+   same accounts as before until an administrator changes the reach.
+4. **Chosen people.** The editor gains the third scope of SUB-OWN-02:
+   `allowedPeople` (organization membership ids of active people, read
+   through the administrators' member list; adding a service account or a
+   person who has left is refused, while a person already chosen who has
+   since left may stay listed and is not served, since people scope admits
+   only active memberships). A people-scoped connection
+   serves only sessions whose owner is a chosen person (§3.8), in any
+   workspace that person uses and in their Personal workspace, and never an
+   ownerless session (SQL and placement already refuse people scope there).
+   Choosing people removes the organization-pool rows and the reach for
+   workspaces created later; local copies keep their rows, which serve again
+   when the reach includes workspaces, but under people scope only chosen
+   people's sessions in that workspace can use the account. A save without
+   `allowedPeople` while the scope is people is refused as a stale form
+   (409), so an older form cannot silently replace people with workspaces.
+5. **Delegated management is unchanged.** The managing workspace's
+   administrators keep exactly what they can do today: reconnect, rename,
+   allocation, the models of the account from their workspace (0702), the
+   Apps designation in their workspace, usage-limit resets, and their
+   workspace's source, rotation and primary. They gain nothing: scope and
+   reach stay organization-administrator decisions (scope guard), they cannot
+   manage the account from another workspace (the update, assignment and
+   designation policies require the current workspace to be the manager),
+   and they see no other workspace's assignments. This is the strictest
+   choice that does not take a current ability away from them. Consequence,
+   recorded for the owner: because these actions act on the one connection,
+   a delegated manager's allocation, model and extra-credit choices and a
+   reconnect also apply where the organization later shares the account.
+   Other workspaces stay bounded by their organization-pool rows (placement
+   requires both the connection's and the workspace assignment's allocator and
+   models), so a delegated manager can narrow another workspace's use but
+   never widen it; extra credits are the exception, since they are one
+   per-connection switch. Whether sharing beyond the managing workspace
+   should narrow the delegation is an open question below.
+6. **Personal accounts are untouched.** Personal connections are never
+   listed, read or written by the organization editor (it selects `shared`
+   rows only, and the scope guard forbids changing `ownership`); widening a
+   personal connection (SUB-OWN-06) is a separate flow. Fail closed: a shared
+   connection managed by a Personal workspace cannot be produced by any
+   writer (Personal-workspace connects create personal connections, 0689 maps
+   Personal-workspace rows to personal ones), but if one existed the
+   organization editor and routes would treat it as not found; the runbook
+   query counts them (expected zero).
+7. **Pins, leases and waits.** Bindings stay; a reach change that makes an
+   explicit choice unusable for the session leaves it waiting
+   `pinned_account_ineligible` (D-24) until the reach includes it again. A
+   transferred or running lease finishes only its already-authorized call;
+   renewal, the next call and waiter recovery recheck the live reach (core,
+   unchanged). Every save delivers the account-wide wake after commit, so
+   work that a wider reach can now serve is placed without waiting for its
+   recheck.
+8. **Aliases and Apps.** Route ids resolve through aliases as before. Apps
+   designations stay where they are and keep 0688's target rule: a
+   workspace-managed account can be designated only in its managing workspace
+   (by that workspace's administrators or an organization administrator), an
+   unmanaged one by an organization administrator in any workspace (D-20).
+   Designating a workspace-managed account in another workspace it now
+   reaches is not added here: it would redefine the 0688 designation routine
+   and is left to the owner (open question).
+9. **Provider-neutral.** The access editor for core connections moves into
+   the shared core (`subscription-core/access.ts`), keyed by the provider
+   binding: SuperGrok and Claude reuse it when their access routes read the
+   core (X2b, C2b). The Codex functions stay as thin wrappers with unchanged
+   names and shapes.
+
+10. **Delivery.** The backend change (this migration, the neutral editor,
+   people, and the organization routes for allocation, rename, extra credits,
+   disconnect, usage and reset credits resolving every organization account)
+   ships first and changes nothing a shipped page shows, because the
+   organization Accounts list still lists only unmanaged accounts and no
+   shipped page opens a managed one on the organization route. The
+   organization pool list (`readSubscriptionCoreOrganizationPool`) and the
+   Accounts page and editor change together in the UI change, which awaits
+   the owner's approval of its preview: listing managed accounts without the
+   page change would show each twice, once with a misleading reach.
+   `organizationAdministeredConnection` (organization context only, through
+   the shared-workspace inventory) is the one condition every organization
+   route uses, except the organization primary: it stays within the
+   organization pool (connections no workspace manages), because a former
+   workspace account keeps its `workspace` classification (decision 3) and
+   an organization primary outside the pool `organization` source mode
+   selects from would mean nothing. Making one the organization default
+   would need a reclassification, which is not part of this change.
+#### Target shape for the SuperGrok and Claude cutovers
+
+A legacy credential of either provider with `authority_scope = workspace` in
+a shared workspace maps directly to the shape above, with nothing further to
+run: a `shared` connection of the organization, `scope_kind = workspaces`
+over that workspace, `allow_personal_workspaces = false`, one assignment
+`(workspace)` and one assignment policy `(workspace, inference_pool =
+workspace)` with the row's exact allocator, model allowlist and
+`managed_by_workspace_id = workspace`, and the connection's
+`managed_by_workspace_id = workspace` when its dedupe group has exactly that
+one source (otherwise NULL, with one local policy per source, as 0689). No
+auto-assignment row. Merged ids become aliases; the connecting person stays
+audit metadata. The connection is then an organization account editable
+through the provider-neutral access editor as soon as the provider's access
+route reads the core. Personal-workspace and `user` credentials become
+personal connections, outside the organization editor.
+
+#### Finding
+
+| Finding | Where | Fixed in |
+| --- | --- | --- |
+| A connection 0689 merged from two workspaces' copies of one upstream account gets `managed_by_workspace_id = NULL` with each copy's manager on its assignment policy, but no route or policy honours an assignment-level manager (the assignment-policy and designation policies require the connection-level manager), so those workspaces' administrators lost reconnect, allocation and model management of their copy. Restoring it grants management authority, which is an owner decision; this change does not alter it. The duplicated listing of such accounts on the Accounts page is fixed by the UI change. | 0642 policies, 0689 planner | open question |
+
+Open questions for the product owner: whether sharing an account beyond its
+managing workspace should end or narrow that workspace's delegated management
+(decision 5); whether to restore per-workspace management of merged copies
+(finding above); and whether an organization administrator may designate a
+workspace-managed account for Codex Apps in other workspaces it reaches
+(decision 8).
+
 ## 6. Specific behaviours
 
 ### 6.1 Cache coldness (SUB-STICK-04)

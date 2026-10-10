@@ -4343,6 +4343,62 @@ total). New work those owners accept gets no personal Codex access. If the
 total is not zero, raise it with the product owner; the repair is a separate
 decision and is not part of this migration.
 
+### Workspace-managed accounts as organization accounts (0713)
+
+Migration `0713_subscription_workspace_managed_organization_accounts.sql` is
+**rolling**. It changes no row: since 0689 an account connected in a shared
+workspace is already a shared connection of the organization, scoped to that
+workspace and managed by it. The migration only lets the organization access
+editor's reach helper (`set_subscription_codex_reach`) accept such a
+connection, so an organization administrator can give it to the whole
+organization, chosen workspaces or chosen people without reconnecting. Design
+record: [workspace-managed connections as organization accounts](design/subscription-core-2026-10-07.md#54-workspace-managed-connections-as-organization-accounts).
+It needs no drain or window: older binaries never call the helper for a
+managed connection and read the same rows with the same meaning. It can ship
+alone or in the same release as the SuperGrok and Claude cutovers.
+
+**Parity check.** Run this read-only inventory as the migration owner before
+and after the release; the counts must be identical (the migration writes no
+row), and `personal_managed` must be 0 (a shared connection managed by a
+Personal workspace is not an organization account; investigate before any
+repair):
+
+```sql
+SELECT connection.account_id, connection.provider,
+  count(*) AS managed,
+  count(*) FILTER (WHERE connection.scope_kind = 'workspaces') AS workspaces_scope,
+  count(*) FILTER (WHERE membership.id IS NOT NULL) AS personal_managed,
+  count(policy.connection_id) AS local_policies,
+  count(auto.connection_id) AS reach_rows
+FROM subscription_connections connection
+LEFT JOIN organization_memberships membership
+  ON membership.account_id = connection.account_id
+  AND membership.personal_workspace_id = connection.managed_by_workspace_id
+LEFT JOIN subscription_connection_assignment_policies policy
+  ON policy.connection_id = connection.id
+  AND policy.workspace_id = connection.managed_by_workspace_id
+  AND policy.inference_pool = 'workspace'
+LEFT JOIN opengeni_private.subscription_codex_auto_assignments auto
+  ON auto.connection_id = connection.id
+WHERE connection.ownership = 'shared' AND connection.disconnected_at IS NULL
+  AND connection.managed_by_workspace_id IS NOT NULL
+GROUP BY connection.account_id, connection.provider
+ORDER BY connection.account_id, connection.provider;
+```
+
+**Validation.** As an organization administrator, open a workspace-managed
+account's access on the organization route: it reads its workspace's own copy
+(`localWorkspaceIds`), its manager and no other workspace. Saving a reach
+changes only scope, assignments, organization-pool rows, people and the
+reach row; credentials, refresh generations, quota, bindings, leases and
+waiters are untouched, and the account-wide wake follows every save. Until
+the owner approves the Accounts page change, the page still lists these
+accounts under their workspace.
+
+**Fix forward.** The previous helper definition is in 0702. If the helper
+misbehaves, ship a forward migration restoring that definition; saves on
+managed accounts then fail with "not found" again, and nothing else changes.
+
 ### Slack API pilot activation (0597)
 
 Stop every old/new API, control worker, and turn worker before applying

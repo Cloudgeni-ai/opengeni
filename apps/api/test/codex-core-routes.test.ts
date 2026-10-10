@@ -1119,6 +1119,94 @@ describe("organization Codex routes with a cutover row", () => {
   });
 });
 
+describe("the organization access editor for a workspace-managed Codex account", () => {
+  const MANAGER = "00000000-0000-4000-8000-0000000000b2";
+  const PERSON = "00000000-0000-4000-8000-0000000000d4";
+  const path = `/v1/organizations/${ACCOUNT}/model-connections/codex/${CONNECTION}/access`;
+  function editor() {
+    cutover("core");
+    mock("assertOrganizationCodexAdministrator", async () => undefined);
+    mock("getOrganizationAdministrationOverview", async () => ({
+      workspaces: [
+        { id: WS, name: "Research" },
+        { id: MANAGER, name: "Platform" },
+      ],
+    }));
+    const member = (id: string, subjectId: string, status = "active") => ({
+      id,
+      organizationId: ACCOUNT,
+      subjectId,
+      name: subjectId,
+      email: null,
+      role: "member",
+      status,
+      authorizationRevision: 1,
+      sharedWorkspaceAccess: [],
+      revokedAt: null,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    mock("listOrganizationAdministrationMembers", async () => [
+      member(PERSON, "user:ada"),
+      member("00000000-0000-4000-8000-0000000000d5", "service:robot"),
+      member("00000000-0000-4000-8000-0000000000d6", "user:left", "revoked"),
+    ]);
+  }
+
+  test("reads its reach, the managing workspace's own copy and the people to choose", async () => {
+    editor();
+    mock("readSubscriptionCoreCodexModelConnectionAccess", async () => ({
+      policy: {
+        allowedModels: null,
+        allowedWorkspaces: [],
+        allowPersonalWorkspaces: false,
+        allowedPeople: null,
+        version: 1,
+      },
+      localWorkspaceIds: [MANAGER],
+      managedByWorkspaceId: MANAGER,
+    }));
+    const response = await app().fetch(organizationAdminRequest(path));
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    // An older form saves exactly what it saved before: no people key.
+    expect(body.policy).toEqual({
+      allowedModels: null,
+      allowedWorkspaces: [],
+      allowPersonalWorkspaces: false,
+      version: 1,
+    });
+    expect(body).toMatchObject({
+      peopleSupported: true,
+      people: [{ id: PERSON, name: "user:ada", email: null }],
+      localWorkspaceIds: [MANAGER],
+      managedByWorkspaceId: MANAGER,
+    });
+  });
+
+  test("a person outside the organization or a mixed choice is a 422, never a write", async () => {
+    editor();
+    for (const error of [
+      new opengeniDb.SubscriptionCoreAccessPersonNotInOrganizationError(),
+      new opengeniDb.SubscriptionCoreAccessInvalidError("mixed"),
+    ]) {
+      mock("updateSubscriptionCoreCodexModelConnectionAccess", async () => {
+        throw error;
+      });
+      const body = JSON.stringify({
+        allowedModels: null,
+        allowedWorkspaces: [],
+        allowPersonalWorkspaces: false,
+        allowedPeople: [PERSON],
+        version: 1,
+      });
+      const response = await app().fetch(organizationAdminRequest(path, { method: "PUT", body }));
+      expect(response.status).toBe(422);
+    }
+    expect(wakes).toEqual([]);
+  });
+});
+
 describe("the Codex Apps designation for a run", () => {
   const poison = poisonDb as never;
   function leaves() {
