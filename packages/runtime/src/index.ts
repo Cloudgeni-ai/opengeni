@@ -12051,13 +12051,48 @@ const cloneRepositoryFunctionLines: readonly string[] = [
   '  mkdir -p "$(dirname "$target")"',
   '  tmp="${target}.tmp.$$"',
   '  rm -rf "$tmp"',
+  "  fetch_output=''",
+  "  remote_refs=''",
+  "  remote_empty=0",
+  "  repository_empty=0",
   // Fetch failures must not leak the pid-suffixed tmp clone beside the mount
-  // (set -eu would exit before any cleanup).
-  '  if ! { repository_git init "$tmp" >/dev/null && repository_git -C "$tmp" remote add origin "$uri" && repository_git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref"; }; then',
-  '    rm -rf "$tmp"',
-  '    echo "Repository resource fetch failed for $target" >&2',
-  '    echo "Check repository access and the requested ref. Use a full commit SHA or an existing branch, tag, or PR ref; an abbreviated commit SHA is not a fetchable remote ref." >&2',
-  "    exit 1",
+  // (set -eu would exit before any cleanup). Fetch diagnostics are held back so
+  // an empty remote (below) does not print a misleading "couldn't find remote
+  // ref"; every other outcome replays them unchanged.
+  '  if ! { repository_git -c init.defaultBranch=main init "$tmp" >/dev/null && repository_git -C "$tmp" remote add origin "$uri" && fetch_output="$(repository_git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref" 2>&1)"; }; then',
+  // A freshly created repository has no refs at all, so no ref can be fetched.
+  // `ls-remote` succeeding with no output (it fails on auth or access errors)
+  // proves that. Attaching such a repository is valid: leave an initialized
+  // repository with origin configured on the requested branch, unborn, so the
+  // agent can commit and `git push origin <branch>`. A pinned commit, a subpath,
+  // or a non-branch ref cannot exist on an empty remote and stays fatal.
+  '    if [ -d "$tmp/.git" ] && remote_refs="$(repository_git -C "$tmp" ls-remote origin 2>/dev/null)" && [ -z "$remote_refs" ]; then',
+  "      remote_empty=1",
+  '      empty_branch="${ref#refs/heads/}"',
+  '      if [ "$empty_branch" = HEAD ]; then empty_branch=main; fi',
+  '      case "$empty_branch" in',
+  "        refs/*|pull/*/head|pull/*/merge) empty_branch='' ;;",
+  "        *[!0-9a-f]*) ;;",
+  '        *) if [ "${#empty_branch}" -eq 40 ] || [ "${#empty_branch}" -eq 64 ]; then empty_branch=\'\'; fi ;;',
+  "      esac",
+  '      if [ -z "$expected_commit" ] && [ -z "$subpath" ] && [ -n "$empty_branch" ] && command git check-ref-format "refs/heads/$empty_branch" >/dev/null 2>&1 && repository_git -C "$tmp" symbolic-ref HEAD "refs/heads/$empty_branch"; then',
+  "        repository_empty=1",
+  '        echo "Repository resource remote is empty; $target starts on unborn branch $empty_branch"',
+  "      fi",
+  "    fi",
+  '    if [ "$repository_empty" -eq 0 ]; then',
+  '      if [ -n "$fetch_output" ]; then printf \'%s\\n\' "$fetch_output" >&2; fi',
+  '      rm -rf "$tmp"',
+  '      echo "Repository resource fetch failed for $target" >&2',
+  '      if [ "$remote_empty" -eq 1 ]; then',
+  '        echo "The remote repository is empty; attach it by branch name, without a pinned commit or subpath, until it has commits." >&2',
+  "      else",
+  '        echo "Check repository access and the requested ref. Use a full commit SHA or an existing branch, tag, or PR ref; an abbreviated commit SHA is not a fetchable remote ref." >&2',
+  "      fi",
+  "      exit 1",
+  "    fi",
+  '  elif [ -n "$fetch_output" ]; then',
+  "    printf '%s\\n' \"$fetch_output\" >&2",
   "  fi",
   // origin/HEAD is best-effort: workspace capture diffs the branch against it
   // when present and already treats a missing origin/HEAD as additive. `git
@@ -12067,7 +12102,7 @@ const cloneRepositoryFunctionLines: readonly string[] = [
   '  if repository_git -C "$tmp" rev-parse --verify --quiet "refs/remotes/origin/$ref" >/dev/null; then',
   '    repository_git -C "$tmp" remote set-head origin "$ref" >/dev/null || true',
   "  fi",
-  '  if ! repository_git -C "$tmp" checkout --detach FETCH_HEAD >/dev/null; then',
+  '  if [ "$repository_empty" -eq 0 ] && ! repository_git -C "$tmp" checkout --detach FETCH_HEAD >/dev/null; then',
   '    rm -rf "$tmp"',
   '    echo "Repository resource fetch failed for $target" >&2',
   "    exit 1",

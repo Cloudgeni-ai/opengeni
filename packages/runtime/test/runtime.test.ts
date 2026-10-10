@@ -5891,7 +5891,7 @@ describe("runtime event normalization", () => {
     );
     expect(command).toContain('git -C "$tmp" remote set-head origin "$ref" >/dev/null || true');
     expect(command).toContain(
-      'if ! repository_git -C "$tmp" checkout --detach FETCH_HEAD >/dev/null; then',
+      'if [ "$repository_empty" -eq 0 ] && ! repository_git -C "$tmp" checkout --detach FETCH_HEAD >/dev/null; then',
     );
     expect(command).not.toContain('origin "$ref" && git -C "$tmp" remote set-head');
     expect(command).toContain('git -C "$target" rev-parse --is-inside-work-tree >/dev/null');
@@ -6194,7 +6194,7 @@ describe("runtime event normalization", () => {
     expect(calls.length).toBeGreaterThan(1);
     expect(calls[0]?.runAs).toBe("sandbox");
     expect(calls[0]?.workdir).toBe("/workspace");
-    expect(capturedRepositorySetupCommand(calls)).toContain("git init");
+    expect(capturedRepositorySetupCommand(calls)).toContain("-c init.defaultBranch=main init");
     expect(capturedRepositorySetupCommand(calls)).not.toContain("secret-token");
     // Exercise the installed SDK path as well as the runtime provider path:
     // both wrappers expand their input before Modal applies its argv limit.
