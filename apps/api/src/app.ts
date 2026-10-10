@@ -324,6 +324,8 @@ import { registerPreferenceRegistryRoutes } from "./routes/preference-registry";
 import { registerInsightsRoutes } from "./routes/insights";
 import { registerInsightsUsageRoutes } from "./routes/insights-usage";
 import { registerTranscriptionRoutes } from "./routes/transcriptions";
+import { registerChatCompletionRoutes } from "./routes/chat-completions";
+import { createModelCallService } from "./model-calls/service";
 import { registerEditableArtifactRoutes } from "./routes/editable-artifacts";
 import { registerSessionArtifactAssociationRoutes } from "./routes/session-artifact-associations";
 import { registerVideoGenerationRoutes } from "./routes/video-generation";
@@ -566,6 +568,20 @@ export function createAppComposition(deps: AppDependencies): {
           ffmpegPath: deps.settings.voiceInputFfmpegPath,
         })
       : deps.transcriptionSegmenter;
+  const modelCalls =
+    deps.modelCalls === undefined
+      ? createModelCallService({
+          db: deps.db,
+          settings: deps.settings,
+          ...(deps.catalogSourceSettings
+            ? { catalogSourceSettings: deps.catalogSourceSettings }
+            : {}),
+          entitlements: deps.entitlements ?? null,
+          ...(deps.codexFetch ? { codexFetch: deps.codexFetch } : {}),
+          ...(deps.xaiFetch ? { xaiFetch: deps.xaiFetch as never } : {}),
+          log: (message, attributes) => observability.error(message, attributes),
+        })
+      : deps.modelCalls;
   registerProductUsageMetricBaselines(observability);
   // Server-side presence counts managed people, so it exists only where
   // canonical managed browser sessions exist. Writes are batched off the
@@ -591,6 +607,7 @@ export function createAppComposition(deps: AppDependencies): {
     getDocumentServices,
     transcription,
     transcriptionSegmenter,
+    modelCalls,
     ...(sandboxClient ? { sandboxClient } : {}),
     resumeBoxById,
   };
@@ -2130,6 +2147,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerSuperGrokRoutes(app, routeDeps);
   registerClaudeSubscriptionAccountRoutes(app, routeDeps);
   registerTranscriptionRoutes(app, routeDeps);
+  registerChatCompletionRoutes(app, { ...routeDeps, modelCalls });
   registerEditableArtifactRoutes(app, routeDeps);
   registerVideoGenerationRoutes(app, routeDeps);
   registerCanonicalHumanIdentityRoutes(app, routeDeps);
