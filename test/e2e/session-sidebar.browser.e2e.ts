@@ -691,7 +691,9 @@ test("the row hover explains status, model and activity from the compact list ro
   await row(3003).focus();
   await card.waitFor();
   const waiting = await card.innerText();
-  expect(waiting).toMatch(/Next check at \d{2}:\d{2}/);
+  // The fixture deadline is relative to the wall clock, so near midnight it
+  // lands on the next day and the label reads "tomorrow, HH:MM".
+  expect(waiting).toMatch(/Next check (?:at|tomorrow,) \d{2}:\d{2}/);
   expect(waiting).toContain("Waiting for the nightly import to finish");
 
   await page.mouse.move(1150, 10);

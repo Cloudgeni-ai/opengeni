@@ -41,6 +41,8 @@ const subscriptionCoreMigrations = [
   // Patches the request guard after 0697.
   "0699_codex_recovery_after_interrupted_attempt.sql",
   "0700_codex_ownerless_person_refresh.sql",
+  // Replaces the scope guard on the shared connection table from withheld 0642.
+  "0702_subscription_codex_access_editor.sql",
 ] as const;
 const key = Buffer.alloc(32, 67);
 const ids = {

@@ -164,4 +164,7 @@ export const embeddingMigrationTail = [
   "0699_codex_recovery_after_interrupted_attempt.sql",
   // Completes ownerless refresh authorization in withheld 0667.
   "0700_codex_ownerless_person_refresh.sql",
+  // Extends the shared connection table created by withheld 0642 and replaces
+  // its scope guard; replay after the cutover it edits.
+  "0702_subscription_codex_access_editor.sql",
 ];
