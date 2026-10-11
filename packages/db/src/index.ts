@@ -28931,10 +28931,10 @@ export async function pinSubscriptionCoreSessionCodexAccount(
         wake: null,
       };
       if (!session || session.accountId !== input.accountId) return unchanged;
-      // Lock the binding: a running turn's placement or cache-warmth touch
-      // (`writeSubscriptionSessionBinding`, `touchSubscriptionCoreCodexBinding`)
-      // advances its version, and an unlocked read would lose the version
-      // compare-and-swap below to it and report the choice as not found.
+      // Lock the binding: a running turn's placement
+      // (`writeSubscriptionSessionBinding`) advances its version, and an
+      // unlocked read would lose the version compare-and-swap below to it and
+      // report the choice as not found. Cache-clock advances do not bump it.
       const [lockedBinding] = await rawRows<{ choice: string; version: number | string }>(
         tx,
         sql`select choice, version from subscription_session_bindings

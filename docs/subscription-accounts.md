@@ -201,29 +201,31 @@ for it until the matching requirement below is implemented:
 ### Stickiness and the prompt cache
 
 - **SUB-STICK-01** The account belongs to the session, not to whoever sends
-  the message. Verification: pending (cache-stickiness).
+  the message. Verification: `packages/db/test/subscription-core-fake-api-key-conformance-postgres.test.ts`.
 - **SUB-STICK-02** While the prompt cache is warm, a session keeps its account
   across turns, senders, goal continuations, scheduled runs on the same session
   and recovery. Child sessions and new scheduled sessions have their own prompt
-  cache and start with an automatic choice. Verification: pending (cache-stickiness).
+  cache and start with an automatic choice. Verification: `packages/subscriptions/test/policy.test.ts`, `packages/db/test/subscription-core-fake-api-key-conformance-postgres.test.ts`.
 - **SUB-STICK-03** A session moves to another account only when forced
-  (exhausted, disconnected, revoked, out of scope, owner left) or when the
-  cache is predictably cold. Verification: pending (cache-stickiness).
+  (exhausted, disconnected, revoked, out of scope, owner left, or a person
+  changed the session's explicit choice) or when the cache is predictably
+  cold. Verification: `packages/subscriptions/test/policy.test.ts`, `packages/db/test/subscription-core-fake-api-key-conformance-postgres.test.ts`.
 - **SUB-STICK-04** Cache coldness is exact for Claude: the session has been
   idle longer than the cache lifetime Opengeni sent, which each cache read
   refreshes. For Codex and SuperGrok the cut-off comes from recorded cached
-  token counts against idle time, with a conservative default until measured.
-  Verification: pending (cache-stickiness).
-- **SUB-STICK-05** Compaction and a model change are re-selection points
-  regardless of idle time. Verification: pending (cache-stickiness).
+  token counts against idle time, with a conservative default until measured
+  (D-30). Verification: `packages/subscriptions/test/policy.test.ts`, `packages/db/test/subscription-core-fake-api-key-conformance-postgres.test.ts`.
+- **SUB-STICK-05** Compaction, a model change and a change of the session's
+  explicit choice (setting or removing a pin, D-31) are re-selection points
+  regardless of idle time. Verification: `packages/subscriptions/test/policy.test.ts`, `packages/db/test/subscription-core-fake-api-key-conformance-postgres.test.ts`.
 - **SUB-STICK-06** At a re-selection point only automatic choices are
-  re-evaluated; an explicit choice is kept. Verification: pending (cache-stickiness).
+  re-evaluated; an explicit choice is kept. Verification: `packages/subscriptions/test/policy.test.ts`, `packages/db/test/subscription-core-fake-api-key-conformance-postgres.test.ts`.
 - **SUB-STICK-07** A session that was started on a personal account and is
   later shared stops using that account at once, even while its cache is
   warm: SUB-ELIG-05 takes precedence over stickiness, so the personal account
   is out of scope for the shared session (SUB-STICK-03). Its next turn moves
   to an eligible organization account, or waits if none can serve.
-  Verification: pending (cache-stickiness).
+  Verification: `packages/subscriptions/test/policy.test.ts`, `packages/db/test/subscription-core-fake-api-key-conformance-postgres.test.ts`.
 
 ### Exhaustion and failover
 
@@ -457,6 +459,8 @@ by the implementer and recorded here; consequential ones are escalated.
 | D-27 | 2026-10-07 | Implementer decision, following SUB-STICK-02 and SUB-STICK-03: turning personal fallback off (by the owner or the organization) stops new automatic selections of personal accounts but is not a forced move. A session whose cache is warm on its owner's personal account keeps it and moves at its next re-selection point. Sharing the session (SUB-STICK-07), revoking the account or the owner leaving (SUB-STICK-03, SUB-ACCESS-06) still move it at once, and disabling personal connections (SUB-OWN-05) moves it at its next safe point. |
 | D-28 | 2026-10-09 | Supersedes D-03 for the owner’s Personal workspace: connected personal accounts participate automatically there, with organization permission and accepted authority. Funding private work elsewhere still requires explicit choice or permitted opt-in fallback. |
 | D-29 | 2026-10-09 | Supersedes the known-first portions of D-14, D-15 and D-21: unknown quota participates equally in normal rotation. Provider refusals establish cooldowns; missing telemetry does not deprioritize an account. |
+| D-30 | 2026-10-11 | Implementer decision, for SUB-STICK-02 to SUB-STICK-04: each provider adapter declares a positive cache lifetime, and core placement has no provider default (the reference model's legacy `DEFAULT_IDLE_CUTOFF_MS` applies only to legacy cache facts without a cut-off, never to a core adapter). An unusable declaration fails placement closed. Claude declares the exact 5-minute lifetime Opengeni sends. Codex declares one hour until a measured cut-off exists: the longest in-memory retention OpenAI documents for prompt caching. The SuperGrok core adapter will declare one hour on the same terms when it joins the core, as xAI documents no lifetime. Erring long costs some rotation balance; erring short pays for a cache miss the provider would have avoided. |
+| D-31 | 2026-10-11 | Implementer decision, strictest reading of SUB-STICK-02 to SUB-STICK-05 and of the M5 stickiness brief, which lists a pin change among the forced re-selections: a session's cache clock is recorded with its binding and is the latest placement or reserved model request of that session on its bound account and model; for an adapter that declares an idle cut-off, also the end of its latest completed model call. An exact lifetime is refreshed when a request starts, so the end of a call never extends it. A forced reason is checked before warmth, so a warm cache never keeps an account the session may not use. Moving to another account or model writes the placement time as the new clock; warmth is never carried to another account. Setting or removing a pin clears the clock, so removing a pin re-runs normal selection at the next turn, which may keep the account; a request, a completed call or a retried attempt of a turn already running never restarts a cleared clock, only the next turn's placement does. A placement that is followed by no request (the turn fails first) still counts as a use, so for an exact lifetime warmth can run past the provider's by at most the time since the session's previous request: a bounded, rare error toward keeping the account. A compaction counts as a re-selection point only when it is later than the clock: once the session has made a request after it, the cache was rebuilt on the bound account from the compacted context and is kept while warm. Placement decides from the binding under its row lock, taken before any per-connection lock as a pin takes it, so concurrent placements of one session and a concurrent pin never leave the turn and the binding on different accounts and never deadlock. The reported re-selection reason is the first that applies (forced reasons, then re-selection points, then a cold cache) and is diagnostic only. |
 
 ### Open decisions
 

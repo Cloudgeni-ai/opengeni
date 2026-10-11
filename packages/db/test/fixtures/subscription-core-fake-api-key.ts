@@ -47,6 +47,12 @@ export const FAKE_API_KEY_ENTITLEMENT_COOLDOWN_MS = 60 * 60 * 1000;
 export const FAKE_API_KEY_RATE_LIMIT_FALLBACK_MS = 60 * 1000;
 /** A spend budget refused without a reset is retried after an hour. */
 export const FAKE_API_KEY_EXHAUSTED_FALLBACK_MS = 60 * 60 * 1000;
+/**
+ * The connector's declared prompt-cache idle cut-off. Deliberately unlike
+ * every real adapter's value, so the conformance suite proves it reads the
+ * lifetime from the adapter rather than assuming one.
+ */
+export const FAKE_API_KEY_CACHE_IDLE_CUTOFF_MS = 20 * 60 * 1000;
 /** How long the connector's transport waits for a reply. */
 export const FAKE_API_KEY_REQUEST_TIMEOUT_MS = 2_000;
 /** The one stored credential format of the connector (a key never renews). */
@@ -78,7 +84,10 @@ export const fakeApiKeyAdapter: SubscriptionCoreAdapter<FakeApiKeyCredential> = 
   credentialKind: "api_key",
   quotaKind: "spend_budget",
   modelPolicyProviderId: FAKE_API_KEY_PROVIDER,
-  cacheFacts: Object.freeze({ kind: "measured_idle_cutoff", cutoffMs: null }),
+  cacheFacts: Object.freeze({
+    kind: "measured_idle_cutoff",
+    cutoffMs: FAKE_API_KEY_CACHE_IDLE_CUTOFF_MS,
+  }),
   health: Object.freeze({
     forbiddenQuarantineMs: FAKE_API_KEY_FORBIDDEN_QUARANTINE_MS,
     entitlementCooldownMs: FAKE_API_KEY_ENTITLEMENT_COOLDOWN_MS,

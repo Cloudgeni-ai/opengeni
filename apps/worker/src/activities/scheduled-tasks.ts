@@ -71,6 +71,9 @@ import {
   getScheduledTaskXaiProviderAccountAuthoritySnapshot,
   getEnrollment,
   getSandbox,
+  getSessionAuthorityEpoch,
+  issueSelfUserResourceGrant,
+  listSelfUserResourceAuthorities,
   getRig,
   getScheduledScopedRigVersionMetadata,
   getNestedAgentDepthDeploymentPolicy,
@@ -697,6 +700,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       const creatorSessionPolicy = scheduledCreatorSessionPolicyInput(
         creatorPolicy?.sessionPolicy ?? null,
       );
+      let acceptedPersonalMachine = false;
       if (generatedTarget && task.agentConfig.machineTarget) {
         const access = {
           accountId: task.accountId,
@@ -708,11 +712,15 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           access,
           task.agentConfig.machineTarget.targetSandboxId,
         );
+        // A personal machine runs only its owner's Only me schedule. The scoped
+        // lookup returns a personal machine to its owner alone, and every attempt
+        // re-proves the owner's membership, workspace access and grant in the
+        // database before the machine is used.
         if (
           !machine ||
           machine.kind !== "selfhosted" ||
           !machine.enrollmentId ||
-          machine.scope === "user"
+          (machine.scope === "user" && !personalMachineScheduleOwner(task, access.subjectId))
         ) {
           return await refuseAdmission(
             "machine_target_unavailable",
@@ -739,6 +747,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         }
         sandboxBackend = "selfhosted";
         sandboxOs = enrollment.os;
+        acceptedPersonalMachine = machine.scope === "user";
       } else if (generatedTarget && sandboxBackend === "selfhosted") {
         return await refuseAdmission(
           "machine_target_unavailable",
@@ -1060,9 +1069,14 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       // workspace authority; only a user-owned resource needs the exact frozen
       // human, and the database admission fence re-proves the same rule for
       // existing/warm targets.
+      // A personal machine additionally needs that human to be the machine's owner.
+      const personalResourceSelected =
+        acceptedVariableSet?.scope === "user" ||
+        acceptedRig?.scope === "user" ||
+        acceptedPersonalMachine;
       if (
-        (acceptedVariableSet?.scope === "user" || acceptedRig?.scope === "user") &&
-        !causalHumanSubjectId
+        (personalResourceSelected && !causalHumanSubjectId) ||
+        (acceptedPersonalMachine && causalHumanSubjectId !== task.ownerSubjectId)
       ) {
         return await refuseAdmission(
           "scheduled_authority_unavailable",
@@ -2286,6 +2300,50 @@ async function recordScheduledTaskFiredUsage(
   });
 }
 
+function personalMachineScheduleOwner(task: ScheduledTask, subjectId: string | null): boolean {
+  return (
+    task.visibility === "private" &&
+    task.ownerSubjectId !== null &&
+    task.ownerSubjectId === subjectId
+  );
+}
+
+/**
+ * The owner and machine authority when an Only me schedule runs on its owner's
+ * personal machine; null for a shared machine. Throws when a personal machine is
+ * no longer usable by the owner, so the run fails closed.
+ */
+async function scheduledPersonalMachineOwner(
+  db: Database,
+  task: ScheduledTask,
+  target: NonNullable<ScheduledTask["agentConfig"]["machineTarget"]>,
+): Promise<{ subjectId: string; authorityId: string } | null> {
+  const subjectId = task.ownerSubjectId;
+  if (task.visibility !== "private" || !subjectId) return null;
+  const access = { accountId: task.accountId, workspaceId: task.workspaceId, subjectId };
+  const machine = await getSandbox(db, access, target.targetSandboxId);
+  if (machine?.scope !== "user") return null;
+  if (!machine.enrollmentId) {
+    throw new Error("scheduled personal Connected Machine has no enrollment");
+  }
+  let cursor: string | undefined;
+  for (let page = 0; page < 50; page += 1) {
+    const listed = await listSelfUserResourceAuthorities(db, {
+      ...access,
+      resourceKind: "connected_machine",
+      limit: 100,
+      ...(cursor ? { cursor } : {}),
+    });
+    const authority = listed.authorities.find(
+      (candidate) => candidate.resourceId === machine.enrollmentId && candidate.status === "active",
+    );
+    if (authority) return { subjectId, authorityId: authority.authorityId };
+    if (!listed.nextCursor) break;
+    cursor = listed.nextCursor;
+  }
+  throw new Error("scheduled personal Connected Machine authority is not active");
+}
+
 async function seedScheduledGeneratedSessionRoute(input: {
   db: Database;
   bus: ControlActivityServices["bus"];
@@ -2301,6 +2359,7 @@ async function seedScheduledGeneratedSessionRoute(input: {
 }): Promise<Awaited<ReturnType<typeof createSession>>> {
   const target = input.task.agentConfig.machineTarget;
   if (!target) return input.session;
+  const personalOwner = await scheduledPersonalMachineOwner(input.db, input.task, target);
   const seeded = await swapActiveSandbox(
     {
       db: input.db,
@@ -2313,11 +2372,35 @@ async function seedScheduledGeneratedSessionRoute(input: {
       sessionId: input.session.id,
       sessionBackend: input.session.sandboxBackend,
       sessionGroupId: input.session.sandboxGroupId,
+      // A personal machine attaches through the owner's scoped authorization.
+      ...(personalOwner ? { subjectId: personalOwner.subjectId } : {}),
     },
     target.targetSandboxId,
     target.workingDir ?? null,
   );
   if (seeded.swapped) {
+    if (personalOwner) {
+      // Saving an Only me schedule on your own machine is the consent. Each run
+      // gets a grant for exactly its own chat, so other chats keep asking.
+      const authorityEpoch = await getSessionAuthorityEpoch(input.db, {
+        accountId: input.task.accountId,
+        workspaceId: input.task.workspaceId,
+        sessionId: input.session.id,
+      });
+      if (authorityEpoch === null) throw new Error("scheduled run chat has no authority epoch");
+      await issueSelfUserResourceGrant(input.db, {
+        accountId: input.task.accountId,
+        workspaceId: input.task.workspaceId,
+        subjectId: personalOwner.subjectId,
+        authorityId: personalOwner.authorityId,
+        resourceKind: "connected_machine",
+        mode: "session",
+        context: "user_private",
+        sessionId: input.session.id,
+        expectedAuthorityEpoch: authorityEpoch,
+        workspaceSharedAcknowledged: false,
+      });
+    }
     return await requireSession(input.db, input.task.workspaceId, input.session.id);
   }
 

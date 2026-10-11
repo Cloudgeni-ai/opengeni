@@ -180,9 +180,36 @@ Primary key `(workspace_id, session_id)`: `provider`, `connection_id`,
 `model_id`, `choice` (`automatic` | `explicit`), `only_this_model`,
 `last_model_call_at`, `last_switch_reason`, `version`.
 
-- `last_model_call_at` is written when each model call completes (finalization
-  and mid-turn placement), not only at turn start, so a long turn is not
-  mistaken for a cold cache.
+- `last_model_call_at` is the session's cache clock (M5 cache-aware
+  stickiness, D-30 and D-31 of the contract). It advances, forward only and
+  only while the binding still names that connection, when a placement
+  commits on the bound account and when a model request on it is reserved
+  (in the reservation's transaction), so a long turn is not mistaken for a
+  cold cache. For an adapter that declares an idle cut-off it also advances
+  when a model call completes; an exact lifetime is refreshed when a request
+  starts, so for it the end of a call is not recorded. A clock-only advance does not bump
+  `version`. A switch of account or model writes the placement time as the new
+  clock; the trigger `subscription_session_bindings_cache_clock` (migration
+  `0723_subscription_binding_cache_clock.sql`) clears it for any writer that
+  changes the connection, provider, model or choice without stating a clock,
+  so a pin change or an older binary never carries warmth to another account.
+  Setting or removing a pin therefore makes the next turn re-run selection
+  (D-31): a request, a completed call or a retried attempt that keeps its
+  lease never restarts a cleared clock, only a new selection at placement
+  does, so removing a pin mid-turn still takes effect at the next turn. A compaction is a re-selection point only when it is later than the
+  clock.
+- Placement reads the binding under its row lock (`FOR UPDATE`, in the
+  placement world, before the lease) and decides and commits from that row,
+  so no pin or other placement of the session changes it in between; only
+  the first binding of a session (no row to lock yet) can race, and the
+  insert's compare-and-swap makes the loser retry. A model request's
+  reservation locks the same row before the account's request lock and
+  advances the clock under it. Every path that holds both takes the binding
+  row first and the per-connection lock (`subscription-refresh:<connection>`,
+  taken by the lease, request and binding admission triggers) second, as a
+  person's pin does, so a pin of the account a session is on never deadlocks
+  with that session's requests or placement. The clock is application time,
+  as placement judges warmth by it.
 - Child sessions and scheduled runs that create a new session start
   `automatic` (their prompt cache key is their own session id, so there is no
   warm cache to keep). Forks copy the binding as `automatic`.
@@ -337,7 +364,7 @@ decisions with `checkDecision`.
 | M2 | New tables, functions and policies, empty. Generic membership-lifecycle kind. Per-organization, per-provider cutover switch stored in the database. | rolling | none |
 | M3 | Codex cutover: drained maintenance migration moves Codex rows (dedupe, aliases, secrets, bindings, leases, live waiters with generation and wake revision, v2 authority backfill) inside the owner window with explicit account-context parity counts; every Codex consumer (chat, compaction, transcription, realtime, image, Apps, reset credits, usage routes) switches in the same release. Workflow activities keep their names and accept both waiter shapes. | maintenance | Codex on the core |
 | M4 | SuperGrok, then Claude, the same way; synthetic pool subjects and per-provider SQL functions retired. | maintenance | per provider |
-| M5 | Product features: scopes and people, personal connections for every provider, settings with overrides and the overview, cache-aware stickiness, cross-provider failover and portable-compaction defaults. API and UI, previewed before merge. | rolling | product |
+| M5 | Product features: scopes and people, personal connections for every provider, settings with overrides and the overview, cache-aware stickiness (6.1, 3.4; migration `0723_subscription_binding_cache_clock.sql`), cross-provider failover and portable-compaction defaults. API and UI, previewed before merge. | rolling | product |
 | M6 | Drop legacy tables, columns, triggers and functions. | maintenance | none |
 
 Each migration declares its `deployment-mode`, opens the owner-only
@@ -4764,11 +4791,45 @@ Fail-closed choices (contract ambiguous; strictest option taken):
 
 ### 6.1 Cache coldness (SUB-STICK-04)
 
-Claude: idle longer than the TTL Opengeni sent. Codex and SuperGrok: a
-per-provider cut-off measured from `model_call_facts`, which gains
-`connection_id` (also needed for SUB-ACCT-01). Until measured, the cut-off is
-60 minutes: erring towards "warm" avoids paying a cache miss for a switch
-that was not needed, at the cost of returning to the preferred account later.
+Each adapter declares its cache lifetime as a capability
+(`SubscriptionCoreAdapter.cacheFacts`, a positive exact TTL or idle cut-off;
+`declaredCacheLifetimeMs` refuses anything else), and shared code names no
+provider and has no provider default:
+
+| Adapter | Declared lifetime | Source |
+| --- | --- | --- |
+| Claude | exact TTL, 5 minutes (the `cacheTtl` Opengeni sends) | Anthropic prompt caching: the default cache lifetime is 5 minutes, refreshed on each use (https://platform.claude.com/docs/en/build-with-claude/prompt-caching) |
+| Codex | idle cut-off, 60 minutes | OpenAI prompt caching: in-memory retention keeps prefixes for about 5 to 10 minutes of inactivity, up to one hour (https://developers.openai.com/api/docs/guides/prompt-caching) |
+| SuperGrok | will declare an idle cut-off of 60 minutes when its core adapter lands (M4) | xAI documents no lifetime and says cached prefixes can be evicted at any time (https://docs.x.ai/developers/advanced-api-usage/prompt-caching/best-practices) |
+| Test API-key connector | idle cut-off, 20 minutes | deliberately unlike the real adapters, so conformance reads the lifetime from the adapter |
+
+Core placement validates the declaration (`declaredCacheLifetimeMs`) when it
+builds the world and fails closed on anything but a positive whole number of
+milliseconds. The reference model's `DEFAULT_IDLE_CUTOFF_MS` applies only to
+legacy cache facts without a cut-off, never to a core adapter.
+
+Until per-provider cut-offs are measured from `model_call_facts` (which
+gains `connection_id`, also needed for SUB-ACCT-01), erring towards "warm"
+avoids paying a cache miss for a switch that was not needed, at the cost of
+returning to the preferred account later.
+
+`bindingStickiness` (pure policy) decides whether an automatic binding keeps
+its account. Forced reasons come first, so a warm cache never keeps an
+account the session may not use: the account is gone from the session's
+world (`account_unavailable`: removed, out of scope), cannot serve
+(`account_ineligible` with the eligibility reasons: exhausted, rate-limited,
+unhealthy or quarantined, disconnected, switched off), its model may not be
+used (`model_not_permitted`), or it would spend paid credits while another
+account has included allowance (`extra_credits`). Then re-selection points
+(`reselection_point`: compaction, model change) and finally the clock
+(`cache_cold`: idle longer than the declared lifetime, or no clock, which is
+how a pin change shows up). Idle exactly the
+lifetime is still warm. The reported reason is the first that applies and is
+diagnostic only. A re-selection runs normal selection (rotation
+applies) and may land on the same account. Core placement reports the reason
+as `reselection` on a run (null when the warm account was kept, for an
+explicit choice and for a reused lease). Explicit pins, personal-account
+rules, background pools and the ownerless shared-only rule are unchanged.
 
 ### 6.2 Events (SUB-FAIL-06)
 

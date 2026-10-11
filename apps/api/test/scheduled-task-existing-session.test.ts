@@ -244,6 +244,7 @@ describe("scheduled Connected Machine targeting", () => {
         db: {} as never,
         grant: manageOnly,
         runMode: "new_session_per_run",
+        audience: "workspace_shared",
         agentConfig: baseConfig,
       }),
     ).rejects.toMatchObject({ status: 422 });
@@ -259,6 +260,7 @@ describe("scheduled Connected Machine targeting", () => {
         db: {} as never,
         grant: manageOnly,
         runMode: "new_session_per_run",
+        audience: "workspace_shared",
         agentConfig: {
           ...baseConfig,
           machineTarget: { targetSandboxId: machineSandboxId, workingDir: "repos/app" },
@@ -272,7 +274,7 @@ describe("scheduled Connected Machine targeting", () => {
     });
   });
 
-  test("rejects personal and offline machines for unattended runs", async () => {
+  test("a personal machine runs only Only me schedules; offline machines never run", async () => {
     const sandboxLookup = spyOn(db, "getSandbox");
     sandboxLookup.mockResolvedValue({ ...sandbox, scope: "user" });
     await expect(
@@ -281,12 +283,30 @@ describe("scheduled Connected Machine targeting", () => {
         db: {} as never,
         grant: manageOnly,
         runMode: "new_session_per_run",
+        audience: "workspace_shared",
         agentConfig: {
           ...baseConfig,
           machineTarget: { targetSandboxId: machineSandboxId },
         },
       }),
-    ).rejects.toMatchObject({ status: 422 });
+    ).rejects.toMatchObject({
+      status: 422,
+      message: expect.stringContaining("Only me"),
+    });
+    spyOn(db, "getEnrollment").mockResolvedValue(enrollment);
+    await expect(
+      validateScheduledTaskMachineTarget({
+        settings,
+        db: {} as never,
+        grant: manageOnly,
+        runMode: "new_session_per_run",
+        audience: "user_private",
+        agentConfig: {
+          ...baseConfig,
+          machineTarget: { targetSandboxId: machineSandboxId },
+        },
+      }),
+    ).resolves.toEqual({ sandboxId: machineSandboxId, enrollmentId, sandboxOs: "linux" });
 
     sandboxLookup.mockResolvedValue(sandbox);
     spyOn(db, "getLiveEnrollmentConnection").mockResolvedValue(null);
@@ -296,6 +316,7 @@ describe("scheduled Connected Machine targeting", () => {
         db: {} as never,
         grant: manageOnly,
         runMode: "new_session_per_run",
+        audience: "workspace_shared",
         agentConfig: {
           ...baseConfig,
           machineTarget: { targetSandboxId: machineSandboxId },

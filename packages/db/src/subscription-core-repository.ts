@@ -406,7 +406,16 @@ export type SubscriptionSessionBinding = {
 
 export async function readSubscriptionSessionBinding(
   db: Database,
-  input: { workspaceId: string; sessionId: string },
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    /**
+     * Lock the row until the transaction ends, so a placement compares and
+     * writes the binding it decided from while parallel placements of the
+     * same session wait (SUB-STICK-02).
+     */
+    forUpdate?: boolean;
+  },
 ): Promise<SubscriptionSessionBinding | null> {
   const [row] = await rawRows<{
     account_id: string;
@@ -426,7 +435,8 @@ export async function readSubscriptionSessionBinding(
       session_id::text as session_id, provider, connection_id::text as connection_id,
       model_id, choice, only_this_model, last_model_call_at, last_switch_reason, version
     from subscription_session_bindings
-    where workspace_id = ${input.workspaceId}::uuid and session_id = ${input.sessionId}::uuid`,
+    where workspace_id = ${input.workspaceId}::uuid and session_id = ${input.sessionId}::uuid
+    ${input.forUpdate ? sql`for update` : sql``}`,
   );
   if (!row) return null;
   return {
@@ -481,6 +491,46 @@ export async function writeSubscriptionSessionBinding(
     returning version`,
   );
   return row ? Number(row.version) : null;
+}
+
+/**
+ * Record a use of the bound account's prompt cache on the session binding
+ * (SUB-STICK-04): the clock placement measures warmth from. It moves only
+ * forward and only while the binding still names this provider's connection,
+ * so a use on an account the session has already left never warms the new
+ * one. The clock is not part of the binding's version: the version guards the
+ * account, model and choice, and a clock-only advance must not make a
+ * concurrent placement or pin lose its compare-and-swap.
+ *
+ * A cleared clock (a pin change, or a switch by a writer that stated none)
+ * means the next turn re-runs selection (SUB-STICK-05, D-31). Only a
+ * placement restarts it (`restart: true`); a request or completed call of the
+ * turn already running never does, so removing a pin mid-turn still takes
+ * effect at the next turn.
+ */
+export async function advanceSubscriptionBindingCacheClock(
+  db: Database,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    provider: ProviderId;
+    connectionId: string;
+    at: Date;
+    /** A placement on the account: may start a cleared clock. */
+    restart?: boolean;
+  },
+): Promise<boolean> {
+  const at = sql`${input.at.toISOString()}::timestamptz`;
+  const rows = await rawRows<{ advanced: boolean }>(
+    db,
+    sql`update subscription_session_bindings
+      set last_model_call_at = ${at}
+      where workspace_id = ${input.workspaceId}::uuid and session_id = ${input.sessionId}::uuid
+        and provider = ${input.provider} and connection_id = ${input.connectionId}::uuid
+        and ${input.restart === true ? sql`(last_model_call_at is null or last_model_call_at < ${at})` : sql`last_model_call_at < ${at}`}
+      returning true as advanced`,
+  );
+  return rows.length > 0;
 }
 
 export async function createSubscriptionConnection(
