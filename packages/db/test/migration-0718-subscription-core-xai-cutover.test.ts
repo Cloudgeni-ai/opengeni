@@ -123,6 +123,15 @@ const b = {
   session: randomUUID(),
   turn: randomUUID(),
 };
+// Organization D locks rotation (with the primaries) and providers: its
+// workspaces with local accounts keep following the organization's values.
+const d = {
+  account: randomUUID(),
+  w1: randomUUID(), // local account, rotation off; a pre-existing override row
+  w2: randomUUID(), // local account, no override row
+  z1: randomUUID(),
+  z2: randomUUID(),
+};
 // Organization C: Codex and Claude state the cutover must not touch.
 const c = {
   account: randomUUID(),
@@ -320,7 +329,7 @@ async function video(id: string, envelope: Record<string, unknown>) {
 async function seed() {
   const admin = owned.admin;
   await withSeedTriggersOff(async () => {
-    for (const account of [a.account, b.account, c.account]) {
+    for (const account of [a.account, b.account, c.account, d.account]) {
       await admin`INSERT INTO managed_accounts (id, name) VALUES (${account}, 'Cutover fixture')`;
     }
     for (const [id, account] of [
@@ -332,6 +341,8 @@ async function seed() {
       [b.personal, b.account],
       [b.w1, b.account],
       [c.w1, c.account],
+      [d.w1, d.account],
+      [d.w2, d.account],
     ] as const) {
       await admin`INSERT INTO workspaces (id, account_id, name) VALUES (${id}, ${account}, 'Cutover workspace')`;
     }
@@ -696,6 +707,32 @@ async function seed() {
       human: b.owner,
       v1: userV1(1),
     });
+
+    // Organization D: rotation and providers locked on the organization row.
+    await admin`INSERT INTO subscription_settings (account_id, workspace_id, personal_connections_allowed,
+        personal_fallback_allowed, cross_provider_failover, rotation, providers, fallback_order,
+        locked_settings, version)
+      VALUES (${d.account}, NULL, true, false, false, '{}'::jsonb,
+          '{"xai":{"inferenceSource":"organization"}}'::jsonb, '{}'::jsonb,
+          ARRAY['rotation', 'providers'], 5),
+        (${d.account}, ${d.w1}, NULL, NULL, NULL, '{"codex":{"mode":"spread"}}'::jsonb,
+          '{"codex":{"inferenceSource":"organization"}}'::jsonb, NULL, '{}', 2)`;
+    await credential({
+      id: d.z1,
+      account: d.account,
+      workspace: d.w1,
+      scope: "workspace",
+      subject: "sub-d-one",
+    });
+    await credential({
+      id: d.z2,
+      account: d.account,
+      workspace: d.w2,
+      scope: "workspace",
+      subject: "sub-d-two",
+    });
+    await admin`INSERT INTO xai_rotation_settings (account_id, workspace_id, authority_scope, owner_organization_membership_id, active_credential_id, rotation_enabled, fairness_cursor)
+      VALUES (${d.account}, ${d.w1}, 'workspace', NULL, ${d.z1}, false, 0)`;
 
     // Organization C: Codex core and Claude legacy rows.
     await admin`INSERT INTO subscription_connections (id, account_id, provider, credential_encrypted, ownership, scope_kind, label)
@@ -1075,7 +1112,7 @@ describe.skipIf(!realDb)(
             provider_subject_id, status, ownership, scope_kind, allow_personal_workspaces,
             allocator_enabled, allowed_model_ids, version, refresh_generation, credential_encrypted,
             credential_format, owner_organization_membership_id::text AS owner, authority_generation
-          FROM subscription_connections WHERE provider = 'xai' ORDER BY id`;
+          FROM subscription_connections WHERE provider = 'xai' AND account_id <> ${d.account} ORDER BY id`;
         const byId = new Map(rows.map((row) => [row.id, row]));
         expect(rows).toHaveLength(8);
         expect(byId.has(a.x2)).toBe(false);
@@ -1130,7 +1167,7 @@ describe.skipIf(!realDb)(
         const [legacy] = await owned.admin`SELECT count(*)::int AS total,
             count(*) FILTER (WHERE credential_encrypted = '')::int AS blank
           FROM xai_subscription_credentials`;
-        expect(legacy).toEqual({ total: 10, blank: 10 });
+        expect(legacy).toEqual({ total: 12, blank: 12 });
         // Quota: one window; the rate-limited exhaustion keeps its kind.
         const quotas =
           await owned.admin`SELECT connection_id::text AS id, quota, selection_count::int AS selection_count
@@ -1265,6 +1302,72 @@ describe.skipIf(!realDb)(
           personal_connections_allowed: false,
           rotation: { xai: { mode: "spread" } },
         });
+      });
+
+      test("an organization that locks rotation and providers keeps its workspaces on the locked values, each listed", async () => {
+        const settings =
+          await owned.admin`SELECT workspace_id::text AS workspace, rotation, providers,
+            xai_primary_connection_id::text AS primary, version::int AS version,
+            updated_by_subject_id AS writer
+          FROM subscription_settings WHERE account_id = ${d.account} ORDER BY workspace_id NULLS FIRST`;
+        const byWorkspace = new Map(settings.map((row) => [row.workspace, row]));
+        // The organization row gains the SuperGrok rotation entry as usual.
+        expect(byWorkspace.get(null)).toMatchObject({
+          rotation: { xai: { mode: "spread" } },
+          providers: { xai: { inferenceSource: "organization" } },
+          primary: null,
+          version: 6,
+        });
+        // The pre-existing workspace row is not written at all; the workspace
+        // without a row gets none.
+        expect(byWorkspace.get(d.w1)).toEqual({
+          workspace: d.w1,
+          rotation: { codex: { mode: "spread" } },
+          providers: { codex: { inferenceSource: "organization" } },
+          primary: null,
+          version: 2,
+          writer: null,
+        });
+        expect(byWorkspace.has(d.w2)).toBe(false);
+        // The effective settings of both workspaces follow the organization.
+        for (const workspace of [d.w1, d.w2]) {
+          const [effective] = await owned.admin`SELECT
+              subscription_effective_settings(${d.account}::uuid, ${workspace}::uuid) AS value`;
+          expect(effective!.value.values.providers.xai).toMatchObject({
+            inferenceSource: "organization",
+          });
+          expect(effective!.value.values.rotation.xai).toEqual({ mode: "spread" });
+          expect(effective!.value.sources.providers.xai).toBe("organization");
+          expect(effective!.value.sources.rotation.xai).toBe("organization");
+        }
+        // The local accounts still moved, assigned to their workspace.
+        const [moved] =
+          await owned.admin`SELECT count(*)::int AS total FROM subscription_connections
+          WHERE account_id = ${d.account} AND provider = 'xai' AND ownership = 'shared'`;
+        expect(moved!.total).toBe(2);
+        // Parity holds, and the report lists each workspace per locked key.
+        const report =
+          await owned.admin`SELECT metric, legacy_count::int AS legacy, core_count::int AS core
+          FROM opengeni_private.subscription_cutover_report
+          WHERE provider = 'xai' AND account_id = ${d.account} ORDER BY metric`;
+        expect(report.filter((row) => row.legacy !== row.core)).toEqual([]);
+        const metrics = new Map(report.map((row) => [row.metric, row.legacy]));
+        expect(metrics.get("locked_workspace_keys_untouched")).toBe(4);
+        expect(metrics.has("source_modes")).toBe(false);
+        expect(metrics.has("workspace_rotation")).toBe(false);
+        expect(
+          report
+            .map((row) => row.metric)
+            .filter((metric) => metric.includes("_locked:"))
+            .sort(),
+        ).toEqual(
+          [
+            `disposition:local_pool_freeze_locked:${d.w1}`,
+            `disposition:local_pool_freeze_locked:${d.w2}`,
+            `disposition:local_rotation_locked:${d.w1}`,
+            `disposition:local_rotation_locked:${d.w2}`,
+          ].sort(),
+        );
       });
 
       test("pins become bindings through aliases; an ineligible pin is a disposition", async () => {
@@ -1520,7 +1623,8 @@ describe.skipIf(!realDb)(
       test("retrying the ledger is a no-op without the key", async () => {
         await migrateCutover();
         const [count] =
-          await owned.admin`SELECT count(*)::int AS total FROM subscription_connections WHERE provider = 'xai'`;
+          await owned.admin`SELECT count(*)::int AS total FROM subscription_connections
+            WHERE provider = 'xai' AND account_id <> ${d.account}`;
         expect(count!.total).toBe(8);
       }, 180_000);
 
@@ -1566,7 +1670,8 @@ describe.skipIf(!realDb)(
         expect(await connect("user")).toContain("xai_subscription_authority_closed");
         expect(await connect("workspace")).toContain("xai_subscription_credentials_closed");
         const [count] = await owned.admin`SELECT
-            (SELECT count(*)::int FROM xai_subscription_credentials) AS credentials,
+            (SELECT count(*)::int FROM xai_subscription_credentials
+              WHERE account_id <> ${d.account}) AS credentials,
             (SELECT count(*)::int FROM organization_user_resource_authorities
               WHERE resource_kind = 'xai_subscription') AS authorities`;
         expect(count).toEqual({ credentials: 10, authorities: 4 });

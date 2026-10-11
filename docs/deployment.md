@@ -4913,6 +4913,31 @@ SELECT account_id, workspace_id FROM subscription_settings
   WHERE xai_primary_connection_id IS NOT NULL;
 ```
 
+Before the window, list the workspaces whose SuperGrok setting will follow a
+locked organization value instead of the workspace's legacy one. A
+workspace with its own SuperGrok accounts is normally frozen on its own
+accounts (`inferenceSource: workspace`) with its local rotation and primary;
+where the organization locks `providers` or `rotation`, the cutover leaves
+that key to the organization and records the workspace in the report. Decide
+with the organization whether to unlock first; nothing aborts either way:
+
+```sql
+SELECT workspace.account_id, workspace.id AS workspace_id,
+  'providers' = ANY(org.locked_settings) AS freeze_follows_organization,
+  'rotation' = ANY(org.locked_settings) AS rotation_follows_organization
+FROM workspaces workspace
+JOIN subscription_settings org
+  ON org.account_id = workspace.account_id AND org.workspace_id IS NULL
+WHERE org.locked_settings && ARRAY['providers', 'rotation']
+  AND EXISTS (SELECT 1 FROM xai_subscription_credentials credential
+    WHERE credential.account_id = workspace.account_id
+      AND credential.workspace_id = workspace.id
+      AND credential.authority_scope = 'workspace')
+  AND NOT EXISTS (SELECT 1 FROM organization_memberships owner
+    WHERE owner.account_id = workspace.account_id
+      AND owner.personal_workspace_id = workspace.id);
+```
+
 **2. Stop and drain.** Stop every API, control worker and turn worker of the
 old and the new release, including idle pooled connections. Drain processes,
 not work: queued, waiting, checkpointed and scheduled work stays in the
@@ -4980,7 +5005,12 @@ restarted after it.
   waiters, in-flight videos whose credential no longer existed (their
   reference names no connection, so they are never polled again and end at
   their recovery deadline), owners whose organization disallows personal
-  connections, locked-off personal fallback, logins of unknown or
+  connections, locked-off personal fallback, one
+  `disposition:local_pool_freeze_locked:<workspace>` or
+  `disposition:local_rotation_locked:<workspace>` row per workspace whose
+  frozen source or local rotation and primary the organization's lock kept
+  (the workspace follows the organization; `locked_workspace_keys_untouched`
+  proves the workspace row kept those keys), logins of unknown or
   contradictory identity kept separate, merged duplicate pool policies and
   organization reach kept by auto-assignment.
   `compat:carriers_that_will_wait` counts accepted work whose recorded
@@ -5009,7 +5039,9 @@ restarted after it.
   personal fallback (a per-person preference that covers every provider).
 - A workspace that had its own SuperGrok accounts keeps using only them: its
   inference source is frozen on `workspace` with organization accounts off,
-  as before. An administrator can change that afterwards.
+  as before. An administrator can change that afterwards. Where the
+  organization locks the provider settings or rotation, the workspace
+  follows the organization's locked value instead (listed in the report).
 - Work accepted before the cutover keeps exactly the accounts it was
   accepted with. Personal access is re-issued at one new generation per
   owner, so a later disconnect-all revokes it as for Codex.

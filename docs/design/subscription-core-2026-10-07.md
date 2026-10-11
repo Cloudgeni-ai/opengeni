@@ -3681,6 +3681,23 @@ reviewers:
   connection, which X2a's video lease refuses (video is never funded by a
   personal connection), so it ends the same way. Image operations keep
   their recorded identity and resolve it through aliases.
+- **Organization locks.** A workspace override is never written for a key
+  the organization row locks (`rotation`, which also governs the
+  `*_primary_connection_id` columns, `providers` and
+  `personalFallbackAllowed`). `subscription_effective_settings` already
+  ignores a workspace override of a locked key, so the effective outcome is
+  the one the lock gives, and M5's trigger, which refuses a workspace write
+  of a locked key with `42501`, is never contradicted (0718 disables
+  non-internal triggers on the relations it moves during the owner window,
+  so the trigger would not fire there, but an unseen override would take
+  effect if the organization later unlocked the key). The workspace follows
+  the organization's locked value after the cutover. Each such workspace is
+  listed in the report as `disposition:local_pool_freeze_locked:<workspace>`
+  (its inference source was not frozen on `workspace`) or
+  `disposition:local_rotation_locked:<workspace>` (its local rotation mode
+  and primary were not applied), and the parity metric
+  `locked_workspace_keys_untouched` proves every such key kept its value.
+  An administrator who later unlocks the key re-applies the setting by hand.
 - **Steer and Cancel.** The legacy SuperGrok supersede in the Steer path is
   gone (no legacy waiter can be live after the receipt the binary
   requires). Steer and Cancel call

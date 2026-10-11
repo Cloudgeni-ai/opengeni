@@ -341,8 +341,24 @@ ON CONFLICT (account_id, workspace_id) DO UPDATE SET
 -- Personal workspace whose credentials became its owner's personal
 -- connection gets personal fallback instead. Every other workspace keeps no
 -- override (automatic admits only organization connections there).
+--
+-- A key the organization row locks (`rotation`, which also governs the
+-- primaries, `providers`, `personalFallbackAllowed`) is never written to a
+-- workspace row: the effective settings already ignore a workspace override
+-- of a locked key, so the outcome is the same, and the workspace follows the
+-- organization's locked value after the cutover. Each such workspace is
+-- listed in the report (`disposition:local_pool_freeze_locked:<workspace>`,
+-- `disposition:local_rotation_locked:<workspace>`).
+CREATE TEMP TABLE xai_cutover_workspace_settings_before AS
+  SELECT account_id, workspace_id, rotation->'xai' AS rotation, providers->'xai' AS providers,
+    xai_primary_connection_id, personal_fallback_allowed
+  FROM subscription_settings WHERE workspace_id IS NOT NULL;
+
 CREATE TEMP TABLE xai_cutover_workspace_settings AS
   SELECT workspace.account_id, workspace.id AS workspace_id,
+    coalesce('rotation' = ANY(org.locked_settings), false) AS rotation_locked,
+    coalesce('providers' = ANY(org.locked_settings), false) AS providers_locked,
+    coalesce('personalFallbackAllowed' = ANY(org.locked_settings), false) AS fallback_locked,
     EXISTS (SELECT 1 FROM organization_memberships owner
       WHERE owner.account_id = workspace.account_id
         AND owner.personal_workspace_id = workspace.id) AS personal,
@@ -355,6 +371,8 @@ CREATE TEMP TABLE xai_cutover_workspace_settings AS
     rotation.id AS rotation_id, rotation.rotation_enabled, rotation.fairness_cursor,
     primary_map.connection_id AS primary_connection_id
   FROM workspaces workspace
+  LEFT JOIN subscription_settings org
+    ON org.account_id = workspace.account_id AND org.workspace_id IS NULL
   LEFT JOIN xai_rotation_settings rotation
     ON rotation.account_id = workspace.account_id AND rotation.workspace_id = workspace.id
    AND rotation.authority_scope = 'workspace'
@@ -369,21 +387,22 @@ INSERT INTO subscription_settings (
   personal_fallback_allowed, updated_by_subject_id, updated_at
 )
 SELECT ws.account_id, ws.workspace_id,
-  CASE WHEN ws.has_local_shared AND ws.rotation_id IS NOT NULL AND NOT ws.rotation_enabled
+  CASE WHEN ws.has_local_shared AND NOT ws.rotation_locked AND ws.rotation_id IS NOT NULL
+      AND NOT ws.rotation_enabled
     THEN ws.primary_connection_id END,
-  CASE WHEN ws.has_local_shared THEN jsonb_build_object('xai', jsonb_build_object('mode',
-    CASE WHEN ws.rotation_id IS NULL OR ws.rotation_enabled THEN 'spread' ELSE 'primary_first' END)) END,
-  CASE WHEN ws.has_local_shared
+  CASE WHEN ws.has_local_shared AND NOT ws.rotation_locked
+    THEN jsonb_build_object('xai', jsonb_build_object('mode',
+      CASE WHEN ws.rotation_id IS NULL OR ws.rotation_enabled THEN 'spread' ELSE 'primary_first' END)) END,
+  CASE WHEN ws.has_local_shared AND NOT ws.providers_locked
     THEN '{"xai":{"inferenceSource":"workspace","useOrganizationAccounts":false}}'::jsonb END,
-  CASE WHEN ws.personal AND ws.has_moved_personal AND NOT coalesce(
-      'personalFallbackAllowed' = ANY(org.locked_settings) AND NOT org.personal_fallback_allowed, false)
-    THEN true END,
+  CASE WHEN ws.personal AND ws.has_moved_personal AND NOT ws.fallback_locked THEN true END,
   'service:subscription-core-cutover', now()
 FROM xai_cutover_workspace_settings ws
-JOIN subscription_settings org ON org.account_id = ws.account_id AND org.workspace_id IS NULL
-WHERE ws.has_local_shared OR (ws.personal AND ws.has_moved_personal)
+WHERE (ws.has_local_shared AND NOT (ws.rotation_locked AND ws.providers_locked))
+  OR (ws.personal AND ws.has_moved_personal AND NOT ws.fallback_locked)
 ON CONFLICT (account_id, workspace_id) DO UPDATE SET
-  xai_primary_connection_id = EXCLUDED.xai_primary_connection_id,
+  xai_primary_connection_id = CASE WHEN EXCLUDED.rotation IS NULL
+    THEN subscription_settings.xai_primary_connection_id ELSE EXCLUDED.xai_primary_connection_id END,
   rotation = CASE WHEN EXCLUDED.rotation IS NULL THEN subscription_settings.rotation
     ELSE coalesce(subscription_settings.rotation, '{}'::jsonb) || EXCLUDED.rotation END,
   providers = CASE WHEN EXCLUDED.providers IS NULL THEN subscription_settings.providers
@@ -1181,7 +1200,28 @@ INSERT INTO xai_cutover_parity
   FROM xai_cutover_workspace_settings ws
   LEFT JOIN subscription_settings settings ON settings.account_id = ws.account_id
    AND settings.workspace_id = ws.workspace_id
-  WHERE ws.has_local_shared GROUP BY ws.account_id
+  WHERE ws.has_local_shared AND NOT ws.providers_locked GROUP BY ws.account_id
+  -- A key the organization locks is left exactly as it was on the workspace
+  -- row (one count per workspace and locked key the cutover would have set).
+  UNION ALL SELECT ws.account_id, 'locked_workspace_keys_untouched',
+    count(*) FILTER (WHERE ws.has_local_shared AND ws.rotation_locked)
+      + count(*) FILTER (WHERE ws.has_local_shared AND ws.providers_locked)
+      + count(*) FILTER (WHERE ws.personal AND ws.has_moved_personal AND ws.fallback_locked),
+    count(*) FILTER (WHERE ws.has_local_shared AND ws.rotation_locked
+        AND settings.rotation->'xai' IS NOT DISTINCT FROM before.rotation
+        AND settings.xai_primary_connection_id IS NOT DISTINCT FROM before.xai_primary_connection_id)
+      + count(*) FILTER (WHERE ws.has_local_shared AND ws.providers_locked
+        AND settings.providers->'xai' IS NOT DISTINCT FROM before.providers)
+      + count(*) FILTER (WHERE ws.personal AND ws.has_moved_personal AND ws.fallback_locked
+        AND settings.personal_fallback_allowed IS NOT DISTINCT FROM before.personal_fallback_allowed)
+  FROM xai_cutover_workspace_settings ws
+  LEFT JOIN subscription_settings settings ON settings.account_id = ws.account_id
+   AND settings.workspace_id = ws.workspace_id
+  LEFT JOIN xai_cutover_workspace_settings_before before ON before.account_id = ws.account_id
+   AND before.workspace_id = ws.workspace_id
+  WHERE (ws.has_local_shared AND (ws.rotation_locked OR ws.providers_locked))
+    OR (ws.personal AND ws.has_moved_personal AND ws.fallback_locked)
+  GROUP BY ws.account_id
   -- Rotation for the pool in effect: organization row to organization settings.
   UNION ALL SELECT rotation.account_id, 'organization_rotation', count(*),
     count(*) FILTER (WHERE (settings.rotation->'xai'->>'mode') =
@@ -1203,7 +1243,7 @@ INSERT INTO xai_cutover_parity
   FROM xai_cutover_workspace_settings ws
   LEFT JOIN subscription_settings settings ON settings.account_id = ws.account_id
    AND settings.workspace_id = ws.workspace_id
-  WHERE ws.rotation_id IS NOT NULL AND ws.has_local_shared
+  WHERE ws.rotation_id IS NOT NULL AND ws.has_local_shared AND NOT ws.rotation_locked
   GROUP BY ws.account_id
   -- Session bindings: every pin row is a binding or a disposition; moved
   -- bindings exact.
@@ -1239,6 +1279,10 @@ INSERT INTO xai_cutover_parity
   LEFT JOIN subscription_settings settings ON settings.account_id = rotation.account_id
    AND settings.workspace_id IS NOT DISTINCT FROM rotation.workspace_id
   WHERE NOT rotation.rotation_enabled AND rotation.authority_scope IN ('organization', 'workspace')
+    -- A locked rotation keeps its workspace primary out (locked_workspace_keys_untouched).
+    AND NOT EXISTS (SELECT 1 FROM xai_cutover_workspace_settings ws
+      WHERE rotation.authority_scope = 'workspace' AND ws.account_id = rotation.account_id
+        AND ws.workspace_id = rotation.workspace_id AND ws.rotation_locked)
   GROUP BY rotation.account_id
   -- Leases: same turn, holder, generation, expiry and canonical connection.
   UNION ALL SELECT inventory.account_id, 'live_leases', inventory.legacy_count,
@@ -1378,9 +1422,18 @@ UNION ALL
 SELECT 'xai', 'disposition:personal_fallback_locked_off', ws.account_id, count(*), count(*)
 FROM xai_cutover_workspace_settings ws
 JOIN subscription_settings org ON org.account_id = ws.account_id AND org.workspace_id IS NULL
-WHERE ws.personal AND ws.has_moved_personal
-  AND 'personalFallbackAllowed' = ANY(org.locked_settings) AND NOT org.personal_fallback_allowed
+WHERE ws.personal AND ws.has_moved_personal AND ws.fallback_locked
+  AND NOT org.personal_fallback_allowed
 GROUP BY ws.account_id
+-- One row per workspace whose local-pool freeze (`providers`) or local
+-- rotation and primary (`rotation`) the organization's lock kept from being
+-- applied: after the cutover it follows the organization's locked value.
+UNION ALL
+SELECT 'xai', 'disposition:local_pool_freeze_locked:' || ws.workspace_id, ws.account_id, 1, 1
+FROM xai_cutover_workspace_settings ws WHERE ws.has_local_shared AND ws.providers_locked
+UNION ALL
+SELECT 'xai', 'disposition:local_rotation_locked:' || ws.workspace_id, ws.account_id, 1, 1
+FROM xai_cutover_workspace_settings ws WHERE ws.has_local_shared AND ws.rotation_locked
 UNION ALL
 SELECT 'xai', 'disposition:expired_leases_dropped', lease.account_id, count(*), count(*)
 FROM xai_credential_leases lease
