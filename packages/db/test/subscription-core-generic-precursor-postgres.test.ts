@@ -35,10 +35,10 @@ const COMPAT = "0716_subscription_authority_compat.sql";
 const FENCES = "0717_subscription_authority_fences.sql";
 // The drained SuperGrok cutover requires 0717; held back (never applied) so
 // this database models the rolling state before it.
-const XAI_CUTOVER = "0719_subscription_core_xai_cutover.sql";
+const XAI_CUTOVER = "0721_subscription_core_xai_cutover.sql";
 /** This binary requires the SuperGrok receipt, which the rolling state lacks. */
 const BEFORE_XAI_CUTOVER = [
-  "database is missing the xai subscription-core cutover receipt (0719_subscription_core_xai_cutover.sql); apply the pending migrations first",
+  "database is missing the xai subscription-core cutover receipt (0721_subscription_core_xai_cutover.sql); apply the pending migrations first",
 ];
 let database: OwnerMigratedTestDatabase | null = null;
 let client: DbClient | null = null;

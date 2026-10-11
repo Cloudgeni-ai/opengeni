@@ -83,7 +83,7 @@ const withheldMigrations = [
   // Patches the acceptance writers withheld 0688 and 0707 define.
   "0718_subscription_personal_acceptance_reads.sql",
   // The drained SuperGrok cutover requires 0712 through 0718; it runs last.
-  "0719_subscription_core_xai_cutover.sql",
+  "0721_subscription_core_xai_cutover.sql",
 ];
 let database: OwnerMigratedTestDatabase | null = null;
 

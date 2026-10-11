@@ -28,7 +28,7 @@ const compat = "0716_subscription_authority_compat.sql";
 // 0717 requires 0716's routines; it follows 0716.
 const fences = "0717_subscription_authority_fences.sql";
 // Held back (never applied): the SuperGrok cutover requires 0717.
-const xaiCutover = "0719_subscription_core_xai_cutover.sql";
+const xaiCutover = "0721_subscription_core_xai_cutover.sql";
 const key = Buffer.alloc(32, 87);
 const cases: Array<{
   name: string;

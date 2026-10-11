@@ -63,7 +63,7 @@ const subscriptionCoreMigrations = [
   // Patches the acceptance writers withheld 0669, 0688 and 0707 define.
   "0718_subscription_personal_acceptance_reads.sql",
   // The drained SuperGrok cutover requires 0712 through 0718; it runs last.
-  "0719_subscription_core_xai_cutover.sql",
+  "0721_subscription_core_xai_cutover.sql",
 ] as const;
 const key = Buffer.alloc(32, 67);
 const ids = {

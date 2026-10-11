@@ -49,7 +49,7 @@ test("a pre-writer personal-resource task retains its execution proof across mig
   // 0718 patches the acceptance writers 0688 and 0707 define; it follows them.
   const acceptanceReads = "0718_subscription_personal_acceptance_reads.sql";
   // The drained SuperGrok cutover requires 0718; held back (never applied).
-  const xaiCutover = "0719_subscription_core_xai_cutover.sql";
+  const xaiCutover = "0721_subscription_core_xai_cutover.sql";
   try {
     // Stage the actual pre-writer ledger, including on the stacked cutover
     // branch. This is a rolling/gate-off regression, not cutover activation.

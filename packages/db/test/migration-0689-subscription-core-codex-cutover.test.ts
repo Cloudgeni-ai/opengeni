@@ -57,7 +57,7 @@ const COMPAT = "0716_subscription_authority_compat.sql";
 const FENCES = "0717_subscription_authority_fences.sql";
 // The drained SuperGrok cutover requires 0717; held back (never applied) so
 // this database stays a Codex-only cutover fixture.
-const XAI_CUTOVER = "0719_subscription_core_xai_cutover.sql";
+const XAI_CUTOVER = "0721_subscription_core_xai_cutover.sql";
 const key = Buffer.alloc(32, 72);
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 

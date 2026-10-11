@@ -24,28 +24,28 @@ DO $xai_cutover_drain$
 DECLARE roles jsonb := nullif(current_setting('opengeni.migration_application_roles', true), '')::jsonb;
 BEGIN
   IF to_regclass('pg_temp.xai_cutover_stage') IS NULL THEN
-    RAISE EXCEPTION '0719 requires the codec-aware TypeScript migration runner' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0721 requires the codec-aware TypeScript migration runner' USING ERRCODE = '55000';
   END IF;
   IF roles IS NULL OR jsonb_typeof(roles) <> 'array' THEN
-    RAISE EXCEPTION '0719 requires explicit application database roles' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0721 requires explicit application database roles' USING ERRCODE = '55000';
   END IF;
   IF jsonb_array_length(roles) NOT BETWEEN 1 AND 16 OR EXISTS (
     SELECT 1 FROM jsonb_array_elements(roles) item WHERE jsonb_typeof(item) <> 'string'
       OR octet_length(item #>> '{}') NOT BETWEEN 1 AND 63
       OR item #>> '{}' <> btrim(item #>> '{}')
-  ) THEN RAISE EXCEPTION '0719 received invalid application roles' USING ERRCODE = '55000'; END IF;
+  ) THEN RAISE EXCEPTION '0721 received invalid application roles' USING ERRCODE = '55000'; END IF;
   IF EXISTS (SELECT 1 FROM pg_stat_activity a JOIN jsonb_array_elements_text(roles) r ON r.value = a.usename
     WHERE a.datname = current_database() AND a.pid <> pg_backend_pid()) THEN
-    RAISE EXCEPTION '0719 requires drained application sessions' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0721 requires drained application sessions' USING ERRCODE = '55000';
   END IF;
   IF to_regprocedure('opengeni_private.subscription_provider_cutover_committed(text)') IS NULL
     OR to_regclass('opengeni_private.subscription_authority_compat') IS NULL
     OR to_regclass('opengeni_private.subscription_core_auto_assignments') IS NULL THEN
-    RAISE EXCEPTION '0719 requires the generic precursor, provider-keyed reach and compatibility migrations'
+    RAISE EXCEPTION '0721 requires the generic precursor, provider-keyed reach and compatibility migrations'
       USING ERRCODE = '55000';
   END IF;
   IF opengeni_private.subscription_provider_cutover_committed('xai') THEN
-    RAISE EXCEPTION '0719 found an existing SuperGrok cutover receipt' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0721 found an existing SuperGrok cutover receipt' USING ERRCODE = '55000';
   END IF;
 END $xai_cutover_drain$;
 
@@ -79,11 +79,11 @@ DO $xai_cutover_owner_window$
 DECLARE item record;
 BEGIN
   IF (SELECT count(*) FROM xai_cutover_relations) <> 37 THEN
-    RAISE EXCEPTION '0719 could not resolve every cutover relation' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0721 could not resolve every cutover relation' USING ERRCODE = '55000';
   END IF;
   IF EXISTS (SELECT 1 FROM xai_cutover_relations r JOIN pg_class c ON c.oid = r.oid
     WHERE c.relowner <> (SELECT oid FROM pg_roles WHERE rolname = current_user)) THEN
-    RAISE EXCEPTION '0719 requires the schema owner' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0721 requires the schema owner' USING ERRCODE = '55000';
   END IF;
   -- A runtime login missing from the passed role list still writes: refuse
   -- every other client backend whose role may insert, update or delete a
@@ -101,7 +101,7 @@ BEGIN
           OR has_table_privilege(activity.usesysid, relation.oid, 'UPDATE')
           OR has_table_privilege(activity.usesysid, relation.oid, 'DELETE'))
   ) THEN
-    RAISE EXCEPTION '0719 requires drained application sessions (a connected role outside the listed application roles can write moved relations)'
+    RAISE EXCEPTION '0721 requires drained application sessions (a connected role outside the listed application roles can write moved relations)'
       USING ERRCODE = '55000';
   END IF;
   FOR item IN SELECT * FROM xai_cutover_relations ORDER BY oid LOOP
@@ -160,7 +160,7 @@ DO $xai_cutover_owner_window_open$
 BEGIN
   IF EXISTS (SELECT 1 FROM xai_cutover_relations r JOIN pg_class c ON c.oid = r.oid
     WHERE c.relforcerowsecurity) THEN
-    RAISE EXCEPTION '0719 owner window did not open' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0721 owner window did not open' USING ERRCODE = '55000';
   END IF;
 END $xai_cutover_owner_window_open$;
 
@@ -173,7 +173,7 @@ BEGIN
   BEGIN
     EXECUTE format('ALTER TABLE %s VALIDATE CONSTRAINT xai_cutover_empty_probe', relation);
   EXCEPTION WHEN check_violation THEN
-    RAISE EXCEPTION '0719 counted zero rows in a non-empty relation' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0721 counted zero rows in a non-empty relation' USING ERRCODE = '55000';
   END;
   EXECUTE format('ALTER TABLE %s DROP CONSTRAINT xai_cutover_empty_probe', relation);
 END $xai_cutover_assert_empty$;
@@ -237,7 +237,7 @@ BEGIN
     OR EXISTS (SELECT 1 FROM opengeni_private.subscription_authority_compat WHERE provider = 'xai')
     OR EXISTS (SELECT 1 FROM subscription_settings WHERE xai_primary_connection_id IS NOT NULL)
   THEN
-    RAISE EXCEPTION '0719 refuses pre-existing core SuperGrok state' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0721 refuses pre-existing core SuperGrok state' USING ERRCODE = '55000';
   END IF;
   -- Ambiguous session ownership on live work aborts activation.
   IF EXISTS (
@@ -253,7 +253,7 @@ BEGIN
             AND membership.id = session.owner_organization_membership_id
             AND membership.subject_id = session.owner_subject_id)))
   ) THEN
-    RAISE EXCEPTION '0719 refused ambiguous session ownership on live work (session_owner_ambiguous)'
+    RAISE EXCEPTION '0721 refused ambiguous session ownership on live work (session_owner_ambiguous)'
       USING ERRCODE = '55000';
   END IF;
 END $xai_cutover_preflight$;
@@ -269,14 +269,14 @@ INSERT INTO opengeni_private.subscription_core_providers (provider, extra_credit
 VALUES ('xai', false, 'xai_primary_connection_id');
 INSERT INTO opengeni_private.subscription_provider_cutover_receipts (
   provider, migration, committed_at, seed_rotation
-) VALUES ('xai', '0719_subscription_core_xai_cutover.sql', transaction_timestamp(), '{"mode":"spread"}');
+) VALUES ('xai', '0721_subscription_core_xai_cutover.sql', transaction_timestamp(), '{"mode":"spread"}');
 
 -- opengeni:xai-subscription-core-cutover-v1
 
 DO $xai_cutover_codec_receipt$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_temp.xai_cutover_stage WHERE completed) THEN
-    RAISE EXCEPTION '0719 codec stage did not complete' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0721 codec stage did not complete' USING ERRCODE = '55000';
   END IF;
 END $xai_cutover_codec_receipt$;
 
@@ -301,7 +301,7 @@ BEGIN
     GROUP BY map.account_id, map.owner_membership_id
     HAVING count(DISTINCT map.authority_generation) <> 1
   ) THEN
-    RAISE EXCEPTION '0719 refused ambiguous personal generations (personal_generation_ambiguous)'
+    RAISE EXCEPTION '0721 refused ambiguous personal generations (personal_generation_ambiguous)'
       USING ERRCODE = '55000';
   END IF;
 END $xai_cutover_generations$;
@@ -493,7 +493,7 @@ DO $xai_cutover_binding_unique$
 BEGIN
   IF EXISTS (SELECT 1 FROM xai_cutover_bindings WHERE moves
     GROUP BY workspace_id, session_id HAVING count(*) > 1) THEN
-    RAISE EXCEPTION '0719 refused ambiguous session pins (pin_pool_ambiguous)' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0721 refused ambiguous session pins (pin_pool_ambiguous)' USING ERRCODE = '55000';
   END IF;
 END $xai_cutover_binding_unique$;
 
@@ -538,7 +538,7 @@ BEGIN
   IF EXISTS (SELECT 1 FROM xai_cutover_live_leases legacy
     JOIN subscription_leases core ON core.workspace_id = legacy.workspace_id
      AND core.turn_id = legacy.turn_id) THEN
-    RAISE EXCEPTION '0719 refused a turn leased on both runtimes (lease_conflict)' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0721 refused a turn leased on both runtimes (lease_conflict)' USING ERRCODE = '55000';
   END IF;
 END $xai_cutover_lease_conflict$;
 INSERT INTO subscription_leases (
@@ -576,14 +576,14 @@ DO $xai_cutover_waiter_checks$
 BEGIN
   IF EXISTS (SELECT 1 FROM xai_cutover_waiters waiter WHERE waiter.rank = 1
     AND waiter.workflow_id IS DISTINCT FROM waiter.session_workflow_id) THEN
-    RAISE EXCEPTION '0719 refused a waiter of another workflow (waiter_workflow_mismatch)'
+    RAISE EXCEPTION '0721 refused a waiter of another workflow (waiter_workflow_mismatch)'
       USING ERRCODE = '55000';
   END IF;
   IF EXISTS (SELECT 1 FROM xai_cutover_waiters waiter
     JOIN subscription_capacity_waiters core ON core.workspace_id = waiter.workspace_id
      AND core.session_id = waiter.session_id
     WHERE waiter.rank = 1) THEN
-    RAISE EXCEPTION '0719 refused a session waiting on both runtimes (waiter_conflict)'
+    RAISE EXCEPTION '0721 refused a session waiting on both runtimes (waiter_conflict)'
       USING ERRCODE = '55000';
   END IF;
 END $xai_cutover_waiter_checks$;
@@ -952,7 +952,7 @@ BEGIN
       <> (SELECT count(DISTINCT connection_id) FROM pg_temp.subscription_cutover_connection_map)
     OR (SELECT count(*) FROM pg_temp.subscription_cutover_connection_map)
       <> (SELECT count(*) FROM xai_subscription_credentials) THEN
-    RAISE EXCEPTION '0719 parity mismatch (secret_readability)' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0721 parity mismatch (secret_readability)' USING ERRCODE = '55000';
   END IF;
 END $xai_cutover_readability$;
 UPDATE xai_subscription_credentials SET credential_encrypted = ''
@@ -1500,14 +1500,14 @@ BEGIN
   SELECT string_agg(DISTINCT metric, ', ' ORDER BY metric) INTO mismatches
   FROM xai_cutover_parity WHERE legacy_count <> core_count;
   IF mismatches IS NOT NULL THEN
-    RAISE EXCEPTION '0719 parity mismatch (%)', mismatches USING ERRCODE = '55000';
+    RAISE EXCEPTION '0721 parity mismatch (%)', mismatches USING ERRCODE = '55000';
   END IF;
   -- Zero-row success is invalid: a source with rows must yield a non-empty
   -- target, and every counted source was counted inside the owner window.
   IF EXISTS (SELECT 1 FROM xai_cutover_inventory WHERE legacy_count > 0
       AND metric LIKE 'credentials_%')
     AND NOT EXISTS (SELECT 1 FROM subscription_connections WHERE provider = 'xai') THEN
-    RAISE EXCEPTION '0719 parity mismatch (zero_row_backfill)' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0721 parity mismatch (zero_row_backfill)' USING ERRCODE = '55000';
   END IF;
 END $xai_cutover_parity_check$;
 
@@ -1527,7 +1527,7 @@ BEGIN
   END LOOP;
   IF EXISTS (SELECT 1 FROM xai_cutover_relations r JOIN pg_class c ON c.oid = r.oid
     WHERE r.relforcerowsecurity AND NOT c.relforcerowsecurity) THEN
-    RAISE EXCEPTION '0719 could not restore FORCE row security' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0721 could not restore FORCE row security' USING ERRCODE = '55000';
   END IF;
 END $xai_cutover_restore$;
 
@@ -1555,7 +1555,7 @@ BEGIN
       WHERE c.relname IN ('xai_subscription_credentials', 'xai_rotation_settings',
         'xai_credential_leases', 'xai_session_account_pins', 'xai_capacity_waiters')
         AND c.relrowsecurity AND c.relforcerowsecurity) <> 5 THEN
-    RAISE EXCEPTION '0719 requires FORCE row security on the legacy SuperGrok tables'
+    RAISE EXCEPTION '0721 requires FORCE row security on the legacy SuperGrok tables'
       USING ERRCODE = '55000';
   END IF;
   FOREACH legacy IN ARRAY ARRAY['xai_subscription_credentials', 'xai_rotation_settings',

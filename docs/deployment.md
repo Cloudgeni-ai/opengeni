@@ -4942,9 +4942,9 @@ GROUP BY 1, 2
 HAVING count(DISTINCT authority.generation) = 1;
 ```
 
-### SuperGrok on the shared subscription core (0719)
+### SuperGrok on the shared subscription core (0721)
 
-Migration `0719_subscription_core_xai_cutover.sql` is a one-way maintenance
+Migration `0721_subscription_core_xai_cutover.sql` is a one-way maintenance
 cutover, the SuperGrok counterpart of 0689. It moves every organization's
 SuperGrok (`xai`) subscription state onto the shared subscription core,
 records the `xai` receipt and registry row, and enables the SuperGrok cutover
@@ -5083,7 +5083,7 @@ ownership ambiguity, named by content-free classes such as
 `personal_generation_ambiguous` or `pin_pool_ambiguous`; a turn leased or a
 session waiting on both runtimes (`lease_conflict`, `waiter_conflict`); a
 waiter whose workflow is not its session's (`waiter_workflow_mismatch`);
-pre-existing core SuperGrok state; or any parity mismatch (`0719 parity
+pre-existing core SuperGrok state; or any parity mismatch (`0721 parity
 mismatch (<metrics>)`). A database error while writing the core surfaces only
 as `could not write the shared core (SQLSTATE <code>, <constraint>)`: no
 statement parameter, token, label or email leaves the migration. Fix the named
@@ -5179,22 +5179,22 @@ legacy tables and only their own provider's keys in shared relations, and
 each commits in its own transaction with its own parity. Either order of
 releases works:
 
-- Separately: deploy the release that carries 0719, run steps 1 to 6 in one
+- Separately: deploy the release that carries 0721, run steps 1 to 6 in one
   window, and run the Claude cutover's window with its later release.
 - In one window: deploy a release that carries both. Drain and back up once,
   take both inventories, and run the migrator once with the same roles and
-  key; it applies 0719 and then the Claude cutover in ledger order. If the
-  Claude cutover aborts, 0719 stays committed: fix the named Claude rows and
+  key; it applies 0721 and then the Claude cutover in ledger order. If the
+  Claude cutover aborts, 0721 stays committed: fix the named Claude rows and
   run the migrator again (it resumes at the Claude cutover). Start binaries
   only after both receipts exist; readiness refuses a database missing
-  either. Validate each provider's report rows separately. While only 0719
+  either. Validate each provider's report rows separately. While only 0721
   is committed no binary can start: this release needs both receipts and
-  the old release must not run after 0719. If the Claude rows cannot be
+  the old release must not run after 0721. If the Claude rows cannot be
   fixed within the window, restore the step 3 backup and use the separate
-  path, or deploy a release that carries 0719 but not the Claude cutover.
-### Personal connect writer with a credential format (0719)
+  path, or deploy a release that carries 0721 but not the Claude cutover.
+### Personal connect writer with a credential format (0721)
 
-Migration `0719_subscription_core_personal_connect_format.sql` is
+Migration `0720_subscription_core_personal_connect_format.sql` is
 **rolling**: deploy it like any release, without draining. Design record:
 [subscription core, SuperGrok track](design/subscription-core-2026-10-07.md#x2b-routes-and-writers).
 It adds one overload of the neutral personal connect writer,

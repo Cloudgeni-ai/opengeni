@@ -769,7 +769,7 @@ describe("runtime database posture evaluator", () => {
       "database is missing the codex subscription-core cutover receipt (0689_subscription_core_codex_cutover.sql); apply the pending migrations first",
     );
     expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
-      "database is missing the xai subscription-core cutover receipt (0719_subscription_core_xai_cutover.sql); apply the pending migrations first",
+      "database is missing the xai subscription-core cutover receipt (0721_subscription_core_xai_cutover.sql); apply the pending migrations first",
     );
     // Each listed cutover migration is in this binary's ledger.
     for (const migration of Object.values(SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS)) {
@@ -803,7 +803,7 @@ describe("runtime database posture evaluator", () => {
       before.filter((violation) => violation.includes("xai_subscription_credentials")),
     ).toEqual([]);
     expect(before).toContain(
-      "database is missing the xai subscription-core cutover receipt (0719_subscription_core_xai_cutover.sql); apply the pending migrations first",
+      "database is missing the xai subscription-core cutover receipt (0721_subscription_core_xai_cutover.sql); apply the pending migrations first",
     );
   });
 
@@ -1542,7 +1542,7 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 1
             : 0) -
-          // 0719: the five legacy SuperGrok tables become read-only forensics.
+          // 0721: the five legacy SuperGrok tables become read-only forensics.
           (tables === RUNTIME_FULL_DML_TABLES ? 5 : 0) +
           embeddingTableCount +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES

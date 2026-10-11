@@ -136,7 +136,7 @@ describe("migration 0053 (Codex credential leases)", () => {
       // This exercises the legacy Codex lease protocol, which the drained
       // 0689 cutover moves onto the shared core (M3 PR 4 deletes the legacy
       // path). Hold that one migration back so the fixture stays legacy,
-      // with 0712, 0713, 0714, 0716, 0717 and 0719, which build on it.
+      // with 0712, 0713, 0714, 0716, 0717 and 0721, which build on it.
       await admin`
         insert into schema_migrations (name)
         values ('0689_subscription_core_codex_cutover.sql'),
@@ -152,7 +152,7 @@ describe("migration 0053 (Codex credential leases)", () => {
           ('0716_subscription_authority_compat.sql'),
           ('0717_subscription_authority_fences.sql'),
           -- The SuperGrok cutover requires 0712 through 0717.
-          ('0719_subscription_core_xai_cutover.sql') on conflict do nothing`;
+          ('0721_subscription_core_xai_cutover.sql') on conflict do nothing`;
       await migrate(databaseUrl);
       client = createDb(databaseUrl, { max: 2 });
 

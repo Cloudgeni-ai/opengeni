@@ -53,7 +53,7 @@ const FENCES = "0717_subscription_authority_fences.sql";
 // The drained SuperGrok cutover requires 0712 through 0717 and the codec
 // stage; it is recorded and never applied, so this database stays the Codex
 // seam fixture before any SuperGrok cutover.
-const XAI_CUTOVER = "0719_subscription_core_xai_cutover.sql";
+const XAI_CUTOVER = "0721_subscription_core_xai_cutover.sql";
 const MODEL = "codex/gpt-5.5";
 const key = Buffer.alloc(32, 77);
 const settings = { environmentsEncryptionKey: key.toString("base64") } as never;
