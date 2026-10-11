@@ -2442,7 +2442,8 @@ Module map (old Codex module, its new shared home, and what stays Codex):
 Every `@opengeni/db` export that existed before this step keeps its name,
 signature and behaviour; callers outside `packages/db` are unchanged. The new
 shared runtimes are internal to `packages/db` (the package index exports none
-of the provider-parameterized entry points). Provider-derived texts keep
+of the provider-parameterized entry points; superseded for the worker and
+`@opengeni/core` by SuperGrok track X1a in §5.3). Provider-derived texts keep
 Codex's bytes: wake reasons are `core_<provider>_<event>`, the extra-credits
 audit action `<provider>.extra_credits.updated`, the Apps-cleared audit action
 `<provider>_apps.cleared_on_disconnect` (only for a provider with the `apps`
@@ -3684,6 +3685,85 @@ resolver a live turn calls are still Codex-named and are exercised by the
 Codex suites, and move to the shared path with the worker settlement
 (decision 5). For Codex the suite therefore checks the shared settlement
 step, not the worker's own settlement that live Codex turns use today.
+
+#### SuperGrok track
+
+The SuperGrok steps land dormant: every new call site reads
+`readSubscriptionCoreProviderRoute(db, {accountId, provider: "xai"})` first.
+`legacy` (no `xai` cutover receipt) runs the existing SuperGrok path
+unchanged, at the cost of that one receipt read; `maintenance` fails closed
+with `subscription_core_cutover_disabled`; `core` runs the shared runtime.
+The SuperGrok binding stays out of the provider registry until X3 adds its
+SQL registry row, so a `core` answer before then still fails closed.
+
+##### X1a: adapter and chat placement
+
+Generalized (Codex keeps every export, error class, code and text, metric
+name and label, and event shape; its names are thin bindings of the shared
+code):
+
+| Codex-named (M3) | Provider-neutral |
+| --- | --- |
+| `createCoreCodexRequests`, `providerRequestIdPrefix` (`codex-core-requests.ts`) | `createCoreSubscriptionRequests`, `providerRequestIdPrefix` (`subscription-core-requests.ts`) |
+| `CodexTurnLease` renewal, dispatch fence and release | `CoreSubscriptionTurnLease` (provider id, display name, TTL, optional legacy heartbeat); `CodexTurnLease` and `XaiTurnLease` extend it |
+| `selectCoreCodexTurnCapacity` placement, adoption and compaction defer | `selectCoreSubscriptionTurnCapacity` with a `CoreTurnPlacementProvider` (`subscription-core-capacity.ts`); Codex keeps its entitlement refresh, selection receipt and park as hooks |
+| the source and lease guard of `buildCoreCodexRequestTokenResolver` | `guardCoreTokenResolver`, `coreLeaseRef`, `assertCoreSourceConnected` |
+| between-call revalidation in `stream-attempt.ts` | `revalidatePlacedSubscriptionCore` (`subscription-core-placed.ts`) |
+| `CodexSubscriptionCoreTurn` | `SubscriptionCoreTurn` (alias kept); `subscriptionCoreTurnOf(providerTurn)` for checkpoints and `model_call_facts.connection_id` attribution |
+| `codexCredentialLeaseHolderId` | `subscriptionTurnLeaseHolderId(provider, displayName, input, turnId)` |
+| failure copy builders in `codex-core-errors.ts` | the same builders with an optional display name (default `Codex`, so texts are unchanged) |
+| `subscriptionCoreAcceptedCodexTurnIsFunded` behind `isCodexBilledTurn` | `readSubscriptionCoreRouteFunding` (`subscription-core/route-readiness.ts`) and `coreRoutedSubscriptionFunding` in the `@opengeni/core` limits; `isCodexBilledTurn` is unchanged |
+| the Codex turn bearer resolver | `buildSubscriptionCoreTurnTokenResolver` (`subscription-core/turn-token-resolver.ts`); Codex keeps its own binding |
+
+The package index now exports, for the worker and `@opengeni/core`,
+`subscriptionCoreTurns`, `subscriptionCoreRequests`, the catalog functions,
+`SubscriptionCoreError`, the `SubscriptionCoreProvider` type,
+`buildSubscriptionCoreTurnTokenResolver`, the route helpers
+(`readSubscriptionCoreProviderRoute`,
+`readSubscriptionCoreProviderRouteForWorkspace`) and route answers
+(`readSubscriptionCoreRouteFunding`, `readSubscriptionCoreRouteReadiness`),
+and the SuperGrok adapter and resolver. This supersedes §5.1.3's "the
+package index exports none of the provider-parameterized entry points".
+
+SuperGrok on the core:
+
+- Capacity: `selectXaiTurnCapacityByRoute`. On `core`, placement under the
+  turn's accepted identity and attempt fence with the `xai` binding; the
+  core lease (`subscription_leases`, provider `xai`) is renewed, fenced and
+  released by `XaiTurnLease`, which keeps its legacy heartbeat by subject on
+  the legacy route. The legacy pre-selection quota refresh does not run.
+- Materialization and refresh: the shared credential resolver under the
+  exact accepted turn and this attempt's lease; `userId` is the
+  connection's `provider_account_id` (a connection without one needs a new
+  sign-in).
+- Request custody: `@opengeni/xai-subscription` gains
+  `beforeProviderDispatch` and `onProviderRequestSettled`. Each physical
+  request (each transport attempt, including the refreshed retry after a
+  401; a hosted-search continuation is part of the same streamed request)
+  is fenced and reserved before network I/O and settled once: `refused` for
+  a definite HTTP refusal or an HTTP 200 capacity terminal before any
+  output, `response_received` for a completed stream, `unknown` otherwise.
+  Session-title requests use the turn's title custody lane.
+- Readiness, `list_models` and funding: `loadCoreRoutedXaiCatalogReadiness`
+  (readiness and the `supergrok/` restriction from the serving connections'
+  allowlists) and `coreRoutedSubscriptionFunding` (the accepted turn's core
+  funding, or a serving connection that admits the model).
+
+Fail-closed choices:
+
+- No core park until X1b: a core wait is a terminal capacity failure (a
+  compaction turn is cancelled with its request preserved, as for Codex).
+- An unknown outcome is terminal for the turn (Codex's bounded
+  own-interruption recovery is not extended to SuperGrok). Lease-loss
+  recovery on the core requires checkpointed, recoverable request lanes.
+- A frozen legacy SuperGrok authority snapshot (scheduled work) does not
+  select the core pool in catalog readiness; execution uses the accepted
+  turn's core authority. Until X2b no SuperGrok acceptance writes v2, which
+  reads as no personal authority.
+- Image, video, transcription and realtime readiness stay on their legacy
+  readers (X2a).
+- The route is read when the turn's capacity phase runs, not at claim time:
+  a turn claimed before the cutover and placed after it places on the core.
 
 #### Verification plan
 

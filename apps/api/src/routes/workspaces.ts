@@ -131,7 +131,9 @@ import {
   requireFreshAccessGrant,
   resolveWorkspaceCatalogSettings,
   creditsDefaultSessionModel,
+  loadCoreRoutedXaiCatalogReadiness,
   loadWorkspaceClaudeSubscriptionReadiness,
+  withCoreRoutedXaiRestriction,
   resolveDefaultSessionModelForSelections,
   resolveWorkspaceModelSelection,
 } from "@opengeni/core";
@@ -590,10 +592,10 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       ),
     ];
     const [
-      connectionModelRestrictions,
+      currentConnectionModelRestrictions,
       policy,
       codexCatalog,
-      xaiSubscriptionActive,
+      xaiCatalog,
       claudePool,
       workspaceConnections,
       workspaceCustomModels,
@@ -610,7 +612,23 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
         { activeSettings: deps.settings },
       ),
-      workspaceXaiSubscriptionActive(deps.db, deps.settings, workspaceId, grant.subjectId),
+      // By SuperGrok's provider route: the shared core's projection once it
+      // has cut over, else the legacy readiness.
+      loadCoreRoutedXaiCatalogReadiness(deps.db, deps.settings, {
+        accountId: grant.accountId,
+        workspaceId,
+        subjectId: grant.subjectId,
+      }).then(async (core) => ({
+        core,
+        active:
+          core?.ready ??
+          (await workspaceXaiSubscriptionActive(
+            deps.db,
+            deps.settings,
+            workspaceId,
+            grant.subjectId,
+          )),
+      })),
       loadWorkspaceClaudeSubscriptionReadiness(deps.db, resolvedCatalog.settings, {
         accountId: grant.accountId,
         workspaceId,
@@ -629,6 +647,10 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       }),
       getWorkspace(deps.db, workspaceId),
     ]);
+    const xaiSubscriptionActive = xaiCatalog.active;
+    const connectionModelRestrictions = xaiCatalog.core
+      ? withCoreRoutedXaiRestriction(currentConnectionModelRestrictions, xaiCatalog.core)
+      : currentConnectionModelRestrictions;
     const organizationDefaults = await getOrganizationModelDefaults(deps.db, grant.accountId);
     const claudeConnections: ClaudeConnectionCatalog = {};
     const workspaceClaudeConnections: ClaudeConnectionCatalog = {};

@@ -103,6 +103,7 @@ import type {
   TurnControlState,
 } from "./turn-context";
 import type { createCoreCodexRequests } from "./codex-core-requests";
+import { xaiCoreLanesRecoverAfterCheckpoint, xaiCoreRequestOutcomeUnknown } from "./xai-core";
 
 import { providerRecoveryCause, recordProviderRecoveryOutcome } from "./provider-recovery-metrics";
 
@@ -630,6 +631,9 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
   // Codex refusal, quota attribution and failover belong exclusively to the
   // exact core placement and its generation fence.
   const coreCodex = billingState.isCodexTurn ? (providerTurn.codexSubscriptionCore ?? null) : null;
+  // A SuperGrok turn on the shared core: unknown request outcomes are never
+  // replayed (its refusal settlement arrives with X1b).
+  const coreXai = billingState.isXaiTurn ? (providerTurn.xaiSubscriptionCore ?? null) : null;
   // The transport may settle an ambiguous request before the SDK throws a plain
   // HTTP error. That custody evidence must survive classification.
   //
@@ -657,7 +661,9 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       coreCodex?.requests?.hasUnknownOutcome() ||
       coreCodex?.titleRequests?.hasUnknownOutcome())
       ? new SubscriptionCoreCodexRequestOutcomeUnknownError()
-      : null;
+      : coreXai
+        ? xaiCoreRequestOutcomeUnknown(error, coreXai)
+        : null;
   const coreCodexLeaseLost =
     coreCodex !== null &&
     !coreRequestOutcomeUnknown &&
@@ -685,10 +691,22 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       });
     }
   }
+  // A core SuperGrok turn recovers a lost lease only once every request it
+  // dispatched is settled and its committed responses are checkpointed.
+  const xaiLeaseRecoverable =
+    billingState.isXaiTurn &&
+    leases.xai.lost &&
+    (!coreXai ||
+      (!coreRequestOutcomeUnknown &&
+        eventing.turnStartedPublished &&
+        (await xaiCoreLanesRecoverAfterCheckpoint(coreXai, async () => {
+          await flushRuntimeBatcher();
+          await historySink.reconcileConversationTruth({ requireDurable: true });
+        }))));
   const scopedLeaseLost =
     billingState.isClaudeTurn && leases.claude.lost
       ? "claude"
-      : billingState.isXaiTurn && leases.xai.lost
+      : xaiLeaseRecoverable
         ? "xai"
         : coreCodexLeaseRecoverable
           ? "codex"
@@ -1491,6 +1509,8 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
     !coreLeaseCheckpointFailed &&
     coreLaneRecoverable(coreCodex?.requests) &&
     coreLaneRecoverable(coreCodex?.titleRequests) &&
+    coreLaneRecoverable(coreXai?.requests) &&
+    coreLaneRecoverable(coreXai?.titleRequests) &&
     (earlyRecoverableSetup ||
       (failure.retryable && eventing.publish && eventing.turnStartedPublished))
   ) {
