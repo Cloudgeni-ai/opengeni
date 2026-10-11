@@ -215,6 +215,13 @@ DECLARE
   relation text;
   present boolean;
 BEGIN
+  -- The workspace settings upsert widens settings, which the settings
+  -- trigger admits only at READ COMMITTED (the migration runner's default).
+  -- Refuse up front instead of rolling back midway.
+  IF current_setting('transaction_isolation') <> 'read committed' THEN
+    RAISE EXCEPTION '0721 must run at READ COMMITTED (the migration runner default)'
+      USING ERRCODE = '55000';
+  END IF;
   FOREACH relation IN ARRAY ARRAY[
     'xai_subscription_credentials', 'xai_rotation_settings', 'xai_credential_leases',
     'xai_session_account_pins', 'xai_capacity_waiters', 'session_turns', 'managed_accounts'

@@ -5075,7 +5075,9 @@ before migrating. It is the only recovery point before the one-way commit.
   videos needs no key.
 
 The migration aborts and rolls back everything (`55000`) on: a drain-check
-failure; an undecodable credential (fixed message, no material); identity or
+failure; a transaction isolation other than READ COMMITTED (the runner's
+default: do not set `default_transaction_isolation` for the migrating role or
+database); an undecodable credential (fixed message, no material); identity or
 ownership ambiguity, named by content-free classes such as
 `provider_identity_mismatch` (the stored account id differs from the token's),
 `personal_workspace_owner_ambiguous`, `personal_owner_missing`,
