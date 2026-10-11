@@ -210,7 +210,7 @@ const OVERRIDE_COLUMN_VALUE = (
 
 /**
  * The locked settings a workspace-row write would widen: the TypeScript
- * mirror of the database guard (migration 0718). A write widens a setting
+ * mirror of the database guard (migration 0722). A write widens a setting
  * when it sets a value that is not already stored unchanged; for a
  * map-valued setting, when it adds or changes an entry. Clearing an override,
  * or leaving it unchanged, never widens. A rotation lock also covers the
