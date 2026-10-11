@@ -1595,6 +1595,11 @@ but admits no new connection, source configuration, credential delegation, or
 source-fetch execution. Scheduled admission and attempt-bound source fetching
 both enforce that retirement, including existing schedules and accepted work.
 Google Drive keeps its separate native API connection and source features.
+Publishing setup first verifies a folder through a file-only OAuth Picker, then
+uses a separate incremental OAuth step to retain recursive source reads. Both
+steps bind the same subject, account and unchanged connection; only final
+completion replaces the encrypted credential and enables the verified output
+folder. See [`google-drive.md`](google-drive.md#launch-oauth-scope-decision).
 See [`integrations-design.md`](integrations-design.md).
 
 The attempt-frozen Allow/Ask/Block policy and `connector_action_requests` apply
