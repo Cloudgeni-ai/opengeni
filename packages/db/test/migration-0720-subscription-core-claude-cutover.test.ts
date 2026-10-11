@@ -1663,72 +1663,86 @@ describe.skipIf(!realDb)(
         expect(deleted).toHaveLength(1);
       }, 60_000);
 
-      // Registering Claude relies on its adapter declaring its usage readings
-      // incomplete: a Claude usage reading can omit a window that is still
-      // exhausted, and must not end that block before its reset. The fix is
-      // C2a's (#4130, `usageReadingsComplete: false`); C3 merges after C2a,
-      // which makes this an ordinary test.
-      test.failing(
-        "a Claude usage reading that omits a still-exhausted window keeps it until its reset",
-        async () => {
-          const operations = subscriptionCoreOperations(subscriptionCoreProvider("claude"));
-          const scope = {
-            kind: "workspace" as const,
-            accountId: a.account,
-            workspaceId: a.w1,
-            subjectId: a.owner,
-          };
-          const observedAt = Date.now();
-          const resetsAt = observedAt + 2 * HOUR;
-          const reading = (
-            source: "response_headers" | "usage_endpoint",
-            at: number,
-            windows: {
-              id: string;
-              usedPercent: number;
-              resetsAt: number;
-              status: "ok" | "exhausted";
-            }[],
-          ) => ({
-            windows,
-            modelCooldowns: {},
-            exhaustedUntil: null,
-            exhaustedKind: null,
-            revision: 0,
-            observedAt: at,
-            observedRefreshGeneration: 4,
-            source,
-          });
-          // The migrated connection c1 (generation 4) reports its weekly window
-          // exhausted in response headers ...
-          expect(
-            await operations.recordSubscriptionCoreUsageObservation(
-              client.db,
-              scope,
-              a.c1,
-              reading("response_headers", observedAt, [
-                { id: "five_hour", usedPercent: 40, resetsAt: observedAt + HOUR, status: "ok" },
-                { id: "seven_day", usedPercent: 100, resetsAt, status: "exhausted" },
-              ]),
-            ),
-          ).toMatchObject({ applied: true });
-          // ... then a usage reading reports only the five-hour window.
-          await operations.recordSubscriptionCoreUsageObservation(
-            client.db,
-            scope,
-            a.c1,
-            reading("usage_endpoint", observedAt + 1_000, [
-              { id: "five_hour", usedPercent: 41, resetsAt: observedAt + HOUR, status: "ok" },
-            ]),
-          );
-          const [row] = await owned.admin`SELECT quota FROM subscription_connection_quota
+      // A partial Claude reading must not end a block before its reset. The
+      // migrated connection c1 (generation 4) is read through the registered
+      // Claude binding as the runtime reads it after the receipt.
+      const claudeQuotaScope = () => ({
+        kind: "workspace" as const,
+        accountId: a.account,
+        workspaceId: a.w1,
+        subjectId: a.owner,
+      });
+      const claudeReading = (
+        source: "response_headers" | "usage_endpoint",
+        at: number,
+        windows: {
+          id: string;
+          usedPercent: number;
+          resetsAt: number;
+          status: "ok" | "exhausted";
+        }[],
+      ) => ({
+        windows,
+        modelCooldowns: {},
+        exhaustedUntil: null,
+        exhaustedKind: null,
+        revision: 0,
+        observedAt: at,
+        observedRefreshGeneration: 4,
+        source,
+      });
+      const recordClaudeReading = (reading: ReturnType<typeof claudeReading>) =>
+        subscriptionCoreOperations(
+          subscriptionCoreProvider("claude"),
+        ).recordSubscriptionCoreUsageObservation(client.db, claudeQuotaScope(), a.c1, reading);
+      const weeklyObservedAt = Date.now();
+      const weeklyReset = weeklyObservedAt + 2 * HOUR;
+      const migratedC1Windows = async () => {
+        const [row] = await owned.admin`SELECT quota FROM subscription_connection_quota
           WHERE connection_id = ${a.c1}`;
-          expect(row!.quota.windows).toContainEqual(
-            expect.objectContaining({ id: "seven_day", status: "exhausted", resetsAt }),
-          );
-        },
-        60_000,
-      );
+        return row!.quota.windows as { id: string; status: string; resetsAt: number }[];
+      };
+
+      test("a newer Claude response-header reading that omits a still-exhausted window keeps it until its reset", async () => {
+        expect(
+          await recordClaudeReading(
+            claudeReading("response_headers", weeklyObservedAt, [
+              { id: "five_hour", usedPercent: 40, resetsAt: weeklyObservedAt + HOUR, status: "ok" },
+              { id: "seven_day", usedPercent: 100, resetsAt: weeklyReset, status: "exhausted" },
+            ]),
+          ),
+        ).toMatchObject({ applied: true });
+        expect(
+          await recordClaudeReading(
+            claudeReading("response_headers", weeklyObservedAt + 1_000, [
+              { id: "five_hour", usedPercent: 41, resetsAt: weeklyObservedAt + HOUR, status: "ok" },
+            ]),
+          ),
+        ).toMatchObject({ applied: true });
+        expect(await migratedC1Windows()).toContainEqual(
+          expect.objectContaining({ id: "seven_day", status: "exhausted", resetsAt: weeklyReset }),
+        );
+      }, 60_000);
+
+      // Registering Claude also relies on its adapter declaring its usage
+      // readings incomplete: a Claude usage reading can omit a window that is
+      // still exhausted. That declaration is C2a's (#4130,
+      // `usageReadingsComplete: false`); this case stays red until C2a is in
+      // the base, so C3 cannot pass its validation, or merge, ahead of it.
+      test("a newer Claude usage reading that omits a still-exhausted window keeps it until its reset", async () => {
+        await recordClaudeReading(
+          claudeReading("usage_endpoint", weeklyObservedAt + 2_000, [
+            { id: "five_hour", usedPercent: 42, resetsAt: weeklyObservedAt + HOUR, status: "ok" },
+          ]),
+        );
+        expect(await migratedC1Windows()).toContainEqual(
+          expect.objectContaining({
+            id: "seven_day",
+            status: "exhausted",
+            resetsAt: weeklyReset,
+          }),
+        );
+      }, 60_000);
     });
   },
 );

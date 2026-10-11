@@ -18,7 +18,11 @@
 import { createHash } from "node:crypto";
 import type postgres from "postgres";
 import { decryptEnvironmentValue, encryptEnvironmentValue } from "../environment-crypto";
-import { subscriptionCoreConnectionKind, type SubscriptionCoreProvider } from "./provider";
+import {
+  subscriptionCoreConnectionKind,
+  subscriptionCoreProviderId,
+  type SubscriptionCoreProvider,
+} from "./provider";
 import type {
   SubscriptionCutoverConnection,
   SubscriptionCutoverLegacyAuthority,
@@ -265,7 +269,7 @@ export async function writeSubscriptionCutoverConnections<Row>(
   },
 ): Promise<void> {
   const { encryptionKey, now } = input;
-  const provider = input.binding.adapter.provider;
+  const provider = subscriptionCoreProviderId(input.binding);
   const kind = subscriptionCoreConnectionKind(input.binding);
   const dispositions = new Map<string, number>();
   for (const staged of input.staged) {

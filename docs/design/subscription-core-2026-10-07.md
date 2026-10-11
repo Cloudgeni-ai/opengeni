@@ -4500,8 +4500,10 @@ Facts the adapter declares, each read from today's Claude path:
     early reset, including of a refusal's `exhausted_without_reset` fallback
     window. A two-observation shared test covers all three sources, and the
     adapter's former `test.failing` case is an ordinary test, which C3
-    (which registers Claude) requires. C3's combined cutover ledger test
-    covers the case on real data.
+    (which registers Claude) requires. C3's 0720 test
+    covers the case on a migrated Claude connection through the registered
+    binding (a response-header reading; a usage reading once C2a declares
+    Claude's usage readings incomplete).
   - C3 re-keys the legacy cooldowns and restrictions: the legacy reading is
     keyed by Anthropic's upstream model id, the core by product model id, so
     the cutover maps each through `subscriptionCoreClaudeProductModelIds`
@@ -4605,9 +4607,13 @@ Choices made where the plan left room, for reviewers:
   0719 committed and a rerun resumes at 0720. The combined-window ledger
   test (`subscription-core-combined-cutover-ledger.test.ts`) proves this
   and that only rolling migrations lie between them.
-- **Merge-gate seam cases.** The Claude seam integration test's peek and
-  reconcile cases are `test.failing` until C1b's Claude core waits land;
-  C3 merges after C1b, which makes them ordinary tests.
+- **Merge gates as ordinary tests.** The Claude seam integration test's
+  peek and reconcile cases need C1b's Claude core waits, and the 0720 test's
+  "a newer Claude usage reading that omits a still-exhausted window" case
+  needs C2a's `usageReadingsComplete: false`. They are ordinary tests, red
+  until those land in the base, so C3 cannot pass its exact-head validation
+  (and so cannot merge) ahead of the Claude core runtime. The response-header
+  variant of the usage case passes on #4120 alone.
 
 ### 5.4 Workspace-managed connections as organization accounts
 

@@ -5290,8 +5290,24 @@ SELECT account_id, workspace_id FROM subscription_settings
 ```
 
 List the workspaces whose Claude setting will follow a locked organization
-value (the 0719 query with `claude_subscription_credentials` in place of
-`xai_subscription_credentials`); nothing aborts either way.
+value; nothing aborts either way:
+
+```sql
+SELECT workspace.account_id, workspace.id AS workspace_id,
+  'providers' = ANY(org.locked_settings) AS freeze_follows_organization,
+  'rotation' = ANY(org.locked_settings) AS rotation_follows_organization
+FROM workspaces workspace
+JOIN subscription_settings org
+  ON org.account_id = workspace.account_id AND org.workspace_id IS NULL
+WHERE org.locked_settings && ARRAY['providers', 'rotation']
+  AND EXISTS (SELECT 1 FROM claude_subscription_credentials credential
+    WHERE credential.account_id = workspace.account_id
+      AND credential.workspace_id = workspace.id
+      AND credential.authority_scope = 'workspace')
+  AND NOT EXISTS (SELECT 1 FROM organization_memberships owner
+    WHERE owner.account_id = workspace.account_id
+      AND owner.personal_workspace_id = workspace.id);
+```
 
 **2. Stop and drain. 3. Back up.** As for 0719. Do not cancel turns.
 

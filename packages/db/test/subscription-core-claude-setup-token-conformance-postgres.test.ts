@@ -5,7 +5,9 @@
  * refresher, but a setup token's credential format does not renew: the core
  * never refreshes it, and once Claude refuses it the connection becomes
  * needs-relogin (the suite's "refused static credential" case) instead of
- * being refreshed. Any call to the token endpoint fails the run. * Since the Claude cutover (C3) the binding is registered in production and
+ * being refreshed. Any call to the token endpoint fails the run.
+ *
+ * Since the Claude cutover (C3) the binding is registered in production and
  * the suite runs it with no test registration.
  */
 import { afterAll, expect } from "bun:test";
