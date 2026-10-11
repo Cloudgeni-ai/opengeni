@@ -111,7 +111,9 @@ export type SubscriptionCoreClaudePoolProjection = {
  * A workspace's Claude pool for one viewer in the legacy shapes. Shared
  * connections carry the pool they serve this workspace from; personal ones
  * (listed only to their owner, only in the owner's Personal workspace) are
- * `user`, with their version read through the owner reader.
+ * `user`, with their version read through the owner reader. Both reads share
+ * one snapshot (repeatable read), so a concurrent disconnect cannot leave a
+ * listed personal row without its version; a mismatch is a defect and fails.
  */
 export async function getSubscriptionCoreClaudeWorkspaceProjection(
   db: Database,
@@ -159,6 +161,7 @@ export async function getSubscriptionCoreClaudeWorkspaceProjection(
         rotationEnabled: view.pool.rotationMode === "spread",
       };
     },
+    { isolationLevel: "repeatable read" },
   );
 }
 
@@ -212,12 +215,13 @@ export type SubscriptionCoreClaudeConnectResult =
   /**
    * A reconnect whose credential may not replace the target:
    * `setup_token_over_sign_in` (a setup token for an account a sign-in
-   * proved), `sign_in_over_setup_token` (a proven sign-in for an account
-   * added with a setup token), else `different_account`.
+   * proved), `sign_in_over_unverified` (a proven sign-in for an account
+   * whose id is unverified: a setup token's, or an earlier sign-in's without
+   * an account uuid), else `different_account`.
    */
   | {
       kind: "refused";
-      reason: "different_account" | "setup_token_over_sign_in" | "sign_in_over_setup_token";
+      reason: "different_account" | "setup_token_over_sign_in" | "sign_in_over_unverified";
     };
 
 function reconnectRefusal(
@@ -228,9 +232,9 @@ function reconnectRefusal(
   if (signedIn.setupToken && targetProven) return "setup_token_over_sign_in";
   if (
     !isSubscriptionCoreClaudeUnverifiedAccountId(signedIn.providerAccountId) &&
-    targetProviderAccountId?.startsWith("setup:")
+    isSubscriptionCoreClaudeUnverifiedAccountId(targetProviderAccountId)
   )
-    return "sign_in_over_setup_token";
+    return "sign_in_over_unverified";
   return "different_account";
 }
 

@@ -254,22 +254,25 @@ export function registerClaudeSubscriptionAccountRoutes(app: Hono, deps: ApiRout
           }
         : null;
       const workspaceId = organization ? null : c.req.param("workspaceId")!;
-      // The runtime first (one receipt read, behind a read grant), so a
-      // private account on the core is authorized in the owner's Personal
-      // workspace, where the core keeps it, and refused (403) anywhere else.
-      const readGrant = workspaceId
-        ? await requireAccessGrant(c, deps, workspaceId, "workspace:read")
-        : null;
-      const runtime = await claudeCoreRoute(
-        deps,
-        async () => actor?.organizationId ?? readGrant!.accountId,
-      );
-      if (runtime === "core" && workspaceId && parsed.data.scope === "user")
+      // The runtime first (one receipt read), so a private account on the
+      // core is authorized in the owner's Personal workspace, where the core
+      // keeps it, and refused (403) anywhere else. The read grant naming the
+      // organization is taken only once a receipt exists (the callback), so
+      // legacy authorizes exactly as before.
+      const read: { grant?: Awaited<ReturnType<typeof requireAccessGrant>> } = {};
+      const runtime = await claudeCoreRoute(deps, async () => {
+        if (actor) return actor.organizationId;
+        read.grant = await requireAccessGrant(c, deps, workspaceId!, "workspace:read");
+        return read.grant.accountId;
+      });
+      if (runtime === "core" && workspaceId && parsed.data.scope === "user") {
+        if (!read.grant) throw new Error("core Claude route without its read grant");
         await requireClaudeCorePersonalWorkspace(deps, {
-          accountId: readGrant!.accountId,
+          accountId: read.grant.accountId,
           workspaceId,
-          subjectId: readGrant!.subjectId,
+          subjectId: read.grant.subjectId,
         });
+      }
       const authority = workspaceId
         ? await requireSubscriptionScopeMutation(
             c,

@@ -109,15 +109,15 @@ export async function requireClaudeCorePersonalWorkspace(
 
 /** What a person who cannot reconnect this way is told to do instead. */
 const RECONNECT_REFUSED: Record<
-  "different_account" | "setup_token_over_sign_in" | "sign_in_over_setup_token",
+  "different_account" | "setup_token_over_sign_in" | "sign_in_over_unverified",
   string
 > = {
   different_account:
     "Sign in to the same Claude account to reconnect. Use Add account for a different subscription.",
   setup_token_over_sign_in:
     "A setup token can't replace a signed-in Claude account. Add it as a new account.",
-  sign_in_over_setup_token:
-    "This account was added with a setup token. Add it again with Sign in, then remove the old one.",
+  sign_in_over_unverified:
+    "This account was added without a verified sign-in. Add it again with Sign in, then remove the old one.",
 };
 
 /** The legacy response for a refused core Claude connect. */
@@ -129,7 +129,7 @@ export function claudeCoreConnectRefused(
   if (
     result.reason === "different_account" ||
     result.reason === "setup_token_over_sign_in" ||
-    result.reason === "sign_in_over_setup_token"
+    result.reason === "sign_in_over_unverified"
   )
     return new HTTPException(409, { message: RECONNECT_REFUSED[result.reason] });
   if (result.reason === "changed") return new HTTPException(409, { message: changedMessage });

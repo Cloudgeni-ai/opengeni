@@ -5363,16 +5363,22 @@ including comments.
   accepted (confirmed decision; a test pins it). The refresh generation
   stays internal for usage staleness. C2a's usage routes report the same
   row version. Personal rows are read through the
-  owner reader, which does not return the version, so migration 0720 adds
+  owner reader, which does not return the version, so migration 0725 adds
   `opengeni_private.subscription_core_personal_connection_versions`,
-  derived from the live 0707 owner reader by drift-checked replacement
-  (the 0719 pattern) and returning only `(id, version)`.
+  derived from the live owner reader (0707, as 0715 rewrote it) by
+  drift-checked replacement (the 0724 pattern) and returning only
+  `(id, version)`. A schema test compares the two live bodies outside the
+  patched name, `RETURNS` and `SELECT` parts, so a later fix to the owner
+  reader must reach the version reader too. The workspace listing reads the
+  rows and their versions in one snapshot (repeatable read), so a
+  concurrent disconnect cannot leave a listed personal row without a
+  version.
 - **Reconnect.** The neutral connect writer takes an optional
   `reconnect {connectionId, expectedVersion}`: the sign-in must land on
   exactly that connection at that version, or nothing is written and the
   route answers the legacy 409. A reconnect never creates a connection. For
   a shared row the writer checks under its row lock; for a personal row the
-  0719 writer serializes and moves the version by exactly one, so the
+  0724 writer serializes and moves the version by exactly one, so the
   writer reads the version back and rolls the whole write back unless it is
   the target at `expectedVersion + 1`.
 - **Identity.** A core connection's Claude identity never changes. The
@@ -5383,20 +5389,21 @@ including comments.
   account. One that proves none (a setup token, or OAuth without a uuid)
   keeps the target's unverified id, so replacing a setup token whose HMAC
   changes keeps the account, its pins and policy; it never replaces a
-  target whose account was proven. A proven sign-in over an unproven target
-  is refused too (`different_account`, the legacy "Sign in to the same
-  Claude account" 409), where legacy upgraded the row in place: re-keying a
-  core connection could merge it with another connection of that account,
-  so the person adds the signed-in account and disconnects the setup-token
-  one. Legacy also let a setup token replace a proven account; the core
-  refuses it. Each refusal has its own short copy: a sign-in over a
-  setup-token account, "This account was added with a setup token. Add it
-  again with Sign in, then remove the old one."; a setup token over a
-  signed-in account, "A setup token can't replace a signed-in Claude
-  account. Add it as a new account."; any other account, the legacy "Sign
-  in to the same Claude account to reconnect. Use Add account for a
-  different subscription." (Confirmed decision: no in-place upgrade between
-  setup-token and OAuth identities.)
+  target whose account was proven. A proven sign-in over any unproven
+  target (a setup token's `setup:` id, or an earlier sign-in's `oauth:` id
+  without an account uuid) is refused too, where legacy upgraded the row in
+  place: re-keying a core connection could merge it with another
+  connection of that account, so the person adds the signed-in account and
+  disconnects the old one. Legacy also let a setup token replace a proven
+  account; the core refuses it. Each refusal has its own short copy: a
+  sign-in over an unproven account (`sign_in_over_unverified`), "This
+  account was added without a verified sign-in. Add it again with Sign in,
+  then remove the old one."; a setup token over a signed-in account
+  (`setup_token_over_sign_in`), "A setup token can't replace a signed-in
+  Claude account. Add it as a new account."; any other account
+  (`different_account`), the legacy "Sign in to the same Claude account to
+  reconnect. Use Add account for a different subscription." (Confirmed
+  decision: no in-place upgrade between setup-token and OAuth identities.)
 - **Connect.** Shared and personal connects store the legacy secret object
   through the adapter codec, with the adapter's format
   (`claude_oauth_v1` with `oauth`, else `claude_setup_token_v1`) and the
@@ -5410,14 +5417,17 @@ including comments.
   `deliverPoolCoreWake` (the OAuth writer passes only the binding).
 - **Personal.** `scope: "user"` connects only in the person's own Personal
   workspace. The setup-token route and OAuth start and complete read the
-  `claude` route first (behind a `workspace:read` grant), then on the core
+  `claude` route first (the `workspace:read` grant naming the organization
+  is taken only once a receipt exists, as for SuperGrok, so legacy
+  authorizes exactly as before: a test connects a shared setup token with
+  `workspace:admin` and no `workspace:read`), then on the core
   refuse a private connect anywhere else with 403 before any sign-in
   starts (`requireClaudeCorePersonalWorkspace`) and authorize the private
   human with X2b's `personal_workspace` place, as the shared pool routes
   do, so the owner connects, lists, renames, reconnects and disconnects
   there (a Personal workspace has no ordinary membership, which legacy's
   `ordinary_workspace` place requires). Another member's Personal workspace
-  is not visible to the person (404). The 0719 writer checks the exact
+  is not visible to the person (404). The 0724 writer checks the exact
   owner membership and authority generation in its transaction; a personal
   sign-in completed elsewhere is refused 403, never turned into a shared
   connection. On legacy the routes keep `ordinary_workspace` after the same
@@ -5458,8 +5468,9 @@ including comments.
 Generalizations (provider-neutral): the connect writer's `reconnect` fence,
 `returnVersion` and the connected result's `version`; the `changed`
 refusal; `SubscriptionCoreConnectionRow.version` and
-`readSubscriptionCorePersonalConnectionVersionsInTransaction` (0720; C2a
-carries identical copies and merges first);
+`readSubscriptionCorePersonalConnectionVersionsInTransaction` (0725; C2a
+carries identical copies, its migration numbered 0720 on its own stack,
+and merges first);
 `SubscriptionPoolCore.listedAccountJson`; `deliverPoolCoreWake` takes only
 the binding.
 
