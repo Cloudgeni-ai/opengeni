@@ -21,10 +21,12 @@ import { withPoolWakeServiceScopeInTransaction } from "../subscription-session-a
  */
 export async function deleteSubscriptionCoreWaitersForTurns(
   db: Database | SessionActivityDatabase,
-  provider: ProviderId,
+  provider: ProviderId | null,
   input: { workspaceId: string; turnIds: readonly string[]; sessionId?: string },
 ): Promise<number> {
-  subscriptionCoreProvider(provider);
+  // Null: the waiter of whichever provider the turn parked on (a turn waits
+  // on at most one), including a provider that is not registered yet.
+  if (provider !== null) subscriptionCoreProvider(provider);
   if (input.turnIds.length === 0) return 0;
   const deleted = await db
     .delete(schema.subscriptionCapacityWaiters)
@@ -34,7 +36,7 @@ export async function deleteSubscriptionCoreWaitersForTurns(
         ...(input.sessionId
           ? [eq(schema.subscriptionCapacityWaiters.sessionId, input.sessionId)]
           : []),
-        eq(schema.subscriptionCapacityWaiters.provider, provider),
+        ...(provider === null ? [] : [eq(schema.subscriptionCapacityWaiters.provider, provider)]),
         inArray(schema.subscriptionCapacityWaiters.turnId, [...input.turnIds]),
       ),
     )

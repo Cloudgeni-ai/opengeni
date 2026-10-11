@@ -90,6 +90,16 @@ describeSubscriptionCoreConformance<SubscriptionCoreXaiTokens>({
   expiresAt: () => new Date(Date.now() + 24 * 60 * 60 * 1000),
   upstream,
   denyNetwork: installNetworkDenialGuard,
+  // The core waiter speaks the legacy SuperGrok wait's session events, so
+  // clients and the workflow see one vocabulary across the cutover.
+  sessionWaits: {
+    provider: "xai",
+    events: {
+      waiting: "turn.capacity_waiting",
+      resumed: "turn.recovery.requested",
+      superseded: "turn.superseded",
+    },
+  },
 });
 
 describe("SuperGrok binding before its cutover", () => {

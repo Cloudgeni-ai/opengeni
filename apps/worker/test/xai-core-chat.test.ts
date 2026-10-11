@@ -117,14 +117,19 @@ function route(value: db.SubscriptionCoreProviderRoute) {
   return spy(db, "readSubscriptionCoreProviderRoute").mockResolvedValue(value);
 }
 
-function coreTurns(placement: db.SubscriptionCorePlacement) {
+function coreTurns(
+  placement: db.SubscriptionCorePlacement,
+  evaluation: unknown = { kind: "run", connectionId: "connection-core", switch: "initial" },
+) {
   const place = spyOn({ place: async () => placement }, "place");
   const recover = spyOn({ recover: async () => 0 }, "recover");
+  const evaluate = spyOn({ evaluate: async () => evaluation }, "evaluate");
   spy(db, "subscriptionCoreTurns").mockReturnValue({
     placeSubscriptionCoreTurn: place,
     recoverSubscriptionCoreConnectionHealth: recover,
+    evaluateSubscriptionCorePlacement: evaluate,
   } as never);
-  return { place, recover };
+  return { place, recover, evaluate };
 }
 
 const runPlacement = {
@@ -216,20 +221,97 @@ describe("SuperGrok capacity by provider route", () => {
     }
   });
 
-  test("a core wait is a terminal capacity failure until SuperGrok waits exist", async () => {
+  test("a core wait parks the same turn on its SuperGrok core waiter and re-evaluates it", async () => {
     route("core");
     spy(db, "readSubscriptionCoreTurnIdentity").mockResolvedValue(identity);
+    spy(db, "readSubscriptionCoreTurnModel").mockResolvedValue({
+      productModelId: "supergrok/grok-4.7",
+      reasoningLevel: "medium",
+    });
+    spy(db, "getSessionGoal").mockResolvedValue(null);
+    spy(events, "publishDurableSessionEvents").mockResolvedValue(undefined as never);
     const resetAt = new Date(Date.now() + 3_600_000);
-    coreTurns({
-      kind: "wait",
-      reason: "all_accounts_exhausted",
+    const { evaluate } = coreTurns(
+      {
+        kind: "wait",
+        reason: "no_eligible_capacity",
+        earliestResetAt: resetAt,
+        healthRetryAt: null,
+        explicitConnectionId: null,
+      } as unknown as db.SubscriptionCorePlacement,
+      {
+        kind: "wait",
+        reason: "no_eligible_capacity",
+        earliestResetAt: resetAt,
+        healthRetryAt: null,
+        explicitConnectionId: null,
+      },
+    );
+    const waiter = {
+      waiterId: "waiter-1",
+      provider: "xai",
+      accountId: "account-1",
+      workspaceId: "workspace-1",
+      sessionId: "session-1",
+      blockedTurnId: "turn-1",
+      blockedTurnGeneration: 3,
+      generation: 1,
+      wakeRevision: 1,
+      observedWakeRevision: 1,
+      waitReason: "no_eligible_capacity",
+      resetKind: "authoritative",
+      refreshAttempt: 0,
       earliestResetAt: resetAt,
-      healthRetryAt: null,
-      explicitConnectionId: null,
-    } as unknown as db.SubscriptionCorePlacement);
+      nextCheckAt: resetAt,
+      goalId: null,
+      goalVersion: null,
+      lastWakeReason: "capacity_wait_armed",
+    } satisfies db.SubscriptionCoreCodexCapacityWait;
+    const arm = spy(db, "armSubscriptionCoreCapacityWait").mockResolvedValue({
+      action: "waiting",
+      waiter,
+      events: [],
+    });
+    const codexArm = spy(db, "armSubscriptionCoreCodexCapacityWait");
+    spy(db, "getSubscriptionCoreCapacityWaitById").mockResolvedValue(waiter);
+    const reconcile = spy(db, "reconcileSubscriptionCoreCapacityWait").mockResolvedValue({
+      action: "waiting",
+      waiter,
+      events: [],
+    });
     const deps = capacityDeps();
-    await expect(selectXaiTurnCapacityByRoute(deps)).rejects.toMatchObject({
-      payload: { code: "subscription_capacity_unavailable" },
+    expect(await selectXaiTurnCapacityByRoute(deps)).toEqual({
+      exit: {
+        status: "waiting_capacity",
+        capacityWait: {
+          provider: "xai",
+          waiterId: "waiter-1",
+          generation: 1,
+          nextCheckAt: resetAt.toISOString(),
+          wakeRevision: 1,
+        },
+        turnId: "turn-1",
+      },
+    });
+    expect(arm).toHaveBeenCalledTimes(1);
+    expect(arm.mock.calls[0]![1]).toBe("xai");
+    expect(arm.mock.calls[0]![2]).toMatchObject({
+      turnId: "turn-1",
+      attemptId: "attempt-1",
+      waitReason: "no_eligible_capacity",
+      earliestResetAt: resetAt,
+      failurePayload: { code: "subscription_capacity_unavailable" },
+    });
+    expect(
+      String((arm.mock.calls[0]![2] as { failurePayload: { error: string } }).failurePayload.error),
+    ).toContain("SuperGrok");
+    expect(codexArm).not.toHaveBeenCalled();
+    expect(evaluate).toHaveBeenCalledTimes(1);
+    expect(reconcile.mock.calls[0]![1]).toMatchObject({
+      waiterId: "waiter-1",
+      generation: 1,
+      provider: "xai",
+      evaluation: { kind: "wait", waitReason: "no_eligible_capacity" },
     });
     expect(deps.leases.xai.held).toBe(false);
   });
@@ -287,10 +369,14 @@ function placedCore(options: { fence?: () => Promise<void> } = {}) {
   spy(db, "buildSubscriptionCoreXaiTokenResolver").mockImplementation(((...args: unknown[]) => {
     resolverInputs.push(args);
     return {
-      getToken: async () => ({ accessToken: "core-access", userId: "subject-1" }),
+      getToken: async () => ({
+        accessToken: "core-access",
+        userId: "subject-1",
+        credentialVersion: 4,
+      }),
       refresh: async () => {
         refreshes += 1;
-        return { accessToken: "core-fresh", userId: "subject-1" };
+        return { accessToken: "core-fresh", userId: "subject-1", credentialVersion: 5 };
       },
     };
   }) as never);
@@ -371,11 +457,15 @@ const completed = () =>
 
 describe("SuperGrok request custody on the core", () => {
   test("the bearer comes from the core resolver for the exact turn and lease", async () => {
-    const { authorization, resolverInputs } = placedCore();
+    const { authorization, resolverInputs, core } = placedCore();
     expect(await authorization.getToken()).toEqual({
       accessToken: "core-access",
       userId: "subject-1",
     });
+    // The refusal settlement fences on the generation the latest bearer carried.
+    expect(core.credentialVersion).toBe(4);
+    await authorization.refresh();
+    expect(core.credentialVersion).toBe(5);
     expect((resolverInputs[0] as unknown[])[2]).toEqual(identity);
     expect((resolverInputs[0] as unknown[])[3]).toEqual({
       connectionId: "connection-core",
