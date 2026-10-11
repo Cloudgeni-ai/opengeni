@@ -2505,6 +2505,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "getModelAccountSettingsOverview",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/model-account-settings/overview",
+    "request": [],
+    "response": [
+      "ModelAccountSettingsOverview"
+    ]
+  },
+  {
     "id": "getMyUsage",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/usage/me",
@@ -2619,6 +2628,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "OrganizationIntegrationPolicy"
+    ]
+  },
+  {
+    "id": "getOrganizationModelAccountSettings",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/model-account-settings",
+    "request": [],
+    "response": [
+      "OrganizationModelAccountSettings"
     ]
   },
   {
@@ -3131,6 +3149,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/:workspaceId/model-policy",
     "request": [],
     "response": []
+  },
+  {
+    "id": "getWorkspaceModelAccountSettings",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/model-account-settings",
+    "request": [],
+    "response": [
+      "WorkspaceModelAccountSettings"
+    ]
   },
   {
     "id": "getWorkspaceModelCatalog",
@@ -6776,6 +6803,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "updateOrganizationModelAccountSettings",
+    "method": "PATCH",
+    "path": "/v1/organizations/:organizationId/model-account-settings",
+    "request": [
+      "UpdateOrganizationModelAccountSettingsRequest"
+    ],
+    "response": [
+      "OrganizationModelAccountSettings"
+    ]
+  },
+  {
     "id": "updateOrganizationModelDefaults",
     "method": "PATCH",
     "path": "/v1/organizations/:organizationId/model-defaults",
@@ -7113,6 +7151,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "UpdateWorkspaceModelPolicyRequest"
     ],
     "response": []
+  },
+  {
+    "id": "updateWorkspaceModelAccountSettings",
+    "method": "PATCH",
+    "path": "/v1/workspaces/:workspaceId/model-account-settings",
+    "request": [
+      "UpdateWorkspaceModelAccountSettingsRequest"
+    ],
+    "response": [
+      "WorkspaceModelAccountSettings"
+    ]
   },
   {
     "id": "updateWorkspaceSettings",

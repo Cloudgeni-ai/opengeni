@@ -171,6 +171,8 @@ One row per connection with the shared quota model and placement statistics
   enforcement source; the TypeScript `effectiveSettings` has a parity test.
   An organization overview reads the same function for every workspace
   (SUB-SET-05).
+- Locks are enforced at write time by migration 0716 and exposed through the
+  model-account settings API; see §5.5.
 
 ### 3.4 `subscription_session_bindings`
 
@@ -4247,6 +4249,91 @@ workspace route would then report the list placement reads for its source, as
 its switch does, and where that workspace also has an organization-pool row,
 its automatic and organization sources would still serve the organization's
 list; decision 5).
+
+### 5.5 M5: settings with lockable overrides and the overview
+
+Scope: SUB-SET-01, SUB-SET-02, SUB-SET-03 and the data of SUB-SET-05. The
+screens (SUB-SET-04 and the SUB-SET-05 page) ship in a separate UI change,
+previewed before merge. Cross-provider failover at run time is a later track;
+this one stores and resolves its switch and fallback order.
+
+**What exists.** The settings table, the NULL-inherits workspace rows, the
+`locked_settings` column and the resolver that ignores a locked workspace
+override all date from 0642/0644. Nothing wrote a lock, and nothing stopped a
+workspace row from storing an override of a locked setting.
+
+**Migration 0716 (rolling).** It changes no column, routine or value, so
+every effective setting is the same before and after (asserted on staged
+data with workspace overrides). It adds:
+
+1. CHECKs: `locked_settings` names only the six keys; `fallback_order` maps
+   each model to an array of model-id strings.
+2. A `BEFORE INSERT OR UPDATE` guard on workspace rows. Setting or changing a
+   locked setting is refused with 42501 and detail
+   `subscription_setting_locked:<key>`; clearing it, or leaving it unchanged,
+   is allowed. For map-valued settings the test is per entry: adding or
+   changing an entry widens, removing one does not. The guard is SECURITY
+   DEFINER so a caller who cannot see the organization row is not mistaken
+   for an organization without locks; it reads that row through an owner-only
+   `SELECT` policy scoped to the organization it names in a
+   transaction-local setting (the table keeps FORCE RLS).
+3. An `AFTER INSERT OR UPDATE OF locked_settings` trigger on the organization
+   row (SECURITY INVOKER) that clears newly locked settings from the
+   organization's workspace rows in the same transaction.
+4. Serialization: the guard takes a shared transaction advisory lock on
+   `subscription-settings-locks:<organization>`, the lock writer an exclusive
+   one. A workspace write either commits before the clear or sees the lock.
+   The repository locks workspace rows before the organization row when locks
+   change; a raw writer that does not can deadlock, and PostgreSQL aborts one
+   side (nothing partial is written).
+
+**API.** `GET/PATCH /v1/organizations/:organizationId/model-account-settings`
+(organization owners and admins), `GET .../model-account-settings/overview`
+(paged by workspace id, at most 500 per page), and
+`GET/PATCH /v1/workspaces/:workspaceId/model-account-settings` (members read;
+workspace administrators and organization administrators write). Writes take
+an optional `expectedVersion` (409 on a concurrent change), refuse a lock with
+409 `setting_locked` naming the settings, and deliver the core capacity wake
+(`core_settings_changed`). Every read goes through
+`subscription_effective_settings`; nothing in the API resolves a value itself.
+
+**Sources.** Per setting: `locked` (the organization value applies and
+workspaces cannot override it), `workspace` (this workspace overrides it; for
+a map, at least one entry), or `organization`. Per-entry sources stay
+available for maps.
+
+**Core.** The core already reads effective settings for placement
+(`readSubscriptionEffectiveSettings`); `fallbackOrderFor` reads the effective
+fallback order for a model. Turn placement still forces cross-provider
+failover off with an empty fallback order (the M3 policy) until the failover
+runtime ships.
+
+Fail-closed choices (contract ambiguous; strictest option taken):
+
+- A lock binds every writer: workspace administrators, organization
+  administrators writing a workspace row, and the owner-run core routines
+  (for example a workspace rotation or source change through the provider
+  routes answers forbidden while that setting is locked).
+- Locking clears existing workspace overrides of that setting; unlocking does
+  not bring them back.
+- A rotation lock also refuses setting or changing any workspace
+  `*_primary_connection_id` column (found by name, so later provider columns
+  are covered).
+- `providers` is lockable, but changes only through the existing provider
+  source routes.
+- Rotation can be set only for providers registered on the shared core; any
+  other provider is refused (422) because a value would have no effect.
+- Personal workspaces hold no overrides (409) and report `canEdit: false`;
+  they follow the organization. The overview lists shared workspaces only.
+- Fallback order: at most 64 preferred models, 8 fallbacks each, model ids up
+  to 200 characters, no repeats and no self-reference. Model ids are not
+  checked against the catalog (placement skips unknown models).
+- Personal fallback is never active for ownerless work (no session owner);
+  this was already the eligibility rule and is unchanged.
+- Under REPEATABLE READ or SERIALIZABLE a workspace writer whose snapshot
+  predates a lock can miss it in the guard. Such an override stays inert (the
+  resolver ignores locked overrides) and is reported as `locked`. Application
+  writers use READ COMMITTED.
 
 ## 6. Specific behaviours
 

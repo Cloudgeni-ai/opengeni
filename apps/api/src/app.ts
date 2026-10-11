@@ -264,6 +264,7 @@ import { registerCatalogAssetRoutes } from "./routes/catalog-assets";
 import { registerCodexRoutes } from "./routes/codex";
 import { registerOrganizationModelProviderRoutes } from "./routes/organization-model-providers";
 import { registerOrganizationModelDefaultsRoutes } from "./routes/organization-model-defaults";
+import { registerModelAccountSettingsRoutes } from "./routes/model-account-settings";
 import { registerSessionAdminAccessRoutes } from "./routes/session-admin-access";
 import { registerOrganizationIntegrationPolicyRoutes } from "./routes/organization-integration-policy";
 import { registerSuperGrokRoutes } from "./routes/supergrok";
@@ -2158,6 +2159,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerCodexRoutes(app, routeDeps);
   registerOrganizationModelProviderRoutes(app, routeDeps);
   registerOrganizationModelDefaultsRoutes(app, routeDeps);
+  registerModelAccountSettingsRoutes(app, routeDeps);
   registerSessionAdminAccessRoutes(app, routeDeps);
   registerWorkspaceModelProviderRoutes(app, routeDeps);
   registerClaudeSubscriptionOAuthRoutes(app, routeDeps);

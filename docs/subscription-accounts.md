@@ -113,15 +113,23 @@ for it until the matching requirement below is implemented:
 - **SUB-SET-01** Rotation (Primary first or spread), cross-provider failover
   (on or off, plus the fallback order), personal connections allowed, and
   personal fallback allowed are organization settings with defaults.
-  Verification: pending (data-model).
+  Verification: `packages/db/test/subscription-settings-postgres.test.ts`
+  (organization read and write as the application role),
+  `apps/api/test/model-account-settings-routes-postgres.test.ts` (routes).
 - **SUB-SET-02** A workspace administrator can override any of those settings
   for their workspace unless an organization administrator has locked it.
-  Verification: pending (data-model).
+  Verification: `packages/db/test/subscription-settings-postgres.test.ts`
+  (database guard for every writer, lock clearing, concurrency),
+  `packages/subscriptions/test/settings.test.ts` (the guard's TypeScript
+  mirror), `apps/api/test/model-account-settings-routes-postgres.test.ts`
+  (routes).
 - **SUB-SET-03** Every setting resolves to one effective value with a source
   ("Organization default" or "Overridden in this workspace"), and selection
   uses only the effective value. Two settings can never both apply to the same
   pool. Verification: `packages/db/test/subscription-core-m2-postgres.test.ts`
-  (SQL/TypeScript settings parity and source resolution).
+  (SQL/TypeScript settings parity and source resolution),
+  `packages/db/test/subscription-settings-postgres.test.ts` (randomized
+  parity with locks and workspace overrides).
 - **SUB-SET-04** Every settings screen shows the effective value and its
   source, with a one-step reset to the organization default.
   Verification: pending (product-surface).

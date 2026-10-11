@@ -172,6 +172,16 @@ export type EffectiveSubscriptionSettings = {
   };
 };
 
+/** A setting's source in a view: `locked` is an organization value a workspace cannot override. */
+export type EffectiveSettingSource = SettingSource | "locked";
+
+/** One workspace's effective settings, one source per setting (SUB-SET-03, SUB-SET-05). */
+export type SubscriptionSettingsView = {
+  values: SubscriptionSettingValues;
+  sources: Readonly<Record<SubscriptionSettingKey, EffectiveSettingSource>>;
+  entrySources: { [K in KeyedSettingKey]: Readonly<Record<string, SettingSource>> };
+};
+
 // Placement context
 
 export type PlacementWorkspace = {
