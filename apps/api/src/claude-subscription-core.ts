@@ -39,8 +39,8 @@ export function claudePoolCore(
       // The legacy listing's usage fields, from the core quota reading.
       return {
         ...accountJson(claude, activeId),
-        ...(claude.usage ? { usage: claude.usage } : {}),
-        ...(claude.usage?.refreshStatus === "reconnect"
+        usage: claude.usage,
+        ...(claude.usage.refreshStatus === "reconnect"
           ? { status: "needs_relogin", lastError: "Sign in to Claude again." }
           : {}),
       };

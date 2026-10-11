@@ -30,20 +30,18 @@ import {
   SUBSCRIPTION_CORE_CLAUDE,
   type SubscriptionCoreClaudeCredential,
 } from "./subscription-core-claude-adapter";
+import { projectSubscriptionCoreClaudeUsage } from "./subscription-core-claude-usage";
 
 export type SubscriptionCoreClaudeScope = "workspace" | "user" | "organization";
 
 /** A core Claude connection in the legacy account shape, with its usage reading. */
 export type SubscriptionCoreClaudeAccount = ClaudeSubscriptionAccountMetadata & {
-  usage: ClaudeSubscriptionUsage | null;
+  usage: ClaudeSubscriptionUsage;
 };
 
-/**
- * The legacy usage reading of a core connection. Seam for C2a's
- * `projectSubscriptionCoreClaudeUsage`; until it lands no reading is listed,
- * which the legacy listing also does for an account without one.
- */
-const claudeUsage = (_row: SubscriptionCoreConnectionRow): ClaudeSubscriptionUsage | null => null;
+/** The legacy usage reading of a core connection (C2a's projection of its quota row). */
+const claudeUsage = (row: SubscriptionCoreConnectionRow): ClaudeSubscriptionUsage =>
+  projectSubscriptionCoreClaudeUsage(row);
 
 function date(value: Date | string | null | undefined): Date | null {
   return value === null || value === undefined ? null : new Date(value);

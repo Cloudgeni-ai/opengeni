@@ -336,7 +336,8 @@ describe.skipIf(!realDb)("Claude on the shared core's writers (M4 C2b)", () => {
       status: "active",
       version: oauth.version,
       allocatorEnabled: true,
-      usage: null,
+      // C2a's projection: no reading yet; the OAuth scopes include the usage scope.
+      usage: { connected: true, windows: [], refreshStatus: "not_checked" },
     });
     expect(JSON.stringify(projection)).not.toContain("sk-ant-");
   });

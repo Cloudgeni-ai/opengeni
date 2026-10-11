@@ -5338,10 +5338,9 @@ including comments.
   legacy listing derives from it. Core rows project into the legacy
   `ClaudeSubscriptionAccountMetadata` shape (every field `accountJson`
   emits); the legacy quota columns and selection counters have no core
-  counterpart and no Claude route renders them. The usage reading is C2a's
-  `projectSubscriptionCoreClaudeUsage`, behind a one-line seam
-  (`claudeUsage`) until C2a lands; until then a core account lists no
-  `usage`, as a legacy account without a reading does. The usage routes
+  counterpart and no Claude route renders them. Each account's `usage` is
+  C2a's `projectSubscriptionCoreClaudeUsage` of its core quota row and
+  provider state, so the listing keeps the legacy keys. The usage routes
   themselves are C2a's.
 - **Version.** A Claude account's `version` (the setup-token
   `expectedCredentialVersion`, the OAuth attempt's `credentialVersion`, the

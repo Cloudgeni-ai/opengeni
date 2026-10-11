@@ -351,14 +351,14 @@ describe.skipIf(!realDb)("Claude routes on the shared core (M4 C2b)", () => {
       allocatorEnabled: true,
     });
     expect(String(first.accounts[0]!.subject)).toStartWith("setup:");
-    // The legacy account shape: the same keys, no secrets. The usage reading
-    // is C2a's projection (a one-line seam until it lands), so it is compared
-    // apart: listed when the core holds a reading.
-    const withoutUsage = (shape: typeof legacyShape) => ({
-      ...shape!,
-      account: shape!.account.filter((name) => name !== "usage"),
+    // The legacy account shape: the same keys (the usage reading is C2a's
+    // projection of the core quota row), no secrets.
+    expect(shapeOf(first)).toEqual(legacyShape!);
+    expect(first.accounts[0]!.usage).toMatchObject({
+      connected: true,
+      windows: [],
+      refreshStatus: "scope_required",
     });
-    expect(withoutUsage(shapeOf(first))).toEqual(withoutUsage(legacyShape));
     expect(JSON.stringify(first)).not.toContain("sk-ant-");
     const [stored] = await shared!.admin<
       { credential_format: string; ownership: string; managed_by_workspace_id: string | null }[]
