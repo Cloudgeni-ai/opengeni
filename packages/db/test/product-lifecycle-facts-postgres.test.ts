@@ -25,8 +25,8 @@ import {
   createDb,
   createEnrollment,
   createOrganizationInvitation,
+  connectSubscriptionCoreXaiConnection,
   createScheduledTask,
-  createXaiSubscriptionCredential,
   deadLetterHostExportHead,
   disableHostExportConsumer,
   installPortableSkill,
@@ -424,14 +424,25 @@ describe("product lifecycle facts (real PostgreSQL)", () => {
       connectedBySubjectId: person,
     });
     expect(codex).toBeDefined();
-    await createXaiSubscriptionCredential(client.db, {
-      ...target,
-      subjectId: person,
+    // SuperGrok connects on the shared core since its cutover (an
+    // organization connection by its owner); the core connection insert
+    // emits the same content-free `model.connected` fact.
+    const xaiConnected = await connectSubscriptionCoreXaiConnection(client.db, {
+      accountId: owner.organizationId,
+      workspaceId: null,
+      subjectId: owner.subjectId,
       encryptionKey: Buffer.alloc(32, 7),
-      secret: { version: 1, accessToken: remember(`xai-secret-${crypto.randomUUID()}`) },
-      providerAccountId: remember(`xai-account-${crypto.randomUUID()}`),
+      tokens: {
+        accessToken: remember(`xai-secret-${crypto.randomUUID()}`),
+        refreshToken: null,
+      },
+      identitySubject: remember(`xai-account-${crypto.randomUUID()}`),
+      accountEmail: null,
       label: remember("Lifecycle xAI label"),
+      expiresAt: null,
+      connectedBySubjectId: owner.subjectId,
     });
+    expect(xaiConnected.kind).not.toBe("refused");
     await upsertOrganizationModelProviderConnection(client.db, {
       organizationId: owner.organizationId,
       actorSubjectId: owner.subjectId,
