@@ -3872,8 +3872,8 @@ Facts the adapter declares, each read from today's Claude path:
     blocks that response reports for the models it concerns (its own model;
     without one, the family its limit names, else every model) no later
     than that reset, as today's `nextCheckAt` does for the models whose
-    capacity that request decides; the other models keep waiting for their
-    own limits. An overage allowance whose reset has already passed
+    capacity that request decides, and only while the request's own plan
+    limit still runs; the other models keep waiting for their own limits. An overage allowance whose reset has already passed
     covers nothing. One whose reset falls before the plan limit's covers
     the limit until a newer response arrives, where today's rule blocks
     again after the overage reset: a recorded difference toward dispatch,
@@ -3900,10 +3900,12 @@ Facts the adapter declares, each read from today's Claude path:
     exhausting the connection, and the window is reported as a `warning`.
   - Cooldowns are keyed by product model id under both Claude prefixes
     (`organization-claude-subscription/…`, `workspace-claude-subscription/…`).
-    A family limit reaches the models listed when the response is decoded,
-    and always the response's own model: C1b and C2a pass every Claude model
-    the connection can serve (its organization's catalog at that moment); a
-    model added later is cooled by its first refused response.
+    A family limit, and an account limit judged per model, reaches the
+    models listed when the response is decoded, and always the response's
+    own model: C1b and C2a pass every Claude model the connection can serve
+    (its organization's catalog at that moment), and C1b tests that the
+    worker does. A model missing from the list (for example one added later)
+    is dispatched until its first refused response records its limit.
   - Differences from today's merged reading. A later allowed response does
     not end a running cooldown or connection exhaustion early (the shared
     model never shortens either; the reset or an explicit store operation

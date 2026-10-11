@@ -638,6 +638,23 @@ describe("Claude usage in the shared quota model", () => {
     expect(decoded.modelCooldowns["organization-claude-subscription/claude-opus-5-5"]).toBe(
       at(5 * 86_400) * 1000,
     );
+    // A request whose own plan limit has already reset decides nothing, so
+    // its refused overage caps no other limit the response reports.
+    expectParity(
+      parseClaudeUsageHeaders(
+        new Headers({
+          "anthropic-ratelimit-unified-status": "rejected",
+          "anthropic-ratelimit-unified-representative-claim": "seven_day",
+          "anthropic-ratelimit-unified-reset": String(at(0)),
+          "anthropic-ratelimit-unified-overage-status": "rejected",
+          "anthropic-ratelimit-unified-overage-reset": String(at(0)),
+          "anthropic-ratelimit-unified-7d-sonnet-status": "rejected",
+          "anthropic-ratelimit-unified-7d-sonnet-reset": String(at(3600)),
+        }),
+        now,
+        "claude-sonnet-5-5",
+      )!,
+    );
     // Without a model and with an account limit: every model, the connection.
     const modelless = expectParity(parseClaudeUsageHeaders(new Headers(sevenDay), now)!);
     expect(modelless.exhaustedUntil).toBe(at(600) * 1000);

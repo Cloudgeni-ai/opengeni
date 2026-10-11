@@ -195,7 +195,8 @@ const allowed = (status: string | null | undefined) =>
  *   blocks. Overage is the Claude account's own setting, so it covers every
  *   model of the account.
  * - A rejected request whose overage was refused with a known reset is
- *   checked again at that reset: the blocks that response reports for the
+ *   checked again at that reset (while its own plan limit still runs): the
+ *   blocks that response reports for the
  *   models it concerns (its own model; without one, the family its limit
  *   names, else every model) end no later than it.
  * - The account windows (five hours, seven days) decide the connection's
@@ -235,7 +236,15 @@ export function decodeSubscriptionCoreClaudeQuota(input: {
   const overageReset = request?.overageResetsAt ? Date.parse(request.overageResetsAt) : null;
   const overageCovers =
     rejected && allowed(request.overageStatus) && (overageReset ?? Infinity) > observedAt;
-  const recheck = rejected && request.overageStatus === "rejected" ? overageReset : null;
+  const base = (reset: string | null, at: string) =>
+    reset === null ? Date.parse(at) + SUBSCRIPTION_CORE_CLAUDE_UNKNOWN_RESET_MS : Date.parse(reset);
+  // Only while the request's own plan limit still runs.
+  const recheck =
+    rejected &&
+    request.overageStatus === "rejected" &&
+    base(request.resetsAt, request.observedAt) > observedAt
+      ? overageReset
+      : null;
   const recheckFamily =
     own === null && request?.representativeClaim
       ? FAMILY_WINDOWS[request.representativeClaim]
@@ -253,8 +262,6 @@ export function decodeSubscriptionCoreClaudeQuota(input: {
             ? recheck
             : Infinity
           : recheck;
-  const base = (reset: string | null, at: string) =>
-    reset === null ? Date.parse(at) + SUBSCRIPTION_CORE_CLAUDE_UNKNOWN_RESET_MS : Date.parse(reset);
   // The model this response was allowed for dispatches whatever else it
   // reports, until the allowance's own reset (a minute when unknown).
   const spared = request && allowed(request.status) ? own : null;
