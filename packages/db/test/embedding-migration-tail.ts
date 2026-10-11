@@ -211,4 +211,6 @@ export const embeddingMigrationTail = [
   // Patches the operation-lease guard withheld 0671 and 0711 define; replay
   // after them.
   "0727_subscription_core_ownerless_video_operations.sql",
+  // Built from the connect writer withheld 0715 rewrites; it follows 0715.
+  "0719_subscription_core_personal_connect_format.sql",
 ];
