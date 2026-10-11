@@ -550,6 +550,7 @@ async function withAdministration<T>(
   db: Database,
   input: SubscriptionCoreAdministration,
   fn: (tx: Database) => Promise<T>,
+  options: { writesSettings?: boolean } = {},
 ): Promise<T> {
   try {
     return await withRlsContext(
@@ -557,9 +558,10 @@ async function withAdministration<T>(
       { accountId: input.accountId, workspaceId: input.workspaceId },
       async (tx) => {
         await setSubjectRlsContext(tx, input.subjectId);
-        // A workspace route may write the workspace's settings row: take the
-        // settings lock before any row lock (see lockSubscriptionSettings).
-        if (input.workspaceId !== null) {
+        // A workspace route that writes the workspace's settings row takes the
+        // settings lock before any row lock (see lockSubscriptionSettings);
+        // routes that never write settings do not queue behind a lock change.
+        if (input.workspaceId !== null && options.writesSettings === true) {
           await lockSubscriptionSettings(tx, input.accountId, "shared");
         }
         return await fn(tx);
@@ -574,6 +576,15 @@ async function withAdministration<T>(
     throwIfSubscriptionSettingLocked(error);
     throw error;
   }
+}
+
+/** `withAdministration` for a route that may write a settings row. */
+async function withSettingsAdministration<T>(
+  db: Database,
+  input: SubscriptionCoreAdministration,
+  fn: (tx: Database) => Promise<T>,
+): Promise<T> {
+  return await withAdministration(db, input, fn, { writesSettings: true });
 }
 
 /**
@@ -1197,7 +1208,7 @@ export async function setSubscriptionCorePrimary(
   // connections alike (after the binding's own checks).
   subscriptionCoreProviderId(provider);
   if (provider.settings.primaryColumn === null) throw primaryUnsupported(provider);
-  return await withAdministration(db, input, async (tx) => {
+  return await withSettingsAdministration(db, input, async (tx) => {
     const personal = await managePersonalConnection(tx, provider, input, "primary");
     if (personal)
       return { activated: personal.id, wake: wakeFor(provider, input, "primary_changed") };
@@ -1255,7 +1266,7 @@ export async function setSubscriptionCoreRotation(
   provider: SubscriptionCoreProvider,
   input: SubscriptionCoreAdministration & { rotationEnabled: boolean },
 ): Promise<{ primaryConnectionId: string | null; wake: SubscriptionCoreWake } | null> {
-  return await withAdministration(db, input, async (tx) => {
+  return await withSettingsAdministration(db, input, async (tx) => {
     const written = await writeSettingsRow(tx, provider, input, {
       rotationMode: input.rotationEnabled ? "spread" : "primary_first",
       ...(await inheritedPrimaryForOverride(tx, provider, input)),
@@ -1289,7 +1300,7 @@ export async function setSubscriptionCoreWorkspaceSource(
     mode: SubscriptionCoreWorkspaceSourceMode;
   },
 ): Promise<{ pool: SubscriptionCoreWorkspacePool; wake: SubscriptionCoreWake }> {
-  return await withAdministration(db, input, async (tx) => {
+  return await withSettingsAdministration(db, input, async (tx) => {
     const [workspace] = await rawRows<{ workspace_kind: string }>(
       tx,
       sql`select get_workspace_kind(${input.accountId}::uuid, ${input.workspaceId}::uuid)

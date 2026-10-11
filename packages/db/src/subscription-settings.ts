@@ -322,9 +322,10 @@ export async function readOrganizationSubscriptionSettings(
 
 /**
  * Update organization settings and locks in one transaction. Locking a
- * setting clears its workspace overrides (the 0716 trigger); the
- * organization's workspace rows are locked first, before the organization
- * row, the order every workspace writer follows.
+ * setting clears its workspace overrides (the 0716 trigger). A lock change
+ * first queues for the organization's exclusive settings lock and never
+ * waits for a workspace row while holding it; a row held elsewhere makes it
+ * retry, and then answer busy.
  */
 export async function updateOrganizationSubscriptionSettings(
   db: Database,
@@ -432,14 +433,9 @@ async function updateOrganizationSubscriptionSettingsOnce(
           ) on conflict (account_id, workspace_id) do nothing
           returning id`,
       );
-      if (locked !== undefined) {
-        await rawRows(
-          tx,
-          sql`select id from subscription_settings
-            where account_id = ${input.organizationId}::uuid and workspace_id is not null
-            order by id for update`,
-        );
-      }
+      // No workspace row is locked here: holding the exclusive lock, only the
+      // 0716 trigger touches them, with NOWAIT (a writer outside the
+      // repository may hold a row while it waits for the shared lock).
       const [current] = await rawRows<{ version: number | string; locked_settings: string[] }>(
         tx,
         sql`select version, locked_settings from subscription_settings

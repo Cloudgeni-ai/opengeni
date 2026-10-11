@@ -4664,13 +4664,21 @@ effective model-account settings are the same before and after it. It adds:
 A workspace-row write that sets or changes any setting, and a lock change,
 run only at READ COMMITTED (SQLSTATE 0A000, detail
 `subscription_settings_requires_read_committed`, otherwise); writes that only
-clear or keep values are unaffected. Application writers pin READ COMMITTED on their
-own transactions. A database whose `default_transaction_isolation` is
+clear or keep values are unaffected. Application writers pin READ COMMITTED on
+their own transactions. A database whose `default_transaction_isolation` is
 stricter must run any later migration that writes workspace overrides (for
-example a provider cutover) at READ COMMITTED. Inside the trigger a lock
-change never waits for a workspace writer: it raises 55P03 (detail
-`subscription_settings_lock_busy`). The API queues for the lock first, retries,
-and answers 503 `settings_busy` if writes keep it busy for several seconds.
+example a provider cutover) at READ COMMITTED.
+
+A lock change never waits for a workspace row: the trigger locks the rows it
+clears with `NOWAIT` and raises 55P03 (detail
+`subscription_settings_lock_busy`) when one is held. The API queues for the
+organization's settings lock first, retries, and answers 503 `settings_busy`
+(nothing written) if it stays busy for about 5 to 8 seconds. Writers outside
+this release's repository can cause that: the previous release's workspace
+writers during the rolling upgrade, and raw or migration writers. Migrations
+that write workspace overrides should take
+`pg_advisory_xact_lock_shared(hashtextextended('subscription-settings-locks:'
+|| account_id::text, 0))` for each organization before locking its rows.
 
 No release before this one writes `locked_settings` (a workspace row cannot
 hold locks, and no API wrote the organization's), so the guard refuses

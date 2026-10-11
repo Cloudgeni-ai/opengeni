@@ -4292,14 +4292,21 @@ data with workspace overrides). It adds:
    rows it clears with `NOWAIT`, and raises 55P03
    `subscription_settings_lock_busy` when either is taken. The repository
    takes the same advisory lock first, before any row lock: its workspace
-   writers (the settings API and the core administration writers) take it
-   shared, and a lock change queues for it exclusively with a 3 s lock
+   writers (the settings API and the core administration routes that write
+   settings: primary, rotation and source; allocator, extra-credit and rename
+   routes never take it) take it shared, and a lock change queues for it
+   exclusively with a 3 s lock
    timeout. Widening writes that arrive after the change queue behind it, so
    a stream of writes cannot starve it, and none of the repository's writers
-   holds a row while waiting for the lock. A lock change retries a busy
-   answer or a 40P01 (a raw writer outside the repository) for up to about
-   5 s, and answers 503 `settings_busy` (retryable, nothing written) when the
-   lock timeout or the retries run out. Tested deterministically for both
+   holds a row while waiting for the lock. Holding the exclusive lock, the
+   lock change locks no workspace row itself; only the trigger does, with
+   `NOWAIT`. A writer outside the repository (the previous release during the
+   rolling upgrade, which updates a row before its guard asks for the shared
+   lock, or a raw or migration writer) can therefore make a lock change
+   answer busy, never deadlock it. A lock change retries a busy answer or a
+   40P01 for about 5 s (up to about 8 s in the worst case, with the lock
+   timeout) and then answers 503 `settings_busy` (retryable, nothing
+   written). Tested deterministically for both
    cycles (an upsert waiting on a row the lock writer holds, and a writer
    holding a row the lock writer would clear), for a lock change landing
    under four continuous upsert loops, and by racing the real

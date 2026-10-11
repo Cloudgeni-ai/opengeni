@@ -52,10 +52,13 @@ export function throwIfSubscriptionSettingLocked(error: unknown): void {
 
 /**
  * Take the organization's settings lock: the transaction advisory lock 0716's
- * guard (shared) and lock writer (exclusive) use. Writers take it before any
- * row lock, so a lock change queued for the exclusive lock is admitted fairly
- * (new widening writes queue behind it) and never meets a writer that holds a
- * row while waiting for this lock.
+ * guard (shared) and lock writer (exclusive) use. The repository's workspace
+ * writers take it shared before any row lock, and a lock change queues for it
+ * exclusively before any row lock, so later widening writes queue behind the
+ * change instead of starving it. Holding it exclusively, a lock change never
+ * waits for a workspace row (0716 locks them NOWAIT): a writer outside the
+ * repository (an older release during a rolling upgrade, a raw or migration
+ * writer) may hold a row while it waits for this lock.
  */
 export async function lockSubscriptionSettings(
   tx: Database,
