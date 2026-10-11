@@ -14,7 +14,7 @@ import {
 import { settleTurnFailure } from "../src/activities/agent-turn/failure-settlement";
 import { SUBSCRIPTION_CORE_TURN_REFUSAL_LIMIT } from "../src/activities/agent-turn/subscription-core-failover";
 import type { SubscriptionCoreTurn } from "../src/activities/agent-turn/turn-context";
-import { finalizeCoreXaiTurn } from "../src/activities/agent-turn/xai-core";
+import { finalizeCoreSubscriptionTurn } from "../src/activities/agent-turn/subscription-core-settlement";
 
 // SuperGrok refusal settlement and finalization on the shared core
 // (design 5.3, SuperGrok track X1b). Dormant: these paths run only for a
@@ -375,8 +375,9 @@ describe("SuperGrok finalization on the core", () => {
     const runtime = coreRuntime({});
     const early = new Date("2026-10-11T03:00:00.000Z");
     const late = new Date("2026-10-11T03:00:05.000Z");
-    await finalizeCoreXaiTurn({
+    await finalizeCoreSubscriptionTurn({
       db: {} as db.Database,
+      provider: db.SUBSCRIPTION_CORE_XAI as db.SubscriptionCoreProvider,
       core: core({ requests: lane(early), titleRequests: lane(late) }),
       lease,
     });
@@ -390,8 +391,9 @@ describe("SuperGrok finalization on the core", () => {
 
   test("a turn without a responded call leaves the binding clock", async () => {
     const runtime = coreRuntime({});
-    await finalizeCoreXaiTurn({
+    await finalizeCoreSubscriptionTurn({
       db: {} as db.Database,
+      provider: db.SUBSCRIPTION_CORE_XAI as db.SubscriptionCoreProvider,
       core: core({ requests: lane(null) }),
       lease,
     });

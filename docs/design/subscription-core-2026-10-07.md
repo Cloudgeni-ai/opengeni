@@ -3784,6 +3784,7 @@ and label; its names are thin bindings of the shared code):
 | `deleteSubscriptionCoreCodexWaitersForTurns` (file removed) | `deleteSubscriptionCoreWaitersForTurns(db, null, ...)`: Steer, Cancel and queue supersession remove a blocked turn's core waiter of any provider |
 | the Codex-only `capacity_waiter` session classification and peek | `getSubscriptionCoreCapacityWaitForSession`, `getSubscriptionCoreCapacityWaitById` and `subscriptionCoreCapacityWaitRef` (any provider; the ref names `provider` only when it is not Codex, so Codex refs are unchanged) |
 | the refusal step of `settleSubscriptionCoreOutcome` | `applySubscriptionCoreRefusal`, exported with `subscriptionCoreSettlement` |
+| (new, no Codex counterpart: Codex keeps its M3 refusal kinds) | `settleCoreSubscriptionRefusal(deps, core, binding)` and `finalizeCoreSubscriptionTurn` with a `CoreRefusalBinding` (provider, display name, classifier, lease, disconnect check, failover binding) in `subscription-core-settlement.ts`; `subscriptionCoreFailoverMetrics(provider)` in `subscription-core-failover.ts`. The Claude track binds the same steps. |
 
 SuperGrok on the core:
 
@@ -3796,8 +3797,9 @@ SuperGrok on the core:
   the Codex classifier in the worker because it needs the worker's safety
   refusal and Retry-After parsing; the core binding has no classification
   hook (step F's adapters classify in their transport too).
-- Settlement (`settleCoreXaiRefusal`): a refusal is recorded against the
-  leased connection through `planSubscriptionCoreRefusal` and
+- Settlement (`settleCoreSubscriptionRefusal` with `XAI_CORE_REFUSAL`): a
+  refusal is recorded against the leased connection through
+  `planSubscriptionCoreRefusal` and
   `applySubscriptionCoreRefusal` (failure receipt plus quota, cooldown or
   quarantine), fenced on the refresh generation the refused bearer carried.
   The transport already refreshed and retried an unauthorized request once,
