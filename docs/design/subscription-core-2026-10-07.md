@@ -192,9 +192,9 @@ Primary key `(workspace_id, session_id)`: `provider`, `connection_id`,
   changes the connection, provider, model or choice without stating a clock,
   so a pin change or an older binary never carries warmth to another account.
   Setting or removing a pin therefore makes the next turn re-run selection
-  (D-31): a request or completed call never restarts a cleared clock, only a
-  placement does, so removing a pin mid-turn still takes effect at the next
-  turn. A compaction is a re-selection point only when it is later than the
+  (D-31): a request, a completed call or a retried attempt that keeps its
+  lease never restarts a cleared clock, only a new selection at placement
+  does, so removing a pin mid-turn still takes effect at the next turn. A compaction is a re-selection point only when it is later than the
   clock.
 - Placement reads the binding under its row lock (`FOR UPDATE`, in the
   placement world, before the lease) and decides and commits from that row,

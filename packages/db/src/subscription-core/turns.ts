@@ -580,6 +580,9 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
             modelId: request.productModelId,
             placementSwitch: decision.switch,
             now,
+            // A retried attempt that keeps its lease made no new selection: it
+            // never restarts a clock a pin change cleared (D-31).
+            restartClock: !reused,
           });
         }
         const rotation = input.settings.rotation[providerId];
@@ -1082,6 +1085,8 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
       modelId: string;
       placementSwitch: PlacementSwitch;
       now: Date;
+      /** Whether this placement may start a cleared clock (a new selection). */
+      restartClock: boolean;
     },
   ): Promise<void> {
     const current = await readSubscriptionSessionBinding(tx, { ...identity, forUpdate: true });
@@ -1114,7 +1119,7 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
         provider: providerId,
         connectionId: next.connectionId,
         at: next.now,
-        restart: true,
+        restart: next.restartClock,
       });
       return;
     }
@@ -1128,8 +1133,9 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
       // A person's explicit choice is changed only by that person.
       choice: current?.choice ?? "automatic",
       onlyThisModel: current?.onlyThisModel ?? false,
-      // The clock starts on the new account or model at this placement.
-      lastModelCallAt: next.now,
+      // The clock starts on the new account or model at this placement, or
+      // cold when the placement made no new selection.
+      lastModelCallAt: next.restartClock ? next.now : null,
       lastSwitchReason: bindingSwitchReason(
         next.placementSwitch,
         current?.lastSwitchReason ?? null,

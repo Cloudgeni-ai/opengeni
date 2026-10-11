@@ -2168,6 +2168,13 @@ export function describeSubscriptionCoreConformance<Credential>(
         new Date(),
       );
       expect((await bindingOf(first))!.clock).toBeNull();
+      // A retry of the same attempt keeps its lease and makes no new selection.
+      expect(await place(first)).toMatchObject({
+        kind: "run",
+        connectionId: account,
+        reusedLease: true,
+      });
+      expect((await bindingOf(first))!.clock).toBeNull();
       const second = await nextTurn(org, first);
       const placedAt = Date.now();
       expect(await placeChecked(second, new Date(placedAt))).toMatchObject({
@@ -2176,6 +2183,57 @@ export function describeSubscriptionCoreConformance<Credential>(
         reselection: { reason: "cache_cold" },
       });
       expect((await bindingOf(second))!.clock).toBe(placedAt);
+    });
+
+    test("SUB-STICK-05, SUB-STICK-06: a personal account pinned and unpinned mid-turn is not kept without personal fallback", async () => {
+      const org = await organization();
+      const organizationAccount = await sharedConnection(
+        org,
+        `unpin-personal-shared-${crypto.randomUUID()}`,
+      );
+      const personal = await personalConnection(org, `unpin-personal-${crypto.randomUUID()}`);
+      // The owner has not opted in to personal fallback.
+      await admin()`update subscription_person_preferences set personal_fallback_opt_in = false
+        where account_id = ${org.accountId}::uuid
+          and organization_membership_id = ${org.ownerMembershipId}::uuid`;
+      const first = await runningTurn(org, { visibility: "user_private", personalAuthority: true });
+      expect(await placeChecked(first)).toMatchObject({
+        kind: "run",
+        connectionId: organizationAccount,
+      });
+      // The owner pins their personal account; the next turn runs on it.
+      const pin = stickPausedPin(org, first, personal, "explicit");
+      await pin.locked;
+      pin.proceed();
+      expect(await pin.done).toBe("pin committed (1)");
+      const second = await nextTurn(org, first, { personalAuthority: true });
+      expect(await placeChecked(second)).toMatchObject({
+        kind: "run",
+        connectionId: personal,
+        explicit: true,
+      });
+      // The pin is removed while that turn runs, which keeps requesting on it.
+      const unpin = stickPausedPin(org, second, personal, "automatic");
+      await unpin.locked;
+      unpin.proceed();
+      expect(await unpin.done).toBe("pin committed (1)");
+      expect(await callUpstream(second, personal, [])).toBeNull();
+      await runtime().touchSubscriptionCoreBinding(
+        db(),
+        second.identity,
+        leaseOf(second, personal),
+        new Date(),
+      );
+      expect(await place(second)).toMatchObject({ kind: "run", reusedLease: true });
+      expect(await bindingOf(second)).toMatchObject({ choice: "automatic", clock: null });
+      // Without the pin and without fallback consent, the next turn leaves it.
+      const third = await nextTurn(org, second, { personalAuthority: true });
+      expect(await placeChecked(third)).toMatchObject({
+        kind: "run",
+        connectionId: organizationAccount,
+        personal: false,
+        reselection: { reason: "cache_cold" },
+      });
     });
 
     test("administration lists and manages exactly this provider's connections of its kind", async () => {
