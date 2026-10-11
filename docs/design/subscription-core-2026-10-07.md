@@ -4784,6 +4784,108 @@ subject's credentials renew from their format
 run. Claude's own refusal classification is the worker's (C1b); until then
 the suite's scripted classification is used.
 
+##### C2a: usage, readiness and admission
+
+C2a moves the Claude usage routes (EP-N24, EP-S13), catalog readiness
+(EP-T18, EP-S25, EP-N26) and organization custom-model admission onto the
+core. Every path first reads the organization's Claude provider route:
+`legacy` (no receipt, every organization until C3) runs today's code
+unchanged after that one read; `maintenance` fails closed (the usage routes
+answer the typed 503 with `subscription_core_cutover_disabled`, readiness is
+not ready for both prefixes, admission admits nothing); `core` uses the
+`SUBSCRIPTION_CORE_CLAUDE` binding, which stays unregistered until C3, so a
+core read before C3 fails closed in the registry.
+
+- Usage members. The adapter's `fetchUsage` is the legacy
+  `/api/oauth/usage` read (ten-second deadline, 64 KiB bounded body,
+  `redirect: "error"`): a credential without the `user:profile` OAuth scope
+  answers `scope_required` without any request (setup tokens never have
+  it); a 401 is `reconnect`, the 403 `user:profile` scope message is
+  `scope_required`, anything else is `unavailable`. `decodeQuota` decodes
+  only an `available` reading, through `decodeSubscriptionCoreClaudeQuota`,
+  with the caller's `modelIds`. Both members live in
+  `subscription-core-claude-usage.ts`; the adapter file only wires them.
+- `provider_state.oauthScopes`. The connection's adapter-owned
+  `provider_state` records the credential's OAuth scopes as a string array:
+  the granted scopes for an OAuth credential, `[]` for a setup token;
+  absent means unknown. C2b's connect and reconnect writers and C3's data
+  move (from the legacy credential's `oauth.scopes`) must set it. GET reads
+  it (no credential is decrypted to answer a read); refresh decides from the
+  decoded credential. `scope_required` and `reconnect` are response values,
+  never stored: `reconnect` when the connection is `needs_relogin` or the
+  probe reports a relogin, `scope_required` when the scopes are known and
+  lack `user:profile`.
+- Projection. `projectSubscriptionCoreClaudeUsage(row, refresh?)` maps the
+  core quota row to `ClaudeSubscriptionUsage`: legacy window ids only (an
+  unknown id is dropped, duplicates keep the first), `usedPercent`, ISO
+  resets, status `exhausted` to `rejected`, `warning` to `allowed_warning`,
+  `ok` to `allowed`, `unknown` to null; `credentialVersion` is the quota's
+  observed refresh generation; the source is `provider` for a usage-endpoint
+  reading, else `response_headers`. Refresh status, in order: `reconnect`
+  for a connection that needs a new sign-in; the given refresh result;
+  `scope_required` from `oauthScopes`; `available` for a stored
+  usage-endpoint reading (checked at its observation); else `not_checked`.
+  C2b's pool account listing uses the one-argument form.
+- Visibility. Account ids resolve through the cutover aliases. A workspace
+  route sees a shared connection of the workspace's effective pool (its
+  legacy scope is the pool source, so today's private-human and
+  scope-mutation checks apply unchanged), or the caller's own personal
+  connection only in the caller's own Personal workspace through the
+  owner-only reader (by canonical id: personal rows and their aliases are
+  invisible to the generic resolver). The organization route reads the
+  organization pool for an organization administrator only. Anything else
+  is the legacy 404.
+- Refresh. POST refresh reads live usage only for a shared connection of
+  the workspace pool, through the core connection seam in workspace scope,
+  with every Claude model of the workspace's catalog (`modelIds`, both
+  prefixes). A recovery wakes the Claude core waiters
+  (`usage_recovered`); a failed wake is dropped and never fails the
+  committed read. A connection the caller's context cannot read live (a
+  personal connection, which the workspace credential seam does not reach,
+  and every connection on the organization route, which has no workspace
+  context for the seam) refreshes nothing and answers its stored projection
+  with refresh status `unavailable` and no check time (`reconnect` and
+  `scope_required` kept). This is the strictest answer, following the Codex
+  core usage precedent that an unreadable connection reports no data:
+  `available` would claim a read that did not happen, and `not_checked`
+  would invite a retry that can never succeed in this context.
+- Throttle. The legacy 30-second refresh throttle holds: within 30 seconds
+  of a stored usage-endpoint reading, or of the last attempt in this API
+  process (failed attempts included, kept in a bounded in-process map), the
+  stored projection is answered without a provider call. The attempt map is
+  per API replica; the stored-reading bound holds across replicas.
+- Readiness. On the core route `loadWorkspaceClaudeSubscriptionReadiness`,
+  the selection restrictions and the models catalog read the core
+  eligibility projection (`listSubscriptionCoreServingConnections`: shared
+  pools; personal connections only through the owner-only reader in the
+  owner's own Personal workspace) and never a frozen v1 Claude snapshot.
+  The legacy `{workspace, organization}` meaning is kept by pool:
+  `organization-claude-subscription/` models are ready when a serving shared
+  connection serves the organization inference pool;
+  `workspace-claude-subscription/` models when one serves the workspace
+  pool or the subject's own personal connection serves. Each prefix's
+  restriction is the union of its serving connections' allowlists (null
+  when any admits every model). A serving connection's pools are its
+  applicable assignment policies' inference pools, or, without assignment
+  rows, its management classification (`workspace` when this workspace
+  manages it, else `organization`).
+- Admission. On the core route the `claude_subscription` branch of
+  `lockActiveOrganizationModelProviderCustomModelForAdmission` admits an
+  organization model for session creation and fresh prompts when the
+  transaction's subject was established by the caller (never a borrowed
+  session creator or an inferred human for a service actor) and a live,
+  allocatable shared connection serving the organization pool under the
+  workspace's effective source admits the model; shared capacity only. A
+  scheduled-task update first reads the task's accepted Claude authority
+  through `read_subscription_authority_compat` (PR 0b) for its
+  `scheduled_task` carrier: a compatibility record admits only when its
+  shared pool is `organization`; a task without one (`v2` or `none`) takes
+  the same source rule; anything else (`missing`, `v1`, not visible, or a
+  database without the reader) admits nothing.
+- Generalizations (provider-neutral): an optional `modelIds` on the probe
+  deps and the `decodeQuota` input, and `pools` on
+  `SubscriptionCoreServingConnection`.
+
 ### 5.4 Workspace-managed connections as organization accounts
 
 Owner request (M4 addition): an account connected in a workspace, which the

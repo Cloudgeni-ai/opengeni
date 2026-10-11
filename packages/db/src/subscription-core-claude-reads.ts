@@ -85,7 +85,10 @@ export async function readSubscriptionCoreClaudeWorkspaceUsageTarget(
     workspaceId: input.workspaceId,
     connectionId: input.accountIdParam,
   });
-  if (!connectionId) return null;
+  // A personal connection is invisible to the generic resolver (its rows and
+  // aliases are read only through the owner-only reader): it is named by
+  // its canonical id.
+  const personalId = connectionId ?? input.accountIdParam;
   const ownPersonalWorkspace =
     (await namedSubjectPersonalWorkspaceId(db, {
       accountId: input.accountId,
@@ -96,16 +99,19 @@ export async function readSubscriptionCoreClaudeWorkspaceUsageTarget(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (tx) => {
       const pool = await readSubscriptionCoreWorkspacePool(tx, binding, input);
-      const shared = pool.connections.find((entry) => entry.row.id === connectionId);
-      if (shared) return { connectionId, scope: shared.source, row: shared.row };
+      const shared =
+        connectionId === null
+          ? undefined
+          : pool.connections.find((entry) => entry.row.id === connectionId);
+      if (shared) return { connectionId: shared.row.id, scope: shared.source, row: shared.row };
       if (!ownPersonalWorkspace || pool.source.workspaceKind !== "personal") return null;
       const personal = await listSubscriptionCorePersonalConnectionRowsInTransaction(
         tx,
         binding,
         input,
       );
-      const row = personal.find((candidate) => candidate.id === connectionId);
-      return row ? { connectionId, scope: "user" as const, row } : null;
+      const row = personal.find((candidate) => candidate.id === personalId);
+      return row ? { connectionId: row.id, scope: "user" as const, row } : null;
     },
   );
 }
