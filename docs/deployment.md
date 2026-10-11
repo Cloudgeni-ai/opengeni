@@ -4358,6 +4358,9 @@ secret already does).
 - The reach rows that assign an organization connection to workspaces created
   later (`opengeni_private.subscription_codex_auto_assignments`) gain a
   `provider` column; every existing row is a Codex row and is kept exactly.
+  The new routines read them through the owner-only view
+  `opengeni_private.subscription_core_auto_assignments`; the table keeps its
+  name until the retirement migration.
 - Applying reach on workspace and Personal-workspace creation, reading and
   setting reach, plan-change history and the organization workspace inventory
   take the provider as data, so a later SuperGrok or Claude cutover adds rows,

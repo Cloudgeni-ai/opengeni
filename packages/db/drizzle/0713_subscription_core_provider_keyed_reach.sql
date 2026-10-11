@@ -21,12 +21,12 @@
 -- then SHARE ROW EXCLUSIVE on the owner-only provider registry, which runtime
 -- transactions only read (no runtime lock conflicts with it). Nothing locks
 -- workspaces, organization_memberships, subscription_connections or the
--- assignment tables: every other statement replaces or creates a routine or
--- creates a table. While it waits for its first lock this migration holds
--- nothing a runtime transaction waits for, and afterwards it waits for no
--- lock a runtime transaction holds, so it cannot close a lock cycle with
--- runtime work (which takes the workspace prefix first and the subscription
--- tables after it).
+-- assignment tables: every other statement acts on those two tables, creates
+-- a table or a view, or creates or replaces a routine. While it waits for its
+-- first lock this migration holds nothing a runtime transaction waits for,
+-- and afterwards it waits for no lock a runtime transaction holds, so it
+-- cannot close a lock cycle with runtime work (which takes the workspace
+-- prefix first and the subscription tables after it).
 --
 -- 1. opengeni_private.subscription_core_plan_change_providers: the providers
 --    whose adapters keep plan-change history in provider state, keyed by the
@@ -39,13 +39,21 @@
 --    cutover and 0702's Codex reach helper write no other), so each is
 --    Codex's; from now on the one writer checks the connection's provider.
 --    The rows are otherwise kept exactly.
+--    The routines below reach them through the owner-only view
+--    opengeni_private.subscription_core_auto_assignments, their provider-free
+--    name. The table keeps its 0689 name while older binaries run: a
+--    statement that waits for this migration's lock looks its table up by
+--    name again once it has the lock, so a rename would fail a workspace
+--    creation that straddles the commit. The retirement migration drops the
+--    view and gives the table that name.
 -- 3. One owner-only apply path for every provider
 --    (opengeni_subscription_internal.apply_subscription_core_auto_assignments,
 --    0689's body with the provider as data). 0689's two trigger functions run
 --    it for each provider with rows in the organization, in provider order;
 --    0689's owner-only policies admit its writes for the organization named
---    by their setting, whatever the provider. The Codex apply routine
---    delegates to it.
+--    by their setting, whatever the provider. Its callers (those two trigger
+--    functions and the Codex apply routine, which delegates to it) set that
+--    setting around each call, so the apply path itself names no provider.
 -- 4. Plan-change history by the table in 1: 0689's trigger function tests it
 --    instead of a provider literal. It now reads owner data, so it runs as
 --    its owner (SECURITY DEFINER, search path pinned, pg_temp last); it still
@@ -92,6 +100,14 @@ ALTER TABLE opengeni_private.subscription_codex_auto_assignments
     FOREIGN KEY (provider) REFERENCES opengeni_private.subscription_core_providers(provider);
 COMMENT ON TABLE opengeni_private.subscription_codex_auto_assignments IS
   'Owner-only reach of an organization connection over workspaces created later, per provider (renamed provider-free at retirement). Runtime roles never read or write it.';
+-- Their provider-free name, for every routine below.
+CREATE VIEW opengeni_private.subscription_core_auto_assignments AS
+SELECT auto.account_id, auto.provider, auto.connection_id, auto.shared_workspaces,
+  auto.personal_workspaces, auto.allocator_enabled, auto.allowed_model_ids
+FROM opengeni_private.subscription_codex_auto_assignments auto;
+REVOKE ALL ON TABLE opengeni_private.subscription_core_auto_assignments FROM PUBLIC;
+COMMENT ON VIEW opengeni_private.subscription_core_auto_assignments IS
+  'Provider-keyed reach rows of subscription_codex_auto_assignments under their provider-free name; at retirement the table takes this name. Owner-only.';
 
 -- 3-6. The routines.
 DO $install$
@@ -102,29 +118,27 @@ BEGIN
   -- instead. Only the organization pool this mechanism writes is touched; a
   -- workspace's own local copy never is. 0689's owner-only policies on both
   -- assignment tables admit these writes for the organization named by
-  -- their setting.
+  -- their setting, which the caller sets.
   EXECUTE format($ddl$
     CREATE FUNCTION opengeni_subscription_internal.apply_subscription_core_auto_assignments(
       p_provider text, p_account_id uuid, p_workspace_id uuid, p_personal boolean
     ) RETURNS void LANGUAGE plpgsql SECURITY DEFINER
     SET search_path = pg_catalog, %1$I, opengeni_private, pg_temp
     AS $body$
-    DECLARE previous text := current_setting('opengeni.subscription_codex_auto_assign', true);
     BEGIN
-      IF NOT EXISTS (SELECT 1 FROM opengeni_private.subscription_codex_auto_assignments auto
+      IF NOT EXISTS (SELECT 1 FROM opengeni_private.subscription_core_auto_assignments auto
           WHERE auto.account_id = p_account_id AND auto.provider = p_provider) THEN
         RETURN;
       END IF;
-      PERFORM pg_catalog.set_config('opengeni.subscription_codex_auto_assign', p_account_id::text, true);
       DELETE FROM subscription_connection_assignment_policies policy
-      USING opengeni_private.subscription_codex_auto_assignments auto
+      USING opengeni_private.subscription_core_auto_assignments auto
       WHERE auto.account_id = p_account_id AND auto.provider = p_provider
         AND policy.account_id = p_account_id
         AND policy.connection_id = auto.connection_id AND policy.workspace_id = p_workspace_id
         AND policy.inference_pool = 'organization'
         AND NOT (CASE WHEN p_personal THEN auto.personal_workspaces ELSE auto.shared_workspaces END);
       DELETE FROM subscription_connection_workspaces assignment
-      USING opengeni_private.subscription_codex_auto_assignments auto
+      USING opengeni_private.subscription_core_auto_assignments auto
       WHERE auto.account_id = p_account_id AND auto.provider = p_provider
         AND assignment.account_id = p_account_id
         AND assignment.connection_id = auto.connection_id AND assignment.workspace_id = p_workspace_id
@@ -134,7 +148,7 @@ BEGIN
             AND policy.workspace_id = p_workspace_id);
       INSERT INTO subscription_connection_workspaces (account_id, connection_id, workspace_id)
       SELECT p_account_id, auto.connection_id, p_workspace_id
-      FROM opengeni_private.subscription_codex_auto_assignments auto
+      FROM opengeni_private.subscription_core_auto_assignments auto
       WHERE auto.account_id = p_account_id AND auto.provider = p_provider
         AND CASE WHEN p_personal THEN auto.personal_workspaces ELSE auto.shared_workspaces END
         AND NOT EXISTS (SELECT 1 FROM subscription_connection_workspaces assignment
@@ -146,31 +160,37 @@ BEGIN
       )
       SELECT p_account_id, auto.connection_id, p_workspace_id, 'organization',
         auto.allocator_enabled, auto.allowed_model_ids, '{}'::text[], NULL
-      FROM opengeni_private.subscription_codex_auto_assignments auto
+      FROM opengeni_private.subscription_core_auto_assignments auto
       WHERE auto.account_id = p_account_id AND auto.provider = p_provider
         AND CASE WHEN p_personal THEN auto.personal_workspaces ELSE auto.shared_workspaces END
         AND NOT EXISTS (SELECT 1 FROM subscription_connection_assignment_policies policy
           WHERE policy.account_id = p_account_id AND policy.connection_id = auto.connection_id
             AND policy.workspace_id = p_workspace_id AND policy.inference_pool = 'organization');
-      PERFORM pg_catalog.set_config('opengeni.subscription_codex_auto_assign', coalesce(previous, ''), true);
     END
     $body$
   $ddl$, data_schema);
   -- 0689's trigger functions, still attached to its two triggers, apply the
   -- reach of every provider with rows in the organization, in provider
-  -- order. Owner, grants, security mode and search path are 0689's.
+  -- order, each under 0689's setting naming the organization. Owner,
+  -- grants, security mode and search path are 0689's.
   EXECUTE format($ddl$
     CREATE OR REPLACE FUNCTION opengeni_private.auto_assign_subscription_codex_workspace()
     RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER
     SET search_path = pg_catalog, %1$I, opengeni_private, pg_temp
     AS $body$
-    DECLARE reach_provider text;
+    DECLARE
+      reach_provider text;
+      previous text := current_setting('opengeni.subscription_codex_auto_assign', true);
     BEGIN
       FOR reach_provider IN SELECT DISTINCT auto.provider
-          FROM opengeni_private.subscription_codex_auto_assignments auto
+          FROM opengeni_private.subscription_core_auto_assignments auto
           WHERE auto.account_id = NEW.account_id ORDER BY auto.provider LOOP
+        PERFORM pg_catalog.set_config('opengeni.subscription_codex_auto_assign',
+          NEW.account_id::text, true);
         PERFORM opengeni_subscription_internal.apply_subscription_core_auto_assignments(
           reach_provider, NEW.account_id, NEW.id, false);
+        PERFORM pg_catalog.set_config('opengeni.subscription_codex_auto_assign',
+          coalesce(previous, ''), true);
       END LOOP;
       RETURN NEW;
     END
@@ -181,31 +201,43 @@ BEGIN
     RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER
     SET search_path = pg_catalog, %1$I, opengeni_private, pg_temp
     AS $body$
-    DECLARE reach_provider text;
+    DECLARE
+      reach_provider text;
+      previous text := current_setting('opengeni.subscription_codex_auto_assign', true);
     BEGIN
       IF NEW.personal_workspace_id IS NOT NULL AND (TG_OP = 'INSERT'
           OR NEW.personal_workspace_id IS DISTINCT FROM OLD.personal_workspace_id) THEN
         FOR reach_provider IN SELECT DISTINCT auto.provider
-            FROM opengeni_private.subscription_codex_auto_assignments auto
+            FROM opengeni_private.subscription_core_auto_assignments auto
             WHERE auto.account_id = NEW.account_id ORDER BY auto.provider LOOP
+          PERFORM pg_catalog.set_config('opengeni.subscription_codex_auto_assign',
+            NEW.account_id::text, true);
           PERFORM opengeni_subscription_internal.apply_subscription_core_auto_assignments(
             reach_provider, NEW.account_id, NEW.personal_workspace_id, true);
+          PERFORM pg_catalog.set_config('opengeni.subscription_codex_auto_assign',
+            coalesce(previous, ''), true);
         END LOOP;
       END IF;
       RETURN NEW;
     END
     $body$
   $ddl$, data_schema);
-  -- The Codex-named apply routine acts on its provider's rows.
+  -- The Codex-named apply routine acts on its provider's rows, under 0689's
+  -- setting as before.
   EXECUTE format($ddl$
     CREATE OR REPLACE FUNCTION opengeni_private.apply_subscription_codex_auto_assignments(
       p_account_id uuid, p_workspace_id uuid, p_personal boolean
     ) RETURNS void LANGUAGE plpgsql SECURITY DEFINER
     SET search_path = pg_catalog, %1$I, opengeni_private, pg_temp
     AS $body$
+    DECLARE previous text := current_setting('opengeni.subscription_codex_auto_assign', true);
     BEGIN
+      PERFORM pg_catalog.set_config('opengeni.subscription_codex_auto_assign',
+        p_account_id::text, true);
       PERFORM opengeni_subscription_internal.apply_subscription_core_auto_assignments(
         'codex', p_account_id, p_workspace_id, p_personal);
+      PERFORM pg_catalog.set_config('opengeni.subscription_codex_auto_assign',
+        coalesce(previous, ''), true);
     END
     $body$
   $ddl$, data_schema);
@@ -260,7 +292,7 @@ BEGIN
           'sharedWorkspaces', auto.shared_workspaces,
           'personalWorkspaces', auto.personal_workspaces)
         INTO reach
-      FROM opengeni_private.subscription_codex_auto_assignments auto
+      FROM opengeni_private.subscription_core_auto_assignments auto
       WHERE auto.account_id = p_account_id AND auto.provider = p_provider
         AND auto.connection_id = p_connection_id;
       RETURN reach;
@@ -304,7 +336,7 @@ BEGIN
       END IF;
       IF p_shared IS NULL THEN
         SELECT auto.shared_workspaces, auto.personal_workspaces INTO shared_reach, personal_reach
-        FROM opengeni_private.subscription_codex_auto_assignments auto
+        FROM opengeni_private.subscription_core_auto_assignments auto
         WHERE auto.account_id = p_account_id AND auto.provider = p_provider
           AND auto.connection_id = p_connection_id;
         IF NOT FOUND THEN
@@ -312,12 +344,12 @@ BEGIN
         END IF;
       END IF;
       IF NOT (shared_reach OR personal_reach) THEN
-        DELETE FROM opengeni_private.subscription_codex_auto_assignments auto
+        DELETE FROM opengeni_private.subscription_core_auto_assignments auto
         WHERE auto.account_id = p_account_id AND auto.provider = p_provider
           AND auto.connection_id = p_connection_id;
         RETURN;
       END IF;
-      INSERT INTO opengeni_private.subscription_codex_auto_assignments AS auto (
+      INSERT INTO opengeni_private.subscription_core_auto_assignments AS auto (
         account_id, provider, connection_id, shared_workspaces, personal_workspaces,
         allocator_enabled, allowed_model_ids
       ) VALUES (

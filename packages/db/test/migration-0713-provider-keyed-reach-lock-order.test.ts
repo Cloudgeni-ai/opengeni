@@ -442,7 +442,7 @@ describe("migration 0713 lock order", () => {
           expect(applying.failure()).toBeNull();
           // The whole lock set, read inside 0713's transaction: owner data
           // only (the reach table and its indexes, the registry and its key,
-          // and the table 0713 creates), never a runtime table.
+          // and the table and view 0713 creates), never a runtime table.
           const locks = await applying.lockSet();
           const locked = [...new Set(locks.map((lock) => lock.relation))].sort();
           for (const table of RUNTIME_TABLES) expect(locked).not.toContain(table);
@@ -450,6 +450,7 @@ describe("migration 0713 lock order", () => {
             "opengeni_private.subscription_codex_auto_assignments",
             "opengeni_private.subscription_codex_auto_assignments_account_idx",
             "opengeni_private.subscription_codex_auto_assignments_pkey",
+            "opengeni_private.subscription_core_auto_assignments",
             "opengeni_private.subscription_core_plan_change_providers",
             "opengeni_private.subscription_core_plan_change_providers_pkey",
             "opengeni_private.subscription_core_providers",

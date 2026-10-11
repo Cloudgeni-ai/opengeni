@@ -3165,7 +3165,7 @@ routine of its own:
 | Need | Provider-keyed entry point | Codex entry point kept |
 | --- | --- | --- |
 | Cutover plan | `planSubscriptionCoreCutover(rules, input)` with `SubscriptionCutoverRules` (`packages/db/src/subscription-core/cutover-plan.ts`) | `planCodexCutover(input)`: the same call with `CODEX_CUTOVER_RULES` |
-| Reach rows for workspaces created later | `opengeni_private.subscription_codex_auto_assignments` (owner-only), now with `provider` keyed by the registry | the same table; its provider-free name comes at retirement |
+| Reach rows for workspaces created later | owner-only view `opengeni_private.subscription_core_auto_assignments` over `subscription_codex_auto_assignments`, which gains `provider` keyed by the registry | the table keeps its name until retirement, when it takes the view's |
 | Applying reach to a new shared or Personal workspace | `opengeni_subscription_internal.apply_subscription_core_auto_assignments(provider, account, workspace, personal)`, run for every provider by 0689's two trigger functions | `opengeni_private.apply_subscription_codex_auto_assignments` delegates with `codex` |
 | Plan-change history | owner-only table `opengeni_private.subscription_core_plan_change_providers` (only `codex`) | 0689's `record_subscription_codex_plan_change()`, redefined in place to test it, still attached |
 | Reading and setting reach | `opengeni_private.subscription_core_reach(provider, account, connection)`, `opengeni_private.set_subscription_core_reach(provider, account, connection, shared, personal)` | the 0702 pair, its own checks first, then the neutral routine |
@@ -3225,6 +3225,15 @@ Decisions, each the strictest fail-closed reading of the plan and contract:
   is no NO FORCE window. The registry stays untruncatable: a plain TRUNCATE
   is refused by the keys that reference it, and TRUNCATE ... CASCADE by its
   append-only guard.
+- **A provider-free name without a rename.** The neutral routines reach the
+  rows through the owner-only view `subscription_core_auto_assignments`
+  (every column, no filter). Renaming the table would take no other lock,
+  but a statement that waits for 0713's lock looks its relation up by name
+  again once it has the lock: an older binary's workspace creation or reach
+  edit waiting on the table across 0713's commit would then fail with
+  42P01. Under its kept name it completes, with the reach it had before
+  (lock-order test). The retirement migration drops the view and gives the
+  table its name, so the neutral routines need no change then.
 - **One apply path.** 0689's apply body with the provider as data, in
   `opengeni_subscription_internal` (owner-only routines stay out of
   `opengeni_private`, whose unknown routines a previous binary's readiness
@@ -3237,7 +3246,11 @@ Decisions, each the strictest fail-closed reading of the plan and contract:
   order. 0689's owner-only policies on both assignment tables already admit
   these writes for the organization named by their setting
   `opengeni.subscription_codex_auto_assign` (an organization, not a
-  provider), so there is no new trigger, policy or setting.
+  provider), so there is no new trigger, policy or setting. The callers
+  (those two trigger functions and the Codex apply routine) set that
+  setting around each call, as 0689's apply routine did around its writes,
+  so the neutral apply path names no provider (the neutral-routine source
+  check of 0707 covers it); without the setting its writes are refused.
 - **Plan-change history by table.** The owner-only table
   `subscription_core_plan_change_providers` (only `codex`, keyed by the
   registry) replaces the provider test in 0689's trigger function, which is
@@ -3255,12 +3268,12 @@ Decisions, each the strictest fail-closed reading of the plan and contract:
   0702's helpers), then the registry SHARE ROW EXCLUSIVE, which conflicts
   with no runtime lock (runtime roles only read it or check keys against
   it). It locks no workspace, membership, connection or assignment table:
-  every other statement acts on those two tables, creates a table, or
-  creates or replaces a routine.
+  every other statement acts on those two tables, creates a table or a
+  view, or creates or replaces a routine.
   While it waits for its first lock it holds nothing, and afterwards it
   waits for no lock a runtime transaction holds, so it cannot close a lock
-  cycle with runtime work (the 40P01 shape 0299 fixed). Renaming the table,
-  replacing the triggers or adding the connection key would lock hot tables
+  cycle with runtime work (the 40P01 shape 0299 fixed). Replacing the
+  triggers or policies or adding the connection key would lock hot tables
   and wait for runtime work, so those come with the maintenance retirement
   migration. `migration-0713-provider-keyed-reach-lock-order.test.ts` races
   0713 against those runtime shapes as the application role.
@@ -3309,12 +3322,14 @@ Decisions, each the strictest fail-closed reading of the plan and contract:
   as the migration set them.
 - **Kept until retirement.** The Codex-named reach pair and apply routine
   are dropped with the other Codex-named routines (§5.1.2, "Rolling
-  compatibility and retirement"). The same maintenance migration gives the
-  reach table, 0689's two auto-assignment triggers and their functions, the
-  plan-change trigger and its function, 0689's `*_codex_auto_assign`
-  policies and their setting provider-free names, and adds the reach rows'
-  connection-and-provider key; none of that can run while a rolling
-  migration must stay off the workspace, membership and connection tables.
+  compatibility and retirement"). The same maintenance migration replaces
+  the reach view with the table under that name, gives 0689's two
+  auto-assignment triggers and their functions, the plan-change trigger and
+  its function, 0689's `*_codex_auto_assign` policies and their setting
+  provider-free names, and adds the reach rows' connection-and-provider key;
+  none of that can run while a rolling migration must stay off the
+  workspace, membership and connection tables and keep the names older
+  binaries use.
   `list_organization_codex_workspace_ids`
   stays while the legacy SuperGrok and Claude organization wakes call it
   (until X4 and C4). The Codex scope-visibility helpers stay as well. Most

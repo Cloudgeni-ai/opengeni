@@ -517,12 +517,13 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
           )}::text[])`),
       ].sort((left, right) => (left.routine < right.routine ? -1 : 1));
       expect(provisionedAcl).toEqual(staged!.unprovisionedAcl);
-      // The registry, the plan-change providers and the reach rows stay
-      // owner data.
+      // The registry, the plan-change providers and the reach rows (under
+      // either name) stay owner data.
       for (const table of [
         "opengeni_private.subscription_core_providers",
         "opengeni_private.subscription_core_plan_change_providers",
         "opengeni_private.subscription_codex_auto_assignments",
+        "opengeni_private.subscription_core_auto_assignments",
       ]) {
         await expect(rawRows(client!.db, sql.raw(`select * from ${table}`))).rejects.toThrow();
       }
@@ -541,6 +542,7 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
         .filter((entry) => before.has(entry) && before.get(entry) !== after.get(entry))
         .sort();
       expect(added).toEqual([
+        "relation opengeni_private.subscription_core_auto_assignments",
         "relation opengeni_private.subscription_core_plan_change_providers",
         "relation opengeni_private.subscription_core_plan_change_providers_pkey",
         "routine list_organization_subscription_workspace_ids(uuid)",
@@ -607,6 +609,13 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
         from opengeni_private.subscription_codex_auto_assignments
         where account_id = ${accountId}::uuid order by connection_id`;
       expect([...kept]).toEqual(staged!.legacyRows.map((row) => ({ ...row, provider: "codex" })));
+      // The provider-free view the routines use shows exactly these rows.
+      const viewed = await database!.admin<(ReachRow & { provider: string })[]>`
+        select account_id::text as account_id, connection_id::text as connection_id,
+          shared_workspaces, personal_workspaces, allocator_enabled, allowed_model_ids, provider
+        from opengeni_private.subscription_core_auto_assignments
+        where account_id = ${accountId}::uuid order by connection_id`;
+      expect([...viewed]).toEqual([...kept]);
       const constraints = await database!.admin<{ name: string; definition: string }[]>`
         select conname as name, pg_get_constraintdef(oid) as definition from pg_constraint
         where conrelid = 'opengeni_private.subscription_codex_auto_assignments'::regclass
