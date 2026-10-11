@@ -29,10 +29,10 @@ import { ownerlessRefreshFixture, ownerlessRefreshKey } from "./fixtures/ownerle
 
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const PRECURSOR = "0712_subscription_core_generic_precursor.sql";
-// 0713 builds on 0712's receipts and patches its helpers; it follows 0712.
-const COMPAT = "0713_subscription_authority_compat.sql";
-// 0714 requires 0713's routines; it follows 0713.
-const FENCES = "0714_subscription_authority_fences.sql";
+// 0714 builds on 0712's receipts and patches its helpers; it follows 0712.
+const COMPAT = "0714_subscription_authority_compat.sql";
+// 0715 requires 0714's routines; it follows 0714.
+const FENCES = "0715_subscription_authority_fences.sql";
 let database: OwnerMigratedTestDatabase | null = null;
 let client: DbClient | null = null;
 let appUrl = "";

@@ -45,7 +45,7 @@ BEGIN
     OR to_regprocedure(
       'opengeni_subscription_internal.subscription_compat_expected(text,timestamptz,uuid,text,uuid,bigint,text)') IS NULL
   THEN
-    RAISE EXCEPTION '0714 requires the 0713 accepted authority compatibility routines'
+    RAISE EXCEPTION '0715 requires the 0713 accepted authority compatibility routines'
       USING ERRCODE = '55000';
   END IF;
 END
@@ -660,7 +660,7 @@ BEGIN
           SELECT 1 FROM claude_subscription_credentials credential
           WHERE credential.id = authority.resource_id)))
   ) THEN
-    RAISE EXCEPTION '0714 left a disconnected personal subscription authority active'
+    RAISE EXCEPTION '0715 left a disconnected personal subscription authority active'
       USING ERRCODE = '55000';
   END IF;
 END

@@ -4344,7 +4344,7 @@ total). New work those owners accept gets no personal Codex access. If the
 total is not zero, raise it with the product owner; the repair is a separate
 decision and is not part of this migration.
 
-### Provider-keyed reach (0713)
+### Provider-keyed reach (0714)
 
 Migration `0713_subscription_core_provider_keyed_reach.sql` is **rolling**:
 deploy it like any release, without draining. Design record:
@@ -4369,7 +4369,7 @@ secret already does).
 - Codex behaves as before, and older binaries keep working: every Codex-named
   routine keeps its name, signature and grants and acts on the same rows.
 
-**Locks.** 0713 locks owner data only, first and in this order: the reach
+**Locks.** 0714 locks owner data only, first and in this order: the reach
 table `ACCESS EXCLUSIVE`, then the provider registry `SHARE ROW EXCLUSIVE`,
 which no runtime lock conflicts with. It locks no workspace, membership,
 connection or assignment table, so it cannot deadlock with runtime work.
@@ -4377,13 +4377,13 @@ While it runs, workspace and Personal-workspace creation, access-editor
 reach changes and deleting a subscription connection or an organization
 (their cascades reach the reach table) wait for it briefly. If a transaction
 already using the reach table keeps it past the runner's 5-second
-`lock_timeout`, the Job fails without recording 0713 and changes nothing;
+`lock_timeout`, the Job fails without recording 0714 and changes nothing;
 retry the Job.
 
 Nothing else needs an operator.
-### Accepted authority compatibility (0713)
+### Accepted authority compatibility (0714)
 
-Migration `0713_subscription_authority_compat.sql` is **rolling** and inert on
+Migration `0714_subscription_authority_compat.sql` is **rolling** and inert on
 deploy. Design record:
 [subscription core, PR 0b](design/subscription-core-2026-10-07.md#pr-0b-authority-compatibility-and-fences).
 It requires 0712 and, like 0712, grants to the configured application roles
@@ -4403,12 +4403,12 @@ It requires 0712 and, like 0712, grants to the configured application roles
 - The scheduled-task execution digest ignores the new column, so existing run
   receipts stay valid.
 
-### Subscription authority fences (0714)
+### Subscription authority fences (0715)
 
-Migration `0714_subscription_authority_fences.sql` is **rolling**, requires
-0713 and grants nothing. Design record:
+Migration `0715_subscription_authority_fences.sql` is **rolling**, requires
+0714 and grants nothing. Design record:
 [subscription core, PR 0b](design/subscription-core-2026-10-07.md#pr-0b-authority-compatibility-and-fences).
-Unlike 0713, part of it acts on deploy:
+Unlike 0714, part of it acts on deploy:
 
 - Codex (already cut over): an internal turn delivered into a receiving
   context must carry the v2 accepted authority it copies (the context's, or
@@ -4424,7 +4424,7 @@ Unlike 0713, part of it acts on deploy:
 - Personal (`user`) SuperGrok and Claude accounts: under a migration owner
   without `BYPASSRLS` (the documented posture), disconnecting one deleted the
   credential but left its authority active, and connecting a personal Claude
-  account failed with `42501`. 0714 adds the missing owner policies and
+  account failed with `42501`. 0715 adds the missing owner policies and
   revokes the authorities earlier disconnects left active. A live run
   accepted for such a disconnected account then fails with
   `scheduled_xai_authority_changed` or `scheduled_claude_authority_changed`;
@@ -4440,11 +4440,11 @@ Unlike 0713, part of it acts on deploy:
 
 **Before deploying**, run this read-only inventory as a role that bypasses
 row security. Each row is one finding. Resolve the scheduled findings first
-(pause or edit the task, or let the run finish): after 0714, their tasks
+(pause or edit the task, or let the run finish): after 0715, their tasks
 cannot be admitted, their occurrences or reusable sessions are refused, or
 the run fails at claim. Record the counts of the two `inbox_` findings
 (history the fences never check again) and of
-`disconnected_personal_authority` (the authorities 0714 revokes).
+`disconnected_personal_authority` (the authorities 0715 revokes).
 
 ```sql
 WITH live_run AS (
@@ -4620,7 +4620,7 @@ WHERE turn.execution_context_turn_id IS NOT NULL
 ORDER BY 1, 2, 3, 4;
 ```
 
-| Finding | After 0714 |
+| Finding | After 0715 |
 | --- | --- |
 | `scheduled_task_claude_subject` | Every firing is refused (the dispatcher already refuses it). |
 | `scheduled_run_claude_accepted` | Admission would not accept this run's Claude values. |
@@ -4631,7 +4631,7 @@ ORDER BY 1, 2, 3, 4;
 | `disconnected_personal_authority` | Revoked: its credential was disconnected. |
 | `inbox_turn_v2`, `inbox_update_v2` | Such a delivery is refused; existing rows are not checked again. |
 
-Staging and production were not queried when 0714 was written; run the
+Staging and production were not queried when 0715 was written; run the
 inventory there before deploying it.
 
 ### Slack API pilot activation (0597)

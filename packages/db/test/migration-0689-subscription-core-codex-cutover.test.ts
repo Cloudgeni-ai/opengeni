@@ -43,14 +43,14 @@ import {
 
 const MIGRATION = "0689_subscription_core_codex_cutover.sql";
 const PRECURSOR = "0712_subscription_core_generic_precursor.sql";
-// 0713 keys and redefines objects 0689 creates: held back with it and
+// 0714 keys and redefines objects 0689 creates: held back with it and
 // replayed right after it, so these cases also cover the provider-keyed
 // reach, auto-assignment and plan-change paths on cutover data.
 const PROVIDER_KEYED_REACH = "0713_subscription_core_provider_keyed_reach.sql";
-// 0713 builds on 0712's receipts and patches its helpers; it follows 0712.
-const COMPAT = "0713_subscription_authority_compat.sql";
-// 0714 requires 0713's routines; it follows 0713.
-const FENCES = "0714_subscription_authority_fences.sql";
+// 0714 builds on 0712's receipts and patches its helpers; it follows 0712.
+const COMPAT = "0714_subscription_authority_compat.sql";
+// 0715 requires 0714's routines; it follows 0714.
+const FENCES = "0715_subscription_authority_fences.sql";
 const key = Buffer.alloc(32, 72);
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
@@ -1474,7 +1474,7 @@ describe.skipIf(!realDb)(
       });
 
       test("scope: organization reach covers workspaces created after the cutover, Personal or not as legacy did", async () => {
-        // 0713 keeps the rows the cutover wrote, each keyed by its provider.
+        // 0714 keeps the rows the cutover wrote, each keyed by its provider.
         const reach = await owned.admin`SELECT connection_id::text AS connection, provider,
             shared_workspaces, personal_workspaces, allocator_enabled
           FROM opengeni_private.subscription_codex_auto_assignments

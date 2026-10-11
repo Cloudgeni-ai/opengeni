@@ -16,13 +16,13 @@ import { encryptEnvironmentValue } from "../src/environment-crypto";
 const migration = "0689_subscription_core_codex_cutover.sql";
 // 0712 requires the committed 0689 cutover, so it is held back with it.
 const precursor = "0712_subscription_core_generic_precursor.sql";
-// 0713 keys and redefines objects 0689 creates: held back and replayed right
+// 0714 keys and redefines objects 0689 creates: held back and replayed right
 // after it.
 const providerKeyedReach = "0713_subscription_core_provider_keyed_reach.sql";
-// 0713 builds on 0712's receipts and patches its helpers; it follows 0712.
-const compat = "0713_subscription_authority_compat.sql";
-// 0714 requires 0713's routines; it follows 0713.
-const fences = "0714_subscription_authority_fences.sql";
+// 0714 builds on 0712's receipts and patches its helpers; it follows 0712.
+const compat = "0714_subscription_authority_compat.sql";
+// 0715 requires 0714's routines; it follows 0714.
+const fences = "0715_subscription_authority_fences.sql";
 const key = Buffer.alloc(32, 87);
 const cases: Array<{
   name: string;

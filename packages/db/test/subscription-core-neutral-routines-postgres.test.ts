@@ -43,15 +43,15 @@ beforeAll(async () => {
   // until roles are provisioned again. Stage a provisioned database without
   // 0707 (as a deployment is before it), apply 0707 alone, and evaluate the
   // full runtime posture as the runtime role before provisioning again. 0712
-  // patches routines 0707 creates and 0713 builds on 0707's registry, so both
+  // patches routines 0707 creates and 0714 builds on 0707's registry, so both
   // are withheld and applied with it.
   const neutral = "0707_subscription_core_neutral_routines.sql";
   const withheld = [
     neutral,
     "0712_subscription_core_generic_precursor.sql",
     "0713_subscription_core_provider_keyed_reach.sql",
-    "0713_subscription_authority_compat.sql",
-    "0714_subscription_authority_fences.sql",
+    "0714_subscription_authority_compat.sql",
+    "0715_subscription_authority_fences.sql",
   ];
   const owner = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
@@ -64,7 +64,7 @@ beforeAll(async () => {
     const [applied] = await owner<{ count: number }[]>`
       select count(*)::int as count from schema_migrations where name in ${owner(withheld)}`;
     if (applied?.count !== withheld.length)
-      throw new Error("0707, 0712 and 0713 were not applied by the second migrate");
+      throw new Error("0707, 0712 and 0714 were not applied by the second migrate");
   } finally {
     await owner.end();
   }
@@ -998,7 +998,7 @@ describe("provider-neutral subscription-core routines (migration 0707)", () => {
           await attempt("truncate", () =>
             tx`truncate opengeni_private.subscription_core_providers`.then(() => "truncated"),
           );
-          // 0713's reach rows and plan-change providers reference the
+          // 0714's reach rows and plan-change providers reference the
           // registry, so a plain TRUNCATE is refused by those keys first;
           // with CASCADE the append-only guard still refuses it.
           await attempt("truncateCascade", () =>
