@@ -23,6 +23,8 @@ for it until the matching requirement below is implemented:
 - Each requirement ends with a `Verification:` line. It lists the test files
   (unit `*.test.ts(x)`, integration `*.integration.ts` or end-to-end
   `*.e2e.ts`, anywhere CI discovers tests) that assert the requirement, or
+  a shared suite under a `test/helpers/` directory that such a test file
+  imports and runs (for example the subscription-core conformance suite), or
   `pending` with the work item (see
   [Work items](#work-items)) that will add them, or `retired`. A test asserts a requirement
   by naming its ID in its title: the first string argument of a `test`, `it`
@@ -38,9 +40,10 @@ for it until the matching requirement below is implemented:
   source guard on every CI plan (full, focused and documentation-only), and
   `scripts/check-subscription-contract.test.ts` runs the same check as a unit
   test. It fails when an ID is duplicated, has no verification line, names a
-  missing test file, names a test file none of whose titles names the ID,
-  names an unknown work item, or when a test file mentions an ID (anywhere,
-  including comments) that this document does not define.
+  missing test file or a shared suite no test file runs, names a test file
+  none of whose titles names the ID, names an unknown work item, or when a
+  test file or a cited shared suite mentions an ID (anywhere, including
+  comments) that this document does not define.
 - "Must" is a requirement. "Current state" notes describe main today and are
   informative only.
 
@@ -193,31 +196,31 @@ for it until the matching requirement below is implemented:
 ### Stickiness and the prompt cache
 
 - **SUB-STICK-01** The account belongs to the session, not to whoever sends
-  the message. Verification: `packages/db/test/subscription-core-fake-api-key-conformance-postgres.test.ts`.
+  the message. Verification: `packages/db/test/helpers/subscription-core-conformance.ts`.
 - **SUB-STICK-02** While the prompt cache is warm, a session keeps its account
   across turns, senders, goal continuations, scheduled runs on the same session
   and recovery. Child sessions and new scheduled sessions have their own prompt
-  cache and start with an automatic choice. Verification: `packages/subscriptions/test/policy.test.ts`, `packages/db/test/subscription-core-fake-api-key-conformance-postgres.test.ts`.
+  cache and start with an automatic choice. Verification: `packages/subscriptions/test/policy.test.ts`, `packages/db/test/helpers/subscription-core-conformance.ts`.
 - **SUB-STICK-03** A session moves to another account only when forced
   (exhausted, disconnected, revoked, out of scope, owner left, or a person
   changed the session's explicit choice) or when the cache is predictably
-  cold. Verification: `packages/subscriptions/test/policy.test.ts`, `packages/db/test/subscription-core-fake-api-key-conformance-postgres.test.ts`.
+  cold. Verification: `packages/subscriptions/test/policy.test.ts`, `packages/db/test/helpers/subscription-core-conformance.ts`.
 - **SUB-STICK-04** Cache coldness is exact for Claude: the session has been
   idle longer than the cache lifetime Opengeni sent, which each cache read
   refreshes. For Codex and SuperGrok the cut-off comes from recorded cached
   token counts against idle time, with a conservative default until measured
-  (D-30). Verification: `packages/subscriptions/test/policy.test.ts`, `packages/db/test/subscription-core-fake-api-key-conformance-postgres.test.ts`.
+  (D-30). Verification: `packages/subscriptions/test/policy.test.ts`, `packages/db/test/helpers/subscription-core-conformance.ts`.
 - **SUB-STICK-05** Compaction, a model change and a change of the session's
   explicit choice (setting or removing a pin, D-31) are re-selection points
-  regardless of idle time. Verification: `packages/subscriptions/test/policy.test.ts`, `packages/db/test/subscription-core-fake-api-key-conformance-postgres.test.ts`.
+  regardless of idle time. Verification: `packages/subscriptions/test/policy.test.ts`, `packages/db/test/helpers/subscription-core-conformance.ts`.
 - **SUB-STICK-06** At a re-selection point only automatic choices are
-  re-evaluated; an explicit choice is kept. Verification: `packages/subscriptions/test/policy.test.ts`, `packages/db/test/subscription-core-fake-api-key-conformance-postgres.test.ts`.
+  re-evaluated; an explicit choice is kept. Verification: `packages/subscriptions/test/policy.test.ts`, `packages/db/test/helpers/subscription-core-conformance.ts`.
 - **SUB-STICK-07** A session that was started on a personal account and is
   later shared stops using that account at once, even while its cache is
   warm: SUB-ELIG-05 takes precedence over stickiness, so the personal account
   is out of scope for the shared session (SUB-STICK-03). Its next turn moves
   to an eligible organization account, or waits if none can serve.
-  Verification: `packages/subscriptions/test/policy.test.ts`, `packages/db/test/subscription-core-fake-api-key-conformance-postgres.test.ts`.
+  Verification: `packages/subscriptions/test/policy.test.ts`, `packages/db/test/helpers/subscription-core-conformance.ts`.
 
 ### Exhaustion and failover
 

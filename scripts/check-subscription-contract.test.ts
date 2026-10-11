@@ -76,6 +76,50 @@ test("reports duplicate, unverified, missing, unclaimed and undefined requiremen
   }
 });
 
+test("a shared suite under test/helpers verifies a requirement only when a test file runs it", () => {
+  const root = fixtureRepository({
+    [CONTRACT_PATH]: [
+      "- **SUB-FIXTURE-01** Verification: `packages/x/test/helpers/suite.ts`.",
+      "- **SUB-FIXTURE-02** Verification: `packages/x/test/helpers/orphan.ts`.",
+      "- **SUB-FIXTURE-03** Verification: `packages/x/src/suite.ts`.",
+    ].join("\n"),
+    "packages/x/test/helpers/suite.ts": [
+      "export function describeSuite() {",
+      '  test("SUB-FIXTURE-01 behaves", () => {});',
+      '  test("SUB-FIXTURE-08 is not defined", () => {});',
+      "}",
+    ].join("\n"),
+    "packages/x/test/helpers/orphan.ts": 'test("SUB-FIXTURE-02 behaves", () => {});\n',
+    "packages/x/src/suite.ts": 'test("SUB-FIXTURE-03 behaves", () => {});\n',
+    "packages/x/test/runs.test.ts": [
+      'const { describeSuite } = await import("./helpers/suite");',
+      "describeSuite();",
+    ].join("\n"),
+  });
+  try {
+    expect(checkSubscriptionContract(root)).toEqual([
+      {
+        file: CONTRACT_PATH,
+        line: 2,
+        message:
+          "SUB-FIXTURE-02 names a shared suite no test file runs: packages/x/test/helpers/orphan.ts",
+      },
+      {
+        file: CONTRACT_PATH,
+        line: 3,
+        message: "SUB-FIXTURE-03 names a test file that does not exist: packages/x/src/suite.ts",
+      },
+      {
+        file: "packages/x/test/helpers/suite.ts",
+        line: 3,
+        message: "SUB-FIXTURE-08 is not defined in " + CONTRACT_PATH,
+      },
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a test-backed requirement passes when its test names the ID", () => {
   const root = fixtureRepository({
     [CONTRACT_PATH]: "- **SUB-FIXTURE-01** Verification: `apps/x/test/ok.test.ts`.\n",

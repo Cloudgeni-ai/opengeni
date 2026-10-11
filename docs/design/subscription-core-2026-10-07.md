@@ -209,8 +209,8 @@ Primary key `(workspace_id, session_id)`: `provider`, `connection_id`,
   Setting or removing a pin therefore makes the next turn re-run selection
   (D-31): a request, a completed call or a retried attempt that keeps its
   lease never restarts a cleared clock, only a new selection at placement
-  does, so removing a pin mid-turn still takes effect at the next turn. A compaction is a re-selection point only when it is later than the
-  clock.
+  does, so removing a pin mid-turn still takes effect at the next turn. A
+  compaction is a re-selection point only when it is later than the clock.
 - Placement reads the binding under its row lock (`FOR UPDATE`, in the
   placement world, before the lease) and decides and commits from that row,
   so no pin or other placement of the session changes it in between; only
@@ -325,10 +325,18 @@ request; it marks the lease for failover at the next model-call boundary.
 
 ## 4. Placement
 
-One transaction per placement, following the canonical lock order:
-workspace control, then session, turn and attempt, then the session binding
-row (created with `INSERT … ON CONFLICT DO NOTHING` before it is locked).
-No provider call happens inside it.
+One transaction per placement. No provider call happens inside it. It reads
+the session and the turn without row locks, then locks the session binding
+row (`FOR UPDATE`) and decides and commits from that row. A session's first
+binding has no row to lock yet: its insert's compare-and-swap makes a
+concurrent loser retry. Placement and model requests lock the binding row
+before the per-connection advisory lock (`subscription-refresh:<connection>`)
+and the lease, as a person's pin does (D-31 of the contract): the lease
+triggers and a request's reservation take that lock after the binding, so a
+pin of the account a session is on never deadlocks with the session's
+placement or requests. Turn rows are locked only in shared modes on these
+paths (`FOR KEY SHARE` by the lease triggers, `FOR SHARE` by a request's
+reservation), which never block one another.
 
 1. Read effective settings (SQL).
 2. If the binding is `explicit`, use that connection or wait

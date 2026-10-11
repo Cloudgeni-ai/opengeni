@@ -207,7 +207,7 @@ export async function selectCoreCodexTurnCapacity(
       case "cutover_not_enabled":
         throw subscriptionCoreCutoverDisabledFailure();
       case "lease_busy":
-        throw subscriptionCoreLeaseBusyFailure(placement.leasedUntil);
+        throw subscriptionCoreLeaseBusyFailure(placement.leasedUntil, placement.cause);
       case "wait":
         // Maintenance never parks: as on the legacy path, compaction is
         // cancelled with its request preserved and runs again with the
