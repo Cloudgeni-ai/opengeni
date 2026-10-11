@@ -4600,8 +4600,10 @@ account with `ownInWorkspaceIds` naming its workspace, and that workspace's
 `GET /v1/workspaces/<workspace id>/codex/accounts` returns
 `source.workspaceSetAside` and `source.organizationCount` (how many
 organization accounts other than its own reach it; after sharing only its own
-account it is 0, while `organizationAvailable` reads true). A browser tab still running the previous page
-lists the account twice (once as "<workspace> only") until it reloads. API
+account it is 0, while `organizationAvailable` reads true). A browser tab
+still running the previous page lists the account twice (once as "<workspace>
+only") and offers "Make primary" for it, which the server refuses as not
+found, until it reloads. API
 and SDK callers of the organization account list now also receive
 workspace-connected accounts, each with `ownInWorkspaceIds`, and the
 workspace account list's `source` gains the two optional fields above; nothing

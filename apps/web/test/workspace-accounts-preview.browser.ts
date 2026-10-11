@@ -184,6 +184,21 @@ try {
     await page.getByText("In Research too, only these people can use it.").waitFor();
     await noOverflow();
     await shot("11-editor-people-kept");
+
+    // Research keeps Acme Pro, now limited to chosen people, and uses only its
+    // own accounts: the row is in use for them, and the notice says so.
+    await open(
+      "reach=people&kept=research&researchSource=workspace&workspace=00000000-0000-4000-8000-0000000000d3",
+    );
+    await page.getByText("Its account limited to chosen people serves only them.").waitFor();
+    const kept = page.locator("[data-slot=list-row]", { hasText: "Acme Pro" });
+    await kept.getByText("Selected people").waitFor();
+    assert(
+      (await kept.getByText("Set aside", { exact: true }).count()) === 0,
+      "kept people-limited account shown as set aside",
+    );
+    await noOverflow();
+    await shot("12-workspace-page-kept-for-people");
     assert(errors.length === 0, errors.join("\n"));
     await page.close();
   }

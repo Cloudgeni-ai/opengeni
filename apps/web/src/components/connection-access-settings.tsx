@@ -484,7 +484,12 @@ export function ConnectionAccessFormPage({
             ) : null}
             {keptNote ? (
               // A workspace that keeps it as its own follows the people choice too.
-              <p id={keptNoteId} className="m-0 text-sm text-fg-muted">
+              // Without a People list to describe, it is announced as it appears.
+              <p
+                id={keptNoteId}
+                role={peopleListed ? undefined : "status"}
+                className="m-0 text-sm text-fg-muted"
+              >
                 {`In ${localNames(local, data.workspaces)} too, only these people can use it.`}
               </p>
             ) : null}

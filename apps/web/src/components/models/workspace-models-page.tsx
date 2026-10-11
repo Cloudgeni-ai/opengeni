@@ -12,7 +12,7 @@ import {
 import { DirectModelProviderConnections } from "@/components/direct-model-provider-connections";
 import type { OrganizationModelProviderKind, WorkspaceModelCatalogModel } from "@opengeni/sdk";
 import { KeyRoundIcon, PlusIcon } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import {
@@ -284,6 +284,18 @@ export function WorkspaceModelsPageBody({
   const nav = useModelsNavigation(scope, { account, view });
   const [revision, setRevision] = useState(0);
   const [claudeSigningIn, setClaudeSigningIn] = useState(false);
+  // Organization accounts this workspace keeps as its own, limited to chosen
+  // people: its pool doesn't list them, so their rows report them to the notice.
+  const [keptForPeople, setKeptForPeople] = useState<ReadonlySet<string>>(() => new Set());
+  const reportKeptForPeople = useCallback((accountId: string, kept: boolean) => {
+    setKeptForPeople((current) => {
+      if (current.has(accountId) === kept) return current;
+      const next = new Set(current);
+      if (kept) next.add(accountId);
+      else next.delete(accountId);
+      return next;
+    });
+  }, []);
   const connectionChanged = () => {
     setRevision((value) => value + 1);
     onConnectionChange();
@@ -1101,6 +1113,7 @@ export function WorkspaceModelsPageBody({
                     ? organizationNoticeCodexCount(orgCodex.accounts, codex, here.id)
                     : undefined)
                 }
+                keptForPeopleCount={keptForPeople.size}
               />
             }
             accounts={
@@ -1111,7 +1124,12 @@ export function WorkspaceModelsPageBody({
                   workspaceName={workspaceName}
                   scope={labels.everyone}
                 />
-                <CodexAccountRows codex={codex} places={codexPlaces} organization={codexPool} />
+                <CodexAccountRows
+                  codex={codex}
+                  places={codexPlaces}
+                  organization={codexPool}
+                  onKeptForPeople={reportKeptForPeople}
+                />
                 <SuperGrokAccountRows grok={grok} places={grokPlaces} organization={grokPool} />
                 {claudeEnabled ? (
                   <ClaudeAccountRows

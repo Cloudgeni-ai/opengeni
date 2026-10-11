@@ -493,6 +493,8 @@ test("a workspace's own copy no workspace manages is an organization account: it
   // Changed by the last two cases: a workspace manages it; the member list can't be read.
   let managedBy: string | null = null;
   let peopleReadable = true;
+  // The workspaces that keep it as their own (a copy an older migration merged).
+  let kept = ["workspace-a"];
   const response = () => ({
     policy,
     models: [{ id: "model-a", label: "Model A" }],
@@ -511,7 +513,7 @@ test("a workspace's own copy no workspace manages is an organization account: it
           ],
         }
       : {}),
-    localWorkspaceIds: ["workspace-a"],
+    localWorkspaceIds: kept,
     managedByWorkspaceId: managedBy,
   });
   const labels = modelsScopeLabels("Acme", false);
@@ -755,6 +757,12 @@ test("a workspace's own copy no workspace manages is an organization account: it
     await flush();
     expect(container.textContent).toContain("2 people chosen.");
     expect(container.textContent).not.toContain("Former member");
+    // No People list to describe: the workspace that keeps it is announced as a status.
+    expect(
+      [...container.querySelectorAll("p")]
+        .find((p) => p.textContent === "In Engineering too, only these people can use it.")
+        ?.getAttribute("role"),
+    ).toBe("status");
     expect(container.querySelector('[role="radio"][aria-checked="true"]')?.textContent).toContain(
       "Only selected people",
     );
@@ -770,6 +778,17 @@ test("a workspace's own copy no workspace manages is an organization account: it
     expect(container.textContent).toContain("No one can use it.");
     expect(container.textContent).toContain("too many members to list here");
     expect(container.textContent).not.toContain("0 people");
+
+    // No workspace keeps it: chosen people need no line about one.
+    policy = { ...policy, allowedPeople: ["person-a"] };
+    peopleReadable = true;
+    kept = [];
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await act(async () => root.render(<Page />));
+    await flush();
+    expect(container.textContent).toContain("Alex Morgan");
+    expect(container.textContent).not.toContain("too, only these people can use it.");
 
     // A workspace manages it: no people choice (the server refuses one).
     policy = { ...policy, allowedPeople: null };

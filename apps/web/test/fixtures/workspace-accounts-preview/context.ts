@@ -23,6 +23,8 @@ const params = new URLSearchParams(window.location.search);
 const initialReach = params.get("reach");
 /** `designSource=organization`: Design is set to use the organization's accounts. */
 const designSource = params.get("designSource") === "organization" ? "organization" : "automatic";
+/** `researchSource=workspace`: Research is set to use only its own accounts. */
+const researchSource = params.get("researchSource") === "workspace" ? "workspace" : "automatic";
 /** `kept=research`: Research also keeps Acme Pro as its own (a copy an older migration merged). */
 const keptByResearch = params.get("kept") === "research";
 
@@ -204,9 +206,15 @@ const methods: Record<string, (...args: never[]) => Promise<unknown>> = {
         };
       })
       .filter((row) => row.local || row.organization);
-    const mode = workspaceId === WORKSPACES.design.id ? designSource : "automatic";
+    const mode =
+      workspaceId === WORKSPACES.design.id
+        ? designSource
+        : workspaceId === WORKSPACES.research.id
+          ? researchSource
+          : "automatic";
     const workspaceAvailable = rows.some((row) => row.local);
-    const listed = (row: (typeof rows)[number]) => mode === "automatic" || row.organization;
+    const listed = (row: (typeof rows)[number]) =>
+      mode === "automatic" || (mode === "workspace" ? row.local : row.organization);
     return {
       accounts: rows
         .filter(listed)
@@ -218,7 +226,9 @@ const methods: Record<string, (...args: never[]) => Promise<unknown>> = {
         workspaceKind: workspaceId === WORKSPACES.personal.id ? "personal" : "shared",
         mode,
         effectiveSource:
-          mode === "automatic" && workspaceAvailable ? "workspace" : "organization",
+          mode === "workspace" || (mode === "automatic" && workspaceAvailable)
+            ? "workspace"
+            : "organization",
         workspaceAvailable,
         organizationAvailable: rows.some((row) => row.organization),
         workspaceSetAside: rows.some((row) => row.local && !listed(row)),

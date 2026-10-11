@@ -2229,8 +2229,27 @@ describe("One Models page for the organization and the workspace", () => {
         const row = rowsNamed(workspaceOnly.container, "Team plan")[0]!;
         expect(row.textContent).not.toContain("Set aside");
         expect(row.textContent).not.toContain("Not in use");
+        // Its pool doesn't list it, so the notice says it serves its people.
+        expect(workspaceOnly.container.textContent).toContain(
+          "New work uses this workspace's Codex account. The organization's accounts are never used here, even if none are connected. Its account limited to chosen people serves only them.",
+        );
       } finally {
         await cleanup(workspaceOnly);
+      }
+      // With no other account of its own, new work starts only for those people,
+      // not "can't start … none are connected".
+      accounts = { ...workspaceSource, accounts: [], activeAccountId: null };
+      const keptOnly = await render();
+      try {
+        await flush();
+        const row = rowsNamed(keptOnly.container, "Team plan")[0]!;
+        expect(row.textContent).not.toContain("Set aside");
+        expect(keptOnly.container.textContent).toContain(
+          "New Codex work can start only for the people chosen for this workspace's own account. This workspace is set to use only its own accounts.",
+        );
+        expect(keptOnly.container.textContent).not.toContain("none are connected");
+      } finally {
+        await cleanup(keptOnly);
       }
       // Set to use only the organization's accounts: its own copy isn't used,
       // and the organization's isn't given to this workspace: nobody uses it here.
@@ -2274,8 +2293,28 @@ describe("One Models page for the organization and the workspace", () => {
         expect(row.textContent).toContain("Set aside");
         expect(row.textContent).toContain("Not in use");
         expect(row.querySelector('[aria-label^="More actions"]')).not.toBeNull();
+        expect(notKept.container.textContent).not.toContain("limited to chosen people");
       } finally {
         await cleanup(notKept);
+      }
+      // Kept by no workspace, automatic or the organization's accounts: chosen
+      // people's sessions here use it.
+      for (const mode of ["automatic", "organization"] as const) {
+        accounts = {
+          ...accounts,
+          accounts: [codexAccount({ id: "org-1", label: "Company plan", source: "organization" })],
+          activeAccountId: "org-1",
+          source: { ...source, mode, effectiveSource: "organization" as const },
+        };
+        const modeView = await render();
+        try {
+          await flush();
+          const row = rowsNamed(modeView.container, "Team plan")[0]!;
+          expect(row.textContent).not.toContain("Set aside");
+          expect(row.textContent).not.toContain("Not in use");
+        } finally {
+          await cleanup(modeView);
+        }
       }
     });
 
