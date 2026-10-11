@@ -543,16 +543,28 @@ function SharedCodexSetAsideRow({
     <ListRow
       leading={<ProviderTile provider="codex" size="lg" />}
       title={codexAccountName(account)}
-      meta={[
-        organizationReachLabel(places.scope, access.data),
-        // Before the plan, so it stays readable on a phone.
-        failed ? "Couldn't check who can use it" : reason,
-        planLabel(account.plan, "ChatGPT"),
-        resetsLabel(account.resetCreditAvailableCount),
-      ]}
-      cells={forPeople ? undefined : { usage: NOT_IN_USE }}
+      meta={
+        // Unread, its reach and use here are unknown: say so in the tag's place.
+        failed
+          ? ["Couldn't check who can use it", planLabel(account.plan, "ChatGPT")]
+          : [
+              organizationReachLabel(places.scope, access.data),
+              // Before the plan, so it stays readable on a phone.
+              reason,
+              planLabel(account.plan, "ChatGPT"),
+              resetsLabel(account.resetCreditAvailableCount),
+            ]
+      }
+      cells={forPeople || failed ? undefined : { usage: NOT_IN_USE }}
       control={
-        failed ? <RowButton onClick={() => void access.reload()}>Try again</RowButton> : undefined
+        failed ? (
+          <RowButton
+            aria-label={`Try again for ${codexAccountName(account)}`}
+            onClick={() => void access.reload()}
+          >
+            Try again
+          </RowButton>
+        ) : undefined
       }
       menu={!forPeople && (reaches || chosenPeople) ? menu : null}
       indicator={
@@ -727,9 +739,7 @@ export function codexPoolCopy({
     };
   }
   return {
-    text: `New work uses ${here}. ${capitalize(orgAccounts)} ${orgOne ? "is" : "are"} set aside while ${
-      workspaceCount === 1 ? "it's" : "these are"
-    } connected.`,
+    text: `New work uses ${here}. ${capitalize(orgAccounts)} ${orgOne ? "is" : "are"} set aside while this workspace has its own.`,
     blocked: false,
   };
 }

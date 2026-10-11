@@ -894,7 +894,7 @@ describe("Codex pool controls", () => {
     try {
       expect(view.container.querySelector('[role="radiogroup"]')).toBeNull();
       expect(view.container.textContent).toContain(
-        "New work uses this workspace's Codex account. The organization's accounts are set aside while it's connected.",
+        "New work uses this workspace's Codex account. The organization's accounts are set aside while this workspace has its own.",
       );
       expect(button(view.container, "Use automatically")).toBeUndefined();
     } finally {
@@ -1144,7 +1144,7 @@ describe("Codex account page", () => {
     try {
       const text = view.container.textContent ?? "";
       expect(text).toContain("New work uses this workspace's Codex account.");
-      expect(text).toContain("while it's connected");
+      expect(text).toContain("while this workspace has its own");
     } finally {
       await cleanup(view);
     }
@@ -1434,7 +1434,7 @@ describe("One Models page for the organization and the workspace", () => {
       const text = () => view.container.textContent ?? "";
       // One organization account besides its own: "account is", "it's".
       expect(text()).toContain(
-        "New work uses this workspace's Codex account. The organization's account is set aside while it's connected.",
+        "New work uses this workspace's Codex account. The organization's account is set aside while this workspace has its own.",
       );
       const ownRow = () =>
         [...view.container.querySelectorAll<HTMLElement>("[data-slot=list-row]")].find((row) =>
@@ -2342,6 +2342,12 @@ describe("One Models page for the organization and the workspace", () => {
         // Its row says so, with the way to read it again.
         const failedRow = rowsNamed(failedView.container, "Team plan")[0]!;
         expect(failedRow.textContent).toContain("Couldn't check who can use it");
+        // No guessed reach or use while it's unknown; its retry names the account.
+        expect(failedRow.textContent).not.toContain("Shared by");
+        expect(failedRow.textContent).not.toContain("Not in use");
+        expect(
+          failedRow.querySelector('button[aria-label="Try again for Team plan"]'),
+        ).not.toBeNull();
         client.getModelConnectionAccess.mockImplementation(keptAccess);
         // Every failed row offers it; read them all again.
         const retries = [...failedView.container.querySelectorAll("button")].filter(
@@ -2384,6 +2390,29 @@ describe("One Models page for the organization and the workspace", () => {
       } finally {
         client.requestJson.mockImplementation(keptList);
         await cleanup(listPending);
+      }
+      // Nor when the organization's list can't be read.
+      client.requestJson.mockImplementation(async (...args: unknown[]): Promise<unknown> => {
+        if (args[0] === "GET" && args[1] === "/v1/organizations/organization-a/codex/accounts") {
+          throw new Error("Organization accounts unavailable");
+        }
+        return callList(...args);
+      });
+      // Credits keep the list from being empty, so the notice would show.
+      const previousConfig = context.clientConfig;
+      const previousAccess = context.accessContext;
+      context.clientConfig = { billingMode: "stripe", models: [CREDITS_MODEL] };
+      context.accessContext = { accountGrants: [{ accountId: "organization-a", permissions: [] }] };
+      const listFailed = await render();
+      try {
+        await flush();
+        expect(listFailed.container.textContent).toContain("Opengeni credits");
+        expect(listFailed.container.textContent).not.toContain("New Codex work");
+      } finally {
+        context.clientConfig = previousConfig;
+        context.accessContext = previousAccess;
+        client.requestJson.mockImplementation(keptList);
+        await cleanup(listFailed);
       }
       // Two kept accounts are named in the rows' order, whichever read finishes first.
       const zeta = {
@@ -2821,7 +2850,7 @@ describe("One Models page for the organization and the workspace", () => {
         expect(company.querySelector('[aria-label^="More actions"]')).not.toBeNull();
         // The notice counts only the organization's account known to reach here.
         expect(view.container.textContent).toContain(
-          "The organization's account is set aside while it's connected.",
+          "The organization's account is set aside while this workspace has its own.",
         );
       } finally {
         await cleanup(view);
@@ -2951,7 +2980,7 @@ describe("One Models page for the organization and the workspace", () => {
       try {
         await flush();
         expect(older.container.textContent).toContain(
-          "The organization's accounts are set aside while it's connected.",
+          "The organization's accounts are set aside while this workspace has its own.",
         );
       } finally {
         await cleanup(older);
@@ -2962,7 +2991,7 @@ describe("One Models page for the organization and the workspace", () => {
       try {
         await flush();
         expect(current.container.textContent).toContain(
-          "The organization's account is set aside while it's connected.",
+          "The organization's account is set aside while this workspace has its own.",
         );
       } finally {
         await cleanup(current);

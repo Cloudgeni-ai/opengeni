@@ -796,11 +796,24 @@ test("a workspace's own copy no workspace manages is an organization account: it
     await flush();
     expect(container.textContent).toContain("Alex Morgan");
     expect(container.textContent).not.toContain("too, only these people can use it.");
+    // Without a member list either: no status region that nothing could fill.
+    peopleReadable = false;
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await act(async () => root.render(<Page />));
+    await flush();
+    expect(container.textContent).toContain("too many members to list here");
+    expect(
+      [...container.querySelectorAll('p[role="status"]')].filter(
+        (paragraph) => !paragraph.textContent,
+      ).length,
+    ).toBe(0);
 
     // A workspace manages it: no people choice (the server refuses one).
     policy = { ...policy, allowedPeople: null };
     peopleReadable = true;
     managedBy = "workspace-a";
+    kept = ["workspace-a"];
     await act(async () => root.unmount());
     root = createRoot(container);
     await act(async () => root.render(<Page />));
