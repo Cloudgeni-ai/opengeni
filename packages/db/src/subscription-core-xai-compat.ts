@@ -31,9 +31,34 @@ import {
   SUBSCRIPTION_CORE_XAI_CREDENTIAL_FORMAT,
   type SubscriptionCoreXaiTokens,
 } from "./subscription-core-xai-adapter";
-import type { XaiSubscriptionAccountMetadata } from "./xai-subscription";
 
 export type SubscriptionCoreXaiScope = "workspace" | "user" | "organization";
+
+/** The legacy SuperGrok account shape the SuperGrok routes render. */
+export type XaiSubscriptionAccountMetadata = {
+  allowedModelIds?: string[] | null;
+  id: string;
+  scope: SubscriptionCoreXaiScope;
+  providerAccountId: string | null;
+  label: string | null;
+  accountEmail: string | null;
+  planType: string | null;
+  status: "active" | "needs_relogin" | "error" | "disabled";
+  allocatorEnabled: boolean;
+  version: number;
+  allocatorVersion: number;
+  allocatorUpdatedAt: Date | null;
+  expiresAt: Date | null;
+  lastRefreshAt: Date | null;
+  lastError: string | null;
+  quotaUsedPercent: number | null;
+  quotaResetAt: Date | null;
+  quotaCheckedAt: Date | null;
+  exhaustedUntil: Date | null;
+  selectionCount: number;
+  lastSelectedAt: Date | null;
+  connectedBySubjectId: string | null;
+};
 
 function date(value: Date | string | null | undefined): Date | null {
   return value === null || value === undefined ? null : new Date(value);

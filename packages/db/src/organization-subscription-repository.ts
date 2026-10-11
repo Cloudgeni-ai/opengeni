@@ -11,9 +11,10 @@ import { encryptEnvironmentValue } from "./environment-crypto";
 import type { SubscriptionPoolTables } from "./subscription-pool-schema";
 import type { createSubscriptionAccountRepository } from "./subscription-account-repository";
 
+/** The organization-scope legacy pool of a provider not yet on the core (Claude until C4). */
 export function createOrganizationSubscriptionRepository<Secret, Settings>(options: {
-  provider: "xai" | "claude";
-  displayName: "SuperGrok" | "Claude";
+  provider: "claude";
+  displayName: "Claude";
   tables: SubscriptionPoolTables;
   repository: Pick<
     ReturnType<typeof createSubscriptionAccountRepository<Secret, Settings>>,

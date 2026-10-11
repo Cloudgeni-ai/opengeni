@@ -28,11 +28,16 @@ export type SubscriptionAccountCapacity = {
   resetsAt: Date | null;
 };
 
-/** Shared subscription account lifecycle, selection, leases, pins and wake writes. */
+/**
+ * Shared subscription account lifecycle, selection, leases, pins and wake
+ * writes of a provider's legacy (pre-core) pool. Only Claude still runs on it
+ * until its own cutover and deletion (C4); SuperGrok's instance was deleted
+ * with its legacy runtime (M4 X4). Routine names derive from `provider`.
+ */
 export function createSubscriptionAccountRepository<Secret, Settings>(options: {
-  provider: "xai" | "claude";
-  label: "xAI" | "Claude";
-  displayName: "SuperGrok" | "Claude";
+  provider: "claude";
+  label: "Claude";
+  displayName: "Claude";
   isEnabled: (settings: Settings) => boolean;
   tables: SubscriptionPoolTables;
   leaseTable: Parameters<typeof heartbeatPoolCredentialLeaseUntil>[1];
@@ -210,8 +215,7 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
   class SubscriptionAuthorityPoolInactiveError extends Error {
     constructor() {
       super(label + " user authority pool is no longer active");
-      this.name =
-        provider === "xai" ? "XaiAuthorityPoolInactiveError" : "ClaudeAuthorityPoolInactiveError";
+      this.name = `${provider.charAt(0).toUpperCase()}${provider.slice(1)}AuthorityPoolInactiveError`;
     }
   }
 
@@ -227,7 +231,7 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
     const rows = await rawRows<{ membership_id: string }>(
       db,
       sql`select organization_membership_id as membership_id
-      from ${sql.identifier("resolve_xai_authority_pool".replace("xai", provider))}(
+      from ${sql.identifier(`resolve_${provider}_authority_pool`)}(
         current_setting('opengeni.account_id')::uuid,
         ${input.workspaceId}::uuid,
         ${input.subjectId},
@@ -330,7 +334,7 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
           authority_generation: number | string | null;
         }>(
           scopedDb,
-          sql`select * from ${sql.identifier("create_xai_subscription_credential".replace("xai", provider))}(
+          sql`select * from ${sql.identifier(`create_${provider}_subscription_credential`)}(
           ${input.accountId}::uuid,
           ${input.workspaceId}::uuid,
           ${input.subjectId},
@@ -444,7 +448,7 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
       async (scopedDb) => {
         const authorized = await rawRows<{ id: string }>(
           scopedDb,
-          sql`select id from ${sql.identifier("revalidate_xai_subscription_authority".replace("xai", provider))}(
+          sql`select id from ${sql.identifier(`revalidate_${provider}_subscription_authority`)}(
         ${input.workspaceId}::uuid, ${input.subjectId}, ${credentialId}::uuid,
         ${JSON.stringify(snapshot)}::jsonb
       )`,
@@ -1044,7 +1048,7 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
       async (scopedDb) => {
         const rows = await rawRows<{ disconnected: boolean }>(
           scopedDb,
-          sql`select ${sql.identifier("disconnect_xai_subscription_credential".replace("xai", provider))}(
+          sql`select ${sql.identifier(`disconnect_${provider}_subscription_credential`)}(
           ${input.accountId}::uuid, ${input.workspaceId}::uuid,
           ${input.subjectId}, ${input.credentialId}::uuid,
           ${JSON.stringify(snapshot)}::jsonb
@@ -1081,7 +1085,7 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
       async (scopedDb) => {
         const authorized = await rawRows<{ id: string }>(
           scopedDb,
-          sql`select id from ${sql.identifier("revalidate_xai_subscription_authority".replace("xai", provider))}(
+          sql`select id from ${sql.identifier(`revalidate_${provider}_subscription_authority`)}(
           ${input.workspaceId}::uuid, ${input.subjectId}, ${input.credentialId}::uuid,
           ${JSON.stringify(snapshot)}::jsonb)`,
         );
@@ -1247,7 +1251,7 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
       async (scopedDb) => {
         const authorized = await rawRows<{ id: string }>(
           scopedDb,
-          sql`select id from ${sql.identifier("revalidate_xai_subscription_authority".replace("xai", provider))}(
+          sql`select id from ${sql.identifier(`revalidate_${provider}_subscription_authority`)}(
         ${input.workspaceId}::uuid,
         ${input.subjectId},
         ${input.credentialId}::uuid,

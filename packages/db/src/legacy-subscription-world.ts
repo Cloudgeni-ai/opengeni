@@ -2,14 +2,14 @@
  * Read-only legacy adapter for the shared subscription core's shadow
  * comparison (design record docs/design/subscription-core-2026-10-07.md, step
  * M1). It builds the placement input of `@opengeni/subscriptions` for one
- * session and turn from today's Codex, Claude and SuperGrok tables, mapping
+ * session and turn from today's Codex and Claude tables, mapping
  * legacy shapes as design section 5.2 describes, so the worker can compare the
  * core's decision with the decision the legacy selector just made.
  *
  * Guarantees:
  * - One transaction of SELECT statements with a transaction-local statement
  *   timeout and no advisory locks; the adapter writes nothing. Codex worlds use
- *   a READ ONLY transaction. Claude and SuperGrok credential row security calls
+ *   a READ ONLY transaction. Claude credential row security calls
  *   `<provider>_subscription_authority_live`, which records and removes its own
  *   transient capability row inside the policy function (exactly as every
  *   legacy read of those pools does), so those worlds cannot run READ ONLY.
@@ -17,7 +17,7 @@
  *   session-access rules as the turn itself) and never with an empty subject,
  *   so it cannot read a private session the turn could not read. The human it
  *   acts for comes only from that actor. A personal (user-scope)
- *   Claude/SuperGrok pool is read as that human, exactly like the legacy
+ *   Claude pool is read as that human, exactly like the legacy
  *   selector reads it; other pools never read personal rows.
  * - It starts no transaction or statement after `deadlineAt` or once `signal`
  *   aborts, and each statement is bounded by the statement timeout, capped at
@@ -34,7 +34,6 @@ import type {
   PersonalAuthority,
   PlacementInput,
   PlacementPerson,
-  QuotaWindow,
   RotationSetting,
   SessionBinding,
   SubscriptionConnection,
@@ -49,15 +48,12 @@ import {
   type Database,
 } from "./database";
 
-export type LegacySubscriptionProvider = "xai" | "claude";
-export const LEGACY_SUBSCRIPTION_PROVIDERS: readonly LegacySubscriptionProvider[] = [
-  "xai",
-  "claude",
-];
+/** SuperGrok left the legacy world with its runtime (M4 X4); Claude stays until C4. */
+export type LegacySubscriptionProvider = "claude";
+export const LEGACY_SUBSCRIPTION_PROVIDERS: readonly LegacySubscriptionProvider[] = ["claude"];
 export const LEGACY_WORLD_MAX_CONNECTIONS = 64;
 /** Opengeni's default Anthropic prompt-cache lifetime (`5m`). */
 export const LEGACY_CLAUDE_CACHE_TTL_MS = 5 * 60_000;
-const NEAR_EXHAUSTION_PERCENT = 90;
 
 export type LegacyPlacementWorldRequest = {
   accountId: string;
@@ -72,7 +68,7 @@ export type LegacyPlacementWorldRequest = {
   reasoningLevel: string;
   /** Workspace model policy provider id of the product model (`policyProviderIdForModel`). */
   modelPolicyProviderId: string;
-  /** Claude/SuperGrok: the turn's frozen pool scope. Null for Codex. */
+  /** Claude: the turn's frozen pool scope. Null for Codex. */
   authorityScope: "workspace" | "organization" | "user" | null;
   now: Date;
   /** Upper bound for each statement; also bounded by the time left to `deadlineAt`. */
@@ -173,11 +169,6 @@ type PinRow = {
 };
 
 const POOL_TABLES = {
-  xai: {
-    credentials: sql.raw("xai_subscription_credentials"),
-    rotation: sql.raw("xai_rotation_settings"),
-    pins: sql.raw("xai_session_account_pins"),
-  },
   claude: {
     credentials: sql.raw("claude_subscription_credentials"),
     rotation: sql.raw("claude_rotation_settings"),
@@ -189,23 +180,6 @@ function epoch(value: Date | string | null | undefined): number | null {
   if (value === null || value === undefined) return null;
   const time = value instanceof Date ? value.getTime() : Date.parse(value);
   return Number.isFinite(time) ? time : null;
-}
-
-function windowFor(
-  id: string,
-  usedPercent: number | null,
-  resetsAt: number | null,
-  observed: boolean,
-): QuotaWindow {
-  const status: QuotaWindow["status"] =
-    !observed || usedPercent === null
-      ? "unknown"
-      : usedPercent >= 100
-        ? "exhausted"
-        : usedPercent >= NEAR_EXHAUSTION_PERCENT
-          ? "warning"
-          : "ok";
-  return { id, usedPercent: observed ? usedPercent : null, resetsAt, status };
 }
 
 function healthOf(status: string): SubscriptionConnection["health"] {
@@ -461,20 +435,9 @@ export async function loadLegacySubscriptionPlacementWorld(
               observedRefreshGeneration: row.version,
               source: "response_headers",
             };
-          } else if (provider === "xai" || exhaustedUntil !== null) {
-            const observed = epoch(row.quota_checked_at) !== null;
+          } else if (exhaustedUntil !== null) {
             quota = {
-              windows:
-                provider === "xai"
-                  ? [
-                      windowFor(
-                        "quota",
-                        row.quota_used_percent,
-                        epoch(row.quota_reset_at),
-                        observed,
-                      ),
-                    ]
-                  : [],
+              windows: [],
               modelCooldowns: {},
               exhaustedUntil,
               exhaustedKind: null,
@@ -587,7 +550,6 @@ export async function loadLegacySubscriptionPlacementWorld(
         : null;
       const cacheFacts: Record<string, CacheFacts> = {
         codex: { kind: "measured_idle_cutoff", cutoffMs: null },
-        xai: { kind: "measured_idle_cutoff", cutoffMs: null },
         claude: {
           kind: "exact_ttl",
           ttlMs: request.claudeCacheTtlMs ?? LEGACY_CLAUDE_CACHE_TTL_MS,
