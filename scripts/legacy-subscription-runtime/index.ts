@@ -1,8 +1,8 @@
 import { LEGACY_CODEX_RUNTIME } from "./codex";
-import type { LegacySubscriptionRuntime } from "./types";
+import type { LegacySubscriptionRetirement } from "./types";
 import { LEGACY_XAI_RUNTIME } from "./xai";
 
-export type { LegacyRuntimeException, LegacySubscriptionRuntime } from "./types";
+export type { LegacyRuntimeException, LegacySubscriptionRetirement } from "./types";
 export { LEGACY_CODEX_RUNTIME } from "./codex";
 export { LEGACY_XAI_RUNTIME } from "./xai";
 
@@ -11,7 +11,7 @@ export { LEGACY_XAI_RUNTIME } from "./xai";
  * provider's legacy runtime is deleted (Claude: C4) or when shared legacy
  * routines are dropped (R); the engine stays unchanged.
  */
-export const LEGACY_SUBSCRIPTION_RUNTIMES: readonly LegacySubscriptionRuntime[] = [
+export const LEGACY_SUBSCRIPTION_RETIREMENTS: readonly LegacySubscriptionRetirement[] = [
   LEGACY_CODEX_RUNTIME,
   LEGACY_XAI_RUNTIME,
 ];

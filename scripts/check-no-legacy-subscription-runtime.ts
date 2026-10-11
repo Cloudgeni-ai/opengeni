@@ -2,8 +2,8 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { parseSync } from "oxc-parser";
 import {
-  LEGACY_SUBSCRIPTION_RUNTIMES,
-  type LegacySubscriptionRuntime,
+  LEGACY_SUBSCRIPTION_RETIREMENTS,
+  type LegacySubscriptionRetirement,
 } from "./legacy-subscription-runtime";
 
 /**
@@ -50,7 +50,7 @@ export type LegacySubscriptionFinding = { file: string; line: number; message: s
 export function checkLegacySubscriptionSource(
   file: string,
   source: string,
-  runtimes: readonly LegacySubscriptionRuntime[] = LEGACY_SUBSCRIPTION_RUNTIMES,
+  runtimes: readonly LegacySubscriptionRetirement[] = LEGACY_SUBSCRIPTION_RETIREMENTS,
 ): LegacySubscriptionFinding[] {
   const result = parseSync(file, source);
   if (result.errors.length) return [{ file, line: 1, message: "Cannot parse runtime source" }];
@@ -154,7 +154,7 @@ const GUARD_SOURCES =
 
 export function checkNoLegacySubscriptionRuntime(
   root: string,
-  runtimes: readonly LegacySubscriptionRuntime[] = LEGACY_SUBSCRIPTION_RUNTIMES,
+  runtimes: readonly LegacySubscriptionRetirement[] = LEGACY_SUBSCRIPTION_RETIREMENTS,
 ): LegacySubscriptionFinding[] {
   return ["apps", "packages", "scripts"]
     .flatMap((dir) => files(join(root, dir)))
@@ -172,7 +172,7 @@ if (import.meta.main) {
   if (findings.length) process.exitCode = 1;
   else
     console.log(
-      `No executable legacy subscription decision state (${LEGACY_SUBSCRIPTION_RUNTIMES.map(
+      `No executable legacy subscription decision state (${LEGACY_SUBSCRIPTION_RETIREMENTS.map(
         (runtime) => runtime.name,
       ).join(", ")}); exact declared exceptions only.`,
     );

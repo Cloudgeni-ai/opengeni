@@ -3,9 +3,9 @@ import { readFileSync } from "node:fs";
 import { checkLegacySubscriptionSource } from "./check-no-legacy-subscription-runtime";
 import {
   LEGACY_CODEX_RUNTIME,
-  LEGACY_SUBSCRIPTION_RUNTIMES,
+  LEGACY_SUBSCRIPTION_RETIREMENTS,
   LEGACY_XAI_RUNTIME,
-  type LegacySubscriptionRuntime,
+  type LegacySubscriptionRetirement,
 } from "./legacy-subscription-runtime";
 
 const codex = (file: string, code: string) =>
@@ -20,13 +20,15 @@ describe("no-legacy subscription runtime guard: engine", () => {
       "utf8",
     );
     expect(engine).not.toMatch(/codex|xai|supergrok|claude/i);
-    expect(LEGACY_SUBSCRIPTION_RUNTIMES.map((runtime) => runtime.name)).toEqual([
+    expect(LEGACY_SUBSCRIPTION_RETIREMENTS.map((entry) => entry.id)).toEqual(["codex", "xai"]);
+    expect(LEGACY_SUBSCRIPTION_RETIREMENTS.map((runtime) => runtime.name)).toEqual([
       "Codex (M3 PR4)",
       "SuperGrok (M4 X4)",
     ]);
   });
   test("a new entry is enforced without changing the engine", () => {
-    const retired: LegacySubscriptionRuntime = {
+    const retired: LegacySubscriptionRetirement = {
+      id: "pool",
       name: "Example",
       identifiers: ["example_legacy_table"],
       patterns: [{ pattern: /mintExampleSubject\(\)/, message: "Retired example subject" }],

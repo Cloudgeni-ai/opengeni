@@ -1,4 +1,4 @@
-import type { LegacySubscriptionRuntime } from "./types";
+import type { LegacySubscriptionRetirement } from "./types";
 
 /**
  * Decision state retired by M3 PR4. The reset-redemption ledger is NOT here:
@@ -7,7 +7,8 @@ import type { LegacySubscriptionRuntime } from "./types";
  * retained. Only the codec-aware 0689 migration may read or decode the
  * retired credentials.
  */
-export const LEGACY_CODEX_RUNTIME: LegacySubscriptionRuntime = {
+export const LEGACY_CODEX_RUNTIME: LegacySubscriptionRetirement = {
+  id: "codex",
   name: "Codex (M3 PR4)",
   identifiers: [
     "codex_subscription_credentials",
