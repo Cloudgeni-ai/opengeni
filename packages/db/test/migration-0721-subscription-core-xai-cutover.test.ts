@@ -1731,7 +1731,7 @@ describe.skipIf(!realDb)(
               'xai_credential_leases', 'xai_session_account_pins', 'xai_capacity_waiters')
             AND p.polname LIKE '%\_closed\_%'
             AND p.polcmd NOT IN ('a', 'w')`;
-        expect(readBlocking).toEqual([]);
+        expect([...readBlocking]).toEqual([]);
         const [closed] = await owned.admin<{ total: number }[]>`
           SELECT count(*)::int AS total FROM pg_policy p JOIN pg_class c ON c.oid = p.polrelid
           WHERE c.relname IN ('xai_subscription_credentials', 'xai_rotation_settings',
