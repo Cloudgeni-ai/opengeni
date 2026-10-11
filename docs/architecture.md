@@ -79,6 +79,9 @@ validation active while restoring wide-session locking and compatibility writes.
 
 Task-tree [locking invariants](run-lifecycle.md).
 
+The macOS Connected Machine LaunchAgent starts in the installing user's home;
+explicit session folders remain authoritative. Service rendering is owned by
+`agent/crates/opengeni-agent-platform/src/service.rs`.
 Heartbeats refresh desktop availability without reconnecting or granting consent;
 see `docs/connected-machines.md`.
 

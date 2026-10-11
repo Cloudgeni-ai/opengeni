@@ -636,8 +636,9 @@ fn install_systemd(spec: &ServiceSpec, restart: bool) -> Result<(), String> {
 
 /// macOS: write the LaunchAgent plist and bootstrap it into the user's GUI session.
 fn install_launchd(spec: &ServiceSpec, restart: bool) -> Result<(), String> {
-    let plist_path = service::launchd_plist_path(&home()?);
-    let body = service::render_launchd_plist(spec);
+    let user_home = home()?;
+    let plist_path = service::launchd_plist_path(&user_home);
+    let body = service::render_launchd_plist(spec, &user_home).map_err(|e| e.to_string())?;
     let definition_changed =
         std::fs::read(&plist_path).map_or(true, |existing| existing != body.as_bytes());
     if let Some(parent) = plist_path.parent() {
