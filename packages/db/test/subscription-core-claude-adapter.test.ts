@@ -6,6 +6,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   CLAUDE_OAUTH_TOKEN_URL,
+  claudeSubscriptionCapacity,
+  emptyClaudeUsage,
+  mergeClaudeUsage,
   parseClaudeUsageHeaders,
   parseClaudeUsageResponse,
 } from "@opengeni/config";
@@ -16,6 +19,7 @@ import {
 } from "@opengeni/subscriptions";
 import { subscriptionCoreProviderIds } from "../src/subscription-core-providers";
 import { ClaudeSubscriptionReconnectRequired } from "../src/claude-subscription-tokens";
+import { LEGACY_CLAUDE_CACHE_TTL_MS } from "../src/legacy-subscription-world";
 import {
   decodeSubscriptionCoreClaudeCredential,
   decodeSubscriptionCoreClaudeQuota,
@@ -86,6 +90,35 @@ describe("Claude adapter", () => {
       ttlMs: 5 * 60 * 1000,
     });
     expect(SUBSCRIPTION_CORE_CLAUDE.adapter.credentialKind).toBe("oauth");
+  });
+
+  test("declares today's Claude timings, labels and limits", () => {
+    const { adapter, errors } = SUBSCRIPTION_CORE_CLAUDE;
+    expect(adapter.displayName).toBe("Claude");
+    // The legacy resolver refreshes once the token is within a minute of
+    // expiry (`resolveClaudeSubscriptionCredential`).
+    expect(adapter.refresh?.windowMs).toBe(60_000);
+    expect(adapter.refresh?.fallbackMs).toBe(60 * 60_000);
+    // The prompt-cache lifetime the legacy path sends (`cacheTtl: "5m"`).
+    expect(adapter.cacheFacts).toEqual({ kind: "exact_ttl", ttlMs: LEGACY_CLAUDE_CACHE_TTL_MS });
+    expect(adapter.health).toEqual({
+      // Claude's 403 never rotates accounts; this only bounds a forbidden
+      // outcome another path reports.
+      forbiddenQuarantineMs: 60 * 60_000,
+      entitlementCooldownMs: 24 * 60 * 60_000,
+      // A 429 without a retry time, and a limit without a known reset, are
+      // checked again after a minute (the legacy capacity recheck).
+      rateLimitFallbackMs: 60_000,
+      exhaustedFallbackMs: 60_000,
+    });
+    expect(adapter.modelPolicyProviderId).toBe("organization-claude-subscription");
+    for (const error of [
+      errors.leaseLost(),
+      errors.accessLost(),
+      errors.sourceDisconnected(),
+      errors.requestOutcomeUnknown(),
+    ])
+      expect(error.message).toContain("Claude");
   });
 
   test("round-trips OAuth and setup-token credentials in the legacy secret format", () => {
@@ -184,6 +217,8 @@ describe("Claude adapter", () => {
     const second = await adapter.refresh!.rotate(first.credential);
     expect(second.credential.oauth?.refreshToken).toBe("refresh-two");
     expect(second.credential.token).toBe("sk-ant-oat01-access-three");
+    // The granted scopes are recorded as the token endpoint reports them.
+    expect(second.credential.oauth?.scopes).toEqual(["user:profile", "user:inference"]);
     expect(endpoint.calls.map((call) => call.url)).toEqual([
       CLAUDE_OAUTH_TOKEN_URL,
       CLAUDE_OAUTH_TOKEN_URL,
@@ -320,35 +355,294 @@ describe("Claude usage in the shared quota model", () => {
     ]);
   });
 
-  test("paid overage the provider allows keeps a rejected plan usable", () => {
-    const base = {
-      "anthropic-ratelimit-unified-status": "rejected",
-      "anthropic-ratelimit-unified-reset": String(at(3600)),
-    };
-    const allowed = decode(
-      parseClaudeUsageHeaders(
-        new Headers({ ...base, "anthropic-ratelimit-unified-overage-status": "allowed" }),
-        now,
-        "claude-opus-5-5",
-      )!,
+  // Today's capacity rule for one model at one instant, over the same
+  // observation (`mergeClaudeUsage` into an empty reading, as the legacy
+  // observer stores it).
+  const legacyAvailable = (
+    observation: NonNullable<ReturnType<typeof parseClaudeUsageHeaders>>,
+    model: string,
+    time: number,
+  ) =>
+    claudeSubscriptionCapacity(
+      mergeClaudeUsage(emptyClaudeUsage(1), observation),
+      model,
+      new Date(time),
+    ).available;
+  const coreAvailable = (decoded: ReturnType<typeof decode>, model: string, time: number) =>
+    quotaCapacity(quota(decoded), time).kind !== "exhausted" &&
+    ["organization-claude-subscription", "workspace-claude-subscription"].every(
+      (prefix) => modelCooldownUntil(quota(decoded), `${prefix}/${model}`, time) === null,
     );
-    expect(allowed.modelCooldowns).toEqual({});
-    expect(allowed.exhaustedUntil).toBeNull();
-    // A rejected overage with an earlier reset is checked again at that reset.
-    const rejected = decode(
+  const offsets = [0, 300, 660, 1801, 3601, 7201, 90_000];
+  /** Same answer as today's rule for each model and instant. */
+  const expectParity = (
+    observation: NonNullable<ReturnType<typeof parseClaudeUsageHeaders>>,
+    compared: readonly string[] = models,
+  ) => {
+    const decoded = decode(observation);
+    for (const model of compared)
+      for (const offset of offsets) {
+        const time = now.getTime() + offset * 1000;
+        expect({ model, offset, available: coreAvailable(decoded, model, time) }).toEqual({
+          model,
+          offset,
+          available: legacyAvailable(observation, model, time),
+        });
+      }
+    return decoded;
+  };
+
+  test("decodes realistic responses as today's capacity rule judges them", () => {
+    const rejected5h = {
+      "anthropic-ratelimit-unified-status": "rejected",
+      "anthropic-ratelimit-unified-representative-claim": "five_hour",
+      "anthropic-ratelimit-unified-reset": String(at(1800)),
+      "anthropic-ratelimit-unified-5h-utilization": "1.0",
+      "anthropic-ratelimit-unified-5h-status": "rejected",
+      "anthropic-ratelimit-unified-5h-reset": String(at(1800)),
+      "anthropic-ratelimit-unified-7d-utilization": "0.4",
+      "anthropic-ratelimit-unified-7d-status": "allowed",
+      "anthropic-ratelimit-unified-7d-reset": String(at(86_400)),
+    };
+    // The 5-hour plan limit with no overage: every model waits for its reset.
+    expectParity(parseClaudeUsageHeaders(new Headers(rejected5h), now, "claude-sonnet-5-5")!);
+    // The overage was refused with a reset ten minutes out: checked again then.
+    const refused = expectParity(
       parseClaudeUsageHeaders(
         new Headers({
-          ...base,
+          ...rejected5h,
           "anthropic-ratelimit-unified-overage-status": "rejected",
           "anthropic-ratelimit-unified-overage-reset": String(at(600)),
+        }),
+        now,
+        "claude-sonnet-5-5",
+      )!,
+      ["claude-sonnet-5-5"],
+    );
+    expect(coreAvailable(refused, "claude-sonnet-5-5", now.getTime() + 660_000)).toBe(true);
+    // The Opus 7-day limit: Opus waits, the other families dispatch.
+    expectParity(
+      parseClaudeUsageHeaders(
+        new Headers({
+          "anthropic-ratelimit-unified-status": "rejected",
+          "anthropic-ratelimit-unified-representative-claim": "seven_day_opus",
+          "anthropic-ratelimit-unified-reset": String(at(7200)),
+          "anthropic-ratelimit-unified-7d-opus-utilization": "1.0",
+          "anthropic-ratelimit-unified-7d-opus-status": "rejected",
+          "anthropic-ratelimit-unified-7d-opus-reset": String(at(7200)),
+          "anthropic-ratelimit-unified-5h-utilization": "0.2",
+          "anthropic-ratelimit-unified-5h-status": "allowed",
         }),
         now,
         "claude-opus-5-5",
       )!,
     );
-    expect(rejected.modelCooldowns["workspace-claude-subscription/claude-opus-5-5"]).toBe(
-      at(600) * 1000,
+    // Sonnet was allowed while the Opus window is full: only Opus waits.
+    expectParity(
+      parseClaudeUsageHeaders(
+        new Headers({
+          "anthropic-ratelimit-unified-status": "allowed",
+          "anthropic-ratelimit-unified-representative-claim": "five_hour",
+          "anthropic-ratelimit-unified-5h-utilization": "0.3",
+          "anthropic-ratelimit-unified-7d-opus-utilization": "1.0",
+          "anthropic-ratelimit-unified-7d-opus-status": "rejected",
+          "anthropic-ratelimit-unified-7d-opus-reset": String(at(7200)),
+        }),
+        now,
+        "claude-sonnet-5-5",
+      )!,
     );
+    // A rejection without a model whose limit is the Sonnet window: only Sonnet waits.
+    const sonnetOnly = expectParity(
+      parseClaudeUsageHeaders(
+        new Headers({
+          "anthropic-ratelimit-unified-status": "rejected",
+          "anthropic-ratelimit-unified-representative-claim": "seven_day_sonnet",
+          "anthropic-ratelimit-unified-reset": String(at(3600)),
+        }),
+        now,
+      )!,
+    );
+    expect(sonnetOnly.exhaustedUntil).toBeNull();
+  });
+
+  test("paid overage the provider allows keeps a rejected plan usable", () => {
+    const fiveHour = {
+      "anthropic-ratelimit-unified-status": "rejected",
+      "anthropic-ratelimit-unified-representative-claim": "five_hour",
+      "anthropic-ratelimit-unified-reset": String(at(1800)),
+      "anthropic-ratelimit-unified-5h-utilization": "1.0",
+      "anthropic-ratelimit-unified-5h-status": "rejected",
+      "anthropic-ratelimit-unified-5h-reset": String(at(1800)),
+      "anthropic-ratelimit-unified-overage-status": "allowed",
+    };
+    const allowed = expectParity(
+      parseClaudeUsageHeaders(new Headers(fiveHour), now, "claude-sonnet-5-5")!,
+      ["claude-sonnet-5-5"],
+    );
+    expect(allowed.modelCooldowns).toEqual({});
+    expect(allowed.exhaustedUntil).toBeNull();
+    expect(allowed.windows[0]).toMatchObject({ id: "five_hour", status: "warning" });
+    // Overage is the account's own setting, so it covers every model of the
+    // account (today's rule judges only the model the response was for).
+    expect(coreAvailable(allowed, "claude-opus-5-5", now.getTime())).toBe(true);
+    const opus = expectParity(
+      parseClaudeUsageHeaders(
+        new Headers({
+          "anthropic-ratelimit-unified-status": "rejected",
+          "anthropic-ratelimit-unified-representative-claim": "seven_day_opus",
+          "anthropic-ratelimit-unified-reset": String(at(7200)),
+          "anthropic-ratelimit-unified-7d-opus-utilization": "1.0",
+          "anthropic-ratelimit-unified-7d-opus-status": "rejected",
+          "anthropic-ratelimit-unified-7d-opus-reset": String(at(7200)),
+          "anthropic-ratelimit-unified-overage-status": "allowed",
+        }),
+        now,
+        "claude-opus-5-5",
+      )!,
+      ["claude-opus-5-5"],
+    );
+    expect(opus.modelCooldowns).toEqual({});
+    // The 7-day plan limit served from an allowed (warning) overage.
+    expectParity(
+      parseClaudeUsageHeaders(
+        new Headers({
+          "anthropic-ratelimit-unified-status": "rejected",
+          "anthropic-ratelimit-unified-representative-claim": "seven_day",
+          "anthropic-ratelimit-unified-reset": String(at(5 * 86_400)),
+          "anthropic-ratelimit-unified-7d-utilization": "1.0",
+          "anthropic-ratelimit-unified-overage-status": "allowed_warning",
+          "anthropic-ratelimit-unified-overage-reset": String(at(20 * 86_400)),
+        }),
+        now,
+        "claude-sonnet-5-5",
+      )!,
+      ["claude-sonnet-5-5"],
+    );
+    // An overage allowance whose reset has already passed covers nothing.
+    const lapsed = expectParity(
+      parseClaudeUsageHeaders(
+        new Headers({
+          ...fiveHour,
+          "anthropic-ratelimit-unified-overage-reset": String(at(-10)),
+        }),
+        now,
+        "claude-sonnet-5-5",
+      )!,
+    );
+    expect(lapsed.windows[0]).toMatchObject({ id: "five_hour", status: "exhausted" });
+  });
+
+  test("the model a response was allowed for dispatches; the others wait for the account limit", () => {
+    // Allowed for Sonnet while the 5-hour window reads full without a status.
+    const fullWindow = {
+      "anthropic-ratelimit-unified-status": "allowed",
+      "anthropic-ratelimit-unified-reset": String(at(1800)),
+      "anthropic-ratelimit-unified-5h-utilization": "1.0",
+      "anthropic-ratelimit-unified-5h-reset": String(at(1800)),
+    };
+    const decoded = expectParity(
+      parseClaudeUsageHeaders(new Headers(fullWindow), now, "claude-sonnet-5-5")!,
+    );
+    expect(decoded.exhaustedUntil).toBeNull();
+    expect(decoded.windows[0]).toMatchObject({ id: "five_hour", status: "warning" });
+    // An allowance that ends before the limit (here, unknown: a minute) does
+    // not spare its model: it waits from now, where today's rule still
+    // dispatches it for that minute (a recorded difference toward waiting).
+    const { "anthropic-ratelimit-unified-reset": _reset, ...shortAllowance } = fullWindow;
+    const short = parseClaudeUsageHeaders(new Headers(shortAllowance), now, "claude-sonnet-5-5")!;
+    expect(legacyAvailable(short, "claude-sonnet-5-5", now.getTime())).toBe(true);
+    expect(coreAvailable(decode(short), "claude-sonnet-5-5", now.getTime())).toBe(false);
+    for (const offset of offsets.filter((value) => value >= 60))
+      for (const model of models)
+        expect(coreAvailable(decode(short), model, now.getTime() + offset * 1000)).toBe(
+          legacyAvailable(short, model, now.getTime() + offset * 1000),
+        );
+    // A window that reports `allowed` at its limit is not a limit.
+    expectParity(
+      parseClaudeUsageHeaders(
+        new Headers({
+          "anthropic-ratelimit-unified-5h-utilization": "1.0",
+          "anthropic-ratelimit-unified-5h-status": "allowed",
+          "anthropic-ratelimit-unified-5h-reset": String(at(1800)),
+        }),
+        now,
+      )!,
+    );
+  });
+
+  test("a family limit reaches the response's own model even when the list misses it", () => {
+    const observation = parseClaudeUsageHeaders(
+      new Headers({
+        "anthropic-ratelimit-unified-7d-opus-utilization": "1.0",
+        "anthropic-ratelimit-unified-7d-opus-reset": String(at(7200)),
+      }),
+      now,
+      "claude-opus-4-1",
+    )!;
+    expectParity(observation, ["claude-opus-4-1", ...models]);
+  });
+
+  test("request restrictions limit their model unless a later allowance lifts it", () => {
+    const restriction = (
+      upstreamModelId: string | null,
+      status: "rejected" | "allowed",
+      offset: number,
+      claim: "five_hour" | "seven_day_opus" | null = null,
+    ) => ({
+      status,
+      resetsAt: status === "rejected" ? new Date(at(3600) * 1000).toISOString() : null,
+      representativeClaim: claim,
+      overageStatus: null,
+      overageResetsAt: null,
+      upstreamModelId,
+      observedAt: new Date(now.getTime() + offset).toISOString(),
+    });
+    const observation = {
+      windows: [],
+      observedAt: new Date(now.getTime() + 10).toISOString(),
+      source: "response_headers" as const,
+      requestRestrictions: [
+        restriction("claude-opus-5-5", "rejected", 0),
+        restriction("claude-haiku-5-5", "rejected", 0),
+        restriction("claude-haiku-5-5", "allowed", 5),
+      ],
+    };
+    const decoded = decode(observation);
+    expect(Object.keys(decoded.modelCooldowns).sort()).toEqual([
+      "organization-claude-subscription/claude-opus-5-5",
+      "workspace-claude-subscription/claude-opus-5-5",
+    ]);
+    expect(decoded.exhaustedUntil).toBeNull();
+    // An account-wide restriction without a model limits the connection.
+    const account = decode({
+      ...observation,
+      requestRestrictions: [restriction(null, "rejected", 0, "five_hour")],
+    });
+    expect(account.exhaustedUntil).toBe(at(3600) * 1000);
+  });
+
+  test("a limit whose reset has passed leaves no cooldown", () => {
+    const decoded = decode(
+      parseClaudeUsageResponse(
+        {
+          seven_day_opus: {
+            utilization: 100,
+            resets_at: new Date(now.getTime() - 1000).toISOString(),
+          },
+        },
+        now,
+      )!,
+    );
+    expect(decoded.modelCooldowns).toEqual({});
+    // Just under the full threshold is not a limit.
+    const nearly = decode(
+      parseClaudeUsageHeaders(
+        new Headers({ "anthropic-ratelimit-unified-5h-utilization": "0.999" }),
+        now,
+      )!,
+    );
+    expect(nearly.windows[0]).toMatchObject({ id: "five_hour", status: "ok" });
   });
 
   test("a rejection for an unknown model limits the whole connection; unknown resets recheck in a minute", () => {

@@ -10,25 +10,30 @@
  * Run this file in its own process: the registration below replaces module
  * bindings for the whole process.
  */
-import { expect, mock } from "bun:test";
+import { afterAll, expect, mock } from "bun:test";
 import { createHmac } from "node:crypto";
 import {
   subscriptionCoreClaudeProvider,
   type SubscriptionCoreClaudeCredential,
 } from "../src/subscription-core-claude-adapter";
-import {
-  installNetworkDenialGuard,
-  ScriptedApiKeyUpstream,
-} from "./fixtures/subscription-core-fake-api-key";
+import { installNetworkDenialGuard } from "./fixtures/subscription-core-fake-api-key";
+import { ScriptedClaudeUpstream } from "./fixtures/subscription-core-claude-upstream";
 import {
   admitTestSubscriptionCoreProvider,
   testSubscriptionCoreProviderModules,
 } from "./helpers/subscription-core-test-provider";
 
+// Any token call fails the run: the refresh would swallow a throwing fetch
+// as a retryable failure, so the calls are counted and checked at the end.
+let tokenCalls = 0;
 const provider = subscriptionCoreClaudeProvider({
   fetch: (async () => {
+    tokenCalls += 1;
     throw new Error("a setup token must never be refreshed");
   }) as unknown as typeof fetch,
+});
+afterAll(() => {
+  expect(tokenCalls).toBe(0);
 });
 
 for (const [specifier, factory] of testSubscriptionCoreProviderModules(provider))
@@ -36,9 +41,11 @@ for (const [specifier, factory] of testSubscriptionCoreProviderModules(provider)
 const { describeSubscriptionCoreConformance } =
   await import("./helpers/subscription-core-conformance");
 
-const upstream = new ScriptedApiKeyUpstream<SubscriptionCoreClaudeCredential>(
-  (credential) => credential.token,
-);
+const upstream = new ScriptedClaudeUpstream([
+  "claude-conformance-a",
+  "claude-conformance-b",
+  "claude-conformance-c",
+]);
 
 describeSubscriptionCoreConformance<SubscriptionCoreClaudeCredential>({
   name: "Claude subscription (setup token)",
@@ -86,8 +93,9 @@ describeSubscriptionCoreConformance<SubscriptionCoreClaudeCredential>({
     for (const list of lists) expect(list.definition).toContain("'claude'::text");
     await admitTestSubscriptionCoreProvider(shared.admin, provider);
   },
-  // Setup tokens record no expiry.
+  // Setup tokens record no expiry, and never renew.
   expiresAt: () => null,
+  renews: false,
   upstream,
   denyNetwork: installNetworkDenialGuard,
 });

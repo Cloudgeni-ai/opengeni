@@ -10,10 +10,13 @@
  * to): the same `ClaudeSubscriptionCredential` JSON object the legacy
  * `claude_subscription_credentials` table stores,
  * `{ version: 1, token, identity: { accountUuid, deviceId }, oauth? }`. A
- * credential with `oauth` is stored as `claude_oauth_v1` and renews through
- * the OAuth refresh; one without it is a pasted setup token
+ * credential with `oauth` has the format `claude_oauth_v1` and renews
+ * through the OAuth refresh; one without it is a pasted setup token
  * (`claude_setup_token_v1`), which never renews: once Claude refuses it the
- * shared refresh marks the connection needs-relogin. `provider_account_id` is
+ * shared refresh marks the connection needs-relogin. The format is derived
+ * from the decoded secret (`credential.format`) whenever the core decides
+ * renewal; the stored `credential_format` column holds the encryption
+ * envelope version the shared writers record. `provider_account_id` is
  * the Claude account UUID, else the `oauth:`/`setup:` HMAC id the writers
  * already derive; setup tokens report no email or plan.
  *
@@ -26,6 +29,7 @@ import { ClaudeSubscriptionCredential, type ClaudeUsageObservation } from "@open
 import type { z } from "zod";
 import type { SubscriptionCoreAdapter, SubscriptionQuota } from "@opengeni/subscriptions";
 import {
+  claudeRefreshedCredential,
   ClaudeSubscriptionReconnectRequired,
   requestClaudeTokenRefresh,
 } from "./claude-subscription-tokens";
@@ -34,9 +38,9 @@ import type { SubscriptionCoreProvider } from "./subscription-core/provider";
 
 /** Claude's provider id on the shared core and in the legacy tables. */
 export const SUBSCRIPTION_CORE_CLAUDE_PROVIDER = "claude";
-/** The `credential_format` of an OAuth sign-in, which renews. */
+/** The credential format of an OAuth sign-in, which renews (derived from the decoded secret). */
 export const SUBSCRIPTION_CORE_CLAUDE_OAUTH_FORMAT = "claude_oauth_v1";
-/** The `credential_format` of a pasted setup token, which never renews. */
+/** The credential format of a pasted setup token, which never renews. */
 export const SUBSCRIPTION_CORE_CLAUDE_SETUP_TOKEN_FORMAT = "claude_setup_token_v1";
 /** Refresh this long before the OAuth token expires (the legacy resolver's margin). */
 export const SUBSCRIPTION_CORE_CLAUDE_REFRESH_WINDOW_MS = 60 * 1000;
@@ -81,7 +85,7 @@ export function decodeSubscriptionCoreClaudeCredential(
     parsed = JSON.parse(plaintext);
   } catch {
     // No cause: a JSON.parse message quotes the plaintext it failed on.
-    throw new Error("A core Claude credential could not be decrypted");
+    throw new Error("A core Claude credential is not valid JSON");
   }
   const result = ClaudeSubscriptionCredential.safeParse(parsed);
   if (!result.success) {
@@ -156,19 +160,9 @@ export function subscriptionCoreClaudeAdapter(
         // The OAuth call has its own deadline and classifies a revoked grant
         // as ClaudeSubscriptionReconnectRequired, anything else as retryable.
         const tokens = await requestClaudeTokenRefresh(credential, deps.fetch ?? globalThis.fetch);
-        const expiresAt = new Date(now() + tokens.expires_in * 1000);
-        const rotated = ClaudeSubscriptionCredential.parse({
-          ...credential,
-          token: tokens.access_token,
-          oauth: {
-            ...credential.oauth,
-            refreshToken: tokens.refresh_token ?? credential.oauth.refreshToken,
-            expiresAt: expiresAt.toISOString(),
-            scopes: tokens.scope.split(/\s+/).filter(Boolean),
-          },
-        });
+        const rotated = claudeRefreshedCredential(credential, tokens, now());
         // Claude's refresh reports no plan; the recorded plan stays.
-        return { credential: rotated, expiresAt, planType: null };
+        return { ...rotated, planType: null };
       },
       reloginMessage(error) {
         return error instanceof ClaudeSubscriptionReconnectRequired ? error.message : null;
@@ -194,8 +188,15 @@ const allowed = (status: string | null | undefined) =>
 /**
  * One Claude usage observation (response headers or the usage endpoint)
  * in the shared quota model, with the legacy capacity rules
- * (`claudeSubscriptionCapacity`):
+ * (`claudeSubscriptionCapacity`, applied to the one response observed):
  *
+ * - Paid overage the response allowed covers every plan limit it reports:
+ *   a full account window is a `warning`, and no family or request limit
+ *   blocks. Overage is the Claude account's own setting, so it covers every
+ *   model of the account.
+ * - A rejected request whose overage was refused with a known reset is
+ *   checked again at that reset: every block the response reports ends no
+ *   later than it.
  * - The account windows (five hours, seven days) decide the connection's
  *   capacity: `rejected`, or full without a status, is `exhausted` until its
  *   reset (a minute when the reset is unknown).
@@ -203,14 +204,19 @@ const allowed = (status: string | null | undefined) =>
  *   or rejected it becomes a cooldown of each listed model of the family, and
  *   the window itself is reported with `unknown` status so it never decides
  *   the account's capacity. The paid overage windows never block the plan.
- * - A rejected request limits the model it was made for (a cooldown of that
- *   model's product ids), or the whole connection when the model is unknown
- *   (`exhaustedUntil`, kind `quota`), unless the provider allowed paid
- *   overage for it. A rejected overage with an earlier reset is checked at
- *   that reset.
+ * - A rejected request, and each rejected request restriction the
+ *   observation carries (unless a later allowance of the same model lifts
+ *   it), limits the model it was made for (a cooldown of that model's
+ *   product ids); without a model, the family its limit names, else the
+ *   whole connection (`exhaustedUntil`, kind `quota`).
+ * - The model a response was allowed for dispatches whatever else that
+ *   response reports, until the allowance's reset (a limit outlasting it
+ *   limits that model too, from now): an account limit beside it cools the
+ *   listed models instead of the connection, and the window is a `warning`.
  *
- * `upstreamModelIds` lists the Claude models the organization offers, so a
- * family limit reaches each of them.
+ * `upstreamModelIds` must list every Claude model the connection can serve
+ * (the organization's catalog when decoded), so a family limit reaches each
+ * of them; the response's own model is always included.
  */
 export function decodeSubscriptionCoreClaudeQuota(input: {
   observation: ClaudeUsageObservation;
@@ -219,28 +225,70 @@ export function decodeSubscriptionCoreClaudeQuota(input: {
 }): Omit<SubscriptionQuota, "revision"> {
   const { observation } = input;
   const observedAt = Date.parse(observation.observedAt);
-  const unknownReset = observedAt + SUBSCRIPTION_CORE_CLAUDE_UNKNOWN_RESET_MS;
+  const request = observation.requestStatus ?? null;
+  const rejected = request?.status === "rejected";
+  const overageReset = request?.overageResetsAt ? Date.parse(request.overageResetsAt) : null;
+  const overageCovers =
+    rejected && allowed(request.overageStatus) && (overageReset ?? Infinity) > observedAt;
+  const recheckAt =
+    rejected && request.overageStatus === "rejected" ? (overageReset ?? Infinity) : Infinity;
+  const until = (reset: string | null, at: string) =>
+    Math.min(
+      reset === null
+        ? Date.parse(at) + SUBSCRIPTION_CORE_CLAUDE_UNKNOWN_RESET_MS
+        : Date.parse(reset),
+      recheckAt,
+    );
+  // The model this response was allowed for dispatches whatever else it
+  // reports, until the allowance's own reset (a minute when unknown). A
+  // limit that outlasts the allowance limits that model too, from now.
+  const spared =
+    request && allowed(request.status) ? (request.upstreamModelId ?? undefined) : undefined;
+  const allowanceEnd =
+    spared === undefined
+      ? -Infinity
+      : request?.resetsAt
+        ? Date.parse(request.resetsAt)
+        : observedAt + SUBSCRIPTION_CORE_CLAUDE_UNKNOWN_RESET_MS;
+  // The response's own model is limited by its family's window even when the
+  // listed catalog misses it.
+  const listed = [
+    ...new Set([
+      ...input.upstreamModelIds,
+      ...(request?.upstreamModelId ? [request.upstreamModelId] : []),
+    ]),
+  ];
   const modelCooldowns: Record<string, number> = {};
-  const cool = (upstreamModelId: string, until: number) => {
-    if (until <= observedAt) return;
+  const cool = (upstreamModelId: string, end: number) => {
+    if (end <= observedAt || (upstreamModelId === spared && end <= allowanceEnd)) return;
     for (const modelId of subscriptionCoreClaudeProductModelIds(upstreamModelId)) {
-      modelCooldowns[modelId] = Math.max(modelCooldowns[modelId] ?? until, until);
+      modelCooldowns[modelId] = Math.max(modelCooldowns[modelId] ?? end, end);
     }
   };
+  let exhaustedUntil: number | null = null;
+  const block = (model: string | null, claim: string | null, end: number) => {
+    const family = claim === null ? undefined : FAMILY_WINDOWS[claim];
+    if (model !== null) cool(model, end);
+    else if (family || spared !== undefined) {
+      // A family limit, or an account limit beside an allowed model: every
+      // other listed model it covers.
+      for (const id of listed) if (!family || family.test(id)) cool(id, end);
+    } else if (end > observedAt) exhaustedUntil = Math.max(exhaustedUntil ?? end, end);
+  };
   const windows = observation.windows.map((window) => {
-    const resetsAt = window.resetsAt === null ? null : Date.parse(window.resetsAt);
     const full =
-      window.status === "rejected" || (window.status === null && (window.usedPercent ?? 0) >= 100);
-    const family = FAMILY_WINDOWS[window.id];
-    if (family && full) {
-      for (const model of input.upstreamModelIds)
-        if (family.test(model)) cool(model, resetsAt ?? unknownReset);
-    }
-    const status = !ACCOUNT_WINDOWS.has(window.id)
+      !overageCovers &&
+      (window.status === "rejected" ||
+        (window.status === null && (window.usedPercent ?? 0) >= 100));
+    const resetsAt = window.resetsAt === null ? null : Date.parse(window.resetsAt);
+    const account = ACCOUNT_WINDOWS.has(window.id);
+    if (full && (!account || spared !== undefined))
+      block(null, window.id, until(window.resetsAt, window.observedAt));
+    const status = !account
       ? ("unknown" as const)
-      : full
+      : full && spared === undefined
         ? ("exhausted" as const)
-        : window.status === "allowed_warning"
+        : full || overageCovers || window.status === "allowed_warning"
           ? ("warning" as const)
           : window.status === "allowed" || window.usedPercent !== null
             ? ("ok" as const)
@@ -248,19 +296,33 @@ export function decodeSubscriptionCoreClaudeQuota(input: {
     return {
       id: window.id,
       usedPercent: window.usedPercent,
-      resetsAt: status === "exhausted" ? (resetsAt ?? unknownReset) : resetsAt,
+      resetsAt: status === "exhausted" ? until(window.resetsAt, window.observedAt) : resetsAt,
       status,
     };
   });
-  let exhaustedUntil: number | null = null;
-  const request = observation.requestStatus;
-  if (request?.status === "rejected" && !allowed(request.overageStatus)) {
-    let until = request.resetsAt === null ? unknownReset : Date.parse(request.resetsAt);
-    if (request.overageStatus === "rejected" && request.overageResetsAt !== null) {
-      until = Math.min(until, Date.parse(request.overageResetsAt));
-    }
-    if (request.upstreamModelId !== null) cool(request.upstreamModelId, until);
-    else if (until > observedAt) exhaustedUntil = until;
+  if (rejected && !overageCovers) {
+    block(
+      request.upstreamModelId,
+      request.representativeClaim,
+      until(request.resetsAt, request.observedAt),
+    );
+  }
+  const restrictions = observation.requestRestrictions ?? [];
+  for (const item of restrictions) {
+    if (item.status !== "rejected") continue;
+    // Restrictions carry no overage of their own: the response's allowed
+    // overage covers those it postdates, and a later allowance of the same
+    // model lifts its restriction.
+    if (overageCovers && item.observedAt <= request.observedAt) continue;
+    const lifted = restrictions.some(
+      (other) =>
+        item.upstreamModelId !== null &&
+        other.upstreamModelId === item.upstreamModelId &&
+        allowed(other.status) &&
+        other.observedAt > item.observedAt,
+    );
+    if (!lifted)
+      block(item.upstreamModelId, item.representativeClaim, until(item.resetsAt, item.observedAt));
   }
   return {
     windows,

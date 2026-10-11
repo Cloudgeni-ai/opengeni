@@ -13,7 +13,7 @@
  * used, and the OAuth refresh goes to a scripted token endpoint through the
  * adapter's own refresh call (`requestClaudeTokenRefresh`). Claude's refusal
  * classification is the worker's (C1b); the suite's scripted classification
- * is used here.
+ * is used here. Usage readings go through the Claude usage decoder.
  *
  * Run this file in its own process: the registration below replaces module
  * bindings for the whole process.
@@ -25,10 +25,8 @@ import {
   subscriptionCoreClaudeProvider,
   type SubscriptionCoreClaudeCredential,
 } from "../src/subscription-core-claude-adapter";
-import {
-  installNetworkDenialGuard,
-  ScriptedApiKeyUpstream,
-} from "./fixtures/subscription-core-fake-api-key";
+import { installNetworkDenialGuard } from "./fixtures/subscription-core-fake-api-key";
+import { ScriptedClaudeUpstream } from "./fixtures/subscription-core-claude-upstream";
 import {
   admitTestSubscriptionCoreProvider,
   testSubscriptionCoreProviderModules,
@@ -57,9 +55,11 @@ for (const [specifier, factory] of testSubscriptionCoreProviderModules(provider)
 const { describeSubscriptionCoreConformance } =
   await import("./helpers/subscription-core-conformance");
 
-const upstream = new ScriptedApiKeyUpstream<SubscriptionCoreClaudeCredential>(
-  (credential) => credential.token,
-);
+const upstream = new ScriptedClaudeUpstream([
+  "claude-conformance-a",
+  "claude-conformance-b",
+  "claude-conformance-c",
+]);
 
 const accountUuid = (label: string) =>
   new Bun.CryptoHasher("sha256")
@@ -119,6 +119,7 @@ describeSubscriptionCoreConformance<SubscriptionCoreClaudeCredential>({
     await admitTestSubscriptionCoreProvider(shared.admin, provider);
   },
   expiresAt: () => new Date(Date.now() + 8 * 60 * 60 * 1000),
+  renews: true,
   upstream,
   denyNetwork: installNetworkDenialGuard,
 });

@@ -193,6 +193,11 @@ export type SubscriptionCoreConformanceSubject<Credential> = {
   foreignProvider: string;
   /** Expiry stored with a fresh credential (null for one that never expires). */
   expiresAt(): Date | null;
+  /**
+   * Whether this subject's credentials are expected to renew; the suite
+   * checks the adapter agrees (a subject without it takes the adapter's word).
+   */
+  renews?: boolean;
   /** Test-database setup run once as the owner (for example a test registration). */
   prepareDatabase?(shared: SharedTestDatabase): Promise<void>;
   /** The scripted upstream all traffic goes to (started by the suite). */
@@ -225,6 +230,10 @@ export function describeSubscriptionCoreConformance<Credential>(
   const renews =
     subscriptionCoreCredentialRefresher(provider.adapter, subject.credential("renewal-probe")) !==
     null;
+  if (subject.renews !== undefined && subject.renews !== renews)
+    throw new Error(
+      `The conformance subject expects credentials that ${subject.renews ? "renew" : "never renew"}`,
+    );
   const m0 = subject.models[0]!;
   const m1 = subject.models[1]!;
   const m2 = subject.models[2]!;

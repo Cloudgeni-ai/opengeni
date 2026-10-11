@@ -3830,11 +3830,17 @@ Facts the adapter declares, each read from today's Claude path:
 - Credential. The stored plaintext is the legacy secret object unchanged
   (`ClaudeSubscriptionCredential`: `version`, `token`, `identity
   {accountUuid, deviceId}`, optional `oauth {refreshToken, expiresAt,
-  scopes}`), so C3 copies it without rewriting. `credential_format` is
-  `claude_oauth_v1` with `oauth`, else `claude_setup_token_v1`.
-  `capabilitiesFor` renews only `claude_oauth_v1`; any other format,
-  including one a newer binary might write, never refreshes (fail closed).
-  The embedded expiry is `oauth.expiresAt`; a setup token has none.
+  scopes}`), so C3 copies it without rewriting. The credential format is
+  `claude_oauth_v1` with `oauth`, else `claude_setup_token_v1`, always
+  derived from the decoded secret (`credential.format`) when the core
+  decides renewal. `capabilitiesFor` renews only `claude_oauth_v1`; any
+  other format, including one a newer binary might write, never refreshes
+  (fail closed). The stored `credential_format` column is not read for that
+  decision: the shared connect and reconnect writers record the encryption
+  envelope version there (`v1`, as for Codex), so nothing may treat the
+  column as the Claude format; the `capabilitiesFor` contract text in the
+  shared adapter interface is corrected with the C1a call sites. The
+  embedded expiry is `oauth.expiresAt`; a setup token has none.
 - Refresh. The legacy OAuth call (`requestClaudeTokenRefresh`, ten-second
   deadline), 60 seconds before expiry as the legacy resolver does. A 401 or
   `invalid_grant`, or a response missing a required scope, is a relogin;
@@ -3852,21 +3858,60 @@ Facts the adapter declares, each read from today's Claude path:
   unused: Claude's 403 classifies as `fatal` (decision 7).
 - Usage in the shared quota model (`decodeSubscriptionCoreClaudeQuota`, for
   response headers and the usage endpoint alike), preserving
-  `claudeSubscriptionCapacity`: the five-hour and seven-day windows decide
-  the connection's capacity (`rejected`, or full without a status, is
-  `exhausted` until the reset, a minute when unknown). A model-family window
-  (Opus, Sonnet) never decides the account: when full or rejected it becomes
-  a cooldown of each of the organization's models of that family, and is
-  reported with `unknown` status. The paid overage windows never block. A
-  rejected request cools the model it was made for, or exhausts the
-  connection (kind `quota`) when the model is unknown, unless the provider
-  allowed overage; a rejected overage with an earlier reset is checked then.
-  Cooldowns are keyed by product model id under both Claude prefixes
-  (`organization-claude-subscription/…`, `workspace-claude-subscription/…`).
-  Two deliberate differences, both toward waiting: a later allowed response
-  does not end a running cooldown early (the shared model never shortens a
-  cooldown; the reset or a usage reading ends it), and an observation
-  replaces the stored windows instead of merging them per window.
+  `claudeSubscriptionCapacity` for the one response observed (a unit test
+  compares both on realistic headers, per model, across the resets):
+  - Paid overage the response allowed covers every plan limit it reports: a
+    full account window becomes a `warning` and no family or request limit
+    blocks. Today's rule grants this only to the model the response was
+    for; overage is the Claude account's own setting, so the core grants it
+    to every model of the account (deliberate, recorded difference). A
+    rejected request whose overage was refused with a known reset ends every
+    block that response reports no later than that reset, as today's
+    `nextCheckAt` does. An overage allowance whose reset has already passed
+    covers nothing. One whose reset falls before the plan limit's covers
+    the limit until a newer response arrives, where today's rule blocks
+    again after the overage reset: a recorded difference toward dispatch,
+    bounded by one refused request, whose headers record the limit again.
+  - The five-hour and seven-day windows decide the connection's capacity
+    (`rejected`, or full without a status, is `exhausted` until the reset, a
+    minute when unknown). A model-family window (Opus, Sonnet) never decides
+    the account: when full or rejected it becomes a cooldown of each of the
+    organization's models of that family, and is reported with `unknown`
+    status. The paid overage windows never block.
+  - A rejected request, and each rejected request restriction the
+    observation carries (unless a later allowance of the same model lifts
+    it), cools the model it was made for; without a model, the family its
+    limit names, else it exhausts the connection (kind `quota`).
+  - The model a response was allowed for dispatches whatever else that
+    response reports, until the allowance's own reset (a minute when
+    unknown); an account limit beside it cools the listed models instead of
+    exhausting the connection. A limit that outlasts the allowance limits
+    that model too, from the observation on, where today's rule still
+    dispatches it until the allowance's reset (a difference toward waiting).
+  - Cooldowns are keyed by product model id under both Claude prefixes
+    (`organization-claude-subscription/…`, `workspace-claude-subscription/…`).
+    A family limit reaches the models listed when the response is decoded,
+    and always the response's own model: C1b and C2a pass every Claude model
+    the connection can serve (its organization's catalog at that moment); a
+    model added later is cooled by its first refused response.
+  - Differences from today's merged reading. A later allowed response does
+    not end a running cooldown or connection exhaustion early (the shared
+    model never shortens either; the reset or an explicit store operation
+    ends it), which only waits longer. The shared store replaces the stored
+    windows with the newest observation's, so a reading that omits a window
+    would drop that window's running exhaustion, where today's merged
+    reading keeps it. Recording the window in `exhaustedUntil` instead
+    would let no later usage reading show an early reset, which today's
+    reading does. So C1a, before any Claude call site exists, makes the
+    shared `applyQuotaObservation` keep a stored exhausted window that a
+    newer observation omits until that window's reset (provider-neutral,
+    toward waiting, with the Codex and SuperGrok suites run against it),
+    with a two-observation test. C3's combined cutover ledger
+    test covers the case on real data.
+  - C3 re-keys the legacy cooldowns and restrictions: the legacy reading is
+    keyed by Anthropic's upstream model id, the core by product model id, so
+    the cutover maps each through `subscriptionCoreClaudeProductModelIds`
+    (both prefixes) rather than copying keys.
 - Classification (C1b, worker): a reconnect-required refresh or HTTP 401 is
   `unauthorized`; 429 is `rate_limited` with the request's model and the
   retry time; 529 or `overloaded_error` is `overloaded`; 403 is `fatal`; a
