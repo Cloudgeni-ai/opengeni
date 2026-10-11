@@ -4418,6 +4418,14 @@ disabled) answers the typed 503 `subscription_core_cutover_disabled`.
   settings change only on the organization routes. Otherwise they write
   that workspace's own setting, and whether a workspace may hold it is the
   organization's settings lock, enforced by the neutral settings writers.
+  The one exception is the owner's own Personal workspace once they have a
+  private account there (the listing's source is `user`): legacy changed
+  their private pool's rotation, and on the core that pool is their
+  Personal workspace's, which the organization pool may also serve. The
+  owner's rotation and activate write their Personal workspace's own
+  override, so the organization accounts serving it follow the owner's
+  order there; nobody else's work runs in that workspace. Without a private
+  account the organization pool's 409 applies, as legacy.
 - **Private accounts live in the Personal workspace.** On the core, every
   route that manages a private (`user`) account (connect start and poll,
   listing personal rows, rename, allocator, activate, disconnect, rotation)

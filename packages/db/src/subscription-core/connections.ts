@@ -133,13 +133,13 @@ async function isOrganizationAdministrator(tx: Database, accountId: string): Pro
   return row?.admin === true;
 }
 
+/** A stored `credential_format` name, as 0719's personal writer checks it. */
+const SUBSCRIPTION_CORE_CREDENTIAL_FORMAT = /^[a-z][a-z0-9_]{0,63}$/u;
+
 /**
  * Connect (or reconnect) one account of this provider from a completed
  * sign-in. The caller delivers `wake` after commit.
  */
-/** A stored `credential_format` name, as 0719's personal writer checks it. */
-const SUBSCRIPTION_CORE_CREDENTIAL_FORMAT = /^[a-z][a-z0-9_]{0,63}$/u;
-
 export async function connectSubscriptionCoreConnection(
   db: Database,
   provider: SubscriptionCoreProvider,

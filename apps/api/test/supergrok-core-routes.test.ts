@@ -768,6 +768,12 @@ describe.skipIf(!realDb)("SuperGrok routes on the shared core (M4 X2b)", () => {
       status: 200,
       body: { rotationEnabled: false },
     });
+    // The owner's Personal workspace now holds its own override, which the
+    // next listing shows (it orders only the owner's own work there).
+    const overridden = await (
+      await browserWorkspaceRequest(personalWorkspaceId, "/accounts")
+    ).json();
+    expect(overridden.settings).toMatchObject({ rotationEnabled: false });
 
     // Reconnecting the same login updates the same personal connection.
     const restart = await browserWorkspaceRequest(personalWorkspaceId, "/connect/start", "POST", {
