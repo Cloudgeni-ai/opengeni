@@ -27,6 +27,7 @@ import {
   disconnectSubscriptionCoreConnection,
 } from "../src/subscription-core/connections";
 import {
+  subscriptionCoreConnectionKind,
   subscriptionCoreProviderId,
   type SubscriptionCoreProvider,
 } from "../src/subscription-core/provider";
@@ -243,14 +244,20 @@ describe("subscription-core binding gates (pure)", () => {
 describe.skipIf(!realDb)("subscription-core binding gates (PostgreSQL)", () => {
   test("the TypeScript registry agrees with the SQL registry", async () => {
     const rows = await shared!.admin<
-      { provider: string; extra_credits: boolean; primary_setting_column: string | null }[]
-    >`select provider, extra_credits, primary_setting_column
+      {
+        provider: string;
+        extra_credits: boolean;
+        primary_setting_column: string | null;
+        connection_kind: string;
+      }[]
+    >`select provider, extra_credits, primary_setting_column, connection_kind
       from opengeni_private.subscription_core_providers order by provider`;
     expect(rows.map((row) => row.provider)).toEqual([...subscriptionCoreProviderIds()].sort());
     for (const row of rows) {
       const binding = subscriptionCoreProvider(row.provider);
       expect(binding.settings.primaryColumn).toBe(row.primary_setting_column);
       expect(binding.adapter.capabilities.extraCredits).toBe(row.extra_credits);
+      expect(row.connection_kind).toBe(subscriptionCoreConnectionKind(binding));
     }
   });
 

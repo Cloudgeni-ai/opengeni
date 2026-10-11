@@ -39,7 +39,11 @@ import {
   readSubscriptionCoreCutoverDisposition,
   type SubscriptionCoreCutoverDisposition,
 } from "./administration";
-import { subscriptionCoreProviderId, type SubscriptionCoreProvider } from "./provider";
+import {
+  subscriptionCoreConnectionKind,
+  subscriptionCoreProviderId,
+  type SubscriptionCoreProvider,
+} from "./provider";
 
 export type SubscriptionCoreServingConnection = {
   connectionId: string;
@@ -184,6 +188,7 @@ export async function listSubscriptionCoreServingConnections(
         accountId: input.accountId,
         workspaceId: input.workspaceId,
         provider: providerId,
+        kind: subscriptionCoreConnectionKind(provider),
       });
       const shared = world.filter((connection) => {
         if (

@@ -25,7 +25,11 @@ import {
 import type { Database } from "../database";
 import { nestedPostgresSqlState } from "../persistence-errors";
 import { resolveSubscriptionConnectionId } from "../subscription-core-repository";
-import { subscriptionCoreProviderId, type SubscriptionCoreProvider } from "./provider";
+import {
+  subscriptionCoreConnectionKind,
+  subscriptionCoreProviderId,
+  type SubscriptionCoreProvider,
+} from "./provider";
 
 export type SubscriptionCoreAccessPolicy = {
   allowedModels: string[] | null;
@@ -181,7 +185,8 @@ async function accessConnection(
       from subscription_connections connection
       where connection.account_id = ${target.accountId}::uuid
         and connection.id = ${connectionId}::uuid
-        and connection.provider = ${providerId} and connection.kind = 'subscription'
+        and connection.provider = ${providerId}
+        and connection.kind = ${subscriptionCoreConnectionKind(provider)}
         and connection.ownership = 'shared' and connection.disconnected_at is null
         and ${
           target.workspaceId === null
