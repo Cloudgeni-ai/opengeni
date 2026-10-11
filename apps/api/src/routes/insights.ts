@@ -6,6 +6,7 @@ import {
   normalizeWorkspaceInsightsFilter,
   normalizeWorkspaceInsightsSessionScope,
   requireAccessGrant,
+  scheduledTaskViewerForGrant,
   WorkspaceInsightsFilterValidationError,
   type ApiRouteDeps,
   type WorkspaceInsightsFilterField,
@@ -104,7 +105,7 @@ export function registerInsightsRoutes(app: Hono, deps: ApiRouteDeps): void {
 
     try {
       const workspaceId = c.req.param("workspaceId");
-      await measureInsightsPhase(observePhase, "auth", () =>
+      const grant = await measureInsightsPhase(observePhase, "auth", () =>
         requireAccessGrant(c, deps, workspaceId, "workspace:admin"),
       );
 
@@ -143,6 +144,8 @@ export function registerInsightsRoutes(app: Hono, deps: ApiRouteDeps): void {
               model,
               rootSessionId,
               sessionId,
+              viewerSubjectId: async () =>
+                (await scheduledTaskViewerForGrant(deps.db, grant)).subjectId,
             },
             observePhase,
           ),

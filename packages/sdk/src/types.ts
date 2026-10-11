@@ -3264,6 +3264,11 @@ export type ScheduledTask = {
   name: string;
   /** Immutable execution owner; null for workspace/service tasks. */
   ownerSubjectId: string | null;
+  /**
+   * Who can see this schedule. `workspace`: everyone in the workspace.
+   * `private`: only its owner; its runs create Only me chats owned by them.
+   */
+  visibility: SessionVisibility;
   status: ScheduledTaskStatus;
   schedule: ScheduledTaskScheduleSpec;
   temporalScheduleId: string;
@@ -3287,6 +3292,24 @@ export type ScheduledTask = {
   updatedAt: string;
   /** Read-only: what `refreshScheduledTaskAccess` would change, for a viewer who can act on it. */
   policyDrift?: ScheduledTaskPolicyDrift | null | undefined;
+};
+
+/**
+ * What an admin sees of someone else's Only me schedule: that it exists, whose
+ * it is, how often it runs and what it costs. Never its name, prompt, settings
+ * or runs.
+ */
+export type PrivateScheduledTaskSummary = {
+  id: string;
+  ownerSubjectId: string;
+  /** The owner's display name or email, when known. */
+  ownerName: string | null;
+  status: ScheduledTaskStatus;
+  schedule: ScheduledTaskScheduleSpec;
+  lastRunAt: string | null;
+  /** Usage of this schedule's runs over the last 30 days. */
+  last30Days: { runs: number; creditUsd: number; estimatedProviderUsd: number };
+  createdAt: string;
 };
 
 /** One connector named in a scheduled task's access report. */
@@ -6505,6 +6528,8 @@ export type CreateAgentScheduledTaskRequest = {
   };
   name: string;
   schedule: ScheduledTaskScheduleSpec;
+  /** Who can see it. Omitted: everyone in the workspace. */
+  visibility?: SessionVisibility | undefined;
   action?: { kind: "agent_turn" } | undefined;
   runMode?: ScheduledTaskRunMode | undefined;
   targetSessionId?: string | null | undefined;
@@ -6540,6 +6565,8 @@ export type CreateSessionScheduledTaskRequest = {
   schedule: ScheduledTaskScheduleSpec;
   prompt: string;
   targetSessionId: string;
+  /** A schedule posting into an Only me chat is always Only me. */
+  visibility?: SessionVisibility | undefined;
   runMode?: "existing_session" | undefined;
   connectionAccounts?: McpConnectionAccountSelection[] | undefined;
   overlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
@@ -6561,6 +6588,8 @@ export type UpdateScheduledTaskRequest = {
   schedule?: ScheduledTaskScheduleSpec | undefined;
   runMode?: ScheduledTaskRunMode | undefined;
   targetSessionId?: string | null | undefined;
+  /** Change who can see it. Only the owner can; a schedule posting into an Only me chat stays Only me. */
+  visibility?: SessionVisibility | undefined;
   connectionAccounts?: McpConnectionAccountSelection[] | undefined;
   overlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
   action?: ScheduledTaskAction | undefined;

@@ -128,6 +128,7 @@ const directHotMutatorInventory = [
   "opengeni_private.abandon_session_content_archive(uuid,uuid)",
   "opengeni_private.configure_fork_session_runtime(uuid,uuid,uuid,uuid,text,jsonb,uuid,uuid,text)",
   "opengeni_private.detach_retention_variable_set_session_selections(uuid,uuid,uuid)",
+  "opengeni_private.pause_private_scheduled_task(uuid,uuid,text,uuid)",
   "opengeni_private.reap_sandbox_leases(bigint,bigint,bigint,bigint)",
   "opengeni_private.purge_archived_session_content(uuid,uuid,text,integer)",
   "opengeni_private.reap_stale_interaction_transitions(bigint)",

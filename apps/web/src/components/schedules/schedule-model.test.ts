@@ -154,6 +154,52 @@ describe("schedule requests", () => {
     expect(request.overlapPolicy).toBe("skip");
   });
 
+  test("a new schedule is shared by default and sends Only me only when chosen", () => {
+    const shared = createRequestFromDraft(base(), { now: NOW, learningScope: "workspace" });
+    expect("visibility" in shared).toBe(false);
+
+    const privateNew = createRequestFromDraft(
+      { ...base(), visibility: "private" },
+      { now: NOW, learningScope: "workspace" },
+    );
+    expect("visibility" in privateNew && privateNew.visibility).toBe("private");
+
+    const privateMessage = createRequestFromDraft(
+      { ...base(), runMode: "existing_session", targetSessionId: "chat", visibility: "private" },
+      { now: NOW, learningScope: "workspace" },
+    );
+    expect("visibility" in privateMessage && privateMessage.visibility).toBe("private");
+  });
+
+  test("an edit sends who can see the schedule only when it changed", () => {
+    const initial = base();
+    const unchanged = updateRequestFromDraft(
+      task(),
+      initial,
+      { ...initial, name: "Renamed" },
+      {
+        now: NOW,
+      },
+    );
+    expect("visibility" in unchanged).toBe(false);
+
+    const madePrivate = updateRequestFromDraft(
+      task(),
+      initial,
+      { ...initial, visibility: "private" },
+      { now: NOW },
+    );
+    expect(madePrivate.visibility).toBe("private");
+
+    const shared = updateRequestFromDraft(
+      task({ visibility: "private" }),
+      { ...initial, visibility: "private" },
+      initial,
+      { now: NOW },
+    );
+    expect(shared.visibility).toBe("workspace");
+  });
+
   test("an existing-chat message carries no copied execution settings", () => {
     const request = createRequestFromDraft(
       {

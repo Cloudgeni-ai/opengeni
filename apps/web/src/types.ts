@@ -156,6 +156,7 @@ export type {
   WorkspaceMemorySearchMode,
   WorkspaceMemorySearchResponse,
   WorkspaceMemorySearchResult,
+  PrivateScheduledTaskSummary,
 } from "@opengeni/sdk";
 
 // Infer lifecycle leaf types from the public client rather than mirroring wire

@@ -908,6 +908,14 @@ describe("runtime database posture evaluator", () => {
       name: "visible_workspace_insights_model_fact_rows(uuid, timestamp with time zone, timestamp with time zone, text, text, uuid, uuid)",
       violation: "Insights scoped fact projection is missing or unsafe",
     },
+    {
+      name: "private_scheduled_task_summaries(uuid, uuid, text, uuid, timestamp with time zone, integer)",
+      violation: "private schedule summary capability is missing or unsafe",
+    },
+    {
+      name: "pause_private_scheduled_task(uuid, uuid, text, uuid)",
+      violation: "private schedule pause capability is missing or unsafe",
+    },
   ];
 
   function modelFactPosture(): RuntimeDatabasePosture {

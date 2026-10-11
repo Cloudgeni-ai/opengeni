@@ -2334,6 +2334,10 @@ BEGIN
     IF to_regprocedure('opengeni_private.workspace_insights_amount_fact_rows(uuid,timestamptz,timestamptz,text,text,uuid,uuid)') IS NOT NULL THEN
       REVOKE ALL ON FUNCTION opengeni_private.workspace_insights_amount_fact_rows(uuid,timestamptz,timestamptz,text,text,uuid,uuid) FROM PUBLIC;
     END IF;
+    IF to_regprocedure('opengeni_private.private_scheduled_task_summaries(uuid,uuid,text,uuid,timestamptz,integer)') IS NOT NULL THEN
+      REVOKE ALL ON FUNCTION opengeni_private.private_scheduled_task_summaries(uuid,uuid,text,uuid,timestamptz,integer) FROM PUBLIC;
+      REVOKE ALL ON FUNCTION opengeni_private.pause_private_scheduled_task(uuid,uuid,text,uuid) FROM PUBLIC;
+    END IF;
     IF to_regprocedure('opengeni_private.insights_scoped_usage_rows(uuid,uuid,timestamptz,timestamptz,text,uuid[],boolean)') IS NOT NULL THEN
       REVOKE ALL ON FUNCTION opengeni_private.insights_scoped_usage_rows(uuid,uuid,timestamptz,timestamptz,text,uuid[],boolean) FROM PUBLIC;
       REVOKE ALL ON FUNCTION opengeni_private.insights_scoped_calls_rows(uuid,uuid,timestamptz,timestamptz,jsonb,timestamptz,uuid,integer,uuid[],boolean) FROM PUBLIC;

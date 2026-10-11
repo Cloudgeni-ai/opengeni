@@ -556,6 +556,7 @@ import type {
   ModelContextContributionSummary,
   Permission,
   PersonalResourceAttachmentIntent,
+  PrivateScheduledTaskSummary,
   ResourceRef,
   SandboxBackend,
   SandboxOs,
@@ -6498,6 +6499,8 @@ export type CreateScheduledTaskInput = {
   // The rig each run binds to (M3); active version resolved per fire at dispatch.
   rigId?: string | null;
   metadata: Record<string, unknown>;
+  /** Who can see it; `user_private` requires a human owner. Default shared. */
+  visibility?: "user_private" | "workspace_shared";
   /** Trusted database-only admission seam. Throwing rolls the task creation back. */
   beforeCreateCommit?: (tx: Database) => Promise<void>;
 
@@ -6507,6 +6510,7 @@ export type CreateScheduledTaskInput = {
 export type UpdateScheduledTaskInput = Partial<{
   name: string;
   status: ScheduledTaskStatus;
+  visibility: "user_private" | "workspace_shared";
   schedule: ScheduledTaskScheduleSpec;
   runMode: ScheduledTaskRunMode;
   overlapPolicy: ScheduledTaskOverlapPolicy;
@@ -18131,6 +18135,7 @@ export async function createScheduledTask(
                   : null))
               : null,
           status: input.status,
+          visibility: input.visibility ?? "workspace_shared",
           schedule: input.schedule,
           temporalScheduleId: input.temporalScheduleId,
           runMode: input.runMode,
@@ -18206,6 +18211,131 @@ export async function scheduledTaskMutationOwnerMatches(
   });
 }
 
+/**
+ * The person a request reads schedules as: the human caller, or the human an
+ * exact agent attempt acts for. Null for keys and services, which own no
+ * Only me schedules.
+ */
+export async function scheduledTaskViewerSubject(
+  db: Database,
+  input: {
+    workspaceId: string;
+    createdBy?: TurnInitiator;
+    createdByContext?: TurnInitiatorContext;
+    createdByActor?: AgentSessionCreationActor | null;
+  },
+): Promise<string | null> {
+  return withWorkspaceRls(db, input.workspaceId, async (tx) => {
+    const actor = await frozenSessionCreatorForInsert(tx, input);
+    const subject =
+      actor.initiatingHumanSubjectId ??
+      (actor.initiator.kind === "subject" ? actor.initiator.subjectId : null);
+    return subject && !subject.startsWith("api_key:") ? subject : null;
+  });
+}
+
+/**
+ * Admin view of other people's Only me schedules: owner, cadence, status, last
+ * run and the last 30 days of usage. Never the name, prompt, settings or runs.
+ */
+export async function listPrivateScheduledTaskSummaries(
+  db: Database,
+  input: {
+    workspaceId: string;
+    /** Leave out this person's own schedules; they see those in full. */
+    excludeOwnerSubjectId: string | null;
+    /** Read just this schedule. */
+    taskId?: string;
+    now?: Date;
+    limit?: number;
+  },
+): Promise<PrivateScheduledTaskSummary[]> {
+  const since = new Date((input.now ?? new Date()).getTime() - 30 * 24 * 60 * 60 * 1000);
+  const limit = Math.min(Math.max(input.limit ?? 200, 1), 500);
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const rows = await rawRows<{
+      id: string;
+      owner_subject_id: string;
+      owner_name: string | null;
+      status: string;
+      schedule: unknown;
+      created_at: Date | string;
+      last_run_at: Date | string | null;
+      runs: number | string;
+      credit_micros: number | string;
+      provider_micros: number | string;
+    }>(
+      scopedDb,
+      // Their runs and usage are usually hidden by chat visibility; this
+      // definer function returns only these aggregates.
+      sql`select * from opengeni_private.private_scheduled_task_summaries(
+        nullif(current_setting('opengeni.account_id', true), '')::uuid,
+        ${input.workspaceId}::uuid,
+        ${input.excludeOwnerSubjectId}::text,
+        ${input.taskId ?? null}::uuid,
+        ${since.toISOString()}::timestamptz,
+        ${limit}::integer
+      )`,
+    );
+    const iso = (value: Date | string | null) =>
+      value === null ? null : new Date(value).toISOString();
+    return rows.map((row) => ({
+      id: row.id,
+      ownerSubjectId: row.owner_subject_id,
+      ownerName: row.owner_name,
+      status: row.status as ScheduledTaskStatus,
+      schedule: row.schedule as ScheduledTaskScheduleSpec,
+      lastRunAt: iso(row.last_run_at),
+      last30Days: {
+        runs: Number(row.runs),
+        creditUsd: Number(row.credit_micros) / 1_000_000,
+        estimatedProviderUsd: Number(row.provider_micros) / 1_000_000,
+      },
+      createdAt: iso(row.created_at)!,
+    }));
+  });
+}
+
+/**
+ * Pause someone else's Only me schedule as a workspace admin, even when it
+ * posts into a chat the admin cannot see. Returns false when no such schedule
+ * exists. Runs check the stored status, so the paused schedule stops firing.
+ */
+export async function pausePrivateScheduledTask(
+  db: Database,
+  input: { workspaceId: string; taskId: string; excludeOwnerSubjectId: string | null },
+): Promise<boolean> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const [row] = await rawRows<{ paused: boolean }>(
+      scopedDb,
+      sql`select opengeni_private.pause_private_scheduled_task(
+        nullif(current_setting('opengeni.account_id', true), '')::uuid,
+        ${input.workspaceId}::uuid,
+        ${input.excludeOwnerSubjectId}::text,
+        ${input.taskId}::uuid
+      ) as paused`,
+    );
+    return row?.paused === true;
+  });
+}
+
+/** The stored audience of a chat this request can already see, or null. */
+export async function getVisibleSessionTenancyVisibility(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<"user_private" | "workspace_shared" | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({ visibility: schema.sessions.visibility })
+      .from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+      .limit(1);
+    if (!row) return null;
+    return row.visibility === "user_private" ? "user_private" : "workspace_shared";
+  });
+}
+
 export async function updateScheduledTask(
   db: Database,
   workspaceId: string,
@@ -18262,6 +18392,7 @@ export async function updateScheduledTask(
       .set({
         ...(input.name !== undefined ? { name: input.name } : {}),
         ...(input.status !== undefined ? { status: input.status } : {}),
+        ...(input.visibility !== undefined ? { visibility: input.visibility } : {}),
         ...(input.schedule !== undefined ? { schedule: input.schedule } : {}),
         ...(input.runMode !== undefined ? { runMode: input.runMode } : {}),
         ...(input.overlapPolicy !== undefined ? { overlapPolicy: input.overlapPolicy } : {}),
@@ -18637,6 +18768,12 @@ export async function listScheduledTasks(
   limit = 100,
   offset = 0,
   sessionId?: string,
+  /**
+   * The person reading. Omitted (trusted internal callers only): every
+   * schedule. Given: shared schedules plus this person's own Only me ones;
+   * null reads shared schedules only.
+   */
+  viewerSubjectId?: string | null,
 ): Promise<ScheduledTask[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const rows = await scopedDb
@@ -18646,6 +18783,16 @@ export async function listScheduledTasks(
         and(
           eq(schema.scheduledTasks.workspaceId, workspaceId),
           isNull(schema.scheduledTasks.deletedAt),
+          ...(viewerSubjectId === undefined
+            ? []
+            : [
+                viewerSubjectId === null
+                  ? eq(schema.scheduledTasks.visibility, "workspace_shared")
+                  : or(
+                      eq(schema.scheduledTasks.visibility, "workspace_shared"),
+                      eq(schema.scheduledTasks.ownerSubjectId, viewerSubjectId),
+                    ),
+              ]),
           ...(sessionId
             ? [
                 eq(schema.scheduledTasks.reusableSessionId, sessionId),
@@ -31498,24 +31645,48 @@ async function createSessionInTransaction(
           runId: input.scheduledSourceRunId,
         });
         const source = accepted?.task.agentConfig.knowledgeSource;
-        if (
-          !accepted ||
-          !source ||
-          accepted.task.accountId !== input.accountId ||
-          accepted.task.runMode !== "new_session_per_run" ||
-          source.destination.kind !== "personal" ||
-          source.destination.subjectId !== source.initiatingSubjectId ||
-          source.connection.ownerSubjectId !== source.initiatingSubjectId ||
-          accepted.causalHumanSubjectId !== source.initiatingSubjectId ||
-          accepted.causalHumanAuthority?.subjectId !== source.initiatingSubjectId ||
-          accepted.generatedSessionBinding?.createIdempotencyKey !== input.createIdempotencyKey ||
-          frozenCreator.initiator.kind !== "service" ||
-          frozenCreator.initiator.subjectId !== "scheduler" ||
-          input.sandboxGroupId
-        ) {
+        // The run must be this exact accepted scheduler occurrence, creating
+        // the chat its generated-session binding names.
+        const acceptedRun =
+          accepted &&
+          accepted.task.accountId === input.accountId &&
+          accepted.generatedSessionBinding?.createIdempotencyKey === input.createIdempotencyKey &&
+          frozenCreator.initiator.kind === "service" &&
+          frozenCreator.initiator.subjectId === "scheduler" &&
+          !input.sandboxGroupId
+            ? accepted
+            : null;
+        let scheduledOwner: string | null = null;
+        if (acceptedRun && source) {
+          // A personal-knowledge source run belongs to its connection owner.
+          if (
+            acceptedRun.task.runMode === "new_session_per_run" &&
+            source.destination.kind === "personal" &&
+            source.destination.subjectId === source.initiatingSubjectId &&
+            source.connection.ownerSubjectId === source.initiatingSubjectId &&
+            acceptedRun.causalHumanSubjectId === source.initiatingSubjectId &&
+            acceptedRun.causalHumanAuthority?.subjectId === source.initiatingSubjectId
+          )
+            scheduledOwner = source.initiatingSubjectId;
+        } else if (acceptedRun) {
+          // An Only me schedule's chats belong to its owner, the human its
+          // accepted run was admitted for. The capability below re-proves that
+          // person may still create Only me chats here.
+          const taskOwner = acceptedRun.task.ownerSubjectId;
+          if (
+            acceptedRun.task.visibility === "private" &&
+            taskOwner &&
+            (acceptedRun.task.runMode === "new_session_per_run" ||
+              acceptedRun.task.runMode === "reusable_session") &&
+            acceptedRun.causalHumanSubjectId === taskOwner &&
+            acceptedRun.causalHumanAuthority?.subjectId === taskOwner
+          )
+            scheduledOwner = taskOwner;
+        }
+        if (!scheduledOwner) {
           throw new Error("Private source session requires its accepted owning-human run");
         }
-        owner = source.initiatingSubjectId;
+        owner = scheduledOwner;
         await setSubjectRlsContext(tx, owner);
       } else if (frozenCreator.initiator.kind !== "subject" || !owner || input.sandboxGroupId) {
         throw new Error("Private session creation requires a top-level managed-human singleton");
@@ -85742,6 +85913,7 @@ function mapScheduledTask(row: typeof schema.scheduledTasks.$inferSelect): Sched
     workspaceId: row.workspaceId,
     name: row.name,
     ownerSubjectId: row.ownerSubjectId,
+    visibility: row.visibility === "user_private" ? "private" : "workspace",
     status: row.status as ScheduledTaskStatus,
     schedule: row.schedule as ScheduledTaskScheduleSpec,
     temporalScheduleId: row.temporalScheduleId,

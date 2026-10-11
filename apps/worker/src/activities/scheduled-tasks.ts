@@ -1394,7 +1394,8 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                   ? { instructions: resolvedAgentInstructions }
                   : {}),
                 ...creatorSessionPolicy,
-                ...(task.agentConfig.knowledgeSource?.destination.kind === "personal"
+                ...(task.agentConfig.knowledgeSource?.destination.kind === "personal" ||
+                task.visibility === "private"
                   ? {
                       visibility: "user_private" as const,
                       scheduledSourceRunId: run.id,
@@ -2458,7 +2459,8 @@ async function recoverBoundScheduledTaskDispatch(input: {
         ? { instructions: input.acceptedExecution.resolvedAgentInstructions }
         : {}),
       ...scheduledCreatorSessionPolicyInput(recoveredCreatorPolicy?.sessionPolicy ?? null),
-      ...(task.agentConfig.knowledgeSource?.destination.kind === "personal"
+      ...(task.agentConfig.knowledgeSource?.destination.kind === "personal" ||
+      task.visibility === "private"
         ? {
             visibility: "user_private" as const,
             scheduledSourceRunId: input.run.id,
