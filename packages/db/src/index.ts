@@ -313,6 +313,10 @@ export * from "./subscription-core-codex-operations";
 export * from "./subscription-core-codex-requests";
 export * from "./subscription-core-codex-connections";
 export * from "./subscription-core-codex-catalog";
+export {
+  readSubscriptionCoreProviderRoute,
+  type SubscriptionCoreProviderRoute,
+} from "./subscription-core/provider-route";
 import {
   listSubscriptionCoreCodexServingConnections,
   readCodexCutoverDispositionForWorkspace,
