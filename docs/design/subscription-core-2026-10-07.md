@@ -4163,6 +4163,55 @@ subject's credentials renew from their format
 run. Claude's own refusal classification is the worker's (C1b); until then
 the suite's scripted classification is used.
 
+##### C1b: Claude settlement, finalization and waits (implemented)
+
+Built on X1b's shared refusal settlement, failover and core waits; dormant
+like C1a.
+
+- Classification. `classifyClaudeProviderError(error, modelId)` reads only
+  errors of the Claude subscription transport (an `AnthropicRequestError`
+  marked `subscription`, or a reconnect-required refresh): 401 or
+  reconnect-required is `unauthorized`, 429 `rate_limited` with the turn's
+  product model and the provider's retry time, 529 or `overloaded_error`
+  `overloaded`, 403 `fatal`; anything else, a safety refusal or an
+  API-key Anthropic error included, is not an account refusal.
+- Settlement. A core Claude turn settles a refusal through the shared step
+  (`settleCoreSubscriptionRefusal`) with Claude's binding
+  (`claudeCoreRefusal(productModelId)`; the placed core turn carries the
+  accepted product model). The transport already ran the turn's one forced
+  refresh, so `unauthorized` becomes a sign-in quarantine; a 429 becomes a
+  cooldown of that model on the connection until the provider's time or the
+  adapter fallback (the connection keeps serving other models). Both record
+  the core turn-failure receipt, which counts toward the shared per-turn
+  bound, and re-place the same turn (reason `claude_credential_failover`).
+  `overloaded` and `fatal` record nothing: a 529 continues in the generic
+  provider-overload recovery (the same turn retries, the binding keeps its
+  connection) and a 403 fails the turn without a rotation or quarantine.
+  An unknown request outcome or a lost lease skips the step. The legacy
+  Claude receipts, refresh recovery, rotation and wait never run for a core
+  turn, and the core never reads the v1 `claudeAuthRecovery` marker (the
+  receipts replace it); the claim keeps reading it for legacy turns until
+  C3 converts live values.
+- Header usage. Each response's usage headers are decoded with
+  `decodeSubscriptionCoreClaudeQuota`, using the refresh generation of the
+  bearer that made the request and every Claude model of the deployment's
+  catalog, and applied in order to the leased connection under the lease
+  fence (best effort). Finalization joins them before the lease is
+  released; one that ended a stored exhaustion wakes the account's Claude
+  waiters (`quota_observed_available`). This relies on the partial-reading
+  fix of `applyQuotaObservation` (#4120), so C1b merges on a base that
+  contains it.
+- Waits. The core waiter accepts `claude` with the legacy Claude wait's
+  vocabulary (`turn.capacity_waiting`, `turn.recovery.requested`,
+  `turn.superseded`, status reason `claude_capacity`), and its workflow
+  reference carries `provider: "claude"`. A Claude placement wait parks the
+  same turn on the core waiter and re-evaluates it at once; a health
+  recovery wakes the account's Claude waiters; the workflow reconciles a
+  Claude reference against the core waiter by exact id and generation first
+  (only a Claude core waiter), then the legacy Claude waiter. Compaction
+  never parks (C1a). The shared conformance suite runs its session-wait
+  scenarios for both Claude subjects.
+
 ### 5.4 Workspace-managed connections as organization accounts
 
 Owner request (M4 addition): an account connected in a workspace, which the

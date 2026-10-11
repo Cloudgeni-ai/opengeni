@@ -109,7 +109,7 @@ import {
   xaiCoreRequestOutcomeUnknown,
 } from "./xai-core";
 import { settleCoreSubscriptionRefusal } from "./subscription-core-settlement";
-import { claudeCoreRequestOutcomeUnknown } from "./claude-core";
+import { claudeCoreRefusal, claudeCoreRequestOutcomeUnknown } from "./claude-core";
 import { coreLanesRecoverAfterCheckpoint } from "./subscription-core-requests";
 
 import { providerRecoveryCause, recordProviderRecoveryOutcome } from "./provider-recovery-metrics";
@@ -841,6 +841,21 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
     if (settled.result) return settled.result;
     coreXaiRefusal = settled.failure;
   }
+  // The same for a Claude core turn: a sign-in refusal (after the transport's
+  // one forced refresh) or a model rate limit re-places the same turn; 529
+  // stays in the overload lane below and 403 fails the turn, neither moving
+  // it to another account. The bound counts the core's turn-failure
+  // receipts (the legacy `claudeAuthRecovery` marker is never read here).
+  let coreClaudeRefusal: SubscriptionCoreCodexTurnError | null = null;
+  if (coreClaude && !coreRequestOutcomeUnknown && !leases.claude.lost) {
+    const settled = await settleCoreSubscriptionRefusal(
+      deps,
+      coreClaude,
+      claudeCoreRefusal(coreClaude.productModelId),
+    );
+    if (settled.result) return settled.result;
+    coreClaudeRefusal = settled.failure;
+  }
   const xaiFailure =
     billingState.isXaiTurn && !coreXai && providerTurn.effectiveXaiCredentialId
       ? classifyXaiCredentialFailure(error)
@@ -1284,7 +1299,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       ? subscriptionCoreLeaseBusyExhaustedFailure()
       : error instanceof SubscriptionCoreCodexTurnError
         ? error
-        : (coreAccountRefusal ?? coreXaiRefusal);
+        : (coreAccountRefusal ?? coreXaiRefusal ?? coreClaudeRefusal);
   if (
     coreTurnFailure &&
     !coreTurnFailure.payload.retryable &&
