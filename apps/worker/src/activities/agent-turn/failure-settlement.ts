@@ -109,6 +109,8 @@ import {
   xaiCoreRequestOutcomeUnknown,
 } from "./xai-core";
 import { settleCoreSubscriptionRefusal } from "./subscription-core-settlement";
+import { claudeCoreRequestOutcomeUnknown } from "./claude-core";
+import { coreLanesRecoverAfterCheckpoint } from "./subscription-core-requests";
 
 import { providerRecoveryCause, recordProviderRecoveryOutcome } from "./provider-recovery-metrics";
 
@@ -640,6 +642,11 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
   // replayed, and refusals settle through the shared core (X1b) instead of
   // the legacy SuperGrok wait below.
   const coreXai = billingState.isXaiTurn ? (providerTurn.xaiSubscriptionCore ?? null) : null;
+  // A Claude turn on the shared core: its legacy receipts, refresh recovery
+  // and capacity wait below never run (they would see a core connection id).
+  const coreClaude = billingState.isClaudeTurn
+    ? (providerTurn.claudeSubscriptionCore ?? null)
+    : null;
   // The transport may settle an ambiguous request before the SDK throws a plain
   // HTTP error. That custody evidence must survive classification.
   //
@@ -669,7 +676,9 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       ? new SubscriptionCoreCodexRequestOutcomeUnknownError()
       : coreXai
         ? xaiCoreRequestOutcomeUnknown(error, coreXai)
-        : null;
+        : coreClaude
+          ? claudeCoreRequestOutcomeUnknown(error, coreClaude)
+          : null;
   const coreCodexLeaseLost =
     coreCodex !== null &&
     !coreRequestOutcomeUnknown &&
@@ -709,14 +718,24 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
           await flushRuntimeBatcher();
           await historySink.reconcileConversationTruth({ requireDurable: true });
         }))));
-  const scopedLeaseLost =
-    billingState.isClaudeTurn && leases.claude.lost
-      ? "claude"
-      : xaiLeaseRecoverable
-        ? "xai"
-        : coreCodexLeaseRecoverable
-          ? "codex"
-          : null;
+  // The same for a core Claude turn.
+  const claudeLeaseRecoverable =
+    billingState.isClaudeTurn &&
+    leases.claude.lost &&
+    (!coreClaude ||
+      (!coreRequestOutcomeUnknown &&
+        eventing.turnStartedPublished &&
+        (await coreLanesRecoverAfterCheckpoint(coreClaude, async () => {
+          await flushRuntimeBatcher();
+          await historySink.reconcileConversationTruth({ requireDurable: true });
+        }))));
+  const scopedLeaseLost = claudeLeaseRecoverable
+    ? "claude"
+    : xaiLeaseRecoverable
+      ? "xai"
+      : coreCodexLeaseRecoverable
+        ? "codex"
+        : null;
   if (scopedLeaseLost && eventing.publish && attempt.turnId && eventing.turnStartedPublished) {
     if (scopedLeaseLost !== "codex") {
       await flushRuntimeBatcher();
@@ -827,7 +846,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       ? classifyXaiCredentialFailure(error)
       : null;
   const claudeFailure =
-    billingState.isClaudeTurn && providerTurn.effectiveClaudeCredentialId
+    billingState.isClaudeTurn && !coreClaude && providerTurn.effectiveClaudeCredentialId
       ? classifyClaudeCredentialFailure(error)
       : null;
   const scopedFailure = claudeFailure ?? xaiFailure;
@@ -1526,6 +1545,8 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
     coreLaneRecoverable(coreCodex?.titleRequests) &&
     coreLaneRecoverable(coreXai?.requests) &&
     coreLaneRecoverable(coreXai?.titleRequests) &&
+    coreLaneRecoverable(coreClaude?.requests) &&
+    coreLaneRecoverable(coreClaude?.titleRequests) &&
     (earlyRecoverableSetup ||
       (failure.retryable && eventing.publish && eventing.turnStartedPublished))
   ) {

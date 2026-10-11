@@ -355,6 +355,8 @@ export type { SubscriptionCoreProvider } from "./subscription-core/provider";
 export { buildSubscriptionCoreTurnTokenResolver } from "./subscription-core/turn-token-resolver";
 export * from "./subscription-core-xai-adapter";
 export * from "./subscription-core-xai";
+export * from "./subscription-core-claude-adapter";
+export * from "./subscription-core-claude";
 import {
   listSubscriptionCoreCodexServingConnections,
   readCodexCutoverDispositionForWorkspace,

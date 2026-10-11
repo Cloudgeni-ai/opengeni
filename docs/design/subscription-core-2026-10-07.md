@@ -4094,6 +4094,66 @@ policy provider id a function of the model in the shared placement world,
 in a provider-neutral change after the SuperGrok track's X1a and X1b, so
 workspace-scoped Claude models keep their policy.
 
+##### C1a: Claude chat call sites (implemented)
+
+Built on the X1a/X1b generalizations (core turn lease, placement, request
+lanes, placed-core helpers); dormant until Claude's receipt (C3), because
+every Claude entry point reads the provider route first and the binding is
+unregistered until then.
+
+- Policy identity. The shared adapter interface gains an optional
+  `modelPolicyProviderIdFor(modelId)`, read through
+  `subscriptionCoreModelPolicyProviderId(adapter, modelId)` by the
+  placement world. The Claude adapter maps each product model id to its own
+  prefix; providers with one identity declare nothing. The shared
+  conformance suite asserts, for every provider, that a workspace policy
+  naming one model's policy identity admits exactly the models sharing it.
+- Placement. `selectClaudeTurnCapacityByRoute`: `legacy` runs the legacy
+  Claude selection unchanged after one route read; `maintenance` fails
+  closed; `core` places the accepted turn (holder
+  `claude-turn:<workflow>:<turn>:<attempt>`, the legacy Claude lease TTL)
+  and adopts the core lease. `ClaudeTurnLease` becomes a core subscription
+  turn lease, keeping the legacy heartbeat while a legacy subject holds it
+  and the `claude_credential_lease_lost` code. A core turn never enables the
+  legacy rotation, and carries no legacy authority snapshot or credential
+  version. No park until C1b: a core wait is a terminal capacity failure,
+  and compaction defers with its request preserved.
+- Materialization and refresh. The bearer comes from the shared turn token
+  resolver under the exact accepted turn and the attempt's live core lease;
+  the decoded credential is bound into the capability settings with the
+  connection id and refresh generation, and the token scope follows the
+  accepted product model's prefix. A 401 renews through one forced refresh
+  per attempt (memoized, under the connection's refresh lock in the shared
+  resolver) and retries the same request on the same connection, as a new
+  reservation, only when the generation advanced past the refused bearer's;
+  otherwise, and for a second 401, the refusal surfaces (classified in C1b).
+- Request custody. The Anthropic transport's per-request preparation
+  (`withClaudeUsageObserver`) gains an optional custody: the dispatch fence
+  and reservation are the last awaited step before each physical fetch; an
+  error status settles refused (408, 409 and 504 unknown); a successful body
+  settles when it ends or stops, read by a Claude response inspector
+  (`message_delta` or `message_stop` is a response, an `error` event before
+  any content block a refusal, anything else unknown); a failed fetch is
+  unknown. An unknown outcome is never replayed: later requests of the
+  attempt are refused locally. The 401 renewal resends the same body only
+  when it can be sent again. A 529 is a refusal on the same connection
+  (never a refresh or a rotation). Session titles use their own lane under
+  the same fence. The legacy usage observer, its receipts and its usage
+  rows are not used on a core turn; header usage becomes quota
+  observations in C1b.
+- Readiness and `list_models`. On the core route the catalog answers from
+  the core projection (`readSubscriptionCoreRouteReadiness`); every Claude
+  connection there belongs to the organization, so new selections offer the
+  organization's Claude models (the union of the serving connections'
+  allowlists) and no workspace-scoped Claude model, while an accepted turn
+  that already names a workspace-scoped id still runs. A frozen legacy
+  authority snapshot no longer selects the pool. The legacy route costs one
+  receipt read in the catalog loader.
+- Funding and attribution were already provider-neutral (credential source
+  `claude`); usage facts attribute the core connection through the placed
+  core turn, and the legacy model-connection check is skipped for a core
+  turn.
+
 Conformance. The shared suite runs against the production binding twice,
 with OAuth credentials and with setup tokens; the suite decides whether a
 subject's credentials renew from their format

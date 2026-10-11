@@ -9,23 +9,26 @@ import {
   assertCoreSourceConnected,
   type CoreTurnPlacementProvider,
 } from "./subscription-core-capacity";
-import type { ProviderTurnState, SubscriptionCoreTurn } from "./turn-context";
+import type { SubscriptionCorePlacedFields, SubscriptionCoreTurn } from "./turn-context";
 import { XAI_CORE_TURN_PROVIDER } from "./xai-core";
+import { CLAUDE_CORE_TURN_PROVIDER } from "./claude-core";
 
 export function placedSubscriptionCore(
-  providerTurn: Pick<ProviderTurnState, "codexSubscriptionCore" | "xaiSubscriptionCore">,
+  providerTurn: SubscriptionCorePlacedFields,
 ): { core: SubscriptionCoreTurn; provider: CoreTurnPlacementProvider } | null {
   if (providerTurn.codexSubscriptionCore)
     return { core: providerTurn.codexSubscriptionCore, provider: CODEX_CORE_TURN_PROVIDER };
   if (providerTurn.xaiSubscriptionCore)
     return { core: providerTurn.xaiSubscriptionCore, provider: XAI_CORE_TURN_PROVIDER };
+  if (providerTurn.claudeSubscriptionCore)
+    return { core: providerTurn.claudeSubscriptionCore, provider: CLAUDE_CORE_TURN_PROVIDER };
   return null;
 }
 
 /** Between model calls: settle committed responses, then recheck the source. */
 export async function revalidatePlacedSubscriptionCore(
   db: Database,
-  providerTurn: Pick<ProviderTurnState, "codexSubscriptionCore" | "xaiSubscriptionCore">,
+  providerTurn: SubscriptionCorePlacedFields,
 ): Promise<void> {
   const placed = placedSubscriptionCore(providerTurn);
   if (!placed) return;

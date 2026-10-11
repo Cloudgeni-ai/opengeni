@@ -133,6 +133,7 @@ import {
   creditsDefaultSessionModel,
   loadCoreRoutedXaiCatalogReadiness,
   loadWorkspaceClaudeSubscriptionReadiness,
+  withCoreRoutedClaudeRestriction,
   withCoreRoutedXaiRestriction,
   resolveDefaultSessionModelForSelections,
   resolveWorkspaceModelSelection,
@@ -648,9 +649,13 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       getWorkspace(deps.db, workspaceId),
     ]);
     const xaiSubscriptionActive = xaiCatalog.active;
-    const connectionModelRestrictions = xaiCatalog.core
+    const xaiRestrictions = xaiCatalog.core
       ? withCoreRoutedXaiRestriction(currentConnectionModelRestrictions, xaiCatalog.core)
       : currentConnectionModelRestrictions;
+    // Claude by its provider route, as SuperGrok above.
+    const connectionModelRestrictions = claudePool.core
+      ? withCoreRoutedClaudeRestriction(xaiRestrictions, claudePool.core)
+      : xaiRestrictions;
     const organizationDefaults = await getOrganizationModelDefaults(deps.db, grant.accountId);
     const claudeConnections: ClaudeConnectionCatalog = {};
     const workspaceClaudeConnections: ClaudeConnectionCatalog = {};

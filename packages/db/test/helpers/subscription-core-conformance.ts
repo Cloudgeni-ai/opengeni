@@ -32,6 +32,7 @@ import {
   type PlacementDecision,
   type PlacementInput,
   subscriptionCoreCredentialRefresher,
+  subscriptionCoreModelPolicyProviderId,
   type ProviderErrorOutcome,
   type SubscriptionQuota,
 } from "@opengeni/subscriptions";
@@ -2500,6 +2501,42 @@ export function describeSubscriptionCoreConformance<Credential>(
         kind: "run",
         connectionId: broad,
       });
+    });
+
+    test("workspace model policy judges each model by its own policy provider identity", async () => {
+      const org = await organization();
+      await sharedConnection(org, `policy-${crypto.randomUUID()}`);
+      const policyId = (model: { productModelId: string }) =>
+        subscriptionCoreModelPolicyProviderId(provider.adapter, model.productModelId);
+      const allowed = policyId(m2);
+      await admin()`
+        insert into workspace_model_policies (account_id, workspace_id, allowed_providers)
+        values (${org.accountId}::uuid, ${org.sharedWorkspaceId}::uuid, ARRAY[${allowed}]::text[])`;
+      const turn = await runningTurn(org, { model: m2 });
+      const result = await withSubscriptionCoreProviderPlacementWorld(
+        db(),
+        provider,
+        {
+          ...turn.identity,
+          preferredModelId: m2.productModelId,
+          reasoningLevel: "medium",
+          models: [m0, m1, m2].map((model) => ({
+            id: model.productModelId,
+            provider: providerId,
+            reasoningLevels: ["medium"],
+          })),
+          reselectionPoints: [],
+          now: new Date(),
+        },
+        async (_tx, input) => input.workspace.allowedModelIds,
+      );
+      expect(result).toEqual({
+        status: "completed",
+        value: [m0, m1, m2]
+          .filter((model) => policyId(model) === allowed)
+          .map((model) => model.productModelId),
+      });
+      expect(await placeChecked(turn)).toMatchObject({ kind: "run" });
     });
 
     const sessionWaits = subject.sessionWaits;
