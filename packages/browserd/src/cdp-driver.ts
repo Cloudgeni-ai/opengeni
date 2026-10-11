@@ -1124,7 +1124,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           throw error instanceof InteractionDefiniteDriverError
             ? new InteractionOutcomeUnknownDriverError(
                 "outcome_unknown",
-                `browser action sent input or completed ${completedActions} action(s) before a later failure (${error.code}); inspect the outcome before continuing and do not replay automatically`,
+                `browser action sent input or completed ${completedActions} action(s) before a later failure (${error.code}: ${error.message}); inspect the outcome before continuing and do not replay automatically`,
               )
             : error;
         }
