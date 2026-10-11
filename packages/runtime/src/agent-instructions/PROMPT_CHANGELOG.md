@@ -305,3 +305,10 @@ different operational contract per turn, which breaks prompt-prefix reuse
 across those turns. This is expected: the turn's executable first-party
 permissions differ in the same way. Turns with the same authority keep an
 identical contract.
+
+Opt-in experiment `OPENGENI_EXPERIMENT_SYSTEM_PROMPT_CACHE_SPLIT` (default off):
+the workspace environment, sandbox environment and attachment modules render
+after every other contract module, so the session-independent prefix (identity,
+contract, Codemode/code-search directives) is shared across workspaces. Turning
+it on changes live sessions' prompt order once (one cache miss each). Off, every
+prompt is byte-identical.
