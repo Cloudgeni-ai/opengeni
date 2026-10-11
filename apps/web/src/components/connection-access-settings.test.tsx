@@ -643,6 +643,8 @@ test("a workspace's own copy no workspace manages is an organization account: it
       fieldset.textContent?.startsWith("People"),
     )!;
     expect(group.getAttribute("aria-describedby")).toBe(note.id);
+    // With the People list shown, it describes the list; no status region.
+    expect(note.getAttribute("role")).toBeNull();
     await choose("Only selected workspaces");
     expect(container.textContent).not.toContain(keptNote);
     await choose("Only selected people");
@@ -805,6 +807,18 @@ test("a workspace's own copy no workspace manages is an organization account: it
     await flush();
     expect(container.textContent).not.toContain("Only selected people");
     expect(container.textContent).toContain("Which workspaces can use it");
+    // No people offered, so no status region for them, even without a member list.
+    peopleReadable = false;
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await act(async () => root.render(<Page />));
+    await flush();
+    expect(container.textContent).toContain("Which workspaces can use it");
+    expect(
+      [...container.querySelectorAll('p[role="status"]')].filter(
+        (paragraph) => !paragraph.textContent,
+      ).length,
+    ).toBe(0);
   } finally {
     await act(async () => root.unmount());
     container.remove();

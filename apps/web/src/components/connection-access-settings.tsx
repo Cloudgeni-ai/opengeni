@@ -483,9 +483,10 @@ export function ConnectionAccessFormPage({
               </fieldset>
             ) : null}
             {/* A workspace that keeps it as its own follows the people choice too.
-                Without a People list to describe, it is a status that stays in
-                place (empty and hidden until needed), so its line is announced. */}
-            {keptNote || !peopleListed ? (
+                Where people are offered without a People list to describe, it is
+                a status that stays in place (empty and hidden until needed), so
+                its line is announced. */}
+            {keptNote || (people && !peopleListed) ? (
               <p
                 id={keptNoteId}
                 role={peopleListed ? undefined : "status"}

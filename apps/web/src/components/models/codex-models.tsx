@@ -518,6 +518,9 @@ function SharedCodexSetAsideRow({
   // The pool notice names these: this workspace's own pool doesn't list them.
   // Unread or unreadable: whether it is one isn't known.
   const pending = !access.data;
+  // A failed read says so, with the way to read it again: until then whether it
+  // serves anyone here isn't known, and the pool notice waits too.
+  const failed = Boolean(access.error) && !access.data;
   const keptName = chosenPeople && keptHere ? codexAccountName(account) : null;
   useEffect(() => {
     if (!onKeptForPeople) return;
@@ -543,11 +546,14 @@ function SharedCodexSetAsideRow({
       meta={[
         organizationReachLabel(places.scope, access.data),
         // Before the plan, so it stays readable on a phone.
-        reason,
+        failed ? "Couldn't check who can use it" : reason,
         planLabel(account.plan, "ChatGPT"),
         resetsLabel(account.resetCreditAvailableCount),
       ]}
       cells={forPeople ? undefined : { usage: NOT_IN_USE }}
+      control={
+        failed ? <RowButton onClick={() => void access.reload()}>Try again</RowButton> : undefined
+      }
       menu={!forPeople && (reaches || chosenPeople) ? menu : null}
       indicator={
         account.status !== "active" ? { kind: "attention", label: "Needs reconnect" } : "open"
@@ -682,7 +688,7 @@ export function codexPoolCopy({
   const keptNames = listNames(keptForPeople);
   if (workspaceCount === 0 && keptForPeople.length > 0) {
     return {
-      text: `New Codex work can start only for the people chosen for ${keptNames}, kept here as this workspace's own. This workspace is set to use only its own accounts.`,
+      text: `New Codex work can start only for the people chosen for ${keptNames}, kept as this workspace's own. This workspace is set to use only its own accounts.`,
       blocked: true,
     };
   }
@@ -696,7 +702,7 @@ export function codexPoolCopy({
   if (keptForPeople.length > 0) {
     // Named, since its row is listed among the organization's; the rest of
     // the organization's are the "other" ones.
-    const kept = `${keptNames}, kept here as this workspace's own, ${
+    const kept = `${keptNames}, kept as this workspace's own, ${
       keptOne ? "serves only the people chosen for it" : "serve only the people chosen for them"
     }.`;
     const others = `The organization's other ${orgOne ? "account is" : "accounts are"}`;
@@ -707,9 +713,7 @@ export function codexPoolCopy({
               organizationAvailable ? ` ${others} never used here.` : ""
             }`
           : `New work uses ${here}. ${kept}${
-              organizationAvailable
-                ? ` ${others} set aside while ${workspaceCount === 1 ? "it's" : "these are"} connected.`
-                : ""
+              organizationAvailable ? ` ${others} set aside while this workspace has its own.` : ""
             }`,
       blocked: false,
     };

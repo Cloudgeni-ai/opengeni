@@ -333,7 +333,7 @@ test("the pool notice names this workspace's kept people-limited copies, in ever
   expect(
     codexPoolCopy({ ...base, mode: "workspace", workspaceCount: 0, keptForPeople: ["A", "B"] }),
   ).toEqual({
-    text: "New Codex work can start only for the people chosen for A and B, kept here as this workspace's own. This workspace is set to use only its own accounts.",
+    text: "New Codex work can start only for the people chosen for A and B, kept as this workspace's own. This workspace is set to use only its own accounts.",
     blocked: true,
   });
   expect(
@@ -344,7 +344,7 @@ test("the pool notice names this workspace's kept people-limited copies, in ever
       keptForPeople: ["A", "B", "C"],
     }).text,
   ).toBe(
-    "New work uses this workspace's Codex accounts. A, B and C, kept here as this workspace's own, serve only the people chosen for them. The organization's other account is never used here.",
+    "New work uses this workspace's Codex accounts. A, B and C, kept as this workspace's own, serve only the people chosen for them. The organization's other account is never used here.",
   );
   expect(
     codexPoolCopy({
@@ -355,7 +355,7 @@ test("the pool notice names this workspace's kept people-limited copies, in ever
       keptForPeople: ["A"],
     }).text,
   ).toBe(
-    "New work uses this workspace's Codex account. A, kept here as this workspace's own, serves only the people chosen for it.",
+    "New work uses this workspace's Codex account. A, kept as this workspace's own, serves only the people chosen for it.",
   );
   expect(
     codexPoolCopy({
@@ -366,7 +366,7 @@ test("the pool notice names this workspace's kept people-limited copies, in ever
       keptForPeople: ["A"],
     }),
   ).toEqual({
-    text: "New work uses this workspace's Codex accounts. A, kept here as this workspace's own, serves only the people chosen for it. The organization's other accounts are set aside while these are connected.",
+    text: "New work uses this workspace's Codex accounts. A, kept as this workspace's own, serves only the people chosen for it. The organization's other accounts are set aside while this workspace has its own.",
     blocked: false,
   });
 });
@@ -2281,7 +2281,7 @@ describe("One Models page for the organization and the workspace", () => {
         expect(row.textContent).not.toContain("Not in use");
         // Its pool doesn't list it, so the notice says it serves its people.
         expect(workspaceOnly.container.textContent).toContain(
-          "New work uses this workspace's Codex account. Team plan, kept here as this workspace's own, serves only the people chosen for it. The organization's other accounts are never used here.",
+          "New work uses this workspace's Codex account. Team plan, kept as this workspace's own, serves only the people chosen for it. The organization's other accounts are never used here.",
         );
       } finally {
         await cleanup(workspaceOnly);
@@ -2295,7 +2295,7 @@ describe("One Models page for the organization and the workspace", () => {
         const row = rowsNamed(keptOnly.container, "Team plan")[0]!;
         expect(row.textContent).not.toContain("Set aside");
         expect(keptOnly.container.textContent).toContain(
-          "New Codex work can start only for the people chosen for Team plan, kept here as this workspace's own. This workspace is set to use only its own accounts.",
+          "New Codex work can start only for the people chosen for Team plan, kept as this workspace's own. This workspace is set to use only its own accounts.",
         );
         expect(keptOnly.container.textContent).not.toContain("none are connected");
         // Its row goes away (here: no longer an organization admin's page): the
@@ -2339,9 +2339,128 @@ describe("One Models page for the organization and the workspace", () => {
       try {
         await flush();
         expect(failedView.container.textContent).not.toContain("New Codex work");
+        // Its row says so, with the way to read it again.
+        const failedRow = rowsNamed(failedView.container, "Team plan")[0]!;
+        expect(failedRow.textContent).toContain("Couldn't check who can use it");
+        client.getModelConnectionAccess.mockImplementation(keptAccess);
+        // Every failed row offers it; read them all again.
+        const retries = [...failedView.container.querySelectorAll("button")].filter(
+          (candidate) => candidate.textContent === "Try again",
+        );
+        expect(retries.length).toBeGreaterThan(0);
+        expect([...failedRow.querySelectorAll("button")].map((b) => b.textContent)).toContain(
+          "Try again",
+        );
+        for (const retry of retries) await act(async () => retry.click());
+        await flush();
+        expect(failedView.container.textContent).not.toContain("Couldn't check who can use it");
+        expect(failedView.container.textContent).toContain(
+          "New Codex work can start only for the people chosen for Team plan",
+        );
       } finally {
         client.getModelConnectionAccess.mockImplementation(keptAccess);
         await cleanup(failedView);
+      }
+      // Nor while the organization's list (and so its rows) is still being read.
+      const keptList = client.requestJson.getMockImplementation()!;
+      const callList = keptList as (...input: unknown[]) => Promise<unknown>;
+      const heldLists: (() => void)[] = [];
+      client.requestJson.mockImplementation(
+        (...args: unknown[]): Promise<unknown> =>
+          args[0] === "GET" && args[1] === "/v1/organizations/organization-a/codex/accounts"
+            ? new Promise((resolve) => heldLists.push(() => resolve(callList(...args))))
+            : callList(...args),
+      );
+      const listPending = await render();
+      try {
+        await flush();
+        expect(heldLists.length).toBeGreaterThan(0);
+        expect(listPending.container.textContent).not.toContain("New Codex work");
+        await act(async () => heldLists.splice(0).forEach((release) => release()));
+        await flush();
+        expect(listPending.container.textContent).toContain(
+          "New Codex work can start only for the people chosen for Team plan",
+        );
+      } finally {
+        client.requestJson.mockImplementation(keptList);
+        await cleanup(listPending);
+      }
+      // Two kept accounts are named in the rows' order, whichever read finishes first.
+      const zeta = {
+        ...codexAccount({ id: "acct-3", label: "Zeta plan", source: "organization" }),
+        ownInWorkspaceIds: [],
+      };
+      client.requestJson.mockImplementation(async (...args: unknown[]) => {
+        const listed = await callList(...args);
+        return args[0] === "GET" && args[1] === "/v1/organizations/organization-a/codex/accounts"
+          ? {
+              ...(listed as typeof orgAccounts),
+              accounts: [...(listed as typeof orgAccounts).accounts, zeta],
+            }
+          : listed;
+      });
+      const heldById = new Map<string, () => void>();
+      client.getModelConnectionAccess.mockImplementation(
+        (...args: unknown[]) =>
+          new Promise((resolve) => {
+            const id = (args[0] as { connectionId: string }).connectionId;
+            heldById.set(id, () =>
+              resolve(
+                id === "acct-3"
+                  ? (keptAccess as (...input: unknown[]) => unknown)({
+                      ...(args[0] as object),
+                      connectionId: "acct-1",
+                    })
+                  : (keptAccess as (...input: unknown[]) => unknown)(...args),
+              ),
+            );
+          }),
+      );
+      const twoKept = await render();
+      try {
+        await flush();
+        expect(rowsNamed(twoKept.container, "Zeta plan")).toHaveLength(1);
+        for (const id of ["acct-3", "acct-1", ...heldById.keys()]) {
+          await act(async () => heldById.get(id)?.());
+          await flush();
+        }
+        expect(twoKept.container.textContent).toContain(
+          "New Codex work can start only for the people chosen for Team plan and Zeta plan, kept as this workspace's own.",
+        );
+      } finally {
+        client.requestJson.mockImplementation(keptList);
+        client.getModelConnectionAccess.mockImplementation(keptAccess);
+        await cleanup(twoKept);
+      }
+      // A pending read doesn't hide the notice where no "can't start" is at stake:
+      // the workspace uses the organization's accounts.
+      accounts = {
+        ...accounts,
+        accounts: [codexAccount({ id: "org-1", label: "Company plan", source: "organization" })],
+        activeAccountId: "org-1",
+        source: {
+          ...source,
+          mode: "organization" as const,
+          effectiveSource: "organization" as const,
+        },
+      };
+      const heldOrg: (() => void)[] = [];
+      client.getModelConnectionAccess.mockImplementation(
+        (...args: unknown[]) =>
+          new Promise((resolve) => {
+            heldOrg.push(() => resolve((keptAccess as (...input: unknown[]) => unknown)(...args)));
+          }),
+      );
+      const organizationPending = await render();
+      try {
+        await flush();
+        expect(organizationPending.container.textContent).toContain(
+          "New work uses the organization's Codex",
+        );
+      } finally {
+        await act(async () => heldOrg.forEach((release) => release()));
+        client.getModelConnectionAccess.mockImplementation(keptAccess);
+        await cleanup(organizationPending);
       }
       // Automatic, with an account of its own in use: the notice names it too.
       accounts = {
@@ -2352,7 +2471,7 @@ describe("One Models page for the organization and the workspace", () => {
       try {
         await flush();
         expect(automatic.container.textContent).toContain(
-          "New work uses this workspace's Codex account. Team plan, kept here as this workspace's own, serves only the people chosen for it. The organization's other accounts are set aside while it's connected.",
+          "New work uses this workspace's Codex account. Team plan, kept as this workspace's own, serves only the people chosen for it. The organization's other accounts are set aside while this workspace has its own.",
         );
       } finally {
         await cleanup(automatic);
@@ -2375,7 +2494,7 @@ describe("One Models page for the organization and the workspace", () => {
         expect(noOne.container.textContent).toContain(
           "New work uses this workspace's Codex account.",
         );
-        expect(noOne.container.textContent).not.toContain("kept here");
+        expect(noOne.container.textContent).not.toContain("kept as");
       } finally {
         await cleanup(noOne);
       }
@@ -2422,7 +2541,8 @@ describe("One Models page for the organization and the workspace", () => {
         expect(row.textContent).toContain("Set aside");
         expect(row.textContent).toContain("Not in use");
         expect(row.querySelector('[aria-label^="More actions"]')).not.toBeNull();
-        expect(notKept.container.textContent).not.toContain("limited to chosen people");
+        // Not kept here: the notice names no kept account.
+        expect(notKept.container.textContent).not.toContain("kept as");
       } finally {
         await cleanup(notKept);
       }

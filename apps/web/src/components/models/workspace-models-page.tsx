@@ -301,10 +301,6 @@ export function WorkspaceModelsPageBody({
       return next;
     });
   }, []);
-  const keptForPeople = [...keptReports.values()].flatMap((report) =>
-    !report.pending && report.keptName ? [report.keptName] : [],
-  );
-  const keptForPeoplePending = [...keptReports.values()].some((report) => report.pending);
   const connectionChanged = () => {
     setRevision((value) => value + 1);
     onConnectionChange();
@@ -350,6 +346,19 @@ export function WorkspaceModelsPageBody({
   const orgId = organizationId ?? "";
   const { orgCodex, orgGrok, orgClaude, orgGateways, audiences, setAudiences } =
     organizationAccounts;
+  // Named in the order the rows list them, not the order their reads finish.
+  const orgCodexOrder = new Map(orgCodex.accounts.map((candidate, index) => [candidate.id, index]));
+  const keptForPeople = [...keptReports.entries()]
+    .sort(
+      ([left], [right]) =>
+        (orgCodexOrder.get(left) ?? Number.MAX_SAFE_INTEGER) -
+        (orgCodexOrder.get(right) ?? Number.MAX_SAFE_INTEGER),
+    )
+    .flatMap(([, report]) => (!report.pending && report.keptName ? [report.keptName] : []));
+  // Until the organization's list (and so its rows) is read, a kept copy isn't known either.
+  const keptForPeoplePending =
+    (organizationAdmin && (orgCodex.loading || Boolean(orgCodex.loadError))) ||
+    [...keptReports.values()].some((report) => report.pending);
   const catalog = useWorkspaceModelCatalog(workspaceId);
   const credits = useOpenGeniCredits(organizationId);
   // What every workspace follows until it changes it: owners and admins only.

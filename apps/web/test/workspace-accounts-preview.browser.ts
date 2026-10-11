@@ -191,9 +191,7 @@ try {
       "reach=people&kept=research&researchSource=workspace&workspace=00000000-0000-4000-8000-0000000000d3",
     );
     await page
-      .getByText(
-        "Acme Pro, kept here as this workspace's own, serves only the people chosen for it.",
-      )
+      .getByText("Acme Pro, kept as this workspace's own, serves only the people chosen for it.")
       .waitFor();
     const kept = page.locator("[data-slot=list-row]", { hasText: "Acme Pro" });
     await kept.getByText("Selected people").waitFor();
