@@ -4,9 +4,10 @@
  * 5.3 Claude track C1a): the same placement, personal-authority, lease,
  * custody, failover, health and wait tests the Codex, SuperGrok and API-key
  * subjects pass, so Claude differs only by its binding's declared facts.
- * Before the Claude cutover (C3) the binding is registered only in this
- * process and this test database; production registers nothing (asserted
- * below). Setup-token credentials, which never renew, run the same suite in
+ * Since the Claude cutover (C3) the binding is registered in production, like
+ * Codex's and SuperGrok's, and the cutover migration wrote its registry row
+ * and receipt: the suite runs it with no test registration (asserted below).
+ * Setup-token credentials, which never renew, run the same suite in
  * `subscription-core-claude-setup-token-conformance-postgres.test.ts`.
  *
  * The upstream is scripted and keyed by the access token; no network is
@@ -14,11 +15,8 @@
  * adapter's own refresh call (`requestClaudeTokenRefresh`). Claude's refusal
  * classification is the worker's (C1b); the suite's scripted classification
  * is used here. Usage readings go through the Claude usage decoder.
- *
- * Run this file in its own process: the registration below replaces module
- * bindings for the whole process.
  */
-import { describe, expect, mock, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { CLAUDE_OAUTH_TOKEN_URL } from "@opengeni/config";
 import { subscriptionCoreProviderIds } from "../src/subscription-core-providers";
 import {
@@ -27,13 +25,7 @@ import {
 } from "../src/subscription-core-claude-adapter";
 import { installNetworkDenialGuard } from "./fixtures/subscription-core-fake-api-key";
 import { ScriptedClaudeUpstream } from "./fixtures/subscription-core-claude-upstream";
-import {
-  admitTestSubscriptionCoreProvider,
-  testSubscriptionCoreProviderModules,
-} from "./helpers/subscription-core-test-provider";
-
-// Read before the test registration: what production registers.
-const productionProviderIds = subscriptionCoreProviderIds();
+import { describeSubscriptionCoreConformance } from "./helpers/subscription-core-conformance";
 
 let rotations = 0;
 const tokenEndpoint = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -49,11 +41,6 @@ const tokenEndpoint = (async (input: string | URL | Request, init?: RequestInit)
 }) as unknown as typeof fetch;
 
 const provider = subscriptionCoreClaudeProvider({ fetch: tokenEndpoint });
-
-for (const [specifier, factory] of testSubscriptionCoreProviderModules(provider))
-  mock.module(specifier, factory);
-const { describeSubscriptionCoreConformance } =
-  await import("./helpers/subscription-core-conformance");
 
 const upstream = new ScriptedClaudeUpstream([
   "claude-conformance-a",
@@ -109,14 +96,15 @@ describeSubscriptionCoreConformance<SubscriptionCoreClaudeCredential>({
   },
   foreignProvider: "codex",
   async prepareDatabase(shared) {
-    // Every provider list a migration wrote already names Claude: the
-    // registration widens nothing a Claude migration would have to.
-    const lists = await shared.admin<{ definition: string }[]>`
-      select pg_get_constraintdef(oid) as definition from pg_constraint
-      where contype = 'c' and pg_get_constraintdef(oid) like '%''xai''::text]%'`;
-    expect(lists.length).toBeGreaterThan(0);
-    for (const list of lists) expect(list.definition).toContain("'claude'::text");
-    await admitTestSubscriptionCoreProvider(shared.admin, provider);
+    // The cutover migration registered Claude and wrote its receipt;
+    // nothing is admitted or widened for the suite.
+    const [registered] = await shared.admin<{ provider: boolean; receipt: boolean }[]>`
+      select
+        exists (select 1 from opengeni_private.subscription_core_providers
+          where provider = 'claude') as provider,
+        exists (select 1 from opengeni_private.subscription_provider_cutover_receipts
+          where provider = 'claude') as receipt`;
+    expect(registered).toEqual({ provider: true, receipt: true });
   },
   expiresAt: () => new Date(Date.now() + 8 * 60 * 60 * 1000),
   renews: true,
@@ -124,8 +112,8 @@ describeSubscriptionCoreConformance<SubscriptionCoreClaudeCredential>({
   denyNetwork: installNetworkDenialGuard,
 });
 
-describe("Claude binding before its cutover", () => {
-  test("production registers no Claude binding", () => {
-    expect(productionProviderIds).not.toContain("claude");
+describe("Claude binding after its cutover", () => {
+  test("production registers the Claude binding", () => {
+    expect(subscriptionCoreProviderIds()).toContain("claude");
   });
 });

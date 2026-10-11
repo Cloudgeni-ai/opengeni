@@ -4392,7 +4392,9 @@ several current generations (finding above) if the count is not zero.
 
 Claude (`claude`) joins the core as an adapter and binding
 (`packages/db/src/subscription-core-claude-adapter.ts`), unregistered until
-C3 adds its SQL registry row; a test asserts production registers nothing.
+C3 adds its SQL registry row (until then a test asserted production registered
+nothing; since C3 the binding is registered and the conformance suites run it
+as production does).
 Facts the adapter declares, each read from today's Claude path:
 
 - Credential. The stored plaintext is the legacy secret object unchanged

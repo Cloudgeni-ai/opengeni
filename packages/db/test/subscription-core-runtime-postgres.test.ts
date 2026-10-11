@@ -1166,10 +1166,18 @@ describe("provider-neutral subscription runtime persistence", () => {
       expect(String(uppercaseAuthorityError)).toContain(
         "session_turns_subscription_authority_v2_chk",
       );
-      // Claude has no cutover receipt (migration 0712): the application role
-      // can neither create nor enable its switch row, and a row that already
-      // exists (possible before 0712) with a matching v2 entry still grants
-      // no personal placement. Its personal access is decided by its v1 path.
+      // A provider without a cutover receipt (migration 0712): the
+      // application role can neither create nor enable its switch row, and a
+      // row that already exists (possible before 0712) with a matching v2
+      // entry still grants no personal placement. Its personal access is
+      // decided by its v1 path. Every known provider has a receipt since its
+      // cutover (Claude's since 0720), so the fixture removes Claude's to
+      // stand for a provider before its cutover.
+      await shared!.admin.begin(async (owner) => {
+        await owner`set local session_replication_role = replica`;
+        await owner`delete from opengeni_private.subscription_provider_cutover_receipts
+          where provider = 'claude'`;
+      });
       const claudeRowError = await runAccessCase({
         cutover: "enabled",
         provider: "claude",
@@ -1183,7 +1191,8 @@ describe("provider-neutral subscription runtime persistence", () => {
       );
       await shared!.admin`
         insert into subscription_provider_cutovers (account_id, provider, enabled)
-        values (${state.accountId}::uuid, 'claude', true)`;
+        values (${state.accountId}::uuid, 'claude', true)
+        on conflict (account_id, provider) do update set enabled = true`;
       await shared!.admin`
         update session_turns
         set subscription_authority = ${shared!.admin.json({

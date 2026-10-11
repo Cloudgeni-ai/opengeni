@@ -39,6 +39,17 @@ import {
   upsertOrganizationClaudeSubscription,
   type DbClient,
 } from "../src";
+import postgres from "postgres";
+import { SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS } from "../src/runtime-posture";
+
+// The model-setup facts are written through the legacy SuperGrok and Claude
+// connect paths, which run only before their drained subscription-core
+// cutovers: the ledger records those migrations without running them.
+// Removed with the legacy runtimes.
+const LEGACY_SUBSCRIPTION_CUTOVERS = [
+  SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.xai!,
+  SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.claude!,
+];
 import { upsertCodexSubscriptionCredential } from "./fixtures/legacy-codex";
 import {
   ensureCanonicalHumanIdentityForAuthUser,
@@ -189,6 +200,15 @@ beforeAll(async () => {
   }
   // Migrate as the NOSUPERUSER NOBYPASSRLS owner so the capture triggers run
   // under FORCE RLS exactly as they do in production.
+  const ledger = postgres(owned.ownerUrl, { max: 1, onnotice: () => undefined });
+  try {
+    await ledger`create table if not exists schema_migrations (
+      name text primary key, applied_at timestamptz not null default now())`;
+    await ledger`insert into schema_migrations (name)
+      select unnest(${LEGACY_SUBSCRIPTION_CUTOVERS}::text[])`;
+  } finally {
+    await ledger.end();
+  }
   await migrate(owned.ownerUrl);
   await provisionRoles(owned.adminUrl, { appPassword: owned.appPassword, rlsStrategy: "force" });
   const appUrl = new URL(owned.ownerUrl);
