@@ -42,6 +42,7 @@ import {
 } from "../../sandbox-resume";
 import { createTurnCredentialLeases } from "./credential-leases";
 import { coreCodexModelCallCompletedAt, finalizeCoreCodexUsage } from "./codex-core-settlement";
+import { finalizeCoreXaiTurn } from "./xai-core";
 import { wakeSubscriptionCoreCodexWaitersAndDeliver } from "../subscription-core-codex-waits";
 import { drainPhysicalSandboxResumes } from "./sandbox-provision";
 import { safeErrorDiagnostic, safeErrorForTelemetry } from "./errors";
@@ -497,9 +498,18 @@ async function finalizeTurnAttemptSteps(
       );
       leases.codex.held = false;
     }
-    // A core-placed SuperGrok turn releases its core lease (the legacy
-    // release below needs the legacy subject, which a core lease never has).
+    // A core-placed SuperGrok turn moves its binding's cache clock after a
+    // completed model call, then releases its core lease (the legacy release
+    // below needs the legacy subject, which a core lease never has).
     if (providerTurn.xaiSubscriptionCore && leases.xai.held && attempt.turnId) {
+      await waitForTurnFinalizerStep(
+        finalizeCoreXaiTurn({
+          db,
+          core: providerTurn.xaiSubscriptionCore,
+          lease: leases.xai,
+        }).catch(() => undefined),
+        finalizerSignal,
+      );
       leases.xai.stopHeartbeat();
       await waitForTurnFinalizerStep(
         leases.xai.releaseCurrent().catch(() => false),
@@ -507,7 +517,10 @@ async function finalizeTurnAttemptSteps(
       );
       leases.xai.held = false;
     }
+    // The per-turn SuperGrok quota call is legacy only: on the core, quota is
+    // observed on refusal and by the out-of-turn probe.
     if (
+      !providerTurn.xaiSubscriptionCore &&
       providerTurn.effectiveXaiCredentialId &&
       leases.xai.subjectId &&
       providerTurn.xaiRequestContext &&

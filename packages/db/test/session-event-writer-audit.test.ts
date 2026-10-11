@@ -115,9 +115,10 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "canonical",
   },
-  // The shared-core Codex waiter (M3 PR 2a) mirrors the legacy Codex arm,
-  // reconcile and supersession lock contracts exactly.
-  "packages/db/src/index.ts#armSubscriptionCoreCodexCapacityWait": {
+  // The shared-core waiter (M3 PR 2a; any provider since SuperGrok X1b)
+  // mirrors the legacy Codex arm, reconcile and supersession lock contracts
+  // exactly.
+  "packages/db/src/index.ts#armSubscriptionCoreCapacityWait": {
     inserts: 1,
     contract: "canonical",
     requiresControlRevalidation: true,
@@ -126,7 +127,7 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "owned_suffix",
   },
-  "packages/db/src/index.ts#reconcileSubscriptionCoreCodexCapacityWait": {
+  "packages/db/src/index.ts#reconcileSubscriptionCoreCapacityWait": {
     inserts: 1,
     contract: "canonical",
     requiresControlRevalidation: true,
@@ -386,7 +387,7 @@ const expectedOwnedSuffixCallers: Record<string, string[]> = {
   appendTimeline: ["importArchivedSession", "appendArchivedSessionEvents"],
   cancelSessionSubtreeInTransaction: ["mutateSessionControlInTransaction"],
   supersedeSubscriptionCoreCodexCapacityWaitInTransaction: [
-    "reconcileSubscriptionCoreCodexCapacityWait",
+    "reconcileSubscriptionCoreCapacityWait",
   ],
   supersedeXaiCapacityWaitInTransaction: ["reconcileXaiCapacityWait"],
   projectPausedRecovery: ["commitSessionAttemptQuiescence"],
@@ -400,7 +401,7 @@ const expectedOwnedSuffixCallers: Record<string, string[]> = {
     "submitHumanPromptInTransaction",
   ],
   closePendingSessionToolCallsInTransaction: [
-    "armSubscriptionCoreCodexCapacityWait",
+    "armSubscriptionCoreCapacityWait",
     "armXaiCapacityWait",
     "cancelSessionSubtreeInTransaction",
     "failSessionWorkBeforeAttemptClaim",
@@ -439,7 +440,7 @@ const expectedFailedChildOutboxCallers = [
   "applySessionTurnSettlement",
   // arm owns the canonical child-lifecycle prefix (including parent session)
   // before atomically emitting a false-capacity-recovery terminal boundary.
-  "armSubscriptionCoreCodexCapacityWait",
+  "armSubscriptionCoreCapacityWait",
   "failSessionWorkBeforeAttemptClaim",
   "recoverSessionOwner",
 ];
@@ -472,10 +473,7 @@ const expectedChildLifecycleNoticeProducers: Record<string, string[]> = {
     "applySessionTurnSettlement",
     "failSessionWorkBeforeAttemptClaim",
   ],
-  enqueueChildWaitingCapacityOutboxTx: [
-    "armSubscriptionCoreCodexCapacityWait",
-    "armXaiCapacityWait",
-  ],
+  enqueueChildWaitingCapacityOutboxTx: ["armSubscriptionCoreCapacityWait", "armXaiCapacityWait"],
   enqueueChildProgressOutboxTx: ["recordSessionGoalProgressWithEvent"],
 };
 const expectedControlPlaneChildOutboxWrappers: Record<string, string[]> = {

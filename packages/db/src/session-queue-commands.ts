@@ -57,7 +57,7 @@ import {
   withLosslessContentWriteVersion,
 } from "./lossless-json";
 import { closePendingSessionToolCallsInTransaction } from "./session-tool-call-settlement";
-import { deleteSubscriptionCoreCodexWaitersForTurns } from "./subscription-core-codex-waiter-cleanup";
+import { deleteSubscriptionCoreWaitersForTurns } from "./subscription-core/waiters";
 import { cancelTurnInteractionInterventionsInTransaction } from "./browser-auth";
 import {
   assertAgentCommandAuthorityInTransaction,
@@ -804,10 +804,10 @@ export async function supersedeSessionCurrentDirectionInTransaction(
           ),
         );
     }
-    // The shared subscription core's Codex waiter exists only while its turn
-    // waits; the Steer ends that wait, so the row goes with it (its pending
-    // wake deliveries cascade).
-    await deleteSubscriptionCoreCodexWaitersForTurns(db, {
+    // The shared subscription core's waiter (of whichever provider) exists
+    // only while its turn waits; the Steer ends that wait, so the row goes
+    // with it (its pending wake deliveries cascade).
+    await deleteSubscriptionCoreWaitersForTurns(db, null, {
       workspaceId: input.workspaceId,
       turnIds: [current.id],
     });

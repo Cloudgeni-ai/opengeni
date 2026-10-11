@@ -14,15 +14,18 @@ import type {
   SubscriptionCoreTurnIdentity,
 } from "@opengeni/db";
 import { readSubscriptionCoreTurnIdentity } from "@opengeni/db";
+import { publishDurableSessionEvents } from "@opengeni/events";
 import { recordTurnStartupPhase } from "../../observability-metrics";
 import type { CapacityPhaseDeps, CapacityPhaseOutcome } from "./codex-capacity";
 import {
   subscriptionCoreCapacityFailure,
+  subscriptionCoreCapacityWaitPayload,
   subscriptionCoreCutoverDisabledFailure,
   subscriptionCoreLeaseBusyFailure,
 } from "./codex-core-errors";
 import type { CoreSubscriptionTurnLease } from "./credential-leases";
 import type { SubscriptionCoreTurn } from "./turn-context";
+import { reconcileCoreCapacityWait, type CoreWaitBinding } from "../subscription-core-codex-waits";
 
 type WaitPlacement = Extract<SubscriptionCorePlacement, { kind: "wait" }>;
 type RunPlacement = Extract<SubscriptionCorePlacement, { kind: "run" }>;
@@ -285,4 +288,92 @@ export async function activeGoalFence(
   const goal = await getSessionGoal(deps.db, deps.input.workspaceId, deps.input.sessionId);
   const activeGoal = goal?.status === "active" ? goal : null;
   return { goalId: activeGoal?.id ?? null, goalVersion: activeGoal?.version ?? null };
+}
+
+/**
+ * Arm the session's core waiter for this attempt's turn and re-evaluate it at
+ * once: a capacity change that committed before the waiter existed could not
+ * wake it, so the arm closes that edge itself (as the legacy Codex arm does).
+ * Any provider: `waits` supplies its waiter entry points.
+ */
+export async function parkCoreSubscriptionTurn(
+  deps: CapacityPhaseDeps,
+  wait: WaitPlacement,
+  waits: CoreWaitBinding,
+  displayName: string,
+): Promise<CapacityPhaseOutcome> {
+  const {
+    input,
+    db,
+    bus,
+    control,
+    attempt,
+    claimedResult,
+    acknowledgeLostAttemptOwnership,
+    signalCodexCapacityWorkflow,
+  } = deps;
+  const turnId = attempt.turnId!;
+  const goal = await getSessionGoal(db, input.workspaceId, input.sessionId);
+  const activeGoal = goal?.status === "active" ? goal : null;
+  const armed = await waits.arm(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    turnId,
+    attemptId: input.attemptId,
+    goalId: activeGoal?.id ?? null,
+    goalVersion: activeGoal?.version ?? null,
+    waitReason: wait.reason,
+    earliestResetAt: wait.earliestResetAt,
+    healthRetryAt: wait.healthRetryAt,
+    failurePayload: subscriptionCoreCapacityWaitPayload(
+      wait.reason,
+      wait.earliestResetAt,
+      displayName,
+    ),
+  });
+  await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, armed.events);
+  if (armed.action === "stopped") {
+    control.turnMetricOutcome = "failed";
+    control.activityStatus = armed.sessionStatus === "queued" ? "idle" : "failed";
+    return { exit: claimedResult({ status: control.activityStatus }) };
+  }
+  if (armed.action === "waiting") {
+    const evaluated = await reconcileCoreCapacityWait(
+      { db, bus, signalCodexCapacityWorkflow },
+      waits,
+      {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        waiterId: armed.waiter.waiterId,
+        generation: armed.waiter.generation,
+      },
+    );
+    if (evaluated?.action === "resumed") {
+      control.turnMetricOutcome = "recovering";
+      control.activityStatus = "recovering";
+      return { exit: claimedResult({ status: "recovering" }) };
+    }
+    if (evaluated?.action === "waiting") {
+      control.turnMetricOutcome = "recovering";
+      control.activityStatus = "waiting_capacity";
+      return {
+        exit: claimedResult({
+          status: "waiting_capacity",
+          capacityWait: {
+            ...(evaluated.provider ? { provider: evaluated.provider } : {}),
+            waiterId: evaluated.waiterId,
+            generation: evaluated.generation,
+            nextCheckAt: evaluated.nextCheckAt,
+            wakeRevision: evaluated.wakeRevision,
+          },
+        }),
+      };
+    }
+  }
+  acknowledgeLostAttemptOwnership();
+  control.turnMetricOutcome = "cancelled";
+  control.activityStatus = "cancelled";
+  return { exit: claimedResult({ status: "cancelled" }) };
 }
