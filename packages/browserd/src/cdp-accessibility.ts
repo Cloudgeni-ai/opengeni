@@ -42,6 +42,8 @@ export type CdpAccessibilitySnapshot = {
   entries: CdpAccessibilityEntry[];
   entriesByRef: Map<string, CdpAccessibilityEntry>;
   entriesByNodeId: Map<string, CdpAccessibilityEntry>;
+  /** Raw parent links, including ignored nodes that have no entry. */
+  rawParentByNodeId?: ReadonlyMap<string, string>;
 };
 
 /** AX ids and their relationships are scoped to one frame tree. Prefix them
@@ -173,7 +175,48 @@ export function normalizeCdpAccessibilityTree(options: {
     entries,
     entriesByRef: new Map(entries.map((entry) => [entry.ref, entry])),
     entriesByNodeId: new Map(entries.map((entry) => [entry.nodeId, entry])),
+    rawParentByNodeId: new Map(
+      [...rawById].flatMap(([nodeId, node]) =>
+        typeof node.parentId === "string" ? [[nodeId, node.parentId] as const] : [],
+      ),
+    ),
   };
+}
+
+/** Accessibility roles that frame where an element sits on the page. */
+const CONTAINER_ROLES = new Set([
+  "alertdialog",
+  "banner",
+  "complementary",
+  "contentinfo",
+  "dialog",
+  "form",
+  "main",
+  "menu",
+  "menubar",
+  "navigation",
+  "region",
+  "search",
+  "toolbar",
+]);
+
+/** Nearest dialog, landmark, menu or toolbar ancestor of an entry. */
+export function accessibilityContainer(
+  snapshot: Pick<CdpAccessibilitySnapshot, "entriesByNodeId" | "rawParentByNodeId">,
+  nodeId: string,
+): CdpAccessibilityEntry | null {
+  const visited = new Set<string>([nodeId]);
+  let parentId =
+    snapshot.entriesByNodeId.get(nodeId)?.parentNodeId ??
+    snapshot.rawParentByNodeId?.get(nodeId) ??
+    null;
+  while (parentId !== null && !visited.has(parentId)) {
+    visited.add(parentId);
+    const ancestor = snapshot.entriesByNodeId.get(parentId);
+    if (ancestor && CONTAINER_ROLES.has(ancestor.role)) return ancestor;
+    parentId = ancestor?.parentNodeId ?? snapshot.rawParentByNodeId?.get(parentId) ?? null;
+  }
+  return null;
 }
 
 function safeValue(
