@@ -41,7 +41,7 @@ const memberPermissions = [
   "scheduled_tasks:manage",
 ];
 
-async function fixture() {
+async function fixture(settingsOverrides: Parameters<typeof testSettings>[0] = {}) {
   const [account] =
     await shared.admin`insert into managed_accounts (name) values ('Schedule audience fixture') returning id`;
   const accountId = String(account!.id);
@@ -67,7 +67,11 @@ async function fixture() {
   const app = createApp({
     db: db.db,
     bus: new MemoryEventBus(),
-    settings: testSettings({ productAccessMode: "configured", sandboxBackend: "none" }),
+    settings: testSettings({
+      productAccessMode: "configured",
+      sandboxBackend: "none",
+      ...settingsOverrides,
+    }),
     workflowClient: {
       signalUserMessage: noop,
       wakeSessionWorkflow: noop,
@@ -380,4 +384,56 @@ test("Only me schedules follow the organization's Only me setting", async () => 
     "Only me schedules are turned off for this organization.",
   );
   expect((await f.create(f.owner.headers, {})).status).toBe(201);
+});
+
+test("only its owner's Only me schedules can run on a personal machine", async () => {
+  const f = await fixture({ sandboxOwnershipEnabled: true, sandboxSelfhostedEnabled: true });
+  const machine = await shared.admin.begin(async (tx) => {
+    await tx`select set_config('opengeni.account_id', ${f.accountId}, true)`;
+    await tx`select set_config('opengeni.workspace_id', ${f.workspace.id}, true)`;
+    await tx`select set_config('opengeni.subject_id', ${f.owner.subjectId}, true)`;
+    const [row] = await tx<Array<{ sandboxId: string }>>`
+      select sandbox_id as "sandboxId" from finalize_scoped_enrollment(
+        ${f.accountId}::uuid, ${f.workspace.id}::uuid, 'user',
+        ${`pubkey-${crypto.randomUUID()}`}, false, false, 'linux', 'x86_64', 'My laptop', false
+      )`;
+    return row!;
+  });
+  const onMachine = {
+    prompt: "Tidy my downloads folder",
+    resources: [],
+    tools: [],
+    metadata: {},
+    machineTarget: { targetSandboxId: machine.sandboxId },
+  };
+
+  const forEveryone = await f.create(f.owner.headers, { agentConfig: onMachine });
+  expect(forEveryone.status).toBe(422);
+  expect(await forEveryone.text()).toContain("Only me");
+  const notTheirs = await f.create(f.other.headers, {
+    visibility: "private",
+    agentConfig: onMachine,
+  });
+  expect(notTheirs.status).toBe(422);
+
+  const created = await f.create(f.owner.headers, {
+    visibility: "private",
+    agentConfig: onMachine,
+  });
+  expect(created.status).toBe(201);
+  const task = (await created.json()) as { id: string; visibility: string };
+  expect(task.visibility).toBe("private");
+  const widened = await f.app.request(`${f.base}/${task.id}`, {
+    method: "PATCH",
+    headers: f.owner.headers,
+    body: JSON.stringify({ visibility: "workspace" }),
+  });
+  expect(widened.status).toBe(422);
+  expect(await widened.text()).toContain("Only me");
+  const renamed = await f.app.request(`${f.base}/${task.id}`, {
+    method: "PATCH",
+    headers: f.owner.headers,
+    body: JSON.stringify({ name: "Tidy downloads" }),
+  });
+  expect(renamed.status).toBe(200);
 });

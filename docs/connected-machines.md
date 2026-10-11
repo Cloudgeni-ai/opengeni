@@ -310,10 +310,24 @@ durable target authority and commits the active pointer in the same transaction
 as the new session row. If the target is invalid, removed, revoked, or otherwise
 no longer attachable, the create fails without leaving a queued session shell.
 
-Unattended schedules currently accept workspace- and organization-scoped
-machines only. User-scoped machines require an owning human's explicit personal
-resource attachment, which a future scheduled-execution authority flow must
-freeze durably before those machines can be offered safely.
+Workspace- and organization-scoped machines run any schedule. A user-scoped
+(personal) machine runs only an **Only me** schedule owned by the machine's
+owner:
+
+- Saving is the consent. Create and update accept a personal machine only when
+  the final audience is Only me; widening such a schedule to Workspace, or
+  saving it for Workspace, returns 422. The scoped sandbox lookup returns a
+  personal machine to its owner alone, so nobody else can select it.
+- Each run attaches the machine through the owner's scoped authorization and
+  then issues a `session`-mode `connected_machine.use` grant (context
+  `user_private`) for exactly that run's chat. No standing `always` grant is
+  created, so the owner's other chats keep asking.
+- Every attempt goes through the same database admission as an interactive
+  turn (`admit_session_attempt_personal_machine`): the run's causal human must
+  be the machine's owner and still an active member with access to the
+  workspace, the machine's authority must be current, and the run's grant must
+  be active. Removing the person, revoking the machine or revoking the grant
+  stops the next attempt.
 
 On macOS, the enrollment display offer is independent of Screen Recording
 permission. A detected display keeps the existing screen-control consent option
