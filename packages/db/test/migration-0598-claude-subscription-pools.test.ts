@@ -60,6 +60,8 @@ const subscriptionCoreMigrations = [
   "0716_subscription_authority_compat.sql",
   // Requires 0716's routines; it follows 0716.
   "0717_subscription_authority_fences.sql",
+  // Adds a trigger on the session bindings table from withheld 0642.
+  "0723_subscription_binding_cache_clock.sql",
   // Patches the acceptance writers withheld 0669, 0688 and 0707 define.
   "0724_subscription_personal_acceptance_reads.sql",
 ] as const;
