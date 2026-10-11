@@ -23,11 +23,11 @@ import {
   disconnectSubscriptionCoreConnection,
   readSubscriptionCoreProviderRouteForRequest,
   renameSubscriptionCoreConnection,
+  resolveSubscriptionCoreRouteConnectionId,
   resolveNamedManagedPersonalWorkspaceGrant,
   setSubscriptionCoreAllocator,
   setSubscriptionCorePrimary,
   setSubscriptionCoreRotation,
-  subscriptionCoreOperations,
   type Database,
   type SubscriptionCoreConnectRefusal,
   type SubscriptionCoreDisconnectOutcome,
@@ -168,20 +168,38 @@ function settingsJson(projection: { rotationEnabled: boolean; activeCredentialId
   };
 }
 
+/**
+ * A route's account id as the canonical core connection id: a legacy id the
+ * drained cutover kept as an alias resolves to its connection as the caller
+ * may see it (`resolveSubscriptionCoreRouteConnectionId`). Anything else is
+ * returned as given; the caller's projection or writer decides whether it
+ * exists and is theirs.
+ */
+export async function canonicalConnectionId(
+  deps: ApiRouteDeps,
+  binding: SubscriptionCoreProvider,
+  input: { accountId: string; workspaceId: string | null; subjectId: string; routeId: string },
+): Promise<string> {
+  if (!z.uuid().safeParse(input.routeId).success) return input.routeId;
+  const resolved = await resolveSubscriptionCoreRouteConnectionId(deps.db, binding, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    subjectId: input.subjectId,
+    connectionId: input.routeId,
+  });
+  return resolved ?? input.routeId;
+}
+
 /** A workspace route's account: its canonical id, legacy scope and the caller's authority. */
 async function workspaceTarget(c: Context, ctx: PoolContext, workspaceId: string, routeId: string) {
   const { deps, core, displayName } = ctx;
   const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
-  const resolved = z.uuid().safeParse(routeId).success
-    ? await subscriptionCoreOperations(core.binding).resolveSubscriptionCoreConnectionId(deps.db, {
-        accountId: grant.accountId,
-        workspaceId,
-        connectionId: routeId,
-      })
-    : null;
-  // Personal connections are visible only through the owner reader, so their
-  // ids do not resolve here; the owner's projection lists them by id.
-  const connectionId = resolved ?? routeId;
+  const connectionId = await canonicalConnectionId(deps, core.binding, {
+    accountId: grant.accountId,
+    workspaceId,
+    subjectId: grant.subjectId,
+    routeId,
+  });
   const projection = await core.workspaceProjection(deps.db, {
     accountId: grant.accountId,
     workspaceId,
@@ -251,7 +269,8 @@ export async function coreWorkspaceActivate(
   if (!result.activated)
     throw new HTTPException(404, { message: `${ctx.displayName} account not found` });
   await deliverPoolCoreWake(ctx.deps, ctx.core, result.wake);
-  return c.json({ activated: true, accountId: routeId });
+  // The canonical id: the listing (and its active account) shows canonical ids.
+  return c.json({ activated: true, accountId: target.connectionId });
 }
 
 /** Legacy rotation toggle: on is `spread`, off is `primary_first`. */
@@ -418,7 +437,7 @@ export async function coreOrganizationAccount(
   c: Context,
   ctx: PoolContext,
   actor: OrganizationActor,
-  connectionId: string,
+  routeId: string,
   change:
     | { activate: true }
     | { disconnect: true }
@@ -431,6 +450,7 @@ export async function coreOrganizationAccount(
     workspaceId: null,
     subjectId: actor.actorSubjectId,
   };
+  const connectionId = await canonicalConnectionId(deps, core.binding, { ...admin, routeId });
   const notFound = () => new HTTPException(404, { message: `${displayName} account not found` });
   if ("disconnect" in change) {
     const result = await disconnectSubscriptionCoreConnection(deps.db, core.binding, {

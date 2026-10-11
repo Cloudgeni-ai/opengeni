@@ -382,6 +382,7 @@ export {
 } from "./subscription-core/administration";
 export {
   disconnectSubscriptionCoreConnection,
+  resolveSubscriptionCoreRouteConnectionId,
   type SubscriptionCoreConnectRefusal,
   type SubscriptionCoreDisconnectOutcome,
 } from "./subscription-core/connections";

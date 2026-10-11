@@ -4399,7 +4399,14 @@ disabled) answers the typed 503 `subscription_core_cutover_disabled`.
   bodies and response shapes stay; accounts are core connections projected
   into the legacy SuperGrok account shape (`subscription-core-xai-compat.ts`;
   the one quota window is the legacy percentage and reset), so the legacy
-  `accountJson` renders both. Route ids resolve through the cutover aliases.
+  `accountJson` renders both. Route ids resolve through the cutover aliases
+  on both route families, as the caller (`resolveSubscriptionCoreRouteConnectionId`):
+  an organization administrator sees every alias of the organization, any
+  other workspace administrator the aliases of connections the workspace
+  reaches, and a personal connection's alias resolves only for its owner in
+  their own Personal workspace (inside the owner-only routine); the caller's
+  projection or writer still decides whether the connection is theirs.
+  Activate answers with the canonical id the listing shows.
   Activate sets the effective primary at the scope the caller administers;
   rotation maps to `spread` / `primary_first`; rename, allocator and
   disconnect use the neutral writers, behind the legacy browser and scope

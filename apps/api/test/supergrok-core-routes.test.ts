@@ -243,12 +243,12 @@ afterAll(async () => {
 
 async function request(
   path: string,
-  options: { method?: string; body?: unknown; permissions?: Permission[] } = {},
+  options: { method?: string; body?: unknown; permissions?: Permission[]; subject?: string } = {},
 ): Promise<Response> {
   const token = await signDelegatedAccessToken(DELEGATION_SECRET, {
     accountId,
     workspaceId,
-    subjectId,
+    subjectId: options.subject ?? subjectId,
     principalKind: "human_session",
     permissions: options.permissions ?? ["workspace:read", "workspace:admin"],
     exp: Math.floor(Date.now() / 1_000) + 3_600,
@@ -786,5 +786,163 @@ describe.skipIf(!realDb)("SuperGrok routes on the shared core (M4 X2b)", () => {
     expect(disconnected.status).toBe(200);
     const after = await (await browserWorkspaceRequest(personalWorkspaceId, "/accounts")).json();
     expect(JSON.stringify(after.accounts)).not.toContain(personalId);
+  });
+
+  test("legacy account ids the cutover kept as aliases resolve for the authorized caller only", async () => {
+    // A legacy SuperGrok id the drained cutover merged into a canonical
+    // connection is kept as an alias; every account route accepts it.
+    const alias = async (organization: string, connection: string) => {
+      const legacyId = crypto.randomUUID();
+      await shared!.admin`
+        insert into subscription_connection_aliases (
+          account_id, provider, alias_connection_id, connection_id
+        ) values (${organization}::uuid, 'xai', ${legacyId}::uuid, ${connection}::uuid)`;
+      return legacyId;
+    };
+
+    // Organization routes: the organization's own account by its legacy id.
+    const organizationListing = await (await organizationRequest("/accounts")).json();
+    const organizationAccount: string = organizationListing.accounts[0].id;
+    const organizationAlias = await alias(organizationId, organizationAccount);
+    const orgRenamed = await organizationRequest(`/accounts/${organizationAlias}`, "PATCH", {
+      label: "Renamed by legacy id",
+    });
+    expect({ status: orgRenamed.status, body: await orgRenamed.json() }).toMatchObject({
+      status: 200,
+      body: { updated: true },
+    });
+    const orgActivated = await organizationRequest(
+      `/accounts/${organizationAlias}/activate`,
+      "POST",
+      {},
+    );
+    expect({ status: orgActivated.status, body: await orgActivated.json() }).toEqual({
+      status: 200,
+      body: { updated: true },
+    });
+    const orgAllocator = await organizationRequest(
+      `/accounts/${organizationAlias}/allocator`,
+      "PATCH",
+      {
+        enabled: true,
+        expectedVersion: Number(organizationListing.accounts[0].allocatorVersion),
+      },
+    );
+    expect(orgAllocator.status).toBe(200);
+    expect(
+      (await (await organizationRequest("/accounts")).json()).accounts.find(
+        (account: { id: string }) => account.id === organizationAccount,
+      ),
+    ).toMatchObject({ label: "Renamed by legacy id", active: true });
+
+    // Workspace routes: an account this workspace manages, by its legacy id,
+    // for the organization administrator and for a workspace administrator
+    // who is not one.
+    providerSubject = "xai-core-alias";
+    const managed = await connectWorkspaceAccount();
+    const workspaceAlias = await alias(accountId, managed.accountId);
+    const ownerRenamed = await request(`/supergrok/accounts/${workspaceAlias}`, {
+      method: "PATCH",
+      body: { label: "Owner by legacy id" },
+    });
+    expect({ status: ownerRenamed.status, body: await ownerRenamed.json() }).toMatchObject({
+      status: 200,
+      body: { id: managed.accountId, label: "Owner by legacy id" },
+    });
+    const workspaceAdmin = `user:supergrok-core-workspace-admin-${crypto.randomUUID()}`;
+    const [adminPersonal] = await shared!.admin<{ id: string }[]>`
+      insert into workspaces (account_id, name)
+      values (${accountId}::uuid, 'Workspace admin personal') returning id::text as id`;
+    await shared!.admin`
+      insert into organization_memberships (account_id, subject_id, role, status, personal_workspace_id)
+      values (${accountId}::uuid, ${workspaceAdmin}, 'member', 'active', ${adminPersonal!.id}::uuid)`;
+    await shared!.admin`
+      insert into workspace_memberships (account_id, workspace_id, subject_id, role, permissions)
+      values (${accountId}::uuid, ${workspaceId}::uuid, ${workspaceAdmin}, 'admin',
+        '["workspace:read", "workspace:admin", "connections:write"]'::jsonb)`;
+    const adminRenamed = await request(`/supergrok/accounts/${workspaceAlias}`, {
+      method: "PATCH",
+      body: { label: "Workspace admin by legacy id" },
+      subject: workspaceAdmin,
+    });
+    expect({ status: adminRenamed.status, body: await adminRenamed.json() }).toMatchObject({
+      status: 200,
+      body: { id: managed.accountId, label: "Workspace admin by legacy id" },
+    });
+    const adminActivated = await request(`/supergrok/accounts/${workspaceAlias}/activate`, {
+      method: "POST",
+      subject: workspaceAdmin,
+    });
+    expect({ status: adminActivated.status, body: await adminActivated.json() }).toEqual({
+      status: 200,
+      body: { activated: true, accountId: managed.accountId },
+    });
+    const aliasAccess = await request(`/model-connections/supergrok/${workspaceAlias}/access`);
+    expect(aliasAccess.status).toBe(200);
+
+    // Refused otherwise: another organization's legacy id resolves on neither
+    // route family, and an organization route never reaches another
+    // organization's account.
+    const foreignWorkspace = await request(`/supergrok/accounts/${organizationAlias}`, {
+      method: "PATCH",
+      body: { label: "nope" },
+    });
+    expect(foreignWorkspace.status).toBe(404);
+    const foreignOrganization = await organizationRequest(`/accounts/${workspaceAlias}`, "PATCH", {
+      label: "nope",
+    });
+    expect(foreignOrganization.status).toBe(404);
+    const foreignDisconnect = await organizationRequest(`/accounts/${workspaceAlias}`, "DELETE");
+    expect(foreignDisconnect.status).toBe(404);
+    // A shared workspace never reaches an organization account by its
+    // legacy id when it does not serve it.
+    const otherShared = await browserWorkspaceRequest(
+      managedSharedWorkspaceId,
+      `/accounts/${workspaceAlias}`,
+      "PATCH",
+      { label: "nope" },
+    );
+    expect(otherShared.status).toBe(404);
+
+    // The legacy id of a private account resolves only for its owner, in
+    // their Personal workspace.
+    providerSubject = "xai-core-personal-alias";
+    const start = await browserWorkspaceRequest(personalWorkspaceId, "/connect/start", "POST", {
+      scope: "user",
+    });
+    const poll = await browserWorkspaceRequest(personalWorkspaceId, "/connect/poll", "POST", {
+      state: (await start.json()).state,
+    });
+    const personalId: string = (await poll.json()).accountId;
+    const personalAlias = await alias(organizationId, personalId);
+    const personalRenamed = await browserWorkspaceRequest(
+      personalWorkspaceId,
+      `/accounts/${personalAlias}`,
+      "PATCH",
+      { label: "Mine by legacy id" },
+    );
+    expect({ status: personalRenamed.status, body: await personalRenamed.json() }).toMatchObject({
+      status: 200,
+      body: { id: personalId, label: "Mine by legacy id", scope: "user" },
+    });
+    const personalElsewhere = await browserWorkspaceRequest(
+      managedSharedWorkspaceId,
+      `/accounts/${personalAlias}`,
+      "PATCH",
+      { label: "nope" },
+    );
+    expect(personalElsewhere.status).toBe(404);
+    const personalFromOrganization = await organizationRequest(
+      `/accounts/${personalAlias}`,
+      "PATCH",
+      { label: "nope" },
+    );
+    expect(personalFromOrganization.status).toBe(404);
+    const personalDisconnected = await browserWorkspaceRequest(
+      personalWorkspaceId,
+      `/accounts/${personalAlias}`,
+      "DELETE",
+    );
+    expect(personalDisconnected.status).toBe(200);
   });
 });

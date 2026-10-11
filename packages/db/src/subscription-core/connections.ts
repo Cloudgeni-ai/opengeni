@@ -483,11 +483,7 @@ async function disconnectTarget(
   const providerId = subscriptionCoreProviderId(provider);
   const connectionKind = subscriptionCoreConnectionKind(provider);
   if (input.workspaceId === null) {
-    const id = await resolveSubscriptionConnectionId(tx, {
-      accountId: input.accountId,
-      provider: providerId,
-      connectionId: rawId,
-    });
+    const id = await resolveRouteConnectionIdInTransaction(tx, provider, input, rawId);
     if (!id) return null;
     const [row] = await rawRows<{ id: string }>(
       tx,
@@ -498,17 +494,8 @@ async function disconnectTarget(
     );
     return row ? { id: row.id, organization: true } : null;
   }
-  if ((await workspaceKind(tx, input.accountId, input.workspaceId)) === "personal") {
-    // Resolve migrated aliases inside the owner-only routine. Ordinary app
-    // RLS deliberately hides personal aliases, including from administrators.
-    const [personal] = await rawRows<{ resolved: { id: string } | null }>(
-      tx,
-      sql`select opengeni_private.manage_subscription_core_personal(${providerId},
-        ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.subjectId}, ${rawId}::uuid,
-        'resolve', null, null, null) as resolved`,
-    );
-    if (personal?.resolved) return { id: personal.resolved.id, organization: false };
-  }
+  const personal = await resolvePersonalConnectionIdInTransaction(tx, provider, input, rawId);
+  if (personal) return { id: personal, organization: false };
   const id = await resolveSubscriptionConnectionId(tx, {
     accountId: input.accountId,
     provider: providerId,
@@ -521,6 +508,69 @@ async function disconnectTarget(
   });
   const entry = pool.connections.find((candidate) => candidate.row.id === id);
   return entry ? { id, organization: entry.source === "organization" } : null;
+}
+
+/**
+ * The caller's own personal connection a route id names (canonical, or a
+ * legacy id the drained cutover kept as its alias), only in their own
+ * Personal workspace. Resolved inside the owner-only routine: ordinary app
+ * RLS deliberately hides personal aliases, including from administrators.
+ */
+async function resolvePersonalConnectionIdInTransaction(
+  tx: Database,
+  provider: SubscriptionCoreProvider,
+  input: SubscriptionCoreConnectScope,
+  rawId: string,
+): Promise<string | null> {
+  if (input.workspaceId === null) return null;
+  if ((await workspaceKind(tx, input.accountId, input.workspaceId)) !== "personal") return null;
+  const [personal] = await rawRows<{ resolved: { id: string } | null }>(
+    tx,
+    sql`select opengeni_private.manage_subscription_core_personal(${subscriptionCoreProviderId(provider)},
+      ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.subjectId}, ${rawId}::uuid,
+      'resolve', null, null, null) as resolved`,
+  );
+  return personal?.resolved?.id ?? null;
+}
+
+async function resolveRouteConnectionIdInTransaction(
+  tx: Database,
+  provider: SubscriptionCoreProvider,
+  input: SubscriptionCoreConnectScope,
+  rawId: string,
+): Promise<string | null> {
+  const personal = await resolvePersonalConnectionIdInTransaction(tx, provider, input, rawId);
+  if (personal) return personal;
+  return await resolveSubscriptionConnectionId(tx, {
+    accountId: input.accountId,
+    provider: subscriptionCoreProviderId(provider),
+    connectionId: rawId,
+  });
+}
+
+/**
+ * A route's account id (canonical, or a legacy id the drained cutover kept
+ * as an alias) as the canonical connection id, resolved as the caller: an
+ * organization administrator sees every alias of the organization (the
+ * organization route, `workspaceId: null`, or any workspace route); anyone
+ * else the aliases of connections the workspace reaches; a personal
+ * connection's only its owner, in their own Personal workspace. Null when
+ * nothing resolves; the caller's projection still decides whether the
+ * connection is theirs to name.
+ */
+export async function resolveSubscriptionCoreRouteConnectionId(
+  db: Database,
+  provider: SubscriptionCoreProvider,
+  input: SubscriptionCoreConnectScope & { connectionId: string },
+): Promise<string | null> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (tx) => {
+      await setSubjectRlsContext(tx, input.subjectId);
+      return await resolveRouteConnectionIdInTransaction(tx, provider, input, input.connectionId);
+    },
+  );
 }
 
 /**
