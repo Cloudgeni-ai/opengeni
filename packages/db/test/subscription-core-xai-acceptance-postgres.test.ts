@@ -1,39 +1,22 @@
 /**
  * M4 X2b: SuperGrok (`xai`) on the shared core's writers, as the restricted
  * application role, once SuperGrok is registered and its cutover receipt and
- * switch row exist (X3 ships both; this process and database stand in for
- * them). Connect writes SuperGrok's credential format through the neutral
+ * switch row exist. X3 registers SuperGrok in production; this database
+ * withholds the cutover migration and stages the receipt and switch row
+ * itself, so the pre-receipt state stays observable. Connect writes SuperGrok's credential format through the neutral
  * writers; a personal connection exists only in the person's own Personal
  * workspace; acceptance writes the xai v2 entry next to Codex's for the
  * exact owner only; and after the receipt no acceptance computes xai's v1
  * value from live state.
- *
- * Run this file in its own process: the registration below replaces module
- * bindings for the whole process (the CI shard classifier isolates files that
- * call mock.module).
- */
-import { afterAll, beforeAll, describe, expect, mock, setDefaultTimeout, test } from "bun:test";
+ * */
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import * as realRegistry from "../src/subscription-core-providers";
-import type { SubscriptionCoreProvider } from "../src/subscription-core/provider";
 import { SUBSCRIPTION_CORE_XAI } from "../src/subscription-core-xai-adapter";
 
 setDefaultTimeout(180_000);
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
-// What production registers, read before the test registration.
-const productionProviderIds = realRegistry.subscriptionCoreProviderIds();
-const realProvider = realRegistry.subscriptionCoreProvider;
-const lookup = (providerId: string): SubscriptionCoreProvider =>
-  providerId === "xai"
-    ? (SUBSCRIPTION_CORE_XAI as SubscriptionCoreProvider)
-    : realProvider(providerId);
-mock.module(Bun.resolveSync("../src/subscription-core-providers", import.meta.dir), () => ({
-  ...realRegistry,
-  subscriptionCoreProviderIds: () => [...productionProviderIds, "xai"].sort(),
-  subscriptionCoreProvider: lookup,
-  subscriptionCoreAdapter: (providerId: string) => lookup(providerId).adapter,
-}));
 const db = await import("../src");
 const { encryptEnvironmentValue } = await import("../src/environment-crypto");
 const { connectSubscriptionCoreConnection } = await import("../src/subscription-core/connections");
@@ -206,7 +189,10 @@ let beforeReceipt: { v2: unknown; xai: unknown } | null = null;
 
 beforeAll(async () => {
   if (!realDb) return;
-  shared = await acquireSharedTestDatabase("subscription-core-xai-acceptance");
+  shared = await acquireSharedTestDatabase("subscription-core-xai-acceptance", {
+    // The drained cutover writes the real receipt; this file stages its own.
+    withheldMigrations: ["0721_subscription_core_xai_cutover.sql"],
+  });
   if (!shared) throw new Error("Real PostgreSQL is required");
   client = db.createDb(shared.appUrl, { max: 4 });
   org = await organization();
@@ -232,8 +218,7 @@ afterAll(async () => {
 }, 180_000);
 
 describe.skipIf(!realDb)("SuperGrok on the shared core's writers (M4 X2b)", () => {
-  test("production registers only Codex; this process registers SuperGrok", () => {
-    expect(productionProviderIds).toEqual(["codex"]);
+  test("production registers Codex and SuperGrok", () => {
     expect(realRegistry.subscriptionCoreProviderIds()).toEqual(["codex", "xai"]);
   });
 
