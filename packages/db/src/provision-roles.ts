@@ -2163,6 +2163,7 @@ BEGIN
       'subscription_core_personal_connections(text,uuid,uuid,text)',
       'subscription_core_reach(text,uuid,uuid)',
       'set_subscription_core_reach(text,uuid,uuid,boolean,boolean)',
+      'set_subscription_core_reach_allocator(text,uuid,uuid,boolean)',
       'subscription_provider_cutover_committed(text)',
       'copy_subscription_authority_compat(text,text,uuid,uuid,bigint)',
       'read_subscription_authority_compat(text,text,uuid,uuid,bigint)',

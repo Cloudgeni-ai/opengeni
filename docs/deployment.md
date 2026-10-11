@@ -4816,6 +4816,149 @@ releases works:
   only after both receipts exist; readiness refuses a database missing
   either. Validate each provider's report rows separately.
 
+### Workspace-managed accounts as organization accounts (0714)
+
+Migration `0714_subscription_workspace_managed_organization_accounts.sql` is
+**rolling**. It changes no row: since 0689 an account connected in a shared
+workspace is already a shared connection of the organization, scoped to that
+workspace and managed by it. The migration only lets the organization access
+editor's reach setters (`set_subscription_core_reach` and its Codex wrapper
+`set_subscription_codex_reach`, from 0713) accept such a connection when its
+manager is a shared workspace of the organization, so an organization
+administrator can give it to the whole
+organization, chosen workspaces or chosen people without reconnecting. Design
+record: [workspace-managed connections as organization accounts](design/subscription-core-2026-10-07.md#54-workspace-managed-connections-as-organization-accounts).
+It also adds one routine, `opengeni_private.set_subscription_core_reach_allocator`
+(organization administrators only, granted to the application roles like the
+setters): the organization's rotation switch sets the reach row's switch
+without copying the connection's model list, which the managing workspace's
+administrators also write. The organization's choices for other workspaces
+live on its organization-pool rows and that reach row, so a managing
+workspace can narrow other workspaces' use but never widen it; giving such an
+account to every workspace stores every workspace's row plus the reach
+instead of organization scope. Each route's rotation switch shows and flips
+its own side's copies; a request is unchanged only when every copy it writes
+already has the value. 0714 also makes the reach reader
+(`opengeni_private.subscription_core_reach`) report the reach row's switch and
+model list, additive keys older binaries ignore.
+It needs no drain or window: older binaries never call the helper for a
+managed connection and read the same rows with the same meaning. This
+release's API calls the new routine on every organization rotation switch and
+access save, so apply 0714 before rolling out the API (the normal order). It can ship
+alone or in the same release as the SuperGrok and Claude cutovers. It must
+run after 0713 (ordinal order guarantees it).
+
+**Parity check.** Run this read-only inventory before and after the release
+as a superuser or another role with `BYPASSRLS` (row security hides these
+tables from the migration owner, so as that role every count reads 0). The
+migration writes no row, so run it immediately before and after applying
+0714: the counts must be identical. Later comparisons can differ only by
+accounts connected or disconnected in between (check those against the
+connect and disconnect audit events). In every run
+`personal_managed` must be 0 (a shared connection managed by a
+Personal workspace is not an organization account; investigate before any
+repair). On a database without 0713 yet, the reach table is still named
+`opengeni_private.subscription_codex_auto_assignments`:
+
+```sql
+SELECT connection.account_id, connection.provider,
+  count(*) AS managed,
+  count(*) FILTER (WHERE connection.scope_kind = 'workspaces') AS workspaces_scope,
+  count(*) FILTER (WHERE membership.id IS NOT NULL) AS personal_managed,
+  count(policy.connection_id) AS local_policies,
+  count(auto.connection_id) AS reach_rows
+FROM subscription_connections connection
+LEFT JOIN organization_memberships membership
+  ON membership.account_id = connection.account_id
+  AND membership.personal_workspace_id = connection.managed_by_workspace_id
+LEFT JOIN subscription_connection_assignment_policies policy
+  ON policy.connection_id = connection.id
+  AND policy.workspace_id = connection.managed_by_workspace_id
+  AND policy.inference_pool = 'workspace'
+LEFT JOIN opengeni_private.subscription_core_auto_assignments auto
+  ON auto.connection_id = connection.id
+WHERE connection.ownership = 'shared' AND connection.disconnected_at IS NULL
+  AND connection.managed_by_workspace_id IS NOT NULL
+GROUP BY connection.account_id, connection.provider
+ORDER BY connection.account_id, connection.provider;
+```
+
+The inventory compares counts. To compare every subscription row, rehearse
+on a restored copy of the production backup (live traffic changes leases and
+waits, so a live before/after digest differs for unrelated reasons): run this
+block as a superuser before and after applying 0714 there; every digest must
+match. Run it with the application data schema first on the `search_path`
+(the block reads `current_schema()`).
+
+```sql
+DO $$
+DECLARE source record; digest text;
+BEGIN
+  FOR source IN SELECT table_schema, table_name FROM information_schema.columns
+    WHERE column_name = 'account_id' AND table_name LIKE 'subscription%'
+      AND table_schema IN (current_schema(), 'opengeni_private')
+    ORDER BY 1, 2
+  LOOP
+    EXECUTE format('SELECT md5(coalesce(string_agg(to_jsonb(r)::text, %L ORDER BY to_jsonb(r)::text), %L)) FROM %I.%I r',
+      ',', '', source.table_schema, source.table_name) INTO digest;
+    RAISE NOTICE '%.%: %', source.table_schema, source.table_name, digest;
+  END LOOP;
+END $$;
+```
+
+**Rollout rule.** Do not limit any account to chosen people (`allowedPeople`)
+until every API pod runs this release. An older pod reads a people-scoped
+account as "no workspaces", and a save there would switch it back to
+workspace scope. Workspace-managed accounts can't be limited to people at all
+(`peopleSupported: false`, refused with 422) so their workspace's
+administrators keep managing them. Organizations with more than 1000
+memberships (revoked ones count) are not offered people: the member list
+refuses them, so the editor reads `peopleSupported: false`. An account that
+already has people there can still have them kept or removed and its models
+edited; adding someone is refused with 422.
+
+**Validation.** Use an operator-owned test organization (never a customer
+account: the `PUT` below widens a real account). As its administrator, call
+`GET /v1/organizations/<organization id>/model-connections/codex/<connection id>/access`
+for a workspace-managed account: it returns its workspace's own copy in
+`localWorkspaceIds`, its manager in `managedByWorkspaceId`,
+`allowedWorkspaces: []` and `peopleSupported: false`. Before this release the
+same call is refused. A `PUT` to the same path with the returned `version`
+and `allowedWorkspaces` naming another shared workspace makes the account
+available there; it changes only scope, assignments, organization-pool rows
+and the reach row (and copies the account's model list onto its workspace's
+own row). Credentials, refresh generations, quota, bindings, leases
+and waiters are untouched, and the account-wide wake follows every save. A
+`PUT` with `allowedPeople` for that account returns 422. Until the owner
+approves the Accounts page change, the page still lists these accounts under
+their workspace.
+
+In the same test organization, switch the account's rotation off on the
+organization route and on again on its workspace's route: the workspace's
+own copy serves again (under the workspace's own source) and other workspaces
+and a workspace created afterwards stay off until the organization turns it on
+on its route. Then the other order:
+switch it off on the workspace's route, off on the organization route (it
+answers `changed: true`), and on again on the workspace's route: other
+workspaces and a workspace created afterwards stay off.
+Switching it on another workspace's route returns 404: a workspace-managed
+account switches only on the organization route and its managing workspace's.
+Narrowing it back to its workspace alone (`allowedWorkspaces: []`) removes the
+organization's copies, so an organization "off" is not kept: the account page
+then shows the connection's switch, which a later share copies.
+
+**Fix forward.** The previous setter definitions are in 0713. If they
+misbehave, ship a forward migration restoring those definitions and keeping
+`set_subscription_core_reach_allocator` (this release's API calls it on every
+organization rotation switch and access save; dropping it makes those fail).
+Organization access saves on managed accounts then fail (the setter's "not
+found" surfaces as a server error while this release's API is deployed) and
+write nothing; rotation switches keep working on both routes; nothing else
+changes. That includes narrowing: an account already given to more
+workspaces stays that way. Narrow such accounts back to their workspace
+(`allowedWorkspaces: []`) before restoring the setters, or restore only if
+a defect requires it.
+
 ### Slack API pilot activation (0597)
 
 Stop every old/new API, control worker, and turn worker before applying

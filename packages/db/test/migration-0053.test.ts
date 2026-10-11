@@ -142,8 +142,10 @@ describe("migration 0053 (Codex credential leases)", () => {
         values ('0689_subscription_core_codex_cutover.sql'),
           -- 0712 requires the committed 0689 cutover; hold it back too.
           ('0712_subscription_core_generic_precursor.sql'),
-          -- 0714 alters objects 0689 creates; hold it back too.
+          -- 0713 alters objects 0689 creates; hold it back too.
           ('0713_subscription_core_provider_keyed_reach.sql'),
+          -- 0714 redefines 0713's reach setters; hold it back too.
+          ('0714_subscription_workspace_managed_organization_accounts.sql'),
           ('0714_subscription_authority_compat.sql'),
           ('0715_subscription_authority_fences.sql'),
           ('0716_subscription_core_xai_cutover.sql') on conflict do nothing`;

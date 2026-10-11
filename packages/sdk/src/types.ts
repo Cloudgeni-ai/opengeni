@@ -9494,8 +9494,15 @@ export type EnrollTokenExchangeResponse = {
 
 export type ModelConnectionAccessPolicy = {
   allowedModels: string[] | null;
+  /** Organization-pool grants; null for every shared workspace, including new ones. */
   allowedWorkspaces: string[] | null;
   allowPersonalWorkspaces: boolean;
+  /**
+   * The chosen people (organization membership ids), or null when the account
+   * is not limited to people. Requires `allowedWorkspaces: []` and
+   * `allowPersonalWorkspaces: false`.
+   */
+  allowedPeople?: string[] | null;
   version: number;
 };
 export type ModelConnectionAccessResponse = {
@@ -9503,6 +9510,14 @@ export type ModelConnectionAccessResponse = {
   models: Array<{ id: string; label: string }>;
   workspaces: Array<{ id: string; name: string }>;
   personalWorkspacesSupported: boolean;
+  /** The account can be limited to chosen people. */
+  peopleSupported?: boolean;
+  /** Active members of the organization an administrator can choose. */
+  people?: Array<{ id: string; name: string | null; email: string | null }>;
+  /** Workspaces that use the account as their own; they always keep it for workspace choices. */
+  localWorkspaceIds?: string[];
+  /** The workspace whose administrators also manage the account, if any. */
+  managedByWorkspaceId?: string | null;
 };
 
 export type ConnectorToolPermission = "allow" | "ask" | "block";

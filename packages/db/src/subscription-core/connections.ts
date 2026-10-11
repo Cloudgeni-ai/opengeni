@@ -41,6 +41,7 @@ import {
   subscriptionCoreWakeReason,
   type SubscriptionCoreWake,
 } from "./administration";
+import { organizationAdministeredConnection } from "./access";
 import { subscriptionCoreProviderId, type SubscriptionCoreProvider } from "./provider";
 
 export type SubscriptionCoreCredentialInput = {
@@ -425,7 +426,7 @@ async function disconnectInTransaction(
 
 /**
  * The canonical connection a route may disconnect: on the organization route
- * a shared connection no workspace manages; on a workspace route a connection
+ * any organization account (`organizationAdministeredConnection`); on a workspace route a connection
  * of the workspace's projected pool, or (in the person's own Personal
  * workspace) one of their personal connections. `organization` marks an
  * organization account named from a workspace route (legacy 409).
@@ -448,7 +449,8 @@ async function disconnectTarget(
       tx,
       sql`select id::text as id from subscription_connections
         where account_id = ${input.accountId}::uuid and id = ${id}::uuid and provider = ${providerId}
-          and kind = 'subscription' and ownership = 'shared' and managed_by_workspace_id is null`,
+          and kind = 'subscription' and ownership = 'shared'
+          and ${organizationAdministeredConnection()}`,
     );
     return row ? { id: row.id, organization: true } : null;
   }
