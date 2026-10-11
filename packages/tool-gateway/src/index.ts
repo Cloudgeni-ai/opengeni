@@ -10,6 +10,7 @@ import Ajv, {
 import Ajv2019 from "ajv/dist/2019.js";
 import Ajv2020 from "ajv/dist/2020.js";
 import { schemaPatternEngine } from "./schema-pattern";
+import { repairNumericStringArguments } from "./numeric-string-arguments";
 import {
   TOOL_GATEWAY_CATALOG_VERSION,
   ToolGatewayCallRequest,
@@ -268,8 +269,15 @@ export class ToolGateway {
     if (!this.resolveApproval && this.requireApproval?.(definition.entry, caller, context)) {
       throw new ToolGatewayApprovalRequiredError();
     }
-    if (!definition.validateInput(request.arguments)) {
-      throw inputValidationError(definition, request.arguments);
+    let callArguments = request.arguments;
+    if (!definition.validateInput(callArguments)) {
+      const repaired = repairableInputSize(callArguments)
+        ? repairNumericStringArguments(callArguments, definition.diagnoseInput())
+        : undefined;
+      if (!repaired) throw inputValidationError(definition, callArguments);
+      // Report what is still wrong after the numeric repair, not what it fixed.
+      if (!definition.validateInput(repaired)) throw inputValidationError(definition, repaired);
+      callArguments = repaired;
     }
     if (
       caller.kind === "model" &&
@@ -283,7 +291,7 @@ export class ToolGateway {
       operationId,
       catalogDigest: request.catalogDigest,
       identity: request.identity,
-      arguments: request.arguments,
+      arguments: callArguments,
       caller,
     } satisfies ToolGatewayCall;
     await measureMcpPhase("provider_authorization", () =>
@@ -344,7 +352,7 @@ export class ToolGateway {
             let result: ToolGatewayResultValue;
             try {
               result = ToolGatewayResult.parse(
-                await definition.execute(request.arguments, {
+                await definition.execute(callArguments, {
                   operationId,
                   caller,
                   ...(context.sourceCallId === undefined
@@ -562,6 +570,15 @@ function createSchemaValidators(mode: SchemaValidatorMode): SchemaValidators {
     }
   }
   return { mode, ...validators };
+}
+
+function repairableInputSize(args: Record<string, unknown>): boolean {
+  try {
+    const serialized = JSON.stringify(args);
+    return serialized !== undefined && serialized.length <= TOOL_GATEWAY_INPUT_DIAGNOSTIC_MAX_CHARS;
+  } catch {
+    return false;
+  }
 }
 
 function codePointLength(value: string): number {
