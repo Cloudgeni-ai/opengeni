@@ -4491,12 +4491,15 @@ its models edited; adding someone is refused with 422.
 **Rollback.** The same rules hold before an older API image runs again. Older
 organization routes refuse workspace-managed accounts, so a shared one can't
 be narrowed after the rollback. Before rolling back, run this read-only check
-as a superuser or `BYPASSRLS` role (like the parity check); it must return no
-rows:
+as a superuser or `BYPASSRLS` role (like the parity check). Row security hides
+these tables from any other role, so first confirm the role (this must return
+true):
+`SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = current_user`.
+The check must then return no rows:
 
 ```sql
 SELECT connection.account_id, connection.provider, connection.id,
-  connection.managed_by_workspace_id
+  connection.managed_by_workspace_id, connection.allowed_model_ids
 FROM subscription_connections connection
 WHERE connection.ownership = 'shared' AND connection.disconnected_at IS NULL
   AND connection.managed_by_workspace_id IS NOT NULL
@@ -4511,22 +4514,25 @@ WHERE connection.ownership = 'shared' AND connection.disconnected_at IS NULL
 ORDER BY connection.account_id, connection.provider, connection.id;
 ```
 
-For each row, that organization's administrator narrows the account back to its
-workspace with both `allowedWorkspaces: []` and
-`allowPersonalWorkspaces: false` (an account given to the whole organization otherwise stays in every
-Personal workspace), and with `allowedModels` set to the managing workspace's
-current list (the connection's `allowed_model_ids`), since the editor shows the
-organization's list and saving it would widen a list the workspace narrowed;
-otherwise fix forward instead of rolling back. Likewise, shared accounts
-limited to people (`ownership = 'shared' AND scope_kind = 'people'`) are read
-as "no workspaces" by an older image, and a save there replaces the people:
-move them back to workspaces first, or accept that. Run right after the
-rollout, the same check also shows whether anything was shared while older pods
-still served.
+For each row, that organization's administrator narrows the account back to
+its workspace with both `allowedWorkspaces: []` and
+`allowPersonalWorkspaces: false` (an account given to the whole organization
+otherwise stays in every Personal workspace), and with `allowedModels` set to
+the row's `allowed_model_ids` (the managing workspace's current list; the
+editor shows the organization's list, and saving it would widen a list the
+workspace narrowed). Otherwise fix forward instead of rolling back. Run the
+check again once every pod runs the older image: an account shared while pods
+were still being replaced can't be narrowed then, so any row means rolling
+forward again. Likewise, shared accounts limited to people
+(`ownership = 'shared' AND scope_kind = 'people'`) are read as "no
+workspaces" by an older image, and a save there replaces the people: move them
+back to workspaces first, or accept that. Run right after the rollout, the
+same check also shows whether anything was shared while older pods still
+served.
 
 **Validation.** Once every API pod runs this release, use an operator-owned
-test organization (never a customer
-account: the `PUT` below widens a real account). As its administrator, call
+test organization (never a customer account: the `PUT` below widens a real
+account). As its administrator, call
 `GET /v1/organizations/<organization id>/model-connections/codex/<connection id>/access`
 for a workspace-managed account: it returns its workspace's own copy in
 `localWorkspaceIds`, its manager in `managedByWorkspaceId`,
@@ -4564,9 +4570,8 @@ found" surfaces as a server error while this release's API is deployed) and
 write nothing; rotation switches keep working on both routes; nothing else
 changes. That includes narrowing: an account already given to more
 workspaces stays that way. Narrow such accounts back to their workspace
-(`allowedWorkspaces: []` and `allowPersonalWorkspaces: false`; the Rollback
-check lists them) before restoring the setters, or restore only if a defect
-requires it.
+as in Rollback (the check there lists them, with the model list to keep)
+before restoring the setters, or restore only if a defect requires it.
 
 ### Slack API pilot activation (0597)
 
