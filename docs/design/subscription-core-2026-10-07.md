@@ -4441,6 +4441,47 @@ connect writer gains `credentialFormat` and `personal`.
   `packages/db/test/subscription-core-xai-copy-paths-postgres.test.ts` (the
   `compat:dependent_sources_without_record` copy-path test) green at its
   head.
+- **X4 as delivered.** Rolling; no migration.
+  - Deleted modules: `packages/db/src/xai-subscription.ts` (the
+    `xaiSubscriptionRepository` factory instance),
+    `packages/db/src/organization-xai-subscriptions.ts`,
+    `apps/worker/src/activities/xai-quota.ts` and
+    `apps/api/src/xai-subscription-auth.ts`. In `packages/db/src/index.ts`
+    the `xaiCapacityRepository` waiters and every `xai` waiter arm (arm,
+    reconcile, supersede in `updateSessionVariableSets` and
+    `createScopedSubscriptionCapacityWaiters`) are gone, as are the `xai`
+    branches of the legacy credential lease heartbeat, failure settlement,
+    finalization, worker capacity peek and reconcile, the legacy video token
+    envelope (`xai-subscription` kind, `encryptVideoGenerationXaiCredential`,
+    its reconciliation and submission paths) and the M1 shadow's `xai`
+    world. `apps/worker/src/activities/agent-turn/xai-capacity.ts` is now
+    `scoped-subscription-capacity.ts` and serves Claude only.
+  - Selector arm: every SuperGrok entry point (worker turn build and video,
+    API status, connect and pool routes, transcription, realtime, model
+    connection access, catalog readiness, default session model and billing
+    funding) treats any route other than `core` as it treats `maintenance`:
+    it fails closed. The provider-neutral route readers are unchanged; the
+    API routes share `requireSubscriptionCoreRoute`.
+  - Shared factory: `subscription-account-repository.ts` is parameterized by
+    its provider options and names no `xai` routine; Claude's instance and
+    `ScopedSubscriptionTurnLease` are unchanged.
+  - v1 carriers: SuperGrok's v1 value is written as the column default
+    (`{ version: 1, scope: "workspace" }`) and copied verbatim on derived
+    rows; no reader derives it from live state or decides on it.
+  - Kept, with reasons: the legacy secret decoder and the codec stage in
+    `xai-subscription-core-cutover.ts` (0721 still ships); the schema,
+    posture inventory and routine signatures (forensic tables and their
+    grants until the retirement step); `@opengeni/xai-subscription` (the
+    protocol package the core adapter uses); the worker `xai-auth.ts`
+    helper, now core-only; `XaiSubscriptionAccountMetadata` (the public
+    account shape the core routes return). Tests that need pre-cutover rows
+    build them through the test-only `packages/db/test/fixtures/legacy-xai.ts`.
+  - Guard: the SuperGrok entry additionally lists the deleted repository,
+    waiter, quota, authorization and video-envelope names, the deleted
+    modules (relative specifiers only, so `@opengeni/xai-subscription`, the
+    transcription provider and the `*-core*` modules stay importable) and
+    `legacy-xai` as a test-only fixture. Its exceptions are unchanged:
+    schema declarations, posture inventories and the 0721 codec stage.
 
 #### Verification plan
 

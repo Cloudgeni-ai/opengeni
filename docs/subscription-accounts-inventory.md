@@ -17,6 +17,15 @@
 > (`packages/db/src/subscription-core-codex-adapter.ts`); the Codex-named
 > exports remain as thin bindings. Module map:
 > [design §5.1.3](design/subscription-core-2026-10-07.md#513-m4-shared-typescript-core-and-the-adapter-interface).
+>
+> M4 X4: SuperGrok runs only on the shared core after the 0721 cutover. The
+> legacy SuperGrok entry points cited below (`packages/db/src/xai-subscription.ts`,
+> `organization-xai-subscriptions.ts`, `xai-quota.ts`,
+> `apps/api/src/xai-subscription-auth.ts`, the `xai` waiters, leases, pins,
+> quota refresh and the video token envelope) are deleted; `xai-capacity.ts`
+> is now `scoped-subscription-capacity.ts` and serves Claude only. Their
+> references are historical. See
+> [design X4](design/subscription-core-2026-10-07.md#x4-supergrok-legacy-deletion-and-the-provider-neutral-guard).
 
 
 Baseline: `origin/main` at `0d7075e` (7 October 2026). Research and documentation only; no product code was changed.

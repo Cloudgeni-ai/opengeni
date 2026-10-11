@@ -8,13 +8,16 @@ Canonical implementation sources:
 
 - protocol/OAuth/transport: `packages/xai-subscription`;
 - public management API: `apps/api/src/routes/supergrok.ts`;
-- persistence and RLS: `packages/db/src/xai-subscription.ts` adapts the shared
-  `packages/db/src/subscription-account-repository.ts` lifecycle and
-  `packages/db/src/subscription-pool-schema.ts` table definitions;
-  `packages/db/src/index.ts`, `packages/db/src/schema.ts`, and migration
-  `0234_xai_subscription_authority.sql`;
-- runtime: `apps/worker/src/activities/xai-auth.ts` and
-  `apps/worker/src/activities/agent-turn/xai-capacity.ts`;
+- persistence and RLS: the shared subscription core through the SuperGrok
+  adapter (`packages/db/src/subscription-core-xai.ts`,
+  `packages/db/src/subscription-core-xai-adapter.ts`,
+  `packages/db/src/subscription-core-xai-compat.ts`) since the drained 0721
+  cutover; the legacy SuperGrok tables are read-only history and the legacy
+  repository was deleted in M4 X4;
+- runtime: `apps/worker/src/activities/agent-turn/xai-core.ts`,
+  `apps/worker/src/activities/xai-auth.ts` and
+  `apps/api/src/xai-subscription-core.ts`; a SuperGrok route other than the
+  core fails closed;
 - workflow capacity orchestration: `apps/worker/src/activities/codex-capacity.ts`
   and `apps/worker/src/workflows/session.ts`;
 - clients: the SuperGrok methods/types in `@opengeni/sdk`,
