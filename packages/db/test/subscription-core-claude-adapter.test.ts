@@ -674,9 +674,10 @@ describe("Claude usage in the shared quota model", () => {
       status: "rejected" | "allowed",
       offset: number,
       claim: "five_hour" | "seven_day_opus" | null = null,
+      resetSeconds = 3600,
     ) => ({
       status,
-      resetsAt: status === "rejected" ? new Date(at(3600) * 1000).toISOString() : null,
+      resetsAt: status === "rejected" ? new Date(at(resetSeconds) * 1000).toISOString() : null,
       representativeClaim: claim,
       overageStatus: null,
       overageResetsAt: null,
@@ -705,6 +706,54 @@ describe("Claude usage in the shared quota model", () => {
       requestRestrictions: [restriction(null, "rejected", 0, "five_hour")],
     });
     expect(account.exhaustedUntil).toBe(at(3600) * 1000);
+    // Several account-wide restrictions: the longest wins, in any order.
+    for (const order of [
+      [7200, 3600],
+      [3600, 7200],
+    ]) {
+      const longest = decode({
+        ...observation,
+        requestRestrictions: order.map((reset) =>
+          restriction(null, "rejected", 0, "five_hour", reset),
+        ),
+      });
+      expect(longest.exhaustedUntil).toBe(at(7200) * 1000);
+    }
+    // An allowance observed in the same millisecond does not lift a
+    // restriction (timestamps do not order concurrent responses).
+    const tied = decode({
+      ...observation,
+      requestRestrictions: [
+        restriction("claude-haiku-5-5", "rejected", 0),
+        restriction("claude-haiku-5-5", "allowed", 0),
+      ],
+    });
+    expect(Object.keys(tied.modelCooldowns)).toContain(
+      "organization-claude-subscription/claude-haiku-5-5",
+    );
+    // A response's allowed overage covers the restrictions it postdates,
+    // not a restriction observed after it.
+    const overage = {
+      status: "rejected" as const,
+      resetsAt: new Date(at(1800) * 1000).toISOString(),
+      representativeClaim: "five_hour" as const,
+      overageStatus: "allowed" as const,
+      overageResetsAt: null,
+      upstreamModelId: "claude-sonnet-5-5",
+      observedAt: new Date(now.getTime() + 5).toISOString(),
+    };
+    const covered = decode({
+      ...observation,
+      requestStatus: overage,
+      requestRestrictions: [
+        restriction("claude-opus-5-5", "rejected", 0),
+        restriction("claude-haiku-5-5", "rejected", 8),
+      ],
+    });
+    expect(Object.keys(covered.modelCooldowns).sort()).toEqual([
+      "organization-claude-subscription/claude-haiku-5-5",
+      "workspace-claude-subscription/claude-haiku-5-5",
+    ]);
   });
 
   test("a limit whose reset has passed leaves no cooldown", () => {

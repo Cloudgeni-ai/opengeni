@@ -3864,7 +3864,10 @@ Facts the adapter declares, each read from today's Claude path:
     full account window becomes a `warning` and no family or request limit
     blocks. Today's rule grants this only to the model the response was
     for; overage is the Claude account's own setting, so the core grants it
-    to every model of the account (deliberate, recorded difference). A
+    to every model of the account (deliberate, recorded difference toward
+    dispatch). It is bounded like the others: a model whose own limit the
+    overage does not cover is refused once, and that response's headers
+    record its limit again. A
     rejected request whose overage was refused with a known reset ends the
     blocks that response reports for the models it concerns (its own model;
     without one, the family its limit names, else every model) no later
