@@ -16,6 +16,7 @@ import {
   fetchSubscriptionCoreClaudeUsage,
   projectSubscriptionCoreClaudeUsage,
   SUBSCRIPTION_CORE_CLAUDE_USAGE_URL,
+  SubscriptionCoreClaudeUsageVersionMissing,
   subscriptionCoreClaudeUpstreamModelIds,
   subscriptionCoreClaudeUsageScopeMissing,
   type SubscriptionCoreClaudeUsageReading,
@@ -272,19 +273,22 @@ describe("projectSubscriptionCoreClaudeUsage", () => {
     quota_revision: 4,
     quota_observed_refresh_generation: 6,
     quota_updated_at: updatedAt,
+    version: 3,
     ...patch,
   });
 
-  test("maps core windows back to the legacy shape", () => {
+  test("maps core windows back to the legacy shape; the credential version is the row version", () => {
     const usage = ClaudeSubscriptionUsage.parse(projectSubscriptionCoreClaudeUsage(row()));
     expect(usage).toEqual({
       connected: true,
-      credentialVersion: 6,
+      // The row version (the account listing's), not the quota's generation.
+      credentialVersion: 3,
       windows: [
         {
           id: "five_hour",
           usedPercent: 100,
           resetsAt: "2026-10-11T15:00:00.000Z",
+          // Exhausted is rejected whatever reading kept it.
           status: "rejected",
           observedAt: updatedAt,
           source: "provider",
@@ -293,7 +297,8 @@ describe("projectSubscriptionCoreClaudeUsage", () => {
           id: "seven_day",
           usedPercent: 91,
           resetsAt: "2026-10-15T00:00:00.000Z",
-          status: "allowed_warning",
+          // Legacy usage-endpoint windows carried no status.
+          status: null,
           observedAt: updatedAt,
           source: "provider",
         },
@@ -309,7 +314,7 @@ describe("projectSubscriptionCoreClaudeUsage", () => {
           id: "overage",
           usedPercent: null,
           resetsAt: null,
-          status: "allowed",
+          status: null,
           observedAt: updatedAt,
           source: "provider",
         },
@@ -319,6 +324,93 @@ describe("projectSubscriptionCoreClaudeUsage", () => {
       refreshStatus: "available",
       refreshCheckedAt: updatedAt,
     });
+  });
+
+  test("after a header observation statuses map back, and family and overage rejections are derived", () => {
+    const now = Date.now();
+    const headerRow = (patch: Record<string, unknown>) =>
+      row({
+        quota: {
+          windows: [
+            { id: "five_hour", usedPercent: 40, resetsAt: now + 3_600_000, status: "ok" },
+            { id: "seven_day", usedPercent: 91, resetsAt: now + 86_400_000, status: "warning" },
+            {
+              id: "seven_day_opus",
+              usedPercent: 100,
+              resetsAt: now + 86_400_000,
+              status: "unknown",
+            },
+            {
+              id: "seven_day_sonnet",
+              usedPercent: 20,
+              resetsAt: now + 86_400_000,
+              status: "unknown",
+            },
+            { id: "overage", usedPercent: null, resetsAt: now + 86_400_000, status: "unknown" },
+          ],
+          modelCooldowns: {
+            "organization-claude-subscription/claude-opus-4-5": now + 86_400_000,
+            // An ended cooldown is not a running limit.
+            "organization-claude-subscription/claude-sonnet-4-5": now - 1_000,
+          },
+          exhaustedUntil: null,
+          exhaustedKind: null,
+          source: "response_headers",
+          ...patch,
+        },
+      });
+    const statuses = (usage: ReturnType<typeof projectSubscriptionCoreClaudeUsage>) =>
+      Object.fromEntries(usage.windows.map((window) => [window.id, window.status]));
+    expect(statuses(projectSubscriptionCoreClaudeUsage(headerRow({})))).toEqual({
+      five_hour: "allowed",
+      seven_day: "allowed_warning",
+      seven_day_opus: "rejected",
+      seven_day_sonnet: null,
+      // The connection still serves: its overage status is unknown here.
+      overage: null,
+    });
+    // While the connection itself is exhausted, an overage would have covered
+    // it had it been allowed: the overage window is rejected.
+    expect(
+      statuses(
+        projectSubscriptionCoreClaudeUsage(
+          headerRow({ exhaustedUntil: now + 3_600_000, exhaustedKind: "quota" }),
+        ),
+      ).overage,
+    ).toBe("rejected");
+    // A usage-endpoint reading keeps the legacy null statuses.
+    expect(
+      statuses(projectSubscriptionCoreClaudeUsage(headerRow({ source: "usage_endpoint" }))),
+    ).toEqual({
+      five_hour: null,
+      seven_day: null,
+      seven_day_opus: null,
+      seven_day_sonnet: null,
+      overage: null,
+    });
+  });
+
+  test("windows observed under an earlier credential generation stay visible", () => {
+    // The quota was observed with refresh generation 1; the credential has
+    // since refreshed (the row version does not move on a token refresh).
+    const usage = projectSubscriptionCoreClaudeUsage(
+      row({ quota_observed_refresh_generation: 1, version: 5 }),
+    );
+    expect(usage.credentialVersion).toBe(5);
+    expect(usage.windows.map((window) => window.id)).toEqual([
+      "five_hour",
+      "seven_day",
+      "seven_day_opus",
+      "overage",
+    ]);
+  });
+
+  test("a row without a usable version fails closed (never 0 or null)", () => {
+    for (const version of [undefined, 0, -1, "x", 1.5])
+      expect(() => projectSubscriptionCoreClaudeUsage(row({ version: version as never }))).toThrow(
+        SubscriptionCoreClaudeUsageVersionMissing,
+      );
+    expect(projectSubscriptionCoreClaudeUsage(row({ version: "7" })).credentialVersion).toBe(7);
   });
 
   test("header and refusal observations are response_headers and not a usage read", () => {
@@ -335,7 +427,7 @@ describe("projectSubscriptionCoreClaudeUsage", () => {
     }
   });
 
-  test("no quota row: connected, no windows, not checked", () => {
+  test("no quota row: connected with its row version, no windows, not checked", () => {
     const usage = projectSubscriptionCoreClaudeUsage(
       row({
         quota: null,
@@ -346,7 +438,7 @@ describe("projectSubscriptionCoreClaudeUsage", () => {
     );
     expect(ClaudeSubscriptionUsage.parse(usage)).toEqual({
       connected: true,
-      credentialVersion: null,
+      credentialVersion: 3,
       windows: [],
       observedAt: null,
       source: null,

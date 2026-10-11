@@ -52,10 +52,11 @@ const {
   readSubscriptionCoreProviderRouteForWorkspace,
   refreshSubscriptionCoreClaudeWorkspaceUsage,
   resetSubscriptionCoreClaudeUsageThrottle,
-  subscriptionCoreClaudeTaskAuthorityAdmitsOrganization,
+  subscriptionCoreClaudeAcceptedAuthorityAdmitsOrganization,
   upsertOrganizationClaudeSubscription,
 } = await import("../src");
-const { rawRows, withRlsContext, withWorkspaceSubjectRls } = await import("../src/database");
+const { rawRows, withRlsContext, withSessionActivityRlsContext, withWorkspaceSubjectRls } =
+  await import("../src/database");
 type DbClient = Awaited<ReturnType<typeof createDb>>;
 
 const key = Buffer.alloc(32, 53);
@@ -188,6 +189,10 @@ async function sharedConnection(
     pool?: "organization" | "workspace";
     kind?: "oauth" | "setup";
     allowedModelIds?: string[] | null;
+    /** Assignment policies per pool (default: one for `pool`, allowing every model). */
+    policies?: Array<{ pool: "organization" | "workspace"; allowedModelIds: string[] | null }>;
+    /** Further workspaces assigned to the connection (organization pool). */
+    workspaceIds?: string[];
   } = {},
 ): Promise<string> {
   const pool = options.pool ?? "organization";
@@ -206,11 +211,111 @@ async function sharedConnection(
       ${options.allowedModelIds ?? null}::text[],
       ${pool === "workspace" ? org.workspaceId : null}::uuid
     ) returning id::text as id`;
-  await shared.admin`
-    insert into subscription_connection_assignment_policies (
-      account_id, connection_id, workspace_id, inference_pool
-    ) values (${org.accountId}::uuid, ${row!.id}::uuid, ${org.workspaceId}::uuid, ${pool})`;
+  for (const workspaceId of [org.workspaceId, ...(options.workspaceIds ?? [])])
+    for (const policy of options.policies ?? [{ pool, allowedModelIds: null }])
+      await shared.admin`
+        insert into subscription_connection_assignment_policies (
+          account_id, connection_id, workspace_id, inference_pool, allowed_model_ids
+        ) values (
+          ${org.accountId}::uuid, ${row!.id}::uuid, ${workspaceId}::uuid, ${policy.pool},
+          ${policy.allowedModelIds}::text[]
+        )`;
   return row!.id;
+}
+
+async function connectionVersion(connectionId: string): Promise<number> {
+  const [row] = await shared.admin<{ version: number }[]>`
+    select version::int as version from subscription_connections where id = ${connectionId}::uuid`;
+  return row!.version;
+}
+
+/** Another shared workspace of the organization, with the owner as a member. */
+async function secondWorkspace(org: Org): Promise<string> {
+  const [workspace] = await shared.admin<{ id: string }[]>`
+    insert into workspaces (account_id, name)
+    values (${org.accountId}, 'Claude reads second workspace') returning id::text as id`;
+  await shared.admin`
+    insert into workspace_memberships (account_id, workspace_id, subject_id, role)
+    values (${org.accountId}::uuid, ${workspace!.id}::uuid, ${org.ownerSubjectId}, 'owner')
+    on conflict do nothing`;
+  return workspace!.id;
+}
+
+/** A session of the workspace, optionally with one accepted turn. */
+async function session(org: Org, options: { turn?: boolean } = {}) {
+  const sessionId = crypto.randomUUID();
+  const turnId = options.turn ? crypto.randomUUID() : null;
+  await withSessionActivityRlsContext(
+    client.db,
+    { accountId: org.accountId, workspaceId: org.workspaceId },
+    async (tx) => {
+      await tx.execute(
+        sql`insert into sessions (id, account_id, workspace_id, initial_message, model,
+          reasoning_effort, latency_mode, sandbox_backend, sandbox_group_id, status, tool_policy)
+        values (${sessionId}::uuid, ${org.accountId}::uuid, ${org.workspaceId}::uuid, 'carrier',
+          'claude-carrier-test', 'high', 'standard', 'none', ${sessionId}::uuid, 'idle',
+          '{"mode":"explicit","inheritedFromSessionId":null}'::jsonb)`,
+      );
+      if (turnId)
+        await tx.execute(
+          sql`insert into session_turns (id, account_id, workspace_id, session_id,
+            trigger_event_id, temporal_workflow_id, status, source, position, prompt, model,
+            reasoning_effort, latency_mode, sandbox_backend, finished_at)
+          values (${turnId}::uuid, ${org.accountId}::uuid, ${org.workspaceId}::uuid,
+            ${sessionId}::uuid, gen_random_uuid(), 'wf', 'completed', 'user', 1, 'go',
+            'claude-carrier-test', 'high', 'standard', 'none', now())`,
+        );
+    },
+  );
+  return { sessionId, turnId };
+}
+
+/**
+ * A stand-in for PR 0b's `read_subscription_authority_compat` (0716 is not
+ * on this stack): answers per carrier from a table and records each call.
+ * Removed by the returned function.
+ */
+async function installCompatReader() {
+  await shared.admin.unsafe(`
+    create table public.claude_reads_compat_answers (
+      carrier_kind text not null, carrier_id uuid not null, answer jsonb,
+      primary key (carrier_kind, carrier_id));
+    create table public.claude_reads_compat_calls (
+      provider text, carrier_kind text, carrier_id uuid, at timestamptz default clock_timestamp());
+    create function opengeni_private.read_subscription_authority_compat(
+      p_provider text, p_carrier_kind text, p_workspace_id uuid, p_carrier_id uuid,
+      p_task_authority_revision bigint)
+    returns jsonb language plpgsql security definer set search_path = public, pg_temp as $body$
+    begin
+      insert into public.claude_reads_compat_calls (provider, carrier_kind, carrier_id)
+      values (p_provider, p_carrier_kind, p_carrier_id);
+      return (select answer from public.claude_reads_compat_answers
+        where carrier_kind = p_carrier_kind and carrier_id = p_carrier_id);
+    end $body$;
+    grant execute on function opengeni_private.read_subscription_authority_compat(
+      text, text, uuid, uuid, bigint) to public;`);
+  return {
+    answer: async (kind: string, id: string, answer: Record<string, unknown>) => {
+      await shared.admin`
+        insert into public.claude_reads_compat_answers (carrier_kind, carrier_id, answer)
+        values (${kind}, ${id}::uuid, ${shared.admin.json(answer as never)}::jsonb)
+        on conflict (carrier_kind, carrier_id) do update set answer = excluded.answer`;
+    },
+    lastCall: async () => {
+      const [call] = await shared.admin<
+        { provider: string; carrier_kind: string; carrier_id: string }[]
+      >`select provider, carrier_kind, carrier_id::text as carrier_id
+        from public.claude_reads_compat_calls order by at desc limit 1`;
+      return call ?? null;
+    },
+    remove: async () => {
+      await shared.admin.unsafe(`
+        drop function opengeni_private.read_subscription_authority_compat(
+          text, text, uuid, uuid, bigint);
+        drop table public.claude_reads_compat_answers;
+        drop table public.claude_reads_compat_calls;`);
+    },
+  };
 }
 
 async function personalConnection(org: Org, label: string): Promise<string> {
@@ -385,6 +490,22 @@ describe("on the Claude core route", () => {
     expect(own?.scope).toBe("user");
     expect(own?.row.id).toBe(personal);
     expect(await target(org.personalWorkspaceId, personal, "user:someone-else")).toBeNull();
+    // Every target carries its row version (the owner-only reader's, for a
+    // personal connection).
+    expect(Number(own?.row.version)).toBe(await connectionVersion(personal));
+    expect(Number((await target(org.workspaceId, organizationPool))?.row.version)).toBe(
+      await connectionVersion(organizationPool),
+    );
+    // A personal alias resolves only through the owner-only routine: for its
+    // owner, in their own Personal workspace.
+    const personalAlias = crypto.randomUUID();
+    await shared.admin`
+      insert into subscription_connection_aliases (account_id, provider, alias_connection_id, connection_id)
+      values (${org.accountId}::uuid, 'claude', ${personalAlias}::uuid, ${personal}::uuid)`;
+    expect((await target(org.personalWorkspaceId, personalAlias))?.connectionId).toBe(personal);
+    expect(await target(org.workspaceId, personalAlias)).toBeNull();
+    expect(await target(org.personalWorkspaceId, personalAlias, "user:someone-else")).toBeNull();
+    expect(await target(org.personalWorkspaceId, "not-a-uuid")).toBeNull();
     // The organization path: the organization's own connections, administrators only.
     const orgRow = (subjectId: string, accountIdParam: string) =>
       readSubscriptionCoreClaudeOrganizationUsageRow(client.db, {
@@ -393,6 +514,9 @@ describe("on the Claude core route", () => {
         accountIdParam,
       });
     expect((await orgRow(org.ownerSubjectId, organizationPool))?.id).toBe(organizationPool);
+    expect(Number((await orgRow(org.ownerSubjectId, organizationPool))?.version)).toBe(
+      await connectionVersion(organizationPool),
+    );
     expect((await orgRow(org.ownerSubjectId, legacyId))?.id).toBe(organizationPool);
     expect(await orgRow(org.ownerSubjectId, workspacePool)).toBeNull();
     expect(await orgRow(org.ownerSubjectId, personal)).toBeNull();
@@ -433,10 +557,12 @@ describe("on the Claude core route", () => {
     expect(result.usage.refreshStatus).toBe("available");
     expect(result.usage.source).toBe("provider");
     expect(result.usage.windows.map((window) => [window.id, window.status])).toEqual([
-      ["five_hour", "allowed"],
+      // Legacy usage-endpoint windows carry no status.
+      ["five_hour", null],
       ["seven_day_opus", null],
     ]);
-    expect(result.usage.credentialVersion).toBeGreaterThan(0);
+    // The row version: what the account listing reports.
+    expect(result.usage.credentialVersion).toBe(await connectionVersion(connectionId));
     // The family window cooled every listed Opus model of the catalog.
     const quota = (await storedQuota(connectionId))!;
     expect(Object.keys(quota.modelCooldowns as object).sort()).toEqual([
@@ -512,6 +638,100 @@ describe("on the Claude core route", () => {
     });
   });
 
+  test("the throttle prefers a newer stored reading and is keyed by workspace and version", async () => {
+    resetSubscriptionCoreClaudeUsageThrottle();
+    const org = await organization();
+    await setCutover(org, true);
+    const other = await secondWorkspace(org);
+    const connectionId = await sharedConnection(org, "keyed", { workspaceIds: [other] });
+    const refresh = async (workspaceId: string, fetchImpl: typeof fetch) => {
+      const scope = { accountId: org.accountId, workspaceId, subjectId: org.ownerSubjectId };
+      return (
+        await refreshSubscriptionCoreClaudeWorkspaceUsage(
+          client.db,
+          settings,
+          {
+            ...scope,
+            target: (await readSubscriptionCoreClaudeWorkspaceUsageTarget(client.db, {
+              ...scope,
+              accountIdParam: connectionId,
+            }))!,
+          },
+          { fetchImpl },
+        )
+      ).usage;
+    };
+    const down = scriptedUsage(() => new Response("down", { status: 503 }));
+    expect((await refresh(org.workspaceId, down.fetchImpl)).refreshStatus).toBe("unavailable");
+    // Another workspace's refresh of the same connection is not held back.
+    expect((await refresh(other, down.fetchImpl)).refreshStatus).toBe("unavailable");
+    expect(down.calls).toHaveLength(2);
+    expect((await refresh(org.workspaceId, down.fetchImpl)).refreshStatus).toBe("unavailable");
+    expect(down.calls).toHaveLength(2);
+    // A reconnect moves the row version: the remembered failure no longer applies.
+    await shared.admin`update subscription_connections set version = version + 1
+      where id = ${connectionId}::uuid`;
+    expect((await refresh(org.workspaceId, down.fetchImpl)).refreshStatus).toBe("unavailable");
+    expect(down.calls).toHaveLength(3);
+    // A usage reading stored since (another replica's) answers before the
+    // remembered failure, without a provider call.
+    await shared.admin`
+      insert into subscription_connection_quota (
+        account_id, connection_id, quota, observed_refresh_generation, revision, updated_at
+      ) values (
+        ${org.accountId}::uuid, ${connectionId}::uuid,
+        ${shared.admin.json({
+          windows: [{ id: "five_hour", usedPercent: 12, resetsAt: null, status: "ok" }],
+          modelCooldowns: {},
+          exhaustedUntil: null,
+          exhaustedKind: null,
+          source: "usage_endpoint",
+        })}::jsonb, 1, 1, clock_timestamp() + interval '1 second'
+      )`;
+    const stored = await refresh(org.workspaceId, down.fetchImpl);
+    expect(stored.refreshStatus).toBe("available");
+    expect(stored.windows.map((window) => [window.id, window.usedPercent])).toEqual([
+      ["five_hour", 12],
+    ]);
+    expect(down.calls).toHaveLength(3);
+  });
+
+  test("a reading the core did not record is reported unavailable", async () => {
+    resetSubscriptionCoreClaudeUsageThrottle();
+    const org = await organization();
+    await setCutover(org, true);
+    const connectionId = await sharedConnection(org, "fenced", { pool: "workspace" });
+    const scope = {
+      accountId: org.accountId,
+      workspaceId: org.workspaceId,
+      subjectId: org.ownerSubjectId,
+    };
+    // The credential refreshes while the reading is in flight: the
+    // generation fence refuses the older bearer's observation.
+    const raced = scriptedUsage(() => Response.json({ five_hour: { utilization: 5 } }));
+    const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+      await shared.admin`update subscription_connections
+        set refresh_generation = refresh_generation + 1 where id = ${connectionId}::uuid`;
+      return await raced.fetchImpl(input, init);
+    }) as typeof fetch;
+    const result = await refreshSubscriptionCoreClaudeWorkspaceUsage(
+      client.db,
+      settings,
+      {
+        ...scope,
+        target: (await readSubscriptionCoreClaudeWorkspaceUsageTarget(client.db, {
+          ...scope,
+          accountIdParam: connectionId,
+        }))!,
+      },
+      { fetchImpl },
+    );
+    expect(raced.calls).toHaveLength(1);
+    expect(result.usage.refreshStatus).toBe("unavailable");
+    expect(result.usage.windows).toEqual([]);
+    expect(await storedQuota(connectionId)).toBeNull();
+  });
+
   test("readiness splits the core projection by the legacy prefixes", async () => {
     const org = await organization();
     await setCutover(org, true);
@@ -559,6 +779,37 @@ describe("on the Claude core route", () => {
     expect((await read(org.personalWorkspaceId, null)).workspace).toBe(false);
   });
 
+  test("each prefix reads only its own pool's assignment policies", async () => {
+    const org = await organization();
+    await setCutover(org, true);
+    const opus = `organization-claude-subscription/${org.opus}`;
+    // One connection in both pools: the organization pool allows only Opus,
+    // the workspace pool every model.
+    await sharedConnection(org, "two-pools", {
+      policies: [
+        { pool: "organization", allowedModelIds: [opus] },
+        { pool: "workspace", allowedModelIds: null },
+      ],
+    });
+    expect(
+      await readSubscriptionCoreClaudeCatalogReadiness(client.db, {
+        accountId: org.accountId,
+        workspaceId: org.workspaceId,
+        subjectId: org.ownerSubjectId,
+      }),
+    ).toEqual({
+      workspace: true,
+      organization: true,
+      restrictions: {
+        "organization-claude-subscription/": [opus],
+        "workspace-claude-subscription/": null,
+      },
+    });
+    // The workspace pool's policy never widens organization admission.
+    expect(await admit(org, org.opus, organizationSnapshot)).toBe(org.opus);
+    expect(await admit(org, org.sonnet, organizationSnapshot)).toBeNull();
+  });
+
   test("organization admission: the effective source and a live organization-pool connection", async () => {
     const org = await organization();
     await setCutover(org, true);
@@ -570,11 +821,28 @@ describe("on the Claude core route", () => {
       allowedModelIds: [`organization-claude-subscription/${org.opus}`],
     });
     expect(await admit(org, org.opus, organizationSnapshot)).toBe(org.opus);
-    // The v1 snapshot and the session's frozen snapshot are not read on the core.
+    // A human's own new work resolves the current source; the v1 snapshot is
+    // not read on the core.
     expect(
       await admit(org, org.opus, { authoritySnapshot: { version: 1, scope: "workspace" } }),
     ).toBe(org.opus);
-    expect(await admit(org, org.opus, { sessionId: crypto.randomUUID() })).toBe(org.opus);
+    // Work whose authority was accepted before this request (a new session's
+    // initial authority, an edit's source turn, agent work's receiving
+    // session) needs the accepted-authority reader: without it (0716 is not
+    // on this database) nothing is admitted.
+    expect(await admit(org, org.opus, { sessionId: crypto.randomUUID() })).toBeNull();
+    expect(
+      await admit(org, org.opus, {
+        ...organizationSnapshot,
+        acceptedSource: { kind: "session_turn", turnId: crypto.randomUUID() },
+      }),
+    ).toBeNull();
+    expect(
+      await admit(org, org.opus, {
+        ...organizationSnapshot,
+        acceptedSource: { kind: "receiving_session", sessionId: crypto.randomUUID() },
+      }),
+    ).toBeNull();
     // The connection's allowlist bounds the model.
     expect(await admit(org, org.sonnet, organizationSnapshot)).toBeNull();
     // A caller that established no subject admits nothing; no person is inferred.
@@ -601,8 +869,87 @@ describe("on the Claude core route", () => {
     expect(await admit(org, org.opus, organizationSnapshot)).toBeNull();
   });
 
-  test("a task's accepted authority decides a scheduled-task update", () => {
-    const admits = subscriptionCoreClaudeTaskAuthorityAdmitsOrganization;
+  test("carried accepted authority decides through the accepted-authority reader", async () => {
+    const org = await organization();
+    await setCutover(org, true);
+    await sharedConnection(org, "carried");
+    const compat = await installCompatReader();
+    try {
+      // A new session: its initial authority.
+      const created = await session(org);
+      expect(await admit(org, org.opus, { sessionId: created.sessionId })).toBeNull();
+      expect(await compat.lastCall()).toEqual({
+        provider: "claude",
+        carrier_kind: "session_initial",
+        carrier_id: created.sessionId,
+      });
+      await compat.answer("session_initial", created.sessionId, { authority: "none" });
+      expect(await admit(org, org.opus, { sessionId: created.sessionId })).toBe(org.opus);
+      await compat.answer("session_initial", created.sessionId, {
+        authority: "record",
+        sharedPool: "workspace",
+        personal: [],
+      });
+      expect(await admit(org, org.opus, { sessionId: created.sessionId })).toBeNull();
+      await compat.answer("session_initial", created.sessionId, {
+        authority: "record",
+        sharedPool: "organization",
+        personal: [],
+      });
+      expect(await admit(org, org.opus, { sessionId: created.sessionId })).toBe(org.opus);
+      // An edit: its source turn's authority, whatever the copied snapshot says.
+      const edited = await session(org, { turn: true });
+      await compat.answer("session_turn", edited.turnId!, {
+        authority: "record",
+        sharedPool: "workspace",
+        personal: [],
+      });
+      const edit = {
+        ...organizationSnapshot,
+        acceptedSource: { kind: "session_turn" as const, turnId: edited.turnId! },
+      };
+      expect(await admit(org, org.opus, edit)).toBeNull();
+      await compat.answer("session_turn", edited.turnId!, { authority: "v2" });
+      expect(await admit(org, org.opus, edit)).toBe(org.opus);
+      // Agent work: the receiving session's latest accepted turn, else its
+      // initial authority.
+      const receiving = (sessionId: string) => ({
+        ...organizationSnapshot,
+        acceptedSource: { kind: "receiving_session" as const, sessionId },
+      });
+      expect(await admit(org, org.opus, receiving(edited.sessionId))).toBe(org.opus);
+      expect(await compat.lastCall()).toMatchObject({
+        carrier_kind: "session_turn",
+        carrier_id: edited.turnId,
+      });
+      const fresh = await session(org);
+      expect(await admit(org, org.opus, receiving(fresh.sessionId))).toBeNull();
+      expect(await compat.lastCall()).toMatchObject({
+        carrier_kind: "session_initial",
+        carrier_id: fresh.sessionId,
+      });
+      // A session this workspace cannot see admits nothing (no reader call).
+      expect(await admit(org, org.opus, receiving(crypto.randomUUID()))).toBeNull();
+      // A scheduled task's record.
+      const taskId = crypto.randomUUID();
+      await compat.answer("scheduled_task", taskId, {
+        authority: "record",
+        sharedPool: "organization",
+        personal: [],
+      });
+      expect(await admit(org, org.opus, { ...organizationSnapshot, scheduledTaskId: taskId })).toBe(
+        org.opus,
+      );
+      // A carrier that admits still needs the current source and a live connection.
+      await setSource(org, "workspace");
+      expect(await admit(org, org.opus, { sessionId: created.sessionId })).toBeNull();
+    } finally {
+      await compat.remove();
+    }
+  });
+
+  test("which accepted authority admits an organization model", () => {
+    const admits = subscriptionCoreClaudeAcceptedAuthorityAdmitsOrganization;
     expect(admits({ authority: "record", sharedPool: "organization", personal: [] })).toBe(true);
     expect(admits({ authority: "record", sharedPool: "workspace", personal: [] })).toBe(false);
     expect(admits({ authority: "record", sharedPool: "none", personal: [] })).toBe(false);

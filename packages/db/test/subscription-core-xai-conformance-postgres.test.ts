@@ -61,6 +61,8 @@ const upstream = new ScriptedApiKeyUpstream<SubscriptionCoreXaiTokens>(
 describeSubscriptionCoreConformance<SubscriptionCoreXaiTokens>({
   name: "SuperGrok subscription",
   databaseLabel: "subscription-core-xai-conformance",
+  // The adapter's declared usage-reading completeness (asserted by the suite).
+  usageReadingsComplete: true,
   provider,
   models: [
     { productModelId: "supergrok/conformance-a", upstreamModelId: "conformance-a" },

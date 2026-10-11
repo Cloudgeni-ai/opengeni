@@ -119,8 +119,11 @@ function connectionRow(patch: Record<string, unknown> = {}) {
       source: "usage_endpoint",
     },
     quota_revision: 2,
-    quota_observed_refresh_generation: 3,
+    // Observed under an earlier credential generation: still shown.
+    quota_observed_refresh_generation: 1,
     quota_updated_at: observedAt,
+    // The row version is the usage credential version (the listing's).
+    version: 3,
     ...patch,
   } as never;
 }
@@ -133,7 +136,8 @@ const storedUsage = {
       id: "five_hour",
       usedPercent: 25,
       resetsAt: null,
-      status: "allowed",
+      // Legacy usage-endpoint windows carried no status.
+      status: null,
       observedAt,
       source: "provider",
     },
