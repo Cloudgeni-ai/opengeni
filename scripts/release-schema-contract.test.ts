@@ -2264,7 +2264,11 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
-      "0718_subscription_personal_acceptance_reads.sql",
+      "0722_subscription_personal_acceptance_reads.sql",
+      "0721_private_scheduled_task_summaries.sql",
+      "0720_scheduled_task_audience.sql",
+      "0719_session_admin_access_time_limit.sql",
+      "0718_inbox_time_sensitive_needs_you.sql",
       "0717_subscription_authority_fences.sql",
       "0716_subscription_authority_compat.sql",
       "0715_subscription_core_api_key_connections.sql",

@@ -61,7 +61,7 @@ const subscriptionCoreMigrations = [
   // Requires 0716's routines; it follows 0716.
   "0717_subscription_authority_fences.sql",
   // Patches the acceptance writers withheld 0669, 0688 and 0707 define.
-  "0718_subscription_personal_acceptance_reads.sql",
+  "0722_subscription_personal_acceptance_reads.sql",
 ] as const;
 const key = Buffer.alloc(32, 67);
 const ids = {

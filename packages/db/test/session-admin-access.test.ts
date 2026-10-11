@@ -114,6 +114,7 @@ describe("session admin access", () => {
         workspaceId: org.workspaceId,
         sessionId: own,
         actorSubjectId: org.owner,
+        durationHours: null,
       }),
     ).rejects.toBeInstanceOf(SessionAdminAccessNotAllowedError);
     expect(
@@ -146,7 +147,11 @@ describe("session admin access", () => {
     const ownersSession = await session(org, { kind: "subject", subjectId: org.owner });
     const membersSession = await session(org, { kind: "subject", subjectId: org.member });
     const spawned = await session(org, { kind: "service", subjectId: org.owner });
-    const target = { organizationId: org.accountId, workspaceId: org.workspaceId };
+    const target = {
+      organizationId: org.accountId,
+      workspaceId: org.workspaceId,
+      durationHours: null,
+    };
 
     // Someone else's session, or one an agent started, never takes an admin's access.
     await expect(
@@ -176,7 +181,8 @@ describe("session admin access", () => {
       actorSubjectId: org.owner,
     });
     expect(granted.grantedBySubjectId).toBe(org.owner);
-    // Giving it again keeps the original grant.
+    expect(granted.expiresAt).toBeNull();
+    // Giving it again while it is on keeps when it was given.
     expect(
       await grantSessionAdminAccess(db, {
         ...target,
@@ -188,6 +194,7 @@ describe("session admin access", () => {
     expect(await resolveSessionAdminAuthority(db, { ...key, sessionId: ownersSession })).toEqual({
       subjectId: org.owner,
       grantedAt: granted.grantedAt,
+      expiresAt: null,
     });
     expect(
       await resolveSessionAdminAuthority(db, { ...key, sessionId: membersSession }),
@@ -247,6 +254,7 @@ describe("session admin access", () => {
         workspaceId: org.workspaceId,
         sessionId,
         actorSubjectId,
+        durationHours: 1,
       });
     }
     expect(
@@ -274,5 +282,59 @@ describe("session admin access", () => {
       sessionAdminAccessAllowed: true,
     });
     expect(await resolveSessionAdminAuthority(db, { ...key, sessionId: ownersSession })).toBeNull();
+  });
+
+  test("lasts the hours chosen, can be given again, and refuses other lengths", async () => {
+    if (!client) return;
+    const db = client.db;
+    const org = await organization("admin-access-time-limit");
+    const key = { accountId: org.accountId, workspaceId: org.workspaceId };
+    await setOrganizationAgentAdminAccess(db, {
+      organizationId: org.accountId,
+      actorSubjectId: org.owner,
+      sessionAdminAccessAllowed: true,
+    });
+    const own = await session(org, { kind: "subject", subjectId: org.owner });
+    const give = (durationHours: number | null) =>
+      grantSessionAdminAccess(db, {
+        organizationId: org.accountId,
+        workspaceId: org.workspaceId,
+        sessionId: own,
+        actorSubjectId: org.owner,
+        durationHours,
+      });
+
+    const hour = await give(1);
+    const lasts = Date.parse(hour.expiresAt!) - Date.parse(hour.grantedAt);
+    expect(Math.abs(lasts - 3_600_000)).toBeLessThan(5_000);
+    expect(await resolveSessionAdminAuthority(db, { ...key, sessionId: own })).toEqual({
+      subjectId: org.owner,
+      grantedAt: hour.grantedAt,
+      expiresAt: hour.expiresAt,
+    });
+
+    // Choosing again while it is on sets a new limit from now, same grant.
+    const day = await give(24);
+    expect(day.grantedAt).toBe(hour.grantedAt);
+    expect(Date.parse(day.expiresAt!)).toBeGreaterThan(Date.parse(hour.expiresAt!));
+    expect((await give(null)).expiresAt).toBeNull();
+
+    // Once the time is up, nothing uses it, and the viewer sees it as off.
+    await shared!.admin`
+      update session_admin_access set expires_at = now() - interval '1 second'
+      where session_id = ${own}`;
+    expect(await resolveSessionAdminAuthority(db, { ...key, sessionId: own })).toBeNull();
+    expect(
+      await getSessionAdminAccessView(db, { ...key, sessionId: own, viewerSubjectId: org.owner }),
+    ).toMatchObject({ active: false, grant: null, allowed: true });
+
+    // Giving it after it ended counts as given anew.
+    const again = await give(2);
+    expect(Date.parse(again.grantedAt)).toBeGreaterThan(Date.parse(hour.grantedAt));
+    expect(await resolveSessionAdminAuthority(db, { ...key, sessionId: own })).not.toBeNull();
+
+    for (const bad of [0, -1, 1.5, 721]) {
+      await expect(give(bad)).rejects.toBeInstanceOf(RangeError);
+    }
   });
 });

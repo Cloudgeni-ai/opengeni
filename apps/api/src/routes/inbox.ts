@@ -234,7 +234,12 @@ export function registerInboxRoutes(app: Hono, deps: ApiRouteDeps): void {
     const accountId = context.defaultAccountId ?? (await personAccounts(deps, context))[0];
     if (!accountId) {
       return c.json(
-        InboxSettings.parse({ tidyPolicy: "own_sessions", pausedGoals: false, replies: false }),
+        InboxSettings.parse({
+          tidyPolicy: "own_sessions",
+          pausedGoals: false,
+          replies: false,
+          timeSensitiveNeedsYou: false,
+        }),
       );
     }
     return c.json(InboxSettings.parse(await getInboxSettings(deps.db, { accountId, subjectId })));
@@ -250,6 +255,7 @@ export function registerInboxRoutes(app: Hono, deps: ApiRouteDeps): void {
       tidyPolicy: "own_sessions",
       pausedGoals: false,
       replies: false,
+      timeSensitiveNeedsYou: false,
     };
     for (const accountId of await personAccounts(deps, context)) {
       settings = await setInboxSettings(deps.db, {
@@ -258,6 +264,7 @@ export function registerInboxRoutes(app: Hono, deps: ApiRouteDeps): void {
         tidyPolicy: parsed.data.tidyPolicy,
         pausedGoals: parsed.data.pausedGoals,
         replies: parsed.data.replies,
+        timeSensitiveNeedsYou: parsed.data.timeSensitiveNeedsYou,
       });
     }
     return c.json(InboxSettings.parse(settings));

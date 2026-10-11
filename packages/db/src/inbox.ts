@@ -247,22 +247,25 @@ export type InboxSettingsValue = {
   tidyPolicy: InboxTidyPolicyValue;
   pausedGoals: boolean;
   replies: boolean;
+  /** Question and approval alerts arrive time-sensitive (0718). */
+  timeSensitiveNeedsYou: boolean;
 };
 
 type InboxSettingsRecord = {
   tidy_policy: InboxTidyPolicyValue;
   paused_goals: boolean;
   replies: boolean;
+  time_sensitive_needs_you: boolean;
 };
 
-/** The person's inbox settings in one account (0663, 0665). */
+/** The person's inbox settings in one account (0663, 0665, 0718). */
 export async function getInboxSettings(
   db: Database,
   input: { accountId: string; subjectId: string },
 ): Promise<InboxSettingsValue> {
   const [row] = await rawRows<InboxSettingsRecord>(
     db,
-    sql`select * from opengeni_private.inbox_settings_v3(
+    sql`select * from opengeni_private.inbox_settings_v4(
       ${input.accountId}::uuid, ${input.subjectId}::text
     )`,
   );
@@ -270,6 +273,7 @@ export async function getInboxSettings(
     tidyPolicy: row?.tidy_policy ?? "own_sessions",
     pausedGoals: row?.paused_goals ?? false,
     replies: row?.replies ?? false,
+    timeSensitiveNeedsYou: row?.time_sensitive_needs_you ?? false,
   };
 }
 
@@ -285,20 +289,22 @@ export async function setInboxSettings(
     tidyPolicy?: InboxTidyPolicyValue | undefined;
     pausedGoals?: boolean | undefined;
     replies?: boolean | undefined;
+    timeSensitiveNeedsYou?: boolean | undefined;
   },
 ): Promise<InboxSettingsValue> {
   const [row] = await rawRows<InboxSettingsRecord>(
     db,
-    sql`select * from opengeni_private.set_inbox_settings_v3(
+    sql`select * from opengeni_private.set_inbox_settings_v4(
       ${input.accountId}::uuid, ${input.subjectId}::text,
       ${input.tidyPolicy ?? null}::text, ${input.pausedGoals ?? null}::boolean,
-      ${input.replies ?? null}::boolean
+      ${input.replies ?? null}::boolean, ${input.timeSensitiveNeedsYou ?? null}::boolean
     )`,
   );
   return {
     tidyPolicy: row?.tidy_policy ?? input.tidyPolicy ?? "own_sessions",
     pausedGoals: row?.paused_goals ?? input.pausedGoals ?? false,
     replies: row?.replies ?? input.replies ?? false,
+    timeSensitiveNeedsYou: row?.time_sensitive_needs_you ?? input.timeSensitiveNeedsYou ?? false,
   };
 }
 

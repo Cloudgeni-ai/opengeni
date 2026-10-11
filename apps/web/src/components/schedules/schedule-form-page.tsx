@@ -6,7 +6,7 @@ import { Link } from "@tanstack/react-router";
  * Advanced section. Knowledge source syncs keep a small editor of their own.
  */
 import { Suspense, lazy, useEffect, useId, useMemo, useRef, useState } from "react";
-import { LaptopIcon, MessageSquareIcon, ServerIcon } from "lucide-react";
+import { LaptopIcon, LockIcon, MessageSquareIcon, ServerIcon, UsersIcon } from "lucide-react";
 import { toast } from "sonner";
 import { MACHINES_COMPOSER_POLL_MS } from "@opengeni/react/machines";
 
@@ -329,6 +329,7 @@ function AgentScheduleForm({
         cadence: cadenceOfSchedule(task.schedule),
         variableSetId: task.variableSetId,
         rigId: task.rigId,
+        visibility: task.visibility,
       };
       if (editing) return fromTask;
       // Duplicate: a new schedule you own. Someone else's connected accounts
@@ -348,6 +349,7 @@ function AgentScheduleForm({
         cadence: { timeZone: viewerTimeZone(), rule: { frequency: "hourly" } },
         variableSetId: null,
         rigId: null,
+        visibility: "workspace",
       };
     }
     const template = mode.kind === "create" ? templateById(mode.template) : undefined;
@@ -490,6 +492,45 @@ function AgentScheduleForm({
       live = false;
     };
   }, [client, materializedSessionId, needsSessions, targetSessionId, workspaceId, sessionsRetry]);
+
+  /* ----- who can see it */
+  const [canCreatePrivate, setCanCreatePrivate] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (personal) return;
+    let live = true;
+    void client
+      .getSessionTenancyCreateCapabilities(workspaceId)
+      .then((capabilities) => {
+        if (live) setCanCreatePrivate(capabilities.canCreatePrivate === true);
+      })
+      .catch(() => {
+        if (live) setCanCreatePrivate(false);
+      });
+    return () => {
+      live = false;
+    };
+  }, [client, personal, workspaceId]);
+  const audienceTarget =
+    draft.runMode === "existing_session"
+      ? sessions.find((session) => session.id === draft.targetSessionId)
+      : undefined;
+  // A schedule that posts into an Only me chat, or saves to personal
+  // knowledge, is always Only me; the server enforces the same rule.
+  const privateReason =
+    audienceTarget?.tenancy?.visibility === "private"
+      ? "It posts into an Only me chat."
+      : draft.knowledgeSource?.destination.kind === "personal"
+        ? "It saves to your personal knowledge."
+        : null;
+  useEffect(() => {
+    if (privateReason)
+      setDraft((current) =>
+        current.visibility === "private" ? current : { ...current, visibility: "private" },
+      );
+  }, [privateReason]);
+  const showAudience =
+    !personal &&
+    (canCreatePrivate === true || draft.visibility === "private" || privateReason !== null);
 
   /* ----- connected accounts for the chosen tools */
   const accountTargetSession = inheritsChatSettings
@@ -1059,6 +1100,37 @@ function AgentScheduleForm({
                   />
                 </div>
               ) : null}
+            </Field>
+          ) : null}
+          {showAudience ? (
+            <Field
+              label="Who can see it"
+              hint={
+                draft.visibility === "private"
+                  ? "Only you can see this schedule and its chats. Admins can see that it exists, what it costs, and pause it."
+                  : "Everyone in this workspace can see this schedule and its chats."
+              }
+            >
+              <FieldSegmented<"workspace" | "private">
+                value={draft.visibility}
+                onValueChange={(visibility) => update({ visibility })}
+                options={[
+                  {
+                    value: "workspace",
+                    label: "Workspace",
+                    icon: <UsersIcon aria-hidden="true" />,
+                    disabled: privateReason !== null,
+                    ...(privateReason ? { disabledReason: privateReason } : {}),
+                  },
+                  {
+                    value: "private",
+                    label: "Only me",
+                    icon: <LockIcon aria-hidden="true" />,
+                    disabled: canCreatePrivate === false && draft.visibility !== "private",
+                    disabledReason: "Only me is turned off for this organization.",
+                  },
+                ]}
+              />
             </Field>
           ) : null}
           <Field

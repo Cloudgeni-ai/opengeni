@@ -106,6 +106,26 @@ export const OrganizationAccessPolicy = OrganizationAccessPolicyInput.transform(
   normalizeOrganizationAccessPolicy,
 );
 
+/** Change what a connected agent can do. Only the person who connected it can. */
+export const UpdateOrganizationMcpConnectionRequest = z
+  .object({ access: OrganizationAccessPolicy })
+  .strict();
+
+/**
+ * The answer to a pending agent sign-in: deny it, or approve it for one
+ * organization with the access the agent gets there.
+ */
+export const McpConnectionDecision = z.discriminatedUnion("decision", [
+  z.object({ decision: z.literal("deny") }).strict(),
+  z
+    .object({
+      decision: z.literal("approve"),
+      organizationId: z.string().uuid(),
+      access: OrganizationAccessPolicy,
+    })
+    .strict(),
+]);
+
 /* ----------------------------------------------------------------------------
    Service accounts: an organization identity with no person behind it. It
    holds organization API keys; its role caps what those keys can be given.

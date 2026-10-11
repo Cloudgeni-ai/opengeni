@@ -214,19 +214,19 @@ const RULES: Rule[] = [
     method: "POST",
     pattern: /\/codex\/accounts\/:accountId\/reset-credits\/prepare$/,
     text: () =>
-      "Prepare redeeming one ChatGPT usage-limit reset for a Codex account. Person only: redeeming is irreversible, so it is done in the Opengeni app in a browser, on the account's page under Usage limit resets. A workspace's own account is redeemed by the person who connected it; an organization account by an organization owner or admin, from Organization settings > Models, even if no workspace uses it. An agent can't call it; read the resets with the account's overview and send the person there.",
+      "Prepare redeeming one ChatGPT usage-limit reset for a Codex account, with a new attemptId and the reset's creditId from the account's overview. Returns a confirmation token for redeem. A workspace's own account is redeemed by the person who connected it; an organization account by an organization owner or admin, even if no workspace uses it. Redeeming is irreversible and uses up the reset: only do it when the person asked for it.",
   },
   {
     method: "POST",
     pattern: /\/codex\/accounts\/:accountId\/reset-credits\/redeem$/,
     text: () =>
-      "Redeem a prepared ChatGPT usage-limit reset. Person only: irreversible, and needs the person's confirmation in their browser. An agent can't call it.",
+      "Redeem a prepared ChatGPT usage-limit reset: the same attemptId and creditId, the confirmationToken from prepare, and confirmation set to REDEEM_USAGE_LIMIT_RESET. Irreversible: only when the person asked for it. If the outcome is unknown, prepare and redeem again with the same attemptId; never start a new attempt for the same reset.",
   },
   {
     method: "GET",
     pattern: /\/organizations\/:organizationId\/codex\/accounts\/:accountId\/overview$/,
     text: () =>
-      "Read one organization Codex (ChatGPT) account's live usage and its usage-limit resets (each with its expiry), even when no workspace uses the account. Redeeming them is a person-only step on the account's page.",
+      "Read one organization Codex (ChatGPT) account's live usage and its usage-limit resets (each with its expiry), even when no workspace uses the account. Redeem one with reset-credits/prepare and then redeem.",
   },
   {
     method: "GET",

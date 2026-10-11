@@ -12,6 +12,7 @@ import {
 import { and, eq, inArray, sql } from "drizzle-orm";
 import type { Database, SessionActivityDatabase } from "./database";
 import { withLosslessContentWriteVersion } from "./lossless-json";
+import { withBoundSessionEventPayloads } from "./session-event-write-bounds";
 import { nestedPostgresSqlState } from "./persistence-errors";
 import { getExternalLinkTurnAuthorization } from "./external-link-work";
 import * as schema from "./schema";
@@ -3380,7 +3381,13 @@ async function cancelSessionSubtreeInTransaction(
       eventValues.length > 0
         ? await db
             .insert(schema.sessionEvents)
-            .values(withLosslessContentWriteVersion(eventValues, "payload", "payloadCodecVersion"))
+            .values(
+              withLosslessContentWriteVersion(
+                withBoundSessionEventPayloads(eventValues),
+                "payload",
+                "payloadCodecVersion",
+              ),
+            )
             .returning({
               id: schema.sessionEvents.id,
               sequence: schema.sessionEvents.sequence,

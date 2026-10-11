@@ -134,7 +134,10 @@ export type ClaimedNativePushDelivery = {
     subjectId: string;
     title?: string;
     body?: string;
-    /** An agent notification's subtitle, facts and urgency (0664). */
+    /**
+     * An agent notification's subtitle, facts and urgency (0664); a question or
+     * approval carries urgency when its person asked for time-sensitive ones (0718).
+     */
     subtitle?: string;
     facts?: Array<{ label: string; value: string }>;
     urgency?: "normal" | "time_sensitive";

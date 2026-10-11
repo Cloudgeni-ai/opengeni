@@ -126,6 +126,38 @@ Canonical code: `packages/core/src/domain/scheduled-task-access.ts`,
 (`apps/web/src/components/schedules/`, with the notices in
 `schedule-access-notices.tsx`).
 
+## Who can see a schedule
+
+A schedule has an audience, like a chat: **Workspace** (everyone in the
+workspace, the default) or **Only me**. The form asks "Who can see it" when the
+organization allows Only me chats.
+
+- A Workspace schedule is visible to every member. Only its owner changes or
+  runs it (unchanged).
+- An Only me schedule is visible only to its owner, through every surface: the
+  HTTP API, the agent's schedule tools and Slack all use the one core gate in
+  `packages/core/src/domain/scheduled-task-audience.ts`. To anyone else it is
+  indistinguishable from a schedule that does not exist.
+- Each run of an Only me schedule creates an Only me chat owned by the schedule's
+  owner. The run rechecks that the owner is still an active member who may
+  create Only me chats; if not, the run fails closed instead of creating a
+  shared chat.
+- A schedule that posts into an Only me chat, or saves to the owner's personal
+  knowledge, is always Only me. Widening it is refused while that holds.
+- Workspace admins see other people's Only me schedules only as a summary:
+  the owner, how often it runs, its status, when it last ran and what its runs
+  cost over the last 30 days. Never its name, message, settings or runs. An
+  admin can pause one (`POST
+  /v1/workspaces/:workspaceId/scheduled-tasks/private-summaries/:taskId/pause`);
+  only the owner can resume it. The list is
+  `GET /v1/workspaces/:workspaceId/scheduled-tasks/private-summaries`.
+
+The audience is not execution configuration: like the name and status it is
+left out of the execution digest, so changing it never invalidates accepted
+runs. Migration 0720 adds it; schedules that already posted into an Only me
+chat or wrote to personal knowledge become Only me, which only narrows who can
+see them. Migration 0721 adds the admin summary read and pause.
+
 ## One plan, two uses
 
 `computeScheduledTaskAccessPlan` answers one question: what would this task's

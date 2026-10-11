@@ -3,6 +3,7 @@ import { canonicalizePersistedHistoryItem, omitOutputOnlyHistoryItemFields } fro
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import type { Database } from "./database";
 import { fromPostgresLosslessJson, LOSSLESS_CONTENT_CODEC_VERSION } from "./lossless-json";
+import { withBoundSessionEventPayloads } from "./session-event-write-bounds";
 import * as schema from "./schema";
 import { cancelUnacceptedVideoGenerationsForToolCallsInTransaction } from "./video-generation";
 
@@ -438,9 +439,10 @@ export async function closePendingSessionToolCallsInTransaction(
   }
 
   if (historyValues.length > 0) await tx.insert(schema.sessionHistoryItems).values(historyValues);
+  const boundEventValues = withBoundSessionEventPayloads(eventValues);
   const inserted =
     eventValues.length > 0
-      ? await tx.insert(schema.sessionEvents).values(eventValues).returning()
+      ? await tx.insert(schema.sessionEvents).values(boundEventValues).returning()
       : [];
   await cancelUnacceptedVideoGenerationsForToolCallsInTransaction(tx, {
     workspaceId: input.workspaceId,

@@ -10,10 +10,13 @@ import type { ResolvedModelProvider } from "@opengeni/config";
 import {
   ANTHROPIC_PAUSE_TURN_MAX_REQUESTS,
   AnthropicMessagesModel,
-  anthropicResponse,
+  anthropicResponse as parseAnthropicResponse,
   buildAnthropicRequest,
 } from "../src/anthropic-messages";
-import { anthropicWebSearchQueries } from "../src/anthropic-web-search";
+import {
+  anthropicSearchAccountScope,
+  anthropicWebSearchQueries,
+} from "../src/anthropic-web-search";
 import { renderCompactionPromptInputForChat } from "../src/context-compaction";
 import { projectHostedSearchEvidence } from "../src/hosted-search-evidence";
 import { projectHistoryForProvider } from "../src/provider-history-adapter";
@@ -32,6 +35,29 @@ const provider: ResolvedModelProvider = {
   credentialSource: { kind: "deployment", mechanism: "api_key" },
   billing: { upstreamPayer: "deployment", metering: "external" },
 };
+
+/** Responses parsed directly in these tests were produced on the test provider's account. */
+const testAccount = anthropicSearchAccountScope(provider);
+const anthropicResponse = (
+  value: Record<string, any>,
+  requestId?: string,
+  names?: Map<string, { name: string; namespace?: string }>,
+  searchQueries?: ReadonlyMap<string, string>,
+  requestUsages?: Record<string, any>[],
+) => parseAnthropicResponse(value, requestId, names, searchQueries, requestUsages, testAccount);
+
+/** A Claude subscription route signed in to one Claude account. */
+const subscription = (accountUuid: string, token: string): ResolvedModelProvider => ({
+  ...provider,
+  apiKey: token,
+  anthropic: {
+    auth: "oauth",
+    cacheTtl: "5m",
+    maxOutputTokens: 32000,
+    streamIdleTimeoutMs: 600000,
+    identity: { accountUuid, deviceId: "a".repeat(64) },
+  },
+});
 
 const hostedSearch = webSearchTool();
 const lookupTool = {
@@ -624,6 +650,145 @@ describe("Claude paused search turns", () => {
       "paused its web search",
     );
     expect(calls).toBe(ANTHROPIC_PAUSE_TURN_MAX_REQUESTS);
+  });
+});
+
+describe("Claude searches across Claude accounts", () => {
+  // Anthropic encrypts results for the account that ran the search; any
+  // other account rejects the request with "Invalid `encrypted_content`".
+  const accountA = subscription("10000000-0000-4000-8000-00000000000a", "sk-ant-oat01-token-a");
+  const accountB = subscription("10000000-0000-4000-8000-00000000000b", "sk-ant-oat01-token-b");
+  const searchedOn = (account: ResolvedModelProvider): any[] => [
+    { role: "user", content: "What changed?" },
+    ...parseAnthropicResponse(
+      message("msg_1", searchedContent),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      anthropicSearchAccountScope(account),
+    ).output,
+    { role: "user", content: "Thanks" },
+  ];
+
+  test("the account scope is opaque and never contains the credential", () => {
+    expect(anthropicSearchAccountScope(accountA)).toBe(
+      "claude-account:10000000-0000-4000-8000-00000000000a",
+    );
+    const keyed = anthropicSearchAccountScope(provider)!;
+    expect(keyed).toStartWith("credential:");
+    expect(keyed).not.toContain("test-key");
+    expect(anthropicSearchAccountScope({ ...provider, apiKey: "other-key" })).not.toBe(keyed);
+    expect(anthropicSearchAccountScope({ ...provider, apiKey: undefined })).toBeNull();
+  });
+
+  test("the account that ran the search gets its blocks and citations back exactly", () => {
+    const body = buildAnthropicRequest(request(searchedOn(accountA)), "claude", accountA, false);
+    expect(unmarked(body.messages[1])).toEqual({ role: "assistant", content: searchedContent });
+  });
+
+  test("another account gets readable facts with no encrypted data or citations", () => {
+    const body = buildAnthropicRequest(request(searchedOn(accountA)), "claude", accountB, false);
+    const wire = JSON.stringify(body.messages);
+    expect(wire).not.toContain("ENC_");
+    expect(wire).not.toContain("server_tool_use");
+    expect(wire).not.toContain("web_search_tool_result");
+    expect(wire).not.toContain("citations");
+    expect(wire).toContain("https://example.com/notes");
+    expect(wire).toContain("opengeni release notes");
+    expect(wire).toContain("Version 2 adds search.");
+    // The search tool itself stays declared, so new searches still work.
+    expect(body.tools.some((tool: any) => tool.type === "web_search_20250305")).toBe(true);
+  });
+
+  test("a search stored without an account is never replayed natively to a credentialed account", () => {
+    const unscoped = searchedOn(accountA).map((item) =>
+      item.type === "hosted_tool_call"
+        ? {
+            ...item,
+            providerData: {
+              ...item.providerData,
+              anthropic: { blocks: item.providerData.anthropic.blocks },
+            },
+          }
+        : item,
+    );
+    const wire = JSON.stringify(
+      buildAnthropicRequest(request(unscoped), "claude", accountA, false).messages,
+    );
+    expect(wire).not.toContain("ENC_");
+    expect(wire).not.toContain("citations");
+    expect(wire).toContain("https://example.com/notes");
+  });
+
+  test("after moving accounts, the prefix stays byte-identical on every later request", () => {
+    const first = buildAnthropicRequest(request(searchedOn(accountA)), "claude", accountB, false);
+    const later = buildAnthropicRequest(
+      request([
+        ...searchedOn(accountA),
+        ...anthropicResponse(message("msg_2", [{ type: "text", text: "Welcome" }])).output,
+        { role: "user", content: "One more" },
+      ]),
+      "claude",
+      accountB,
+      false,
+    );
+    expect(JSON.stringify(unmarked(later.messages.slice(0, first.messages.length)))).toBe(
+      JSON.stringify(unmarked(first.messages)),
+    );
+  });
+
+  test("a conversation that moves accounts between turns keeps working", async () => {
+    const sent: any[] = [];
+    const fetcher = (async (_url, init) => {
+      sent.push(JSON.parse(String(init?.body)));
+      return new Response(
+        JSON.stringify(
+          sent.length === 1
+            ? message("msg_1", searchedContent)
+            : message(`msg_${sent.length}`, [{ type: "text", text: "Sure." }]),
+        ),
+      );
+    }) as typeof fetch;
+    const runner = new Runner({ tracingDisabled: true });
+    const onA = new Agent({
+      name: "Test",
+      model: new AnthropicMessagesModel(accountA, "claude", fetcher),
+      tools: [webSearchTool()],
+    });
+    const first = await runner.run(onA, "What changed?");
+    const searchItem = first.history.find((item: any) => item.type === "hosted_tool_call") as any;
+    expect(searchItem.providerData.anthropic.accountScope).toBe(
+      anthropicSearchAccountScope(accountA),
+    );
+    const onB = new Agent({
+      name: "Test",
+      model: new AnthropicMessagesModel(accountB, "claude", fetcher),
+      tools: [webSearchTool()],
+    });
+    await runner.run(onB, [...first.history, { role: "user", content: "Thanks" }]);
+    expect(JSON.stringify(sent[1].messages)).not.toContain("ENC_");
+    await runner.run(onA, [...first.history, { role: "user", content: "Thanks" }]);
+    expect(unmarked(sent[2].messages[1])).toEqual({ role: "assistant", content: searchedContent });
+  });
+
+  test("a paused search continues natively on the same account", async () => {
+    const sent: any[] = [];
+    const model = new AnthropicMessagesModel(accountA, "claude", (async (_url, init) => {
+      sent.push(JSON.parse(String(init?.body)));
+      return new Response(
+        JSON.stringify(
+          sent.length === 1
+            ? message("msg_1", [call, results], "pause_turn")
+            : message("msg_2", [{ type: "text", text: "Done." }]),
+        ),
+      );
+    }) as typeof fetch);
+    await model.getResponse(request([{ role: "user", content: "Go" }]));
+    expect(unmarked(sent[1].messages.at(-1))).toEqual({
+      role: "assistant",
+      content: [call, results],
+    });
   });
 });
 

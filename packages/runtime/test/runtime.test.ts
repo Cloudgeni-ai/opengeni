@@ -112,6 +112,7 @@ import {
   normalizeToolOutputForEvent,
   OPENGENI_INNER_MCP_CUSTOM_DATA_KEY,
   OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY,
+  mcpResultModelContent,
   PrefixedMcpServer,
   prepareRunInput,
   runAgentStream,
@@ -3072,7 +3073,7 @@ describe("runtime event normalization", () => {
               JSON.stringify({ query: "needle" }),
               { toolCall: { callId: "call-provider-error" } } as any,
             );
-            expect(result).toMatchObject({ isError: true });
+            expect(result).toContainEqual({ type: "text", text: "The tool reported an error." });
             // The model receives the provider's exact error, never a replacement.
             expect(JSON.stringify(result)).toContain("found document for needle");
             expect(JSON.stringify(result)).not.toContain("outcome is uncertain");
@@ -7070,7 +7071,7 @@ describe("runtime event normalization", () => {
       (event) =>
         event.type === "run_item_stream_event" && event.item?.type === "tool_call_output_item",
     );
-    expect(outputEvent?.item.output).toEqual(fullResult);
+    expect(outputEvent?.item.output).toEqual(mcpResultModelContent(fullResult));
     expect(outputEvent?.item.customData).toEqual({
       [OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY]: fullResult,
       [OPENGENI_INNER_MCP_CUSTOM_DATA_KEY]: { innerReceipt: "inner-1" },
@@ -7088,11 +7089,13 @@ describe("runtime event normalization", () => {
     const [durable] = normalizeSdkEvent(outputEvent);
     expect((durable!.payload as { output?: unknown }).output).toEqual(fullResult);
 
+    // The model sees the content and structured result; `_meta` and
+    // non-standard envelope fields stay in the retained audit result.
     const secondRequest = JSON.stringify(model.requests[1]?.input);
     expect(secondRequest).toContain("model-visible content");
     expect(secondRequest).toContain("structuredOnly");
-    expect(secondRequest).toContain("providerTrace");
-    expect(secondRequest).toContain("vendor-receipt-1");
+    expect(secondRequest).not.toContain("providerTrace");
+    expect(secondRequest).not.toContain("vendor-receipt-1");
   });
 
   test("the Agents SDK sends a structuredContent duplicate text block to the model once while retaining the exact audit result", async () => {
@@ -7159,14 +7162,10 @@ describe("runtime event normalization", () => {
     const toolOutput = ((model.requests[1]?.input ?? []) as any[]).find(
       (item) => item.type === "function_call_result",
     )?.output;
-    expect(toolOutput).toEqual({
-      type: "text",
-      text: JSON.stringify({
-        content: [{ type: "text", text: "Showing the first page." }],
-        structuredContent,
-        _meta: { providerTrace: "trace-dup" },
-      }),
-    });
+    expect(toolOutput).toEqual([
+      { type: "input_text", text: "Showing the first page." },
+      { type: "input_text", text: `Structured result: ${JSON.stringify(structuredContent)}` },
+    ]);
   });
 
   test("rejects MCP result values the Agents SDK custom-data boundary would rewrite", async () => {
@@ -7331,7 +7330,7 @@ describe("runtime event normalization", () => {
         (event) =>
           event.type === "run_item_stream_event" && event.item?.type === "tool_call_output_item",
       );
-      expect(outputEvent?.item.output).toEqual(fullResult);
+      expect(outputEvent?.item.output).toEqual(mcpResultModelContent(fullResult));
       expect(outputEvent?.item.customData).toEqual({
         [OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY]: fullResult,
         [OPENGENI_INNER_MCP_CUSTOM_DATA_KEY]: { baseReceipt: "base-1" },
@@ -7491,7 +7490,7 @@ describe("runtime event normalization", () => {
       (event) =>
         event.type === "run_item_stream_event" && event.item?.type === "tool_call_output_item",
     );
-    expect(outputEvent?.item.output).toEqual(fullResult);
+    expect(outputEvent?.item.output).toEqual(mcpResultModelContent(fullResult));
     expect(outputEvent?.item.customData).toEqual({
       [OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY]: fullResult,
     });
@@ -7556,7 +7555,7 @@ describe("runtime event normalization", () => {
 
     const secondRequest = JSON.stringify(model.requests[1]?.input);
     expect(secondRequest).toContain("structuredOnly");
-    expect(secondRequest).toContain("structured-only-trace");
+    expect(secondRequest).not.toContain("structured-only-trace");
   });
 
   test("a prefixed server forwards the inner SDK structured-content projection to its extractor", async () => {
@@ -7686,7 +7685,7 @@ describe("runtime event normalization", () => {
       (event) =>
         event.type === "run_item_stream_event" && event.item?.type === "tool_call_output_item",
     );
-    expect(outputEvent?.item.output).toEqual(fullResult);
+    expect(outputEvent?.item.output).toEqual(mcpResultModelContent(fullResult));
     expect(outputEvent?.item.customData).toEqual({
       [OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY]: fullResult,
       [OPENGENI_INNER_MCP_CUSTOM_DATA_KEY]: { retained: true },
@@ -7913,7 +7912,9 @@ describe("runtime event normalization", () => {
     expect(compacted).not.toContain(OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY);
     expect(compacted).toContain(OPENGENI_INNER_MCP_CUSTOM_DATA_KEY);
     expect(compacted).toContain("keep-me");
-    expect(compacted).toContain("large-trace-1");
+    // The model never saw `_meta`, so the resumable state does not carry it;
+    // the durable tool-output event keeps the exact result.
+    expect(compacted).not.toContain("large-trace-1");
     expect(Buffer.byteLength(compacted, "utf8")).toBeLessThan(3 * 1024 * 1024);
 
     const resumed = await RunState.fromString(agent, compacted);
@@ -8017,21 +8018,24 @@ describe("runtime event normalization", () => {
         (event) =>
           event.type === "run_item_stream_event" && event.item?.type === "tool_call_output_item",
       );
-      expect(outputEvent?.item.output).toMatchObject({
+      expect(outputEvent?.item.output).toEqual([
+        { type: "text", text: "The tool reported an error." },
+        { type: "text", text: providerOnlyErrorMarker },
+      ]);
+      const [durable] = normalizeSdkEvent(outputEvent);
+      expect((durable!.payload as { output?: unknown }).output).toMatchObject({
         isError: true,
         content: [{ type: "text", text: providerOnlyErrorMarker }],
       });
-      const [durable] = normalizeSdkEvent(outputEvent);
-      expect((durable!.payload as { output?: unknown }).output).toEqual(outputEvent.item.output);
       const nextModelInput = model.requests[1]?.input;
       expect(Array.isArray(nextModelInput)).toBe(true);
       const nextModelToolResult = (nextModelInput as any[]).find(
         (item) => item.type === "function_call_result" && item.callId === "http-error-call",
       );
-      expect(JSON.parse(nextModelToolResult.output.text)).toMatchObject({
-        isError: true,
-        content: [{ type: "text", text: providerOnlyErrorMarker }],
-      });
+      expect(nextModelToolResult.output).toEqual([
+        { type: "input_text", text: "The tool reported an error." },
+        { type: "input_text", text: providerOnlyErrorMarker },
+      ]);
 
       const scriptedResults: unknown[] = [
         { content: [{ type: "text", text: "ok" }] },

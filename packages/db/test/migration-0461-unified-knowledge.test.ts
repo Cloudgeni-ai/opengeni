@@ -425,6 +425,9 @@ beforeAll(async () => {
       ADD COLUMN content_archived_at timestamptz,
       ADD COLUMN content_archive jsonb,
       ADD COLUMN content_archive_purged_at timestamptz`;
+    // The current schedule adapter writes 0720's audience; 0720 stays withheld.
+    await owner`ALTER TABLE scheduled_tasks
+      ADD COLUMN visibility text NOT NULL DEFAULT 'workspace_shared'`;
     await owned.admin`INSERT INTO managed_accounts(id,name) VALUES(${accountId},'Acme migration')`;
     await owned.admin`INSERT INTO workspaces(id,account_id,name,settings)
       VALUES(${workspaceId},${accountId},'Migration workspace','{"memoryEnabled":false}')`;
@@ -652,6 +655,7 @@ beforeAll(async () => {
       DROP COLUMN content_archived_at,
       DROP COLUMN content_archive,
       DROP COLUMN content_archive_purged_at`;
+    await owner`ALTER TABLE scheduled_tasks DROP COLUMN visibility`;
     await owner`DELETE FROM schema_migrations WHERE name=ANY(${[migration, ...forwardMigrations]}::text[])`;
   } finally {
     await owner.end({ timeout: 5 });

@@ -2702,6 +2702,7 @@ function scheduledTask(
 ): ScheduledTask {
   return {
     ownerSubjectId: null,
+    visibility: "workspace",
     id: "00000000-0000-4000-8000-000000000100",
     accountId: "account-1",
     workspaceId: "workspace-1",
