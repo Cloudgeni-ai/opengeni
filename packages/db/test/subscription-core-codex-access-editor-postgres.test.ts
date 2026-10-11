@@ -5,11 +5,15 @@ import {
   createDb,
   ensureManagedAccessForUser,
   getSubscriptionCoreCodexModelConnectionAccess,
+  getSubscriptionCoreCodexWorkspaceProjection,
+  getSubscriptionCoreOrganizationCodexAccount,
+  getSubscriptionCoreOrganizationCodexProjection,
   listOrganizationAdministrationMembers,
   listSubscriptionCoreCodexServingConnections,
   ModelConnectionWorkspaceNotInOrganizationError,
   nestedPostgresSqlState,
   readSubscriptionCoreCodexModelConnectionAccess,
+  renameSubscriptionCoreCodexConnection,
   SubscriptionCoreAccessInvalidError,
   SubscriptionCoreAccessPeopleUnlistableError,
   SubscriptionCoreAccessPersonNotInOrganizationError,
@@ -479,6 +483,22 @@ describe.skipIf(!realDb)("Codex access editor on the shared core", () => {
     });
     expect(on.result.kind).toBe("updated");
     expect(await servedIn(org, org.sharedWorkspaceId)).toEqual([id]);
+    // "Unchanged" needs every copy the route writes, the reach included.
+    await shared!.admin`update opengeni_private.subscription_core_auto_assignments
+      set allocator_enabled = false where connection_id = ${id}::uuid`;
+    const repaired = await setSubscriptionCoreCodexAllocator(client!.db, {
+      accountId: org.accountId,
+      workspaceId: null,
+      subjectId: org.ownerSubjectId,
+      connectionId: id,
+      enabled: true,
+      expectedVersion: 3,
+    });
+    expect(repaired.result.kind).toBe("updated");
+    const [reach] = await shared!.admin<{ allocator_enabled: boolean }[]>`
+      select allocator_enabled from opengeni_private.subscription_core_auto_assignments
+      where connection_id = ${id}::uuid`;
+    expect(reach?.allocator_enabled).toBe(true);
   });
 
   test("the organization's choices hold other workspaces; each side flips its own switch", async () => {
@@ -594,8 +614,19 @@ describe.skipIf(!realDb)("Codex access editor on the shared core", () => {
     });
     expect(await served()).toEqual({ own: [id], other: [id] });
 
-    // The organization switches it off; the managing workspace switches its
-    // own copy back on, but not the organization's.
+    const later = await workspace(org.accountId, org.ownerSubjectId, "Shared later");
+    const servedLater = async () => await servedIn(org, later);
+    // The managing workspace's page shows the switch its route flips.
+    const ownPage = async () =>
+      (
+        await getSubscriptionCoreCodexWorkspaceProjection(client!.db, {
+          accountId: org.accountId,
+          workspaceId: org.sharedWorkspaceId,
+        })
+      ).accounts.find((account) => account.id === id)?.allocatorEnabled;
+
+    // The organization switches it off everywhere; the managing workspace
+    // switches its own copy back on, but not the organization's.
     expect((await flip("organization", false, 1)).result).toMatchObject({
       kind: "updated",
       allocatorEnabled: false,
@@ -620,11 +651,27 @@ describe.skipIf(!realDb)("Codex access editor on the shared core", () => {
       reach: false,
     });
     expect(await served()).toEqual({ own: [id], other: [] });
-    // The organization's switch still reads off, so turning it on is a change.
-    expect((await flip("organization", false, 3)).result).toMatchObject({
+    expect(await servedLater()).toEqual([]);
+    // Under the organization's pool the organization's copy, off, decides:
+    // the managing workspace's page reads off, and its own "on" (already on)
+    // changes nothing it could change.
+    await source(org, org.sharedWorkspaceId, "organization");
+    expect(await ownPage()).toBe(false);
+    expect((await flip("workspace", true, 3)).result).toMatchObject({
       kind: "unchanged",
       allocatorEnabled: false,
     });
+    expect(await servedIn(org, org.sharedWorkspaceId)).toEqual([]);
+    await source(org, org.sharedWorkspaceId, "workspace");
+    // The organization's "off" while its own copies are off still switches
+    // the connection off: either side can turn it off everywhere.
+    expect((await flip("organization", false, 3)).result).toMatchObject({
+      kind: "updated",
+      allocatorEnabled: false,
+    });
+    expect(await served()).toEqual({ own: [], other: [] });
+    expect((await flip("workspace", true, 4)).result).toMatchObject({ kind: "updated" });
+    expect(await served()).toEqual({ own: [id], other: [] });
     // An organization save meanwhile keeps the organization's switch for new
     // rows and the reach.
     await updateSubscriptionCoreCodexModelConnectionAccess(client!.db, orgTarget, {
@@ -634,14 +681,14 @@ describe.skipIf(!realDb)("Codex access editor on the shared core", () => {
       version: 3,
     });
     expect(await switches()).toMatchObject({ organization: [false], reach: false });
-    // A workspace created later gets the organization's switch and list.
-    const later = await workspace(org.accountId, org.ownerSubjectId, "Shared later");
-    const [laterRow] = await shared!.admin<
+    // A workspace created now gets the organization's switch and list.
+    const newer = await workspace(org.accountId, org.ownerSubjectId, "Shared newer");
+    const [newerRow] = await shared!.admin<
       { allocator_enabled: boolean; allowed_model_ids: string[] | null }[]
     >`select allocator_enabled, allowed_model_ids from subscription_connection_assignment_policies
-      where connection_id = ${id}::uuid and workspace_id = ${later}::uuid`;
-    expect(laterRow).toEqual({ allocator_enabled: false, allowed_model_ids: [MODEL] });
-    expect((await flip("organization", true, 3)).result).toMatchObject({
+      where connection_id = ${id}::uuid and workspace_id = ${newer}::uuid`;
+    expect(newerRow).toEqual({ allocator_enabled: false, allowed_model_ids: [MODEL] });
+    expect((await flip("organization", true, 5)).result).toMatchObject({
       kind: "updated",
       allocatorEnabled: true,
     });
@@ -652,17 +699,41 @@ describe.skipIf(!realDb)("Codex access editor on the shared core", () => {
       reach: true,
     });
     expect(await served()).toEqual({ own: [id], other: [id] });
+    expect(await servedLater()).toEqual([id]);
 
-    // The managing workspace switches it off everywhere (the connection gates
-    // every copy); the organization turns its own copies back on, and the
-    // workspace's own copy stays off until that workspace turns it on.
-    expect((await flip("workspace", false, 4)).result).toMatchObject({ kind: "updated" });
+    // The managing workspace pauses it, the organization pauses it too (its
+    // own copies record that "off"), and the workspace resumes: only its own
+    // copy serves again, not other workspaces or workspaces created later.
+    expect((await flip("workspace", false, 6)).result).toMatchObject({ kind: "updated" });
     expect(await served()).toEqual({ own: [], other: [] });
-    expect((await flip("organization", false, 5)).result).toMatchObject({
-      kind: "unchanged",
+    expect((await flip("organization", false, 7)).result).toMatchObject({
+      kind: "updated",
       allocatorEnabled: false,
     });
-    expect((await flip("organization", true, 5)).result).toMatchObject({
+    expect(await switches()).toEqual({
+      connection: false,
+      organization: [false],
+      own: false,
+      reach: false,
+    });
+    expect((await flip("organization", false, 8)).result).toMatchObject({ kind: "unchanged" });
+    expect((await flip("workspace", true, 8)).result).toMatchObject({ kind: "updated" });
+    expect(await served()).toEqual({ own: [id], other: [] });
+    expect(await servedLater()).toEqual([]);
+    const latest = await workspace(org.accountId, org.ownerSubjectId, "Shared latest");
+    expect(await servedIn(org, latest)).toEqual([]);
+    expect((await flip("organization", true, 9)).result).toMatchObject({ kind: "updated" });
+    expect(await served()).toEqual({ own: [id], other: [id] });
+
+    // The mirror: the organization pauses it, the managing workspace pauses
+    // its own copy too, and the organization resumes: the managing workspace
+    // stays off until it turns its own copy back on.
+    expect((await flip("organization", false, 10)).result).toMatchObject({ kind: "updated" });
+    expect((await flip("workspace", false, 11)).result).toMatchObject({
+      kind: "updated",
+      allocatorEnabled: false,
+    });
+    expect((await flip("organization", true, 12)).result).toMatchObject({
       kind: "updated",
       allocatorEnabled: true,
     });
@@ -672,9 +743,8 @@ describe.skipIf(!realDb)("Codex access editor on the shared core", () => {
       own: false,
       reach: true,
     });
-    expect((await served()).other).toEqual([id]);
-    expect((await served()).own).toEqual([]);
-    expect((await flip("workspace", true, 6)).result).toMatchObject({
+    expect(await served()).toEqual({ own: [], other: [id] });
+    expect((await flip("workspace", true, 13)).result).toMatchObject({
       kind: "updated",
       allocatorEnabled: true,
     });
@@ -682,6 +752,219 @@ describe.skipIf(!realDb)("Codex access editor on the shared core", () => {
     // An organization switch never copies the workspace's widened list onto
     // the reach.
     expect((await stored(org, id)).reach?.allowed_model_ids).toEqual([MODEL]);
+
+    // The managing workspace's page shows what serves it under each source:
+    // its own copy, the organization's copy, or (automatic) either.
+    expect((await flip("workspace", false, 14)).result).toMatchObject({ kind: "updated" });
+    expect((await flip("organization", true, 15)).result).toMatchObject({ kind: "updated" });
+    expect(await switches()).toEqual({
+      connection: true,
+      organization: [true],
+      own: false,
+      reach: true,
+    });
+    for (const [mode, serves] of [
+      ["workspace", false],
+      ["organization", true],
+      ["automatic", true],
+    ] as const) {
+      await source(org, org.sharedWorkspaceId, mode);
+      expect(await ownPage()).toBe(serves);
+      expect(await servedIn(org, org.sharedWorkspaceId)).toEqual(serves ? [id] : []);
+    }
+    // Its "off" while it serves through the organization's copy turns the
+    // connection off: nothing serves it, or anywhere else.
+    expect((await flip("workspace", false, 16)).result).toMatchObject({
+      kind: "updated",
+      allocatorEnabled: false,
+    });
+    expect(await ownPage()).toBe(false);
+    expect(await servedIn(org, org.sharedWorkspaceId)).toEqual([]);
+    expect(await servedIn(org, org.otherWorkspaceId)).toEqual([]);
+  });
+
+  test("with a reach row but no organization-pool rows, the organization's switch and list are the reach's", async () => {
+    const org = await organization();
+    const id = await connection(org, "reach-only", { managedByWorkspaceId: org.sharedWorkspaceId });
+    const admin = await member(org, "member", "admin");
+    const orgTarget = organizationTarget(org, id);
+    const workspaceTarget = {
+      ...orgTarget,
+      workspaceId: org.sharedWorkspaceId,
+      subjectId: admin.subjectId,
+    };
+    await updateSubscriptionCoreCodexModelConnectionAccess(client!.db, orgTarget, {
+      allowedModels: [MODEL],
+      allowedWorkspaces: null,
+      allowPersonalWorkspaces: false,
+      version: 1,
+    });
+    const flip = async (from: "organization" | "workspace", enabled: boolean, version: number) =>
+      await setSubscriptionCoreCodexAllocator(client!.db, {
+        accountId: org.accountId,
+        workspaceId: from === "organization" ? null : org.sharedWorkspaceId,
+        subjectId: from === "organization" ? org.ownerSubjectId : admin.subjectId,
+        connectionId: id,
+        enabled,
+        expectedVersion: version,
+      });
+    expect((await flip("organization", false, 1)).result).toMatchObject({ kind: "updated" });
+    // The workspaces that held organization-pool rows are gone; the reach
+    // row for workspaces created later stays.
+    await shared!.admin`delete from subscription_connection_assignment_policies
+      where connection_id = ${id}::uuid and inference_pool = 'organization'`;
+    // The managing workspace switches it on and widens its own list.
+    expect((await flip("workspace", true, 2)).result).toMatchObject({ kind: "updated" });
+    await updateSubscriptionCoreCodexModelConnectionAccess(client!.db, workspaceTarget, {
+      allowedModels: null,
+      allowedWorkspaces: null,
+      allowPersonalWorkspaces: false,
+      version: 2,
+    });
+    // The organization still reads its own off switch and list, from the reach.
+    expect(
+      await getSubscriptionCoreOrganizationCodexAccount(client!.db, {
+        organizationId: org.accountId,
+        subjectId: org.ownerSubjectId,
+        connectionId: id,
+      }),
+    ).toMatchObject({ allocatorEnabled: false });
+    const shown = await readSubscriptionCoreCodexModelConnectionAccess(client!.db, orgTarget);
+    expect(shown?.policy.allowedModels).toEqual([MODEL]);
+    // Saving the form as shown keeps the reach at the organization's values,
+    // so a workspace created later is neither served nor widened.
+    await updateSubscriptionCoreCodexModelConnectionAccess(client!.db, orgTarget, {
+      allowedModels: shown!.policy.allowedModels,
+      allowedWorkspaces: shown!.policy.allowedWorkspaces,
+      allowPersonalWorkspaces: shown!.policy.allowPersonalWorkspaces,
+      version: shown!.policy.version,
+    });
+    const [reach] = await shared!.admin<
+      { allocator_enabled: boolean; allowed_model_ids: string[] | null }[]
+    >`select allocator_enabled, allowed_model_ids
+      from opengeni_private.subscription_core_auto_assignments where connection_id = ${id}::uuid`;
+    expect(reach).toEqual({ allocator_enabled: false, allowed_model_ids: [MODEL] });
+    const later = await workspace(org.accountId, org.ownerSubjectId, "Shared later");
+    const [laterRow] = await shared!.admin<
+      { allocator_enabled: boolean; allowed_model_ids: string[] | null }[]
+    >`select allocator_enabled, allowed_model_ids from subscription_connection_assignment_policies
+      where connection_id = ${id}::uuid and workspace_id = ${later}::uuid`;
+    expect(laterRow).toEqual({ allocator_enabled: false, allowed_model_ids: [MODEL] });
+    expect(await servedIn(org, later)).toEqual([]);
+    // Its "on" is a change: the reach is off.
+    expect((await flip("organization", true, 3)).result).toMatchObject({
+      kind: "updated",
+      allocatorEnabled: true,
+    });
+  });
+
+  test("an account 0689 merged with its organization copies off: the organization page's switch turns it off", async () => {
+    const org = await organization();
+    const id = await connection(org, "merged-paused", { localWorkspaceId: org.sharedWorkspaceId });
+    await updateSubscriptionCoreCodexModelConnectionAccess(
+      client!.db,
+      organizationTarget(org, id),
+      {
+        allowedModels: null,
+        allowedWorkspaces: [org.otherWorkspaceId],
+        allowPersonalWorkspaces: false,
+        version: 1,
+      },
+    );
+    // 0689's shape: the organization source's copies paused, the workspace's
+    // copy and the connection (their union) on.
+    await shared!.admin`update subscription_connection_assignment_policies
+      set allocator_enabled = false
+      where connection_id = ${id}::uuid and inference_pool = 'organization'`;
+    await source(org, org.sharedWorkspaceId, "workspace");
+    await source(org, org.otherWorkspaceId, "organization");
+    expect(await servedIn(org, org.sharedWorkspaceId)).toEqual([id]);
+    expect(await servedIn(org, org.otherWorkspaceId)).toEqual([]);
+    const page = async () =>
+      (
+        await getSubscriptionCoreOrganizationCodexProjection(client!.db, {
+          organizationId: org.accountId,
+          subjectId: org.ownerSubjectId,
+        })
+      ).accounts.find((account) => account.id === id)?.allocatorEnabled;
+    // The shipped page shows the connection's switch, and its "off" turns
+    // every copy off.
+    expect(await page()).toBe(true);
+    const off = await setSubscriptionCoreCodexAllocator(client!.db, {
+      accountId: org.accountId,
+      workspaceId: null,
+      subjectId: org.ownerSubjectId,
+      connectionId: id,
+      enabled: false,
+      expectedVersion: 1,
+    });
+    expect(off.result).toMatchObject({ kind: "updated", allocatorEnabled: false });
+    expect(await page()).toBe(false);
+    expect(await servedIn(org, org.sharedWorkspaceId)).toEqual([]);
+    expect(await servedIn(org, org.otherWorkspaceId)).toEqual([]);
+    // Its "on" turns the organization's copies on too.
+    const on = await setSubscriptionCoreCodexAllocator(client!.db, {
+      accountId: org.accountId,
+      workspaceId: null,
+      subjectId: org.ownerSubjectId,
+      connectionId: id,
+      enabled: true,
+      expectedVersion: 2,
+    });
+    expect(on.result).toMatchObject({ kind: "updated", allocatorEnabled: true });
+    expect(await servedIn(org, org.sharedWorkspaceId)).toEqual([id]);
+    expect(await servedIn(org, org.otherWorkspaceId)).toEqual([id]);
+  });
+
+  test("the organization route renames a workspace-managed account and reads it back", async () => {
+    const org = await organization();
+    const id = await connection(org, "managed-label", {
+      managedByWorkspaceId: org.sharedWorkspaceId,
+    });
+    const orgAdmin = { accountId: org.accountId, workspaceId: null, subjectId: org.ownerSubjectId };
+    expect(
+      await renameSubscriptionCoreCodexConnection(client!.db, {
+        ...orgAdmin,
+        connectionId: id,
+        label: "Renamed by the organization",
+      }),
+    ).toBe(id);
+    // Not in the organization's list (the Accounts page change lists it), so
+    // the route reads the renamed account itself, with the organization's switch.
+    const read = () =>
+      getSubscriptionCoreOrganizationCodexAccount(client!.db, {
+        organizationId: org.accountId,
+        subjectId: org.ownerSubjectId,
+        connectionId: id,
+      });
+    expect(await read()).toMatchObject({
+      id,
+      label: "Renamed by the organization",
+      allocatorEnabled: true,
+    });
+    await updateSubscriptionCoreCodexModelConnectionAccess(
+      client!.db,
+      organizationTarget(org, id),
+      {
+        allowedModels: null,
+        allowedWorkspaces: [org.otherWorkspaceId],
+        allowPersonalWorkspaces: false,
+        version: 1,
+      },
+    );
+    await shared!.admin`update subscription_connection_assignment_policies
+      set allocator_enabled = false
+      where connection_id = ${id}::uuid and inference_pool = 'organization'`;
+    expect(await read()).toMatchObject({ id, allocatorEnabled: false });
+    // A workspace member is no organization administrator: nothing.
+    const outsider = await member(org);
+    expect(
+      await getSubscriptionCoreOrganizationCodexAccount(client!.db, {
+        organizationId: org.accountId,
+        subjectId: outsider.subjectId,
+        connectionId: id,
+      }),
+    ).toBeNull();
   });
 });
 

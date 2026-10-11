@@ -259,7 +259,7 @@ async function projection(
     shared.has(id),
   );
   // The organization's list, which its workspaces are held to.
-  const allowedModels = await organizationModels(tx, target.accountId, connection);
+  const allowedModels = await organizationModels(tx, provider, target.accountId, connection);
   const base = {
     localWorkspaceIds: local,
     managedByWorkspaceId: connection.managed_by_workspace_id,
@@ -414,44 +414,96 @@ async function chosenPeople(tx: Database, accountId: string, connectionId: strin
 }
 
 /**
+ * The organization's own copies of a connection: its organization-pool rows
+ * (in workspace order) and the reach row for workspaces created later, each
+ * with its rotation switch and model list. Only organization administrators
+ * write them (the organization route and editor write them together); a
+ * workspace-managed connection's delegated manager writes the connection's
+ * switch and list and its own copy, never these. Organization administrators
+ * only (the reach reader refuses anyone else).
+ */
+async function organizationCopies(
+  tx: Database,
+  provider: SubscriptionCoreProvider,
+  accountId: string,
+  connectionId: string,
+): Promise<{
+  rows: { allocator: boolean; models: string[] | null }[];
+  reach: { allocator: boolean; models: string[] | null } | null;
+}> {
+  const rows = await rawRows<{ allocator_enabled: boolean; allowed_model_ids: string[] | null }>(
+    tx,
+    sql`select policy.allocator_enabled, policy.allowed_model_ids
+      from subscription_connection_assignment_policies policy
+      where policy.account_id = ${accountId}::uuid and policy.connection_id = ${connectionId}::uuid
+        and policy.inference_pool = 'organization' and policy.managed_by_workspace_id is null
+      order by policy.workspace_id`,
+  );
+  const [reachRow] = await rawRows<{
+    reach: { allocatorEnabled?: unknown; allowedModelIds?: unknown } | null;
+  }>(
+    tx,
+    sql`select opengeni_private.subscription_core_reach(
+      ${subscriptionCoreProviderId(provider)}, ${accountId}::uuid, ${connectionId}::uuid) as reach`,
+  );
+  const reach = reachRow?.reach;
+  return {
+    rows: rows.map((row) => ({ allocator: row.allocator_enabled, models: row.allowed_model_ids })),
+    // 0714's reader reports the reach row's switch and list.
+    reach:
+      reach && typeof reach.allocatorEnabled === "boolean"
+        ? {
+            allocator: reach.allocatorEnabled,
+            models: Array.isArray(reach.allowedModelIds) ? reach.allowedModelIds.map(String) : null,
+          }
+        : null,
+  };
+}
+
+/** The switches of the organization's own copies (`organizationCopies`). */
+export async function organizationAllocatorCopies(
+  tx: Database,
+  provider: SubscriptionCoreProvider,
+  accountId: string,
+  connectionId: string,
+): Promise<boolean[]> {
+  const copies = await organizationCopies(tx, provider, accountId, connectionId);
+  return [...copies.rows, ...(copies.reach ? [copies.reach] : [])].map((copy) => copy.allocator);
+}
+
+/**
  * The organization's own rotation switch for the workspaces it shares a
- * connection with: its organization-pool rows' switch (uniform; the
- * organization route writes them together), or the connection's when it has
- * none. A workspace-managed connection's delegated manager writes the
- * connection's switch, never these rows, so new rows and the reach for
+ * connection with: its copies' switch (uniform), or the connection's while it
+ * has none (an account not shared yet), so new rows and the reach for
  * workspaces created later take this value, not the connection's.
  */
 export async function organizationAllocator(
   tx: Database,
+  provider: SubscriptionCoreProvider,
   accountId: string,
   connectionId: string,
   connectionAllocator: boolean,
 ): Promise<boolean> {
-  const [row] = await rawRows<{ enabled: boolean | null }>(
-    tx,
-    sql`select bool_and(policy.allocator_enabled) as enabled
-      from subscription_connection_assignment_policies policy
-      where policy.account_id = ${accountId}::uuid and policy.connection_id = ${connectionId}::uuid
-        and policy.inference_pool = 'organization' and policy.managed_by_workspace_id is null`,
-  );
-  return row?.enabled ?? connectionAllocator;
+  const copies = await organizationAllocatorCopies(tx, provider, accountId, connectionId);
+  return copies.length > 0 ? copies.every(Boolean) : connectionAllocator;
 }
 
-/** The organization's model list: its organization-pool rows' list, or the connection's. */
-async function organizationModels(
+/**
+ * The organization's model list: for a connection no workspace manages, the
+ * connection's; otherwise its organization-pool rows' list, the reach row's
+ * when it has no rows, or the connection's while it has neither (an account
+ * not shared yet).
+ */
+export async function organizationModels(
   tx: Database,
+  provider: SubscriptionCoreProvider,
   accountId: string,
-  connection: AccessRow,
+  connection: Pick<AccessRow, "id" | "managed_by_workspace_id" | "allowed_model_ids">,
 ): Promise<string[] | null> {
   if (connection.managed_by_workspace_id === null) return connection.allowed_model_ids;
-  const [row] = await rawRows<{ allowed_model_ids: string[] | null }>(
-    tx,
-    sql`select policy.allowed_model_ids from subscription_connection_assignment_policies policy
-      where policy.account_id = ${accountId}::uuid and policy.connection_id = ${connection.id}::uuid
-        and policy.inference_pool = 'organization' and policy.managed_by_workspace_id is null
-      order by policy.workspace_id limit 1`,
-  );
-  return row ? row.allowed_model_ids : connection.allowed_model_ids;
+  const copies = await organizationCopies(tx, provider, accountId, connection.id);
+  const first = copies.rows[0] ?? copies.reach;
+  return first ? first.models : connection.allowed_model_ids;
 }
 
 /**
@@ -564,6 +616,7 @@ export async function updateSubscriptionCoreConnectionAccess(
       policy.allowPersonalWorkspaces;
     const organizationSwitch = await organizationAllocator(
       tx,
+      provider,
       target.accountId,
       id,
       current.allocator_enabled,

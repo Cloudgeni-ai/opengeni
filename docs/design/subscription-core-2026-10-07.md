@@ -2981,7 +2981,7 @@ repository's complex-change review policy.
 | X4. SuperGrok legacy deletion | Removes the xAI selector arm, factory repository use, v1 xAI readers and writers, xAI use of `ScopedSubscriptionTurnLease`, the video envelope code and the shadow; extends the guard below to xAI. Merges only with the `compat:dependent_sources_without_record` copy-path test green. | rolling |
 | C1a, C1b, C2a, C2b, C3, C4. Claude | The same steps. C1b reads core turn-failure receipts in place of `claudeAuthRecovery`; C2a covers the usage routes; C2b covers the OAuth and setup-token writers; C3 converts live `claudeAuthRecovery` values and includes the combined-window ledger test; C4 deletes the Claude arm, `claude_subscription_account_usage` use and the dead connection-based usage code. | as X1a..X4 |
 | F. Fake API-key adapter conformance | A test-only adapter (`kind = api_key`, static credential, no quota windows, no refresh) driven through the same core placement, lease, failover and wait paths as subscriptions and compared with the reference model; scripted local upstream and a network-denial guard. No production table or route. | test only |
-| W. Workspace-managed connections as organization accounts | [§5.4](#54-workspace-managed-connections-as-organization-accounts): 0714 lets the provider-keyed reach setters accept a connection managed by a shared workspace; the organization access editor reads and saves its reach (people scope only for unmanaged accounts); the Accounts page change ships separately after owner approval. Applies to SuperGrok and Claude through X3 and C3, which map workspace credentials into the same shape. | rolling (no row changes) |
+| W. Workspace-managed connections as organization accounts | [§5.4](#54-workspace-managed-connections-as-organization-accounts): 0714 lets the provider-keyed reach setters accept a connection managed by a shared workspace, makes the reach reader report the reach row's switch and list, and adds `set_subscription_core_reach_allocator` (organization administrators only); the organization access editor reads and saves its reach (people scope only for unmanaged accounts); the Accounts page change ships separately after owner approval. Applies to SuperGrok and Claude through X3 and C3, which map workspace credentials into the same shape. | rolling (no row changes) |
 | R. Retirement | A forward migration drops the retired SQL routines, triggers and policies listed below; `subscriptionPoolWorkerSubject` and its users are removed; posture inventories are updated. Historical migrations, legacy tables and columns, v1 CHECK validators and column-immutability triggers stay until M6. | maintenance (exact posture contract) |
 
 Retired in R, for both providers unless noted:
@@ -3532,9 +3532,13 @@ as "not an organization account":
    parity-checked move like 0689; that protocol exists to move and re-encrypt
    rows that old binaries would otherwise write concurrently. Here nothing is
    rewritten, old binaries read the same rows with the same meaning, and the
-   one SQL change (the two reach setters also accepting a connection a shared
-   workspace of the organization manages, migration 0714) only
-   admits a call older binaries never make. A maintenance migration would
+   SQL changes of migration 0714 (the two reach setters also accepting a
+   connection a shared workspace of the organization manages, the reach
+   reader also reporting the reach row's switch and model list, and the new
+   organization-administrator routine `set_subscription_core_reach_allocator`,
+   which this release's API calls on every organization rotation switch and
+   access save) only admit calls older binaries never make or add keys they
+   ignore. A maintenance migration would
    move zero rows, so its parity report would compare every table with itself;
    the evidence is instead a real-PostgreSQL test
    (`migration-0714-workspace-managed-organization-accounts.test.ts`) that
@@ -3597,8 +3601,10 @@ as "not an organization account":
    and they see no other workspace's assignments. This is the strictest
    choice that does not take a current ability away from them. Consequence,
    recorded for the owner: because these actions act on the one connection,
-   a delegated manager's allocation, model and extra-credit choices and a
-   reconnect also apply where the organization later shares the account.
+   a delegated manager's switching off, narrowing of models, extra credits
+   and a reconnect also apply where the organization later shares the
+   account; switching on and widening models reach only the manager's own
+   copy.
    The organization's choices for the workspaces it shares the account with
    live where only organization administrators write: the
    organization-pool rows and the reach row for workspaces created later
@@ -3606,12 +3612,34 @@ as "not an organization account":
    allocator and models). So "every workspace" for a workspace-managed
    account is stored as every workspace's organization-pool row plus that
    reach, never as `organization` scope, which only the connection's own
-   values would bound. Each route shows and flips its own switch: the
-   organization's (the connection's switch and its organization-pool rows)
-   or the managing workspace's (the connection's switch and its own row).
-   The connection's switch gates every copy, so either side can switch the
-   account off everywhere, but switching on reaches only that side's copies,
-   and neither switch can be stuck reading one value while serving another.
+   values would bound. Each route flips its own switch: the organization's
+   (the connection's switch with its organization-pool rows and the reach
+   row) or the managing workspace's (the connection's switch with its own
+   row). Each page shows what serves: the organization's page the
+   connection's switch with the organization's copies; a workspace's page
+   the switch placement reads for its source (its own copy, the
+   organization's copy, or under the automatic source either). When the
+   managing workspace uses the organization's pool and the organization has
+   paused its copy, its page reads off and its own "on" changes nothing it
+   can change (fail closed): only the organization turns its copy on. A
+   request is "unchanged" only when every part its
+   route writes already has the value; otherwise it writes all of them, so
+   an "off" is recorded on that side's copies even when the other side has
+   already switched the connection off, and the other side's later "on"
+   cannot serve where this side said off. The connection's switch gates
+   every copy, so either side can switch the account off everywhere, but
+   switching on reaches only that side's copies. An account no workspace
+   manages is the organization's alone: its route shows the connection's
+   switch (as the shipped organization page always did) and its "off" turns
+   every copy off, including copies 0689 merged with their organization
+   copies paused. Until a workspace-managed account is first shared it has
+   no organization copies, so the organization's switch is the connection's,
+   which its managing workspace also flips; the organization's choice is
+   recorded on its copies from the first share on (new copies take the
+   organization's switch, or the connection's while there were none). The
+   organization's switch and model list are read from its copies, the reach
+   row included, so a reach row without organization-pool rows (its
+   workspaces deleted) still holds the organization's values.
    The organization's switch sets the reach row's switch alone (0714's
    `set_subscription_core_reach_allocator`), since the reach setter would
    also copy the connection's model list, which the delegated manager
@@ -3668,7 +3696,12 @@ as "not an organization account":
    disconnect, usage and reset credits resolving every organization account)
    ships first and changes nothing a shipped page shows, because the
    organization Accounts list still lists only unmanaged accounts and no
-   shipped page opens a managed one on the organization route. The
+   shipped page opens a managed one on the organization route. One
+   correction is visible: under the automatic source a workspace page shows
+   an account on when any of its copies there is on, which is what placement
+   serves (it showed only the effective pool's copy, so an account 0689 left
+   with a paused copy next to an enabled one could read off while serving).
+   The organization page's switch turns such an account off, as before. The
    organization pool list (`readSubscriptionCoreOrganizationPool`) and the
    Accounts page and editor change together in the UI change, which awaits
    the owner's approval of its preview: listing managed accounts without the

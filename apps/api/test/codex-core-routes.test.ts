@@ -1090,6 +1090,12 @@ describe("organization Codex routes with a cutover row", () => {
     expect(rotation.mock.calls[0]![1]).toEqual({ ...orgAdmin, rotationEnabled: false });
 
     const rename = mock("renameSubscriptionCoreCodexConnection", async () => CONNECTION);
+    // The response reads the renamed account itself: the organization route
+    // also renames accounts a shared workspace manages, which its list omits.
+    const renamedAccount = mock("getSubscriptionCoreOrganizationCodexAccount", async () => ({
+      ...account,
+      label: "Renamed",
+    }));
     const renamed = await app().fetch(
       organizationAdminRequest(`${orgPath}/accounts/${CONNECTION}`, {
         method: "PATCH",
@@ -1102,6 +1108,11 @@ describe("organization Codex routes with a cutover row", () => {
       ...orgAdmin,
       connectionId: CONNECTION,
       label: "Renamed",
+    });
+    expect(renamedAccount.mock.calls[0]![1]).toEqual({
+      organizationId: ACCOUNT,
+      subjectId: orgAdmin.subjectId,
+      connectionId: CONNECTION,
     });
 
     // A refused account (not an organization account, or not manageable) is the legacy 404.

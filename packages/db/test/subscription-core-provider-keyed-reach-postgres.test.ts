@@ -240,7 +240,14 @@ async function reachOf(
           : sql`select opengeni_private.subscription_core_reach(
               ${provider}, ${org.accountId}::uuid, ${connectionId}::uuid) as reach`,
       );
-      return row?.reach ?? null;
+      // The reach rule is its two flags; 0714 also reports the row's switch
+      // (`allocatorEnabled`), which its own tests cover.
+      const reach = row?.reach as Record<string, unknown> | null | undefined;
+      if (!reach) return null;
+      return {
+        sharedWorkspaces: reach.sharedWorkspaces,
+        personalWorkspaces: reach.personalWorkspaces,
+      };
     }),
   );
 }
