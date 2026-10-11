@@ -51,7 +51,9 @@ export {
 } from "./subscription-core/turns";
 export {
   SUBSCRIPTION_CORE_CODEX_ENTITLEMENT_COOLDOWN_MS,
+  SUBSCRIPTION_CORE_CODEX_EXHAUSTED_FALLBACK_MS,
   SUBSCRIPTION_CORE_CODEX_FORBIDDEN_QUARANTINE_MS,
+  SUBSCRIPTION_CORE_CODEX_RATE_LIMIT_FALLBACK_MS,
 } from "./subscription-core-codex-adapter";
 
 const core = subscriptionCoreTurns(SUBSCRIPTION_CORE_CODEX);
