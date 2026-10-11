@@ -188,7 +188,7 @@ Primary key `(workspace_id, session_id)`: `provider`, `connection_id`,
   starts, so for it the end of a call is not recorded. A clock-only advance does not bump
   `version`. A switch of account or model writes the placement time as the new
   clock; the trigger `subscription_session_bindings_cache_clock` (migration
-  `0716_subscription_binding_cache_clock.sql`) clears it for any writer that
+  `0723_subscription_binding_cache_clock.sql`) clears it for any writer that
   changes the connection, provider, model or choice without stating a clock,
   so a pin change or an older binary never carries warmth to another account.
   Setting or removing a pin therefore makes the next turn re-run selection
@@ -362,7 +362,7 @@ decisions with `checkDecision`.
 | M2 | New tables, functions and policies, empty. Generic membership-lifecycle kind. Per-organization, per-provider cutover switch stored in the database. | rolling | none |
 | M3 | Codex cutover: drained maintenance migration moves Codex rows (dedupe, aliases, secrets, bindings, leases, live waiters with generation and wake revision, v2 authority backfill) inside the owner window with explicit account-context parity counts; every Codex consumer (chat, compaction, transcription, realtime, image, Apps, reset credits, usage routes) switches in the same release. Workflow activities keep their names and accept both waiter shapes. | maintenance | Codex on the core |
 | M4 | SuperGrok, then Claude, the same way; synthetic pool subjects and per-provider SQL functions retired. | maintenance | per provider |
-| M5 | Product features: scopes and people, personal connections for every provider, settings with overrides and the overview, cache-aware stickiness (6.1, 3.4; migration `0716_subscription_binding_cache_clock.sql`), cross-provider failover and portable-compaction defaults. API and UI, previewed before merge. | rolling | product |
+| M5 | Product features: scopes and people, personal connections for every provider, settings with overrides and the overview, cache-aware stickiness (6.1, 3.4; migration `0723_subscription_binding_cache_clock.sql`), cross-provider failover and portable-compaction defaults. API and UI, previewed before merge. | rolling | product |
 | M6 | Drop legacy tables, columns, triggers and functions. | maintenance | none |
 
 Each migration declares its `deployment-mode`, opens the owner-only
