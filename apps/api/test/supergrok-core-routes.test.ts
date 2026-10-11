@@ -18,7 +18,7 @@ import {
   testSettings,
   type SharedTestDatabase,
 } from "@opengeni/testing";
-import type { Hono as HonoApp } from "hono";
+import type { Context, Hono as HonoApp } from "hono";
 
 setDefaultTimeout(180_000);
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
@@ -47,6 +47,8 @@ const { Hono } = await import("hono");
 const { registerSuperGrokRoutes } = await import("../src/routes/supergrok");
 const { registerModelConnectionAccessRoutes } =
   await import("../src/routes/model-connection-access");
+const { synchronizeCanonicalHumanLoginBindings } =
+  await import("@opengeni/db/canonical-human-identities");
 
 const DELEGATION_SECRET = "supergrok-core-routes-delegation-secret";
 const STATE_SECRET = "supergrok-core-routes-state-secret";
@@ -57,15 +59,26 @@ const settings = testSettings({
   environmentsEncryptionKey: encryptionKey.toString("base64"),
   supergrokSubscriptionEnabled: true,
 });
+const PUBLIC_ORIGIN = "https://app.opengeni.test";
+const managedSettings = testSettings({
+  productAccessMode: "managed",
+  delegationSecret: DELEGATION_SECRET,
+  environmentsEncryptionKey: encryptionKey.toString("base64"),
+  publicBaseUrl: PUBLIC_ORIGIN,
+  supergrokSubscriptionEnabled: true,
+});
 
 let shared: SharedTestDatabase | null = null;
 let client: ReturnType<typeof opengeniDb.createDb> | null = null;
 let app: HonoApp | null = null;
+/** The organization routes: an organization administrator's managed browser session. */
+let organizationApp: HonoApp | null = null;
+let organizationId = "";
 let accountId = "";
 let workspaceId = "";
 let subjectId = "";
 let deviceSequence = 0;
-const providerSubject = "xai-core-user-1";
+let providerSubject = "xai-core-user-1";
 
 function jwt(payload: Record<string, unknown>): string {
   return `header.${Buffer.from(JSON.stringify(payload)).toString("base64url")}.signature`;
@@ -142,13 +155,66 @@ beforeAll(async () => {
   registerSuperGrokRoutes(app, deps);
   registerModelConnectionAccessRoutes(app, deps);
   // The typed errors as the API renders them (code and details).
-  app.onError((error, c) => {
+  const renderTyped = (error: Error, c: Context) => {
     const typed = error as { status?: number; code?: string; details?: Record<string, unknown> };
     return c.json(
       { code: typed.code ?? null, message: error.message, ...(typed.details ?? {}) },
       (typed.status ?? 500) as 500,
     );
+  };
+  app.onError(renderTyped);
+
+  // A second organization whose administrator has a managed browser session:
+  // the organization routes accept no bearer.
+  const managedUserId = `supergrok-core-org-${crypto.randomUUID()}`;
+  const managedSessionId = `managed-session-${managedUserId}`;
+  const managedEmail = `${managedUserId}@example.test`;
+  await shared.admin`
+    insert into auth_users (id, name, email, email_verified)
+    values (${managedUserId}, 'Organization Owner', ${managedEmail}, true)`;
+  await shared.admin`
+    insert into auth_identities (id, user_id, provider_id, account_id)
+    values (${crypto.randomUUID()}, ${managedUserId}, 'credential', ${managedUserId})`;
+  const managedIdentity = await synchronizeCanonicalHumanLoginBindings(client.db, managedUserId);
+  await shared.admin`
+    insert into auth_sessions (
+      id, user_id, token, expires_at, identity_id, identity_revision, auth_revision
+    ) values (
+      ${managedSessionId}, ${managedUserId}, ${crypto.randomUUID()}, now() + interval '1 hour',
+      ${managedIdentity.identityId}, ${managedIdentity.identityRevision},
+      ${managedIdentity.authRevision}
+    )`;
+  const managedAccess = await opengeniDb.ensureManagedAccessForUser(client.db, {
+    userId: managedUserId,
+    email: managedEmail,
+    name: "Organization Owner",
   });
+  organizationId = managedAccess.defaultAccountId!;
+  organizationApp = new Hono();
+  const managedDeps = {
+    db: client.db,
+    settings: managedSettings,
+    resolveCatalogSettings: async () => await resolveCatalogSettings(client!.db, managedSettings),
+    githubStateSecret: STATE_SECRET,
+    xaiFetch,
+    managedAuth: {
+      api: {
+        getSession: async () => ({
+          headers: new Headers(),
+          response: {
+            session: {
+              id: managedSessionId,
+              userId: managedUserId,
+              expiresAt: new Date(Date.now() + 3_600_000),
+            },
+            user: { id: managedUserId, email: managedEmail, name: "Organization Owner" },
+          },
+        }),
+      },
+    },
+  } as never;
+  registerSuperGrokRoutes(organizationApp, managedDeps);
+  organizationApp.onError(renderTyped);
 }, 180_000);
 
 afterAll(async () => {
@@ -195,6 +261,36 @@ async function connectWorkspaceAccount(): Promise<{ accountId: string; isActive:
   return { accountId: connected.accountId, isActive: connected.isActive };
 }
 
+async function organizationRequest(path: string, method = "GET", body?: unknown) {
+  return await organizationApp!.request(
+    `${PUBLIC_ORIGIN}/v1/organizations/${organizationId}/supergrok${path}`,
+    {
+      method,
+      headers: {
+        "content-type": "application/json",
+        origin: PUBLIC_ORIGIN,
+        "sec-fetch-site": "same-origin",
+        cookie: "better-auth.session_token=organization-owner",
+      },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    },
+  );
+}
+
+async function connectOrganizationAccount(subject: string): Promise<string> {
+  providerSubject = subject;
+  const start = await organizationRequest("/connect/start", "POST", {});
+  expect(start.status).toBe(200);
+  const started = await start.json();
+  const poll = await organizationRequest("/connect/poll", "POST", { state: started.state });
+  const connected = await poll.json();
+  expect({ status: poll.status, body: connected }).toMatchObject({
+    status: 200,
+    body: { status: "connected", scope: "organization", isActive: false },
+  });
+  return connected.accountId;
+}
+
 /** The account list with its volatile fields (timestamps) removed. */
 async function listed() {
   const response = await request("/supergrok/accounts");
@@ -218,6 +314,19 @@ function shapeOf(body: Awaited<ReturnType<typeof listed>>) {
 }
 
 describe.skipIf(!realDb)("SuperGrok routes on the shared core (M4 X2b)", () => {
+  test("runs as the non-superuser, non-bypass application role", async () => {
+    const roles = await client!.db.execute<{
+      currentUser: string;
+      superuser: boolean;
+      bypassRls: boolean;
+    }>(opengeniDb.dbSql`select current_user as "currentUser", rolsuper as superuser,
+        rolbypassrls as "bypassRls"
+      from pg_catalog.pg_roles where rolname = current_user`);
+    expect([...roles]).toEqual([
+      { currentUser: "opengeni_app", superuser: false, bypassRls: false },
+    ]);
+  });
+
   test("without the receipt the legacy routes answer", async () => {
     legacyEmpty = await listed();
     expect(legacyEmpty).toMatchObject({ accounts: [], activeAccountId: null });
@@ -400,5 +509,108 @@ describe.skipIf(!realDb)("SuperGrok routes on the shared core (M4 X2b)", () => {
     expect(disconnected.status).toBe(200);
     expect(await disconnected.json()).toEqual({ disconnected: true, newActiveId: null });
     expect(await listed()).toMatchObject({ accounts: [], activeAccountId: null });
+  });
+
+  test("organization routes: maintenance fails closed, then they answer from core connections", async () => {
+    // The receipt exists (above); this organization has no switch row.
+    const someId = crypto.randomUUID();
+    for (const [path, method, body] of [
+      ["/accounts", "GET", undefined],
+      ["/settings", "PATCH", { rotationEnabled: false }],
+      ["/connect/start", "POST", {}],
+      ["/connect/poll", "POST", { state: "x" }],
+      [`/accounts/${someId}/activate`, "POST", {}],
+      [`/accounts/${someId}`, "PATCH", { label: "x" }],
+      [`/accounts/${someId}/allocator`, "PATCH", { enabled: false, expectedVersion: 1 }],
+      [`/accounts/${someId}`, "DELETE", undefined],
+    ] as const) {
+      const response = await organizationRequest(path, method, body);
+      expect({ path, method, status: response.status, body: await response.json() }).toMatchObject({
+        path,
+        method,
+        status: 503,
+        body: { reason: "subscription_core_cutover_disabled" },
+      });
+    }
+
+    await shared!.admin`
+      insert into subscription_provider_cutovers (account_id, provider, enabled)
+      values (${organizationId}::uuid, 'xai', true)`;
+    const first = await connectOrganizationAccount("xai-core-org-first");
+    const second = await connectOrganizationAccount("xai-core-org-second");
+    expect(first).not.toBe(second);
+    const stored = await shared!.admin<
+      { credential_format: string; ownership: string; managed_by_workspace_id: string | null }[]
+    >`
+      select credential_format, ownership, managed_by_workspace_id::text
+      from subscription_connections
+      where account_id = ${organizationId}::uuid and provider = 'xai' order by id`;
+    expect(stored).toEqual([
+      { credential_format: "xai_oauth_v1", ownership: "shared", managed_by_workspace_id: null },
+      { credential_format: "xai_oauth_v1", ownership: "shared", managed_by_workspace_id: null },
+    ]);
+    const listing = await (await organizationRequest("/accounts")).json();
+    expect(listing).toMatchObject({
+      source: "organization",
+      organizationId,
+      activeAccountId: null,
+      settings: { rotationEnabled: true, activeCredentialId: null },
+    });
+    expect(listing.accounts.map((account: { id: string }) => account.id).sort()).toEqual(
+      [first, second].sort(),
+    );
+    expect(JSON.stringify(listing)).not.toContain("refresh-");
+
+    // Allocator: a stale version is a conflict.
+    const version = Number(
+      listing.accounts.find((account: { id: string }) => account.id === second).allocatorVersion,
+    );
+    const disabled = await organizationRequest(`/accounts/${second}/allocator`, "PATCH", {
+      enabled: false,
+      expectedVersion: version,
+    });
+    expect(disabled.status).toBe(200);
+    const stale = await organizationRequest(`/accounts/${second}/allocator`, "PATCH", {
+      enabled: true,
+      expectedVersion: version,
+    });
+    expect(stale.status).toBe(409);
+
+    // Activate: as legacy, only an active account the allocator may use.
+    const refused = await organizationRequest(`/accounts/${second}/activate`, "POST", {});
+    expect({ status: refused.status, body: await refused.json() }).toMatchObject({
+      status: 409,
+      body: { message: "Choose an active, enabled SuperGrok subscription" },
+    });
+    const unknown = await organizationRequest(`/accounts/${someId}/activate`, "POST", {});
+    expect(unknown.status).toBe(404);
+    const activated = await organizationRequest(`/accounts/${first}/activate`, "POST", {});
+    expect({ status: activated.status, body: await activated.json() }).toEqual({
+      status: 200,
+      body: { updated: true },
+    });
+
+    const rotation = await organizationRequest("/settings", "PATCH", { rotationEnabled: false });
+    expect({ status: rotation.status, body: await rotation.json() }).toMatchObject({
+      status: 200,
+      body: { rotationEnabled: false, activeCredentialId: first },
+    });
+    const renamed = await organizationRequest(`/accounts/${first}`, "PATCH", {
+      label: "Organization Grok",
+    });
+    expect(renamed.status).toBe(200);
+    expect(await (await organizationRequest("/accounts")).json()).toMatchObject({
+      activeAccountId: first,
+      settings: { rotationEnabled: false, activeCredentialId: first },
+    });
+
+    const disconnected = await organizationRequest(`/accounts/${second}`, "DELETE");
+    expect({ status: disconnected.status, body: await disconnected.json() }).toEqual({
+      status: 200,
+      body: { disconnected: true },
+    });
+    const remaining = await (await organizationRequest("/accounts")).json();
+    expect(remaining.accounts.map((account: { id: string }) => account.id)).toEqual([first]);
+    expect(remaining.accounts[0]).toMatchObject({ label: "Organization Grok", active: true });
   });
 });

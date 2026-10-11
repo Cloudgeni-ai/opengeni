@@ -2132,6 +2132,7 @@ BEGIN
       'fail_subscription_core_connection_refresh(text,uuid,uuid,uuid,bigint,text)',
       'connect_subscription_core_personal(text,uuid,uuid,text,text,text,text,text,jsonb,timestamptz,timestamptz,text,text,text)',
       'connect_subscription_core_personal(text,uuid,uuid,text,text,text,text,text,jsonb,timestamptz,timestamptz,text,text,text,text)',
+      'subscription_authority_carrier_inserted_now(text,uuid,uuid,bigint)',
       'disconnect_subscription_core_connection(text,uuid,uuid,text,uuid)',
       'manage_subscription_core_personal(text,uuid,uuid,text,uuid,text,text,boolean,integer)',
       'subscription_core_personal_connections(text,uuid,uuid,text)',

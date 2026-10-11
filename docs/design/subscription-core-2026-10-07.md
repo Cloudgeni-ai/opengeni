@@ -4404,6 +4404,20 @@ disabled) answers the typed 503 `subscription_core_cutover_disabled`.
   rotation maps to `spread` / `primary_first`; rename, allocator and
   disconnect use the neutral writers, behind the legacy browser and scope
   checks. Connect start fails closed in maintenance.
+- **Workspace settings over an inherited pool.** On the core, rotation and
+  activate on a workspace route write that workspace's own setting, as
+  Codex on the core does; the organization's settings change only on the
+  organization routes. Legacy SuperGrok changed the organization's
+  rotation from a workspace that used the organization pool, and its
+  activate there wrote nothing. Whether a workspace may hold such an
+  override is the organization's settings lock, enforced by the neutral
+  settings writers these routes call.
+- **Organization activate** refuses, as legacy did (409), an account that
+  is not active or that the allocator may not use; an unknown id is 404.
+- **Connect admission.** Whether a workspace administrator may save the
+  signed-in account (a reconnect of an account their workspace manages) is
+  known only after the sign-in, so the neutral writer decides at poll time;
+  connect start checks the scope and fails closed in maintenance.
 - **Connect.** Organization and workspace connects create shared
   connections through the neutral writer with `credential_format =
   'xai_oauth_v1'`; the token identity subject is both the upstream account
@@ -4429,10 +4443,15 @@ disabled) answers the typed 503 `subscription_core_cutover_disabled`.
   "Accepted authority across the cutover",
   `copySubscriptionAuthorityCompatInTransaction` copies the record of each
   provider whose own cutover holds records: one read while none does. A
-  carrier an upsert did not insert is skipped.
+  carrier an upsert did not insert is skipped, and so is a task revision an
+  earlier transaction inserted (a replayed or detached reusable-session
+  materialization returns the existing head): the application role cannot
+  read revisions, so 0719's owner-run
+  `subscription_authority_carrier_inserted_now` answers for them.
 - **v1 after the receipt.** The SuperGrok v1 resolvers return the column
   default once the `xai` receipt exists; derived rows already copy v1
-  verbatim.
+  verbatim. The resolvers are provider-parameterized, so Claude's follow the
+  same rule from Claude's own receipt (C3); before it they are unchanged.
 - **Status (EP-S15) and media** stay with X2a; SDK, React and event names
   and shapes (EP-S26..S31) are unchanged.
 

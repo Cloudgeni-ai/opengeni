@@ -327,7 +327,8 @@ function carrierRelation(
  * then requires exactly that copy. Call it once the carrier and every row its
  * source resolver reads (for a delivering turn, its delivered updates) are
  * written. A named carrier this transaction did not insert (an upsert that
- * updated an existing row, a task revision its SQL writer did not record) is
+ * updated an existing row, a task revision an earlier transaction inserted
+ * and a replayed or detached materialization returned) is
  * skipped: its record, if any, was copied when it was inserted. Inert, after
  * one read, while no provider has such a receipt.
  */
@@ -340,15 +341,14 @@ export async function copySubscriptionAuthorityCompatInTransaction(
   if (providers.length === 0) return;
   for (const carrier of carriers) {
     const revision = carrier.taskAuthorityRevision ?? null;
-    // Task revisions are not readable by the application role: their
-    // writers always insert a new revision number in this transaction, so
-    // existence (the security-definer reader answers NULL without a row) is
-    // the guard; a revision from an earlier transaction fails the copy closed.
+    // Task revisions are not readable by the application role, so 0719's
+    // owner-run predicate answers "inserted by this transaction" for them: a
+    // replayed or detached materialization returns an earlier revision, which
+    // already holds whatever record its insertion copied.
     const inserted =
       carrier.kind === "scheduled_task_revision"
-        ? sql`opengeni_private.read_subscription_authority_compat(
-            listed.provider, ${carrier.kind}, ${carrier.workspaceId}::uuid, ${carrier.id}::uuid,
-            ${revision}::bigint) is not null`
+        ? sql`opengeni_private.subscription_authority_carrier_inserted_now(
+            ${carrier.kind}, ${carrier.workspaceId}::uuid, ${carrier.id}::uuid, ${revision}::bigint)`
         : sql`exists (select 1 from ${carrierRelation({ ...carrier, kind: carrier.kind })}
             and carrier.workspace_id = ${carrier.workspaceId}::uuid
             and carrier.authority_inserted_at = pg_catalog.transaction_timestamp())`;
