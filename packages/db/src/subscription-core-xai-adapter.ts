@@ -42,6 +42,10 @@ export const SUBSCRIPTION_CORE_XAI_QUOTA_WINDOW_ID = "billing";
 export const SUBSCRIPTION_CORE_XAI_FORBIDDEN_QUARANTINE_MS = 60 * 60 * 1000;
 /** SuperGrok has no plan entitlements; kept equal to Codex for the shared health policy. */
 export const SUBSCRIPTION_CORE_XAI_ENTITLEMENT_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+/** A rate limit without a retry time rests as long as the legacy SuperGrok backpressure delay. */
+export const SUBSCRIPTION_CORE_XAI_RATE_LIMIT_FALLBACK_MS = 60 * 1000;
+/** An exhausted connection without a reset is retried after an hour (the quota probe may clear it sooner). */
+export const SUBSCRIPTION_CORE_XAI_EXHAUSTED_FALLBACK_MS = 60 * 60 * 1000;
 
 /** The decoded SuperGrok credential. */
 export type SubscriptionCoreXaiTokens = {
@@ -126,6 +130,8 @@ export function subscriptionCoreXaiAdapter(
     health: {
       forbiddenQuarantineMs: SUBSCRIPTION_CORE_XAI_FORBIDDEN_QUARANTINE_MS,
       entitlementCooldownMs: SUBSCRIPTION_CORE_XAI_ENTITLEMENT_COOLDOWN_MS,
+      rateLimitFallbackMs: SUBSCRIPTION_CORE_XAI_RATE_LIMIT_FALLBACK_MS,
+      exhaustedFallbackMs: SUBSCRIPTION_CORE_XAI_EXHAUSTED_FALLBACK_MS,
     },
     credential: {
       decode: decodeSubscriptionCoreXaiCredential,

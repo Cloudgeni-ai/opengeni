@@ -144,8 +144,10 @@ describe("migration 0053 (Codex credential leases)", () => {
           ('0712_subscription_core_generic_precursor.sql'),
           -- 0713 alters objects 0689 creates; hold it back too.
           ('0713_subscription_core_provider_keyed_reach.sql'),
-          -- 0714 redefines 0713's reach setters; hold it back too.
+          -- 0714 redefines 0713's reach setters and 0715 rewrites routines
+          -- 0713 and 0714 create; hold them back too.
           ('0714_subscription_workspace_managed_organization_accounts.sql'),
+          ('0715_subscription_core_api_key_connections.sql'),
           -- 0715 builds on 0712 and 0716 on 0715; hold them back too.
           ('0715_subscription_authority_compat.sql'),
           ('0716_subscription_authority_fences.sql'),

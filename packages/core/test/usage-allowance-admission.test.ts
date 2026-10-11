@@ -31,6 +31,7 @@ describe("core usage allowance admission", () => {
   let allowance: ReturnType<typeof spyOn<typeof opengeniDb, "checkWorkspaceAllowance">>;
   let balance: ReturnType<typeof spyOn<typeof opengeniDb, "getBillingBalance">>;
   let codex: ReturnType<typeof spyOn<typeof opengeniDb, "isCodexBilledTurn">>;
+  let route: ReturnType<typeof spyOn<typeof opengeniDb, "readSubscriptionCoreRouteFunding">>;
 
   beforeEach(() => {
     allowance = spyOn(opengeniDb, "checkWorkspaceAllowance").mockResolvedValue(null);
@@ -41,12 +42,17 @@ describe("core usage allowance admission", () => {
       updatedAt: "2026-09-30T00:00:00.000Z",
     });
     codex = spyOn(opengeniDb, "isCodexBilledTurn").mockResolvedValue(false);
+    // No provider has cut over: every connected subscription keeps its legacy funding.
+    route = spyOn(opengeniDb, "readSubscriptionCoreRouteFunding").mockResolvedValue({
+      route: "legacy",
+    });
   });
 
   afterEach(() => {
     allowance.mockRestore();
     balance.mockRestore();
     codex.mockRestore();
+    route.mockRestore();
   });
 
   test.each(["workspace", "member"] as const)(

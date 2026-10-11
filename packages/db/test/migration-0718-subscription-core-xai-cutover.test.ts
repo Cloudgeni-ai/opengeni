@@ -31,7 +31,7 @@ import {
 import { decodeSubscriptionCoreXaiCredential } from "../src/subscription-core-xai-adapter";
 import { subscriptionCoreProviderIds } from "../src/subscription-core-providers";
 import { SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES } from "../src/runtime-posture";
-import { deleteSubscriptionCoreWaitersOfEveryProviderForTurns } from "../src/subscription-core-waiter-cleanup";
+import { deleteSubscriptionCoreWaitersForTurns } from "../src/subscription-core/waiters";
 
 const MIGRATION = "0718_subscription_core_xai_cutover.sql";
 const key = Buffer.alloc(32, 73);
@@ -1808,7 +1808,7 @@ describe.skipIf(!realDb)(
           client.db,
           { accountId: a.account, workspaceId: waiter!.workspace },
           (tx) =>
-            deleteSubscriptionCoreWaitersOfEveryProviderForTurns(tx, {
+            deleteSubscriptionCoreWaitersForTurns(tx, null, {
               workspaceId: waiter!.workspace,
               turnIds: [a.t1],
             }),

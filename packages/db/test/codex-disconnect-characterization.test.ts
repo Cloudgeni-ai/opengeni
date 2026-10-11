@@ -157,8 +157,8 @@ describeRealDatabase("legacy Codex disconnect: known pre-fix behavior", () => {
       // on all of them.
       await owner`insert into schema_migrations(name) values ('0689_subscription_core_codex_cutover.sql'),
         ('0712_subscription_core_generic_precursor.sql'), ('0713_subscription_core_provider_keyed_reach.sql'),
-        ('0714_subscription_workspace_managed_organization_accounts.sql'), ('0715_subscription_authority_compat.sql'),
-        ('0716_subscription_authority_fences.sql'), ('0718_subscription_core_xai_cutover.sql')`;
+        ('0714_subscription_workspace_managed_organization_accounts.sql'), ('0715_subscription_core_api_key_connections.sql'),
+        ('0715_subscription_authority_compat.sql'), ('0716_subscription_authority_fences.sql'), ('0718_subscription_core_xai_cutover.sql')`;
       await migrate(owned.databaseUrl);
       await provisionRoles(owned.databaseUrl, { appPassword: owned.appPassword });
     } finally {

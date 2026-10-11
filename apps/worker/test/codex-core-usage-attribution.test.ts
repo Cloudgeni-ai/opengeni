@@ -173,16 +173,13 @@ test("a connection deleted mid-turn keeps the fact without its attribution", asy
 });
 
 test("the streamed, aggregate, compaction and title paths pass the core connection", () => {
-  const stream = readFileSync(
-    new URL("../src/activities/agent-turn/stream-attempt.ts", import.meta.url),
-    "utf8",
-  );
-  const compaction = readFileSync(
-    new URL("../src/activities/agent-turn/compaction-prep.ts", import.meta.url),
-    "utf8",
-  );
+  // Whitespace-normalized, so the formatter's line wrapping does not matter.
+  const source = (path: string) =>
+    readFileSync(new URL(path, import.meta.url), "utf8").replace(/\s+/g, " ");
+  const stream = source("../src/activities/agent-turn/stream-attempt.ts");
+  const compaction = source("../src/activities/agent-turn/compaction-prep.ts");
   const wiring =
-    "subscriptionConnectionId: providerTurn.codexSubscriptionCore?.connectionId ?? null";
+    "subscriptionConnectionId: subscriptionCoreTurnOf(providerTurn)?.connectionId ?? null";
   // Title usage, the streamed terminal response and the aggregate fallback.
   expect(stream.split(wiring).length - 1).toBe(3);
   expect(compaction.split(wiring).length - 1).toBe(1);

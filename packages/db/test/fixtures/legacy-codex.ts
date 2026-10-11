@@ -4051,6 +4051,7 @@ function mapSubscriptionCoreCodexWaiter(
 ): SubscriptionCoreCodexCapacityWait {
   return {
     waiterId: row.waiter_id,
+    provider: "codex",
     accountId: row.account_id,
     workspaceId: row.workspace_id,
     sessionId: row.session_id,

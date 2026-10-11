@@ -56,7 +56,11 @@ import {
   xaiSubscriptionRequestStorage,
   type XaiSubscriptionRequestContext,
 } from "@opengeni/xai-subscription";
-import { buildXaiTurnRequestAuthorization } from "../xai-auth";
+import {
+  buildXaiTurnRequestAuthorization,
+  xaiTurnRequestContext,
+  type XaiTurnRequestContextOptions,
+} from "../xai-auth";
 import { TurnAttemptFencedError } from "../turn-attempt-fenced";
 import { currentActivityContext } from "../streaming";
 import type {
@@ -121,7 +125,13 @@ import {
   establishTurnSandbox,
   bindLazySandboxProvisioner,
 } from "./sandbox-establish";
-import { selectXaiTurnCapacity, selectClaudeTurnCapacity } from "./xai-capacity";
+import { selectClaudeTurnCapacity } from "./xai-capacity";
+import {
+  buildXaiCoreRequestAuthorization,
+  selectXaiTurnCapacityByRoute,
+  type XaiCoreRequestAuthorization,
+} from "./xai-core";
+import type { CoreSubscriptionRequests } from "./subscription-core-requests";
 import { prepareRunCredentials } from "./run-credentials";
 import { prepareTurnToolPolicy, prepareTurnToolRuntime } from "./tool-environment";
 import { applyTurnGitHubRepositoryBindings } from "./github-repository-bindings";
@@ -169,6 +179,8 @@ export function sessionTitleCodexRequestContext(
 export function sessionTitleXaiRequestContext(
   context: XaiSubscriptionRequestContext,
   nextRequestId: () => string,
+  /** On the shared core: the turn's dispatch fence and the title custody lane. */
+  core?: { assertDispatch: () => Promise<void>; requests: CoreSubscriptionRequests },
 ): XaiSubscriptionRequestContext {
   return {
     clientVersion: context.clientVersion,
@@ -182,6 +194,15 @@ export function sessionTitleXaiRequestContext(
       : {}),
     ...(context.hostedToolContinuationTimeoutMs !== undefined
       ? { hostedToolContinuationTimeoutMs: context.hostedToolContinuationTimeoutMs }
+      : {}),
+    ...(core
+      ? {
+          beforeProviderDispatch: async (request) => {
+            await core.assertDispatch();
+            await core.requests.reserve(request);
+          },
+          onProviderRequestSettled: core.requests.observe,
+        }
       : {}),
     nextRequestId,
   };
@@ -594,7 +615,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             };
             const codexCapacity = await selectCodexTurnCapacity(capacityDeps);
             if ("exit" in codexCapacity) return codexCapacity.exit;
-            const xaiCapacity = await selectXaiTurnCapacity(capacityDeps);
+            const xaiCapacity = await selectXaiTurnCapacityByRoute(capacityDeps);
             if ("exit" in xaiCapacity) return xaiCapacity.exit;
             const claudeCapacity = await selectClaudeTurnCapacity(capacityDeps);
             if ("exit" in claudeCapacity) return claudeCapacity.exit;
@@ -950,21 +971,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   };
                 })()
               : null;
+          let xaiCoreAuthorization: XaiCoreRequestAuthorization | null = null;
           if (resolvedModel?.provider.kind === "xai-subscription") {
-            if (!providerTurn.effectiveXaiCredentialId || !leases.xai.subjectId) {
+            const xaiCore = providerTurn.xaiSubscriptionCore;
+            if (!providerTurn.effectiveXaiCredentialId || (!xaiCore && !leases.xai.subjectId)) {
               throw new Error("SuperGrok subscription execution has no leased credential");
             }
             let xaiModelRequestSequence = 0;
-            const authorization = await buildXaiTurnRequestAuthorization({
-              db,
-              settings: runSettings,
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              subjectId: leases.xai.subjectId,
+            const xaiRequestOptions: XaiTurnRequestContextOptions = {
               sessionId: input.sessionId,
               turnId: turn.id,
-              credentialId: providerTurn.effectiveXaiCredentialId,
-              authoritySnapshot: turn.xaiProviderAccountAuthoritySnapshot,
               hostedSearch: {
                 webSearch: resolveAgentToolFamilies(session.agent, {
                   webSearch: runSettings.webSearchEnabled,
@@ -1105,8 +1121,35 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   }
                 }
               },
-            });
-            providerTurn.xaiRequestContext = authorization.context;
+            };
+            // On the shared core the bearer, refresh and request custody come
+            // from the core placement; the legacy path keeps its own.
+            xaiCoreAuthorization = xaiCore
+              ? buildXaiCoreRequestAuthorization({
+                  db,
+                  settings: runSettings,
+                  core: xaiCore,
+                  lease: leases.xai,
+                  execution: {
+                    attemptId: input.attemptId,
+                    executionGeneration: attempt.executionGeneration!,
+                  },
+                })
+              : null;
+            providerTurn.xaiRequestContext = xaiCoreAuthorization
+              ? xaiTurnRequestContext(xaiRequestOptions, xaiCoreAuthorization)
+              : (
+                  await buildXaiTurnRequestAuthorization({
+                    db,
+                    settings: runSettings,
+                    accountId: input.accountId,
+                    workspaceId: input.workspaceId,
+                    subjectId: leases.xai.subjectId!,
+                    credentialId: providerTurn.effectiveXaiCredentialId,
+                    authoritySnapshot: turn.xaiProviderAccountAuthoritySnapshot,
+                    ...xaiRequestOptions,
+                  })
+                ).context;
           }
           const claudeUsageObserver = await createClaudeUsageObserver(
             parseModelProvidersJson(runSettings.modelProvidersJson),
@@ -1188,6 +1231,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             ? sessionTitleXaiRequestContext(
                 providerTurn.xaiRequestContext,
                 () => `${requestIdPrefix}:xai:title:${++xaiSessionTitleRequestSequence}`,
+                xaiCoreAuthorization && providerTurn.xaiSubscriptionCore?.titleRequests
+                  ? {
+                      assertDispatch: xaiCoreAuthorization.assertDispatch,
+                      requests: providerTurn.xaiSubscriptionCore.titleRequests,
+                    }
+                  : undefined,
               )
             : null;
           const withSessionTitleProviderRequestContext = <T>(fn: () => Promise<T>): Promise<T> =>

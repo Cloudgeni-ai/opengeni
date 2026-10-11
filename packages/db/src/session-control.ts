@@ -24,7 +24,7 @@ import {
   childRequiresActionResolvedSummary,
 } from "./child-lifecycle-notices";
 import { closePendingSessionToolCallsInTransaction } from "./session-tool-call-settlement";
-import { deleteSubscriptionCoreWaitersOfEveryProviderForTurns } from "./subscription-core-waiter-cleanup";
+import { deleteSubscriptionCoreWaitersForTurns } from "./subscription-core/waiters";
 import {
   mirrorSessionRealtimeContextInTransaction,
   renderRealtimeHumanInputResponseContext,
@@ -3252,9 +3252,10 @@ async function cancelSessionSubtreeInTransaction(
         turnGeneration: schema.sessionHumanInputRequests.turnGeneration,
         questions: schema.sessionHumanInputRequests.questions,
       });
-    // A core waiter exists only while its turn waits; cancelling the turn
-    // removes it (and its pending wake deliveries) in the same commit.
-    await deleteSubscriptionCoreWaitersOfEveryProviderForTurns(db, {
+    // A core waiter (of whichever provider) exists only while its turn
+    // waits; cancelling the turn removes it (and its pending wake
+    // deliveries) in the same commit.
+    await deleteSubscriptionCoreWaitersForTurns(db, null, {
       workspaceId: input.workspaceId,
       turnIds: immediatelyCancelledTurnIds,
     });

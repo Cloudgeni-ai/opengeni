@@ -33,7 +33,11 @@ import {
   organizationModels,
 } from "./access";
 import { SubscriptionCoreError } from "./errors";
-import { subscriptionCoreProviderId, type SubscriptionCoreProvider } from "./provider";
+import {
+  subscriptionCoreConnectionKind,
+  subscriptionCoreProviderId,
+  type SubscriptionCoreProvider,
+} from "./provider";
 
 /**
  * `core`: the provider's cutover is enabled. `maintenance`: a missing or
@@ -256,7 +260,8 @@ export async function readSubscriptionCoreWorkspacePool(
     left join subscription_connection_quota quota
       on quota.account_id = connection.account_id and quota.connection_id = connection.id
     where connection.account_id = ${input.accountId}::uuid
-      and connection.provider = ${providerId} and connection.kind = 'subscription'
+      and connection.provider = ${providerId}
+      and connection.kind = ${subscriptionCoreConnectionKind(provider)}
       and connection.disconnected_at is null
       and connection.ownership = 'shared'
       and (connection.scope_kind = 'organization'
@@ -442,7 +447,8 @@ export async function readSubscriptionCoreOrganizationPool(
       left join subscription_connection_quota quota
         on quota.account_id = connection.account_id and quota.connection_id = connection.id
       where connection.account_id = ${input.organizationId}::uuid
-        and connection.provider = ${providerId} and connection.kind = 'subscription'
+        and connection.provider = ${providerId}
+        and connection.kind = ${subscriptionCoreConnectionKind(provider)}
         and connection.disconnected_at is null
         and connection.ownership = 'shared' and ${
           input.connectionId === undefined
@@ -587,7 +593,8 @@ async function visibleSharedConnection(
     tx,
     sql`select allocator_enabled, allocator_version, managed_by_workspace_id::text
       from subscription_connections
-      where account_id = ${input.accountId}::uuid and provider = ${providerId} and kind = 'subscription'
+      where account_id = ${input.accountId}::uuid and provider = ${providerId}
+        and kind = ${subscriptionCoreConnectionKind(provider)}
         and ownership = 'shared' and id = ${connectionId}::uuid
         and disconnected_at is null
         and ${

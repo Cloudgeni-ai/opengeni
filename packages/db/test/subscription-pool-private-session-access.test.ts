@@ -962,3 +962,87 @@ test("a wake stays in its workspace even on a connection that bypasses RLS", asy
   expect(await claudeWakeRevision(here)).toBe(2);
   expect(await claudeWakeRevision(elsewhere)).toBe(1);
 }, 60_000);
+
+async function waitForLockWaiter(text: string): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const [row] = await shared.admin<{ count: number }[]>`
+      select count(*)::int as count from pg_stat_activity
+      where datname = current_database() and wait_event_type = 'Lock'
+        and query ilike ${"%" + text + "%"}`;
+    if (row!.count > 0) return;
+    await Bun.sleep(25);
+  }
+  throw new Error("No backend started waiting on a lock");
+}
+
+test("a capacity wake takes the session lock before the waiter lock, like a resume", async () => {
+  const input = await fixture();
+  const running = await turn(input, "workspace_shared");
+  const armed = await armClaudeCapacityWait(client.db, {
+    ...input,
+    ...running,
+    subjectId: subscriptionPoolWorkerSubject("claude"),
+    earliestResetAt: null,
+    failurePayload: capacityFailure,
+  });
+  if (armed.action !== "waiting") throw new Error("Fixture failed to arm");
+  // A resume holds the session, then locks its waiter. A wake that held the
+  // waiter while waiting for the session would deadlock with it.
+  const resume = await shared.admin.reserve();
+  let wake: Promise<void> | null = null;
+  try {
+    await resume`begin`;
+    await resume`select id from sessions where id = ${running.sessionId} for update`;
+    wake = wakeClaudeCapacityWaiters(client.db, {
+      workspaceId: input.workspaceId,
+      subjectId: subscriptionPoolWorkerSubject("claude"),
+      authoritySnapshot: input.authoritySnapshot,
+      reason: "fixture_lock_order",
+    });
+    await waitForLockWaiter("session_workflow_wake_outbox");
+    const locked = await resume`
+      select id from claude_capacity_waiters where id = ${armed.waiter.id} for update nowait`;
+    expect(locked.map((row) => row.id)).toEqual([armed.waiter.id]);
+    await resume`commit`;
+  } catch (error) {
+    await resume`rollback`.catch(() => undefined);
+    throw error;
+  } finally {
+    resume.release();
+    await wake?.catch(() => undefined);
+  }
+  expect(await claudeWakeRevision(armed.waiter.id)).toBe(2);
+}, 60_000);
+
+test("concurrent wakes of one pool all succeed and each bumps every waiter once", async () => {
+  const input = await fixture();
+  const waiters: string[] = [];
+  for (let index = 0; index < 12; index += 1) {
+    const running = await turn(input, "workspace_shared");
+    const armed = await armClaudeCapacityWait(client.db, {
+      ...input,
+      ...running,
+      subjectId: subscriptionPoolWorkerSubject("claude"),
+      earliestResetAt: null,
+      failurePayload: capacityFailure,
+    });
+    if (armed.action !== "waiting") throw new Error("Fixture failed to arm");
+    waiters.push(armed.waiter.id);
+  }
+  const concurrency = 12;
+  const rounds = 4;
+  for (let round = 0; round < rounds; round += 1)
+    await Promise.all(
+      Array.from({ length: concurrency }, () =>
+        wakeClaudeCapacityWaiters(client.db, {
+          workspaceId: input.workspaceId,
+          subjectId: subscriptionPoolWorkerSubject("claude"),
+          authoritySnapshot: input.authoritySnapshot,
+          reason: "fixture_concurrent_wake",
+        }),
+      ),
+    );
+  for (const waiterId of waiters)
+    expect(await claudeWakeRevision(waiterId)).toBe(1 + concurrency * rounds);
+}, 120_000);

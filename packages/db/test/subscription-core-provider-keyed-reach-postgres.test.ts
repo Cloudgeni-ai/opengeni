@@ -52,6 +52,9 @@ const MAINTENANCE_MIGRATIONS = ["0718_subscription_core_xai_cutover.sql"];
 const BEFORE_XAI_CUTOVER = [
   "database is missing the xai subscription-core cutover receipt (0718_subscription_core_xai_cutover.sql); apply the pending migrations first",
 ];
+// 0715 rewrites routines 0713 and 0714 create, so a deployment before 0713
+// is also before it: held back while 0713 is applied, then applied.
+const API_KEY_CONNECTIONS = "0715_subscription_core_api_key_connections.sql";
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const key = Buffer.alloc(32, 71);
 const MODEL = "codex/gpt-5.5";
@@ -419,7 +422,7 @@ beforeAll(async () => {
   const owner = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
-    await owner`insert into schema_migrations(name) values (${REACH_MIGRATION})`;
+    await owner`insert into schema_migrations(name) values (${REACH_MIGRATION}), (${API_KEY_CONNECTIONS})`;
     for (const later of [...LATER_MIGRATIONS, ...MAINTENANCE_MIGRATIONS])
       await owner`insert into schema_migrations(name) values (${later})`;
     await migrate(database.ownerUrl);
@@ -473,6 +476,13 @@ beforeAll(async () => {
       from pg_proc proc
       where proc.oid::regprocedure::text = any(${added}::text[])`),
   ].sort((left, right) => (left.routine < right.routine ? -1 : 1));
+  const later = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
+  try {
+    await later`delete from schema_migrations where name = ${API_KEY_CONNECTIONS}`;
+    await migrate(database.ownerUrl);
+  } finally {
+    await later.end();
+  }
   await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
   staged = {
     catalogBefore,
