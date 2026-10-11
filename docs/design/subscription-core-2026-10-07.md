@@ -4356,6 +4356,19 @@ until X3. SuperGrok-specific code is the adapter's `fetchUsage`,
   below the limit end a quota exhaustion, the legacy SuperGrok rule. Codex
   does not set it. An at-limit reading (no known reset) is not below the
   limit and leaves the exhaustion and its deadline in place.
+- **Gap: personal connections (fails closed).** The legacy probe re-read
+  every exhausted account the person could use, personal ones included.
+  On the core nothing re-reads a personal SuperGrok connection's billing:
+  the service-subject probe sees shared connections only, and the
+  credential seam refuses a personal connection outside an exact accepted
+  turn. A personal connection's stored exhaustion therefore stands until
+  its stored deadline. The status likewise reports only the workspace's
+  shared pool, so a person whose only SuperGrok connection is personal
+  sees `connected: false` there. SuperGrok has no organization-level
+  status or usage route, so nothing else is affected. This is the same gap
+  Claude has; closing it needs provider-neutral owner-only reads (the
+  Claude C2c step). X3 either lands after them or ships with this
+  behaviour documented.
 - **Image** (EP-N09/N10). A core-placed SuperGrok turn generates images on
   its own placed connection (`executeCoreXaiImageGeneration`): an `image`
   operation lease keyed by the ledger operation id at the turn's execution
