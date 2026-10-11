@@ -36,6 +36,14 @@ export type SubscriptionCorePlacementWorldRequest = {
   models: readonly ModelDescriptor[];
   reselectionPoints: readonly ReselectionPoint[];
   now: Date;
+  /**
+   * Read the session binding under its row lock (`FOR UPDATE`), held until
+   * the transaction ends: placement decides from, and commits to, the
+   * binding no pin or other placement can change meanwhile (SUB-STICK-02).
+   * Taken before any per-connection lock (lease, request), the order a pin
+   * also uses: binding row, then the connection.
+   */
+  lockBinding?: boolean;
 };
 
 export type SubscriptionCorePlacementWorldResult<T> =
@@ -156,6 +164,7 @@ export async function withSubscriptionCoreProviderPlacementWorld<T>(
       readSubscriptionSessionBinding(tx, {
         workspaceId: request.workspaceId,
         sessionId: request.sessionId,
+        forUpdate: request.lockBinding === true,
       }),
       {
         allowedProviders: session.allowed_providers,

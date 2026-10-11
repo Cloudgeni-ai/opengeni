@@ -450,8 +450,10 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
       try {
         return await placeOnce(db, request);
       } catch (error) {
-        if (!(error instanceof SubscriptionBindingConflict) || attempt >= BINDING_CONFLICT_RETRIES)
-          throw error;
+        if (!(error instanceof SubscriptionBindingConflict)) throw error;
+        // Only first bindings of one session can race (no row to lock yet);
+        // past the retries the worker treats it as a busy lease and retries.
+        if (attempt >= BINDING_CONFLICT_RETRIES) return { kind: "lease_busy", leasedUntil: null };
       }
     }
   }
@@ -465,7 +467,12 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
     const result = await withSubscriptionCoreProviderPlacementWorld(
       db,
       provider,
-      placementWorldRequest(identity, request.productModelId, request.reasoningLevel, now),
+      {
+        ...placementWorldRequest(identity, request.productModelId, request.reasoningLevel, now),
+        // The binding row is locked before the lease (binding, then the
+        // connection), as a pin locks it, so the two never deadlock.
+        lockBinding: true,
+      },
       async (tx, worldInput): Promise<SubscriptionCorePlacement> => {
         if (!(await cutoverEnabled(tx, identity.accountId))) return { kind: "cutover_not_enabled" };
         const fence = await readAttemptFence(tx, request);
@@ -1051,17 +1058,15 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
   }
 
   /**
-   * Commit the placement to the session binding under its row lock
-   * (SUB-STICK-02). The world was read without locks, so the locked row must
-   * still be the binding the decision was made from: its account, model and
-   * choice always, and its cache clock exactly when the decision depended on
-   * it (a cold cache or a re-selection point), else a clock no earlier than
-   * the one read (a pin change clears it). Otherwise another placement or a pin
-   * committed first and this placement retries on the new binding, so
-   * parallel turns of one session never split accounts. Placing a turn uses
-   * the account: the clock moves to the placement time, so a parallel turn
-   * that waited for this lock finds the account warm and keeps it. A cache
-   * clock never carries to another account or model (the database trigger
+   * Commit the placement to the session binding (SUB-STICK-02). The world read
+   * the binding under its row lock, so no pin or other placement of the
+   * session changed it since the decision; the comparison below is defense
+   * in depth, and the only race left is two first placements of a session
+   * that has no binding row yet (the insert's compare-and-swap refuses the
+   * second, which retries). Placing a turn uses the account: the clock moves
+   * to the placement time, so a placement that waited for the row lock finds
+   * the account warm and keeps it. A cache clock never carries to another
+   * account or model (the database trigger
    * `subscription_session_bindings_cache_clock` enforces the same for every
    * writer).
    */

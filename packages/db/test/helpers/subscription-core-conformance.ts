@@ -1938,6 +1938,210 @@ export function describeSubscriptionCoreConformance<Credential>(
       expect(await place(third)).toMatchObject({ kind: "run", connectionId, reusedLease: true });
     });
 
+    /** Whether some backend is waiting on a lock the given backend holds (polls up to 5s). */
+    async function stickBlockedBy(pid: number): Promise<boolean> {
+      for (let index = 0; index < 200; index += 1) {
+        const [row] = await admin()<{ blocked: number }[]>`
+          select count(*)::int as blocked from pg_stat_activity
+          where datname = current_database() and ${pid}::int = any(pg_blocking_pids(pid))`;
+        if (row!.blocked > 0) return true;
+        await Bun.sleep(25);
+      }
+      return false;
+    }
+
+    /**
+     * A person's pin as the application role, in the real route's lock order
+     * (session row, binding row, then the account's lock through the binding
+     * trigger), paused after the binding row lock until `proceed` resolves.
+     */
+    function stickPausedPin(
+      org: Org,
+      turn: Turn,
+      connectionId: string,
+      choice: "explicit" | "automatic",
+    ) {
+      let proceed!: () => void;
+      const mayProceed = new Promise<void>((resolve) => (proceed = resolve));
+      let markLocked!: (pid: number) => void;
+      const locked = new Promise<number>((resolve) => (markLocked = resolve));
+      const done = withWorkspaceSubjectSessionActivityRls(
+        db(),
+        turn.identity.workspaceId,
+        org.ownerSubjectId,
+        async (scoped) => {
+          const tx = scoped as unknown as Parameters<typeof rawRows>[0];
+          await tx.execute(
+            sql`select set_config('opengeni.initiating_human_subject_id', ${org.ownerSubjectId}, true)`,
+          );
+          const [me] = await rawRows<{ pid: number }>(tx, sql`select pg_backend_pid() as pid`);
+          await rawRows(
+            tx,
+            sql`select id from sessions where workspace_id = ${turn.identity.workspaceId}::uuid
+              and id = ${turn.identity.sessionId}::uuid for no key update`,
+          );
+          const [row] = await rawRows<{ version: number | string }>(
+            tx,
+            sql`select version from subscription_session_bindings
+              where workspace_id = ${turn.identity.workspaceId}::uuid
+                and session_id = ${turn.identity.sessionId}::uuid for update`,
+          );
+          markLocked(me!.pid);
+          await mayProceed;
+          const written = await rawRows(
+            tx,
+            sql`update subscription_session_bindings
+              set connection_id = ${connectionId}::uuid, choice = ${choice},
+                last_switch_reason = 'explicit_choice', version = version + 1
+              where workspace_id = ${turn.identity.workspaceId}::uuid
+                and session_id = ${turn.identity.sessionId}::uuid
+                and version = ${Number(row!.version)}
+              returning version`,
+          );
+          return written.length;
+        },
+      ).then(
+        (rows) => `pin committed (${rows})`,
+        (error: unknown) => `pin failed ${postgresCode(error)}`,
+      );
+      return { locked, proceed, done };
+    }
+
+    async function stickLeaseOf(turn: Turn): Promise<string | null> {
+      const [lease] = await admin()<{ connection_id: string }[]>`
+        select connection_id::text as connection_id from subscription_leases
+        where workspace_id = ${turn.identity.workspaceId}::uuid
+          and turn_id = ${turn.identity.turnId}::uuid`;
+      return lease?.connection_id ?? null;
+    }
+
+    test("SUB-STICK-06: a pin of the bound account never deadlocks with a model request or the next placement on it", async () => {
+      const org = await organization();
+      await sharedConnection(org, `pin-order-a-${crypto.randomUUID()}`);
+      await sharedConnection(org, `pin-order-b-${crypto.randomUUID()}`);
+      const first = await runningTurn(org);
+      const bound = await placeChecked(first);
+      if (bound.kind !== "run") throw new Error("expected a run");
+      const account = bound.connectionId;
+      // A person pins the account the session is on while its turn reserves a
+      // model request on it: both lock the binding before the account.
+      const pin = stickPausedPin(org, first, account, "explicit");
+      const pinPid = await pin.locked;
+      const reservation = subscriptionCoreRequests(provider)
+        .reserveSubscriptionCoreRequest(db(), first.identity, leaseOf(first, account), {
+          requestId: crypto.randomUUID(),
+          transportAttempt: 1,
+          attemptId: first.attemptId,
+          executionGeneration: first.executionGeneration,
+        })
+        .then(
+          () => "reservation committed",
+          (error: unknown) => `reservation failed ${postgresCode(error)}`,
+        );
+      expect(await stickBlockedBy(pinPid)).toBe(true);
+      pin.proceed();
+      expect(await Promise.all([pin.done, reservation])).toEqual([
+        "pin committed (1)",
+        "reservation committed",
+      ]);
+      // Unpinned again while the next turn is being placed on the same account.
+      const second = await nextTurn(org, first);
+      const unpin = stickPausedPin(org, second, account, "automatic");
+      const unpinPid = await unpin.locked;
+      const placement = place(second).then(
+        (placed) => placed,
+        (error: unknown) => `placement failed ${postgresCode(error)}`,
+      );
+      expect(await stickBlockedBy(unpinPid)).toBe(true);
+      unpin.proceed();
+      const [unpinned, placed] = await Promise.all([unpin.done, placement]);
+      expect(unpinned).toBe("pin committed (1)");
+      // The placement waited for the unpin and decided from it: the clock
+      // was cleared, so normal selection ran again.
+      expect(placed).toMatchObject({ kind: "run", explicit: false });
+      if (typeof placed === "string" || placed.kind !== "run") return;
+      expect(placed.reselection).toMatchObject({ reason: "cache_cold" });
+      expect(await stickLeaseOf(second)).toBe(placed.connectionId);
+      expect(await bindingOf(second)).toMatchObject({
+        connectionId: placed.connectionId,
+        choice: "automatic",
+      });
+    });
+
+    test("SUB-STICK-02: a placement that waits for a concurrent pin decides from the pin", async () => {
+      const org = await organization();
+      const a = await sharedConnection(org, `pin-race-a-${crypto.randomUUID()}`);
+      const b = await sharedConnection(org, `pin-race-b-${crypto.randomUUID()}`);
+      const first = await runningTurn(org);
+      const bound = await placeChecked(first);
+      if (bound.kind !== "run") throw new Error("expected a run");
+      const other = bound.connectionId === a ? b : a;
+      const second = await nextTurn(org, first);
+      // The pin holds the binding when the warm placement starts; the
+      // placement waits instead of keeping the old account from a stale read.
+      const pin = stickPausedPin(org, second, other, "explicit");
+      const pinPid = await pin.locked;
+      const placement = place(second);
+      expect(await stickBlockedBy(pinPid)).toBe(true);
+      pin.proceed();
+      expect(await pin.done).toBe("pin committed (1)");
+      expect(await placement).toMatchObject({ kind: "run", connectionId: other, explicit: true });
+      expect(await stickLeaseOf(second)).toBe(other);
+      expect(await bindingOf(second)).toMatchObject({ connectionId: other, choice: "explicit" });
+    });
+
+    test("SUB-STICK-02: a placement that waits for a concurrent use of the account sees the warm clock", async () => {
+      const org = await organization();
+      const a = await sharedConnection(org, `use-race-a-${crypto.randomUUID()}`);
+      const b = await sharedConnection(org, `use-race-b-${crypto.randomUUID()}`);
+      const lifetime = declaredCacheLifetimeMs(provider.adapter.cacheFacts);
+      const first = await runningTurn(org);
+      const bound = await placeChecked(first);
+      if (bound.kind !== "run") throw new Error("expected a run");
+      const preferred = bound.connectionId;
+      const other = preferred === a ? b : a;
+      // Bind the session to the account selection does not rank first.
+      await admin()`update subscription_connections set allocator_enabled = false
+        where id = ${preferred}::uuid`;
+      const second = await nextTurn(org, first);
+      const movedAt = Date.now();
+      expect(await placeChecked(second, new Date(movedAt))).toMatchObject({
+        kind: "run",
+        connectionId: other,
+      });
+      await admin()`update subscription_connections set allocator_enabled = true
+        where id = ${preferred}::uuid`;
+      const third = await nextTurn(org, second);
+      // A use of the bound account (as a request's clock advance) holds the
+      // binding when a placement starts that would find the cache cold.
+      let release!: () => void;
+      const released = new Promise<void>((resolve) => (release = resolve));
+      let markHeld!: (pid: number) => void;
+      const held = new Promise<number>((resolve) => (markHeld = resolve));
+      const use = admin().begin(async (tx) => {
+        const [me] = await tx<{ pid: number }[]>`select pg_backend_pid() as pid`;
+        await tx`update subscription_session_bindings
+          set last_model_call_at = ${new Date(movedAt + lifetime)}
+          where workspace_id = ${third.identity.workspaceId}::uuid
+            and session_id = ${third.identity.sessionId}::uuid`;
+        markHeld(me!.pid);
+        await released;
+      });
+      const holder = await held;
+      const placement = place(third, { now: new Date(movedAt + lifetime + 1) });
+      expect(await stickBlockedBy(holder)).toBe(true);
+      release();
+      await use;
+      expect(await placement).toMatchObject({
+        kind: "run",
+        connectionId: other,
+        switch: "sticky",
+        reselection: null,
+      });
+      expect(await stickLeaseOf(third)).toBe(other);
+      expect(await bindingOf(third)).toMatchObject({ connectionId: other });
+    });
+
     test("administration lists and manages exactly this provider's connections of its kind", async () => {
       const org = await organization();
       const a = await sharedConnection(org, `admin-a-${crypto.randomUUID()}`);

@@ -14,7 +14,9 @@
 -- state a new clock, `last_model_call_at` becomes NULL (cold). A writer that
 -- states a clock (a model call it records on the new account) keeps it.
 -- Changing the choice also starts cold, so removing a pin re-runs normal
--- selection at the next turn (a pin change is a re-selection point).
+-- selection at the next turn (a pin change is a re-selection point). A
+-- switch whose stated clock equals the old one to the microsecond reads as
+-- unstated and also starts cold: one extra re-selection, never a warm carry.
 --
 -- Rolling: no table or column changes. Older binaries write the same columns;
 -- they only stop carrying a stale clock across a switch, which can only

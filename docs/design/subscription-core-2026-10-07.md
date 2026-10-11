@@ -194,13 +194,18 @@ Primary key `(workspace_id, session_id)`: `provider`, `connection_id`,
   Setting or removing a pin therefore makes the next turn re-run selection
   (D-31); a compaction is a re-selection point only when it is later than
   the clock.
-- Placement commits the binding under its row lock (`FOR UPDATE`, after the
-  lease, in the existing binding-write position of the lock order): the
-  locked row must still name the account, model and choice the decision read,
-  and the same clock when the decision depended on it (a cold cache or a
-  re-selection point). Otherwise the placement retries on the new binding, so
-  concurrent placements of one session and a concurrent pin never leave the
-  lease and the binding on different accounts.
+- Placement reads the binding under its row lock (`FOR UPDATE`, in the
+  placement world, before the lease) and decides and commits from that row,
+  so no pin or other placement of the session changes it in between; only
+  the first binding of a session (no row to lock yet) can race, and the
+  insert's compare-and-swap makes the loser retry. A model request's
+  reservation locks the same row before the account's request lock and
+  advances the clock under it. Every path that holds both takes the binding
+  row first and the per-connection lock (`subscription-refresh:<connection>`,
+  taken by the lease, request and binding admission triggers) second, as a
+  person's pin does, so a pin of the account a session is on never deadlocks
+  with that session's requests or placement. The clock is application time,
+  as placement judges warmth by it.
 - Child sessions and scheduled runs that create a new session start
   `automatic` (their prompt cache key is their own session id, so there is no
   warm cache to keep). Forks copy the binding as `automatic`.
