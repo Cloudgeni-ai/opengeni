@@ -356,6 +356,24 @@ ON CONFLICT (account_id, workspace_id) DO UPDATE SET
 -- organization's locked value after the cutover. Each such workspace is
 -- listed in the report (`disposition:local_pool_freeze_locked:<workspace>`,
 -- `disposition:local_rotation_locked:<workspace>`).
+--
+-- The settings lock protocol: a writer of workspace overrides first takes its
+-- organization's shared settings lock, in ascending organization order, then
+-- reads the organization's locks. The window is drained, so nothing contends;
+-- only organizations with moved workspace accounts (the only ones whose
+-- workspace rows this writes) are locked, which bounds the lock table.
+DO $xai_cutover_settings_locks$
+DECLARE organization uuid;
+BEGIN
+  FOR organization IN
+    SELECT DISTINCT account_id FROM pg_temp.subscription_cutover_connection_map
+    WHERE legacy_scope = 'workspace' ORDER BY account_id
+  LOOP
+    PERFORM pg_catalog.pg_advisory_xact_lock_shared(
+      pg_catalog.hashtextextended('subscription-settings-locks:' || organization::text, 0));
+  END LOOP;
+END $xai_cutover_settings_locks$;
+
 CREATE TEMP TABLE xai_cutover_workspace_settings_before AS
   SELECT account_id, workspace_id, rotation->'xai' AS rotation, providers->'xai' AS providers,
     xai_primary_connection_id, personal_fallback_allowed
