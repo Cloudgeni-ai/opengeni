@@ -131,6 +131,8 @@ export function xaiSubscriptionFetch(base: XaiFetchLike): XaiFetchLike {
       refresh: boolean,
       transportAttempt: number,
     ): Promise<{ response: Response; audit: RequestAudit }> => {
+      // An already-cancelled request resolves no token and reserves nothing.
+      init?.signal?.throwIfAborted();
       const token = refresh ? await context.refresh() : await context.getToken();
       const headers = new Headers(originalHeaders);
       headers.set("authorization", `Bearer ${token.accessToken}`);
@@ -275,12 +277,15 @@ async function normalizeResponse(
   }
   const contentType = response.headers.get("content-type") ?? "";
   if (!contentType.includes("text/event-stream")) {
-    const value = await readBodySettled(audit, response, () => response.json());
-    const normalized = normalizeXaiResponseEventJson({
-      type: "response.completed",
-      response: value,
+    const { value, normalized } = await readBodySettled(audit, response, async () => {
+      const value: unknown = await response.json();
+      const normalized = normalizeXaiResponseEventJson({
+        type: "response.completed",
+        response: value,
+      });
+      emitContextUsage(normalized.value, normalized.finalContextTokens, onFinalContextUsage);
+      return { value, normalized };
     });
-    emitContextUsage(normalized.value, normalized.finalContextTokens, onFinalContextUsage);
     const responseValue =
       normalized.value && typeof normalized.value === "object" && !Array.isArray(normalized.value)
         ? (normalized.value as Record<string, unknown>).response
@@ -635,8 +640,9 @@ function xaiSseTerminalError(
 }
 
 /**
- * Read a whole non-stream body; a failed read still settles the request once:
- * refused for a definite error status, unknown otherwise (a 200 was produced).
+ * Read and decode a whole non-stream body; a failure still settles the
+ * request once: refused for a definite error status, unknown otherwise (a
+ * 200 was produced).
  */
 async function readBodySettled<T>(
   audit: RequestAudit,

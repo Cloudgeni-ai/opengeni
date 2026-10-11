@@ -107,13 +107,16 @@ export function subscriptionCoreFailoverExhaustedFailure(
   maxRefusals: number,
   displayName: string = DEFAULT_DISPLAY_NAME,
 ): SubscriptionCoreCodexTurnError {
-  return new SubscriptionCoreCodexTurnError({
-    error: `${displayName} accounts refused this turn too many times in a row. Send a new message after checking the accounts' health or capacity.`,
-    code: "subscription_failover_exhausted",
-    retryable: false,
-    refusals,
-    maxRefusals,
-  });
+  return new SubscriptionCoreCodexTurnError(
+    {
+      error: `${displayName} accounts refused this turn too many times in a row. Send a new message after checking the accounts' health or capacity.`,
+      code: "subscription_failover_exhausted",
+      retryable: false,
+      refusals,
+      maxRefusals,
+    },
+    displayName,
+  );
 }
 
 /**
@@ -126,13 +129,16 @@ export function subscriptionCoreCapacityFailure(
   earliestResetAt: Date | null,
   displayName: string = DEFAULT_DISPLAY_NAME,
 ): SubscriptionCoreCodexTurnError {
-  return new SubscriptionCoreCodexTurnError({
-    error: WAIT_COPY(displayName)[reason],
-    code: "subscription_capacity_unavailable",
-    retryable: false,
-    waitReason: reason,
-    ...(earliestResetAt ? { resetsAt: earliestResetAt.toISOString() } : {}),
-  });
+  return new SubscriptionCoreCodexTurnError(
+    {
+      error: WAIT_COPY(displayName)[reason],
+      code: "subscription_capacity_unavailable",
+      retryable: false,
+      waitReason: reason,
+      ...(earliestResetAt ? { resetsAt: earliestResetAt.toISOString() } : {}),
+    },
+    displayName,
+  );
 }
 
 /**
@@ -246,12 +252,15 @@ export function subscriptionCoreAccountRefusedFailure(
   refusal: SubscriptionCoreAccountRefusal,
   displayName: string = DEFAULT_DISPLAY_NAME,
 ): SubscriptionCoreCodexTurnError {
-  return new SubscriptionCoreCodexTurnError({
-    error: REFUSAL_COPY(displayName)[refusal],
-    code: "subscription_account_refused",
-    retryable: false,
-    refusal,
-  });
+  return new SubscriptionCoreCodexTurnError(
+    {
+      error: REFUSAL_COPY(displayName)[refusal],
+      code: "subscription_account_refused",
+      retryable: false,
+      refusal,
+    },
+    displayName,
+  );
 }
 
 /** A Codex consumer that has not moved to the core yet (PR 2) must not read legacy tables. */
@@ -259,20 +268,26 @@ export function subscriptionCoreUnsupportedFailure(
   consumer: string,
   displayName: string = DEFAULT_DISPLAY_NAME,
 ): SubscriptionCoreCodexTurnError {
-  return new SubscriptionCoreCodexTurnError({
-    error: `${consumer} is not available for ${displayName} subscriptions on this deployment yet.`,
-    code: "subscription_core_unsupported",
-    retryable: false,
-  });
+  return new SubscriptionCoreCodexTurnError(
+    {
+      error: `${consumer} is not available for ${displayName} subscriptions on this deployment yet.`,
+      code: "subscription_core_unsupported",
+      retryable: false,
+    },
+    displayName,
+  );
 }
 
 /** The organization's cutover row for the provider exists but is switched off. */
 export function subscriptionCoreCutoverDisabledFailure(
   displayName: string = DEFAULT_DISPLAY_NAME,
 ): SubscriptionCoreCodexTurnError {
-  return new SubscriptionCoreCodexTurnError({
-    error: `${displayName} subscriptions are paused for this organization during maintenance.`,
-    code: "subscription_core_cutover_disabled",
-    retryable: false,
-  });
+  return new SubscriptionCoreCodexTurnError(
+    {
+      error: `${displayName} subscriptions are paused for this organization during maintenance.`,
+      code: "subscription_core_cutover_disabled",
+      retryable: false,
+    },
+    displayName,
+  );
 }

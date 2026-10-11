@@ -233,4 +233,26 @@ describe("SuperGrok request custody hooks", () => {
     await expect(completed.send()).rejects.toThrow("connection reset");
     expect(completed.settled.map((request) => request.outcome)).toEqual(["unknown"]);
   });
+
+  test("an already-cancelled request resolves no token and reserves nothing", async () => {
+    const h = harness([() => sse({ type: "response.completed", response: { output: [] } })]);
+    const controller = new AbortController();
+    const reason = new Error("cancelled earlier");
+    controller.abort(reason);
+    let tokens = 0;
+    await expect(
+      h.send(
+        {
+          getToken: async () => {
+            tokens += 1;
+            return { accessToken: "access", userId: "user-1" };
+          },
+        },
+        { signal: controller.signal },
+      ),
+    ).rejects.toBe(reason);
+    expect(tokens).toBe(0);
+    expect(h.calls()).toBe(0);
+    expect(h.order).toEqual([]);
+  });
 });

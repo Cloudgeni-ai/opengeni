@@ -25,10 +25,14 @@ import {
 } from "../src/activities/agent-turn/codex-core-claim";
 import {
   SubscriptionCoreCodexTurnError,
+  subscriptionCoreAccountRefusedFailure,
   subscriptionCoreCapacityFailure,
+  subscriptionCoreCutoverDisabledFailure,
+  subscriptionCoreFailoverExhaustedFailure,
   subscriptionCoreLeaseBusyChain,
   subscriptionCoreLeaseBusyDelayMs,
   subscriptionCoreLeaseBusyFailure,
+  subscriptionCoreUnsupportedFailure,
   SUBSCRIPTION_CORE_LEASE_BUSY_JITTER_MS,
   SUBSCRIPTION_CORE_LEASE_BUSY_MAX_MS,
 } from "../src/activities/agent-turn/codex-core-errors";
@@ -2026,6 +2030,19 @@ describe("core Codex failure settlement", () => {
     expect(String(settled.events[0]!.payload.error)).toBe(
       "A previous attempt of this turn kept holding its SuperGrok account, so the turn stopped. Send a new message to try again.",
     );
+  });
+
+  test("every failure-copy builder carries the provider it names; the default stays Codex", () => {
+    const named = (displayName?: string) => [
+      subscriptionCoreFailoverExhaustedFailure(4, 4, displayName),
+      subscriptionCoreCapacityFailure("no_eligible_capacity", null, displayName),
+      subscriptionCoreAccountRefusedFailure("forbidden", displayName),
+      subscriptionCoreUnsupportedFailure("Image generation", displayName),
+      subscriptionCoreCutoverDisabledFailure(displayName),
+      subscriptionCoreLeaseBusyFailure(null, displayName),
+    ];
+    for (const error of named("SuperGrok")) expect(error.displayName).toBe("SuperGrok");
+    for (const error of named()) expect(error.displayName).toBe("Codex");
   });
 
   test("a database failure while recovering from lease busy keeps the turn recoverable", async () => {
