@@ -177,8 +177,8 @@ function SharedRow<T extends Account>({
           ? "Couldn't check availability"
           : reaches === false
             ? "Not available here"
-            : // Only once it is known to reach here, so nothing flashes while it loads.
-              reaches && ownInUse
+            : // Only once its reach is read, so nothing flashes while it loads.
+              access.data && ownInUse
               ? "Set aside"
               : null,
         plan(account),

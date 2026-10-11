@@ -1295,6 +1295,7 @@ describe("One Models page for the organization and the workspace", () => {
       accounts: [
         grok("grok-org", "Company grok", "organization"),
         grok("grok-far", "Research grok", "organization"),
+        grok("grok-people", "People grok", "organization"),
       ],
       activeAccountId: null,
       settings,
@@ -1308,7 +1309,9 @@ describe("One Models page for the organization and the workspace", () => {
               policy:
                 (args[0] as { connectionId: string }).connectionId === "grok-far"
                   ? { ...openPolicy, allowedWorkspaces: ["workspace-b"] }
-                  : openPolicy,
+                  : (args[0] as { connectionId: string }).connectionId === "grok-people"
+                    ? { ...openPolicy, allowedWorkspaces: [], allowedPeople: ["person-1"] }
+                    : openPolicy,
               workspaces: [
                 { id: "workspace-a", name: "Design preview" },
                 { id: "workspace-b", name: "Research" },
@@ -1328,13 +1331,18 @@ describe("One Models page for the organization and the workspace", () => {
         )!.textContent ?? "";
       // No reason while its reach loads.
       expect(row("Company grok")).not.toContain("Set aside");
+      expect(row("People grok")).not.toContain("Set aside");
       await act(async () => {
         for (const settle of pending.splice(0)) settle();
       });
       await flush();
-      // The reason comes before the plan, so a phone doesn't cut it off.
-      expect(row("Company grok")).toMatch(/Set aside[^]*SuperGrok Heavy/);
-      expect(row("Research grok")).toMatch(/Not available here[^]*SuperGrok Heavy/);
+      // The reason comes right after the tag and before the plan, so a phone
+      // doesn't cut it off.
+      expect(row("Company grok")).toContain("·Everyone in Acme·Set aside·SuperGrok");
+      expect(row("Research grok")).toContain("·Selected workspaces·Not available here·SuperGrok");
+      // Chosen people's reach isn't a property of the workspace: once read, it
+      // is set aside like any other while this workspace uses its own.
+      expect(row("People grok")).toContain("·Selected people·Set aside·SuperGrok");
     } finally {
       await cleanup(view);
     }
@@ -1625,7 +1633,7 @@ describe("One Models page for the organization and the workspace", () => {
     }
   });
 
-  test("an organization key whose workspaces leave this one out is not available here", async () => {
+  test("an organization key whose workspaces leave this one out is not available here, and a Personal workspace says shared workspaces only", async () => {
     organizationAdmin = true;
     routeOrganizationReads();
     client.getOrganizationModelProviderConnection.mockImplementation(async (...args: unknown[]) =>
@@ -1647,6 +1655,18 @@ describe("One Models page for the organization and the workspace", () => {
       expect(row.textContent).not.toContain("Not available in");
     } finally {
       await cleanup(view);
+    }
+    // Organization keys serve shared workspaces only.
+    personalWorkspace = true;
+    const personal = await render();
+    try {
+      await flush();
+      const row = [
+        ...personal.container.querySelectorAll<HTMLElement>("[data-slot=list-row]"),
+      ].find((candidate) => candidate.textContent?.includes("OpenRouter"))!;
+      expect(row.textContent).toContain("Shared workspaces only");
+    } finally {
+      await cleanup(personal);
       client.getOrganizationModelProviderConnection.mockImplementation(async () => null);
     }
   });
@@ -2360,8 +2380,9 @@ describe("One Models page for the organization and the workspace", () => {
         await flush();
         const row = rowsNamed(view.container, "Research plan")[0]!;
         expect(row.textContent).toContain("Not available here");
-        // The reason comes before the plan, so a phone doesn't cut it off.
-        expect(row.textContent).toMatch(/Not available here[^]*ChatGPT/);
+        // The reason comes right after the tag and before the plan, so a phone
+        // doesn't cut it off.
+        expect(row.textContent).toContain("·Selected workspaces·Not available here·ChatGPT");
         expect(row.textContent).not.toContain("Set aside");
         expect(row.querySelector('[aria-label^="More actions"]')).toBeNull();
         // The organization's account that does reach here is still set aside, with its way back.
