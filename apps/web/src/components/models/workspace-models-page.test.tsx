@@ -320,6 +320,56 @@ GlobalRegistrator.register();
   true;
 
 const { WorkspaceModelsPage } = await import("./workspace-models-page");
+const { codexPoolCopy } = await import("./codex-models");
+
+test("the pool notice names this workspace's kept people-limited copies, in every form", () => {
+  const base = {
+    inUse: "workspace" as const,
+    organizationAvailable: true,
+    organizationCount: 1,
+    canConnect: true,
+  };
+  // None of its own otherwise: work starts only for those people, a warning.
+  expect(
+    codexPoolCopy({ ...base, mode: "workspace", workspaceCount: 0, keptForPeople: ["A", "B"] }),
+  ).toEqual({
+    text: "New Codex work can start only for the people chosen for A and B, kept here as this workspace's own. This workspace is set to use only its own accounts.",
+    blocked: true,
+  });
+  expect(
+    codexPoolCopy({
+      ...base,
+      mode: "workspace",
+      workspaceCount: 2,
+      keptForPeople: ["A", "B", "C"],
+    }).text,
+  ).toBe(
+    "New work uses this workspace's Codex accounts. A, B and C, kept here as this workspace's own, serve only the people chosen for them. The organization's other account is never used here.",
+  );
+  expect(
+    codexPoolCopy({
+      ...base,
+      mode: "workspace",
+      organizationAvailable: false,
+      workspaceCount: 1,
+      keptForPeople: ["A"],
+    }).text,
+  ).toBe(
+    "New work uses this workspace's Codex account. A, kept here as this workspace's own, serves only the people chosen for it.",
+  );
+  expect(
+    codexPoolCopy({
+      ...base,
+      mode: "automatic",
+      organizationCount: 2,
+      workspaceCount: 2,
+      keptForPeople: ["A"],
+    }),
+  ).toEqual({
+    text: "New work uses this workspace's Codex accounts. A, kept here as this workspace's own, serves only the people chosen for it. The organization's other accounts are set aside while these are connected.",
+    blocked: false,
+  });
+});
 
 afterAll(() => {
   mock.restore();
@@ -2231,7 +2281,7 @@ describe("One Models page for the organization and the workspace", () => {
         expect(row.textContent).not.toContain("Not in use");
         // Its pool doesn't list it, so the notice says it serves its people.
         expect(workspaceOnly.container.textContent).toContain(
-          "New work uses this workspace's Codex account. The organization's accounts are never used here, even if none are connected. Its account limited to chosen people serves only them.",
+          "New work uses this workspace's Codex account. Team plan, kept here as this workspace's own, serves only the people chosen for it. The organization's other accounts are never used here.",
         );
       } finally {
         await cleanup(workspaceOnly);
@@ -2245,12 +2295,91 @@ describe("One Models page for the organization and the workspace", () => {
         const row = rowsNamed(keptOnly.container, "Team plan")[0]!;
         expect(row.textContent).not.toContain("Set aside");
         expect(keptOnly.container.textContent).toContain(
-          "New Codex work can start only for the people chosen for this workspace's own account. This workspace is set to use only its own accounts.",
+          "New Codex work can start only for the people chosen for Team plan, kept here as this workspace's own. This workspace is set to use only its own accounts.",
         );
         expect(keptOnly.container.textContent).not.toContain("none are connected");
+        // Its row goes away (here: no longer an organization admin's page): the
+        // notice stops counting it.
+        organizationAdmin = false;
+        await act(async () => keptOnly.root.render(<Harness canManage={true} />));
+        await flush();
+        expect(keptOnly.container.textContent).not.toContain("Team plan");
+        expect(keptOnly.container.textContent).toContain("New Codex work can't start.");
       } finally {
+        organizationAdmin = true;
         await cleanup(keptOnly);
       }
+      // While the rows still read their access, no "can't start" that a kept
+      // copy might contradict.
+      const held: (() => void)[] = [];
+      const keptAccess = client.getModelConnectionAccess.getMockImplementation()!;
+      client.getModelConnectionAccess.mockImplementation(
+        (...args: unknown[]) =>
+          new Promise((resolve) => {
+            held.push(() => resolve((keptAccess as (...input: unknown[]) => unknown)(...args)));
+          }),
+      );
+      const pendingView = await render();
+      try {
+        expect(pendingView.container.textContent).not.toContain("New Codex work");
+        await act(async () => held.forEach((release) => release()));
+        await flush();
+        expect(pendingView.container.textContent).toContain(
+          "New Codex work can start only for the people chosen for Team plan",
+        );
+      } finally {
+        client.getModelConnectionAccess.mockImplementation(keptAccess);
+        await cleanup(pendingView);
+      }
+      // A read that fails leaves it unknown: still no "can't start".
+      client.getModelConnectionAccess.mockImplementation(async () => {
+        throw new Error("Connection request failed");
+      });
+      const failedView = await render();
+      try {
+        await flush();
+        expect(failedView.container.textContent).not.toContain("New Codex work");
+      } finally {
+        client.getModelConnectionAccess.mockImplementation(keptAccess);
+        await cleanup(failedView);
+      }
+      // Automatic, with an account of its own in use: the notice names it too.
+      accounts = {
+        ...workspaceSource,
+        source: { ...source, mode: "automatic" as const, effectiveSource: "workspace" as const },
+      };
+      const automatic = await render();
+      try {
+        await flush();
+        expect(automatic.container.textContent).toContain(
+          "New work uses this workspace's Codex account. Team plan, kept here as this workspace's own, serves only the people chosen for it. The organization's other accounts are set aside while it's connected.",
+        );
+      } finally {
+        await cleanup(automatic);
+      }
+      // Limited to no one: kept here, but it serves nobody, so no such sentence.
+      client.getModelConnectionAccess.mockImplementation(async (...args: unknown[]) => {
+        const access = managedAccess((args[0] as { connectionId: string }).connectionId);
+        return (args[0] as { connectionId: string }).connectionId === "acct-1"
+          ? {
+              ...access,
+              policy: { ...access.policy, allowedPeople: [] },
+              managedByWorkspaceId: null,
+            }
+          : access;
+      });
+      accounts = workspaceSource;
+      const noOne = await render();
+      try {
+        await flush();
+        expect(noOne.container.textContent).toContain(
+          "New work uses this workspace's Codex account.",
+        );
+        expect(noOne.container.textContent).not.toContain("kept here");
+      } finally {
+        await cleanup(noOne);
+      }
+      client.getModelConnectionAccess.mockImplementation(keptAccess);
       // Set to use only the organization's accounts: its own copy isn't used,
       // and the organization's isn't given to this workspace: nobody uses it here.
       accounts = {

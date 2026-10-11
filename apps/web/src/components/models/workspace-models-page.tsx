@@ -42,6 +42,8 @@ import {
   CodexAccountRows,
   CodexConnectPage,
   CodexPoolNotice,
+  type KeptForPeopleReport,
+  type KeptForPeopleReporter,
   CodexSettingRows,
   codexListedCount,
   organizationNoticeCodexCount,
@@ -286,16 +288,23 @@ export function WorkspaceModelsPageBody({
   const [claudeSigningIn, setClaudeSigningIn] = useState(false);
   // Organization accounts this workspace keeps as its own, limited to chosen
   // people: its pool doesn't list them, so their rows report them to the notice.
-  const [keptForPeople, setKeptForPeople] = useState<ReadonlySet<string>>(() => new Set());
-  const reportKeptForPeople = useCallback((accountId: string, kept: boolean) => {
-    setKeptForPeople((current) => {
-      if (current.has(accountId) === kept) return current;
-      const next = new Set(current);
-      if (kept) next.add(accountId);
+  const [keptReports, setKeptReports] = useState<ReadonlyMap<string, KeptForPeopleReport>>(
+    () => new Map(),
+  );
+  const reportKeptForPeople = useCallback<KeptForPeopleReporter>((accountId, report) => {
+    setKeptReports((current) => {
+      const previous = current.get(accountId);
+      if (JSON.stringify(previous) === JSON.stringify(report)) return current;
+      const next = new Map(current);
+      if (report) next.set(accountId, report);
       else next.delete(accountId);
       return next;
     });
   }, []);
+  const keptForPeople = [...keptReports.values()].flatMap((report) =>
+    !report.pending && report.keptName ? [report.keptName] : [],
+  );
+  const keptForPeoplePending = [...keptReports.values()].some((report) => report.pending);
   const connectionChanged = () => {
     setRevision((value) => value + 1);
     onConnectionChange();
@@ -1113,7 +1122,8 @@ export function WorkspaceModelsPageBody({
                     ? organizationNoticeCodexCount(orgCodex.accounts, codex, here.id)
                     : undefined)
                 }
-                keptForPeopleCount={keptForPeople.size}
+                keptForPeople={keptForPeople}
+                keptForPeoplePending={keptForPeoplePending}
               />
             }
             accounts={

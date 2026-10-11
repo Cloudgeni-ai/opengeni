@@ -757,12 +757,17 @@ test("a workspace's own copy no workspace manages is an organization account: it
     await flush();
     expect(container.textContent).toContain("2 people chosen.");
     expect(container.textContent).not.toContain("Former member");
-    // No People list to describe: the workspace that keeps it is announced as a status.
-    expect(
-      [...container.querySelectorAll("p")]
-        .find((p) => p.textContent === "In Engineering too, only these people can use it.")
-        ?.getAttribute("role"),
-    ).toBe("status");
+    // No People list to describe: the workspace that keeps it is announced
+    // through a status that stays in place, empty while people aren't chosen.
+    const status = () => container.querySelector<HTMLElement>('p[role="status"]');
+    expect(status()?.textContent).toBe("In Engineering too, only these people can use it.");
+    const region = status()!;
+    await choose("Only selected workspaces");
+    expect(status()).toBe(region);
+    expect(region.textContent).toBe("");
+    await choose("Only selected people");
+    expect(status()).toBe(region);
+    expect(region.textContent).toBe("In Engineering too, only these people can use it.");
     expect(container.querySelector('[role="radio"][aria-checked="true"]')?.textContent).toContain(
       "Only selected people",
     );

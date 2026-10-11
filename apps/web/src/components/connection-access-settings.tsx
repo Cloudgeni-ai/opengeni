@@ -482,15 +482,18 @@ export function ConnectionAccessFormPage({
                 ))}
               </fieldset>
             ) : null}
-            {keptNote ? (
-              // A workspace that keeps it as its own follows the people choice too.
-              // Without a People list to describe, it is announced as it appears.
+            {/* A workspace that keeps it as its own follows the people choice too.
+                Without a People list to describe, it is a status that stays in
+                place (empty and hidden until needed), so its line is announced. */}
+            {keptNote || !peopleListed ? (
               <p
                 id={keptNoteId}
                 role={peopleListed ? undefined : "status"}
-                className="m-0 text-sm text-fg-muted"
+                className={keptNote ? "m-0 text-sm text-fg-muted" : "sr-only"}
               >
-                {`In ${localNames(local, data.workspaces)} too, only these people can use it.`}
+                {keptNote
+                  ? `In ${localNames(local, data.workspaces)} too, only these people can use it.`
+                  : null}
               </p>
             ) : null}
             {reachesNoOne ? (

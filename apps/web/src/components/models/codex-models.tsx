@@ -226,6 +226,17 @@ function alwaysOrganizationItem(codex: CodexSubscriptions, places: CodexPlaces):
 }
 
 /**
+ * A row's report: still reading its access, or the account's name when this
+ * workspace keeps it as its own and it is limited to chosen people (else
+ * null); `undefined` when the row goes away.
+ */
+export type KeptForPeopleReport = { pending: true } | { pending: false; keptName: string | null };
+export type KeptForPeopleReporter = (
+  accountId: string,
+  report: KeptForPeopleReport | undefined,
+) => void;
+
+/**
  * Codex's rows in the Accounts list: the accounts new work uses, then the
  * other pool's accounts, muted with "Not in use". People who manage the
  * organization's accounts see each of them, in use here or not; everyone else
@@ -241,8 +252,8 @@ export function CodexAccountRows({
   codex: CodexSubscriptions;
   places: CodexPlaces;
   organization?: OrganizationCodexPool | null;
-  /** Reports an account this workspace keeps as its own that is limited to chosen people. */
-  onKeptForPeople?: ((accountId: string, kept: boolean) => void) | undefined;
+  /** Reports, per organization row, whether this workspace keeps it as its own for chosen people. */
+  onKeptForPeople?: KeptForPeopleReporter | undefined;
 }) {
   if (codex.loading || organization?.codex.loading) return <ListRowSkeleton count={1} />;
   if (codex.loadError) {
@@ -490,7 +501,7 @@ function SharedCodexSetAsideRow({
   /** This workspace uses only the organization's accounts. */
   organizationOnly: boolean;
   menu: ReactNode;
-  onKeptForPeople?: ((accountId: string, kept: boolean) => void) | undefined;
+  onKeptForPeople?: KeptForPeopleReporter | undefined;
 }) {
   const access = useConnectionAccess({
     client: organization.codex.client,
@@ -504,13 +515,15 @@ function SharedCodexSetAsideRow({
   const chosenPeople = (access.data?.policy.allowedPeople?.length ?? 0) > 0;
   const keptHere = (access.data?.localWorkspaceIds ?? []).includes(organization.workspace.id);
   const forPeople = chosenPeople && (keptHere ? !organizationOnly : !workspaceOnly);
-  // The pool notice counts these: this workspace's own pool doesn't list them.
-  const keptForPeople = chosenPeople && keptHere;
+  // The pool notice names these: this workspace's own pool doesn't list them.
+  // Unread or unreadable: whether it is one isn't known.
+  const pending = !access.data;
+  const keptName = chosenPeople && keptHere ? codexAccountName(account) : null;
   useEffect(() => {
-    if (!onKeptForPeople || !keptForPeople) return;
-    onKeptForPeople(account.id, true);
-    return () => onKeptForPeople(account.id, false);
-  }, [onKeptForPeople, keptForPeople, account.id]);
+    if (!onKeptForPeople) return;
+    onKeptForPeople(account.id, pending ? { pending: true } : { pending: false, keptName });
+    return () => onKeptForPeople(account.id, undefined);
+  }, [onKeptForPeople, account.id, pending, keptName]);
   // Another workspace's own account, or one shared elsewhere, may not reach
   // this workspace at all: then this workspace's own accounts set nothing aside.
   const reaches = reachesWorkspace(access.data, organization.workspace);
@@ -544,6 +557,8 @@ function SharedCodexSetAsideRow({
   );
 }
 
+const NONE_KEPT: readonly string[] = [];
+
 /**
  * The one line above the Accounts list that says which Codex accounts new
  * work uses. It replaces a source control: the pool is picked automatically,
@@ -553,17 +568,26 @@ export function CodexPoolNotice({
   codex,
   places,
   organizationAccountCount,
-  keptForPeopleCount = 0,
+  keptForPeople = NONE_KEPT,
+  keptForPeoplePending = false,
 }: {
   codex: CodexSubscriptions;
   places: CodexPlaces;
   /** How many accounts the organization shares, when known. */
   organizationAccountCount?: number | undefined;
-  /** This workspace's own accounts limited to chosen people (known to organization admins). */
-  keptForPeopleCount?: number;
+  /** Names of this workspace's own accounts limited to chosen people (known to organization admins). */
+  keptForPeople?: readonly string[];
+  /** Some organization row hasn't read (or couldn't read) whether it is one of those. */
+  keptForPeoplePending?: boolean;
 }) {
   const source = codex.source;
   if (codex.loading || codex.loadError || !source || source.effectiveSource === "disabled") {
+    return null;
+  }
+  const ownCount = codex.accounts.filter((account) => account.source !== "organization").length;
+  // Until the rows know, "can't start" may be wrong: a kept copy may serve chosen people.
+  // A row whose read fails keeps it unknown, so the notice stays away.
+  if (keptForPeoplePending && source.effectiveSource === "workspace" && ownCount === 0) {
     return null;
   }
   const explicit = source.mode !== "automatic";
@@ -573,10 +597,7 @@ export function CodexPoolNotice({
     inUse: source.effectiveSource,
     organizationAvailable: organizationOthersAvailable(source),
     // Only the workspace's own: automatic also lists the organization's here.
-    workspaceCount:
-      source.effectiveSource === "workspace"
-        ? codex.accounts.filter((account) => account.source !== "organization").length
-        : 0,
+    workspaceCount: source.effectiveSource === "workspace" ? ownCount : 0,
     organizationCount:
       source.effectiveSource === "organization" ? codex.accounts.length : organizationAccountCount,
     // The organization's accounts here are only this workspace's own, shared,
@@ -585,7 +606,7 @@ export function CodexPoolNotice({
       source.organizationCount === 0 &&
       source.workspaceSetAside === false &&
       codex.accounts.length > 0,
-    keptForPeople: keptForPeopleCount,
+    keptForPeople,
     canConnect: codex.canManage,
   });
   return (
@@ -622,7 +643,7 @@ export function codexPoolCopy({
   workspaceCount,
   organizationCount,
   onlyOwnShared = false,
-  keptForPeople = 0,
+  keptForPeople = [],
   canConnect,
 }: {
   mode: "automatic" | "workspace" | "organization" | "disabled";
@@ -637,7 +658,7 @@ export function codexPoolCopy({
    * migration merged): its pool doesn't list them, yet they serve those people
    * here while it uses its own accounts.
    */
-  keptForPeople?: number;
+  keptForPeople?: readonly string[];
   canConnect: boolean;
 }): { text: string; blocked: boolean } {
   const orgOne = organizationCount === 1;
@@ -657,12 +678,11 @@ export function codexPoolCopy({
       blocked: false,
     };
   }
-  const keptOne = keptForPeople === 1;
-  if (workspaceCount === 0 && keptForPeople > 0) {
+  const keptOne = keptForPeople.length === 1;
+  const keptNames = listNames(keptForPeople);
+  if (workspaceCount === 0 && keptForPeople.length > 0) {
     return {
-      text: `New Codex work can start only for the people chosen for this workspace's own ${
-        keptOne ? "account" : "accounts"
-      }. This workspace is set to use only its own accounts.`,
+      text: `New Codex work can start only for the people chosen for ${keptNames}, kept here as this workspace's own. This workspace is set to use only its own accounts.`,
       blocked: true,
     };
   }
@@ -672,28 +692,49 @@ export function codexPoolCopy({
       blocked: true,
     };
   }
-  const keptNote =
-    keptForPeople > 0
-      ? ` ${keptOne ? "Its account" : "Its accounts"} limited to chosen people ${
-          keptOne ? "serves" : "serve"
-        } only them.`
-      : "";
   const here = `this workspace's Codex ${workspaceCount === 1 ? "account" : "accounts"}`;
-  if (mode === "workspace") {
+  if (keptForPeople.length > 0) {
+    // Named, since its row is listed among the organization's; the rest of
+    // the organization's are the "other" ones.
+    const kept = `${keptNames}, kept here as this workspace's own, ${
+      keptOne ? "serves only the people chosen for it" : "serve only the people chosen for them"
+    }.`;
+    const others = `The organization's other ${orgOne ? "account is" : "accounts are"}`;
     return {
       text:
-        (organizationAvailable
-          ? `New work uses ${here}. ${capitalize(orgAccounts)} ${orgOne ? "is" : "are"} never used here, even if none are connected.`
-          : `New work uses only ${here}, never the organization's.`) + keptNote,
+        mode === "workspace"
+          ? `New work uses ${here}. ${kept}${
+              organizationAvailable ? ` ${others} never used here.` : ""
+            }`
+          : `New work uses ${here}. ${kept}${
+              organizationAvailable
+                ? ` ${others} set aside while ${workspaceCount === 1 ? "it's" : "these are"} connected.`
+                : ""
+            }`,
+      blocked: false,
+    };
+  }
+  if (mode === "workspace") {
+    return {
+      text: organizationAvailable
+        ? `New work uses ${here}. ${capitalize(orgAccounts)} ${orgOne ? "is" : "are"} never used here, even if none are connected.`
+        : `New work uses only ${here}, never the organization's.`,
       blocked: false,
     };
   }
   return {
     text: `New work uses ${here}. ${capitalize(orgAccounts)} ${orgOne ? "is" : "are"} set aside while ${
       workspaceCount === 1 ? "it's" : "these are"
-    } connected.${keptNote}`,
+    } connected.`,
     blocked: false,
   };
+}
+
+/** "A", "A and B", "A, B and C". */
+function listNames(names: readonly string[]): string {
+  return names.length <= 1
+    ? (names[0] ?? "")
+    : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
 }
 
 function capitalize(text: string): string {
