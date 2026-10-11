@@ -134,6 +134,8 @@ export function xaiSubscriptionFetch(base: XaiFetchLike): XaiFetchLike {
       // An already-cancelled request resolves no token and reserves nothing.
       init?.signal?.throwIfAborted();
       const token = refresh ? await context.refresh() : await context.getToken();
+      // A cancellation while the token resolved reserves nothing either.
+      init?.signal?.throwIfAborted();
       const headers = new Headers(originalHeaders);
       headers.set("authorization", `Bearer ${token.accessToken}`);
       headers.set("content-type", "application/json");

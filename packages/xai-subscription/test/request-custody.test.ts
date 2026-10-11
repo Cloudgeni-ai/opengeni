@@ -255,4 +255,42 @@ describe("SuperGrok request custody hooks", () => {
     expect(h.calls()).toBe(0);
     expect(h.order).toEqual([]);
   });
+
+  test("a cancellation while the token resolves reserves nothing", async () => {
+    const h = harness([() => sse({ type: "response.completed", response: { output: [] } })]);
+    const controller = new AbortController();
+    const reason = new Error("cancelled during token");
+    await expect(
+      h.send(
+        {
+          getToken: async () => {
+            controller.abort(reason);
+            return { accessToken: "access", userId: "user-1" };
+          },
+        },
+        { signal: controller.signal },
+      ),
+    ).rejects.toBe(reason);
+    expect(h.calls()).toBe(0);
+    expect(h.order).toEqual([]);
+  });
+
+  test("a cancellation during the 401 refresh reserves no retry and settles only the refused request", async () => {
+    const h = harness([() => new Response("unauthorized", { status: 401 })]);
+    const controller = new AbortController();
+    const reason = new Error("cancelled during refresh");
+    await expect(
+      h.send(
+        {
+          refresh: async () => {
+            controller.abort(reason);
+            return { accessToken: "fresh", userId: "user-1" };
+          },
+        },
+        { signal: controller.signal },
+      ),
+    ).rejects.toBe(reason);
+    expect(h.calls()).toBe(1);
+    expect(h.order).toEqual(["admit:request-1:1", "send:1", "settle:request-1:1:refused"]);
+  });
 });

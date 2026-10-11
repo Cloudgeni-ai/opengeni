@@ -592,7 +592,7 @@ test("a SuperGrok core source disconnect is recognised as a disconnect, as Codex
 });
 
 test("a core-placed SuperGrok turn offers no legacy image or video tool until X2a", () => {
-  // Source-level wiring check (the agent builder is not unit-constructible):
+  // Source-level wiring check, complementing the behavioural agent-build-core-xai-media.test.ts:
   // comments stripped, whitespace collapsed.
   const file = readFileSync(
     new URL("../src/activities/agent-turn/agent-build.ts", import.meta.url),
