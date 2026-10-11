@@ -40,6 +40,9 @@ const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const MIGRATION = "0689_subscription_core_codex_cutover.sql";
 // 0712 requires the committed 0689 cutover, so it is held back with it.
 const PRECURSOR = "0712_subscription_core_generic_precursor.sql";
+// 0713 keys and redefines objects 0689 creates: held back with it and
+// replayed right after it.
+const PROVIDER_KEYED_REACH = "0713_subscription_core_provider_keyed_reach.sql";
 // 0714 builds on 0712's receipts and patches its helpers; it follows 0712.
 const COMPAT = "0714_subscription_authority_compat.sql";
 const MODEL = "codex/gpt-5.5";
@@ -82,9 +85,9 @@ describe.skipIf(!realDb)(
       const owner = postgres(owned.ownerUrl, { max: 1 });
       try {
         await owner`CREATE TABLE schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`;
-        await owner`INSERT INTO schema_migrations(name) VALUES(${MIGRATION}), (${PRECURSOR}), (${COMPAT})`;
+        await owner`INSERT INTO schema_migrations(name) VALUES(${MIGRATION}), (${PRECURSOR}), (${PROVIDER_KEYED_REACH}), (${COMPAT})`;
         await migrate(owned.ownerUrl, undefined, { applicationDatabaseRoles: ["opengeni_app"] });
-        await owner`DELETE FROM schema_migrations WHERE name IN (${MIGRATION}, ${PRECURSOR}, ${COMPAT})`;
+        await owner`DELETE FROM schema_migrations WHERE name IN (${MIGRATION}, ${PRECURSOR}, ${PROVIDER_KEYED_REACH}, ${COMPAT})`;
       } finally {
         await owner.end();
       }
