@@ -16,6 +16,7 @@ import * as xaiCapacity from "../src/activities/agent-turn/xai-capacity";
 import {
   buildXaiCoreRequestAuthorization,
   selectXaiTurnCapacityByRoute,
+  xaiCoreLanesRecoverAfterCheckpoint,
   xaiCoreRequestOutcomeUnknown,
   xaiCoreTitleCustody,
   XAI_CORE_TURN_PROVIDER,
@@ -507,6 +508,63 @@ describe("SuperGrok request custody on the core", () => {
     expect(() => xaiCoreTitleCustody({ ...core, titleRequests: undefined }, authorization)).toThrow(
       "no session-title request custody",
     );
+  });
+
+  test("the lanes recover only after a committed history checkpoint with no unknown outcome", async () => {
+    const settledAfter = placedCore();
+    await (await send(settledAfter.authorization, [completed]).response).text();
+    expect(await xaiCoreLanesRecoverAfterCheckpoint(settledAfter.core, async () => {})).toBe(true);
+    expect(settledAfter.order.at(-1)).toBe("settle:operation-1:response_received");
+
+    const uncommitted = placedCore();
+    await (await send(uncommitted.authorization, [completed]).response).text();
+    expect(
+      await xaiCoreLanesRecoverAfterCheckpoint(uncommitted.core, async () => {
+        throw new Error("history commit failed");
+      }),
+    ).toBe(false);
+    // The completed response stays unsettled without its history.
+    expect(uncommitted.order).toEqual(["fence", "reserve:attempt-1:1:1:xai:1:1"]);
+
+    const unknown = placedCore();
+    await send(unknown.authorization, [
+      () => new Response("upstream gateway timeout", { status: 504 }),
+    ]).response.catch(() => undefined);
+    expect(await xaiCoreLanesRecoverAfterCheckpoint(unknown.core, async () => {})).toBe(false);
+  });
+
+  test("an unknown title-lane outcome is terminal for the turn", async () => {
+    const { core, authorization } = placedCore();
+    const title = sessionTitleXaiRequestContext(
+      {
+        clientVersion: "1.0.1",
+        sessionId: "session-1",
+        turnId: "turn-1",
+        getToken: authorization.getToken,
+        refresh: authorization.refresh,
+        resolveModel: (slug) => slug,
+        nextRequestId: () => "unused",
+      },
+      () => "attempt-1:1:1:xai:title:1",
+      xaiCoreTitleCustody(core, authorization),
+    );
+    const fetch = xaiSubscriptionFetch(
+      async () => new Response("upstream gateway timeout", { status: 504 }),
+    );
+    await xaiSubscriptionRequestStorage
+      .run(title, () =>
+        fetch("https://cli-chat-proxy.grok.com/v1/responses", {
+          method: "POST",
+          body: JSON.stringify({ model: "supergrok/grok-4.7", input: "title" }),
+        }),
+      )
+      .catch(() => undefined);
+    expect(core.requests!.hasUnknownOutcome()).toBe(false);
+    expect(core.titleRequests!.hasUnknownOutcome()).toBe(true);
+    expect(xaiCoreRequestOutcomeUnknown(new Error("plain"), core)).toMatchObject({
+      code: "subscription_core_request_outcome_unknown",
+    });
+    expect(await xaiCoreLanesRecoverAfterCheckpoint(core, async () => {})).toBe(false);
   });
 });
 

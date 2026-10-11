@@ -7,7 +7,6 @@
  * then, so every core entry point fails closed.
  */
 import {
-  CodexCredentialLeaseAttemptFencedError,
   readSubscriptionCoreProviderRoute,
   SUBSCRIPTION_CORE_XAI,
   SubscriptionCoreError,
@@ -53,10 +52,12 @@ export const XAI_CORE_TURN_PROVIDER: CoreTurnPlacementProvider = {
   leaseTtlMs: XAI_CREDENTIAL_LEASE_TTL_MS,
   lease: (deps) => deps.leases.xai,
   place: (db, request) => subscriptionCoreTurns(XAI).placeSubscriptionCoreTurn(db, request),
-  // Waiter wakes after a recovery arrive with the SuperGrok waits (X1b). A
-  // failure propagates, as Codex's does.
+  // Waiter wakes after a recovery arrive with the SuperGrok waits (X1b). As
+  // for Codex, a failed recovery is best effort and never fails placement.
   recoverHealth: async ({ db }, identity) => {
-    await subscriptionCoreTurns(XAI).recoverSubscriptionCoreConnectionHealth(db, identity);
+    await subscriptionCoreTurns(XAI)
+      .recoverSubscriptionCoreConnectionHealth(db, identity)
+      .catch(() => 0);
   },
   adopt: ({ providerTurn }, core, placement) => {
     providerTurn.xaiSubscriptionCore = core;
@@ -69,7 +70,9 @@ export const XAI_CORE_TURN_PROVIDER: CoreTurnPlacementProvider = {
   isSourceDisconnected: (db, identity, connectionId) =>
     subscriptionCoreRequests(XAI).isSubscriptionCoreSourceDisconnected(db, identity, connectionId),
   sourceDisconnectedError: () => XAI.errors.sourceDisconnected(),
-  isAttemptFenced: (error) => error instanceof CodexCredentialLeaseAttemptFencedError,
+  // SuperGrok records no Codex selection receipt, the only step that raises an
+  // attempt-fence error here; any other failure propagates.
+  isAttemptFenced: () => false,
 };
 
 /**

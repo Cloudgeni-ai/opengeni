@@ -55,7 +55,7 @@ function harness(responses: Array<() => Response | Promise<Response>>) {
   };
   const send = (
     overrides: Partial<XaiSubscriptionRequestContext> = {},
-    options: { custody?: boolean } = {},
+    options: { custody?: boolean; signal?: AbortSignal } = {},
   ) =>
     xaiSubscriptionRequestStorage.run(
       options.custody === false ? withoutCustody(context(overrides)) : context(overrides),
@@ -63,6 +63,7 @@ function harness(responses: Array<() => Response | Promise<Response>>) {
         wrapped(URL_RESPONSES, {
           method: "POST",
           body: JSON.stringify({ model: "supergrok/grok-4.6", input: "hello" }),
+          ...(options.signal ? { signal: options.signal } : {}),
         }),
     );
   return { order, admitted, settled, send, calls: () => call };
@@ -194,5 +195,42 @@ describe("SuperGrok request custody hooks", () => {
     const h = harness([() => sse({ type: "response.completed", response: { output: [] } })]);
     await drain(await h.send({}, { custody: false }));
     expect(h.order).toEqual(["send:1"]);
+  });
+
+  test("a cancellation between admission and the send sends nothing and settles refused", async () => {
+    const h = harness([() => sse({ type: "response.completed", response: { output: [] } })]);
+    const controller = new AbortController();
+    const reason = new Error("cancelled");
+    await expect(
+      h.send(
+        {
+          beforeProviderDispatch: async (request) => {
+            h.order.push(`admit:${request.requestId}:${request.transportAttempt}`);
+            controller.abort(reason);
+          },
+        },
+        { signal: controller.signal },
+      ),
+    ).rejects.toBe(reason);
+    expect(h.calls()).toBe(0);
+    expect(h.order).toEqual(["admit:request-1:1", "settle:request-1:1:refused"]);
+  });
+
+  test("a failed body read still settles once: refused for an error status, unknown for a 200", async () => {
+    const broken = (status: number) => () =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.error(new Error("connection reset"));
+          },
+        }),
+        { status, headers: { "content-type": "application/json" } },
+      );
+    const failed = harness([broken(500)]);
+    await expect(failed.send()).rejects.toThrow("connection reset");
+    expect(failed.settled.map((request) => request.outcome)).toEqual(["refused"]);
+    const completed = harness([broken(200)]);
+    await expect(completed.send()).rejects.toThrow("connection reset");
+    expect(completed.settled.map((request) => request.outcome)).toEqual(["unknown"]);
   });
 });

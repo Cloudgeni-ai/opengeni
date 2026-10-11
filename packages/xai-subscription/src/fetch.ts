@@ -176,6 +176,12 @@ export function xaiSubscriptionFetch(base: XaiFetchLike): XaiFetchLike {
         // physical fetch; a refusal here sends nothing.
         await context.beforeProviderDispatch?.({ requestId, transportAttempt });
         audit.admitted = true;
+        if (init?.signal?.aborted) {
+          // Cancelled between admission and the send: nothing reached the
+          // provider, so the admitted request settles as refused, not unknown.
+          audit.refused = true;
+          throw init.signal.reason ?? new DOMException("The request was aborted", "AbortError");
+        }
         response = await base(url, {
           ...init,
           method: init?.method ?? (input instanceof Request ? input.method : "POST"),
@@ -239,7 +245,9 @@ async function normalizeResponse(
   onFinalContextUsage: ((usage: XaiFinalContextUsage) => void) | undefined,
 ): Promise<Response> {
   if (!response.ok) {
-    const bytes = new Uint8Array(await response.arrayBuffer());
+    const bytes = new Uint8Array(
+      await readBodySettled(audit, response, () => response.arrayBuffer()),
+    );
     const bounded =
       bytes.byteLength > MAX_ERROR_BODY_BYTES ? bytes.slice(0, MAX_ERROR_BODY_BYTES) : bytes;
     const headers = new Headers(response.headers);
@@ -267,7 +275,7 @@ async function normalizeResponse(
   }
   const contentType = response.headers.get("content-type") ?? "";
   if (!contentType.includes("text/event-stream")) {
-    const value = await response.json();
+    const value = await readBodySettled(audit, response, () => response.json());
     const normalized = normalizeXaiResponseEventJson({
       type: "response.completed",
       response: value,
@@ -624,6 +632,28 @@ function xaiSseTerminalError(
     diagnosticTruncated: eventTypeField.truncated || codeField.truncated || messageField.truncated,
     headers,
   });
+}
+
+/**
+ * Read a whole non-stream body; a failed read still settles the request once:
+ * refused for a definite error status, unknown otherwise (a 200 was produced).
+ */
+async function readBodySettled<T>(
+  audit: RequestAudit,
+  response: Response,
+  read: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await read();
+  } catch (error) {
+    await emitRequestEvent(audit, {
+      phase: "failed",
+      responseObserved: true,
+      status: response.status,
+      ...providerRequestIdFields(response.headers),
+    }).catch(() => undefined);
+    throw error;
+  }
 }
 
 function settleProviderRequest(
