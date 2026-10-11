@@ -11,9 +11,6 @@ import {
   markVideoGenerationRetaining,
   markVideoGenerationSubmissionIntent,
   markVideoGenerationSubmissionUncertain,
-  materializeXaiCredentialForRun,
-  refreshXaiSubscriptionCredentialSerialized,
-  rotateVideoGenerationCredential,
   markVideoGenerationTerminalUpdate,
   markVideoGenerationTerminalUpdateInTransaction,
   mediaGenerationResultForStoredOperation,
@@ -21,7 +18,6 @@ import {
   rescheduleVideoGenerationOperation,
   settleVideoGenerationFailure,
   settleVideoGenerationReady,
-  type XaiCredentialForRun,
   type VideoGenerationOperationWithReferences,
   cancelVideoGenerationBeforeSubmit,
   SUBSCRIPTION_CORE_XAI,
@@ -42,15 +38,9 @@ import {
   downloadGeneratedVideoToVerifiedTemp,
   retainVerifiedGeneratedVideo,
 } from "./video-output-retention";
+import { decryptVideoGenerationCredential } from "./video-generation-credential";
 import {
-  decryptVideoGenerationCredential,
-  encryptVideoGenerationXaiCredential,
-  type VideoGenerationProviderCredential,
-} from "./video-generation-credential";
-import {
-  refreshXaiToken,
   XaiSubscriptionError,
-  xaiAccessTokenExpiry,
   type XaiFetch,
   type XaiSubscriptionRequestContext,
 } from "@opengeni/xai-subscription";
@@ -129,11 +119,8 @@ export async function reconcileVideoGenerationOperation(
     return await subscriptionConnectionUnavailable(service, input, operation);
   }
   return await reconcileWithProviderCredential(service, input, storage, key, operation, {
-    apiKey: providerCredential.kind === "api-key" ? providerCredential.apiKey : null,
-    xai:
-      providerCredential.kind === "xai-subscription"
-        ? { auth: await durableXaiVideoAuth(service, operation, key, providerCredential) }
-        : null,
+    apiKey: providerCredential.apiKey,
+    xai: null,
   });
 }
 
@@ -721,114 +708,6 @@ function requireApiKey(value: string | null): string {
 function requireXaiAuth(value: XaiVideoAuth | null): XaiVideoAuth {
   if (!value) throw new Error("SuperGrok video authorization is unavailable");
   return value;
-}
-
-/**
- * A paid video job outlives the connected-account row. Keep its frozen OAuth
- * lease usable after disconnect, and durably replace rotated refresh tokens
- * before exposing them to another provider call. The shared account row is a
- * best-effort mirror only; it is never the operation's recovery authority.
- */
-async function durableXaiVideoAuth(
-  service: TurnActivityServices,
-  operation: VideoGenerationOperationWithReferences,
-  key: Uint8Array,
-  credential: Extract<VideoGenerationProviderCredential, { kind: "xai-subscription" }>,
-): Promise<Pick<XaiSubscriptionRequestContext, "getToken" | "refresh">> {
-  let current = credential;
-  const frozenEncrypted = operation.credentialEncrypted;
-  if (!frozenEncrypted) throw new Error("SuperGrok video credential lease is unavailable");
-  let currentEncrypted: string = frozenEncrypted;
-
-  let connectedAccount: XaiCredentialForRun | null = null;
-  try {
-    connectedAccount = await materializeXaiCredentialForRun(service.db, {
-      workspaceId: operation.workspaceId,
-      subjectId: current.subjectId,
-      credentialId: current.credentialId,
-      authoritySnapshot: current.authoritySnapshot,
-      encryptionKey: key,
-    });
-  } catch {
-    // Disconnect/revocation must not cancel a previously accepted paid job.
-  }
-
-  return {
-    getToken: async () => ({
-      accessToken: current.accessToken,
-      userId: current.userId,
-    }),
-    refresh: async () => {
-      let next: typeof current | null = null;
-      if (connectedAccount) {
-        try {
-          const result = await refreshXaiSubscriptionCredentialSerialized(service.db, {
-            accountId: operation.accountId,
-            workspaceId: operation.workspaceId,
-            subjectId: current.subjectId,
-            credentialId: current.credentialId,
-            authoritySnapshot: current.authoritySnapshot,
-            encryptionKey: key,
-            observedAccessToken: current.accessToken,
-            observedRefreshToken: current.refreshToken,
-            refresh: async (shared) => {
-              const refreshToken = shared.secret.refreshToken;
-              if (!refreshToken) {
-                throw new Error("The connected SuperGrok account cannot be refreshed");
-              }
-              const tokens = await refreshXaiToken(refreshToken);
-              return {
-                secret: {
-                  version: 1,
-                  accessToken: tokens.accessToken,
-                  refreshToken: tokens.refreshToken,
-                },
-                expiresAt:
-                  xaiAccessTokenExpiry(tokens.accessToken) ??
-                  new Date(Date.now() + tokens.expiresInSeconds * 1_000),
-              };
-            },
-          });
-          connectedAccount = result.credential;
-          if (
-            connectedAccount.secret.accessToken &&
-            connectedAccount.secret.refreshToken &&
-            connectedAccount.providerAccountId
-          ) {
-            next = Object.freeze({
-              ...current,
-              accessToken: connectedAccount.secret.accessToken,
-              refreshToken: connectedAccount.secret.refreshToken,
-              userId: connectedAccount.providerAccountId,
-            });
-          }
-        } catch {
-          // Disconnect/revocation must not cancel a previously accepted paid job.
-          connectedAccount = null;
-        }
-      }
-      if (!next) {
-        const tokens = await refreshXaiToken(current.refreshToken);
-        next = Object.freeze({
-          ...current,
-          accessToken: tokens.accessToken,
-          refreshToken: tokens.refreshToken,
-        });
-      }
-      const nextEncrypted = encryptVideoGenerationXaiCredential(key, next);
-      await rotateVideoGenerationCredential(service.db, {
-        accountId: operation.accountId,
-        workspaceId: operation.workspaceId,
-        operationId: operation.id,
-        requestDigest: operation.requestDigest,
-        expectedCredentialEncrypted: currentEncrypted,
-        credentialEncrypted: nextEncrypted,
-      });
-      current = next;
-      currentEncrypted = nextEncrypted;
-      return { accessToken: current.accessToken, userId: current.userId };
-    },
-  };
 }
 
 function isPermanentProviderFailure(error: unknown): boolean {

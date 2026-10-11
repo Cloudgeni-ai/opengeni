@@ -4,7 +4,6 @@ import {
   CLAUDE_CREDENTIAL_LEASE_TTL_MS,
   heartbeatClaudeCredentialLeaseUntil,
   releaseSubscriptionTurnLease,
-  heartbeatXaiCredentialLeaseUntil,
   assertSubscriptionTurnLeaseCurrent,
   renewSubscriptionTurnLease,
   withRlsContext,
@@ -313,33 +312,15 @@ class ScopedSubscriptionTurnLease extends SubscriptionTurnLease {
 }
 
 /**
- * The SuperGrok credential holder: the legacy scoped lease keyed by subject
- * until the organization's SuperGrok cutover, the core turn lease (provider
- * `xai`) after core placement. Both modes keep the legacy lost error code
- * and warnings.
+ * The SuperGrok credential holder: the core turn lease (provider `xai`),
+ * held only after core placement (SuperGrok has no legacy lease after its
+ * cutover). It keeps the legacy lost error code and warnings.
  */
 export class XaiTurnLease extends CoreSubscriptionTurnLease {
-  /** The legacy lease's subject; null on the core path. */
-  subjectId: string | null = null;
   constructor(deps: TurnCredentialLeaseDeps) {
     super(
       deps,
-      {
-        id: "xai",
-        displayName: "SuperGrok",
-        ttlMs: XAI_CREDENTIAL_LEASE_TTL_MS,
-        legacyHeartbeat: ({ turnId, holderId, generation }) =>
-          this.subjectId
-            ? heartbeatXaiCredentialLeaseUntil(deps.db, {
-                workspaceId: deps.workspaceId,
-                subjectId: this.subjectId,
-                turnId,
-                holderId,
-                generation,
-                leaseTtlMs: XAI_CREDENTIAL_LEASE_TTL_MS,
-              })
-            : Promise.resolve(null),
-      },
+      { id: "xai", displayName: "SuperGrok", ttlMs: XAI_CREDENTIAL_LEASE_TTL_MS },
       scopedLeaseCallbacks(deps, { name: "SuperGrok", code: "xai_credential_lease_lost" }),
     );
   }

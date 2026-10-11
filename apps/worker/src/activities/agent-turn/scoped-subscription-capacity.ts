@@ -1,12 +1,6 @@
 import { connectionModelAllowed, subscriptionPoolWorkerSubject } from "@opengeni/db";
 import {
   getSessionGoal,
-  acquireXaiCredentialLease,
-  getXaiSessionAccountPin,
-  setXaiSessionAccountPin,
-  recordXaiSessionLastAccount,
-  XAI_CREDENTIAL_LEASE_TTL_MS,
-  armXaiCapacityWait,
   acquireClaudeCredentialLease,
   getClaudeSessionAccountPin,
   setClaudeSessionAccountPin,
@@ -21,15 +15,19 @@ import {
   subscriptionCapacityArmingDiagnostic,
   subscriptionCapacityArmingFailure,
 } from "./subscription-capacity-arming";
-import { refreshExhaustedXaiQuota } from "../xai-quota";
 import {
   startSubscriptionCoreShadow,
   subscriptionCoreShadowRequest,
 } from "./subscription-core-shadow";
 
+/**
+ * The legacy scoped-subscription capacity phase, for Claude until its own
+ * cutover. SuperGrok's legacy selection was deleted with its runtime (M4 X4):
+ * SuperGrok turns place on the shared core (`selectXaiTurnCapacityByRoute`).
+ */
 async function selectScopedSubscriptionTurnCapacity(
   deps: CapacityPhaseDeps,
-  provider: "xai" | "claude",
+  provider: "claude",
 ): Promise<CapacityPhaseOutcome> {
   const {
     input,
@@ -45,23 +43,20 @@ async function selectScopedSubscriptionTurnCapacity(
     turn,
   } = deps;
 
-  const claude = provider === "claude";
-  const name = claude ? "Claude" : "SuperGrok";
-  const acquireLease = claude ? acquireClaudeCredentialLease : acquireXaiCredentialLease;
-  const getPin = claude ? getClaudeSessionAccountPin : getXaiSessionAccountPin;
-  const setPin = claude ? setClaudeSessionAccountPin : setXaiSessionAccountPin;
-  const recordLastAccount = claude ? recordClaudeSessionLastAccount : recordXaiSessionLastAccount;
-  const armWait = claude ? armClaudeCapacityWait : armXaiCapacityWait;
-  const lease = claude ? leases.claude : leases.xai;
-  const credentialKey = claude ? "effectiveClaudeCredentialId" : "effectiveXaiCredentialId";
-  const rotationKey = claude ? "claudeRotationEnabled" : "xaiRotationEnabled";
-  const authorityKey = claude ? "claudeAuthoritySnapshot" : "xaiAuthoritySnapshot";
-  if (claude ? billingState.isClaudeTurn : billingState.isXaiTurn) {
-    const authoritySnapshot = claude
-      ? turn.claudeProviderAccountAuthoritySnapshot
-      : turn.xaiProviderAccountAuthoritySnapshot;
+  const name = "Claude";
+  const acquireLease = acquireClaudeCredentialLease;
+  const getPin = getClaudeSessionAccountPin;
+  const setPin = setClaudeSessionAccountPin;
+  const recordLastAccount = recordClaudeSessionLastAccount;
+  const armWait = armClaudeCapacityWait;
+  const lease = leases.claude;
+  const credentialKey = "effectiveClaudeCredentialId";
+  const rotationKey = "claudeRotationEnabled";
+  const authorityKey = "claudeAuthoritySnapshot";
+  if (billingState.isClaudeTurn) {
+    const authoritySnapshot = turn.claudeProviderAccountAuthoritySnapshot;
     providerTurn[authorityKey] = authoritySnapshot;
-    if (claude) providerTurn.claudeUpstreamModelId = deps.turnExecutionPolicy.upstreamModelId;
+    providerTurn.claudeUpstreamModelId = deps.turnExecutionPolicy.upstreamModelId;
     const subjectId =
       authoritySnapshot.scope === "user"
         ? turn.initiatingHumanSubjectId
@@ -76,17 +71,6 @@ async function selectScopedSubscriptionTurnCapacity(
       turnId: turn.id,
       authoritySnapshot,
     });
-    if (!claude)
-      await refreshExhaustedXaiQuota({
-        db,
-        settings: deps.settings,
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        subjectId,
-        sessionId: input.sessionId,
-        turnId: turn.id,
-        authoritySnapshot,
-      });
     const leaseStartedAtMs = performance.now();
     const leased = await acquireLease(db, {
       upstreamModelId: deps.turnExecutionPolicy.upstreamModelId,
@@ -110,7 +94,7 @@ async function selectScopedSubscriptionTurnCapacity(
     lease.holderId = leased.holderId;
     lease.generation = leased.generation;
     lease.confirmedUntilMs = leased.leasedUntil
-      ? leaseStartedAtMs + (claude ? CLAUDE_CREDENTIAL_LEASE_TTL_MS : XAI_CREDENTIAL_LEASE_TTL_MS)
+      ? leaseStartedAtMs + CLAUDE_CREDENTIAL_LEASE_TTL_MS
       : null;
     lease.held =
       providerTurn[credentialKey] !== null &&
@@ -191,15 +175,7 @@ async function selectScopedSubscriptionTurnCapacity(
       }
       const goal = await getSessionGoal(db, input.workspaceId, input.sessionId).catch(() => null);
       const activeGoal = goal?.status === "active" ? goal : null;
-      const now = new Date();
-      const futureResets = leased.accounts
-        .map((account) => account.exhaustedUntil)
-        .filter((date): date is Date => date !== null && date > now);
-      const earliestResetAt = claude
-        ? (leased.nextCheckAt ?? null)
-        : futureResets.length
-          ? new Date(Math.min(...futureResets.map((date) => date.getTime())))
-          : null;
+      const earliestResetAt = leased.nextCheckAt ?? null;
       const error =
         allocatorEnabled === 0
           ? "All connected " + name + " subscription accounts are disabled for allocation"
@@ -312,11 +288,7 @@ async function selectScopedSubscriptionTurnCapacity(
         pinSource: "policy",
         expectedVersion: sessionPin?.version ?? null,
       }).catch((error: unknown) => {
-        if (
-          error instanceof Error &&
-          error.message === (claude ? "Claude" : "xAI") + " session pin changed"
-        )
-          return;
+        if (error instanceof Error && error.message === "Claude session pin changed") return;
         throw error;
       });
     } else if (!leased.rotationEnabled && sessionPin?.pinSource === "policy") {
@@ -331,11 +303,7 @@ async function selectScopedSubscriptionTurnCapacity(
         pinSource: null,
         expectedVersion: sessionPin.version,
       }).catch((error: unknown) => {
-        if (
-          error instanceof Error &&
-          error.message === (claude ? "Claude" : "xAI") + " session pin changed"
-        )
-          return;
+        if (error instanceof Error && error.message === "Claude session pin changed") return;
         throw error;
       });
     }
@@ -353,7 +321,5 @@ async function selectScopedSubscriptionTurnCapacity(
   return { ok: true };
 }
 
-export const selectXaiTurnCapacity = (deps: CapacityPhaseDeps) =>
-  selectScopedSubscriptionTurnCapacity(deps, "xai");
 export const selectClaudeTurnCapacity = (deps: CapacityPhaseDeps) =>
   selectScopedSubscriptionTurnCapacity(deps, "claude");

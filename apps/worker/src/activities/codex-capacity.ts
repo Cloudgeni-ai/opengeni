@@ -1,15 +1,10 @@
 import {
   getSubscriptionCoreCapacityWaitForSession,
   subscriptionCoreCapacityWaitRef,
-  getXaiCapacityWaitForSession,
   getClaudeCapacityWaitForSession,
-  resolveClaudeWaiterSubject,
   reconcileClaudeCapacityWait as reconcileClaudeCapacityWaitDb,
-  resolveXaiWaiterSubject,
-  reconcileXaiCapacityWait as reconcileXaiCapacityWaitDb,
 } from "@opengeni/db";
 
-import { refreshExhaustedXaiQuota } from "./xai-quota";
 import {
   reconcileCoreCapacityWait,
   reconcileCoreCodexCapacityWait,
@@ -28,26 +23,18 @@ export function createCodexCapacityActivities(services: () => Promise<ControlAct
     const { db } = await services();
     // A core waiter (shared subscription core) is the only waiter written
     // after its provider's cutover. A Codex one keeps the legacy Codex
-    // reference shape; a SuperGrok one carries `provider: "xai"`, so its
-    // reconcile also looks the core up first.
+    // reference shape; a SuperGrok one carries `provider: "xai"`. Only Claude
+    // still has a legacy waiter.
     const coreWaiter = await getSubscriptionCoreCapacityWaitForSession(
       db,
       input.workspaceId,
       input.sessionId,
     );
     if (coreWaiter) return subscriptionCoreCapacityWaitRef(coreWaiter);
-    const xaiWaiter = await getXaiCapacityWaitForSession(db, input.workspaceId, input.sessionId);
-    const claudeWaiter = xaiWaiter
-      ? null
-      : await getClaudeCapacityWaitForSession(db, input.workspaceId, input.sessionId);
-    const waiter = xaiWaiter ?? claudeWaiter;
+    const waiter = await getClaudeCapacityWaitForSession(db, input.workspaceId, input.sessionId);
     return waiter
       ? {
-          ...(xaiWaiter
-            ? { provider: "xai" as const }
-            : claudeWaiter
-              ? { provider: "claude" as const }
-              : {}),
+          provider: "claude" as const,
           waiterId: waiter.id,
           generation: waiter.generation,
           // A capacity mutation may have committed while its Temporal signal
@@ -68,9 +55,10 @@ export function createCodexCapacityActivities(services: () => Promise<ControlAct
   ): Promise<ReconcileCodexCapacityWaitResult> {
     const resolved = await services();
     if (input.provider === "xai") {
-      // The core waiter by its exact id and generation first: a SuperGrok
-      // waiter the cutover moved to the core keeps both, so a history that
-      // recorded the legacy reference reconciles against the core waiter.
+      // SuperGrok waiters live only on the core: the cutover moved each one
+      // there with its id and generation, so a history that recorded the
+      // legacy reference reconciles against the core waiter. Anything else
+      // is stale.
       const core = await reconcileCoreCapacityWait(resolved, XAI_CORE_WAIT_BINDING, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
@@ -78,30 +66,18 @@ export function createCodexCapacityActivities(services: () => Promise<ControlAct
         waiterId: input.waiterId,
         generation: input.generation,
       });
-      if (core) return core;
+      return core ?? { action: "stale" };
     }
-    if (input.provider === "xai" || input.provider === "claude") {
-      const claude = input.provider === "claude";
-      const getWaiter = claude ? getClaudeCapacityWaitForSession : getXaiCapacityWaitForSession;
-      const resolveAuthority = claude ? resolveClaudeWaiterSubject : resolveXaiWaiterSubject;
-      const reconcile = claude ? reconcileClaudeCapacityWaitDb : reconcileXaiCapacityWaitDb;
-      const current = await getWaiter(resolved.db, input.workspaceId, input.sessionId);
+    if (input.provider === "claude") {
+      const current = await getClaudeCapacityWaitForSession(
+        resolved.db,
+        input.workspaceId,
+        input.sessionId,
+      );
       if (!current || current.id !== input.waiterId || current.generation !== input.generation) {
         return { action: "stale" };
       }
-      const authority = await resolveAuthority(resolved.db, input.workspaceId, input.sessionId);
-      if (authority && !claude)
-        await refreshExhaustedXaiQuota({
-          db: resolved.db,
-          settings: resolved.settings,
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          turnId: authority.turnId,
-          subjectId: authority.subjectId,
-          authoritySnapshot: authority.snapshot,
-        });
-      const result = await reconcile(resolved.db, {
+      const result = await reconcileClaudeCapacityWaitDb(resolved.db, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,

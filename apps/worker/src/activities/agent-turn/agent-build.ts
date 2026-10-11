@@ -1,9 +1,4 @@
 import {
-  selectXaiCredentialForUse,
-  materializeXaiCredentialForRun,
-  resolveXaiProviderAccountAuthoritySnapshotForAcceptance,
-  getXaiSessionAccountPin,
-  setXaiSessionAccountPin,
   getWorkspaceVideoGenerationPolicy,
   loadWorkspaceVercelAiGatewayCredentialLease,
   getExternalLinkTurnAuthorization,
@@ -29,21 +24,16 @@ import {
 } from "@opengeni/runtime";
 import {
   serviceTierForLatencyMode,
-  environmentsEncryptionKeyBytes,
   WORKSPACE_GATEWAY_PROVIDER_ID,
   resolveModelProvider,
   type Settings,
 } from "@opengeni/config";
 import { type CodexRequestContext, supportsReasoningConfiguration } from "@opengeni/codex";
-import {
-  executeCoreXaiImageGeneration,
-  executeXaiSubscriptionImageGeneration,
-} from "../xai-image-generation";
+import { executeCoreXaiImageGeneration } from "../xai-image-generation";
 import { rigProviderImageContentHash, videoGenerationCapabilitiesForPolicy } from "@opengeni/core";
 import {
   admitVideoGenerationRequest,
   managedVideoGenerationCredentialLease,
-  xaiVideoGenerationCredentialLease,
   type VideoGenerationCredentialLease,
 } from "../video-generation-admission";
 import { VideoReferenceInputError } from "../video-reference-staging";
@@ -402,8 +392,9 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
 
     if (resolvedModel?.provider.kind === "xai-subscription") {
       // A SuperGrok turn placed by the shared core generates images on its own
-      // placed connection under an `image` operation lease; the legacy
-      // credential tables and the session binding are never touched.
+      // placed connection under an `image` operation lease; the session
+      // binding is never touched. A turn without a core placement offers no
+      // image tool (SuperGrok has no legacy path after its cutover).
       const core = providerTurn.xaiSubscriptionCore;
       if (core) {
         const executionGeneration = leases.xai.generation;
@@ -438,38 +429,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
           },
         };
       }
-      const imageAuthority = connectedSubscriptionImageGenerationAuthority(
-        providerTurn.xaiRequestContext,
-        providerTurn.effectiveXaiCredentialId,
-      );
-      if (!imageAuthority) return {};
-      return {
-        imageGeneration: {
-          kind: "provider_adapter",
-          execute: async ({ prompt, references }, { toolCallId }) => {
-            const referenceResolution = await resolveImageReferences(references);
-            if (referenceResolution.status === "rejected") return referenceResolution.result;
-            const receipt = await executeXaiSubscriptionImageGeneration({
-              db,
-              objectStorage,
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              turnId: turn.id,
-              attemptId: input.attemptId,
-              toolCallId,
-              prompt,
-              references: referenceResolution.references,
-              credentialId: imageAuthority.credentialId,
-              xaiContext: imageAuthority.credentialContext,
-              ...(runtimeCancellationSignal ? { abortSignal: runtimeCancellationSignal } : {}),
-            });
-            media.rememberGeneratedImageCreatedThisTurn(receipt);
-            await media.materializeGeneratedImage(receipt);
-            return receipt;
-          },
-        },
-      };
+      return {};
     }
 
     const gatewayResolution = resolveModelProvider(
@@ -550,73 +510,6 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
             sessionId: input.sessionId,
           },
         );
-      }
-      const encryptionKey = environmentsEncryptionKeyBytes(eventing.modelRunSettings);
-      const subjectId = leases.xai.subjectId ?? turn.initiatingHumanSubjectId;
-      if (route === "legacy" && encryptionKey && subjectId) {
-        const authoritySnapshot =
-          providerTurn.xaiAuthoritySnapshot ??
-          (await resolveXaiProviderAccountAuthoritySnapshotForAcceptance(db, {
-            workspaceId: input.workspaceId,
-            subjectId,
-          }));
-        const pin = await getXaiSessionAccountPin(db, {
-          workspaceId: input.workspaceId,
-          subjectId,
-          sessionId: input.sessionId,
-          turnId: turn.id,
-          authoritySnapshot,
-        });
-        const selected = providerTurn.effectiveXaiCredentialId
-          ? {
-              credentialId: providerTurn.effectiveXaiCredentialId,
-              rotationEnabled: providerTurn.xaiRotationEnabled,
-            }
-          : await selectXaiCredentialForUse(db, {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              subjectId,
-              authoritySnapshot,
-              shardKey: input.sessionId,
-              pinnedCredentialId: pin?.pinnedCredentialId ?? null,
-              pinSource:
-                pin?.pinSource === "manual" || pin?.pinSource === "policy" ? pin.pinSource : null,
-            });
-        if (selected.credentialId) {
-          if (
-            selected.rotationEnabled &&
-            pin?.pinSource !== "manual" &&
-            pin?.pinnedCredentialId !== selected.credentialId
-          ) {
-            await setXaiSessionAccountPin(db, {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              subjectId,
-              sessionId: input.sessionId,
-              turnId: turn.id,
-              authoritySnapshot,
-              credentialId: selected.credentialId,
-              pinSource: "policy",
-              expectedVersion: pin?.version ?? null,
-            }).catch((error: unknown) => {
-              if (error instanceof Error && error.message === "xAI session pin changed") return;
-              throw error;
-            });
-          }
-          const credential = await materializeXaiCredentialForRun(db, {
-            workspaceId: input.workspaceId,
-            subjectId,
-            credentialId: selected.credentialId,
-            authoritySnapshot,
-            encryptionKey,
-          });
-          videoGenerationCredential = xaiVideoGenerationCredentialLease({
-            settings: eventing.modelRunSettings,
-            credential,
-            subjectId,
-            authoritySnapshot,
-          });
-        }
       }
     }
   }

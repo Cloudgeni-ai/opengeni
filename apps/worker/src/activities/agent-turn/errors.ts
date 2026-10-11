@@ -1444,35 +1444,6 @@ export function isClaudeSubscriptionTransportError(error: unknown): boolean {
   return false;
 }
 
-export type XaiCredentialFailure = {
-  kind: "auth" | "forbidden" | "rate_limit";
-  cooldownMs: number | null;
-};
-
-/**
- * Only definitive SuperGrok account refusals may move the same logical turn to
- * another credential. A marked HTTP 401/403/429, or an HTTP 200 SSE terminal
- * that is a rate-limit/capacity diagnostic, proves inference was refused
- * without an accepted model response; refresh relogin is equally definitive.
- * The legacy SuperGrok path's view of `classifyXaiProviderError`.
- */
-export function classifyXaiCredentialFailure(error: unknown): XaiCredentialFailure | null {
-  const outcome = classifyXaiProviderError(error);
-  switch (outcome?.kind) {
-    case "unauthorized":
-      return { kind: "auth", cooldownMs: null };
-    case "forbidden":
-      return { kind: "forbidden", cooldownMs: null };
-    case "rate_limited":
-      return {
-        kind: "rate_limit",
-        cooldownMs: outcome.retryAfterMs ?? PROVIDER_BACKPRESSURE_DELAY_MS,
-      };
-    default:
-      return null;
-  }
-}
-
 /**
  * SuperGrok's classification of a failed model request as a shared provider
  * outcome (the adapter's `classifyError`, SuperGrok track X1b): a refresh
@@ -2360,10 +2331,16 @@ export function codexUsageLimitFailurePayload(
 // goal re-evaluates at most this far out (it will re-pause if still capped).
 export const CODEX_USAGE_LIMIT_MAX_RESUME_MS = 60 * 60_000; // 1h
 
+/** A definitive refusal of the serving account on the scoped legacy (Claude) path. */
+export type ScopedCredentialFailure = {
+  kind: "auth" | "forbidden" | "rate_limit";
+  cooldownMs: number | null;
+};
+
 /** Only typed provider backpressure or a verified reconnect requirement can rotate Claude. */
 export function classifyClaudeCredentialFailure(
   error: unknown,
-): (XaiCredentialFailure & { requestId?: string }) | null {
+): (ScopedCredentialFailure & { requestId?: string }) | null {
   if (isProviderSafetyRefusal(error)) return null;
   let current: unknown = error;
   for (let depth = 0; depth < 6 && current instanceof Error; depth++) {

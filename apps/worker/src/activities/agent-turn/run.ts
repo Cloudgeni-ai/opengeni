@@ -56,11 +56,7 @@ import {
   xaiSubscriptionRequestStorage,
   type XaiSubscriptionRequestContext,
 } from "@opengeni/xai-subscription";
-import {
-  buildXaiTurnRequestAuthorization,
-  xaiTurnRequestContext,
-  type XaiTurnRequestContextOptions,
-} from "../xai-auth";
+import { xaiTurnRequestContext, type XaiTurnRequestContextOptions } from "../xai-auth";
 import { TurnAttemptFencedError } from "../turn-attempt-fenced";
 import { currentActivityContext } from "../streaming";
 import type {
@@ -125,7 +121,7 @@ import {
   establishTurnSandbox,
   bindLazySandboxProvisioner,
 } from "./sandbox-establish";
-import { selectClaudeTurnCapacity } from "./xai-capacity";
+import { selectClaudeTurnCapacity } from "./scoped-subscription-capacity";
 import {
   buildXaiCoreRequestAuthorization,
   selectXaiTurnCapacityByRoute,
@@ -673,7 +669,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             subjectId: turn.initiatingHumanSubjectId ?? "worker:model-access",
             modelId: turnExecutionPolicy.productModelId,
             codexCredentialId: providerTurn.effectiveCodexCredentialId,
-            xaiCredentialId: providerTurn.effectiveXaiCredentialId,
             claudeCredentialId: providerTurn.effectiveClaudeCredentialId,
             claudeAuthoritySnapshot: turn.claudeProviderAccountAuthoritySnapshot,
           });
@@ -974,7 +969,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           let xaiCoreAuthorization: XaiCoreRequestAuthorization | null = null;
           if (resolvedModel?.provider.kind === "xai-subscription") {
             const xaiCore = providerTurn.xaiSubscriptionCore;
-            if (!providerTurn.effectiveXaiCredentialId || (!xaiCore && !leases.xai.subjectId)) {
+            if (!providerTurn.effectiveXaiCredentialId || !xaiCore) {
               throw new Error("SuperGrok subscription execution has no leased credential");
             }
             let xaiModelRequestSequence = 0;
@@ -1122,34 +1117,22 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 }
               },
             };
-            // On the shared core the bearer, refresh and request custody come
-            // from the core placement; the legacy path keeps its own.
-            xaiCoreAuthorization = xaiCore
-              ? buildXaiCoreRequestAuthorization({
-                  db,
-                  settings: runSettings,
-                  core: xaiCore,
-                  lease: leases.xai,
-                  execution: {
-                    attemptId: input.attemptId,
-                    executionGeneration: attempt.executionGeneration!,
-                  },
-                })
-              : null;
-            providerTurn.xaiRequestContext = xaiCoreAuthorization
-              ? xaiTurnRequestContext(xaiRequestOptions, xaiCoreAuthorization)
-              : (
-                  await buildXaiTurnRequestAuthorization({
-                    db,
-                    settings: runSettings,
-                    accountId: input.accountId,
-                    workspaceId: input.workspaceId,
-                    subjectId: leases.xai.subjectId!,
-                    credentialId: providerTurn.effectiveXaiCredentialId,
-                    authoritySnapshot: turn.xaiProviderAccountAuthoritySnapshot,
-                    ...xaiRequestOptions,
-                  })
-                ).context;
+            // The bearer, refresh and request custody come from the core
+            // placement.
+            xaiCoreAuthorization = buildXaiCoreRequestAuthorization({
+              db,
+              settings: runSettings,
+              core: xaiCore,
+              lease: leases.xai,
+              execution: {
+                attemptId: input.attemptId,
+                executionGeneration: attempt.executionGeneration!,
+              },
+            });
+            providerTurn.xaiRequestContext = xaiTurnRequestContext(
+              xaiRequestOptions,
+              xaiCoreAuthorization,
+            );
           }
           const claudeUsageObserver = await createClaudeUsageObserver(
             parseModelProvidersJson(runSettings.modelProvidersJson),
