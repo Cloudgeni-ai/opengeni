@@ -682,6 +682,50 @@ describe("Claude usage in the shared quota model", () => {
     expect(lateOverage.modelCooldowns["organization-claude-subscription/claude-sonnet-5-5"]).toBe(
       at(7200) * 1000,
     );
+    // Nor does one that resets exactly at the plan reset.
+    const equalOverage = expectParity(
+      parseClaudeUsageHeaders(
+        new Headers({
+          "anthropic-ratelimit-unified-status": "rejected",
+          "anthropic-ratelimit-unified-representative-claim": "five_hour",
+          "anthropic-ratelimit-unified-reset": String(at(1800)),
+          "anthropic-ratelimit-unified-5h-utilization": "1.0",
+          "anthropic-ratelimit-unified-5h-status": "rejected",
+          "anthropic-ratelimit-unified-5h-reset": String(at(1800)),
+          "anthropic-ratelimit-unified-7d-sonnet-utilization": "1.0",
+          "anthropic-ratelimit-unified-7d-sonnet-status": "rejected",
+          "anthropic-ratelimit-unified-7d-sonnet-reset": String(at(7200)),
+          "anthropic-ratelimit-unified-overage-status": "rejected",
+          "anthropic-ratelimit-unified-overage-reset": String(at(1800)),
+        }),
+        now,
+        "claude-sonnet-5-5",
+      )!,
+    );
+    expect(equalOverage.modelCooldowns["organization-claude-subscription/claude-sonnet-5-5"]).toBe(
+      at(7200) * 1000,
+    );
+    // A plan limit that has already reset decides nothing even when the
+    // overage reset is earlier still: the family limit runs to its reset.
+    const pastPlan = expectParity(
+      parseClaudeUsageHeaders(
+        new Headers({
+          "anthropic-ratelimit-unified-status": "rejected",
+          "anthropic-ratelimit-unified-representative-claim": "seven_day",
+          "anthropic-ratelimit-unified-reset": String(at(0)),
+          "anthropic-ratelimit-unified-overage-status": "rejected",
+          "anthropic-ratelimit-unified-overage-reset": String(at(-60)),
+          "anthropic-ratelimit-unified-7d-sonnet-utilization": "1.0",
+          "anthropic-ratelimit-unified-7d-sonnet-status": "rejected",
+          "anthropic-ratelimit-unified-7d-sonnet-reset": String(at(3600)),
+        }),
+        now,
+        "claude-sonnet-5-5",
+      )!,
+    );
+    expect(pastPlan.modelCooldowns["organization-claude-subscription/claude-sonnet-5-5"]).toBe(
+      at(3600) * 1000,
+    );
     // Without a model and with the Sonnet limit: Sonnet is rechecked, the
     // others still wait for the account window.
     expectParity(

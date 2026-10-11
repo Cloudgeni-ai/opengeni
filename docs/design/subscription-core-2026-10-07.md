@@ -101,6 +101,16 @@ connection's current `refresh_generation`, so a stale refusal cannot
 quarantine a renewed credential (this replaces `version` fencing, which does
 not change on Claude refresh).
 
+Merging (`applyQuotaObservation`) depends on `source`. A usage-endpoint
+reading is complete and replaces the stored windows, so it can show an early
+reset. Response-header readings and refusals report only some windows: a
+stored exhausted window with a known future reset that such an observation
+does not report stays until that reset (one that reports the window again
+replaces it). Whatever the source, a running `exhaustedUntil` deadline or
+model cooldown is never shortened, and an older or undated reading never
+replaces a newer dated one. So a writer's own refusal is tagged `refusal`,
+never `usage_endpoint`.
+
 ## 3. Data model
 
 Every table is `ENABLE` + `FORCE ROW LEVEL SECURITY` and keyed by
@@ -3621,6 +3631,22 @@ Decisions:
    refresh happens in the worker's own seam before classification; and its
    writes are best effort. Codex's `rateLimitFallbackMs` and
    `exhaustedFallbackMs` equal the worker's 60 seconds and 5 hours.
+   The credit-policy branch records its refusals as `refusal` observations
+   (§2.2): `usage_verification_policy` as no windows with a 60-second
+   `rate_limit` deadline, `included_usage_policy` as one exhausted
+   `included_usage` window until now + max(60 s, the policy's cooldown). Like
+   any refusal they keep a stored exhausted window with a known future
+   reset (a weekly `secondary` window days away, say), so the connection
+   keeps waiting for it after the 60-second hold; before, they were tagged
+   `usage_endpoint` and erased it. Codex header readings report only
+   `primary` and `secondary` (the credit guard's own `/wham/usage` reads
+   reach the store as header readings through finalization too), so a
+   header reading no longer ends the `included_usage` hold: it ends at its
+   reset or with a real usage reading (`fetchSubscriptionCoreCodexUsage`),
+   which replaces every window. Both only wait longer, and the credit guard
+   would refuse again before dispatch anyway. Legacy capped this hold at 60
+   seconds (`includedUsageUnavailableUntil`), so the core waits longer than
+   legacy here.
 6. A connector not registered in production is registered for tests only:
    `testSubscriptionCoreProviderModules(binding)` returns the replacement
    TypeScript registry and v2 provider-list modules, which the test file

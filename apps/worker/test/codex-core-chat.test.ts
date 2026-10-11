@@ -59,6 +59,11 @@ import {
   turnExecutionPolicyBillingIdentity,
 } from "../src/activities/agent-turn/admission";
 import { testSettings } from "@opengeni/testing";
+import {
+  applyQuotaObservation,
+  quotaCapacity,
+  type SubscriptionQuota,
+} from "@opengeni/subscriptions";
 import { resolveTurnExecutionPolicyV1, withCodexCatalogProvider } from "@opengeni/config";
 import { CODEX_FALLBACK_MODEL_SLUGS } from "@opengeni/codex/constants";
 
@@ -731,6 +736,122 @@ describe("core Codex usage, quota and refusal bookkeeping", () => {
       expect.objectContaining({ exhaustedKind: "quota", observedRefreshGeneration: 7 }),
     );
     expect(legacy).not.toHaveBeenCalled();
+  });
+
+  /** The observation a credit-policy refusal writes, captured from the store call. */
+  async function creditPolicyObservation(
+    failure: Parameters<typeof recordCoreCodexRefusal>[0]["failure"],
+    now: Date,
+  ): Promise<SubscriptionQuota> {
+    const quota = spy(db, "recordSubscriptionCoreCodexQuotaObservation").mockResolvedValue(true);
+    const receipt = spy(db, "recordSubscriptionCoreCodexTurnFailure").mockResolvedValue(true);
+    expect(
+      await recordCoreCodexRefusal({
+        db: {} as db.Database,
+        core,
+        lease,
+        failure,
+        credentialVersion: 5,
+        now,
+      }),
+    ).toEqual({ receipt: true, health: true });
+    // A credit-policy refusal is a quota write only; it writes no failure receipt.
+    expect(receipt).not.toHaveBeenCalled();
+    expect(quota).toHaveBeenCalledTimes(1);
+    return quota.mock.calls[0]![3] as SubscriptionQuota;
+  }
+
+  /** A Codex `/wham/usage` reading of both windows (the store's usage observation shape). */
+  function usageReading(observedAt: number, secondary: { usedPercent: number; resetsAt: number }) {
+    return {
+      ...codexUsageHeadersQuotaObservation(
+        {
+          primaryUsedPercent: 10,
+          primaryResetAt: new Date(observedAt + 3_600_000),
+          secondaryUsedPercent: secondary.usedPercent,
+          secondaryResetAt: new Date(secondary.resetsAt),
+          checkedAt: new Date(observedAt),
+        },
+        5,
+      ),
+      source: "usage_endpoint" as const,
+    };
+  }
+
+  test.each([
+    ["usage_verification_policy", { kind: "rate_limit", cooldownSeconds: 60 }],
+    ["included_usage_policy", { kind: "quota", cooldownSeconds: 60 }],
+  ] as const)(
+    "credit-policy refusal (%s) keeps a stored exhausted weekly window; a usage reading still replaces it",
+    async (origin, failure) => {
+      const now = new Date("2026-10-08T12:00:00Z");
+      const weeklyReset = now.getTime() + 3 * 86_400_000;
+      const stored = usageReading(now.getTime() - 60_000, {
+        usedPercent: 100,
+        resetsAt: weeklyReset,
+      });
+      const observation = await creditPolicyObservation({ ...failure, origin }, now);
+      expect(observation.source).toBe("refusal");
+      const refused = applyQuotaObservation({ refreshGeneration: 5, quota: stored }, observation)!;
+      expect(refused.windows).toContainEqual({
+        id: "secondary",
+        usedPercent: 100,
+        resetsAt: weeklyReset,
+        status: "exhausted",
+      });
+      // After the 60-second policy hold the connection still waits for the weekly reset.
+      expect(quotaCapacity(refused, now.getTime() + 120_000)).toEqual({
+        kind: "exhausted",
+        resetsAt: weeklyReset,
+      });
+      // A real usage reading replaces every window, the policy's own included.
+      const read = usageReading(now.getTime() + 180_000, {
+        usedPercent: 40,
+        resetsAt: weeklyReset,
+      });
+      const replaced = applyQuotaObservation({ refreshGeneration: 5, quota: refused }, read)!;
+      expect(replaced.windows).toEqual(read.windows);
+      expect(quotaCapacity(replaced, now.getTime() + 240_000)).toEqual({ kind: "available" });
+    },
+  );
+
+  test("a header reading keeps the included_usage hold until its reset; a usage reading ends it", async () => {
+    const now = new Date("2026-10-08T12:00:00Z");
+    const holdUntil = now.getTime() + 7_200_000;
+    const observation = await creditPolicyObservation(
+      { kind: "quota", cooldownSeconds: 7_200, origin: "included_usage_policy" },
+      now,
+    );
+    expect(observation.windows).toEqual([
+      { id: "included_usage", usedPercent: 100, resetsAt: holdUntil, status: "exhausted" },
+    ]);
+    const held = applyQuotaObservation({ refreshGeneration: 5, quota: null }, observation)!;
+    // A credit-funded or concurrent turn's headers report only primary and secondary.
+    const headers = codexUsageHeadersQuotaObservation(
+      {
+        primaryUsedPercent: 10,
+        primaryResetAt: new Date(now.getTime() + 3_600_000),
+        secondaryUsedPercent: 5,
+        secondaryResetAt: new Date(now.getTime() + 86_400_000),
+        checkedAt: new Date(now.getTime() + 60_000),
+      },
+      5,
+    );
+    const afterHeaders = applyQuotaObservation({ refreshGeneration: 5, quota: held }, headers)!;
+    expect(afterHeaders.windows).toEqual([...headers.windows, observation.windows[0]]);
+    expect(quotaCapacity(afterHeaders, now.getTime() + 3_600_000)).toEqual({
+      kind: "exhausted",
+      resetsAt: holdUntil,
+    });
+    expect(quotaCapacity(afterHeaders, holdUntil + 1)).toEqual({ kind: "available" });
+    // A usage reading is complete, so it ends the hold early.
+    const read = usageReading(now.getTime() + 120_000, {
+      usedPercent: 5,
+      resetsAt: now.getTime() + 86_400_000,
+    });
+    const afterUsage = applyQuotaObservation({ refreshGeneration: 5, quota: afterHeaders }, read)!;
+    expect(afterUsage.windows).toEqual(read.windows);
+    expect(quotaCapacity(afterUsage, now.getTime() + 180_000)).toEqual({ kind: "available" });
   });
 
   test("finalization records usage and the model-call clock before release", async () => {

@@ -1066,11 +1066,15 @@ describe("quota freshness and observations", () => {
 
   test("SUB-ELIG-06: a header reading or refusal that omits a running exhausted window keeps it until its reset; a usage reading or one that reports it again replaces it", () => {
     const weekly = { id: "weekly", usedPercent: 100, resetsAt: NOW + 86_400_000 };
+    // Omitted windows that are not carried: one that is not exhausted, and
+    // an exhausted one that resets exactly when the new reading is made.
     const current = quota({
       observedAt: NOW - 1_000,
       windows: [
         { id: "primary", usedPercent: 20, resetsAt: NOW + 3_600_000, status: "ok" },
         { ...weekly, status: "exhausted" },
+        { id: "daily", usedPercent: 92, resetsAt: NOW + 7_200_000, status: "warning" },
+        { id: "burst", usedPercent: 100, resetsAt: NOW, status: "exhausted" },
       ],
     });
     // A partial header reading (only the primary window) does not drop the block.
@@ -1094,12 +1098,12 @@ describe("quota freshness and observations", () => {
       exhaustedUntil: NOW + 60_000,
       exhaustedKind: "rate_limit",
     });
-    expect(
-      quotaCapacity(
-        applyQuotaObservation({ refreshGeneration: 1, quota: current }, refusal)!,
-        NOW + 120_000,
-      ),
-    ).toEqual({ kind: "exhausted", resetsAt: NOW + 86_400_000 });
+    const refused = applyQuotaObservation({ refreshGeneration: 1, quota: current }, refusal)!;
+    expect(refused.windows).toEqual([{ ...weekly, status: "exhausted" }]);
+    expect(quotaCapacity(refused, NOW + 120_000)).toEqual({
+      kind: "exhausted",
+      resetsAt: NOW + 86_400_000,
+    });
     // A usage-endpoint reading is complete: omitting the window ends it.
     const usage = { ...partial, source: "usage_endpoint" as const };
     expect(applyQuotaObservation({ refreshGeneration: 1, quota: current }, usage)!.windows).toEqual(

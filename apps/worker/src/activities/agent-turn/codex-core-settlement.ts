@@ -119,6 +119,12 @@ function leaseRef(
  * - a 403 that survived refresh: a time-bound health quarantine;
  * - a plan-entitlement refusal: a cooldown of that model on the connection.
  *
+ * A credit-policy refusal (`failure.origin`) is the worker's own refusal, not
+ * a provider usage reading, so it is recorded as a `refusal` observation: it
+ * keeps a stored exhausted window with a known future reset (for example the
+ * weekly `secondary` window) instead of replacing every window, and only a
+ * real usage reading replaces them all (design 2.2).
+ *
  * Every write requires the exact accepted turn, the enabled gate and this
  * turn's live lease. `receipt` reports whether the refusal was recorded.
  */
@@ -153,7 +159,7 @@ export async function recordCoreCodexRefusal(input: {
         revision: 0,
         observedAt: now.getTime(),
         observedRefreshGeneration: generation,
-        source: "usage_endpoint",
+        source: "refusal",
       },
     ).catch(() => false);
     return { receipt: health, health };

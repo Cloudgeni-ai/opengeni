@@ -95,7 +95,11 @@ export function quotaObservationApplies(
  * window). Response headers and refusals report only some windows: a stored
  * exhausted window with a known reset that such an observation does not
  * report at all stays until that reset (one that reports the window again
- * replaces it).
+ * replaces it). So a window that only refusals report (a policy hold the
+ * caller records itself, for example) ends at its reset or with a usage
+ * reading, never with a header reading. A caller's own refusal must be
+ * tagged `refusal`, not `usage_endpoint`, or it would erase the stored
+ * windows.
  * Clearing a cooldown early is an explicit, revision-fenced store operation,
  * not an observation. Revision numbers are assigned by the store.
  */
