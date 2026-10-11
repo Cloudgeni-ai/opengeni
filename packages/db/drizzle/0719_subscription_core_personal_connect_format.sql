@@ -48,7 +48,7 @@ END
 $personal_connect_format$;
 
 -- The "inserted by this transaction" predicate of the compatibility copy
--- (0715) for a carrier the application role cannot read: a scheduled task
+-- (0716) for a carrier the application role cannot read: a scheduled task
 -- revision. A writer that may return an existing revision (a replayed or
 -- detached reusable-session materialization) skips the copy, which the copy
 -- routine would otherwise refuse with 55000 for a revision an earlier

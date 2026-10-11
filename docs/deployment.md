@@ -5071,7 +5071,7 @@ from the live 0707 definition with every check, lock and security setting
 unchanged. The 0707 writer stays for older binaries; Codex keeps calling it
 and still stores `v1`. It also adds
 `opengeni_private.subscription_authority_carrier_inserted_now`, which tells
-the compatibility copy (0715) whether this transaction inserted a scheduled
+the compatibility copy (0716) whether this transaction inserted a scheduled
 task revision, so a replayed materialization skips the copy instead of
 failing. Like 0712 and 0713, it grants both routines to the
 configured application roles: a deployment whose runtime role is not
