@@ -50,7 +50,11 @@ let client: ReturnType<typeof createDb>;
 setDefaultTimeout(60_000);
 
 beforeAll(async () => {
-  const acquired = await acquireSharedTestDatabase("child-lifecycle-notices");
+  const acquired = await acquireSharedTestDatabase("child-lifecycle-notices", {
+    // The xai capacity wait case drives the legacy SuperGrok waiters, which
+    // the drained cutover makes read-only.
+    withheldMigrations: ["0721_subscription_core_xai_cutover.sql"],
+  });
   if (!acquired) throw new Error("PostgreSQL test database unavailable");
   shared = acquired;
   client = createDb(shared.appUrl);
