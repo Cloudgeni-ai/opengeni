@@ -4422,10 +4422,14 @@ disabled) answers the typed 503 `subscription_core_cutover_disabled`.
   private account there (the listing's source is `user`): legacy changed
   their private pool's rotation, and on the core that pool is their
   Personal workspace's, which the organization pool may also serve. The
-  owner's rotation and activate write their Personal workspace's own
-  override, so the organization accounts serving it follow the owner's
-  order there; nobody else's work runs in that workspace. Without a private
-  account the organization pool's 409 applies, as legacy.
+  owner's rotation, and activating their private account, write their
+  Personal workspace's own override; the override takes the organization's
+  current primary as its inherited primary, so the organization accounts
+  serving that workspace follow the owner's order there and no longer
+  later organization primary changes. Nobody else's work runs in that
+  workspace, and the owner cannot make an organization account its
+  primary. Without a private account the organization pool's 409 applies,
+  as legacy; the 409 for activate applies to shared accounts.
 - **Private accounts live in the Personal workspace.** On the core, every
   route that manages a private (`user`) account (connect start and poll,
   listing personal rows, rename, allocator, activate, disconnect, rotation)

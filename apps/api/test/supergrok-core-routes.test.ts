@@ -280,6 +280,45 @@ async function connectWorkspaceAccount(): Promise<{ accountId: string; isActive:
   return { accountId: connected.accountId, isActive: connected.isActive };
 }
 
+/** A workspace SuperGrok route as any bearer human (organization, workspace and subject given). */
+async function bearerRequest(
+  target: { accountId: string; workspaceId: string; subjectId: string },
+  path: string,
+  options: { method?: string; body?: unknown } = {},
+): Promise<Response> {
+  const token = await signDelegatedAccessToken(DELEGATION_SECRET, {
+    accountId: target.accountId,
+    workspaceId: target.workspaceId,
+    subjectId: target.subjectId,
+    principalKind: "human_session",
+    permissions: ["workspace:read", "workspace:admin", "connections:write"],
+    exp: Math.floor(Date.now() / 1_000) + 3_600,
+  });
+  return await app!.request(`http://x/v1/workspaces/${target.workspaceId}/supergrok${path}`, {
+    method: options.method ?? "GET",
+    headers: {
+      authorization: `Bearer ${token}`,
+      ...(options.body === undefined ? {} : { "content-type": "application/json" }),
+    },
+    ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
+  });
+}
+
+/** Another active member of an organization, with their own Personal workspace. */
+async function otherMember(organization: string) {
+  const member = `user:supergrok-core-member-${crypto.randomUUID()}`;
+  const [personal] = await shared!.admin<{ id: string }[]>`
+    insert into workspaces (account_id, name)
+    values (${organization}::uuid, 'Member personal') returning id::text as id`;
+  await shared!.admin`
+    insert into organization_memberships (account_id, subject_id, role, status, personal_workspace_id)
+    values (${organization}::uuid, ${member}, 'member', 'active', ${personal!.id}::uuid)`;
+  await shared!.admin`
+    insert into workspace_inference_controls (workspace_id, account_id)
+    values (${personal!.id}::uuid, ${organization}::uuid) on conflict do nothing`;
+  return { subjectId: member, personalWorkspaceId: personal!.id };
+}
+
 async function organizationRequest(path: string, method = "GET", body?: unknown) {
   return await organizationApp!.request(
     `${PUBLIC_ORIGIN}/v1/organizations/${organizationId}/supergrok${path}`,
@@ -900,8 +939,8 @@ describe.skipIf(!realDb)("SuperGrok routes on the shared core (M4 X2b)", () => {
     expect(foreignOrganization.status).toBe(404);
     const foreignDisconnect = await organizationRequest(`/accounts/${workspaceAlias}`, "DELETE");
     expect(foreignDisconnect.status).toBe(404);
-    // A shared workspace never reaches an organization account by its
-    // legacy id when it does not serve it.
+    // Another organization's shared workspace never reaches this
+    // organization's account by its legacy id.
     const otherShared = await browserWorkspaceRequest(
       managedSharedWorkspaceId,
       `/accounts/${workspaceAlias}`,
@@ -909,6 +948,27 @@ describe.skipIf(!realDb)("SuperGrok routes on the shared core (M4 X2b)", () => {
       { label: "nope" },
     );
     expect(otherShared.status).toBe(404);
+    // Nor does a workspace of the same organization that the account does
+    // not reach, for the organization administrator or a workspace
+    // administrator there.
+    const [unreached] = await shared!.admin<{ id: string }[]>`
+      insert into workspaces (account_id, name)
+      values (${accountId}::uuid, 'SuperGrok core unreached') returning id::text as id`;
+    await shared!.admin`
+      insert into workspace_inference_controls (workspace_id, account_id)
+      values (${unreached!.id}::uuid, ${accountId}::uuid)`;
+    for (const subject of [subjectId, workspaceAdmin]) {
+      await shared!.admin`
+        insert into workspace_memberships (account_id, workspace_id, subject_id, role, permissions)
+        values (${accountId}::uuid, ${unreached!.id}::uuid, ${subject}, 'admin',
+          '["workspace:read", "workspace:admin", "connections:write"]'::jsonb)`;
+      const unreachedRename = await bearerRequest(
+        { accountId, workspaceId: unreached!.id, subjectId: subject },
+        `/accounts/${workspaceAlias}`,
+        { method: "PATCH", body: { label: "nope" } },
+      );
+      expect({ subject, status: unreachedRename.status }).toEqual({ subject, status: 404 });
+    }
 
     // The legacy id of a private account resolves only for its owner, in
     // their Personal workspace.
@@ -944,6 +1004,75 @@ describe.skipIf(!realDb)("SuperGrok routes on the shared core (M4 X2b)", () => {
       { label: "nope" },
     );
     expect(personalFromOrganization.status).toBe(404);
+
+    // Another member never reaches the owner's private account: not by its
+    // legacy or canonical id from their own Personal workspace, and not in
+    // the owner's Personal workspace (no xAI sign-in started, nothing
+    // changed).
+    const member = await otherMember(organizationId);
+    for (const id of [personalAlias, personalId]) {
+      const crossOwner = await bearerRequest(
+        {
+          accountId: organizationId,
+          workspaceId: member.personalWorkspaceId,
+          subjectId: member.subjectId,
+        },
+        `/accounts/${id}`,
+        { method: "PATCH", body: { label: "nope" } },
+      );
+      expect({ id, status: crossOwner.status }).toEqual({ id, status: 404 });
+    }
+    const devicesBefore = deviceSequence;
+    const ownersWorkspace = {
+      accountId: organizationId,
+      workspaceId: personalWorkspaceId,
+      subjectId: member.subjectId,
+    };
+    // Even a delegated grant naming the owner's Personal workspace for the
+    // member shows only the organization pool there.
+    const memberListing = await bearerRequest(ownersWorkspace, "/accounts");
+    const memberListed = await memberListing.json();
+    expect({ status: memberListing.status, source: memberListed.source }).toEqual({
+      status: 200,
+      source: "organization",
+    });
+    expect(JSON.stringify(memberListed)).not.toContain(personalId);
+    for (const [path, method, body, status] of [
+      [`/accounts/${personalId}`, "PATCH", { label: "nope" }, 404],
+      [`/accounts/${personalId}/activate`, "POST", {}, 404],
+      ["/settings", "PATCH", { rotationEnabled: true }, 409],
+      ["/connect/start", "POST", { scope: "user" }, 403],
+    ] as const) {
+      const response = await bearerRequest(ownersWorkspace, path, {
+        method,
+        ...(body ? { body } : {}),
+      });
+      expect({ path, status: response.status }).toEqual({ path, status });
+    }
+    expect(deviceSequence).toBe(devicesBefore);
+
+    // The owner whose organization membership is suspended is refused too.
+    await shared!.admin`
+      update organization_memberships set status = 'suspended'
+      where account_id = ${organizationId}::uuid and personal_workspace_id = ${personalWorkspaceId}::uuid`;
+    try {
+      for (const [path, method, body] of [
+        ["/accounts", "GET", undefined],
+        [`/accounts/${personalId}`, "PATCH", { label: "nope" }],
+        ["/connect/start", "POST", { scope: "user" }],
+      ] as const) {
+        const response = await browserWorkspaceRequest(personalWorkspaceId, path, method, body);
+        expect({ path, status: response.status }).toEqual({ path, status: 403 });
+      }
+      expect(deviceSequence).toBe(devicesBefore);
+    } finally {
+      await shared!.admin`
+        update organization_memberships set status = 'active'
+        where account_id = ${organizationId}::uuid and personal_workspace_id = ${personalWorkspaceId}::uuid`;
+    }
+    const [unchanged] = await shared!.admin<{ label: string | null }[]>`
+      select label from subscription_connections where id = ${personalId}::uuid`;
+    expect(unchanged!.label).toBe("Mine by legacy id");
     const personalDisconnected = await browserWorkspaceRequest(
       personalWorkspaceId,
       `/accounts/${personalAlias}`,
