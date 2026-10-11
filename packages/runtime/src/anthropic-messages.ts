@@ -24,6 +24,8 @@ import { projectHostedSearchEvidence } from "./hosted-search-evidence";
 import {
   ANTHROPIC_WEB_SEARCH_TOOL,
   ANTHROPIC_WEB_SEARCH_TOOL_NAME,
+  anthropicSearchAccountScope,
+  anthropicWebSearchAccountScope,
   anthropicWebSearchBlockFact,
   anthropicWebSearchBlocks,
   anthropicWebSearchItem,
@@ -282,12 +284,19 @@ function contentBlocks(value: unknown, options: { citations?: boolean } = {}): J
  * Stored searches are replayed natively only then (Claude rejects a pending
  * search whose tool is missing); otherwise they become readable facts. The
  * tool list changes in that case anyway, so this costs no extra cache.
+ *
+ * `accountScope` is the Anthropic account this request runs on. A search
+ * produced under another (or an unrecorded) account cannot be decrypted here,
+ * so it becomes readable facts too, and no later citation is sent because it
+ * may point into that search. The account determines the cache anyway, so the
+ * projection is stable for as long as the conversation stays on one account.
  */
 export function anthropicMessages(
   input: ModelRequest["input"],
-  options: { webSearch?: boolean } = {},
+  options: { webSearch?: boolean; accountScope?: string | null } = {},
 ): Message[] {
   const messages: Message[] = [];
+  let foreignSearch = false;
   const append = (role: Message["role"], content: Json[]) => {
     if (!content.length) return;
     const previous = messages.at(-1);
@@ -305,7 +314,7 @@ export function anthropicMessages(
         append(
           role,
           contentBlocks(item.content, {
-            citations: role === "assistant" && options.webSearch === true,
+            citations: role === "assistant" && options.webSearch === true && !foreignSearch,
           }),
         );
         break;
@@ -346,9 +355,13 @@ export function anthropicMessages(
         );
       case "hosted_tool_call":
         if (isAnthropicWebSearchItem(item)) {
-          if (options.webSearch) append("assistant", anthropicWebSearchBlocks(item));
-          else
+          const sameAccount =
+            anthropicWebSearchAccountScope(item) === (options.accountScope ?? null);
+          if (options.webSearch && sameAccount) append("assistant", anthropicWebSearchBlocks(item));
+          else {
+            if (!sameAccount) foreignSearch = true;
             append("assistant", contentBlocks(object(projectHostedSearchEvidence(item)).content));
+          }
           break;
         }
         append("assistant", [
@@ -508,7 +521,8 @@ function placeConversationSystems(messages: Message[]): Message[] {
 export function buildAnthropicRequest(
   request: ModelRequest,
   model: string,
-  provider: Pick<ResolvedModelProvider, "anthropic"> & Partial<Pick<ResolvedModelProvider, "kind">>,
+  provider: Pick<ResolvedModelProvider, "anthropic"> &
+    Partial<Pick<ResolvedModelProvider, "kind" | "apiKey">>,
   stream: boolean,
 ): Json {
   if (request.previousResponseId || request.conversationId)
@@ -539,7 +553,10 @@ export function buildAnthropicRequest(
       ? request.input
       : (projectHistoryForProvider(request.input, "anthropic-messages") as ModelRequest["input"]);
   const webSearch = request.tools.some(isHostedWebSearchTool);
-  let messages = anthropicMessages(input, { webSearch });
+  let messages = anthropicMessages(input, {
+    webSearch,
+    accountScope: anthropicSearchAccountScope(provider),
+  });
   if (!messages.length) throw new AnthropicProtocolError("Claude requires at least one message");
   const system = request.systemInstructions
     ? ([{ type: "text", text: request.systemInstructions }] as Json[])
@@ -732,6 +749,7 @@ export function anthropicResponse(
   names = new Map<string, { name: string; namespace?: string }>(),
   searchQueries: ReadonlyMap<string, string> = new Map(),
   requestUsages: Json[] = [],
+  accountScope: string | null = null,
 ): ModelResponse {
   // A refused response can be HTTP 200 with no content blocks. It must not
   // become an empty successful response or admit a tool call from partial output.
@@ -797,6 +815,7 @@ export function anthropicResponse(
             id,
             blocks: pair ? [block, next] : [block],
             queriesByCallId: searchQueries,
+            accountScope,
           }) as ModelResponse["output"][number],
         );
         if (pair) index += 1;
@@ -1088,10 +1107,13 @@ export class AnthropicMessagesModel implements Model {
   async getResponse(request: ModelRequest): Promise<ModelResponse> {
     const names = toolNames(request);
     const searchQueries = anthropicWebSearchQueries(request.input);
+    const accountScope = anthropicSearchAccountScope(this.provider);
     let merged: Json | undefined;
     let requestId: string | undefined;
     for (let continuation = 0; ; continuation += 1) {
-      const current = merged ? pausedTurnRequest(request, merged, names, searchQueries) : request;
+      const current = merged
+        ? pausedTurnRequest(request, merged, names, searchQueries, accountScope)
+        : request;
       const response = await this.send(current, false);
       requestId = response.headers.get("request-id") ?? undefined;
       const message = object(await response.json());
@@ -1101,16 +1123,26 @@ export class AnthropicMessagesModel implements Model {
       if (message.stop_reason !== "pause_turn") break;
       assertPauseContinuationAllowed(continuation);
     }
-    return anthropicResponse(merged!, requestId, names, searchQueries, merged!.requestUsages);
+    return anthropicResponse(
+      merged!,
+      requestId,
+      names,
+      searchQueries,
+      merged!.requestUsages,
+      accountScope,
+    );
   }
 
   async *getStreamedResponse(request: ModelRequest): AsyncIterable<ResponseStreamEvent> {
     const names = toolNames(request);
     const searchQueries = anthropicWebSearchQueries(request.input);
+    const accountScope = anthropicSearchAccountScope(this.provider);
     let merged: Json | undefined;
     let requestId: string | undefined;
     for (let continuation = 0; ; continuation += 1) {
-      const current = merged ? pausedTurnRequest(request, merged, names, searchQueries) : request;
+      const current = merged
+        ? pausedTurnRequest(request, merged, names, searchQueries, accountScope)
+        : request;
       // A continuation's blocks extend the same logical response: stream
       // their text under the ids the merged response will give them.
       const streamed = yield* this.streamMessage(current, {
@@ -1130,6 +1162,7 @@ export class AnthropicMessagesModel implements Model {
       names,
       searchQueries,
       merged!.requestUsages,
+      accountScope,
     );
     yield protocol.StreamEventResponseCompleted.parse({
       type: "response_done",
@@ -1393,12 +1426,15 @@ function pausedTurnRequest(
   paused: Json,
   names: Map<string, { name: string; namespace?: string }>,
   searchQueries: ReadonlyMap<string, string>,
+  accountScope: string | null,
 ): ModelRequest {
   const replay = anthropicResponse(
     { ...paused, stop_reason: "pause_turn" },
     undefined,
     names,
     searchQueries,
+    [],
+    accountScope,
   ).output;
   const input =
     typeof request.input === "string"
