@@ -231,7 +231,11 @@ agent runner, as the compaction summarizer does. The main agent does not wait
 for a title tool result or make a title follow-up model call. When the main
 stream reaches normal settlement, the worker waits for the already-running
 bounded sidecar and joins it without cancelling. Exceptional or
-cancelled exits abort and join any still-pending sidecar. A completed candidate
+cancelled exits abort and join any still-pending sidecar, then persist any
+already-completed candidate and checkpoint its separate Codex request custody
+before failure settlement tests same-turn recovery. A discarded result can
+checkpoint only an observed complete response; a still-pending or unknown
+request retains its replay fence. A completed candidate
 then uses the canonical title mutation, which updates the session row and
 appends `session.title_set`. Generation or persistence failure leaves the safe
 pending marker in place, and a human title remains protected from every later

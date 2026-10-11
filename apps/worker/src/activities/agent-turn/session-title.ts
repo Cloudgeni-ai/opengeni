@@ -223,13 +223,15 @@ export type ParallelSessionTitleGeneration = {
  * stream. finish() waits for the already-running bounded request, so a quick
  * main response does not discard a valid title merely because it completed
  * first. cancel() aborts and joins exceptional/cancelled exits so no provider
- * work escapes the owning runAgentTurn activity.
+ * work escapes the owning runAgentTurn activity. Both exits settle an already
+ * completed result before returning, including its separate request custody.
  */
 export function startParallelSessionTitleGeneration(input: {
   generate: (signal: AbortSignal) => Promise<GeneratedSessionTitle>;
   signal?: AbortSignal;
   timeoutMs?: number;
   onError?: (error: unknown) => void;
+  onFinish?: (result: GeneratedSessionTitle | null) => Promise<void>;
 }): ParallelSessionTitleGeneration {
   const cancellationController = new AbortController();
   const timeoutSignal = AbortSignal.timeout(input.timeoutMs ?? PARALLEL_SESSION_TITLE_TIMEOUT_MS);
@@ -245,15 +247,22 @@ export function startParallelSessionTitleGeneration(input: {
     });
   let finished: Promise<GeneratedSessionTitle | null> | null = null;
 
+  const finish = (): Promise<GeneratedSessionTitle | null> => {
+    finished ??= generation.then(async (result) => {
+      await input.onFinish?.(result);
+      return result;
+    });
+    return finished;
+  };
+
   return {
-    finish: () => {
-      if (finished) return finished;
-      finished = generation;
-      return finished;
-    },
+    finish,
     cancel: async () => {
+      // Let an already-resolved generation deliver its queued result before
+      // aborting. A request still pending at this boundary remains cancelled.
+      await Promise.resolve();
       cancellationController.abort();
-      await generation;
+      await finish();
     },
   };
 }
