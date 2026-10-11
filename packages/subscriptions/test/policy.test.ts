@@ -1063,6 +1063,59 @@ describe("quota freshness and observations", () => {
     expect(later.exhaustedUntil).toBeNull();
     expect(quotaCapacity(later, NOW)).toEqual({ kind: "unknown" });
   });
+
+  test("SUB-ELIG-06: a reading that omits a running exhausted window keeps it until its reset; one that reports it again replaces it", () => {
+    const weekly = { id: "weekly", usedPercent: 100, resetsAt: NOW + 86_400_000 };
+    const current = quota({
+      observedAt: NOW - 1_000,
+      windows: [
+        { id: "primary", usedPercent: 20, resetsAt: NOW + 3_600_000, status: "ok" },
+        { ...weekly, status: "exhausted" },
+      ],
+    });
+    // A partial reading (only the primary window) does not drop the block.
+    const partial = quota({
+      observedAt: NOW,
+      windows: [{ id: "primary", usedPercent: 25, resetsAt: NOW + 3_600_000, status: "ok" }],
+    });
+    const kept = applyQuotaObservation({ refreshGeneration: 1, quota: current }, partial)!;
+    expect(kept.windows).toEqual([...partial.windows, { ...weekly, status: "exhausted" }]);
+    expect(quotaCapacity(kept, NOW + 1_000)).toEqual({
+      kind: "exhausted",
+      resetsAt: NOW + 86_400_000,
+    });
+    expect(quotaCapacity(kept, NOW + 86_400_001)).toEqual({ kind: "available" });
+    // A reading that reports the window again shows an early reset.
+    const reset = quota({
+      observedAt: NOW + 2_000,
+      windows: [
+        { id: "primary", usedPercent: 25, resetsAt: NOW + 3_600_000, status: "ok" },
+        { ...weekly, usedPercent: 0, status: "ok" },
+      ],
+    });
+    const replaced = applyQuotaObservation({ refreshGeneration: 1, quota: kept }, reset)!;
+    expect(replaced.windows).toEqual(reset.windows);
+    expect(quotaCapacity(replaced, NOW + 3_000)).toEqual({ kind: "available" });
+    // A window whose reset passed before the reading, or whose reset is
+    // unknown, is not carried forward.
+    const ended = quota({
+      observedAt: NOW - 1_000,
+      windows: [
+        { id: "weekly", usedPercent: 100, resetsAt: NOW - 1, status: "exhausted" },
+        { id: "daily", usedPercent: 100, resetsAt: null, status: "exhausted" },
+      ],
+    });
+    expect(applyQuotaObservation({ refreshGeneration: 1, quota: ended }, partial)!.windows).toEqual(
+      partial.windows,
+    );
+    // A reading for a newer credential generation starts afresh.
+    expect(
+      applyQuotaObservation(
+        { refreshGeneration: 2, quota: current },
+        { ...partial, observedRefreshGeneration: 2 },
+      )!.windows,
+    ).toEqual(partial.windows);
+  });
 });
 
 describe("cache lifetime and settings fields", () => {
