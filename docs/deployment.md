@@ -4511,15 +4511,18 @@ WHERE connection.ownership = 'shared' AND connection.disconnected_at IS NULL
 ORDER BY connection.account_id, connection.provider, connection.id;
 ```
 
-For each row, that organization's administrator narrows the account back to
-its workspace with both `allowedWorkspaces: []` and
-`allowPersonalWorkspaces: false` (an account given to the whole organization
-otherwise stays in every Personal workspace); otherwise fix forward instead of
-rolling back. Likewise, shared accounts limited to people
-(`ownership = 'shared' AND scope_kind = 'people'`) are read as "no workspaces"
-by an older image, and a save there replaces the people: move them back to
-workspaces first, or accept that. Run right after the rollout, the same check
-also shows whether anything was shared while older pods still served.
+For each row, that organization's administrator narrows the account back to its
+workspace with both `allowedWorkspaces: []` and
+`allowPersonalWorkspaces: false` (an account given to the whole organization otherwise stays in every
+Personal workspace), and with `allowedModels` set to the managing workspace's
+current list (the connection's `allowed_model_ids`), since the editor shows the
+organization's list and saving it would widen a list the workspace narrowed;
+otherwise fix forward instead of rolling back. Likewise, shared accounts
+limited to people (`ownership = 'shared' AND scope_kind = 'people'`) are read
+as "no workspaces" by an older image, and a save there replaces the people:
+move them back to workspaces first, or accept that. Run right after the
+rollout, the same check also shows whether anything was shared while older pods
+still served.
 
 **Validation.** Once every API pod runs this release, use an operator-owned
 test organization (never a customer
