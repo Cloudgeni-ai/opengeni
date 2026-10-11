@@ -41,6 +41,7 @@ import {
   claimSessionWorkForAttempt,
   createDb,
   createSession,
+  enqueueSessionWorkflowWakeInTransaction,
   enqueueSessionTurn,
   ensureManagedAccessForUser,
   withRlsContext,
@@ -85,6 +86,7 @@ import { subscriptionCoreOperations } from "../../src/subscription-core/operatio
 import { listSubscriptionCoreServingConnections } from "../../src/subscription-core/catalog";
 import { subscriptionCoreRequests } from "../../src/subscription-core/requests";
 import { subscriptionCoreSettlement } from "../../src/subscription-core/settlement";
+import { wakeSubscriptionCoreCapacityWaiters } from "../../src/subscription-core/waiters";
 import {
   subscriptionCoreConnectionKind,
   type SubscriptionCoreProvider,
@@ -2154,6 +2156,241 @@ export function describeSubscriptionCoreConformance<Credential>(
         kind: "run",
         connectionId: rateLimited,
       });
+      await expectForeignUntouched(org);
+    });
+
+    /** A core waiter armed for a running turn, as the worker persists it. */
+    async function armedWaiter(org: Org, turn: Turn): Promise<string> {
+      const tenant = { accountId: org.accountId, workspaceId: org.sharedWorkspaceId };
+      const waiter = await withRlsContext(db(), tenant, (tx) =>
+        upsertSubscriptionCapacityWaiter(tx, {
+          ...tenant,
+          sessionId: turn.identity.sessionId,
+          turnId: turn.identity.turnId,
+          waiterId: crypto.randomUUID(),
+          provider: providerId,
+          waitReason: "capacity",
+          generation: 1,
+          wakeRevision: 1,
+          observedWakeRevision: 1,
+          blockedTurnGeneration: turn.executionGeneration,
+        }),
+      );
+      if (!waiter) throw new Error("Fixture failed to arm a waiter");
+      return waiter.waiterId;
+    }
+
+    /** The provider's bulk capacity wake with the production session wake producer. */
+    const wakePool = (org: Org, reason: string, sessionIds?: readonly string[]) =>
+      wakeSubscriptionCoreCapacityWaiters(
+        db(),
+        providerId,
+        {
+          accountId: org.accountId,
+          reason,
+          ...(sessionIds
+            ? { workspaceIds: [org.sharedWorkspaceId], sessionIds }
+            : { workspaceIds: [org.sharedWorkspaceId] }),
+        },
+        enqueueSessionWorkflowWakeInTransaction,
+      );
+
+    const waiterRevision = async (waiterId: string) => {
+      const [row] = await admin()<{ wake_revision: string }[]>`
+        select wake_revision::text from subscription_capacity_waiters
+        where waiter_id = ${waiterId}::uuid`;
+      return Number(row!.wake_revision);
+    };
+
+    /** Waits until some backend is blocked on a lock the holder's backend holds. */
+    async function waitUntilBlockedBy(holder: Sql): Promise<void> {
+      const [self] = await holder<{ pid: number }[]>`select pg_backend_pid() as pid`;
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline) {
+        const [row] = await admin()<{ count: number }[]>`
+          select count(*)::int as count from pg_stat_activity
+          where datname = current_database() and ${self!.pid}::int = any(pg_blocking_pids(pid))`;
+        if (row!.count > 0) return;
+        await Bun.sleep(25);
+      }
+      throw new Error("No backend started waiting on the holder's lock");
+    }
+
+    /** Whether another transaction could lock the session row right now. */
+    async function sessionLockable(sessionId: string): Promise<boolean> {
+      const probe = await admin().reserve();
+      try {
+        await probe`begin`;
+        await probe`select id from sessions where id = ${sessionId}::uuid for no key update nowait`;
+        return true;
+      } catch (error) {
+        if ((error as { code?: string }).code === "55P03") return false;
+        throw error;
+      } finally {
+        await probe`rollback`.catch(() => undefined);
+        probe.release();
+      }
+    }
+
+    test("a capacity wake locks the workspace before its sessions, like a runnable wake or a context clear", async () => {
+      const org = await organization();
+      const turn = await runningTurn(org);
+      const waiterId = await armedWaiter(org, turn);
+      const sessionId = turn.identity.sessionId;
+      // A runnable wake and a context clear hold the workspace FOR UPDATE,
+      // then lock the session. A wake that held the session while waiting for
+      // its workspace (an outbox foreign key) would deadlock with them.
+      const holder = await admin().reserve();
+      let wake: ReturnType<typeof wakePool> | null = null;
+      let failed = false;
+      try {
+        await holder`begin`;
+        await holder`select id from workspaces where id = ${org.sharedWorkspaceId}::uuid for update`;
+        wake = wakePool(org, "fixture_workspace_order");
+        await waitUntilBlockedBy(holder);
+        const locked = await holder<{ id: string }[]>`
+          select id::text as id from sessions where id = ${sessionId}::uuid for no key update nowait`;
+        expect(locked.map((row) => row.id)).toEqual([sessionId]);
+        await holder`commit`;
+      } catch (error) {
+        failed = true;
+        await holder`rollback`.catch(() => undefined);
+        throw error;
+      } finally {
+        holder.release();
+        if (failed) await wake?.catch(() => undefined);
+      }
+      expect(await wake).toEqual([
+        { accountId: org.accountId, workspaceId: org.sharedWorkspaceId },
+      ]);
+      expect(await waiterRevision(waiterId)).toBe(2);
+      await expectForeignUntouched(org);
+    });
+
+    test("a capacity wake locks each session before its waiter, like Steer, Cancel and a resume", async () => {
+      const org = await organization();
+      const turn = await runningTurn(org);
+      const waiterId = await armedWaiter(org, turn);
+      const sessionId = turn.identity.sessionId;
+      // Steer and Cancel hold the session, then delete its waiter. A wake that
+      // held the waiter while waiting for the session would deadlock with them.
+      const holder = await admin().reserve();
+      let wake: ReturnType<typeof wakePool> | null = null;
+      let failed = false;
+      try {
+        await holder`begin`;
+        await holder`select id from sessions where id = ${sessionId}::uuid for update`;
+        wake = wakePool(org, "fixture_lock_order");
+        await waitUntilBlockedBy(holder);
+        const locked = await holder<{ waiter_id: string }[]>`
+          select waiter_id::text as waiter_id from subscription_capacity_waiters
+          where workspace_id = ${org.sharedWorkspaceId}::uuid and session_id = ${sessionId}::uuid
+          for update nowait`;
+        expect(locked.map((row) => row.waiter_id)).toEqual([waiterId]);
+        await holder`commit`;
+      } catch (error) {
+        failed = true;
+        await holder`rollback`.catch(() => undefined);
+        throw error;
+      } finally {
+        holder.release();
+        if (failed) await wake?.catch(() => undefined);
+      }
+      expect(await wake).toEqual([
+        { accountId: org.accountId, workspaceId: org.sharedWorkspaceId },
+      ]);
+      expect(await waiterRevision(waiterId)).toBe(2);
+      const [typed] = await admin()<{ count: number }[]>`
+        select count(*)::int as count from subscription_capacity_wake_outbox
+        where waiter_id = ${waiterId}::uuid and wake_revision = 2`;
+      expect(typed!.count).toBe(1);
+      const [generic] = await admin()<{ reason: string }[]>`
+        select reason from session_workflow_wake_outbox where session_id = ${sessionId}::uuid`;
+      expect(generic?.reason).toBe("subscription_capacity");
+      await expectForeignUntouched(org);
+    });
+
+    test("a capacity wake locks sessions in ascending order and bumps only the sessions it names", async () => {
+      const org = await organization();
+      const turns: Turn[] = [];
+      for (let index = 0; index < 5; index += 1) turns.push(await runningTurn(org));
+      const waiterBySession = new Map<string, string>();
+      for (const turn of turns)
+        waiterBySession.set(turn.identity.sessionId, await armedWaiter(org, turn));
+      // Four named sessions in ascending order; the fifth is not named.
+      const [unnamed, ...rest] = turns.map((turn) => turn.identity.sessionId);
+      const named = rest.sort();
+      const [first, second, third, fourth] = named as [string, string, string, string];
+      // Multi-session lockers (lockSessionEventWriteRows, a subtree Cancel)
+      // lock sessions in ascending order. Holding the third session, an
+      // ascending wake holds the first two and waits on the third, leaving
+      // the fourth free; any other order holds the fourth or leaves the
+      // first free.
+      const holder = await admin().reserve();
+      let wake: ReturnType<typeof wakePool> | null = null;
+      let failed = false;
+      try {
+        await holder`begin`;
+        await holder`select id from sessions where id = ${third}::uuid for update`;
+        // Name them out of order: the wake must sort them itself.
+        wake = wakePool(org, "fixture_session_order", [fourth, second, third, first]);
+        await waitUntilBlockedBy(holder);
+        expect({
+          first: await sessionLockable(first),
+          second: await sessionLockable(second),
+          fourth: await sessionLockable(fourth),
+        }).toEqual({ first: false, second: false, fourth: true });
+        await holder`commit`;
+      } catch (error) {
+        failed = true;
+        await holder`rollback`.catch(() => undefined);
+        throw error;
+      } finally {
+        holder.release();
+        if (failed) await wake?.catch(() => undefined);
+      }
+      expect(await wake).toEqual([
+        { accountId: org.accountId, workspaceId: org.sharedWorkspaceId },
+      ]);
+      for (const sessionId of named)
+        expect(await waiterRevision(waiterBySession.get(sessionId)!)).toBe(2);
+      expect(await waiterRevision(waiterBySession.get(unnamed!)!)).toBe(1);
+      const [unnamedWake] = await admin()<{ count: number }[]>`
+        select count(*)::int as count from session_workflow_wake_outbox
+        where session_id = ${unnamed!}::uuid and reason = 'subscription_capacity'`;
+      expect(unnamedWake!.count).toBe(0);
+      await expectForeignUntouched(org);
+    });
+
+    test("concurrent wakes of one pool all succeed and bump each waiter once per wake", async () => {
+      const org = await organization();
+      const sessions: string[] = [];
+      const waiters: string[] = [];
+      for (let index = 0; index < 6; index += 1) {
+        const turn = await runningTurn(org);
+        sessions.push(turn.identity.sessionId);
+        waiters.push(await armedWaiter(org, turn));
+      }
+      // Pool-wide wakes and session-scoped wakes naming the sessions in
+      // reverse overlap on every waiter, in different statement shapes.
+      const reversed = [...sessions].reverse();
+      const rounds = 6;
+      const perRound = 6;
+      for (let round = 0; round < rounds; round += 1)
+        await Promise.all(
+          Array.from({ length: perRound }, (_, index) =>
+            index % 2 === 0
+              ? wakePool(org, "fixture_concurrent_wake")
+              : wakePool(org, "fixture_concurrent_wake", reversed),
+          ),
+        );
+      for (const waiterId of waiters) {
+        expect(await waiterRevision(waiterId)).toBe(1 + rounds * perRound);
+        const [typed] = await admin()<{ count: number }[]>`
+          select count(*)::int as count from subscription_capacity_wake_outbox
+          where waiter_id = ${waiterId}::uuid`;
+        expect(typed!.count).toBe(rounds * perRound);
+      }
       await expectForeignUntouched(org);
     });
 

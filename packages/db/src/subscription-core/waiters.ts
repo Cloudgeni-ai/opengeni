@@ -108,7 +108,7 @@ export async function wakeSubscriptionCoreCapacityWaiters(
       });
       if (cutover !== "enabled") return [];
       const workspaceIds =
-        input.workspaceIds ??
+        (input.workspaceIds ? [...new Set(input.workspaceIds)].sort() : null) ??
         (
           await rawRows<{ workspace_id: string }>(
             tx,
@@ -126,6 +126,60 @@ export async function wakeSubscriptionCoreCapacityWaiters(
         await tx.execute(
           sql`select pg_advisory_xact_lock_shared(hashtextextended(${`session-tenancy:${workspaceId}`}, 0))`,
         );
+        // The canonical prefix locks the workspace row before any session
+        // (`lockSessionEventWriteRows`; a runnable wake and a context clear
+        // take it FOR UPDATE, then the session). The outbox inserts below
+        // key-share-lock it through their foreign keys, so take it first: a
+        // wake that held a session while waiting for its workspace would
+        // deadlock with them.
+        const [workspace] = await rawRows<{ id: string }>(
+          tx,
+          sql`select id::text as id from workspaces
+            where id = ${workspaceId}::uuid and account_id = ${input.accountId}::uuid
+            for key share`,
+        );
+        if (!workspace) continue;
+        const sessionFilter =
+          sessionIds === null
+            ? sql``
+            : sql`and session_id in (${sql.join(
+                sessionIds.map((id) => sql`${id}::uuid`),
+                sql`, `,
+              )})`;
+        // Lock order: workspace, then session, then waiter. Steer, Cancel and
+        // a resume lock the session before its waiter, and the generic wake's
+        // archive guard locks the session too. So read the waiters without
+        // locking, take the session locks (by recording each session's generic
+        // wake) in session order, and only then bump those sessions' waiters
+        // and record their typed wakes (whose foreign key share-locks the
+        // waiter). Holding a waiter while waiting for its session deadlocks
+        // with Steer or Cancel, and concurrent multi-row bumps of one pool
+        // deadlock with each other. A session has at most one core waiter (its
+        // primary key), so it gets one generic wake as before.
+        const waiting = await rawRows<{ session_id: string }>(
+          tx,
+          sql`select session_id::text as session_id from subscription_capacity_waiters
+            where account_id = ${input.accountId}::uuid
+              and workspace_id = ${workspaceId}::uuid and provider = ${provider}
+              ${sessionFilter}
+            order by session_id`,
+        );
+        if (waiting.length === 0) continue;
+        for (const row of waiting) {
+          // The generic durable wake is the crash-safe backstop: the global
+          // dispatcher delivers it even if the typed outbox row's signal is
+          // never sent. A waiter that ended since the read leaves its session
+          // a spurious but harmless wake.
+          await enqueueSessionWorkflowWake(tx, {
+            accountId: input.accountId,
+            workspaceId,
+            sessionId: row.session_id,
+            temporalWorkflowId: `session-${row.session_id}`,
+            reason: "subscription_capacity",
+          });
+        }
+        // Every session read above is now held by this transaction, so no
+        // concurrent wake, Steer, Cancel or resume holds any of their waiters.
         const woken = await rawRows<{
           session_id: string;
           waiter_id: string;
@@ -138,35 +192,20 @@ export async function wakeSubscriptionCoreCapacityWaiters(
                 updated_at = clock_timestamp()
             where account_id = ${input.accountId}::uuid
               and workspace_id = ${workspaceId}::uuid and provider = ${provider}
-              ${
-                sessionIds === null
-                  ? sql``
-                  : sql`and session_id in (${sql.join(
-                      sessionIds.map((id) => sql`${id}::uuid`),
-                      sql`, `,
-                    )})`
-              }
+              and session_id in (${sql.join(
+                waiting.map((row) => sql`${row.session_id}::uuid`),
+                sql`, `,
+              )})
             returning session_id::text as session_id, waiter_id::text as waiter_id,
               generation, wake_revision`,
         );
-        for (const row of woken) {
+        for (const row of woken)
           await tx.execute(sql`insert into subscription_capacity_wake_outbox (
               account_id, workspace_id, session_id, waiter_id, generation, wake_revision
             ) values (
               ${input.accountId}::uuid, ${workspaceId}::uuid, ${row.session_id}::uuid,
               ${row.waiter_id}::uuid, ${Number(row.generation)}, ${Number(row.wake_revision)}
             ) on conflict (account_id, waiter_id, generation, wake_revision) do nothing`);
-          // The generic durable wake is the crash-safe backstop: the global
-          // dispatcher delivers it even if this outbox row's typed signal is
-          // never sent.
-          await enqueueSessionWorkflowWake(tx, {
-            accountId: input.accountId,
-            workspaceId,
-            sessionId: row.session_id,
-            temporalWorkflowId: `session-${row.session_id}`,
-            reason: "subscription_capacity",
-          });
-        }
         if (woken.length > 0) touched.push({ accountId: input.accountId, workspaceId });
       }
       await setRlsContext(tx, { accountId: input.accountId, workspaceId: null });

@@ -1001,7 +1001,15 @@ always stays after them.
   empty-subject worker scope the outbox policy requires, never through legacy
   active pointers. Each woken waiter gets a provider-neutral outbox row and a
   generic session workflow wake in the same commit; the generic wake is the
-  crash-safe backstop the global dispatcher always delivers. Typed delivery
+  crash-safe backstop the global dispatcher always delivers. The wake takes
+  the canonical workspace, then session, then waiter lock order: per
+  workspace it key-share-locks the workspace row (as
+  `lockSessionEventWriteRows` does, and before a runnable wake or a context
+  clear's `FOR UPDATE` could interleave), reads the waiters' sessions without
+  locking, records each session's generic wake in ascending session order
+  (whose archive guard locks the session, so Steer, Cancel and a resume, which
+  lock the session before its waiter, cannot interleave), and only then bumps
+  those sessions' waiters and records their typed wakes. Typed delivery
   claims due rows (claim-generation fenced), signals `codexCapacityChanged`
   with the waiter's wake revision through `signalWithStart`, then marks the
   row delivered; a failed signal retries after 1 second doubling to 5
