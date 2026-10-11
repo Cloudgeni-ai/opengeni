@@ -15,6 +15,7 @@ import {
   type ViewStyle,
 } from "react-native";
 import Animated, { useAnimatedKeyboard, useAnimatedStyle } from "react-native-reanimated";
+import Svg, { Defs, LinearGradient, Rect, Stop } from "react-native-svg";
 import { Button } from "./controls";
 import { Icon, type NativeIconName } from "./icon";
 import { withAlpha } from "./primitives";
@@ -198,9 +199,10 @@ export function SessionComposer(props: SessionComposerProps) {
   // inside modals and overlays; the animated keyboard height does not.
   const keyboard = useAnimatedKeyboard();
   const floating = props.floating ?? false;
-  // Only Liquid Glass lets the conversation scroll visibly beneath the composer;
-  // a solid surface (Android, older iOS) sits on an opaque band down to the
-  // screen edge, or text would peek out under the card and the gesture handle.
+  // Only Liquid Glass lets the conversation scroll beneath the composer, and
+  // then under a scroll-edge fade like the system bars: the glass picks up the
+  // page color, never legible text behind or below it. A solid surface
+  // (Android, older iOS) sits on an opaque band down to the screen edge.
   const glass = useLiquidGlass();
   const seeThrough = floating && glass;
   // Floating: iOS tucks the glass toward the home indicator like system bars;
@@ -296,6 +298,7 @@ export function SessionComposer(props: SessionComposerProps) {
         lift,
       ]}
     >
+      {seeThrough ? <ScrollEdgeFade color={c.bg} /> : null}
       {props.above ? <View pointerEvents="box-none">{props.above}</View> : null}
       <ComposerSurface radius={compact ? 22 : 24}>
         {props.header}
@@ -373,6 +376,35 @@ export function SessionComposer(props: SessionComposerProps) {
         )}
       </ComposerSurface>
     </Animated.View>
+  );
+}
+
+/** How far the scroll-edge fade reaches above the floating composer. */
+const SCROLL_EDGE_PX = 24;
+
+/**
+ * The scroll-edge effect under a floating glass composer: the conversation
+ * fades into the page color just above the composer and is fully covered
+ * behind and below it, down to the screen edge (or the keyboard).
+ */
+function ScrollEdgeFade({ color }: { color: string }) {
+  return (
+    <View
+      pointerEvents="none"
+      style={{ position: "absolute", top: -SCROLL_EDGE_PX, left: 0, right: 0, bottom: 0 }}
+    >
+      <Svg width="100%" height="100%">
+        <Defs>
+          <LinearGradient id="composer-scroll-edge" x1="0" y1="0" x2="0" y2="1">
+            <Stop offset="0" stopColor={color} stopOpacity={0} />
+            <Stop offset="0.25" stopColor={color} stopOpacity={0.8} />
+            <Stop offset="0.4" stopColor={color} stopOpacity={1} />
+            <Stop offset="1" stopColor={color} stopOpacity={1} />
+          </LinearGradient>
+        </Defs>
+        <Rect x="0" y="0" width="100%" height="100%" fill="url(#composer-scroll-edge)" />
+      </Svg>
+    </View>
   );
 }
 
