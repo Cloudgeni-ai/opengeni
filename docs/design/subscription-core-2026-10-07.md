@@ -4181,6 +4181,13 @@ reviewers:
   it is never reached, but the preflight still refuses any other isolation
   up front (`55000`), so a database or role default cannot change the
   outcome. The runbook says not to set one.
+  Before it reads the organizations' locks, the cutover takes each affected
+  organization's shared settings lock
+  (`pg_advisory_xact_lock_shared(hashtextextended('subscription-settings-locks:'
+  || account_id, 0))`) in ascending order, as every workspace override
+  writer must. The drained window means nothing contends. Only
+  organizations with moved workspace accounts are locked, which bounds the
+  lock table.
 - **Steer and Cancel.** The legacy SuperGrok supersede in the Steer path is
   gone (no legacy waiter can be live after the receipt the binary
   requires). Steer and Cancel call
