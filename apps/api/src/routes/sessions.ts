@@ -2247,6 +2247,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
 
   // Personal chat organization: archived roots leave the ordinary rail only
   // for this member and remain recoverable through the archived list view.
+  // Archiving a chat you started that still has work also pauses it (see
+  // pauseOwnArchivedWork); archiving anyone else's chat only hides it for you.
   app.put("/v1/workspaces/:workspaceId/sessions/:sessionId/archive", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const authorization = await requireAccessGrantAuthorization(
@@ -2262,14 +2264,22 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       throw new HTTPException(400, { message: "invalid session archive request" });
     }
     try {
-      const session = await setSessionArchive(db, {
+      const archived = await setSessionArchive(db, {
         workspaceId,
         subjectId: grant.subjectId,
         sessionId,
         personalWorkspaceOwnerException: hasVerifiedOwningUserAuthorization(authorization),
         ...parsed.data,
       });
-      if (!session) throw new HTTPException(404, { message: "session not found" });
+      if (!archived) throw new HTTPException(404, { message: "session not found" });
+      let session = archived;
+      if (parsed.data.archived) {
+        try {
+          session = await pauseOwnArchivedWork(deps, grant, workspaceId, archived);
+        } catch (error) {
+          return commandConflictResponse(c, error);
+        }
+      }
       return c.json(
         await withEffectivePolicy(
           deps,
@@ -6321,6 +6331,52 @@ function zodErrorFields(error: ZodError): string {
   const shown = paths.slice(0, 5);
   const remainder = paths.length - shown.length;
   return `${shown.join(", ")}${remainder > 0 ? `, and ${remainder} more` : ""}`;
+}
+
+/** Statuses in which a chat still has work that would keep running after it is archived. */
+const ARCHIVE_LIVE_WORK_STATUSES: ReadonlySet<string> = new Set([
+  "queued",
+  "running",
+  "requires_action",
+  "recovering",
+  "waiting_capacity",
+]);
+
+/**
+ * Archiving a chat you started means you are done with it, so work it still
+ * has (a running or queued turn, a pending wait, an active goal) must not keep
+ * running out of sight. It is paused exactly like the Pause control: reversible
+ * with Resume, and a paused chat dispatches no goal continuations either. A
+ * chat someone else started is never paused: archiving only hides it for you.
+ * Settled chats are left alone so a later message to them still just runs.
+ */
+async function pauseOwnArchivedWork(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  workspaceId: string,
+  session: Session,
+): Promise<Session> {
+  if (session.createdBy.kind !== "subject" || session.createdBy.subjectId !== grant.subjectId)
+    return session;
+  if (!hasPermission(grant.permissions, "sessions:control")) return session;
+  if (session.effectiveControl.directState === "paused") return session;
+  const liveWork =
+    ARCHIVE_LIVE_WORK_STATUSES.has(session.status) ||
+    session.activeTurnId !== null ||
+    Boolean(session.inputWait) ||
+    (await getSessionGoal(deps.db, workspaceId, session.id))?.status === "active";
+  if (!liveWork) return session;
+  const paused = await controlHumanSessionWorkstream(
+    deps,
+    { accountId: grant.accountId, workspaceId, sessionId: session.id, subjectId: grant.subjectId },
+    {
+      action: "pause",
+      reason: "Archived",
+      // One pause per archive: a retried archive replays it instead of pausing twice.
+      clientEventId: `archive-pause:${session.id}:${session.archiveVersion}`,
+    },
+  );
+  return { ...session, effectiveControl: paused.effectiveControl };
 }
 
 function commandConflictResponse(c: Context, error: unknown): Response {
