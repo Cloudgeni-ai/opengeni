@@ -22,6 +22,7 @@
 //! The coarse outer restart loop (the service manager) sits ABOVE the in-process
 //! full-jitter backoff (the fine loop) — two independent layers of resiliency.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use crate::error::{PlatformError, PlatformResult};
@@ -286,6 +287,24 @@ pub fn render_legacy_systemd_unit_before_supervisor_subgroup(spec: &ServiceSpec)
     )
 }
 
+/// Resolve the home used by service installation and dry-run rendering.
+///
+/// # Errors
+///
+/// Returns an OS error when neither HOME nor USERPROFILE is configured.
+pub fn service_user_home() -> PlatformResult<PathBuf> {
+    service_user_home_from_environment(std::env::var_os("HOME"), std::env::var_os("USERPROFILE"))
+}
+
+fn service_user_home_from_environment(
+    home: Option<OsString>,
+    userprofile: Option<OsString>,
+) -> PlatformResult<PathBuf> {
+    home.or(userprofile)
+        .map(PathBuf::from)
+        .ok_or_else(|| PlatformError::os("could not resolve a home directory ($HOME/$USERPROFILE)"))
+}
+
 /// Renders the macOS LaunchAgent plist body for `spec`. PURE + tested.
 /// The user home is explicit: launchd otherwise starts in `/`, which is read-only
 /// on macOS and cannot hold session attachments. Never inherit the installer's
@@ -293,7 +312,8 @@ pub fn render_legacy_systemd_unit_before_supervisor_subgroup(spec: &ServiceSpec)
 ///
 /// # Errors
 ///
-/// Returns an OS error if the supplied home is not an absolute non-root path.
+/// Returns an OS error if the supplied home is not an absolute non-root path,
+/// or contains characters unsuitable for XML or launchctl line-oriented output.
 pub fn render_launchd_plist(spec: &ServiceSpec, user_home: &Path) -> PlatformResult<String> {
     // This pure renderer is also tested on Windows; validate macOS/POSIX syntax
     // rather than the build host's interpretation of an absolute path.
@@ -305,9 +325,12 @@ pub fn render_launchd_plist(spec: &ServiceSpec, user_home: &Path) -> PlatformRes
             .split('/')
             .all(|part| part.is_empty() || part == ".")
         || user_home.split('/').any(|part| part == "..")
+        || user_home
+            .chars()
+            .any(|ch| ch.is_control() || matches!(ch, '\u{fffe}' | '\u{ffff}'))
     {
         return Err(PlatformError::os(
-            "LaunchAgent working directory requires an absolute non-root user home",
+            "LaunchAgent working directory requires an absolute non-root user home without control or XML-invalid characters",
         ));
     }
     let mut args = vec![spec.binary_path.to_string_lossy().into_owned()];
@@ -446,9 +469,7 @@ pub fn render_for_host(spec: &ServiceSpec) -> PlatformResult<String> {
     match ServiceSpec::backend() {
         ServiceBackend::Systemd => Ok(render_systemd_unit(spec)),
         ServiceBackend::Launchd => {
-            let user_home = std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
-                PlatformError::os("could not resolve LaunchAgent user home ($HOME)")
-            })?;
+            let user_home = service_user_home()?;
             render_launchd_plist(spec, &user_home)
         }
         ServiceBackend::WindowsScm => Ok(format!(
@@ -607,6 +628,32 @@ mod tests {
         let plist = render_launchd_plist(&spec(), home).unwrap();
         assert!(plist
             .contains("<key>WorkingDirectory</key>\n  <string>/Users/Runner &amp; Co</string>"));
+    }
+
+    #[test]
+    fn service_home_resolution_is_shared_with_print_mode() {
+        let home = OsString::from("/Users/home");
+        let profile = OsString::from("/Users/profile");
+        assert_eq!(
+            service_user_home_from_environment(Some(home), Some(profile.clone())).unwrap(),
+            PathBuf::from("/Users/home")
+        );
+        assert_eq!(
+            service_user_home_from_environment(None, Some(profile)).unwrap(),
+            PathBuf::from("/Users/profile")
+        );
+        assert!(service_user_home_from_environment(None, None).is_err());
+    }
+
+    #[test]
+    fn launchd_refuses_home_characters_that_break_xml_or_loaded_path_observation() {
+        for ch in [
+            '\0', '\u{1}', '\u{b}', '\n', '\r', '\t', '\u{7f}', '\u{fffe}', '\u{ffff}',
+        ] {
+            let home = format!("/Users/Runner{ch}");
+            assert!(render_launchd_plist(&spec(), Path::new(&home)).is_err());
+        }
+        assert!(render_launchd_plist(&spec(), Path::new("/Users/Åsa 🐈")).is_ok());
     }
 
     #[test]
