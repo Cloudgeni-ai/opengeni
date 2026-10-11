@@ -555,7 +555,8 @@ describe.skipIf(!realDb)("0713 subscription authority compatibility", () => {
     expect(
       await failure(
         () =>
-          database!.admin`update session_turns set authority_inserted_at = authority_inserted_at - interval '1 day'
+          database!
+            .admin`update session_turns set authority_inserted_at = authority_inserted_at - interval '1 day'
             where id = ${before!.turnId}::uuid`,
       ),
     ).toStartWith("42501");
@@ -647,7 +648,9 @@ describe.skipIf(!realDb)("0713 subscription authority compatibility", () => {
       workspaceTurn = await acceptedTurn(client!, org!);
       serviceTurn = await acceptedTurn(client!, org!, "service");
       batchSource = await acceptedTurn(client!, org!, "service");
-      missedUpdate = await asOwner((db) => insertWaitTimeout(db, batchSource!, batchSource!.turnId));
+      missedUpdate = await asOwner((db) =>
+        insertWaitTimeout(db, batchSource!, batchSource!.turnId),
+      );
       await database!.admin`
         insert into opengeni_private.subscription_provider_cutover_receipts (
           provider, migration, committed_at, seed_rotation
@@ -681,9 +684,7 @@ describe.skipIf(!realDb)("0713 subscription authority compatibility", () => {
     test("a carrier derived from a pre-receipt source commits only with the waiting `missing` copy", async () => {
       // Without the copy the commit-time check rejects the whole transaction.
       expect(
-        await failure(() =>
-          asOwner((db) => insertWaitTimeout(db, before!, before!.turnId)),
-        ),
+        await failure(() => asOwner((db) => insertWaitTimeout(db, before!, before!.turnId))),
       ).toStartWith("23514");
       const copied = await asOwner(async (db) => {
         const id = await insertWaitTimeout(db, before!, before!.turnId);
@@ -700,14 +701,14 @@ describe.skipIf(!realDb)("0713 subscription authority compatibility", () => {
           owner_subject_id: null,
         },
       ]);
-      expect(
-        await asOwner((db) => read(db, "claude", "session_system_update", copied.id)),
-      ).toEqual({
-        authority: "record",
-        personal: [],
-        sharedPool: "none",
-        legacyScope: "missing",
-      });
+      expect(await asOwner((db) => read(db, "claude", "session_system_update", copied.id))).toEqual(
+        {
+          authority: "record",
+          personal: [],
+          sharedPool: "none",
+          legacyScope: "missing",
+        },
+      );
     });
 
     test("copies keep personal authority only for the record's owner and narrow otherwise", async () => {
@@ -794,9 +795,7 @@ describe.skipIf(!realDb)("0713 subscription authority compatibility", () => {
     test("the commit-time check rejects a missing, different or v2-shadowed copy", async () => {
       // A derived carrier committed without its record.
       expect(
-        await failure(() =>
-          asOwner((db) => insertWaitTimeout(db, ownerTurn!, ownerTurn!.turnId)),
-        ),
+        await failure(() => asOwner((db) => insertWaitTimeout(db, ownerTurn!, ownerTurn!.turnId))),
       ).toStartWith("23514");
       // A different record, written by a role that can (the owner).
       expect(
@@ -849,9 +848,7 @@ describe.skipIf(!realDb)("0713 subscription authority compatibility", () => {
     test("the copy routine takes no content and copies only into a carrier its transaction inserted", async () => {
       // A carrier inserted by an earlier transaction.
       expect(
-        await failure(() =>
-          asOwner((db) => copy(db, "claude", "session_turn", ownerTurn!.turnId)),
-        ),
+        await failure(() => asOwner((db) => copy(db, "claude", "session_turn", ownerTurn!.turnId))),
       ).toStartWith("55000");
       // Another workspace than the caller's.
       expect(
@@ -968,9 +965,7 @@ describe.skipIf(!realDb)("0713 subscription authority compatibility", () => {
       expect(await failure(() => deliver(narrowedSource, [updates.fresh], false))).toBe(
         "succeeded",
       );
-      expect(await failure(() => deliver(narrowedSource, [missedUpdate!], true))).toBe(
-        "succeeded",
-      );
+      expect(await failure(() => deliver(narrowedSource, [missedUpdate!], true))).toBe("succeeded");
       const delivered = await database!.admin<
         { id: string; shared_pool: string | null; legacy_scope: string | null }[]
       >`
@@ -979,7 +974,9 @@ describe.skipIf(!realDb)("0713 subscription authority compatibility", () => {
         left join opengeni_private.subscription_authority_compat record
           on record.turn_id = update_row.delivered_turn_id and record.provider = 'claude'
         where update_row.id = any(${[updates.narrowed, updates.fresh, missedUpdate!]}::uuid[])`;
-      expect(new Map(delivered.map((row) => [row.id, [row.shared_pool, row.legacy_scope]]))).toEqual(
+      expect(
+        new Map(delivered.map((row) => [row.id, [row.shared_pool, row.legacy_scope]])),
+      ).toEqual(
         new Map([
           [updates.narrowed, ["workspace", "workspace"]],
           [updates.fresh, [null, null]],
@@ -1011,7 +1008,11 @@ describe.skipIf(!realDb)("0713 subscription authority compatibility", () => {
       const edit = (link: string, copyRecord: boolean) =>
         insertTurn(
           source,
-          { source: "user", lineage: { actor: "human", editedFromTurnId: link }, human: org!.subjectId },
+          {
+            source: "user",
+            lineage: { actor: "human", editedFromTurnId: link },
+            human: org!.subjectId,
+          },
           copyRecord,
         );
       // The resubmitted prompt copies the withdrawn turn's record verbatim.
@@ -1087,7 +1088,9 @@ describe.skipIf(!realDb)("0713 subscription authority compatibility", () => {
 
       // A pure goal continuation reads the goal's causal turn, only for the
       // delivering turn's own human.
-      const goal = await asOwner((db) => insertGoalContinuation(db, narrowed, narrowed.turnId, true));
+      const goal = await asOwner((db) =>
+        insertGoalContinuation(db, narrowed, narrowed.turnId, true),
+      );
       expect((await records(goal))[0]).toMatchObject({ legacy_scope: "user" });
       const continuation = { source: "goal" as const, human: org!.subjectId };
       expect(await failure(() => deliver(narrowed, [goal], false, continuation))).toStartWith(
@@ -1212,28 +1215,37 @@ describe.skipIf(!realDb)("0713 subscription authority compatibility", () => {
             ),
         );
       const placement = async (turn: Carrier, membershipId = org!.membershipId) => {
-        const result = await withSubscriptionCoreAcceptedTurn(client!.db, identity(turn), async (tx) => {
-          const [row] = await rawRows<{ authorized: boolean }>(
-            tx,
-            sql`select opengeni_private.authorize_subscription_personal_placement_access(
+        const result = await withSubscriptionCoreAcceptedTurn(
+          client!.db,
+          identity(turn),
+          async (tx) => {
+            const [row] = await rawRows<{ authorized: boolean }>(
+              tx,
+              sql`select opengeni_private.authorize_subscription_personal_placement_access(
                   ${org!.accountId}::uuid, ${org!.personalWorkspaceId}::uuid,
                   ${turn.sessionId}::uuid, ${turn.turnId}::uuid, 'claude', ${membershipId}::uuid,
                   ${generation}::bigint, ${org!.subjectId}, ${org!.subjectId}) as authorized`,
-          );
-          const visible = async (connectionId: string) => {
-            const [visibility] = await rawRows<{ visible: boolean }>(
-              tx,
-              sql`select opengeni_private.subscription_connection_visible(
+            );
+            const visible = async (connectionId: string) => {
+              const [visibility] = await rawRows<{ visible: boolean }>(
+                tx,
+                sql`select opengeni_private.subscription_connection_visible(
                     ${org!.accountId}::uuid, ${org!.personalWorkspaceId}::uuid, ${connectionId}::uuid,
                     'personal', 'people', ${org!.membershipId}::uuid, ${org!.subjectId}, 'claude'
                   ) as visible`,
-            );
-            return visibility!.visible;
-          };
-          return { authorized: row!.authorized, listed: await visible(listed), unlisted: await visible(unlisted) };
-        });
+              );
+              return visibility!.visible;
+            };
+            return {
+              authorized: row!.authorized,
+              listed: await visible(listed),
+              unlisted: await visible(unlisted),
+            };
+          },
+        );
         expect(result.status).toBe("completed");
-        return (result as { value: { authorized: boolean; listed: boolean; unlisted: boolean } }).value;
+        return (result as { value: { authorized: boolean; listed: boolean; unlisted: boolean } })
+          .value;
       };
       expect(await access(current, listed)).toBe(true);
       expect(await access(current, unlisted)).toBe(false);
@@ -1241,7 +1253,11 @@ describe.skipIf(!realDb)("0713 subscription authority compatibility", () => {
       // Membership and generation alone never reach the record's other connections.
       for (const turn of [staleGeneration, otherMembership, noRecord]) {
         expect(await access(turn, listed)).toBe(false);
-        expect(await placement(turn)).toEqual({ authorized: false, listed: false, unlisted: false });
+        expect(await placement(turn)).toEqual({
+          authorized: false,
+          listed: false,
+          unlisted: false,
+        });
       }
       expect(await placement(current, crypto.randomUUID())).toMatchObject({ authorized: false });
       // personalConnectionsAllowed and the enabled cutover row still apply.

@@ -628,9 +628,9 @@ describe("immutable session turn initiators", () => {
       (await getSessionTurn(client.db, grant.workspaceId!, resubmitted.turnId))?.initiator,
     ).toEqual(original?.initiator);
     // The edit names the exact withdrawn turn it copies (0713's edit source).
-    expect((await getSessionTurn(client.db, grant.workspaceId!, resubmitted.turnId))?.lineage).toEqual(
-      { actor: "human", editedFromTurnId: sent.turnId },
-    );
+    expect(
+      (await getSessionTurn(client.db, grant.workspaceId!, resubmitted.turnId))?.lineage,
+    ).toEqual({ actor: "human", editedFromTurnId: sent.turnId });
     expect((await getSessionTurn(client.db, grant.workspaceId!, sent.turnId))?.lineage).toEqual({
       actor: "human",
     });
