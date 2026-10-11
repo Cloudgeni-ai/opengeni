@@ -259,13 +259,10 @@ test("owner inventory works without private conversation activation and isolates
   try {
     await sql.unsafe(`grant usage on schema public to "${ownerRole}"`);
     await sql.unsafe(`grant usage on schema opengeni_private to "${ownerRole}"`);
-    // The migration owner owns the subscription internals, which the live
-    // authority fences call once a provider has a cutover receipt.
-    await sql.unsafe(`grant usage on schema opengeni_subscription_internal to "${ownerRole}"`);
     // Mirror a migration owner's object access without its local superuser
     // privilege. FORCE-RLS still evaluates every policy and helper normally.
     await sql.unsafe(
-      `grant execute on all functions in schema public, opengeni_private, opengeni_subscription_internal to "${ownerRole}"`,
+      `grant execute on all functions in schema public, opengeni_private to "${ownerRole}"`,
     );
     await sql.unsafe(
       `grant select on all tables in schema public, opengeni_private to "${ownerRole}"`,
@@ -379,6 +376,13 @@ test("owner inventory works without private conversation activation and isolates
     );
     await sql.unsafe(
       `grant execute on all functions in schema public, opengeni_private to "${executionOwner}"`,
+    );
+    // The migration owner owns the subscription internals, which the live
+    // authority fence calls once a provider has a cutover receipt (SuperGrok
+    // since 0717).
+    await sql.unsafe(`grant usage on schema opengeni_subscription_internal to "${executionOwner}"`);
+    await sql.unsafe(
+      `grant execute on all functions in schema opengeni_subscription_internal to "${executionOwner}"`,
     );
     for (const routine of routines)
       await sql.unsafe(`alter function ${routine.signature} owner to "${executionOwner}"`);

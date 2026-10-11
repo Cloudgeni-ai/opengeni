@@ -43,6 +43,9 @@ import { provisionRoles } from "../src/provision-roles";
 const REACH_MIGRATION = "0713_subscription_core_provider_keyed_reach.sql";
 // 0714 redefines 0713's reach setters, so it is held back with it.
 const LATER_MIGRATION = "0714_subscription_workspace_managed_organization_accounts.sql";
+// The drained SuperGrok cutover is a maintenance step this rolling test never
+// runs: it stays recorded as applied throughout.
+const MAINTENANCE_MIGRATION = "0717_subscription_core_xai_cutover.sql";
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const key = Buffer.alloc(32, 73);
 // What the runner sends ahead of a migration body, in the same transaction
@@ -378,7 +381,8 @@ beforeAll(async () => {
   const owner = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
-    await owner`insert into schema_migrations(name) values (${REACH_MIGRATION}), (${LATER_MIGRATION})`;
+    await owner`insert into schema_migrations(name)
+      values (${REACH_MIGRATION}), (${LATER_MIGRATION}), (${MAINTENANCE_MIGRATION})`;
     await migrate(database.ownerUrl);
     await owner`delete from schema_migrations where name in (${REACH_MIGRATION}, ${LATER_MIGRATION})`;
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
