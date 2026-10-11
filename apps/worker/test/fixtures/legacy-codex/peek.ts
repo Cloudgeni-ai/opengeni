@@ -5,9 +5,11 @@ import {
   getSubscriptionCoreCodexCapacityWaitForSession,
   subscriptionCoreCodexCapacityWaitRef,
   getXaiCapacityWaitForSession,
-  getClaudeCapacityWaitForSession,
 } from "@opengeni/db";
-import { getCodexCapacityWaitForSession } from "../../../../../packages/db/test/fixtures/legacy-codex";
+import {
+  getClaudeCapacityWaitForSession,
+  getCodexCapacityWaitForSession,
+} from "../../../../../packages/db/test/fixtures/legacy-codex";
 import type { ControlActivityServices, GetCodexCapacityWaitInput } from "../../../src/activities/types";
 
 export function createHistoricalCodexCapacityPeek(services: () => Promise<ControlActivityServices>) {

@@ -178,15 +178,11 @@ function failureDeps(error: unknown, coreTurn: SubscriptionCoreTurn | null) {
         modelRequestStarted: true,
         redispatchesAtDispatch: 0,
         triggerType: "user",
-        // A v1 marker the legacy path wrote: never read on the core.
-        claudeAuthRecovery: { credentialId: "connection-core", credentialVersion: 4 },
       },
       billingState: { isClaudeTurn: true },
       eventing: { publish: async () => [], turnStartedPublished: true, settle },
       providerTurn: {
         effectiveClaudeCredentialId: "connection-core",
-        effectiveClaudeCredentialVersion: null,
-        claudeUpstreamModelId: "claude-sonnet-5",
         claudeSubscriptionCore: coreTurn,
         xaiSubscriptionCore: null,
         codexSubscriptionCore: null,
@@ -237,14 +233,9 @@ function coreRuntime(options: {
   spy(db, "subscriptionCoreRequests").mockReturnValue({
     isSubscriptionCoreSourceDisconnected: async () => options.disconnected ?? false,
   } as never);
-  // The legacy Claude settlement (receipts, refresh recovery, rotation and
-  // its capacity wait) must never run for a core turn.
-  const legacy = [
-    spy(db, "armClaudeCapacityWait"),
-    spy(db, "reconcileClaudeCapacityWait"),
-    spy(db, "loadClaudeAccountCredential"),
-    spy(db, "resolveClaudeAccountCredential"),
-  ];
+  // The legacy Claude settlement is deleted (C4); the legacy token reader the
+  // API still uses until C2a must never run for a core turn.
+  const legacy = [spy(db, "resolveClaudeAccountCredential")];
   return { apply, count, touch, settlementProviders, legacy };
 }
 
@@ -312,7 +303,7 @@ describe("Claude refusal settlement on the core", () => {
     const { deps } = failureDeps(anthropic(401, "authentication_error"), core());
     expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "recovering" });
     // The transport already ran the turn's one forced refresh: no second
-    // refresh plan, and the v1 `claudeAuthRecovery` marker is not consulted.
+    // refresh plan.
     expect(runtime.apply.mock.calls[0]![3]).toMatchObject({
       kind: "settle",
       receipt: { kind: "unauthorized", evidence: { refreshGeneration: 4 } },

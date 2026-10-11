@@ -1,8 +1,10 @@
 /** TEST ONLY: historical Codex regression fixture, snapshot 8c43a921512078d302f671ae590d43645669f88d. Never import from production. */
 import { environmentsEncryptionKeyBytes } from "@opengeni/config";
 
-import { requestSessionTurnRecovery, getSessionGoal, armXaiCapacityWait, armClaudeCapacityWait, reconcileClaudeCapacityWait, recordClaudeAccountUsage, resolveClaudeAccountCredential, loadClaudeAccountCredential, ClaudeSubscriptionConnectionChanged, reconcileXaiCapacityWait, recordUsageEvent, getActiveSessionHistoryItemsPaged, readLease, SandboxLeaseSupersededError, isSessionEventPersistenceError, SANDBOX_SETUP_RECOVERY_LIMIT, SubscriptionCoreCodexAccessLostError, SubscriptionCoreCodexLeaseLostError, type CodexLeaseAccountStatus } from "@opengeni/db";
-import { listCodexAccountStatuses, quarantineCodexCredentialForLease, recheckCodexCredentialPlan, settleCodexCredentialLeaseLoss, settleCodexCredentialFailover } from "../../../../../packages/db/test/fixtures/legacy-codex";
+import { requestSessionTurnRecovery, getSessionGoal, armXaiCapacityWait, recordClaudeAccountUsage, resolveClaudeAccountCredential, ClaudeSubscriptionConnectionChanged, reconcileXaiCapacityWait, recordUsageEvent, getActiveSessionHistoryItemsPaged, readLease, SandboxLeaseSupersededError, isSessionEventPersistenceError, SANDBOX_SETUP_RECOVERY_LIMIT, SubscriptionCoreCodexAccessLostError, SubscriptionCoreCodexLeaseLostError, type CodexLeaseAccountStatus } from "@opengeni/db";
+import { armClaudeCapacityWait, listCodexAccountStatuses, quarantineCodexCredentialForLease, reconcileClaudeCapacityWait, recheckCodexCredentialPlan, settleCodexCredentialLeaseLoss, settleCodexCredentialFailover } from "../../../../../packages/db/test/fixtures/legacy-codex";
+// The legacy Claude runtime is deleted (M4 C4); its usage reader stays only for the API until C2a.
+import { loadClaudeAccountCredential } from "../../../../../packages/db/src/claude-subscription-account-usage";
 
 import { publishDurableSessionEvents } from "@opengeni/events";
 
@@ -86,7 +88,6 @@ import {
   sandboxRouteTransitionCode,
   safeErrorDiagnostic,
   classifyXaiCredentialFailure,
-  classifyClaudeCredentialFailure,
   agentRunFailurePayload,
   agentRunRecoveryFailurePayload,
   codexCredentialCooldownUntil,
@@ -94,6 +95,42 @@ import {
   codexUsageLimitFailurePayload,
   type CodexCredentialFailure,
 } from "../../../src/activities/agent-turn/errors";
+import { AnthropicRequestError } from "@opengeni/runtime";
+import { ClaudeSubscriptionReconnectRequired } from "@opengeni/db";
+import {
+  PROVIDER_BACKPRESSURE_DELAY_MS,
+  type XaiCredentialFailure,
+} from "../../../src/activities/agent-turn/errors";
+
+/**
+ * The snapshot's legacy Claude classifier, deleted from the runtime in M4 C4
+ * and inlined here so this frozen fixture stays importable. Provider safety
+ * refusals are never HTTP 401 or 429, so the runtime's private safety check
+ * that preceded these cases is not repeated.
+ */
+function classifyClaudeCredentialFailure(
+  error: unknown,
+): (XaiCredentialFailure & { requestId?: string }) | null {
+  let current: unknown = error;
+  for (let depth = 0; depth < 6 && current instanceof Error; depth++) {
+    if (current instanceof ClaudeSubscriptionReconnectRequired)
+      return { kind: "auth", cooldownMs: null };
+    if (current instanceof AnthropicRequestError && current.status === 401)
+      return {
+        kind: "auth",
+        cooldownMs: null,
+        ...(current.request_id ? { requestId: current.request_id } : {}),
+      };
+    if (current instanceof AnthropicRequestError && current.status === 429)
+      return {
+        kind: "rate_limit",
+        cooldownMs: providerRetryAfterMs(current) ?? PROVIDER_BACKPRESSURE_DELAY_MS,
+        ...(current.request_id ? { requestId: current.request_id } : {}),
+      };
+    current = current.cause;
+  }
+  return null;
+}
 
 import { selectRejectedProviderArtifactHistoryIds } from "../../../src/activities/agent-turn/history";
 

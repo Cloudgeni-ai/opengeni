@@ -6,20 +6,16 @@ import { TurnExecutionPolicyV1, TURN_EXECUTION_POLICY_METADATA_KEY } from "@open
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
-import { emptyClaudeUsage } from "@opengeni/config";
 import { sql } from "drizzle-orm";
 import {
   acquireXaiCredentialLease,
-  armClaudeCapacityWait,
   armXaiCapacityWait,
   createDb,
   createSession,
-  getClaudeCapacityWaitForSession,
   getOrganizationPrivateSessionSettings,
   getXaiCapacityWaitForSession,
   getXaiSessionAccountPin,
   peekSessionWork,
-  reconcileClaudeCapacityWait,
   reconcileXaiCapacityWait,
   setXaiSessionAccountPin,
   subscriptionPoolWorkerSubject,
@@ -32,19 +28,6 @@ import {
   withWorkspaceSubjectRls,
   type DbClient,
 } from "../src";
-import {
-  acquireClaudeCredentialLease,
-  createClaudeSubscriptionAccount,
-  getClaudeRotationSettings,
-  getClaudeSessionAccountPin,
-  recordClaudeSessionLastAccount,
-  selectClaudeCredentialForUse,
-  setClaudeSessionAccountPin,
-  setInitialActiveClaudeCredential,
-  updateClaudeRotationSettings,
-  wakeClaudeCapacityWaiters,
-  type ClaudeAccountSecret,
-} from "../src/claude-subscription-accounts";
 import { currentSessionRlsActorContext } from "../src/database";
 import {
   withPoolWakeServiceScopeInTransaction,
@@ -52,19 +35,16 @@ import {
 } from "../src/subscription-session-access";
 import { SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS } from "../src/runtime-posture";
 
-// Characterizes the legacy SuperGrok and Claude runtimes, which run only before
-// their drained subscription-core cutovers: the database withholds those
-// migrations. Removed with the legacy runtimes.
+// Characterizes the legacy SuperGrok runtime, which runs only before its
+// drained subscription-core cutover: the database withholds that migration.
+// Removed with the legacy runtime. (The legacy Claude runtime is deleted,
+// design 5.3, C4; the shared scoped waiter cases run on the SuperGrok pool.)
 const LEGACY_SUBSCRIPTION_WORLD = {
-  withheldMigrations: [
-    SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.xai!,
-    SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.claude!,
-  ],
+  withheldMigrations: [SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.xai!],
 };
 
 let shared: SharedTestDatabase;
 let client: DbClient;
-const encryptionKey = Buffer.alloc(32, 41);
 const authoritySnapshot: { version: 1; scope: "workspace" | "organization" } = {
   version: 1,
   scope: "workspace",
@@ -124,65 +104,6 @@ async function fixture() {
 }
 type Fixture = Awaited<ReturnType<typeof fixture>>;
 
-function secret(): ClaudeAccountSecret {
-  return {
-    version: 1,
-    token: "sk-ant-oat01-fixture-" + randomUUID(),
-    identity: { accountUuid: randomUUID(), deviceId: "a".repeat(64) },
-    oauth: {
-      refreshToken: "fixture-refresh-" + randomUUID(),
-      expiresAt: new Date(Date.now() + 3600_000).toISOString(),
-      scopes: ["user:inference", "user:profile"],
-    },
-  };
-}
-
-async function account(input: Fixture) {
-  const credential = secret();
-  return createClaudeSubscriptionAccount(client.db, {
-    ...input,
-    scope: "workspace",
-    encryptionKey,
-    secret: credential,
-    providerAccountId: credential.identity.accountUuid,
-    label: null,
-    accountEmail: "account@example.test",
-    planType: "claude_max",
-    expiresAt: new Date(credential.oauth!.expiresAt),
-  });
-}
-
-async function pool(input: Fixture) {
-  const a = await account(input),
-    b = await account(input);
-  await setInitialActiveClaudeCredential(client.db, { ...input, credentialId: a.account.id });
-  const settings = (await getClaudeRotationSettings(client.db, input))!;
-  await updateClaudeRotationSettings(client.db, {
-    ...input,
-    expectedVersion: settings.version,
-    rotationEnabled: true,
-  });
-  return { a, b };
-}
-
-async function rejectOpus(input: Fixture, id: string, version: number, now: Date) {
-  const snapshot = {
-    ...emptyClaudeUsage(version),
-    windows: [
-      {
-        id: "seven_day_opus",
-        usedPercent: 100,
-        status: "rejected",
-        resetsAt: new Date(now.getTime() + 3600_000).toISOString(),
-        observedAt: now.toISOString(),
-      },
-    ],
-    observedAt: now.toISOString(),
-    source: "response_headers",
-  };
-  await shared.admin`insert into claude_subscription_account_usage (credential_id, account_id, credential_version, snapshot) values (${id}, ${input.accountId}, ${version}, ${JSON.stringify(snapshot)}::jsonb) on conflict (credential_id) do update set snapshot = excluded.snapshot, credential_version = excluded.credential_version`;
-}
-
 async function turn(
   input: Fixture,
   visibility: Visibility,
@@ -241,11 +162,11 @@ async function turn(
 
 const capacityFailure = { code: "synthetic_capacity_unavailable" };
 
-for (const provider of ["claude", "xai"] as const) {
+for (const provider of ["xai"] as const) {
   test.each(visibilities)(
     `SUB-ACCESS-03: ${provider} capacity arming under the pool worker subject succeeds for %s sessions`,
     async (visibility) => {
-      const arm = provider === "claude" ? armClaudeCapacityWait : armXaiCapacityWait;
+      const arm = armXaiCapacityWait;
       const input = await fixture();
       const running = await turn(input, visibility);
       const armed = await arm(client.db, {
@@ -266,55 +187,6 @@ for (const provider of ["claude", "xai"] as const) {
     60_000,
   );
 }
-
-test.each(visibilities)(
-  "SUB-ACCESS-03: Claude %s capacity wait resumes after quota recovery",
-  async (visibility) => {
-    const input = await fixture(),
-      { a, b } = await pool(input),
-      running = await turn(input, visibility),
-      now = new Date();
-    await rejectOpus(input, a.account.id, a.account.version, now);
-    await rejectOpus(input, b.account.id, b.account.version, now);
-    const armed = await armClaudeCapacityWait(client.db, {
-      ...input,
-      ...running,
-      subjectId: subscriptionPoolWorkerSubject("claude"),
-      earliestResetAt: new Date(now.getTime() + 3600_000),
-      failurePayload: capacityFailure,
-      now,
-    });
-    expect(armed.action).toBe("waiting");
-    if (armed.action !== "waiting") throw new Error("Fixture failed to arm");
-    expect(
-      (await getClaudeCapacityWaitForSession(client.db, input.workspaceId, running.sessionId))?.id,
-    ).toBe(armed.waiter.id);
-    const afterReset = new Date(now.getTime() + 3600_001);
-    expect(
-      (
-        await selectClaudeCredentialForUse(client.db, {
-          ...input,
-          shardKey: running.sessionId,
-          upstreamModelId: "claude-opus-fixture",
-          now: afterReset,
-        })
-      ).credentialId,
-    ).not.toBeNull();
-    const reconciled = await reconcileClaudeCapacityWait(client.db, {
-      ...input,
-      sessionId: running.sessionId,
-      waiterId: armed.waiter.id,
-      generation: armed.waiter.generation,
-      now: afterReset,
-    });
-    expect(reconciled.action).toBe("resumed");
-    const [stored] = await shared.admin<
-      { status: string }[]
-    >`select status from claude_capacity_waiters where id = ${armed.waiter.id}`;
-    expect(stored!.status).toBe("resumed");
-  },
-  60_000,
-);
 
 test.each(visibilities)(
   "SUB-ACCESS-03: SuperGrok %s capacity waiter stays visible to recovery",
@@ -345,36 +217,12 @@ test.each(visibilities)(
   60_000,
 );
 
-test.each(visibilities)(
-  "SUB-ACCESS-03: Claude %s session pin and last-account metadata work under the pool worker subject",
-  async (visibility) => {
-    const input = await fixture(),
-      { a } = await pool(input),
-      running = await turn(input, visibility);
-    const pin = await setClaudeSessionAccountPin(client.db, {
-      ...input,
-      ...running,
-      credentialId: a.account.id,
-      pinSource: "manual",
-      expectedVersion: null,
-    });
-    const worker = { ...input, ...running, subjectId: subscriptionPoolWorkerSubject("claude") };
-    expect((await getClaudeSessionAccountPin(client.db, worker))?.id).toBe(pin.id);
-    const recorded = await recordClaudeSessionLastAccount(client.db, {
-      ...worker,
-      credentialId: a.account.id,
-    });
-    expect(recorded.lastCredentialId).toBe(a.account.id);
-  },
-  60_000,
-);
-
 test("SUB-ACCESS-02, SUB-ACCESS-04: restored session access admits only the acting turn's human, never another member's private session", async () => {
   const input = await fixture();
   const mine = await turn(input, "user_private");
   const theirs = await turn(input, "user_private", input.otherSubjectId);
   const shared_ = await turn(input, "workspace_shared", input.otherSubjectId);
-  const worker = subscriptionPoolWorkerSubject("claude");
+  const worker = subscriptionPoolWorkerSubject("xai");
   const visible = await withSubscriptionPoolSessionAccess(
     client.db,
     { workspaceId: input.workspaceId, subjectId: worker, sessionId: mine.sessionId },
@@ -401,10 +249,10 @@ test("SUB-ACCESS-02, SUB-ACCESS-04: restored session access admits only the acti
 test("SUB-ACCESS-04: an ambient actor carrying a different human is never overridden", async () => {
   const input = await fixture(),
     running = await turn(input, "user_private");
-  const armed = await armClaudeCapacityWait(client.db, {
+  const armed = await armXaiCapacityWait(client.db, {
     ...input,
     ...running,
-    subjectId: subscriptionPoolWorkerSubject("claude"),
+    subjectId: subscriptionPoolWorkerSubject("xai"),
     earliestResetAt: null,
     failurePayload: capacityFailure,
   });
@@ -412,7 +260,7 @@ test("SUB-ACCESS-04: an ambient actor carrying a different human is never overri
   const seen = await withSessionRlsActorContext(
     { subjectId: "service:agent-turn", initiatingHumanSubjectId: input.otherSubjectId },
     async () =>
-      await getClaudeCapacityWaitForSession(client.db, input.workspaceId, running.sessionId),
+      await getXaiCapacityWaitForSession(client.db, input.workspaceId, running.sessionId),
   );
   expect(seen).toBeNull();
 }, 60_000);
@@ -445,7 +293,7 @@ test("SUB-ACCESS-02: non-pool subjects run unchanged", async () => {
 
 async function poolVisibleSessions(
   input: Fixture,
-  provider: "claude" | "xai",
+  provider: "xai",
   sessionIds: string[],
 ): Promise<string[]> {
   return await withWorkspaceSubjectRls(
@@ -493,13 +341,13 @@ test.each([
           client.db,
           {
             workspaceId: input.workspaceId,
-            subjectId: subscriptionPoolWorkerSubject("claude"),
+            subjectId: subscriptionPoolWorkerSubject("xai"),
             sessionId: sharedByMe.sessionId,
             turnId: sharedByMe.turnId,
           },
           async () => ({
             actor: currentSessionRlsActorContext(),
-            visible: await poolVisibleSessions(input, "claude", [
+            visible: await poolVisibleSessions(input, "xai", [
               mine.sessionId,
               sharedByMe.sessionId,
             ]),
@@ -527,7 +375,7 @@ test("without an ambient actor the helper restores exactly the pool-worker subje
 test("restoring pool session access refuses an open transaction handle", async () => {
   const input = await fixture();
   const mine = await turn(input, "user_private");
-  const worker = subscriptionPoolWorkerSubject("claude");
+  const worker = subscriptionPoolWorkerSubject("xai");
   let ran = false;
   await expect(
     withWorkspaceSubjectRls(
@@ -547,73 +395,55 @@ test("restoring pool session access refuses an open transaction handle", async (
   expect(ran).toBe(false);
 }, 60_000);
 
-for (const provider of ["claude", "xai"] as const) {
-  test.each(visibilities)(
-    `SUB-ACCESS-03: ${provider} lease acquisition under the pool worker subject succeeds for %s sessions`,
-    async (visibility) => {
-      const input = await fixture();
-      if (provider === "claude") await pool(input);
-      const running = await turn(input, visibility);
-      const acquire =
-        provider === "claude" ? acquireClaudeCredentialLease : acquireXaiCredentialLease;
-      const leased = await acquire(client.db, {
-        ...input,
-        sessionId: running.sessionId,
-        turnId: running.turnId,
-        subjectId: subscriptionPoolWorkerSubject(provider),
-        holderId: "fixture-holder-" + randomUUID(),
-        upstreamModelId: "claude-opus-fixture",
-        modelId: "fixture-model",
-      });
-      if (provider === "claude") expect(leased.credentialId).not.toBeNull();
-      else expect(leased.credentialId).toBeNull();
-    },
-    60_000,
-  );
+test.each(visibilities)(
+  "SUB-ACCESS-03: xai lease acquisition under the pool worker subject succeeds for %s sessions",
+  async (visibility) => {
+    const input = await fixture();
+    const running = await turn(input, visibility);
+    const leased = await acquireXaiCredentialLease(client.db, {
+      ...input,
+      sessionId: running.sessionId,
+      turnId: running.turnId,
+      subjectId: subscriptionPoolWorkerSubject("xai"),
+      holderId: "fixture-holder-" + randomUUID(),
+    });
+    expect(leased.credentialId).toBeNull();
+  },
+  60_000,
+);
 
-  test.each(visibilities)(
-    `${provider} %s session pin uses the acting turn, not the session's active turn`,
-    async (visibility) => {
-      const input = await fixture();
-      const credentialId = provider === "claude" ? (await pool(input)).a.account.id : null;
-      const running = await turn(input, visibility);
-      // The acting turn is no longer the session's active turn.
-      await shared.admin`update sessions set active_turn_id = null where id = ${running.sessionId}`;
-      const setPin = provider === "claude" ? setClaudeSessionAccountPin : setXaiSessionAccountPin;
-      const getPin = provider === "claude" ? getClaudeSessionAccountPin : getXaiSessionAccountPin;
-      const worker = {
-        ...input,
-        sessionId: running.sessionId,
-        turnId: running.turnId,
-        subjectId: subscriptionPoolWorkerSubject(provider),
-      };
-      const pin = await setPin(client.db, {
-        ...worker,
-        credentialId,
-        pinSource: credentialId ? "policy" : null,
-        expectedVersion: null,
-      });
-      expect((await getPin(client.db, worker))?.id).toBe(pin.id);
-      if (credentialId) {
-        const recorded = await recordClaudeSessionLastAccount(client.db, {
-          ...worker,
-          credentialId,
-        });
-        expect(recorded.lastCredentialId).toBe(credentialId);
-      }
-      if (visibility === "user_private") {
-        // Without the acting turn nothing is restored and the private pin stays hidden.
-        expect(await getPin(client.db, { ...worker, turnId: null })).toBeNull();
-      }
-    },
-    60_000,
-  );
-}
+test.each(visibilities)(
+  "xai %s session pin uses the acting turn, not the session's active turn",
+  async (visibility) => {
+    const input = await fixture();
+    const running = await turn(input, visibility);
+    // The acting turn is no longer the session's active turn.
+    await shared.admin`update sessions set active_turn_id = null where id = ${running.sessionId}`;
+    const worker = {
+      ...input,
+      sessionId: running.sessionId,
+      turnId: running.turnId,
+      subjectId: subscriptionPoolWorkerSubject("xai"),
+    };
+    const pin = await setXaiSessionAccountPin(client.db, {
+      ...worker,
+      credentialId: null,
+      pinSource: null,
+      expectedVersion: null,
+    });
+    expect((await getXaiSessionAccountPin(client.db, worker))?.id).toBe(pin.id);
+    if (visibility === "user_private") {
+      // Without the acting turn nothing is restored and the private pin stays hidden.
+      expect(await getXaiSessionAccountPin(client.db, { ...worker, turnId: null })).toBeNull();
+    }
+  },
+  60_000,
+);
 
 test("SUB-ACCESS-04: a turn without an initiating human restores nothing and private sessions stay hidden", async () => {
   const input = await fixture();
   const serviceTurn = await turn(input, "user_private", input.subjectId, null);
-  const worker = subscriptionPoolWorkerSubject("claude");
+  const worker = subscriptionPoolWorkerSubject("xai");
   const observed = await withSubscriptionPoolSessionAccess(
     client.db,
     {
@@ -624,7 +454,7 @@ test("SUB-ACCESS-04: a turn without an initiating human restores nothing and pri
     },
     async () => ({
       actor: currentSessionRlsActorContext(),
-      visible: await poolVisibleSessions(input, "claude", [serviceTurn.sessionId]),
+      visible: await poolVisibleSessions(input, "xai", [serviceTurn.sessionId]),
     }),
   );
   expect(observed).toEqual({ actor: undefined, visible: [] });
@@ -723,10 +553,10 @@ async function readActorSettings(tx: Parameters<typeof withPoolWakeServiceScopeI
   } satisfies GucSnapshot;
 }
 
-for (const provider of ["claude", "xai"] as const) {
+for (const provider of ["xai"] as const) {
   test(`${provider}: another member's shared-pool change wakes a private waiter of exactly that pool, without granting access to it`, async () => {
-    const arm = provider === "claude" ? armClaudeCapacityWait : armXaiCapacityWait;
-    const wake = provider === "claude" ? wakeClaudeCapacityWaiters : wakeXaiCapacityWaiters;
+    const arm = armXaiCapacityWait;
+    const wake = wakeXaiCapacityWaiters;
     const worker = subscriptionPoolWorkerSubject(provider);
     const armWaiter = async (input: Fixture) => {
       const running = await turn(input, "user_private");
@@ -840,12 +670,12 @@ test("the pool wake service scope clears and then restores the caller's actor se
 test("an organization-pool change by another member wakes a private organization-scope waiter only", async () => {
   const base = await fixture();
   const input: Fixture = { ...base, authoritySnapshot: { version: 1, scope: "organization" } };
-  await shared.admin`insert into claude_rotation_settings (account_id, workspace_id, authority_scope) values (${base.accountId}, null, 'organization') on conflict do nothing`;
+  await shared.admin`insert into xai_rotation_settings (account_id, workspace_id, authority_scope) values (${base.accountId}, null, 'organization') on conflict do nothing`;
   const running = await turn(input, "user_private");
-  const armed = await armClaudeCapacityWait(client.db, {
+  const armed = await armXaiCapacityWait(client.db, {
     ...input,
     ...running,
-    subjectId: subscriptionPoolWorkerSubject("claude"),
+    subjectId: subscriptionPoolWorkerSubject("xai"),
     earliestResetAt: null,
     failurePayload: capacityFailure,
   });
@@ -854,11 +684,11 @@ test("an organization-pool change by another member wakes a private organization
     Number(
       (
         await shared.admin<{ wake_revision: number }[]>`
-          select wake_revision from claude_capacity_waiters where id = ${armed.waiter.id}`
+          select wake_revision from xai_capacity_waiters where id = ${armed.waiter.id}`
       )[0]!.wake_revision,
     );
   const wakeAs = async (scope: "workspace" | "organization") =>
-    await wakeClaudeCapacityWaiters(client.db, {
+    await wakeXaiCapacityWaiters(client.db, {
       workspaceId: input.workspaceId,
       subjectId: input.otherSubjectId,
       authoritySnapshot: { version: 1, scope },
@@ -870,12 +700,12 @@ test("an organization-pool change by another member wakes a private organization
   expect(await revision()).toBe(2);
 }, 60_000);
 
-async function armPrivateClaudeWaiter(input: Fixture) {
+async function armPrivateXaiWaiter(input: Fixture) {
   const running = await turn(input, "user_private");
-  const armed = await armClaudeCapacityWait(client.db, {
+  const armed = await armXaiCapacityWait(client.db, {
     ...input,
     ...running,
-    subjectId: subscriptionPoolWorkerSubject("claude"),
+    subjectId: subscriptionPoolWorkerSubject("xai"),
     earliestResetAt: null,
     failurePayload: capacityFailure,
   });
@@ -883,9 +713,9 @@ async function armPrivateClaudeWaiter(input: Fixture) {
   return armed.waiter.id;
 }
 
-async function claudeWakeRevision(waiterId: string): Promise<number> {
+async function xaiWakeRevision(waiterId: string): Promise<number> {
   const [row] = await shared.admin<{ wake_revision: number }[]>`
-    select wake_revision from claude_capacity_waiters where id = ${waiterId}`;
+    select wake_revision from xai_capacity_waiters where id = ${waiterId}`;
   return Number(row!.wake_revision);
 }
 
@@ -899,9 +729,9 @@ async function organizationAdminOutsideWorkspace(input: Fixture): Promise<string
 
 test("only a subject holding the shared pool wakes another member's private waiter", async () => {
   const input = await fixture();
-  const waiterId = await armPrivateClaudeWaiter(input);
+  const waiterId = await armPrivateXaiWaiter(input);
   const wakeAs = async (subjectId: string, scope: "workspace" | "organization" = "workspace") =>
-    await wakeClaudeCapacityWaiters(client.db, {
+    await wakeXaiCapacityWaiters(client.db, {
       workspaceId: input.workspaceId,
       subjectId,
       authoritySnapshot: { version: 1, scope },
@@ -911,35 +741,35 @@ test("only a subject holding the shared pool wakes another member's private wait
   // A subject with no authority here wakes under its own subject and reaches
   // no other member's private waiter.
   await wakeAs("user:" + randomUUID());
-  expect(await claudeWakeRevision(waiterId)).toBe(1);
+  expect(await xaiWakeRevision(waiterId)).toBe(1);
   // An organization member outside this workspace holds the organization
   // pool, not this workspace's pool.
   await wakeAs(await organizationAdminOutsideWorkspace(input));
-  expect(await claudeWakeRevision(waiterId)).toBe(1);
+  expect(await xaiWakeRevision(waiterId)).toBe(1);
   // Worker usage and quota observations wake as the pool-worker subject.
-  await wakeAs(subscriptionPoolWorkerSubject("claude"));
-  expect(await claudeWakeRevision(waiterId)).toBe(2);
+  await wakeAs(subscriptionPoolWorkerSubject("xai"));
+  expect(await xaiWakeRevision(waiterId)).toBe(2);
   // A workspace member does too.
   await wakeAs(input.otherSubjectId);
-  expect(await claudeWakeRevision(waiterId)).toBe(3);
+  expect(await xaiWakeRevision(waiterId)).toBe(3);
 }, 60_000);
 
 test("an organization administrator outside the workspace wakes the organization pool's private waiters", async () => {
   const base = await fixture();
   const input: Fixture = { ...base, authoritySnapshot: { version: 1, scope: "organization" } };
-  await shared.admin`insert into claude_rotation_settings (account_id, workspace_id, authority_scope) values (${base.accountId}, null, 'organization') on conflict do nothing`;
-  const waiterId = await armPrivateClaudeWaiter(input);
+  await shared.admin`insert into xai_rotation_settings (account_id, workspace_id, authority_scope) values (${base.accountId}, null, 'organization') on conflict do nothing`;
+  const waiterId = await armPrivateXaiWaiter(input);
   const wakeAs = async (subjectId: string) =>
-    await wakeClaudeCapacityWaiters(client.db, {
+    await wakeXaiCapacityWaiters(client.db, {
       workspaceId: input.workspaceId,
       subjectId,
       authoritySnapshot: input.authoritySnapshot,
       reason: "fixture_organization_wake",
     });
   await wakeAs("user:" + randomUUID());
-  expect(await claudeWakeRevision(waiterId)).toBe(1);
+  expect(await xaiWakeRevision(waiterId)).toBe(1);
   await wakeAs(await organizationAdminOutsideWorkspace(input));
-  expect(await claudeWakeRevision(waiterId)).toBe(2);
+  expect(await xaiWakeRevision(waiterId)).toBe(2);
 }, 60_000);
 
 test("a wake stays in its workspace even on a connection that bypasses RLS", async () => {
@@ -949,11 +779,11 @@ test("a wake stays in its workspace even on a connection that bypasses RLS", asy
   await shared.admin`insert into workspace_inference_controls (workspace_id, account_id) values (${second!.id}, ${input.accountId})`;
   for (const subjectId of [input.subjectId, input.otherSubjectId])
     await shared.admin`insert into workspace_memberships (account_id, workspace_id, subject_id, role, permissions) values (${input.accountId}, ${second!.id}, ${subjectId}, 'owner', '[]'::jsonb)`;
-  const here = await armPrivateClaudeWaiter(input);
-  const elsewhere = await armPrivateClaudeWaiter({ ...input, workspaceId: second!.id });
+  const here = await armPrivateXaiWaiter(input);
+  const elsewhere = await armPrivateXaiWaiter({ ...input, workspaceId: second!.id });
   const bypass = createDb(shared.adminUrl);
   try {
-    await wakeClaudeCapacityWaiters(bypass.db, {
+    await wakeXaiCapacityWaiters(bypass.db, {
       workspaceId: input.workspaceId,
       subjectId: input.otherSubjectId,
       authoritySnapshot: input.authoritySnapshot,
@@ -962,8 +792,8 @@ test("a wake stays in its workspace even on a connection that bypasses RLS", asy
   } finally {
     await bypass.close();
   }
-  expect(await claudeWakeRevision(here)).toBe(2);
-  expect(await claudeWakeRevision(elsewhere)).toBe(1);
+  expect(await xaiWakeRevision(here)).toBe(2);
+  expect(await xaiWakeRevision(elsewhere)).toBe(1);
 }, 60_000);
 
 async function waitForLockWaiter(text: string): Promise<void> {
@@ -982,10 +812,10 @@ async function waitForLockWaiter(text: string): Promise<void> {
 test("a capacity wake takes the session lock before the waiter lock, like a resume", async () => {
   const input = await fixture();
   const running = await turn(input, "workspace_shared");
-  const armed = await armClaudeCapacityWait(client.db, {
+  const armed = await armXaiCapacityWait(client.db, {
     ...input,
     ...running,
-    subjectId: subscriptionPoolWorkerSubject("claude"),
+    subjectId: subscriptionPoolWorkerSubject("xai"),
     earliestResetAt: null,
     failurePayload: capacityFailure,
   });
@@ -997,15 +827,15 @@ test("a capacity wake takes the session lock before the waiter lock, like a resu
   try {
     await resume`begin`;
     await resume`select id from sessions where id = ${running.sessionId} for update`;
-    wake = wakeClaudeCapacityWaiters(client.db, {
+    wake = wakeXaiCapacityWaiters(client.db, {
       workspaceId: input.workspaceId,
-      subjectId: subscriptionPoolWorkerSubject("claude"),
+      subjectId: subscriptionPoolWorkerSubject("xai"),
       authoritySnapshot: input.authoritySnapshot,
       reason: "fixture_lock_order",
     });
     await waitForLockWaiter("session_workflow_wake_outbox");
     const locked = await resume`
-      select id from claude_capacity_waiters where id = ${armed.waiter.id} for update nowait`;
+      select id from xai_capacity_waiters where id = ${armed.waiter.id} for update nowait`;
     expect(locked.map((row) => row.id)).toEqual([armed.waiter.id]);
     await resume`commit`;
   } catch (error) {
@@ -1015,7 +845,7 @@ test("a capacity wake takes the session lock before the waiter lock, like a resu
     resume.release();
     await wake?.catch(() => undefined);
   }
-  expect(await claudeWakeRevision(armed.waiter.id)).toBe(2);
+  expect(await xaiWakeRevision(armed.waiter.id)).toBe(2);
 }, 60_000);
 
 test("concurrent wakes of one pool all succeed and each bumps every waiter once", async () => {
@@ -1023,10 +853,10 @@ test("concurrent wakes of one pool all succeed and each bumps every waiter once"
   const waiters: string[] = [];
   for (let index = 0; index < 12; index += 1) {
     const running = await turn(input, "workspace_shared");
-    const armed = await armClaudeCapacityWait(client.db, {
+    const armed = await armXaiCapacityWait(client.db, {
       ...input,
       ...running,
-      subjectId: subscriptionPoolWorkerSubject("claude"),
+      subjectId: subscriptionPoolWorkerSubject("xai"),
       earliestResetAt: null,
       failurePayload: capacityFailure,
     });
@@ -1038,14 +868,14 @@ test("concurrent wakes of one pool all succeed and each bumps every waiter once"
   for (let round = 0; round < rounds; round += 1)
     await Promise.all(
       Array.from({ length: concurrency }, () =>
-        wakeClaudeCapacityWaiters(client.db, {
+        wakeXaiCapacityWaiters(client.db, {
           workspaceId: input.workspaceId,
-          subjectId: subscriptionPoolWorkerSubject("claude"),
+          subjectId: subscriptionPoolWorkerSubject("xai"),
           authoritySnapshot: input.authoritySnapshot,
           reason: "fixture_concurrent_wake",
         }),
       ),
     );
   for (const waiterId of waiters)
-    expect(await claudeWakeRevision(waiterId)).toBe(1 + concurrency * rounds);
+    expect(await xaiWakeRevision(waiterId)).toBe(1 + concurrency * rounds);
 }, 120_000);

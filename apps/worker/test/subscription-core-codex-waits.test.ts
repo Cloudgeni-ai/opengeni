@@ -323,7 +323,6 @@ describe("capacity activities accept both waiter shapes", () => {
       provider: "claude",
     });
     const legacyXai = spy(db, "getXaiCapacityWaitForSession");
-    const legacyClaude = spy(db, "getClaudeCapacityWaitForSession");
     expect(
       await activities().getCodexCapacityWait({
         workspaceId: "workspace-1",
@@ -337,43 +336,45 @@ describe("capacity activities accept both waiter shapes", () => {
       provider: "claude",
     });
     expect(legacyXai).not.toHaveBeenCalled();
-    expect(legacyClaude).not.toHaveBeenCalled();
   });
 
-  test.each(["xai", "claude"] as const)(
-    "without a core waiter the %s peek remains unchanged",
-    async (provider) => {
-      spy(db, "getSubscriptionCoreCapacityWaitForSession").mockResolvedValue(null);
-      const legacy = spy(db, "getCodexCapacityWaitForSession");
-      const nextCheckAt = new Date("2030-01-01T00:00:00.000Z");
-      const row = {
-        id: "provider-waiter",
-        generation: 7,
-        wakeRevision: 2,
-        observedWakeRevision: 2,
-        nextCheckAt,
-      };
-      spy(db, "getXaiCapacityWaitForSession").mockResolvedValue(
-        provider === "xai" ? (row as never) : null,
-      );
-      spy(db, "getClaudeCapacityWaitForSession").mockResolvedValue(
-        provider === "claude" ? (row as never) : null,
-      );
-      expect(
-        await activities().getCodexCapacityWait({
-          workspaceId: "workspace-1",
-          sessionId: "session-1",
-        }),
-      ).toEqual({
-        provider,
-        waiterId: row.id,
-        generation: 7,
-        nextCheckAt: nextCheckAt.toISOString(),
-        wakeRevision: 2,
-      });
-      expect(legacy).not.toHaveBeenCalled();
-    },
-  );
+  test("without a core waiter the xai peek remains unchanged", async () => {
+    spy(db, "getSubscriptionCoreCapacityWaitForSession").mockResolvedValue(null);
+    const legacy = spy(db, "getCodexCapacityWaitForSession");
+    const nextCheckAt = new Date("2030-01-01T00:00:00.000Z");
+    const row = {
+      id: "provider-waiter",
+      generation: 7,
+      wakeRevision: 2,
+      observedWakeRevision: 2,
+      nextCheckAt,
+    };
+    spy(db, "getXaiCapacityWaitForSession").mockResolvedValue(row as never);
+    expect(
+      await activities().getCodexCapacityWait({
+        workspaceId: "workspace-1",
+        sessionId: "session-1",
+      }),
+    ).toEqual({
+      provider: "xai",
+      waiterId: row.id,
+      generation: 7,
+      nextCheckAt: nextCheckAt.toISOString(),
+      wakeRevision: 2,
+    });
+    expect(legacy).not.toHaveBeenCalled();
+  });
+
+  test("without a core or SuperGrok waiter there is no Claude legacy waiter to peek", async () => {
+    spy(db, "getSubscriptionCoreCapacityWaitForSession").mockResolvedValue(null);
+    spy(db, "getXaiCapacityWaitForSession").mockResolvedValue(null);
+    expect(
+      await activities().getCodexCapacityWait({
+        workspaceId: "workspace-1",
+        sessionId: "session-1",
+      }),
+    ).toBeNull();
+  });
 
   test("reconcile resolves a recorded waiter id against the core waiter first", async () => {
     spy(db, "getSubscriptionCoreCodexCapacityWaitById").mockResolvedValue(waiter);
@@ -492,7 +493,6 @@ describe("capacity activities accept both waiter shapes", () => {
     const core = spy(db, "getSubscriptionCoreCodexCapacityWaitById");
     const anyCore = spy(db, "getSubscriptionCoreCapacityWaitById").mockResolvedValue(null);
     spy(db, "getXaiCapacityWaitForSession").mockResolvedValue(null);
-    spy(db, "getClaudeCapacityWaitForSession").mockResolvedValue(null);
     expect(
       await activities().reconcileCodexCapacityWait({
         accountId: "account-1",
@@ -528,7 +528,6 @@ describe("capacity activities accept both waiter shapes", () => {
       provider: "xai",
     });
     const reconcile = spy(db, "reconcileSubscriptionCoreCapacityWait");
-    spy(db, "getClaudeCapacityWaitForSession").mockResolvedValue(null);
     expect(
       await activities().reconcileCodexCapacityWait({
         accountId: "account-1",

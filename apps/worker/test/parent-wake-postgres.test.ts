@@ -6,7 +6,6 @@ import {
   applySessionTurnSettlement,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
-  createClaudeSubscriptionAccount,
   createDb,
   createSession,
   createXaiSubscriptionCredential,
@@ -27,7 +26,13 @@ import type { EventBus } from "@opengeni/events";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 
 import { notifyParentOfChildIdle, type NotifyServices } from "../src/activities/parent-wake";
-import { SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS } from "@opengeni/db";
+import {
+  SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS,
+} from "@opengeni/db";
+// Legacy Claude account helpers stay only for the API until C2a/C2b (design 5.3, C4).
+import {
+  createClaudeSubscriptionAccount,
+} from "../../../packages/db/src/claude-subscription-accounts";
 
 // Characterizes the legacy SuperGrok and Claude runtimes, which run only before
 // their drained subscription-core cutovers: the database withholds those

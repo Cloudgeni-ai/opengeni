@@ -1,8 +1,7 @@
 import {
   CODEX_CREDENTIAL_LEASE_TTL_MS,
   XAI_CREDENTIAL_LEASE_TTL_MS,
-  CLAUDE_CREDENTIAL_LEASE_TTL_MS,
-  heartbeatClaudeCredentialLeaseUntil,
+  SUBSCRIPTION_CORE_CLAUDE_LEASE_TTL_MS,
   releaseSubscriptionTurnLease,
   heartbeatXaiCredentialLeaseUntil,
   assertSubscriptionTurnLeaseCurrent,
@@ -314,33 +313,15 @@ export class XaiTurnLease extends CoreSubscriptionTurnLease {
   }
 }
 /**
- * The Claude credential holder: the legacy scoped lease keyed by subject
- * until the organization's Claude cutover, the core turn lease (provider
- * `claude`) after core placement. Both modes keep the legacy lost error code
- * and warnings.
+ * The Claude credential holder: the core turn lease (provider `claude`),
+ * held only after core placement (the legacy Claude lease is deleted). It
+ * keeps the legacy lost error code and warnings.
  */
 export class ClaudeTurnLease extends CoreSubscriptionTurnLease {
-  /** The legacy lease's subject; null on the core path. */
-  subjectId: string | null = null;
   constructor(deps: TurnCredentialLeaseDeps) {
     super(
       deps,
-      {
-        id: "claude",
-        displayName: "Claude",
-        ttlMs: CLAUDE_CREDENTIAL_LEASE_TTL_MS,
-        legacyHeartbeat: ({ turnId, holderId, generation }) =>
-          this.subjectId
-            ? heartbeatClaudeCredentialLeaseUntil(deps.db, {
-                workspaceId: deps.workspaceId,
-                subjectId: this.subjectId,
-                turnId,
-                holderId,
-                generation,
-                leaseTtlMs: CLAUDE_CREDENTIAL_LEASE_TTL_MS,
-              })
-            : Promise.resolve(null),
-      },
+      { id: "claude", displayName: "Claude", ttlMs: SUBSCRIPTION_CORE_CLAUDE_LEASE_TTL_MS },
       scopedLeaseCallbacks(deps, { name: "Claude", code: "claude_credential_lease_lost" }),
     );
   }

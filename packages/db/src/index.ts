@@ -158,10 +158,6 @@ export {
 } from "./subscription-core-codex-bindings";
 import type { GoalAdmissionPausedReason } from "@opengeni/contracts";
 import { SubscriptionPersonalAuthorityV2 } from "@opengeni/contracts";
-import {
-  claudeSubscriptionAccountRepository,
-  claudeSubscriptionTables,
-} from "./claude-subscription-accounts";
 import { subscriptionExecutionAuthorityFromTurn } from "./accepted-subscription-authority";
 export const getScheduledTaskClaudeProviderAccountAuthoritySnapshot = (
   db: Database,
@@ -180,7 +176,6 @@ export const getSessionParentClaudeProviderAccountAuthority = (
   childSessionId: string,
 ) => getAcceptedSubscriptionParentAuthority(db, "claude", workspaceId, childSessionId);
 import { WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1 } from "@opengeni/contracts";
-import { resolveClaudeProviderAccountAuthoritySnapshotForAcceptanceInTransaction } from "./claude-subscription-accounts";
 import {
   getAcceptedSubscriptionTaskAuthority,
   getAcceptedSubscriptionTurnAuthority,
@@ -191,9 +186,41 @@ export {
   getScheduledTaskSubscriptionAuthority,
   receiverCodexSubscriptionAuthorityV2InTransaction,
 } from "./accepted-subscription-authority";
-export { resolveClaudeAccountCredential } from "./claude-subscription-account-tokens";
-export * from "./claude-subscription-accounts";
-export * from "./claude-subscription-account-usage";
+// The legacy Claude pool repository and its usage and token readers are no
+// runtime decision path (the legacy Claude runtime is deleted, C4). Only the
+// API account routes, OAuth and setup-token writers, access policy and usage
+// refresh still use them, until C2a/C2b move those consumers to the shared
+// core; nothing else is exported, so no turn, selector or lease reaches them.
+export {
+  resolveClaudeAccountCredential,
+  ClaudeSubscriptionConnectionChanged,
+} from "./claude-subscription-account-tokens";
+export {
+  disconnectClaudeSubscriptionAccountAndRepick,
+  ensureClaudeRotationSettings,
+  getClaudeRotationSettings,
+  getClaudeSubscriptionAccountAuthoritySnapshot,
+  getClaudeSubscriptionAccountMetadata,
+  listClaudeSubscriptionAccountsMetadata,
+  listOrganizationClaudeSubscriptions,
+  renameClaudeSubscriptionAccount,
+  resolveClaudeProviderAccountAuthoritySnapshotForAcceptance,
+  setActiveClaudeCredential,
+  setInitialActiveClaudeCredential,
+  updateClaudeAllocatorEligibility,
+  updateClaudeRotationSettings,
+  updateOrganizationClaudeRotation,
+  updateOrganizationClaudeSubscription,
+  upsertClaudeSubscriptionAccount,
+  upsertOrganizationClaudeSubscription,
+  wakeClaudeCapacityWaiters,
+  type ClaudeSubscriptionAccountMetadata,
+} from "./claude-subscription-accounts";
+export {
+  listClaudeAccountUsage,
+  recordClaudeAccountUsage,
+  type ClaudeAccountUsageAuthority,
+} from "./claude-subscription-account-usage";
 
 import { directModelConnectionSpec, isDirectModelId } from "@opengeni/contracts";
 import {
@@ -21855,10 +21882,6 @@ export async function updateSessionVariableSets(
                 where xai_waiter.workspace_id = ${input.workspaceId}
                   and xai_waiter.session_id = ${input.sessionId}
                   and xai_waiter.status = 'waiting')
-              or exists (select 1 from ${schema.claudeCapacityWaiters} claude_waiter
-                where claude_waiter.workspace_id = ${input.workspaceId}
-                  and claude_waiter.session_id = ${input.sessionId}
-                  and claude_waiter.status = 'waiting')
               then 'capacity_waiter'
             when exists (select 1 from ${schema.sessionRealtimeModes} realtime_mode
                 where realtime_mode.workspace_id = ${input.workspaceId}
@@ -26252,12 +26275,12 @@ async function withTemporarySubjectRls<T>(
 
 /** Shared durable scoped-subscription waiter state machine. */
 function createScopedSubscriptionCapacityWaiters(options: {
-  provider: "xai" | "claude";
+  provider: "xai";
   label: string;
   wireProvider: string;
   workerSubject: string;
-  snapshotColumn: "xaiProviderAccountAuthoritySnapshot" | "claudeProviderAccountAuthoritySnapshot";
-  resolvePoolFunction: "resolve_xai_authority_pool" | "resolve_claude_authority_pool";
+  snapshotColumn: "xaiProviderAccountAuthoritySnapshot";
+  resolvePoolFunction: "resolve_xai_authority_pool";
   tables: import("./subscription-pool-schema").SubscriptionPoolTables;
   rotationWorkspacePredicate: typeof xaiRotationWorkspacePredicate;
   credentialWorkspacePredicate: typeof xaiCredentialWorkspacePredicate;
@@ -26480,7 +26503,6 @@ function createScopedSubscriptionCapacityWaiters(options: {
       leaseFence?: { holderId: string; generation: number };
       credentialQuarantine?: XaiCredentialLeaseQuarantine;
       expectedCredentialVersion?: number;
-      credentialTokenFence?: { encryptionKey: Uint8Array; observedAccessToken: string };
       now?: Date;
     },
   ): Promise<ArmXaiCapacityWaitResult> {
@@ -26499,8 +26521,6 @@ function createScopedSubscriptionCapacityWaiters(options: {
     if (input.credentialQuarantine && !input.leaseFence) {
       throw new Error(options.label + " credential quarantine requires an exact lease fence");
     }
-    if (options.provider === "claude" && input.credentialQuarantine && !input.credentialTokenFence)
-      throw new Error("Claude credential quarantine requires the exact dispatched token");
     if (
       input.credentialQuarantine?.kind === "cooldown" &&
       (!Number.isFinite(input.credentialQuarantine.until.getTime()) ||
@@ -26701,26 +26721,6 @@ function createScopedSubscriptionCapacityWaiters(options: {
                 waiter: existing ? mapXaiCapacityWaiter(existing) : null,
                 events: [],
               } as const;
-            if (options.provider === "claude" && input.credentialTokenFence) {
-              const fence = input.credentialTokenFence;
-              const token = credential
-                ? ClaudeSubscriptionCredential.parse(
-                    JSON.parse(decryptEnvironmentValue(fence.encryptionKey, credential.encrypted)),
-                  ).token
-                : null;
-              const current = Buffer.from(token ?? ""),
-                observed = Buffer.from(fence.observedAccessToken);
-              if (
-                !token ||
-                current.length !== observed.length ||
-                !timingSafeEqual(current, observed)
-              )
-                return {
-                  action: "stale",
-                  waiter: existing ? mapXaiCapacityWaiter(existing) : null,
-                  events: [],
-                } as const;
-            }
             const updated = await tx
               .update(tables.credentials)
               .set(
@@ -27288,8 +27288,6 @@ function createScopedSubscriptionCapacityWaiters(options: {
             )
             .limit(1);
           const policy = readTurnExecutionPolicyV1(blockedTurn.metadata);
-          if (options.provider === "claude" && policy.kind !== "valid")
-            throw new Error("Claude capacity reconciliation requires its accepted model policy");
           const selection = await options.selectAvailable(tx, {
             accountId: input.accountId,
             workspaceId: input.workspaceId,
@@ -27465,39 +27463,14 @@ const xaiCapacityRepository = createScopedSubscriptionCapacityWaiters({
   credentialWorkspacePredicate: xaiCredentialWorkspacePredicate,
   selectAvailable: xaiSubscriptionRepository.selectSubscriptionCredentialForUse,
 });
-const claudeCapacityRepository = createScopedSubscriptionCapacityWaiters({
-  provider: "claude",
-  label: "Claude",
-  wireProvider: "claude-subscription",
-  workerSubject: subscriptionPoolWorkerSubject("claude"),
-  snapshotColumn: "claudeProviderAccountAuthoritySnapshot",
-  resolvePoolFunction: "resolve_claude_authority_pool",
-  tables: claudeSubscriptionTables,
-  rotationWorkspacePredicate:
-    claudeSubscriptionAccountRepository.subscriptionRotationWorkspacePredicate,
-  credentialWorkspacePredicate:
-    claudeSubscriptionAccountRepository.subscriptionCredentialWorkspacePredicate,
-  selectAvailable: claudeSubscriptionAccountRepository.selectSubscriptionCredentialForUse,
-});
 export const {
   resolveWaiterSubject: resolveXaiWaiterSubject,
   armCapacityWait: armXaiCapacityWait,
   getWaitForSession: getXaiCapacityWaitForSession,
   reconcileCapacityWait: reconcileXaiCapacityWait,
 } = xaiCapacityRepository;
-export const {
-  resolveWaiterSubject: resolveClaudeWaiterSubject,
-  armCapacityWait: armClaudeCapacityWait,
-  getWaitForSession: getClaudeCapacityWaitForSession,
-  reconcileCapacityWait: reconcileClaudeCapacityWait,
-} = claudeCapacityRepository;
 const getXaiCapacityWaitForSessionInTransaction =
   xaiCapacityRepository.getWaitForSessionInTransaction;
-const getClaudeCapacityWaitForSessionInTransaction =
-  claudeCapacityRepository.getWaitForSessionInTransaction;
-export type ClaudeCapacityWait = XaiCapacityWait;
-export type ArmClaudeCapacityWaitResult = ArmXaiCapacityWaitResult;
-export type ReconcileClaudeCapacityWaitResult = ReconcileXaiCapacityWaitResult;
 export type ClaudeCredentialLeaseQuarantine = XaiCredentialLeaseQuarantine;
 
 export type CodexCredentialLeaseQuarantine =
@@ -27578,7 +27551,6 @@ export async function getWorkspaceConnectionModelRestrictions(
   workspaceId: string,
   subjectId: string,
   authoritySnapshot?: XaiProviderAccountAuthoritySnapshotV1,
-  claudeAuthoritySnapshot?: ClaudeProviderAccountAuthoritySnapshotV1,
 ) {
   return await resolveWorkspaceConnectionModelRestrictions(
     db,
@@ -27586,7 +27558,6 @@ export async function getWorkspaceConnectionModelRestrictions(
     subjectId,
     await codexAccountsForModelRestrictions(db, workspaceId, subjectId),
     authoritySnapshot,
-    claudeAuthoritySnapshot,
   );
 }
 
@@ -31703,9 +31674,7 @@ async function createSessionInTransaction(
   const subjectCreatorId =
     frozenCreator.initiator.kind === "subject" && input.subjectId ? input.subjectId : null;
   const sharedCreatorPool =
-    !subjectCreatorId &&
-    (input.initialXaiProviderAccountAuthoritySnapshot === undefined ||
-      input.initialClaudeProviderAccountAuthoritySnapshot === undefined)
+    !subjectCreatorId && input.initialXaiProviderAccountAuthoritySnapshot === undefined
       ? await sharedPoolSubscriptionAuthoritySnapshotsInTransaction(tx, input.workspaceId)
       : null;
   let initialXaiProviderAccountAuthoritySnapshot =
@@ -31719,17 +31688,12 @@ async function createSessionInTransaction(
         workspaceId: input.workspaceId,
       });
   }
-  let initialClaudeProviderAccountAuthoritySnapshot =
+  // Claude is on the shared core (C3 receipt): its v1 value is never computed
+  // from live state; a new session writes the column default, never read
+  // (design 5.3, "v1 columns after a provider's cutover").
+  const initialClaudeProviderAccountAuthoritySnapshot =
     input.initialClaudeProviderAccountAuthoritySnapshot ??
-    sharedCreatorPool?.claude ??
     WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1;
-  if (input.initialClaudeProviderAccountAuthoritySnapshot === undefined && subjectCreatorId) {
-    await setSubjectRlsContext(tx, subjectCreatorId);
-    initialClaudeProviderAccountAuthoritySnapshot =
-      await resolveClaudeProviderAccountAuthoritySnapshotForAcceptanceInTransaction(tx, {
-        workspaceId: input.workspaceId,
-      });
-  }
   const parentTurnId = input.parentSessionId
     ? input.createdByActor?.sessionId === input.parentSessionId
       ? input.createdByActor.turnId
@@ -65155,11 +65119,6 @@ export async function getSessionGoalWithContinuation(
         workspaceId,
         sessionId,
       );
-      const claudeCapacityWait = await getClaudeCapacityWaitForSessionInTransaction(
-        tx,
-        workspaceId,
-        sessionId,
-      );
       const [wake] = await tx
         .select({
           wakeRevision: schema.sessionWorkflowWakeOutbox.wakeRevision,
@@ -65190,7 +65149,6 @@ export async function getSessionGoalWithContinuation(
         nextAttemptAt:
           capacityWait?.nextCheckAt.toISOString() ??
           xaiCapacityWait?.nextCheckAt.toISOString() ??
-          claudeCapacityWait?.nextCheckAt.toISOString() ??
           pendingWorkflowWake?.nextAttemptAt.toISOString() ??
           null,
         // Delivery errors belong to one still-undelivered workflow-wake
@@ -65217,7 +65175,6 @@ export async function getSessionGoalWithContinuation(
       } else if (
         capacityWait ||
         xaiCapacityWait ||
-        claudeCapacityWait ||
         turn?.status === "waiting_capacity"
       ) {
         continuation = {
@@ -68107,12 +68064,7 @@ export async function materializeGoalContinuation(
           input.workspaceId,
           input.sessionId,
         );
-        const claudeCapacityWait = await getClaudeCapacityWaitForSessionInTransaction(
-          tx,
-          input.workspaceId,
-          input.sessionId,
-        );
-        if (coreCapacityWait || xaiCapacityWait || claudeCapacityWait) {
+        if (coreCapacityWait || xaiCapacityWait) {
           return { action: "none", events: [] } as const;
         }
 
@@ -72472,12 +72424,7 @@ export async function claimSessionWorkForAttempt(
                 workspaceId,
                 sessionId,
               );
-              const claudeWaiter = await getClaudeCapacityWaitForSessionInTransaction(
-                tx as unknown as Database,
-                workspaceId,
-                sessionId,
-              );
-              if (coreWaiter || xaiWaiter || claudeWaiter) {
+              if (coreWaiter || xaiWaiter) {
                 return { action: "unclaimed", reason: "no-work" };
               }
             }
@@ -75438,11 +75385,6 @@ export async function peekSessionWork(
       workspaceId,
       sessionId,
     );
-    const claudeCapacityWait = await getClaudeCapacityWaitForSessionInTransaction(
-      scopedDb,
-      workspaceId,
-      sessionId,
-    );
     if (xaiCapacityWait) {
       return {
         kind: "capacity-wait",
@@ -75455,22 +75397,6 @@ export async function peekSessionWork(
               ? new Date(0).toISOString()
               : xaiCapacityWait.nextCheckAt.toISOString(),
           wakeRevision: xaiCapacityWait.wakeRevision,
-        },
-      };
-    }
-
-    if (claudeCapacityWait) {
-      return {
-        kind: "capacity-wait",
-        ref: {
-          provider: "claude",
-          waiterId: claudeCapacityWait.id,
-          generation: claudeCapacityWait.generation,
-          nextCheckAt:
-            claudeCapacityWait.wakeRevision > claudeCapacityWait.observedWakeRevision
-              ? new Date(0).toISOString()
-              : claudeCapacityWait.nextCheckAt.toISOString(),
-          wakeRevision: claudeCapacityWait.wakeRevision,
         },
       };
     }
@@ -76296,12 +76222,7 @@ export async function failSessionWorkBeforeAttemptClaim(
                 workspaceId,
                 input.sessionId,
               );
-              const claudeWaiter = await getClaudeCapacityWaitForSessionInTransaction(
-                tx as unknown as Database,
-                workspaceId,
-                input.sessionId,
-              );
-              if (coreWaiter || xaiWaiter || claudeWaiter) {
+              if (coreWaiter || xaiWaiter) {
                 return { action: "stale", turnId: null, events: [] } as const;
               }
             }
@@ -79516,8 +79437,6 @@ export type RequestSessionTurnRecoveryInput = {
   /** Park proven non-dispatch after the existing five-recovery budget. */
   sandboxSetupRecoveryExhausted?: true;
   providerRecoveryCount?: number;
-  /** One rejected-token renewal per serving account generation on this turn. */
-  claudeAuthRecovery?: { credentialId: string; credentialVersion: number };
   /**
    * The consecutive shared-core lease-busy chain this recovery continues: when
    * it started and the execution generation that recorded it. The worker
@@ -79555,15 +79474,6 @@ export async function requestSessionTurnRecovery(
   workspaceId: string,
   input: RequestSessionTurnRecoveryInput,
 ): Promise<RequestSessionTurnRecoveryResult> {
-  if (
-    input.claudeAuthRecovery &&
-    (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
-      input.claudeAuthRecovery.credentialId,
-    ) ||
-      !Number.isSafeInteger(input.claudeAuthRecovery.credentialVersion) ||
-      input.claudeAuthRecovery.credentialVersion < 1)
-  )
-    throw new Error("Invalid Claude authentication recovery identity");
   if (
     input.subscriptionLeaseBusy &&
     (!Number.isFinite(Date.parse(input.subscriptionLeaseBusy.startedAt)) ||
@@ -79818,7 +79728,6 @@ export async function requestSessionTurnRecovery(
           version: turn.version + 1,
           metadata: {
             ...recoveryTurnMetadata(turn.metadata, input.sandboxLifecycleWait),
-            ...(input.claudeAuthRecovery ? { claudeAuthRecovery: input.claudeAuthRecovery } : {}),
             ...(input.subscriptionLeaseBusy
               ? {
                   subscriptionLeaseBusy: {
@@ -86768,8 +86677,7 @@ export * from "./automations";
 export * from "./organization-model-providers";
 export * from "./organization-model-defaults";
 export * from "./session-admin-access";
-export * from "./claude-subscription-usage";
-export * from "./claude-subscription-tokens";
+export * from "./subscription-core-claude-oauth";
 
 export {
   setWorkspacePauseTimerInTransaction,

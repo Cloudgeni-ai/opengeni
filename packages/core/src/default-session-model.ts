@@ -12,13 +12,11 @@ import {
   type ScheduledTask,
   type WorkspaceSessionDefaults,
   type XaiProviderAccountAuthoritySnapshotV1,
-  type ClaudeProviderAccountAuthoritySnapshotV1,
   type BillingBalance,
   type OrganizationModelDefaults,
 } from "@opengeni/contracts";
 import {
   getScheduledTaskXaiProviderAccountAuthoritySnapshot,
-  getScheduledTaskClaudeProviderAccountAuthoritySnapshot,
   getSession,
   getWorkspace,
   getWorkspaceConnectionModelRestrictions,
@@ -34,9 +32,6 @@ import {
   workspaceXaiSubscriptionActive,
   workspaceXaiSubscriptionActiveForAuthority,
   XaiAuthorityPoolInactiveError,
-  ClaudeAuthorityPoolInactiveError,
-  resolveClaudeProviderAccountAuthoritySnapshotForAcceptance,
-  workspaceClaudeSubscriptionActiveForAuthority,
   type ConnectionModelRestrictions,
   type Database,
   type WorkspaceCustomModelProviderKind,
@@ -331,8 +326,6 @@ export type WorkspaceModelSelectionContext = {
    * direct Send resolves it.
    */
   xaiAuthoritySnapshot?: XaiProviderAccountAuthoritySnapshotV1 | undefined;
-  /** Already accepted Claude pool; never replace it with current selection. */
-  claudeAuthoritySnapshot?: ClaudeProviderAccountAuthoritySnapshotV1 | undefined;
 };
 
 /**
@@ -388,7 +381,6 @@ async function connectionRestrictionsAndXaiReadiness(
       workspaceId,
       subjectId,
       undefined,
-      context.claudeAuthoritySnapshot,
     );
     return {
       restrictions: withCoreRoutedXaiRestriction(restrictions, core),
@@ -402,7 +394,6 @@ async function connectionRestrictionsAndXaiReadiness(
         workspaceId,
         subjectId,
         undefined,
-        context.claudeAuthoritySnapshot,
       ),
       workspaceXaiSubscriptionActive(db, settings, workspaceId, subjectId),
     ]);
@@ -414,7 +405,6 @@ async function connectionRestrictionsAndXaiReadiness(
       workspaceId,
       subjectId,
       xaiAuthoritySnapshot,
-      context.claudeAuthoritySnapshot,
     ),
     workspaceXaiSubscriptionActiveForAuthority(db, settings, {
       workspaceId,
@@ -436,7 +426,6 @@ async function connectionRestrictionsAndXaiReadiness(
     workspaceId,
     subjectId,
     undefined,
-    context.claudeAuthoritySnapshot,
   );
   return {
     restrictions: { ...current, "supergrok/": [] },
@@ -481,9 +470,9 @@ export function withCoreRoutedClaudeRestriction(
  * Readiness for the subject's current or already accepted Claude pool observes
  * metadata only; quota is handled by the runtime allocator. This is not an
  * authorization: callers must supply their authenticated or frozen subject.
- * After Claude's cutover the core answers instead (`core`, with the model
- * restriction the caller applies through `withCoreRoutedClaudeRestriction`),
- * and a frozen legacy authority no longer selects the pool.
+ * The core answers (`core`, with the model restriction the caller applies
+ * through `withCoreRoutedClaudeRestriction`); no frozen legacy authority
+ * selects the pool, and without a receipt nothing is ready.
  */
 export async function loadWorkspaceClaudeSubscriptionReadiness(
   db: Database,
@@ -506,24 +495,9 @@ export async function loadWorkspaceClaudeSubscriptionReadiness(
       organization: core.ready,
       core: { allowedModelIds: core.allowedModelIds },
     };
-  const authoritySnapshot =
-    context.claudeAuthoritySnapshot ??
-    (await resolveClaudeProviderAccountAuthoritySnapshotForAcceptance(db, context));
-  let active: boolean;
-  try {
-    active = await workspaceClaudeSubscriptionActiveForAuthority(db, settings, {
-      ...context,
-      authoritySnapshot,
-    });
-  } catch (error) {
-    if (!context.claudeAuthoritySnapshot || !(error instanceof ClaudeAuthorityPoolInactiveError))
-      throw error;
-    active = false;
-  }
-  return {
-    workspace: active && authoritySnapshot.scope !== "organization",
-    organization: active && authoritySnapshot.scope === "organization",
-  };
+  // No receipt: the legacy Claude runtime is deleted, so nothing is ready
+  // (fail closed) until the drained cutover's receipt is committed.
+  return { workspace: false, organization: false };
 }
 
 /** Load the same inputs the workspace model catalog route evaluates. */
@@ -714,11 +688,6 @@ export async function resolveScheduledTaskDefaultModel(
     accountId: task.accountId,
     workspaceId: task.workspaceId,
     subjectId: task.ownerSubjectId ?? task.createdBy.subjectId,
-    claudeAuthoritySnapshot: await getScheduledTaskClaudeProviderAccountAuthoritySnapshot(
-      db,
-      task.workspaceId,
-      task.id,
-    ),
     xaiAuthoritySnapshot: await getScheduledTaskXaiProviderAccountAuthoritySnapshot(
       db,
       task.workspaceId,

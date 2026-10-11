@@ -13,8 +13,15 @@ import {
   claudeRefreshedCredential,
   requestClaudeTokenRefresh,
   ClaudeSubscriptionReconnectRequired,
-  ClaudeSubscriptionConnectionChanged,
-} from "./claude-subscription-tokens";
+} from "./subscription-core-claude-oauth";
+
+/** The account's credential changed under a legacy usage read; reload. */
+export class ClaudeSubscriptionConnectionChanged extends Error {
+  readonly status = 409;
+  constructor() {
+    super("Claude connection changed; reload usage.");
+  }
+}
 
 /** The selected account's identity and rotating token pair are resolved together. */
 export async function resolveClaudeAccountCredential(

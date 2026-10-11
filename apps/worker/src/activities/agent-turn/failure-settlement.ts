@@ -1,14 +1,7 @@
-import { environmentsEncryptionKeyBytes } from "@opengeni/config";
 import {
   requestSessionTurnRecovery,
   getSessionGoal,
   armXaiCapacityWait,
-  armClaudeCapacityWait,
-  reconcileClaudeCapacityWait,
-  recordClaudeAccountUsage,
-  resolveClaudeAccountCredential,
-  loadClaudeAccountCredential,
-  ClaudeSubscriptionConnectionChanged,
   reconcileXaiCapacityWait,
   recordUsageEvent,
   getActiveSessionHistoryItemsPaged,
@@ -81,7 +74,6 @@ import {
   sandboxRouteTransitionCode,
   safeErrorDiagnostic,
   classifyXaiCredentialFailure,
-  classifyClaudeCredentialFailure,
   agentRunFailurePayload,
   agentRunRecoveryFailurePayload,
   classifyCodexCredentialFailure,
@@ -642,8 +634,8 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
   // replayed, and refusals settle through the shared core (X1b) instead of
   // the legacy SuperGrok wait below.
   const coreXai = billingState.isXaiTurn ? (providerTurn.xaiSubscriptionCore ?? null) : null;
-  // A Claude turn on the shared core: its legacy receipts, refresh recovery
-  // and capacity wait below never run (they would see a core connection id).
+  // A Claude turn runs only on the shared core (the legacy Claude runtime is
+  // deleted): its refusals, unknown outcomes and lease loss settle there.
   const coreClaude = billingState.isClaudeTurn
     ? (providerTurn.claudeSubscriptionCore ?? null)
     : null;
@@ -720,15 +712,14 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
         }))));
   // The same for a core Claude turn.
   const claudeLeaseRecoverable =
-    billingState.isClaudeTurn &&
+    coreClaude !== null &&
     leases.claude.lost &&
-    (!coreClaude ||
-      (!coreRequestOutcomeUnknown &&
-        eventing.turnStartedPublished &&
-        (await coreLanesRecoverAfterCheckpoint(coreClaude, async () => {
-          await flushRuntimeBatcher();
-          await historySink.reconcileConversationTruth({ requireDurable: true });
-        }))));
+    !coreRequestOutcomeUnknown &&
+    eventing.turnStartedPublished &&
+    (await coreLanesRecoverAfterCheckpoint(coreClaude, async () => {
+      await flushRuntimeBatcher();
+      await historySink.reconcileConversationTruth({ requireDurable: true });
+    }));
   const scopedLeaseLost = claudeLeaseRecoverable
     ? "claude"
     : xaiLeaseRecoverable
@@ -860,24 +851,16 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
     billingState.isXaiTurn && !coreXai && providerTurn.effectiveXaiCredentialId
       ? classifyXaiCredentialFailure(error)
       : null;
-  const claudeFailure =
-    billingState.isClaudeTurn && !coreClaude && providerTurn.effectiveClaudeCredentialId
-      ? classifyClaudeCredentialFailure(error)
-      : null;
-  const scopedFailure = claudeFailure ?? xaiFailure;
-  const scopedProvider = claudeFailure ? ("claude" as const) : ("xai" as const);
-  const scopedName = claudeFailure ? "Claude" : "SuperGrok";
-  const scopedCredentialId = claudeFailure
-    ? providerTurn.effectiveClaudeCredentialId
-    : providerTurn.effectiveXaiCredentialId;
-  const scopedAuthority = claudeFailure
-    ? providerTurn.claudeAuthoritySnapshot
-    : providerTurn.xaiAuthoritySnapshot;
-  const scopedLease = claudeFailure ? leases.claude : leases.xai;
-  const armScopedWait = claudeFailure ? armClaudeCapacityWait : armXaiCapacityWait;
-  const reconcileScopedWait = claudeFailure
-    ? reconcileClaudeCapacityWait
-    : reconcileXaiCapacityWait;
+  // SuperGrok's legacy credential wait (its X4 deletion owns this arm). A
+  // Claude turn always runs on the shared core: its refusals settle above.
+  const scopedFailure = xaiFailure;
+  const scopedProvider = "xai" as const;
+  const scopedName = "SuperGrok";
+  const scopedCredentialId = providerTurn.effectiveXaiCredentialId;
+  const scopedAuthority = providerTurn.xaiAuthoritySnapshot;
+  const scopedLease = leases.xai;
+  const armScopedWait = armXaiCapacityWait;
+  const reconcileScopedWait = reconcileXaiCapacityWait;
   if (
     scopedFailure &&
     scopedCredentialId &&
@@ -891,167 +874,13 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
   ) {
     await flushRuntimeBatcher();
     await historySink.reconcileConversationTruth({ requireDurable: true });
-    const recoverChangedAccount = async () => {
-      const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
-        sessionId: input.sessionId,
-        turnId: attempt.turnId!,
-        triggerEventId: attempt.triggerEventId!,
-        attemptId: input.attemptId,
-        reason: "claude_credential_changed",
-        detail: { code: "claude_credential_changed", retryable: true },
-      });
-      if (recovery.action === "stale") {
-        acknowledgeLostAttemptOwnership();
-        control.activityStatus = "cancelled";
-        control.turnMetricOutcome = "cancelled";
-        return claimedResult({ status: "cancelled" });
-      }
-      acknowledgeRecoveryQuiescence();
-      await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
-      control.activityStatus = "recovering";
-      control.turnMetricOutcome = "recovering";
-      control.activityError = error;
-      return claimedResult({ status: "recovering" });
-    };
     const goal = await getSessionGoal(db, input.workspaceId, input.sessionId).catch(() => null);
     const activeGoal = goal?.status === "active" ? goal : null;
     const now = new Date();
-    let claudeTokenFence: { encryptionKey: Uint8Array; observedAccessToken: string } | undefined;
     const cooldownUntil =
       scopedFailure.kind === "rate_limit"
         ? new Date(now.getTime() + Math.max(1, scopedFailure.cooldownMs ?? 60_000))
         : null;
-    if (claudeFailure) {
-      const key = environmentsEncryptionKeyBytes(settings);
-      const matchingReceipts = [...providerTurn.latestClaudeUsage.values()].filter(
-        (value) =>
-          value.expectedConnectionId === scopedCredentialId &&
-          value.expectedCredentialVersion === providerTurn.effectiveClaudeCredentialVersion &&
-          value.upstreamModelId === providerTurn.claudeUpstreamModelId &&
-          (value.responseStatus === (scopedFailure.kind === "rate_limit" ? 429 : 401) ||
-            (value.responseStatus === 200 &&
-              !!claudeFailure.requestId &&
-              value.requestId === claudeFailure.requestId)) &&
-          (!claudeFailure.requestId || value.requestId === claudeFailure.requestId),
-      );
-      const receipt = matchingReceipts.length === 1 ? matchingReceipts[0] : undefined;
-      if (
-        !key ||
-        !providerTurn.claudeUpstreamModelId ||
-        providerTurn.effectiveClaudeCredentialVersion === null
-      )
-        throw new Error("Claude refused request has no exact serving account");
-      if (!receipt) {
-        // Refresh may discover a revoked grant before any physical model call.
-        // Verify durable reconnect evidence instead of inventing a response receipt.
-        const current = await loadClaudeAccountCredential(
-          db,
-          {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            subjectId: scopedLease.subjectId,
-            credentialId: scopedCredentialId,
-            authoritySnapshot: scopedAuthority,
-          },
-          key,
-        );
-        if (current.version !== providerTurn.effectiveClaudeCredentialVersion)
-          return await recoverChangedAccount();
-        if (scopedFailure.kind !== "auth" || current.usage.refreshStatus !== "reconnect")
-          throw new Error("Claude refused request has no exact account receipt");
-        claudeTokenFence = { encryptionKey: key, observedAccessToken: current.secret.token };
-      }
-      if (receipt) claudeTokenFence = { encryptionKey: key, observedAccessToken: receipt.token };
-      if (
-        receipt &&
-        scopedFailure.kind === "auth" &&
-        !(
-          attempt.claudeAuthRecovery?.credentialId === scopedCredentialId &&
-          attempt.claudeAuthRecovery.credentialVersion === receipt.expectedCredentialVersion
-        )
-      ) {
-        const credential = await resolveClaudeAccountCredential(
-          db,
-          settings,
-          {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            subjectId: scopedLease.subjectId,
-            credentialId: scopedCredentialId,
-            authoritySnapshot: scopedAuthority,
-          },
-          {
-            expectedCredentialVersion: receipt.expectedCredentialVersion,
-            forceRefresh: true,
-            observedAccessToken: receipt.token,
-          },
-        ).catch((refreshError) => {
-          if (refreshError instanceof ClaudeSubscriptionConnectionChanged) return null;
-          throw refreshError;
-        });
-        if (!credential) return await recoverChangedAccount();
-        if (!("reconnectRequired" in credential) && credential.secret.token !== receipt.token) {
-          const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
-            sessionId: input.sessionId,
-            turnId: attempt.turnId,
-            triggerEventId: attempt.triggerEventId!,
-            attemptId: input.attemptId,
-            reason: "claude_token_renewed",
-            claudeAuthRecovery: {
-              credentialId: scopedCredentialId,
-              credentialVersion: receipt.expectedCredentialVersion,
-            },
-            detail: { code: "claude_token_renewed", retryable: true },
-          });
-          if (recovery.action === "stale") {
-            acknowledgeLostAttemptOwnership();
-            control.activityStatus = "cancelled";
-            control.turnMetricOutcome = "cancelled";
-            return claimedResult({ status: "cancelled" });
-          }
-          acknowledgeRecoveryQuiescence();
-          await publishDurableSessionEvents(
-            bus,
-            input.workspaceId,
-            input.sessionId,
-            recovery.events,
-          );
-          control.activityStatus = "recovering";
-          control.turnMetricOutcome = "recovering";
-          control.activityError = error;
-          return claimedResult({ status: "recovering" });
-        }
-      }
-      const recorded = receipt
-        ? await recordClaudeAccountUsage(
-            db,
-            {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              subjectId: scopedLease.subjectId,
-              credentialId: scopedCredentialId,
-              authoritySnapshot: scopedAuthority,
-            },
-            {
-              encryptionKey: key,
-              token: receipt.token,
-              expectedCredentialVersion: receipt.expectedCredentialVersion,
-              ...(receipt.observation ? { observation: receipt.observation } : {}),
-              ...(receipt.refresh ? { refresh: receipt.refresh } : {}),
-              ...(cooldownUntil
-                ? {
-                    modelCooldown: {
-                      upstreamModelId:
-                        receipt.upstreamModelId ?? providerTurn.claudeUpstreamModelId,
-                      until: cooldownUntil,
-                    },
-                  }
-                : {}),
-            },
-          )
-        : true;
-      if (!recorded) return await recoverChangedAccount();
-    }
     const failurePayload = {
       error:
         scopedFailure.kind === "auth"
@@ -1086,30 +915,20 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
           holderId: scopedLease.holderId,
           generation: scopedLease.generation,
         },
-        ...(claudeFailure
-          ? {
-              expectedCredentialVersion: providerTurn.effectiveClaudeCredentialVersion!,
-              ...(claudeTokenFence ? { credentialTokenFence: claudeTokenFence } : {}),
-            }
-          : {}),
-        ...(!claudeFailure || scopedFailure.kind !== "rate_limit"
-          ? {
-              credentialQuarantine:
-                scopedFailure.kind === "auth"
-                  ? {
-                      kind: "status",
-                      status: "needs_relogin",
-                      lastError: "model request remained unauthorized after refresh",
-                    }
-                  : scopedFailure.kind === "forbidden"
-                    ? {
-                        kind: "status",
-                        status: "error",
-                        lastError: "model request was forbidden for this credential",
-                      }
-                    : { kind: "cooldown", until: cooldownUntil! },
-            }
-          : {}),
+        credentialQuarantine:
+          scopedFailure.kind === "auth"
+            ? {
+                kind: "status",
+                status: "needs_relogin",
+                lastError: "model request remained unauthorized after refresh",
+              }
+            : scopedFailure.kind === "forbidden"
+              ? {
+                  kind: "status",
+                  status: "error",
+                  lastError: "model request was forbidden for this credential",
+                }
+              : { kind: "cooldown", until: cooldownUntil! },
         now,
       });
     } catch (armError) {
@@ -1142,7 +961,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
     }
     if (armed.action === "waiting") {
       scopedLease.held = false;
-      if (!claudeFailure) providerTurn.xaiCredentialQuarantined = true;
+      providerTurn.xaiCredentialQuarantined = true;
       await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, armed.events);
       const evaluated = await reconcileScopedWait(db, {
         accountId: input.accountId,

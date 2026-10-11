@@ -2,22 +2,23 @@
  * Read-only legacy adapter for the shared subscription core's shadow
  * comparison (design record docs/design/subscription-core-2026-10-07.md, step
  * M1). It builds the placement input of `@opengeni/subscriptions` for one
- * session and turn from today's Codex, Claude and SuperGrok tables, mapping
+ * session and turn from today's SuperGrok tables (the Codex and Claude legacy
+ * runtimes were deleted in M3 and M4 C4), mapping
  * legacy shapes as design section 5.2 describes, so the worker can compare the
  * core's decision with the decision the legacy selector just made.
  *
  * Guarantees:
  * - One transaction of SELECT statements with a transaction-local statement
  *   timeout and no advisory locks; the adapter writes nothing. Codex worlds use
- *   a READ ONLY transaction. Claude and SuperGrok credential row security calls
+ *   a READ ONLY transaction. SuperGrok credential row security calls
  *   `<provider>_subscription_authority_live`, which records and removes its own
  *   transient capability row inside the policy function (exactly as every
- *   legacy read of those pools does), so those worlds cannot run READ ONLY.
+ *   legacy read of that pool does), so those worlds cannot run READ ONLY.
  * - It runs only under the ambient session RLS actor of the turn (the same
  *   session-access rules as the turn itself) and never with an empty subject,
  *   so it cannot read a private session the turn could not read. The human it
  *   acts for comes only from that actor. A personal (user-scope)
- *   Claude/SuperGrok pool is read as that human, exactly like the legacy
+ *   SuperGrok pool is read as that human, exactly like the legacy
  *   selector reads it; other pools never read personal rows.
  * - It starts no transaction or statement after `deadlineAt` or once `signal`
  *   aborts, and each statement is bounded by the statement timeout, capped at
@@ -27,8 +28,7 @@
  *   never selected.
  */
 import { sql, type SQL } from "drizzle-orm";
-import { claudeSubscriptionCapacity } from "@opengeni/config";
-import { ClaudeSubscriptionUsage, evaluateWorkspaceModelPolicy } from "@opengeni/contracts";
+import { evaluateWorkspaceModelPolicy } from "@opengeni/contracts";
 import type {
   CacheFacts,
   PersonalAuthority,
@@ -49,14 +49,9 @@ import {
   type Database,
 } from "./database";
 
-export type LegacySubscriptionProvider = "xai" | "claude";
-export const LEGACY_SUBSCRIPTION_PROVIDERS: readonly LegacySubscriptionProvider[] = [
-  "xai",
-  "claude",
-];
+export type LegacySubscriptionProvider = "xai";
+export const LEGACY_SUBSCRIPTION_PROVIDERS: readonly LegacySubscriptionProvider[] = ["xai"];
 export const LEGACY_WORLD_MAX_CONNECTIONS = 64;
-/** Opengeni's default Anthropic prompt-cache lifetime (`5m`). */
-export const LEGACY_CLAUDE_CACHE_TTL_MS = 5 * 60_000;
 const NEAR_EXHAUSTION_PERCENT = 90;
 
 export type LegacyPlacementWorldRequest = {
@@ -67,12 +62,12 @@ export type LegacyPlacementWorldRequest = {
   provider: LegacySubscriptionProvider;
   /** The turn's accepted product model. */
   productModelId: string;
-  /** Upstream model id (Claude cooldowns and windows are keyed by it). */
+  /** Upstream model id of the product model. */
   upstreamModelId: string | null;
   reasoningLevel: string;
   /** Workspace model policy provider id of the product model (`policyProviderIdForModel`). */
   modelPolicyProviderId: string;
-  /** Claude/SuperGrok: the turn's frozen pool scope. Null for Codex. */
+  /** The turn's frozen pool scope. */
   authorityScope: "workspace" | "organization" | "user" | null;
   now: Date;
   /** Upper bound for each statement; also bounded by the time left to `deadlineAt`. */
@@ -81,7 +76,6 @@ export type LegacyPlacementWorldRequest = {
   deadlineAt?: number;
   /** Aborting stops the read before its next statement. */
   signal?: AbortSignal;
-  claudeCacheTtlMs?: number;
   /**
    * The session's pin and last account exactly as the legacy selector read
    * them before its own writes (it records the selected account and policy
@@ -155,9 +149,6 @@ type PoolCredentialRow = {
   quota_checked_at: Date | string | null;
   exhausted_until: Date | string | null;
   version: number;
-  usage_snapshot: unknown;
-  usage_model_cooldowns: Record<string, string> | null;
-  usage_credential_version: number | null;
 };
 
 type RotationRow = {
@@ -177,11 +168,6 @@ const POOL_TABLES = {
     credentials: sql.raw("xai_subscription_credentials"),
     rotation: sql.raw("xai_rotation_settings"),
     pins: sql.raw("xai_session_account_pins"),
-  },
-  claude: {
-    credentials: sql.raw("claude_subscription_credentials"),
-    rotation: sql.raw("claude_rotation_settings"),
-    pins: sql.raw("claude_session_account_pins"),
   },
 } as const;
 
@@ -398,16 +384,6 @@ export async function loadLegacySubscriptionPlacementWorld(
           guard();
           await setSubjectRlsContext(scoped, human);
         }
-        const usageColumns =
-          provider === "claude"
-            ? sql`usage.snapshot as usage_snapshot, usage.model_cooldowns as usage_model_cooldowns,
-                usage.credential_version as usage_credential_version`
-            : sql`null::jsonb as usage_snapshot, null::jsonb as usage_model_cooldowns,
-                null::integer as usage_credential_version`;
-        const usageJoin =
-          provider === "claude"
-            ? sql`left join claude_subscription_account_usage usage on usage.credential_id = credential.id`
-            : sql``;
         // Row security admits only the acting human's own personal rows (the
         // app role cannot read memberships to re-check owners); the co-member
         // test pins this.
@@ -417,9 +393,8 @@ export async function loadLegacySubscriptionPlacementWorld(
             credential.allocator_enabled, credential.allowed_model_ids,
             credential.allowed_workspace_ids, credential.allow_personal_workspaces,
             credential.quota_used_percent, credential.quota_reset_at, credential.quota_checked_at,
-            credential.exhausted_until, credential.version, ${usageColumns}
+            credential.exhausted_until, credential.version
           from ${tables.credentials} credential
-          ${usageJoin}
           where credential.account_id = ${request.accountId}::uuid
             and (credential.workspace_id = ${request.workspaceId}::uuid
               or (credential.authority_scope = 'organization' and credential.workspace_id is null))
@@ -431,59 +406,19 @@ export async function loadLegacySubscriptionPlacementWorld(
         const bounded = rows.slice(0, LEGACY_WORLD_MAX_CONNECTIONS);
         hasLocalAccounts = bounded.some((row) => row.authority_scope === "workspace");
         poolOrder = bounded.filter((row) => row.authority_scope === scope).map((row) => row.id);
-        const upstream = request.upstreamModelId ?? request.productModelId;
         connections = bounded.map((row) => {
-          let quota: SubscriptionQuota | null = null;
           const exhaustedUntil = epoch(row.exhausted_until);
-          const parsed =
-            provider === "claude" && row.usage_credential_version === row.version
-              ? ClaudeSubscriptionUsage.safeParse(row.usage_snapshot)
-              : null;
-          if (parsed?.success && parsed.data.credentialVersion === row.version) {
-            const capacity = claudeSubscriptionCapacity(parsed.data, upstream, request.now);
-            const cooldown = epoch(row.usage_model_cooldowns?.[upstream] ?? null);
-            quota = {
-              windows: [
-                capacity.available
-                  ? { id: "plan", usedPercent: null, resetsAt: null, status: "ok" }
-                  : {
-                      id: "plan",
-                      usedPercent: null,
-                      resetsAt: epoch(capacity.nextCheckAt),
-                      status: "exhausted",
-                    },
-              ],
-              modelCooldowns: cooldown === null ? {} : { [request.productModelId]: cooldown },
-              exhaustedUntil: null,
-              exhaustedKind: null,
-              revision: 0,
-              observedAt: now,
-              observedRefreshGeneration: row.version,
-              source: "response_headers",
-            };
-          } else if (provider === "xai" || exhaustedUntil !== null) {
-            const observed = epoch(row.quota_checked_at) !== null;
-            quota = {
-              windows:
-                provider === "xai"
-                  ? [
-                      windowFor(
-                        "quota",
-                        row.quota_used_percent,
-                        epoch(row.quota_reset_at),
-                        observed,
-                      ),
-                    ]
-                  : [],
-              modelCooldowns: {},
-              exhaustedUntil,
-              exhaustedKind: null,
-              revision: 0,
-              observedAt: epoch(row.quota_checked_at),
-              observedRefreshGeneration: row.version,
-              source: "usage_endpoint",
-            };
-          }
+          const observed = epoch(row.quota_checked_at) !== null;
+          const quota: SubscriptionQuota = {
+            windows: [windowFor("quota", row.quota_used_percent, epoch(row.quota_reset_at), observed)],
+            modelCooldowns: {},
+            exhaustedUntil,
+            exhaustedKind: null,
+            revision: 0,
+            observedAt: epoch(row.quota_checked_at),
+            observedRefreshGeneration: row.version,
+            source: "usage_endpoint",
+          };
           return {
             id: row.id,
             provider,
@@ -588,10 +523,6 @@ export async function loadLegacySubscriptionPlacementWorld(
       const cacheFacts: Record<string, CacheFacts> = {
         codex: { kind: "measured_idle_cutoff", cutoffMs: null },
         xai: { kind: "measured_idle_cutoff", cutoffMs: null },
-        claude: {
-          kind: "exact_ttl",
-          ttlMs: request.claudeCacheTtlMs ?? LEGACY_CLAUDE_CACHE_TTL_MS,
-        },
       };
       const input: PlacementInput = {
         now,

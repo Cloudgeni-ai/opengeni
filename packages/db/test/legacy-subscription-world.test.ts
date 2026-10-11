@@ -1,6 +1,5 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
-import { emptyClaudeUsage } from "@opengeni/config";
 import { sql } from "drizzle-orm";
 import { decidePlacement } from "@opengeni/subscriptions";
 import {
@@ -24,15 +23,16 @@ import {
   type LegacyPlacementWorldRequest,
 } from "./fixtures/legacy-subscription-world";
 
-// Codex is a historical migration fixture only. Claude/SuperGrok still exercise
-// the current executable shadow adapter, not its historical snapshot.
+// Codex is a historical migration fixture only. SuperGrok still exercises the
+// current executable shadow adapter, not its historical snapshot. The legacy
+// Claude runtime is deleted (design 5.3, C4), so no Claude world is loaded.
 function loadLegacySubscriptionPlacementWorld(
   db: Parameters<typeof loadCurrentLegacyWorld>[0],
   input: LegacyPlacementWorldRequest,
 ) {
-  return input.provider === "codex"
-    ? loadHistoricalCodexWorld(db, input)
-    : loadCurrentLegacyWorld(db, { ...input, provider: input.provider });
+  if (input.provider === "codex") return loadHistoricalCodexWorld(db, input);
+  if (input.provider !== "xai") throw new Error("Only SuperGrok has a current legacy world");
+  return loadCurrentLegacyWorld(db, { ...input, provider: input.provider });
 }
 
 // Real PostgreSQL under the restricted application role, so FORCE RLS applies.
@@ -529,25 +529,12 @@ describe("legacy subscription world", () => {
           (account_id, workspace_id, authority_scope, credential_encrypted, allowed_workspace_ids)
         values (${setup.accountId}, null, 'organization', 'v1:enc', ${[setup.otherWorkspaceId]})
         returning id`;
-      const [claudeElsewhere] = await shared!.admin<{ id: string }[]>`
-        insert into claude_subscription_credentials
-          (account_id, workspace_id, authority_scope, credential_encrypted, allowed_workspace_ids)
-        values (${setup.accountId}, null, 'organization', 'v1:enc', ${[setup.otherWorkspaceId]})
-        returning id`;
       // ...and ones assigned here, which must be visible, so the check above is not vacuous.
       const [xaiHere] = await shared!.admin<{ id: string }[]>`
         insert into xai_subscription_credentials
           (account_id, workspace_id, authority_scope, credential_encrypted, allowed_workspace_ids)
         values (${setup.accountId}, null, 'organization', 'v1:enc', ${[workspaceId]})
         returning id`;
-      const [claudeHere] = await shared!.admin<{ id: string }[]>`
-        insert into claude_subscription_credentials
-          (account_id, workspace_id, authority_scope, credential_encrypted, allowed_workspace_ids)
-        values (${setup.accountId}, null, 'organization', 'v1:enc', ${[workspaceId]})
-        returning id`;
-      const [claudeMine] = await shared!.admin<{ id: string }[]>`
-        insert into claude_subscription_credentials (account_id, workspace_id, credential_encrypted)
-        values (${setup.accountId}, ${workspaceId}, 'v1:enc') returning id`;
 
       const { sessionId, turnId } = await session(workspaceId, setup.accountId, setup.owner);
       await transitionSessionVisibility(client!.db, {
@@ -623,63 +610,7 @@ describe("legacy subscription world", () => {
           expect(ids).toEqual([workspaceAccount.account.id, xaiHere!.id]);
           expect(loaded.input.session.personalAuthority).toEqual([]);
         }
-
-        const claude = await loadLegacySubscriptionPlacementWorld(
-          client!.db,
-          request(base, {
-            provider: "claude",
-            productModelId: "claude/test-model",
-            upstreamModelId: "claude-test-model",
-            authorityScope: "workspace",
-          }),
-        );
-        if (claude.status !== "loaded") throw new Error("expected a loaded world");
-        const claudeIds = claude.input.connections.map((connection) => connection.id);
-        expect(claudeIds).toEqual([claudeHere!.id, claudeMine!.id]);
-        expect(claudeIds).not.toContain(claudeElsewhere!.id);
       });
     },
   );
-
-  realTest("maps Claude per-model cooldowns from the usage table and waits for them", async () => {
-    const setup = await fixture();
-    const workspaceId = setup.grantWorkspaceId;
-    const [credential] = await shared!.admin<{ id: string; version: number }[]>`
-        insert into claude_subscription_credentials (account_id, workspace_id, credential_encrypted)
-        values (${setup.accountId}, ${workspaceId}, 'v1:enc') returning id, version`;
-    const cooldownUntil = new Date(Date.now() + 10 * 60_000);
-    const snapshot = emptyClaudeUsage(credential!.version);
-    await shared!.admin`
-        insert into claude_subscription_account_usage
-          (credential_id, account_id, credential_version, snapshot, model_cooldowns)
-        values (${credential!.id}, ${setup.accountId}, ${credential!.version},
-          ${shared!.admin.json(snapshot as never)},
-          ${shared!.admin.json({ "claude-test-model": cooldownUntil.toISOString() })})`;
-    const { sessionId, turnId } = await session(workspaceId, setup.accountId, setup.owner);
-    const loaded = await asTurn(setup.owner, () =>
-      loadLegacySubscriptionPlacementWorld(
-        client!.db,
-        request(
-          { accountId: setup.accountId, workspaceId, sessionId, turnId },
-          {
-            provider: "claude",
-            productModelId: "claude/test-model",
-            upstreamModelId: "claude-test-model",
-            authorityScope: "workspace",
-          },
-        ),
-      ),
-    );
-    if (loaded.status !== "loaded") throw new Error("expected a loaded world: " + loaded.reason);
-    expect(loaded.input.connections).toHaveLength(1);
-    expect(loaded.input.connections[0]!.quota?.modelCooldowns).toEqual({
-      "claude/test-model": cooldownUntil.getTime(),
-    });
-    expect(loaded.input.cacheFacts.claude).toEqual({ kind: "exact_ttl", ttlMs: 300_000 });
-    expect(decidePlacement(loaded.input)).toEqual({
-      kind: "wait",
-      reason: "no_eligible_capacity",
-      earliestResetAt: cooldownUntil.getTime(),
-    });
-  });
 });

@@ -72,15 +72,14 @@ import { loadWorkspaceEnvironmentForRunWithCredentials } from "../src/activities
 import type { ActivityServices } from "../src/activities/types";
 import { SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS } from "@opengeni/db";
 
-// Characterizes the legacy SuperGrok and Claude runtimes, which run only before
-// their drained subscription-core cutovers: the database withholds those
-// migrations. Removed with the legacy runtimes.
+// Characterizes the legacy SuperGrok runtime, which runs only before its
+// drained subscription-core cutover: the database withholds that migration.
+// Removed with the legacy runtime. Claude is on the shared core (its legacy
+// runtime is deleted, design 5.3, C4): its v1 columns carry the default.
 const LEGACY_SUBSCRIPTION_WORLD = {
-  withheldMigrations: [
-    SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.xai!,
-    SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.claude!,
-  ],
+  withheldMigrations: [SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.xai!],
 };
+const CLAUDE_V1_DEFAULT = { version: 1, scope: "workspace" } as const;
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -337,11 +336,12 @@ async function claimedCommonVariableSetRun(
 
 describe("scheduled task personal MCP authority", () => {
   test.each(["organization", "personal"] as const)(
-    "SUB-ACCESS-01: a scheduled run carries its task's accepted Claude and SuperGrok %s pool snapshots into the generated turn",
+    "SUB-ACCESS-01: a scheduled run carries its task's accepted SuperGrok %s pool snapshot into the generated turn",
     async (scope) => {
       if (!available) return;
       const workspace = await workspaceFixture();
-      let claudeSnapshot:
+      const claudeSnapshot = CLAUDE_V1_DEFAULT;
+      let xaiSnapshot:
         | {
             version: 1;
             scope: "organization";
@@ -351,7 +351,6 @@ describe("scheduled task personal MCP authority", () => {
             scope: "user";
             authorityGeneration: number;
           };
-      let xaiSnapshot: typeof claudeSnapshot;
       if (scope === "personal") {
         await admin`insert into workspace_memberships (
         account_id, workspace_id, subject_id, role, permissions
@@ -359,27 +358,6 @@ describe("scheduled task personal MCP authority", () => {
         ${workspace.accountId}, ${workspace.workspaceId}, ${workspace.subjectId},
         'owner', '[]'::jsonb
       ) on conflict (workspace_id, subject_id) do update set role = 'owner', permissions = '[]'::jsonb`;
-        const claudeIdentity = crypto.randomUUID();
-        const claude = await createClaudeSubscriptionAccount(client.db, {
-          ...workspace,
-          scope: "user",
-          encryptionKey: new Uint8Array(32).fill(23),
-          secret: {
-            version: 1,
-            token: "sk-ant-oat01-scheduled-personal",
-            identity: { accountUuid: claudeIdentity, deviceId: "c".repeat(64) },
-          },
-          providerAccountId: claudeIdentity,
-          label: null,
-          accountEmail: null,
-          planType: "claude_max",
-          expiresAt: null,
-        });
-        await setInitialActiveClaudeCredential(client.db, {
-          ...workspace,
-          authoritySnapshot: claude.authoritySnapshot,
-          credentialId: claude.account.id,
-        });
         const xai = await createXaiSubscriptionCredential(client.db, {
           ...workspace,
           scope: "user",
@@ -392,12 +370,10 @@ describe("scheduled task personal MCP authority", () => {
           authoritySnapshot: xai.authoritySnapshot,
           credentialId: xai.account.id,
         });
-        claudeSnapshot = claude.authoritySnapshot;
         xaiSnapshot = xai.authoritySnapshot;
-        expect(xaiSnapshot).toEqual(claudeSnapshot);
+        expect(xaiSnapshot).toMatchObject({ version: 1, scope: "user" });
       } else {
-        claudeSnapshot = { version: 1, scope: "organization" };
-        xaiSnapshot = claudeSnapshot;
+        xaiSnapshot = { version: 1, scope: "organization" };
       }
       const task = await createScheduledTask(client.db, {
         ...workspace,

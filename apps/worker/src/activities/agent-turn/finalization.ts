@@ -1,8 +1,6 @@
 import {
   commitSessionAttemptQuiescence,
   listPendingSessionTurns,
-  recordClaudeAccountUsage,
-  releaseClaudeCredentialLease,
   releaseXaiCredentialLease,
   updateXaiQuotaMetadata,
   type SessionAttemptQuiescenceCommit,
@@ -11,7 +9,7 @@ import { appendAndPublishTurnEventsFenced, publishDurableSessionEvents } from "@
 import { sandboxLeaseTelemetryKey } from "@opengeni/observability";
 import { clearRunCredentialsForAttempt } from "@opengeni/runtime";
 import { fetchXaiSubscriptionQuota } from "@opengeni/xai-subscription";
-import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
+import type { Settings } from "@opengeni/config";
 
 import { startActivityHeartbeat, type currentActivityContext } from "../streaming";
 import { startTurnFinalizationMonitor } from "./finalization-monitor";
@@ -426,37 +424,6 @@ async function finalizeTurnAttemptSteps(
     // best-effort (same discipline as today's usage write). Both writers skip
     // version/updatedAt, so neither can race the token-refresh CAS.
     monitor.enter("provider_leases");
-    const claudeEncryptionKey = environmentsEncryptionKeyBytes(settings);
-    if (claudeEncryptionKey && providerTurn.claudeAuthoritySnapshot && leases.claude.subjectId) {
-      for (const snapshot of providerTurn.latestClaudeUsage.values()) {
-        if (
-          (!snapshot.observation && !snapshot.refresh) ||
-          snapshot.expectedConnectionId !== providerTurn.effectiveClaudeCredentialId ||
-          snapshot.expectedCredentialVersion !== providerTurn.effectiveClaudeCredentialVersion
-        )
-          continue;
-        await waitForTurnFinalizerStep(
-          recordClaudeAccountUsage(
-            db,
-            {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              subjectId: leases.claude.subjectId,
-              credentialId: snapshot.expectedConnectionId,
-              authoritySnapshot: providerTurn.claudeAuthoritySnapshot,
-            },
-            {
-              encryptionKey: claudeEncryptionKey,
-              token: snapshot.token,
-              expectedCredentialVersion: snapshot.expectedCredentialVersion,
-              ...(snapshot.observation ? { observation: snapshot.observation } : {}),
-              ...(snapshot.refresh ? { refresh: snapshot.refresh } : {}),
-            },
-          ).catch(() => null),
-          finalizerSignal,
-        );
-      }
-    }
     const coreCodex = providerTurn.codexSubscriptionCore;
     if (coreCodex) {
       // Shared-core turn: usage headers become a quota observation on the
@@ -520,8 +487,8 @@ async function finalizeTurnAttemptSteps(
       );
       leases.xai.held = false;
     }
-    // The same for a core-placed Claude turn (its legacy usage receipts and
-    // legacy release never run: they need the legacy authority and subject).
+    // The same for a Claude turn (always core-placed: the legacy Claude
+    // runtime, its usage receipts and its lease release are deleted).
     if (providerTurn.claudeSubscriptionCore && leases.claude.held && attempt.turnId) {
       await waitForTurnFinalizerStep(
         finalizeCoreClaudeTurn({
@@ -570,30 +537,26 @@ async function finalizeTurnAttemptSteps(
         );
       }
     }
-    for (const [lease, release] of [
-      [leases.xai, releaseXaiCredentialLease],
-      [leases.claude, releaseClaudeCredentialLease],
-    ] as const) {
-      lease.stopHeartbeat();
-      if (
-        lease.held &&
-        attempt.turnId &&
-        lease.subjectId &&
-        lease.holderId &&
-        lease.generation !== null
-      ) {
-        await waitForTurnFinalizerStep(
-          release(db, {
-            workspaceId: input.workspaceId,
-            subjectId: lease.subjectId,
-            turnId: attempt.turnId,
-            holderId: lease.holderId,
-            generation: lease.generation,
-          }).catch(() => undefined),
-          finalizerSignal,
-        );
-        lease.held = false;
-      }
+    leases.claude.stopHeartbeat();
+    leases.xai.stopHeartbeat();
+    if (
+      leases.xai.held &&
+      attempt.turnId &&
+      leases.xai.subjectId &&
+      leases.xai.holderId &&
+      leases.xai.generation !== null
+    ) {
+      await waitForTurnFinalizerStep(
+        releaseXaiCredentialLease(db, {
+          workspaceId: input.workspaceId,
+          subjectId: leases.xai.subjectId,
+          turnId: attempt.turnId,
+          holderId: leases.xai.holderId,
+          generation: leases.xai.generation,
+        }).catch(() => undefined),
+        finalizerSignal,
+      );
+      leases.xai.held = false;
     }
     // Workbench v2 turn-end workspace capture — runs FIRST in
     // the turn-end finally, while the box is MAXIMALLY ALIVE. The agent's last

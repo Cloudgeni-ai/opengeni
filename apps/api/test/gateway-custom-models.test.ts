@@ -27,11 +27,9 @@ import {
   requireWorkspace,
   createOrganizationModelProviderCustomModel,
   upsertOrganizationModelProviderConnection,
-  createClaudeSubscriptionAccount,
   upsertClaudeSubscriptionAccount,
   upsertOrganizationClaudeSubscription,
   setInitialActiveClaudeCredential,
-  disconnectClaudeSubscriptionAccount,
   getModelConnectionAccess,
   updateModelConnectionAccess,
   getWorkspaceProviderApiKeyConnectionMetadata,
@@ -56,7 +54,14 @@ import {
 } from "../src/app";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
 import { registerWorkspaceRoutes } from "../src/routes/workspaces";
-import { SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS } from "@opengeni/db";
+import {
+  SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS,
+} from "@opengeni/db";
+// Legacy Claude account helpers stay only for the API until C2a/C2b (design 5.3, C4).
+import {
+  createClaudeSubscriptionAccount,
+  disconnectClaudeSubscriptionAccount,
+} from "../../../packages/db/src/claude-subscription-accounts";
 
 // Characterizes the legacy Claude runtime, which runs only before the drained
 // Claude cutover: the database withholds that migration. Removed with the

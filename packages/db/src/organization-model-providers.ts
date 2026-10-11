@@ -4,11 +4,10 @@ import {
   environmentsEncryptionKeyBytes,
   type Settings,
 } from "@opengeni/config";
-import { ClaudeProviderAccountAuthoritySnapshotV1 } from "@opengeni/contracts";
+import type { ClaudeProviderAccountAuthoritySnapshotV1 } from "@opengeni/contracts";
 import { and, count, eq, exists, inArray, isNull, sql } from "drizzle-orm";
 
-import { type Database, rawRows, setSubjectRlsContext, withRlsContext } from "./database";
-import { workspaceClaudeSubscriptionActiveForAuthority } from "./claude-subscription-accounts";
+import { type Database, setSubjectRlsContext, withRlsContext } from "./database";
 import { decryptEnvironmentValue } from "./environment-crypto";
 import { defaultModelRequestHash } from "./model-catalog";
 import * as schema from "./schema";
@@ -496,47 +495,10 @@ export async function lockActiveOrganizationModelProviderCustomModelForAdmission
   },
 ): Promise<OrganizationModelProviderCustomModel | null> {
   return await withOrganizationModelProviderCustomModelReadLock(db, input, async (scopedDb) => {
-    if (input.providerKind === "claude_subscription") {
-      if (!input.claudeAuthority) return null;
-      let snapshot: unknown;
-      if ("sessionId" in input.claudeAuthority) {
-        const [session] = await scopedDb
-          .select({ snapshot: schema.sessions.initialClaudeProviderAccountAuthoritySnapshot })
-          .from(schema.sessions)
-          .where(
-            and(
-              eq(schema.sessions.accountId, input.accountId),
-              eq(schema.sessions.workspaceId, input.workspaceId),
-              eq(schema.sessions.id, input.claudeAuthority.sessionId),
-            ),
-          )
-          .limit(1);
-        snapshot = session?.snapshot;
-      } else {
-        snapshot = input.claudeAuthority.authoritySnapshot;
-      }
-      const authority = ClaudeProviderAccountAuthoritySnapshotV1.safeParse(snapshot);
-      if (!authority.success || authority.data.scope !== "organization") return null;
-      // The admission caller already established this transaction's subject.
-      // Do not borrow a session creator or infer a human for a service actor.
-      const [scope] = await rawRows<{ subjectId: string | null }>(
-        scopedDb,
-        sql`select nullif(current_setting('opengeni.subject_id', true), '') as "subjectId"`,
-      );
-      if (
-        !scope?.subjectId ||
-        !(await workspaceClaudeSubscriptionActiveForAuthority(
-          scopedDb,
-          { claudeSubscriptionEnabled: true },
-          {
-            workspaceId: input.workspaceId,
-            subjectId: scope.subjectId,
-            authoritySnapshot: authority.data,
-          },
-        ))
-      )
-        return null;
-    }
+    // The legacy Claude pool admission was deleted (design 5.3, C4). The
+    // core admission arrives with C2a; until then no Claude subscription
+    // custom model is admitted (fail closed).
+    if (input.providerKind === "claude_subscription") return null;
     const [row] = await scopedDb
       .select()
       .from(schema.organizationModelProviderCustomModels)
@@ -546,23 +508,18 @@ export async function lockActiveOrganizationModelProviderCustomModelForAdmission
           eq(schema.organizationModelProviderCustomModels.providerKind, input.providerKind),
           eq(schema.organizationModelProviderCustomModels.upstreamModelId, input.upstreamModelId),
           isNull(schema.organizationModelProviderCustomModels.retiredAt),
-          input.providerKind === "claude_subscription"
-            ? undefined
-            : exists(
-                scopedDb
-                  .select({ id: schema.organizationModelProviderConnections.id })
-                  .from(schema.organizationModelProviderConnections)
-                  .where(
-                    and(
-                      eq(schema.organizationModelProviderConnections.accountId, input.accountId),
-                      eq(
-                        schema.organizationModelProviderConnections.providerKind,
-                        input.providerKind,
-                      ),
-                      eq(schema.organizationModelProviderConnections.status, "active"),
-                    ),
-                  ),
+          exists(
+            scopedDb
+              .select({ id: schema.organizationModelProviderConnections.id })
+              .from(schema.organizationModelProviderConnections)
+              .where(
+                and(
+                  eq(schema.organizationModelProviderConnections.accountId, input.accountId),
+                  eq(schema.organizationModelProviderConnections.providerKind, input.providerKind),
+                  eq(schema.organizationModelProviderConnections.status, "active"),
+                ),
               ),
+          ),
         ),
       )
       .limit(1);

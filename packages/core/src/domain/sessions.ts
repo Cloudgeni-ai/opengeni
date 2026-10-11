@@ -3177,9 +3177,6 @@ async function createSessionForRequestInFileScope(
         ...(xaiProviderAccountAuthoritySnapshot
           ? { xaiAuthoritySnapshot: xaiProviderAccountAuthoritySnapshot }
           : {}),
-        ...(claudeProviderAccountAuthoritySnapshot
-          ? { claudeAuthoritySnapshot: claudeProviderAccountAuthoritySnapshot }
-          : {}),
       });
       if (!admissibleWorkspaceModel(selections, model)) {
         throw new HTTPException(422, { message: `model is not selectable: ${model}` });

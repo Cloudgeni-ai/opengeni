@@ -1,7 +1,6 @@
 import {
   getSessionTurnClaudeProviderAccountAuthoritySnapshot,
   getScheduledTaskClaudeProviderAccountAuthoritySnapshot,
-  resolveClaudeProviderAccountAuthoritySnapshotForAcceptance,
 } from "@opengeni/db";
 import {
   SCHEDULED_SLACK_BOT_POSTING_TOOLS,
@@ -41,6 +40,7 @@ import type {
 } from "@opengeni/contracts";
 import {
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
+  WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
   OPENGENI_SLACK_BOT_SESSION_METADATA_KEY,
   resolveWorkspaceSessionToolDefaults,
   resolveBundledSkillSelection,
@@ -557,10 +557,10 @@ export async function createValidatedScheduledTask(input: {
           creationInitiator.actor.sessionId,
           creationInitiator.actor.turnId,
         )
-      : await resolveClaudeProviderAccountAuthoritySnapshotForAcceptance(input.db, {
-          workspaceId: input.grant.workspaceId,
-          subjectId: input.grant.subjectId,
-        });
+      : // Claude is on the shared core (its C3 receipt exists): a fresh task
+        // writes the v1 column default, never computed from live state
+        // (design 5.3, "v1 columns after a provider's cutover").
+        WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1;
   const beforeCreateCommit =
     input.payload.runMode !== "existing_session"
       ? workspaceCustomModelCommitGuard({

@@ -9,7 +9,6 @@ import {
 } from "@opengeni/codex";
 import {
   codexUpstreamModelSlugs,
-  withClaudeConnectionCredential,
   type ConfiguredModel,
   type Settings,
 } from "@opengeni/config";
@@ -43,9 +42,6 @@ import {
   releaseSubscriptionCoreCodexOperationLease,
   renewSubscriptionCoreCodexOperationLease,
   reserveSubscriptionCoreCodexOperationRequest,
-  resolveClaudeAccountCredential,
-  resolveClaudeProviderAccountAuthoritySnapshotForAcceptance,
-  selectClaudeCredentialForUse,
   settleSubscriptionCoreCodexOperationRequest,
   withCreditDebitAttribution,
   type Database,
@@ -182,9 +178,9 @@ export function createModelCallService(deps: ModelCallServiceDeps): ModelCallSer
         productModelId: model.id,
         codexSubscriptionActive: subscription === "codex",
       });
-      if (subscription === "claude") {
-        settings = await withClaudeSubscriptionCredential(deps, settings, input, model);
-      }
+      // A single Claude subscription call has no shared-core operation path
+      // yet and the legacy Claude pool is deleted (C4): fail closed.
+      if (subscription === "claude") throw subscriptionCapacityUnavailable("Claude");
       const request = {
         ...input.request,
         ...reasoningEffortFor(model, input.request.reasoningEffort),
@@ -287,45 +283,6 @@ function reasoningEffortFor(
   if (!requested || !model.capabilities.reasoning.runnable) return {};
   if (model.capabilities.reasoning.efforts.length === 0) return {};
   return { reasoningEffort: clampReasoningEffortForConfiguredModel(model, requested, requested) };
-}
-
-async function withClaudeSubscriptionCredential(
-  deps: ModelCallServiceDeps,
-  settings: Settings,
-  input: ModelCallInput,
-  model: ConfiguredModel,
-): Promise<Settings> {
-  const authoritySnapshot = await resolveClaudeProviderAccountAuthoritySnapshotForAcceptance(
-    deps.db,
-    { workspaceId: input.workspaceId, subjectId: input.subjectId },
-  );
-  // Single calls hold no capacity lease, like transcription and media: one
-  // account may serve many concurrent requests.
-  const selected = await selectClaudeCredentialForUse(deps.db, {
-    accountId: input.accountId,
-    workspaceId: input.workspaceId,
-    subjectId: input.subjectId,
-    authoritySnapshot,
-    shardKey: input.requestId,
-    modelId: model.id,
-    upstreamModelId: model.upstreamModelId,
-  });
-  if (!selected.credentialId) throw subscriptionCapacityUnavailable("Claude");
-  const credential = await resolveClaudeAccountCredential(deps.db, deps.settings, {
-    accountId: input.accountId,
-    workspaceId: input.workspaceId,
-    subjectId: input.subjectId,
-    credentialId: selected.credentialId,
-    authoritySnapshot,
-  });
-  if ("reconnectRequired" in credential) throw subscriptionReconnectRequired("Claude");
-  return withClaudeConnectionCredential(
-    settings,
-    "claude_subscription",
-    JSON.stringify(credential.secret),
-    authoritySnapshot.scope === "organization" ? "organization" : "workspace",
-    { connectionId: selected.credentialId, credentialVersion: credential.version },
-  );
 }
 
 async function withXaiSubscription<T>(

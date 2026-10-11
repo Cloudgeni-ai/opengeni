@@ -1,5 +1,7 @@
-import { ClaudeProviderAccountAuthoritySnapshotV1 } from "@opengeni/contracts";
-import { resolveClaudeProviderAccountAuthoritySnapshotForAcceptanceInTransaction } from "./claude-subscription-accounts";
+import {
+  ClaudeProviderAccountAuthoritySnapshotV1,
+  WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+} from "@opengeni/contracts";
 import {
   receiverCodexSubscriptionAuthorityV2InTransaction,
   receiverSubscriptionAuthorityInTransaction,
@@ -2179,14 +2181,16 @@ export async function submitHumanPromptInTransaction(
       (await resolveXaiProviderAccountAuthoritySnapshotForAcceptanceInTransaction(db, {
         workspaceId: input.workspaceId,
       })));
+  // Claude is on the shared core (its C3 receipt exists): an edit and
+  // agent-submitted work copy the stored v1 value verbatim (the 0608 and
+  // scheduled fences compare it); a fresh acceptance writes the column
+  // default, never computed from live state and never read (design 5.3,
+  // "v1 columns after a provider's cutover").
   const claudeProviderAccountAuthoritySnapshot = editedSourceTurn
     ? ClaudeProviderAccountAuthoritySnapshotV1.parse(
         editedSourceTurn.claudeProviderAccountAuthoritySnapshot,
       )
-    : (nonHumanAuthority?.claude ??
-      (await resolveClaudeProviderAccountAuthoritySnapshotForAcceptanceInTransaction(db, {
-        workspaceId: input.workspaceId,
-      })));
+    : (nonHumanAuthority?.claude ?? WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1);
   // Codex v2 accepted authority (M3 PR 2a, 3b): an edit keeps its source
   // turn's frozen value; a human prompt, whether sent or steered, resolves
   // that human's own owner-caused authority; agent-submitted work copies the

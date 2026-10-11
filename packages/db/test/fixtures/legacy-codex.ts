@@ -5368,6 +5368,14 @@ const getXaiCapacityWaitForSessionInTransaction =
 const getClaudeCapacityWaitForSessionInTransaction =
   claudeCapacityRepository.getWaitForSessionInTransaction;
 
+/**
+ * TEST ONLY: the retired legacy Claude waiter (deleted from the runtime in M4
+ * C4), kept to stage the pre-0720 world for cutover and historical tests.
+ */
+export const armClaudeCapacityWait = claudeCapacityRepository.armCapacityWait;
+export const getClaudeCapacityWaitForSession = claudeCapacityRepository.getWaitForSession;
+export const reconcileClaudeCapacityWait = claudeCapacityRepository.reconcileCapacityWait;
+
 export async function heartbeatCodexCredentialLeaseUntil(
   db: Database,
   accountId: string,

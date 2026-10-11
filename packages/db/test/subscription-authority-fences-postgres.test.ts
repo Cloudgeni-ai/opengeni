@@ -23,23 +23,27 @@ import {
   applySessionTurnSettlement,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
-  createClaudeSubscriptionAccount,
   createDb,
   createScheduledTask,
   createSession,
   createXaiSubscriptionCredential,
-  disconnectClaudeSubscriptionAccount,
   disconnectXaiSubscriptionCredential,
   evaluateRuntimeDatabasePosture,
   inspectRuntimeDatabasePosture,
   sendAgentMessageInTransaction,
-  setInitialActiveClaudeCredential,
   submitHumanPromptInTransaction,
   withRlsContext,
   withWorkspaceSessionActivityRls,
   withWorkspaceSubjectSessionActivityRls,
   type DbClient,
 } from "../src";
+// Historical 0717 staging writes pre-fence Claude accounts with the legacy
+// account writers, which stay only for the API until C2b (design 5.3, C4).
+import {
+  createClaudeSubscriptionAccount,
+  disconnectClaudeSubscriptionAccount,
+  setInitialActiveClaudeCredential,
+} from "../src/claude-subscription-accounts";
 import { rawRows } from "../src/database";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";

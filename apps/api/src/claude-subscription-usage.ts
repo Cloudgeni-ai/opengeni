@@ -1,16 +1,8 @@
-import { parseClaudeUsageResponse, type Settings } from "@opengeni/config";
-import { emptyClaudeUsage } from "@opengeni/config";
+import { parseClaudeUsageResponse } from "@opengeni/config";
 import type { ClaudeSubscriptionUsage } from "@opengeni/contracts";
-import {
-  resolveClaudeSubscriptionCredential,
-  ClaudeSubscriptionConnectionChanged,
-  ClaudeSubscriptionRefreshUnavailable,
-  recordClaudeSubscriptionUsage,
-  type ClaudeUsageScope,
-  type Database,
-} from "@opengeni/db";
 import { readResponseJsonBounded } from "@opengeni/network";
-import { HTTPException } from "hono/http-exception";
+
+/** The Claude profile usage request (no inference); the caller records its reading. */
 
 export async function requestClaudeUsage(
   token: string,
@@ -57,41 +49,4 @@ export async function requestClaudeUsage(
   }
 
   return { status, observation, checkedAt };
-}
-
-/** No inference calls. Inference-only setup tokens retain their response-header cache. */
-export async function refreshClaudeSubscriptionUsage(
-  db: Database,
-  settings: Settings,
-  scope: ClaudeUsageScope,
-  fetchImpl: typeof fetch = globalThis.fetch,
-) {
-  const credential = await resolveClaudeSubscriptionCredential(db, settings, scope, {
-    fetchImpl,
-  }).catch((error) => {
-    if (error instanceof ClaudeSubscriptionConnectionChanged)
-      throw new HTTPException(409, { message: error.message });
-    if (error instanceof ClaudeSubscriptionRefreshUnavailable)
-      throw new HTTPException(503, { message: error.message });
-    throw error;
-  });
-  if (!credential) return emptyClaudeUsage(null);
-  if ("reconnectRequired" in credential) return credential.usage;
-  const current = credential.usage;
-  if (
-    current.refreshStatus === "scope_required" ||
-    (current.refreshCheckedAt && Date.now() - Date.parse(current.refreshCheckedAt) < 30_000)
-  )
-    return current;
-  const { status, observation, checkedAt } = await requestClaudeUsage(credential.token, fetchImpl);
-  const result = await recordClaudeSubscriptionUsage(db, settings, scope, {
-    token: credential.token,
-    expectedConnectionId: credential.connectionId,
-    expectedCredentialVersion: credential.credentialVersion,
-    ...(observation ? { observation } : {}),
-    refresh: { status, checkedAt },
-  });
-  if (!result)
-    throw new HTTPException(409, { message: "Claude connection changed; reload usage." });
-  return result;
 }
