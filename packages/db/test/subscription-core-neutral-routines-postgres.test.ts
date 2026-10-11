@@ -69,6 +69,8 @@ beforeAll(async () => {
     "0726_subscription_personal_acceptance_reads.sql",
     // 0728 adds a format-aware overload next to 0707's personal connect writer.
     "0728_subscription_core_personal_connect_format.sql",
+    // 0720 derives the personal version reader from 0707's owner reader.
+    "0720_subscription_core_personal_connection_versions.sql",
   ];
   const owner = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
