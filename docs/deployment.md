@@ -4505,8 +4505,11 @@ would otherwise undo the error and print the passing empty results. Keep the
 `\\` that ends the second line: it ends the `\set` when a terminal pastes the
 block as one line. From a file or standard input, psql stops at the guard and
 exits with status 3. Pasted, or read with `\i`, the queries fail or are
-skipped and the session is left in an aborted transaction: send `ROLLBACK`
-before anything else. Both queries must return no rows:
+skipped. If the prompt then shows `!` (`=!>`), the session is still in an
+aborted transaction: send `ROLLBACK` before anything else. That happens after
+`\i`, or after a one-line paste when `ON_ERROR_STOP` was already on (as it is
+after an earlier run of this block in the same session). Both queries must
+return no rows:
 
 ```sql
 \set ON_ERROR_ROLLBACK off
