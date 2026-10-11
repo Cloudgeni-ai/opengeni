@@ -25,7 +25,12 @@ export type LegacyRuntimeException = {
   reason: string;
 };
 
-export type LegacySubscriptionRuntime = {
+export type LegacySubscriptionRetirement = {
+  /**
+   * Stable retirement id: one entry per retired provider runtime, plus
+   * `pool` for the shared legacy routines the retirement step drops.
+   */
+  id: "codex" | "xai" | "claude" | "pool";
   /** Shown in findings, for example "Codex (M3 PR4)". */
   name: string;
   /** Identifiers and SQL names whose executable use is retired. */
@@ -39,6 +44,11 @@ export type LegacySubscriptionRuntime = {
    * that only tests may import.
    */
   testFixtures?: RegExp;
-  /** Exceptions keyed by repository-relative file path. */
+  /**
+   * This retirement's exceptions keyed by repository-relative file path.
+   * Kept per entry (rather than one shared map) so each retirement owns
+   * and reviews its own exact exceptions and parallel retirements never
+   * edit the same map.
+   */
   exceptions: Readonly<Record<string, LegacyRuntimeException>>;
 };

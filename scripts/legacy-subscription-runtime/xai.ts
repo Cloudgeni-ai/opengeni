@@ -1,4 +1,4 @@
-import type { LegacySubscriptionRuntime } from "./types";
+import type { LegacySubscriptionRetirement } from "./types";
 
 /**
  * SuperGrok (`xai`) decision state retired by M4 X4, after the drained X3
@@ -8,7 +8,8 @@ import type { LegacySubscriptionRuntime } from "./types";
  * with the legacy secret decoder it calls stays for as long as 0719 ships:
  * a fresh install and a one-window upgrade still run it.
  */
-export const LEGACY_XAI_RUNTIME: LegacySubscriptionRuntime = {
+export const LEGACY_XAI_RUNTIME: LegacySubscriptionRetirement = {
+  id: "xai",
   name: "SuperGrok (M4 X4)",
   identifiers: [
     // The factory tables.
