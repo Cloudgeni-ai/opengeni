@@ -172,7 +172,7 @@ export function codexListedCount(
     ? organizationOnlyCodexAccounts(organization.codex.accounts, codex, organization.workspace.id)
         .length
     : codex.accounts.length - own + (pool.organizationSetAside ? 1 : 0);
-  return own + shared + (codex.pending ? 1 : 0) + (poolState(codex).workspaceSetAside ? 1 : 0);
+  return own + shared + (codex.pending ? 1 : 0) + (pool.workspaceSetAside ? 1 : 0);
 }
 
 /** The ⋯ item that keeps new work on the organization's accounts, when it would change something. */
@@ -245,9 +245,11 @@ export function CodexAccountRows({
         account={account}
         places={places}
         // Until the organization's list says whether it is shared wider, no
-        // "<workspace> only" tag.
+        // "<workspace> only" tag; a Personal workspace's account never is.
         scopeLabel={
-          organization && (organization.codex.loading || organization.codex.loadError)
+          organization &&
+          !organization.workspace.personal &&
+          (organization.codex.loading || organization.codex.loadError)
             ? ""
             : undefined
         }
@@ -264,7 +266,7 @@ export function CodexAccountRows({
       onOpen={places.openConnect}
     />
   ) : null;
-  const workspaceSetAsideRow = poolState(codex).workspaceSetAside ? (
+  const workspaceSetAsideRow = pool.workspaceSetAside ? (
     <ListRow
       disabled
       leading={<ProviderTile provider="codex" size="lg" />}
@@ -452,12 +454,16 @@ function SharedCodexSetAsideRow({
     kind: "codex",
     connectionId: account.id,
   });
+  // Chosen people's sessions use it here whichever pool the workspace uses.
+  const forPeople = Boolean(access.data?.policy.allowedPeople);
   const reaches = ownInUse ? true : reachesWorkspace(access.data, organization.workspace);
-  const reason = ownInUse
-    ? "Set aside while this workspace has its own"
-    : reaches === false
-      ? `Not available in ${places.workspaceName}`
-      : null;
+  const reason = forPeople
+    ? null
+    : ownInUse
+      ? "Set aside while this workspace has its own"
+      : reaches === false
+        ? `Not available in ${places.workspaceName}`
+        : null;
   return (
     <ListRow
       leading={<ProviderTile provider="codex" size="lg" />}
@@ -468,8 +474,8 @@ function SharedCodexSetAsideRow({
         resetsLabel(account.resetCreditAvailableCount),
         reason,
       ]}
-      cells={{ usage: NOT_IN_USE }}
-      menu={menu}
+      cells={forPeople ? undefined : { usage: NOT_IN_USE }}
+      menu={forPeople ? null : menu}
       indicator={
         account.status !== "active" ? { kind: "attention", label: "Needs reconnect" } : "open"
       }

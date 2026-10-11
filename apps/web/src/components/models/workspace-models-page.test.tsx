@@ -2033,7 +2033,12 @@ describe("One Models page for the organization and the workspace", () => {
       try {
         await flush();
         expect(rowsNamed(view.container, "Team plan")).toHaveLength(1);
-        expect(rowsNamed(view.container, "Team plan")[0]!.textContent).toContain("Selected people");
+        const row = rowsNamed(view.container, "Team plan")[0]!;
+        expect(row.textContent).toContain("Selected people");
+        // Chosen people's sessions here use it whichever pool the workspace uses.
+        expect(row.textContent).not.toContain("Set aside");
+        expect(row.textContent).not.toContain("Not in use");
+        expect(row.querySelector('[aria-label^="More actions"]')).toBeNull();
       } finally {
         await cleanup(view);
       }
@@ -2065,6 +2070,65 @@ describe("One Models page for the organization and the workspace", () => {
         await flush();
         expect(view.container.querySelector("h1")?.textContent).toBe("Company plan");
         expect(view.container.textContent).toContain("Primary account");
+      } finally {
+        await cleanup(view);
+      }
+    });
+
+    const failOrganizationRead = () =>
+      client.requestJson.mockImplementation(async (method: string, path: string) => {
+        if (method === "GET" && path === "/v1/organizations/organization-a/codex/accounts") {
+          throw new Error("organization list unavailable");
+        }
+        if (method === "GET") throw new Error(`unexpected read ${path}`);
+        return {};
+      });
+
+    test("while the organization's list can't be read, its workspace page tags it with no reach", async () => {
+      organizationAdmin = true;
+      failOrganizationRead();
+      client.getModelConnectionAccess.mockImplementation(async (...args: unknown[]) =>
+        managedAccess((args[0] as { connectionId: string }).connectionId),
+      );
+      const view = await render();
+      try {
+        await flush();
+        expect(view.container.textContent).toContain(
+          "Couldn't load the organization's Codex accounts.",
+        );
+        expect(rowsNamed(view.container, "Team plan")).toHaveLength(1);
+        // It may be shared wider: "<workspace> only" may not be true.
+        expect(rowsNamed(view.container, "Team plan")[0]!.textContent).not.toContain(
+          "Design preview only",
+        );
+      } finally {
+        await cleanup(view);
+      }
+    });
+
+    test("while the organization's list can't be read, the organization's list tags it with no reach", async () => {
+      organizationAdmin = true;
+      organizationList = true;
+      failOrganizationRead();
+      client.getModelConnectionAccess.mockImplementation(async (...args: unknown[]) =>
+        managedAccess((args[0] as { connectionId: string }).connectionId),
+      );
+      organizationWorkspaces = [
+        {
+          id: "workspace-a",
+          name: "Design preview",
+          personal: false,
+          canManage: true,
+          savedDefaultModel: null,
+        },
+      ];
+      const view = await render();
+      try {
+        await flush();
+        expect(rowsNamed(view.container, "Team plan")).toHaveLength(1);
+        expect(rowsNamed(view.container, "Team plan")[0]!.textContent).not.toContain(
+          "Design preview only",
+        );
       } finally {
         await cleanup(view);
       }

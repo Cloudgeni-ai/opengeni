@@ -331,7 +331,8 @@ export function OrganizationModelsList({
         ]);
   const ownCodexIds = new Set(ready.flatMap(({ snapshot }) => snapshot.codexOwn.map((a) => a.id)));
   // Until the organization's list says which Codex accounts it shares wider,
-  // a workspace's Codex account carries no "<workspace> only" tag.
+  // a shared workspace's Codex account carries no "<workspace> only" tag. A
+  // Personal workspace's never is an organization account.
   const codexReachUnknown = administrator && (orgCodex.loading || Boolean(orgCodex.loadError));
   const ownRows = ready.flatMap(({ workspace, snapshot }) => {
     const tag = workspace.personal ? "Personal workspace only" : `${workspace.name} only`;
@@ -346,7 +347,7 @@ export function OrganizationModelsList({
             meta={[
               sharedCodexWhere.has(account.id)
                 ? `Used in ${[workspace.name, ...sharedCodexWhere.get(account.id)!].join(", ")}`
-                : codexReachUnknown
+                : codexReachUnknown && !workspace.personal
                   ? null
                   : tag,
               planLabel(account.plan, "ChatGPT"),
