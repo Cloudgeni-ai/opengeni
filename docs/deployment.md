@@ -4381,9 +4381,9 @@ already using the reach table keeps it past the runner's 5-second
 retry the Job.
 
 Nothing else needs an operator.
-### Accepted authority compatibility (0714)
+### Accepted authority compatibility (0715)
 
-Migration `0714_subscription_authority_compat.sql` is **rolling** and inert on
+Migration `0715_subscription_authority_compat.sql` is **rolling** and inert on
 deploy. Design record:
 [subscription core, PR 0b](design/subscription-core-2026-10-07.md#pr-0b-authority-compatibility-and-fences).
 It requires 0712 and, like 0712, grants to the configured application roles
@@ -4403,12 +4403,12 @@ It requires 0712 and, like 0712, grants to the configured application roles
 - The scheduled-task execution digest ignores the new column, so existing run
   receipts stay valid.
 
-### Subscription authority fences (0715)
+### Subscription authority fences (0716)
 
-Migration `0715_subscription_authority_fences.sql` is **rolling**, requires
-0714 and grants nothing. Design record:
+Migration `0716_subscription_authority_fences.sql` is **rolling**, requires
+0715 and grants nothing. Design record:
 [subscription core, PR 0b](design/subscription-core-2026-10-07.md#pr-0b-authority-compatibility-and-fences).
-Unlike 0714, part of it acts on deploy:
+Unlike 0715, part of it acts on deploy:
 
 - Codex (already cut over): an internal turn delivered into a receiving
   context must carry the v2 accepted authority it copies (the context's, or
@@ -4424,7 +4424,7 @@ Unlike 0714, part of it acts on deploy:
 - Personal (`user`) SuperGrok and Claude accounts: under a migration owner
   without `BYPASSRLS` (the documented posture), disconnecting one deleted the
   credential but left its authority active, and connecting a personal Claude
-  account failed with `42501`. 0715 adds the missing owner policies and
+  account failed with `42501`. 0716 adds the missing owner policies and
   revokes the authorities earlier disconnects left active. A live run
   accepted for such a disconnected account then fails with
   `scheduled_xai_authority_changed` or `scheduled_claude_authority_changed`;
@@ -4440,11 +4440,11 @@ Unlike 0714, part of it acts on deploy:
 
 **Before deploying**, run this read-only inventory as a role that bypasses
 row security. Each row is one finding. Resolve the scheduled findings first
-(pause or edit the task, or let the run finish): after 0715, their tasks
+(pause or edit the task, or let the run finish): after 0716, their tasks
 cannot be admitted, their occurrences or reusable sessions are refused, or
 the run fails at claim. Record the counts of the two `inbox_` findings
 (history the fences never check again) and of
-`disconnected_personal_authority` (the authorities 0715 revokes).
+`disconnected_personal_authority` (the authorities 0716 revokes).
 
 ```sql
 WITH live_run AS (
@@ -4620,7 +4620,7 @@ WHERE turn.execution_context_turn_id IS NOT NULL
 ORDER BY 1, 2, 3, 4;
 ```
 
-| Finding | After 0715 |
+| Finding | After 0716 |
 | --- | --- |
 | `scheduled_task_claude_subject` | Every firing is refused (the dispatcher already refuses it). |
 | `scheduled_run_claude_accepted` | Admission would not accept this run's Claude values. |
@@ -4631,18 +4631,18 @@ ORDER BY 1, 2, 3, 4;
 | `disconnected_personal_authority` | Revoked: its credential was disconnected. |
 | `inbox_turn_v2`, `inbox_update_v2` | Such a delivery is refused; existing rows are not checked again. |
 
-Staging and production were not queried when 0715 was written; run the
+Staging and production were not queried when 0716 was written; run the
 inventory there before deploying it.
 
-### SuperGrok on the shared subscription core (0716)
+### SuperGrok on the shared subscription core (0717)
 
-Migration `0716_subscription_core_xai_cutover.sql` is a one-way maintenance
+Migration `0717_subscription_core_xai_cutover.sql` is a one-way maintenance
 cutover, the SuperGrok counterpart of 0689. It moves every organization's
 SuperGrok (`xai`) subscription state onto the shared subscription core,
 records the `xai` receipt and registry row, and enables the SuperGrok cutover
 row for every organization, in one transaction. Design record:
 [subscription core, X3](design/subscription-core-2026-10-07.md#x3-the-drained-supergrok-cutover).
-It requires 0712 through 0715. The release that carries it must also carry
+It requires 0712 through 0716. The release that carries it must also carry
 the dormant SuperGrok core runtime (chat, refresh, media and routes); after
 the receipt the runtime serves SuperGrok only through the core.
 
@@ -4720,7 +4720,7 @@ ownership ambiguity, named by content-free classes such as
 `personal_generation_ambiguous` or `pin_pool_ambiguous`; a turn leased or a
 session waiting on both runtimes (`lease_conflict`, `waiter_conflict`); a
 waiter whose workflow is not its session's (`waiter_workflow_mismatch`);
-pre-existing core SuperGrok state; or any parity mismatch (`0716 parity
+pre-existing core SuperGrok state; or any parity mismatch (`0717 parity
 mismatch (<metrics>)`). A database error while writing the core surfaces only
 as `could not write the shared core (SQLSTATE <code>, <constraint>)`: no
 statement parameter, token, label or email leaves the migration. Fix the named
@@ -4806,12 +4806,12 @@ legacy tables and only their own provider's keys in shared relations, and
 each commits in its own transaction with its own parity. Either order of
 releases works:
 
-- Separately: deploy the release that carries 0716, run steps 1 to 6 in one
+- Separately: deploy the release that carries 0717, run steps 1 to 6 in one
   window, and run the Claude cutover's window with its later release.
 - In one window: deploy a release that carries both. Drain and back up once,
   take both inventories, and run the migrator once with the same roles and
-  key; it applies 0716 and then the Claude cutover in ledger order. If the
-  Claude cutover aborts, 0716 stays committed: fix the named Claude rows and
+  key; it applies 0717 and then the Claude cutover in ledger order. If the
+  Claude cutover aborts, 0717 stays committed: fix the named Claude rows and
   run the migrator again (it resumes at the Claude cutover). Start binaries
   only after both receipts exist; readiness refuses a database missing
   either. Validate each provider's report rows separately.

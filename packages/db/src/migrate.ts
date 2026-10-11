@@ -256,9 +256,9 @@ export async function executeMigrationFile(
   }
   if (sqlText.includes(XAI_SUBSCRIPTION_CORE_CUTOVER_MARKER)) {
     if (file !== XAI_SUBSCRIPTION_CORE_CUTOVER_MIGRATION)
-      throw new Error("SuperGrok subscription cutover is restricted to migration 0716");
+      throw new Error("SuperGrok subscription cutover is restricted to migration 0717");
     const parts = sqlText.split(XAI_SUBSCRIPTION_CORE_CUTOVER_MARKER);
-    if (parts.length !== 2) throw new Error("0716 requires exactly one SuperGrok cutover stage");
+    if (parts.length !== 2) throw new Error("0717 requires exactly one SuperGrok cutover stage");
     // Every failure leaves content-free, as for 0689.
     await sql
       .begin(async (transaction) => {

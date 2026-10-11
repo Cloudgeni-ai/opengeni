@@ -247,7 +247,7 @@ describe("migration 0234 xAI subscription authority", () => {
       expect(migration).toContain(`CREATE TABLE "${table}"`);
       expect(migration).toContain(`ALTER TABLE "${table}" FORCE ROW LEVEL SECURITY`);
       expect(FORCE_RLS_TABLES).toContain(table);
-      // Read-only forensics once the SuperGrok cutover receipt exists (0716).
+      // Read-only forensics once the SuperGrok cutover receipt exists (0717).
       expect(SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES.xai).toContain(table);
     }
     expect(migration).toContain("\"authority_scope\" IN ('workspace', 'user')");

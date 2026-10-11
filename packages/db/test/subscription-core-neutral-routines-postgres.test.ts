@@ -34,7 +34,7 @@ let client: DbClient | null = null;
 let appConnectionUrl = "";
 /** This binary requires the SuperGrok receipt, which the rolling state lacks. */
 const BEFORE_XAI_CUTOVER = [
-  "database is missing the xai subscription-core cutover receipt (0716_subscription_core_xai_cutover.sql); apply the pending migrations first",
+  "database is missing the xai subscription-core cutover receipt (0717_subscription_core_xai_cutover.sql); apply the pending migrations first",
 ];
 /** Runtime posture violations right after applying 0707 to a provisioned database, before provisioning again. */
 let unprovisionedPostureViolations: string[] | null = null;
@@ -47,7 +47,7 @@ beforeAll(async () => {
   // until roles are provisioned again. Stage a provisioned database without
   // 0707 (as a deployment is before it), apply 0707 alone, and evaluate the
   // full runtime posture as the runtime role before provisioning again. 0712
-  // patches routines 0707 creates and 0714 builds on 0707's registry, so both
+  // patches routines 0707 creates and 0715 builds on 0707's registry, so both
   // are withheld and applied with it.
   const neutral = "0707_subscription_core_neutral_routines.sql";
   const withheld = [
@@ -56,12 +56,12 @@ beforeAll(async () => {
     "0713_subscription_core_provider_keyed_reach.sql",
     // Redefines 0713's reach setters.
     "0714_subscription_workspace_managed_organization_accounts.sql",
-    "0714_subscription_authority_compat.sql",
-    "0715_subscription_authority_fences.sql",
+    "0715_subscription_authority_compat.sql",
+    "0716_subscription_authority_fences.sql",
   ];
   // The drained SuperGrok cutover is maintenance-only: a rolling deployment
   // of 0707 never applies it, so it stays recorded and unapplied here.
-  const xaiCutover = "0716_subscription_core_xai_cutover.sql";
+  const xaiCutover = "0717_subscription_core_xai_cutover.sql";
   const owner = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
@@ -74,7 +74,7 @@ beforeAll(async () => {
     const [applied] = await owner<{ count: number }[]>`
       select count(*)::int as count from schema_migrations where name in ${owner(withheld)}`;
     if (applied?.count !== withheld.length)
-      throw new Error("0707 and 0712 through 0716 were not applied by the second migrate");
+      throw new Error("0707 and 0712 through 0717 were not applied by the second migrate");
   } finally {
     await owner.end();
   }
@@ -1008,7 +1008,7 @@ describe("provider-neutral subscription-core routines (migration 0707)", () => {
           await attempt("truncate", () =>
             tx`truncate opengeni_private.subscription_core_providers`.then(() => "truncated"),
           );
-          // 0714's reach rows and plan-change providers reference the
+          // 0715's reach rows and plan-change providers reference the
           // registry, so a plain TRUNCATE is refused by those keys first;
           // with CASCADE the append-only guard still refuses it.
           await attempt("truncateCascade", () =>

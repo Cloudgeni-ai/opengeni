@@ -40,12 +40,12 @@ test("a pre-writer personal-resource task retains its execution proof across mig
   const providerKeyedReach = "0713_subscription_core_provider_keyed_reach.sql";
   // 0714 redefines 0713's reach setters: deferred and replayed with it.
   const workspaceManagedAccounts = "0714_subscription_workspace_managed_organization_accounts.sql";
-  // 0714 builds on 0712's receipts and patches its helpers; it follows 0712.
-  const compat = "0714_subscription_authority_compat.sql";
-  // 0715 requires 0714's routines; it follows 0714.
-  const fences = "0715_subscription_authority_fences.sql";
-  // The drained SuperGrok cutover requires 0715; held back (never applied).
-  const xaiCutover = "0716_subscription_core_xai_cutover.sql";
+  // 0715 builds on 0712's receipts and patches its helpers; it follows 0712.
+  const compat = "0715_subscription_authority_compat.sql";
+  // 0716 requires 0715's routines; it follows 0715.
+  const fences = "0716_subscription_authority_fences.sql";
+  // The drained SuperGrok cutover requires 0716; held back (never applied).
+  const xaiCutover = "0717_subscription_core_xai_cutover.sql";
   try {
     // Stage the actual pre-writer ledger, including on the stacked cutover
     // branch. This is a rolling/gate-off regression, not cutover activation.

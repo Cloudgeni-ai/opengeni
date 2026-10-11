@@ -46,7 +46,7 @@ import {
 
 /** Splits the cutover migration into its owner-window prelude and its SQL backfill. */
 export const XAI_SUBSCRIPTION_CORE_CUTOVER_MARKER = "-- opengeni:xai-subscription-core-cutover-v1";
-export const XAI_SUBSCRIPTION_CORE_CUTOVER_MIGRATION = "0716_subscription_core_xai_cutover.sql";
+export const XAI_SUBSCRIPTION_CORE_CUTOVER_MIGRATION = "0717_subscription_core_xai_cutover.sql";
 
 /** As the legacy fleet read classifies a window. */
 const NEAR_EXHAUSTION_PERCENT = 90;
@@ -418,7 +418,7 @@ async function stageVideoReferences(
       connectionId?: unknown;
     };
     if (parsed.connectionId !== (connectionId ?? UNMAPPED_VIDEO_CONNECTION)) {
-      throw new XaiCutoverStageError("0716 parity mismatch (video_reference_readability)", "55000");
+      throw new XaiCutoverStageError("0717 parity mismatch (video_reference_readability)", "55000");
     }
     await tx`INSERT INTO subscription_cutover_video_credentials (
         operation_id, account_id, connection_id, reference_encrypted
@@ -501,7 +501,7 @@ async function moveXaiCredentialRows(
     const classes = [...new Set(plan.conflicts.map((entry) => entry.conflictClass))].sort();
     const organizations = new Set(plan.conflicts.map((entry) => entry.accountId)).size;
     throw new XaiCutoverStageError(
-      `0716 refused ambiguous legacy state (${classes.join(", ")}) in ${organizations} organization(s); see the runbook`,
+      `0717 refused ambiguous legacy state (${classes.join(", ")}) in ${organizations} organization(s); see the runbook`,
       "55000",
     );
   }

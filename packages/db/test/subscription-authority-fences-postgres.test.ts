@@ -1,10 +1,10 @@
-// Migration 0715: the fences compare subscription authority (design
+// Migration 0716: the fences compare subscription authority (design
 // docs/design/subscription-core-2026-10-07.md, 5.3 "PR 0b: authority
 // compatibility and fences" and "Findings in earlier merged work", rows 2 and
 // 3). The database is migrated by the NOSUPERUSER, NOBYPASSRLS owner; runtime
 // work runs as the restricted application role through the real dispatcher,
 // inbox planner and claim. Only the rows a fence must refuse are written by
-// the superuser, in transactions that roll back. Rows staged before 0715 are
+// the superuser, in transactions that roll back. Rows staged before 0716 are
 // the pre-merge inventory's fixtures. Receipts are append-only, so the
 // receipt switch runs last.
 import { readFile } from "node:fs/promises";
@@ -48,21 +48,21 @@ import { subscriptionAuthorityCompatForCarriersInTransaction } from "../src/subs
 setDefaultTimeout(180_000);
 
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
-const FENCES = "0715_subscription_authority_fences.sql";
-// The drained SuperGrok cutover requires 0715; held back (never applied) so
+const FENCES = "0716_subscription_authority_fences.sql";
+// The drained SuperGrok cutover requires 0716; held back (never applied) so
 // this database models the rolling state before it.
-const XAI_CUTOVER = "0716_subscription_core_xai_cutover.sql";
+const XAI_CUTOVER = "0717_subscription_core_xai_cutover.sql";
 const EMPTY = { version: 2, personal: [] };
 const ORGANIZATION_CLAUDE = { version: 1, scope: "organization" };
 let database: OwnerMigratedTestDatabase | null = null;
 let client: DbClient | null = null;
-/** The application role's database: the staging client before 0715, then `client`. */
+/** The application role's database: the staging client before 0716, then `client`. */
 let app: DbClient["db"] | null = null;
 let appUrl = "";
-/** Runtime posture right after applying 0715 to a provisioned database, then after provisioning. */
+/** Runtime posture right after applying 0716 to a provisioned database, then after provisioning. */
 /** This binary requires the SuperGrok receipt, which the rolling state lacks. */
 const BEFORE_XAI_CUTOVER = [
-  "database is missing the xai subscription-core cutover receipt (0716_subscription_core_xai_cutover.sql); apply the pending migrations first",
+  "database is missing the xai subscription-core cutover receipt (0717_subscription_core_xai_cutover.sql); apply the pending migrations first",
 ];
 let posture: { unprovisioned: string[]; provisioned: string[] } | null = null;
 
@@ -79,7 +79,7 @@ type Run = {
 
 type Finding = { finding: string; row_id: string; account_id: string };
 
-/** Rows accepted before 0715 that its comparisons refuse: the inventory's fixtures. */
+/** Rows accepted before 0716 that its comparisons refuse: the inventory's fixtures. */
 let staged: {
   accounts: string[];
   inboxTurn: string;
@@ -87,13 +87,13 @@ let staged: {
   drifted: Run;
   revoked: Run & { grant: Scheduled };
   ownerlessTask: string;
-  /** A personal Claude connect before 0715 under the owner without BYPASSRLS. */
+  /** A personal Claude connect before 0716 under the owner without BYPASSRLS. */
   claudeLockRefusal: string;
   /** The live `user` Claude credential of the drifted run's owner. */
   liveClaudeCredential: string;
-  /** The authorities of the personal accounts disconnected before 0715, by kind. */
+  /** The authorities of the personal accounts disconnected before 0716, by kind. */
   disconnected: Record<string, { id: string; status: string }>;
-  /** The inventory as an operator runs it before deploying 0715. */
+  /** The inventory as an operator runs it before deploying 0716. */
   inventoryBefore: Finding[];
 } | null = null;
 
@@ -436,8 +436,8 @@ async function authoritiesOf(credentialIds: string[]) {
 }
 
 /**
- * Before 0715 an owner without BYPASSRLS cannot lock the membership a
- * personal Claude connect needs (0598 missed the lock policy; 0715 adds it),
+ * Before 0716 an owner without BYPASSRLS cannot lock the membership a
+ * personal Claude connect needs (0598 missed the lock policy; 0716 adds it),
  * so the pre-0714 fixtures connect as a deployment whose owner is not bound by
  * the membership policies would. The schema is restored before staging goes on.
  */
@@ -601,7 +601,7 @@ function occurrenceCopy(grant: Grant, run: Run, overrides: Record<string, unknow
 
 async function inventory(): Promise<Finding[]> {
   const runbook = await readFile(new URL("../../../docs/deployment.md", import.meta.url), "utf8");
-  const section = runbook.slice(runbook.indexOf("### Subscription authority fences (0715)"));
+  const section = runbook.slice(runbook.indexOf("### Subscription authority fences (0716)"));
   const start = section.indexOf("```sql\n") + "```sql\n".length;
   const query = section.slice(start, section.indexOf("\n```", start));
   const rows =
@@ -615,7 +615,7 @@ async function inventory(): Promise<Finding[]> {
   }));
 }
 
-/** Rows the comparisons of 0715 refuse, written while the previous fences accept them. */
+/** Rows the comparisons of 0716 refuse, written while the previous fences accept them. */
 async function stageRowsTheFencesRefuse(): Promise<NonNullable<typeof staged>> {
   // An internal turn that borrowed a receiving context but carries another
   // v2 value than the context's, delivering an update frozen with a third.
@@ -662,8 +662,8 @@ async function stageRowsTheFencesRefuse(): Promise<NonNullable<typeof staged>> {
 
   // A live run whose owner then disconnected the accepted `user` Claude
   // account, and their SuperGrok account (connected after the firing, so the
-  // run's SuperGrok snapshot stays `workspace`). Before 0715 neither
-  // disconnect revokes its authority under this owner; 0715 repairs both.
+  // run's SuperGrok snapshot stays `workspace`). Before 0716 neither
+  // disconnect revokes its authority under this owner; 0716 repairs both.
   const revokedGrant = await scheduledGrant();
   const credential = await withMembershipRlsUnforced(() => claudeUserCredential(revokedGrant));
   const revoked = await dispatch(
@@ -692,7 +692,7 @@ beforeAll(async () => {
   if (!realDb) return;
   database = await acquireOwnerMigratedTestDatabase("subscription-authority-fences");
   if (!database) throw new Error("Real PostgreSQL is required");
-  // Stage a provisioned database without 0715, as a deployment is before it.
+  // Stage a provisioned database without 0716, as a deployment is before it.
   const owner = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
@@ -714,7 +714,7 @@ beforeAll(async () => {
     await before.close();
   }
   // A rolling migration keeps the previous binary's runtime posture until
-  // roles are provisioned again: apply 0715 alone, evaluate as the runtime
+  // roles are provisioned again: apply 0716 alone, evaluate as the runtime
   // role, then provision and evaluate again.
   const ownerAgain = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
@@ -722,7 +722,7 @@ beforeAll(async () => {
     await migrate(database.ownerUrl);
     const [applied] = await ownerAgain<{ count: number }[]>`
       select count(*)::int as count from schema_migrations where name = ${FENCES}`;
-    if (applied?.count !== 1) throw new Error("0715 was not applied by the second migrate");
+    if (applied?.count !== 1) throw new Error("0716 was not applied by the second migrate");
   } finally {
     await ownerAgain.end();
   }
@@ -755,7 +755,7 @@ afterAll(async () => {
   await database?.release();
 });
 
-describe.skipIf(!realDb)("0715 subscription authority fences", () => {
+describe.skipIf(!realDb)("0716 subscription authority fences", () => {
   test("applies over a provisioned database and keeps the runtime posture before and after provisioning", async () => {
     expect(posture).toEqual({
       unprovisioned: BEFORE_XAI_CUTOVER,
@@ -824,8 +824,8 @@ describe.skipIf(!realDb)("0715 subscription authority fences", () => {
     expect(policy).toEqual({ command: "w", check: "false" });
   });
 
-  test("a personal SuperGrok or Claude disconnect revokes its authority; 0715 revoked those left active", async () => {
-    // Before 0715 the owner's disconnects deleted both credentials and left
+  test("a personal SuperGrok or Claude disconnect revokes its authority; 0716 revoked those left active", async () => {
+    // Before 0716 the owner's disconnects deleted both credentials and left
     // both authorities active.
     const { claude_subscription: claude, xai_subscription: xai } = staged!.disconnected;
     expect([claude?.status, xai?.status]).toEqual(["active", "active"]);
@@ -837,7 +837,7 @@ describe.skipIf(!realDb)("0715 subscription authority fences", () => {
     expect(await authoritiesOf([staged!.liveClaudeCredential])).toMatchObject({
       claude_subscription: { status: "active" },
     });
-    // From 0715 the disconnect itself revokes, and only its own kind.
+    // From 0716 the disconnect itself revokes, and only its own kind.
     const grant = await scheduledGrant();
     const connected = {
       claude: await claudeUserCredential(grant),
@@ -873,7 +873,7 @@ describe.skipIf(!realDb)("0715 subscription authority fences", () => {
     ]);
   });
 
-  test("pre-merge inventory: lists exactly the staged rows 0715 refuses or repairs", async () => {
+  test("pre-merge inventory: lists exactly the staged rows 0716 refuses or repairs", async () => {
     const listed = (rows: Finding[]) =>
       rows
         .filter((row) => staged!.accounts.includes(row.account_id))
@@ -892,9 +892,9 @@ describe.skipIf(!realDb)("0715 subscription authority fences", () => {
     const repaired = Object.values(staged!.disconnected).map(
       (authority) => `disconnected_personal_authority ${authority.id}`,
     );
-    // As an operator runs it before deploying 0715.
+    // As an operator runs it before deploying 0716.
     expect(listed(staged!.inventoryBefore)).toEqual([...refused, ...repaired].sort());
-    // After 0715 the repaired authorities are revoked; the refused rows stay.
+    // After 0716 the repaired authorities are revoked; the refused rows stay.
     expect(listed(await inventory())).toEqual([...refused].sort());
   });
 
@@ -1148,8 +1148,8 @@ describe.skipIf(!realDb)("0715 subscription authority fences", () => {
 
     test("a revoked accepted user Claude authority fails the live check and the claim", async () => {
       const revoked = staged!.revoked;
-      // Admitted before 0715 for an account its owner then disconnected
-      // (0715 revoked the authority that disconnect left active): the check
+      // Admitted before 0716 for an account its owner then disconnected
+      // (0716 revoked the authority that disconnect left active): the check
       // it now inherits refuses it.
       expect(await liveAuthority(revoked.grant, revoked.runId)).toBe(
         "scheduled_claude_authority_changed",

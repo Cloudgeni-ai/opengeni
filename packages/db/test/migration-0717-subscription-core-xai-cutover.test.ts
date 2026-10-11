@@ -1,5 +1,5 @@
 /**
- * Migration 0716: the drained, one-way SuperGrok cutover onto the shared
+ * Migration 0717: the drained, one-way SuperGrok cutover onto the shared
  * subscription core (design 5.3 "Data mapping", "Accepted authority across
  * the cutover", "Personal authority generations", "Cutover protocol"). The
  * legacy state is seeded as the database superuser (an upgrade fixture, not
@@ -30,7 +30,7 @@ import { decodeSubscriptionCoreXaiCredential } from "../src/subscription-core-xa
 import { subscriptionCoreProviderIds } from "../src/subscription-core-providers";
 import { SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES } from "../src/runtime-posture";
 
-const MIGRATION = "0716_subscription_core_xai_cutover.sql";
+const MIGRATION = "0717_subscription_core_xai_cutover.sql";
 const key = Buffer.alloc(32, 73);
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const NIL = "00000000-0000-0000-0000-000000000000";
@@ -681,7 +681,7 @@ async function abortMessage(): Promise<string> {
 }
 
 describe.skipIf(!realDb)(
-  "SUB-COMPAT-02 migration 0716: SuperGrok onto the shared subscription core",
+  "SUB-COMPAT-02 migration 0717: SuperGrok onto the shared subscription core",
   () => {
     let before: Awaited<ReturnType<typeof snapshotUntouched>>;
     beforeAll(async () => {
@@ -795,7 +795,7 @@ describe.skipIf(!realDb)(
       // A rule silently drops moved leases, which only the parity check can see.
       await owned.admin`CREATE RULE xai_cutover_parity_probe AS ON INSERT TO subscription_leases DO INSTEAD NOTHING`;
       try {
-        expect(await abortMessage()).toContain("0716 parity mismatch (live_leases)");
+        expect(await abortMessage()).toContain("0717 parity mismatch (live_leases)");
       } finally {
         await owned.admin`DROP RULE xai_cutover_parity_probe ON subscription_leases`;
       }

@@ -193,9 +193,9 @@ export const embeddingMigrationTail = [
   // Builds on 0712's receipts, adds a marker to the session and scheduled
   // carrier tables and patches the personal helpers 0712 patched; replay
   // after it.
-  "0714_subscription_authority_compat.sql",
-  // Requires 0714's routines and patches fences earlier migrations define.
-  "0715_subscription_authority_fences.sql",
-  // The drained SuperGrok cutover requires 0712 through 0715; it runs last.
-  "0716_subscription_core_xai_cutover.sql",
+  "0715_subscription_authority_compat.sql",
+  // Requires 0715's routines and patches fences earlier migrations define.
+  "0716_subscription_authority_fences.sql",
+  // The drained SuperGrok cutover requires 0712 through 0716; it runs last.
+  "0717_subscription_core_xai_cutover.sql",
 ];

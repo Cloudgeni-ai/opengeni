@@ -16,17 +16,17 @@ import { encryptEnvironmentValue } from "../src/environment-crypto";
 const migration = "0689_subscription_core_codex_cutover.sql";
 // 0712 requires the committed 0689 cutover, so it is held back with it.
 const precursor = "0712_subscription_core_generic_precursor.sql";
-// 0714 keys and redefines objects 0689 creates: held back and replayed right
+// 0715 keys and redefines objects 0689 creates: held back and replayed right
 // after it.
 const providerKeyedReach = "0713_subscription_core_provider_keyed_reach.sql";
-// 0714 redefines 0713's reach setters: held back and replayed with it.
+// 0715 redefines 0713's reach setters: held back and replayed with it.
 const workspaceManagedAccounts = "0714_subscription_workspace_managed_organization_accounts.sql";
-// 0714 builds on 0712's receipts and patches its helpers; it follows 0712.
-const compat = "0714_subscription_authority_compat.sql";
-// 0715 requires 0714's routines; it follows 0714.
-const fences = "0715_subscription_authority_fences.sql";
-// Held back (never applied): the SuperGrok cutover requires 0715.
-const xaiCutover = "0716_subscription_core_xai_cutover.sql";
+// 0715 builds on 0712's receipts and patches its helpers; it follows 0712.
+const compat = "0715_subscription_authority_compat.sql";
+// 0716 requires 0715's routines; it follows 0715.
+const fences = "0716_subscription_authority_fences.sql";
+// Held back (never applied): the SuperGrok cutover requires 0716.
+const xaiCutover = "0717_subscription_core_xai_cutover.sql";
 const key = Buffer.alloc(32, 87);
 const cases: Array<{
   name: string;

@@ -24,7 +24,7 @@ BEGIN
   IF to_regprocedure('opengeni_private.subscription_provider_cutover_committed(text)') IS NULL
     OR to_regclass('opengeni_private.subscription_provider_cutover_receipts') IS NULL
   THEN
-    RAISE EXCEPTION '0714 requires the 0712 provider cutover receipts' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0715 requires the 0712 provider cutover receipts' USING ERRCODE = '55000';
   END IF;
 END
 $prerequisite$;
@@ -1172,7 +1172,7 @@ $body$;
 -- created before the receipt that holds neither (no personal authority,
 -- shared_pool none: the work waits), else `none` (no personal authority and
 -- no narrowing). NULL when the carrier does not exist. The reader below and
--- the inbox fence (0714) both answer with it.
+-- the inbox fence (0715) both answer with it.
 CREATE FUNCTION opengeni_subscription_internal.subscription_compat_effective(
   p_provider text, p_carrier_kind text, p_workspace_id uuid, p_carrier_id uuid,
   p_task_authority_revision bigint)

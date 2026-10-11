@@ -106,6 +106,18 @@ describe("release schema contract", () => {
     });
   });
 
+  test("registers the drained SuperGrok subscription-core cutover as maintenance-only", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0717_subscription_core_xai_cutover.sql",
+      ),
+    ).toMatchObject({
+      path: "0717_subscription_core_xai_cutover.sql",
+      deploymentMode: "maintenance",
+    });
+  });
+
   test("registers the subscription people-assignment read policy fix as rolling", async () => {
     const contract = await buildCompleteSchemaContract();
     expect(
@@ -2264,10 +2276,11 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
+      "0717_subscription_core_xai_cutover.sql",
       "0714_subscription_workspace_managed_organization_accounts.sql",
       "0713_subscription_core_provider_keyed_reach.sql",
-      "0715_subscription_authority_fences.sql",
-      "0714_subscription_authority_compat.sql",
+      "0716_subscription_authority_fences.sql",
+      "0715_subscription_authority_compat.sql",
       "0712_subscription_core_generic_precursor.sql",
       "0711_subscription_codex_completion_operations.sql",
       "0710_drop_discarded_session_create_key_release.sql",

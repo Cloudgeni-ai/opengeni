@@ -1,4 +1,4 @@
-// Migration 0714: accepted authority across a provider's cutover (design
+// Migration 0715: accepted authority across a provider's cutover (design
 // docs/design/subscription-core-2026-10-07.md, 5.3 "Accepted authority across
 // the cutover" and "PR 0b: authority compatibility and fences"). The database
 // is migrated by the NOSUPERUSER, NOBYPASSRLS owner; runtime calls run as the
@@ -31,26 +31,26 @@ import { provisionRoles } from "../src/provision-roles";
 setDefaultTimeout(180_000);
 
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
-const COMPAT = "0714_subscription_authority_compat.sql";
-// 0715 requires 0714's routines: withheld with it and applied by the same run.
-const FENCES = "0715_subscription_authority_fences.sql";
-// The drained SuperGrok cutover requires 0715; held back (never applied) so
+const COMPAT = "0715_subscription_authority_compat.sql";
+// 0716 requires 0715's routines: withheld with it and applied by the same run.
+const FENCES = "0716_subscription_authority_fences.sql";
+// The drained SuperGrok cutover requires 0716; held back (never applied) so
 // this database models the rolling state before it.
-const XAI_CUTOVER = "0716_subscription_core_xai_cutover.sql";
+const XAI_CUTOVER = "0717_subscription_core_xai_cutover.sql";
 const CORE_SUBJECT = "service:subscription-core";
 let database: OwnerMigratedTestDatabase | null = null;
 let client: DbClient | null = null;
 let appUrl = "";
-/** Runtime posture right after applying 0714 to a provisioned database, then after provisioning. */
+/** Runtime posture right after applying 0715 to a provisioned database, then after provisioning. */
 /** This binary requires the SuperGrok receipt, which the rolling state lacks. */
 const BEFORE_XAI_CUTOVER = [
-  "database is missing the xai subscription-core cutover receipt (0716_subscription_core_xai_cutover.sql); apply the pending migrations first",
+  "database is missing the xai subscription-core cutover receipt (0717_subscription_core_xai_cutover.sql); apply the pending migrations first",
 ];
 let posture: { unprovisioned: string[]; provisioned: string[] } | null = null;
 /** A configured application role other than the default name, and its grants before provisioning. */
 const customApplicationRole = `og_pr0b_custom_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
 let customRoleGrantsBeforeProvision: Record<string, boolean> | null = null;
-/** 0714's transaction time, read from a row that existed before it. */
+/** 0715's transaction time, read from a row that existed before it. */
 let migratedAt: Date | null = null;
 
 type Org = {
@@ -62,7 +62,7 @@ type Org = {
 type Carrier = { sessionId: string; turnId: string };
 
 let org: Org | null = null;
-/** A private session and turn accepted before 0714 (and so before any later receipt). */
+/** A private session and turn accepted before 0715 (and so before any later receipt). */
 let before: Carrier | null = null;
 
 async function organization(db: DbClient, label: string): Promise<Org> {
@@ -406,7 +406,7 @@ beforeAll(async () => {
   if (!realDb) return;
   database = await acquireOwnerMigratedTestDatabase("subscription-authority-compat");
   if (!database) throw new Error("Real PostgreSQL is required");
-  // Stage a provisioned database without 0714, as a deployment is before it.
+  // Stage a provisioned database without 0715, as a deployment is before it.
   const owner = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
@@ -428,7 +428,7 @@ beforeAll(async () => {
     await staged.close();
   }
   // A rolling migration keeps the previous binary's runtime posture until
-  // roles are provisioned again: apply 0714 alone, evaluate as the runtime
+  // roles are provisioned again: apply 0715 alone, evaluate as the runtime
   // role, then provision and evaluate again.
   const ownerAgain = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
@@ -442,7 +442,7 @@ beforeAll(async () => {
     const [applied] = await ownerAgain<{ count: number }[]>`
       select count(*)::int as count from schema_migrations where name in (${COMPAT}, ${FENCES})`;
     if (applied?.count !== 2) {
-      throw new Error("0714 and 0715 were not applied by the second migrate");
+      throw new Error("0715 and 0716 were not applied by the second migrate");
     }
     const grants = await database.admin<{ routine: string; allowed: boolean }[]>`
       select routine, has_function_privilege(${customApplicationRole}, routine, 'EXECUTE') as allowed
@@ -495,7 +495,7 @@ afterAll(async () => {
   await database?.release();
 });
 
-describe.skipIf(!realDb)("0714 subscription authority compatibility", () => {
+describe.skipIf(!realDb)("0715 subscription authority compatibility", () => {
   test("applies over a provisioned database and keeps the runtime posture before and after provisioning", async () => {
     expect(posture).toEqual({
       unprovisioned: BEFORE_XAI_CUTOVER,
@@ -518,7 +518,7 @@ describe.skipIf(!realDb)("0714 subscription authority compatibility", () => {
   });
 
   test("authority_inserted_at: existing rows read the migration time, explicit values are replaced, never changed", async () => {
-    // Every carrier row that existed before 0714 reads 0714's transaction time.
+    // Every carrier row that existed before 0715 reads 0715's transaction time.
     const existing = await database!.admin<{ count: number; distinct: number }[]>`
       select count(*)::int as count, count(distinct authority_inserted_at)::int as distinct
       from (
