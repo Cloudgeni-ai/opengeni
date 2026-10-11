@@ -687,6 +687,7 @@ export {
   OPENGENI_INNER_MCP_CUSTOM_DATA_KEY,
   OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY,
   mcpResultFromCustomData,
+  mcpResultModelContent,
   releaseMcpResultCustomDataFromSdkEvent,
 } from "./mcp-result-custom-data";
 export type {
