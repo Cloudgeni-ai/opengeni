@@ -212,6 +212,14 @@ export interface SubscriptionCoreAdapter<Credential = unknown> {
     refreshGeneration: number;
   }): SubscriptionQuota | null;
   /**
+   * The provider's usage endpoint is authoritative for its quota: a
+   * `decodeQuota` reading below the limit ends a stored quota exhaustion
+   * (`exhaustedKind: "quota"`) before its deadline, as an explicit,
+   * revision-fenced store write. Absent: a running deadline is kept until
+   * it passes (design 2.2).
+   */
+  usageReadEndsQuotaExhaustion?: boolean;
+  /**
    * Optional live model catalog of one connection (provider model ids),
    * read with its bearer through `input.fetch`. Throws when the provider
    * refuses the credential.

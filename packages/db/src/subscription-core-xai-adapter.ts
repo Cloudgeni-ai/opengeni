@@ -251,6 +251,8 @@ export function subscriptionCoreXaiAdapter(
     // Quota is the billing endpoint; never an inference request.
     fetchUsage: async (read) => await fetchXaiSubscriptionQuota(xaiReadContext(read)),
     decodeQuota: decodeSubscriptionCoreXaiQuota,
+    // Billing below the limit ends a stored exhaustion (the legacy refresh rule).
+    usageReadEndsQuotaExhaustion: true,
     liveModels: async (read) =>
       (await fetchXaiSubscriptionModels(xaiReadContext(read))).map((model) => model.slug),
   };

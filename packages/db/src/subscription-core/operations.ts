@@ -702,8 +702,17 @@ export const subscriptionCoreOperations = memoByProvider((provider: Subscription
         for update`,
       );
       const current = row ? decodeSubscriptionQuota(row) : null;
-      const next = applyQuotaObservation({ refreshGeneration, quota: current }, observation);
-      if (!next || next === current) return { applied: false, recovered: false };
+      const observed = applyQuotaObservation({ refreshGeneration, quota: current }, observation);
+      if (!observed || observed === current) return { applied: false, recovered: false };
+      // An authoritative usage read below the limit ends a quota exhaustion
+      // (adapter opt-in; this row is locked, and the write bumps its revision).
+      const next =
+        provider.adapter.usageReadEndsQuotaExhaustion === true &&
+        observation.source === "usage_endpoint" &&
+        observation.exhaustedUntil === null &&
+        observed.exhaustedKind === "quota"
+          ? { ...observed, exhaustedUntil: null, exhaustedKind: null }
+          : observed;
       const observedNow = observation.observedAt ?? Date.now();
       const recovered =
         current !== null &&
