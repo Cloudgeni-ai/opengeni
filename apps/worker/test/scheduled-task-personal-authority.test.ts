@@ -77,7 +77,10 @@ let admin: postgres.Sql;
 let client: DbClient;
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("worker-scheduled-personal-authority");
+  shared = await acquireSharedTestDatabase("worker-scheduled-personal-authority", {
+    // Characterizes legacy SuperGrok authority, before the cutover.
+    withheldMigrations: ["0721_subscription_core_xai_cutover.sql"],
+  });
   if (!shared) {
     available = false;
     if (process.env.OPENGENI_REQUIRE_REAL_DB === "1") {

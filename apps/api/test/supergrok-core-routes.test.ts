@@ -7,11 +7,11 @@
  * (connect, list, rename, allocator, activate, rotation, reconnect,
  * disconnect, the access policy).
  *
- * X3 ships SuperGrok's registry entry; this process registers it (the module
- * binding below) and the test database gets its registry row. Run this file in
- * its own process: the registration replaces module bindings process-wide.
+ * X3 registers SuperGrok; this database withholds the cutover migration and
+ * stages the registry row, receipt and switch row itself, so the pre-receipt
+ * routes stay observable.
  */
-import { afterAll, beforeAll, describe, expect, mock, setDefaultTimeout, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
 import {
   acquireSharedTestDatabase,
@@ -23,24 +23,6 @@ import type { Hono as HonoApp } from "hono";
 setDefaultTimeout(180_000);
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
-const registryPath = Bun.resolveSync(
-  "../../../packages/db/src/subscription-core-providers.ts",
-  import.meta.dir,
-);
-const realRegistry = await import(registryPath);
-const { SUBSCRIPTION_CORE_XAI } = await import(
-  Bun.resolveSync("../../../packages/db/src/subscription-core-xai-adapter.ts", import.meta.dir)
-);
-const productionIds: string[] = realRegistry.subscriptionCoreProviderIds();
-const realProvider = realRegistry.subscriptionCoreProvider;
-const lookup = (providerId: string) =>
-  providerId === "xai" ? SUBSCRIPTION_CORE_XAI : realProvider(providerId);
-mock.module(registryPath, () => ({
-  ...realRegistry,
-  subscriptionCoreProviderIds: () => [...productionIds, "xai"].sort(),
-  subscriptionCoreProvider: lookup,
-  subscriptionCoreAdapter: (providerId: string) => lookup(providerId).adapter,
-}));
 const opengeniDb = await import("@opengeni/db");
 const { resolveCatalogSettings } = await import("@opengeni/core");
 const { Hono } = await import("hono");
@@ -106,7 +88,10 @@ const xaiFetch: typeof fetch = (async (input: string | URL | Request) => {
 
 beforeAll(async () => {
   if (!realDb) return;
-  shared = await acquireSharedTestDatabase("api-supergrok-core-routes");
+  shared = await acquireSharedTestDatabase("api-supergrok-core-routes", {
+    // The drained cutover writes the real receipt; this file stages its own.
+    withheldMigrations: ["0721_subscription_core_xai_cutover.sql"],
+  });
   if (!shared) throw new Error("Real PostgreSQL is required");
   client = opengeniDb.createDb(shared.appUrl);
   // An organization administrator in a shared workspace: on the core only
