@@ -141,6 +141,35 @@ const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   // receipts and the provider-neutral cutover-row identity.
   "guard_subscription_provider_cutover_receipts()",
   "keep_subscription_cutover_identity()",
+  // Migration 0715: the authority marker and compatibility guards, the
+  // per-path source resolvers and the commit-time compatibility check. The
+  // triggers fire without the writing role holding EXECUTE.
+  "stamp_subscription_authority_inserted_at()",
+  "keep_subscription_authority_inserted_at()",
+  "subscription_authority_compat_entry_valid(jsonb)",
+  "guard_subscription_authority_compat()",
+  "subscription_compat_turn_human(uuid, uuid)",
+  "subscription_compat_v2_has_entry(jsonb, text)",
+  "subscription_compat_receiver_source(uuid, uuid)",
+  "subscription_compat_delivery_sources(uuid, uuid, uuid, uuid, text)",
+  "subscription_compat_compaction_source(uuid, uuid)",
+  "subscription_compat_scheduled_source(uuid, uuid)",
+  "subscription_compat_carrier_sources(text, uuid, uuid, bigint)",
+  "subscription_compat_carrier_state(text, uuid, uuid, bigint)",
+  "subscription_compat_record(text, text, uuid, uuid, bigint)",
+  "subscription_compat_expected(text, timestamp with time zone, uuid, text, uuid, bigint, text)",
+  "subscription_compat_carrier_expected(text, timestamp with time zone, text, uuid, uuid, bigint)",
+  "subscription_compat_enter_scope(uuid, uuid)",
+  "subscription_compat_leave_scope(text[])",
+  "subscription_compat_effective(text, text, uuid, uuid, bigint)",
+  "enforce_subscription_authority_compat()",
+  // Migration 0716: the fences' helpers (the v2 copy rule, a scheduled
+  // firing's v2 value and the personal-entry liveness check), called only by
+  // owner-run fences and functions.
+  "subscription_v2_copy_matches(jsonb, jsonb)",
+  "subscription_scheduled_firing_v2(uuid, uuid, uuid, bigint)",
+  "subscription_personal_entry_serviceable(uuid, jsonb)",
+  "subscription_scheduled_run_personal_entries(uuid, uuid, uuid)",
   // Migration 0689: the owner-only Codex cutover receipt and the trigger that
   // seeds organizations created later onto the shared core.
   "subscription_codex_cutover_v1_active()",
@@ -775,6 +804,58 @@ export const SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS: Readonly<Record<string, s
   codex: "0689_subscription_core_codex_cutover.sql",
 };
 
+/**
+ * Migration 0715 (M4 PR 0b): accepted authority across a provider's cutover.
+ * The runtime role may call the copy routine (inert until a provider's
+ * writers call it), the reader, and the list of providers whose records can
+ * exist; it holds no privilege on the compatibility relation itself.
+ */
+export const SUBSCRIPTION_AUTHORITY_COMPAT_PRIVATE_ROUTINES = [
+  "copy_subscription_authority_compat(text, text, uuid, uuid, bigint)",
+  "read_subscription_authority_compat(text, text, uuid, uuid, bigint)",
+  "subscription_authority_compat_providers()",
+] as const;
+
+/**
+ * Migration 0715: owner-only marker and guard triggers, the per-path source
+ * resolvers and the commit-time compatibility check, in
+ * opengeni_subscription_internal.
+ */
+export const SUBSCRIPTION_AUTHORITY_COMPAT_OWNER_ROUTINES = [
+  "stamp_subscription_authority_inserted_at()",
+  "keep_subscription_authority_inserted_at()",
+  "subscription_authority_compat_entry_valid(jsonb)",
+  "guard_subscription_authority_compat()",
+  "subscription_compat_turn_human(uuid, uuid)",
+  "subscription_compat_v2_has_entry(jsonb, text)",
+  "subscription_compat_receiver_source(uuid, uuid)",
+  "subscription_compat_delivery_sources(uuid, uuid, uuid, uuid, text)",
+  "subscription_compat_compaction_source(uuid, uuid)",
+  "subscription_compat_scheduled_source(uuid, uuid)",
+  "subscription_compat_carrier_sources(text, uuid, uuid, bigint)",
+  "subscription_compat_carrier_state(text, uuid, uuid, bigint)",
+  "subscription_compat_record(text, text, uuid, uuid, bigint)",
+  "subscription_compat_expected(text, timestamp with time zone, uuid, text, uuid, bigint, text)",
+  "subscription_compat_carrier_expected(text, timestamp with time zone, text, uuid, uuid, bigint)",
+  "subscription_compat_enter_scope(uuid, uuid)",
+  "subscription_compat_leave_scope(text[])",
+  "subscription_compat_effective(text, text, uuid, uuid, bigint)",
+  "enforce_subscription_authority_compat()",
+] as const;
+
+/**
+ * Migration 0716: the fences' owner-only helpers in
+ * opengeni_subscription_internal (the v2 copy rule, a scheduled firing's v2
+ * value and the personal-entry liveness check). Only owner-run fences and
+ * functions call them.
+ */
+export const SUBSCRIPTION_AUTHORITY_FENCE_OWNER_ROUTINES = [
+  "subscription_v2_copy_matches(jsonb, jsonb)",
+  "subscription_scheduled_firing_v2(uuid, uuid, uuid, bigint)",
+  "subscription_personal_entry_serviceable(uuid, jsonb)",
+  "subscription_scheduled_run_personal_entries(uuid, uuid, uuid)",
+] as const;
+
 export const SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES = [
   "authorize_subscription_ownerless_session_access(uuid, uuid, uuid, uuid)",
   "authorize_subscription_personal_placement_access(uuid, uuid, uuid, uuid, text, uuid, bigint, text, text)",
@@ -817,6 +898,7 @@ export const SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES = [
   // Migration 0707: the provider-neutral equivalents the runtime calls.
   ...SUBSCRIPTION_CORE_NEUTRAL_PRIVATE_ROUTINES,
   ...SUBSCRIPTION_CORE_PRECURSOR_PRIVATE_ROUTINES,
+  ...SUBSCRIPTION_AUTHORITY_COMPAT_PRIVATE_ROUTINES,
 ] as const;
 
 /** Owner-only private helpers the runtime role must never be able to execute. */
@@ -843,6 +925,8 @@ export const SUBSCRIPTION_M3_OWNER_ONLY_PRIVATE_ROUTINES = [
   "auto_assign_subscription_codex_personal_workspace()",
   ...SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES,
   ...SUBSCRIPTION_CORE_PRECURSOR_OWNER_ROUTINES,
+  ...SUBSCRIPTION_AUTHORITY_COMPAT_OWNER_ROUTINES,
+  ...SUBSCRIPTION_AUTHORITY_FENCE_OWNER_ROUTINES,
 ] as const;
 
 const UNIFIED_KNOWLEDGE_ROUTINES = [
@@ -2750,6 +2834,18 @@ export function evaluateRuntimeDatabasePosture(
         routine.name.startsWith("subscription_provider_cutover_committed("),
       )
         ? SUBSCRIPTION_CORE_PRECURSOR_OWNER_ROUTINES
+        : []),
+      ...(posture.privateRoutines.some((routine) =>
+        routine.name.startsWith("copy_subscription_authority_compat("),
+      )
+        ? SUBSCRIPTION_AUTHORITY_COMPAT_OWNER_ROUTINES
+        : []),
+      // 0716 adds no runtime routine: once any of its helpers exists, all of
+      // them must, owner-only and with a safe search path.
+      ...(posture.subscriptionOwnerRoutines.some((routine) =>
+        (SUBSCRIPTION_AUTHORITY_FENCE_OWNER_ROUTINES as readonly string[]).includes(routine.name),
+      )
+        ? SUBSCRIPTION_AUTHORITY_FENCE_OWNER_ROUTINES
         : []),
     ];
     for (const signature of required) {
