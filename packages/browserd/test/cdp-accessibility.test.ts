@@ -6,6 +6,61 @@ import {
 } from "../src";
 
 describe("normalizeCdpAccessibilityTree", () => {
+  test("offers fill on native date and time inputs, not on their part spin buttons", () => {
+    const snapshot = normalizeCdpAccessibilityTree({
+      controllerGeneration: "controller-1",
+      targetId: "target-1",
+      documentGeneration: "document-1",
+      nodes: [
+        {
+          nodeId: "1",
+          ignored: false,
+          role: { value: "InputTime" },
+          name: { value: "Start" },
+          value: { value: "07:00" },
+          backendDOMNodeId: 10,
+          childIds: ["2", "5"],
+        },
+        {
+          nodeId: "2",
+          parentId: "1",
+          ignored: false,
+          role: { value: "generic" },
+          backendDOMNodeId: 11,
+          childIds: ["3"],
+        },
+        {
+          nodeId: "3",
+          parentId: "2",
+          ignored: false,
+          role: { value: "spinbutton" },
+          name: { value: "Hours" },
+          backendDOMNodeId: 12,
+        },
+        {
+          nodeId: "5",
+          parentId: "1",
+          ignored: false,
+          role: { value: "spinbutton" },
+          name: { value: "Quantity" },
+          backendDOMNodeId: 13,
+        },
+        {
+          nodeId: "6",
+          ignored: false,
+          role: { value: "spinbutton" },
+          name: { value: "Count" },
+          backendDOMNodeId: 14,
+        },
+      ],
+    });
+    const byName = new Map([...snapshot.entriesByRef.values()].map((entry) => [entry.name, entry]));
+    expect(byName.get("Start")?.actions).toEqual(["focus", "fill"]);
+    expect(byName.get("Hours")?.actions).toEqual(["focus", "type", "press"]);
+    expect(byName.get("Quantity")?.actions).toEqual(["focus", "type", "press"]);
+    expect(byName.get("Count")?.actions).toEqual(["focus", "fill", "type", "press"]);
+  });
+
   test("promotes ignored ancestors, preserves static text, and keeps native ids private", () => {
     const snapshot = normalizeCdpAccessibilityTree({
       controllerGeneration: "controller-1",
