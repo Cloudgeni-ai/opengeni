@@ -282,6 +282,49 @@ export function stampDelegatedHumanAuthorization(
   delegatedHumanRequests.set(request, Object.freeze(proof));
 }
 
+/** Token prefix of personal API keys, which act as the person who made them. */
+export const PERSONAL_API_KEY_TOKEN_PREFIX = "ogp_";
+
+/**
+ * A personal API key acts as its owner. Call once per incoming request, after
+ * any middleware that may rebuild the Request and before access resolution:
+ * an active personal key stamps this exact raw Request with its owner and
+ * access setting, so the request resolves through the same live-access path as
+ * a person's signed-in agent (their current membership, role and workspaces,
+ * capped by the key) and routes treat it as that person. Anything else is left
+ * to the ordinary resolver, which refuses an unknown or revoked key.
+ */
+export async function stampPersonalApiKeyRequest(
+  request: Request,
+  deps: Pick<AccessDeps, "db">,
+): Promise<boolean> {
+  const authorization = request.headers.get("authorization");
+  if (!authorization?.startsWith(`${bearerPrefix}${PERSONAL_API_KEY_TOKEN_PREFIX}`)) return false;
+  if (
+    request.headers.has("x-opengeni-external-actor") ||
+    serviceInitiatorFromHeaders(request.headers)
+  ) {
+    throw new HTTPException(403, {
+      message: "A personal API key acts only as the person who created it.",
+    });
+  }
+  const apiKey = await findActiveApiKeyByHash(
+    deps.db,
+    await sha256Hex(authorization.slice(bearerPrefix.length)),
+  );
+  if (!apiKey || apiKey.credentialKind !== "personal" || !apiKey.ownerSubjectId) return false;
+  stampDelegatedHumanAuthorization(request, {
+    organizationId: apiKey.accountId,
+    subjectId: apiKey.ownerSubjectId,
+    permissions: (apiKey.ownerPermissions ?? []).flatMap((permission) => {
+      const parsed = Permission.safeParse(permission);
+      return parsed.success ? [parsed.data] : [];
+    }),
+    workspaceScope: apiKey.workspaceScope ?? { kind: "all" },
+  });
+  return true;
+}
+
 /** Immutable verified dispatch bounds for this exact raw Request, not a grant. */
 export function verifiedDelegatedHumanAuthorizationForRequest(
   request: Request,
@@ -1585,6 +1628,12 @@ async function apiKeyAccessContext(
   const apiKey = await findActiveApiKeyByHash(deps.db, await sha256Hex(bearer));
   if (!apiKey) {
     return null;
+  }
+  // Verified at request entry (stampPersonalApiKeyRequest) and resolved as
+  // its owner; reaching here means that step did not run. Never fall back to
+  // a key-shaped principal.
+  if (apiKey.credentialKind === "personal") {
+    throw new HTTPException(401, { message: "personal API key could not be verified" });
   }
   const externalHeader = c.req.header("x-opengeni-external-actor");
   const service = serviceInitiatorFromHeaders(c.req.raw.headers);

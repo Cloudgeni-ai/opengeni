@@ -209,6 +209,8 @@ import {
   validateOrganizationApiKeyWorkspaceScope,
 } from "./organization-api-key-access";
 export { OrganizationApiKeyWorkspaceScopeError } from "./organization-api-key-access";
+export * from "./personal-api-keys";
+import { personalApiKeyAccess } from "./personal-api-keys";
 import {
   effectiveKeyPermissions,
   insertOrganizationServiceAccount,
@@ -4924,7 +4926,15 @@ export async function revokeOrganizationApiKey(
 export async function findActiveApiKeyByHash(
   db: Database,
   keyHash: string,
-): Promise<(ApiKey & { credentialKind: schema.ApiKeyCredentialKind }) | null> {
+): Promise<
+  | (ApiKey & {
+      credentialKind: schema.ApiKeyCredentialKind;
+      /** Personal keys: the person the key acts as and the most it may do. */
+      ownerSubjectId: string | null;
+      ownerPermissions: string[] | null;
+    })
+  | null
+> {
   return await db.transaction(async (tx) => {
     await tx.execute(sql`select set_config('opengeni.api_key_hash', ${keyHash}, true)`);
     const [row] = await tx
@@ -4953,7 +4963,12 @@ export async function findActiveApiKeyByHash(
       .where(eq(schema.apiKeys.id, row.id));
     return {
       ...mapApiKey({ ...row, lastUsedAt: now }, scopes.get(row.id)),
+      ...(row.credentialKind === "personal"
+        ? { workspaceScope: personalApiKeyAccess(row, scopes.get(row.id)).workspaceScope }
+        : {}),
       credentialKind: row.credentialKind,
+      ownerSubjectId: row.ownerSubjectId,
+      ownerPermissions: row.ownerPermissions,
     };
   });
 }
