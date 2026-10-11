@@ -4360,7 +4360,8 @@ secret already does).
   `provider` column; every existing row is a Codex row and is kept exactly.
   The new routines read them through the owner-only view
   `opengeni_private.subscription_core_auto_assignments`; the table keeps its
-  name until the retirement migration.
+  name, and the column its `codex` default for older binaries' reach writes,
+  until the retirement migration.
 - Applying reach on workspace and Personal-workspace creation, reading and
   setting reach, plan-change history and the organization workspace inventory
   take the provider as data, so a later SuperGrok or Claude cutover adds rows,
@@ -4372,10 +4373,12 @@ secret already does).
 table `ACCESS EXCLUSIVE`, then the provider registry `SHARE ROW EXCLUSIVE`,
 which no runtime lock conflicts with. It locks no workspace, membership,
 connection or assignment table, so it cannot deadlock with runtime work.
-While it runs, workspace and Personal-workspace creation and access-editor
-reach changes wait for it briefly. If a transaction already using the reach
-table keeps it past the runner's 5-second `lock_timeout`, the Job fails
-without recording 0713 and changes nothing; retry the Job.
+While it runs, workspace and Personal-workspace creation, access-editor
+reach changes and deleting a subscription connection or an organization
+(their cascades reach the reach table) wait for it briefly. If a transaction
+already using the reach table keeps it past the runner's 5-second
+`lock_timeout`, the Job fails without recording 0713 and changes nothing;
+retry the Job.
 
 Nothing else needs an operator.
 

@@ -31493,6 +31493,7 @@
       "turnRatingsFromFeedback": "value"
     },
     "@opengeni/react/session-list-model": {
+      "applySessionPinToLists": "value",
       "compareSessionActivity": "value",
       "compareSessionPins": "value",
       "findPickerRow": "value",
@@ -31504,6 +31505,7 @@
       "isEffectivelyRunning": "value",
       "isRunningStatus": "value",
       "partitionPinnedSessions": "value",
+      "PinnedSessionLists": "type",
       "recencyGroupFor": "value",
       "recentSessionModelPresentation": "value",
       "recentSessionsForHome": "value",
@@ -31518,6 +31520,7 @@
       "sessionDisplayTitle": "value",
       "sessionInputWait": "value",
       "SessionListRow": "type",
+      "SessionPinProjection": "type",
       "SessionProjectSection": "type",
       "SessionRecencyBucket": "type",
       "SessionRecencyGroup": "type",
