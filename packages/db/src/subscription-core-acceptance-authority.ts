@@ -151,3 +151,49 @@ export async function subscriptionAuthorityV2ForScheduledTaskInTransaction(
   if (!row || row.authority === null || row.authority === undefined) return null;
   return SubscriptionPersonalAuthorityV2.parse(row.authority);
 }
+
+/** A carrier of delivered inbox input (0713 carrier kinds). */
+export type InboxAuthorityCarrier = {
+  kind: "session_turn" | "session_system_update";
+  id: string;
+};
+
+/**
+ * The effective accepted authority of each inbox carrier (0713's reader), per
+ * provider whose own drained cutover holds compatibility records (design 5.3,
+ * inbox batching): keyed `kind:id`, one value per provider. Empty while no
+ * provider has a receipt with a real commit time, and on historical ledgers
+ * without the reader, so batching keys are unchanged until then.
+ */
+export async function subscriptionAuthorityCompatForCarriersInTransaction(
+  tx: Database,
+  input: { workspaceId: string; carriers: readonly InboxAuthorityCarrier[] },
+): Promise<ReadonlyMap<string, Readonly<Record<string, unknown>>>> {
+  const effective = new Map<string, Record<string, unknown>>();
+  if (input.carriers.length === 0) return effective;
+  const [present] = await rawRows<{ present: boolean }>(
+    tx,
+    sql`select to_regprocedure(
+        'opengeni_private.subscription_authority_compat_providers()'
+      ) is not null as present`,
+  );
+  if (present?.present !== true) return effective;
+  const carriers = sql.join(
+    input.carriers.map((carrier) => sql`(${carrier.kind}::text, ${carrier.id}::uuid)`),
+    sql`, `,
+  );
+  const rows = await rawRows<{ provider: string; kind: string; id: string; authority: unknown }>(
+    tx,
+    sql`select listed.provider, carrier.kind, carrier.id::text as id,
+        opengeni_private.read_subscription_authority_compat(
+          listed.provider, carrier.kind, ${input.workspaceId}::uuid, carrier.id, null
+        ) as authority
+      from unnest(opengeni_private.subscription_authority_compat_providers()) listed(provider)
+      cross join (values ${carriers}) carrier(kind, id)`,
+  );
+  for (const row of rows) {
+    const key = `${row.kind}:${row.id}`;
+    effective.set(key, { ...effective.get(key), [row.provider]: row.authority ?? null });
+  }
+  return effective;
+}

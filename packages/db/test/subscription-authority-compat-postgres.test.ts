@@ -32,6 +32,8 @@ setDefaultTimeout(180_000);
 
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const COMPAT = "0713_subscription_authority_compat.sql";
+// 0714 requires 0713's routines: withheld with it and applied by the same run.
+const FENCES = "0714_subscription_authority_fences.sql";
 const CORE_SUBJECT = "service:subscription-core";
 let database: OwnerMigratedTestDatabase | null = null;
 let client: DbClient | null = null;
@@ -401,7 +403,7 @@ beforeAll(async () => {
   const owner = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
-    await owner`insert into schema_migrations(name) values (${COMPAT})`;
+    await owner`insert into schema_migrations(name) values (${COMPAT}), (${FENCES})`;
     await migrate(database.ownerUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
   } finally {
@@ -423,7 +425,7 @@ beforeAll(async () => {
   // role, then provision and evaluate again.
   const ownerAgain = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
-    await ownerAgain`delete from schema_migrations where name = ${COMPAT}`;
+    await ownerAgain`delete from schema_migrations where name in (${COMPAT}, ${FENCES})`;
     await database.admin.unsafe(
       `CREATE ROLE "${customApplicationRole}" NOLOGIN NOSUPERUSER NOBYPASSRLS`,
     );
@@ -431,8 +433,10 @@ beforeAll(async () => {
       applicationDatabaseRoles: ["opengeni_app", customApplicationRole],
     });
     const [applied] = await ownerAgain<{ count: number }[]>`
-      select count(*)::int as count from schema_migrations where name = ${COMPAT}`;
-    if (applied?.count !== 1) throw new Error("0713 was not applied by the second migrate");
+      select count(*)::int as count from schema_migrations where name in (${COMPAT}, ${FENCES})`;
+    if (applied?.count !== 2) {
+      throw new Error("0713 and 0714 were not applied by the second migrate");
+    }
     const grants = await database.admin<{ routine: string; allowed: boolean }[]>`
       select routine, has_function_privilege(${customApplicationRole}, routine, 'EXECUTE') as allowed
       from unnest(array[

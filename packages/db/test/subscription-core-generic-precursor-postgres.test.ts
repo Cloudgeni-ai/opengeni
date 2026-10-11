@@ -31,6 +31,8 @@ const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const PRECURSOR = "0712_subscription_core_generic_precursor.sql";
 // 0713 builds on 0712's receipts and patches its helpers; it follows 0712.
 const COMPAT = "0713_subscription_authority_compat.sql";
+// 0714 requires 0713's routines; it follows 0713.
+const FENCES = "0714_subscription_authority_fences.sql";
 let database: OwnerMigratedTestDatabase | null = null;
 let client: DbClient | null = null;
 let appUrl = "";
@@ -173,7 +175,7 @@ beforeAll(async () => {
   });
   try {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
-    await owner`insert into schema_migrations(name) values (${PRECURSOR}), (${COMPAT})`;
+    await owner`insert into schema_migrations(name) values (${PRECURSOR}), (${COMPAT}), (${FENCES})`;
     await migrate(database.ownerUrl);
     await provisionRoles(database.adminUrl, {
       appPassword: database.appPassword,
@@ -215,7 +217,7 @@ beforeAll(async () => {
     onnotice: () => undefined,
   });
   try {
-    await ownerAgain`delete from schema_migrations where name in (${PRECURSOR}, ${COMPAT})`;
+    await ownerAgain`delete from schema_migrations where name in (${PRECURSOR}, ${COMPAT}, ${FENCES})`;
     await database.admin.unsafe(
       `CREATE ROLE "${customApplicationRole}" NOLOGIN NOSUPERUSER NOBYPASSRLS`,
     );

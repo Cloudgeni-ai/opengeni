@@ -71,6 +71,8 @@ const withheldMigrations = [
   "0712_subscription_core_generic_precursor.sql",
   // Builds on withheld 0712's receipts and patches the helpers it patched.
   "0713_subscription_authority_compat.sql",
+  // Requires 0713's routines; it follows 0713.
+  "0714_subscription_authority_fences.sql",
 ];
 let database: OwnerMigratedTestDatabase | null = null;
 

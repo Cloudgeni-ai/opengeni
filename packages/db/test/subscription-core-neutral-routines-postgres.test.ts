@@ -47,14 +47,16 @@ beforeAll(async () => {
   const precursor = "0712_subscription_core_generic_precursor.sql";
   // 0713 builds on 0712's receipts and patches its helpers; it follows 0712.
   const compat = "0713_subscription_authority_compat.sql";
+  // 0714 requires 0713's routines; it follows 0713.
+  const fences = "0714_subscription_authority_fences.sql";
   const owner = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
     // 0712 patches routines 0707 creates, so it is withheld and replayed with it.
-    await owner`insert into schema_migrations(name) values (${neutral}), (${precursor}), (${compat})`;
+    await owner`insert into schema_migrations(name) values (${neutral}), (${precursor}), (${compat}), (${fences})`;
     await migrate(database.ownerUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
-    await owner`delete from schema_migrations where name in (${neutral}, ${precursor}, ${compat})`;
+    await owner`delete from schema_migrations where name in (${neutral}, ${precursor}, ${compat}, ${fences})`;
     await migrate(database.ownerUrl);
     const [applied] = await owner<{ count: number }[]>`
       select count(*)::int as count from schema_migrations where name = ${neutral}`;
