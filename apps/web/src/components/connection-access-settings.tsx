@@ -484,8 +484,8 @@ export function ConnectionAccessFormPage({
             ) : null}
             {/* A workspace that keeps it as its own follows the people choice too.
                 Where people are offered without a People list to describe and a
-                workspace keeps it, it is a status that stays in place (empty and hidden until needed), so
-                its line is announced. */}
+                workspace keeps it, it is a status that stays in place (empty and
+                hidden until needed), so its line is announced. */}
             {keptNote || (people && !peopleListed && local.length > 0) ? (
               <p
                 id={keptNoteId}

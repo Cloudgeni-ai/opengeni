@@ -2322,6 +2322,10 @@ describe("One Models page for the organization and the workspace", () => {
       const pendingView = await render();
       try {
         expect(pendingView.container.textContent).not.toContain("New Codex work");
+        // Nor a guessed tag or "Not in use" on the row still reading.
+        const reading = rowsNamed(pendingView.container, "Team plan")[0]!;
+        expect(reading.textContent).not.toContain("Shared by");
+        expect(reading.textContent).not.toContain("Not in use");
         await act(async () => held.forEach((release) => release()));
         await flush();
         expect(pendingView.container.textContent).toContain(
@@ -2398,19 +2402,16 @@ describe("One Models page for the organization and the workspace", () => {
         }
         return callList(...args);
       });
-      // Credits keep the list from being empty, so the notice would show.
-      const previousConfig = context.clientConfig;
-      const previousAccess = context.accessContext;
-      context.clientConfig = { billingMode: "stripe", models: [CREDITS_MODEL] };
-      context.accessContext = { accountGrants: [{ accountId: "organization-a", permissions: [] }] };
+      // Its error row (with Try again) keeps the list from reading "No accounts connected".
       const listFailed = await render();
       try {
         await flush();
-        expect(listFailed.container.textContent).toContain("Opengeni credits");
+        expect(listFailed.container.textContent).toContain(
+          "Couldn't load the organization's Codex accounts.",
+        );
+        expect(listFailed.container.textContent).not.toContain("No accounts connected");
         expect(listFailed.container.textContent).not.toContain("New Codex work");
       } finally {
-        context.clientConfig = previousConfig;
-        context.accessContext = previousAccess;
         client.requestJson.mockImplementation(keptList);
         await cleanup(listFailed);
       }

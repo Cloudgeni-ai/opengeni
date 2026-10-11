@@ -198,9 +198,12 @@ export function codexListedCount(
   if (codex.loadError || codex.sourceDisabled) return 1;
   const pool = poolState(codex);
   const own = codex.accounts.filter((account) => account.source !== "organization").length;
+  // The organization's list failing still lists its error row (with Try again).
   const shared = organization
-    ? organizationOnlyCodexAccounts(organization.codex.accounts, codex, organization.workspace.id)
-        .length
+    ? organization.codex.loadError
+      ? 1
+      : organizationOnlyCodexAccounts(organization.codex.accounts, codex, organization.workspace.id)
+          .length
     : codex.accounts.length - own + (pool.organizationSetAside ? 1 : 0);
   return own + shared + (codex.pending ? 1 : 0) + (pool.workspaceSetAside ? 1 : 0);
 }
@@ -544,18 +547,21 @@ function SharedCodexSetAsideRow({
       leading={<ProviderTile provider="codex" size="lg" />}
       title={codexAccountName(account)}
       meta={
-        // Unread, its reach and use here are unknown: say so in the tag's place.
+        // Unread, its reach and use here are unknown: no guessed tag, and a
+        // failed read says so in the tag's place.
         failed
           ? ["Couldn't check who can use it", planLabel(account.plan, "ChatGPT")]
-          : [
-              organizationReachLabel(places.scope, access.data),
-              // Before the plan, so it stays readable on a phone.
-              reason,
-              planLabel(account.plan, "ChatGPT"),
-              resetsLabel(account.resetCreditAvailableCount),
-            ]
+          : pending
+            ? [planLabel(account.plan, "ChatGPT"), resetsLabel(account.resetCreditAvailableCount)]
+            : [
+                organizationReachLabel(places.scope, access.data),
+                // Before the plan, so it stays readable on a phone.
+                reason,
+                planLabel(account.plan, "ChatGPT"),
+                resetsLabel(account.resetCreditAvailableCount),
+              ]
       }
-      cells={forPeople || failed ? undefined : { usage: NOT_IN_USE }}
+      cells={forPeople || pending ? undefined : { usage: NOT_IN_USE }}
       control={
         failed ? (
           <RowButton
