@@ -1064,7 +1064,7 @@ describe("quota freshness and observations", () => {
     expect(quotaCapacity(later, NOW)).toEqual({ kind: "unknown" });
   });
 
-  test("SUB-ELIG-06: a reading that omits a running exhausted window keeps it until its reset; one that reports it again replaces it", () => {
+  test("SUB-ELIG-06: a header reading or refusal that omits a running exhausted window keeps it until its reset; a usage reading or one that reports it again replaces it", () => {
     const weekly = { id: "weekly", usedPercent: 100, resetsAt: NOW + 86_400_000 };
     const current = quota({
       observedAt: NOW - 1_000,
@@ -1073,9 +1073,10 @@ describe("quota freshness and observations", () => {
         { ...weekly, status: "exhausted" },
       ],
     });
-    // A partial reading (only the primary window) does not drop the block.
+    // A partial header reading (only the primary window) does not drop the block.
     const partial = quota({
       observedAt: NOW,
+      source: "response_headers",
       windows: [{ id: "primary", usedPercent: 25, resetsAt: NOW + 3_600_000, status: "ok" }],
     });
     const kept = applyQuotaObservation({ refreshGeneration: 1, quota: current }, partial)!;
@@ -1085,9 +1086,29 @@ describe("quota freshness and observations", () => {
       resetsAt: NOW + 86_400_000,
     });
     expect(quotaCapacity(kept, NOW + 86_400_001)).toEqual({ kind: "available" });
+    // Neither does a refusal (which reports no windows).
+    const refusal = quota({
+      observedAt: NOW,
+      source: "refusal",
+      windows: [],
+      exhaustedUntil: NOW + 60_000,
+      exhaustedKind: "rate_limit",
+    });
+    expect(
+      quotaCapacity(
+        applyQuotaObservation({ refreshGeneration: 1, quota: current }, refusal)!,
+        NOW + 120_000,
+      ),
+    ).toEqual({ kind: "exhausted", resetsAt: NOW + 86_400_000 });
+    // A usage-endpoint reading is complete: omitting the window ends it.
+    const usage = { ...partial, source: "usage_endpoint" as const };
+    expect(applyQuotaObservation({ refreshGeneration: 1, quota: current }, usage)!.windows).toEqual(
+      usage.windows,
+    );
     // A reading that reports the window again shows an early reset.
     const reset = quota({
       observedAt: NOW + 2_000,
+      source: "response_headers",
       windows: [
         { id: "primary", usedPercent: 25, resetsAt: NOW + 3_600_000, status: "ok" },
         { ...weekly, usedPercent: 0, status: "ok" },

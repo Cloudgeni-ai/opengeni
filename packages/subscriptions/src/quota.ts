@@ -90,9 +90,12 @@ export function quotaObservationApplies(
  * the current credential generation, never replaces a newer or dated reading
  * with an older or undated one, and never shortens a running exhaustion
  * deadline or model cooldown: a later usage reading without them does not
- * clear them. A stored exhausted window with a known reset that the newer
- * observation does not report at all stays until that reset (a reading that
- * reports the window again replaces it, so an early reset still shows).
+ * clear them. A usage-endpoint reading is complete and replaces the stored
+ * windows, so it can show an early reset (also of a refusal's fallback
+ * window). Response headers and refusals report only some windows: a stored
+ * exhausted window with a known reset that such an observation does not
+ * report at all stays until that reset (one that reports the window again
+ * replaces it).
  * Clearing a cooldown early is an explicit, revision-fenced store operation,
  * not an observation. Revision numbers are assigned by the store.
  */
@@ -126,13 +129,16 @@ export function applyQuotaObservation(
     current.exhaustedUntil > observedAt &&
     (observation.exhaustedUntil === null || observation.exhaustedUntil < current.exhaustedUntil);
   const reported = new Set(observation.windows.map((window) => window.id));
-  const omittedExhausted = current.windows.filter(
-    (window) =>
-      !reported.has(window.id) &&
-      window.status === "exhausted" &&
-      window.resetsAt !== null &&
-      window.resetsAt > observedAt,
-  );
+  const omittedExhausted =
+    observation.source === "usage_endpoint"
+      ? []
+      : current.windows.filter(
+          (window) =>
+            !reported.has(window.id) &&
+            window.status === "exhausted" &&
+            window.resetsAt !== null &&
+            window.resetsAt > observedAt,
+        );
   return {
     ...observation,
     windows: omittedExhausted.length
