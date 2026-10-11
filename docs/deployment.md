@@ -4650,11 +4650,19 @@ It requires 0712 and, like 0712, grants to the configured application roles
   no table rewrite) and two triggers to `sessions`, `session_turns`,
   `scheduled_tasks`, `scheduled_task_revision_authorities`,
   `session_system_updates` and `session_system_update_outbox`, plus a
-  commit-time check trigger on each. Each lock waits at most 5 seconds; on a
-  busy database the Job can fail with a lock timeout, which rolls the whole
-  migration back, and is safe to retry.
+  deferred check trigger on each.
+- Locks: it first takes ACCESS EXCLUSIVE on those six tables together, in
+  the order above starting with `sessions` and `session_turns`, waiting at
+  most 100 ms per lock and releasing everything and retrying after a short
+  pause when it cannot take them all. It never holds a carrier lock for more
+  than about 600 ms while it waits, so it cannot deadlock with live session
+  or scheduled work as long as `deadlock_timeout` keeps its default of one
+  second or more. Once it holds them the migration runs in well under a
+  second; session and scheduled work waits for it meanwhile. If it cannot
+  take the whole set within 30 seconds the Job fails with `55P03`, the
+  migration rolls back entirely, and it is safe to retry.
 - The compatibility relation stays empty, and the copy routine, the
-  commit-time check and the personal helpers' record branch do nothing, until
+  deferred check and the personal helpers' record branch do nothing, until
   SuperGrok's or Claude's own drained cutover records its receipt. Codex and
   every other provider behave as before.
 - The scheduled-task execution digest ignores the new column, so existing run
@@ -4682,18 +4690,33 @@ Unlike 0716, part of it acts on deploy:
   without `BYPASSRLS` (the documented posture), disconnecting one deleted the
   credential but left its authority active, and connecting a personal Claude
   account failed with `42501`. 0717 adds the missing owner policies and
-  revokes the authorities earlier disconnects left active. A live run
-  accepted for such a disconnected account then fails with
+  revokes every active personal SuperGrok or Claude authority whose
+  credential is gone: those earlier disconnects left active, and those whose
+  credential went with a deleted workspace (the credential's workspace
+  foreign key cascades, the authority's only loses its origin workspace). A
+  live run accepted for such an account then fails with
   `scheduled_xai_authority_changed` or `scheduled_claude_authority_changed`;
-  connected accounts are unaffected.
+  connected accounts are unaffected. 0717 fixes the disconnect path only, so
+  after it an authority whose credential went with a deleted workspace stays
+  active (and without a credential grants nothing) until a later fix; the
+  inventory below lists both kinds.
 - The receipt switch and the effective-authority comparisons stay inert
   until SuperGrok's or Claude's own cutover records its receipt.
 - It recreates the `scheduled_turn_execution_immutable` trigger on
   `session_turns`, adds policies on `organization_memberships` and
   `organization_user_resource_authorities`, and briefly relaxes FORCE row
   security for the owner on that table and both personal credential tables
-  for the repair. Each lock waits at most 5 seconds; a lock timeout rolls the
-  migration back and is safe to retry.
+  for the repair.
+- Locks: it first takes ACCESS EXCLUSIVE on `organization_memberships`, both
+  personal credential tables, `organization_user_resource_authorities` and
+  `session_turns` together, waiting at most 100 ms per lock and releasing
+  everything and retrying after a short pause when it cannot take them all,
+  so it cannot deadlock with live work (with `deadlock_timeout` at its
+  default of one second or more). While it holds them, for well under a
+  second, private-session reads, turn writes and personal connects and
+  disconnects wait for it. If it cannot take the whole set within 30
+  seconds the Job fails with `55P03`, the migration rolls back entirely, and
+  it is safe to retry.
 
 **Before deploying**, run this read-only inventory as a role that bypasses
 row security. Each row is one finding. Resolve the scheduled findings first
@@ -4701,7 +4724,8 @@ row security. Each row is one finding. Resolve the scheduled findings first
 cannot be admitted, their occurrences or reusable sessions are refused, or
 the run fails at claim. Record the counts of the two `inbox_` findings
 (history the fences never check again) and of
-`disconnected_personal_authority` (the authorities 0717 revokes).
+`disconnected_personal_authority` (the authorities 0717 revokes: credentials
+removed by a disconnect or with a deleted workspace).
 
 ```sql
 WITH live_run AS (

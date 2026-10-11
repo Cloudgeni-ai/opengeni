@@ -2191,7 +2191,7 @@ BEGIN
       'subscription_core_connection_target(text,uuid,uuid,uuid,uuid,uuid,text,bigint)',
       'apply_subscription_core_auto_assignments(text,uuid,uuid,boolean)',
       -- Migration 0716: the authority marker and compatibility guards,
-      -- resolvers and commit-time check are owner-only.
+      -- resolvers and deferred check are owner-only.
       'stamp_subscription_authority_inserted_at()',
       'keep_subscription_authority_inserted_at()',
       'subscription_authority_compat_entry_valid(jsonb)',

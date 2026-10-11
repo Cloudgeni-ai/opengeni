@@ -33,6 +33,21 @@
 -- drained cutover writes a receipt with a real commit time. Every patch is an
 -- anchored replacement of the live definition; each anchor must occur exactly
 -- once.
+--
+-- Locks: ACCESS EXCLUSIVE on organization_memberships,
+-- xai_subscription_credentials, claude_subscription_credentials,
+-- organization_user_resource_authorities and session_turns (sections 5 and 6
+-- and the turn-execution trigger), all taken first by one statement in that
+-- order, and no other runtime table: every other statement creates or
+-- replaces a routine. Runtime work reads memberships before turns (session
+-- visibility) and turns before memberships (the turn enqueue then the v2
+-- writer), so no static order is cycle-free. As in 0716, the set is taken
+-- under a 100 ms per-wait lock timeout inside a savepoint and retried after
+-- a short pause until the migration holds it all: it never holds one of
+-- these locks for more than about 500 ms while it waits, under PostgreSQL's
+-- default one-second deadlock_timeout, so neither side becomes a deadlock
+-- victim. After 30 seconds without the whole set it fails with 55P03 and
+-- changes nothing (safe to retry).
 SET LOCAL lock_timeout = '5s';
 
 DO $prerequisite$
@@ -50,6 +65,31 @@ BEGIN
   END IF;
 END
 $prerequisite$;
+
+DO $fence_locks$
+DECLARE
+  deadline constant timestamptz := pg_catalog.clock_timestamp() + interval '30 seconds';
+BEGIN
+  LOOP
+    BEGIN
+      PERFORM pg_catalog.set_config('lock_timeout', '100ms', true);
+      LOCK TABLE organization_memberships, xai_subscription_credentials,
+        claude_subscription_credentials, organization_user_resource_authorities, session_turns
+        IN ACCESS EXCLUSIVE MODE;
+      PERFORM pg_catalog.set_config('lock_timeout', '5s', true);
+      RETURN;
+    EXCEPTION WHEN lock_not_available THEN
+      -- The subtransaction's rollback released every lock it took and
+      -- restored the lock timeout.
+      IF pg_catalog.clock_timestamp() >= deadline THEN
+        RAISE EXCEPTION '0717 could not lock the membership, credential, authority and turn tables within 30 seconds'
+          USING ERRCODE = '55P03';
+      END IF;
+      PERFORM pg_catalog.pg_sleep(0.05 + pg_catalog.random() * 0.2);
+    END;
+  END LOOP;
+END
+$fence_locks$;
 
 -- A copied v2 value matches its source's: the same value, or, when the source
 -- froze none, none or the empty value (a writer stores the empty value once
@@ -575,8 +615,6 @@ $fence_search_paths$;
 -- so under an owner without BYPASSRLS connecting a personal (`user`) Claude
 -- account fails with 42501. The same policy for Claude's lifecycle
 -- capability: it permits only the lock (WITH CHECK false forbids a rewrite).
--- Near the end, so the organization_memberships lock is held only until
--- commit.
 CREATE POLICY claude_subscription_membership_lock ON organization_memberships
   FOR UPDATE USING (
     current_user = pg_catalog.pg_get_userbyid(
@@ -670,7 +708,6 @@ ALTER TABLE xai_subscription_credentials FORCE ROW LEVEL SECURITY;
 ALTER TABLE organization_user_resource_authorities FORCE ROW LEVEL SECURITY;
 
 -- The turn-execution fence also fires for Claude snapshot and v2 updates.
--- Last, so the session_turns lock is held only until commit.
 DO $turn_execution_trigger$
 DECLARE expected text := 'CREATE TRIGGER scheduled_turn_execution_immutable BEFORE UPDATE OF model, '
   'reasoning_effort, latency_mode, tools, sandbox_backend, sandbox_os, initiating_human_subject_id, '

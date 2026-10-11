@@ -142,7 +142,7 @@ const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   "guard_subscription_provider_cutover_receipts()",
   "keep_subscription_cutover_identity()",
   // Migration 0716: the authority marker and compatibility guards, the
-  // per-path source resolvers and the commit-time compatibility check. The
+  // per-path source resolvers and the deferred compatibility check. The
   // triggers fire without the writing role holding EXECUTE.
   "stamp_subscription_authority_inserted_at()",
   "keep_subscription_authority_inserted_at()",
@@ -818,7 +818,7 @@ export const SUBSCRIPTION_AUTHORITY_COMPAT_PRIVATE_ROUTINES = [
 
 /**
  * Migration 0716: owner-only marker and guard triggers, the per-path source
- * resolvers and the commit-time compatibility check, in
+ * resolvers and the deferred compatibility check, in
  * opengeni_subscription_internal.
  */
 export const SUBSCRIPTION_AUTHORITY_COMPAT_OWNER_ROUTINES = [

@@ -9,14 +9,34 @@
 --    carrier and provider. Runtime roles hold no privilege on it.
 -- 3. One source resolver per carrier path, the copy rule, the copy routine
 --    and the reader.
--- 4. A commit-time (deferred) compatibility constraint trigger on every
---    carrier table.
+-- 4. A deferred compatibility constraint trigger on every carrier table
+--    (it fires at the first constraint flush: commit, or the end of the
+--    session-activity scope that inserted the carrier).
 -- 5. The record branch of both personal-authority helpers (0667, 0668).
 --
 -- Inert until a provider's own drained cutover inserts a receipt with a real
 -- commit time: nothing here acts for Codex (receipt at '-infinity', no
 -- records) or for a provider without a receipt, and nothing in the runtime
 -- calls the copy routine yet (the provider writers, X2b and C2b, will).
+--
+-- Locks: ACCESS EXCLUSIVE on the six carrier tables, all taken first by one
+-- statement in the runtime's order (sessions, session_turns,
+-- session_system_updates, session_system_update_outbox, then scheduled_tasks
+-- and scheduled_task_revision_authorities), and no other runtime table: every
+-- later statement acts on those tables, creates the owner-only relation or
+-- creates or replaces a routine. No static order of the six is cycle-free
+-- (runtime work takes sessions before turns, but scheduled dispatch can lock a
+-- task before creating its session and deleting a session reaches tasks
+-- through a foreign key), so the set is taken under a short per-wait lock
+-- timeout and retried: an attempt that cannot take every lock within 100 ms
+-- per wait rolls back to its savepoint, which releases what it took, and
+-- tries again after a short pause. The migration therefore never holds a
+-- carrier lock for more than about 600 ms while it waits, well under
+-- PostgreSQL's default one-second deadlock_timeout, so a runtime transaction
+-- that waits behind it is granted its lock before any deadlock check could
+-- choose it as a victim, and the migration itself gives up a wait before its
+-- own check runs. After 30 seconds without the whole set it fails with 55P03
+-- and changes nothing (safe to retry).
 SET LOCAL lock_timeout = '5s';
 
 DO $prerequisite$
@@ -28,6 +48,30 @@ BEGIN
   END IF;
 END
 $prerequisite$;
+
+DO $carrier_locks$
+DECLARE
+  deadline constant timestamptz := pg_catalog.clock_timestamp() + interval '30 seconds';
+BEGIN
+  LOOP
+    BEGIN
+      PERFORM pg_catalog.set_config('lock_timeout', '100ms', true);
+      LOCK TABLE sessions, session_turns, session_system_updates, session_system_update_outbox,
+        scheduled_tasks, scheduled_task_revision_authorities IN ACCESS EXCLUSIVE MODE;
+      PERFORM pg_catalog.set_config('lock_timeout', '5s', true);
+      RETURN;
+    EXCEPTION WHEN lock_not_available THEN
+      -- The subtransaction's rollback released every lock it took and
+      -- restored the lock timeout.
+      IF pg_catalog.clock_timestamp() >= deadline THEN
+        RAISE EXCEPTION '0716 could not lock the session and scheduled carrier tables within 30 seconds'
+          USING ERRCODE = '55P03';
+      END IF;
+      PERFORM pg_catalog.pg_sleep(0.05 + pg_catalog.random() * 0.2);
+    END;
+  END LOOP;
+END
+$carrier_locks$;
 
 -- 1. The server-owned insertion marker. A constant default is a metadata-only
 -- change: every existing row reads this migration's time, before any receipt
@@ -317,8 +361,14 @@ BEGIN
     RETURN NEW;
   END IF;
   IF TG_OP = 'DELETE' THEN
-    -- Only a referential cascade from the carrier deletes a record: the
-    -- cascade's DELETE runs inside the carrier's referential trigger.
+    -- Records are deleted only by the referential cascade from their carrier,
+    -- whose DELETE runs inside the carrier's referential trigger. The depth
+    -- test admits a DELETE issued from any trigger, but no other trigger
+    -- deletes records and no other role can reach one: the table has no
+    -- DELETE policy under FORCE ROW LEVEL SECURITY and the runtime roles hold
+    -- no privilege on it, so only the owner's referential cascade (exempt
+    -- from row security) or a BYPASSRLS role acting from its own trigger gets
+    -- here; a direct DELETE by either is refused below.
     IF pg_catalog.pg_trigger_depth() > 1 THEN RETURN OLD; END IF;
     RAISE EXCEPTION 'subscription authority compatibility records are deleted only with their carrier'
       USING ERRCODE = '42501';
@@ -970,7 +1020,7 @@ END
 $body$;
 
 -- Resolve with the carrier's own tenancy and every session in it visible, so
--- the copy routine and the commit-time check see the same sources whatever
+-- the copy routine and the deferred check see the same sources whatever
 -- the caller's later settings. Returns the settings to restore.
 CREATE FUNCTION opengeni_subscription_internal.subscription_compat_enter_scope(
   p_account_id uuid, p_workspace_id uuid)
@@ -1001,7 +1051,10 @@ BEGIN
 END
 $body$;
 
--- 4. The commit-time compatibility check, on every carrier table. For each
+-- 4. The deferred compatibility check, on every carrier table. It fires at
+-- the first constraint flush after the insert, which a session-activity scope
+-- performs when it finalizes (SET CONSTRAINTS ALL IMMEDIATE), so a writer
+-- copies inside the scope that inserted the carrier. For each
 -- provider whose receipt has a real commit time, when the carrier's source
 -- has a record or predates the receipt, the carrier must hold exactly the
 -- copy and no v2 entry for that provider. Otherwise it holds no record.
