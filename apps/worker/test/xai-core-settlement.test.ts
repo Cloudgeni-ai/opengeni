@@ -7,6 +7,14 @@ import {
   XaiSubscriptionStreamingTerminalError,
 } from "@opengeni/xai-subscription";
 import * as parentWake from "../src/activities/parent-wake";
+import * as xaiSubscription from "@opengeni/xai-subscription";
+import type { Settings } from "@opengeni/config";
+import * as coreSettlementSteps from "../src/activities/agent-turn/subscription-core-settlement";
+import {
+  finalizeTurnAttempt,
+  type TurnFinalizationDeps,
+} from "../src/activities/agent-turn/finalization";
+import { createTurnContext } from "../src/activities/agent-turn/turn-context";
 import {
   classifyXaiCredentialFailure,
   classifyXaiProviderError,
@@ -14,7 +22,11 @@ import {
 import { settleTurnFailure } from "../src/activities/agent-turn/failure-settlement";
 import { SUBSCRIPTION_CORE_TURN_REFUSAL_LIMIT } from "../src/activities/agent-turn/subscription-core-failover";
 import type { SubscriptionCoreTurn } from "../src/activities/agent-turn/turn-context";
-import { finalizeCoreSubscriptionTurn } from "../src/activities/agent-turn/subscription-core-settlement";
+import {
+  finalizeCoreSubscriptionTurn,
+  recordCoreSubscriptionRefusal,
+} from "../src/activities/agent-turn/subscription-core-settlement";
+import { XAI_CORE_REFUSAL } from "../src/activities/agent-turn/xai-core";
 
 // SuperGrok refusal settlement and finalization on the shared core
 // (design 5.3, SuperGrok track X1b). Dormant: these paths run only for a
@@ -201,6 +213,30 @@ function coreRuntime(options: {
 }
 
 describe("SuperGrok refusal settlement on the core", () => {
+  test("the refusal plan follows the binding's credential behaviour, not a shared assumption", async () => {
+    // SuperGrok's transport refreshes and retries an unauthorized request once.
+    expect(XAI_CORE_REFUSAL.credential).toEqual({ renewable: true, refreshedBeforeRefusal: true });
+    const runtime = coreRuntime({});
+    const record = (credential: { renewable: boolean; refreshedBeforeRefusal: boolean }) =>
+      recordCoreSubscriptionRefusal({
+        db: {} as db.Database,
+        provider: db.SUBSCRIPTION_CORE_XAI as db.SubscriptionCoreProvider,
+        core: core(),
+        lease: { holderId: "xai-turn:session-1:turn-1", generation: 3 },
+        outcome: { kind: "unauthorized" },
+        credential,
+      });
+    expect(await record(XAI_CORE_REFUSAL.credential)).toEqual({ receipt: true, health: true });
+    expect(runtime.apply).toHaveBeenCalledTimes(1);
+    // A renewable credential not yet refreshed for this refusal is not settled
+    // as a sign-in failure: the plan asks for a refresh first.
+    expect(await record({ renewable: true, refreshedBeforeRefusal: false })).toEqual({
+      receipt: false,
+      health: false,
+    });
+    expect(runtime.apply).toHaveBeenCalledTimes(1);
+  });
+
   test("a rate limit is recorded against the leased connection and the same turn re-places", async () => {
     const runtime = coreRuntime({ refusals: 1 });
     const recovery = spy(db, "requestSessionTurnRecovery").mockResolvedValue({
@@ -371,7 +407,7 @@ describe("SuperGrok finalization on the core", () => {
   const lane = (at: Date | null) =>
     ({ lastResponseReceivedAt: () => at }) as unknown as SubscriptionCoreTurn["requests"];
 
-  test("a completed model call moves the binding clock to the latest response", async () => {
+  test("a completed conversation call moves the binding clock; a title response does not", async () => {
     const runtime = coreRuntime({});
     const early = new Date("2026-10-11T03:00:00.000Z");
     const late = new Date("2026-10-11T03:00:05.000Z");
@@ -385,7 +421,7 @@ describe("SuperGrok finalization on the core", () => {
       {},
       identity,
       { connectionId: "connection-core", holderId: "xai-turn:session-1:turn-1", generation: 3 },
-      late,
+      early,
     );
   });
 
@@ -398,5 +434,82 @@ describe("SuperGrok finalization on the core", () => {
       lease,
     });
     expect(runtime.touch).not.toHaveBeenCalled();
+  });
+});
+
+describe("SuperGrok turn finalization by route", () => {
+  function finalizationDeps(placedOnCore: boolean) {
+    const settings = { workspaceCaptureEnabled: false } as Settings;
+    const context = createTurnContext({ settings, cancellationRequestedAt: null });
+    context.control.activityStatus = "idle";
+    context.control.turnMetricOutcome = "completed";
+    context.attempt.turnId = "turn-1";
+    context.attempt.executionGeneration = 3;
+    context.providerTurn.effectiveXaiCredentialId = placedOnCore
+      ? "connection-core"
+      : "credential-legacy";
+    context.providerTurn.xaiRequestContext = {} as never;
+    if (placedOnCore) context.providerTurn.xaiSubscriptionCore = core();
+    const release = mock(async () => true);
+    return {
+      release,
+      deps: {
+        ...context,
+        db: {},
+        input: {
+          accountId: "account-1",
+          workspaceId: "workspace-1",
+          sessionId: "session-1",
+          attemptId: "attempt-1",
+        },
+        settings,
+        activityStarted: performance.now(),
+        activitySpan: { end() {} },
+        sandboxResumeController: new AbortController(),
+        activityContext: { heartbeat() {} },
+        observability: {
+          incrementCounter() {},
+          incrementGauge() {},
+          setGauge() {},
+          observeHistogram() {},
+          error() {},
+          recordWorkerActivity() {},
+        },
+        leases: {
+          codex: { held: false, stopHeartbeat() {} },
+          xai: {
+            held: placedOnCore,
+            // A subject on both routes, so the route gate alone decides.
+            subjectId: "user:owner",
+            holderId: "xai-turn:session-1:turn-1",
+            generation: 3,
+            releaseCurrent: release,
+            stopHeartbeat() {},
+          },
+          claude: { held: false, stopHeartbeat() {} },
+        },
+        machineOpObserver: { drainEvents: () => [] },
+        stopLeaseHeartbeat() {},
+        turnCompletionMemoryCollector: { schedule() {} },
+        noteCancellationRequested() {},
+      } as unknown as TurnFinalizationDeps,
+    };
+  }
+
+  test("the legacy route keeps the per-turn quota call; the core skips it and finalizes its binding", async () => {
+    const quota = spy(xaiSubscription, "fetchXaiSubscriptionQuota").mockResolvedValue(
+      null as never,
+    );
+    const finalize = spy(coreSettlementSteps, "finalizeCoreSubscriptionTurn").mockResolvedValue(
+      undefined,
+    );
+    await finalizeTurnAttempt(finalizationDeps(false).deps);
+    expect(quota).toHaveBeenCalledTimes(1);
+    expect(finalize).not.toHaveBeenCalled();
+    const placed = finalizationDeps(true);
+    await finalizeTurnAttempt(placed.deps);
+    expect(quota).toHaveBeenCalledTimes(1);
+    expect(finalize).toHaveBeenCalledTimes(1);
+    expect(placed.release).toHaveBeenCalledTimes(1);
   });
 });

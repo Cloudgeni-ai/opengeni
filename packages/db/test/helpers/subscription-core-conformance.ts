@@ -41,6 +41,7 @@ import {
 import { checkPlacementDecision } from "@opengeni/subscriptions/reference";
 import { sql } from "drizzle-orm";
 import {
+  appendSessionEventsForTurnAttempt,
   applySessionTurnSettlement,
   armSubscriptionCoreCapacityWait,
   claimSessionWorkForAttempt,
@@ -74,6 +75,11 @@ import {
   setSubjectRlsContext,
   withWorkspaceSubjectSessionActivityRls,
 } from "../../src/database";
+import {
+  CODEX_CAPACITY_FALSE_RESUMPTION_LIMIT,
+  CODEX_CAPACITY_RECOVERY_KEY,
+  SUBSCRIPTION_CORE_WAIT_EXHAUSTED_CODES,
+} from "../../src/codex-capacity-recovery";
 import { encryptEnvironmentValue } from "../../src/environment-crypto";
 import {
   subscriptionAuthorityV2ForAcceptanceInTransaction,
@@ -3133,6 +3139,19 @@ export function describeSubscriptionCoreConformance<Credential>(
       );
       expect(waiter).toMatchObject({ provider: providerId });
       expect(instantOf(waiter, "earliestResetAt")).toBe(resetA);
+      // A provider without a session wait vocabulary is never read as the
+      // session's core wait: the provider-neutral reader (behind the workflow
+      // peek and this lookup) skips it, so the workflow cannot loop on a ref
+      // it cannot reconcile.
+      if (!subject.sessionWaits) {
+        expect(
+          await getSubscriptionCoreCapacityWaitForSession(
+            db(),
+            org.sharedWorkspaceId,
+            turn.identity.sessionId,
+          ),
+        ).toBeNull();
+      }
       const due = () =>
         withRlsContext(db(), tenant, (tx) =>
           listDueSubscriptionCapacityWaiters(tx, { provider: providerId, limit: 50 }),
@@ -4990,6 +5009,90 @@ export function describeSubscriptionCoreConformance<Credential>(
             evaluation: { kind: "run" },
           }),
         ).toEqual({ action: "stale", events: [] });
+      },
+    );
+
+    test.skipIf(!sessionWaits)(
+      "a false resumption counts toward the shared breaker; at its limit the turn stops with this provider's code",
+      async () => {
+        const waits = sessionWaits!;
+        const org = await organization();
+        const connection = await sharedConnection(org, `breaker-${crypto.randomUUID()}`);
+        const now = Date.now();
+        const arm = async (falseResumptions: number, progress = false) => {
+          const turn = await runningTurn(org);
+          if ((await placeChecked(turn, new Date(now))).kind === "run") {
+            await callUpstream(
+              turn,
+              connection,
+              [{ kind: "rate_limited", retryAfterSeconds: 3_600 }],
+              now,
+            );
+          }
+          // The previous attempt resumed this turn and came straight back.
+          await admin()`update session_turns
+            set metadata = metadata || ${admin().json({
+              [CODEX_CAPACITY_RECOVERY_KEY]: {
+                falseResumptions,
+                resumeGeneration: turn.executionGeneration,
+                retryNotBefore: null,
+              },
+            })}::jsonb
+            where id = ${turn.identity.turnId}::uuid`;
+          if (progress) {
+            // The resumed attempt did real work: a completed model request with
+            // output resets the breaker, whatever transport reported it.
+            const appended = await appendSessionEventsForTurnAttempt(
+              db(),
+              turn.identity.workspaceId,
+              turn.identity.sessionId,
+              turn.identity.turnId,
+              turn.executionGeneration,
+              turn.attemptId,
+              [
+                {
+                  type: "agent.model.request",
+                  payload: { phase: "completed", meaningfulOutput: true },
+                },
+              ],
+            );
+            expect(appended.accepted).toBe(true);
+          }
+          const armed = await armSubscriptionCoreCapacityWait(db(), waits.provider, {
+            accountId: org.accountId,
+            workspaceId: turn.identity.workspaceId,
+            sessionId: turn.identity.sessionId,
+            turnId: turn.identity.turnId,
+            attemptId: turn.attemptId,
+            waitReason: "no_eligible_capacity",
+            earliestResetAt: null,
+            failurePayload: { code: "subscription_capacity_unavailable" },
+          });
+          const [row] = await admin()<{ status: string; metadata: Record<string, unknown> }[]>`
+            select status, metadata from session_turns where id = ${turn.identity.turnId}::uuid`;
+          return { armed, turn: row! };
+        };
+        const counted = await arm(3);
+        expect(counted.armed.action).toBe("waiting");
+        expect(counted.turn.metadata[CODEX_CAPACITY_RECOVERY_KEY]).toMatchObject({
+          falseResumptions: 4,
+        });
+        const productive = await arm(CODEX_CAPACITY_FALSE_RESUMPTION_LIMIT - 1, true);
+        expect(productive.armed.action).toBe("waiting");
+        expect(productive.turn.metadata[CODEX_CAPACITY_RECOVERY_KEY]).toMatchObject({
+          falseResumptions: 0,
+          retryNotBefore: null,
+        });
+        const stopped = await arm(CODEX_CAPACITY_FALSE_RESUMPTION_LIMIT - 1);
+        expect(stopped.armed.action).toBe("stopped");
+        expect(stopped.turn.status).toBe("failed");
+        expect(stopped.armed.events[0]).toMatchObject({
+          type: "turn.failed",
+          payload: {
+            code: SUBSCRIPTION_CORE_WAIT_EXHAUSTED_CODES[waits.provider],
+            recoveryExhausted: true,
+          },
+        });
       },
     );
 

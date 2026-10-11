@@ -52,8 +52,8 @@ export function coreRequestRefreshGeneration(core: SubscriptionCoreTurn): number
  * failure receipt, which counts toward the per-turn failover bound, then the
  * health state that keeps placement away (a quota observation fenced on the
  * refresh generation the refused bearer carried, a model cooldown, or a
- * sign-in or forbidden quarantine). The transport already refreshed and
- * retried an unauthorized request once, so the refusal is settled as is.
+ * sign-in or forbidden quarantine). Whether the credential renews and was
+ * already refreshed before the refusal comes from the provider's binding.
  * `receipt` reports whether the refusal was recorded.
  */
 export async function recordCoreSubscriptionRefusal(input: {
@@ -62,6 +62,8 @@ export async function recordCoreSubscriptionRefusal(input: {
   core: SubscriptionCoreTurn;
   lease: LeaseFence;
   outcome: ProviderErrorOutcome;
+  /** How the provider's transport treats the refused credential (`CoreRefusalBinding.credential`). */
+  credential: CoreRefusalCredential;
   now?: Date;
 }): Promise<{ receipt: boolean; health: boolean }> {
   const ref = leaseRef(input.core, input.lease);
@@ -71,8 +73,8 @@ export async function recordCoreSubscriptionRefusal(input: {
   const plan = planSubscriptionCoreRefusal(input.provider.adapter, input.outcome, {
     now,
     refreshGeneration,
-    renewable: true,
-    refreshed: true,
+    renewable: input.credential.renewable,
+    refreshed: input.credential.refreshedBeforeRefusal,
   });
   if (plan.kind !== "settle") return { receipt: false, health: false };
   return await subscriptionCoreSettlement(input.provider)
@@ -103,9 +105,17 @@ export async function touchCoreSubscriptionBinding(input: {
 }
 
 /** One provider's refusal settlement inputs. */
+/**
+ * How a provider's transport treats a refused credential: whether it renews,
+ * and whether an unauthorized request was already refreshed and retried once
+ * before the refusal reached settlement.
+ */
+export type CoreRefusalCredential = { renewable: boolean; refreshedBeforeRefusal: boolean };
+
 export type CoreRefusalBinding = {
   provider: SubscriptionCoreProvider;
   displayName: string;
+  credential: CoreRefusalCredential;
   /** The provider's classification of a failed model request (null: not a refusal). */
   classify: (error: unknown) => ProviderErrorOutcome | null;
   lease: (deps: TurnFailureDeps) => CoreSubscriptionTurnLease;
@@ -168,6 +178,7 @@ export async function settleCoreSubscriptionRefusal(
       core,
       lease: binding.lease(deps),
       outcome,
+      credential: binding.credential,
     });
     if (recorded.receipt && eventing.publish && attempt.turnId && eventing.turnStartedPublished) {
       const settled = await failOverCoreSubscriptionTurn(
@@ -195,9 +206,10 @@ export async function settleCoreSubscriptionRefusal(
 
 /**
  * Finalization of a core turn before its lease is released: a completed
- * model call (the latest response of either request lane) moves the
- * binding's cache clock. No per-turn quota call runs on the core path:
- * quota is observed on refusal and by the out-of-turn probe.
+ * model call of the conversation lane moves the binding's cache clock (a
+ * session-title request has another prompt prefix and warms no conversation
+ * cache, as for Codex). No per-turn quota call runs on the core path: quota
+ * is observed on refusal and by the out-of-turn probe.
  */
 export async function finalizeCoreSubscriptionTurn(input: {
   db: Database;
@@ -205,11 +217,6 @@ export async function finalizeCoreSubscriptionTurn(input: {
   core: SubscriptionCoreTurn;
   lease: LeaseFence;
 }): Promise<void> {
-  const at = [input.core.requests, input.core.titleRequests]
-    .map((lane) => lane?.lastResponseReceivedAt() ?? null)
-    .reduce<Date | null>(
-      (latest, next) => (next && (!latest || next > latest) ? next : latest),
-      null,
-    );
+  const at = input.core.requests?.lastResponseReceivedAt() ?? null;
   await touchCoreSubscriptionBinding({ ...input, modelCallCompletedAt: at });
 }

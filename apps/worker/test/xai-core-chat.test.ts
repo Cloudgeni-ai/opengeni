@@ -318,6 +318,7 @@ describe("SuperGrok capacity by provider route", () => {
 
   test("a core wait for compaction defers with its request preserved, never parks", async () => {
     route("core");
+    const arm = spy(db, "armSubscriptionCoreCapacityWait");
     spy(db, "readSubscriptionCoreTurnIdentity").mockResolvedValue(identity);
     coreTurns({
       kind: "wait",
@@ -336,6 +337,8 @@ describe("SuperGrok capacity by provider route", () => {
       exit: { status: "idle", deferredUntilWake: true, turnId: "turn-1" },
     });
     expect(JSON.stringify(settled)).toContain('"requestPreserved":true');
+    // SuperGrok parks chat turns on the core (X1b); maintenance never parks.
+    expect(arm).not.toHaveBeenCalled();
   });
 });
 
@@ -462,10 +465,16 @@ describe("SuperGrok request custody on the core", () => {
       accessToken: "core-access",
       userId: "subject-1",
     });
-    // The refusal settlement fences on the generation the latest bearer carried.
+    // The refusal fence moves only when a main-lane request is dispatched,
+    // to the generation of the bearer that request carries.
+    expect(core.credentialVersion).toBeUndefined();
+    await authorization.beforeProviderDispatch({
+      requestId: "attempt-1:1:1:xai:1",
+      transportAttempt: 1,
+    } as never);
     expect(core.credentialVersion).toBe(4);
     await authorization.refresh();
-    expect(core.credentialVersion).toBe(5);
+    expect(core.credentialVersion).toBe(4);
     expect((resolverInputs[0] as unknown[])[2]).toEqual(identity);
     expect((resolverInputs[0] as unknown[])[3]).toEqual({
       connectionId: "connection-core",
@@ -495,6 +504,8 @@ describe("SuperGrok request custody on the core", () => {
     expect(sent.calls()).toBe(2);
     expect(refreshes()).toBe(1);
     expect(sent.tokens).toEqual(["Bearer core-access", "Bearer core-fresh"]);
+    // The refreshed retry was dispatched with the refreshed bearer's generation.
+    expect(core.credentialVersion).toBe(5);
     expect(order).toEqual([
       "fence",
       "reserve:attempt-1:1:1:xai:1:1",
@@ -520,6 +531,20 @@ describe("SuperGrok request custody on the core", () => {
     ]);
     await (await sent.response).text().catch(() => undefined);
     expect(order).toEqual(["fence", "reserve:attempt-1:1:1:xai:1:1", "settle:operation-1:refused"]);
+  });
+
+  test("a title-lane refresh after a main-lane refusal keeps the refused bearer's generation", async () => {
+    const { core, authorization } = placedCore();
+    const refused = send(authorization, [
+      () => new Response(JSON.stringify({ error: "rate limited" }), { status: 429 }),
+    ]);
+    await refused.response.then((response) => response.text()).catch(() => undefined);
+    expect(core.credentialVersion).toBe(4);
+    // The title lane refreshes (generation 5) before failure settlement reads the fence.
+    const title = xaiCoreTitleCustody(core, authorization)!;
+    await title.getToken();
+    await title.refresh();
+    expect(core.credentialVersion).toBe(4);
   });
 
   test("an unknown outcome is settled unknown and never replayed", async () => {

@@ -411,6 +411,7 @@ import {
   readCodexCapacityRecovery,
   codexFalseResumptionBackoffMs,
   clearCodexCapacityRecovery,
+  SUBSCRIPTION_CORE_WAIT_EXHAUSTED_CODES,
 } from "./codex-capacity-recovery";
 import {
   projectSessionAdmissionBlock,
@@ -25145,7 +25146,7 @@ const SUBSCRIPTION_CORE_WAIT_VOCABULARY: Record<
     waitingPayload: { recovery: "codex_capacity", retryable: true, rotated: true },
     statusReason: "codex_capacity",
     closeToolsReason: "codex_capacity_wait",
-    exhaustedCode: "codex_capacity_recovery_exhausted",
+    exhaustedCode: SUBSCRIPTION_CORE_WAIT_EXHAUSTED_CODES.codex,
     resumedEvent: (waiter) => ({
       type: "codex.capacity.resumed",
       payload: {
@@ -25175,7 +25176,7 @@ const SUBSCRIPTION_CORE_WAIT_VOCABULARY: Record<
     },
     statusReason: "xai_capacity",
     closeToolsReason: "xai_capacity_wait",
-    exhaustedCode: "xai_capacity_recovery_exhausted",
+    exhaustedCode: SUBSCRIPTION_CORE_WAIT_EXHAUSTED_CODES.xai,
     resumedEvent: (waiter) => ({
       type: "turn.recovery.requested",
       payload: {
@@ -25263,12 +25264,28 @@ const SUBSCRIPTION_CORE_CODEX_WAITER_COLUMNS = sql.raw(`waiter_id::text as waite
   refresh_attempt, earliest_reset_at, next_check_at, goal_id::text as goal_id,
   goal_version, last_wake_reason, updated_at`);
 
+/**
+ * The providers whose turns park on the core waiter: exactly those with a
+ * wait vocabulary. A row of any other provider is never read as a session's
+ * core wait (the provider-neutral readers filter on this list) and fails
+ * closed if it is ever mapped.
+ */
+const SUBSCRIPTION_CORE_WAITER_PROVIDERS = Object.keys(
+  SUBSCRIPTION_CORE_WAIT_VOCABULARY,
+) as SubscriptionCoreWaiterProvider[];
+
+function subscriptionCoreWaiterProvider(provider: string): SubscriptionCoreWaiterProvider {
+  if (!(SUBSCRIPTION_CORE_WAITER_PROVIDERS as string[]).includes(provider))
+    throw new Error("Core capacity waiter has an unsupported provider");
+  return provider as SubscriptionCoreWaiterProvider;
+}
+
 function mapSubscriptionCoreCodexWaiter(
   row: SubscriptionCoreCodexWaiterRow,
 ): SubscriptionCoreCodexCapacityWait {
   return {
     waiterId: row.waiter_id,
-    provider: row.provider as SubscriptionCoreWaiterProvider,
+    provider: subscriptionCoreWaiterProvider(row.provider),
     accountId: row.account_id,
     workspaceId: row.workspace_id,
     sessionId: row.session_id,
@@ -25301,15 +25318,15 @@ function mapSubscriptionCoreCodexWaiter(
  * sleeping on it until its next check.
  */
 export function subscriptionCoreCodexCapacityWaitRef(wait: SubscriptionCoreCodexCapacityWait): {
-  /** Absent for Codex (the legacy peek's "absent means Codex"). */
-  provider?: "xai";
+  /** Absent for Codex (the legacy peek's "absent means Codex"); every other provider names itself. */
+  provider?: Exclude<SubscriptionCoreWaiterProvider, "codex">;
   waiterId: string;
   generation: number;
   nextCheckAt: string;
   wakeRevision: number;
 } {
   return {
-    ...(wait.provider === "xai" ? { provider: "xai" as const } : {}),
+    ...(wait.provider !== "codex" ? { provider: wait.provider } : {}),
     waiterId: wait.waiterId,
     generation: wait.generation,
     nextCheckAt:
@@ -25349,7 +25366,11 @@ async function readSubscriptionCoreWaiterInTransaction(
         ) as blocked_turn_live
       from subscription_capacity_waiters w
       where workspace_id = ${input.workspaceId}::uuid and session_id = ${input.sessionId}::uuid
-        ${input.provider ? sql`and provider = ${input.provider}` : sql``}
+        ${
+          input.provider
+            ? sql`and provider = ${input.provider}`
+            : sql`and provider = any(${`{${SUBSCRIPTION_CORE_WAITER_PROVIDERS.join(",")}}`}::text[])`
+        }
         ${input.waiterId ? sql`and waiter_id = ${input.waiterId}::uuid` : sql``}
       ${input.forUpdate ? sql`for update` : sql``}`,
   );
@@ -25660,9 +25681,13 @@ export async function armSubscriptionCoreCapacityWait(
         );
         let waiter: SubscriptionCoreCodexCapacityWait | null = null;
         if (stopped) {
-          await tx.execute(sql`delete from subscription_capacity_waiters
-            where workspace_id = ${input.workspaceId}::uuid
-              and session_id = ${input.sessionId}::uuid and provider = ${provider}`);
+          // The session's waiter row, whatever provider armed it (`existing`
+          // is read without a provider).
+          if (existing)
+            await tx.execute(sql`delete from subscription_capacity_waiters
+              where workspace_id = ${input.workspaceId}::uuid
+                and session_id = ${input.sessionId}::uuid
+                and waiter_id = ${existing.waiterId}::uuid`);
         } else {
           // Arming follows a placement evaluation, so this generation has
           // already observed its own initial revision; only a later capacity

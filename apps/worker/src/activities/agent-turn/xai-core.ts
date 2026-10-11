@@ -143,6 +143,12 @@ export function createCoreXaiRequests(
 export type XaiCoreRequestAuthorization = {
   getToken: XaiSubscriptionRequestContext["getToken"];
   refresh: XaiSubscriptionRequestContext["refresh"];
+  /**
+   * The same bearer for session-title requests. A title request never moves
+   * the main lane's refusal fence (`core.credentialVersion`).
+   */
+  titleGetToken: XaiSubscriptionRequestContext["getToken"];
+  titleRefresh: XaiSubscriptionRequestContext["refresh"];
   /** The dispatch fence every physical request passes before its reservation. */
   assertDispatch: () => Promise<void>;
   beforeProviderDispatch: NonNullable<XaiSubscriptionRequestContext["beforeProviderDispatch"]>;
@@ -180,23 +186,31 @@ export function buildXaiCoreRequestAuthorization(input: {
     await lease.assertCurrentForDispatch();
   };
   const requests = core.requests;
-  // The refusal settlement fences its quota write on the generation the
-  // refused bearer carried.
-  const carried = (snapshot: {
-    accessToken: string;
-    userId: string;
-    credentialVersion: number;
-  }) => {
-    core.credentialVersion = snapshot.credentialVersion;
-    return { accessToken: snapshot.accessToken, userId: snapshot.userId };
+  // The refusal settlement fences its health write on the generation the
+  // refused bearer carried: the main lane records the generation of the
+  // bearer it obtained when that physical request is dispatched. Main-lane
+  // requests are sequential, so at settlement the slot holds the refused
+  // request's generation; title requests (their own lane) never write it.
+  let mainLaneGeneration: number | null = null;
+  type Snapshot = { accessToken: string; userId: string; credentialVersion: number };
+  const bearer = (snapshot: Snapshot) => ({
+    accessToken: snapshot.accessToken,
+    userId: snapshot.userId,
+  });
+  const mainLane = (snapshot: Snapshot) => {
+    mainLaneGeneration = snapshot.credentialVersion;
+    return bearer(snapshot);
   };
   return {
-    getToken: async () => carried(await resolver.getToken()),
-    refresh: async () => carried(await resolver.refresh()),
+    getToken: async () => mainLane(await resolver.getToken()),
+    refresh: async () => mainLane(await resolver.refresh()),
+    titleGetToken: async () => bearer(await resolver.getToken()),
+    titleRefresh: async () => bearer(await resolver.refresh()),
     assertDispatch,
     beforeProviderDispatch: async (request) => {
       await assertDispatch();
       await requests.reserve(request);
+      if (mainLaneGeneration !== null) core.credentialVersion = mainLaneGeneration;
     },
     onProviderRequestSettled: requests.observe,
   };
@@ -209,12 +223,27 @@ export function buildXaiCoreRequestAuthorization(input: {
  */
 export function xaiCoreTitleCustody(
   core: Pick<SubscriptionCoreTurn, "titleRequests"> | null,
-  authorization: Pick<XaiCoreRequestAuthorization, "assertDispatch"> | null,
-): { assertDispatch: () => Promise<void>; requests: CoreSubscriptionRequests } | undefined {
+  authorization: Pick<
+    XaiCoreRequestAuthorization,
+    "assertDispatch" | "titleGetToken" | "titleRefresh"
+  > | null,
+):
+  | {
+      assertDispatch: () => Promise<void>;
+      requests: CoreSubscriptionRequests;
+      getToken: XaiSubscriptionRequestContext["getToken"];
+      refresh: XaiSubscriptionRequestContext["refresh"];
+    }
+  | undefined {
   if (!core) return undefined;
   if (!authorization || !core.titleRequests)
     throw new Error("A SuperGrok turn on the shared core has no session-title request custody");
-  return { assertDispatch: authorization.assertDispatch, requests: core.titleRequests };
+  return {
+    assertDispatch: authorization.assertDispatch,
+    requests: core.titleRequests,
+    getToken: authorization.titleGetToken,
+    refresh: authorization.titleRefresh,
+  };
 }
 
 /**
@@ -256,6 +285,9 @@ export async function xaiCoreLanesRecoverAfterCheckpoint(
 export const XAI_CORE_REFUSAL: CoreRefusalBinding = {
   provider: XAI,
   displayName: DISPLAY_NAME,
+  // OAuth credentials renew, and the transport refreshes and retries an
+  // unauthorized request once before it surfaces as a refusal.
+  credential: { renewable: true, refreshedBeforeRefusal: true },
   classify: classifyXaiProviderError,
   lease: (deps) => deps.leases.xai,
   isSourceDisconnected: XAI_CORE_TURN_PROVIDER.isSourceDisconnected,
