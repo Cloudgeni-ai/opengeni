@@ -412,12 +412,12 @@ async function connectionRestrictionsAndXaiReadiness(
   db: Database,
   settings: Settings,
   context: WorkspaceModelSelectionContext,
+  claudeCoreReadiness: SubscriptionCoreClaudeCatalogReadiness | null,
 ): Promise<{ restrictions: ConnectionModelRestrictions; xaiSubscriptionActive: boolean }> {
   const { workspaceId, subjectId, xaiAuthoritySnapshot } = context;
   // Claude's restrictions come from the core on its core route (no legacy
-  // Claude pool or v1 snapshot is read then).
-  const claudeCore = (await loadCoreRoutedClaudeCatalogReadiness(db, settings, context))
-    ?.restrictions;
+  // Claude pool or v1 snapshot is read then); the caller read the route once.
+  const claudeCore = claudeCoreReadiness?.restrictions;
   // On the core route a frozen legacy authority snapshot no longer selects
   // the pool: the core projection (and, at execution, the accepted turn's
   // core authority) does.
@@ -497,10 +497,19 @@ export async function loadWorkspaceClaudeSubscriptionReadiness(
   db: Database,
   settings: Settings,
   context: WorkspaceModelSelectionContext,
+  /**
+   * Claude's core readiness when the caller already read it for this
+   * request (`loadCoreRoutedClaudeCatalogReadiness`; null on the legacy
+   * route), so the route is read once per request. Read here when absent.
+   */
+  claudeCoreReadiness?: SubscriptionCoreClaudeCatalogReadiness | null,
 ): Promise<{ workspace: boolean; organization: boolean }> {
   if (!settings.claudeSubscriptionEnabled) return { workspace: false, organization: false };
   // Claude's core route: the core projection, never a v1 snapshot.
-  const core = await loadCoreRoutedClaudeCatalogReadiness(db, settings, context);
+  const core =
+    claudeCoreReadiness === undefined
+      ? await loadCoreRoutedClaudeCatalogReadiness(db, settings, context)
+      : claudeCoreReadiness;
   if (core) return { workspace: core.workspace, organization: core.organization };
   const authoritySnapshot =
     context.claudeAuthoritySnapshot ??
@@ -540,10 +549,12 @@ export async function loadWorkspaceModelSelectionInput(
       (kind) => kind !== "claude_subscription" || settings.claudeSubscriptionEnabled,
     ),
   ];
-  const inputRead = (async () =>
-    Promise.all([
-      connectionRestrictionsAndXaiReadiness(db, settings, context),
-      loadWorkspaceClaudeSubscriptionReadiness(db, settings, context),
+  const inputRead = (async () => {
+    // Claude's provider route and core projection, once for both readers.
+    const claudeCore = await loadCoreRoutedClaudeCatalogReadiness(db, settings, context);
+    return await Promise.all([
+      connectionRestrictionsAndXaiReadiness(db, settings, context, claudeCore),
+      loadWorkspaceClaudeSubscriptionReadiness(db, settings, context, claudeCore),
       getWorkspaceModelPolicy(db, workspaceId),
       // Codex readiness and live availability by the organization's Codex
       // cutover row: legacy without one, the shared core when enabled, not
@@ -554,7 +565,8 @@ export async function loadWorkspaceModelSelectionInput(
         { accountId, workspaceId, subjectId: context.subjectId },
         { observeAvailability: options.observeAvailability !== false },
       ),
-    ]))();
+    ]);
+  })();
   // Transaction handles share one backend and LOCAL scope. Preserve the old
   // batch ordering there rather than introduce concurrent nested savepoints.
   if (typeof (db as Database & { rollback?: unknown }).rollback === "function") await inputRead;

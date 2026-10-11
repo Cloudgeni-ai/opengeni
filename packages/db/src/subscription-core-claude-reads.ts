@@ -22,6 +22,7 @@ import { resolveSubscriptionConnectionId } from "./subscription-core-repository"
 import {
   listSubscriptionCorePersonalConnectionRowsInTransaction,
   readSubscriptionCoreOrganizationPool,
+  readSubscriptionCorePersonalConnectionVersionsInTransaction,
   readSubscriptionCoreWorkspacePool,
   type SubscriptionCoreConnectionRow,
 } from "./subscription-core/administration";
@@ -36,11 +37,15 @@ import {
   type SubscriptionCoreConnectionProbeDeps,
 } from "./subscription-core/operation-connections";
 import { subscriptionCoreOperations } from "./subscription-core/operations";
-import type { SubscriptionCoreProvider } from "./subscription-core/provider";
+import {
+  subscriptionCoreProviderId,
+  type SubscriptionCoreProvider,
+} from "./subscription-core/provider";
 import { subscriptionCoreProvider } from "./subscription-core-providers";
 import { SUBSCRIPTION_CORE_CLAUDE_PROVIDER } from "./subscription-core-claude-adapter";
 import {
   projectSubscriptionCoreClaudeUsage,
+  subscriptionCoreClaudeUsageVersion,
   type SubscriptionCoreClaudeUsageReading,
   type SubscriptionCoreClaudeUsageRefresh,
 } from "./subscription-core-claude-usage";
@@ -50,6 +55,7 @@ const ORGANIZATION_PREFIX = "organization-claude-subscription";
 const WORKSPACE_PREFIX = "workspace-claude-subscription";
 /** The legacy refresh throttle: one live usage read per connection per 30 seconds. */
 export const SUBSCRIPTION_CORE_CLAUDE_USAGE_REFRESH_INTERVAL_MS = 30_000;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** The registered Claude binding; throws until the Claude cutover registers it. */
 function claudeBinding(): SubscriptionCoreProvider {
@@ -72,11 +78,16 @@ export type SubscriptionCoreClaudeUsageTarget = {
  * cutover alias), when the caller may see it here: a shared connection of
  * the workspace's effective pool, or the caller's own personal connection
  * in their own Personal workspace (the owner-only reader). Null otherwise.
+ * The row carries its row version (shared reads select it; a personal row
+ * gets it from the owner-only version reader, and is not returned without
+ * one).
  */
 export async function readSubscriptionCoreClaudeWorkspaceUsageTarget(
   db: Database,
   input: { accountId: string; workspaceId: string; subjectId: string; accountIdParam: string },
 ): Promise<SubscriptionCoreClaudeUsageTarget | null> {
+  // Every connection id and alias is a UUID; anything else names nothing.
+  if (!UUID.test(input.accountIdParam)) return null;
   const binding = claudeBinding();
   const connectionId = await subscriptionCoreOperations(
     binding,
@@ -85,10 +96,6 @@ export async function readSubscriptionCoreClaudeWorkspaceUsageTarget(
     workspaceId: input.workspaceId,
     connectionId: input.accountIdParam,
   });
-  // A personal connection is invisible to the generic resolver (its rows and
-  // aliases are read only through the owner-only reader): it is named by
-  // its canonical id.
-  const personalId = connectionId ?? input.accountIdParam;
   const ownPersonalWorkspace =
     (await namedSubjectPersonalWorkspaceId(db, {
       accountId: input.accountId,
@@ -105,13 +112,32 @@ export async function readSubscriptionCoreClaudeWorkspaceUsageTarget(
           : pool.connections.find((entry) => entry.row.id === connectionId);
       if (shared) return { connectionId: shared.row.id, scope: shared.source, row: shared.row };
       if (!ownPersonalWorkspace || pool.source.workspaceKind !== "personal") return null;
+      // A personal connection and its aliases are invisible to the generic
+      // resolver: the owner-only routine resolves them (exact owner
+      // membership, in the owner's own Personal workspace).
+      await setSubjectRlsContext(tx, input.subjectId);
+      const [resolved] = await rawRows<{ resolved: { id?: unknown } | null }>(
+        tx,
+        sql`select opengeni_private.manage_subscription_core_personal(
+          ${subscriptionCoreProviderId(binding)}, ${input.accountId}::uuid,
+          ${input.workspaceId}::uuid, ${input.subjectId}, ${input.accountIdParam}::uuid,
+          'resolve', null, null, null) as resolved`,
+      );
+      const personalId = resolved?.resolved?.id;
+      if (typeof personalId !== "string") return null;
       const personal = await listSubscriptionCorePersonalConnectionRowsInTransaction(
         tx,
         binding,
         input,
       );
       const row = personal.find((candidate) => candidate.id === personalId);
-      return row ? { connectionId: row.id, scope: "user" as const, row } : null;
+      if (!row) return null;
+      const version = (
+        await readSubscriptionCorePersonalConnectionVersionsInTransaction(tx, binding, input)
+      ).get(row.id);
+      return version === undefined
+        ? null
+        : { connectionId: row.id, scope: "user" as const, row: { ...row, version } };
     },
   );
 }
@@ -125,6 +151,7 @@ export async function readSubscriptionCoreClaudeOrganizationUsageRow(
   db: Database,
   input: { organizationId: string; subjectId: string; accountIdParam: string },
 ): Promise<SubscriptionCoreConnectionRow | null> {
+  if (!UUID.test(input.accountIdParam)) return null;
   const binding = claudeBinding();
   const pool = await readSubscriptionCoreOrganizationPool(db, binding, input);
   if (!pool) return null;
@@ -184,9 +211,11 @@ export async function listSubscriptionCoreClaudeCatalogModelIds(
 type RefreshAttempt = { at: number; refresh: SubscriptionCoreClaudeUsageRefresh };
 const MAX_REMEMBERED_ATTEMPTS = 1024;
 /**
- * The last live read per connection in this process: the legacy throttle
- * also holds back a read that failed (the core stores readings, not failed
- * attempts).
+ * The last live read per workspace, connection and row version in this
+ * process: the legacy throttle also holds back a read that failed (the core
+ * stores readings, not failed attempts). Per replica: another API replica
+ * may read once more within the interval. A reconnect moves the row
+ * version, so a remembered outcome never outlives the credential it read.
  */
 const lastAttempts = new Map<string, RefreshAttempt>();
 
@@ -211,8 +240,13 @@ export function resetSubscriptionCoreClaudeUsageThrottle(): void {
  * connection is not readable there). Returns the connection's projected
  * usage after the read and whether the reading ended a stored exhaustion
  * (the caller wakes the Claude core waiters; a failed wake never fails the
- * committed read). Within 30 seconds of the last reading or attempt the
- * stored projection is returned without a provider call.
+ * committed read).
+ *
+ * Throttle (legacy: one read per 30 seconds): a stored usage-endpoint
+ * reading younger than the interval answers first; else this replica's
+ * remembered attempt, when it is younger than the interval and newer than
+ * the stored reading. A reading the core did not apply (the generation
+ * fence, or a failed write) is reported `unavailable`, never `available`.
  */
 export async function refreshSubscriptionCoreClaudeWorkspaceUsage(
   db: Database,
@@ -229,22 +263,31 @@ export async function refreshSubscriptionCoreClaudeWorkspaceUsage(
 ): Promise<{ usage: ClaudeSubscriptionUsage; recovered: boolean }> {
   const now = deps.now ?? Date.now;
   const { target } = input;
-  const key = `${input.accountId}:${target.connectionId}`;
   const stored = projectSubscriptionCoreClaudeUsage(target.row);
+  const key = [
+    input.accountId,
+    input.workspaceId,
+    target.connectionId,
+    subscriptionCoreClaudeUsageVersion(target.row),
+  ].join(":");
   // The connection needs a new sign-in: no read until it reconnects.
   if (stored.refreshStatus === "reconnect") return { usage: stored, recovered: false };
+  const storedAt =
+    stored.refreshStatus === "available" && stored.refreshCheckedAt !== null
+      ? Date.parse(stored.refreshCheckedAt)
+      : null;
+  if (storedAt !== null && now() - storedAt < SUBSCRIPTION_CORE_CLAUDE_USAGE_REFRESH_INTERVAL_MS)
+    return { usage: stored, recovered: false };
   const last = lastAttempts.get(key);
-  if (last && now() - last.at < SUBSCRIPTION_CORE_CLAUDE_USAGE_REFRESH_INTERVAL_MS)
+  if (
+    last &&
+    now() - last.at < SUBSCRIPTION_CORE_CLAUDE_USAGE_REFRESH_INTERVAL_MS &&
+    (storedAt === null || last.at > storedAt)
+  )
     return {
       usage: projectSubscriptionCoreClaudeUsage(target.row, last.refresh),
       recovered: false,
     };
-  if (
-    stored.refreshStatus === "available" &&
-    stored.refreshCheckedAt !== null &&
-    now() - Date.parse(stored.refreshCheckedAt) < SUBSCRIPTION_CORE_CLAUDE_USAGE_REFRESH_INTERVAL_MS
-  )
-    return { usage: stored, recovered: false };
   const binding = claudeBinding();
   const scope = {
     kind: "workspace" as const,
@@ -262,11 +305,14 @@ export async function refreshSubscriptionCoreClaudeWorkspaceUsage(
     modelIds,
   });
   const checkedAt = new Date(now()).toISOString();
+  const reading =
+    probe.kind === "read" ? (probe.response as SubscriptionCoreClaudeUsageReading) : null;
   const refresh: SubscriptionCoreClaudeUsageRefresh =
-    probe.kind === "read"
+    reading !== null && probe.kind === "read"
       ? {
-          status: (probe.response as SubscriptionCoreClaudeUsageReading).status,
-          checkedAt: (probe.response as SubscriptionCoreClaudeUsageReading).checkedAt,
+          // An available reading the core did not record is not reported as read.
+          status: reading.status === "available" && !probe.applied ? "unavailable" : reading.status,
+          checkedAt: reading.checkedAt,
         }
       : probe.kind === "relogin"
         ? { status: "reconnect", checkedAt }
@@ -274,7 +320,8 @@ export async function refreshSubscriptionCoreClaudeWorkspaceUsage(
           { status: "unavailable", checkedAt };
   rememberAttempt(key, { at: now(), refresh });
   // The reading (or a relogin the refresh seam recorded) is read back as
-  // committed; a connection that left the pool keeps the row read before.
+  // committed. When the read-back fails (or the connection left the pool),
+  // the row read before is answered, never as a fresh `available` reading.
   const after = await readSubscriptionCoreClaudeWorkspaceUsageTarget(db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
@@ -282,7 +329,12 @@ export async function refreshSubscriptionCoreClaudeWorkspaceUsage(
     accountIdParam: target.connectionId,
   }).catch(() => null);
   return {
-    usage: projectSubscriptionCoreClaudeUsage(after?.row ?? target.row, refresh),
+    usage: after
+      ? projectSubscriptionCoreClaudeUsage(after.row, refresh)
+      : projectSubscriptionCoreClaudeUsage(
+          target.row,
+          refresh.status === "available" ? { status: "unavailable", checkedAt } : refresh,
+        ),
     recovered: probe.kind === "read" && probe.recovered,
   };
 }
@@ -293,19 +345,16 @@ export type SubscriptionCoreClaudeCatalogReadiness = {
   workspace: boolean;
   /** `organization-claude-subscription/` models: the organization inference pool. */
   organization: boolean;
-  /** Each prefix's model restriction: the union of its serving allowlists (null: every model). */
+  /**
+   * Each prefix's model restriction: the union of its serving allowlists,
+   * each built from its own pool's assignment policies only (null: every
+   * model).
+   */
   restrictions: {
-    "organization-claude-subscription/": string[] | null;
-    "workspace-claude-subscription/": string[] | null;
+    readonly "organization-claude-subscription/": readonly string[] | null;
+    readonly "workspace-claude-subscription/": readonly string[] | null;
   };
 };
-
-function allowlistUnion(connections: readonly SubscriptionCoreServingConnection[]) {
-  const allowlists = connections.map(subscriptionCoreConnectionAllowlist);
-  return allowlists.some((allowed) => allowed === null)
-    ? null
-    : [...new Set(allowlists.flatMap((allowed) => allowed ?? []))].sort();
-}
 
 /** Whether a serving connection serves the organization inference pool here. */
 function servesOrganizationPool(connection: SubscriptionCoreServingConnection): boolean {
@@ -317,14 +366,43 @@ function servesWorkspacePool(connection: SubscriptionCoreServingConnection): boo
   return connection.ownership === "personal" || connection.pools.includes("workspace");
 }
 
-/** Not ready: what maintenance answers. */
+/**
+ * The connection's model policy as one pool sees it: a classified shared
+ * connection keeps only that pool's assignment policies (a connection in
+ * both pools never lets one pool's policy widen the other's prefix).
+ */
+function inPool(
+  connection: SubscriptionCoreServingConnection,
+  pool: "workspace" | "organization",
+): SubscriptionCoreServingConnection {
+  return connection.assignments === null
+    ? connection
+    : {
+        ...connection,
+        assignments: connection.assignments.filter((policy) => policy.inferencePool === pool),
+      };
+}
+
+function allowlistUnion(
+  connections: readonly SubscriptionCoreServingConnection[],
+  pool: "workspace" | "organization",
+) {
+  const allowlists = connections.map((connection) =>
+    subscriptionCoreConnectionAllowlist(inPool(connection, pool)),
+  );
+  return allowlists.some((allowed) => allowed === null)
+    ? null
+    : [...new Set(allowlists.flatMap((allowed) => allowed ?? []))].sort();
+}
+
+/** Not ready: what maintenance answers (deeply frozen; shared by every answer). */
 export const SUBSCRIPTION_CORE_CLAUDE_NOT_READY: SubscriptionCoreClaudeCatalogReadiness =
   Object.freeze({
     workspace: false,
     organization: false,
     restrictions: Object.freeze({
-      "organization-claude-subscription/": [],
-      "workspace-claude-subscription/": [],
+      "organization-claude-subscription/": Object.freeze([] as string[]),
+      "workspace-claude-subscription/": Object.freeze([] as string[]),
     }),
   });
 
@@ -346,8 +424,9 @@ export async function readSubscriptionCoreClaudeCatalogReadiness(
     organization: organization.length > 0,
     restrictions: {
       "organization-claude-subscription/":
-        organization.length > 0 ? allowlistUnion(organization) : [],
-      "workspace-claude-subscription/": workspace.length > 0 ? allowlistUnion(workspace) : [],
+        organization.length > 0 ? allowlistUnion(organization, "organization") : [],
+      "workspace-claude-subscription/":
+        workspace.length > 0 ? allowlistUnion(workspace, "workspace") : [],
     },
   };
 }
@@ -371,33 +450,87 @@ export async function subscriptionCoreClaudeOrganizationModelAdmitted(
   return serving.some(
     (connection) =>
       servesOrganizationPool(connection) &&
-      subscriptionCoreConnectionAllowsModel(connection, productModelId),
+      subscriptionCoreConnectionAllowsModel(inPool(connection, "organization"), productModelId),
   );
 }
 
 /**
- * Whether a scheduled task's accepted Claude authority (0716's
- * `read_subscription_authority_compat` for its `scheduled_task` carrier)
- * lets an update re-admit an organization model on the core:
+ * The carrier whose accepted Claude authority an admission re-reads on the
+ * core, when the work it admits was accepted before this request:
  *
- * - a compatibility record (a task accepted before the cutover) admits only
- *   when its shared pool is the organization's;
- * - a task accepted after the cutover (`v2` or `none`: it has no record)
+ * - `session_initial`: a new session's initial authority (session creation);
+ * - `session_turn`: an edit's source turn, whose authority the edit copies;
+ * - `receiving_session`: agent-submitted work, which takes the receiving
+ *   session's accepted source (its execution-context turn, else its latest
+ *   turn, else its initial authority);
+ * - `scheduled_task`: a scheduled-task update.
+ *
+ * A human's own new work and a service actor's work carry none: they
+ * resolve the workspace's current source.
+ */
+export type SubscriptionCoreClaudeAdmissionCarrier =
+  | { kind: "session_initial"; sessionId: string }
+  | { kind: "session_turn"; turnId: string }
+  | { kind: "receiving_session"; sessionId: string }
+  | { kind: "scheduled_task"; scheduledTaskId: string };
+
+/**
+ * Whether a carrier's accepted Claude authority (0716's
+ * `read_subscription_authority_compat`) lets the core admit an organization
+ * model for it:
+ *
+ * - a compatibility record (a carrier accepted before the cutover) admits
+ *   only when its shared pool is the organization's;
+ * - a carrier accepted after the cutover (`v2` or `none`: it has no record)
  *   follows the same source rule as new work;
  * - anything else (not visible, `missing`, `v1`, an unknown answer, or a
  *   database without the reader) admits nothing.
  */
-export function subscriptionCoreClaudeTaskAuthorityAdmitsOrganization(compat: unknown): boolean {
+export function subscriptionCoreClaudeAcceptedAuthorityAdmitsOrganization(
+  compat: unknown,
+): boolean {
   if (compat === null || typeof compat !== "object" || Array.isArray(compat)) return false;
   const value = compat as { authority?: unknown; sharedPool?: unknown };
   if (value.authority === "record") return value.sharedPool === "organization";
   return value.authority === "v2" || value.authority === "none";
 }
 
-/** The task carrier's effective Claude authority, or null (not visible, or no reader). */
-async function readSubscriptionCoreClaudeTaskAuthority(
+/**
+ * The compatibility carrier of agent-submitted work: the receiving
+ * session's accepted source, as the v1 receiver authority reads it (its
+ * execution-context turn, else its latest accepted turn, else the session's
+ * initial authority). Null when the session is not visible.
+ */
+async function receivingSessionCarrier(
   tx: Database,
-  input: { workspaceId: string; scheduledTaskId: string },
+  input: { workspaceId: string; sessionId: string },
+): Promise<{ kind: "session_turn" | "session_initial"; id: string } | null> {
+  const [row] = await rawRows<{ kind: "session_turn" | "session_initial"; id: string }>(
+    tx,
+    sql`select case when coalesce(context_turn.id, latest_turn.id) is null
+          then 'session_initial' else 'session_turn' end as kind,
+        coalesce(context_turn.id, latest_turn.id, session.id)::text as id
+      from sessions session
+      left join session_turns context_turn
+        on context_turn.workspace_id = session.workspace_id
+        and context_turn.session_id = session.id
+        and context_turn.id = session.execution_context_turn_id
+      left join lateral (
+        select turn.id from session_turns turn
+        where turn.workspace_id = session.workspace_id and turn.session_id = session.id
+        order by turn.created_at desc, turn.position desc, turn.id desc
+        limit 1
+      ) latest_turn on true
+      where session.workspace_id = ${input.workspaceId}::uuid
+        and session.id = ${input.sessionId}::uuid`,
+  );
+  return row ? { kind: row.kind, id: row.id } : null;
+}
+
+/** The carrier's effective Claude authority, or null (not visible, or no reader). */
+async function readSubscriptionCoreClaudeAcceptedAuthority(
+  tx: Database,
+  input: { workspaceId: string; carrier: SubscriptionCoreClaudeAdmissionCarrier },
 ): Promise<unknown> {
   const [present] = await rawRows<{ present: boolean }>(
     tx,
@@ -406,11 +539,24 @@ async function readSubscriptionCoreClaudeTaskAuthority(
       ) is not null as present`,
   );
   if (present?.present !== true) return null;
+  const { carrier } = input;
+  const resolved =
+    carrier.kind === "receiving_session"
+      ? await receivingSessionCarrier(tx, {
+          workspaceId: input.workspaceId,
+          sessionId: carrier.sessionId,
+        })
+      : carrier.kind === "session_initial"
+        ? { kind: carrier.kind, id: carrier.sessionId }
+        : carrier.kind === "session_turn"
+          ? { kind: carrier.kind, id: carrier.turnId }
+          : { kind: carrier.kind, id: carrier.scheduledTaskId };
+  if (resolved === null || !UUID.test(resolved.id)) return null;
   const [row] = await rawRows<{ authority: unknown }>(
     tx,
     sql`select opengeni_private.read_subscription_authority_compat(
-        ${SUBSCRIPTION_CORE_CLAUDE_PROVIDER}, 'scheduled_task', ${input.workspaceId}::uuid,
-        ${input.scheduledTaskId}::uuid, null
+        ${SUBSCRIPTION_CORE_CLAUDE_PROVIDER}, ${resolved.kind}, ${input.workspaceId}::uuid,
+        ${resolved.id}::uuid, null
       ) as authority`,
   );
   return row?.authority ?? null;
@@ -425,8 +571,11 @@ async function readSubscriptionCoreClaudeTaskAuthority(
  * - the transaction's subject must be established by the admission caller
  *   (as on the legacy route); it is never replaced by a session creator and
  *   no person is inferred for a service actor;
- * - a scheduled-task update first reads the task's accepted authority
- *   (`subscriptionCoreClaudeTaskAuthorityAdmitsOrganization`);
+ * - work accepted before this request (a carrier: a new session's initial
+ *   authority, an edit's source turn, the receiving session of
+ *   agent-submitted work, a scheduled task) first reads that accepted
+ *   authority (`subscriptionCoreClaudeAcceptedAuthorityAdmitsOrganization`);
+ *   without the reader nothing is admitted;
  * - then the workspace's effective Claude source must admit organization
  *   connections and a live organization-pool connection must admit the model.
  */
@@ -436,7 +585,7 @@ export async function subscriptionCoreClaudeCustomModelAdmitted(
     accountId: string;
     workspaceId: string;
     upstreamModelId: string;
-    claudeAuthority: { sessionId: string } | { scheduledTaskId?: string };
+    carrier: SubscriptionCoreClaudeAdmissionCarrier | null;
   },
 ): Promise<boolean> {
   const [scope] = await rawRows<{ subjectId: string | null }>(
@@ -444,14 +593,12 @@ export async function subscriptionCoreClaudeCustomModelAdmitted(
     sql`select nullif(current_setting('opengeni.subject_id', true), '') as "subjectId"`,
   );
   if (!scope?.subjectId) return false;
-  const taskId =
-    "scheduledTaskId" in input.claudeAuthority ? input.claudeAuthority.scheduledTaskId : undefined;
   if (
-    taskId !== undefined &&
-    !subscriptionCoreClaudeTaskAuthorityAdmitsOrganization(
-      await readSubscriptionCoreClaudeTaskAuthority(tx, {
+    input.carrier !== null &&
+    !subscriptionCoreClaudeAcceptedAuthorityAdmitsOrganization(
+      await readSubscriptionCoreClaudeAcceptedAuthority(tx, {
         workspaceId: input.workspaceId,
-        scheduledTaskId: taskId,
+        carrier: input.carrier,
       }),
     )
   )

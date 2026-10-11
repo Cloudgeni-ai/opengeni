@@ -10,7 +10,10 @@ import { and, count, eq, exists, inArray, isNull, sql } from "drizzle-orm";
 import { type Database, rawRows, setSubjectRlsContext, withRlsContext } from "./database";
 import { workspaceClaudeSubscriptionActiveForAuthority } from "./claude-subscription-accounts";
 import { SUBSCRIPTION_CORE_CLAUDE_PROVIDER } from "./subscription-core-claude-adapter";
-import { subscriptionCoreClaudeCustomModelAdmitted } from "./subscription-core-claude-reads";
+import {
+  subscriptionCoreClaudeCustomModelAdmitted,
+  type SubscriptionCoreClaudeAdmissionCarrier,
+} from "./subscription-core-claude-reads";
 import { readSubscriptionCoreProviderRoute } from "./subscription-core/provider-route";
 import { decryptEnvironmentValue } from "./environment-crypto";
 import { defaultModelRequestHash } from "./model-catalog";
@@ -52,7 +55,27 @@ export type OrganizationClaudeModelAdmissionAuthority =
        * of the v1 snapshot; ignored on the legacy route.
        */
       scheduledTaskId?: string;
+      /**
+       * The accepted source a fresh prompt copies: an edit's source turn, or
+       * the receiving session of agent-submitted work. On Claude's core
+       * route its accepted authority decides; ignored on the legacy route
+       * (the snapshot already carries it). Absent for a human's own new work
+       * and for service actors, which resolve the current source.
+       */
+      acceptedSource?:
+        | { kind: "session_turn"; turnId: string }
+        | { kind: "receiving_session"; sessionId: string };
     };
+
+/** The carrier whose accepted authority Claude's core route reads for an admission. */
+function claudeAdmissionCarrier(
+  authority: OrganizationClaudeModelAdmissionAuthority,
+): SubscriptionCoreClaudeAdmissionCarrier | null {
+  if ("sessionId" in authority) return { kind: "session_initial", sessionId: authority.sessionId };
+  if (authority.scheduledTaskId !== undefined)
+    return { kind: "scheduled_task", scheduledTaskId: authority.scheduledTaskId };
+  return authority.acceptedSource ?? null;
+}
 
 export class OrganizationModelProviderConflictError extends Error {}
 export class OrganizationModelProviderLimitError extends Error {}
@@ -523,7 +546,7 @@ export async function lockActiveOrganizationModelProviderCustomModelForAdmission
             accountId: input.accountId,
             workspaceId: input.workspaceId,
             upstreamModelId: input.upstreamModelId,
-            claudeAuthority: input.claudeAuthority,
+            carrier: claudeAdmissionCarrier(input.claudeAuthority),
           }))
         )
           return null;

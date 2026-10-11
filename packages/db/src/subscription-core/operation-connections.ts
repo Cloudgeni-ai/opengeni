@@ -105,6 +105,12 @@ export type SubscriptionCoreUsageProbe =
       response: unknown;
       /** The recorded observation, or null when the response carried none. */
       quota: SubscriptionQuota | null;
+      /**
+       * The observation was written to the connection's quota (false when the
+       * response carried none, the refresh-generation fence refused it, or
+       * the write failed).
+       */
+      applied: boolean;
       /** The observation ended a stored exhaustion (the caller wakes waiters). */
       recovered: boolean;
     };
@@ -485,11 +491,17 @@ export const subscriptionCoreOperationConnections = memoByProvider(
         refreshGeneration: prepared.current().credentialVersion,
         ...(deps.modelIds ? { modelIds: deps.modelIds } : {}),
       });
-      if (!quota) return { kind: "read", response, quota: null, recovered: false };
+      if (!quota) return { kind: "read", response, quota: null, applied: false, recovered: false };
       const applied = await operations()
         .recordSubscriptionCoreUsageObservation(db, scope, connectionId, quota)
         .catch(() => ({ applied: false, recovered: false }));
-      return { kind: "read", response, quota, recovered: applied.recovered };
+      return {
+        kind: "read",
+        response,
+        quota,
+        applied: applied.applied,
+        recovered: applied.recovered,
+      };
     }
 
     /** The live model catalog of one shared connection through the adapter. */

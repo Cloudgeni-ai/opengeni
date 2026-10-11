@@ -57,8 +57,15 @@ export type SubscriptionCoreServingConnection = {
    * The workspace assignment policies of the effective inference source; null
    * when none apply (personal, or a shared connection classified by
    * management). Placement requires one of them to admit the model.
+   * `inferencePool` names the pool each policy belongs to, so a caller that
+   * reads one pool (a provider's per-pool model prefix) applies only that
+   * pool's policies.
    */
-  assignments: Array<{ allowedModelIds: string[] | null; excludedModelIds: string[] }> | null;
+  assignments: Array<{
+    allowedModelIds: string[] | null;
+    excludedModelIds: string[];
+    inferencePool?: "workspace" | "organization";
+  }> | null;
   /**
    * The inference pools of this workspace that the connection serves under
    * the effective source: its applicable assignment policies' pools, or,
@@ -273,6 +280,7 @@ export async function listSubscriptionCoreServingConnections(
             ? applicable.map((policy) => ({
                 allowedModelIds: policy.allowedModelIds,
                 excludedModelIds: policy.excludedModels,
+                inferencePool: policy.inferencePool,
               }))
             : null,
           pools: classified

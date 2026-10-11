@@ -63,11 +63,11 @@ export async function claudeUsageRoute(
 }
 
 /**
- * The stored projection of a connection this context cannot read live (a
+ * The stored projection of a connection this context cannot read live yet (a
  * personal connection, or the organization path, which has no workspace
- * context for the credential seam). Nothing is refreshed: like the Codex
- * core usage routes, an unreadable connection reports no new data, and its
- * refresh status is `unavailable` (never `available` for a read that did not
+ * context for the core credential seam; design 5.3, C2a: a gap awaiting a
+ * decision before Claude's cutover). Nothing is refreshed and its refresh
+ * status is `unavailable` (never `available` for a read that did not
  * happen), unless the connection itself needs a new sign-in or lacks the
  * usage scope.
  */

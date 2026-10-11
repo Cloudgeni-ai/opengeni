@@ -647,14 +647,15 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
             grant.subjectId,
           )),
       })),
-      claudeCore.then(async (core) =>
-        core
-          ? { workspace: core.workspace, organization: core.organization }
-          : await loadWorkspaceClaudeSubscriptionReadiness(deps.db, resolvedCatalog.settings, {
-              accountId: grant.accountId,
-              workspaceId,
-              subjectId: grant.subjectId,
-            }),
+      // The route read above decides for both Claude readers (read once).
+      claudeCore.then(
+        async (core) =>
+          await loadWorkspaceClaudeSubscriptionReadiness(
+            deps.db,
+            resolvedCatalog.settings,
+            { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
+            core,
+          ),
       ),
       listConnectionsMetadata(deps.db, workspaceId, null),
       listWorkspaceProviderCustomModelsByKind(deps.db, {

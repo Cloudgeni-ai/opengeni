@@ -16,11 +16,13 @@
  *   caller's catalog lists (`modelIds`), so a model-family window becomes a
  *   cooldown of each listed model of the family.
  * - `projectSubscriptionCoreClaudeUsage` maps a stored core quota back to the
- *   legacy window shape. `scope_required` and `reconnect` are response
- *   values derived from the connection, never stored: `reconnect` while the
- *   connection needs a new sign-in, `scope_required` when the adapter-owned
- *   `provider_state.oauthScopes` (written by the connect writers; `[]` for a
- *   setup token, absent when unknown) lacks `user:profile`.
+ *   legacy window shape, with the connection's row `version` as the
+ *   credential version (the account listing's `version`). `scope_required`
+ *   and `reconnect` are response values derived from the connection, never
+ *   stored: `reconnect` while the connection needs a new sign-in,
+ *   `scope_required` when the adapter-owned `provider_state.oauthScopes`
+ *   (written by the connect writers; `[]` for a setup token, absent when
+ *   unknown) lacks `user:profile`.
  */
 import { parseClaudeUsageResponse, type ClaudeUsageObservation } from "@opengeni/config";
 import {
@@ -29,7 +31,12 @@ import {
   type ClaudeUsageWindow,
 } from "@opengeni/contracts";
 import { readResponseJsonBounded } from "@opengeni/network";
-import type { SubscriptionCoreConnectionRead, SubscriptionQuota } from "@opengeni/subscriptions";
+import {
+  quotaCapacity,
+  type QuotaWindow,
+  type SubscriptionCoreConnectionRead,
+  type SubscriptionQuota,
+} from "@opengeni/subscriptions";
 import {
   decodeSubscriptionCoreClaudeQuota,
   SUBSCRIPTION_CORE_CLAUDE_MODEL_PREFIXES,
@@ -158,6 +165,12 @@ export type SubscriptionCoreClaudeUsageRow = {
   quota_revision: number | string | null;
   quota_observed_refresh_generation: number | string | null;
   quota_updated_at: Date | string | null;
+  /**
+   * The connection's row version (the account listing's `version`): the
+   * shared connection reads select it; a personal row gets it from the
+   * owner-only version reader. Required: the projection throws without it.
+   */
+  version?: number | string;
 };
 
 /** A live refresh outcome to report instead of the one derived from the row. */
@@ -182,12 +195,68 @@ export function subscriptionCoreClaudeUsageScopeMissing(
   );
 }
 
-const WINDOW_STATUS: Record<string, ClaudeUsageWindow["status"]> = {
-  exhausted: "rejected",
-  warning: "allowed_warning",
-  ok: "allowed",
-  unknown: null,
+/** A connection row without a usable row version (never reported as 0 or null). */
+export class SubscriptionCoreClaudeUsageVersionMissing extends Error {
+  constructor() {
+    super("Claude usage needs the connection's row version");
+  }
+}
+
+/** The row version a usage response reports; throws when the row has none. */
+export function subscriptionCoreClaudeUsageVersion(row: { version?: number | string }): number {
+  const version = row.version === undefined ? Number.NaN : Number(row.version);
+  if (!Number.isSafeInteger(version) || version < 1)
+    throw new SubscriptionCoreClaudeUsageVersionMissing();
+  return version;
+}
+
+// The upstream model families of the family windows (the adapter's decoder).
+const FAMILY_PREFIXES: Partial<Record<ClaudeUsageWindow["id"], string>> = {
+  seven_day_opus: "claude-opus-",
+  seven_day_sonnet: "claude-sonnet-",
 };
+
+/**
+ * The legacy status of one stored window:
+ *
+ * - a window the core holds as exhausted is `rejected`, whatever reading it
+ *   came from (a partial reading may have kept it from an earlier one);
+ * - after a usage-endpoint reading every other window is null, as legacy
+ *   usage-endpoint windows were;
+ * - after a response-header reading `ok` and `warning` map back to
+ *   `allowed` and `allowed_warning`; the decoder stores family and overage
+ *   windows as `unknown` (they never block the connection), so their
+ *   header `rejected` is derived: a family window while a model of its
+ *   family is cooling down, the overage window while the connection itself
+ *   is exhausted (an overage that covered the plan would have kept it
+ *   serving). Anything else is null.
+ */
+function windowStatus(
+  window: QuotaWindow,
+  quota: SubscriptionQuota,
+  now: number,
+): ClaudeUsageWindow["status"] {
+  if (window.status === "exhausted") return "rejected";
+  if (quota.source === "usage_endpoint") return null;
+  if (window.status === "ok") return "allowed";
+  if (window.status === "warning") return "allowed_warning";
+  const running = window.resetsAt === null || window.resetsAt > now;
+  const family = FAMILY_PREFIXES[window.id as ClaudeUsageWindow["id"]];
+  if (family !== undefined)
+    return running &&
+      Object.entries(quota.modelCooldowns).some(
+        ([modelId, until]) =>
+          until > now &&
+          subscriptionCoreClaudeUpstreamModelIds([modelId]).some((upstream) =>
+            upstream.startsWith(family),
+          ),
+      )
+      ? "rejected"
+      : null;
+  if (window.id === "overage")
+    return running && quotaCapacity(quota, now).kind === "exhausted" ? "rejected" : null;
+  return null;
+}
 
 function iso(value: number | null): string | null {
   if (value === null || !Number.isFinite(value)) return null;
@@ -196,20 +265,30 @@ function iso(value: number | null): string | null {
 }
 
 /**
- * One core connection's stored quota as the legacy usage response. The
- * credential version is the refresh generation the quota was observed with;
- * windows keep the legacy ids, percentages and ISO resets, with the core
- * status mapped back (exhausted to rejected, warning to allowed_warning, ok
- * to allowed, unknown to null). The refresh status is `reconnect` while the
- * connection needs a new sign-in; else `refresh` when given (a live read
- * decides by the credential it decoded); else `scope_required` when
- * `provider_state.oauthScopes` lacks the usage scope, `available` for a
- * stored usage-endpoint reading and `not_checked` otherwise.
+ * One core connection's stored quota as the legacy usage response.
+ *
+ * - `credentialVersion` is the connection's row version (the account
+ *   listing's `version`; it moves on reconnect and rename, never on a token
+ *   refresh). A row without one throws: a connected account never reports 0
+ *   or null.
+ * - Windows keep the legacy ids, percentages and ISO resets; every stored
+ *   window stays visible whatever credential generation observed it (as
+ *   legacy kept them across token refreshes). Statuses: see `windowStatus`.
+ *   The shared quota keeps no per-window time or source, so each window
+ *   carries the newest observation's.
+ * - The refresh status is `reconnect` while the connection needs a new
+ *   sign-in; else `refresh` when given (a live read decides by the
+ *   credential it decoded); else `scope_required` when
+ *   `provider_state.oauthScopes` lacks the usage scope, `available` when the
+ *   newest stored observation is a usage-endpoint reading and `not_checked`
+ *   otherwise.
  */
 export function projectSubscriptionCoreClaudeUsage(
   row: SubscriptionCoreClaudeUsageRow,
   refresh?: SubscriptionCoreClaudeUsageRefresh,
 ): ClaudeSubscriptionUsage {
+  const credentialVersion = subscriptionCoreClaudeUsageVersion(row);
+  const now = Date.now();
   const quota = decodeSubscriptionQuota(row);
   const observedAt = iso(quota?.observedAt ?? null);
   const source =
@@ -220,7 +299,8 @@ export function projectSubscriptionCoreClaudeUsage(
         : ("response_headers" as const);
   const seen = new Set<string>();
   const windows: ClaudeUsageWindow[] = [];
-  for (const window of observedAt === null ? [] : (quota?.windows ?? [])) {
+  const stored = observedAt === null ? null : quota;
+  for (const window of stored?.windows ?? []) {
     const id = ClaudeUsageWindowId.safeParse(window.id);
     if (!id.success || seen.has(id.data)) continue;
     seen.add(id.data);
@@ -233,12 +313,11 @@ export function projectSubscriptionCoreClaudeUsage(
           ? window.usedPercent
           : null,
       resetsAt: iso(window.resetsAt),
-      status: WINDOW_STATUS[window.status] ?? null,
+      status: windowStatus(window, stored!, now),
       observedAt: observedAt!,
       ...(source ? { source } : {}),
     });
   }
-  const generation = quota?.observedRefreshGeneration ?? null;
   const derived: SubscriptionCoreClaudeUsageRefresh =
     row.status === "needs_relogin"
       ? { status: "reconnect", checkedAt: refresh?.checkedAt ?? null }
@@ -249,9 +328,10 @@ export function projectSubscriptionCoreClaudeUsage(
             ? { status: "available", checkedAt: observedAt }
             : { status: "not_checked", checkedAt: null }));
   return {
-    connected: row.status !== "disconnected",
-    credentialVersion:
-      generation !== null && Number.isSafeInteger(generation) && generation > 0 ? generation : null,
+    // Every row a usage route can read is connected: the readers return no
+    // disconnected connection.
+    connected: true,
+    credentialVersion,
     windows,
     observedAt: windows.length > 0 || source !== null ? observedAt : null,
     source,

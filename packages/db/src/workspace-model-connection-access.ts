@@ -26,9 +26,13 @@ export type ConnectionModelRestrictions = Record<string, string[] | null>;
 
 /** Claude's two model restrictions, as its core route projects them. */
 export type ClaudeCoreModelRestrictions = {
-  "organization-claude-subscription/": string[] | null;
-  "workspace-claude-subscription/": string[] | null;
+  readonly "organization-claude-subscription/": readonly string[] | null;
+  readonly "workspace-claude-subscription/": readonly string[] | null;
 };
+
+/** A mutable copy of one core restriction (the core's answers may be frozen). */
+const copied = (restriction: readonly string[] | null) =>
+  restriction === null ? null : [...restriction];
 
 /** Metadata-only read under the caller's workspace and subject RLS scope. */
 async function listDirectModelConnections(db: Database, workspaceId: string, subjectId: string) {
@@ -144,7 +148,7 @@ export async function getWorkspaceConnectionModelRestrictions(
     "workspace-opper/": [],
     "workspace-anthropic/": [],
     "workspace-claude-subscription/": claudeCoreRestrictions
-      ? claudeCoreRestrictions["workspace-claude-subscription/"]
+      ? copied(claudeCoreRestrictions["workspace-claude-subscription/"])
       : claudeAuthority?.scope === "organization"
         ? []
         : claudeModels,
@@ -153,7 +157,7 @@ export async function getWorkspaceConnectionModelRestrictions(
     "organization-opper/": [],
     "organization-anthropic/": [],
     "organization-claude-subscription/": claudeCoreRestrictions
-      ? claudeCoreRestrictions["organization-claude-subscription/"]
+      ? copied(claudeCoreRestrictions["organization-claude-subscription/"])
       : claudeAuthority?.scope === "organization"
         ? claudeModels
         : [],
