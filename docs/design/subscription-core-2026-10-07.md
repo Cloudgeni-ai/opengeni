@@ -77,11 +77,15 @@ provider adapters                 codex (packages/codex), xai (packages/xai-subs
 
 API-key connectors implement `provider`, `capabilities`, `transport`,
 `classifyError`, `cacheFacts`, `entitledModels` and `historyCompatibility`
-with a static credential and no quota windows. They are stored as
+with a static credential, no refresh and no provider quota windows (a spend
+budget or a rate limit is recorded in the shared quota model, §5.3). They are
+stored as
 connections with `kind = api_key` in the same table, which makes them
 failover targets and gives non-agent consumers one way to obtain a model
 credential. Moving the existing API-key connection tables is a separate,
-later step.
+later step. How one plugs into the shared core without core changes (what
+it implements, what it stores, what the core does) is in §5.3, "API-key
+connectors on the shared core"; a test-only connector proves it.
 
 ### 2.2 Shared quota model
 
@@ -2141,10 +2145,12 @@ a provider name.
   row and, where needed, widens the provider lists in existing CHECK
   constraints; the neutral routines need no change for another subscription
   provider, while the deferred routines listed below still carry
-  per-provider branches that its step must extend. The neutral routines, like
-  their Codex twins, accept only `kind = 'subscription'` connections; an
-  API-key connector's step widens that filter from data (a registry column
-  naming the connection kind), never by a provider branch. A provider's
+  per-provider branches that its step must extend. The neutral routines
+  manage only connections of the kind the registry row names
+  (`connection_kind`, `subscription` or `api_key`, immutable once
+  registered; step F, migration 0714), read through the owner-only
+  `subscription_core_connection_kind(provider)`, never by a provider branch;
+  their Codex twins still accept only `kind = 'subscription'`. A provider's
   registry row must land with or after its drained
   cutover: the row alone turns on the shared disconnect-admission trigger for
   that provider's lease and binding rows, whatever its cutover row says.
@@ -2304,19 +2310,21 @@ compatibility, refresh and quota decoding, §2.1):
 - `credentialKind`: `oauth`, `setup_token` or `api_key`;
 - `quotaKind`: `usage_windows`, `spend_budget` or `rate_limits`;
 - `cacheFacts` (exact TTL or a measured idle cut-off);
-- `health`: forbidden-quarantine and entitlement-cooldown durations;
+- `health`: forbidden-quarantine and entitlement-cooldown durations, and
+  the fallbacks `rateLimitFallbackMs` and `exhaustedFallbackMs` for a refusal
+  that names no time (step F);
 - `credential`: `decode`/`encode` of the decrypted plaintext (fixed error
-  text, never echoing it) and `expiry` (the embedded expiry when the store has
-  none);
+  text, never echoing it), `expiry` (the embedded expiry when the store has
+  none) and `format` (PR 0, read with `capabilitiesFor`);
 - `refresh`: `CredentialRefresher` (`windowMs`, `fallbackMs`, `rotate`,
   `reloginMessage` classifying a permanent refusal) or `null` for credentials
   that never renew;
 - `reloginText(message)`: the stored needs-relogin text.
 
-`credentialKind`, `quotaKind` and `health.entitlementCooldownMs` are declared
-facts the Codex runtime does not read yet; they are reserved for the steps
-named below that wire API-key credentials, spend-budget quota and the shared
-settlement. The core reads `capabilities.extraCredits`: the placement world
+`credentialKind` decides the connection kind the shared writers,
+administration and placement manage (`subscriptionCoreConnectionKind`, step
+F). `quotaKind` is a declared fact; `health` is read by the shared settlement
+step (step F), which the live Codex worker does not use yet. The core reads `capabilities.extraCredits`: the placement world
 clears `extraCreditsEnabled` for a provider without it, so the pure policy
 (`eligibility.ts`, `reference-model.ts`) no longer tests a provider id.
 
@@ -2355,35 +2363,36 @@ which are still Codex-named or missing today:
   `quotaWindows: false`; their models (possibly many vendors') come from the
   adapter's entitled-model catalog into the shared catalog cache. A refusal
   the adapter classifies as rate-limited cools the model or source down
-  exactly as a subscription window does. A later step adds a fake API-key
-  adapter conformance test.
+  exactly as a subscription window does. Step F proves this with a test-only
+  connector (§5.3, "API-key connectors on the shared core").
 
 Still Codex-named or missing, and owned by the provider steps (or by the
 shared settlement step they share) rather than by this extraction:
 
 - worker settlement (`apps/worker/src/activities/agent-turn/codex-core-settlement.ts`):
-  refusal classification into quarantine, model cooldown and quota writes is
-  Codex-specific code in the worker; it moves behind an adapter
-  `classifyError` hook (unifying `SubscriptionCoreAdapter` with
-  `SubscriptionProviderAdapter.classifyError`);
+  refusal settlement into quarantine, model cooldown and quota writes is
+  Codex-specific code in the worker. Step F adds the shared step
+  (`planSubscriptionCoreRefusal`, `subscriptionCoreSettlement`) that the
+  worker adopts, with the connector's `classifyError` feeding it (§5.3,
+  decision 5);
 - capacity waits and wake delivery, the usage fetch, operation candidate
   ordering and the API routes, which call Codex-named wrappers over the
-  shared core;
-- quota decoding: a `decodeQuota`/usage-probe hook on the adapter and a
-  spend-budget quota shape (`quotaKind` is only declared today);
-- a `video` operation kind (the 0691 operation-kind CHECK and
-  `SubscriptionOperationKind` list image, realtime and transcription);
+  shared core (the conformance suite drives the shared waiter repository
+  directly, not the Codex-named arming wrapper);
+- quota decoding: a `decodeQuota`/usage-probe hook on the adapter (PR 0
+  adds an optional `fetchUsage`); a spend budget is one usage window of the
+  shared quota model (§5.3);
+- resolved in PR 0: a `video` operation kind (the 0691 operation-kind CHECK
+  and `SubscriptionOperationKind` listed only image, realtime and
+  transcription);
 - per-model cache facts and model-policy provider ids for an adapter that
   serves several vendors' models (`cacheFacts` and `modelPolicyProviderId`
   are per adapter today);
-- connection administration for API-key connectors: the shared writers
-  (administration, connect and disconnect) and the neutral SQL routines only
-  manage `kind = 'subscription'` rows, and the shared connect requires an
-  upstream account id and person id to tell logins apart, which an API key
-  does not have. Placement and the serving catalog already read rows of
-  both kinds, so the API-key step either widens the writers' kind filter
-  with an identity rule for keys (for example a key fingerprint) or keeps
-  API-key rows out of the core until it does.
+- resolved in step F: connection administration for API-key connectors. The
+  shared writers and the neutral SQL routines manage the kind the binding
+  declares (`subscriptionCoreConnectionKind`, from `credentialKind`) and the
+  registry row records; the identity rule for keys is the adapter's
+  (§5.3, "API-key connectors on the shared core").
 
 Registry. `packages/db/src/subscription-core-providers.ts` is the only module,
 besides adapters, that enumerates providers. Its bindings are a private frozen
@@ -2406,8 +2415,13 @@ is matched case-sensitively) or branches on a provider: a comparison with a
 literal on either side or with a named constant, a `switch` or `case` on a
 provider, `[...].includes(provider)`, an object literal indexed by a provider,
 `startsWith` on a provider id, and SQL `= any('{...}')`, `is distinct from`
-or `provider_id` comparisons. It also fails when the TypeScript registry and
-the SQL registry rows differ. It is line-based: a conditional split across
+or `provider_id` comparisons. It fails when a shared module names a
+connection kind by literal (`"subscription"`, `'api_key'`) anywhere but a
+comment, a union type or the one mapping from the adapter's credential kind
+in `subscription-core/provider.ts`. It also fails when the TypeScript registry
+and the SQL registry rows differ, in providers or in each provider's
+`connection_kind` (an insert that omits the column registers `subscription`).
+It is line-based: a conditional split across
 lines in an unusual shape can evade it, so review still checks for provider
 logic in shared modules.
 
@@ -2980,7 +2994,7 @@ repository's complex-change review policy.
 | X3. SuperGrok drained cutover | Codec stage, data move, compatibility records, parity report, receipt, switch rows enabled; role provisioning and the posture contract stop granting legacy writes; runbook section. | maintenance |
 | X4. SuperGrok legacy deletion | Removes the xAI selector arm, factory repository use, v1 xAI readers and writers, xAI use of `ScopedSubscriptionTurnLease`, the video envelope code and the shadow; extends the guard below to xAI. Merges only with the `compat:dependent_sources_without_record` copy-path test green. | rolling |
 | C1a, C1b, C2a, C2b, C3, C4. Claude | The same steps. C1b reads core turn-failure receipts in place of `claudeAuthRecovery`; C2a covers the usage routes; C2b covers the OAuth and setup-token writers; C3 converts live `claudeAuthRecovery` values and includes the combined-window ledger test; C4 deletes the Claude arm, `claude_subscription_account_usage` use and the dead connection-based usage code. | as X1a..X4 |
-| F. Fake API-key adapter conformance | A test-only adapter (`kind = api_key`, static credential, no quota windows, no refresh) driven through the same core placement, lease, failover and wait paths as subscriptions and compared with the reference model; scripted local upstream and a network-denial guard. No production table or route. | test only |
+| F. Fake API-key adapter conformance | A test-only adapter (`kind = api_key`, static credential, no quota windows, no refresh) driven through the same core placement, lease, failover and wait paths as subscriptions and compared with the reference model; scripted local upstream and a network-denial guard. No production table, provider row or route; one migration (0715) makes the neutral routines read the connection kind from the provider registry. Lands after PR 0. See "API-key connectors on the shared core" below. | rolling (the connector is test only) |
 | W. Workspace-managed connections as organization accounts | [§5.4](#54-workspace-managed-connections-as-organization-accounts): 0714 lets the provider-keyed reach setters accept a connection managed by a shared workspace, makes the reach reader report the reach row's switch and list, and adds `set_subscription_core_reach_allocator` (organization administrators only); the organization access editor reads and saves its reach (people scope only for unmanaged accounts); the Accounts page change ships separately after owner approval. Applies to SuperGrok and Claude through X3 and C3, which map workspace credentials into the same shape. | rolling (no row changes) |
 | R. Retirement | A forward migration drops the retired SQL routines, triggers and policies listed below; `subscriptionPoolWorkerSubject` and its users are removed; posture inventories are updated. Historical migrations, legacy tables and columns, v1 CHECK validators and column-immutability triggers stay until M6. | maintenance (exact posture contract) |
 
@@ -3360,7 +3374,270 @@ Decisions, each the strictest fail-closed reading of the plan and contract:
   the API-key connectors.
 - **Migration tests.** Tests that withhold 0689 also withhold 0713, which
   alters objects 0689 creates, and replay it after 0689; the neutral-routine
-  test replays 0707, 0712 and 0713 together.
+  test replays 0707, 0712, 0713, 0714 and 0715 together.
+
+#### API-key connectors on the shared core
+
+Step F proves that an API-key connector (OpenRouter, Vercel AI Gateway) joins
+the shared core with an adapter and data only. A test-only connector,
+`conformance_api_key`, passes the same conformance suite as the registered
+Codex binding on real PostgreSQL as `opengeni_app`
+(`packages/db/test/subscription-core-fake-api-key-conformance-postgres.test.ts`
+and `subscription-core-codex-conformance-postgres.test.ts`). It is registered
+only inside that test process and test database.
+
+What a real connector implements:
+
+- the adapter (`SubscriptionCoreAdapter`): `credentialKind: "api_key"`,
+  `quotaKind` `spend_budget` or `rate_limits`, `refresh: null`; capabilities
+  with `autoRenews`, `quotaWindows` and `extraCredits` false, the same for its
+  one credential format through `capabilitiesFor`; `credential.decode`,
+  `encode`, `expiry` (null) and `format` for its stored secret (for example
+  `{ apiKey }`); `health` durations (forbidden quarantine, entitlement
+  cooldown, and the fallbacks `rateLimitFallbackMs` and `exhaustedFallbackMs`
+  for a refusal that names no time), `cacheFacts`, `modelPolicyProviderId`
+  and `reloginText`;
+- the database binding: `settings.primaryColumn: null` (no primary
+  connection: the shared setter refuses with
+  `subscription_core_primary_unsupported`), no compaction lock, the default
+  errors, no allocator hook;
+- outside the binding, in the connector's step: a sign-in that validates the
+  pasted key upstream and returns its identity (below); a transport with
+  request-local bearer authorization; `classifyError` into the shared
+  outcomes, reading the response body as well as the status, and never
+  the HTTP client's error class (Vercel warns that its AI SDK can surface a
+  budget 402 as `GatewayInternalServerError`, which would read as
+  `transient`). The mapping:
+  - 429 to `rate_limited(retryAfter)`.
+  - A spent key, budget or credit limit to `exhausted(resetAt)`:
+    - OpenRouter: a 403 whose `error.metadata.limit_source` is
+      `openrouter_key_limit`, `openrouter_workspace_budget` or
+      `openrouter_guardrail_budget`, with `resets_at` (an ISO 8601 string;
+      null for a lifetime limit) parsed as the reset.
+    - OpenRouter: a 402 for `openrouter_key_limit` or a balance that cannot
+      cover the request, with no reset in the body (the key's `limit_reset`
+      from `GET /api/v1/key` names only a period).
+    - Vercel AI Gateway: a 402 with `error.type: quota_for_entity_exceeded`
+      and no reset in the body, or the budget's refresh boundary (midnight
+      UTC, Monday, the 1st, or never) when the connector knows which budget
+      refused.
+  - OpenRouter's 402 for a full in-flight budget
+    (`limit_source: openrouter_in_flight_budget`) to `rate_limited` with its
+    `Retry-After` delay: it is transient.
+  - OpenRouter's 402 for one request too expensive for the whole budget
+    (`reason: weight_exceeds_budget`) to `fatal`: retrying cannot help and
+    smaller requests still fit.
+  - 401 to `unauthorized`.
+  - A block of the one request to `fatal`, which neither fails over nor
+    changes health. For OpenRouter that is a 403 with no `limit_source` that
+    carries a guardrail's `error.metadata.patterns`, a moderation flag's
+    `reasons`, or `error_type` `content_policy_violation` or `refusal`.
+  - Only a refusal of the key itself to `forbidden`.
+  - A model the key cannot use to `entitlement_missing(model)`.
+  - A limit on one model to `rate_limited` or `exhausted` with that
+    `modelId`.
+  - A busy upstream to `overloaded`, and a server error to `transient`.
+  - Null for what it cannot classify, such as a lost connection.
+
+  The step also adds a usage reading into the shared quota model, and the
+  key's live model catalog (upstream ids of any number of vendors).
+
+What it stores: `subscription_connections` rows with `kind = 'api_key'`, the
+encrypted secret in `credential_encrypted`, `expires_at` NULL and its own
+`provider_state`. A spend budget is one usage window (`id: "spend_budget"`,
+`usedPercent` = spent / limit, `resetsAt` = end of the budget period or
+null). Refusals are recorded by the shared settlement step (decision 5): a
+rate limit is `exhaustedUntil` = now + retry delay (`exhaustedKind:
+"rate_limit"`, `rateLimitFallbackMs` when the upstream gives none); an
+exhausted budget with a known reset is `exhaustedUntil` = reset (`"quota"`,
+authoritative); one without a known reset is an exhausted window
+(`exhausted_without_reset`) that resets after `exhaustedFallbackMs`, so
+placement retries the key then even without a usage reading, and a usage
+reading that shows capacity replaces it sooner (a reading never shortens an
+`exhaustedUntil`); a limit on one model is that model's cooldown on the
+connection. Its step's
+migration inserts the registry row (`connection_kind = 'api_key'`,
+`primary_setting_column` NULL, `extra_credits` false) and the cutover receipt
+(PR 0), and adds the provider id to the provider lists that still enumerate
+providers: the CHECK constraints whose `ARRAY[...]` lists end in `'xai'` and
+`subscription_personal_authority_v2_valid` (the harness function
+`admitTestSubscriptionCoreProvider` performs and returns exactly this list).
+It also extends the provider-to-attribute mapping that emits `model.connected`
+on a core connection insert (`capture_product_lifecycle_fact`, 0712 part 6,
+which lists only `codex`, `xai` and `claude`) with the provider id and its
+legacy attribute (`openrouter`, `vercel_gateway`); without it a connector
+moved onto the core silently stops a lifecycle fact the legacy table emits
+today. The test harness admits no lifecycle mapping, since the conformance
+suite does not capture lifecycle facts.
+In TypeScript it adds the binding to `subscription-core-providers.ts` and the
+id to `SubscriptionPersonalAuthorityV2`.
+
+What the core does, unchanged: connect, reconnect and disconnect through the
+shared writers; organization access and reach through the shared access
+editor and `set_subscription_core_reach`, with a new workspace assigned from
+the reach row; placement with shared scopes, ownerless sessions shared-only,
+personal connections only for the owner's private session or Personal
+workspace with the exact frozen owner membership and current authority
+generation, and spread; generation-fenced leases; per-lease credential load;
+request reservation and settlement, with an unknown outcome never replayed;
+the refusal count that bounds failover; quota observations, and a durable wait
+at the earliest reset of rate limits and budgets, its wake outbox and resume;
+forbidden quarantine and recovery; model cooldowns; observed-catalog
+entitlement; no failover and no health change for an overloaded, failed or
+lost request (a lost one blocks every later request of the turn). A refused
+key becomes `needs_relogin` at once (a sign-in quarantine), because the core
+never refreshes a credential whose format does not renew; a renewable
+credential is refreshed once and retried on the same connection first.
+
+Decisions:
+
+1. Connection kind is registry data. `subscription_core_providers` gains an
+   immutable `connection_kind` (`subscription` default, or `api_key`); the
+   sixteen neutral routines that named a kind (fourteen from 0707 and the
+   organization reach setter and reach allocator setter as 0714 defines
+   them), plus the two personal reads
+   that did not (personal management's target lookup and the personal
+   connect's authority generation), read it through the owner-only
+   `subscription_core_connection_kind(provider)` (0715, rewritten from their
+   live definitions by anchored replacement; the neutral-routines test pins
+   each routine's count of registered-kind reads), and the TypeScript writers
+   derive it from the adapter's `credentialKind`
+   (`subscriptionCoreConnectionKind`). A binding-gate test requires the two to
+   agree. Core placement, the serving catalog, a wait's health-retry read
+   and the organization access editor read only the registered kind, so a
+   row of the other kind is never placed for the provider. A
+   connection kind is never a provider branch, and no shared code names
+   one: the neutrality guard refuses a kind literal in the shared TypeScript
+   modules outside comments, union types and the credential-kind mapping
+   (§5.1.3 Guard), and the neutral-routines test
+   refuses a `'subscription'` or `'api_key'` literal in any database routine
+   named `subscription_core`, so a later neutral routine reads the
+   registered kind too. Because the kind belongs to
+   the provider, a vendor that offers both a subscription and API keys
+   registers two provider ids, one per kind. Because 0715 rewrites routines
+   0707, 0713 and 0714 create, migration tests that hold back any of them
+   hold back 0715 too and replay it after them.
+2. Identity of a key. A key names no upstream account or person, but the
+   shared connect needs both to tell connections apart and refuses without
+   them (`identity_unverified`, unchanged). The connector's sign-in derives a
+   stable synthetic identity only after the upstream accepted the key, never
+   from caller input: `provider_account_id = provider_subject_id =
+   key-hmac:<first 32 hex digits of HMAC-SHA256(deployment secret, key)>`,
+   keyed with a stable server-side secret (as the Claude subscription
+   fingerprints are), so a stored value neither confirms a guessed key
+   offline nor correlates tenants across deployments; changing the scheme
+   later re-keys identities and breaks reconnect-in-place, so it is fixed
+   before a real connector stores any. Re-adding a key reconnects in place, a
+   new key is a new connection, and the key never appears in identity
+   columns. A connector whose upstream reports a stable account or key id
+   may use it as `provider_account_id` and keep the keyed fingerprint as the
+   subject id. Open: replacing a rotated or revoked key in place (keeping
+   the connection's label, scope, people, allowlist and allocator state)
+   needs a credential-replace writer; today a new key is a new connection and
+   the old one stays `needs_relogin` until removed.
+3. No primary connection for API-key connectors (`primary_setting_column`
+   NULL); spread and allowlists apply.
+4. Cross-provider failover between an API-key connection and a subscription
+   is a placement-policy decision (`decidePlacement` with
+   `crossProviderFailover`), which the suite checks against the reference
+   model in both directions. Core placement leases from one provider per turn
+   (§5.1.3); its cross-provider step is not part of M4.
+5. Refusal settlement is shared: `planSubscriptionCoreRefusal`
+   (`@opengeni/subscriptions`, pure) maps a classified outcome to the request
+   ledger outcome and one plan, and `subscriptionCoreSettlement`
+   (`packages/db/src/subscription-core/settlement.ts`) applies it through the
+   core's fenced writers: the failure receipt first (it counts toward the
+   failover bound and carries the refused credential's refresh generation),
+   then the quota observation, model cooldown or quarantine. Unauthorized and
+   forbidden refusals of a renewable credential are refreshed once and
+   retried on the same connection; only a refusal that survives is settled.
+   An overloaded, failed or unclassified reply is never a refusal. The suite
+   settles every outcome through this step. The live Codex worker still
+   settles through its own Codex-named code
+   (`apps/worker/src/activities/agent-turn/codex-core-settlement.ts`) and
+   adopts this step with the shared worker settlement (SuperGrok and Claude
+   steps). Until then it differs in: Codex failure-kind names (`quota`,
+   `rate_limit`, `auth`, `forbidden`, `plan_entitlement`) in receipts; the
+   Codex credit-policy (`usage_verification_policy`) branch; an exhaustion
+   whose reset is unknown rests as `exhaustedUntil` = now + 5 hours (the
+   shared step uses a fallback window that a usage reading can clear);
+   refresh happens in the worker's own seam before classification; and its
+   writes are best effort. Codex's `rateLimitFallbackMs` and
+   `exhaustedFallbackMs` equal the worker's 60 seconds and 5 hours.
+6. A connector not registered in production is registered for tests only:
+   `testSubscriptionCoreProviderModules(binding)` returns the replacement
+   TypeScript registry and v2 provider-list modules, which the test file
+   installs with `mock.module` before importing the suite (so the CI shard
+   classifier runs that file in its own process), and
+   `admitTestSubscriptionCoreProvider` widens the test database only.
+
+Found by the suite and fixed in PR 0: the personal-access helper (0668) and
+the operation-lease kind CHECK (0691) admitted personal leases and model
+request reservations for Codex only, so any other provider's personal turns
+and requests were refused. Still provider-specific or open, and owned by later
+steps: the worker settlement (decision 5) and capacity-wait wrappers;
+per-model `cacheFacts` and `modelPolicyProviderId` for a connector serving
+several vendors (one per adapter today); the effective-settings primary
+mapping; a turn credential source for an API-key connector on the core
+(`ModelCredentialSourceV1`'s `connected_subscription` lists only `codex`,
+`xai` and `claude`; the suite freezes `organization_connection` /
+`api_key`, the existing organization-key source); the in-place key
+replacement of decision 2; and the stored `credential_format`, which the
+shared connect writers (TypeScript and the 0707 personal connect) still set
+to `v1` for every provider (PR 0a's note above), so the core reads a
+credential's format from the decoded credential (`credential.format`), never
+from that column.
+
+Running the suite for another adapter: call
+`describeSubscriptionCoreConformance(subject)` from
+`packages/db/test/helpers/subscription-core-conformance.ts` in a new
+`*-postgres.test.ts`. The subject gives the binding, at least three models,
+a credential per label, the sign-in identity, provider state, expiry, the
+frozen execution policy's credential source and billing, a foreign provider
+id its database admits, a scripted upstream
+(`SubscriptionCoreConformanceUpstream`: it renders the suite's
+`ScriptedReply` vocabulary in the provider's wire format and supplies the
+connector's transport, classifier and optional usage reading) and the
+network-denial guard. A renewable provider's binding is built with a
+scripted refresher (the Codex subject rotates tokens locally), which the
+suite's refresh-and-retry test drives. A registered provider passes its
+binding; an unregistered one installs `testSubscriptionCoreProviderModules`
+with `mock.module` in its test file before importing the suite, and calls
+`admitTestSubscriptionCoreProvider` in `prepareDatabase`. Every organization
+the suite creates also holds a healthy and a quarantined, exhausted
+connection of the foreign provider with the subject's connection kind, and
+two healthy rows of the subject's provider with the other kind; no read,
+lease, wait, recovery, administration, access edit or reach change of the
+subject's provider may touch either (the access test also calls the reach
+routine directly for each, which must refuse, and edits a workspace's own
+connection through the workspace route, which must not read that
+workspace's row of the other kind). The connect and administration tests add the owner's personal
+connection of the foreign provider (authority generation 2) and of the
+subject's provider with the other kind (generation 7); personal lists,
+management, disconnects, frozen authority and new personal connections'
+generation must ignore both. The recovery test quarantines an other-kind row,
+first until sooner than this kind's quarantine (the wait's retry time must
+ignore it, and a current model catalog on the other other-kind row that
+expires sooner still) and then due (recovery must leave it alone). Reset and retry times
+are compared as exact instants. Run each file in its own
+process from `packages/db` with
+`OPENGENI_TEST_PG_NATIVE=1 OPENGENI_REQUIRE_REAL_DB=1 bun test ./test/<file>`.
+The network-denial guard refuses `fetch` and `node:http`/`node:https`
+requests made through the module objects to any origin but the scripted
+upstream; named ESM imports of those functions, `node:net`/`node:tls`
+sockets (PostgreSQL uses them), `Bun.connect` and `WebSocket` are not
+intercepted, so a connector's transport must use `fetch` or the module
+objects. The suite does not cover streaming replies, malformed responses,
+delays or a provider's real wire classifier and usage decoder, nor the
+out-of-turn connection refresh or the serving catalog beyond its exclusion of
+other-kind rows; each provider step tests those for its own connector. It arms and
+wakes the durable waiter through the shared waiter repository with the
+earliest reset the placement returned, and loads credentials through the
+core's lease-checked load; the arming wrapper and the turn credential
+resolver a live turn calls are still Codex-named and are exercised by the
+Codex suites, and move to the shared path with the worker settlement
+(decision 5). For Codex the suite therefore checks the shared settlement
+step, not the worker's own settlement that live Codex turns use today.
 
 #### Verification plan
 

@@ -47,8 +47,10 @@ const PRECURSOR = "0712_subscription_core_generic_precursor.sql";
 // replayed right after it, so these cases also cover the provider-keyed
 // reach, auto-assignment and plan-change paths on cutover data.
 const PROVIDER_KEYED_REACH = "0713_subscription_core_provider_keyed_reach.sql";
-// 0714 redefines 0713's reach setters: held back and replayed with it.
+// 0714 redefines 0713's reach setters and 0715 rewrites routines 0713 and
+// 0714 create: held back and replayed after it.
 const WORKSPACE_MANAGED_ACCOUNTS = "0714_subscription_workspace_managed_organization_accounts.sql";
+const API_KEY_CONNECTIONS = "0715_subscription_core_api_key_connections.sql";
 const key = Buffer.alloc(32, 72);
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
@@ -706,9 +708,9 @@ describe.skipIf(!realDb)(
       await owner`CREATE TABLE schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`;
       // 0712 records the provider cutover receipts and requires the committed
       // 0689, so it is withheld with it and applied by the same cutover run.
-      await owner`INSERT INTO schema_migrations(name) VALUES(${MIGRATION}), (${PRECURSOR}), (${PROVIDER_KEYED_REACH}), (${WORKSPACE_MANAGED_ACCOUNTS})`;
+      await owner`INSERT INTO schema_migrations(name) VALUES(${MIGRATION}), (${PRECURSOR}), (${PROVIDER_KEYED_REACH}), (${WORKSPACE_MANAGED_ACCOUNTS}), (${API_KEY_CONNECTIONS})`;
       await migrate(owned.ownerUrl, undefined, { applicationDatabaseRoles: ["opengeni_app"] });
-      await owner`DELETE FROM schema_migrations WHERE name IN (${MIGRATION}, ${PRECURSOR}, ${PROVIDER_KEYED_REACH}, ${WORKSPACE_MANAGED_ACCOUNTS})`;
+      await owner`DELETE FROM schema_migrations WHERE name IN (${MIGRATION}, ${PRECURSOR}, ${PROVIDER_KEYED_REACH}, ${WORKSPACE_MANAGED_ACCOUNTS}, ${API_KEY_CONNECTIONS})`;
       await seed();
     }, 180_000);
 

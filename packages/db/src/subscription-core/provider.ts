@@ -53,6 +53,19 @@ export function subscriptionCoreProviderId(provider: SubscriptionCoreProvider): 
 }
 
 /**
+ * The `subscription_connections.kind` of this provider's rows: `api_key` for
+ * an adapter whose credential is a static API key (an API-key connector),
+ * else `subscription`. It equals the `connection_kind` of the provider's SQL
+ * registry row (migration 0715), which the neutral routines read; a test
+ * checks that the two agree.
+ */
+export function subscriptionCoreConnectionKind(
+  provider: SubscriptionCoreProvider,
+): "subscription" | "api_key" {
+  return provider.adapter.credentialKind === "api_key" ? "api_key" : "subscription";
+}
+
+/**
  * One runtime instance per provider binding: `factory(provider)` runs once
  * per binding object and its functions close over that provider. Instances
  * resolve each other lazily (at call time), so modules may depend on each

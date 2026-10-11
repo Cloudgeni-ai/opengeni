@@ -40,10 +40,12 @@ const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const MIGRATION = "0689_subscription_core_codex_cutover.sql";
 // 0712 requires the committed 0689 cutover, so it is held back with it.
 const PRECURSOR = "0712_subscription_core_generic_precursor.sql";
-// 0713 locks and alters tables 0689 creates, and 0714 redefines 0713's reach
-// setters: both are held back and replayed after the cutover.
+// 0713 locks and alters tables 0689 creates, 0714 redefines 0713's reach
+// setters and 0715 rewrites routines 0713 and 0714 create: all are held back
+// and replayed after the cutover.
 const PROVIDER_KEYED_REACH = "0713_subscription_core_provider_keyed_reach.sql";
 const WORKSPACE_MANAGED_ACCOUNTS = "0714_subscription_workspace_managed_organization_accounts.sql";
+const API_KEY_CONNECTIONS = "0715_subscription_core_api_key_connections.sql";
 const MODEL = "codex/gpt-5.5";
 const key = Buffer.alloc(32, 77);
 const settings = { environmentsEncryptionKey: key.toString("base64") } as never;
@@ -84,9 +86,9 @@ describe.skipIf(!realDb)(
       const owner = postgres(owned.ownerUrl, { max: 1 });
       try {
         await owner`CREATE TABLE schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`;
-        await owner`INSERT INTO schema_migrations(name) VALUES(${MIGRATION}), (${PRECURSOR}), (${PROVIDER_KEYED_REACH}), (${WORKSPACE_MANAGED_ACCOUNTS})`;
+        await owner`INSERT INTO schema_migrations(name) VALUES(${MIGRATION}), (${PRECURSOR}), (${PROVIDER_KEYED_REACH}), (${WORKSPACE_MANAGED_ACCOUNTS}), (${API_KEY_CONNECTIONS})`;
         await migrate(owned.ownerUrl, undefined, { applicationDatabaseRoles: ["opengeni_app"] });
-        await owner`DELETE FROM schema_migrations WHERE name IN (${MIGRATION}, ${PRECURSOR}, ${PROVIDER_KEYED_REACH}, ${WORKSPACE_MANAGED_ACCOUNTS})`;
+        await owner`DELETE FROM schema_migrations WHERE name IN (${MIGRATION}, ${PRECURSOR}, ${PROVIDER_KEYED_REACH}, ${WORKSPACE_MANAGED_ACCOUNTS}, ${API_KEY_CONNECTIONS})`;
       } finally {
         await owner.end();
       }

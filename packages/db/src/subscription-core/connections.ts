@@ -42,7 +42,11 @@ import {
   type SubscriptionCoreWake,
 } from "./administration";
 import { organizationAdministeredConnection } from "./access";
-import { subscriptionCoreProviderId, type SubscriptionCoreProvider } from "./provider";
+import {
+  subscriptionCoreConnectionKind,
+  subscriptionCoreProviderId,
+  type SubscriptionCoreProvider,
+} from "./provider";
 
 export type SubscriptionCoreCredentialInput = {
   /** v1 envelope of the adapter's encoded credential. */
@@ -189,6 +193,7 @@ async function connectShared(
   input: SubscriptionCoreConnectScope & SubscriptionCoreCredentialInput,
 ): Promise<SubscriptionCoreConnectResult> {
   const providerId = subscriptionCoreProviderId(provider);
+  const connectionKind = subscriptionCoreConnectionKind(provider);
   const [cutover] = await rawRows<{ enabled: boolean }>(
     tx,
     sql`select enabled from subscription_provider_cutovers
@@ -213,7 +218,7 @@ async function connectShared(
       tx,
       sql`select id from subscription_connections
       where account_id = ${input.accountId}::uuid and provider = ${providerId}
-        and kind = 'subscription' and ownership = 'shared'
+        and kind = ${connectionKind} and ownership = 'shared'
         and provider_account_id = ${input.providerAccountId}
         and (provider_subject_id is null or provider_subject_id like 'legacy:%') limit 1`,
     );
@@ -227,7 +232,7 @@ async function connectShared(
           sql`select id::text as id, managed_by_workspace_id::text as managed_by_workspace_id
             from subscription_connections
             where account_id = ${input.accountId}::uuid and provider = ${providerId}
-              and kind = 'subscription' and ownership = 'shared'
+              and kind = ${connectionKind} and ownership = 'shared'
               and provider_account_id = ${input.providerAccountId}
               and provider_subject_id is not distinct from ${input.providerSubjectId}`,
         );
@@ -321,7 +326,7 @@ async function connectShared(
         ownership, connected_by_subject_id, scope_kind, allow_personal_workspaces,
         managed_by_workspace_id, provider_state, provider_subject_id
       ) values (
-        ${input.accountId}::uuid, ${providerId}, 'subscription', ${input.providerAccountId},
+        ${input.accountId}::uuid, ${providerId}, ${connectionKind}, ${input.providerAccountId},
         ${input.accountEmail}, ${input.label}, ${input.planType}, ${input.credentialEncrypted},
         'v1', ${iso(input.expiresAt)}::timestamptz, ${iso(input.lastRefreshAt)}::timestamptz, 'active', 'shared', ${connectedBySubjectId},
         ${workspaceScoped ? "workspaces" : "organization"}, ${!workspaceScoped},
@@ -438,6 +443,7 @@ async function disconnectTarget(
   rawId: string,
 ): Promise<{ id: string; organization: boolean } | null> {
   const providerId = subscriptionCoreProviderId(provider);
+  const connectionKind = subscriptionCoreConnectionKind(provider);
   if (input.workspaceId === null) {
     const id = await resolveSubscriptionConnectionId(tx, {
       accountId: input.accountId,
@@ -449,7 +455,7 @@ async function disconnectTarget(
       tx,
       sql`select id::text as id from subscription_connections
         where account_id = ${input.accountId}::uuid and id = ${id}::uuid and provider = ${providerId}
-          and kind = 'subscription' and ownership = 'shared'
+          and kind = ${connectionKind} and ownership = 'shared'
           and ${organizationAdministeredConnection()}`,
     );
     return row ? { id: row.id, organization: true } : null;
