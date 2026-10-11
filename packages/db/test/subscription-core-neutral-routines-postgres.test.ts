@@ -67,6 +67,8 @@ beforeAll(async () => {
     "0716_subscription_authority_compat.sql",
     "0717_subscription_authority_fences.sql",
     "0726_subscription_personal_acceptance_reads.sql",
+    // 0719 adds a format-aware overload next to 0707's personal connect writer.
+    "0719_subscription_core_personal_connect_format.sql",
   ];
   const owner = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
