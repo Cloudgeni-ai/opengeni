@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, mock, test } from "bun:test";
 import {
   AUTOMATIC_SESSION_TITLE_FALLBACK,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
@@ -437,7 +437,9 @@ describe("startParallelSessionTitleGeneration", () => {
 
   test("cancel aborts and joins a title request that is still pending", async () => {
     let observedSignal: AbortSignal | null = null;
+    const onFinish = mock(async () => {});
     const task = startParallelSessionTitleGeneration({
+      onFinish,
       generate: async (signal) => {
         observedSignal = signal;
         await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve()));
@@ -448,6 +450,70 @@ describe("startParallelSessionTitleGeneration", () => {
     await Promise.resolve();
     await task.cancel();
     expect(observedSignal?.aborted).toBe(true);
+    expect(onFinish).toHaveBeenCalledWith(null);
+  });
+
+  test("cancel preserves a resolved title whose completion handler is still queued", async () => {
+    const result = {
+      title: "Already resolved title",
+      usage: { responseId: "title-response", usage: { inputTokens: 20, outputTokens: 5 } },
+    };
+    let resolveGeneration!: (value: typeof result) => void;
+    const generation = new Promise<typeof result>((resolve) => {
+      resolveGeneration = resolve;
+    });
+    const onFinish = mock(async () => {});
+    const task = startParallelSessionTitleGeneration({ generate: () => generation, onFinish });
+
+    resolveGeneration(result);
+    // No yield: cancellation races the already-queued completion handler.
+    await task.cancel();
+    expect(await task.finish()).toBe(result);
+    expect(onFinish).toHaveBeenCalledTimes(1);
+    expect(onFinish).toHaveBeenCalledWith(result);
+  });
+
+  test("a timed-out request discards a late title and still joins settlement", async () => {
+    const onFinish = mock(async () => {});
+    const task = startParallelSessionTitleGeneration({
+      timeoutMs: 1,
+      generate: async (signal) => {
+        await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve()));
+        return { title: "Too late", usage: null };
+      },
+      onFinish,
+    });
+
+    expect(await task.finish()).toBeNull();
+    expect(onFinish).toHaveBeenCalledTimes(1);
+    expect(onFinish).toHaveBeenCalledWith(null);
+  });
+
+  test("finish and cancellation join one awaited settlement of a completed result", async () => {
+    let releaseSettlement!: () => void;
+    const settlement = new Promise<void>((resolve) => {
+      releaseSettlement = resolve;
+    });
+    const onFinish = mock(async () => settlement);
+    const result = { title: "Completed title", usage: null };
+    const task = startParallelSessionTitleGeneration({
+      generate: async () => result,
+      onFinish,
+    });
+    const finished = task.finish();
+    await Promise.resolve();
+    const cancelled = task.cancel();
+    let returned = false;
+    void cancelled.then(() => {
+      returned = true;
+    });
+    await Promise.resolve();
+    expect(returned).toBe(false);
+    releaseSettlement();
+    expect(await finished).toEqual(result);
+    await cancelled;
+    expect(onFinish).toHaveBeenCalledTimes(1);
+    expect(onFinish).toHaveBeenCalledWith(result);
   });
 });
 

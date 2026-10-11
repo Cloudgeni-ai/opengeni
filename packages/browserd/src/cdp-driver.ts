@@ -1317,11 +1317,14 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           await this.clickNode(state, submitNodeId, "left", 1);
           submitted = true;
         } else if (command.submit.type === "press") {
+          // Validate the key before focusing, so an unsupported key is a
+          // definite refusal with no input sent.
+          const key = this.parseActionKey(command.submit.key);
           await this.focusNode(
             state,
             submitNodeId ?? resolvedFields.at(-1)?.backendDOMNodeId ?? null,
           );
-          await this.pressKey(state, command.submit.key);
+          await this.pressKey(state, key);
           submitted = true;
         }
 
@@ -2896,13 +2899,18 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             text: action.text,
           });
         return;
-      case "press":
+      case "press": {
+        // Validate the key before focusing: focus is an input effect, so a
+        // key rejected after it would surface as outcome_unknown instead of
+        // a definite, side-effect-free invalid_action.
+        const key = this.parseActionKey(action.key);
         if (action.locator) {
           const node = await this.resolveActionLocator(state, action.locator);
           await this.focusNode(state, node.backendDOMNodeId);
         }
-        await this.pressKey(state, action.key);
+        await this.pressKey(state, key);
         return;
+      }
       case "select": {
         const node = await this.resolveActionLocator(state, action.locator);
         const result = await this.callOnNode(
@@ -3672,9 +3680,24 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       }
       return;
     }
-    await this.sendActionTarget(state, "DOM.focus", {
-      backendNodeId: backendDOMNodeId,
-    });
+    const effectsBeforeFocus = state.actionEffectCount;
+    try {
+      await this.sendActionTarget(state, "DOM.focus", {
+        backendNodeId: backendDOMNodeId,
+      });
+    } catch (error) {
+      // Chromium validates the node (an Element that can take focus) before
+      // moving focus, so a protocol refusal changed nothing. Report it as a
+      // definite refusal instead of letting it surface as an unknown outcome.
+      if (error instanceof CdpProtocolError && error.method === "DOM.focus") {
+        state.actionEffectCount = effectsBeforeFocus;
+        throw new InteractionDefiniteDriverError(
+          "invalid_action",
+          "browser node cannot be focused",
+        );
+      }
+      throw error;
+    }
   }
 
   /**
@@ -3784,8 +3807,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     });
   }
 
-  private async pressKey(state: TargetState, input: string): Promise<void> {
-    const key = parseKey(input, /Macintosh|Mac OS/u.test(this.userAgent));
+  private parseActionKey(input: string): ParsedKey {
+    return parseKey(input, /Macintosh|Mac OS/u.test(this.userAgent));
+  }
+
+  private async pressKey(state: TargetState, key: ParsedKey): Promise<void> {
     await this.sendActionTarget(state, "Input.dispatchKeyEvent", {
       type: "keyDown",
       key: key.key,
@@ -4653,16 +4679,15 @@ function isFormControlRole(role: string): boolean {
   ].includes(role);
 }
 
-function parseKey(
-  input: string,
-  mac: boolean,
-): {
+type ParsedKey = {
   key: string;
   code: string;
   keyCode: number;
   modifiers: number;
   text: string;
-} {
+};
+
+function parseKey(input: string, mac: boolean): ParsedKey {
   const parts = input.split("+");
   const rawKey = parts.pop()?.trim();
   if (!rawKey) throw new InteractionDefiniteDriverError("invalid_action", "browser key is invalid");

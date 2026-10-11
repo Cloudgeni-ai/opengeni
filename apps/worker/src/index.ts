@@ -51,6 +51,7 @@ import type {
 } from "./activities/types";
 import { turnTaskQueue } from "./workflows/activities";
 import { createTurnTaskQueueStatsClient } from "./turn-task-queue-reader";
+import { installTemporalRuntimeLogging } from "./temporal-runtime-logger";
 import {
   closeWorkerHttpAfterActivityExecution,
   withTurnWorkerActivityTelemetry,
@@ -1295,6 +1296,8 @@ export async function startWorker() {
   }
   const settings = getSettings();
   const observability = createObservability(settings, { component: `worker-${role}` });
+  // Before any NativeConnection: SDK and core logs become structured lines.
+  installTemporalRuntimeLogging(observability);
   // The Agents SDK also listens for unhandled rejections and exits the process.
   // Keep detached SDK/transport promises observational here: durable turn
   // activity boundaries own failures, while process exit causes cross-session
