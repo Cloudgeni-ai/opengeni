@@ -143,8 +143,10 @@ describe.skipIf(!realDb)("retiring the Codex twin routines (M4 step R)", () => {
   test("every subscription_codex private routine the application role can execute is classified", async () => {
     // A runtime-executable M3 Codex routine is either a retiring twin (checked
     // while present) or still required by the posture: none goes unchecked.
-    // The pre-core Codex factory helpers (codex_*, enforce_codex_*) belong to
-    // the retained legacy Codex tables and are outside this step.
+    // The pre-core Codex factory helpers (every Codex-named routine without
+    // "subscription_codex" in its name, such as codex_*, enforce_*codex*,
+    // clear_workspace_codex_* and prevent_organization_codex_*) belong to the
+    // retained legacy Codex tables and are outside this step.
     const executable = await app!<{ name: string }[]>`
       select p.proname || '(' || array_to_string(array(
           select format_type(argument.type, null)

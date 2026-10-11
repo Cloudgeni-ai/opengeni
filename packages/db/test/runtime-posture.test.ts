@@ -26,13 +26,14 @@ import {
   ORGANIZATION_SIGNUP_USE_CASE_RUNTIME_ROUTINES,
   SLACK_FILE_UPLOAD_OPERATIONS_TABLE,
   SUBSCRIPTION_CODEX_TWIN_PRIVATE_ROUTINES,
-  SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES,
-  SUBSCRIPTION_CORE_PRECURSOR_OWNER_ROUTINES,
   type RuntimeDatabasePosture,
   type RuntimeDatabasePostureOptions,
   type RuntimePrivateTablePosture,
   type RuntimeTablePosture,
 } from "../src/runtime-posture";
+// Namespace access for the owner-routine lists, which other open PRs import
+// by name in the list above: a merge must not duplicate an imported binding.
+import * as runtimePosture from "../src/runtime-posture";
 
 /** Write-allowed probes pin a fixed search path without the target schema. */
 const FIXED_SEARCH_PATH_PRIVATE_ROUTINES: ReadonlySet<string> = new Set([
@@ -718,8 +719,8 @@ describe("runtime database posture evaluator", () => {
       "grant_subscription_codex_owner_capability(text, uuid, uuid, text, uuid)",
       "drop_subscription_codex_owner_capabilities(uuid)",
       "derive_scheduled_revision_subscription_authority()",
-      ...SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES,
-      ...SUBSCRIPTION_CORE_PRECURSOR_OWNER_ROUTINES,
+      ...runtimePosture.SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES,
+      ...runtimePosture.SUBSCRIPTION_CORE_PRECURSOR_OWNER_ROUTINES,
     ];
     // The safe posture carries the neutral writers and no Codex twin writer.
     // Every other owner-only routine is present and safe too, so owner
