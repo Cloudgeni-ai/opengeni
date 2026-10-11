@@ -732,6 +732,12 @@ describe("file upload crash, concurrency, RLS, and object cleanup", () => {
           await release;
           return { claimed: 0, deleted: 0, failed: 0 };
         },
+        // The reaper workflow runs further sweeps after the upload reaper;
+        // register them as no-ops so each triggered run completes cleanly.
+        maintainRetainedScreenshots: async () => ({}),
+        maintainBrowserStateArtifacts: async () => ({}),
+        recoverVideoGenerationWorkflows: async () => ({}),
+        reconcileRecentModelCallFacts: async () => ({}),
       },
     });
     const run = worker.run();
