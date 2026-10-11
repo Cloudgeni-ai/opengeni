@@ -1539,8 +1539,11 @@ END $xai_cutover_restore$;
 -- create and lease routines run as the owner, which FORCE row security
 -- binds, so a restrictive policy refuses them whatever runtime grants a login
 -- still holds (before provision-roles runs again, or a login it does not
--- provision). The policies leave deletes open (an owner delete still
--- works). Organization retention deletion removes an offboarded member's
+-- provision). The policies cover INSERT and UPDATE only: reads keep exactly
+-- their existing policies (the lifecycle backfill refuses a source whose
+-- restrictive read policy lacks its capability branch, so a FOR ALL policy
+-- would break it), and deletes stay open (an owner delete still works).
+-- Organization retention deletion removes an offboarded member's
 -- migrated connection with their Personal workspace; it does not reach their
 -- legacy `user` rows, which row security hides from it without a workspace
 -- context exactly as before the receipt, and whose ciphertext this migration
@@ -1561,10 +1564,14 @@ BEGIN
   FOREACH legacy IN ARRAY ARRAY['xai_subscription_credentials', 'xai_rotation_settings',
     'xai_credential_leases', 'xai_session_account_pins', 'xai_capacity_waiters'] LOOP
     EXECUTE format($ddl$
-      CREATE POLICY %2$I ON %1$I.%3$I AS RESTRICTIVE FOR ALL
+      CREATE POLICY %2$I ON %1$I.%3$I AS RESTRICTIVE FOR INSERT
+      WITH CHECK (NOT opengeni_private.subscription_provider_cutover_committed('xai'))
+    $ddl$, data_schema, legacy || '_closed_insert', legacy);
+    EXECUTE format($ddl$
+      CREATE POLICY %2$I ON %1$I.%3$I AS RESTRICTIVE FOR UPDATE
       USING (true)
       WITH CHECK (NOT opengeni_private.subscription_provider_cutover_committed('xai'))
-    $ddl$, data_schema, legacy || '_closed', legacy);
+    $ddl$, data_schema, legacy || '_closed_update', legacy);
   END LOOP;
   EXECUTE format($ddl$
     CREATE POLICY xai_subscription_authority_closed

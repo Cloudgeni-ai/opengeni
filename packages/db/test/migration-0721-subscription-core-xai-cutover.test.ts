@@ -1701,7 +1701,37 @@ describe.skipIf(!realDb)(
           await asOwner(
             `UPDATE xai_subscription_credentials SET label = 'Renamed' WHERE id = '${a.x1}'`,
           ),
-        ).toContain("xai_subscription_credentials_closed");
+        ).toContain("xai_subscription_credentials_closed_update");
+        // The closed policies cover INSERT and UPDATE only, so reads keep
+        // their exact policies: the product lifecycle backfill (which refuses
+        // a source whose restrictive read policy lacks its capability
+        // branch) still reads xai_subscription_credentials after the receipt.
+        const readBlocking = await owned.admin<{ table_name: string; name: string }[]>`
+          SELECT c.relname::text AS table_name, p.polname::text AS name
+          FROM pg_policy p JOIN pg_class c ON c.oid = p.polrelid
+          WHERE c.relname IN ('xai_subscription_credentials', 'xai_rotation_settings',
+              'xai_credential_leases', 'xai_session_account_pins', 'xai_capacity_waiters')
+            AND p.polname LIKE '%\_closed\_%'
+            AND p.polcmd NOT IN ('a', 'w')`;
+        expect(readBlocking).toEqual([]);
+        const [closed] = await owned.admin<{ total: number }[]>`
+          SELECT count(*)::int AS total FROM pg_policy p JOIN pg_class c ON c.oid = p.polrelid
+          WHERE c.relname IN ('xai_subscription_credentials', 'xai_rotation_settings',
+              'xai_credential_leases', 'xai_session_account_pins', 'xai_capacity_waiters')
+            AND NOT p.polpermissive AND p.polname LIKE '%\_closed\_%'`;
+        expect(closed!.total).toBe(10);
+        // Exactly the backfill's own source check (0565).
+        const [source] = await owned.admin<{ read: boolean; blocking: number }[]>`
+          SELECT
+            EXISTS (SELECT 1 FROM pg_policy p
+              WHERE p.polrelid = 'xai_subscription_credentials'::regclass
+                AND p.polname = 'lifecycle_backfill_read') AS read,
+            (SELECT count(*)::int FROM pg_policy p
+              WHERE p.polrelid = 'xai_subscription_credentials'::regclass
+                AND NOT p.polpermissive AND p.polcmd IN ('r', '*')
+                AND position('lifecycle_backfill_read_active'
+                  IN coalesce(pg_get_expr(p.polqual, p.polrelid), '')) = 0) AS blocking`;
+        expect(source).toEqual({ read: true, blocking: 0 });
       }, 60_000);
 
       test("the legacy disconnect refuses after the receipt and changes nothing", async () => {
