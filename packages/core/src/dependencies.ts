@@ -3,6 +3,7 @@ import type {
   ConnectionCredentialsPort,
   Document,
   DocumentAuthorityKind,
+  EntitlementsPort,
   GitHubAppApiPort,
   ScheduledTask,
   ScheduledTaskTriggerType,
@@ -19,6 +20,7 @@ import type { ManagedAuth } from "./managed-auth-type";
 import type { ManagedAuthSessionAdapter } from "./managed-auth-session-sets";
 import type { ApiSandboxClient, ResumeBoxByIdInput, ResumedSandboxSession } from "./sandbox-types";
 import type { TranscriptionSegmenter, TranscriptionService } from "./transcription";
+import type { ModelCallService } from "./model-call";
 import type { EditableArtifactApplicationPort } from "./editable-artifact-live";
 import type { ResolvedCatalogSettings } from "./model-catalog";
 import type {
@@ -155,6 +157,8 @@ export type AppDependencies = {
    */
   catalogSourceSettings?: Settings;
   db: Database;
+  /** Read-only host funding admission; unset uses the standalone billing ledger. */
+  entitlements?: EntitlementsPort | null;
   /**
    * Host-composed editable artifact engine. Standalone startup binds the same
    * native kernel/DB/object-store implementation; embedded hosts may inject an
@@ -193,7 +197,7 @@ export type AppDependencies = {
    * App credentials; standalone deployments fall back to @opengeni/github.
    */
   githubAppApi?: GitHubAppApiPort;
-  /** Optional provider seam for the separately registered OpenGeni Lens App. */
+  /** Optional provider seam for the separately registered Opengeni Lens App. */
   prReviewGithubAppApi?: GitHubAppApiPort;
   /**
    * Optional host-owned connection credential seam. API-side consumers use
@@ -232,6 +236,8 @@ export type AppDependencies = {
   apiIntegrationOAuthFetch?: typeof fetch;
   /** Injectable specification/introspection transport, still network-policy checked. */
   apiIntegrationSourceFetch?: typeof fetch;
+  /** Injectable bounded MCP initialization/tools-list probe for Connect tests. */
+  mcpCapabilityProbe?: import("./domain/capabilities").McpCapabilityProbe;
   atlassianFetch?: typeof fetch;
   /** Injectable MCP OAuth setup deadline for deterministic stalled-provider tests. */
   oauthStartDeadlineMs?: number;
@@ -241,6 +247,8 @@ export type AppDependencies = {
   transcription?: TranscriptionService | null;
   /** Optional host-owned long-form audio normalization/segmentation service. */
   transcriptionSegmenter?: TranscriptionSegmenter | null;
+  /** Stateless single model calls (chat completions); built from settings when omitted. */
+  modelCalls?: ModelCallService | null;
   // The API process's OWN agent-loop-free sandbox client (constructed from
   // settings via @opengeni/runtime/sandbox). Undefined when sandboxBackend=none.
   // This is the foundation of the API-direct control plane: the API resumes

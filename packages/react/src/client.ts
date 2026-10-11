@@ -193,13 +193,13 @@ type SessionClientMethods = Pick<
 
 /** Compact list transport is optional for scripted and older clients. */
 export type SessionClientLike = SessionClientMethods &
-  Partial<Pick<OpenGeniClient, "listSessionSummaryPage">>;
+  Partial<Pick<OpenGeniClient, "listSessionSummaryPage" | "findGoal">>;
 
 /**
  * Tenant-safe client surface required by the session-only React entry.
  *
  * A host proxy can implement only these session-scoped operations instead of
- * stubbing OpenGeni's workbench, billing, rig, file-system, and workspace
+ * stubbing Opengeni's workbench, billing, rig, file-system, and workspace
  * administration APIs. Workspace-level resume is deliberately optional: a
  * host that does not expose that authority still supports every session-local
  * composer/control path.
@@ -233,9 +233,15 @@ export type EmbeddedSessionEventClientLike = Pick<OpenGeniClient, "getSession" |
 export type EmbeddedSessionReadClientLike = EmbeddedSessionEventClientLike &
   Pick<OpenGeniClient, "getSession" | "updateSession">;
 
-/** Exact client surface required by {@link useGoal}. */
+/**
+ * Exact client surface required by {@link useGoal}. `findGoal` is optional:
+ * when present the hook reads a goal-less session as a successful `null`
+ * instead of an absorbed 404.
+ */
 export type EmbeddedGoalClientLike = EmbeddedSessionEventClientLike &
-  Pick<OpenGeniClient, "getGoal" | "updateGoal" | "deleteGoal">;
+  Pick<OpenGeniClient, "getGoal" | "updateGoal" | "deleteGoal"> & {
+    findGoal?: OpenGeniClient["findGoal"] | undefined;
+  };
 
 /** Exact client surface required by {@link useSessionLineage}. */
 export type EmbeddedSessionLineageClientLike = EmbeddedSessionEventClientLike &

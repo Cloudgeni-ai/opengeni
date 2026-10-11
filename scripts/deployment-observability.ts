@@ -57,7 +57,7 @@ if (import.meta.main) {
     process.exit(0);
   }
 
-  console.log(`OpenGeni observability stack plan: ${plan.profile}`);
+  console.log(`Opengeni observability stack plan: ${plan.profile}`);
   console.log(`Wrapper chart: ${plan.chartPath} ${plan.chartVersion}`);
   console.log(`kube-prometheus-stack: ${plan.kubePrometheusStackVersion}`);
   console.log(`Namespace/release: ${plan.namespace}/${plan.releaseName}`);
@@ -130,12 +130,12 @@ export function observabilityStackPlanFor(
     ],
     destroyCommands: [`helm uninstall ${releaseName} --namespace ${namespace} --ignore-not-found`],
     notes: [
-      "The observability wrapper installs kube-prometheus-stack separately from the OpenGeni application chart.",
+      "The observability wrapper installs kube-prometheus-stack separately from the Opengeni application chart.",
       opensandbox
         ? "OpenSandbox monitoring is enabled: install the pinned OpenSandbox CRDs and controller metrics Service before this wrapper."
         : "OpenSandbox custom-resource and controller monitoring remains disabled unless --opensandbox is selected.",
-      "Install the wrapper first so the Prometheus Operator CRDs exist before the OpenGeni chart renders ServiceMonitor and PrometheusRule resources.",
-      "Integrate deploy/observability/opengeni.values.example.yaml into the next ordinary OpenGeni application release with its exact chart version and authoritative values; the observability plan never upgrades or rolls back application workloads and never runs application hooks.",
+      "Install the wrapper first so the Prometheus Operator CRDs exist before the Opengeni chart renders ServiceMonitor and PrometheusRule resources.",
+      "Integrate deploy/observability/opengeni.values.example.yaml into the next ordinary Opengeni application release with its exact chart version and authoritative values; the observability plan never upgrades or rolls back application workloads and never runs application hooks.",
       "Prometheus discovers monitoring resources only in namespaces labeled opengeni.ai/monitoring=enabled.",
       "Canonical dashboard ConfigMaps are rendered directly from deploy/observability/dashboards; do not maintain a second dashboard copy in an environment overlay.",
       "Keep Grafana ingress, administrator credentials, Alertmanager receivers, remote-write endpoints, and environment-only dashboards or rules in a private values overlay.",

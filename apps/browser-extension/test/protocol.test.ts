@@ -16,7 +16,7 @@ describe("attached browser extension protocol", () => {
         id: 7,
         windowId: 2,
         index: 1,
-        title: "OpenGeni",
+        title: "Opengeni",
         url: "https://opengeni.ai/",
         active: true,
         pinned: false,

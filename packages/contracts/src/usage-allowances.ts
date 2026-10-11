@@ -43,6 +43,16 @@ export const MemberAllowanceDefault = z.union([
 export type MemberAllowanceDefault = z.infer<typeof MemberAllowanceDefault>;
 
 const Thresholds = z.array(z.number().finite().positive().max(1)).max(16);
+/**
+ * How model calls that spend no Opengeni credits count: subscription
+ * connections, workspace-owned keys and deployments without credit billing.
+ * "ignore" (the default) keeps the allowance credit-only. "list_price" counts
+ * each such call at its configured list-price estimate in USD micros and
+ * admits those turns against the allowance; calls without a list price are
+ * not counted.
+ */
+export const UnbilledUsageMetering = z.enum(["ignore", "list_price"]);
+export type UnbilledUsageMetering = z.infer<typeof UnbilledUsageMetering>;
 /** Omitted threshold lists default to [0.8, 1]. Monthly boundaries are UTC. */
 export const WorkspaceAllowanceConfig = z
   .object({
@@ -54,6 +64,7 @@ export const WorkspaceAllowanceConfig = z
       .object({ workspace: Thresholds.optional(), member: Thresholds.optional() })
       .strict()
       .optional(),
+    unbilledUsage: UnbilledUsageMetering.optional(),
   })
   .strict();
 export type WorkspaceAllowanceConfig = z.infer<typeof WorkspaceAllowanceConfig>;

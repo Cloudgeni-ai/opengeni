@@ -2,15 +2,19 @@ export { readSessionAttachmentFiles } from "./domain/session-file-access";
 export { verifyDirectModelAccess } from "./domain/direct-model-provider";
 export * from "./domain/skills";
 export * from "./domain/mcp-account-bindings";
+export * from "./domain/mcp-account-routes";
 export * from "./domain/session-connection-accounts";
 export * from "./domain/organization-integration-catalog";
 export * from "./domain/knowledge";
 export * from "./domain/knowledge-search";
-// @opengeni/core — the framework-agnostic OpenGeni core.
+export * from "./domain/voice-input-billing";
+export * from "./domain/web-search-billing";
+export * from "./domain/realtime-voice-billing";
+// @opengeni/core — the framework-agnostic Opengeni core.
 //
-// WHAT THIS PACKAGE IS: the OpenGeni domain, access, and billing layers carved
+// WHAT THIS PACKAGE IS: the Opengeni domain, access, and billing layers carved
 // out of `apps/api` into an importable library, so a host (e.g. cloudgeni) can
-// call the OpenGeni core DIRECTLY, off-HTTP — e.g. `createSessionForRequest(
+// call the Opengeni core DIRECTLY, off-HTTP — e.g. `createSessionForRequest(
 // deps, grant, workspaceId, input)` — without standing up the Hono router.
 // `apps/api` (@opengeni/api-router) and `apps/worker` (@opengeni/worker-bundle)
 // remain the STANDALONE RUNNERS that consume this library; nothing about the
@@ -51,6 +55,10 @@ export {
   getManagedAuthRequestActorEpoch,
   getManagedAuthRequestActorLeaseStamp,
   getManagedSession,
+  getNativeAppManagedSession,
+  NATIVE_APP_CREDENTIAL_PREFIX,
+  recordManagedAuthLoggedFailure,
+  withManagedAuthSessionLookup,
   configureManagedUserAdmission,
   assertManagedUserAdmission,
   ManagedAuthActorLeaseOutcomeUnknownError,
@@ -62,6 +70,8 @@ export {
 } from "./managed-session";
 export * from "./transcription";
 export * from "./model-catalog";
+export * from "./model-provider-credentials";
+export * from "./goal-admission";
 export * from "./codex-model-availability";
 export * from "./default-session-model";
 
@@ -81,10 +91,15 @@ export * from "./application/session-mcp-credential-rotation";
 export * from "./application/external-link-work-admission";
 export * from "./application/connect-authority";
 export * from "./application/connect-operation";
+export * from "./application/prepared-mcp-connection";
 export * from "./session-authorization";
 
 // Billing / usage-limit admission (checkLimit / requireLimit / recordWorkspaceUsage).
 export * from "./billing/limits";
+export * from "./billing/agent-run-admission";
+export * from "./billing/model-usage-settlement";
+export * from "./billing/model-call-admission";
+export * from "./model-call";
 
 // Domain layer — the off-HTTP V2 surface (createSessionForRequest,
 

@@ -31,6 +31,8 @@ const EXPECTED_CAPS = [
     5,
     "run",
   ],
+  ["backup-image.yml", "publish", "Test operator runner", 5, "run"],
+  ["backup-image.yml", "publish", "Retain digest receipt", 1, "run"],
   ["local-startup.yml", "docker", "Check startup ownership and prerequisite regressions", 2, "run"],
   ["local-startup.yml", "docker", "Verify the runner Docker dependency", 1, "run"],
   ["local-startup.yml", "docker", "Start the documented stack from a clean checkout", 50, "run"],
@@ -50,6 +52,109 @@ const EXPECTED_CAPS = [
     "publish",
     "Verify and retain all seven native archives without rebuilding",
     8,
+    "run",
+  ],
+  [
+    "ci.yml",
+    "automation-admission",
+    "Restore complete checkout history without listing refs",
+    5,
+    "run",
+  ],
+  ["ci.yml", "plan", "Restore complete checkout history without listing refs", 5, "run"],
+  [
+    "ci.yml",
+    "source-contracts",
+    "Restore complete checkout history without listing refs",
+    5,
+    "run",
+  ],
+  ["ci.yml", "unit-shards", "Restore complete checkout history without listing refs", 5, "run"],
+  ["ci.yml", "test-suite", "Restore complete checkout history without listing refs", 5, "run"],
+  [
+    "ci.yml",
+    "browser-acceptance",
+    "Restore complete checkout history without listing refs",
+    5,
+    "run",
+  ],
+  [
+    "ci.yml",
+    "package-contracts",
+    "Restore complete checkout history without listing refs",
+    5,
+    "run",
+  ],
+  [
+    "open-version-pr.yml",
+    "version",
+    "Restore complete checkout history without listing refs",
+    5,
+    "run",
+  ],
+  [
+    "publish-canary.yml",
+    "publish",
+    "Restore complete checkout history without listing refs",
+    5,
+    "run",
+  ],
+  [
+    "publish-packages.yml",
+    "publish",
+    "Restore complete checkout history without listing refs",
+    5,
+    "run",
+  ],
+  [
+    "publish-stable.yml",
+    "publish",
+    "Restore complete checkout history without listing refs",
+    5,
+    "run",
+  ],
+  [
+    "release-acceptance.yml",
+    "acceptance",
+    "Restore complete checkout history without listing refs",
+    5,
+    "run",
+  ],
+  [
+    "release-candidate.yml",
+    "candidate",
+    "Restore complete checkout history without listing refs",
+    5,
+    "run",
+  ],
+  [
+    "release-embedded.yml",
+    "source-verification",
+    "Restore complete checkout history without listing refs",
+    5,
+    "run",
+  ],
+  [
+    "release-embedded.yml",
+    "release",
+    "Restore complete checkout history without listing refs",
+    5,
+    "run",
+  ],
+  [
+    "release-publication-admission.yml",
+    "verify",
+    "Restore complete checkout history without listing refs",
+    5,
+    "run",
+  ],
+  ["release.yml", "version", "Restore complete checkout history without listing refs", 5, "run"],
+  ["release.yml", "publish", "Restore complete checkout history without listing refs", 5, "run"],
+  [
+    "staging-canary-dispatch.yml",
+    "receipt",
+    "Restore complete checkout history without listing refs",
+    5,
     "run",
   ],
   ["ci.yml", "plan", "Install exact dependency tree", 11, "run"],
@@ -73,6 +178,13 @@ const EXPECTED_CAPS = [
   ["ci.yml", "browser-acceptance", "Browser account session-set acceptance", 14, "run"],
   ["ci.yml", "browser-acceptance", "Workbench browser acceptance", 4, "run"],
   ["ci.yml", "browser-acceptance", "Compact session-search header browser acceptance", 8, "run"],
+  [
+    "ci.yml",
+    "browserd-real-e2e",
+    "Verify managed recovery in an owned process namespace",
+    2,
+    "run",
+  ],
   ["ci.yml", "browserd-real-e2e", "Run actual browserd end-to-end suite", 6, "run"],
   ["desktop-e2e.yml", "desktop-image", "Desktop image e2e", 36, "run"],
   [
@@ -90,18 +202,19 @@ const EXPECTED_CAPS = [
 
 const EXPECTED_JOB_BUDGETS = {
   "agent-ci.yml:native-command-supervisor": { stepCaps: 5, needed: 6, jobCap: 6 },
+  "backup-image.yml:publish": { stepCaps: 6, needed: 7, jobCap: 30 },
   "local-startup.yml:docker": { stepCaps: 88, needed: 89, jobCap: 90 },
   "local-startup.yml:platform-preflight": { stepCaps: 2, needed: 3, jobCap: 5 },
   "publish-artifact-runtime.yml:publish": { stepCaps: 12, needed: 13, jobCap: 15 },
-  "ci.yml:plan": { stepCaps: 11, needed: 12, jobCap: 15 },
-  "ci.yml:source-contracts": { stepCaps: 27, needed: 28, jobCap: 35 },
-  "ci.yml:unit-shards": { stepCaps: 21, needed: 22, jobCap: 30 },
+  "ci.yml:plan": { stepCaps: 16, needed: 17, jobCap: 17 },
+  "ci.yml:source-contracts": { stepCaps: 32, needed: 33, jobCap: 35 },
+  "ci.yml:unit-shards": { stepCaps: 26, needed: 27, jobCap: 30 },
   "ci.yml:integration-shards": { stepCaps: 31, needed: 32, jobCap: 40 },
   "ci.yml:e2e-shards": { stepCaps: 30, needed: 31, jobCap: 35 },
-  "ci.yml:test-suite": { stepCaps: 18, needed: 19, jobCap: 30 },
-  "ci.yml:browser-acceptance": { stepCaps: 65, needed: 66, jobCap: 70 },
-  "ci.yml:package-contracts": { stepCaps: 38, needed: 39, jobCap: 55 },
-  "ci.yml:browserd-real-e2e": { stepCaps: 23, needed: 24, jobCap: 25 },
+  "ci.yml:test-suite": { stepCaps: 23, needed: 24, jobCap: 30 },
+  "ci.yml:browser-acceptance": { stepCaps: 70, needed: 71, jobCap: 71 },
+  "ci.yml:package-contracts": { stepCaps: 43, needed: 44, jobCap: 55 },
+  "ci.yml:browserd-real-e2e": { stepCaps: 25, needed: 26, jobCap: 27 },
   "desktop-e2e.yml:desktop-image": { stepCaps: 36, needed: 37, jobCap: 45 },
   "publish-desktop-image.yml:ghcr-mirror": { stepCaps: 5, needed: 6, jobCap: 10 },
 } as const;
@@ -123,7 +236,7 @@ function numericCap(value: unknown): number | null {
 }
 
 describe("workflow timeout contract", () => {
-  test("all jobs and the exact 27 run plus 5 action steps use static native caps", async () => {
+  test("all jobs and the exact 49 run plus 5 action steps use static native caps", async () => {
     const workflows = await loadWorkflows();
     const capped: Array<readonly [string, string, string, number, "run" | "action"]> = [];
     const budgets: Record<string, { stepCaps: number; needed: number; jobCap: number }> = {};
@@ -163,7 +276,7 @@ describe("workflow timeout contract", () => {
       right: readonly [string, string, string, number, "run" | "action"],
     ) => left.slice(0, 3).join("\0").localeCompare(right.slice(0, 3).join("\0"));
     expect(capped.toSorted(byIdentity)).toEqual(EXPECTED_CAPS.toSorted(byIdentity));
-    expect(capped.filter((row) => row[4] === "run")).toHaveLength(27);
+    expect(capped.filter((row) => row[4] === "run")).toHaveLength(49);
     expect(capped.filter((row) => row[4] === "action")).toHaveLength(5);
     for (const [job, expected] of Object.entries(EXPECTED_JOB_BUDGETS)) {
       expect(budgets[job], job).toEqual(expected);

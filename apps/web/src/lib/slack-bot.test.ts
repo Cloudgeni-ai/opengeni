@@ -43,7 +43,7 @@ function connection(overrides: Partial<ConnectionMetadata> = {}): ConnectionMeta
       slackTeamName: "Test workspace",
       botId: "B_TEST",
       botUserId: "U_TEST",
-      botDisplayName: "OpenGeni",
+      botDisplayName: "Opengeni",
     },
     createdBySubjectId: "subject-a",
     updatedBySubjectId: "subject-a",
@@ -53,7 +53,7 @@ function connection(overrides: Partial<ConnectionMetadata> = {}): ConnectionMeta
   };
 }
 
-describe("OpenGeni Slack bot UI connection filtering", () => {
+describe("Opengeni Slack bot UI connection filtering", () => {
   test("shows active shared bot-role connections with all required safe scopes", () => {
     const valid = connection();
     const validWithAdditionalScopes = connection({
@@ -111,13 +111,13 @@ describe("OpenGeni Slack bot UI connection filtering", () => {
     expect(openGeniSlackBotUiMetadata(valid)).toMatchObject({
       credentialRole: OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
       slackTeamId: "T_TEST",
-      botDisplayName: "OpenGeni",
+      botDisplayName: "Opengeni",
     });
     expect(
       openGeniSlackBotUiMetadata(
-        connection({ metadata: { ...valid.metadata, botDisplayName: "OpenGeni Staging" } }),
+        connection({ metadata: { ...valid.metadata, botDisplayName: "Opengeni Staging" } }),
       ),
-    ).toMatchObject({ botDisplayName: "OpenGeni Staging" });
+    ).toMatchObject({ botDisplayName: "Opengeni Staging" });
   });
 
   test("prefers an active reinstall target over a newer revoked connection", () => {
@@ -134,11 +134,11 @@ describe("OpenGeni Slack bot UI connection filtering", () => {
 
   test("names an install by its Slack workspace, never by its uuid", () => {
     const existing = connection();
-    expect(openGeniSlackBotConnectionLabel(existing)).toBe("Test workspace · OpenGeni");
+    expect(openGeniSlackBotConnectionLabel(existing)).toBe("Test workspace · Opengeni");
 
     // One install needs no discriminator at all.
     expect(openGeniSlackBotConnectionOptions([existing])).toEqual([
-      { connection: existing, label: "Test workspace · OpenGeni" },
+      { connection: existing, label: "Test workspace · Opengeni" },
     ]);
 
     // Two same-named Slack workspaces are told apart by the Slack team id,
@@ -149,8 +149,8 @@ describe("OpenGeni Slack bot UI connection filtering", () => {
     });
     const named = openGeniSlackBotConnectionOptions([existing, otherTeam]);
     expect(named.map((option) => option.label)).toEqual([
-      "Test workspace · OpenGeni · T_TEST",
-      "Test workspace · OpenGeni · T_OTHER",
+      "Test workspace · Opengeni · T_TEST",
+      "Test workspace · Opengeni · T_OTHER",
     ]);
 
     // Reinstalling the same Slack workspace collides on the team id too, so the
@@ -161,10 +161,10 @@ describe("OpenGeni Slack bot UI connection filtering", () => {
     });
     const duplicates = openGeniSlackBotConnectionOptions([existing, reinstalled]);
     expect(duplicates[0]?.label).toBe(
-      `Test workspace · OpenGeni · T_TEST · installed ${formatTimestamp(existing.createdAt)}`,
+      `Test workspace · Opengeni · T_TEST · installed ${formatTimestamp(existing.createdAt)}`,
     );
     expect(duplicates[1]?.label).toBe(
-      `Test workspace · OpenGeni · T_TEST · installed ${formatTimestamp(reinstalled.createdAt)}`,
+      `Test workspace · Opengeni · T_TEST · installed ${formatTimestamp(reinstalled.createdAt)}`,
     );
 
     // Whatever the ladder produced, no label may leak a uuid and no two rows
@@ -174,7 +174,7 @@ describe("OpenGeni Slack bot UI connection filtering", () => {
     }
     expect(new Set(duplicates.map((option) => option.label)).size).toBe(2);
 
-    // A row that is not an OpenGeni bot install is dropped, not labeled.
+    // A row that is not an Opengeni bot install is dropped, not labeled.
     expect(openGeniSlackBotConnectionOptions([connection({ kind: "oauth2" })])).toEqual([]);
   });
 
@@ -186,3 +186,15 @@ describe("OpenGeni Slack bot UI connection filtering", () => {
     expect(openGeniSlackBotInstallInput(null, false)).toEqual({});
   });
 });
+
+// Existing installations retain their immutable receipts across the brand change.
+for (const name of ["Opengeni", "Opengeni Staging", "OpenGeni", "OpenGeni Staging"]) {
+  test(`recognizes the saved Slack bot name ${name} with current presentation`, () => {
+    const original = connection();
+    const saved = connection({ metadata: { ...original.metadata, botDisplayName: name } });
+    expect(openGeniSlackBotUiMetadata(saved)).not.toBeNull();
+    expect(openGeniSlackBotConnectionLabel(saved)).toBe(
+      `Test workspace · ${name.replace("OpenGeni", "Opengeni")}`,
+    );
+  });
+}

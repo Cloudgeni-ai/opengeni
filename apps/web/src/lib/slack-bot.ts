@@ -13,7 +13,7 @@ export type OpenGeniSlackBotUiMetadata = {
   slackTeamName: string;
   botId: string;
   botUserId: string;
-  botDisplayName: "OpenGeni" | "OpenGeni Staging";
+  botDisplayName: "Opengeni" | "Opengeni Staging" | "OpenGeni" | "OpenGeni Staging";
 };
 
 export function openGeniSlackBotUiMetadata(
@@ -33,7 +33,10 @@ export function openGeniSlackBotUiMetadata(
     typeof metadata.slackTeamName !== "string" ||
     typeof metadata.botId !== "string" ||
     typeof metadata.botUserId !== "string" ||
-    (metadata.botDisplayName !== "OpenGeni" && metadata.botDisplayName !== "OpenGeni Staging")
+    (metadata.botDisplayName !== "Opengeni" &&
+      metadata.botDisplayName !== "Opengeni Staging" &&
+      metadata.botDisplayName !== "OpenGeni" &&
+      metadata.botDisplayName !== "OpenGeni Staging")
   ) {
     return null;
   }
@@ -73,7 +76,9 @@ export function preferredOpenGeniSlackBotConnection(
  */
 export function openGeniSlackBotConnectionLabel(connection: ConnectionMetadata): string | null {
   const metadata = openGeniSlackBotUiMetadata(connection);
-  return metadata ? `${metadata.slackTeamName} · ${metadata.botDisplayName}` : null;
+  return metadata
+    ? `${metadata.slackTeamName} · ${metadata.botDisplayName.replace("OpenGeni", "Opengeni")}`
+    : null;
 }
 
 export type OpenGeniSlackBotConnectionOption = {
@@ -104,7 +109,7 @@ function tally<T>(rows: readonly T[], key: (row: T) => string): Map<string, numb
  * when one Slack workspace was installed more than once. Both are stable facts
  * a person can match against Slack itself, which a connection uuid is not.
  *
- * Rows that are not OpenGeni bot installs are dropped rather than labeled: this
+ * Rows that are not Opengeni bot installs are dropped rather than labeled: this
  * renders a picker, and an unlabelable option is not a choice.
  */
 export function openGeniSlackBotConnectionOptions(

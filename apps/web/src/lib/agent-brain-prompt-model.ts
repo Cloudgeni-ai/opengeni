@@ -49,7 +49,7 @@ export function paymentSourceFor(model: WorkspaceModelCatalogModel): string {
 }
 
 /**
- * Pick a workspace-selectable model for the Company Brain "Create with OpenGeni"
+ * Pick a workspace-selectable model for the Company Brain "Create with Opengeni"
  * prompt from the raw workspace model catalog. The preferred (app-context)
  * model wins when the catalog marks it selectable; otherwise the first
  * selectable catalog model (catalog order) is used. Returns `null` when the

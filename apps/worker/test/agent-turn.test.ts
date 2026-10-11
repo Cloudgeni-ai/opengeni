@@ -288,6 +288,19 @@ describe("periodic workspace snapshot admission", () => {
 });
 
 describe("Connected Machine durable stream finalization", () => {
+  test("forwards exact durable tool owners without converting an empty scope to turn-end release", async () => {
+    const calls: Array<readonly string[] | undefined> = [];
+    const machine = {
+      finalizeOpStreamOps: async (callIds?: readonly string[]) => {
+        calls.push(callIds);
+      },
+    };
+    await finalizeDurableTurnOpStreams([machine, machine], null, ["call_first"]);
+    await finalizeDurableTurnOpStreams([], machine, []);
+    await finalizeDurableTurnOpStreams([machine], null);
+    expect(calls).toEqual([["call_first"], [], undefined]);
+  });
+
   test("finalizes every routed proxy once and does not bypass them for the raw fallback", async () => {
     const calls: string[] = [];
     const eagerProxy = {
@@ -379,7 +392,7 @@ function citedAssistantMessage() {
     content: [
       {
         type: "output_text",
-        text: "OpenGeni is documented here [1].",
+        text: "Opengeni is documented here [1].",
         providerData: {
           annotations: [
             {
@@ -387,7 +400,7 @@ function citedAssistantMessage() {
               start_index: 28,
               end_index: 31,
               url: "https://docs.opengeni.example/search",
-              title: "OpenGeni search documentation",
+              title: "Opengeni search documentation",
             },
           ],
         },
@@ -561,7 +574,7 @@ describe("turn exact-content boundaries", () => {
     ).toMatchObject({
       type: "url_citation",
       url: "https://docs.opengeni.example/search",
-      title: "OpenGeni search documentation",
+      title: "Opengeni search documentation",
     });
   });
 
@@ -576,7 +589,7 @@ describe("turn exact-content boundaries", () => {
         type: "web_search_call",
         id: "ws_123",
         status: "completed",
-        action: { type: "search", query: "OpenGeni" },
+        action: { type: "search", query: "Opengeni" },
       },
     };
 
@@ -648,6 +661,34 @@ describe("turn exact-content boundaries", () => {
               name,
               status: "completed",
               output: "opaque",
+            },
+          },
+        }),
+      ).toBeNull();
+    },
+  );
+
+  test.each([
+    {
+      status: "failed",
+      providerData: { type: "web_search_call", error: { code: "max_uses_exceeded" } },
+    },
+    { status: "in_progress", providerData: { type: "web_search_call" } },
+    { status: "failed", providerData: undefined },
+  ])(
+    "does not register a finished or provider-run hosted search ($status) as a pending call",
+    ({ status, providerData }) => {
+      expect(
+        pendingToolCallFromSdkEvent({
+          type: "run_item_stream_event",
+          item: {
+            type: "tool_call_item",
+            rawItem: {
+              type: "hosted_tool_call",
+              id: "msg_1:1",
+              name: "web_search_call",
+              status,
+              ...(providerData ? { providerData } : {}),
             },
           },
         }),
@@ -861,7 +902,7 @@ describe("turn exact-content boundaries", () => {
       postCompactionRecovery,
     );
     const interruptionPath = source.indexOf(
-      "if (eventing.stream.interruptions.length > 0)",
+      "if (eventing.stream.interruptions.length > 0 || programmaticPending.length > 0)",
       cancelledStreamGuard,
     );
     const completionPath = source.indexOf(
@@ -1875,6 +1916,90 @@ describe("production model-response usage callback authority", () => {
     }
   });
 
+  test("a response continued across requests binds context to its last request and counts its searches", async () => {
+    // Claude continues a paused search turn with a second request that
+    // re-sends the whole prefix: billing sums both, context is the last one.
+    const terminal = new RunRawModelStreamEvent({
+      type: "response_done",
+      response: {
+        id: "msg_paused",
+        output: [],
+        usage: {
+          requests: 2,
+          inputTokens: 30_000,
+          outputTokens: 40,
+          totalTokens: 30_040,
+          inputTokensDetails: { cached_tokens: 25_000 },
+          requestUsageEntries: [
+            { inputTokens: 14_000, outputTokens: 10, totalTokens: 14_010 },
+            {
+              inputTokens: 16_000,
+              outputTokens: 30,
+              totalTokens: 16_030,
+              inputTokensDetails: { cached_tokens: 15_000 },
+            },
+          ],
+        },
+        providerData: { anthropic: { webSearchRequests: 3 } },
+      },
+    } as any);
+    const observability = createObservability(testSettings(), { component: "worker" });
+    const recordUsageSpy = spyOn(opengeniDb, "recordUsageEvent").mockImplementation(
+      async () => undefined,
+    );
+    try {
+      const fencedInputs: Array<number | null> = [];
+      const state = createModelResponseEventState();
+      const result = await processModelResponseTerminalEvent({
+        event: terminal,
+        state,
+        dispatchId: "activity-A",
+        settings: testSettings(),
+        db: {} as any,
+        observability,
+        publish: (async (batch: any[]) => ({
+          accepted: true,
+          events: batch.map((event) => ({
+            ...event,
+            id: crypto.randomUUID(),
+            turnAssociation: "current" as const,
+          })),
+        })) as any,
+        accountId: "acct-1",
+        workspaceId: "ws-1",
+        sessionId: "sess-1",
+        turnId: "turn-1",
+        turnAttemptId: "attempt-1",
+        provider: "claude-subscription",
+        providerApi: "anthropic-messages",
+        model: "claude-opus-5-5",
+        metricProvider: "claude-subscription",
+        externallyBilled: true,
+        servingCredentialId: "credential-1",
+        priorSessionCredentialId: "credential-1",
+        emittedSourceKeys: new Set<string>(),
+        renewLease: async () => undefined,
+        leaseLost: () => false,
+        leaseLostMessage: "lease lost",
+        setLastInputTokens: async (tokens) => {
+          fencedInputs.push(tokens);
+        },
+      });
+      expect(result).toMatchObject({ status: "processed", authoritative: true });
+      expect(state.contextSignal).toEqual({ revision: 1, totalTokens: 16_030 });
+      expect(fencedInputs).toEqual([16_000]);
+      const metrics = await observability.prometheusMetrics();
+      expect(metrics).toMatch(
+        /opengeni_model_web_search_requests_total\{[^}]*provider="claude-subscription"[^}]*\} 3\b/,
+      );
+      expect(metrics).toMatch(
+        /opengeni_model_tokens_total\{[^}]*provider="claude-subscription"[^}]*type="input"[^}]*\} 30000\b/,
+      );
+    } finally {
+      recordUsageSpy.mockRestore();
+    }
+  });
+
   test("persists unpinned workspace Gateway endpoint authority before a soft fact-write failure", async () => {
     const upstreamModelId = "anthropic/claude-sonnet-4.6";
     const model = `${WORKSPACE_GATEWAY_MODEL_ID_PREFIX}${upstreamModelId}`;
@@ -1913,7 +2038,7 @@ describe("production model-response usage callback authority", () => {
     );
     const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockImplementation(
       async () => {
-        throw new Error("workspace Gateway usage must not debit OpenGeni credits");
+        throw new Error("workspace Gateway usage must not debit Opengeni credits");
       },
     );
     try {
@@ -2052,6 +2177,13 @@ describe("production model-response usage callback authority", () => {
         type: "response_done",
         response: { id: "resp-1", output: [] },
       } as any);
+      const emptyRawMirror = new RunRawModelStreamEvent({
+        type: "model",
+        providerData: { rawModelEventSource: OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE },
+        event: { type: "response.completed", response: { id: "resp-2" } },
+      } as any);
+      expect(await process(emptyRawMirror)).toEqual({ status: "not_response" });
+      expect(state.responseCount).toBe(0);
       expect(await process(missingUsage)).toMatchObject({
         status: "processed",
         authoritative: true,
@@ -3426,9 +3558,7 @@ describe("lazy sandbox provisioner single-flight", () => {
     const onDemandEstablishBody = establishSource.slice(onDemandAt, lazyBinderDefinitionAt);
     expect(onDemandEstablishBody).not.toContain("await sandboxState.resumeManagedGroupBox()");
     expect(onDemandEstablishBody).not.toContain("await resumeBoxForTurn(");
-    expect(establishSource).toContain(
-      "onSandboxLost: publishSandboxLost,\n                objectStorage,",
-    );
+    expect(establishSource).toMatch(/onSandboxLost: publishSandboxLost,\n\s+objectStorage,/);
   });
 
   test("personal-connection membership uses named live-authority, not a bare grant join", async () => {
@@ -4564,7 +4694,10 @@ describe("Codex credential lease deadline fence", () => {
     let now = performance.now();
     const clock = spyOn(performance, "now").mockImplementation(() => now);
     let resolveHeartbeat!: (value: Date | null) => void;
-    const heartbeat = spyOn(opengeniDb, "heartbeatCodexCredentialLeaseUntil").mockImplementation(
+    const scope = spyOn(opengeniDb, "withRlsContext").mockImplementation(
+      async (db, _context, fn) => await fn(db),
+    );
+    const heartbeat = spyOn(opengeniDb, "renewSubscriptionTurnLease").mockImplementation(
       () =>
         new Promise<Date | null>((resolve) => {
           resolveHeartbeat = resolve;
@@ -4581,7 +4714,9 @@ describe("Codex credential lease deadline fence", () => {
         workspaceId: "workspace-1",
         codexWorkspaceKey: "workspace-key",
         getTurnId: () => "turn-1",
+        getSessionId: () => "session-1",
       } as never);
+      lease.useSubscriptionCoreLease("connection-1");
       lease.held = true;
       lease.holderId = "holder-1";
       lease.generation = 1;
@@ -4599,6 +4734,7 @@ describe("Codex credential lease deadline fence", () => {
       expect(lease.confirmedUntilMs).toBe(priorDeadline);
     } finally {
       heartbeat.mockRestore();
+      scope.mockRestore();
       clock.mockRestore();
     }
   });
@@ -5196,6 +5332,7 @@ describe("transient provider error classifier", () => {
       error: "SECRET worker server provider detail",
       code: "provider_unavailable",
       retryable: true,
+      providerCondition: "unavailable",
     });
     expect(JSON.stringify({ error: observed.error, payload })).toContain(
       "SECRET worker server provider detail",
@@ -5248,6 +5385,7 @@ describe("transient provider error classifier", () => {
       code: "provider_rate_limited",
       retryable: true,
       detail: "SECRET worker rate provider detail",
+      providerCondition: "rate_limited",
     });
 
     const usage = await actualCodexStreamingFailure({
@@ -5649,7 +5787,7 @@ describe("transient provider error classifier", () => {
     expect(isTransientProviderError(observed)).toBe(true);
     expect(agentRunFailurePayload(observed)).toEqual({
       error:
-        "OpenGeni could not reach an upstream service. The same turn will retry after a short delay.",
+        "Opengeni could not reach an upstream service. The same turn will retry after a short delay.",
       code: "upstream_connectivity_unavailable",
       retryable: true,
     });
@@ -5838,6 +5976,7 @@ describe("transient provider error classifier", () => {
       error: "Our servers are currently overloaded. Please try again later.",
       code: "provider_unavailable",
       retryable: true,
+      providerCondition: "overloaded",
     });
 
     const generic500 = Object.assign(
@@ -6650,8 +6789,12 @@ describe("modelAttachmentInputPolicyForTurn", () => {
     ).toEqual({ supportsImageInput: false, inputFileMediaTypes: [] });
   });
 
-  test("keeps chat-completions typed attachments on the sandbox-path fallback", () => {
+  test("delivers images to image-capable chat models while documents use file paths", () => {
     expect(modelAttachmentInputPolicyForTurn(resolved("chat", true, ["application/pdf"]))).toEqual({
+      supportsImageInput: true,
+      inputFileMediaTypes: [],
+    });
+    expect(modelAttachmentInputPolicyForTurn(resolved("chat", false))).toEqual({
       supportsImageInput: false,
       inputFileMediaTypes: [],
     });

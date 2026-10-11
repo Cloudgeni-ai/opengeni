@@ -1449,7 +1449,7 @@ describe("configuredModels", () => {
 });
 
 describe("normalized model definitions", () => {
-  function definitionFor(input?: {
+  type DefinitionInput = {
     apiKey?: string;
     providerLabel?: string;
     modelLabel?: string;
@@ -1460,7 +1460,9 @@ describe("normalized model definitions", () => {
     publicQueryValue?: string;
     publicHeaderNameCase?: string;
     modelOverrides?: Record<string, unknown>;
-  }) {
+  };
+
+  function settingsFor(input?: DefinitionInput) {
     const registry = JSON.stringify([
       {
         id: "acme",
@@ -1501,20 +1503,23 @@ describe("normalized model definitions", () => {
         ],
       },
     ]);
-    const settings = withEnv(
+    return withEnv(
       {
         OPENGENI_OPENAI_API_KEY: "sk-test",
         OPENGENI_MODEL_PROVIDERS_JSON: registry,
       },
       () => getSettings(),
     );
-    return configuredModels(settings).find((model) => model.id === "acme/model")!;
+  }
+
+  function definitionFor(input?: DefinitionInput) {
+    return configuredModels(settingsFor(input)).find((model) => model.id === "acme/model")!;
   }
 
   test("pins the V1 digest and excludes labels, aliases, API keys, and secret metadata values", () => {
     const baseline = definitionFor();
     expect(baseline.definitionVersion).toBe(
-      "sha256:a26eefb346f36932c41dcd0df64ebe3dfc5841fc02dd7a1c32cc8551adc98314",
+      "sha256:c6a6a89a12c29e8b646ffb2f8a4a3cbccb1641bfda614da39bd603e6f1343a7c",
     );
     expect(
       definitionFor({
@@ -1562,6 +1567,55 @@ describe("normalized model definitions", () => {
     ];
     for (const variant of variants) {
       expect(variant).not.toBe(baseline);
+    }
+  });
+
+  const policyInput = {
+    modelId: "acme/model",
+    requestedModelId: null,
+    modelSource: "continuation",
+    reasoningEffort: "medium",
+    reasoningSource: "continuation",
+  } as const;
+
+  test("keeps the automatic-compaction default out of the executable identity", () => {
+    // Workspace and organization compaction preferences already replace this
+    // trigger live, so a changed default must not strand accepted turns.
+    const accepted = resolveTurnExecutionPolicyV1(settingsFor(), policyInput);
+    const current = settingsFor({ modelOverrides: { autoCompactTokenLimit: 30_000 } });
+    expect(definitionFor({ modelOverrides: { autoCompactTokenLimit: 30_000 } })).toMatchObject({
+      autoCompactTokenLimit: 30_000,
+      definitionVersion: accepted.definitionVersion,
+    });
+    expect(assertTurnExecutionPolicyMatchesConfigV1(current, accepted, policyInput).policy).toEqual(
+      accepted,
+    );
+  });
+
+  test("keeps a turn accepted before the compaction trigger left the digest runnable", () => {
+    // The pinned V1 digest of this exact definition when it still included
+    // the compaction trigger.
+    const preExclusion = {
+      ...resolveTurnExecutionPolicyV1(settingsFor(), policyInput),
+      definitionVersion: "sha256:a26eefb346f36932c41dcd0df64ebe3dfc5841fc02dd7a1c32cc8551adc98314",
+    };
+    expect(
+      assertTurnExecutionPolicyMatchesConfigV1(settingsFor(), preExclusion, policyInput).policy,
+    ).toEqual(preExclusion);
+    // The compatibility digest reproduces only the current trigger and still
+    // binds every executable field.
+    for (const modelOverrides of [
+      { autoCompactTokenLimit: 30_000 },
+      { contextWindowTokens: 100_001 },
+      { toolOutputTruncationTokens: 9_001 },
+    ]) {
+      expect(() =>
+        assertTurnExecutionPolicyMatchesConfigV1(
+          settingsFor({ modelOverrides }),
+          preExclusion,
+          policyInput,
+        ),
+      ).toThrow(TurnExecutionPolicyDefinitionMismatchError);
     }
   });
 });
@@ -1821,14 +1875,29 @@ describe("turn execution policy V1", () => {
       reasoningEffort: "low" as const,
       reasoningSource: "continuation" as const,
     };
-    const accepted = resolveTurnExecutionPolicyV1(historical, input);
+    // Turns accepted before the implicit-caching rollout carry this digest,
+    // which still included the automatic-compaction trigger.
+    const accepted = {
+      ...resolveTurnExecutionPolicyV1(historical, input),
+      definitionVersion: "sha256:3b9f79cc6958b71ef6e14c4dc16797e83b9bbceb070ecd44048f0a685e3a1c2a",
+    };
     const newer = resolveTurnExecutionPolicyV1(current, input);
-    expect(accepted.definitionVersion).toBe(
-      "sha256:3b9f79cc6958b71ef6e14c4dc16797e83b9bbceb070ecd44048f0a685e3a1c2a",
-    );
     expect(newer.definitionVersion).toBe(
-      "sha256:fc4b0bc9ec1a5cc2c302da88c407a633ae5fec0bcc0166668eca3acf1fa49479",
+      "sha256:e5abc1c2cc619db0827f47241011aa90eeca0fe700071973b64f9ed3c32d7952",
     );
+    // The same current definition accepted before the compaction trigger left
+    // the digest.
+    expect(
+      assertTurnExecutionPolicyMatchesConfigV1(
+        current,
+        {
+          ...newer,
+          definitionVersion:
+            "sha256:fc4b0bc9ec1a5cc2c302da88c407a633ae5fec0bcc0166668eca3acf1fa49479",
+        },
+        input,
+      ).policy.definitionVersion,
+    ).toBe("sha256:fc4b0bc9ec1a5cc2c302da88c407a633ae5fec0bcc0166668eca3acf1fa49479");
     const before = structuredClone(accepted);
     for (const policy of [accepted, newer]) {
       expect(settingsForAcceptedSubscriptionTurn(current, policy, input)).toBe(current);
@@ -2321,7 +2390,7 @@ describe("configuredModelPricing", () => {
     });
   });
 
-  test("keeps gateway provider cost separate from OpenGeni credit markup", () => {
+  test("keeps gateway provider cost separate from Opengeni credit markup", () => {
     const settings = withEnv({ OPENGENI_OPENAI_API_KEY: "sk-test" }, () => getSettings());
     expect(
       calculateGatewayReportedCostBreakdown(
@@ -2451,7 +2520,7 @@ describe("validateSettings registry checks", () => {
         },
         () => getSettings(),
       ),
-    ).toThrow("reserved for a reviewed OpenGeni provider");
+    ).toThrow("reserved for a reviewed Opengeni provider");
   });
 
   test("rejects duplicate registry provider ids", () => {

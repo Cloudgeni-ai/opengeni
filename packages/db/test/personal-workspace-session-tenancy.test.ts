@@ -29,6 +29,7 @@ import {
   resolveCompanyBrainContextSelection,
   setSubjectRlsContext,
   submitHumanPromptInTransaction,
+  PersonalSessionInitiatorRequiredError,
   transitionSessionVisibility,
   updateOrganizationPrivateSessionSettings,
   withRlsContext,
@@ -381,6 +382,231 @@ describe("session tenancy SQL seams inside a managed human's own personal worksp
     await getOrCreateCompanyProfileSnapshot(client.db, companyClaims);
     const companyContext = await resolveCompanyBrainContextSelection(client.db, companyClaims);
     expect(companyContext).toMatchObject({ receipt: { sessionRole: "root" } });
+  }, 180_000);
+
+  test.each(["personal", "shared"] as const)(
+    "a private internal-update attempt creates and replays a same-owner child in a %s workspace",
+    async (workspaceKind) => {
+      if (!shared || !client) return;
+      const human = await provisionManagedHuman();
+      const workspaceId =
+        workspaceKind === "personal" ? human.personalWorkspaceId : human.legacyWorkspaceId;
+      const parent = await createSessionWithIdempotencyKey(client.db, {
+        accountId: human.accountId,
+        workspaceId,
+        visibility: "user_private",
+        initialMessage: "private parent awaiting an internal update",
+        resources: [],
+        metadata: {},
+        createdBy: { kind: "subject", subjectId: human.subjectId },
+        subjectId: human.subjectId,
+        model: "test-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "none",
+        createIdempotencyKey: `private-update-parent-${crypto.randomUUID()}`,
+      });
+      await addSessionSystemUpdate(client.db, {
+        accountId: human.accountId,
+        workspaceId,
+        sessionId: parent.session.id,
+        kind: "child_terminal_result",
+        classification: "success",
+        sourceId: crypto.randomUUID(),
+        dedupeKey: crypto.randomUUID(),
+        summary: "A delegated task completed",
+        payload: {
+          type: "child_terminal_result",
+          childSessionId: crypto.randomUUID(),
+          status: "idle",
+        },
+      });
+      const attemptId = crypto.randomUUID();
+      const claim = await claimSessionWorkForAttempt(client.db, workspaceId, {
+        sessionId: parent.session.id,
+        workflowId: `session-${parent.session.id}`,
+        workflowRunId: crypto.randomUUID(),
+        attemptId,
+        dispatchId: crypto.randomUUID(),
+        trigger: { kind: "next" },
+      });
+      if (claim.action !== "claimed") throw new Error("private internal update was not claimed");
+      expect(claim.turn).toMatchObject({
+        source: "system",
+        initiator: { kind: "service", subjectId: "internal-update" },
+        initiatingHumanSubjectId: human.subjectId,
+      });
+      const input = {
+        accountId: human.accountId,
+        workspaceId,
+        visibility: "user_private" as const,
+        initialMessage: "private child after internal update",
+        resources: [],
+        metadata: {},
+        model: "test-model",
+        reasoningEffort: "medium" as const,
+        latencyMode: "standard" as const,
+        sandboxBackend: "none" as const,
+        parentSessionId: parent.session.id,
+        createIdempotencyKey: `private-update-child-${crypto.randomUUID()}`,
+        createdByActor: {
+          type: "agent_attempt" as const,
+          sessionId: parent.session.id,
+          turnId: claim.turn.id,
+          attemptId,
+          executionGeneration: claim.turn.executionGeneration,
+        },
+      };
+      const child = await createSessionWithIdempotencyKey(client.db, input);
+      expect(child.created).toBe(true);
+      expect(child.session.createdBy).toMatchObject({
+        kind: "service",
+        subjectId: "internal-update",
+      });
+      expect(
+        await getSessionForSubject(client.db, workspaceId, child.session.id, human.subjectId),
+      ).toMatchObject({
+        parentSessionId: parent.session.id,
+        sandboxGroupId: child.session.id,
+        tenancy: { visibility: "private", ownedByCurrentUser: true, authorityEpoch: 1 },
+      });
+      const replay = await createSessionWithIdempotencyKey(client.db, input);
+      expect(replay.created).toBe(false);
+      expect(replay.session.id).toBe(child.session.id);
+
+      // An opened capability still cannot forge the source turn's audit
+      // identity or point the child at a different turn. Exercise raw INSERTs
+      // so this proves the database fence, not only the TypeScript helper.
+      for (const forgedFields of [
+        { created_by_kind: "subject", created_by_subject_id: human.subjectId },
+        { created_by_subject_id: "other-service" },
+        { parent_turn_id: crypto.randomUUID() },
+      ]) {
+        const targetId = crypto.randomUUID();
+        let deniedState: string | null = null;
+        try {
+          await withRlsContext(
+            client.db,
+            { accountId: human.accountId, workspaceId },
+            async (tx) => {
+              await openPrivateChildSessionCreateCapability(tx, {
+                accountId: human.accountId,
+                workspaceId,
+                sessionId: targetId,
+                parentSessionId: parent.session.id,
+                actorTurnId: claim.turn.id,
+                actorAttemptId: attemptId,
+                actorExecutionGeneration: claim.turn.executionGeneration,
+              });
+              await tx.execute(sql`insert into sessions
+              select (pg_catalog.jsonb_populate_record(
+                null::sessions,
+                to_jsonb(source) || ${JSON.stringify({
+                  id: targetId,
+                  sandbox_group_id: targetId,
+                  create_idempotency_key: null,
+                  ...forgedFields,
+                })}::jsonb
+              )).*
+              from sessions source where source.id = ${child.session.id}::uuid`);
+            },
+          );
+        } catch (error) {
+          deniedState = nestedPostgresSqlState(error);
+        }
+        expect(deniedState).toBe("42501");
+      }
+
+      // Service attribution alone cannot grant private child authority.
+      const { createdByActor, ...withoutActor } = input;
+      await expect(
+        createSessionWithIdempotencyKey(client.db, {
+          ...withoutActor,
+          createIdempotencyKey: crypto.randomUUID(),
+          createdBy: { kind: "service", subjectId: "internal-update" },
+        }),
+      ).rejects.toThrow();
+      await expect(
+        createSessionWithIdempotencyKey(client.db, {
+          ...input,
+          createIdempotencyKey: crypto.randomUUID(),
+          createdByActor: { ...createdByActor, attemptId: crypto.randomUUID() },
+        }),
+      ).rejects.toThrow();
+      await expect(
+        createSessionWithIdempotencyKey(client.db, {
+          ...input,
+          createIdempotencyKey: crypto.randomUUID(),
+          createdByActor: {
+            ...createdByActor,
+            executionGeneration: claim.turn.executionGeneration + 1,
+          },
+        }),
+      ).rejects.toThrow();
+      const [count] = await shared.admin<Array<{ count: number }>>`
+        select count(*)::integer as count from sessions where parent_session_id = ${parent.session.id}`;
+      expect(count?.count).toBe(1);
+    },
+    180_000,
+  );
+
+  test("a service prompt without a verified owner is refused before a turn is accepted", async () => {
+    if (!shared || !client) return;
+    const human = await provisionManagedHuman();
+    const created = await createSessionWithIdempotencyKey(client.db, {
+      accountId: human.accountId,
+      workspaceId: human.personalWorkspaceId,
+      visibility: "user_private",
+      initialMessage: "private conversation",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId: human.subjectId },
+      subjectId: human.subjectId,
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      createIdempotencyKey: `private-service-${crypto.randomUUID()}`,
+    });
+    const [before] = await shared.admin<Array<{ count: number }>>`
+      select count(*)::integer as count from session_turns where session_id = ${created.session.id}`;
+    const submit = (actor: Parameters<typeof submitHumanPromptInTransaction>[1]["actor"]) =>
+      withWorkspaceSubjectSessionActivityRls(
+        client!.db,
+        human.personalWorkspaceId,
+        human.subjectId,
+        (db) =>
+          db.transaction((tx) =>
+            submitHumanPromptInTransaction(tx as unknown as typeof db, {
+              accountId: human.accountId,
+              workspaceId: human.personalWorkspaceId,
+              sessionId: created.session.id,
+              subjectId: human.subjectId,
+              actor,
+              operationKey: crypto.randomUUID(),
+              delivery: "send",
+              text: "check in",
+              resources: [],
+              model: "test-model",
+              reasoningEffort: "medium",
+              reasoningEffortFallback: "medium",
+              source: "user",
+            }),
+          ),
+      );
+
+    // Every attempt in this session must resolve its verified owner before the
+    // model runs; a service initiator has none, so acceptance must refuse.
+    await expect(
+      submit({ type: "service", subjectId: human.subjectId, subjectLabel: "Automation" }),
+    ).rejects.toBeInstanceOf(PersonalSessionInitiatorRequiredError);
+    const [after] = await shared.admin<Array<{ count: number }>>`
+      select count(*)::integer as count from session_turns where session_id = ${created.session.id}`;
+    expect(after?.count).toBe(before?.count);
+
+    // The owner still sends normally.
+    const accepted = await submit({ type: "human", subjectId: human.subjectId });
+    expect(accepted.turnId).toBeString();
   }, 180_000);
 
   test("an exact private parent attempt creates a same-owner private child", async () => {
@@ -820,34 +1046,22 @@ describe("session tenancy SQL seams inside a managed human's own personal worksp
     expect(settled).toEqual({ authorityEpoch: 2, accessRows: 0, revocationEvents: 1 });
   }, 180_000);
 
-  test("subject reads expose tenancy only after the organization's durable activation", async () => {
+  test("subject reads expose tenancy for every organization without an activation receipt", async () => {
     if (!shared || !client) return;
     const human = await provisionManagedHuman();
     const sessionId = await ownedSession(human, human.personalWorkspaceId);
     await shared.admin`
       delete from session_tenancy_activations where account_id = ${human.accountId}`;
 
-    const inert = await getSessionForSubject(
+    // Migration 0611 made session tenancy universal: the projection no longer
+    // depends on a per-organization receipt.
+    const projected = await getSessionForSubject(
       client.db,
       human.personalWorkspaceId,
       sessionId,
       human.subjectId,
     );
-    expect(inert?.tenancy).toBeUndefined();
-
-    await shared.admin`
-      insert into session_tenancy_activations (
-        account_id, activation_version, inventory_digest, parity_digest, activated_by
-      ) values (
-        ${human.accountId}, 1, ${"0".repeat(64)}, ${"1".repeat(64)}, 'database-test'
-      )`;
-    const activated = await getSessionForSubject(
-      client.db,
-      human.personalWorkspaceId,
-      sessionId,
-      human.subjectId,
-    );
-    expect(activated?.tenancy).toEqual({
+    expect(projected?.tenancy).toEqual({
       visibility: "workspace",
       authorityEpoch: 1,
       ownedByCurrentUser: true,

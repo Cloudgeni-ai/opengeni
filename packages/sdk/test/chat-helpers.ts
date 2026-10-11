@@ -1,9 +1,9 @@
-import { OpenGeni } from "../src/chat";
+import { Opengeni } from "../src/chat";
 import type { CreateSessionRequest, Session, SessionEvent } from "../src/types";
 import { sseBlock, WORKSPACE_ID } from "./helpers";
 
 /**
- * In-memory fake of the few OpenGeni routes the chat facade uses. Every
+ * In-memory fake of the few Opengeni routes the chat facade uses. Every
  * accepted prompt appends a scripted agent turn to a per-session timeline;
  * the SSE stream replays that timeline after the requested cursor.
  */
@@ -36,7 +36,7 @@ export type RecordedRequest = {
 export type FakeSessionState = { session: Session; events: SessionEvent[]; turns: number };
 
 export type FakeServer = {
-  og: OpenGeni;
+  og: Opengeni;
   fetch: typeof fetch;
   requests: RecordedRequest[];
   creates: CreateSessionRequest[];
@@ -226,7 +226,7 @@ export function fakeServer(options: FakeServerOptions = {}): FakeServer {
     return notFound();
   }) as typeof fetch;
 
-  const og = new OpenGeni({
+  const og = new Opengeni({
     apiKey: "og_test_key",
     organizationId: ORGANIZATION_ID,
     baseUrl: BASE_URL,

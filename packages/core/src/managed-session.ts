@@ -1,7 +1,14 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+import { createHmac } from "node:crypto";
 import { managedUserEmailAllowed } from "@opengeni/config";
 import type { Context } from "hono";
 import type { ManagedAuth } from "./managed-auth-type";
-import type { Database } from "@opengeni/db";
+import {
+  DatabaseUnavailableError,
+  isDatabaseConnectionLoss,
+  isRetryableDatabaseTransportFailure,
+  type Database,
+} from "@opengeni/db";
 import {
   acquireManagedAuthActorMutationLease,
   getManagedAuthAdoptedSessionSnapshot,
@@ -22,6 +29,52 @@ import {
   resolveManagedAuthSelectedSession,
   type ManagedAuthSessionAdapter,
 } from "./managed-auth-session-sets";
+
+/**
+ * Better Auth's session endpoint replaces every non-API failure with a generic
+ * INTERNAL_SERVER_ERROR and passes the original only to its logger. A lookup run
+ * through `withManagedAuthSessionLookup` collects what the logger saw, so a lost
+ * database connection is reported as a retryable outage instead of an opaque 500.
+ */
+const managedAuthLookupFailures = new AsyncLocalStorage<{ errors: unknown[] }>();
+const MANAGED_AUTH_LOOKUP_FAILURE_LIMIT = 8;
+
+/** Better Auth `logger.log` sink; a no-op outside a managed-auth session lookup. */
+export function recordManagedAuthLoggedFailure(args: readonly unknown[]): void {
+  const store = managedAuthLookupFailures.getStore();
+  if (!store) return;
+  for (const value of args) {
+    if (store.errors.length >= MANAGED_AUTH_LOOKUP_FAILURE_LIMIT) return;
+    if (value && typeof value === "object") store.errors.push(value);
+  }
+}
+
+function isBetterAuthInternalServerError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const candidate = error as { status?: unknown; statusCode?: unknown };
+  return candidate.status === "INTERNAL_SERVER_ERROR" || candidate.statusCode === 500;
+}
+
+export async function withManagedAuthSessionLookup<T>(lookup: () => Promise<T>): Promise<T> {
+  const store = { errors: [] as unknown[] };
+  try {
+    return await managedAuthLookupFailures.run(store, lookup);
+  } catch (error) {
+    // Better Auth's session endpoint only reads its database adapter, so a
+    // socket failure it logged is that adapter's connection, not another service.
+    if (
+      isBetterAuthInternalServerError(error) &&
+      store.errors.some(
+        (logged) => isDatabaseConnectionLoss(logged) || isRetryableDatabaseTransportFailure(logged),
+      )
+    ) {
+      throw new DatabaseUnavailableError("managed auth session store unavailable", {
+        cause: error,
+      });
+    }
+    throw error;
+  }
+}
 
 const ACTOR_MUTATION_LEASE_SECONDS = 15 * 60;
 const ACTOR_MUTATION_LEASE_REFRESH_MS = 5 * 60 * 1_000;
@@ -84,6 +137,51 @@ export async function getManagedSession(...args: Parameters<typeof resolveManage
   const session = await resolveManagedSession(...args);
   assertManagedUserAdmission(args[1], session?.user);
   return session;
+}
+
+/**
+ * Bearer prefix of a native app credential. The credential is a dedicated
+ * Better Auth session the person approved from a signed-in browser (see the
+ * native app sign-in route); the prefix only routes it to this resolver.
+ */
+export const NATIVE_APP_CREDENTIAL_PREFIX = "ogapp_";
+
+/**
+ * Resolve a native app credential exactly as the legacy managed cookie path
+ * resolves a browser session: Better Auth validates expiry and renews the
+ * durable session, then the canonical human session must still be valid. A
+ * native credential never reads or selects a browser session set; each app
+ * account holds its own independently revocable session.
+ */
+export async function getNativeAppManagedSession(
+  auth: ManagedAuth,
+  credential: string,
+  db: Database | undefined,
+) {
+  if (!credential.startsWith(NATIVE_APP_CREDENTIAL_PREFIX)) return null;
+  const token = credential.slice(NATIVE_APP_CREDENTIAL_PREFIX.length);
+  if (!/^[A-Za-z0-9]{16,128}$/u.test(token)) return null;
+  const context = await auth.$context;
+  const signed = encodeURIComponent(
+    `${token}.${createHmac("sha256", context.secret).update(token, "utf8").digest("base64")}`,
+  );
+  const session = await withManagedAuthSessionLookup(() =>
+    auth.api.getSession({
+      headers: new Headers({ cookie: `${context.authCookies.sessionToken.name}=${signed}` }),
+      // Never serve a cached cookie snapshot: the app's session row is authoritative.
+      query: { disableCookieCache: true },
+    }),
+  );
+  if (!session?.user) return null;
+  assertManagedUserAdmission(auth, session.user);
+  if (!db) return session;
+  const authSessionId = session.session?.id;
+  if (typeof authSessionId !== "string") return null;
+  const valid = await validateCanonicalHumanSession(db, {
+    authSessionId,
+    authUserId: session.user.id,
+  });
+  return valid ? session : null;
 }
 
 export function assertManagedUserAdmission(
@@ -260,10 +358,12 @@ async function resolveManagedSession(
         throw error;
       }
   }
-  const result = await auth.api.getSession({
-    headers: c.req.raw.headers,
-    returnHeaders: true,
-  });
+  const result = await withManagedAuthSessionLookup(() =>
+    auth.api.getSession({
+      headers: c.req.raw.headers,
+      returnHeaders: true,
+    }),
+  );
 
   for (const cookie of setCookieHeaders(result.headers)) {
     c.header("set-cookie", cookie, { append: true });

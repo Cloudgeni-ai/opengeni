@@ -23,20 +23,17 @@ import {
   appendSessionEventsForTurnAttempt,
   appendSessionEventsWithLockedSessionUpdate,
   appendSessionHistoryItems,
-  armCodexCapacityWait,
   applySessionTurnSettlement,
   canonicalSessionCommandHash,
   claimPendingSessionWorkflowWakes,
   createDb,
   enqueueSessionWorkflowWake,
-  ensureCodexRotationSettings,
   getOrCreateSessionSystemUpdateOutbox,
   markSessionAttemptQuiesced,
   markSessionWorkflowWakeFailed,
   mutateSessionControlInTransaction,
   nestedPostgresSqlState,
   QueueCommandConflictError,
-  reconcileCodexCapacityWait,
   recordConsumedChildAnswers,
   recordPendingSessionToolCallResult,
   recoverSessionDispatch,
@@ -54,6 +51,11 @@ import {
   type Database,
   type DbClient,
 } from "../src/index";
+import {
+  armCodexCapacityWait,
+  ensureCodexRotationSettings,
+  reconcileCodexCapacityWait,
+} from "./fixtures/legacy-codex";
 import { LOSSLESS_CONTENT_WRITER_APPLICATION_NAME } from "../src/lossless-json";
 import * as schema from "../src/schema";
 

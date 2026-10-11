@@ -11,7 +11,7 @@
  * - `/workspaces/<ws>/artifacts/files/<uuid>` — a retained file (console path form).
  *
  * None of them is a URL a browser can navigate on its own: the `/workspaces/...`
- * forms are OpenGeni console routes, so inside another product they resolve
+ * forms are Opengeni console routes, so inside another product they resolve
  * against that product's origin and 404. Parse them with {@link parseOpenGeniLink}
  * and route each target to the host's own UI (download, panel, page).
  */
@@ -49,7 +49,7 @@ export function isReservedOpenGeniLink(href: string | undefined): boolean {
 }
 
 /**
- * Parse an OpenGeni `sandbox:` href (plus the historical bare `/workspace/...`
+ * Parse an Opengeni `sandbox:` href (plus the historical bare `/workspace/...`
  * form). The decoded path is intentionally opaque: target selection, path
  * policy, and filesystem authority belong to the session-aware host.
  */
@@ -147,7 +147,7 @@ export function parseOpenGeniLink(href: string | undefined): OpenGeniLinkTarget 
   return null;
 }
 
-/** The OpenGeni console route for a target (the form agents write). */
+/** The Opengeni console route for a target (the form agents write). */
 export function openGeniConsolePath(
   target: OpenGeniLinkTarget,
   workspaceId: string,
@@ -173,6 +173,6 @@ export function openGeniConsolePath(
 
 /**
  * Request header naming the session an embedded artifact read belongs to.
- * `createSessionProxyHandler` only serves artifacts OpenGeni lists for it.
+ * `createSessionProxyHandler` only serves artifacts Opengeni lists for it.
  */
 export const SESSION_SCOPE_HEADER = "x-opengeni-session-id";

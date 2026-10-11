@@ -1,7 +1,11 @@
 import type { TurnHeartbeatDetails } from "../../op-journal";
 import type { Settings } from "@opengeni/config";
 import type { CodexUsageHeaderSnapshot } from "@opengeni/codex";
-import type { AppendEventInput, ApplySessionTurnSettlementInput } from "@opengeni/db";
+import type {
+  AppendEventInput,
+  ApplySessionTurnSettlementInput,
+  SubscriptionCoreTurnIdentity,
+} from "@opengeni/db";
 import type {
   CodexCredentialPolicySnapshotV1,
   ModelContextContributionSummary,
@@ -68,7 +72,18 @@ export type AttemptIdentityState = {
   triggerEventId: string | undefined;
   executionGeneration: number;
   providerRecoveryCount: number;
+  /** Durable recovery policy reason; never inferred from display wording. */
+  providerRecoveryPolicyCode?: string | undefined;
+  providerRecoveryStartedAt?: number | undefined;
+  providerRecoveryObservation?:
+    | import("./provider-recovery-metrics").ProviderRecoveryObservation
+    | undefined;
+  modelMetricRoute?: { provider: string; model: string };
+  /** Public display labels of the accepted model route, for recovery copy only. */
+  modelRoutePresentation?: { model: string; modelLabel: string; providerLabel: string };
   claudeAuthRecovery?: { credentialId: string; credentialVersion: number } | undefined;
+  /** The stored shared-core lease-busy chain this turn's previous attempt recorded. */
+  subscriptionLeaseBusy?: { startedAt: number; executionGeneration: number } | undefined;
   modelRequestStarted: boolean;
   redispatchesAtDispatch: number;
   // Held for same-turn recovery: an approval-decision rerun must re-enter
@@ -99,6 +114,9 @@ export type SandboxRuntimeState = {
   }>;
   turnSandboxProvisioner: TurnSandboxProvisioner<ResumedTurnSandbox> | null;
   resumeManagedGroupBox: (() => Promise<ResumedTurnSandbox>) | null;
+  /** Physical resumeBoxForTurn promises still running for this attempt; the
+   * finalizer joins them so a cancelled establish completes its own cleanup. */
+  inFlightSandboxResumes: Set<Promise<unknown>>;
   prefetchedManagedBox: Promise<ResumedTurnSandbox> | null;
   prefetchedManagedBoxResult: ResumedTurnSandbox | null;
   setupBoxSession: unknown;
@@ -144,11 +162,16 @@ export type EventingState = {
   settle: TurnSettleFn | null;
   turnStartedPublished: boolean;
   stream: Awaited<ReturnType<OpenGeniRuntime["runStream"]>> | undefined;
+  /** Set by the stream attempt: refuses a wait that would leave a person unanswered. */
+  inputWaitReplyGuard: (() => Promise<string | null>) | null;
   modelRunSettings: Settings;
   firstModelRequestPreparationStartedAt: number | null;
   firstModelRequestPreparationRecorded: boolean;
   firstModelRequestCheckpointAt: number | null;
   initialModelWireDispatch: InitialModelWireDispatchClock;
+  /** Diagnostic only: the current stream's timing hook for a native transport's
+   *  literal provider dispatch. Never joins, fences or fails the request. */
+  providerDispatchObserver: (() => void) | null;
   companyBrainContextContributions: readonly ModelContextContributionSummary[] | null;
   /** Skill ids in this turn's frozen, model-visible Skill index; telemetry only. */
   modelVisibleSkillIds: ReadonlySet<string> | null;
@@ -160,6 +183,17 @@ export type WorkspaceRefState = {
   variableSetId: string;
   rigId: string;
   rigVersionId: string;
+};
+
+/** A Codex chat turn running on the shared subscription core. */
+export type CodexSubscriptionCoreTurn = {
+  identity: SubscriptionCoreTurnIdentity;
+  connectionId: string;
+  /** Refresh generation of the connection when it was placed. */
+  placedRefreshGeneration: number;
+  personal: boolean;
+  requests?: ReturnType<typeof import("./codex-core-requests").createCoreCodexRequests>;
+  titleRequests?: ReturnType<typeof import("./codex-core-requests").createCoreCodexRequests>;
 };
 
 export type ProviderTurnState = {
@@ -177,6 +211,14 @@ export type ProviderTurnState = {
   codexProductModelId?: string | null;
   /** Accepted Codex allocator policy captured with the first durable lease. */
   codexPolicySnapshot: CodexCredentialPolicySnapshotV1 | null;
+  /**
+   * Set only when this Codex turn was placed by the shared subscription core
+   * (the account's Codex cutover is enabled). `effectiveCodexCredentialId` is
+   * then a core connection id: legacy Codex tables must never receive it.
+   */
+  codexSubscriptionCore: CodexSubscriptionCoreTurn | null;
+  /** Epoch ms of the latest Codex model call that produced a response. */
+  lastCodexResponseCompletedAt?: number | null;
   effectiveClaudeCredentialId: string | null;
   effectiveClaudeCredentialVersion: number | null;
   claudeUpstreamModelId: string | null;
@@ -255,6 +297,7 @@ export function createTurnContext(input: {
       firstModelPreparationNestedSandboxPhases: [],
       turnSandboxProvisioner: null,
       resumeManagedGroupBox: null,
+      inFlightSandboxResumes: new Set(),
       prefetchedManagedBox: null,
       prefetchedManagedBoxResult: null,
       setupBoxSession: null,
@@ -292,11 +335,13 @@ export function createTurnContext(input: {
       settle: null,
       turnStartedPublished: false,
       stream: undefined,
+      inputWaitReplyGuard: null,
       modelRunSettings: input.settings,
       firstModelRequestPreparationStartedAt: null,
       firstModelRequestPreparationRecorded: false,
       firstModelRequestCheckpointAt: null,
       initialModelWireDispatch: new InitialModelWireDispatchClock(),
+      providerDispatchObserver: null,
       companyBrainContextContributions: null,
       modelVisibleSkillIds: null,
     },
@@ -310,6 +355,8 @@ export function createTurnContext(input: {
       effectiveCodexCredentialVersion: null,
       codexCredentialFailoverLimit: 1,
       codexPolicySnapshot: null,
+      codexSubscriptionCore: null,
+      lastCodexResponseCompletedAt: null,
       effectiveClaudeCredentialId: null,
       effectiveClaudeCredentialVersion: null,
       claudeUpstreamModelId: null,

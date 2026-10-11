@@ -1,14 +1,14 @@
 # MCP surfaces — which one do you want?
 
-Audience: integrators. OpenGeni touches the Model Context Protocol in eight
+Audience: integrators. Opengeni touches the Model Context Protocol in eight
 places. They are different products with different owners and lifecycles; this
 page exists so you pick the right one in one read.
 
 | Surface | Who configures it | Scope / lifecycle | Credentials | Use it when |
 | --- | --- | --- | --- | --- |
 | **Organization MCP server** (`/v1/mcp`) | The person who connects an agent, on the sign-in page; owners and admins can disconnect any agent | One URL for everyone. Every public API action through three tools (find, describe, run), each running the real route in process as the caller | MCP OAuth sign-in acting as the person, capped by the connection's access setting; or an organization API key | An outside agent (Claude Code, Cursor, Codex) should do what a person can do across an organization |
-| **Unified workspace tool MCP** (`/v1/workspaces/:id/mcp`) | Workspace enables integrations; session policy may narrow agent attempts | Current-human requests expose the enabled first-party, Files, Docs, capability, API-integration, and Codex Apps tools through one canonical gateway; `OPENGENI_ALLOWED_FIRST_PARTY_MCP_TOOLS` remains a hard ceiling on the broad `opengeni` server across catalog, execution, and OAuth consent, without narrowing Docs or Files. Entries requiring one-shot human approval stay in the canonical catalog but are omitted from this adapter until MCP has a server-verifiable approval transport. Agent attempts retain their exact frozen selection | Existing OpenGeni bearer or standard MCP OAuth `mcp:access`, always intersected with live workspace authority | An MCP client needs the callable unified tool surface without provider-specific wrappers |
-| **Codemode** (`/v1/workspaces/:id/codemode`) | OpenGeni worker, from the exact tools prepared for one attempt | Immutable attempt-frozen projection of every admitted model tool; approval-required entries remain visible but cannot execute programmatically | Exact `agent_attempt` bearer: protected renewable file in managed sandboxes; in-memory, per-exec snapshot on Connected Machines. Execution stays in the owning worker and reuses the same resolved credentials/executor as model MCP | Attempt code needs typed, idempotent tool calls without a model round trip |
+| **Unified workspace tool MCP** (`/v1/workspaces/:id/mcp`) | Workspace enables integrations; session policy may narrow agent attempts | Current-human requests expose the enabled first-party, Files, Docs, capability, API-integration, and Codex Apps tools through one canonical gateway; `OPENGENI_ALLOWED_FIRST_PARTY_MCP_TOOLS` remains a hard ceiling on the broad `opengeni` server across catalog, execution, and OAuth consent, without narrowing Docs or Files. Entries requiring one-shot human approval stay in the canonical catalog but are omitted from this adapter until MCP has a server-verifiable approval transport. Agent attempts retain their exact frozen selection | Existing Opengeni bearer or standard MCP OAuth `mcp:access`, always intersected with live workspace authority | An MCP client needs the callable unified tool surface without provider-specific wrappers |
+| **Codemode** (`/v1/workspaces/:id/codemode`) | Opengeni worker, from the exact tools prepared for one attempt | Immutable attempt-frozen projection of every admitted model tool; approval choices apply uniformly; capable clients receive durable pending handles for review | Exact `agent_attempt` bearer: protected renewable file in managed sandboxes; in-memory, per-exec snapshot on Connected Machines. Execution stays in the owning worker and reuses the same resolved credentials/executor as model MCP | Attempt code needs typed, idempotent tool calls without a model round trip |
 | **Workspace HTTP/SDK tools** (`/v1/workspaces/:id/tools/*`) | Current authenticated human | Live projection of the same unified gateway; `client.tools.forWorkspace(id)` provides catalog, direct typed calls, and declarations. Connection-backed entries that also require one-shot human approval are omitted until their provider adapter supplies side-effect-free credential/resource preflight | Current human's ordinary authenticated browser/API request | A browser or host application needs typed tools without speaking MCP |
 | **Site tool bridge** (`@opengeni/sdk/site`) | Immutable Site version requests exact identities; the current viewer remains authoritative | Parent-filtered projection over the live workspace HTTP/SDK gateway, carried on one document-retained iframe bootstrap `MessagePort`. Requested identities are only a maximum allowlist; publishing grants no authority. Top-level sandbox previews use the same client through a same-origin Codemode adapter | No credential enters Site code; the published parent uses its current session and the local Bun host retains the attempt bearer | Publisher-controlled Site code needs typed tools in either the published renderer or sandbox preview |
 | **Docs MCP** (`/mcp/docs`) | Nobody — built in | Dedicated compatibility endpoint; the same Docs implementation is also included in the unified gateway | Caller's bearer | A narrowly configured client needs only workspace document search |
@@ -16,6 +16,28 @@ page exists so you pick the right one in one read.
 | **Capability MCP servers** | Workspace admin (capabilities settings) | Workspace-wide; on for every session while enabled | Workspace-owned OAuth or admin-supplied headers, authenticated-encrypted at rest; ordinary projections are metadata-only. Dedicated permissioned plaintext reads are an approved release-held follow-up. Gmail and hosted Slack MCP support personal or workspace ownership; personal use follows the immutable initiating user | A third-party tool (e.g. a SaaS MCP) should be available to *all* sessions and schedules in a workspace |
 | **Per-session MCP servers** (`mcpServers` on session create) | The embedding host, per session | One session; static headers rotatable on every user turn; host connection refs resolved per request | Authenticated-encrypted headers with metadata-only ordinary projections, or a non-secret opaque `connectionRef` resolved by the standalone/host broker. Dedicated plaintext reads are an approved release-held follow-up | An embedding host injects its own tool server or binds an existing provider connection without duplicating it |
 | **Codex Apps MCP** | Deployment enables the feature; a scoped human explicitly designates one workspace credential; session policy selects it | Available only while that exact designation remains authorized; workspace-default sessions receive it as optional, while explicit/fixed sessions see it only when selected | Only the designated Apps credential, independent of inference | A compatible model should use connected ChatGPT apps without tying their authority to inference routing or silently widening an exact tool allowlist |
+
+### Workspace Streamable HTTP
+
+For new remote API-key or bearer MCPs, the agent can prepare the native
+[connection configuration](remote-mcp-credentials.md#agent-prepared-api-key-connections).
+An authorized agent with the credential uses the protected Connect request path;
+otherwise the chat card asks the person only for the missing key. Neither path
+widens the accepted attempt's tool selection or bypasses existing permissions.
+
+The unified `/v1/workspaces/:id/mcp` endpoint uses a fresh stateless
+JSON-response transport per POST. It does not offer a server-to-client SSE
+stream: authorized GET requests return `405 Method Not Allowed` with
+`Allow: POST`, without preparing tools. OAuth, workspace and bound-session
+authorization still run first; unsupported protocol-version headers return 400.
+POST initialization, notifications, tool calls and client-abort handling are
+unchanged. No MCP session ID is issued or required by this stateless endpoint.
+
+Unexpected API 5xx responses emit a content-free error log with the method,
+route pattern and response correlation ID. Thrown failures also retain a closed
+cause kind and diagnostic ID; the existing opt-in protected diagnostics sink
+receives bounded cause locations, never exception messages, request bodies or
+credentials.
 
 ### Organization MCP server
 
@@ -57,16 +79,58 @@ workspace, or selected ones). The connection then acts as that person:
   `workspace:admin` is one permission, never a wildcard for the ones left out.
   The person's own role still expands as usual, so Full access reaches
   everything the person can do.
-- Third-party provider sign-in (Codex, SuperGrok and Claude device or OAuth
-  steps, and integration OAuth starts) and actions outside the connected
-  organization (creating another organization, accepting an invitation) stay
-  with the person in the browser; calls return a hint to finish there.
+- Device-code subscription sign-in (Codex and SuperGrok, at workspace or
+  organization level) works for an agent: it starts the sign-in, gives the
+  person the short code and link, and polls until they approve at the
+  provider. Browser-bound provider OAuth (Claude subscription sign-in and
+  integration OAuth starts) stays with the person in the browser; calls
+  return a hint to finish there. Actions no MCP caller can ever complete
+  because they need the person's own browser session (creating an
+  organization, listing their organization memberships and invitations,
+  accepting an invitation, organization recovery, and confirming an identity
+  link) are marked `browserOnly` in the catalog (`ACTION_CATALOG_BROWSER_ONLY`
+  in `scripts/public-api/action-catalog.ts`): search never returns them, and
+  describe or call answers with the reason without running anything.
   Organization API keys may call the same server and act as the organization.
+- `initialize` advertises `serverInfo` title `Opengeni` and the brand mark as
+  MCP `icons` (light and dark SVG data URIs, plus `/icon-512.png` on the public
+  origin when `OPENGENI_PUBLIC_BASE_URL` is set) for clients that render them.
 
 Connected agents are listed, changed and disconnected at
 `/v1/organizations/:id/mcp-connections` (browser only; SDK
 `listOrganizationMcpConnections`, `updateOrganizationMcpConnection`,
 `deleteOrganizationMcpConnection`). Migration `0601` is rolling.
+
+### Admin access for agent sessions
+
+An owner or admin can let one of their own Opengeni sessions reach the same
+organization actions, without connecting an outside client:
+
+- The organization allows it first: Organization settings > Security & data >
+  Agents, "Admin access for agent sessions" (off by default;
+  `GET`/`PATCH /v1/organizations/:id/agent-admin-access`, owners and admins).
+  Turning it off removes every session's access at once, and turning it on
+  again restores none.
+- Then, in the session's header menu, "Give admin access…" (`PUT
+  /v1/workspaces/:ws/sessions/:id/admin-access`). Only an owner or admin, in
+  their own browser, on a session they started themselves. Agents, API keys
+  and MCP callers can never give access, to their own session or another.
+  The granter or any owner or admin can turn it off from the shield beside
+  the title or the same menu (`DELETE`; `GET` returns the state and what the
+  viewer may do).
+- While it is on, the session's agent sees `admin_actions_search`,
+  `admin_action_describe` and `admin_action_call`. They are never part of a
+  tool selection or default: the session's Opengeni MCP server lists them only
+  while access is in effect, and every call checks again, so turning it off,
+  the organization turning it off, or the granter losing their owner or admin
+  role applies to the very next call.
+- They cover exactly the organization MCP server's catalog and run each
+  action in process as the granter with Full access over all workspaces,
+  under the same rules (`browserOnly` actions, browser-bound provider OAuth
+  and agent connection management stay with the person). Nothing of the agent's own
+  workspace scope carries into the action.
+
+Migration `0692` is rolling.
 
 The public OAuth authorization server is deliberately narrow: public dynamic
 client registration, authorization-code grant with mandatory PKCE S256, exact
@@ -83,6 +147,97 @@ seam is omitted until it can fail before capability issuance. An unconsumed
 capability may be replaced when catalog or provider authority changes, but a
 consumed capability leaves a durable hash-only operation tombstone: the same
 operation id cannot be approved again after execution may have started.
+
+Known workspace HTTP/SDK calls use additive `POST tools/resolve` and
+`POST tools/invoke`. An exact identity or canonical symbolic path selects one
+authorized registry/account route before provider construction. Missing,
+unauthorized, or ambiguous targets return the same non-enumerating
+`tool_unavailable`; malformed contracts fail before preparation. There is no
+whole-catalog fallback. Cold calls use the current definition; optional
+`expectedDefinitionDigest` binds the complete public entry, account and workspace
+under a versioned hash domain. A mismatch returns `tool_definition_stale` before
+approval admission or execution. A selected MCP server may still need its own
+paginated `tools/list`; no provider revision atomicity is promised between that
+listing and its physical call.
+
+`POST tools/target-approvals` issues a version-2 binding over the existing
+executable effect digest and Site tuple. Exact caller, identity, arguments and
+private authority are checked separately. The full public definition digest is
+only an optional invocation precondition, not approval provenance: changing
+Ask to Allow changes its public approval field without changing the approved
+effect. Missing executable effect digests fail closed.
+For targeted raw/local providers without an adapter-owned private revision, the
+private binding uses the existing runtime executable-authority digest and exact
+selected server configuration, scoped to account, workspace and identity. It
+does not use public catalog presentation; endpoint or private-header changes
+still require reapproval. Existing adapter authority and legacy/frozen fallback
+semantics remain unchanged. The shared operation namespace and consumed
+tombstones survive policy Ask-to-Allow and protocol changes. Supplied tokens
+cannot be silently ignored.
+Allow-only calls without approval provenance are not generally idempotent.
+Unknown dispatch outcomes never replay automatically.
+
+Only the selected provider is constructed, credentialed, connected or listed.
+Registry/account/integration inventory remains O(N) metadata; target execution
+does not imply constant-time database work. External targets skip unrelated
+model-catalog loading, while first-party handlers retain complete caller settings.
+Live caller, exact pinned Site, metadata and native credential checks run again
+at the installed physical-request boundary, including after awaited native
+preflight. Targeted current-human calls also re-read the selected action policy:
+Allow becoming Ask or Block before physical dispatch prevents the request.
+This does not change frozen worker/Codemode approval decisions. No
+credential cache, sticky session or cross-replica warm-up is required.
+`opengeni_tool_target_operations_total`,
+`opengeni_tool_target_duration_seconds` and `Server-Timing: gw-target`
+measure the bounded operation labels without identities or arguments. Compare
+cold replicas at increasing connector counts separately from selected-provider
+latency and metadata assembly cost.
+
+Saved legacy Site bundles use `POST tools/manifest` (at most 256 requested
+identities) through an upgraded host, which translates retained manifest pins
+into targeted calls. Modern clients negotiate direct targeted calls; older hosts
+require explicit SDK catalog mode. Local preview keeps frozen attempt/Codemode
+authority, fencing the entry again after any pre-submission catalog refresh.
+The host's legacy call projection separates executed provider errors from retry
+control: an error result named `catalog_stale` or `tool_definition_stale` becomes
+`site_tool_execution_failed`, with the original error intact under
+`structuredContent.error.providerError`. Other result fields, ordinary provider
+errors, and success outputs are unchanged. Stale-named transport errors without
+known preexecution proof become `site_tool_call_failed`, retaining the original
+code in the diagnostic message. Saved bundle bytes are not rewritten; only
+genuine known preexecution stale signals authorize refresh.
+OAuth and explicit catalog/declarations discovery are unchanged.
+For a mixed-version fleet, apply rolling migration
+`0686_target_tool_approval_bindings.sql` first. Bring up a fully upgraded API pool
+and route all four new endpoints (`resolve`, `invoke`, `target-approvals`, and
+`manifest`) exclusively to that pool before sending new-protocol traffic.
+Existing v1 endpoints may still reach older replicas during the rollout. If
+endpoint-specific routing is unavailable, finish upgrading the entire API pool
+before releasing clients. Neither route relies on sticky sessions or a warm-up
+catalog request. Release the matching SDK/React host and generated Site runtime
+only after this API routing gate; old clients remain v1. Do not fall back to v1
+after a failed targeted invocation. Cleanup failures preserve the original
+success/error/unknown outcome and produce only a content-free warning.
+
+Legacy workspace HTTP/SDK/Site calls avoid re-preparing every connector on a warm replica.
+Each complete catalog preparation (`tools/catalog`, `tools/declarations`, or a
+complete call fallback) leaves a bounded, per-process, content-free attestation:
+the complete digest plus only the canonical digest of each entry, keyed by the
+exact caller scope (account, workspace, subject, principal kind, permissions,
+and service/external actor), with a fixed ten-minute lifetime and a global
+entry budget. A later call without an approval token whose `catalogDigest` is
+attested constructs and connects only its target identity's connector, through
+the same live account binding, credential, connector-policy, approval,
+Site-version, and argument validation path; first-party tool handlers still see
+the caller's complete authorized server settings. It executes only when that
+live entry is identical to the attested one, and the response echoes the
+caller's digest. An unknown or expired digest, another
+API replica, an approval token, or a missing, changed, or no-longer-authorized
+target falls back to complete preparation and the unchanged `catalog_stale`
+contract. Attestations never hold credentials or prepared gateways and grant no
+authority. `Server-Timing` (`gw-prepare`, `gw-call`) and
+`opengeni_tool_gateway_preparation_duration_seconds` expose the
+preparation/execution split without content.
 
 First-party project tools use existing session permissions: `project_list/get` require `sessions:read`; `project_create/update/reorder/delete` require `sessions:create`; `session_set_project` requires `sessions:control` and target-session authorization. Projects, pins and order are workspace-shared. Deletion unfiles sessions without stopping or deleting them. `sessions_list(projectId)` filters membership; `session_create(projectId)` files new work. The short [project skill](../packages/runtime/src/bundled_project_skills/opengeni-projects/SKILL.md) explains the sidebar model. No new ownership model or database migration is needed.
 
@@ -234,13 +389,17 @@ verified on packaged artifacts; catalog authority does not certify an installed
 JavaScript client, and an optional client failure grants no additional access.
 The `read` command exits successfully when journal observation succeeds, even
 when the returned operation failed; inspect `operation.state` before using its
-result. Reads remain attempt-authorized and can be denied after an attempt ends.
+result. Reads require a current authorized attempt. A later attempt of the same logical
+turn can inspect the original handle; a token from the ended attempt cannot.
+Calls acknowledge `durableApproval` support. Waiting returns a compact receipt
+and stops polling. Human approval resumes the stored operation, so callers must
+not resubmit its arguments.
 On a Linux Docker build host, `bun scripts/test-codemode-image.ts <image>
 <absolute-native-binary> receipts` verifies the packaged clients against an
 owned loopback fixture, including credential modes and GET-only recovery. This
 is release verification, not a health probe that executes customer tools.
 
-First-party OpenGeni MCP Knowledge tools:
+First-party Opengeni MCP Knowledge tools:
 
 - `knowledge_search`, `knowledge_browse`, `knowledge_get`: published retrieval by
   default; explicit `view: "needs_review"` reads unapproved proposals for reuse
@@ -268,11 +427,11 @@ receive the exact result. See
 [model-visible discovery results](knowledge.md#model-visible-discovery-results).
 The retired Memory and reviewed-claim tools are not registered for new work.
 
-First-party OpenGeni MCP company-profile tools (separate organization policy):
+First-party Opengeni MCP company-profile tools (separate organization policy):
 
-- `company_profile_propose` / `company_profile_confirm` - explicit organization-identity administration for an exact agent attempt whose live turn was initiated by the organization owner. The separate owner-managed organization policy defaults to Require approval: Off creates nothing, Require approval stages one inactive immutable identity/mission revision and returns the exact `request_human_input` payload for `confirm`, and Autonomous activates the proposal immediately through the existing compare-and-swap lifecycle and returns `status=activated`. Every mode retains exact live-owner admission and immutable receipts; this policy is independent of workspace Learning mode (see [`company-profile.md`](company-profile.md)).
+- `company_profile_propose` / `company_profile_confirm` - explicit organization-identity administration for an exact agent attempt whose live turn was initiated by the organization owner. The separate owner-managed organization policy (set on Settings > Agent learning) defaults to Review first (`suggest`): Off creates nothing, Review first stages one inactive immutable identity/mission revision and returns the exact `request_human_input` payload for `confirm`, and Automatic activates the proposal immediately through the existing compare-and-swap lifecycle and returns `status=activated`. Every mode retains exact live-owner admission and immutable receipts; this policy is independent of workspace Learning mode (see [`company-profile.md`](company-profile.md)).
 
-First-party OpenGeni MCP session monitoring tools (`sessions:read`):
+First-party Opengeni MCP session monitoring tools (`sessions:read`):
 
 - `sessions_list` / `session_get` / `session_events` - compact-by-default discovery and child-management state, and conversation-first history with explicit `results`, `tools`, and `debug` views. `session_get({})` reads only the authenticated current agent session (a child reads itself); sessionless/operator callers must supply an explicit `sessionId`. Both forms retain live-attempt and target authorization. Use `detail: "full"` on list/get for the previous bounded projections (get includes `effectiveToolPolicy`). Plain compact list browse skips claim reads; `includeRelatedWork` opts in and query/subject automatically enables advisory evidence without granting access. REST/UI defaults are unchanged. See [session monitoring](session-monitoring-mcp.md) for exact fields, pagination and loss facts, and [work discovery](work-discovery.md) for matching semantics.
 - `session_wait` - one blocking call (session-scoped grants only) for a short in-turn wait. It returns when a watched session has a matching durable event after the supplied cursor, the calling session has immediate pending machine input, or `maxWaitSeconds` elapses (default 45, max 50). `waitFor: "change"` observes turn lifecycle, completed agent messages, terminal background commands, blocking failures, goal facts, and session control; `waitFor: "completion"` remains the child-result join and ignores progress, goal facts, background commands, maintenance turns, and continuation segments until a result-bearing final turn or blocker. The tool subscribes to NATS before reading PostgreSQL, but `session_events` remains authority and every wake is followed by a durable read. Failed live fanout degrades to the durable pre-check plus deadline re-check. `ownPendingUpdates > 0` means input will be delivered only when the next turn is claimed. When the returned events include a direct child's complete final answer and the call is the exact live parent attempt's own model call (the worker marks it `_meta.opengeniCaller: "model"`; a Codemode call does not count), the read is recorded on the turn and the own-pending counts exclude that child's idle terminal result for it. The attempt's successful completion supersedes a still-pending such result (`consumed_by_parent_read`), and one committed after that completion arrives already consumed; a failed or interrupted attempt suppresses nothing. Do not immediately repeat a timed-out short wait without new evidence; an unchanged `session_get` snapshot between waits is not new evidence.
@@ -287,20 +446,47 @@ the operator without deleting durable evidence; see
 
 `CreateSessionRequest.firstPartyMcpTools` is an exact allowlist over the exported
 `FIRST_PARTY_MCP_TOOL_NAMES` catalog. Omission selects the safe default catalog,
-which excludes connector-wide `social_*`, `slack_bot_*` and `fiken_*` tools; those require
-explicit selection plus their normal connection permission. Historical native
+which excludes connector-wide `social_*` and `fiken_*` tools and most `slack_bot_*`
+tools. `slack_bot_list_channels`, `slack_bot_prepare_message`, and
+`slack_bot_send_prepared_message` are default-selected; other Slack bot tools
+require explicit selection plus their normal connection permission. Historical native
 `atlassian_*` names remain parseable but are excluded from execution; Atlassian
 agent access uses its hosted MCP connector. Explicit `[]` means
 no tools from the broad server. Unknown names fail validation. This field does
 not grant authority: every catalog entry also has an explicit registration-time
 permission predicate, and target-scoped authorization still runs on calls.
-Child omission inherits the parent's exact effective selection.
+Omitting the field on a new top-level session follows the workspace's current
+built-in defaults (or the deployment defaults when no workspace override exists).
+`toolPolicy.firstPartyMode: "workspace_default"` records this intent independently
+of connector selection. New defaults are resolved when preparing the next attempt,
+under the deployment allowlist, configured capability families, and permissions.
+An already prepared catalog or signed delegation does not gain tools mid-attempt.
+Child omission inherits both the parent's effective selection and its default or
+pinned intent; an explicit child list can only narrow that selection.
+
+An explicit list, including `[]`, remains pinned. The existing **Reset to workspace
+defaults** action opts an older session into following defaults; editing connector
+exclusions alone preserves its built-in intent. Legacy sessions without that
+intent remain pinned unless their latest retained tool-policy event proves a full
+reset and still matches the stored selection. Migration does not infer intent from
+connector mode or similarity to today's defaults. Scheduled accepted selections
+remain exact snapshots; they are never re-resolved during recovery.
 
 GitHub App installation credentials are deliberately absent from this catalog.
 Repository discovery and browser connect status remain model-visible, but token
 minting and credential-file renewal stay host-side in the worker/runtime. No
 first-party MCP, Codemode, API, SDK, event, or audit projection returns a live
 installation token to the model or sandbox command surface.
+
+For a child, an explicit array replaces the entire inherited selection rather
+than adding to it, so omitted browser, computer, or scheduling names become
+unavailable even when needed by the task. Keep the selection omitted for an
+ordinary specialist.
+For a worker that must not start, message, or follow other sessions, use the
+existing `agent: { capabilities: { from: "all", subagents: false } }` and omit
+tool lists. Other parent-selected tools remain inherited, and the final answer
+still reaches the parent automatically. This guidance changes no inheritance,
+permission, or explicit-empty semantics and adds no tool-enablement UI.
 
 File and document resources are independent from this broad-server selection.
 Attaching a resource still materializes it for the session when
@@ -319,19 +505,38 @@ inherited-fixed policies remain exact. A null designation means no Apps server
 and there is no active-credential, pinned-credential, allocator, or static-header
 fallback.
 
-When an Apps setup attempt fails, the runtime keeps the surface visible and
-emits an Apps-specific reconnect/retry state instead of silently presenting an
-empty tool-search pool. Statusless transport failures are marked retryable;
-provider response bodies, URLs, headers, and credentials remain outside the
-public diagnostic projection.
+When an Apps setup attempt fails, the runtime skips Apps for that turn and logs
+an Apps-specific reconnect/retry warning instead of failing the turn.
+Statusless transport failures are marked retryable; provider response bodies,
+URLs, headers, and credentials remain outside the public diagnostic projection.
+
+Apps is discovered on every turn, so setup traffic (initialize and tool
+listing) never publishes a `tool.auth_needed` card; otherwise a broken
+designation would post a new card on every turn that selects Apps. Only a tool
+call that needs Apps publishes one, at most once per prepared tool environment
+(a publish that fails does not count). A designated credential that can no
+longer be used (the designation was cleared or changed, the credential was
+disconnected, or its owner lost the permission) is reported as
+`designated_credential_unavailable`. A designated credential whose sign-in
+failed (a refresh was rejected, or it is already marked for relogin) stays
+`refresh_failed`, because the remedy is reconnecting that same account.
 
 Inference and Apps authority are deliberately unrelated. The designated Apps
 credential works with compatible Codex or non-Codex inference and remains usable
 when every inference subscription is quota-exhausted, cooled down, allocator-
-disabled, unpinned, or leased elsewhere. Only the current human owner of an
+disabled, unpinned, or leased elsewhere. Loading its token and persisting its
+refreshes use the designation itself as authority (this workspace's own
+credential, the current designation, and its owner's current permission), never
+the workspace's inference routing source, so a designation keeps working when
+routing uses organization accounts or subscriptions are disabled. That authority
+reaches only the designated credential, never another workspace or organization
+account. A refresh it admitted still records its rotated tokens on that same row
+if the designation is cleared while the provider call is in flight, so the row
+never keeps a refresh token the provider has already spent. Only the current human owner of an
 active connected credential may designate it, and that human must currently
 hold `connections:write` (workspace-admin scope satisfies it). Any managed human
-with that scope may clear the designation without owning the credential. Bearer,
+with that scope may clear the designation without owning the credential, in any
+routing mode; designating still requires workspace routing. Bearer,
 agent, scheduled, and service identities cannot perform either mutation. Every
 Apps request rechecks the exact designation, connection status, owner membership,
 and owner permission immediately before resolving/sending credentials. Reconnect
@@ -397,7 +602,7 @@ portable authority.
 - **Event spine:** designation, clear, and disconnect-clear write secret-free audit
   events in the same transaction. They do not create session-history events or
   notifications because they are workspace configuration, not conversation work.
-- **Mobile:** there is no native OpenGeni administration surface. The responsive
+- **Mobile:** there is no native Opengeni administration surface. The responsive
   Workspace settings card is the supported mobile web surface.
 - **Permissions and SDK:** REST and SDK mutations enforce the same
   `connections:write` managed-human boundary; enable additionally requires exact
@@ -415,7 +620,7 @@ pending-proposal reads; ordinary document search stays published-only.
 
 Rules of thumb:
 
-- Building a product **on top of** OpenGeni (embed or API)? Per-session MCP is
+- Building a product **on top of** Opengeni (embed or API)? Per-session MCP is
   your integration point for host tools; the first-party MCP is your agents'
   steering wheel.
 - Giving **every** session in a workspace a tool? Capability MCP.

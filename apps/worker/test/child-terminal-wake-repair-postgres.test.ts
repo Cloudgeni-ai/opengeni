@@ -192,6 +192,27 @@ async function pendingResult(
   return result.update.id;
 }
 
+/** Mark the parent's newest finished turn as a terminal compaction failure,
+ * sequenced after everything already appended to the session. */
+async function appendCompactionFailure(sessionId: string) {
+  await shared.admin`
+    with target as (
+      select session.account_id, session.workspace_id, session.id as session_id,
+        session.last_sequence + 1 as sequence,
+        (select turn.id from session_turns turn
+          where turn.session_id = session.id and turn.finished_at is not null
+          order by turn.finished_at desc, turn.position desc, turn.created_at desc limit 1) as turn_id
+      from sessions session where session.id = ${sessionId}
+    ), appended as (
+      insert into session_events (account_id, workspace_id, session_id, turn_id, sequence, type, payload)
+      select account_id, workspace_id, session_id, turn_id, sequence, 'turn.failed',
+        '{"code":"context_compaction_failed","retryable":false}'::jsonb
+      from target returning session_id, sequence
+    )
+    update sessions set last_sequence = appended.sequence
+    from appended where sessions.id = appended.session_id`;
+}
+
 function services(signals: Array<{ sessionId: string; wakeRevision: number }>): NotifyServices {
   return {
     db: client.db,
@@ -311,6 +332,7 @@ for (const scenario of [
   "unquiesced",
   "completed_goal",
   "paused_goal",
+  "compaction_failure_hold",
 ] as const) {
   test(`repair preserves ${scenario} exclusion`, async () => {
     const ctx = await fixture({
@@ -349,6 +371,11 @@ for (const scenario of [
     } else if (scenario === "nonterminal") {
       await shared.admin`update session_system_updates set kind = 'child_progress',
         payload = jsonb_set(payload, '{type}', '"child_progress"'::jsonb) where id = ${updateId}`;
+    } else if (scenario === "compaction_failure_hold") {
+      // The parent's newest finished turn failed compaction after this result
+      // was already pending: the result is held until newer truth arrives, so
+      // a repaired wake would only re-signal a workflow with nothing to claim.
+      await appendCompactionFailure(ctx.parent.id);
     } else if (scenario === "unquiesced") {
       await shared.admin`update session_turn_attempts set quiesced_at = null, outcome = 'interrupted_recoverable'
         where session_id = ${ctx.parent.id}`;
@@ -364,6 +391,34 @@ for (const scenario of [
     expect(await wakeRow(ctx.parent.id)).toEqual(before);
   });
 }
+
+test("a child result newer than a compaction failure still repairs the parent wake", async () => {
+  const ctx = await fixture();
+  // The failure precedes the result, so the result is new truth, not held input.
+  await appendCompactionFailure(ctx.parent.id);
+  const updateId = await pendingResult(ctx);
+  const before = await wakeRow(ctx.parent.id);
+  const signals: Array<{ sessionId: string; wakeRevision: number }> = [];
+  await reconcilePendingSessionWorkflowWakes(services(signals), 1000);
+  expect(signals.filter((wake) => wake.sessionId === ctx.parent.id)).toHaveLength(1);
+  expect((await wakeRow(ctx.parent.id)).wake_revision).toBe(before.wake_revision + 1);
+  const claimed = await claimSessionWorkForAttempt(client.db, ctx.grant.workspaceId!, {
+    sessionId: ctx.parent.id,
+    workflowId: `session-${ctx.parent.id}`,
+    workflowRunId: crypto.randomUUID(),
+    attemptId: crypto.randomUUID(),
+    dispatchId: crypto.randomUUID(),
+    trigger: { kind: "next" },
+  });
+  if (claimed.action !== "claimed") throw new Error("newer result was not claimed");
+  const batch = await listSessionSystemUpdatesForTurn(
+    client.db,
+    ctx.grant.workspaceId!,
+    ctx.parent.id,
+    claimed.turn.id,
+  );
+  expect(batch.map((update) => update.id)).toContain(updateId);
+});
 
 test("content-free discovery inherits only the existing wake dispatcher owner and runtime ACL", async () => {
   const [posture] = await shared.admin`

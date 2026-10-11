@@ -473,3 +473,90 @@ describe("readable per-turn rows", () => {
     }
   });
 });
+
+describe("capacity limit rows", () => {
+  // The Oct 10 incident shape: a turn queued, started, then parked on Codex
+  // capacity for hours before it resumed and answered.
+  const OLD_COPY =
+    "No Codex subscription has capacity for this turn right now. It continues automatically when an account is available.";
+  const T0 = Date.now() - 5 * 3600_000;
+  const at = (
+    seconds: number,
+    type: string,
+    payload: unknown,
+    turnId: string | null = "turn-1",
+  ) => {
+    sequence += 1;
+    return {
+      ...event(type, payload, turnId),
+      occurredAt: new Date(T0 + seconds * 1000).toISOString(),
+    } satisfies SessionEvent;
+  };
+  function blocked(): SessionEvent[] {
+    sequence = 0;
+    return [
+      at(0, "user.message", { text: "Cool thanks" }, null),
+      at(0, "turn.queued", { turnId: "turn-1" }),
+      at(1, "session.status.changed", { status: "running" }),
+      at(1, "turn.started", {}),
+      at(2, "codex.capacity.waiting", {
+        code: "subscription_capacity_unavailable",
+        waitReason: "no_eligible_capacity",
+        error: OLD_COPY,
+      }),
+      at(2, "session.status.changed", { status: "waiting_capacity" }),
+    ];
+  }
+
+  test("a blocked turn says Limit reached once, with one quiet secondary line", async () => {
+    const r = await renderComponent(
+      <MessageTimeline events={blocked()} turnSummary={{ rolling: true }} />,
+    );
+    try {
+      await flush();
+      expect(statusTrigger(r.container).textContent).toStartWith("Limit reached · ");
+      expect(r.container.querySelector("[data-og-exchange-wait-detail]")?.textContent).toBe(
+        "Continues automatically when capacity is available.",
+      );
+      expect(r.container.textContent).not.toContain("No Codex subscription");
+      expect(r.container.textContent?.split("Limit reached").length).toBe(2);
+      expect(r.container.querySelector("[role=status]")).toBeNull();
+    } finally {
+      await r.unmount();
+    }
+  });
+
+  test("after recovery the warning is gone and worked time excludes the wait", async () => {
+    const hours = 4 * 3600;
+    const events = [
+      ...blocked(),
+      at(hours, "codex.capacity.resumed", {}),
+      at(hours, "session.status.changed", { status: "recovering" }),
+      at(hours + 1, "session.status.changed", { status: "running" }),
+      at(hours + 1, "turn.started", {}),
+      at(hours + 10, "agent.toolCall.created", { id: "t", name: "exec_command", arguments: {} }),
+      at(hours + 20, "agent.toolCall.output", { id: "t", output: "ok" }),
+      at(hours + 30, "agent.message.completed", {
+        text: "You're welcome!",
+        phase: "final_answer",
+      }),
+      at(hours + 31, "turn.completed", {}),
+      at(hours + 31, "session.status.changed", { status: "idle" }),
+    ];
+    const r = await renderComponent(
+      <MessageTimeline events={events} turnSummary={{ rolling: true }} />,
+    );
+    try {
+      await flush();
+      expect(r.container.textContent).not.toContain("Limit reached");
+      expect(r.container.textContent).not.toContain("No Codex subscription");
+      expect(r.container.textContent).toContain("You're welcome!");
+      // 4h 00m 31s wall time minus the 3h 59m 58s wait.
+      expect(r.container.querySelector("[data-og-exchange-status]")?.textContent).toBe(
+        "Worked for 33s",
+      );
+    } finally {
+      await r.unmount();
+    }
+  });
+});

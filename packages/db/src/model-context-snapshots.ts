@@ -7,6 +7,11 @@ import { and, desc, eq, sql } from "drizzle-orm";
 import type { Database } from "./database";
 import { withRlsContext } from "./database";
 import * as schema from "./schema";
+import {
+  encodeModelContextSnapshotContent,
+  hydrateStoredModelContextSnapshot,
+  writeSessionContentBlobs,
+} from "./session-content-blobs";
 
 export class ModelContextSnapshotAuthorityError extends Error {
   readonly code = "model_context_snapshot_authority_mismatch";
@@ -65,6 +70,16 @@ export async function persistModelContextSnapshot(
         }
 
         const now = new Date(snapshot.capturedAt);
+        const encoded = encodeModelContextSnapshotContent(snapshot);
+        await writeSessionContentBlobs(
+          tx,
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+          },
+          encoded.blobs,
+        );
         await tx
           .insert(schema.sessionAttemptModelContextSnapshots)
           .values({
@@ -76,7 +91,8 @@ export async function persistModelContextSnapshot(
             executionGeneration: input.executionGeneration,
             requestIndex: snapshot.requestIndex,
             capturedAt: now,
-            snapshot,
+            snapshot: encoded.stored,
+            contentRefs: encoded.refs,
             createdAt: now,
             updatedAt: now,
           })
@@ -85,7 +101,8 @@ export async function persistModelContextSnapshot(
             set: {
               requestIndex: snapshot.requestIndex,
               capturedAt: now,
-              snapshot,
+              snapshot: encoded.stored,
+              contentRefs: encoded.refs,
               updatedAt: now,
             },
             setWhere: sql`${schema.sessionAttemptModelContextSnapshots.requestIndex} <= ${snapshot.requestIndex}`,
@@ -107,6 +124,7 @@ export async function getLatestSessionModelContext(
           attemptId: schema.sessionAttemptModelContextSnapshots.attemptId,
           turnId: schema.sessionAttemptModelContextSnapshots.turnId,
           snapshot: schema.sessionAttemptModelContextSnapshots.snapshot,
+          contentRefs: schema.sessionAttemptModelContextSnapshots.contentRefs,
         })
         .from(schema.sessionAttemptModelContextSnapshots)
         .innerJoin(
@@ -144,7 +162,13 @@ export async function getLatestSessionModelContext(
         sessionId: input.sessionId,
         attemptId: row.attemptId,
         turnId: row.turnId,
-        snapshot: ModelContextSnapshot.parse(row.snapshot),
+        snapshot: ModelContextSnapshot.parse(
+          await hydrateStoredModelContextSnapshot(
+            scopedDb,
+            { workspaceId: input.workspaceId, sessionId: input.sessionId },
+            row,
+          ),
+        ),
       };
     },
   );

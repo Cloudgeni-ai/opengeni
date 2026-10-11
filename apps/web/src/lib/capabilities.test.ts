@@ -120,7 +120,7 @@ function socialConnection(overrides: Partial<SocialConnection> = {}): SocialConn
     ownership: "workspace",
     provider: "x",
     accountHandle: "opengeni",
-    accountName: "OpenGeni",
+    accountName: "Opengeni",
     externalAccountId: "x-account-1",
     status: "connected",
     scopes: ["tweet.read"],

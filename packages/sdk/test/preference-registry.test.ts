@@ -8,7 +8,8 @@ import {
   PreferenceRegistryTrust as ContractTrust,
 } from "@opengeni/contracts";
 import type { z } from "zod";
-import { OpenGeniClient } from "../src/client";
+import { OpenGeniClient } from "../src/index";
+import { OpenGeniBrowserClient } from "../src/browser";
 import type {
   CreatePreferenceRegistryProposalRequest,
   PreferenceRegistryConflictStrategy,
@@ -43,9 +44,9 @@ describe("preference registry SDK", () => {
     expect(typeof acceptProposal).toBe("function");
   });
 
-  test("maps the complete backend surface to stable routes", async () => {
+  const registryWireContract = async (Client: typeof OpenGeniBrowserClient) => {
     const requests: Request[] = [];
-    const client = new OpenGeniClient({
+    const client = new Client({
       baseUrl: "https://api.example.test",
       fetch: (async (input, init) => {
         const request = new Request(input, init);
@@ -157,8 +158,67 @@ describe("preference registry SDK", () => {
       expectedScopeVersion: 1,
       reason: "Reviewed by the owner",
     });
+    expect(await requests[4]!.json()).toEqual({
+      expectedCurrentRevisionId: REVISION_ID,
+      expectedScopeVersion: 1,
+      title: "Response style",
+      description: "Prefer compact responses.",
+      content: "Use compact answers unless the user asks for detail.",
+      reason: "Clarify the preference",
+    });
+    expect(await requests[6]!.json()).toEqual({
+      expectedCurrentRevisionId: REVISION_ID,
+      expectedScopeVersion: 1,
+      reason: "Temporarily disable",
+    });
+    expect(await requests[7]!.json()).toEqual({
+      replacementPreferenceId: REPLACEMENT_ID,
+      expectedCurrentRevisionId: REVISION_ID,
+      expectedScopeVersion: 1,
+      reason: "Use the replacement",
+    });
+    expect(await requests[8]!.json()).toEqual({
+      revisionId: REVISION_ID,
+      expectedScopeVersion: 1,
+      reason: "Not authoritative",
+    });
     expect(await requests[10]!.json()).toEqual({
       retrievalHandle: `preference://${PREFERENCE_ID}/revisions/${REVISION_ID}?sha256=${"a".repeat(64)}`,
     });
-  });
+  };
+  test.each([OpenGeniClient, OpenGeniBrowserClient])(
+    "%p preserves the complete registry wire contract",
+    registryWireContract,
+  );
+
+  test.each(["network", 403, 409] as const)(
+    "browser registry activation propagates %p without replaying or changing its fences",
+    async (failure) => {
+      const requests: Request[] = [];
+      const client = new OpenGeniBrowserClient({
+        baseUrl: "https://api.example.test",
+        fetch: (async (input, init) => {
+          requests.push(new Request(input, init));
+          if (failure === "network") throw new TypeError("connection lost after send");
+          return Response.json({ error: "refused" }, { status: failure });
+        }) as typeof fetch,
+      });
+      const request = {
+        revisionId: REVISION_ID,
+        expectedCurrentRevisionId: null,
+        expectedScopeVersion: 1,
+        reason: "Reviewed by the owner",
+      };
+      await expect(
+        client.activatePreferenceRegistryRevision(WORKSPACE_ID, PREFERENCE_ID, request),
+      ).rejects.toMatchObject(
+        failure === "network"
+          ? { code: "network_error", outcomeUnknown: true }
+          : { status: failure },
+      );
+      expect(requests).toHaveLength(1);
+      expect(await requests[0]!.json()).toEqual(request);
+      expect(requests[0]!.headers.has("authorization")).toBe(false);
+    },
+  );
 });

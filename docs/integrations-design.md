@@ -4,7 +4,7 @@
 
 ## 1. Overview
 
-OpenGeni gains a first-class integrations layer: users connect external services (one browser OAuth round-trip or a pasted key), agents use them through MCP, and credentials live behind a single broker that no model, sandbox, or workflow payload can see.
+Opengeni gains a first-class integrations layer: users connect external services (one browser OAuth round-trip or a pasted key), agents use them through MCP, and credentials live behind a single broker that no model, sandbox, or workflow payload can see.
 
 Strategy (decided): **MCP-first.** We implement the MCP authorization spec (revision 2025-11-25) _client side_ once; every vendor-hosted remote MCP server becomes installable by URL or domain with zero OpenGeni-side provider registration. OpenGeni-registered provider apps (GitHub App today, Slack bot later) are a selective add-on, not the default path. No third-party iPaaS in the core.
 
@@ -84,7 +84,7 @@ A reserved-namespace check on the subject (`api_key:`, `configured:`, `worker:`,
 against a delegation-secret holder signing a human claim over an
 OpenGeni-minted machine subject. It is deliberately **not** an allow-list of
 human subjects: `docs/embedding.md` states that `subjectId` "remains opaque to
-OpenGeni" and that hosts must not have the kind inferred from a subject-id
+Opengeni" and that hosts must not have the kind inferred from a subject-id
 prefix, so a trusted embedding host legitimately signs `human_session` over a
 non-`user:` subject.
 
@@ -198,7 +198,7 @@ Broker rules:
 - 403 step-up must NOT poison good credentials: `insufficient_scope` does not flip status to `needs_reauth`; only an unusable refresh grant does.
 - Settings carry only `connectionRef` (non-secret pointer); the `mcpServers` entry schema in `packages/config/src/index.ts` gains an optional `connectionRef { connectionId?, providerDomain, kind?, scopes?, resource?, subjectScope? }`.
 
-The broker passes resolved connection credentials directly to the outbound request rather than deliberately copying them into session configuration, events, run state, or Temporal inputs. OpenGeni does not heuristically scan or rewrite arbitrary provider, user, agent, or tool content if that content contains credential-shaped text; internal persisted and model-visible data remains exact.
+The broker passes resolved connection credentials directly to the outbound request rather than deliberately copying them into session configuration, events, run state, or Temporal inputs. Opengeni does not heuristically scan or rewrite arbitrary provider, user, agent, or tool content if that content contains credential-shaped text; internal persisted and model-visible data remains exact.
 
 ## 5. MCP OAuth client (current profile with 2025-03-26 compatibility)
 
@@ -260,7 +260,7 @@ Every integration callback returns the browser to a real page with a plain-langu
 
 DCR-minted OAuth clients are deployment-wide authorization-server identity, not per-workspace user credentials. They live in `integration_oauth_clients`, keyed by AS issuer, with `client_secret` encrypted under the variable-sets key when present. This keeps one DCR client reusable across many workspace connections to the same AS, while the actual access/refresh tokens remain in workspace-scoped `connections.credential_encrypted`. Operator pre-registered clients are read from `OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON` and are not copied into Postgres.
 
-Some authorization servers advertise both CIMD and DCR but reject a metadata-document URL as the authorization `client_id`. OpenGeni therefore prefers the authorization-server-issued DCR identity whenever both mechanisms are advertised. The DCR client is reused deployment-wide and replaced when its registered endpoints, redirect URI, or scope policy becomes stale. A reviewed provider profile may explicitly force CIMD when a server's advertised registration endpoint is unsuitable (§5.2.2).
+Some authorization servers advertise both CIMD and DCR but reject a metadata-document URL as the authorization `client_id`. Opengeni therefore prefers the authorization-server-issued DCR identity whenever both mechanisms are advertised. The DCR client is reused deployment-wide and replaced when its registered endpoints, redirect URI, or scope policy becomes stale. A reviewed provider profile may explicitly force CIMD when a server's advertised registration endpoint is unsuitable (§5.2.2).
 
 ### 5.2.2 Provider OAuth quirks as data (profiles)
 
@@ -299,7 +299,7 @@ Served publicly at `GET /v1/integrations/oauth/client-metadata.json`:
 ```json
 {
   "client_id": "<this document's exact URL>",
-  "client_name": "OpenGeni",
+  "client_name": "Opengeni",
   "redirect_uris": ["<publicBaseUrl>/v1/integrations/oauth/callback"],
   "token_endpoint_auth_method": "none",
   "grant_types": ["authorization_code", "refresh_token"],
@@ -397,7 +397,7 @@ the current DNS/IP/SSRF and redirect policy. Auth-gated rows carry one of:
 | `codex_subscription_credentials`                            | Stays separate (account-level rotation semantics, own resolver). Not a goal of this program.                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | First-party delegated bearer                                | Unchanged — identity plumbing, not an external credential.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `social_connections`                                        | Superseded for future use; existing rows untouched until a consumer needs migration.                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `ConnectionCredentialsPort`                                 | Its `mcpCredentials(request)` leg receives account/workspace/session, exact turn lineage, immutable initiator, server/tool, opaque connection ref, and forced-refresh intent. OpenGeni's own table is the default implementation; host-provided implementations take precedence (embed doctrine: host owns connections).                                                                                                                                                                                                                                     |
+| `ConnectionCredentialsPort`                                 | Its `mcpCredentials(request)` leg receives account/workspace/session, exact turn lineage, immutable initiator, server/tool, opaque connection ref, and forced-refresh intent. Opengeni's own table is the default implementation; host-provided implementations take precedence (embed doctrine: host owns connections).                                                                                                                                                                                                                                     |
 
 ## 12. Security invariants and phase acceptance
 

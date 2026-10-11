@@ -37,6 +37,8 @@ export type AcquireCodexRealtimeMicrophoneOptions = {
 
 export type StartCodexRealtimeWebrtcOptions = {
   negotiate: CodexRealtimeNegotiator;
+  /** Exact configured provider model expected from the server broker. */
+  expectedModel?: CodexRealtimeWebrtcResponse["model"];
   realtimeId: string;
   operationId: string;
   browserInstanceId: string;
@@ -77,6 +79,8 @@ export type CodexRealtimeWebrtcSession = {
   setOutputMuted(muted: boolean): void;
   activateRemoteAudio(): void;
   retryAudibleOutput(): Promise<boolean>;
+  /** Gracefully finish provider output before sealing the durable ledger. */
+  drain?(): Promise<void>;
   /** Idempotently close media, data channel, and peer transport. */
   stop(): void;
 };
@@ -85,7 +89,7 @@ export type CodexRealtimeWebrtcSession = {
  * Complete the browser half of native connected-Codex GPT-Live V3 negotiation.
  * Provider credentials never enter this boundary: `negotiate` sends SDP,
  * public session configuration, and the active browser-owner proof only to the
- * OpenGeni API.
+ * Opengeni API.
  */
 export async function startCodexRealtimeWebrtc(
   options: StartCodexRealtimeWebrtcOptions,
@@ -260,8 +264,12 @@ export async function startCodexRealtimeWebrtc(
       { signal: options.signal },
     );
     throwIfAborted(options.signal);
-    if (answer.version !== "v3" || answer.model !== "gpt-live-1-boulder-alpha" || !answer.sdp) {
-      throw new Error("OpenGeni returned an incompatible Codex realtime answer");
+    if (
+      answer.version !== "v3" ||
+      answer.model !== (options.expectedModel ?? "gpt-live-1-boulder-alpha") ||
+      !answer.sdp
+    ) {
+      throw new Error("Opengeni returned an incompatible Codex realtime answer");
     }
     await peerConnection.setRemoteDescription({
       type: "answer",

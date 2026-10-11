@@ -1,4 +1,4 @@
-//! Per-OS platform abstraction for the OpenGeni self-hosted agent.
+//! Per-OS platform abstraction for the Opengeni self-hosted agent.
 //!
 //! This crate defines the [`Platform`] trait — the single seam between the
 //! agent's transport/dispatch layer and the host operating system. Channel-A
@@ -37,6 +37,7 @@ mod native;
 mod pty;
 pub mod service;
 pub mod transactional_write;
+mod work_scope;
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -54,6 +55,12 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use opengeni_agent_proto::v1;
+
+pub use opengeni_agent_engine::update_drain::WorkReservation;
+pub use work_scope::{
+    current_work_reservation, spawn_blocking_reserved, spawn_reserved, with_work_reservation,
+    with_work_reservation_sync,
+};
 
 pub use cgroup::{establish_oom_isolation, OpCgroupConfig, OpCgroupConfigError, OpCgroups};
 pub use desktop::{
@@ -109,6 +116,23 @@ pub trait BrowserControlBackend: Send + Sync {
     /// Proves every owned browser/computer controller is idle before restart.
     /// Unavailable or incompatible state must fail closed, never mean idle.
     async fn is_idle(&self) -> PlatformResult<bool>;
+
+    /// Atomically fence new controller requests and prove existing work ended.
+    /// Older controllers cannot provide this proof and must fail closed.
+    async fn begin_update(&self, operation_id: &str) -> PlatformResult<bool> {
+        let _ = operation_id;
+        Err(PlatformError::Unsupported(
+            "controller update admission is unavailable".into(),
+        ))
+    }
+
+    /// Reopen only the fence owned by this exact failed/deferred update.
+    async fn release_update(&self, operation_id: &str) -> PlatformResult<()> {
+        let _ = operation_id;
+        Err(PlatformError::Unsupported(
+            "controller update admission is unavailable".into(),
+        ))
+    }
 
     /// Ensures the exact authority scope and attached-browser generation is live.
     async fn ensure(
@@ -456,7 +480,7 @@ pub trait Platform: Send + Sync {
         // (the desktop capture/inject calls already do the same, §10.6).
         let probed = {
             let desktop = Arc::clone(&desktop);
-            tokio::task::spawn_blocking(move || desktop.probe())
+            spawn_blocking_reserved(move || desktop.probe())
                 .await
                 .map_err(|e| PlatformError::os(format!("desktop probe task join: {e}")))?
         };

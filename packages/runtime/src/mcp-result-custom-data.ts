@@ -1,5 +1,6 @@
 import {
   AttemptToolResult,
+  omitStructuredContentTextDuplicates,
   type AttemptToolResult as AttemptToolResultValue,
 } from "@opengeni/contracts";
 import { UserError, type MCPServer } from "@openai/agents";
@@ -191,7 +192,7 @@ export class McpResultCustomDataBridge {
         ) {
           // A PrefixedMcpServer may itself be wrapped by another prefixed
           // server. The outer bridge already retains the exact result, so do
-          // not nest another copy of OpenGeni's private marker. Preserve only
+          // not nest another copy of Opengeni's private marker. Preserve only
           // the actual extractor payload carried through the inner bridge.
           const nestedInnerCustomData =
             normalizedInnerCustomData[OPENGENI_INNER_MCP_CUSTOM_DATA_KEY];
@@ -219,17 +220,21 @@ export class McpResultCustomDataBridge {
   ): Promise<unknown> {
     const { arguments: cleanArguments, token } = this.copyArgumentsWithoutToken(args);
     const invoked = await invoke(cleanArguments);
-    const result = normalizeMcpResult(isSdkResultProjection(invoked) ? invoked.content : invoked);
+    const result = normalizeMcpResult(unwrapSdkMcpResultProjection(invoked));
     if (token) this.resultsByToken.set(token, result);
     if (token && this.input?.sdkModelOutput === "result") {
-      // The prefixed server historically exposed the complete MCP result as
-      // model output. Keep that shape while the SDK reads the standard result
-      // fields and the bridge retains the exact audit copy out of band. Mark
-      // the compatibility projection privately so another prefixed wrapper
-      // can recover the raw result before parsing it at its own boundary.
-      const projected = { ...result, content: result } as Record<PropertyKey, unknown>;
+      // The prefixed server exposes the MCP result envelope as model output,
+      // projected so a text block that merely repeats structuredContent is not
+      // paid for twice. The SDK reads the standard result fields and the
+      // bridge retains the exact audit copy out of band. The exact result is
+      // also attached privately so another prefixed wrapper can recover it
+      // before parsing it at its own boundary.
+      const projected = {
+        ...result,
+        content: omitStructuredContentTextDuplicates(result),
+      } as Record<PropertyKey, unknown>;
       Object.defineProperty(projected, SDK_RESULT_PROJECTION, {
-        value: true,
+        value: result,
         enumerable: false,
         configurable: false,
         writable: false,
@@ -278,19 +283,11 @@ export class McpResultCustomDataBridge {
   }
 }
 
-function isSdkResultProjection(
-  value: unknown,
-): value is Record<PropertyKey, unknown> & { content: unknown } {
-  return Boolean(
-    value &&
-    typeof value === "object" &&
-    !Array.isArray(value) &&
-    (value as Record<PropertyKey, unknown>)[SDK_RESULT_PROJECTION] === true,
-  );
-}
-
+/** Recover the exact result from a prefixed server's SDK model projection. */
 export function unwrapSdkMcpResultProjection(value: unknown): unknown {
-  return isSdkResultProjection(value) ? value.content : value;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const exact = (value as Record<PropertyKey, unknown>)[SDK_RESULT_PROJECTION];
+  return exact === undefined ? value : exact;
 }
 
 function stripMcpResultMarkerFromCustomData(customData: unknown): boolean {
@@ -311,7 +308,7 @@ function compactSerializedRunItem(item: unknown): boolean {
 }
 
 /**
- * Release OpenGeni's duplicate full-result marker from the live SDK run item
+ * Release Opengeni's duplicate full-result marker from the live SDK run item
  * after its normalized event has crossed the durable append boundary. The SDK
  * output and any inner extractor custom data remain available for subsequent
  * model calls and approval resume.
@@ -331,7 +328,7 @@ export function releaseMcpResultCustomDataFromSdkEvent(event: unknown): boolean 
 }
 
 /**
- * Remove only OpenGeni's redundant full-result marker from an approval
+ * Remove only Opengeni's redundant full-result marker from an approval
  * RunState after the worker has durably recorded the exact event output. The
  * SDK's model-visible output, protocol raw item, and any inner custom data stay
  * intact, so approval resume behavior is unchanged without triplicating a

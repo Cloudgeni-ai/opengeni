@@ -19,7 +19,7 @@ first self-service organization setup can receive exactly one $10 grant once
 the trial flag is enabled. Invited users, later organizations, retries, and
 pre-existing setup receipts do not receive a second grant. The trial has no
 card requirement or expiration in this campaign. It is ordinary account credit
-and can pay any resource actually billed in OpenGeni credits, including models
+and can pay any resource actually billed in Opengeni credits, including models
 and video; optional paid sandbox/document work can use it only if separately
 enabled. A completed or already-running operation may leave the account below
 zero; later purchased credits reduce that negative balance first. No card is

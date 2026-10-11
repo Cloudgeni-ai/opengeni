@@ -79,7 +79,7 @@ after successful canonical main CI; a just-merged or modified checkout may need
 a source build until matching assets exist. Download-cache reuse rechecks provider
 metadata; already prepared installations can be reused offline without Rust.
 No unrelated latest binary is substituted. For a source build,
-OpenGeni reads `packages/artifact-tool/kernel/rust-toolchain.toml` and
+Opengeni reads `packages/artifact-tool/kernel/rust-toolchain.toml` and
 invokes Cargo and rustc through `rustup run <exact-pin>`; unrelated Homebrew or
 system Rust binaries earlier on `PATH` are ignored. Cargo is also bound to the
 pinned toolchain's absolute compiler path, so ambient compiler/wrapper variables
@@ -160,7 +160,9 @@ with `OPENGENI_SANDBOX_BACKEND=docker` on Linux the launcher runs
 `scripts/dev-sandbox-bridge.ts`: a forwarder bound to the gateway address of this
 worktree's Compose network (which every sandbox joins) on the API port. It
 relays only the Codemode, MCP, and Git broker routes, refuses peers outside that
-network's subnet, and sets `OPENGENI_MCP_URL` (also written to `.env.runtime`)
+network's subnet (only its content-free health probe answers any peer, because
+hosts that source-NAT loopback-routed traffic make the launcher's own probe
+arrive from a LAN address), and sets `OPENGENI_MCP_URL` (also written to `.env.runtime`)
 so sandboxes use it. With `OPENGENI_DEV_BIND_HOST=0.0.0.0` the API already
 listens there, so the launcher only sets `OPENGENI_MCP_URL`. An explicit
 non-loopback `OPENGENI_MCP_URL` is kept. Rootless Docker keeps its gateway in a

@@ -20,6 +20,9 @@ workspaces, external users) in [`product-integration.md`](product-integration.md
   [`application-observability.md`](application-observability.md#web-client-errors))
 - `POST /v1/analytics-consent` (public, content-free count of analytics banner
   answers; see [`application-observability.md`](application-observability.md#analytics-consent))
+- `POST /v1/workspaces/:workspaceId/chat/completions` and
+  `GET /v1/workspaces/:workspaceId/models` (stateless OpenAI-compatible single
+  model calls without tools; see [`chat-completions.md`](chat-completions.md))
 - `GET /v1/access/me`
 - `GET /v1/organization-memberships` (managed-human self membership and personal-workspace identity)
 - `POST /v1/organizations/additional` (managed-human creation of another isolated organization with its first shared workspace)
@@ -37,8 +40,21 @@ workspaces, external users) in [`product-integration.md`](product-integration.md
 - `GET /v1/workspaces/:workspaceId/sessions/:sessionId/events/stream` (SSE; backfills from Postgres by event sequence)
 - `POST /v1/workspaces/:workspaceId/sessions/:sessionId/events`
 
+`PUT /v1/workspaces/:workspaceId/sessions/:sessionId/retention` with
+`{ "keepLive": true | false }` exempts a session from the idle-session archive
+(`sessions:control`; 409 `SESSION_ARCHIVED_READ_ONLY` once archived). Session
+create accepts `keepLive: true` too. Sessions carry `retention` (`keepLive` and
+the archive state); messages to an archived session return 409
+`SESSION_ARCHIVED_READ_ONLY`. The session list accepts
+`contentArchivedOnly=true` to list only archived sessions, and
+`GET /v1/config/client` reports `sessionArchive: { enabled, idleDays }` when the
+deployment archives idle sessions. See
+[`session-storage-lifecycle.md`](session-storage-lifecycle.md).
+
 Session goals support `GET`, `PATCH`, and idempotent `DELETE` on
-`/v1/workspaces/:workspaceId/sessions/:id/goal`; see [`goals.md`](goals.md).
+`/v1/workspaces/:workspaceId/sessions/:id/goal`; `GET` 404s for a goal-less
+session unless the client opts in with `?absent=null` (200 `null`). See
+[`goals.md`](goals.md).
 
 Scheduled tasks add `GET /v1/workspaces/:workspaceId/scheduled-tasks/attention`
 (failed runs and schedules blocked by an unusable account) and the owner-only

@@ -52,6 +52,7 @@ export function observeBrowserActionResult(
     operation: "act",
     mode: browserActionMode(request.action),
     outcome: actionReceiptOutcome(receipt),
+    reason: actionReceiptReason(receipt),
     durationMs: elapsedMs(startedAtMs),
   });
 }
@@ -67,6 +68,7 @@ export function observeComputerActionResult(
     operation: "act",
     mode: computerActionMode(request.action.type),
     outcome: actionReceiptOutcome(receipt),
+    reason: actionReceiptReason(receipt),
     durationMs: elapsedMs(startedAtMs),
   });
 }
@@ -102,6 +104,7 @@ export function observeLifecycleResult(
     operation: response.operation.kind,
     mode: "lifecycle",
     outcome: actionReceiptOutcome(response.operation),
+    reason: actionReceiptReason(response.operation),
     durationMs: elapsedMs(startedAtMs),
     replayed: response.operation.replayed,
   });
@@ -184,6 +187,167 @@ function actionReceiptOutcome(receipt: Pick<InteractionActionReceipt, "state" | 
   return receipt.state;
 }
 
+function actionReceiptReason(receipt: Pick<InteractionActionReceipt, "state" | "error">): string {
+  if (receipt.state !== "failed") return "none";
+  const code = receipt.error?.code;
+  return code && INTERACTION_ERROR_REASONS.has(code) ? code : "action_failed";
+}
+
 function elapsedMs(startedAtMs: number): number {
   return Math.max(0, performance.now() - startedAtMs);
+}
+
+type InteractionRouteOperation = {
+  resource: "browser" | "computer";
+  operation: string;
+  mode: string;
+  /** The handler already records its successful outcome from the receipt. */
+  successObservedByHandler: boolean;
+};
+
+const BROWSER = "/v1/workspaces/:workspaceId/browser-sessions";
+const COMPUTER = "/v1/workspaces/:workspaceId/computer-sessions";
+const B = `${BROWSER}/:browserSessionId`;
+const C = `${COMPUTER}/:computerSessionId`;
+
+/**
+ * Every Browser/Computer control route the product depends on, keyed by
+ * `METHOD route-label`. Read-only listing/detail routes are deliberately
+ * absent: they are not user-visible operations and stay in the generic HTTP
+ * metrics.
+ */
+const INTERACTION_ROUTE_OPERATIONS = new Map<string, InteractionRouteOperation>(
+  (
+    [
+      ["POST", BROWSER, "browser", "create", "lifecycle", true],
+      ["GET", `${B}/targets`, "browser", "observe", "semantic", false],
+      ["POST", `${B}/targets`, "browser", "open_target", "lifecycle", false],
+      ["POST", `${B}/targets/:targetId/select`, "browser", "select_target", "lifecycle", false],
+      ["DELETE", `${B}/targets/:targetId`, "browser", "close_target", "lifecycle", false],
+      ["GET", `${B}/targets/:targetId/observation`, "browser", "observe", "semantic", false],
+      ["GET", `${B}/targets/:targetId/state`, "browser", "observe", "semantic", false],
+      ["POST", `${B}/targets/:targetId/dom-read`, "browser", "observe", "semantic", false],
+      ["GET", `${B}/targets/:targetId/screenshot`, "browser", "observe", "media", false],
+      ["POST", `${B}/actions`, "browser", "act", "semantic", true],
+      ["POST", `${B}/auth-runs`, "browser", "auth_start", "auth", true],
+      ["POST", `${B}/auth-runs/:authRunId/report`, "browser", "auth_report", "auth", true],
+      ["POST", `${B}/auth-runs/:authRunId/protected-fill`, "browser", "auth_fill", "auth", true],
+      ["POST", `${B}/auth-runs/:authRunId/external-auth`, "browser", "auth_start", "auth", true],
+      [
+        "POST",
+        `${B}/auth-runs/:authRunId/external-auth/interactive`,
+        "browser",
+        "auth_start",
+        "auth",
+        true,
+      ],
+      ["POST", `${B}/auth-runs/:authRunId/verify`, "browser", "auth_verify", "auth", true],
+      ["POST", `${B}/attachments`, "browser", "attach", "human", false],
+      ["POST", `${B}/revisions`, "browser", "publish", "lifecycle", true],
+      ["POST", `${B}/suspend`, "browser", "suspend", "lifecycle", true],
+      ["POST", `${B}/resume`, "browser", "resume", "lifecycle", true],
+      ["POST", `${B}/end`, "browser", "end", "lifecycle", true],
+      ["POST", COMPUTER, "computer", "create", "lifecycle", true],
+      ["GET", `${C}/targets`, "computer", "observe", "semantic", false],
+      ["GET", `${C}/targets/:targetId/observation`, "computer", "observe", "semantic", false],
+      ["GET", `${C}/targets/:targetId/screenshot`, "computer", "observe", "media", false],
+      ["POST", `${C}/actions`, "computer", "act", "semantic", true],
+      ["POST", `${C}/attachments`, "computer", "attach", "human", false],
+      ["POST", `${C}/end`, "computer", "end", "lifecycle", true],
+    ] as const
+  ).map(([method, route, resource, operation, mode, successObservedByHandler]) => [
+    `${method} ${route}`,
+    { resource, operation, mode, successObservedByHandler },
+  ]),
+);
+
+export function interactionRouteOperation(
+  method: string,
+  route: string,
+): InteractionRouteOperation | null {
+  return INTERACTION_ROUTE_OPERATIONS.get(`${method} ${route}`) ?? null;
+}
+
+const INTERACTION_ERROR_REASONS = new Set([
+  "resource_not_found",
+  "resource_unavailable",
+  "controller_stale",
+  "target_not_found",
+  "target_stale",
+  "observation_stale",
+  "document_stale",
+  "frame_stale",
+  "locator_not_found",
+  "locator_ambiguous",
+  "unsupported",
+  "permission_denied",
+  "machine_locked",
+  "attempt_stale",
+  "operation_conflict",
+  "outcome_unknown",
+  "invalid_action",
+  "timeout",
+  "controller_lost",
+  "driver_failed",
+]);
+
+/**
+ * Bounded failure reason for a refused or failed interaction route, derived
+ * only from the HTTP status and the content-free rejection classification.
+ */
+export function interactionRouteFailureReason(
+  status: number,
+  rejectionReason: string | undefined,
+): string {
+  if (rejectionReason?.startsWith("permission:")) return "permission_denied";
+  if (rejectionReason?.startsWith("control:")) return rejectionReason.replace(":", "_");
+  if (rejectionReason && INTERACTION_ERROR_REASONS.has(rejectionReason)) return rejectionReason;
+  if (rejectionReason && STALE_INTERACTION_ERROR_CODES.has(rejectionReason)) return "stale";
+  if (status === 401) return "unauthenticated";
+  if (status === 403) return "access_denied";
+  if (status === 404) return "not_found";
+  if (status === 409) return "conflict";
+  if (status === 400 || status === 422) return "invalid_request";
+  if (status === 429) return "rate_limited";
+  if (status === 504) return "timeout";
+  if (status === 502 || status === 503) return "unavailable";
+  return status >= 500 ? "internal" : "rejected";
+}
+
+/**
+ * Observe the HTTP-level outcome of an interaction route. Routes whose handler
+ * already records success from its receipt are counted here only on failure,
+ * so every attempt is counted exactly once.
+ */
+export function observeInteractionRouteOutcome(
+  observability: Observability | null | undefined,
+  input: {
+    method: string;
+    route: string;
+    status: number;
+    durationMs: number;
+    rejectionReason?: string | undefined;
+  },
+): void {
+  const operation = interactionRouteOperation(input.method, input.route);
+  if (!operation) return;
+  const failed = input.status >= 400;
+  if (!failed && operation.successObservedByHandler) return;
+  const reason = failed
+    ? interactionRouteFailureReason(input.status, input.rejectionReason)
+    : "none";
+  interactionOperationMetricObserver(observability)({
+    resource: operation.resource,
+    operation: operation.operation,
+    mode: operation.mode,
+    outcome: !failed
+      ? "completed"
+      : reason === "stale" || STALE_INTERACTION_ERROR_CODES.has(reason)
+        ? "stale"
+        : input.status === 401 || input.status === 403
+          ? "denied"
+          : "failed",
+    reason,
+    durationMs: input.durationMs,
+  });
 }

@@ -56,12 +56,50 @@ test("account-qualified native and Codemode calls render persisted labels after 
       />,
     );
     await flush();
-    expect(r.container.textContent).toContain(
-      "Search documents — Documents — Workspace: Team inbox",
-    );
+    expect(r.container.textContent).toContain("Search documents");
+    expect(r.container.textContent).not.toContain("Workspace: Team inbox");
     expect(r.container.textContent).not.toContain(name);
     await r.unmount();
   }
+});
+
+test("connector tool rows show the connector's logo and a short label", async () => {
+  const name = "b".repeat(64);
+  const events = [
+    timelineEvent("agent.toolCall.created", {
+      id: "call-logo",
+      name,
+      arguments: {},
+      display: {
+        toolName: "list_issues",
+        connector: "Issues",
+        providerDomain: "issues.example.test",
+      },
+    }),
+    timelineEvent("agent.toolCall.output", { id: "call-logo", output: "done" }),
+  ];
+  const withLogo = await renderComponent(
+    <MessageTimeline
+      events={events}
+      resolveProviderLogo={(domain) =>
+        domain === "issues.example.test" ? "/logos/issues.svg" : null
+      }
+    />,
+  );
+  await flush();
+  const logo = withLogo.container.querySelector<HTMLImageElement>("img[data-og-connector-logo]");
+  expect(logo?.getAttribute("src")).toBe("/logos/issues.svg");
+  expect(withLogo.container.textContent).toContain("List issues");
+  expect(withLogo.container.textContent).not.toContain("Issues —");
+  await withLogo.unmount();
+
+  // Without a logo the row keeps its ordinary icon; nothing is drawn in its place.
+  const withoutLogo = await renderComponent(<MessageTimeline events={events} />);
+  await flush();
+  expect(withoutLogo.container.querySelector("img[data-og-connector-logo]")).toBeNull();
+  expect(withoutLogo.container.querySelector("svg")).not.toBeNull();
+  expect(withoutLogo.container.textContent).toContain("List issues");
+  await withoutLogo.unmount();
 });
 
 let timelineSequence = 0;
@@ -525,9 +563,9 @@ describe("durable machine-input timeline", () => {
     await flush();
     expect(r.container.textContent).toContain("3 agent results received");
     expect(r.container.textContent).not.toContain("agents finished");
-    const links = [...r.container.querySelectorAll("button")].filter(
-      (button) => button.textContent === "View session",
-    );
+    const links = [
+      ...r.container.querySelectorAll<HTMLButtonElement>('button[aria-label="Open agent session"]'),
+    ];
     expect(links).toHaveLength(2);
     await act(async () => {
       links[0]?.click();
@@ -578,9 +616,125 @@ describe("durable machine-input timeline", () => {
     expect(details).not.toBeNull();
     expect(details?.open).toBe(false);
     // Detail rows stay in the DOM for expand-on-demand audit.
-    expect(r.container.textContent).toContain("verification-agent");
     expect(r.container.textContent).toContain("Cache verification completed.");
     expect(r.container.textContent).toContain("Agent result received");
+    await r.unmount();
+  });
+
+  test("names the sending agent, deep-links it, and keeps its words behind the pill", async () => {
+    resetTimelineEvents();
+    const agentId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const opened: string[] = [];
+    const r = await renderComponent(
+      <MessageTimeline
+        onOpenSession={(id) => opened.push(id)}
+        resolveSessionTitle={(id) => (id === agentId ? "Release audit" : null)}
+        events={[
+          timelineEvent("system.update.delivered", {
+            members: [
+              {
+                id: "update-1",
+                kind: "agent_message",
+                classification: "info",
+                sourceId: agentId,
+                summary: "Two breaking changes so far.",
+              },
+            ],
+          }),
+        ]}
+      />,
+    );
+    await flush();
+    const pill = r.container.querySelector("details[data-og-machine-input-batch] summary");
+    expect(pill?.textContent).toBe("Update from Release audit");
+    // No loose summary under the collapsed pill; the text sits in the named row.
+    const batch = r.container.querySelector("details[data-og-machine-input-batch]")!;
+    expect(batch.nextElementSibling).toBeNull();
+    const row = batch.querySelector("[data-og-agent-row]")!;
+    expect(row.textContent).toContain("Update from Release audit");
+    expect(row.textContent).toContain("Two breaking changes so far.");
+    const open = row.querySelector<HTMLButtonElement>('button[aria-label="Open Release audit"]');
+    await actRun(() => open?.click());
+    expect(opened).toEqual([agentId]);
+    await r.unmount();
+  });
+
+  test("folds repeated progress notes from one agent into its latest note", async () => {
+    resetTimelineEvents();
+    const agentId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const r = await renderComponent(
+      <MessageTimeline
+        resolveSessionTitle={() => "Checkout flake"}
+        events={[
+          timelineEvent("system.update.delivered", {
+            members: ["Reproduced locally.", "Root cause found.", "Fix pushed."].map(
+              (note, index) => ({
+                id: `progress-${index}`,
+                kind: "child_progress",
+                classification: "info",
+                sourceId: agentId,
+                summary: `Worker ${agentId} progress: ${note}`,
+              }),
+            ),
+          }),
+        ]}
+      />,
+    );
+    await flush();
+    const batch = r.container.querySelector("details[data-og-machine-input-batch]")!;
+    expect(batch.querySelector("summary")?.textContent).toBe("3 updates from Checkout flake");
+    const rows = batch.querySelectorAll("[data-og-agent-row]");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.textContent).toContain("Progress from Checkout flake");
+    expect(rows[0]!.textContent).toContain("+2 earlier");
+    expect(rows[0]!.querySelector("[data-og-agent-preview]")?.textContent).toBe("Fix pushed.");
+    expect(r.container.textContent).not.toContain(agentId);
+    await actRun(() => rows[0]!.querySelector<HTMLElement>("[role=button]")?.click());
+    expect(rows[0]!.textContent).toContain("Reproduced locally.");
+    expect(rows[0]!.textContent).toContain("Root cause found.");
+    await r.unmount();
+  });
+
+  test("spawn and message rows name the agent from the spawn title", async () => {
+    resetTimelineEvents();
+    const agentId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    const opened: string[] = [];
+    const r = await renderComponent(
+      <MessageTimeline
+        onOpenSession={(id) => opened.push(id)}
+        events={[
+          timelineEvent("agent.toolCall.created", {
+            id: "call-spawn",
+            name: "opengeni__session_create",
+            arguments: { title: "API audit", initialMessage: "Diff the public SDK surface." },
+          }),
+          timelineEvent("agent.toolCall.output", {
+            id: "call-spawn",
+            output: { structuredContent: { sessionId: agentId, status: "queued" } },
+          }),
+          timelineEvent("agent.toolCall.created", {
+            id: "call-message",
+            name: "opengeni__session_send_message",
+            arguments: { sessionId: agentId, text: "Include webhooks too." },
+          }),
+          timelineEvent("agent.toolCall.output", {
+            id: "call-message",
+            output: { structuredContent: { sessionId: agentId } },
+          }),
+        ]}
+      />,
+    );
+    await flush();
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("Spawned API audit");
+    expect(text).toContain("Messaged API audit");
+    expect(text).toContain("Include webhooks too.");
+    const links = r.container.querySelectorAll<HTMLButtonElement>(
+      'button[aria-label="Open API audit"]',
+    );
+    expect(links).toHaveLength(2);
+    await actRun(() => links[1]?.click());
+    expect(opened).toEqual([agentId]);
     await r.unmount();
   });
 
@@ -794,6 +948,73 @@ describe("published file presentation", () => {
       },
     };
   }
+
+  test("a published patch stays visible and copies one command to apply it", async () => {
+    resetTimelineEvents();
+    const requests: Array<string | undefined> = [];
+    const copied: string[] = [];
+    const clipboardItem = (globalThis as { ClipboardItem?: unknown }).ClipboardItem;
+    const clipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+    (globalThis as { ClipboardItem?: unknown }).ClipboardItem = undefined;
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: async (text: string) => void copied.push(text) },
+    });
+    const r = await renderComponent(
+      <MessageTimeline
+        events={[
+          timelineEvent("user.message", { text: "Implement it from my zip" }),
+          timelineEvent("turn.started", { triggerEventId: "timeline-evt-1" }),
+          timelineEvent("agent.toolCall.created", {
+            id: "published-patch",
+            name: "opengeni__sandbox_file_publish",
+            arguments: { path: "/workspace/changes.patch" },
+          }),
+          timelineEvent("agent.toolCall.output", {
+            id: "published-patch",
+            output: {
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify(receipt("application/octet-stream", "changes.patch")),
+                },
+              ],
+            },
+          }),
+          timelineEvent("agent.message.completed", { text: "Here is your patch." }),
+          timelineEvent("turn.completed", {}),
+        ]}
+        loadRetainedArtifact={async (_artifact, _signal, options) => {
+          requests.push(options?.prefer);
+          return {
+            url: "https://objects.example/changes.patch?sig=a'b",
+            expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
+          };
+        }}
+      />,
+    );
+    try {
+      await flush();
+      expect(turnSummaryTrigger(r.container)?.getAttribute("aria-expanded")).toBe("true");
+      expect(r.container.textContent).toContain("Published changes.patch");
+      const button = [...r.container.querySelectorAll("button")].find(
+        (candidate) => candidate.textContent === "Copy command to apply these changes",
+      );
+      expect(button).toBeDefined();
+      await act(async () => button!.click());
+      await flush();
+      expect(requests).toEqual(["url"]);
+      expect(copied).toEqual([
+        "curl -fsSL 'https://objects.example/changes.patch?sig=a'\\''b' | git apply",
+      ]);
+      expect(r.container.textContent).toContain("The link in it expires in 5 minutes.");
+    } finally {
+      await r.unmount();
+      (globalThis as { ClipboardItem?: unknown }).ClipboardItem = clipboardItem;
+      if (clipboard) Object.defineProperty(navigator, "clipboard", clipboard);
+      else delete (navigator as { clipboard?: unknown }).clipboard;
+    }
+  });
 
   test("published images are visible after a settled turn without filesystem access", async () => {
     resetTimelineEvents();
@@ -1401,7 +1622,7 @@ describe("timeline renderer isolation", () => {
             delivery: {
               state: "failed",
               error:
-                "Your organization has no OpenGeni credits left. Add credits before sending again.",
+                "Your organization has no Opengeni credits left. Add credits before sending again.",
               onEdit: () => {
                 edits += 1;
               },
@@ -1412,7 +1633,7 @@ describe("timeline renderer isolation", () => {
     );
     await flush();
     expect(r.container.querySelector('[role="status"]')?.textContent).toContain(
-      "no OpenGeni credits left",
+      "no Opengeni credits left",
     );
     const buttons = [...r.container.querySelectorAll("button")];
     expect(buttons.find((button) => button.textContent === "Retry")).toBeUndefined();
@@ -1464,11 +1685,13 @@ describe("timeline renderer isolation", () => {
 
       const text = r.container.textContent ?? "";
       expect(text).toContain("Message before the broken renderer");
-      expect(text).toContain("Timeline item unavailable");
+      // Only the broken row is replaced; its work group still renders.
+      expect(text).toContain("Consumer tool with missing renderer · couldn't be displayed");
       expect(text).toContain("Message after the broken renderer");
+      expect(r.container.querySelectorAll('[data-testid="tool-row-render-error"]')).toHaveLength(1);
       expect(
         r.container.querySelectorAll('[data-testid="timeline-group-render-error"]'),
-      ).toHaveLength(1);
+      ).toHaveLength(0);
 
       await r.rerender(<MessageTimeline items={items} toolRegistry={defaultToolRegistry} />);
       await flush();
@@ -1480,6 +1703,7 @@ describe("timeline renderer isolation", () => {
       expect(
         r.container.querySelectorAll('[data-testid="timeline-group-render-error"]'),
       ).toHaveLength(0);
+      expect(r.container.querySelectorAll('[data-testid="tool-row-render-error"]')).toHaveLength(0);
 
       await r.unmount();
     } finally {
@@ -3824,6 +4048,59 @@ describe("ask / run_on / exec collapsed previews", () => {
     expect(text).toContain("$ pwd");
     expect(text).toContain("on studio-mac");
     expect(text).toContain("/workspace");
+    await r.unmount();
+  });
+});
+
+describe("GenericRenderer — permission Block", () => {
+  test("a blocked connector call reads as a permission decision, not a tool error", async () => {
+    const item = toolItem({
+      name: "mcp_example__read_wiki_structure",
+      arguments: JSON.stringify({ repoName: "example/repo" }),
+      output: {
+        content: [
+          {
+            type: "text",
+            text: "An error occurred while running the tool. Please try again. Error: Connector action was not executed: blocked",
+          },
+        ],
+        isError: true,
+      },
+      status: "complete",
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const r = await renderComponent(<Renderer item={item} />);
+    await flush();
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("Blocked by your permission settings");
+    expect(text).not.toContain("Please try again");
+    expect(text).not.toContain("error");
+    await r.unmount();
+  });
+});
+
+describe("GenericRenderer — uncertain outcome", () => {
+  test("an uncertain connector outcome never invites a blind retry", async () => {
+    const item = toolItem({
+      name: "mcp_example__read_wiki_contents",
+      arguments: JSON.stringify({ repoName: "example/repo" }),
+      output: {
+        content: [
+          {
+            type: "text",
+            text: "An error occurred while running the tool. Please try again. Error: Connector action outcome is uncertain; inspect provider state before retrying",
+          },
+        ],
+        isError: true,
+      },
+      status: "complete",
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const r = await renderComponent(<Renderer item={item} />);
+    await flush();
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("outcome unknown");
+    expect(text).not.toContain("Please try again");
     await r.unmount();
   });
 });

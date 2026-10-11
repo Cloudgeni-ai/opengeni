@@ -135,6 +135,12 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/storage",
   ],
   "test/integration/db.integration.ts": ["@opengeni/db"],
+  "test/integration/subscription-core-codex-wait.integration.ts": [
+    "@opengeni/worker-bundle",
+    "@opengeni/db",
+    "@opengeni/events",
+    "@opengeni/testing",
+  ],
   "test/integration/durable-queue-control.integration.ts": [
     "@opengeni/api-router",
     "@opengeni/worker-bundle",
@@ -224,6 +230,7 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/sdk",
     "@opengeni/testing",
   ],
+  "test/e2e/codex-account.browser.e2e.ts": ["opengeni-web", "@opengeni/sdk", "@opengeni/testing"],
   "test/e2e/code-editor.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
   "test/e2e/composer-responsive.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
   "test/e2e/workspace-pause-timers.browser.e2e.ts": [
@@ -423,6 +430,16 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/react",
     "@opengeni/api-router",
     "@opengeni/db",
+    "@opengeni/testing",
+  ],
+  "test/e2e/new-conversation.browser.e2e.ts": [
+    "@opengeni/react",
+    "@opengeni/sdk",
+    "@opengeni/testing",
+  ],
+  "test/e2e/session-conversation-controller.browser.e2e.ts": [
+    "@opengeni/react",
+    "@opengeni/sdk",
     "@opengeni/testing",
   ],
   "test/e2e/session-lazy-panels.browser.e2e.ts": [
@@ -680,7 +697,7 @@ function fullPlan(
       // another file is a real conflict; catch it while the fix is one command.
       "migration-ordinals",
       // A migration-time backfill over a FORCE-RLS table silently matches zero
-      // rows for the non-superuser owner OpenGeni migrates as.
+      // rows for the non-superuser owner Opengeni migrates as.
       "migration-rls-backfills",
       // A migration missing from the release-schema forward list is framed by
       // the governed checkpoint input, so the pinned aggregate only breaks after
@@ -689,6 +706,8 @@ function fullPlan(
       // A ledger-replaying test without an explicit budget is one shard repack
       // away from being killed at the shard default.
       "migration-test-budgets",
+      // Contract requirement IDs and the tests that claim them stay consistent.
+      "subscription-contract",
       // The public API surface snapshot and the published-SDK compatibility
       // run (docs/design/api-compatibility-policy.md).
       "public-api",
@@ -768,7 +787,9 @@ export function createImpactPlan(
       artifactRuntimeRequired: false,
       buildPackages: [],
       exampleBuildProjects: [],
-      guards: ["format", "docs-refs", "generated-fonts", "public-hygiene"],
+      // The subscription contract is a document, so a docs-only change to it
+      // must still be checked against the tests that claim its requirements.
+      guards: ["format", "docs-refs", "generated-fonts", "public-hygiene", "subscription-contract"],
       reasons: changedFiles.map((path) => ({
         path,
         reason: "documentation-only change",
@@ -896,6 +917,9 @@ export function createImpactPlan(
     // ledger-replaying test, which adds a `*.test.ts` and touches no migration.
     // It parses every test file in about two seconds, so it runs unconditionally.
     "migration-test-budgets",
+    // Any test file can name a contract requirement ID; the check reads every
+    // test file in about a second, so it runs unconditionally too.
+    "subscription-contract",
   ];
   if (changedFiles.some((path) => path.startsWith("packages/db/drizzle/"))) {
     guards.push("migration-ordinals", "migration-rls-backfills", "migration-schema-contract");

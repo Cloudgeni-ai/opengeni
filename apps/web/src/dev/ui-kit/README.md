@@ -1,4 +1,4 @@
-# OpenGeni UI kit (DEV only)
+# Opengeni UI kit (DEV only)
 
 The component studio at `/dev/ui-kit` (`http://homeserver:3140/dev/ui-kit`). Every fork is
 decided (27 Sep 2026): the registry's `recommended` version is the decision and carries the

@@ -1,4 +1,4 @@
-# OpenGeni web UI
+# Opengeni web UI
 
 Before adding a control, search `src/components/ui`, `src/components/pickers.tsx`, and the chat
 composer for an existing workspace-wide pattern. Reuse or extend the shared component instead of
@@ -12,7 +12,7 @@ The binding UI spec (tokens, type, which control when, copy, decided component p
   bordered cards inside bordered cards or give every setting equal visual weight.
 - Use plain outcome-based copy. Labels should describe what the user is choosing (for example,
   “Start a new chat”), not internal persistence terms such as session reuse or target session.
-- Any model choice must show its payment source—OpenGeni credits, Codex subscription, SuperGrok
+- Any model choice must show its payment source—Opengeni credits, Codex subscription, SuperGrok
   subscription, or the workspace AI Gateway—and use the shared model-policy picker.
 - Reuse shared disclosure, picker, menu, field, switch, button, and status primitives. If a pattern
   will plausibly appear on another workspace route, extract it before shipping the second version.

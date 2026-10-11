@@ -140,6 +140,75 @@ function mapEvent(row: typeof schema.sessionEvents.$inferSelect): SessionEvent {
   };
 }
 
+/** Same terminal fence for model and programmatic calls. Started effects remain unknown. */
+export async function settleInterruptedCodemodeCallsInTransaction(
+  tx: Database,
+  input: Pick<
+    ClosePendingSessionToolCallsInput,
+    "workspaceId" | "sessionId" | "turnId" | "reason" | "now"
+  >,
+): Promise<void> {
+  await tx
+    .update(schema.sessionAttemptCodemodeCalls)
+    .set({
+      state: sql`case when ${schema.sessionAttemptCodemodeCalls.executionStartedAt} is null then 'cancelled' else 'outcome_unknown' end`,
+      claimId: sql`case when ${schema.sessionAttemptCodemodeCalls.executionStartedAt} is null then null else ${schema.sessionAttemptCodemodeCalls.claimId} end`,
+      claimedAt: sql`case when ${schema.sessionAttemptCodemodeCalls.executionStartedAt} is null then null else ${schema.sessionAttemptCodemodeCalls.claimedAt} end`,
+      claimExpiresAt: sql`case when ${schema.sessionAttemptCodemodeCalls.executionStartedAt} is null then null else ${schema.sessionAttemptCodemodeCalls.claimExpiresAt} end`,
+      errorCode: input.reason,
+      errorMessage:
+        "The owning turn ended. Started effects require reconciliation before retrying.",
+      completedAt: input.now,
+      updatedAt: input.now,
+    })
+    .where(
+      and(
+        eq(schema.sessionAttemptCodemodeCalls.workspaceId, input.workspaceId),
+        eq(schema.sessionAttemptCodemodeCalls.sessionId, input.sessionId),
+        eq(schema.sessionAttemptCodemodeCalls.turnId, input.turnId),
+        inArray(schema.sessionAttemptCodemodeCalls.state, [
+          "queued",
+          "running",
+          "waiting_for_approval",
+        ]),
+      ),
+    );
+}
+
+/**
+ * A completed turn owns no live tool call. Consume every receipt of this turn
+ * whose owning attempt has settled (closed, and either quiesced or never
+ * interrupted), so the receipt cannot outlive its turn and later read as
+ * unresolved work (tenancy quiescence, Retry preview, native-origin recovery).
+ * Paired calls are already model-visible and projected; an unpaired call of a
+ * completed turn (for example a hosted approval request the model moved past)
+ * can never be resumed, because only failed/cancelled/superseded settlement or
+ * an approval resume of a nonterminal turn reads these rows. This deletes
+ * ledger rows only: history and events are untouched. The predicate matches
+ * migration 0673. Runs under the settlement's session/turn locks and
+ * workspace tenancy fence, after the completing attempt has been closed.
+ */
+export async function consumeSettledPendingToolCallsForCompletedTurnInTransaction(
+  tx: Database,
+  input: { workspaceId: string; sessionId: string; turnId: string },
+): Promise<number> {
+  const deleted = await tx.execute<{ id: string }>(sql`
+    delete from session_pending_tool_calls pending
+    where pending.workspace_id = ${input.workspaceId}
+      and pending.session_id = ${input.sessionId}
+      and pending.turn_id = ${input.turnId}
+      and not exists (
+        select 1 from session_turn_attempts owner_attempt
+        where owner_attempt.workspace_id = pending.workspace_id
+          and owner_attempt.id = pending.attempt_id
+          and (owner_attempt.state <> 'closed'
+            or (owner_attempt.quiesced_at is null and exists (
+              select 1 from session_attempt_interruptions interruption
+              where interruption.attempt_id = owner_attempt.id))))
+    returning pending.id`);
+  return deleted.length;
+}
+
 /**
  * Close raw tool calls for a logical turn while its owning session/turn locks
  * are held. Recoverable transitions preserve interruption rows because those
@@ -153,6 +222,7 @@ export async function closePendingSessionToolCallsInTransaction(
   tx: Database,
   input: ClosePendingSessionToolCallsInput,
 ): Promise<{ sequence: number; events: SessionEvent[]; closed: number }> {
+  if (!input.preserveInterruptionRows) await settleInterruptedCodemodeCallsInTransaction(tx, input);
   const pendingRows = await tx
     .select()
     .from(schema.sessionPendingToolCalls)

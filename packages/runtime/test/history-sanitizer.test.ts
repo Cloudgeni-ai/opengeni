@@ -84,14 +84,14 @@ describe("sanitizeHistoryItemsForModel", () => {
 
   test("strips compact attachment catalog metadata at the provider boundary", () => {
     const item = {
-      ...userMessage("[OpenGeni retained attachment references]"),
+      ...userMessage("[Opengeni retained attachment references]"),
       [MODEL_ATTACHMENT_CATALOG_MARKER]: true,
       [MODEL_ATTACHMENT_REFS_FIELD]: [
         { kind: "file", fileId: "00000000-0000-4000-8000-000000000099" },
       ],
     };
     const [sanitized] = sanitizeHistoryItemsForModel([item]);
-    expect(sanitized).toEqual(userMessage("[OpenGeni retained attachment references]"));
+    expect(sanitized).toEqual(userMessage("[Opengeni retained attachment references]"));
     expect(item).toHaveProperty(MODEL_ATTACHMENT_CATALOG_MARKER);
     expect(item).toHaveProperty(MODEL_ATTACHMENT_REFS_FIELD);
   });

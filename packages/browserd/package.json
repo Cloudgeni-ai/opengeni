@@ -1,8 +1,8 @@
 {
   "name": "@opengeni/browserd",
-  "version": "0.2.6",
+  "version": "0.2.15",
   "private": true,
-  "description": "Placement-resident browser controller and audited agent-browser adapter for OpenGeni.",
+  "description": "Placement-resident browser controller and audited agent-browser adapter for Opengeni.",
   "license": "Apache-2.0",
   "type": "module",
   "sideEffects": false,
@@ -17,7 +17,7 @@
   "dependencies": {
     "@opengeni/contracts": "workspace:*",
     "@opengeni/interaction": "workspace:*",
-    "@trycua/cua-driver": "0.30.4",
+    "@trycua/cua-driver": "0.34.0",
     "agent-browser": "0.33.2",
     "zod": "4.4.3"
   },

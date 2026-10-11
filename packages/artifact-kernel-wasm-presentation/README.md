@@ -1,6 +1,6 @@
 # `@opengeni/artifact-kernel-wasm-presentation`
 
-Exact, capability-scoped WebAssembly runtime for the OpenGeni presentation editor.
+Exact, capability-scoped WebAssembly runtime for the Opengeni presentation editor.
 It is generated from the safe Rust artifact kernel and loaded only in the SDK's
 dedicated module Worker. It performs no runtime download or version discovery.
 

@@ -1,4 +1,4 @@
-# OpenGeni architecture reference
+# Opengeni architecture reference
 
 > Setup: [`../AGENTS.md`](../AGENTS.md). Documentation index: [`README.md`](README.md).
 
@@ -16,9 +16,12 @@ Preflight: `scripts/run-development-stack.ts`; ownership: `scripts/dev-stack-loc
 
 ---
 
-## 2. OpenGeni
+## 2. Opengeni
 
-External users require live membership/`asUser()`. Visibility differs from `agentAccess`;
+External users require live membership/`asUser()`; an organization key holding
+`members:manage` creates a missing shared-workspace membership on the user's first
+request (`provisionExternalMemberOnFirstUse` in `packages/core/src/access`, never
+changing an existing one; SDK per-user workspaces stay single-user). Visibility differs from `agentAccess`;
 Personal Knowledge follows the verified active-turn user. Links never merge users.
 [Product integration](product-integration.md),
 [embedding authority](embedding-authority-internals.md),
@@ -113,9 +116,10 @@ exactly-once atomic history batches.
 
 `wait_for_input` settles tool-batch execution, preserving trusted authority and
 immutable same-turn deadlines. Command results wake only explicit waits; notices
-never block inbox input. Ordinary messages and lifecycle results batch by equivalent
-human and frozen access; Steer retains exact-caller isolation. Each update keeps its
-own lineage. [Details](run-lifecycle.md).
+never block inbox input. Ordinary same-human agent messages and lifecycle results use the receiving
+chat's last started request context, so different sender account selections do not
+split a batch or replace credentials. Restricted/foreign requests and Steer retain
+their explicit authority. Each update keeps its own lineage. [Details](run-lifecycle.md).
 
 Agent-created sessions inherit omitted model/reasoning from the calling turn;
 latency defaults to `standard`.
@@ -139,6 +143,10 @@ Pause/Resume, prompt admission or synthetic input.
 Active-run writes require exact attempt/generation; stale workers cannot write
 or settle replacements. Temporal cancellation is intent, not quiescence;
 unresolved writers fence capture, rotation and physical settlement.
+Exact committed workspace-mutation settlement carries a physical receipt when
+mutable authority rejects output. This remains non-replayable; missing or
+contradictory admissions, failed commits, caller-owned savepoints, and partial
+batches retain the uncertainty fence. See [run-lifecycle.md](run-lifecycle.md).
 Legacy Modal exec observations on lease-lost attempts allow same-machine
 inference only under exact actor/turn/generation checks; agents inspect before
 replay. Finalization stages carry heartbeat/metric evidence
@@ -170,6 +178,46 @@ into bounded snippets/cursors, not histories. See
 Docker/local SDK processes expose bounded-wait, turn-scoped handles, stay
 cancellation-fenced and stop before finalization; agents can test preview
 servers without awaiting exit.
+
+Interactive ttyd input readiness is separate from command execution proof.
+`agent/native/terminal-ready` owns the stock image's Bash 5.2 Readline producer;
+`docker/desktop/opengeni-terminal-up.sh` advertises the installed contract via
+ttyd preferences without restarting existing daemons. The React terminal hook
+binds explicit HELLO/READY metadata to one socket/PTY generation before releasing
+bounded early typing. Startup prompts/unsupported shells have a deliberate
+queue-discarding manual escape; old images remain labelled legacy. Relay PTYs
+retain OPEN_ACK and cursor resumption. See the [readiness contract](../agent/native/terminal-ready/README.md).
+
+Internal filesystem completion is owned by
+`packages/runtime/src/sandbox/synchronous-command.ts`: one invocation,
+complete separate-stream pages and provider terminal/EOF proof. SDK-native
+collection in `sandbox/native-synchronous-collection.ts` begins before Start,
+on the original process streams, rather than parsing bounded shell presentation.
+Provider adapters own trusted page identities and cursors; routing captures
+those pages before acknowledging or settling the original process. Immediate
+unretained Modal terminal pages use collector-scoped, session-bound receipts
+through that snapshot, cleared when the collector returns or rejects. Physical
+exit can settle process custody without proving complete output, but cannot
+authorize a successful filesystem result. Channel A and routing
+keep this separate from interactive/background shell execution; the worker
+reuses its turn cancellation registration for Skill filesystem commands.
+
+Registered Daytona clients bind the same authenticated native sandbox before
+filesystem dispatch (`sandbox/providers/daytona-command-binding.ts`). Framed
+native sessions preserve exact stream bytes and require original-command exit
+plus both stream EOFs; lossy native log projections are not completion proof.
+Routing awaits retryable namespace cleanup only after durable output settlement.
+Session deletion or absence cannot prove cancellation or output completeness.
+
+OpenSandbox's `sandbox/providers/opensandbox-command-stream.ts` validates the
+original SSE/NDJSON frames before SDK projection and records invocation-local
+dispatch evidence at the bound transport. The adapter pins the first execution
+identity and launch client. Its control-only observer can reconcile physical
+exit after output loss without reading or acknowledging retained output.
+Attempted dispatch without an authenticated execution identity remains unknown
+and joined; absent headers, ambiguous HTTP errors or a missing ID cannot create
+terminal proof. Only a genuinely bound, unchanged default SDK command path that
+failed before command transport grants local non-dispatch proof.
 
 `wait_for_input` retains its turn/deadline until input/timeout; acknowledgment
 cannot strand eligible input/due waits. `Session.inputWait` drives working/recheck
@@ -240,8 +288,12 @@ Knowledge, preserving destination scope and review; see
 [`company-brain-write-routing.md`](company-brain-write-routing.md).
 
 Agent learning governs Knowledge/instructions/Skills: Automatic, Review first,
-Off; sparse chat/task overrides and accepted-turn policies freeze. Review first
-stages inactive changes without pausing. Pending reads support reuse/correction,
+Off; sparse chat/task overrides and accepted-turn policies freeze.
+The worker renders the frozen effective modes and Knowledge destination in the
+governance prompt, without attempt IDs or human identifiers. Useful retention is
+ordinary work under that policy, including newly created Slack sessions; Slack
+source text remains evidence rather than instruction or authorization authority.
+Review first stages inactive changes without pausing. Pending reads support reuse/correction,
 never authority; ordinary reads are published-only. Instructions/Skills retain
 native authority. Instruction edits append to exact baselines or update/remove
 unique exact-text anchors; full replacement requires explicit intent. Active-head
@@ -249,14 +301,16 @@ CAS and budgets apply. Retired writers remain audit/compatibility evidence. See
 [`knowledge.md`](knowledge.md).
 
 Organization identity has a separate organization-owner autonomy policy: Off rejects
-agent-authored changes before proposal creation, Require approval binds human
-confirmation, and Autonomous activates eligible proposals without another
+agent-authored changes before proposal creation, Review first (`suggest`) binds human
+confirmation, and Automatic activates eligible proposals without another
 prompt. Every mode requires an exact live turn from the active organization
 owner and the company-profile compare-and-swap lifecycle; workspace Learning
-mode and admin authority cannot widen this scope.
+mode and admin authority cannot widen this scope. The web app shows it as an
+owner-only row on Settings > Agent learning, in the same Off / Review first /
+Automatic words as the workspace modes, while each store stays separate.
 
 Accepted conversation and tool content stays intact at its canonical boundary;
-OpenGeni does not rewrite arbitrary credential-like text. Configured secrets
+Opengeni does not rewrite arbitrary credential-like text. Configured secrets
 are encrypted at rest and exposed only through explicit permissioned
 operations with metadata-only audit.
 
@@ -286,10 +340,27 @@ native response, current custody claim, physical settlement or effect permit.
 No host entry, provider caller or durable recovery is activated by this helper.
 See [Modal recovery assurance](design/modal-recovery-assurance-2026-10-02.md).
 
+`modal-native-original-configuration.ts` is likewise unused private groundwork.
+It samples explicit deployment settings once, pins the direct read/TLS policy,
+and derives a separately domain-bound private equality commitment. Its draft
+and opaque sample are configuration data, not host/grant/capture authority.
+Tokens and keys never enter the draft; keyed equality must remain protected.
+
+`modal-native-live-declaration-join.ts` is an unused private request/data join,
+not the canonical claimed-worker issuer or a native context. It owns the exact
+bytes before MAC verification/parsing, joins the accepted LIVE origin, frozen
+human, Temporal tuple and unchanged recovery count, then rechecks current
+transport expiry and deployment configuration after blocking DB locks. Its
+immutable output must remain request-local and be consumed in that transaction.
+Protected cold/config/grant insertion and actual worker provenance are still
+required; this helper creates no permission to observe, dispatch or publish.
+
 Organization/workspace membership, API keys, delegated grants, private-session
 ownership and personal-resource grants remain distinct. Organization keys with
 `workspace:admin` may change private-session product settings; DB fences recheck
 live keys, including replay. This grants no private-content access.
+Only-me chats are on by default for every organization (migration 0611); no
+per-organization activation receipt or deployment switch gates them.
 Sharing advances viewer-access epoch while preserving accepted execution and
 connection selections. Privatization/revocation advance the execution-epoch floor;
 privatization requires quiescence and clears staged personal selections.
@@ -298,10 +369,16 @@ and provenance never imply human authority. Turns freeze initiating principals
 and execution/recovery authority snapshots.
 
 An effective first-party permission ceiling of `[]` remains zero delegated
-OpenGeni authority. Runtime skips only remote OpenGeni-delegated MCP preparation,
+Opengeni authority. Runtime skips only remote OpenGeni-delegated MCP preparation,
 never pads a grant or signs an empty token; external-host, host-local,
 connection-backed and already-authorized native paths keep their own authority.
 See [automation defaults](automations.md#empty-first-party-authority).
+
+Managed password sign-ups require email verification outside local development
+unless the operator explicitly disables `OPENGENI_MANAGED_AUTH_REQUIRE_EMAIL_VERIFICATION`.
+That opt-out attests new password users before provisioning; it requires an
+independent trusted-user boundary. Social-provider proof remains required outside
+local development. See [verification configuration](deployment.md#password-sign-up-email-verification).
 
 Organization settings owns the cross-workspace roster and roles. A managed
 browser administrator is the ordinary authority. Single-user local deployments
@@ -329,10 +406,12 @@ ownership or bypass recovery settlement.
 Personal connections and resources require the exact human authority that made
 them executable. Workspace-owned credentials remain workspace-scoped and are
 revalidated at use. An embedding host may narrow access through an explicit
-port; it cannot grant access that OpenGeni denied.
+port; it cannot grant access that Opengeni denied.
 
 The managed personal-workspace owner receives a closed permission projection
-that includes `capabilities:manage`, so they can configure their own Plugins,
+that includes live viewing and handoff (`stream:view`, `stream:control`,
+`stream:acknowledge`, `terminal:attach`, and `files:write`) within their own
+workspace, and `capabilities:manage`, so they can configure their own Plugins,
 Integrations, and Codex subscription without receiving the `workspace:admin`
 wildcard, member management, or API-key delegation.
 `requireWorkspaceSettingsGrant` in the access resolver separately admits the
@@ -373,12 +452,24 @@ membership uses `code` or an operator-owned database singleton; workspace policy
 connection readiness/permissions, organization assignments, and provider health
 determine selectability; `/v1/config/client` and session create share one
 resolver. Deployment cost policy sets `free`/`credits` independently
-of upstream settlement. Workspace Gateway, OpenRouter, Anthropic API, and Claude
-subscription rows are provider-qualified overlays, separate from deployment
-catalog/billing. `openrouter/*` and `workspace-openrouter/*` retain distinct
-provider/billing identities for identical slugs. Claude setup:
+of upstream settlement. Workspace Gateway, OpenRouter, Opper, Anthropic API, and
+Claude subscription rows are provider-qualified overlays, separate from deployment
+catalog/billing. `openrouter/*` and `workspace-openrouter/*` (likewise `opper/*`,
+`workspace-opper/*`, `organization-opper/*`) retain distinct provider/billing
+identities for identical slugs. Claude setup:
 `apps/api/src/routes/workspace-model-providers.ts`; transport:
 `packages/runtime/src/anthropic-messages.ts`.
+Claude request-byte and independent image bounds live in
+`packages/runtime/src/anthropic-request-size.ts`; exact checkpoint-prefix fitting
+is in `packages/runtime/src/anthropic-compaction.ts`. The worker claims a fenced,
+durable one-per-turn byte-recovery allowance before summarizing a prefix and
+preserving its complete suffix. See [context compaction](context-compaction.md).
+Workspace `modelCompactionThresholds` preferences resolve through
+`workspaceModelCompactionPolicy` in config at model preparation. The API catalog
+and Models → Context & compaction page expose the same default/override/effective
+values without changing immutable model definitions or frozen compaction modes.
+Per-model PATCH/reset is atomic in the workspace settings store; request-byte
+guards remain independent of the token preference.
 The shared `claudeNativeModelProfile` in `packages/config/src/index.ts` owns
 native model effort vocabularies, defaults, context windows and output ceilings;
 both catalog projection and request shaping consume it.
@@ -419,53 +510,47 @@ Agent configuration: `packages/contracts/src/agent-config.ts`; null configs stay
 
 ### 3.8 A Connected Machine is first-class primary compute
 
-Connected Machines (`selfhosted`) run agents without sandboxes. [Native updates](../agent/README.md#distribution)
-fence admission and require idle commands, uploads and owned browser/computer controllers;
-unavailable proof defers updates. Mac updates preserve signed bundles and
-[write ACLs](../agent/TRANSACTIONAL-WRITES.md).
+Connected Machines (`selfhosted`) run agents without sandboxes. [Updates](../agent/README.md#distribution)
+fence admission, require idle commands/uploads and owned browser/computer controllers,
+and defer without proof. `opengeni-agent-engine::update_drain` owns one process-wide
+reservation boundary. Platform scopes pass existing guards to blocking actions,
+PTY child cleanup, job descendants and relay pumps; generation tasks own only
+waiters. Reply bytes and their receipt enter the transport as one command;
+blocked writes retain the receipt, and losing that connection fails it before
+reconnect. Replies settle on their original transport, and unproved cleanup or
+publication keeps updates unavailable. The attached-browser bridge reserves
+before spawn and retains timed-out commands until matching physical results.
+The private controller update transaction fences new HTTP requests, including
+queued JSON, before the host atomically seals final admission. Operation-result
+retention and consumer-generation acknowledgments remain engine-owned.
+Mac updates preserve signed bundles and
+[ACLs](../agent/TRANSACTIONAL-WRITES.md).
 
-Machines own files, Git authentication, environment and [credential renewal](connected-machines.md).
-OpenGeni neither clones repositories nor installs durable control-plane credentials;
-children receive transient, exact-attempt Codemode authority.
-[Same-turn recovery](run-lifecycle.md) restores native capabilities without tool replay.
+Machines own files, Git auth, environment and [credential renewal](connected-machines.md).
+Opengeni neither clones repos nor installs durable credentials;
+child Codemode authority is transient/attempt-bound.
+[Recovery](run-lifecycle.md) restores capabilities without tool replay.
 
-Machine paths are host-native and session-specific, not universal `/workspace`
-aliases. Unavailability produces a typed operation outcome; text-only reasoning
-can begin without contact. An offline machine never authorizes cold-creating a
-rival box, snapshotting it, or provider-terminating the user's computer.
+Foreground output releases once its exact tool-result receipt, output event and
+journal are durable, independently of turn completion. Other owners retain output.
+[Streaming exec](connected-machines.md#streaming-exec-op-stream).
 
-Structured Files exposes the selected machine's effective host-native working
-directory as `FileSystem.root`; links and tree nodes share this namespace.
-Connected Machine reads accept external absolute paths under the machine account's
-OS permissions; working directories remain browsing defaults.
-Managed reads and structured mutations stay workspace-confined, including `/`.
-Requests carry capability epoch and root. The API binds one route per request;
-target/root changes return retryable conflicts instead of reinterpreting paths
-on another filesystem.
+Machine paths are session-specific. Offline operations fail typed; reasoning continues.
+Availability never authorizes provisioning, snapshotting or terminating a user's computer.
 
-Generated-session schedules persist an exact workspace- or organization-scoped
-machine target and seed its active pointer before the first turn. Ingress
-rejects targetless `selfhosted` schedules; dispatch revalidates the frozen target
-without managed-compute fallback. Manual and generated creates preflight target
-liveness and workspace root, then recheck durable authority and atomically
-commit the active pointer with the session row. Rejection leaves no queued
-session shell in discovery or parent-tree projections.
+Structured Files binds paths, route, capability epoch and root per request; changes
+conflict. OS permissions govern machine reads; managed access remains workspace-confined.
 
-Child workers keep the ordinary low-friction rule: omitting placement shares
-the creator's box. Because a Connected Machine pointer is session-local, that
-default copies the trusted parent's exact active machine and working directory
-before the child's first turn. This includes a `backend:none` parent that has
-attached a Connected Machine: the child keeps the shared backend-none home and
-group while inheriting the exact active route. A selfhosted-only child with no
-inherited or explicit machine fails at create rather than reaching an unbound
-runtime.
+Creates preflight liveness/root then atomically bind verified machine authority.
+Generated schedules freeze/revalidate scoped targets without managed fallback.
+Unbound `selfhosted` creates leave no queued shell.
 
-Machine-home sessions never pre-provision hidden managed boxes. With a managed
-deployment backend, the fleet exposes the synthetic managed group explicitly.
-Selecting `session`/`default` clears the active machine pointer and verifies that
-group through the ordinary viewer/lease lifecycle before the next operation/turn
-uses it. This intentional user route change is not offline-machine fallback;
-`none`/`selfhosted`-only deployments expose no managed group.
+Omitted child placement inherits parent machine/root and shared home/group,
+including attached `backend:none`; selfhosted-only children require a machine.
+
+Machine homes never pre-provision boxes. Explicit `session`/`default` clears the
+machine pointer and verifies managed compute via viewer/lease authority;
+`none`/`selfhosted` offers none.
 
 Connected Machine event ingestion drains NATS immediately into exact-process
 queues, not one global database queue. Connection subjects progress concurrently
@@ -496,12 +581,31 @@ Home-compute selection proves establishment authority; invalid pointers reconcil
 visibly. Leases/reapers—not viewers—own sandboxes. Identity precedes setup; capture
 fences writers. Exact-instance loss never authorizes ambiguous replay. Routing stays
 lazy; raw handles serve setup/capture (`turn-sandbox-access.ts`).
+Docker drains attach only to capture the authenticated owned host workspace;
+they never call ordinary SDK resume or create a replacement execution wrapper.
+The protected SDK ownership receipt and current lease/capture fence precede
+descriptor-bound content reads. Missing legacy custody or failed capture retains
+data and unresolved lease truth; post-publication exact-container teardown
+then releases the fenced host workspace directory, because the cold commit is
+archive-only and nothing references it afterwards. Canonical leaf:
+packages/runtime/src/sandbox/providers/docker-workspace-drain.ts.
+
 Pending cancellation accepts non-dispatch only from call-scoped routing admission
 proof or typed provider rejection. Credential command decorators preserve these
 invocation options up to routing, which never forwards proof callbacks to the
 provider. Issued helpers retain independent physical joins after original retained
 registration. See [run lifecycle](run-lifecycle.md).
 Global Modal inventory uses an owner-only SELECT capability under FORCE RLS (0497).
+
+`packages/db/src/modal-native-live-origin.ts` is an inert, trusted-server-only
+LIVE-origin projection (0632), not a host authenticator or custody grant. Its
+transaction joins the exact accepted attempt, immutable initiating human,
+current membership/Personal pointer, control, route and execution-authority
+floor before any lease acquisition. Function-lifetime owner-only read
+capabilities preserve private-session isolation without changing the caller's
+subject. Host request authentication and cold reservation remain separate;
+there is no provider call, closed-origin maintenance authority, budget reset or
+native producer activation in this seam.
 
 Stock Modal non-PTY/no-`runAs` commands support native subreaper supervision.
 Exact-instance capability verification precedes admission; durable invocation
@@ -550,8 +654,10 @@ changes. Drain budgets cover dispatch/capture/retry within the lifecycle ceiling
 Warm-capture reclamation/heartbeat cleanup retain holders through the original
 deadline after turn closure: no takeover or authority extension.
 
-Supervision-key presence—even malformed—blocks legacy containment enrollment,
-capture, publication and teardown. Observation failure never proves exit.
+Supervision-key presence (even malformed) blocks legacy containment enrollment,
+drain capture, publication and teardown. Only a warm point-in-time checkpoint
+that runs around the command, published one generation behind, may capture
+the box meanwhile (migration 0685). Observation failure never proves exit.
 
 Acquisition/mutation waits extend once through the first durable capture deadline
 plus handoff grace (one-hour cap). Expired/replacement claims never replenish
@@ -649,7 +755,7 @@ Canonical: [`usage-allowances.md`](usage-allowances.md).
 
 ## 4. System architecture
 
-OpenGeni separates durable control, live transport, and user-code execution.
+Opengeni separates durable control, live transport, and user-code execution.
 
 ```mermaid
 flowchart LR
@@ -664,7 +770,7 @@ flowchart LR
   Machine["Connected Machine"]
   NATS(["NATS\nlive fanout + machine transport"])
   Relay(["Relay\nConnected Machine pixels + terminal"])
-  Realtime(["Realtime provider\nCodex WebRTC / Gateway WebSocket"])
+  Realtime(["Realtime provider\nCodex + Azure Live WebRTC / Gateway WebSocket"])
   Objects[("Object storage\nfiles and retained bytes")]
 
   Client --> API
@@ -728,8 +834,8 @@ Large or high-frequency bytes take separate paths:
 - files, generated media, recordings, and retained evidence use object storage;
 - terminal and desktop streams use the sandbox/provider transport or the
   dedicated relay edge for Connected Machines;
-- realtime voice uses Codex WebRTC or the AI Gateway WebSocket while durable
-  ownership, ledger, delegation, context, and recovery remain in OpenGeni;
+- realtime voice uses Codex or Azure Live WebRTC, or the AI Gateway WebSocket while durable
+  ownership, ledger, delegation, context, and recovery remain in Opengeni;
   the voice lease freezes connector accounts at authenticated admission and
   supplies that exact authority to delegations and transcript handoff;
 - model token and tool events use the session event stream, not Temporal; and
@@ -737,7 +843,8 @@ Large or high-frequency bytes take separate paths:
   than treating Office files or rendered output as mutable truth.
 
 Realtime: [`run-lifecycle.md`](run-lifecycle.md); public transport:
-[`../packages/sdk/README.md`](../packages/sdk/README.md).
+[`../packages/sdk/README.md`](../packages/sdk/README.md). Azure Live adaptation:
+`packages/sdk/src/azure-live-transport.ts` and `apps/api/src/azure-live.ts`.
 
 ### 4.3 Dependency direction
 
@@ -862,12 +969,22 @@ revalidates the immutable attempt through ordinary same-turn recovery and bounde
 redispatch. A lost claim response revealing the exact active attempt follows that
 path. Permanent database/state faults remain terminal; model, tool, or provider
 work is never replayed or requeued.
+Running-turn own-database connection loss, including postgres.js lifecycle
+closure codes and raw RLS transaction admission/settlement errors, enters that
+same exact-attempt recovery lane. Physical writer and unknown-tool-outcome
+fences remain authoritative; database transactions are never blindly replayed.
+See [`run-lifecycle.md`](run-lifecycle.md) for the closed outage classes and
+provenance boundaries.
 
 Transient provider recovery uses a durable consecutive-failure streak, not lifetime
 failures. An exact-current-attempt model completion atomically clears that streak
 with its timeline event; only then does the worker clear its in-memory copy.
 Late attempt evidence cannot replenish the retry budget. See
 [`run-lifecycle.md`](run-lifecycle.md) for pacing and exhaustion semantics.
+Confirmed, structured Claude overload uses that same durable count and clock,
+with at most 15 retries inside a 15-minute recovery window and a pre-dispatch
+deadline check. Display labels or overload keywords do not grant this policy;
+other failure classes keep their existing budgets and capacity semantics.
 
 ### 5.3 Goals, schedules, automations, and child work
 
@@ -933,6 +1050,8 @@ retains exact protocol state without pairing unfinished calls into model history
 Responses bind the pending request, target turn, execution generation, requester,
 and current authorization.
 
+See [Tool approvals](tool-approvals.md) for canonical policy, portable review and durable programmatic continuation.
+
 Tool approvals are human-only. Agent-session authority may permit answering
 another session's structured human-input request, never self-approval of tools.
 
@@ -954,7 +1073,7 @@ selections, and keeps plugin/built-in defaults independent.
 `packages/db/src/workspace-tool-defaults.ts` owns persistence. Deployment
 ceilings apply; defaults never rewrite sessions or accepted attempts.
 
-Fresh provider-qualified Gateway/OpenRouter selections recheck the exact active
+Fresh provider-qualified Gateway/OpenRouter/Opper selections recheck the exact active
 slug under the catalog's shared transaction lock before committing a session,
 turn, task, trigger, binding, or occurrence. This covers fresh sessions,
 explicit switches, new/materially reaccepted schedules, automation triggers,
@@ -979,8 +1098,24 @@ approvals across backends/loading paths.
 
 Always-visible first-request local tools (closed set): `exec_command`,
 `write_stdin`, `apply_patch`, `view_image`, `skill_read`, `repository_skill_read`,
-`request_human_input`, `list_models` (lists, never switches models), and optional
-[`code_search`](code-search.md). Other non-MCP functions/non-eager MCP schemas require search.
+`request_human_input`, `list_models` (lists, never switches models), optional
+[`code_search`](code-search.md), and optional provider
+[`web_search`/`web_fetch`](web-search.md). Authorized first-party harness control
+tools (`opengeni__goal_*` lifecycle, `opengeni__command_read`/`command_wait`,
+`opengeni__wait_for_input`) are also always visible; the `opengeni` server then
+joins the first-request barrier. Other non-MCP functions/non-eager MCP schemas require search.
+
+Web search is hosted by the model provider where the catalog declares it, or
+worker-run through deployment-configured search and page-reading providers
+(`web_search` / `web_fetch`, each an ordered failover list from one provider
+catalog) where it does not. One shared plan (`webSearchToolPlan`) decides
+both the worker's tools and the API's effective-tools projection; provider
+calls are credit-billed per call when billing is active. See
+[web search](web-search.md).
+Included hosted-search evidence is projected request-locally by
+`packages/runtime/src/hosted-search-evidence.ts` before model/portable-compaction
+accounting: bounded untrusted facts, not a dependency on stored provider IDs.
+Canonical hosted items remain unchanged.
 
 Configured-router visibility never joins pending non-eager MCP preparation;
 execution joins the exact catalog. Exposed routers remain in the prefix after
@@ -1028,7 +1163,14 @@ See `docs/session-attachments.md`. Generated media follows paid-operation and re
 Knowledge is the product destination for retained sources and findings, with
 Library, Instructions and Review tabs on the Knowledge page (`/state`).
 `apps/web/src/components/knowledge/knowledge-page.tsx` owns that page's
-navigation, including old Files, Skills, Memory and Documents links. Groups appear
+navigation, including old Files, Skills, Memory and Documents links (a Documents
+`?authority=` link keeps its scope as the Library filter). Agent learning has one
+home per scope in the web app: workspace and private-chat defaults (plus the
+owner-only organization identity row) on Settings > Agent learning (also opened
+from Knowledge's ⋯ menu), and one
+chat's override in the session dock's Agent tab beside its identity and
+capabilities (`apps/web/src/components/session/agent-configuration-panel.tsx`);
+the composer's Chat settings opens that tab. Groups appear
 as collections; detailed finding types are optional browsing metadata. File previews, revision-pinned
 citations and shared groups connect information from different sources without
 changing its ownership. Connector ingestion runs through ordinary scheduled
@@ -1045,6 +1187,19 @@ Canonical: [`knowledge.md`](knowledge.md),
 [`artifact-collaboration.md`](artifact-collaboration.md).
 
 ### 5.7 Usage, limits, and billing
+
+Model-scoped promotions retain offer identity and initial eligibility on each grant.
+Audited `credit_promotion_policy_revisions` can update coverage for existing and
+new scoped grants without a restart. Each paid call retains its admitted revision
+for settlement; the next call reads current policy. `packages/db/src/credit-balances.ts` owns the general/promotional split and
+eligible balance calculation. Model settlement serializes by account, consumes
+eligible grants before general credits, and inserts `credit_debit_allocations`
+with the idempotent debit in one transaction. A settled zero-cost receipt cannot
+be charged later on retry. Non-model resources spend general credits only.
+Legacy grants remain unrestricted. Stripe checkout metadata records scoped status and initial eligibility
+before the customer confirms; webhook and status recovery share fulfillment.
+Deployment policy, activation order and customer flow: [scoped promotional
+credits](scoped-promotional-credits.md).
 
 Blocked account switches: [Codex rotation](codex-subscription-rotation.md).
 
@@ -1073,7 +1228,7 @@ deployment answers it.
 
 Codex/SuperGrok pools preserve logical turns. Shared/Personal workspaces inherit
 same-organization pools as separate allocator boundaries, not access grants.
-SuperGrok freezes scope on acceptance. Vercel AI Gateway/OpenRouter BYOK keys
+SuperGrok freezes scope on acceptance. Vercel AI Gateway/OpenRouter/Opper BYOK keys
 belong to workspaces or organizations; organization keys use encrypted FORCE-RLS,
 inherit into same-organization shared workspaces, retain payer identity, and
 never fall back across rails.
@@ -1085,6 +1240,12 @@ Claude account pools: [setup and quotas](model-providers.md#claude-subscription-
 
 Codex requires exact live credential leases and frozen accepted source/rotation
 policy; recovery preserves that policy while current health governs capacity.
+Shared-core local disconnect fences each physical request at an exact one-shot
+reservation, removes persisted secrets atomically, and preserves already-admitted
+response custody. Expiry and unknown outcomes are not remote completion receipts;
+the next request checkpoints and re-places the same continuation. See
+[`request-level disconnect`](design/codex-graceful-disconnect.md) for the admission
+boundary, reconnect isolation and unsupported provider recovery.
 [Allocator and picker rules](codex-subscription-rotation.md).
 [Migration 0492 rollout](codex-subscription-rotation.md) requires drained processes and matching binaries.
 
@@ -1102,7 +1263,7 @@ Workspaces: `apps/*`, `examples/*`, `packages/*`. Bun consumes internal packages
 from source; Connected Machine agent/relay use Rust Cargo workspace
 `agent/`.
 
-`examples/vue-conversation/app` has its own npm lock and builds against the
+`examples/vue-conversation/app` has its own `bun.lock` and builds against the
 published SDK, not repository source.
 
 Manifests and `.changeset/config.json` own publication; this map describes responsibilities.
@@ -1115,6 +1276,7 @@ Manifests and `.changeset/config.json` own publication; this map describes respo
 | `apps/worker` | `@opengeni/worker-bundle` | Temporal workflows, control/turn activities, agent execution, maintenance pumps, and worker lifecycle |
 | `apps/web` | `opengeni-web` | Stock React/Vite operator console consuming the public SDK and React packages |
 | `apps/browser-extension` | `@opengeni/browser-extension` | Browser attachment extension; a leaf client, not session authority ([README](../apps/browser-extension/README.md), [privacy](../apps/browser-extension/PRIVACY.md)) |
+| `apps/mobile` | Standalone Expo app `opengeni-mobile` (own `bun.lock`) | iOS and Android client: web sign-in for its own app credential, accounts, workspace switching, settings, and push; a leaf client ([README](../apps/mobile/README.md)) |
 
 The standalone `apps/api` entrypoint installs a one-shot fatal process
 boundary before configuration or dependency startup. Startup failures,
@@ -1123,7 +1285,21 @@ structural diagnostics plus an opaque correlation id, drain accepted OTLP
 exports for a bounded interval, and then exit nonzero. Exception messages,
 stacks, enumerable fields, and arbitrary rejection values never cross the
 public telemetry boundary. Embedded API composition does not install process
-handlers because its host owns process lifecycle.
+handlers because its host owns process lifecycle. One class is survivable once
+the API is serving: an unhandled rejection that only reports a lost database
+connection (`isDatabaseConnectionLoss` in `packages/db/src/persistence-errors.ts`:
+SQLSTATE 57P01-57P03/08xxx, exact node-postgres socket-loss sentences, and
+socket or postgres.js transport codes only when the failure carries database
+origin, so the same codes from NATS or a provider fetch never qualify) is logged as
+`api_unhandled_database_connection_loss` and the process keeps running, because
+the driver has already discarded that connection. Background claim loops still
+catch and log their own failures and retry on the next tick. On request paths
+`app.onError` renders the same class as a retryable HTTP 503
+`upstream_unavailable` with `details.code: DATABASE_UNAVAILABLE` and
+`Retry-After: 1`; mutations also carry `outcomeUnknown: true` because the
+connection may have dropped after a commit. Better Auth hides driver errors
+behind a generic 500, so its session lookups run through
+`withManagedAuthSessionLookup`, which recovers the logged cause.
 
 ### 6.2 Packages
 
@@ -1146,6 +1322,7 @@ handlers because its host owns process lifecycle.
 | `packages/ogtool` | `@opengeni/ogtool` | CLI over the Codemode catalog and journal |
 | `packages/codex` | `@opengeni/codex` | Codex subscription authentication, transport, and provider normalization |
 | `packages/xai-subscription` | `@opengeni/xai-subscription` | SuperGrok/xAI subscription authentication and transport |
+| `packages/subscriptions` | `@opengeni/subscriptions` | Pure provider-neutral subscription policy: settings, eligibility, placement, failover order, quota model, adapter types |
 | `packages/github` | `@opengeni/github` | GitHub App installation discovery, proof, and token operations |
 | `packages/interaction` | `@opengeni/interaction` | Provider-neutral browser and computer interaction control |
 | `packages/browserd` | `@opengeni/browserd` | Placement-resident browser controller and audited browser adapter |
@@ -1156,6 +1333,7 @@ handlers because its host owns process lifecycle.
 | `packages/agent-proto` | `@opengeni/agent-proto` | Generated TypeScript side of the Connected Machine wire protocol |
 | `packages/sdk` | `@opengeni/sdk` | Framework-neutral API client, event streaming, and transport helpers |
 | `packages/react` | `@opengeni/react` | React hooks and styled session, composer, artifact, and machine surfaces |
+| `packages/react-native` | `@opengeni/react-native` | Native session timeline, composer, and attention renderers over the renderer-neutral `@opengeni/react` models, plus Expo adapters |
 | `packages/observability` | `@opengeni/observability` | Structured logs, traces, metrics, and Prometheus exposition |
 | `packages/deployment` | `@opengeni/deployment` | Typed deployment profiles, preflight, plans, and generated runtime artifacts |
 | `packages/testing` | `@opengeni/testing` | Shared test services, fixtures, scripted models, and sandbox helpers |
@@ -1169,13 +1347,18 @@ handlers because its host owns process lifecycle.
 | `examples/northstar-support` | `@opengeni/example-northstar-support` | Standalone product reference (proxy, MCP, React, streams) |
 | `examples/tool-server` | `@opengeni/example-tool-server` | Proxy `toolServer` reference |
 | `examples/site-session-embed` | `@opengeni/example-site-session-embed` | Site SDK/React embed and sandbox preview reference |
-| `examples/vue-conversation` | Standalone npm consumer in `app` | Published-SDK Vue conversation behind the Bun session proxy; [recipe](../examples/vue-conversation/README.md) |
+| `examples/vue-conversation` | Standalone Bun consumer in `app` (own `bun.lock`) | Published-SDK Vue conversation behind the Bun session proxy; [recipe](../examples/vue-conversation/README.md) |
 
 ### 6.4 Rust agent and relay
 
 `agent/` is the Cargo workspace for Connected Machine execution and the relay
 edge. `agent/proto/opengeni_agent.proto` is the single wire source, generated to
 Rust and `@opengeni/agent-proto` TypeScript types.
+
+[`agent/vendor/async-nats`](../agent/vendor/async-nats/OPENGENI-PATCH.md) preserves
+the pinned upstream transport with an atomic publication-receipt repair. It is
+a path dependency outside the workspace member set; native CI runs its focused
+transport tests on every supported host.
 
 One agent independently connects multiple deployments/workspaces within shared
 host containment. The relay carries terminal/desktop bytes, never durable session
@@ -1234,7 +1417,7 @@ tool execution, progressive disclosure and sandbox interfaces.
 Embedding processes—not the Agents SDK—own global rejection/termination policy.
 SDK background lifecycle work must settle owned promises, never detach rejecting
 tasks or install `unhandledRejection` handlers exiting shared workers. Worker global
-rejection listeners provide last-resort observation; OpenGeni drains/checkpoints
+rejection listeners provide last-resort observation; Opengeni drains/checkpoints
 before deliberate restarts.
 
 Workers supply frozen authority and durable sinks. Runtime must not invent
@@ -1261,10 +1444,29 @@ Capabilities define integration/tool shapes. Connections bind credentials and
 ownership. Session policy selects authorized tools.
 MCP/Codemode execute tools; neither grants authority.
 
+Agent-prepared API-key MCP setup uses the native Connect attempt lifecycle, not
+a parallel credential store. `apps/api/src/prepared-mcp-actor.ts` fences the
+exact causal owner and frozen/live permissions; the core
+`prepared-mcp-connection.ts` helper probes before the atomic connection,
+installation, and completion receipt. Missing keys use the protected inline
+Connect form; existing credentials use the same lifecycle through the narrow
+Codemode Connect route. Neither admits new tools to a frozen attempt.
+See [prepared MCP setup](remote-mcp-credentials.md#agent-prepared-api-key-connections).
+
 Omitted personal selections restore existing exact-owner grants; explicit empty
 selections suppress restoration. Children inherit captured authority. Canonical:
 `packages/core/src/domain/personal-connection-delegations.ts` and
 [shared connection presentation](connection-presentation.md).
+
+Capabilities detail pages list backend-authorized native accounts through
+`apps/web/src/components/capabilities/catalog-connected-accounts.tsx`.
+`packages/contracts/src/connection-account-label.ts` owns their shared identity
+labels for the web picker and core MCP account bindings. Labels are presentation
+only; exact connection references and accepted selections remain authority.
+Settings opt into inactive rows through the owning-human `/connections/accounts`
+inventory; execution pickers retain its active-only default. Shared accounts are
+current-workspace scoped, while personal accounts use their existing same-owner,
+same-organization authority across origin workspaces.
 
 Connector permission management: `packages/core/src/domain/connector-tool-permissions.ts`.
 See [`session-mcp-servers.md`](session-mcp-servers.md).
@@ -1291,13 +1493,39 @@ Wiring: `apps/worker/src/sandbox-routing.ts` and
 `apps/worker/src/activities/agent-turn/sandbox-runtime.ts`.
 
 Codemode adds attempt scope, active-attempt fencing, a durable operation journal,
-sandbox delivery and recovery. Preflight finishes before the execution-start
+sandbox delivery and recovery. Programmatic review uses a linked durable action
+request and `waiting_for_approval`; the original attempt/catalog foreign key
+never changes. A separate execution claim binds an approved continuation to the
+current attempt of the same turn and compatible tool/account semantics.
+`packages/db/src/codemode-approvals.ts` owns that transition, and the existing
+human-decision transaction supplies the durable workflow wake. Waiting releases
+capacity and yields at the SDK tool boundary; it is not an open SDK call or a
+JavaScript stack checkpoint. Preflight finishes before the execution-start
 marker; a pre-creation `codemode_catalog_stale` allows one safe client refresh,
 never a retry of an existing or ambiguous operation. Submission conflicts never
 reconcile to an existing row; ambiguous failures adopt one only after exact
 scope, catalog, identity and argument comparison. Recovery never replays the
 tool ([run lifecycle](run-lifecycle.md#codemode-recovery)). The current-human
-gateway rebuilds live authority per request. Browsers use
+gateway rebuilds live authority per request. Known-tool HTTP requests use the
+additive `tools/resolve` and `tools/invoke` adapters in
+`apps/api/src/workspace-tool-target.ts`: select one authorized registry/account
+route before provider construction, then use the shared gateway's schema,
+preflight, policy and execution pipeline. Cold calls use the current definition;
+optional full-entry definition pins reject drift before approval consumption.
+The pin is not authority and requires no shared cache or previous discovery.
+Version-2 approvals bind executable effect and Site context, not the public
+approval display field, and share the permanent operation tombstone namespace
+with v1. Physical targeted dispatch rechecks the caller, exact pinned Site and
+selected live action policy after awaited native credential authorization.
+Legacy HTTP calls may rebuild only the
+target identity's connector when their complete catalog digest has a
+content-free per-process attestation for the same caller scope and the live
+entry is identical; otherwise they prepare the complete catalog
+([MCP surfaces](mcp-surfaces.md)). Native connection-backed providers
+use the same account-qualified identities as agent catalogs. Shared projection
+lives in `packages/core/src/domain/mcp-account-routes.ts`; services see workspace
+accounts only, and human transports may see their own eligible accounts.
+Browsers use
 `client.tools.forWorkspace(...)`; opaque-origin Sites use the parent-held
 `@opengeni/sdk/site` MessagePort adapter with no bearer or workspace context.
 A Site version's retained tool identities are only a maximum allowlist: the
@@ -1305,6 +1533,12 @@ parent intersects them with the viewer's live gateway, the API revalidates every
 call, and live approval still applies. Agent-authored versions may retain any
 identity in their exact attempt catalog. Ports are revoked on document
 navigation or replacement.
+
+Modern Site clients negotiate targeted calls with the host. Old bundled Site
+clients receive a bounded requested-identity manifest, whose retained entry
+pins translate their legacy calls without whole-workspace provider discovery.
+Local preview remains frozen-attempt Codemode, not current-human authority.
+Explicit catalog/declarations discovery and OAuth remain separate paths.
 
 HTML-only Sites and inline chat previews share the SDK bridge and renderer.
 See [embedding authority internals](embedding-authority-internals.md#inline-html-and-chat-previews)
@@ -1399,6 +1633,30 @@ requires consent. Computer frames bind screenshot digest to controller/session/t
 runtime, API and SDK independently verify. The browser extension only attaches;
 Lightpanda is semantic-only.
 
+Connected-machine tool failures preserve the API's closed failure details and
+opaque request references at the model boundary. The MCP error renderer retains
+`outcomeUnknown` and discourages automatic action retries; uncertain execution
+still throws from the interaction executor and never becomes a successful result.
+
+An attached tab's debugger disconnect invalidates only its cached target,
+document, frame and element authority. Read-only recovery can attach the same
+surviving tab with fresh fences; explicit cancellation and uncertain effects
+require profile reconnection. Chrome and unrelated tabs remain intact, and
+mutations are never replayed. Partially dispatched input remains outcome unknown;
+queued input, DOM changes, navigation and emulation cannot cross into a replacement
+attachment. See [Connected Machines](connected-machines.md).
+
+Browser tab open/close keeps each physical outcome available to its caller.
+An older response or follow-up observation cannot replace a later selection.
+Once all pending selections settle, superseded tab mutations reconcile fresh
+inventory without replacing the selected page's admitted observation.
+
+When `browser_open` reuses an active session and needs a new URL, it requests
+tab creation with the owned inventory instead of collecting and discarding a
+page observation. The same control authority and session/controller fences
+apply; unsupported controllers refuse without replay. Default SDK tab opening
+and `browser_tabs` open/select retain their page observations.
+
 ComputerSession attachments use canonical frame streams, including relay kind 4,
 for screens and windows. The viewer paints those exact authenticated pixels and
 uses the painted frame ID, target generation and geometry for human `/actions`;
@@ -1434,8 +1692,12 @@ process-birth checks in [`linux-process-identity.ts`](../packages/browserd/src/l
 
 Explicit managed Chromium working-directory recovery uses the internal
 [`working-runtime-journal.ts`](../packages/browserd/src/working-runtime-journal.ts)
-launch/retirement receipt. Exact directory, controller, token, placement and
+launch/suspension/retirement receipt. Exact directory, controller, token, placement and
 process proof gates recovery; unknown launch outcomes cannot dispatch again.
+Graceful supervisor shutdown records suspension only for a completed, owned,
+directory-recoverable browser and confirms it after process cleanup. Recovery
+retains that profile and binding without replaying uncertain inputs. Explicit
+end/capture, unconfirmed process shutdown, and older retirement receipts do not authorize recovery.
 Cleanup retains its exact holder and directory until retirement and journal
 closure settle. See [`packages/browserd`](../packages/browserd/README.md).
 
@@ -1447,7 +1709,58 @@ Native macOS operations drain Cocoa pools and clear pending capture starts;
 desktop discovery is independent of semantic inspection.
 
 `ComputerBackend` supplies desktop operations behind the shared `ComputerDriver`.
-Opt-in [CUA](../packages/browserd/CUA-PILOT.md) includes Windows semantic actions; native remains default.
+[CUA](../packages/browserd/CUA-PILOT.md) is the default for macOS and explicitly
+selected isolated Linux desktops. Linux host desktops and Windows retain the
+native default; explicit backend configuration is retained.
+
+Native framed Desktop input negotiates `pointerClickContinuation`. A supported
+viewer sends its first click immediately; the real second human click may be
+submitted while the first HTTP receipt is pending. `clickCount: 2` delivers only
+one second pair and references `continuationOfOperationId`. The controller's
+target queue requires that exact first click's terminal completed receipt, with
+the same actor, source generation and target generation. Native state also
+requires its confirmed operation, button, point and capture geometry, and
+consumes that proof once. Older helpers and CUA reject continuation before input.
+Each action still uses its exact painted frame and live target geometry. Canvas
+resize or relocation ends continuation recognition. A completed click can retain
+its original bounded metadata and already-captured newer matching frames; those
+extra frames authorize only `clickCount: 2`, never ordinary input or observation.
+Original deadlines remain. Fresh frames cannot replace a failed or unknown first
+delivery. Other mutations and intervening invalidation discard the proof. Later
+viewer input waits for both click receipts. Linux serializes physical pointer,
+keyboard, focus, activating launch and clipboard copy/paste on its exact seat;
+ordinary background AT-SPI actions stay independent. Their exact native
+invocations revoke click proof throughout admission, completion and cancellation;
+an overlapping first click cannot restore it, even with a newly captured frame.
+
+Linux Window Focus activates the exact X11 client retained in its observation,
+rechecking the original accessibility object, process and geometry before input.
+An advertised, verified window manager receives one activation request with an
+X-server timestamp; direct input focus is allowed only on a positively unmanaged
+display. Success requires the same client to own active and input focus and remain
+settled after observation. A refusal or uncertain settlement never forces a
+second route. Window activation does not require a non-focusable AT-SPI frame to
+accept element focus; child semantic Focus still uses its exact accessible node.
+The physical-seat lock and mutation admission guard cover both paths.
+
+Linux Window keyboard and clipboard copy/paste retain at most 64 immutable
+observed window identities for 60 seconds across read-only refreshes. Semantic
+refs and root activation keep their latest-observation rules. Retained identities
+never replace live checks of the original accessible object, process, geometry
+and active/input focus; no action implicitly activates or substitutes Screen.
+All text/chord components in a physical batch are resolved before its first
+input request, so known unsupported mappings remain definite zero-input failures.
+Once any request may have escaped, failures retain an unknown outcome.
+
+Window pointer preflight follows the mapped point through the X11 tree and
+requires the original client window and the same XRes resource owner, including
+embedded children. Covered or unprovable points are refused before XTEST input.
+A verified event-delivery boundary, identity button mappings and a provable
+input route without foreign grabs are also required. Ordinary managed windows
+without that boundary are unsupported and never fall back automatically to Screen.
+A scoped server guard spans native preflight, delivery and postchecks, excluding
+ordinary client focus/topology changes. This does not exclude hardware input or
+impervious XTEST clients; failed postchecks remain uncertain and are never replayed.
 
 Capability negotiation advertises only `manual` and `on-verify` recording.
 Historical `ComputerUse`, `on-turn`, and `computer_screenshot` contract shapes
@@ -1464,6 +1777,9 @@ Workspace/session discovery shares `/artifact-catalog` across Sites, editable
 artifacts, generated images, and published files, preserving existing content
 authority. File provenance stays separate from bytes; `kind:id` identifies list
 entries. Browsing never executes Sites or wakes compute.
+Shared pins live in private discovery metadata, not content domains. The catalog
+and its bounded publication branch apply pin-first keysets globally; pin writes
+require publishing and target-domain read authority ([library](artifact-library.md)).
 
 Published-file links use `Markdown.artifactHref`; `retained-file-preview.tsx`
 previews media/PDF via authorized APIs; `sandbox:` opens the inspector.
@@ -1491,6 +1807,26 @@ Mechanics: [shared connection presentation](connection-presentation.md).
 tool approvals/attachments/human-input forms/history; `ChatComposer` is input-only. Sites supply Site-bound
 clients. Foreground/background share tokens; light embeds set iframe
 `data-og-theme="light"`.
+
+`useSessionConversation` owns that same feed, queue and composer independently
+of presentation. `SessionConversationView` consumes the controller without
+opening another stream or maintaining a second draft. Hosts with persistent
+panels mount the hook above layout switches and keep call-bearing views mounted
+while a live voice call is in progress. Host context/notifications use native
+composer hooks, never a replacement Send/Steer validator. Observer failures do
+not change accepted delivery. The lazy embedded voice entry reuses
+`SessionRealtimeControl` and its catalog rather than owning another call flow.
+
+`OpenGeniChat` uses the reusable `useNewConversation`/`NewConversationView`
+pair (`NewConversation` is the standalone assembled component). The stock
+controller owns a click's immutable request/idempotency key, uncertain retry,
+scope fences, and unsent draft/file/policy handoff. `initialDraft` on the native
+composer seeds local content without inventing its server revision. Host
+creation adapters own only application admission/configuration and durable
+application records. Live voice uses explicit empty `startMode: "realtime"`
+creation and the existing voice-autostart control, never a synthetic first
+message. The session proxy preserves browser retry keys unless the server
+hook supplies its own; authority remains server-owned.
 
 `conversationTimeline`/`SessionChrome`/`SessionCommands`/`ChatComposer`
 share reconciliation/controls. Commands mount only in open activity drawers.
@@ -1618,9 +1954,12 @@ Post-start recovery preserves IDs/cursors, budgets and writer fences.
 Cancellation stays waiter-local; mixed faults never retry. Cleanup retains its
 helper UUID/cursors.
 
-Legacy retained Modal commands, whatever their health, use the existing drain once
-the group is unused for `OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS` with no input
-wait or pending request; they settle lost with a notice. A recovering turn under
+Legacy retained Modal commands use the existing drain once the group is unused
+for `OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS` and no active command printed
+output in that window; they settle lost with a notice. A held input wait or a
+pending approval or human-input request is not use: the box is saved, stopped and
+resumed on demand, and the stop notice waits for a later turn instead of
+waking the session. A recovering turn under
 an effective pause does not retain the machine once physical writers have
 quiesced and the idle window has elapsed; workspace capture precedes stop,
 while turn history and pause state survive. Command backoff never
@@ -1738,6 +2077,20 @@ lanes declare services/credentials.
 
 Manifests/Changesets/CI/release scripts govern evidence-bound npm/image/Helm/Rust
 publication, retaining source identity. Web builds target both CPUs.
+Canary packages prepack the complete cohort, retain write acknowledgements, then
+perform bounded strict read-only verification before producing Site pins.
+Post-write verification selects current tags and one immutable version manifest;
+each actual GET shares the original request quota, deadline and custody limits,
+including final complete-cohort qualification. Pre-write discovery is unchanged.
+An uncertain publication never automatically replays; signed-byte acceptance remains separate.
+For a completely acknowledged failed canary, the protected
+`reconcile-canary-publication.yml` controller can independently verify retained
+origin receipts, signed archive bytes and a fresh complete metadata cohort using
+GETs only. Historical source is immutable JSON input, never executable recovery
+code. Separate linked receipt/pin artifacts preserve the failed producer and
+missing original Site artifact, with `promotionEligible: false`; they require
+explicit manual staging consumer authority and do not change production controls.
+See the bounded protocol and trust-fetch exception in `CONTRIBUTING.md`.
 `reconcile-production-packages.yml` reconciles npm availability independently of acceptance.
 
 Commands: [`../AGENTS.md`](../AGENTS.md), [`../CONTRIBUTING.md`](../CONTRIBUTING.md).
@@ -1754,6 +2107,24 @@ Helm owns applications/integrations; cloud Terraform roots/stack wrappers compos
 external infrastructure. Bundled Postgres/Temporal/NATS/storage templates
 serve development, CI, conformance and documented single-machine fixtures.
 They are not production defaults.
+
+The turn-worker's default-off queue-demand scaler is a separate
+schema-v1 Helm contract: fresh global Temporal ACTIVITY queue MAX plus SDK
+all-non-local-activity occupancy, UID-complete Running/draining coverage, and
+Namespace custom metrics. Dedicated scaler recording rules do not rewrite
+legacy alerts. Initial downscale remains disabled; source support is not
+production recovery acceptance. See [`worker-autoscaling.md`](worker-autoscaling.md).
+Producer boundaries: `apps/worker/src/turn-task-queue-reader.ts` owns the
+native queue-read lifecycle; `apps/worker/src/turn-worker-activity-telemetry.ts`
+owns SDK all-activity count/validity through drain. Original validity deadlines
+(45-second queue producer budget, 60-second raw/activity budget), atomic
+positive classification-stage completion and same-evaluation UID coverage
+fence the dedicated recording-rule pipeline. Rules, HPA selectors and adapter
+queries bind all five source identity labels; the adapter checks both
+final-series age and same-evaluation, all-label-matched deadline companions
+before aggregation, independently of request matchers. Identity labels live
+on every recording rule, not the group; semantic fixtures cover Prometheus
+2.55.1 and 3.5.0 without claiming all engine/CRD versions are qualified.
 
 Procedures, provider requirements, activation and recovery: [`deployment.md`](deployment.md).
 Host ports/in-process composition: [`embedding.md`](embedding.md).
@@ -1778,6 +2149,7 @@ Topics: [`README.md`](README.md).
 | Child sessions or depth policy | `packages/core/src/domain/sessions.ts`, `packages/core/src/session-authorization.ts` | [`nested-agent-depth.md`](nested-agent-depth.md) |
 | Automatic or human session titles | `packages/contracts/src/session-titles.ts`, `apps/api/src/mcp/server.ts`, `packages/core/src/domain/sessions.ts`, `apps/worker/src/activities/agent-turn/session-title.ts`, `packages/db/src/` | [`run-lifecycle.md`](run-lifecycle.md) |
 | Realtime browser conversation | `packages/sdk/src/realtime.ts`, `packages/react/src/realtime/`, `apps/api/src/session-realtime-context.ts` | [`run-lifecycle.md`](run-lifecycle.md), package READMEs |
+| Conversation target context / cross-session receipt reads | `packages/contracts/src/session-target.ts`, `packages/db/src/session-target.ts`, `apps/api/src/mcp/server.ts` | [`session-monitoring-mcp.md`](session-monitoring-mcp.md); non-authoritative context, existing Send/Steer delivery |
 
 ### Contracts, access, and persistence
 
@@ -1805,14 +2177,16 @@ organization-workspace lifecycle authority; see [external membership operation r
 
 | Change area | Canonical source | Read first |
 | --- | --- | --- |
-| Model registry, routing, pricing, provider identity, OpenAI-compatible or Claude inference | `packages/config/src/index.ts`, `packages/runtime/src/model-provider*.ts`, `packages/runtime/src/anthropic-messages.ts` | [`model-providers.md`](model-providers.md) (start at Configuring inference) |
+| Model registry, routing, pricing, provider identity, OpenAI-compatible or Claude inference | `packages/config/src/index.ts`, `packages/runtime/src/model-provider*.ts`, `packages/runtime/src/chat-reasoning.ts`, `packages/runtime/src/anthropic-messages.ts` | [`model-providers.md`](model-providers.md) (start at Configuring inference) |
 | Claude sign-in, renewal or quota | apps/api/src/routes/claude-subscription-accounts.ts, packages/db/src/claude-subscription-account-tokens.ts | [model-providers.md](model-providers.md#claude-subscription-usage) |
-| Codex subscription authority or capacity | `packages/codex/`, `apps/worker/src/activities/codex-rotation.ts` | [`codex-subscription-rotation.md`](codex-subscription-rotation.md) |
+| Codex subscription authority or capacity | `packages/codex/`, `apps/worker/src/activities/agent-turn/codex-core-capacity.ts`, `packages/db/src/subscription-core-codex.ts`, `packages/db/src/subscription-core-codex-adapter.ts` | [`codex-subscription-rotation.md`](codex-subscription-rotation.md) |
+| Shared subscription core (policy, reference model, runtime, adapters) | `packages/subscriptions/` (`src/reference-model.ts`, `src/adapter.ts`), `packages/db/src/subscription-core/`, `packages/db/src/subscription-core-providers.ts`, `packages/db/src/legacy-subscription-world.ts`, `apps/worker/src/activities/agent-turn/subscription-core-shadow.ts` | [`subscription-accounts.md`](subscription-accounts.md), [`design/subscription-core-2026-10-07.md`](design/subscription-core-2026-10-07.md) |
 | SuperGrok/xAI subscription authority or capacity | `packages/xai-subscription/`, `packages/db/src/xai-subscription.ts`, `packages/db/src/subscription-account-repository.ts`, `packages/db/src/subscription-pool-schema.ts`, `packages/db/src/organization-xai-subscriptions.ts` | [`supergrok-subscription.md`](supergrok-subscription.md) |
 | First-party MCP, Codemode, or tool selection | `apps/api/src/mcp/`, `packages/codemode/`, `packages/runtime/src/` | [`mcp-surfaces.md`](mcp-surfaces.md) |
 | Compact MCP session discovery and child management | `packages/contracts/src/session-mcp-projections.ts`, `apps/api/src/mcp/session-view.ts`, `apps/api/src/mcp/server.ts`, `packages/db/src/index.ts` | [`session-monitoring-mcp.md`](session-monitoring-mcp.md) |
 | Per-session MCP or action approval | `packages/core/src/domain/sessions.ts`, `apps/worker/src/activities/agent-turn/tool-environment.ts` | [`session-mcp-servers.md`](session-mcp-servers.md) |
 | Standalone inline MCP credential rotation | `packages/core/src/application/session-mcp-credential-rotation.ts`, `packages/db/src/session-mcp-credential-rotation.ts` | [`session-mcp-servers.md`](session-mcp-servers.md#standalone-inline-credential-rotation) |
+| Web search (hosted vs provider), search adapters, or their billing | `packages/config/src/web-search.ts`, `packages/runtime/src/web-search/`, `apps/worker/src/activities/agent-turn/web-search.ts`, `packages/core/src/domain/web-search-billing.ts` | [`web-search.md`](web-search.md) |
 | Capabilities or integration definitions | `packages/capabilities/`, `packages/core/src/domain/capabilities.ts` | [`capabilities.md`](capabilities.md) |
 | Sandbox backend or provider registry | `packages/runtime/src/sandbox/providers/`, `packages/contracts/src/index.ts` | §3.9 and [`../AGENTS.md`](../AGENTS.md) Sandbox Notes |
 | Lease, snapshot, reaper, or active target | `apps/worker/src/activities/sandbox-lease.ts`, `packages/runtime/src/sandbox/routing/` | §8 and [`connected-machines.md`](connected-machines.md) |
@@ -1828,11 +2202,14 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Editable artifacts | `packages/artifact-tool/`, `packages/core/src/domain/editable-artifacts/` | [`artifact-engine.md`](artifact-engine.md), [`artifact-collaboration.md`](artifact-collaboration.md) |
 | Generated images or media | `apps/worker/src/activities/generated-images.ts`, `packages/contracts/src/image-generation.ts` | [`image-generation.md`](image-generation.md) |
 | Composer voice input or resumable transcription | `packages/contracts/src/transcription-recordings.ts`, `apps/api/src/routes/transcription-recordings.ts`, `packages/react/src/hooks/use-voice-input.ts` | [`transcription.md`](transcription.md) |
+| Stateless single model calls (Chat Completions) or session titles | `apps/api/src/model-calls/`, `apps/api/src/routes/chat-completions.ts`, `packages/runtime/src/single-model-call.ts` | [`chat-completions.md`](chat-completions.md) |
 | Composer draft submission or native embedding host seam | `packages/core/src/application/composer-submit.ts`, `apps/api/src/routes/sessions.ts`, `packages/react/src/embedded-session-client.ts` | [`embedding.md`](embedding.md), package READMEs, and §7.1 |
 | Providers and social connectors | `apps/api/src/integrations/`, `apps/api/src/mcp/server.ts`, `packages/core/src/application/new-session-drafts.ts`, `packages/network/src/mcp-oauth-discovery.ts`, `packages/github/` | [`integrations-design.md`](integrations-design.md), [`github-app.md`](github-app.md), [`google-drive.md`](google-drive.md), [`slack-bot.md`](slack-bot.md), [`social-connectors.md`](social-connectors.md), [`fiken.md`](fiken.md) |
 | Slack user-token MCP tools and shared provider quota | `packages/runtime/src/slack-rest-mcp.ts`, `packages/contracts/src/slack-rest-mcp.ts`, `packages/db/src/slack-api-rate-limits.ts` | [`design/first-party-mcp-bridges.md`](design/first-party-mcp-bridges.md), [`slack-bot.md`](slack-bot.md) |
+| Slack app identity and icons | `packages/contracts/src/slack-bot-scopes.ts`, `scripts/generate-slack-bot-icons.ts`, `deploy/slack/` | [`slack-bot.md`](slack-bot.md) |
+| Organization Slack bot sharing and prepared delivery | `packages/db/src/organization-slack-bots.ts`, `apps/api/src/routes/slack-bot-access.ts`, `apps/api/src/integrations/slack-bot.ts` | [`slack-bot.md`](slack-bot.md) |
 | Slack task files | `apps/api/src/integrations/slack-task-file-upload.ts`, `apps/api/src/integrations/slack-file-upload-flow.ts`, `packages/db/src/slack-file-uploads.ts` | [`slack-bot.md`](slack-bot.md#explicit-file-delivery-in-the-task-thread) |
-| OpenGeni Review Bot and pull-request automation | `packages/core/src/domain/pr-review.ts`, `apps/api/src/routes/pr-review.ts`, `apps/api/src/routes/pr-review-github.ts` | [`automations.md`](automations.md), [`pr-review.md`](pr-review.md) |
+| Opengeni Review Bot and pull-request automation | `packages/core/src/domain/pr-review.ts`, `apps/api/src/routes/pr-review.ts`, `apps/api/src/routes/pr-review-github.ts` | [`automations.md`](automations.md), [`pr-review.md`](pr-review.md) |
 | HTTP routes or SSE | `apps/api/src/app.ts`, `apps/api/src/http/sse.ts` | §4, [`../packages/sdk/README.md`](../packages/sdk/README.md), and [`design/api-compatibility-policy.md`](design/api-compatibility-policy.md) for public routes |
 | SDK, React, or browser bundle surface | `packages/sdk/src/`, `packages/react/src/`, `packages/sdk/test/core-bundle-boundary.test.ts`, `packages/sdk/test/browser-client-surface.test.ts`, `scripts/public-api/` | Package READMEs, §3.10, §7.6, and [`design/api-compatibility-policy.md`](design/api-compatibility-policy.md) |
 | Startup loading, per-turn activity rows, timing diagnostics | `packages/react/src/timeline/activity-rail.tsx`, `projection.ts`, `apps/web/src/components/session/inspector.tsx` | [`design/genie-loading.md`](design/genie-loading.md) |
@@ -1843,6 +2220,14 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Advanced in-process embedding | `packages/core/`, `apps/api/`, `apps/worker/` | [`embedding.md`](embedding.md) |
 
 ### Operations
+
+The standalone database backup runner (`scripts/backup.ts`, `scripts/backup/`)
+uses PostgreSQL clients, Age and rclone without depending on the API or worker.
+Deployment-owned scheduling and a dedicated credential boundary keep recovery
+available during application failure. Its optional Helm CronJobs share a
+persistent checkpoint/lock volume; the independent operator image is published
+separately from runtime images. See [database backups](backups.md) for retention,
+validation, isolated restoration and coverage limits.
 
 | Change area | Canonical source | Read first |
 | --- | --- | --- |
@@ -1861,12 +2246,18 @@ Goals: [semantics](goals.md).
 
 Filtered session page ownership and its maintenance boundary: [session pagination](session-pagination.md).
 
+Session content blobs, legacy compaction and the idle-session archive: [session storage lifecycle](session-storage-lifecycle.md).
+
 Workspace timers: [implementation and rollout](workspace-pause-timers.md).
 
 ### In-conversation connection setup
 
 `SessionCapabilityCard` shares native Connection APIs; hosts retain authorization.
-OAuth never replays tools. Skills retain workspace scope/reviewed hashes.
+OAuth never replays tools. The web connection card reviews missing parent tool
+selections before an explicit human click applies root-to-child updates through
+the ordinary version-fenced API; child ceilings and accepted turn snapshots stay
+unchanged. `packages/react/src/session-capability-policy.ts` owns that client
+review/apply plan. Skills retain workspace scope/reviewed hashes.
 Messages authorize sender accounts; queues, retries and children retain that
 identity. Personal schedules have immutable owners. Personal/Workspace setup
 uses provider defaults unless explicitly chosen; reconnect preserves ownership.

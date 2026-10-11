@@ -14,7 +14,9 @@ import {
 } from "@opengeni/contracts";
 import {
   allowedFirstPartyMcpToolsForSession,
+  resolveSessionFirstPartyMcpTools,
   resolveFirstPartyMcpToolPolicy,
+  type FirstPartyMcpToolPolicySettings,
   type Settings,
 } from "@opengeni/config";
 import {
@@ -230,9 +232,19 @@ export async function scheduledConnectionTools(
 
 export function scheduledConnectionSurfaceEligibility(
   settings: Settings,
-  target: Pick<Session, "firstPartyMcpTools" | "firstPartyMcpPermissions"> | null,
+  target:
+    | (Pick<Session, "firstPartyMcpTools" | "firstPartyMcpPermissions"> &
+        Partial<Pick<Session, "toolPolicy" | "agent">>)
+    | null,
+  workspaceSettings: unknown = {},
 ): { googleDrivePublicationEnabled: boolean; atlassianEnabled: boolean } {
-  const tools = target?.firstPartyMcpTools ?? resolveFirstPartyMcpToolPolicy(settings).default;
+  const tools = target?.toolPolicy
+    ? resolveSessionFirstPartyMcpTools(
+        settings,
+        { ...target, toolPolicy: target.toolPolicy },
+        workspaceSettings,
+      )
+    : allowedFirstPartyMcpToolsForSession(settings, target?.firstPartyMcpTools);
   const permissions = target?.firstPartyMcpPermissions ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS;
   return {
     googleDrivePublicationEnabled:
@@ -488,7 +500,11 @@ export async function createValidatedScheduledTask(input: {
           resources: mergeResourceRefs(target?.resources ?? [], agentConfig.resources),
           source: personalConnectionDelegationSourceForGrant(input.grant),
           authoritySelections: input.payload.connectionAccounts,
-          ...scheduledConnectionSurfaceEligibility(effectiveRuntimeSettings, target),
+          ...scheduledConnectionSurfaceEligibility(
+            effectiveRuntimeSettings,
+            target,
+            (await requireWorkspace(input.db, input.grant.workspaceId)).settings,
+          ),
         });
   const { personalConnectionDelegations, mcpAccountBindings } = acceptedConnections;
   if (!knowledgeAction) {
@@ -672,10 +688,15 @@ export async function frozenScheduledTaskCreatorPolicy(input: {
     (sessionPolicy.kind === "valid" &&
       sessionPolicy.policy.credentialRestriction === "developer_setup"),
   );
-  const firstPartyMcpTools = allowedFirstPartyMcpToolsForSession(
+  const currentSelection = resolveSessionFirstPartyMcpTools(
     input.settings,
-    session.firstPartyMcpTools,
+    session,
+    (await requireWorkspace(input.db, input.grant.workspaceId)).settings,
   );
+  const signedSelection = input.grant.metadata?.["firstPartyMcpTools"];
+  const firstPartyMcpTools = Array.isArray(signedSelection)
+    ? currentSelection.filter((name) => signedSelection.includes(name))
+    : currentSelection;
   const firstPartyMcpPermissions = (
     session.firstPartyMcpPermissions ?? [...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS]
   ).filter((permission) =>
@@ -1637,7 +1658,7 @@ export async function validatedScheduledTaskUpdate(input: {
     ) {
       throw new HTTPException(409, {
         message:
-          "cannot change the OpenGeni Slack bot connection of a task with a live reusable session; recreate the task",
+          "cannot change the Opengeni Slack bot connection of a task with a live reusable session; recreate the task",
       });
     }
     // Update text is exact, even when a full form submission reuses the saved
@@ -1825,6 +1846,7 @@ export async function validatedScheduledTaskUpdate(input: {
     const nextSurfaceEligibility = scheduledConnectionSurfaceEligibility(
       runtimeSettings,
       nextTarget,
+      (await requireWorkspace(input.db, input.grant.workspaceId)).settings,
     );
     if (nextSurfaceEligibility.googleDrivePublicationEnabled)
       nextAccountSurfaceIds.add(GOOGLE_DRIVE_PUBLICATION_SERVER_ID);
@@ -2502,7 +2524,7 @@ async function validateScheduledTaskAgentConfig(input: {
  * Mutable rig/variable-set metadata is revalidated again at dispatch.
  */
 export function validateIncidentTelemetryPreflightSelection(
-  settings: Pick<Settings, "allowedFirstPartyMcpTools" | "defaultFirstPartyMcpTools">,
+  settings: FirstPartyMcpToolPolicySettings,
   agentConfig: ScheduledTaskAgentConfig,
 ): void {
   const executionClass = agentConfig.executionClass;
@@ -2524,7 +2546,7 @@ export function validateIncidentTelemetryPreflightSelection(
   }
 
   const selectedMcpServerIds = new Set(agentConfig.tools.map((tool) => tool.id));
-  // Scheduled dispatch always attaches the first-party OpenGeni MCP server.
+  // Scheduled dispatch always attaches the first-party Opengeni MCP server.
   selectedMcpServerIds.add("opengeni");
   if (preflight.requiredMcpServerIds.some((id) => !selectedMcpServerIds.has(id))) {
     throw new HTTPException(422, {

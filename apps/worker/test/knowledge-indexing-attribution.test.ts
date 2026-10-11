@@ -11,6 +11,7 @@ const embed = mock(async () => [[1, 0, 0]]);
 mock.module("@opengeni/core", () => ({
   paidDocumentEmbedding: () => true,
   documentEmbeddingCostMicros: () => 20,
+  workspaceCreditsDisabled: async () => false,
 }));
 mock.module("@opengeni/documents", () => ({
   knowledgeIndexChunks: function* () {
@@ -38,7 +39,7 @@ mock.module("@opengeni/db", () => ({
     fn: (db: unknown) => Promise<unknown>,
   ) => fn(_db),
   freezeKnowledgeIndexBillingMode: async () => ({ mode: "credits", rateMicrosPerMillionBytes: 1 }),
-  getBillingBalance: async () => ({ balanceMicros: 100 }),
+  getSpendableCreditBalance: async () => ({ balanceMicros: 100 }),
   checkWorkspaceAllowance: preflight,
   guardPaidKnowledgeIndexPublication: async () => "published",
   appendKnowledgeIndexChunks: async () => ({ status: "running" }),

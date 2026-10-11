@@ -1786,6 +1786,11 @@ test("commands from separate turns of the same human coalesce during an explicit
   await enqueueHumanTurn(owner, first.session.id);
   const secondClaim = await claim(owner, first.session.id);
   if (secondClaim.action !== "claimed") throw new Error("second turn was not claimed");
+  const frozen = await shared.admin`select subscription_authority from session_turns
+    where id in (${first.turn.id}, ${secondClaim.turn.id}) order by created_at`;
+  expect(frozen).toHaveLength(2);
+  expect(frozen[0]!.subscription_authority).not.toBeNull();
+  expect(frozen[1]!.subscription_authority).toEqual(frozen[0]!.subscription_authority);
   const second = {
     session: first.session,
     turn: secondClaim.turn,

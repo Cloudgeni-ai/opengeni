@@ -1,5 +1,4 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { createHash } from "node:crypto";
 import { sessionWithEffectiveToolPolicy, resolveSessionAgentConfigForCreate } from "@opengeni/core";
 import { RunContext, type ModelRequest, type Tool } from "@openai/agents";
 import { CODEX_FALLBACK_MODEL_SLUGS, CODEX_MODEL_ID_PREFIX } from "@opengeni/codex/constants";
@@ -25,6 +24,7 @@ import {
   type AgentCapabilityId,
   type AgentConfigCreator,
   type AgentSkillsCapability,
+  type BundledSkillId,
   type FirstPartyMcpToolName,
   type ResolvedAgentConfig,
   type AgentMediaAttachment,
@@ -110,6 +110,10 @@ type FixtureOptions = {
   localMediaCredential?: boolean;
   foreignMediaCredential?: boolean;
   credentialRestrictionSource?: "accepted" | "initial" | "spoof" | "none";
+  /** Route this turn to an attached Connected Machine (home stays `none`). */
+  machineAttached?: boolean;
+  /** The stored bundled selection; `"omit"` leaves it undefined. Default `[]`. */
+  bundledSkillIds?: BundledSkillId[] | "omit";
 };
 
 // Execute all three production worker phases and the production runtime builder.
@@ -166,6 +170,10 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
   context.eventing.publish = async () => {};
   const skillCatalogWrites: string[] = [];
   const persistence = [
+    spyOn(db, "requireWorkspace").mockResolvedValue({
+      id: SCOPE.workspaceId,
+      settings: {},
+    } as Awaited<ReturnType<typeof db.requireWorkspace>>),
     spyOn(db, "getSandboxRecoveryDiscontinuity").mockResolvedValue(null),
     spyOn(db, "getWorkspaceVideoGenerationPolicy").mockResolvedValue({
       schemaVersion: 1,
@@ -293,7 +301,9 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
     })),
     toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
     variableSetIds: [],
-    bundledSkillIds: [],
+    ...(options.bundledSkillIds === "omit"
+      ? {}
+      : { bundledSkillIds: options.bundledSkillIds ?? [] }),
     skills: [],
     firstPartyMcpTools: [...FIRST_PARTY_MCP_TOOL_NAMES],
     firstPartyMcpPermissions: null,
@@ -389,6 +399,7 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
       ...policy,
       sandboxArtifactRuntime: { available: false, environment: {} },
       groupBoxBackend: "none",
+      ...(options.machineAttached ? { activeSandboxBackend: "selfhosted" as const } : {}),
       routingOn: false,
       credentialSubjectId: null,
       interactionInterventionResume: null,
@@ -538,10 +549,16 @@ test.each(["accepted", "initial", "spoof", "none"] as const)(
   },
 );
 
-function expectedFirstPartyTools(config: ResolvedAgentConfig | null, settings: Settings) {
+// The fixture turn has no sandbox or Connected Machine unless `sandboxAttached`.
+function expectedFirstPartyTools(
+  config: ResolvedAgentConfig | null,
+  settings: Settings,
+  sandboxAttached = false,
+) {
   return allowedFirstPartyMcpToolsForSession(settings, [...FIRST_PARTY_MCP_TOOL_NAMES]).filter(
     (name) => {
       const owner = FIRST_PARTY_MCP_TOOL_CAPABILITIES[name];
+      if (owner === "sandbox") return sandboxAttached;
       return (
         !config ||
         owner === "runtime" ||
@@ -574,7 +591,7 @@ function assertCapabilitySurface(
     if (!["opengeni", "interaction"].includes(entry.identity.serverId)) continue;
     const owner =
       FIRST_PARTY_MCP_TOOL_CAPABILITIES[entry.identity.toolName as FirstPartyMcpToolName];
-    if (owner && owner !== "runtime") {
+    if (owner && owner !== "runtime" && owner !== "sandbox") {
       expect(enabled(owner)).toBe(true);
     }
   }
@@ -596,7 +613,50 @@ function assertCapabilitySurface(
   expect(captured.selectedServerIds.includes("docs")).toBe(enabled("knowledge"));
   expect(captured.names).toContain(prefixedMcpToolName("customer-product", "search_documents"));
   expect(captured.names).toContain("opengeni__wait_for_input");
-  expect(captured.names).toContain("opengeni__command_read");
+  // No sandbox or Connected Machine is attached, so no command can exist.
+  expect(captured.names).not.toContain("opengeni__command_read");
+  expect(captured.names).not.toContain("opengeni__command_wait");
+}
+
+// Assert the model-facing contract directly. A whole-request digest also pins
+// incidental product copy in tool descriptions (for example, the Skill library
+// name), hiding which behavioral or authority boundary actually changed.
+function assertLegacyRequestContract(request: ModelRequest) {
+  expect(request.input).toEqual([
+    { role: "developer", content: expect.stringContaining(SKILL_SENTINEL) },
+    { role: "user", content: "Reply done without calling tools." },
+  ]);
+  expect(request.modelSettings).toEqual({
+    reasoning: { effort: "low", summary: "detailed" },
+    providerData: {
+      include: ["reasoning.encrypted_content"],
+      prompt_cache_key: SCOPE.sessionId,
+    },
+  });
+  expect(request.toolsExplicitlyProvided).toBe(true);
+  expect(request.handoffs).toEqual([]);
+  expect(request.outputType).toBe("text");
+  expect(request.systemInstructions).toContain("Never invent URLs or request credentials in chat.");
+  expect(JSON.stringify(request)).not.toContain("test-delegation-secret");
+  const install = request.tools.find((tool) => tool.name === "skill_install");
+  expect(install).toMatchObject({
+    type: "function",
+    strict: false,
+  });
+  if (install?.type !== "function") throw new Error("Skill installation function missing");
+  expect(install.parameters).toEqual({
+    type: "object",
+    properties: {
+      operationId: { type: "string", format: "uuid" },
+      source: { type: "string", minLength: 1, maxLength: 2048 },
+      expectedInstallationVersion: { type: "integer", minimum: 0 },
+      reason: { type: "string", minLength: 1, maxLength: 2000 },
+    },
+    required: ["operationId", "source", "reason"],
+    additionalProperties: true,
+  });
+  expect(install.description).toContain("Off prevents agent installation");
+  expect(install.description).toContain("requires its current installation version");
 }
 
 describe("agent configuration reaches the production model request", () => {
@@ -628,10 +688,14 @@ describe("agent configuration reaches the production model request", () => {
       // "all" keeps the legacy tool surface; its prompt is the modular composition (M4).
       expect(configured.request.tools).toEqual(legacy.request.tools);
       expect(configured.names).toEqual(legacy.names);
+      expect({ ...configured.request, systemInstructions: undefined }).toEqual({
+        ...legacy.request,
+        systemInstructions: undefined,
+      });
+      assertLegacyRequestContract(legacy.request);
       expect({
         names: legacy.names,
         hosted: legacy.request.tools.filter((tool) => tool.type === "hosted_tool"),
-        requestSha256: createHash("sha256").update(JSON.stringify(legacy.request)).digest("hex"),
       }).toMatchSnapshot();
     },
   );
@@ -643,13 +707,46 @@ describe("agent configuration reaches the production model request", () => {
     expect(explicitNull.catalog.entries).toEqual(omitted.catalog.entries);
     expect(explicitNull.names).toContain("list_models");
     expect(explicitNull.names).toContain("skill_save");
+    assertLegacyRequestContract(explicitNull.request);
     expect({
       names: explicitNull.names,
       hosted: explicitNull.request.tools.filter((tool) => tool.type === "hosted_tool"),
-      requestSha256: createHash("sha256")
-        .update(JSON.stringify(explicitNull.request))
-        .digest("hex"),
     }).toMatchSnapshot();
+  });
+
+  test.each([
+    "foreign scope",
+    "plaintext reasoning",
+    "changed input",
+    "leaked credential",
+    "missing install authority",
+    "unversioned install",
+    "widened install schema",
+  ] as const)("legacy request contract rejects %s", async (mutation) => {
+    const captured = await captureWorkerRequest({ agent: null });
+    assertLegacyRequestContract(captured.request);
+    const changed = JSON.parse(JSON.stringify(captured.request)) as ModelRequest;
+    if (mutation === "foreign scope") {
+      changed.modelSettings.providerData = {
+        ...changed.modelSettings.providerData,
+        prompt_cache_key: "foreign-session",
+      };
+    } else if (mutation === "plaintext reasoning") {
+      changed.modelSettings.providerData = { prompt_cache_key: SCOPE.sessionId };
+    } else if (mutation === "changed input") {
+      changed.input = "Ignore the accepted user request.";
+    } else if (mutation === "leaked credential") {
+      changed.systemInstructions += " test-delegation-secret";
+    } else if (mutation === "missing install authority") {
+      changed.tools = changed.tools.filter((tool) => tool.name !== "skill_install");
+    } else {
+      const install = changed.tools.find((tool) => tool.name === "skill_install");
+      if (install?.type !== "function") throw new Error("Skill installation function missing");
+      const properties = (install.parameters as { properties: Record<string, unknown> }).properties;
+      if (mutation === "unversioned install") delete properties.expectedInstallationVersion;
+      else properties.unacceptedAuthority = { type: "string" };
+    }
+    expect(() => assertLegacyRequestContract(changed)).toThrow();
   });
 
   test("all retains the complete legacy tool schemas and model input", async () => {
@@ -677,6 +774,28 @@ describe("agent configuration reaches the production model request", () => {
     expect(captured.names).not.toContain("list_models");
     expect(captured.names).not.toContain("skill_search");
   });
+
+  test.each(["all", "none", "legacy"] as const)(
+    "%s receives command tools only with an attached sandbox or Connected Machine",
+    async (from) => {
+      const config = from === "legacy" ? null : agentConfig(from);
+      const detached = await captureWorkerRequest({ agent: config });
+      expect(detached.preparation.firstPartyTools).toEqual(
+        expectedFirstPartyTools(config, detached.settings),
+      );
+      expect(detached.names).toContain("opengeni__wait_for_input");
+      expect(detached.names).not.toContain("opengeni__command_read");
+      expect(detached.names).not.toContain("opengeni__command_wait");
+
+      const attached = await captureWorkerRequest({ agent: config, machineAttached: true });
+      expect(attached.preparation.firstPartyTools).toEqual(
+        expectedFirstPartyTools(config, attached.settings, true),
+      );
+      expect(attached.names).toContain("opengeni__wait_for_input");
+      expect(attached.names).toContain("opengeni__command_read");
+      expect(attached.names).toContain("opengeni__command_wait");
+    },
+  );
 
   test.each(["all", "none"] as const)(
     "%s effectiveTools matches the captured next model request",
@@ -957,6 +1076,33 @@ describe("Skill attachment is distinct from Skill catalog availability", () => {
       expect(captured.names.includes("tool_list")).toBe(skills === "manage");
     },
   );
+
+  test("none omits bundled Opengeni guides unless listed; all keeps the defaults", async () => {
+    const base = { hasSkills: false, productMcp: false, builtins: false } as const;
+    const noneOmitted = await captureWorkerRequest({
+      ...base,
+      agent: agentConfig("none"),
+      bundledSkillIds: "omit",
+    });
+    expect(noneOmitted.skillCatalog).toEqual([]);
+    expect(noneOmitted.names).not.toContain("skill_read");
+
+    const noneExplicit = await captureWorkerRequest({
+      ...base,
+      agent: agentConfig("none"),
+      bundledSkillIds: ["builtin:opengeni-help"],
+    });
+    expect(noneExplicit.skillCatalog.map((entry) => entry.id)).toEqual(["builtin:opengeni-help"]);
+    expect(noneExplicit.names).toContain("skill_read");
+
+    const allOmitted = await captureWorkerRequest({
+      ...base,
+      agent: agentConfig("all"),
+      bundledSkillIds: "omit",
+    });
+    expect(allOmitted.skillCatalog.map((entry) => entry.id)).toContain("builtin:opengeni-help");
+    expect(allOmitted.names).toContain("skill_read");
+  });
 
   test("legacy null still attaches Skill management and the router with no catalog", async () => {
     const captured = await captureWorkerRequest({

@@ -1,5 +1,10 @@
 # Modular prompt changelog
 
+Product identity and generated guidance now spell the brand Opengeni in both
+legacy and modular compositions. Only capitalization changes; instruction
+behavior and layer order are preserved. Legacy prompt digests are refreshed
+for this shared identity change. Reserved protocol namespaces remain stable.
+
 Sessions with an agent configuration (`sessions.agent_config` non-null) get their
 system instructions from this folder. Sessions without one keep the legacy
 composition (`operational-instructions.ts` + the persona template + CORE in
@@ -13,6 +18,26 @@ The legacy byte locks and worker request hashes include this shared guidance.
 The legacy locks also include the shared goal-completion handoff guidance.
 All fourteen omitted/null legacy cases retain the same composition and layer
 order. Shared guidance is not an intentional removal or modular-only addition.
+
+Both compositions now share one Knowledge guidance source: useful retention is
+ordinary work under the accepted learning policy, adopted feedback corrects
+existing entries, and relevant retrieval precedes dependent tasks. Task-only
+feedback, unaccepted proposals, interim experiment rounds and live status do not
+become settled knowledge. The worker also renders accepted modes and Knowledge
+scope in governance. These changes preserve destination authority and do not add
+permission for external actions or settings changes. New Slack sessions follow
+the same policy; old stored Slack session instructions remain unchanged.
+
+Prompt-size review condensed Knowledge guidance from 941 to 317 words (6,686 to
+2,372 characters), keeping workflow details in tool descriptions. The accepted
+learning block supplies modes/scope without repeating the doctrine. Slack file
+guidance appears only when context contains files. Intentional legacy locks and
+the independent default-persona fixture are updated with this shared revision.
+
+The shared Codemode directive no longer claims every available tool is callable
+programmatically. It names the Codemode catalog (`ogtool list`) and says the
+built-in sandbox tools (shell, file patching, image viewing, terminal input)
+are outside it, so the agent uses the shell and filesystem directly.
 
 ## Authoring rule
 
@@ -41,7 +66,11 @@ Composition order (each part separated by a blank line):
      Formatting rules, Rules for getting work done, Autonomy and persistence,
      Destructive Actions.
    - `runtime_mechanics` (always): new messages while working (steer/queue),
-     waiting and `wait_for_input`, compaction, background commands.
+     waiting and `wait_for_input`, compaction, and background commands. The
+     background-command paragraphs (and the `command_wait` mentions in the
+     in-flight examples and `subagents`) appear only when a managed sandbox or
+     Connected Machine is attached, because `command_read`/`command_wait` are
+     withheld from a turn without compute.
    - Conditional modules, in this order: `renderer_markdown`, `sandbox`,
      `connected_machine`, `repositories`, `workspace_environment`, `rig`,
      `artifacts`, `media`, `goals`, `subagents`, `knowledge`, `skills`, `admin`,
@@ -90,9 +119,17 @@ and literal-prefix recovery; the new `media` capability module directs image
 and video requests to runtime/provider tools rather than integration setup.
 Disabled media removes that module. The legacy prompt remains unchanged.
 
+Discovery reuse. A discovered schema is never added to the tool list (prompt
+cache stability); its exact name binds against the current authorized catalog
+for the rest of the session. The earlier "one focused capability at a time"
+rule turned one search into several sequential round trips, so the rule now
+says a found tool stays callable by name and that several capabilities can be
+searched in one response or loaded together through `names`.
+
 ```diff
 + Deferred tool schemas are omitted from the first request; absence there does not prove a tool is unavailable.
-+ When deferred tools are attached, use `tool_search` for one focused capability at a time; broad searches with small limits can omit a relevant tool.
++ A tool found with `tool_search` stays callable by its exact name for the rest of the session; search again only if its input schema is no longer in context.
++ When you need several capabilities, search for them in parallel `tool_search` calls in the same response, or load known exact names together with `names`; broad searches with small limits can omit a relevant tool.
 + If a search misses, use `tool_list` and follow `nextCursor` until the relevant authorized names are covered, then load exact names with `tool_search`.
 + `namePrefix` is a literal tool-name prefix, not a capability keyword; an empty filtered page does not prove the capability is unavailable.
 + Discovery never grants authority, and remembered tool names must still resolve against the current authorized catalog.
@@ -133,10 +170,36 @@ text named it only inside link examples).
 
 Goal completion. In the first modular-none eval runs, two of nine goal runs
 verified the work, said the goal was complete, and ended without calling the
-(deferred) goal tool. The goal module now says so explicitly.
+(deferred) goal tool. The goal module now says so explicitly. Its discovery
+clause used to say to search when the goal tools "are not listed", which is
+always true for a deferred tool and caused repeated searches for a tool whose
+schema was already in context; it now searches only when the schema is missing.
 
 ```diff
-+ Saying or verifying that the work is done does not complete the goal: call opengeni__goal_complete, and search for the goal tools first when they are not listed.
++ Saying or verifying that the work is done does not complete the goal: call opengeni__goal_complete by its exact name, and search for a goal tool only when its input schema is not in context.
+```
+
+Standing attachments. A file attached to the session is mounted on every
+turn, so after compaction an agent could open a weeks-old screenshot and treat
+it as something the user just sent. The attachments module now says such files
+may be old and belong to the current request only when the latest message
+refers to them.
+
+```diff
++ Files attached to the session stay mounted on every turn and may be old; treat one as part of the current request only when the latest message refers to it.
+```
+
+Session targets. Conversations about another session now keep a remembered
+target and read, send to, or steer that session through the session tools, so
+session coordination says how to select it and follow a sent update to its
+result.
+
+```diff
++ For a conversation about another session, use session_target_get/set to remember or clear the selected target; selection is context, not permission to mutate.
++ Discover with sessions_list and inspect with session_events; keep voice in this session.
++ Send only when asked, and use Steer only for an explicit change of direction.
++ After Send or Steer, use session_message_status with the returned update ID to follow its exact consuming turn and read the indicated result before relaying it.
++ Do not resend pending work or mistake acceptance for completion.
 ```
 
 ## Conditional variants (capability or resource absent)
@@ -170,3 +233,75 @@ unchanged.
   in chat are omitted; `renderer_markdown` adds "# Links and rendering"
   (plain web links only; workspace files by path in backticks when a sandbox
   is attached).
+
+## Tool-availability variants
+
+A broad capability is product semantics, not tool authority: a configured
+session can keep `goals` or `knowledge` on while its accepted first-party
+selection or permission ceiling excludes the matching tools. The worker now
+freezes a per-attempt `AgentPromptToolAvailability` from the same selection and
+ceiling it signs into the delegated token (`deriveAgentPromptToolAvailability`,
+using the shared first-party registration table). It is a rendering input only
+and never changes capabilities, catalogs, approvals, or permissions.
+
+Only a first-party tool that the selection omits, or whose registration
+predicate the ceiling cannot satisfy, is proven absent. Deferred or lazily
+disclosed tools, external MCP catalogs, provider-hosted and local adapter tools
+(`tool_search`, `generate_image`, `command_input`, ...) and live-grant narrowing
+are unknown and keep their guidance. Omitted availability (legacy sessions,
+old callers, standalone compaction) renders exactly as before; the legacy
+composition never reads it. With nothing proven absent the modular bytes are
+unchanged, including for the default selection and ceiling.
+
+When a named tool is proven absent, only the clauses naming it change:
+
+- Goals: the ownership sentence names only the remaining goal tools (with
+  none: "If the session has a goal, you own it: keep working toward it.");
+  the goal_complete handoff and call sentences need `goal_complete`, and
+  without it: "Saying or verifying that the work is done does not complete the
+  goal, and this session has no goal-completion tool: report the outcome
+  instead of claiming the goal is complete."; the goal-pause judgment needs
+  `goal_pause`; the document-deliverable bullet needs `goal_complete` and
+  `goal_set` or `goal_progress`.
+- Knowledge: each sentence naming `task_note_save`, `knowledge_search`,
+  `knowledge_get`, `knowledge_save`, `knowledge_prepare_save`,
+  `knowledge_retain_message`, `knowledge_retain_file`, `instruction_policy_get`
+  or `instruction_policy_save` is narrowed or dropped; the "Before saving"
+  paragraph and "Save a separate finding" need `knowledge_save`. Storage
+  purpose, grounding, pending-entry, learning-mode, and authority rules stay.
+- Integration setup: the `variable_set_list`/`capability_catalog_search`
+  discovery sentence names what remains; the two setup-card sentences and the
+  card follow-ups need their tools.
+- Session coordination: the `session_events` paragraph, the
+  `session_send_message` follow-up clause, the child Variable Set sentence
+  (`variable_set_list`, `session_create`), the `wait_for_input` long-wait and
+  `finalAnswer` sentences, the `session_wait` join and short-wait sentences,
+  and the `session_get` contrasts each need their tools.
+- Runtime mechanics and base behavior: without `wait_for_input` the in-flight
+  and already-waiting sentences and the three base-behavior `wait_for_input`
+  clauses are dropped, and `## Waiting` keeps only its tool-neutral sentence
+  ("When monitoring requires timed checks, use the available
+  recurring-monitoring or session-wait mechanism at that meaningful cadence
+  rather than ritual polling."); Background commands keeps general command
+  guidance and names only the remaining `command_read`/`command_wait`.
+- Artifacts: without `sandbox_file_publish` the visual rule reads "Use the
+  exact retained artifact id from an image tool receipt. A sandbox path is not
+  an inline image source."
+- Sandbox environment: the `rig_propose_change` and `rig_get` sentences need
+  their tools.
+
+Tool discovery, media, accepted user/workspace/Skill instructions, active-goal
+continuation input, and the Codemode/code-search/Git-binding attempt
+directives are unchanged.
+
+Known exception: the Codemode directive's observation clause still names
+`command_wait`/`command_read` when those tools are proven absent; a test pins
+it as the only surviving prompt-named tool.
+
+Linked turns: the permission ceiling of a turn acting for a linked external
+identity is that turn's own snapshot. A session mixing linked and unlinked
+turns (or turns for different linked identities) can therefore render a
+different operational contract per turn, which breaks prompt-prefix reuse
+across those turns. This is expected: the turn's executable first-party
+permissions differ in the same way. Turns with the same authority keep an
+identical contract.

@@ -769,7 +769,7 @@ describe("capabilities browser e2e", () => {
                   h1{font-size:25px;margin:20px 0 10px} p{line-height:1.55;color:#aeb8c7} code{color:#d7e3f4} .fixture{font-size:12px;color:#8994a3;border-top:1px solid #30363d;margin-top:24px;padding-top:18px}
                 </style>
               </head>
-              <body><main aria-labelledby="authorization-heading"><div class="brand" aria-hidden="true">M</div><h1 id="authorization-heading">Authorize Mobbin for OpenGeni</h1><p>Requested access: <code>openid</code></p><p>You would return to OpenGeni after approving access.</p><p class="fixture">Browser evidence fixture - no account, client, credential, or token was used.</p></main></body>
+              <body><main aria-labelledby="authorization-heading"><div class="brand" aria-hidden="true">M</div><h1 id="authorization-heading">Authorize Mobbin for Opengeni</h1><p>Requested access: <code>openid</code></p><p>You would return to Opengeni after approving access.</p><p class="fixture">Browser evidence fixture - no account, client, credential, or token was used.</p></main></body>
             </html>`,
         });
       });
@@ -808,7 +808,7 @@ describe("capabilities browser e2e", () => {
         page.waitForURL(`${authorizationOrigin}/**`),
         page.getByRole("dialog").getByRole("button", { name: "Connect for workspace" }).click(),
       ]);
-      await expectVisible(page.getByRole("heading", { name: "Authorize Mobbin for OpenGeni" }));
+      await expectVisible(page.getByRole("heading", { name: "Authorize Mobbin for Opengeni" }));
       expect(state.oauthStarts).toBe(1);
       expect(state.oauthRequest).toMatchObject({
         mcpUrl: "https://api.mobbin.com/mcp",

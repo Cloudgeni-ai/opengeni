@@ -1,7 +1,7 @@
 {
   "name": "@opengeni/react",
-  "version": "1.0.0",
-  "description": "React hooks and styled components for OpenGeni: live session streaming, chat composer, message timeline, session status, and fleet views — token-themed (CSS variables), dark-first, built on Tailwind v4 + Radix + Motion.",
+  "version": "1.4.4",
+  "description": "React hooks and styled components for Opengeni: live session streaming, chat composer, message timeline, session status, and fleet views — token-themed (CSS variables), dark-first, built on Tailwind v4 + Radix + Motion.",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -36,6 +36,10 @@
     "./sites": {
       "types": "./src/sites.ts",
       "default": "./src/sites.ts"
+    },
+    "./native-previews": {
+      "types": "./src/native-previews.ts",
+      "default": "./src/native-previews.ts"
     },
     "./connect.css": {
       "types": "./styles/connect.d.ts",
@@ -77,6 +81,22 @@
     "./machines": {
       "types": "./src/machines.ts",
       "default": "./src/machines.ts"
+    },
+    "./queue-presentation-model": {
+      "types": "./src/queue-presentation-model.ts",
+      "default": "./src/queue-presentation-model.ts"
+    },
+    "./composer-messages": {
+      "types": "./src/composer-messages.ts",
+      "default": "./src/composer-messages.ts"
+    },
+    "./sandbox-label-model": {
+      "types": "./src/sandbox-label-model.ts",
+      "default": "./src/sandbox-label-model.ts"
+    },
+    "./model-picker-model": {
+      "types": "./src/model-picker-model.ts",
+      "default": "./src/model-picker-model.ts"
     },
     "./model-policy": {
       "types": "./src/model-policy.ts",
@@ -130,6 +150,46 @@
       "types": "./styles/tokens.d.ts",
       "style": "./styles/tokens.css",
       "default": "./styles/tokens.css"
+    },
+    "./testing": {
+      "types": "./src/testing/session-scenarios.ts",
+      "default": "./src/testing/session-scenarios.ts"
+    },
+    "./timeline-model": {
+      "types": "./src/timeline-model.ts",
+      "default": "./src/timeline-model.ts"
+    },
+    "./organization-model": {
+      "types": "./src/organization-model.ts",
+      "default": "./src/organization-model.ts"
+    },
+    "./new-session-draft": {
+      "types": "./src/new-session-draft.ts",
+      "default": "./src/new-session-draft.ts"
+    },
+    "./session-realtime": {
+      "types": "./src/session-realtime.ts",
+      "default": "./src/session-realtime.ts"
+    },
+    "./session-agents-model": {
+      "types": "./src/session-agents-model.ts",
+      "default": "./src/session-agents-model.ts"
+    },
+    "./session-list-model": {
+      "types": "./src/session-list-model.ts",
+      "default": "./src/session-list-model.ts"
+    },
+    "./model-mark-paths": {
+      "types": "./src/model-mark-paths.ts",
+      "default": "./src/model-mark-paths.ts"
+    },
+    "./session-feedback-model": {
+      "types": "./src/session-feedback-model.ts",
+      "default": "./src/session-feedback-model.ts"
+    },
+    "./session-attention-model": {
+      "types": "./src/session-attention-model.ts",
+      "default": "./src/session-attention-model.ts"
     }
   },
   "publishConfig": {

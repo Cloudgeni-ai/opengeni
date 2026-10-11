@@ -1,3 +1,4 @@
+import { startWorkspaceVoiceCapabilityRefresh } from "./lib/workspace-voice-capability";
 import {
   beginSocialLoginAnalytics,
   noteSuccessfulLogin,
@@ -63,6 +64,7 @@ import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { SecureContextWarning } from "@/components/secure-context-warning";
 import { Button } from "@/components/ui/button";
 import { SignInCallbackNotice } from "@/components/sign-in-callback-notice";
+import { NativeSignInProvider } from "@/lib/native-sign-in-context";
 import { PersonalSecurityProvider } from "@/lib/personal-security-context";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -168,6 +170,10 @@ import type {
   UpdateWorkspaceSettingsRequest,
   Workspace,
 } from "@/types";
+import {
+  clearPendingDeveloperSetup,
+  pendingDeveloperSetupFor,
+} from "@/lib/pending-developer-setup";
 
 const AnalyticsManager = lazy(() =>
   import("@/components/analytics-consent").then((module) => ({
@@ -178,6 +184,11 @@ const AnalyticsManager = lazy(() =>
 const OrganizationOnboardingPanel = lazy(() =>
   import("@/components/organization-onboarding-panel").then((module) => ({
     default: module.OrganizationOnboardingPanel,
+  })),
+);
+const ResumedDeveloperSetup = lazy(() =>
+  import("@/components/organization-onboarding-panel").then((module) => ({
+    default: module.ResumedDeveloperSetup,
   })),
 );
 
@@ -588,7 +599,7 @@ export function useOptionalAppContext(): AppContextValue | null {
 export function useAppContext(): AppContextValue {
   const value = useContext(AppContext);
   if (!value) {
-    throw new Error("OpenGeni app context is not ready");
+    throw new Error("Opengeni app context is not ready");
   }
   return value;
 }
@@ -609,6 +620,8 @@ export function RootRouteComponent() {
   const [sessionCreationHandoff, setSessionCreationHandoff] =
     useState<SessionCreationHandoff | null>(null);
   const [clientConfig, setClientConfig] = useState<ClientConfig | null>(null);
+  const [workspaceVoiceInput, setWorkspaceVoiceInput] =
+    useState<ClientConfig["voiceInput"]>(undefined);
   const [configError, setConfigError] = useState<BootstrapErrorPresentation | null>(null);
   const [configRequestVersion, setConfigRequestVersion] = useState(0);
   const [authSession, setAuthSession] = useState<AuthSession | null | undefined>(undefined);
@@ -733,6 +746,14 @@ export function RootRouteComponent() {
   const keyAuthRequired =
     clientConfig?.auth.mode === "deploymentKey" || clientConfig?.auth.mode === "configuredToken";
   const managedAuthRequired = clientConfig?.auth.mode === "managedSession";
+  // "Add AI agents to my product" left its developer setup step unfinished
+  // (reload, closed tab, another device): show it again until it is done.
+  const [developerSetupRevision, setDeveloperSetupRevision] = useState(0);
+  const pendingDeveloperSetup = useMemo(
+    () => (managedAuthRequired ? pendingDeveloperSetupFor(authSession?.user.email ?? null) : null),
+    // oxlint-disable-next-line react-hooks/exhaustive-deps -- re-read after the step finishes
+    [managedAuthRequired, authSession?.user.email, developerSetupRevision],
+  );
   const browserAccountsConfigured =
     managedAuthRequired && clientConfig?.managedAuthSessionSetMode !== "legacy";
   const browserAccountsEnabled = browserAccountsConfigured && managedAuthBootstrapComplete;
@@ -879,6 +900,7 @@ export function RootRouteComponent() {
       setGithubAppBusy(false);
       setPersonalGitHubBusy(false);
       resetWorkspaceIntegrations();
+      setWorkspaceVoiceInput(undefined);
       setWorkspaceStateOwnerId(workspaceId);
     },
     [resetSessionView, resetWorkspaceIntegrations, sessionChannelProjectionAuthority],
@@ -902,6 +924,31 @@ export function RootRouteComponent() {
       ownsWorkspaceTransition(workspaceTransitionIdentity.current, accepted, workspaceId),
     [],
   );
+
+  const clientConfigurationReady = clientConfig !== null;
+  useEffect(() => {
+    if (!clientConfigurationReady || !authReady || !workspaceStateOwnerId) return;
+    const workspaceId = workspaceStateOwnerId;
+    const accepted = captureWorkspaceInvocation(workspaceId);
+    if (!accepted) return;
+    return startWorkspaceVoiceCapabilityRefresh({
+      read: (signal) => fetchClientConfig(signal, workspaceId),
+      ownsWorkspace: () => ownsWorkspaceInvocation(workspaceId, accepted),
+      apply: (voiceInput) => setWorkspaceVoiceInput(voiceInput),
+      subscribeFocus: (refresh) => {
+        window.addEventListener("focus", refresh);
+        return () => window.removeEventListener("focus", refresh);
+      },
+    });
+  }, [
+    clientConfigurationReady,
+    authReady,
+    workspaceStateOwnerId,
+    accessContext?.subjectId,
+    accessKeyVersion,
+    captureWorkspaceInvocation,
+    ownsWorkspaceInvocation,
+  ]);
 
   const invalidatePrincipalWorkspaceState = useCallback(
     (options?: { preservePendingSlackLink?: boolean }) => {
@@ -1608,7 +1655,7 @@ export function RootRouteComponent() {
         if (status.status === "bound") {
           // Explicit refreshes re-sync from GitHub (POST /github/repositories/sync)
           // so installations changed after connect show up; passive loads read
-          // OpenGeni's cached rows.
+          // Opengeni's cached rows.
           const { repositories } = options?.sync
             ? await client.syncGitHubRepositories(workspaceId)
             : await client.listGitHubRepositories(workspaceId);
@@ -2509,14 +2556,24 @@ export function RootRouteComponent() {
     () => setAccessKeyVersion((version) => version + 1),
     [],
   );
-  // Onboarding may finish in a chat it opened (developer setup); go there
-  // while access revalidates, so the app opens on that chat.
+  // Onboarding may finish somewhere other than home (developer setup opens
+  // its workspace's new chat); go there while access revalidates, so the app
+  // opens on it. Resolves once the destination is the current location.
   const completeOrganizationOnboarding = useCallback(
-    (destination?: { workspaceId: string; sessionId: string }) => {
-      if (destination) {
-        void navigate({ to: "/workspaces/$workspaceId/sessions/$sessionId", params: destination });
-      }
+    async (destination?: { workspaceId: string; sessionId?: string }) => {
+      const arrived = destination?.sessionId
+        ? navigate({
+            to: "/workspaces/$workspaceId/sessions/$sessionId",
+            params: { workspaceId: destination.workspaceId, sessionId: destination.sessionId },
+          })
+        : destination
+          ? navigate({
+              to: "/workspaces/$workspaceId/sessions",
+              params: { workspaceId: destination.workspaceId },
+            })
+          : null;
       revalidatePrincipalAccess();
+      await arrived;
     },
     [navigate, revalidatePrincipalAccess],
   );
@@ -2613,7 +2670,14 @@ export function RootRouteComponent() {
     return clientConfig && accessContext
       ? ({
           client,
-          clientConfig,
+          clientConfig: {
+            ...clientConfig,
+            voiceInput:
+              workspaceVoiceInput ??
+              (clientConfig.voiceInput
+                ? { ...clientConfig.voiceInput, available: false, providers: [] }
+                : undefined),
+          },
           authSession: authSession ?? null,
           accessContext,
           workspaces,
@@ -2723,6 +2787,7 @@ export function RootRouteComponent() {
     clearSlackLinkContinuation,
     client,
     clientConfig,
+    workspaceVoiceInput,
     connectionState,
     contextAddManualRepository,
     contextCreateWorkspace,
@@ -2876,6 +2941,19 @@ export function RootRouteComponent() {
         )}
       </SignedOutPage>
     </Suspense>
+  ) : /^\/native-sign-in\/?$/.test(pathname) &&
+    managedAuthRequired &&
+    authSession &&
+    clientConfig ? (
+    // A phone app is signed in by the person, not by a workspace grant, so
+    // approval renders before the access and onboarding gates.
+    browserAccountsConfigured && !browserAccountsEnabled ? (
+      <LoadingPanel />
+    ) : (
+      <NativeSignInProvider value={{ client, email: authSession.user.email, handleManagedSignOut }}>
+        <Outlet />
+      </NativeSignInProvider>
+    )
   ) : /^\/settings\/security\/?$/.test(pathname) &&
     managedAuthRequired &&
     authSession &&
@@ -2959,6 +3037,27 @@ export function RootRouteComponent() {
       title="No workspace access"
       description="You don't have access to any workspace yet."
     />
+  ) : pendingDeveloperSetup &&
+    accessContext?.accountGrants.some(
+      (grant) => grant.accountId === pendingDeveloperSetup.organizationId,
+    ) ? (
+    <Suspense fallback={<LoadingPanel />}>
+      <ResumedDeveloperSetup
+        client={client}
+        organizationId={pendingDeveloperSetup.organizationId}
+        organizationName={pendingDeveloperSetup.organizationName}
+        activeEmail={authSession?.user.email ?? null}
+        onSignOut={handleManagedSignOut}
+        onComplete={(destination) => {
+          clearPendingDeveloperSetup();
+          // Reach the destination before the app's routes return: the home
+          // route would otherwise redirect to the landing workspace first.
+          void completeOrganizationOnboarding(destination).finally(() =>
+            setDeveloperSetupRevision((revision) => revision + 1),
+          );
+        }}
+      />
+    </Suspense>
   ) : (
     <AppContext.Provider value={appContext}>
       <Outlet />

@@ -171,6 +171,8 @@ export type SessionRealtimeInboundEntryInput = {
 export type SyncSessionRealtimeLedgerInput = AssertSessionRealtimeOwnerInput & {
   /** Request-scoped callers bound the control prefix wait; lifecycle callers omit it. */
   controlLockTimeoutMs?: number;
+  /** The owner's own label (their email), so a voice request names its sender. */
+  ownerSubjectLabel?: string | null | undefined;
   connectionId: string;
   connectionEpoch: number;
   entries?: SessionRealtimeInboundEntryInput[] | undefined;
@@ -1134,7 +1136,12 @@ async function admitRealtimeDelegationInTransaction(
   db: SessionActivityDatabase,
   input: Pick<
     SyncSessionRealtimeLedgerInput,
-    "workspaceId" | "sessionId" | "realtimeId" | "connectionEpoch" | "ownerSubjectId"
+    | "workspaceId"
+    | "sessionId"
+    | "realtimeId"
+    | "connectionEpoch"
+    | "ownerSubjectId"
+    | "ownerSubjectLabel"
   >,
   accountId: string,
   incoming: SessionRealtimeInboundEntryInput,
@@ -1176,16 +1183,21 @@ async function admitRealtimeDelegationInTransaction(
     delegationItemId: incoming.delegationItemId!,
     ledgerEntryId: entryId,
   };
-  const inputTranscript = incoming.payload?.inputTranscript;
-  if (typeof inputTranscript !== "string" || inputTranscript.trim().length === 0) {
-    throw new Error("Realtime delegation input transcript is required");
-  }
+  // Some providers (Azure Live) delegate without echoing the user's words. The
+  // work instructions in `incoming.text` still carry the transcript delta, so a
+  // missing echo only changes the display label; it must never fail the sync
+  // batch, which the browser would retry forever.
+  const rawInputTranscript = incoming.payload?.inputTranscript;
+  const inputTranscript =
+    typeof rawInputTranscript === "string" && rawInputTranscript.trim().length > 0
+      ? rawInputTranscript
+      : "Voice request";
   const admitted = await submitHumanPromptInTransaction(db, {
     accountId,
     workspaceId: input.workspaceId,
     sessionId: input.sessionId,
     subjectId: input.ownerSubjectId,
-    subjectLabel: "Realtime",
+    subjectLabel: input.ownerSubjectLabel?.trim() || "Realtime",
     actor: {
       type: "human",
       subjectId: input.ownerSubjectId,

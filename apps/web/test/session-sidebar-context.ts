@@ -141,6 +141,127 @@ if (previewParameters.get("scenario") === "keyboard-focus") {
   );
 }
 
+if (previewParameters.get("scenario") === "hover") {
+  // Sample data for the sidebar hover preview. Every fact below is a field the
+  // real compact list row carries; the values are illustrative.
+  const activeControl = {
+    state: "active",
+    controlVersion: 1,
+    controlEtag: "preview",
+    directState: "active",
+    primaryBlocker: null,
+    additionalBlockerCount: 0,
+    blockers: [],
+    resumeOptions: [],
+    override: null,
+    settlement: null,
+  };
+  const stats = (overrides: Record<string, number | boolean> = {}) => ({
+    directChildren: 0,
+    totalDescendants: 0,
+    runningDescendants: 0,
+    queuedDescendants: 0,
+    waitingDescendants: 0,
+    attentionDescendants: 0,
+    pausedDescendants: 0,
+    failedDescendants: 0,
+    unreadDescendants: 0,
+    unreadFailedDescendants: 0,
+    truncated: false,
+    ...overrides,
+  });
+  const hoverRow = (
+    number: number,
+    title: string,
+    age: number,
+    overrides: Partial<Session> & Record<string, unknown>,
+    createdBy: Session["createdBy"] = alex,
+  ): Session =>
+    ({
+      ...session(number, title, null, age, createdBy),
+      effectiveControl: activeControl,
+      treeStats: stats(),
+      ...overrides,
+    }) as Session;
+  const working = hoverRow(3001, "Astra strategy takeover - preserve and improve Grocery Bot", 2, {
+    status: "running",
+    model: "codex/gpt-6-astra",
+    reasoningEffort: "max",
+    backgroundCommandActivity: { state: "running", count: 2 },
+    treeStats: stats({
+      directChildren: 5,
+      totalDescendants: 5,
+      runningDescendants: 2,
+      attentionDescendants: 1,
+      pausedDescendants: 1,
+      failedDescendants: 1,
+      unreadFailedDescendants: 1,
+    }),
+  });
+  const needsYou = hoverRow(3002, "Approve the staging database migration", 6, {
+    status: "requires_action",
+    requiresActionSince: timeBefore(24),
+    model: "organization-claude-subscription/claude-opus-5-5",
+    reasoningEffort: "high",
+  });
+  const waiting = hoverRow(3003, "Watch the nightly import and verify row counts", 9, {
+    status: "idle",
+    inputWait: {
+      deadlineAt: new Date(now + 35 * 60_000).toISOString(),
+      reason: "Waiting for the nightly import to finish before checking the row counts.",
+    },
+    model: "codex/gpt-6.1-sol",
+    reasoningEffort: "xhigh",
+  });
+  const parent = hoverRow(3004, "Grocery Bot setup", 14, {
+    status: "idle",
+    model: "codex/gpt-6-astra",
+    reasoningEffort: "high",
+    effectiveControl: {
+      ...activeControl,
+      state: "paused",
+      directState: "paused",
+      primaryBlocker: {
+        kind: "session",
+        sessionId: "00000000-0000-4000-9000-000000003004",
+        displayName: "Grocery Bot setup",
+        actor: "Alex Morgan",
+        reason: "Holding until the store API key is rotated.",
+        changedAt: timeBefore(12),
+        revision: 1,
+      },
+    },
+    treeStats: stats({ directChildren: 1, totalDescendants: 1, pausedDescendants: 1 }),
+  });
+  const pausedChild = hoverRow(3005, "Compare grocery prices across three stores", 13, {
+    status: "idle",
+    parentSessionId: parent.id,
+    rootSessionId: parent.id,
+    model: "codex/gpt-6-astra",
+    reasoningEffort: "medium",
+    effectiveControl: {
+      ...activeControl,
+      state: "paused",
+      directState: "active",
+      primaryBlocker: parent.effectiveControl.primaryBlocker,
+    },
+  });
+  const finished = hoverRow(
+    3006,
+    "Quarterly cloud cost report",
+    48,
+    {
+      status: "idle",
+      unread: true,
+      hasSchedules: true,
+      model: "codex/gpt-6-astra",
+      reasoningEffort: "medium",
+    },
+    jamie,
+  );
+  rows.splice(0, rows.length, working, needsYou, waiting, parent, pausedChild, finished);
+}
+
 type RecordedOptions = Omit<SessionListPageOptions, "signal">;
 export type SessionSidebarEvidence = {
   listCalls: {
@@ -315,6 +436,7 @@ const context = {
   session: null,
   accessContext: { subjectId },
   sessionChannelProjectionAuthority: new SessionChannelProjectionAuthority(),
+  clientConfig: {},
   captureWorkspaceInvocation: () => invocation,
   ownsWorkspaceInvocation: (_workspace: string, accepted: unknown) => accepted === invocation,
   setSession: () => {},

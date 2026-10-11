@@ -1,0 +1,593 @@
+import type { ActivityItem, TurnOutcome } from "@opengeni/react/session";
+import {
+  createTurnSummaryContext,
+  formatElapsed,
+  resolveTurnSummaryFacets,
+  rollingActivityItem,
+  selectTurnSummaryFacets,
+  toolDisplayName,
+  type TurnSummaryFacetConfiguration,
+} from "@opengeni/react/timeline-model";
+import { nativeLoadingPhrases } from "./composer-state";
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
+import { Platform, Pressable, Text, View, type TextStyle } from "react-native";
+import Animated, { FadeIn, FadeInDown, FadeOut, FadeOutUp } from "react-native-reanimated";
+import { ActivityRow } from "./activity";
+import { ThinkingOrb } from "./thinking-orb";
+import { Icon } from "./icon";
+import { PulseDot, ShimmerText, ROW_MIN_HEIGHT, useReleaseFollow } from "./primitives";
+import { fontStyle, useNativeTimelineTheme } from "./theme";
+import { useNativeTimelineMessages } from "./messages";
+
+/* ----------------------------------------------------------------------------
+   Native TurnSummary / ActivityRail / RollingActivity — the web components of
+   the same names (timeline/turn-summary.tsx, activity-rail.tsx,
+   rolling-activity.tsx) in their rolling-turn configuration.
+   -------------------------------------------------------------------------- */
+
+/** Native counterpart of the web `TurnSummaryStatus` with a renderable preview. */
+export type NativeTurnStatus =
+  | { kind: "worked"; durationMs?: number | undefined; label?: string | undefined }
+  | {
+      kind: "working" | "waiting";
+      since?: string | undefined;
+      label?: string | undefined;
+      preview?: ReactNode;
+    };
+
+type FoldMemory = Map<string, "open" | "closed">;
+const FoldMemoryContext = createContext<FoldMemory | null>(null);
+
+/**
+ * A shrink-wrapped single-line summary. Android sizes it to the ellipsized line without
+ * the "…" glyph's overhang, which then clips the last dot; a little trailing room keeps
+ * the ellipsis whole.
+ */
+const TRUNCATED_TAIL: TextStyle =
+  Platform.OS === "android" ? { flexShrink: 1, paddingRight: 2 } : { flexShrink: 1 };
+export const FoldMemoryProvider = FoldMemoryContext.Provider;
+
+/**
+ * An expanded outer turn header stays pinned to the top of the timeline while
+ * its section scrolls (web: sticky inside the section). Each open section
+ * reports its content-space frame and a renderer for the header row; the
+ * timeline draws the pinned copy over the scroll view.
+ */
+export type StickyWorkHeader = {
+  top: number;
+  height: number;
+  headerHeight: number;
+  render: () => ReactNode;
+};
+export type StickyWorkHeaderRegistry = {
+  register: (key: string, entry: StickyWorkHeader | null) => void;
+  /** Bring a section's top back into view (after collapsing from the pinned copy). */
+  reveal: (top: number) => void;
+};
+const StickyWorkHeaderContext = createContext<StickyWorkHeaderRegistry | null>(null);
+export const StickyWorkHeaderProvider = StickyWorkHeaderContext.Provider;
+
+export function useLiveNow(active: boolean): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active) return;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [active]);
+  return now;
+}
+
+function LiveElapsed({ since, style }: { since: string; style: TextStyle }) {
+  const startedAt = Date.parse(since);
+  const now = useLiveNow(true);
+  if (!Number.isFinite(startedAt)) return null;
+  return (
+    <Text
+      style={[style, { fontVariant: ["tabular-nums"] }]}
+    >{` · ${formatElapsed(Math.max(0, now - startedAt))}`}</Text>
+  );
+}
+
+export interface TurnSummaryProps {
+  items: ActivityItem[];
+  outcome?: TurnOutcome | undefined;
+  failureText?: string | undefined;
+  durationMs?: number | undefined;
+  defaultOpen?: boolean | undefined;
+  liveHeader?: ReactNode;
+  bare?: boolean | undefined;
+  facets?: TurnSummaryFacetConfiguration | undefined;
+  foldKey?: string | undefined;
+  contextCompactionCount?: number | undefined;
+  status?: NativeTurnStatus | undefined;
+  /**
+   * Reports the disclosure's open state: once on mount when it starts open,
+   * then on every change, in the same update as the change itself.
+   */
+  onOpenStateChange?: ((open: boolean) => void) | undefined;
+  children: ReactNode;
+}
+
+export function TurnSummary({
+  items,
+  outcome,
+  failureText,
+  durationMs,
+  defaultOpen,
+  liveHeader,
+  bare,
+  facets: facetConfiguration,
+  foldKey,
+  contextCompactionCount,
+  status,
+  onOpenStateChange,
+  children,
+}: TurnSummaryProps) {
+  const theme = useNativeTimelineTheme();
+  const m = useNativeTimelineMessages();
+  const foldMemory = useContext(FoldMemoryContext);
+  const registerSticky = useContext(StickyWorkHeaderContext);
+  const releaseFollow = useReleaseFollow();
+  const frame = useRef<{ top: number; height: number; headerHeight: number }>({
+    top: 0,
+    height: 0,
+    headerHeight: 0,
+  });
+  const remembered = foldKey !== undefined ? foldMemory?.get(foldKey) : undefined;
+  const [open, setOpen] = useState(
+    remembered === "closed" ? false : remembered === "open" ? true : (defaultOpen ?? false),
+  );
+  const readerOwnsOpen = useRef(remembered !== undefined);
+  const reportOpen = useRef(onOpenStateChange);
+  reportOpen.current = onOpenStateChange;
+  const openRef = useRef(open);
+  const changeOpen = (next: boolean) => {
+    if (openRef.current === next) return;
+    openRef.current = next;
+    setOpen(next);
+    reportOpen.current?.(next);
+  };
+  // oxlint-disable-next-line react-hooks/exhaustive-deps -- report the starting state once
+  useEffect(() => {
+    if (openRef.current) reportOpen.current?.(true);
+  }, []);
+  useEffect(() => {
+    if (status && defaultOpen && remembered === undefined && !readerOwnsOpen.current)
+      changeOpen(true);
+    // oxlint-disable-next-line react-hooks/exhaustive-deps -- changeOpen only touches refs and state
+  }, [status, defaultOpen, remembered]);
+  const toggle = (next: boolean) => {
+    releaseFollow();
+    readerOwnsOpen.current = true;
+    if (foldKey !== undefined) foldMemory?.set(foldKey, next ? "open" : "closed");
+    changeOpen(next);
+  };
+  const context = useMemo(
+    () =>
+      createTurnSummaryContext(
+        items,
+        outcome,
+        failureText,
+        durationMs,
+        contextCompactionCount ?? 0,
+      ),
+    [items, outcome, failureText, durationMs, contextCompactionCount],
+  );
+  const definitions = useMemo(
+    () => resolveTurnSummaryFacets(facetConfiguration),
+    [facetConfiguration],
+  );
+  const facets = useMemo(
+    () => selectTurnSummaryFacets(definitions, context, status?.kind),
+    [definitions, context, status?.kind],
+  );
+  const liveShell = outcome === undefined && open && !bare;
+  const text: TextStyle = {
+    ...fontStyle(theme),
+    fontSize: bare ? theme.size.sm : theme.size.base,
+    lineHeight: 20,
+    color: liveShell && !status ? theme.colors["fg-subtle"] : theme.colors["fg-muted"],
+  };
+  const showMarker = !(
+    status ||
+    outcome === "complete" ||
+    (!outcome && (liveHeader || context.settled))
+  );
+  const facetText = facets
+    .map(({ result }) =>
+      typeof result.content === "string" || typeof result.content === "number"
+        ? String(result.content)
+        : "",
+    )
+    .filter(Boolean);
+
+  let statusNode: ReactNode = null;
+  let hasStatusText = false;
+  if (status?.kind === "worked") {
+    if (
+      status.durationMs !== undefined &&
+      Number.isFinite(status.durationMs) &&
+      status.durationMs >= 1000
+    ) {
+      hasStatusText = true;
+      statusNode = (
+        <Text
+          style={text}
+        >{`${status.label ?? m.workedFor} ${formatElapsed(status.durationMs)}`}</Text>
+      );
+    }
+  } else if (status) {
+    hasStatusText = true;
+    const label = status.label ?? (status.kind === "working" ? m.working : m.waiting);
+    statusNode = (
+      <>
+        <ShimmerText style={text} active={status.kind === "working"}>
+          {label}
+        </ShimmerText>
+        {status.since ? <LiveElapsed since={status.since} style={text} /> : null}
+      </>
+    );
+  }
+  const showLive = Boolean(liveHeader) && !open && !status;
+  const tail =
+    (showLive
+      ? ""
+      : facetText
+          .map((value, index) => (index > 0 || hasStatusText ? ` · ${value}` : value))
+          .join("")) + "";
+
+  const renderHeader = (pinned: boolean) => (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityState={{ expanded: open }}
+      onPress={() => (pinned ? collapseFromPin() : toggle(!open))}
+      style={({ pressed }) => ({
+        flexDirection: "row",
+        alignItems: "center",
+        minHeight: ROW_MIN_HEIGHT,
+        paddingVertical: 10,
+        borderRadius: theme.radius.sm,
+        // Web `-mx-2 px-2 w-full`: shifted left 8 with the same width.
+        ...(bare
+          ? { gap: 8, paddingHorizontal: 6 }
+          : { gap: 10, paddingHorizontal: 8, marginLeft: -8, marginRight: 8 }),
+        backgroundColor: pressed
+          ? theme.colors.hover
+          : !bare && open
+            ? theme.colors.bg
+            : "transparent",
+      })}
+    >
+      <View style={{ transform: [{ rotate: open ? "90deg" : "0deg" }] }}>
+        <Icon name="chevron-right" size={14} color={theme.colors["fg-subtle"]} />
+      </View>
+      {showMarker ? (
+        <View
+          style={{
+            width: bare ? 14 : 20,
+            height: bare ? 14 : 20,
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          {outcome === "failed" ? (
+            <Icon name="triangle-alert" size={12} color={theme.colors["status-failed"]} />
+          ) : outcome === "cancelled" ? (
+            <Icon name="circle-slash" size={12} color={theme.colors["fg-subtle"]} />
+          ) : (
+            <PulseDot color={theme.colors["fg-subtle"]} />
+          )}
+        </View>
+      ) : null}
+      <View
+        style={{
+          flexDirection: "row",
+          alignItems: "center",
+          minWidth: 0,
+          ...(status?.kind === "worked" ? { flexShrink: 1 } : { flex: 1 }),
+        }}
+      >
+        {statusNode}
+        {showLive ? (
+          <View style={{ flex: 1, minWidth: 0 }}>{liveHeader}</View>
+        ) : (
+          <Text style={[text, TRUNCATED_TAIL]} numberOfLines={1}>
+            {tail}
+            {outcome === "failed" && failureText ? (
+              <Text style={{ color: theme.colors["status-failed"] }}>{` · ${failureText}`}</Text>
+            ) : null}
+            {outcome === "cancelled" ? (
+              <Text style={{ color: theme.colors["fg-subtle"] }}>{" · interrupted"}</Text>
+            ) : null}
+          </Text>
+        )}
+      </View>
+      {status?.kind === "worked" ? (
+        <View
+          style={{
+            marginLeft: 4,
+            height: 1,
+            flex: 1,
+            minWidth: 0,
+            backgroundColor: theme.colors.border,
+          }}
+        />
+      ) : null}
+      {status && status.kind !== "worked" && (contextCompactionCount ?? 0) > 0 ? (
+        <Icon name="shrink" size={14} color={theme.colors["fg-muted"]} />
+      ) : null}
+    </Pressable>
+  );
+  const sticky = !bare && open && foldKey !== undefined && registerSticky !== null;
+  const collapseFromPin = () => {
+    toggle(false);
+    registerSticky?.reveal(frame.current.top);
+  };
+  const report = () => {
+    if (!sticky || !registerSticky || foldKey === undefined) return;
+    registerSticky.register(foldKey, { ...frame.current, render: () => renderHeader(true) });
+  };
+  // oxlint-disable-next-line react-hooks/exhaustive-deps -- re-report when the row content changes
+  useEffect(() => {
+    if (!sticky) {
+      if (registerSticky && foldKey !== undefined) registerSticky.register(foldKey, null);
+      return;
+    }
+    report();
+    return () => registerSticky?.register(foldKey!, null);
+  });
+
+  return (
+    <View
+      onLayout={(event) => {
+        const { y, height } = event.nativeEvent.layout;
+        frame.current = { ...frame.current, top: y, height };
+        report();
+      }}
+    >
+      <View
+        onLayout={(event) => {
+          frame.current = { ...frame.current, headerHeight: event.nativeEvent.layout.height };
+          report();
+        }}
+      >
+        {renderHeader(false)}
+      </View>
+      {status && status.kind !== "worked" && !open && status.preview ? (
+        <Pressable
+          onPress={() => toggle(true)}
+          style={{ paddingBottom: 4, paddingLeft: 24, minWidth: 0 }}
+        >
+          {status.preview}
+        </Pressable>
+      ) : null}
+      {open ? (
+        <Animated.View
+          entering={FadeIn.duration(160)}
+          style={bare ? { paddingTop: 4, paddingLeft: 20 } : { paddingTop: 8 }}
+        >
+          {children}
+        </Animated.View>
+      ) : null}
+    </View>
+  );
+}
+
+/** The stable left rule under a turn/activity body (web TurnRailFrame). */
+export function TurnRailFrame({
+  children,
+  compact = false,
+}: {
+  children: ReactNode;
+  compact?: boolean;
+}) {
+  const theme = useNativeTimelineTheme();
+  return (
+    <View
+      style={{
+        borderLeftWidth: 2,
+        borderLeftColor: theme.colors.border,
+        paddingLeft: 12,
+        gap: compact ? 2 : 16,
+      }}
+    >
+      {children}
+    </View>
+  );
+}
+
+function familyOf(item: ActivityItem): string {
+  if (item.kind === "tool-call") return `tool:${item.name}`;
+  return item.kind;
+}
+
+/** The native ActivityRail (bare): tight same-family rows, breathing room between families. */
+export function ActivityRail({
+  items,
+  startupActive,
+  renderPreparing,
+}: {
+  items: ActivityItem[];
+  startupActive?: boolean | undefined;
+  renderPreparing?: ((props: PreparingProps) => ReactNode) | undefined;
+}) {
+  const phases = items.filter((item) => item.kind === "startup-phase");
+  const hasWork = items.some(
+    (item) =>
+      item.kind !== "startup-phase" && (item.kind !== "reasoning" || item.text.trim().length > 0),
+  );
+  const interrupted = phases.some(
+    (item) => item.status === "failed" || item.status === "cancelled",
+  );
+  const providerResponded = phases.some(
+    (item) => item.phase === "provider_first_byte" && item.status === "complete",
+  );
+  const responsePending = phases.some((item) => item.phase === "provider_first_byte");
+  const loading =
+    !hasWork &&
+    !interrupted &&
+    (startupActive ?? (!providerResponded && phases.some((item) => item.status === "running")));
+  const visibleItems = items.filter((item) =>
+    item.kind === "startup-phase"
+      ? item.status === "failed" || item.status === "cancelled"
+      : item.kind !== "reasoning" || item.text.trim().length > 0,
+  );
+  const startedAt = phases.reduce(
+    (first, item) => (item.startedAt < first ? item.startedAt : first),
+    phases[0]?.startedAt ?? "",
+  );
+  return (
+    <View style={{ gap: 2 }}>
+      {loading ? (
+        <Animated.View entering={FadeIn.duration(160)} exiting={FadeOut.duration(160)}>
+          <PreparingState
+            startedAt={startedAt}
+            phase={responsePending ? "waiting" : "preparing"}
+            render={renderPreparing}
+          />
+        </Animated.View>
+      ) : null}
+      {visibleItems.map((item, index) => {
+        const newFamily = index > 0 && familyOf(item) !== familyOf(visibleItems[index - 1]!);
+        return (
+          <View key={item.id} style={newFamily ? { marginTop: 12 } : undefined}>
+            <ActivityRow item={item} />
+          </View>
+        );
+      })}
+    </View>
+  );
+}
+
+export interface PreparingProps {
+  startedAt: string;
+  phase: "preparing" | "waiting";
+  phrase: string;
+  slow: boolean;
+}
+
+/** The web GenieLoading: a visual (orb by default; hosts supply a character) + rotating copy. */
+export function PreparingState({
+  startedAt,
+  phase,
+  render,
+}: {
+  startedAt: string;
+  phase: "preparing" | "waiting";
+  render?: ((props: PreparingProps) => ReactNode) | undefined;
+}) {
+  const theme = useNativeTimelineTheme();
+  const m = useNativeTimelineMessages();
+  const phrases = nativeLoadingPhrases(m.loadingPhrases, phase);
+  const [index, setIndex] = useState(() => Math.floor(Math.random() * phrases.length));
+  const [slow, setSlow] = useState(false);
+  useEffect(() => {
+    const update = () => {
+      setSlow(Date.now() - Date.parse(startedAt) >= 30_000);
+      setIndex(Math.floor(Math.random() * phrases.length));
+    };
+    const timer = setInterval(update, 5_000);
+    return () => clearInterval(timer);
+  }, [startedAt, phrases]);
+  const phrase = slow
+    ? phase === "waiting"
+      ? m.stillWaiting
+      : m.longerThanUsual
+    : (phrases[index % phrases.length] ?? "");
+  if (render) return <>{render({ startedAt, phase, phrase, slow })}</>;
+  return (
+    <View
+      style={{
+        flexDirection: "row",
+        alignItems: "center",
+        gap: 14,
+        minHeight: 88,
+        paddingVertical: 12,
+      }}
+    >
+      <ThinkingOrb />
+      <Animated.Text
+        key={phrase}
+        entering={FadeIn.duration(650)}
+        style={{
+          ...fontStyle(theme),
+          fontSize: theme.size.sm,
+          lineHeight: 18,
+          color: theme.colors["fg-muted"],
+        }}
+      >
+        {phrase}
+      </Animated.Text>
+    </View>
+  );
+}
+
+/** One stable 24pt viewport; updates replace its content without moving the conversation. */
+export function RollingActivity({
+  items,
+  previousItem,
+  showCount = true,
+}: {
+  items: ActivityItem[];
+  previousItem?: ActivityItem | undefined;
+  showCount?: boolean;
+}) {
+  const theme = useNativeTimelineTheme();
+  const m = useNativeTimelineMessages();
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
+  const selected = rollingActivityItem(items, previousItem, mounted);
+  if (!selected) return null;
+  const { item, earlierCount } = selected;
+  return (
+    <View
+      style={{ flexDirection: "row", alignItems: "center", gap: 12, minWidth: 0, flex: 1 }}
+      accessibilityLabel={
+        item.kind === "tool-call"
+          ? toolDisplayName(item.name, item.display)
+          : item.kind === "reasoning"
+            ? m.thinking
+            : m.working
+      }
+    >
+      <View style={{ flex: 1, minWidth: 0, height: 24, overflow: "hidden" }}>
+        <Animated.View
+          key={item.id}
+          entering={FadeInDown.duration(400)}
+          exiting={FadeOutUp.duration(400)}
+          style={{
+            position: "absolute",
+            left: 0,
+            right: 0,
+            top: 0,
+            bottom: 0,
+            flexDirection: "row",
+            alignItems: "center",
+          }}
+        >
+          <ActivityRow item={item} compact />
+        </Animated.View>
+      </View>
+      {showCount && earlierCount > 0 ? (
+        <Text
+          style={{
+            ...fontStyle(theme),
+            fontSize: theme.size.xs,
+            color: theme.colors["fg-subtle"],
+            fontVariant: ["tabular-nums"],
+          }}
+        >
+          {`+${earlierCount} earlier`}
+        </Text>
+      ) : null}
+    </View>
+  );
+}

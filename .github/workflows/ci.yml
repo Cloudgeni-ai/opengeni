@@ -5,8 +5,7 @@ on:
     branches:
       - main
       - production
-  # Launch window (until 2026-10-04 22:00 Oslo): pull requests into main skip
-  # CI; agents merge on targeted local checks. Restore after the launch window.
+  # Ordinary main PRs use targeted local checks; post-merge CI remains enabled.
   pull_request:
     branches:
       - production
@@ -38,6 +37,10 @@ on:
         type: string
 
 concurrency:
+  # The main -> production promotion PR is not gated by this workflow (the production ruleset
+  # requires only the admission checks) and its head SHA already runs here as a main push, so
+  # its pull_request run skips `plan` and the aggregate instead of rebuilding the full matrix
+  # on every main push and starving the main build of runners.
   # A Version PR has one authoritative latest head. When a newer main push
   # actually regenerates that head, continuing to build the superseded head can
   # only waste capacity. Movement on main alone does not invalidate an admitted
@@ -81,9 +84,56 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           ref: ${{ github.sha }}
-          fetch-depth: 0
+          fetch-depth: 1
           persist-credentials: false
 
+      - name: Restore complete checkout history without listing refs
+        shell: bash
+        timeout-minutes: 5
+        env:
+          EXPECTED_CHECKOUT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          checked_out_sha="$(git rev-parse HEAD 2>/dev/null)"
+          fetch_args=()
+          if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = true ]; then
+            fetch_args+=(--unshallow)
+          fi
+          selected_fetch="$checked_out_sha"
+          if [ -n "${EXPECTED_SELECTED_PULL_REF:-}" ]; then
+            if [[ ! "$EXPECTED_SELECTED_PULL_REF" =~ ^refs/pull/[0-9]+/head$ ]]; then
+              echo "::error::Selected checkout identity changed"
+              exit 1
+            fi
+            selected_fetch="+$EXPECTED_SELECTED_PULL_REF:refs/remotes/origin/selected-pull"
+          fi
+          if ! git fetch --quiet --no-tags --prune --no-recurse-submodules "${fetch_args[@]}" origin \
+            '+refs/heads/*:refs/remotes/origin/*' \
+            '+refs/tags/*:refs/tags/*' \
+            "$selected_fetch" >/dev/null 2>&1; then
+            echo "::error::Could not restore complete repository history"
+            exit 1
+          fi
+          if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" != false ] ||
+             [ "$(git rev-parse HEAD 2>/dev/null)" != "$checked_out_sha" ]; then
+            echo "::error::Repository history or source identity changed"
+            exit 1
+          fi
+          if [ -n "${EXPECTED_SELECTED_PULL_REF:-}" ] &&
+             [ "$(git rev-parse refs/remotes/origin/selected-pull 2>/dev/null)" != "$checked_out_sha" ]; then
+            echo "::error::Selected checkout identity changed"
+            exit 1
+          fi
+          if [ -n "${EXPECTED_CHECKOUT_SHA:-}" ] &&
+             [ "$checked_out_sha" != "$EXPECTED_CHECKOUT_SHA" ]; then
+            echo "::error::Selected checkout identity changed"
+            exit 1
+          fi
+          if [ -n "${EXPECTED_CHECKOUT_REF:-}" ] &&
+             [ "$(git rev-parse "$EXPECTED_CHECKOUT_REF" 2>/dev/null)" != "$checked_out_sha" ]; then
+            echo "::error::Selected checkout identity changed"
+            exit 1
+          fi
       - name: Begin exact-head automation checks
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -149,9 +199,9 @@ jobs:
   plan:
     name: Explain change impact
     needs: automation-admission
-    if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    if: ${{ !cancelled() && !(github.event_name == 'pull_request' && github.head_ref == 'main' && github.base_ref == 'production') && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 17
     outputs:
       mode: ${{ steps.plan.outputs.mode }}
       unit_count: ${{ steps.plan.outputs.unit_count }}
@@ -171,9 +221,57 @@ jobs:
         uses: actions/checkout@v6
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}
-          fetch-depth: 0
+          fetch-depth: 1
           persist-credentials: false
 
+      - name: Restore complete checkout history without listing refs
+        shell: bash
+        timeout-minutes: 5
+        env:
+          EXPECTED_CHECKOUT_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}
+          EXPECTED_SELECTED_PULL_REF: ${{ github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number) || '' }}
+        run: |
+          set -euo pipefail
+          checked_out_sha="$(git rev-parse HEAD 2>/dev/null)"
+          fetch_args=()
+          if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = true ]; then
+            fetch_args+=(--unshallow)
+          fi
+          selected_fetch="$checked_out_sha"
+          if [ -n "${EXPECTED_SELECTED_PULL_REF:-}" ]; then
+            if [[ ! "$EXPECTED_SELECTED_PULL_REF" =~ ^refs/pull/[0-9]+/head$ ]]; then
+              echo "::error::Selected checkout identity changed"
+              exit 1
+            fi
+            selected_fetch="+$EXPECTED_SELECTED_PULL_REF:refs/remotes/origin/selected-pull"
+          fi
+          if ! git fetch --quiet --no-tags --prune --no-recurse-submodules "${fetch_args[@]}" origin \
+            '+refs/heads/*:refs/remotes/origin/*' \
+            '+refs/tags/*:refs/tags/*' \
+            "$selected_fetch" >/dev/null 2>&1; then
+            echo "::error::Could not restore complete repository history"
+            exit 1
+          fi
+          if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" != false ] ||
+             [ "$(git rev-parse HEAD 2>/dev/null)" != "$checked_out_sha" ]; then
+            echo "::error::Repository history or source identity changed"
+            exit 1
+          fi
+          if [ -n "${EXPECTED_SELECTED_PULL_REF:-}" ] &&
+             [ "$(git rev-parse refs/remotes/origin/selected-pull 2>/dev/null)" != "$checked_out_sha" ]; then
+            echo "::error::Selected checkout identity changed"
+            exit 1
+          fi
+          if [ -n "${EXPECTED_CHECKOUT_SHA:-}" ] &&
+             [ "$checked_out_sha" != "$EXPECTED_CHECKOUT_SHA" ]; then
+            echo "::error::Selected checkout identity changed"
+            exit 1
+          fi
+          if [ -n "${EXPECTED_CHECKOUT_REF:-}" ] &&
+             [ "$(git rev-parse "$EXPECTED_CHECKOUT_REF" 2>/dev/null)" != "$checked_out_sha" ]; then
+            echo "::error::Selected checkout identity changed"
+            exit 1
+          fi
       - name: Set up pinned Bun
         uses: oven-sh/setup-bun@v2
         with:
@@ -293,9 +391,57 @@ jobs:
         uses: actions/checkout@v6
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}
-          fetch-depth: 0
+          fetch-depth: 1
           persist-credentials: false
 
+      - name: Restore complete checkout history without listing refs
+        shell: bash
+        timeout-minutes: 5
+        env:
+          EXPECTED_CHECKOUT_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}
+          EXPECTED_SELECTED_PULL_REF: ${{ github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number) || '' }}
+        run: |
+          set -euo pipefail
+          checked_out_sha="$(git rev-parse HEAD 2>/dev/null)"
+          fetch_args=()
+          if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = true ]; then
+            fetch_args+=(--unshallow)
+          fi
+          selected_fetch="$checked_out_sha"
+          if [ -n "${EXPECTED_SELECTED_PULL_REF:-}" ]; then
+            if [[ ! "$EXPECTED_SELECTED_PULL_REF" =~ ^refs/pull/[0-9]+/head$ ]]; then
+              echo "::error::Selected checkout identity changed"
+              exit 1
+            fi
+            selected_fetch="+$EXPECTED_SELECTED_PULL_REF:refs/remotes/origin/selected-pull"
+          fi
+          if ! git fetch --quiet --no-tags --prune --no-recurse-submodules "${fetch_args[@]}" origin \
+            '+refs/heads/*:refs/remotes/origin/*' \
+            '+refs/tags/*:refs/tags/*' \
+            "$selected_fetch" >/dev/null 2>&1; then
+            echo "::error::Could not restore complete repository history"
+            exit 1
+          fi
+          if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" != false ] ||
+             [ "$(git rev-parse HEAD 2>/dev/null)" != "$checked_out_sha" ]; then
+            echo "::error::Repository history or source identity changed"
+            exit 1
+          fi
+          if [ -n "${EXPECTED_SELECTED_PULL_REF:-}" ] &&
+             [ "$(git rev-parse refs/remotes/origin/selected-pull 2>/dev/null)" != "$checked_out_sha" ]; then
+            echo "::error::Selected checkout identity changed"
+            exit 1
+          fi
+          if [ -n "${EXPECTED_CHECKOUT_SHA:-}" ] &&
+             [ "$checked_out_sha" != "$EXPECTED_CHECKOUT_SHA" ]; then
+            echo "::error::Selected checkout identity changed"
+            exit 1
+          fi
+          if [ -n "${EXPECTED_CHECKOUT_REF:-}" ] &&
+             [ "$(git rev-parse "$EXPECTED_CHECKOUT_REF" 2>/dev/null)" != "$checked_out_sha" ]; then
+            echo "::error::Selected checkout identity changed"
+            exit 1
+          fi
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
         with:
@@ -380,11 +526,14 @@ jobs:
 
       - name: Profile impacted TypeScript 7 projects
         timeout-minutes: 11
+        env:
+          OPENGENI_TYPECHECK_CONCURRENCY: "1"
         run: >-
           bun scripts/ci/profile-command.ts
           --name typecheck
           --output ci-profile/typecheck.json
           --timeout-seconds 600
+          --live-resources
           -- bun scripts/ci/run-typecheck-plan.ts
           --plan ${{ runner.temp }}/ci-impact-plan/impact-plan.json
 
@@ -438,9 +587,57 @@ jobs:
         uses: actions/checkout@v6
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}
-          fetch-depth: 0
+          fetch-depth: 1
           persist-credentials: false
 
+      - name: Restore complete checkout history without listing refs
+        shell: bash
+        timeout-minutes: 5
+        env:
+          EXPECTED_CHECKOUT_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}
+          EXPECTED_SELECTED_PULL_REF: ${{ github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number) || '' }}
+        run: |
+          set -euo pipefail
+          checked_out_sha="$(git rev-parse HEAD 2>/dev/null)"
+          fetch_args=()
+          if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = true ]; then
+            fetch_args+=(--unshallow)
+          fi
+          selected_fetch="$checked_out_sha"
+          if [ -n "${EXPECTED_SELECTED_PULL_REF:-}" ]; then
+            if [[ ! "$EXPECTED_SELECTED_PULL_REF" =~ ^refs/pull/[0-9]+/head$ ]]; then
+              echo "::error::Selected checkout identity changed"
+              exit 1
+            fi
+            selected_fetch="+$EXPECTED_SELECTED_PULL_REF:refs/remotes/origin/selected-pull"
+          fi
+          if ! git fetch --quiet --no-tags --prune --no-recurse-submodules "${fetch_args[@]}" origin \
+            '+refs/heads/*:refs/remotes/origin/*' \
+            '+refs/tags/*:refs/tags/*' \
+            "$selected_fetch" >/dev/null 2>&1; then
+            echo "::error::Could not restore complete repository history"
+            exit 1
+          fi
+          if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" != false ] ||
+             [ "$(git rev-parse HEAD 2>/dev/null)" != "$checked_out_sha" ]; then
+            echo "::error::Repository history or source identity changed"
+            exit 1
+          fi
+          if [ -n "${EXPECTED_SELECTED_PULL_REF:-}" ] &&
+             [ "$(git rev-parse refs/remotes/origin/selected-pull 2>/dev/null)" != "$checked_out_sha" ]; then
+            echo "::error::Selected checkout identity changed"
+            exit 1
+          fi
+          if [ -n "${EXPECTED_CHECKOUT_SHA:-}" ] &&
+             [ "$checked_out_sha" != "$EXPECTED_CHECKOUT_SHA" ]; then
+            echo "::error::Selected checkout identity changed"
+            exit 1
+          fi
+          if [ -n "${EXPECTED_CHECKOUT_REF:-}" ] &&
+             [ "$(git rev-parse "$EXPECTED_CHECKOUT_REF" 2>/dev/null)" != "$checked_out_sha" ]; then
+            echo "::error::Selected checkout identity changed"
+            exit 1
+          fi
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
         with:
@@ -637,9 +834,57 @@ jobs:
         uses: actions/checkout@v6
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}
-          fetch-depth: 0
+          fetch-depth: 1
           persist-credentials: false
 
+      - name: Restore complete checkout history without listing refs
+        shell: bash
+        timeout-minutes: 5
+        env:
+          EXPECTED_CHECKOUT_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}
+          EXPECTED_SELECTED_PULL_REF: ${{ github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number) || '' }}
+        run: |
+          set -euo pipefail
+          checked_out_sha="$(git rev-parse HEAD 2>/dev/null)"
+          fetch_args=()
+          if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = true ]; then
+            fetch_args+=(--unshallow)
+          fi
+          selected_fetch="$checked_out_sha"
+          if [ -n "${EXPECTED_SELECTED_PULL_REF:-}" ]; then
+            if [[ ! "$EXPECTED_SELECTED_PULL_REF" =~ ^refs/pull/[0-9]+/head$ ]]; then
+              echo "::error::Selected checkout identity changed"
+              exit 1
+            fi
+            selected_fetch="+$EXPECTED_SELECTED_PULL_REF:refs/remotes/origin/selected-pull"
+          fi
+          if ! git fetch --quiet --no-tags --prune --no-recurse-submodules "${fetch_args[@]}" origin \
+            '+refs/heads/*:refs/remotes/origin/*' \
+            '+refs/tags/*:refs/tags/*' \
+            "$selected_fetch" >/dev/null 2>&1; then
+            echo "::error::Could not restore complete repository history"
+            exit 1
+          fi
+          if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" != false ] ||
+             [ "$(git rev-parse HEAD 2>/dev/null)" != "$checked_out_sha" ]; then
+            echo "::error::Repository history or source identity changed"
+            exit 1
+          fi
+          if [ -n "${EXPECTED_SELECTED_PULL_REF:-}" ] &&
+             [ "$(git rev-parse refs/remotes/origin/selected-pull 2>/dev/null)" != "$checked_out_sha" ]; then
+            echo "::error::Selected checkout identity changed"
+            exit 1
+          fi
+          if [ -n "${EXPECTED_CHECKOUT_SHA:-}" ] &&
+             [ "$checked_out_sha" != "$EXPECTED_CHECKOUT_SHA" ]; then
+            echo "::error::Selected checkout identity changed"
+            exit 1
+          fi
+          if [ -n "${EXPECTED_CHECKOUT_REF:-}" ] &&
+             [ "$(git rev-parse "$EXPECTED_CHECKOUT_REF" 2>/dev/null)" != "$checked_out_sha" ]; then
+            echo "::error::Selected checkout identity changed"
+            exit 1
+          fi
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
         with:
@@ -674,9 +919,10 @@ jobs:
       - name: Recovery integration regressions
         timeout-minutes: 5
         run: |
+          bun test scripts/ci/recovery-selection.test.ts
           bun test --timeout 30000 \
             --test-name-pattern \
-            'an MCP stream timeout after a successful tool output checkpoints once and recovers the same turn' \
+            'a mcp failure after successful tool output checkpoints once and recovers the same turn' \
             ./test/integration/worker-activity.integration.ts
           bun test --timeout 180000 \
             --test-name-pattern \
@@ -688,7 +934,7 @@ jobs:
     needs: [automation-admission, plan]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.browser_lane_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 70
+    timeout-minutes: 71
     strategy:
       fail-fast: false
       matrix:
@@ -698,9 +944,57 @@ jobs:
         uses: actions/checkout@v6
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}
-          fetch-depth: 0
+          fetch-depth: 1
           persist-credentials: false
 
+      - name: Restore complete checkout history without listing refs
+        shell: bash
+        timeout-minutes: 5
+        env:
+          EXPECTED_CHECKOUT_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}
+          EXPECTED_SELECTED_PULL_REF: ${{ github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number) || '' }}
+        run: |
+          set -euo pipefail
+          checked_out_sha="$(git rev-parse HEAD 2>/dev/null)"
+          fetch_args=()
+          if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = true ]; then
+            fetch_args+=(--unshallow)
+          fi
+          selected_fetch="$checked_out_sha"
+          if [ -n "${EXPECTED_SELECTED_PULL_REF:-}" ]; then
+            if [[ ! "$EXPECTED_SELECTED_PULL_REF" =~ ^refs/pull/[0-9]+/head$ ]]; then
+              echo "::error::Selected checkout identity changed"
+              exit 1
+            fi
+            selected_fetch="+$EXPECTED_SELECTED_PULL_REF:refs/remotes/origin/selected-pull"
+          fi
+          if ! git fetch --quiet --no-tags --prune --no-recurse-submodules "${fetch_args[@]}" origin \
+            '+refs/heads/*:refs/remotes/origin/*' \
+            '+refs/tags/*:refs/tags/*' \
+            "$selected_fetch" >/dev/null 2>&1; then
+            echo "::error::Could not restore complete repository history"
+            exit 1
+          fi
+          if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" != false ] ||
+             [ "$(git rev-parse HEAD 2>/dev/null)" != "$checked_out_sha" ]; then
+            echo "::error::Repository history or source identity changed"
+            exit 1
+          fi
+          if [ -n "${EXPECTED_SELECTED_PULL_REF:-}" ] &&
+             [ "$(git rev-parse refs/remotes/origin/selected-pull 2>/dev/null)" != "$checked_out_sha" ]; then
+            echo "::error::Selected checkout identity changed"
+            exit 1
+          fi
+          if [ -n "${EXPECTED_CHECKOUT_SHA:-}" ] &&
+             [ "$checked_out_sha" != "$EXPECTED_CHECKOUT_SHA" ]; then
+            echo "::error::Selected checkout identity changed"
+            exit 1
+          fi
+          if [ -n "${EXPECTED_CHECKOUT_REF:-}" ] &&
+             [ "$(git rev-parse "$EXPECTED_CHECKOUT_REF" 2>/dev/null)" != "$checked_out_sha" ]; then
+            echo "::error::Selected checkout identity changed"
+            exit 1
+          fi
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
         with:
@@ -809,7 +1103,7 @@ jobs:
           OPENGENI_SESSION_SEARCH_ARTIFACT_DIR: /tmp/session-search-header-evidence
         run: >-
           bun test --max-concurrency=1 --timeout 300000
-          --test-name-pattern 'desktop expanded header keeps icon-only search inline'
+          --test-name-pattern 'desktop expanded header keeps icon-only search inline|restores.*focus|mobile result navigation'
           ./test/e2e/session-search.browser.e2e.ts
 
       - name: Queue surface browser acceptance
@@ -1024,9 +1318,57 @@ jobs:
         uses: actions/checkout@v6
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}
-          fetch-depth: 0
+          fetch-depth: 1
           persist-credentials: false
 
+      - name: Restore complete checkout history without listing refs
+        shell: bash
+        timeout-minutes: 5
+        env:
+          EXPECTED_CHECKOUT_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}
+          EXPECTED_SELECTED_PULL_REF: ${{ github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number) || '' }}
+        run: |
+          set -euo pipefail
+          checked_out_sha="$(git rev-parse HEAD 2>/dev/null)"
+          fetch_args=()
+          if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = true ]; then
+            fetch_args+=(--unshallow)
+          fi
+          selected_fetch="$checked_out_sha"
+          if [ -n "${EXPECTED_SELECTED_PULL_REF:-}" ]; then
+            if [[ ! "$EXPECTED_SELECTED_PULL_REF" =~ ^refs/pull/[0-9]+/head$ ]]; then
+              echo "::error::Selected checkout identity changed"
+              exit 1
+            fi
+            selected_fetch="+$EXPECTED_SELECTED_PULL_REF:refs/remotes/origin/selected-pull"
+          fi
+          if ! git fetch --quiet --no-tags --prune --no-recurse-submodules "${fetch_args[@]}" origin \
+            '+refs/heads/*:refs/remotes/origin/*' \
+            '+refs/tags/*:refs/tags/*' \
+            "$selected_fetch" >/dev/null 2>&1; then
+            echo "::error::Could not restore complete repository history"
+            exit 1
+          fi
+          if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" != false ] ||
+             [ "$(git rev-parse HEAD 2>/dev/null)" != "$checked_out_sha" ]; then
+            echo "::error::Repository history or source identity changed"
+            exit 1
+          fi
+          if [ -n "${EXPECTED_SELECTED_PULL_REF:-}" ] &&
+             [ "$(git rev-parse refs/remotes/origin/selected-pull 2>/dev/null)" != "$checked_out_sha" ]; then
+            echo "::error::Selected checkout identity changed"
+            exit 1
+          fi
+          if [ -n "${EXPECTED_CHECKOUT_SHA:-}" ] &&
+             [ "$checked_out_sha" != "$EXPECTED_CHECKOUT_SHA" ]; then
+            echo "::error::Selected checkout identity changed"
+            exit 1
+          fi
+          if [ -n "${EXPECTED_CHECKOUT_REF:-}" ] &&
+             [ "$(git rev-parse "$EXPECTED_CHECKOUT_REF" 2>/dev/null)" != "$checked_out_sha" ]; then
+            echo "::error::Selected checkout identity changed"
+            exit 1
+          fi
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
         with:
@@ -1099,7 +1441,20 @@ jobs:
         run: bun run test:react-native-hermes-bundle
 
       - name: Reproduce committed modality WASM packages from clean Rust sources
-        run: bun scripts/rebuild-artifact-kernel-wasm-packages.ts --check
+        id: modality-wasm-rebuild
+        run: >-
+          bun scripts/rebuild-artifact-kernel-wasm-packages.ts --check
+          --diagnostic-output .opengeni/ci-canonical-modality-wasm
+
+      - name: Retain failed canonical modality WASM rebuild
+        if: ${{ failure() && steps.modality-wasm-rebuild.outcome == 'failure' }}
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: ci-canonical-modality-wasm-${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}
+          path: .opengeni/ci-canonical-modality-wasm
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 3
 
       - name: Stabilize Ubuntu package downloads
         run: |
@@ -1227,7 +1582,7 @@ jobs:
     needs: [automation-admission, plan]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.browserd_real_e2e == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 27
     steps:
       - name: Check out exact candidate
         uses: actions/checkout@v6
@@ -1249,6 +1604,23 @@ jobs:
         with:
           browsers: chromium
 
+      - name: Verify managed recovery in an owned process namespace
+        timeout-minutes: 2
+        run: |
+          set -euo pipefail
+          chromium_binary="$(bun -e 'import { chromium } from "playwright"; process.stdout.write(chromium.executablePath())')"
+          # Recovery must prove that no process still owns the exact profile.
+          # Keep the test non-root, but give it its own complete PID inventory
+          # and the real executable rather than the launch wrapper below.
+          sudo env PATH="$PATH" HOME="$HOME" \
+            OPENGENI_BROWSERD_E2E=1 OPENGENI_BROWSERD_RECOVERY_E2E=1 \
+            OPENGENI_BROWSER_EXECUTABLE="$chromium_binary" \
+            unshare --mount --pid --fork --mount-proc --kill-child=SIGTERM \
+            --setuid="$(id -u)" --setgid="$(id -g)" \
+            "$(command -v bun)" test --timeout 120000 \
+            packages/browserd/test/supervisor.e2e.test.ts \
+            --test-name-pattern '^graceful shutdown'
+
       - name: Run actual browserd end-to-end suite
         timeout-minutes: 6
         run: |
@@ -1266,7 +1638,7 @@ jobs:
   test:
     name: Typecheck and unit tests
     needs: [plan, source-contracts, unit-shards, integration-shards, e2e-shards, test-suite, browser-acceptance, browserd-real-e2e, package-contracts, deployment, artifact-runtime, images]
-    if: ${{ always() }}
+    if: ${{ always() && !(github.event_name == 'pull_request' && github.head_ref == 'main' && github.base_ref == 'production') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

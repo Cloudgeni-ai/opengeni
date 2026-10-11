@@ -39,11 +39,22 @@ function creditAdmissionBoundary(
     }
   };
   visit(declaration.body);
-  if (gates.length !== 1 || persistence.length !== 1) {
+  if (persistence.length !== 1) {
     throw new Error("expected exactly one credit gate and persistence call in this function");
   }
-  const gate = gates[0]!;
   const commit = persistence[0]!;
+  // Codex checks exact accepted-turn authority inside the persistence
+  // transaction. That nested gate cannot satisfy the non-Codex preflight.
+  const preflightGates = gates.filter((gate) => {
+    for (let ancestor = parents.get(gate); ancestor; ancestor = parents.get(ancestor)) {
+      if (ancestor === commit) return false;
+    }
+    return true;
+  });
+  if (preflightGates.length !== 1) {
+    throw new Error("expected exactly one credit gate before the persistence call");
+  }
+  const gate = preflightGates[0]!;
   let awaitedGate: Node = gate;
   // The timing helper synchronously invokes its callback and returns its
   // promise. Its awaited call is the admission boundary, not the callback text.
@@ -127,8 +138,12 @@ describe("allowance admission lifecycle boundaries", () => {
     expect(source.slice(materialize, source.indexOf("policy:", materialize))).toContain(
       "budgetPausedReason:",
     );
-    expect(source).toContain('return { pausedReason: "allowance",');
-    expect(source).toContain(
+    const sharedAdmission = await Bun.file(
+      new URL("../../../packages/core/src/goal-admission.ts", import.meta.url),
+    ).text();
+    expect(source.slice(check)).toContain("await goalRunBudgetBlocked(");
+    expect(sharedAdmission).toContain('pausedReason: "allowance"');
+    expect(sharedAdmission).toContain(
       "agentRunAdmissionDenial(services, { ...input, requestedAgentRuns: 1 })",
     );
     expect(source).toContain(
@@ -136,7 +151,7 @@ describe("allowance admission lifecycle boundaries", () => {
     );
   });
 
-  test("credit refusal is checked before core create and prompt persistence", async () => {
+  test("non-Codex credit refusal is checked before core create and prompt persistence", async () => {
     const source = await Bun.file(
       new URL("../../../packages/core/src/domain/sessions.ts", import.meta.url),
     ).text();
@@ -157,6 +172,28 @@ describe("allowance admission lifecycle boundaries", () => {
       'delivery === "send" && input.expectedDraftRevision != null',
     );
     expect(beforePromptGate).toContain("draft.sourceTurnId");
+  });
+
+  test("a transactional gate does not replace the independent preflight gate", () => {
+    const gate =
+      "requireLimit(deps, { initiatingHumanSubjectId: initiatingHumanForAllowance(frozen) })";
+    const commit = `await persist({ captureTurnAuthority: async () => { await ${gate}; } });`;
+    expect(() =>
+      creditAdmissionBoundary(
+        `async function admission() { await ${gate}; ${commit} }`,
+        "admission",
+        "persist",
+        "frozen",
+      ),
+    ).not.toThrow();
+    expect(() =>
+      creditAdmissionBoundary(
+        `async function admission() { ${commit} }`,
+        "admission",
+        "persist",
+        "frozen",
+      ),
+    ).toThrow("expected exactly one credit gate before the persistence call");
   });
 
   test("the structured guard accepts awaited direct and timing-wrapped credit checks", () => {

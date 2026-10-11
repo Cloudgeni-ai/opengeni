@@ -15,7 +15,7 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import postgres from "postgres";
-import { OpenGeni } from "../../../packages/sdk/src/chat";
+import { Opengeni } from "../../../packages/sdk/src/chat";
 import { uuidV5 } from "../../../packages/sdk/src/chat/ids";
 import { OpenGeniClient } from "../../../packages/sdk/src/client";
 import { OpenGeniEmbeddingClient } from "../../../packages/sdk/src/embedding-client";
@@ -63,6 +63,16 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
+// The API's first-use membership defaults (the SDK's CONVERSATION_PERMISSIONS).
+const FIRST_USE_PERMISSIONS = [
+  "workspace:read",
+  "sessions:create",
+  "sessions:read",
+  "sessions:control",
+  "files:upload",
+  "files:read",
+  "mcp_servers:attach",
+] as const;
 const noop = async () => undefined;
 const productUrl = "https://product.example.test/api/opengeni";
 
@@ -178,7 +188,7 @@ async function fixture(privateSessionsEnabled: boolean) {
 
 test("isolated users can create, read and send with a host per-session MCP server, never administer", async () => {
   const f = await fixture(true);
-  const og = new OpenGeni(f.facadeOptions);
+  const og = new Opengeni(f.facadeOptions);
   const tenant = crypto.randomUUID();
   const workspaceId = await og.workspaceIdFor(
     { tenant, user: f.owner.externalId },
@@ -221,7 +231,7 @@ test("isolated users can create, read and send with a host per-session MCP serve
 
 test("custom isolated member permissions can deny MCP attachment without denying ordinary chat", async () => {
   const f = await fixture(true);
-  const og = new OpenGeni({
+  const og = new Opengeni({
     ...f.facadeOptions,
     memberPermissions: ["workspace:read", "sessions:create", "sessions:read", "sessions:control"],
   });
@@ -293,10 +303,10 @@ test.each([
   async (_label, permissions) => {
     const f = await fixture(true);
     const target = { tenant: crypto.randomUUID(), user: f.owner.externalId };
-    const original = new OpenGeni({ ...f.facadeOptions, memberPermissions: permissions });
+    const original = new Opengeni({ ...f.facadeOptions, memberPermissions: permissions });
     const workspaceId = await original.workspaceIdFor(target, { isolation: "user" });
     const resolveAgain = () =>
-      new OpenGeni(f.facadeOptions).workspaceIdFor(target, { isolation: "user" });
+      new Opengeni(f.facadeOptions).workspaceIdFor(target, { isolation: "user" });
     expect(await resolveAgain()).toBe(workspaceId);
     const members = () => f.service.listWorkspaceMembers(workspaceId);
     expect((await members()).map((member) => member.permissions)).toEqual([
@@ -348,7 +358,7 @@ test("a persisted cancellation before the first isolated grant remains fenced af
     workspace.id,
     await uuidV5(JSON.stringify(["member", workspace.id, f.source, target.user]), namespace),
   );
-  const og = new OpenGeni(f.facadeOptions);
+  const og = new Opengeni(f.facadeOptions);
   expect(await og.workspaceIdFor(target, { isolation: "user" })).toBe(workspace.id);
   expect(await f.service.listWorkspaceMembers(workspace.id)).toEqual([]);
   await expect(
@@ -357,6 +367,44 @@ test("a persisted cancellation before the first isolated grant remains fenced af
       model: "scripted-model",
     }),
   ).rejects.toMatchObject({ status: 403 });
+}, 60_000);
+
+test("a key without members:manage never admits a user on first use", async () => {
+  const f = await fixture(true);
+  const token = crypto.randomUUID();
+  await createOrganizationApiKey(db.db, {
+    accountId: f.accountId,
+    name: "Conversation-only key",
+    prefix: "test",
+    keyHash: createHash("sha256").update(token).digest("hex"),
+    permissions: [...FIRST_USE_PERMISSIONS, "workspace:create"],
+  });
+  const limited = new OpenGeniEmbeddingClient({
+    baseUrl: "http://fixture",
+    apiKey: token,
+    fetch: f.facadeOptions.fetch,
+  });
+  const stranger = limited.asUser(crypto.randomUUID(), { source: f.source });
+  await expect(stranger.getWorkspace(f.workspace.id)).rejects.toMatchObject({ status: 403 });
+}, 60_000);
+
+test("a per-user workspace stays single-user: another user gets 403, never a membership", async () => {
+  const f = await fixture(true);
+  const og = new Opengeni(f.facadeOptions);
+  const workspaceId = await og.workspaceId({ user: f.owner.externalId });
+  expect(
+    (await f.service.listWorkspaceMembers(workspaceId)).map((member) => member.subjectId),
+  ).toEqual([f.owner.subjectId]);
+  const owner = og.client.asUser(f.owner.externalId, { source: f.source });
+  expect(await owner.getWorkspace(workspaceId)).toMatchObject({ id: workspaceId });
+  const intruder = og.client.asUser(f.other.externalId, { source: f.source });
+  await expect(intruder.getWorkspace(workspaceId)).rejects.toMatchObject({ status: 403 });
+  await expect(
+    intruder.createSession(workspaceId, { initialMessage: "let me in", model: "scripted-model" }),
+  ).rejects.toMatchObject({ status: 403 });
+  expect(
+    (await f.service.listWorkspaceMembers(workspaceId)).map((member) => member.subjectId),
+  ).toEqual([f.owner.subjectId]);
 }, 60_000);
 
 test("chats: private creates an external asUser-owned user_private session through the proxy", async () => {

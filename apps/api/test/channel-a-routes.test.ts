@@ -13,9 +13,11 @@ import {
   ChannelAConflictError,
   ChannelAFileSystemRouteChangedError,
   ChannelAUnavailableError,
+  SynchronousCommandOutcomeUnknownError,
   ChannelAValidationError,
   BrowserControlTransportError,
   RoutingActiveRouteChangedError,
+  RoutingMutationOutputRejectedError,
   RoutingWorkspaceRootChangedError,
   NatsControlRpc,
   agentErrorToControlError,
@@ -47,6 +49,34 @@ import {
 const here = dirname(fileURLToPath(import.meta.url));
 const sessionsRoute = readFileSync(resolve(here, "..", "src", "routes", "sessions.ts"), "utf8");
 const channelASeam = readFileSync(resolve(here, "..", "src", "sandbox", "channel-a.ts"), "utf8");
+
+test("pending synchronous commands preserve their original handle and never refresh/replay", async () => {
+  const pending = new SynchronousCommandOutcomeUnknownError(31, {
+    stdout: "already wrote",
+    stderr: "",
+  });
+  const mapped = mapChannelAError(pending);
+  expect(mapped).toBeInstanceOf(HTTPException);
+  expect((mapped as HTTPException).status).toBe(409);
+  expect((mapped as HTTPException).message).toContain("pending or unknown");
+  expect((mapped as HTTPException).message).not.toMatch(/retry|try again|already wrote/iu);
+  expect(shouldEvictChannelAHandleAfterError(pending, "read")).toBe(false);
+  let starts = 0;
+  let refreshed = 0;
+  await expect(
+    runChannelAReadWithFreshHandleRetry(
+      async () => {
+        starts++;
+        throw pending;
+      },
+      async () => {
+        refreshed++;
+      },
+    ),
+  ).rejects.toBe(pending);
+  expect(starts).toBe(1);
+  expect(refreshed).toBe(0);
+});
 
 type RouteSpec = {
   path: string;
@@ -318,6 +348,31 @@ describe("P4.4 Channel-A route discipline", () => {
       errorCode: "sandbox_channel_a_operation_failed",
     });
   });
+
+  test.each(["holder_fenced", "authority_revoked"])(
+    "physically settled output rejection %s remains nonretryable at the public boundary",
+    (reasonCode) => {
+      const error = new RoutingMutationOutputRejectedError("writeFiles", reasonCode);
+      const status = reasonCode === "authority_revoked" ? 403 : 409;
+      const mapped = mapChannelAError(error);
+      expect(mapped).toMatchObject({
+        status,
+        code: status === 403 ? "forbidden" : "conflict",
+        retryable: false,
+        outcomeUnknown: false,
+        details: {
+          code: "sandbox_mutation_output_rejected",
+          reasonCode,
+          physicalOutcome: "resolved",
+        },
+      });
+      expect(channelAOperationFailureDiagnostic(error)).toEqual({
+        reason: "request_rejected",
+        status,
+        errorCode: "sandbox_channel_a_operation_failed",
+      });
+    },
+  );
 
   test("request aborts map to a distinct 499 cancellation diagnostic", () => {
     const controller = new AbortController();

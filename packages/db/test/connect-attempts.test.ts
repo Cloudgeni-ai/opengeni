@@ -689,6 +689,37 @@ describe("durable Connect attempts", () => {
     expect((await claimConnectOperation(client.db, scope, input)).status).toBe("replayed");
   });
 
+  test("prepared MCP configuration cannot change after credential submission is claimed", async () => {
+    const mcpSetup = {
+      name: "Records",
+      endpointUrl: "https://records.example.test/mcp",
+      headers: [{ name: "Authorization", secret: "key", prefix: "Bearer " }],
+      secretFields: [{ id: "key", label: "API key" }],
+    };
+    const value = await begin({ ...attempt(), providerId: "mcp-headers", mcpSetup });
+    const input = {
+      attemptId: value.id,
+      operationId: crypto.randomUUID(),
+      expectedRevision: value.revision,
+      inputDigest: digest,
+    };
+    await claimConnectOperation(client.db, scope, input);
+    await expect(
+      finishConnectOperation(client.db, scope, {
+        ...input,
+        commit: async (_tx, current) => ({
+          ...current,
+          revision: current.revision + 1,
+          mcpSetup: { ...mcpSetup, endpointUrl: "https://different.example.test/mcp" },
+        }),
+      }),
+    ).rejects.toThrow("changed");
+    const stored = await getConnectAttempt(client.db, scope, value.id);
+    expect(stored.attempt.mcpSetup).toEqual(mcpSetup);
+    expect(stored.attempt.revision).toBe(value.revision);
+    expect(stored.operationInFlight).toBe(true);
+  });
+
   test("invalid immutable-field change rolls back and leaves the original claim", async () => {
     const value = await begin();
     const input = {

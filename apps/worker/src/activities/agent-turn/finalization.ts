@@ -1,10 +1,8 @@
 import {
   commitSessionAttemptQuiescence,
   listPendingSessionTurns,
-  recordCodexAccountUsageForFinalization,
   recordClaudeAccountUsage,
   releaseClaudeCredentialLease,
-  releaseCodexCredentialLease,
   releaseXaiCredentialLease,
   updateXaiQuotaMetadata,
   type SessionAttemptQuiescenceCommit,
@@ -14,7 +12,7 @@ import { sandboxLeaseTelemetryKey } from "@opengeni/observability";
 import { clearRunCredentialsForAttempt } from "@opengeni/runtime";
 import { fetchXaiSubscriptionQuota } from "@opengeni/xai-subscription";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
-import { signalCodexCapacityWakeTargets } from "../codex-capacity";
+
 import { startActivityHeartbeat, type currentActivityContext } from "../streaming";
 import { startTurnFinalizationMonitor } from "./finalization-monitor";
 import type { CodemodeTokenRenewalController } from "../codemode-token-renewal";
@@ -43,6 +41,9 @@ import {
   type ResumedTurnSandbox,
 } from "../../sandbox-resume";
 import { createTurnCredentialLeases } from "./credential-leases";
+import { coreCodexModelCallCompletedAt, finalizeCoreCodexUsage } from "./codex-core-settlement";
+import { wakeSubscriptionCoreCodexWaitersAndDeliver } from "../subscription-core-codex-waits";
+import { drainPhysicalSandboxResumes } from "./sandbox-provision";
 import { safeErrorDiagnostic, safeErrorForTelemetry } from "./errors";
 import {
   assertPhysicalToolQuiescenceForCancellation,
@@ -128,6 +129,11 @@ export async function finalizeTurnAttempt(deps: TurnFinalizationDeps): Promise<v
       }
     },
     requestWorkerDrain: deps.requestWorkerDrain,
+    execution: {
+      workspaceId: deps.input.workspaceId,
+      sessionId: deps.input.sessionId,
+      attemptId: deps.input.attemptId,
+    },
   });
   try {
     monitor.enter("tool_writers");
@@ -448,44 +454,33 @@ async function finalizeTurnAttemptSteps(
         );
       }
     }
-    if (providerTurn.effectiveCodexCredentialId) {
-      // Part A: the latest scraped usage-header snapshot → the P2 usage cache. A
-      // full duration-identified snapshot (parseCodexUsageHeaders gates on both),
-      // so untyped response headers cannot mislabel weekly-only quota.
-      if (
-        providerTurn.latestCodexUsage &&
-        attempt.turnId &&
-        leases.codex.held &&
-        leases.codex.holderId &&
-        leases.codex.generation !== null &&
-        providerTurn.effectiveCodexCredentialVersion !== null
-      ) {
-        const usageMutation = await waitForTurnFinalizerStep(
-          recordCodexAccountUsageForFinalization(
+    const coreCodex = providerTurn.codexSubscriptionCore;
+    if (coreCodex) {
+      // Shared-core turn: usage headers become a quota observation on the
+      // leased connection and a completed model call advances the binding's
+      // cache clock. The legacy Codex usage cache never sees a core id.
+      if (attempt.turnId && leases.codex.held) {
+        const finalized = await waitForTurnFinalizerStep(
+          finalizeCoreCodexUsage({
             db,
-            input.workspaceId,
-            providerTurn.effectiveCodexCredentialId,
-            providerTurn.latestCodexUsage,
-            {
-              turnId: attempt.turnId,
-              sessionId: input.sessionId,
-              attemptId: input.attemptId,
-              executionGeneration: attempt.executionGeneration,
-              holderId: leases.codex.holderId,
-              generation: leases.codex.generation,
-              credentialVersion: providerTurn.effectiveCodexCredentialVersion,
-            },
-          ).catch(() => null),
+            core: coreCodex,
+            lease: leases.codex,
+            usage: providerTurn.latestCodexUsage,
+            credentialVersion: providerTurn.effectiveCodexCredentialVersion,
+            modelCallCompletedAt: coreCodexModelCallCompletedAt(providerTurn),
+          }).catch(() => undefined),
           finalizerSignal,
         );
-        if (usageMutation) {
+        // An observation that ended a stored exhaustion is a capacity change
+        // for every core waiter of the account (EP-T10).
+        if (finalized?.capacityRecovered) {
           await waitForTurnFinalizerStep(
-            signalCodexCapacityWakeTargets(
-              { signalCodexCapacityWorkflow, wakeSessionWorkflow },
-              usageMutation.wakeTargets,
+            wakeSubscriptionCoreCodexWaitersAndDeliver(
+              { db, signalCodexCapacityWorkflow },
+              { accountId: input.accountId, reason: "quota_observed_available" },
             ),
             finalizerSignal,
-          );
+          ).catch(() => undefined);
         }
       }
     }
@@ -497,14 +492,7 @@ async function finalizeTurnAttemptSteps(
       leases.codex.generation !== null
     ) {
       await waitForTurnFinalizerStep(
-        releaseCodexCredentialLease(
-          db,
-          input.accountId,
-          input.workspaceId,
-          attempt.turnId,
-          leases.codex.holderId,
-          leases.codex.generation,
-        ).catch(() => undefined),
+        leases.codex.releaseCurrent().catch(() => false),
         finalizerSignal,
       );
       leases.codex.held = false;
@@ -773,6 +761,21 @@ async function finalizeTurnAttemptSteps(
     }
     monitor.enter("workspace_snapshot");
     await drainInFlightWarmSnapshot();
+    // Join any provider establish still running behind a cancelled wrapper
+    // (finalization already aborted provisioning when no box resolved). Its
+    // own exact cleanup (roll an unpublished box back to cold, or keep a
+    // published box and drop its holder) must commit before this activity can
+    // let a shutting-down worker exit. A late success is routed through
+    // releaseLateSandbox before the release targets are collected below.
+    monitor.enter("sandbox_provisioning");
+    if (sandboxState.inFlightSandboxResumes.size > 0) {
+      const drained = await drainPhysicalSandboxResumes(sandboxState.inFlightSandboxResumes);
+      if (drained === "timed_out") {
+        console.error(
+          "in-flight sandbox establish did not settle before finalization; the lease reaper owns its warming row",
+        );
+      }
+    }
     monitor.enter("sandbox_release");
     const sandboxReleaseTargets = new Set(sandboxState.lateSandboxesAwaitingWriterDrain);
     sandboxState.lateSandboxesAwaitingWriterDrain.clear();

@@ -27,6 +27,7 @@ for (const mode of [
   "dialog",
   "navigated",
   "single input rejects multiple",
+  "covered",
 ] as const) {
   e2e(
     `uploads through native file selection: ${mode}`,
@@ -116,7 +117,8 @@ for (const mode of [
         function record(event){changes++; uploaded=Array.from(event.target.files,file=>file.name);document.querySelector('p').textContent='Uploaded '+uploaded.join(', ')}
       </script>
       <input id="file" type="file" aria-label="Upload input" ${multiple ? "multiple" : ""} ${mode === "direct" || mode === "single input rejects multiple" ? "" : "hidden"} onchange="record(event)">
-      ${mode === "label" ? '<label for="file">Upload files</label>' : `<button onclick="clicks++;${handler}">Upload files</button>`}<p>Ready</p>`;
+      ${mode === "label" ? '<label for="file">Upload files</label>' : `<button onclick="clicks++;${handler}">Upload files</button>`}<p>Ready</p>
+      ${mode === "covered" ? '<div style="position:fixed;inset:0;background:white"></div>' : ""}`;
         const html =
           mode === "iframe"
             ? `<!doctype html><iframe title="Upload frame" srcdoc="${content.replaceAll("&", "&amp;").replaceAll('"', "&quot;")}"></iframe>`
@@ -156,7 +158,8 @@ for (const mode of [
         };
         const receipt = await controller.run(command);
         const rejected = mode === "single input rejects multiple";
-        const uncertain = mode === "no chooser" || mode === "dialog" || mode === "navigated";
+        const uncertain =
+          mode === "no chooser" || mode === "dialog" || mode === "navigated" || mode === "covered";
         expect(receipt.state).toBe(
           rejected ? "failed" : uncertain ? "outcome_unknown" : "completed",
         );
@@ -164,6 +167,10 @@ for (const mode of [
           rejected ? "invalid_action" : uncertain ? "outcome_unknown" : null,
         );
         expect(await controller.run(command)).toEqual(receipt);
+        if (mode === "covered") {
+          // The wrapped receipt must still say why the action failed.
+          expect(receipt.error?.message).toContain("covered or not pointer-actionable");
+        }
         if (mode === "dialog") {
           expect(receipt.error?.message).toContain("JavaScript dialog");
           // Some managed headless builds dismiss alerts automatically.
@@ -195,7 +202,7 @@ for (const mode of [
           { sessionId },
         );
         expect(data.result.value).toEqual({
-          clicks: mode === "direct" || mode === "label" || rejected ? 0 : 1,
+          clicks: mode === "direct" || mode === "label" || mode === "covered" || rejected ? 0 : 1,
           changes: rejected || uncertain ? 0 : 1,
           uploaded: rejected || uncertain ? [] : multiple ? ["one.txt", "two.txt"] : ["one.txt"],
         });

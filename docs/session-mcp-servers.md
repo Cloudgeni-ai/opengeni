@@ -1,6 +1,6 @@
 # Per-session MCP servers
 
-OpenGeni supports third-party MCP servers attached to a single session. This is
+Opengeni supports third-party MCP servers attached to a single session. This is
 for embedding hosts that need per-session tool endpoints and per-session bearer
 credentials, without making those servers deployment-global.
 
@@ -14,13 +14,14 @@ credentials, without making those servers deployment-global.
 - `url`: HTTPS MCP endpoint.
 - `allowedTools`, `timeoutMs`, `cacheToolsList`: same runtime meaning as
   deployment MCP server settings.
-- `requireApproval`: `true` requires approval for every tool, `false` requires
-  none, and a string array requires approval only for those unprefixed tool
-  names. Selective policies are canonicalized as a sorted set and bounded to
+- `requireApproval`: the recommended default. `true` recommends Ask first for
+  every tool, `false` for none, and a string array only for those unprefixed
+  tool names. A workspace's explicit Allow, Ask or Block choice for a tool wins
+  over this recommendation. Selective policies are canonicalized as a sorted set and bounded to
   2,048 names, 256 KiB total UTF-8, and 1 KiB UTF-8 per name.
 - `headers`: configured credential headers, authenticated-encrypted at rest.
 - `connectionRef`: optional non-secret opaque connection pointer. Standalone
-  deployments resolve it through OpenGeni's connection store; embedded hosts
+  deployments resolve it through Opengeni's connection store; embedded hosts
   can resolve the same pointer through `ConnectionCredentialsPort.mcpCredentials`.
 
 ### Tool selection
@@ -29,8 +30,8 @@ On a top-level create, each server attached in `mcpServers` is selected by that
 attachment: core adds a strict `{ kind: "mcp", id }` ref whether `tools` is
 omitted (workspace-default mode) or explicit, including `tools: []`. Attaching is
 already an explicit, `mcp_servers:attach`-authorized choice of this endpoint, so
-selection grants nothing further; the server's `requireApproval` still governs
-each call. An explicit ref for the same id is kept exactly, so `tools` is only
+selection grants nothing further; each call still follows the effective
+permission (an explicit workspace choice, otherwise `requireApproval`). An explicit ref for the same id is kept exactly, so `tools` is only
 needed to set `eager: true` (put its schemas on the first model request instead
 of behind `tool_search`) or `optional: true` (skip it on connect/list failure).
 Before this, an attached server that `tools` did not name was stored but never
@@ -137,7 +138,7 @@ otherwise create/rotation requests fail with 503.
 `connection_ref` is non-secret JSON and does not require the encryption key by
 itself. This lets an embedding host attach its existing GitHub, GitLab, Azure
 DevOps, or other provider connection without copying a token or creating an
-OpenGeni connection row. Opaque host ids are accepted; standalone connection
+Opengeni connection row. Opaque host ids are accepted; standalone connection
 lookups still use their ordinary UUID ids. A session server may use static
 headers, a connection ref, or neither.
 
@@ -344,9 +345,9 @@ decision across the approval-resume attempt.
 
 Resolution is most-specific-first. Two matching policies with equal specificity
 fail closed as Block. No matching row preserves the historical unmanaged
-behavior. The connector decision composes monotonically with `requireApproval`:
-Block stops before MCP invocation, Ask requires the ordinary durable approval,
-and Allow never removes a session-level approval requirement.
+behavior. `requireApproval` only supplies the recommended default when no explicit
+choice matches: Block stops before MCP invocation, Ask requires the ordinary
+durable approval, and an explicit Allow runs the tool without asking.
 
 Managed calls use `connector_action_requests` as an idempotency and evidence
 ledger. It freezes the initiating actor, original attempt, connection/server/
@@ -395,8 +396,13 @@ connection pointer.
 
 Each durable session tool ref may set `eager: true`. Eagerness is not inferred
 from mandatory/strict selection: on a fresh progressive-disclosure turn, only
-those exact servers join the first-provider-request barrier. Every other MCP,
-including strict first-party OpenGeni, begins connection/listing concurrently.
+those exact servers join the first-provider-request barrier. The single
+exception is first-party Opengeni when its signed selection and permission
+ceiling can admit a harness control tool (goal lifecycle, `command_read`,
+`command_wait`, `wait_for_input`): it joins the barrier so those exact tools are
+always visible from the first request with a stable tool block, while its other
+tools stay searchable. Every other MCP, including first-party Opengeni without a
+harness tool, begins connection/listing concurrently.
 Ordinary text may settle without waiting; `tool_search`, deferred invocation,
 Codemode activation, and catalog-dependent work join the same attempt promise.
 Generic deferred invocation then renames a valid `tool_invoke` to the exact

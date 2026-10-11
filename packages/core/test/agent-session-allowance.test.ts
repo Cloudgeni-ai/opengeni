@@ -52,10 +52,16 @@ function fixture(action: "send" | "steer", replay = false) {
   );
   const allowance = track(spyOn(db, "checkWorkspaceAllowance").mockResolvedValue(null));
   const codex = track(spyOn(db, "isCodexBilledTurn").mockResolvedValue(false));
-  const gatewayModels = track(spyOn(db, "listWorkspaceGatewayCustomModels").mockResolvedValue([]));
-  const openRouterModels = track(
-    spyOn(db, "listWorkspaceOpenRouterCustomModels").mockResolvedValue([]),
+  // One batched read supplies both workspace-paid catalogs.
+  const gatewayModels = track(
+    spyOn(db, "listWorkspaceProviderCustomModelsByKind").mockResolvedValue({
+      vercel_gateway: [],
+      openrouter: [],
+      anthropic: [],
+      claude_subscription: [],
+    }),
   );
+  const openRouterModels = gatewayModels;
   const retainedGateway = track(
     spyOn(db, "getWorkspaceGatewayCustomModelForExecution").mockResolvedValue(null),
   );
@@ -171,11 +177,14 @@ describe("agent command fresh allowance callbacks", () => {
       expect(f.retainedGateway).not.toHaveBeenCalled();
       expect(f.retainedOpenRouter).not.toHaveBeenCalled();
     });
-    test(`${action} externally billed Codex target bypasses allowance checks`, async () => {
+    test(`${action} externally billed Codex target checks only unbilled-usage allowances`, async () => {
       const f = fixture(action);
       f.codex.mockResolvedValue(true);
       await f.run();
-      expect(f.allowance).not.toHaveBeenCalled();
+      expect(f.allowance).toHaveBeenCalledWith(
+        f.tx,
+        expect.objectContaining({ fundedWithoutCredits: true }),
+      );
     });
     for (const provider of ["gateway", "openrouter"] as const) {
       test(`${action} retains retired workspace ${provider} funding under exhaustion`, async () => {
@@ -201,21 +210,28 @@ describe("agent command fresh allowance callbacks", () => {
           createdAt: new Date("2026-09-28T00:00:00.000Z"),
           updatedAt: new Date("2026-09-29T00:00:00.000Z"),
         } as never);
-        f.allowance.mockResolvedValue({
-          code: "allowance_exhausted",
-          scope: "workspace",
-          subjectId: null,
-          resetsAt: null,
-          message: "Workspace usage exhausted",
-        });
+        // The real check admits credit-free work unless the allowance opts
+        // into counting unbilled usage.
+        f.allowance.mockImplementation(async (_db, input) =>
+          input.fundedWithoutCredits
+            ? null
+            : {
+                code: "allowance_exhausted",
+                scope: "workspace",
+                resetsAt: null,
+                message: "Workspace usage exhausted",
+              },
+        );
         expect((await f.run()).replay).toBe(false);
         expect(retained).toHaveBeenCalledWith(f.tx, {
           accountId: context.accountId,
           workspaceId: context.workspaceId,
           upstreamModelId,
         });
-        expect(f.allowance).not.toHaveBeenCalled();
-        expect(f.frozen).not.toHaveBeenCalled();
+        expect(f.allowance).toHaveBeenCalledWith(
+          f.tx,
+          expect.objectContaining({ fundedWithoutCredits: true }),
+        );
       });
       test(`${action} cannot bypass exhaustion with an unstored workspace ${provider} ID`, async () => {
         const f = fixture(action);

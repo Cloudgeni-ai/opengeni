@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
 import {
   evaluateRuntimeDatabasePosture,
   FORCE_RLS_TABLES,
@@ -16,14 +17,25 @@ import {
   RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES,
   RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES,
   RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES,
+  SUBSCRIPTION_M3_OWNER_ONLY_PRIVATE_ROUTINES,
+  SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES,
+  SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS,
   SANDBOX_FILE_PUBLICATION_RUNTIME_ROUTINES,
+  ARTIFACT_PIN_RUNTIME_ROUTINES,
   SCHEDULED_SLACK_BOT_MESSAGE_RUNTIME_ROUTINES,
   ORGANIZATION_SIGNUP_USE_CASE_RUNTIME_ROUTINES,
   SLACK_FILE_UPLOAD_OPERATIONS_TABLE,
   type RuntimeDatabasePosture,
   type RuntimeDatabasePostureOptions,
+  type RuntimePrivateTablePosture,
   type RuntimeTablePosture,
 } from "../src/runtime-posture";
+
+/** Write-allowed probes pin a fixed search path without the target schema. */
+const FIXED_SEARCH_PATH_PRIVATE_ROUTINES: ReadonlySet<string> = new Set([
+  "subscription_codex_refresh_write_allowed(uuid, uuid, uuid)",
+  "subscription_core_refresh_write_allowed(text, uuid, uuid, uuid)",
+]);
 
 const options: RuntimeDatabasePostureOptions = {
   rlsStrategy: "force",
@@ -397,9 +409,10 @@ function safePosture(): RuntimeDatabasePosture {
     ],
     ownedSchemas: [],
     ownedRelations: [],
-    sessionTenancyProductActivationPresent: false,
     sessionVariableSetAttachmentsCutoverPresent: true,
     claudeSubscriptionPoolActivationPresent: true,
+    subscriptionCodexCutoverActivationPresent: true,
+    subscriptionProviderCutoverReceipts: ["codex"],
     tables: [
       {
         name: "tenant_rows",
@@ -457,6 +470,28 @@ function safePosture(): RuntimeDatabasePosture {
       })),
     ],
     privateTables: [
+      {
+        name: "modal_native_origin_read_capabilities",
+        owner: "opengeni_migrator",
+        rlsEnabled: true,
+        rlsForced: true,
+        rlsActive: true,
+        select: false,
+        insert: false,
+        update: false,
+        delete: false,
+        truncate: false,
+        references: false,
+        trigger: false,
+      },
+      {
+        name: "credit_promotion_policy_revisions",
+        owner: "opengeni_migrator",
+        select: true,
+        insert: false,
+        update: false,
+        delete: false,
+      },
       {
         name: "personal_resource_delegation_capabilities",
         owner: "opengeni_migrator",
@@ -521,6 +556,18 @@ function safePosture(): RuntimeDatabasePosture {
       })),
     ],
     privateRoutines: [
+      ...SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES.map((name) => ({
+        name,
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+        configuration: [
+          FIXED_SEARCH_PATH_PRIVATE_ROUTINES.has(name)
+            ? "search_path=pg_catalog, opengeni_private, pg_temp"
+            : "search_path=pg_catalog, public, opengeni_private, pg_temp",
+        ],
+      })),
       {
         name: "update_organization_integration_policy(uuid, text, jsonb)",
         owner: "opengeni_migrator",
@@ -584,12 +631,87 @@ function safePosture(): RuntimeDatabasePosture {
 }
 
 describe("runtime database posture evaluator", () => {
+  test("rejects a runtime role that can execute an owner-only M3 helper", () => {
+    for (const name of SUBSCRIPTION_M3_OWNER_ONLY_PRIVATE_ROUTINES) {
+      const revoked = safePosture();
+      revoked.privateRoutines.push({
+        name,
+        owner: "opengeni_migrator",
+        execute: false,
+        publicExecute: false,
+        securityDefiner: true,
+        configuration: ["search_path=pg_catalog, public, opengeni_private, pg_temp"],
+      });
+      expect(evaluateRuntimeDatabasePosture(revoked, options)).toEqual([]);
+      for (const unsafe of [{ execute: true }, { publicExecute: true }]) {
+        const posture = safePosture();
+        posture.privateRoutines.push({
+          name,
+          owner: "opengeni_migrator",
+          execute: false,
+          publicExecute: false,
+          securityDefiner: true,
+          configuration: ["search_path=pg_catalog, public, opengeni_private, pg_temp"],
+          ...unsafe,
+        });
+        expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+          `subscription M3 owner-only private routine ${name} is executable`,
+        );
+      }
+    }
+  });
+
+  test("requires exact private M3 precursor capabilities and hardened ownership/ACL/search path", () => {
+    expect(evaluateRuntimeDatabasePosture(safePosture(), options)).toEqual([]);
+    for (const name of SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES) {
+      const missing = safePosture();
+      missing.privateRoutines = missing.privateRoutines.filter((routine) => routine.name !== name);
+      expect(evaluateRuntimeDatabasePosture(missing, options)).toContain(
+        `subscription M3 precursor private routine ${name} is missing or unsafe`,
+      );
+
+      for (const unsafe of [
+        { execute: false },
+        { publicExecute: true },
+        { securityDefiner: false },
+        { owner: "opengeni_app" },
+        { configuration: ["search_path=public"] },
+      ]) {
+        const posture = safePosture();
+        Object.assign(posture.privateRoutines.find((routine) => routine.name === name)!, unsafe);
+        expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+          `subscription M3 precursor private routine ${name} is missing or unsafe`,
+        );
+      }
+    }
+  });
+
   test("requires the individual Claude account activation before starting a runtime", () => {
     const posture = safePosture();
     posture.claudeSubscriptionPoolActivationPresent = false;
     expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
       "database is missing the Claude subscription account activation receipt",
     );
+  });
+
+  test("requires the drained Codex subscription-core cutover before starting a runtime", () => {
+    const posture = safePosture();
+    posture.subscriptionCodexCutoverActivationPresent = false;
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "database is missing the 0689 Codex subscription-core cutover receipt; run the drained migration first",
+    );
+  });
+
+  test("requires the receipt of every provider whose cutover is in the binary's ledger", () => {
+    const posture = safePosture();
+    posture.subscriptionProviderCutoverReceipts = [];
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "database is missing the codex subscription-core cutover receipt (0689_subscription_core_codex_cutover.sql); apply the pending migrations first",
+    );
+    // Each listed cutover migration is in this binary's ledger.
+    for (const migration of Object.values(SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS)) {
+      expect(existsSync(new URL(`../drizzle/${migration}`, import.meta.url))).toBe(true);
+    }
   });
 
   const modelFactCapabilities = [
@@ -687,6 +809,36 @@ describe("runtime database posture evaluator", () => {
       ).toContain(violation);
     });
   }
+
+  test("native LIVE-origin helper requires its private exact-read capability with safe owner and no ACLs", () => {
+    const violation = "Native LIVE-origin read capability has unsafe owner, RLS or privileges";
+    for (const unsafe of [
+      { owner: "opengeni_app" },
+      { owner: "other_owner" },
+      { rlsEnabled: false },
+      { rlsForced: false },
+      { rlsActive: false },
+      { select: true },
+      { insert: true },
+      { update: true },
+      { delete: true },
+      { truncate: true },
+      { references: true },
+      { trigger: true },
+    ]) {
+      const posture = safePosture();
+      Object.assign(
+        posture.privateTables.find((t) => t.name === "modal_native_origin_read_capabilities")!,
+        unsafe,
+      );
+      expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(violation);
+    }
+    const missing = safePosture();
+    missing.privateTables = missing.privateTables.filter(
+      (t) => t.name !== "modal_native_origin_read_capabilities",
+    );
+    expect(evaluateRuntimeDatabasePosture(missing, options)).toContain(violation);
+  });
 
   test("archived import receipts require private FORCE RLS and scoped non-public capabilities", () => {
     const posture = safePosture();
@@ -873,6 +1025,65 @@ describe("runtime database posture evaluator", () => {
     );
   });
 
+  test("private pin capabilities preserve rolling inventory and require safe EXECUTE-only authority", () => {
+    const posture = safePosture();
+    const table: RuntimePrivateTablePosture = {
+      name: "artifact_catalog_pins",
+      owner: "opengeni_migrator",
+      rlsEnabled: true,
+      rlsForced: true,
+      rlsActive: true,
+      policyCount: 1,
+      select: false,
+      insert: false,
+      update: false,
+      delete: false,
+    };
+    posture.privateTables.push(table);
+    posture.privateRoutines.push(
+      ...ARTIFACT_PIN_RUNTIME_ROUTINES.map((name) => ({
+        name,
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+        configuration: ["search_path=pg_catalog, public, pg_temp"],
+      })),
+    );
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
+    expect(FORCE_RLS_TABLES as readonly string[]).not.toContain("artifact_catalog_pins");
+    expect(RUNTIME_TABLE_PRIVILEGES.artifact_catalog_pins).toBeUndefined();
+    for (const privilege of [
+      "select",
+      "insert",
+      "update",
+      "delete",
+      "truncate",
+      "references",
+      "trigger",
+    ] as const) {
+      table[privilege] = true;
+      expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+        "runtime role has forbidden direct artifact pin authority",
+      );
+      table[privilege] = false;
+    }
+    table.extraPrivileges = ["MAINTAIN"];
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "runtime role has forbidden direct artifact pin authority",
+    );
+    table.extraPrivileges = [];
+    table.rlsForced = false;
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "artifact pin relation lacks active FORCE-RLS workspace isolation",
+    );
+    table.rlsForced = true;
+    posture.privateRoutines.at(-1)!.configuration = ["search_path=public"];
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "artifact pin capability list_sandbox_file_publications_pinned(uuid, uuid, jsonb) is missing or unsafe",
+    );
+  });
+
   test("private publication capabilities preserve the rolling table inventory and forbid direct DML", () => {
     const posture = safePosture();
     const table = {
@@ -986,6 +1197,7 @@ describe("runtime database posture evaluator", () => {
       delete: false,
     };
     posture.privateTables.push(table);
+    posture.privateTables.push({ ...table, name: "organization_slack_bot_access" });
     posture.privateRoutines.push(
       ...SCHEDULED_SLACK_BOT_MESSAGE_RUNTIME_ROUTINES.map((name) => ({
         name,
@@ -1010,7 +1222,7 @@ describe("runtime database posture evaluator", () => {
     table.rlsForced = true;
     posture.privateRoutines.at(-1)!.publicExecute = true;
     expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
-      "scheduled Slack bot message capability read_scheduled_slack_bot_message(uuid, uuid, uuid, uuid) is missing or unsafe",
+      "scheduled Slack bot message capability read_organization_slack_bot_message(uuid, uuid, uuid, uuid) is missing or unsafe",
     );
   });
 
@@ -1119,26 +1331,26 @@ describe("runtime database posture evaluator", () => {
         ).length;
       const contracts = hasCurrentMainActivityLedger
         ? ([
-            [FORCE_RLS_TABLES, 322],
+            [FORCE_RLS_TABLES, 339],
             [NON_RLS_RUNTIME_TABLES, 19],
-            [RUNTIME_FULL_DML_TABLES, 163],
+            [RUNTIME_FULL_DML_TABLES, 179],
             [RUNTIME_READ_ONLY_TABLES, 26],
             [readUpdateTables, 1],
-            [RUNTIME_READ_INSERT_TABLES, 46],
+            [RUNTIME_READ_INSERT_TABLES, 47],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 33],
             [PROTECTED_NO_DIRECT_DML_TABLES, 72],
-            [RUNTIME_DML_TABLES, 269],
+            [RUNTIME_DML_TABLES, 286],
           ] as const)
         : ([
-            [FORCE_RLS_TABLES, 206],
+            [FORCE_RLS_TABLES, 223],
             [NON_RLS_RUNTIME_TABLES, 12],
-            [RUNTIME_FULL_DML_TABLES, 120],
+            [RUNTIME_FULL_DML_TABLES, 136],
             [RUNTIME_READ_ONLY_TABLES, 18],
             [readUpdateTables, 0],
-            [RUNTIME_READ_INSERT_TABLES, 38],
+            [RUNTIME_READ_INSERT_TABLES, 39],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 12],
             [PROTECTED_NO_DIRECT_DML_TABLES, 30],
-            [RUNTIME_DML_TABLES, 188],
+            [RUNTIME_DML_TABLES, 205],
           ] as const);
       for (const [tables, length] of contracts) {
         // Nine additive embedding tables: three full-DML, four append-only,
@@ -1158,6 +1370,24 @@ describe("runtime database posture evaluator", () => {
                       ? 8
                       : 0;
         const expectedLength =
+          // 0696 adds the workspace-isolated single-use enroll-token ledger.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
+          // 0690 adds one organization-isolated table with full runtime DML.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
+          // 0692 adds the organization allowance and the per-session grant.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 2
+            : 0) +
           // Individual Claude accounts share the six subscription runtime tables;
           // the organization key scope join and service accounts add two more.
           (tables === FORCE_RLS_TABLES ||
@@ -1213,6 +1443,12 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 1
             : 0) +
+          // 0611 adds account-isolated, append-only promotional debit allocations.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_READ_INSERT_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
           embeddingTableCount +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
             ? length +
@@ -1228,7 +1464,34 @@ describe("runtime database posture evaluator", () => {
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
       const tableCount =
-        (hasCurrentMainActivityLedger ? 341 : 218) + 9 + 12 + 2 + 2 + 2 - 3 + 1 + 1 + 3 + 8 + 1 + 6;
+        (hasCurrentMainActivityLedger ? 341 : 218) +
+        9 +
+        12 +
+        2 +
+        2 +
+        2 -
+        3 +
+        1 +
+        1 +
+        3 +
+        8 +
+        1 +
+        6 +
+        1 +
+        16 + // M2 and M3 runtime-store migrations add sixteen FORCE-RLS tables with explicit runtime DML contracts.
+        1 + // Session content blobs: append-only, session-owned.
+        1 + // 0690 organization model defaults: full-DML, FORCE-RLS.
+        2 + // 0692 agent admin access allowance and session grants: full-DML, FORCE-RLS.
+        1; // 0696 single-use enroll-token redemptions: full-DML, FORCE-RLS.
+      expect(FORCE_RLS_TABLES).toContain("organization_model_defaults");
+      expect(RUNTIME_FULL_DML_TABLES).toContain("organization_model_defaults");
+      expect(RUNTIME_TABLE_PRIVILEGES.organization_model_defaults).toEqual([
+        "SELECT",
+        "INSERT",
+        "UPDATE",
+        "DELETE",
+      ]);
+      expect(RUNTIME_TABLE_PRIVILEGES.credit_debit_allocations).toEqual(["SELECT", "INSERT"]);
       for (const removed of [
         "workspace_packs",
         "pack_installations",
@@ -1447,10 +1710,34 @@ describe("runtime database posture evaluator", () => {
       { ...posture.schemas[0]!, name: "tenantx" },
       { ...posture.schemas[0]!, name: "Tenant Space" },
     );
+    for (const privateRoutine of posture.privateRoutines) {
+      if (
+        (SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES as readonly string[]).includes(
+          privateRoutine.name,
+        ) &&
+        !FIXED_SEARCH_PATH_PRIVATE_ROUTINES.has(privateRoutine.name)
+      ) {
+        privateRoutine.configuration = [
+          "search_path=pg_catalog, tenantx, opengeni_private, pg_temp",
+        ];
+      }
+    }
     routine.configuration = ["search_path=pg_catalog, tenantx, pg_temp"];
     expect(
       evaluateRuntimeDatabasePosture(posture, { ...options, targetSchema: "tenantx" }),
     ).toEqual([]);
+    for (const privateRoutine of posture.privateRoutines) {
+      if (
+        (SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES as readonly string[]).includes(
+          privateRoutine.name,
+        ) &&
+        !FIXED_SEARCH_PATH_PRIVATE_ROUTINES.has(privateRoutine.name)
+      ) {
+        privateRoutine.configuration = [
+          'search_path=pg_catalog, "Tenant Space", opengeni_private, pg_temp',
+        ];
+      }
+    }
     routine.configuration = ['search_path=pg_catalog, "Tenant Space", pg_temp'];
     expect(
       evaluateRuntimeDatabasePosture(posture, { ...options, targetSchema: "Tenant Space" }),
@@ -1685,7 +1972,9 @@ describe("runtime database posture evaluator", () => {
 
   test("enforces the exact personal-resource private capability boundary", () => {
     const posture = safePosture();
-    const capabilityTable = posture.privateTables[0]!;
+    const capabilityTable = posture.privateTables.find(
+      (table) => table.name === "personal_resource_delegation_capabilities",
+    )!;
     const capabilityRoutine = posture.privateRoutines.find(
       (routine) => routine.name === "personal_resource_delegation_capability_active(text)",
     )!;
@@ -1796,7 +2085,10 @@ describe("runtime database posture evaluator", () => {
         routine.name.includes("scoped_enrollment") ||
         routine.name.includes("scoped_sandbox") ||
         routine.name.includes("scoped_machine_dependent_sessions") ||
-        routine.name.includes("personal_machine")
+        routine.name.includes("personal_machine") ||
+        routine.name.includes("subscription_codex_refresh") ||
+        routine.name.includes("authorize_subscription_ownerless_session_access") ||
+        routine.name.includes("authorize_subscription_personal_placement_access")
       ) {
         routine.owner = "pg_database_owner";
       }
@@ -1820,6 +2112,15 @@ describe("runtime database posture evaluator", () => {
   test("keeps dedicated-schema same-owner authority accepted", () => {
     const posture = safePosture();
     posture.schemas[0]!.name = "tenantx";
+    for (const routine of posture.privateRoutines) {
+      if (
+        (SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES as readonly string[]).includes(routine.name)
+      ) {
+        if (!FIXED_SEARCH_PATH_PRIVATE_ROUTINES.has(routine.name)) {
+          routine.configuration = ["search_path=pg_catalog, tenantx, opengeni_private, pg_temp"];
+        }
+      }
+    }
 
     expect(
       evaluateRuntimeDatabasePosture(posture, {
@@ -2633,18 +2934,17 @@ describe("runtime database posture evaluator", () => {
     ).toEqual([]);
   });
 
-  test("fails closed when durable session-tenancy activation outlives the deployment switch", () => {
+  test("session-tenancy activation is universal and no longer has a startup interlock", () => {
+    // Migration 0611 retired OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED:
+    // neither the posture shape nor its options carry an activation switch.
     const posture = safePosture();
-    posture.sessionTenancyProductActivationPresent = true;
-    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
-      "session-tenancy product activation is durable but OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED is not true",
-    );
+    expect(posture).not.toHaveProperty("sessionTenancyProductActivationPresent");
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
     expect(
-      evaluateRuntimeDatabasePosture(posture, {
-        ...options,
-        organizationTenancyCanonicalActivationEnabled: true,
-      }),
-    ).toEqual([]);
+      evaluateRuntimeDatabasePosture(posture, options).some((violation) =>
+        violation.includes("ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED"),
+      ),
+    ).toBe(false);
   });
 
   test("rejects runtime or PUBLIC execution of the owner-internal quiescence helper", () => {

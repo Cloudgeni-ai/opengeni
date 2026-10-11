@@ -35,6 +35,7 @@ jobs:
           [[ "$GITHUB_REF" == "refs/heads/main" ]]
           [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$SOURCE_SHA" == "$GITHUB_SHA" ]]
           [[ "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
           [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/publish-canary.yml@refs/heads/main" ]]
 
@@ -43,16 +44,62 @@ jobs:
         with:
           ref: "${{ github.sha }}"
           persist-credentials: false
-          fetch-depth: 0
+          fetch-depth: 1
 
+      - name: Restore complete checkout history without listing refs
+        shell: bash
+        timeout-minutes: 5
+        env:
+          EXPECTED_CHECKOUT_SHA: "${{ github.sha }}"
+        run: |
+          set -euo pipefail
+          checked_out_sha="$(git rev-parse HEAD 2>/dev/null)"
+          fetch_args=()
+          if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = true ]; then
+            fetch_args+=(--unshallow)
+          fi
+          selected_fetch="$checked_out_sha"
+          if [ -n "${EXPECTED_SELECTED_PULL_REF:-}" ]; then
+            if [[ ! "$EXPECTED_SELECTED_PULL_REF" =~ ^refs/pull/[0-9]+/head$ ]]; then
+              echo "::error::Selected checkout identity changed"
+              exit 1
+            fi
+            selected_fetch="+$EXPECTED_SELECTED_PULL_REF:refs/remotes/origin/selected-pull"
+          fi
+          if ! git fetch --quiet --no-tags --prune --no-recurse-submodules "${fetch_args[@]}" origin \
+            '+refs/heads/*:refs/remotes/origin/*' \
+            '+refs/tags/*:refs/tags/*' \
+            "$selected_fetch" >/dev/null 2>&1; then
+            echo "::error::Could not restore complete repository history"
+            exit 1
+          fi
+          if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" != false ] ||
+             [ "$(git rev-parse HEAD 2>/dev/null)" != "$checked_out_sha" ]; then
+            echo "::error::Repository history or source identity changed"
+            exit 1
+          fi
+          if [ -n "${EXPECTED_SELECTED_PULL_REF:-}" ] &&
+             [ "$(git rev-parse refs/remotes/origin/selected-pull 2>/dev/null)" != "$checked_out_sha" ]; then
+            echo "::error::Selected checkout identity changed"
+            exit 1
+          fi
+          if [ -n "${EXPECTED_CHECKOUT_SHA:-}" ] &&
+             [ "$checked_out_sha" != "$EXPECTED_CHECKOUT_SHA" ]; then
+            echo "::error::Selected checkout identity changed"
+            exit 1
+          fi
+          if [ -n "${EXPECTED_CHECKOUT_REF:-}" ] &&
+             [ "$(git rev-parse "$EXPECTED_CHECKOUT_REF" 2>/dev/null)" != "$checked_out_sha" ]; then
+            echo "::error::Selected checkout identity changed"
+            exit 1
+          fi
       - name: Verify exact source
         env:
           SOURCE_SHA: ${{ inputs.source_sha }}
         shell: bash
         run: |
           set -euo pipefail
-          git merge-base --is-ancestor "$SOURCE_SHA" HEAD
-          git checkout --quiet --detach "$SOURCE_SHA"
+          [[ "$SOURCE_SHA" == "$GITHUB_SHA" ]]
           [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]]
 
       - name: Set up Bun
@@ -63,18 +110,12 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 24
-          registry-url: https://registry.npmjs.org
-
       - name: Publish canary versions
         env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NPM_CONFIG_PROVENANCE: "true"
           OPENGENI_RELEASE: "1"
-        # npm verifies GITHUB_SHA against the signed workflow identity.
-        # Verify exact source above and the source-named receipt bind the checkout.
+        # The checked-out source and workflow identity must match the attested commit.
         run: bun scripts/publish-canary.ts
 
       - name: Retain exact Site package pins for this deployment
@@ -83,3 +124,12 @@ jobs:
           name: site-package-versions-${{ inputs.source_sha }}
           path: .release/site-package-versions.json
           if-no-files-found: error
+
+      - name: Retain bounded publication and registry receipts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: canary-publication-receipts-${{ inputs.source_sha }}
+          path: .release/canary-receipts
+          if-no-files-found: warn
+          retention-days: 7

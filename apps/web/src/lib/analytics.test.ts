@@ -449,11 +449,24 @@ describe("analytics providers", () => {
       beginAnalyticsRequest("/v1/billing/checkout", "POST")(200);
       beginAnalyticsRequest("/v1/auth/organization-onboarding", "POST")(200);
       beginAnalyticsRequest("/v1/auth/organization-onboarding", "GET")(200);
+      const organizationKeys = "/v1/organizations/33333333-3333-4333-8333-333333333333/api-keys";
+      beginAnalyticsRequest(organizationKeys, "POST")(429);
+      beginAnalyticsRequest(organizationKeys, "POST")(201);
       await new Promise((resolve) => setTimeout(resolve, 0));
       const captured = (event: string) =>
         calls.filter(([method, name]) => method === "capture" && name === event);
       expect(captured("checkout_started")).toHaveLength(1);
       expect(captured("organization_setup_completed")).toHaveLength(1);
+      expect(captured("api_key_created")).toEqual([
+        [
+          "capture",
+          "api_key_created",
+          expect.objectContaining({
+            scope: "organization",
+            account_id: "33333333-3333-4333-8333-333333333333",
+          }),
+        ],
+      ]);
 
       // Only the first completed turn of a session this page started is reported.
       const sessionId = "22222222-2222-4222-8222-222222222222";

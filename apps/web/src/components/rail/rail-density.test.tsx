@@ -36,6 +36,10 @@ mock.module("@/components/rail/workspace-config-link", () => ({
   ),
 }));
 
+mock.module("@/components/rail/inbox-link", () => ({
+  InboxLink: () => <a href="#inbox">Inbox</a>,
+}));
+
 const client = { listKnowledgeEntries: async () => ({ entries: [] }) };
 mock.module("@/context", () => ({ useAppContext: () => ({ client }) }));
 

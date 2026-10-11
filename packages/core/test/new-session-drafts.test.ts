@@ -84,7 +84,147 @@ const settings = testSettings({
 
 const mcp = (id: string): ToolRef => ({ kind: "mcp", id });
 
+function draftCreateDeps(): ApiRouteDeps {
+  const noop = async () => undefined;
+  return {
+    settings,
+    db,
+    bus: new MemoryEventBus(),
+    workflowClient: {
+      signalUserMessage: noop,
+      wakeSessionWorkflow: noop,
+      requestSessionWorkflowWakeDispatch: noop,
+      signalApprovalDecision: noop,
+      signalSessionControl: noop,
+      syncScheduledTask: noop,
+      deleteScheduledTaskSchedule: noop,
+      triggerScheduledTask: noop,
+    } as unknown as SessionWorkflowClient,
+    objectStorage: null,
+    githubStateSecret: "test",
+    documentIndexer: { indexDocument: noop },
+    getDocumentServices: () => ({}) as never,
+  } as unknown as ApiRouteDeps;
+}
+
 describe("core new-session draft hydration", () => {
+  test.each(["organization", "user"] as const)(
+    "preserves a visible %s rig selection from another same-organization workspace",
+    async (scope) => {
+      if (!available) return;
+      const { grant, subjectId } = await fixture();
+      const workspaceId = grant.workspaceId;
+      const [origin] = await shared!.admin<{ id: string }[]>`
+        insert into workspaces (account_id, name)
+        values (${grant.accountId}, 'scoped rig origin') returning id`;
+      await shared!.admin`
+        insert into organization_memberships (account_id, subject_id, status, personal_workspace_id)
+        values (${grant.accountId}, ${subjectId}, 'active', ${workspaceId})`;
+      await shared!.admin`
+        insert into workspace_memberships (account_id, workspace_id, subject_id)
+        values (${grant.accountId}, ${origin!.id}, ${subjectId})`;
+      const rig = await createRig(db, {
+        accountId: grant.accountId,
+        workspaceId: origin!.id,
+        subjectId,
+        scope,
+        allowOrganization: scope === "organization",
+        name: `${scope} draft selection`,
+      });
+      await withWorkspaceSubjectRls(db, workspaceId, subjectId, (scoped) =>
+        saveNewSessionDraftInTransaction(scoped, {
+          accountId: grant.accountId,
+          workspaceId,
+          subjectId,
+          expectedRevision: 0,
+          text: "Use the selected environment",
+          resources: [],
+          tools: [],
+          toolsProvided: true,
+          model: settings.openaiModel,
+          modelProvided: true,
+          reasoningEffort: settings.openaiReasoningEffort,
+          latencyMode: "standard",
+          selectedProjectChannelId: null,
+          options: { rigId: rig.id },
+        }),
+      );
+      const hydrated = await getActorNewSessionDraft({ db, settings }, grant, workspaceId);
+      expect(hydrated.options.rigId).toBe(rig.id);
+    },
+    180_000,
+  );
+
+  test("drops cross-organization, another user's, revoked, and versionless rig selections", async () => {
+    if (!available) return;
+    const { grant, subjectId } = await fixture();
+    const foreign = await fixture();
+    const crossOrganization = await createRig(db, {
+      accountId: foreign.grant.accountId,
+      workspaceId: foreign.grant.workspaceId,
+      subjectId: foreign.subjectId,
+      scope: "organization",
+      allowOrganization: true,
+      name: "foreign draft environment",
+    });
+    const otherSubject = `user:${crypto.randomUUID()}`;
+    const [personal] = await shared!.admin<{ id: string }[]>`
+      insert into workspaces (account_id, name)
+      values (${grant.accountId}, 'other personal workspace') returning id`;
+    await shared!.admin`
+      insert into organization_memberships (account_id, subject_id, status, personal_workspace_id)
+      values (${grant.accountId}, ${otherSubject}, 'active', ${personal!.id})`;
+    await shared!.admin`
+      insert into workspace_memberships (account_id, workspace_id, subject_id)
+      values (${grant.accountId}, ${grant.workspaceId}, ${otherSubject})`;
+    const otherUser = await createRig(db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      subjectId: otherSubject,
+      scope: "user",
+      name: "another user's draft environment",
+    });
+    const revoked = await createRig(db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      name: "revoked draft environment",
+    });
+    const versionless = await createRig(db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      name: "versionless draft environment",
+    });
+    await shared!.admin`
+      update rigs set status = 'revoked', revoked_at = now() where id = ${revoked.id}`;
+    await shared!.admin`
+      update rig_versions set active = false where rig_id = ${versionless.id}`;
+
+    let revision = 0;
+    for (const rig of [crossOrganization, otherUser, revoked, versionless]) {
+      await withWorkspaceSubjectRls(db, grant.workspaceId, subjectId, (scoped) =>
+        saveNewSessionDraftInTransaction(scoped, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          subjectId,
+          expectedRevision: revision,
+          text: "Stale environment selection",
+          resources: [],
+          tools: [],
+          toolsProvided: true,
+          model: settings.openaiModel,
+          modelProvided: true,
+          reasoningEffort: settings.openaiReasoningEffort,
+          latencyMode: "standard",
+          selectedProjectChannelId: null,
+          options: { rigId: rig.id },
+        }),
+      );
+      revision += 1;
+      const hydrated = await getActorNewSessionDraft({ db, settings }, grant, grant.workspaceId);
+      expect(hydrated.options).not.toHaveProperty("rigId");
+    }
+  }, 180_000);
+
   test("accepts the exact saved visibility when creating the first session turn", async () => {
     if (!available) return;
     const { grant } = await fixture();
@@ -142,6 +282,84 @@ describe("core new-session draft hydration", () => {
     expect(session.initialTurnId).toBeString();
     expect(session.title).toBe(AUTOMATIC_SESSION_TITLE_FALLBACK);
     expect(session.titleSource).toBe("agent");
+  }, 180_000);
+
+  test("creates from a Customize-on draft that follows workspace connectors with exclusions", async () => {
+    if (!available) return;
+    // The composer saves "Customize on, no connector pinned" as an explicit
+    // empty tools array plus the exclusion list, while its create request
+    // omits `tools` and sends only the exclusions (workspace defaults). Both
+    // describe the same policy, so the exact-draft fence must accept them.
+    for (const excludedMcpServerIds of [[], ["docs"]]) {
+      const { grant } = await fixture();
+      const saved = await saveActorNewSessionDraft(
+        { db, settings, objectStorage: null },
+        grant,
+        grant.workspaceId!,
+        {
+          expectedRevision: 0,
+          text: "What messages can you read?",
+          resources: [],
+          tools: [],
+          toolsProvided: true,
+          model: settings.openaiModel,
+          reasoningEffort: settings.openaiReasoningEffort,
+          latencyMode: "standard",
+          options: { visibility: "workspace", excludedMcpServerIds },
+        },
+      );
+      expect(saved.toolsProvided).toBe(true);
+      const session = await createSessionForRequest(draftCreateDeps(), grant, grant.workspaceId!, {
+        initialMessage: saved.text,
+        visibility: "workspace",
+        resources: [],
+        excludedMcpServerIds,
+        model: saved.model,
+        reasoningEffort: saved.reasoningEffort,
+        latencyMode: saved.latencyMode,
+        expectedNewSessionDraftRevision: saved.revision,
+        idempotencyKey: crypto.randomUUID(),
+      });
+      expect(session.toolPolicy.mode).toBe("workspace_default");
+      expect(session.toolPolicy.excludedMcpServerIds ?? []).toEqual(excludedMcpServerIds);
+      const consumed = await getActorNewSessionDraft({ db, settings }, grant, grant.workspaceId!);
+      expect(consumed.text).toBe("");
+      expect(consumed.revision).toBe(saved.revision + 1);
+    }
+  }, 180_000);
+
+  test("still rejects an exclusion-only create against a draft with pinned connectors", async () => {
+    if (!available) return;
+    const { grant } = await fixture();
+    const saved = await saveActorNewSessionDraft(
+      { db, settings, objectStorage: null },
+      grant,
+      grant.workspaceId!,
+      {
+        expectedRevision: 0,
+        text: "pinned connectors",
+        resources: [],
+        tools: [mcp("docs")],
+        toolsProvided: true,
+        model: settings.openaiModel,
+        reasoningEffort: settings.openaiReasoningEffort,
+        latencyMode: "standard",
+        options: { visibility: "workspace" },
+      },
+    );
+    await expect(
+      createSessionForRequest(draftCreateDeps(), grant, grant.workspaceId!, {
+        initialMessage: saved.text,
+        visibility: "workspace",
+        resources: [],
+        excludedMcpServerIds: [],
+        model: saved.model,
+        reasoningEffort: saved.reasoningEffort,
+        latencyMode: saved.latencyMode,
+        expectedNewSessionDraftRevision: saved.revision,
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    ).rejects.toMatchObject({ status: 409 });
   }, 180_000);
 
   test("rejects a stale create before committing a visible session shell", async () => {

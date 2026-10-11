@@ -100,7 +100,7 @@ export type ScheduledTaskFormState = {
   mcpServerIds?: string[];
   connectionAccounts?: import("@opengeni/sdk").McpConnectionAccountSelection[];
   slackBotConnectionId: string;
-  /** Channel a person chose for the OpenGeni bot's posts; empty means no posting. */
+  /** Channel a person chose for the Opengeni bot's posts; empty means no posting. */
   slackBotChannelId: string;
   resources: ResourceRef[];
   /**
@@ -858,6 +858,7 @@ const ACCESS_FAILURE_REASON: Record<ScheduledTaskRunAccessFailure["reason"], str
   personal_authority_unavailable: "your personal account is not available to this schedule",
   unsupported_auth: "its sign-in is not supported for scheduled runs",
   resource_scope_unavailable: "the resources it was allowed to use are no longer available",
+  designated_credential_unavailable: "the account chosen for it is no longer available",
 };
 
 /** "Couldn't use Slack: your personal account is not available to this schedule." */
@@ -953,7 +954,7 @@ export function scheduledTaskPolicyDriftLines(
 /**
  * Defaults the owner chose to keep off one schedule, for the task head they
  * looked at. Only additions a person may deliberately decline are dismissible:
- * workspace default connectors and OpenGeni tools. A broken account or a
+ * workspace default connectors and Opengeni tools. A broken account or a
  * connector the workspace removed is never hidden.
  */
 export type ScheduledTaskDriftDismissal = {

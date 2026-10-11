@@ -86,7 +86,7 @@ createRoot(document.getElementById("root")!).render(
     <PageSlot>
       <div className="mx-auto max-w-5xl p-6 sm:p-12">
         <h1 className="mb-2 text-xl font-semibold">Capabilities</h1>
-        <p className="mb-8 text-sm text-fg-muted">Extend OpenGeni with skills and plugins.</p>
+        <p className="mb-8 text-sm text-fg-muted">Extend Opengeni with skills and plugins.</p>
         <PluginDiscovery
           client={client}
           workspaceId="workspace"

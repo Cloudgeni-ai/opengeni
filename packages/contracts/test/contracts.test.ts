@@ -70,6 +70,7 @@ import {
   renderTimelineAnnotationsForModel,
   renderSessionGoalContext,
   renderSessionSystemUpdateBatch,
+  renderMessageSentAtForModel,
   renderUserMessageContentForModel,
   formatModelContextTimestamp,
   sessionSystemUpdateBatchHistoryItem,
@@ -355,7 +356,7 @@ describe("contracts", () => {
         error: {
           status: 503,
           code: "upstream_unavailable",
-          message: "OpenGeni is temporarily unavailable — retry.",
+          message: "Opengeni is temporarily unavailable — retry.",
           retryable: true,
           outcomeUnknown: true,
           requestId: "edge-503-safe",
@@ -365,7 +366,7 @@ describe("contracts", () => {
       error: {
         status: 503,
         code: "upstream_unavailable",
-        message: "OpenGeni is temporarily unavailable — retry.",
+        message: "Opengeni is temporarily unavailable — retry.",
         retryable: true,
         outcomeUnknown: true,
         requestId: "edge-503-safe",
@@ -379,7 +380,7 @@ describe("contracts", () => {
         error: {
           status: 402,
           code: "payment_required",
-          message: "insufficient OpenGeni credits",
+          message: "insufficient Opengeni credits",
           retryable: false,
         },
       }),
@@ -387,7 +388,7 @@ describe("contracts", () => {
       error: {
         status: 402,
         code: "payment_required",
-        message: "insufficient OpenGeni credits",
+        message: "insufficient Opengeni credits",
         retryable: false,
       },
     });
@@ -1217,7 +1218,7 @@ describe("contracts", () => {
     ).toBe("https://dev.azure.com/acme/project/_git/repo.git");
   });
 
-  test("keeps uploaded files in the private OpenGeni workspace directory by default", () => {
+  test("keeps uploaded files in the private Opengeni workspace directory by default", () => {
     expect(resourceMountPath({ kind: "file", fileId: "file-1" })).toBe(".opengeni/files/file-1");
     expect(
       resourceMountPath({
@@ -1712,7 +1713,7 @@ describe("contracts", () => {
     const internal = sessionSystemUpdateBatchHistoryItem([update], goalSnapshot);
     expect(internal.role).toBe("system");
     expect(internal.content).toStartWith(`${SESSION_GOAL_CONTEXT_LABEL}\n${goalContext}`);
-    expect(internal.content).toContain("[OpenGeni internal updates]");
+    expect(internal.content).toContain("[Opengeni internal updates]");
   });
 
   test("renders scheduled occurrences as fresh user-role task boundaries", () => {
@@ -1752,7 +1753,7 @@ describe("contracts", () => {
     ];
     const attached = sessionSystemUpdateBatchHistoryItem(updates, completedGoal);
     expect(attached.role).toBe("system");
-    expect(attached.content).toContain("[OpenGeni internal updates]");
+    expect(attached.content).toContain("[Opengeni internal updates]");
 
     const scheduled = sessionSystemUpdateBatchHistoryItem(updates, completedGoal, {
       promoteScheduledOccurrenceToUser: true,
@@ -1773,7 +1774,7 @@ describe("contracts", () => {
     );
     expect(scheduled.content).toContain("Earlier completed goals");
     expect(scheduled.content).toContain("query that state during this occurrence");
-    expect(scheduled.content).not.toContain("[OpenGeni internal updates]");
+    expect(scheduled.content).not.toContain("[Opengeni internal updates]");
     expect(scheduled.content).not.toContain("They are not human prompts");
   });
 
@@ -1814,6 +1815,39 @@ describe("contracts", () => {
     expect(renderUserMessageContentForModel("Visible request", [], null)).toBe("Visible request");
   });
 
+  test("names the person who sent a message so members can be told apart", () => {
+    const sentAt = new Date("2026-09-26T07:51:30Z");
+    expect(
+      renderUserMessageContentForModel(
+        "Ship it",
+        [],
+        null,
+        undefined,
+        sentAt,
+        "second.member@example.com",
+      ),
+    ).toEqual([
+      {
+        type: "input_text",
+        text: "[Message sent Saturday 2026-09-26 07:51 UTC by second.member@example.com]",
+      },
+      { type: "input_text", text: "Ship it" },
+    ]);
+    // The one-line part stays one line with no early closing bracket.
+    expect(renderMessageSentAtForModel(sentAt, " Ada]\n[Lovelace ")).toBe(
+      "[Message sent Saturday 2026-09-26 07:51 UTC by Ada Lovelace]",
+    );
+    expect(renderMessageSentAtForModel(sentAt, "x".repeat(500))).toHaveLength(
+      "[Message sent Saturday 2026-09-26 07:51 UTC by ]".length + 200,
+    );
+    expect(renderMessageSentAtForModel(sentAt, " ][ ")).toBe(
+      "[Message sent Saturday 2026-09-26 07:51 UTC]",
+    );
+    expect(renderMessageSentAtForModel(sentAt, null)).toBe(
+      "[Message sent Saturday 2026-09-26 07:51 UTC]",
+    );
+  });
+
   test("states delivery and creation times on machine-input batches", () => {
     const childSessionId = "12121212-1212-4212-8212-121212121212";
     const update = {
@@ -1830,7 +1864,7 @@ describe("contracts", () => {
       deliveredAt: new Date("2026-09-26T07:51:00Z"),
     });
     expect(content.split("\n").slice(0, 3)).toEqual([
-      "[OpenGeni internal updates]",
+      "[Opengeni internal updates]",
       "These platform updates were delivered together for this inference.",
       "Delivered: Saturday 2026-09-26 07:51 UTC",
     ]);
@@ -1902,7 +1936,7 @@ describe("contracts", () => {
     ]);
 
     expect(scheduled.role).toBe("system");
-    expect(scheduled.content).toContain("[OpenGeni internal updates]");
+    expect(scheduled.content).toContain("[Opengeni internal updates]");
   });
 
   test("accepts client config payloads", () => {
@@ -1913,7 +1947,7 @@ describe("contracts", () => {
       allowedModels: ["gpt-5.6-sol"],
       defaultReasoningEffort: "high",
       allowedReasoningEfforts: ["low", "medium", "high"],
-      mcpServers: [{ id: "opengeni", name: "OpenGeni" }],
+      mcpServers: [{ id: "opengeni", name: "Opengeni" }],
       fileUploads: { enabled: true, maxSizeBytes: 5_000_000_000 },
       productAccessMode: "managed",
       auth: { mode: "managedSession", session: "cookie" },
@@ -2071,7 +2105,7 @@ describe("contracts", () => {
       label: "DeepSeek V4 Flash 0731",
       shortLabel: "V4 Flash",
       provider: "opengeni-gateway",
-      providerLabel: "OpenGeni Gateway",
+      providerLabel: "Opengeni Gateway",
       api: "responses",
     });
     expect(withShort.shortLabel).toBe("V4 Flash");
@@ -2508,7 +2542,7 @@ describe("contracts", () => {
     const numbered = numberTimelineAnnotations([submitted]);
     expect(renderTimelineAnnotationsForModel("", numbered)).toBe(
       [
-        "[OpenGeni timeline annotations]",
+        "[Opengeni timeline annotations]",
         "Annotation 1",
         `Source: ${JSON.stringify(submitted.source)}`,
         'Exact quote: "beta"',
@@ -3006,6 +3040,7 @@ describe("evaluateWorkspaceModelPolicy", () => {
       evaluateWorkspaceModelPolicy(null, {
         providerId: "azure",
         modelId: "gpt-5.6-sol",
+        chargesCredits: true,
       }),
     ).toEqual({ allowed: true });
   });
@@ -3014,7 +3049,7 @@ describe("evaluateWorkspaceModelPolicy", () => {
     expect(
       evaluateWorkspaceModelPolicy(
         { allowedProviders: null, allowedModels: null },
-        { providerId: "azure", modelId: "gpt-5.6-sol" },
+        { providerId: "azure", modelId: "gpt-5.6-sol", chargesCredits: true },
       ),
     ).toEqual({ allowed: true });
   });
@@ -3028,12 +3063,14 @@ describe("evaluateWorkspaceModelPolicy", () => {
       evaluateWorkspaceModelPolicy(policy, {
         providerId: "azure",
         modelId: "gpt-5.6-sol",
+        chargesCredits: true,
       }),
     ).toEqual({ allowed: false, reason: "provider" });
     expect(
       evaluateWorkspaceModelPolicy(policy, {
         providerId: "codex-subscription",
         modelId: "codex/gpt-5.6-sol",
+        chargesCredits: false,
       }),
     ).toEqual({ allowed: true });
   });
@@ -3047,12 +3084,14 @@ describe("evaluateWorkspaceModelPolicy", () => {
       evaluateWorkspaceModelPolicy(policy, {
         providerId: "codex-subscription",
         modelId: "codex/gpt-5.6-luna",
+        chargesCredits: false,
       }),
     ).toEqual({ allowed: false, reason: "model" });
     expect(
       evaluateWorkspaceModelPolicy(policy, {
         providerId: "codex-subscription",
         modelId: "codex/gpt-5.6-sol",
+        chargesCredits: false,
       }),
     ).toEqual({ allowed: true });
   });
@@ -3061,8 +3100,55 @@ describe("evaluateWorkspaceModelPolicy", () => {
     expect(
       evaluateWorkspaceModelPolicy(
         { allowedProviders: [], allowedModels: null },
-        { providerId: "codex-subscription", modelId: "codex/gpt-5.6-sol" },
+        { providerId: "codex-subscription", modelId: "codex/gpt-5.6-sol", chargesCredits: false },
       ),
     ).toEqual({ allowed: false, reason: "provider" });
+  });
+  test("the credit switch blocks every credit-billed model, whatever the allowlists say", () => {
+    const policy = { allowedProviders: null, allowedModels: null, allowCreditModels: false };
+    expect(
+      evaluateWorkspaceModelPolicy(policy, {
+        providerId: "azure",
+        modelId: "gpt-5.6-sol",
+        chargesCredits: true,
+      }),
+    ).toEqual({ allowed: false, reason: "credits" });
+    // A credit model added to the catalog later is blocked without an edit.
+    expect(
+      evaluateWorkspaceModelPolicy(policy, {
+        providerId: "opper",
+        modelId: "opper/aws/claude-opus-5-5",
+        chargesCredits: true,
+      }),
+    ).toEqual({ allowed: false, reason: "credits" });
+    expect(
+      evaluateWorkspaceModelPolicy(policy, {
+        providerId: "codex-subscription",
+        modelId: "codex/gpt-5.6-sol",
+        chargesCredits: false,
+      }),
+    ).toEqual({ allowed: true });
+    // An explicit allowlist entry does not override the switch.
+    expect(
+      evaluateWorkspaceModelPolicy(
+        { allowedProviders: null, allowedModels: ["gpt-5.6-sol"], allowCreditModels: false },
+        { providerId: "azure", modelId: "gpt-5.6-sol", chargesCredits: true },
+      ),
+    ).toEqual({ allowed: false, reason: "credits" });
+  });
+
+  test("an omitted or true credit switch leaves credit models to the allowlists", () => {
+    for (const allowCreditModels of [undefined, true]) {
+      expect(
+        evaluateWorkspaceModelPolicy(
+          {
+            allowedProviders: null,
+            allowedModels: null,
+            ...(allowCreditModels === undefined ? {} : { allowCreditModels }),
+          },
+          { providerId: "azure", modelId: "gpt-5.6-sol", chargesCredits: true },
+        ),
+      ).toEqual({ allowed: true });
+    }
   });
 });

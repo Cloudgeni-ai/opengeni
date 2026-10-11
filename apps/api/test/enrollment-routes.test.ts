@@ -23,6 +23,7 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import { createApp } from "../src/app";
+import { ControlRequest, ControlResponse } from "@opengeni/agent-proto";
 import type { AppDependencies, SessionWorkflowClient } from "@opengeni/core";
 
 // M5 — the enrollment device-flow ROUTES, driven end-to-end through createApp + the
@@ -143,85 +144,91 @@ afterAll(async () => {
 }, 180_000);
 
 describe("M5 device-flow happy path: start -> approve -> poll -> EnrollmentCredentials", () => {
-  test("renewal recovers expired credentials only with the current install key and live grant", async () => {
-    if (!available) throw new Error("renewal acceptance requires PostgreSQL");
-    const { accountId, workspaceId } = await freshWorkspace();
-    const keys = generateKeyPairSync("ed25519");
-    const rawKey = Buffer.from(keys.publicKey.export({ format: "jwk" }).x!, "base64url").toString(
-      "base64",
-    );
-    const enrollment = await createEnrollment(db, {
-      accountId,
-      workspaceId,
-      pubkey: rawKey,
-      exposure: "whole-machine",
-      hasDisplay: true,
-      allowScreenControl: false,
-      os: "macos",
-      arch: "aarch64",
-    });
-    const now = Math.floor(Date.now() / 1000);
-    const claims = {
-      workspaceId,
-      agentId: enrollment.id,
-      enrollmentId: enrollment.id,
-      credentialGeneration: enrollment.credentialGeneration,
-      subjectPrefix: `agent.${workspaceId}.${enrollment.id}`,
-      exp: now - 90 * 24 * 3600,
-    };
-    const expired = await signEnrollmentBearer(SIGNING_SECRET, claims);
-    expect(await verifyEnrollmentBearer(SIGNING_SECRET, expired)).toBeNull();
-    const app = appFor();
-    const request = (token = expired, signedAt = now, key = keys.privateKey, extra = {}) =>
-      app.request("/v1/enrollments/renew", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          bearer: token,
-          signedAt,
-          signature: sign(null, Buffer.from(enrollmentRenewalProof(token, signedAt)), key).toString(
-            "base64",
-          ),
-          ...extra,
-        }),
+  test.each(["test", "production"] as const)(
+    "renewal in %s recovers expired credentials only with the current install key and live grant",
+    async (environment) => {
+      if (!available) throw new Error("renewal acceptance requires PostgreSQL");
+      const { accountId, workspaceId } = await freshWorkspace();
+      const keys = generateKeyPairSync("ed25519");
+      const rawKey = Buffer.from(keys.publicKey.export({ format: "jwk" }).x!, "base64url").toString(
+        "base64",
+      );
+      const enrollment = await createEnrollment(db, {
+        accountId,
+        workspaceId,
+        pubkey: rawKey,
+        exposure: "whole-machine",
+        hasDisplay: true,
+        allowScreenControl: false,
+        os: "macos",
+        arch: "aarch64",
       });
-    const response = await request();
-    expect(response.status).toBe(200);
-    expect(response.headers.get("cache-control")).toBe("no-store");
-    const { credentials } = await response.json();
-    const renewed = await verifyEnrollmentBearer(SIGNING_SECRET, credentials.bearer);
-    expect(renewed!.exp).toBeGreaterThan(now + 29 * 24 * 3600);
-    expect(renewed).toEqual({ ...claims, exp: renewed!.exp });
-    expect(credentials.consentedScreenControl).toBe(false);
-    expect((await getEnrollment(db, workspaceId, enrollment.id))!.credentialGeneration).toBe(
-      enrollment.credentialGeneration,
-    );
-    // Stay outside the 120-second window even when HTTP requests cross a second boundary.
-    expect((await request(expired, now - 300)).status).toBe(401);
-    expect((await request(expired, now + 300)).status).toBe(401);
-    expect((await request(expired, now, generateKeyPairSync("ed25519").privateKey)).status).toBe(
-      401,
-    );
-    expect((await request(expired, now, keys.privateKey, { scope: "organization" })).status).toBe(
-      400,
-    );
-    expect((await request(await signEnrollmentBearer("another-deployment", claims))).status).toBe(
-      401,
-    );
-    expect(
-      (
-        await request(
-          await signEnrollmentBearer(SIGNING_SECRET, {
-            ...claims,
-            credentialGeneration: claims.credentialGeneration + 1,
+      const now = Math.floor(Date.now() / 1000);
+      const claims = {
+        workspaceId,
+        agentId: enrollment.id,
+        enrollmentId: enrollment.id,
+        credentialGeneration: enrollment.credentialGeneration,
+        subjectPrefix: `agent.${workspaceId}.${enrollment.id}`,
+        exp: now - 90 * 24 * 3600,
+      };
+      const expired = await signEnrollmentBearer(SIGNING_SECRET, claims);
+      expect(await verifyEnrollmentBearer(SIGNING_SECRET, expired)).toBeNull();
+      const app = appFor({ settings: { ...settings, environment } });
+      const request = (token = expired, signedAt = now, key = keys.privateKey, extra = {}) =>
+        app.request("/v1/enrollments/renew", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            bearer: token,
+            signedAt,
+            signature: sign(
+              null,
+              Buffer.from(enrollmentRenewalProof(token, signedAt)),
+              key,
+            ).toString("base64"),
+            ...extra,
           }),
-        )
-      ).status,
-    ).toBe(401);
-    await revokeEnrollment(db, { accountId, workspaceId, enrollmentId: enrollment.id });
-    expect((await request()).status).toBe(401);
-    expect((await getEnrollment(db, workspaceId, enrollment.id))!.status).toBe("revoked");
-  }, 180_000);
+        });
+      const response = await request();
+      expect(response.status).toBe(200);
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      const { credentials } = await response.json();
+      const renewed = await verifyEnrollmentBearer(SIGNING_SECRET, credentials.bearer);
+      expect(renewed!.exp).toBeGreaterThan(now + 29 * 24 * 3600);
+      expect(renewed).toEqual({ ...claims, exp: renewed!.exp });
+      expect(credentials.consentedScreenControl).toBe(false);
+      expect((await getEnrollment(db, workspaceId, enrollment.id))!.credentialGeneration).toBe(
+        enrollment.credentialGeneration,
+      );
+      // Stay outside the 120-second window even when HTTP requests cross a second boundary.
+      expect((await request(expired, now - 300)).status).toBe(401);
+      expect((await request(expired, now + 300)).status).toBe(401);
+      expect((await request(expired, now, generateKeyPairSync("ed25519").privateKey)).status).toBe(
+        401,
+      );
+      expect((await request(expired, now, keys.privateKey, { scope: "organization" })).status).toBe(
+        400,
+      );
+      expect((await request(await signEnrollmentBearer("another-deployment", claims))).status).toBe(
+        401,
+      );
+      expect(
+        (
+          await request(
+            await signEnrollmentBearer(SIGNING_SECRET, {
+              ...claims,
+              credentialGeneration: claims.credentialGeneration + 1,
+            }),
+          )
+        ).status,
+      ).toBe(401);
+      await revokeEnrollment(db, { accountId, workspaceId, enrollmentId: enrollment.id });
+      expect((await request()).status).toBe(401);
+      expect((await getEnrollment(db, workspaceId, enrollment.id))!.status).toBe("revoked");
+    },
+    180_000,
+  );
 
   test("the full flow lands an enrollment + sandbox and returns a signed bearer", async () => {
     if (!available) return;
@@ -1030,6 +1037,238 @@ describe("design-11 A2 headless: mint enroll token -> exchange -> identical cred
     expect(list.enrollments[0]!.id).toBe(creds.agentId);
     expect(list.enrollments[0]!.status).toBe("active");
     expect(list.enrollments[0]!.allowScreenControl).toBe(true);
+  }, 120_000);
+
+  test("a minted token connects one machine: the same machine may retry, another is refused", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const app = appFor();
+    const manageBearer = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:manage", "enrollments:read"])}`;
+    const mintRes = await app.request(`/v1/workspaces/${workspaceId}/enrollments/token`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: manageBearer },
+      body: JSON.stringify({ allowScreenControl: false }),
+    });
+    expect(mintRes.status).toBe(201);
+    const { token } = (await mintRes.json()) as { token: string };
+    const exchange = (publicKey: string, machineName: string) =>
+      app.request("/v1/enrollments/token/exchange", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          token,
+          publicKey,
+          os: "linux",
+          arch: "x86_64",
+          machineName,
+          canOfferDisplay: true,
+          requestsScreenControl: false,
+        }),
+      });
+
+    const first = await exchange("ed25519:LAPTOP", "laptop");
+    expect(first.status).toBe(201);
+    const firstAgent = ((await first.json()) as { credentials: { agentId: string } }).credentials
+      .agentId;
+    // A lost response or a re-run install command on the same machine still works.
+    const retry = await exchange("ed25519:LAPTOP", "laptop");
+    expect(retry.status).toBe(201);
+    expect(((await retry.json()) as { credentials: { agentId: string } }).credentials.agentId).toBe(
+      firstAgent,
+    );
+    // A copied command cannot connect a second machine.
+    const other = await exchange("ed25519:OTHER", "someone-else");
+    expect(other.status).toBe(401);
+    expect(await other.text()).toContain("already used to connect another machine");
+
+    const list = (await (
+      await app.request(`/v1/workspaces/${workspaceId}/enrollments`, {
+        headers: { authorization: manageBearer },
+      })
+    ).json()) as { enrollments: { id: string }[] };
+    expect(list.enrollments.map((enrollment) => enrollment.id)).toEqual([firstAgent]);
+  }, 120_000);
+
+  test("screen control turns on in place: consent on the row, renewal carries it, live agent renews", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const keys = generateKeyPairSync("ed25519");
+    const rawKey = Buffer.from(keys.publicKey.export({ format: "jwk" }).x!, "base64url").toString(
+      "base64",
+    );
+    const enrollment = await createEnrollment(db, {
+      accountId,
+      workspaceId,
+      pubkey: rawKey,
+      exposure: "whole-machine",
+      hasDisplay: true,
+      allowScreenControl: false,
+      os: "macos",
+      arch: "aarch64",
+    });
+    const renewRequests: { subject: string; op: string | undefined }[] = [];
+    const bus = Object.assign(new MemoryEventBus(), {
+      getRequestConnection: () => ({
+        request: async (subject: string, payload: Uint8Array) => {
+          const request = ControlRequest.decode(payload);
+          renewRequests.push({ subject, op: request.op?.$case });
+          return {
+            data: ControlResponse.encode({
+              requestId: request.requestId,
+              error: undefined,
+              result: {
+                $case: "credentialRenew",
+                credentialRenew: { renewed: true, consentedScreenControl: true },
+              },
+            }).finish(),
+          };
+        },
+      }),
+    });
+    const app = appFor({ bus: bus as never });
+    const manageBearer = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:manage", "enrollments:read"])}`;
+    const post = (path: string, body: unknown, auth = manageBearer) =>
+      app.request(path, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: auth },
+        body: JSON.stringify(body),
+      });
+    const machinePath = `/v1/workspaces/${workspaceId}/machines/${enrollment.id}`;
+
+    // Reading the machine is not enough to change its consent.
+    const readOnly = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:read"])}`;
+    expect((await post(`${machinePath}/screen-control`, {}, readOnly)).status).toBe(403);
+
+    // Offline: the consent is recorded in place and waits for the machine.
+    const offline = await post(`${machinePath}/screen-control`, {});
+    expect(offline.status).toBe(200);
+    expect(await offline.json()).toMatchObject({ status: "pending", reason: "offline" });
+    const allowed = (await getEnrollment(db, workspaceId, enrollment.id))!;
+    expect(allowed.allowScreenControl).toBe(true);
+    expect(allowed.credentialGeneration).toBe(enrollment.credentialGeneration);
+    expect(renewRequests).toHaveLength(0);
+
+    // The machine's own install-key renewal now carries the consent; its old
+    // credentials keep working (no generation bump).
+    const now = Math.floor(Date.now() / 1000);
+    const current = await signEnrollmentBearer(SIGNING_SECRET, {
+      workspaceId,
+      agentId: enrollment.id,
+      enrollmentId: enrollment.id,
+      credentialGeneration: enrollment.credentialGeneration,
+      subjectPrefix: `agent.${workspaceId}.${enrollment.id}`,
+      exp: now + 3600,
+    });
+    const renewed = await app.request("/v1/enrollments/renew", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        bearer: current,
+        signedAt: now,
+        signature: sign(
+          null,
+          Buffer.from(enrollmentRenewalProof(current, now)),
+          keys.privateKey,
+        ).toString("base64"),
+      }),
+    });
+    expect(renewed.status).toBe(200);
+    expect((await renewed.json()).credentials.consentedScreenControl).toBe(true);
+
+    // Live, but the agent predates on-request renewal: it applies after the update.
+    const connectionInstanceId = crypto.randomUUID();
+    await admin`
+      update enrollments set connection_instance_id = ${connectionInstanceId},
+        connection_lease_expires_at = now() + interval '5 minutes',
+        agent_capabilities = '{"exec":true}'::jsonb
+      where id = ${enrollment.id}`;
+    expect(await (await post(`${machinePath}/screen-control`, {})).json()).toMatchObject({
+      status: "pending",
+      reason: "agent_update_required",
+    });
+    expect(renewRequests).toHaveLength(0);
+
+    // Live and able: exactly that process is asked to renew, and it reports consent.
+    await admin`
+      update enrollments set agent_capabilities = '{"exec":true,"credentialRenew":true}'::jsonb
+      where id = ${enrollment.id}`;
+    const active = await post(`${machinePath}/screen-control`, {});
+    expect(await active.json()).toEqual({ status: "active", reason: null, message: null });
+    expect(renewRequests).toEqual([
+      {
+        subject: `agent.${workspaceId}.${enrollment.id}.connection.${connectionInstanceId}.rpc`,
+        op: "credentialRenew",
+      },
+    ]);
+    // Once the agent's Hello reports the consent, repeating the call changes nothing.
+    await admin`
+      update enrollments
+      set agent_capabilities = '{"exec":true,"credentialRenew":true,"screenControl":true}'::jsonb
+      where id = ${enrollment.id}`;
+    expect(await (await post(`${machinePath}/screen-control`, {})).json()).toMatchObject({
+      status: "active",
+    });
+    expect(renewRequests).toHaveLength(1);
+    const list = (await (
+      await app.request(`/v1/workspaces/${workspaceId}/enrollments`, {
+        headers: { authorization: manageBearer },
+      })
+    ).json()) as { enrollments: { id: string }[] };
+    expect(list.enrollments.map((row) => row.id)).toEqual([enrollment.id]);
+    const audits = await admin<{ action: string }[]>`
+      select action from audit_events
+      where target_id = ${enrollment.id} and action like 'connected_machine.screen_control%'`;
+    expect(audits.map((row) => row.action)).toEqual(["connected_machine.screen_control.allowed"]);
+
+    // Privacy & Security panes: validated, and exec'd only on a reachable Mac.
+    expect((await post(`${machinePath}/privacy-settings`, { pane: "nope" })).status).toBe(400);
+    const otherMachine = await createEnrollment(db, {
+      accountId,
+      workspaceId,
+      pubkey: Buffer.alloc(32, 7).toString("base64"),
+      exposure: "whole-machine",
+      hasDisplay: false,
+      allowScreenControl: false,
+      os: "linux",
+      arch: "x86_64",
+    });
+    expect(
+      (
+        await post(`/v1/workspaces/${workspaceId}/machines/${otherMachine.id}/privacy-settings`, {
+          pane: "screen_recording",
+        })
+      ).status,
+    ).toBe(422);
+  }, 120_000);
+
+  test("an organization machine's screen control needs account:admin", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const enrollment = await createEnrollment(db, {
+      accountId,
+      workspaceId,
+      pubkey: Buffer.alloc(32, 9).toString("base64"),
+      exposure: "whole-machine",
+      hasDisplay: true,
+      allowScreenControl: false,
+      os: "macos",
+      arch: "aarch64",
+    });
+    await admin`update enrollments set authority_scope = 'organization' where id = ${enrollment.id}`;
+    const app = appFor();
+    const response = await app.request(
+      `/v1/workspaces/${workspaceId}/machines/${enrollment.id}/screen-control`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${await bearer(accountId, workspaceId, ["enrollments:manage", "enrollments:read"])}`,
+        },
+        body: "{}",
+      },
+    );
+    expect(response.status).toBe(403);
+    expect((await getEnrollment(db, workspaceId, enrollment.id))!.allowScreenControl).toBe(false);
   }, 120_000);
 
   test("exchange with an invalid token → 401; an oge_ bearer is NOT accepted as an enroll token", async () => {

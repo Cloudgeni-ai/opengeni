@@ -9,6 +9,7 @@ import Ajv, {
 } from "ajv";
 import Ajv2019 from "ajv/dist/2019.js";
 import Ajv2020 from "ajv/dist/2020.js";
+import { schemaPatternEngine } from "./schema-pattern";
 import {
   TOOL_GATEWAY_CATALOG_VERSION,
   ToolGatewayCallRequest,
@@ -16,6 +17,7 @@ import {
   ToolGatewayCatalogEntry,
   ToolGatewayResult,
   isToolResultSpilledReceipt,
+  executableToolSchema,
   type ToolGatewayCaller,
   type ToolGatewayCatalog as ToolGatewayCatalogValue,
   type ToolGatewayCatalogEntry as ToolGatewayCatalogEntryValue,
@@ -30,6 +32,7 @@ import {
 } from "./catalog";
 import {
   ToolGatewayApprovalRequiredError,
+  ToolGatewayBlockedError,
   ToolGatewayCatalogStaleError,
   ToolGatewayInputValidationError,
   ToolGatewayOutputValidationError,
@@ -58,6 +61,8 @@ export type ToolGatewayDefinition = Omit<ToolGatewayCatalogEntryValue, "codemode
   codemodePath?: readonly string[];
   /** Internal authority revision bound into human approval capabilities. */
   approvalAuthorityDigest?: string;
+  /** Executable effect/account identity; excludes unrelated revision changes. */
+  effectAuthorityDigest?: string;
   /** Connection-backed calls must have a side-effect-free provider preflight before approval. */
   requiresProviderPreflight?: boolean;
   /** In-process provider preflight; never enters the public catalog or its digest. */
@@ -79,6 +84,12 @@ export type ToolGatewayAuthorization = (input: {
   entry: ToolGatewayCatalogEntryValue;
 }) => Promise<void> | void;
 
+/** A trusted adapter resolves user preferences after schema and access validation. */
+export type ToolGatewayApprovalResolver = (input: {
+  call: ToolGatewayCall;
+  entry: ToolGatewayCatalogEntryValue;
+}) => Promise<"allow" | "ask" | "block"> | "allow" | "ask" | "block";
+
 export type ToolGatewayCall = {
   operationId: string;
   catalogDigest: string;
@@ -92,6 +103,8 @@ export type ToolGatewayCallSettlement =
   | { outcome: "failed"; error: unknown };
 
 export type PreparedToolGatewayCallLifecycle = {
+  /** Exact durable review created by a trusted policy adapter. */
+  waitingForApproval?: { requestId: string; actionFingerprint: string };
   /** Cross the side-effect boundary immediately before the executor closure. */
   begin?: () => Promise<void> | void;
   /** Settle the side-effect lifecycle after a returned result or thrown failure. */
@@ -122,6 +135,7 @@ type CompiledDefinition = {
   entry: ToolGatewayCatalogEntryValue;
   execute: ToolGatewayDefinition["execute"];
   approvalAuthorityDigest: string | undefined;
+  effectAuthorityDigest: string | undefined;
   preflightCall: ToolGatewayDefinition["preflightCall"];
   lifecycle: ToolGatewayCallLifecycle | undefined;
   validateInput: ValidateFunction<unknown>;
@@ -134,6 +148,10 @@ export type PreparedToolGatewayCall = {
   readonly call: ToolGatewayCall;
   readonly entry: ToolGatewayCatalogEntryValue;
   readonly approvalAuthorityDigest: string;
+  /** Effective choice; optional for older adapters constructing this interface. */
+  readonly approvalDecision?: "allow" | "ask";
+  readonly waitingForApproval?: { requestId: string; actionFingerprint: string };
+  readonly effectDigest?: string;
   execute: () => Promise<ToolGatewayResultValue>;
 };
 
@@ -147,6 +165,7 @@ export class PreparedToolGatewayDefinitions {
   create(input: {
     catalogDigest: string;
     authorize?: ToolGatewayAuthorization;
+    resolveApproval?: ToolGatewayApprovalResolver;
     requireApproval?: (
       entry: ToolGatewayCatalogEntryValue,
       caller: ToolGatewayCaller,
@@ -164,6 +183,7 @@ export class PreparedToolGatewayDefinitions {
       input.authorize,
       input.requireApproval,
       input.confirmModelApproval,
+      input.resolveApproval,
     );
   }
 }
@@ -190,6 +210,7 @@ export class ToolGateway {
           subjectId: string;
         }) => boolean)
       | undefined,
+    private readonly resolveApproval?: ToolGatewayApprovalResolver,
   ) {
     for (const definition of definitions) {
       this.byIdentity.set(identityKey(definition.entry.identity), definition);
@@ -244,7 +265,7 @@ export class ToolGateway {
     if (!definition) {
       throw new ToolGatewayToolNotFoundError();
     }
-    if (this.requireApproval?.(definition.entry, caller, context)) {
+    if (!this.resolveApproval && this.requireApproval?.(definition.entry, caller, context)) {
       throw new ToolGatewayApprovalRequiredError();
     }
     if (!definition.validateInput(request.arguments)) {
@@ -252,6 +273,7 @@ export class ToolGateway {
     }
     if (
       caller.kind === "model" &&
+      !this.resolveApproval &&
       definition.entry.approval === "human" &&
       !modelApprovalConfirmed
     ) {
@@ -267,7 +289,22 @@ export class ToolGateway {
     await measureMcpPhase("provider_authorization", () =>
       this.authorize?.({ call, entry: definition.entry }),
     );
-    if (definition.entry.approval === "human") {
+    const approvalDecision = this.resolveApproval
+      ? await this.resolveApproval({ call, entry: definition.entry })
+      : definition.entry.approval === "human"
+        ? "ask"
+        : "allow";
+    if (approvalDecision === "block") throw new ToolGatewayBlockedError();
+    if (
+      this.resolveApproval &&
+      approvalDecision === "ask" &&
+      (caller.kind === "model"
+        ? !modelApprovalConfirmed
+        : context.transportMeta?.approvalConfirmed !== true)
+    ) {
+      throw new ToolGatewayApprovalRequiredError();
+    }
+    if (approvalDecision === "ask") {
       await measureMcpPhase("preflight", () =>
         definition.preflightCall?.({
           call,
@@ -286,6 +323,11 @@ export class ToolGateway {
     return {
       call,
       entry: definition.entry,
+      approvalDecision,
+      ...(lifecycle?.waitingForApproval
+        ? { waitingForApproval: lifecycle.waitingForApproval }
+        : {}),
+      effectDigest: this.effectDigest(request.identity),
       approvalAuthorityDigest:
         definition.approvalAuthorityDigest ??
         digestCanonicalJson({
@@ -297,6 +339,7 @@ export class ToolGateway {
         measureMcpPhase(
           "execution",
           async () => {
+            if (lifecycle?.waitingForApproval) throw new ToolGatewayApprovalRequiredError();
             await measureMcpPhase("lifecycle_begin", () => lifecycle?.begin?.());
             let result: ToolGatewayResultValue;
             try {
@@ -335,6 +378,24 @@ export class ToolGateway {
           (result) => (result.isError ? "rejected" : "completed"),
         ),
     };
+  }
+
+  /** Binds continuation to one executable operation, independent of unrelated catalog changes. */
+  effectDigest(identity: ToolGatewayIdentity): string {
+    const definition = this.byIdentity.get(identityKey(identity));
+    if (!definition) throw new ToolGatewayToolNotFoundError();
+    const { entry } = definition;
+    return digestCanonicalJson({
+      version: 1,
+      identity: entry.identity,
+      source: entry.source,
+      inputSchema: executableToolSchema(entry.inputSchema),
+      outputSchema: executableToolSchema(entry.outputSchema ?? null),
+      readOnly: entry.annotations?.readOnlyHint ?? null,
+      destructive: entry.annotations?.destructiveHint ?? null,
+      idempotent: entry.annotations?.idempotentHint ?? null,
+      authority: definition.effectAuthorityDigest ?? definition.approvalAuthorityDigest ?? null,
+    });
   }
 
   async callModel(input: ModelToolGatewayCall): Promise<ToolGatewayResultValue> {
@@ -377,6 +438,7 @@ export function prepareToolGatewayDefinitions(
     const {
       execute,
       approvalAuthorityDigest,
+      effectAuthorityDigest,
       requiresProviderPreflight: _requiresProviderPreflight,
       preflightCall,
       lifecycle,
@@ -385,6 +447,9 @@ export function prepareToolGatewayDefinitions(
     } = definition;
     if (approvalAuthorityDigest !== undefined && !/^[0-9a-f]{64}$/u.test(approvalAuthorityDigest)) {
       throw new Error("Tool gateway approval authority digest must be lowercase SHA-256 hex");
+    }
+    if (effectAuthorityDigest !== undefined && !/^[0-9a-f]{64}$/u.test(effectAuthorityDigest)) {
+      throw new Error("Tool gateway effect authority digest must be lowercase SHA-256 hex");
     }
     const entry = ToolGatewayCatalogEntry.parse({
       ...entryInput,
@@ -395,6 +460,7 @@ export function prepareToolGatewayDefinitions(
       entry,
       execute,
       approvalAuthorityDigest,
+      effectAuthorityDigest,
       preflightCall,
       lifecycle,
       validateInput: compileCatalogSchema(schemaValidators, entry.inputSchema),
@@ -418,6 +484,7 @@ export function createWorkspaceToolGateway(input: {
   definitions: readonly ToolGatewayDefinition[];
   createdAt?: Date;
   authorize?: ToolGatewayAuthorization;
+  resolveApproval?: ToolGatewayApprovalResolver;
   requireApproval?: (
     entry: ToolGatewayCatalogEntryValue,
     caller: ToolGatewayCaller,
@@ -443,6 +510,7 @@ export function createWorkspaceToolGateway(input: {
     gateway: prepared.create({
       catalogDigest: catalog.digest,
       ...(input.authorize ? { authorize: input.authorize } : {}),
+      ...(input.resolveApproval ? { resolveApproval: input.resolveApproval } : {}),
       ...(input.requireApproval ? { requireApproval: input.requireApproval } : {}),
     }),
   };
@@ -480,6 +548,8 @@ function createSchemaValidators(mode: SchemaValidatorMode): SchemaValidators {
     strict: false,
     useDefaults: false,
     validateFormats: false,
+    // Remote schemas: a pattern invalid in Unicode mode must not fail the catalog.
+    code: { regExp: schemaPatternEngine },
   } as const;
   const validators = {
     draft7: new Ajv(options),
@@ -598,21 +668,23 @@ function compileCatalogSchema(
 }
 
 function allocateToolPaths(definitions: readonly ToolGatewayDefinition[]): string[][] {
-  const requested = definitions.map((definition) =>
-    definition.codemodePath?.length
-      ? [...definition.codemodePath]
-      : [definition.identity.serverId, definition.identity.toolName],
-  );
-  const bases = requested.map((path) => path.map(safeNamespaceSegment));
-  const allocated = bases.map((base, index) => {
-    const path = requested[index]!;
-    if (path.every((segment, segmentIndex) => segment === base[segmentIndex])) return base;
-    const suffix = `_${shortIdentityDigest(definitions[index]!.identity)}`;
-    const last = base.at(-1)!;
-    return [...base.slice(0, -1), `${last.slice(0, 128 - suffix.length)}${suffix}`];
-  });
+  const allocated = definitions.map(projectToolGatewayPath);
   assertNoToolPathCollisions(allocated);
   return allocated;
+}
+
+/** Shared forward projection; never reverse-parse a namespace as authority. */
+export function projectToolGatewayPath(
+  definition: Pick<ToolGatewayDefinition, "identity" | "codemodePath">,
+): string[] {
+  const path = definition.codemodePath?.length
+    ? [...definition.codemodePath]
+    : [definition.identity.serverId, definition.identity.toolName];
+  const base = path.map(safeNamespaceSegment);
+  if (path.every((segment, segmentIndex) => segment === base[segmentIndex])) return base;
+  const suffix = `_${shortIdentityDigest(definition.identity)}`;
+  const last = base.at(-1)!;
+  return [...base.slice(0, -1), `${last.slice(0, 128 - suffix.length)}${suffix}`];
 }
 
 type ToolPathNode = {
@@ -652,7 +724,7 @@ function compareToolPaths(left: readonly string[], right: readonly string[]): nu
   return left.length - right.length;
 }
 
-function safeNamespaceSegment(value: string): string {
+export function safeNamespaceSegment(value: string): string {
   let normalized = value.replace(/[^A-Za-z0-9_$]/gu, "_");
   if (!/^[A-Za-z_$]/u.test(normalized)) normalized = `_${normalized}`;
   if (["__proto__", "prototype", "constructor"].includes(normalized)) {

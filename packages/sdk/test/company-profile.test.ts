@@ -27,7 +27,7 @@ describe("company-profile SDK", () => {
     await client.updateCompanyProfile(WORKSPACE_ID, {
       operationId: crypto.randomUUID(),
       profile: {
-        identity: "CloudGeni builds OpenGeni.",
+        identity: "CloudGeni builds Opengeni.",
         mission: null,
         products: [],
         customers: [],

@@ -88,13 +88,24 @@ export type RenewSessionRealtimeInput = {
   expectedVersion: number;
   now?: Date;
   leaseMs?: number;
+  /**
+   * False keeps the current lease unchanged (owner still proven). Used when a
+   * deployment-funded call ran out of credits: the client drains and ends
+   * inside the remaining lease, and an ignoring client lapses on its own.
+   */
+  extendLease?: boolean;
 };
 
-export type EndSessionRealtimeInput = Omit<RenewSessionRealtimeInput, "leaseMs"> & {
+export type EndSessionRealtimeInput = Omit<RenewSessionRealtimeInput, "leaseMs" | "extendLease"> & {
   reason: Extract<SessionRealtimeEndReason, "user_stop" | "browser_unload">;
+  /** The ending person's own label (their email), so the flushed tail names its sender. */
+  ownerSubjectLabel?: string | null | undefined;
 };
 
-export type AssertSessionRealtimeOwnerInput = Omit<RenewSessionRealtimeInput, "leaseMs">;
+export type AssertSessionRealtimeOwnerInput = Omit<
+  RenewSessionRealtimeInput,
+  "leaseMs" | "extendLease"
+>;
 
 export type SessionRealtimeMutationResult = {
   mode: SessionRealtimeMode;
@@ -270,6 +281,7 @@ async function endWithEvent(
   row: RealtimeRow,
   reason: SessionRealtimeEndReason,
   now: Date,
+  ownerSubjectLabel?: string | null,
 ): Promise<{
   mode: SessionRealtimeMode;
   eventId: string;
@@ -306,6 +318,7 @@ async function endWithEvent(
     sessionId: session.id,
     realtimeId: ended.id,
     ownerSubjectId: ended.ownerSubjectId,
+    ownerSubjectLabel,
     now,
   });
   const workflowWakeRevision = await registerNormalModeWake(db, session, `realtime_${reason}`);
@@ -594,6 +607,15 @@ export async function renewSessionRealtimeInTransaction(
       expired: true,
     };
   }
+  if (input.extendLease === false) {
+    return {
+      mode: mapRealtimeMode(row),
+      replay: false,
+      eventIds: [],
+      workflowWakeRevision: null,
+      expired: false,
+    };
+  }
   const [renewed] = await db
     .update(schema.sessionRealtimeModes)
     .set({
@@ -648,7 +670,7 @@ export async function endSessionRealtimeInTransaction(
   }
   const reason: SessionRealtimeEndReason =
     row.leaseExpiresAt <= now ? "lease_expired" : input.reason;
-  const ended = await endWithEvent(db, session, row, reason, now);
+  const ended = await endWithEvent(db, session, row, reason, now, input.ownerSubjectLabel);
   return {
     mode: ended.mode,
     replay: false,

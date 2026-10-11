@@ -107,10 +107,91 @@ duration as the unlabeled
 physical histogram name, because one metric name has exactly one label set in a
 process registry.
 
+`opengeni_workspace_capture_skipped_total{backend,reason}` counts warm
+checkpoint attempts that could not start, by a closed reason (the capture-claim
+refusal such as `holder_in_progress` or `mutation_in_progress`, `lease_not_warm`,
+`capture_policy`, `no_persist_primitive`). A blocked checkpoint is retried on
+every turn heartbeat, so a sustained blocker increments it repeatedly. An attempt
+that is not due yet or whose archive already covers the current generation is not
+counted.
+
+`opengeni_sandbox_checkpoint_staleness{kind}` (`dirty`, `stale_4h`,
+`stale_12h`) and `opengeni_sandbox_checkpoint_age_max_seconds` are a fresh,
+content-free reaper inventory (`opengeni_private.sandbox_checkpoint_staleness()`,
+migrations 0672 and 0683) of live Modal sandboxes with a write their last
+checkpoint did not capture: a mutation admission on that exact box newer than
+the archive generation, any captured write that is still open or settled
+after the checkpoint (a background command the checkpoint ran around), or a
+viewer or interaction (a desktop or terminal tab, a browser or computer
+controller) attached now or since the last capture that did not run around one
+(`untracked_writer_since`), which can write without an admission. A generation
+bump with no write behind it, such as a fresh or restored box or a capture that
+published one generation behind, does not count on its own. Age runs from the
+first uncaptured write, or for a writer from the later of the checkpoint and its
+first attach, clamped to the box's creation. `OpenGeniSandboxCheckpointStale` warns when any box has held such a
+write for more than 12 hours, half the default provider lifetime: an unplanned
+provider loss would lose it. Boxes kept warm between turns by a tab, a
+controller or a background command (supervised or not, migration 0685) are
+checkpointed by the idle checkpoint sweep (migration 0680).
+
+To find the leases behind the alert, run this as a role that bypasses row-level
+security (a superuser or a `BYPASSRLS` role); under forced row-level security an
+ordinary role silently sees no rows. It ages boxes the way the inventory does,
+checking every captured write for a settlement after the checkpoint:
+
+```sql
+with live as (
+  select lease.id, lease.workspace_id, lease.sandbox_group_id, lease.liveness,
+    lease.instance_id,
+    coalesce(lease.archive_generation, 0) as archived_generation,
+    coalesce(lease.provider_created_at, lease.created_at) as box_created_at,
+    opengeni_private.sandbox_checkpoint_staleness_at(
+      lease.resume_state #>> '{sessionState,workspaceArchiveAt}') as checkpoint_at,
+    (select min(holder.created_at) from sandbox_lease_holders holder
+      where holder.lease_id = lease.id
+        and holder.kind in ('viewer', 'interaction')) as writer_attached_at,
+    lease.untracked_writer_since
+  from sandbox_leases lease
+  where lease.backend = 'modal' and lease.liveness in ('warm', 'draining')
+    and lease.instance_id is not null
+), evidence as (
+  select live.id, live.workspace_id, live.sandbox_group_id, live.liveness,
+    live.box_created_at, live.checkpoint_at,
+    least(live.untracked_writer_since, live.writer_attached_at) as writer_since,
+    min(admission.admitted_at) filter (
+      where admission.workspace_generation > live.archived_generation
+    ) as newer_write_at,
+    bool_or(admission.workspace_generation <= live.archived_generation
+      and (admission.settled_at is null
+        or admission.settled_at > live.checkpoint_at)) as spanning_write
+  from live
+  left join sandbox_workspace_mutation_admissions admission
+    on admission.lease_id = live.id
+   and admission.provider_instance_id = live.instance_id
+  group by live.id, live.workspace_id, live.sandbox_group_id, live.liveness,
+    live.box_created_at, live.checkpoint_at, live.untracked_writer_since,
+    live.writer_attached_at
+)
+select id, workspace_id, sandbox_group_id, liveness,
+  greatest(
+    least(newer_write_at,
+      case when spanning_write then coalesce(checkpoint_at, box_created_at) end,
+      case when writer_since is not null then greatest(writer_since,
+        coalesce(checkpoint_at, box_created_at)) end),
+    box_created_at) as unsaved_since
+from evidence
+where newer_write_at is not null or spanning_write or writer_since is not null
+order by unsaved_since
+limit 20;
+```
+
 Consistent workspace capture intentionally fences new writing operations; a
 shell command is conservatively a potential writer even when its text looks
 read-only. Capture waits must not be removed by bypassing that fence or by
-disabling recovery snapshots. Compare gate wait and physical capture duration
+disabling recovery snapshots. The one deliberate exception is an already-running
+retained background command under a point-in-time (Modal native) capture: warm
+checkpoints run around it and record the archive one generation behind the
+workspace (see `docs/run-lifecycle.md`). Compare gate wait and physical capture duration
 before changing capture strategy; filesystem and directory-only persistence
 have different recovery semantics.
 
@@ -203,11 +284,11 @@ The same route admits closed operational signals, discriminated by a `signal`
 field. A body without `signal` is an error report as above; an older API refuses
 a signal body as `invalid`, so the extension is backward compatible.
 
-| `signal` | Series | Labels (closed values) |
-| --- | --- | --- |
-| `request_failure` | `opengeni_client_request_failures_total` (counter) | `action`: `create_session`, `send_message` (includes sends the server queues), `steer_message`, `composer_submit`, `retry_turn`, `connect_integration`, `connect_model`, `checkout_start`; `reason`: `network`, `timeout`, `offline` |
-| `stream` | `opengeni_client_stream_events_total` (counter) | `stream`: `session`, `workspace`; `event`: `reconnect`, `reconnect_exhausted`, `long_disconnect` |
-| `web_vital` | `opengeni_client_web_vital` (histogram: `_bucket`, `_sum`, `_count`) | `metric`: `lcp`, `inp`, `ttfb` (seconds), `cls` (unitless score); `page`: the closed journey page label (`sessions`, `home`, `other`, ...) |
+| `signal`          | Series                                                               | Labels (closed values)                                                                                                                                                                                                               |
+| ----------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `request_failure` | `opengeni_client_request_failures_total` (counter)                   | `action`: `create_session`, `send_message` (includes sends the server queues), `steer_message`, `composer_submit`, `retry_turn`, `connect_integration`, `connect_model`, `checkout_start`; `reason`: `network`, `timeout`, `offline` |
+| `stream`          | `opengeni_client_stream_events_total` (counter)                      | `stream`: `session`, `workspace`; `event`: `reconnect`, `reconnect_exhausted`, `long_disconnect`                                                                                                                                     |
+| `web_vital`       | `opengeni_client_web_vital` (histogram: `_bucket`, `_sum`, `_count`) | `metric`: `lcp`, `inp`, `ttfb` (seconds), `cls` (unitless score); `page`: the closed journey page label (`sessions`, `home`, `other`, ...)                                                                                           |
 
 Both counters are published at zero for every label pair on API start, and a
 rate-limited signal is counted in

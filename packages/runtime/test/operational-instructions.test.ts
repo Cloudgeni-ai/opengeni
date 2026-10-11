@@ -35,7 +35,7 @@ describe("provider-neutral operational instructions", () => {
     const guidance = OPENGENI_OPERATIONAL_INSTRUCTIONS.slice(start, end);
     expect(start).toBeGreaterThan(-1);
     expect(end).toBeGreaterThan(start);
-    expect(guidance).toContain("check whether OpenGeni already provides the capability natively");
+    expect(guidance).toContain("check whether Opengeni already provides the capability natively");
     expect(guidance).toContain(
       "a Site reaches the model and workspace tools through the host bridge",
     );
@@ -92,6 +92,16 @@ describe("provider-neutral operational instructions", () => {
     );
   });
 
+  test("limits programmatic coverage to the Codemode catalog, not sandbox built-ins", () => {
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).not.toContain("Every tool available to you");
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain(
+      "Every tool in the Codemode catalog (what `ogtool list` shows)",
+    );
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain(
+      "Built-in sandbox tools for the shell, file patching, image viewing and terminal input are not in that catalog",
+    );
+  });
+
   test("does not carry Codex-only runtime language", () => {
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("You are Codex");
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("GPT-5");
@@ -103,7 +113,7 @@ describe("provider-neutral operational instructions", () => {
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("/abs/path");
   });
 
-  test("teaches OpenGeni sandbox file links with optional line numbers", () => {
+  test("teaches Opengeni sandbox file links with optional line numbers", () => {
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("[app.py](sandbox:/workspace/app.py:12)");
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
       "[My Component.ts](<sandbox:/workspace/My Project/My Component.ts:3>)",

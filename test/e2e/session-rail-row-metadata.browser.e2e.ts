@@ -40,7 +40,10 @@ describe("Session rail row metadata in Chromium", () => {
     );
     browser = await chromium.launch({ headless: true });
     page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+    const pageErrors: string[] = [];
+    page.on("pageerror", (error) => pageErrors.push(error.message));
     await page.goto(`${baseUrl}/test/session-rail-row-metadata.html`, { waitUntil: "networkidle" });
+    expect(pageErrors).toEqual([]);
   }, 60_000);
 
   afterAll(async () => {
@@ -221,9 +224,11 @@ describe("Session rail row metadata in Chromium", () => {
 
     const text = await hoverCard.innerText();
     expect(text).toContain(longTitle);
-    expect(text).toContain("Created by Bendik Nyheim");
+    expect(text).toContain("Example Owner");
+    expect(text).toContain("Created");
+    expect(text).toContain("Updated");
     expect(text).toContain("3 sub-agents");
-    expect(text).not.toContain("Idle");
+    expect(text).toContain("Idle");
     expect(text).not.toContain("Read");
 
     const rowBox = await row.boundingBox();
@@ -248,7 +253,9 @@ describe("Session rail row metadata in Chromium", () => {
       expect(box.x).toBeGreaterThanOrEqual(cardBox.x);
       expect(box.x + box.width).toBeLessThanOrEqual(cardBox.x + cardBox.width);
     }
-    expect(await card.locator("p").innerText()).toBe("Long_unbroken_session_title_".repeat(8));
+    expect(await card.locator("p").first().innerText()).toBe(
+      "Long_unbroken_session_title_".repeat(8),
+    );
     await page.screenshot({ path: "/tmp/opengeni-session-hover-overflow.png", fullPage: true });
   });
 

@@ -16,6 +16,8 @@ export type ArtifactCatalogItem = {
   createdAt: string;
   updatedAt: string;
   status: "active" | "archived";
+  /** Shared workspace pin; absent on older servers. Never grants content access. */
+  pinned?: boolean;
   /** Present only when the viewer can read this session. */
   sourceSessionId?: string;
   versionId?: string;
@@ -38,4 +40,10 @@ export type ArtifactCatalogListOptions = {
 export type ArtifactCatalogListResponse = {
   items: ArtifactCatalogItem[];
   nextCursor: string | null;
+};
+
+export type ArtifactPinResponse = {
+  kind: ArtifactCatalogKind;
+  artifactId: string;
+  pinned: boolean;
 };

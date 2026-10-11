@@ -205,6 +205,11 @@ export async function startPostgresFixture(
     get peerCount() {
       return peers.size;
     },
+    disconnect() {
+      // Drop physical connections while leaving the listener available for a
+      // fresh pool connection. No fabricated driver errors or parser hooks.
+      for (const peer of peers) peer.destroy();
+    },
     async close() {
       // Close rejected handshakes before sql.end(): Bun can otherwise leave the
       // upgraded socket half-open even after emitting the certificate error.

@@ -1,7 +1,7 @@
 // @opengeni/react/session — session state and pure timeline projection.
 //
 // This entry deliberately excludes styled components, workbench surfaces, CSS,
-// and their optional peers. Hosts keep OpenGeni's session semantics while
+// and their optional peers. Hosts keep Opengeni's session semantics while
 // rendering their own product UI.
 
 export type {
@@ -30,6 +30,18 @@ export type {
 } from "./embedded-session-client";
 
 export { useSession, isTitleEvent } from "./hooks/use-session";
+export { useSessionConversation } from "./hooks/use-session-conversation";
+export { useNewConversation } from "./hooks/use-new-conversation";
+export type {
+  NewConversationController,
+  UseNewConversationOptions,
+  NewConversationCreateOptions,
+  CreatedConversation,
+} from "./hooks/use-new-conversation";
+export type {
+  SessionConversationController,
+  UseSessionConversationOptions,
+} from "./hooks/use-session-conversation";
 export type { UseSessionOptions, UseSessionResult } from "./hooks/use-session";
 export { useSessionEvents } from "./hooks/use-session-events";
 export type {
@@ -49,6 +61,7 @@ export {
 export type {
   ComposerControllerState,
   ComposerPolicy,
+  InitialComposerDraft,
   ComposerSendExtras,
   ComposerState,
   UseComposerOptions,

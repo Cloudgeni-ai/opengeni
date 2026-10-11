@@ -2,7 +2,7 @@
 
 Usage allowances let a product set a workspace spending ceiling and optional
 member ceilings without building its own model-usage meter. They govern actual
-OpenGeni credit debits, not tokens, estimated provider expense, or purchased
+Opengeni credit debits, not tokens, estimated provider expense, or purchased
 seat counts. The organization's credit balance and ordinary execution
 authority remain separate requirements.
 
@@ -90,9 +90,10 @@ Allowances are ceilings, not reservations or a second prepaid wallet:
   there is no aggregate overshoot bound of one call. Already incurred cost is
   not reversed. The next admission is refused once the applicable ceiling is
   exhausted.
-- Externally funded work, including connected subscriptions and BYOK calls
-  without an OpenGeni credit debit, does not consume this allowance. Zero
-  OpenGeni credit charge does not imply zero upstream expense.
+- By default, externally funded work, including connected subscriptions and
+  BYOK calls without an Opengeni credit debit, does not consume this
+  allowance. Zero Opengeni credit charge does not imply zero upstream expense.
+  Set `unbilledUsage: "list_price"` to count that work too (see below).
 - Exhaustion does not revoke membership or read access. Preserve conversation
   history and other authorized read/export paths.
 
@@ -103,7 +104,7 @@ from a progress bar, token count, or a provider-price comparison.
 
 ```ts
 const allowance = await og.setWorkspaceAllowance(workspaceId, {
-  includedCredits: 100_000_000, // $100 of OpenGeni credit debits
+  includedCredits: 100_000_000, // $100 of Opengeni credit debits
   period: "monthly",
   anchorDay: 1,
   memberDefault: "equal_share",
@@ -121,6 +122,7 @@ The configuration is:
   anchorDay?: number; // integer 1..31, UTC
   memberDefault?: "none" | "equal_share" | { share: number } | { credits: number };
   thresholds?: { workspace?: number[]; member?: number[] };
+  unbilledUsage?: "ignore" | "list_price";
 }
 ```
 
@@ -137,6 +139,24 @@ Omitted `anchorDay` uses day 1; omitted `memberDefault` uses `"none"`.
 Omitted workspace/member threshold lists default to `[0.8, 1]`; configured
 thresholds must be greater than zero and at most one, with at most 16 values
 per list.
+
+### Counting usage that spends no credits
+
+`unbilledUsage` decides how model calls that debit no Opengeni credits count:
+calls on a connected subscription, workspace- or organization-owned provider
+keys, and deployments that run without credit billing.
+
+- `"ignore"` (the default) keeps the allowance credit-only, as described above.
+- `"list_price"` counts each such call at its configured list-price estimate,
+  in the same USD micros, and admits those turns against the workspace and
+  member ceilings exactly like credit-funded turns. Use this when your product
+  sells usage to its own customers while the model calls run on your own
+  subscription or keys.
+
+A call without a configured list price for its model is not counted; check
+that every model your workspace can select has list pricing before relying on
+the ceiling. Credit-funded calls are always counted from their actual debit,
+so one call is never counted twice.
 
 | Operation | Required authority |
 | --- | --- |
@@ -250,9 +270,9 @@ model or grant Personal workspace access to an organization service key.
 
 ## Recipe: a per-seat plan with equal split
 
-Suppose a product includes $20 of OpenGeni credit usage per paid seat, with
+Suppose a product includes $20 of Opengeni credit usage per paid seat, with
 five seats in one customer workspace. The product owns the paid-seat count and
-billing; OpenGeni owns the settled usage:
+billing; Opengeni owns the settled usage:
 
 ```ts
 const usdMicrosPerSeat = 20_000_000;
@@ -270,9 +290,10 @@ const allowance = await og.setWorkspaceAllowance(workspaceId, {
 ```
 
 Five eligible members initially get equal ceilings against the $100 pool.
-If paid seats and the OpenGeni roster differ, the split follows the roster,
+If paid seats and the Opengeni roster differ, the split follows the roster,
 not the paid-seat count. Decide which users are admitted before applying the
-recipe; `asUser` and the proxy never create membership.
+recipe; an `asUser` request through a key with `members:manage` adds a missing
+member on first use (see [product integration](product-integration.md)).
 On a seat-plan change, update the included amount with the saved version.
 Do not treat a mid-period config update as a fresh usage period.
 
@@ -461,7 +482,7 @@ const handler = createSessionProxyHandler(og, {
   authorizeMutation: verifyCsrf,
 });
 
-// Browser: no OpenGeni key. Use the root SDK client against the proxy.
+// Browser: no Opengeni key. Use the root SDK client against the proxy.
 const client = new OpenGeniClient({ baseUrl: "/api/opengeni" });
 const usage = await client.getMyUsage(workspaceId, { period: "current" });
 const own = usage.members[0];
@@ -511,7 +532,7 @@ the same reads and administration as free functions over `requestJson`
 `setWorkspaceAllowance`, `clearWorkspaceAllowance`, `grantWorkspaceCredits`,
 `setMemberAllowance`). They call the same routes as the root client's methods.
 
-The OpenGeni console shows budgets in dollars, the unit of the credit balance
+The Opengeni console shows budgets in dollars, the unit of the credit balance
 they draw on: owners set a shared workspace's monthly budget under
 Organization settings → Billing (a budgets list and one page per
 workspace), workspace admins set member limits under Workspace settings →
@@ -560,7 +581,7 @@ This applies to non-model debits too:
   cannot have an allowance reversal fabricated from usage totals.
 
 Native image/model credit charges use ordinary model accounting. Externally
-funded adapters without a negative OpenGeni ledger entry and transcription
+funded adapters without a negative Opengeni ledger entry and transcription
 without a ledger debit do not consume allowance.
 
 Keep schedule time zones separate from allowance UTC boundaries. See

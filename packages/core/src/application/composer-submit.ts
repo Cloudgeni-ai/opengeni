@@ -26,7 +26,7 @@ export type SubmitComposerDraftForRequestOptions = {
  * This is the application boundary shared by the stock HTTP adapter and an
  * in-process embedding host. A host may prepare its own durable business state
  * before calling this function and project the returned receipt afterward, but
- * OpenGeni remains the sole authority for draft validation/rotation, event
+ * Opengeni remains the sole authority for draft validation/rotation, event
  * append, turn creation, routing, and idempotent replay.
  */
 export async function submitComposerDraftForRequest(

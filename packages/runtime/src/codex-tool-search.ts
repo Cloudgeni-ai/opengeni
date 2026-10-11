@@ -1,12 +1,13 @@
 // Shared tool classification and bounded search ranking for lazy-tool-transport.ts.
 import { type Tool } from "@openai/agents";
+import type { FirstPartyMcpToolName } from "@opengeni/contracts";
 import {
   MCP_MAX_TOOL_DEFINITION_BYTES,
   MCP_MAX_TOOL_SEARCH_DISCLOSURE_BYTES,
   mcpSerializedSizeBytes,
 } from "./mcp-network";
 
-/** The prefix OpenGeni's PrefixedMcpServer stamps on codex_apps connector tools. */
+/** The prefix Opengeni's PrefixedMcpServer stamps on codex_apps connector tools. */
 export const CODEX_APPS_TOOL_PREFIX = "codex_apps__";
 const DEFAULT_SEARCH_LIMIT = 8;
 const MAX_SEARCH_LIMIT = 20;
@@ -59,6 +60,59 @@ export function isSearchableMcpFunctionTool(
 ): tool is Tool & { name: string; deferLoading?: boolean } {
   const serverId = mcpServerIdForTool(tool, mcpServerIds, modelServerIds);
   return serverId !== null;
+}
+
+/** The first-party server that hosts the harness control tools. */
+export const HARNESS_CONTROL_MCP_SERVER_ID = "opengeni";
+
+/**
+ * First-party tools the harness itself relies on: goal lifecycle, background
+ * command polling, and the session-level wait. The prompt requires them on
+ * ordinary work, so hiding them behind search spends model round trips to
+ * rediscover the same schemas. This is an exact per-tool exception, never the
+ * whole `opengeni` catalog, and it never widens authority: only a tool the
+ * attempt's prepared server actually listed (selection and permissions already
+ * applied) can be visible.
+ */
+export const HARNESS_CONTROL_FIRST_PARTY_TOOLS = [
+  "goal_set",
+  "goal_update",
+  "goal_complete",
+  "goal_pause",
+  "goal_resume",
+  "command_read",
+  "command_wait",
+  "wait_for_input",
+] as const satisfies readonly FirstPartyMcpToolName[];
+
+const HARNESS_CONTROL_MODEL_TOOL_NAMES: ReadonlySet<string> = new Set(
+  HARNESS_CONTROL_FIRST_PARTY_TOOLS.map(
+    (name) => `${HARNESS_CONTROL_MCP_SERVER_ID}${MCP_TOOL_NAME_SEPARATOR}${name}`,
+  ),
+);
+
+/** True for an exact harness control tool name on the first-party server. */
+export function isHarnessControlMcpToolName(registryId: string, modelName: string): boolean {
+  return (
+    registryId === HARNESS_CONTROL_MCP_SERVER_ID && HARNESS_CONTROL_MODEL_TOOL_NAMES.has(modelName)
+  );
+}
+
+/**
+ * True when a prepared MCP function tool is one of the harness control tools
+ * served by the authorized first-party `opengeni` server. These stay in the
+ * first request on every transport even though the server's other schemas
+ * are deferred.
+ */
+export function isHarnessControlMcpFunctionTool(
+  tool: unknown,
+  mcpServerIds: ReadonlySet<string> = NO_MCP_SERVER_IDS,
+  modelServerIds?: ReadonlyMap<string, string>,
+): boolean {
+  const serverId = mcpServerIdForTool(tool, mcpServerIds, modelServerIds);
+  return (
+    serverId !== null && isHarnessControlMcpToolName(serverId, (tool as { name: string }).name)
+  );
 }
 
 // Minimal English stopword set: query phrasings like "send an email to someone"

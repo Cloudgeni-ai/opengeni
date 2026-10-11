@@ -3,7 +3,15 @@
 import { createHash } from "node:crypto";
 import { copyFile, mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join, resolve } from "node:path";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative as relativePath,
+  resolve,
+  sep,
+} from "node:path";
 import { pathToFileURL } from "node:url";
 import { gzipSync } from "node:zlib";
 
@@ -139,6 +147,110 @@ export async function refreshArtifactKernelWasmPackageIdentities(
     );
   }
   return Object.freeze(builds);
+}
+
+/** Retains failed clean-build evidence without changing the committed-byte gate. */
+export async function checkArtifactKernelWasmPackages(
+  builds: readonly PackageBuild[],
+  options: {
+    committedPackagesRoot?: string;
+    rebuilt?: boolean;
+    assetRoot?: string;
+    diagnosticOutput?: string;
+  } = {},
+): Promise<void> {
+  if (options.diagnosticOutput && (!options.rebuilt || !options.assetRoot)) {
+    throw new TypeError("diagnostic output requires a clean Rust rebuild and its bindings");
+  }
+  const committedPackagesRoot = resolve(
+    options.committedPackagesRoot ?? join(repoRoot, "packages"),
+  );
+  const comparisons = await Promise.all(
+    builds.map(async (build) => {
+      const committed = join(committedPackagesRoot, basename(build.packageRoot), "dist");
+      const [actual, expected] = await Promise.all([
+        digestTree(build.outputRoot),
+        digestTree(committed),
+      ]);
+      return {
+        build,
+        matches: JSON.stringify(actual) === JSON.stringify(expected),
+        files: [...new Set([...Object.keys(actual), ...Object.keys(expected)])]
+          .sort()
+          .map((path) => ({
+            path,
+            rebuiltSha256: actual[path] ?? null,
+            committedSha256: expected[path] ?? null,
+            matches: actual[path] === expected[path],
+          })),
+      };
+    }),
+  );
+  const mismatch = comparisons.find(({ matches }) => !matches);
+  if (!mismatch) return;
+
+  if (options.diagnosticOutput) {
+    if (!options.rebuilt || !options.assetRoot) {
+      throw new TypeError("diagnostic output requires a clean Rust rebuild and its bindings");
+    }
+    const output = resolve(options.diagnosticOutput);
+    for (const source of [
+      repoRoot,
+      options.assetRoot,
+      ...builds.map(({ packageRoot }) => packageRoot),
+    ]) {
+      const path = relativePath(resolve(source), output);
+      if (path === "" || (path !== ".." && !path.startsWith(`..${sep}`) && !isAbsolute(path))) {
+        throw new TypeError("diagnostic output must be outside the source and build directories");
+      }
+    }
+    await mkdir(output, { recursive: true });
+    if ((await readdir(output)).length !== 0) {
+      throw new Error("diagnostic output directory must be empty");
+    }
+    const bindings = join(output, "bindings");
+    await mkdir(bindings);
+    for (const { build, files } of comparisons) {
+      const stem = `artifact_kernel_${build.modality}`;
+      for (const suffix of [".js", ".d.ts", "_bg.wasm", "_bg.wasm.d.ts"]) {
+        const name = `${stem}${suffix}`;
+        await copyFile(join(options.assetRoot, name), join(bindings, name));
+      }
+      const packageOutput = join(output, "packages", basename(build.packageRoot), "dist");
+      await mkdir(packageOutput, { recursive: true });
+      for (const { path, rebuiltSha256 } of files) {
+        if (rebuiltSha256 === null) continue;
+        const destination = join(packageOutput, path);
+        await mkdir(dirname(destination), { recursive: true });
+        await copyFile(join(build.outputRoot, path), destination);
+      }
+    }
+    await writeFile(
+      join(output, "comparison.json"),
+      `${JSON.stringify(
+        {
+          schemaVersion: 1,
+          producer: "opengeni-canonical-modality-wasm-rebuild",
+          builder: {
+            platform: process.platform,
+            architecture: process.arch,
+            sourceRoot: repoRoot,
+            cargoHome: process.env.CARGO_HOME ?? null,
+          },
+          packages: comparisons.map(({ build, matches, files }) => ({
+            identity: build.identity,
+            matches,
+            files,
+          })),
+        },
+        null,
+        2,
+      )}\n`,
+    );
+  }
+  throw new Error(
+    `${mismatch.build.identity.packageName} committed package differs from a clean ${options.rebuilt ? "Rust rebuild" : "materialization"}`,
+  );
 }
 
 async function materializeModality(input: {
@@ -530,13 +642,18 @@ function parseModality(value: string | undefined): readonly ArtifactModality[] {
 if (import.meta.main) {
   const check = process.argv.includes("--check");
   const rebuild = process.argv.includes("--rebuild");
+  const diagnosticOutput = argument("--diagnostic-output");
+  if (diagnosticOutput && (!check || !rebuild)) {
+    throw new TypeError("--diagnostic-output requires --rebuild --check");
+  }
   const refreshPackageIdentities = process.argv.includes("--refresh-package-identities");
   if (refreshPackageIdentities) {
     if (
       check ||
       rebuild ||
       process.argv.includes("--asset-root") ||
-      process.argv.includes("--modality")
+      process.argv.includes("--modality") ||
+      diagnosticOutput
     ) {
       throw new TypeError("--refresh-package-identities cannot be combined with build options");
     }
@@ -571,18 +688,11 @@ if (import.meta.main) {
       modalities: selected,
     });
     if (check) {
-      for (const build of builds) {
-        const committed = join(repoRoot, "packages", basename(build.packageRoot), "dist");
-        const [actual, expected] = await Promise.all([
-          digestTree(build.outputRoot),
-          digestTree(committed),
-        ]);
-        if (JSON.stringify(actual) !== JSON.stringify(expected)) {
-          throw new Error(
-            `${build.identity.packageName} committed package differs from a clean ${rebuild ? "Rust rebuild" : "materialization"}`,
-          );
-        }
-      }
+      await checkArtifactKernelWasmPackages(builds, {
+        rebuilt: rebuild,
+        assetRoot,
+        diagnosticOutput,
+      });
     }
     process.stdout.write(
       `${JSON.stringify({ packages: builds.map(({ identity }) => identity), checked: check })}\n`,

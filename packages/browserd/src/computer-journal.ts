@@ -1,4 +1,4 @@
-import { ComputerActionReceipt } from "@opengeni/contracts";
+import { ComputerOperationReceipt } from "@opengeni/contracts";
 import {
   recoverComputerOperationJournalRecord,
   type ComputerOperationJournalRecord,
@@ -19,7 +19,7 @@ export class SqliteComputerOperationJournal {
   readonly path: string;
 
   private constructor(
-    private readonly journal: SqliteInteractionOperationJournal<ComputerActionReceipt>,
+    private readonly journal: SqliteInteractionOperationJournal<ComputerOperationReceipt>,
   ) {
     this.path = journal.path;
   }
@@ -33,7 +33,7 @@ export class SqliteComputerOperationJournal {
       resourceId: options.computerSessionId,
       controllerGeneration: options.controllerGeneration,
       resourceLabel: "computer",
-      parseReceipt: (value) => ComputerActionReceipt.parse(value),
+      parseReceipt: (value) => ComputerOperationReceipt.parse(value),
       assertReceiptAuthority(receipt) {
         if (
           receipt.computerSessionId !== options.computerSessionId ||

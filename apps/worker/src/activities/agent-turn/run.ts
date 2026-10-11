@@ -1,6 +1,9 @@
 import { withClaudeConnectionCredential } from "@opengeni/config";
 import {
   getSessionAuthorityProjection,
+  canSpendSubscriptionCoreCodexExtraCredits,
+  reserveSubscriptionCoreCodexRequest,
+  settleSubscriptionCoreCodexRequest,
   readActiveSandbox,
   getWorkspaceCredentialProvider,
   resolveClaudeAccountCredential,
@@ -36,7 +39,7 @@ import {
   type SandboxFileDownloadFailure,
   type CodemodeTokenWriterSession,
 } from "@opengeni/runtime";
-import { buildCodexTokenResolver } from "../codex-auth";
+
 import {
   buildModelResolver,
   CODEX_CLIENT_VERSION,
@@ -48,6 +51,7 @@ import { codexUpstreamModelSlugs } from "@opengeni/config";
 import { parseModelProvidersJson } from "@opengeni/config";
 import { withClaudeUsageObserver } from "@opengeni/runtime";
 import { createClaudeUsageObserver } from "./claude-usage-observer";
+import { createCodexCreditGuard, assertCodexDispatchAdmission } from "./codex-credit-policy";
 import {
   xaiSubscriptionRequestStorage,
   type XaiSubscriptionRequestContext,
@@ -75,7 +79,10 @@ import { createTurnCredentialLeases } from "./credential-leases";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { createTurnHistorySink } from "./history-sink";
 import { checkpointHistoryBeforeProviderDispatch } from "./provider-dispatch-barrier";
-import { providerRecoveryCountAfterModelRequestPhase } from "./errors";
+import {
+  assertProviderOverloadRecoveryActive,
+  providerRecoveryCountAfterModelRequestPhase,
+} from "./errors";
 import { sandboxRunAs } from "@opengeni/runtime";
 import { randomUUID } from "node:crypto";
 import { createModelCheckpointMemoryCollector } from "../../model-checkpoint-memory-collector";
@@ -95,6 +102,17 @@ import { settleTurnFailure } from "./failure-settlement";
 import { runTurnStreamAttempt } from "./stream-attempt";
 import { claimTurnAttempt } from "./claim";
 import { selectCodexTurnCapacity, type CapacityPhaseDeps } from "./codex-capacity";
+import {
+  assertTurnModelConnection,
+  assertCoreCodexSourceConnected,
+  buildCoreCodexRequestTokenResolver,
+} from "./codex-core-capacity";
+import {
+  buildCoreCodexUsageReader,
+  createCoreCodexRequests,
+  providerRequestIdPrefix,
+} from "./codex-core-requests";
+import { observeCodexResponseCompletion } from "./codex-core-settlement";
 import { prepareGovernanceAndModel } from "./governance-model";
 import { prepareCompaction, runPostAgentCompaction } from "./compaction-prep";
 import { createSandboxTurnRuntime } from "./sandbox-runtime";
@@ -118,6 +136,7 @@ import { buildTurnAgent } from "./agent-build";
 export function sessionTitleCodexRequestContext(
   context: CodexRequestContext,
   nextRequestId: () => string,
+  requests?: ReturnType<typeof createCoreCodexRequests>,
 ): CodexRequestContext {
   return {
     clientVersion: context.clientVersion,
@@ -126,9 +145,19 @@ export function sessionTitleCodexRequestContext(
     refresh: context.refresh,
     resolveModel: context.resolveModel,
     ...(context.onUsageHeaders ? { onUsageHeaders: context.onUsageHeaders } : {}),
-    ...(context.beforeProviderDispatch
-      ? { beforeProviderDispatch: context.beforeProviderDispatch }
-      : {}),
+    ...(requests
+      ? {
+          beforeProviderDispatch: async (
+            request: Parameters<NonNullable<CodexRequestContext["beforeProviderDispatch"]>>[0],
+          ) => {
+            await context.beforeProviderDispatch?.();
+            if (request) await requests.reserve(request);
+          },
+          onProviderRequestSettled: requests.observe,
+        }
+      : context.beforeProviderDispatch
+        ? { beforeProviderDispatch: context.beforeProviderDispatch }
+        : {}),
     ...(context.responseTimeoutPolicy
       ? { responseTimeoutPolicy: context.responseTimeoutPolicy }
       : {}),
@@ -232,6 +261,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       once: true,
     });
     const dispatchId = activityContext?.info.activityId ?? randomUUID();
+    const requestIdPrefix = providerRequestIdPrefix({
+      turnAttemptId: input.attemptId,
+      activityId: dispatchId,
+      activityAttempt: activityContext?.info.attempt ?? 1,
+    });
     const activityStarted = performance.now();
     const acknowledgeLostAttemptOwnership = (): void => {
       // A stale terminal/recovery settlement can lose either to a benign
@@ -298,6 +332,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       workspaceId: input.workspaceId,
       codexWorkspaceKey,
       getTurnId: () => attempt.turnId,
+      getSessionId: () => input.sessionId,
     });
 
     const sandboxRuntime = createSandboxTurnRuntime({
@@ -385,13 +420,29 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       getModelRunSettings: () => eventing.modelRunSettings,
       getExecutionGeneration: () => attempt.executionGeneration,
     });
+    // Diagnostic only: a timing observer can never fence or fail a request.
+    const observeProviderDispatch = () => {
+      try {
+        eventing.providerDispatchObserver?.();
+      } catch {
+        // Metrics emission must never affect a model call.
+      }
+    };
+    const assertRecoveryWindow = () =>
+      assertProviderOverloadRecoveryActive({
+        failureCode: attempt.providerRecoveryPolicyCode,
+        providerRecoveryCount: attempt.providerRecoveryCount,
+        recoveryStartedAt: attempt.providerRecoveryStartedAt,
+      });
     const checkpointBeforeProviderDispatch = async () => {
+      assertRecoveryWindow();
       await awaitModelCallAdmission();
       await checkpointHistoryBeforeProviderDispatch(historySink, {
         effectiveSandboxBackend: eventing.modelRunSettings.sandboxBackend,
         routingEnabled: routingEnabled(settings),
         readActiveSandbox: () => readActiveSandbox(db, input.workspaceId, input.sessionId),
       });
+      assertRecoveryWindow();
     };
 
     try {
@@ -423,6 +474,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       if (!eventing.publish || !eventing.settle) {
         throw new Error("turn eventing was not wired during claim");
       }
+      assertRecoveryWindow();
       // Same object, narrowed type: every post-claim phase mutates this exact
       // context, so this must stay an assertion and never become a copy.
       const wiredEventing = eventing as EventingState & {
@@ -436,7 +488,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         credentialSubjectId,
         fileAuthoritySubjectId,
         capabilitySettings,
-        codexAppsCredentialId,
+        codexAppsCoreConnectionId,
         turnExecutionPolicy,
         trigger,
         humanInputResume,
@@ -577,6 +629,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             );
           }
           const governance = await prepareGovernanceAndModel({
+            learningPolicy: learning,
             input,
             db,
             observability,
@@ -594,7 +647,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             requiredGeneratedVideoFiles,
           });
           if ("exit" in governance) return governance.exit;
-          await assertModelConnectionAllowsTurn(db, {
+          await assertTurnModelConnection(db, providerTurn, {
             workspaceId: input.workspaceId,
             subjectId: turn.initiatingHumanSubjectId ?? "worker:model-access",
             modelId: turnExecutionPolicy.productModelId,
@@ -613,6 +666,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             workspaceAgentIdentity,
             workspaceGovernance,
             structuredWorkspacePolicyActive,
+            workspaceCreditModelsAllowed,
             workspaceMemory,
             buildCompanyBrainContributionReceiptFor,
             logicalSandboxSettings,
@@ -643,27 +697,85 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           const codexContext: CodexRequestContext | null =
             resolvedModel?.provider.kind === "codex-subscription"
               ? ((): CodexRequestContext => {
-                  // The empty-string fallback yields no row → null credential → the
-                  // existing CodexReloginRequired path (a codex turn with no usable
-                  // account fails closed, exactly as before multi-account).
-                  const resolver = buildCodexTokenResolver(
-                    db,
-                    runSettings,
-                    input.workspaceId,
-                    providerTurn.effectiveCodexCredentialId ?? "",
-                    undefined,
-                    {
-                      turnId: turn.id,
+                  const coreCodex = providerTurn.codexSubscriptionCore;
+                  if (!coreCodex) throw new Error("Codex core placement is required for dispatch");
+                  let coreUsageReader: ReturnType<typeof buildCoreCodexUsageReader> | undefined;
+                  if (coreCodex) {
+                    const ref = {
+                      connectionId: coreCodex.connectionId,
                       holderId: leases.codex.holderId!,
                       generation: leases.codex.generation!,
+                    };
+                    const execution = {
+                      attemptId: input.attemptId,
+                      executionGeneration: attempt.executionGeneration!,
+                    };
+                    const requestDeps: Parameters<typeof createCoreCodexRequests>[0] = {
+                      reserve: (request) =>
+                        reserveSubscriptionCoreCodexRequest(db, coreCodex.identity, ref, {
+                          ...request,
+                          ...execution,
+                        }),
+                      settle: (request) =>
+                        settleSubscriptionCoreCodexRequest(db, coreCodex.identity, ref, {
+                          ...request,
+                          ...execution,
+                        }),
+                    };
+                    coreCodex.requests = createCoreCodexRequests(requestDeps);
+                    coreCodex.titleRequests = createCoreCodexRequests(requestDeps);
+                    coreUsageReader = buildCoreCodexUsageReader(
+                      db,
+                      coreCodex.identity,
+                      ref,
+                      execution,
+                    );
+                  }
+                  const resolver = buildCoreCodexRequestTokenResolver(
+                    db,
+                    runSettings,
+                    coreCodex,
+                    leases.codex,
+                    {
+                      signalCodexCapacityWorkflow,
                     },
                   );
+                  let resolvedToken: Awaited<ReturnType<typeof resolver.getToken>> | null = null;
+                  const trackToken = (token: Awaited<ReturnType<typeof resolver.getToken>>) => {
+                    providerTurn.effectiveCodexCredentialVersion = token.credentialVersion;
+                    resolvedToken = token;
+                    return token;
+                  };
+                  const creditGuard = createCodexCreditGuard({
+                    ...(coreUsageReader ? { fetchUsage: coreUsageReader } : {}),
+                    canSpendCredits: async () => {
+                      if (!leases.codex.holderId || leases.codex.generation === null) return false;
+                      return await canSpendSubscriptionCoreCodexExtraCredits(db, {
+                        identity: coreCodex.identity,
+                        connectionId: coreCodex.connectionId,
+                        attemptId: input.attemptId,
+                        executionGeneration: attempt.executionGeneration!,
+                        holderId: leases.codex.holderId,
+                        productModelId: providerTurn.codexProductModelId!,
+                        reasoningLevel: turnExecutionPolicy.reasoningEffort,
+                        leaseTtlMs: 60_000,
+                      });
+                    },
+                    refreshToken: async () => trackToken(await resolver.refresh()),
+                    onUsage: (snapshot) => {
+                      providerTurn.latestCodexUsage = snapshot;
+                    },
+                  });
                   const resolveTrackedToken = async (
                     resolve: () => ReturnType<typeof resolver.getToken>,
                   ) => {
-                    const token = await resolve();
-                    providerTurn.effectiveCodexCredentialVersion = token.credentialVersion;
-                    return token;
+                    const token = trackToken(await resolve());
+                    creditGuard.setToken(token);
+                    await leases.codex.assertCurrentForDispatch();
+                    await creditGuard.assertCanDispatch();
+                    // Usage may have refreshed an unexpectedly rejected bearer.
+                    // Return it before the transport constructs auth headers.
+                    return resolvedToken!;
                   };
                   return {
                     clientVersion: CODEX_CLIENT_VERSION,
@@ -679,10 +791,18 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     resolveModel: buildModelResolver(codexUpstreamModelSlugs(runSettings)),
                     onUsageHeaders: (snapshot) => {
                       providerTurn.latestCodexUsage = snapshot;
+                      creditGuard.observe(snapshot);
                     }, // latest wins; flushed once in finally
-                    beforeProviderDispatch: () => {
-                      leases.codex.assertUsable();
+                    beforeProviderDispatch: async (request) => {
+                      if (coreCodex) await assertCoreCodexSourceConnected(db, coreCodex);
+                      await assertCodexDispatchAdmission(
+                        creditGuard.assertObservedUsageAllowsDispatch,
+                        () => leases.codex.assertCurrentForDispatch(),
+                      );
+                      if (coreCodex && request) await coreCodex.requests!.reserve(request);
+                      observeProviderDispatch();
                     },
+                    ...(coreCodex ? { onProviderRequestSettled: coreCodex.requests!.observe } : {}),
                     onRequestPreparationDiagnostic: (phase) => {
                       if (
                         eventing.firstModelRequestCheckpointAt === null ||
@@ -714,6 +834,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     onModelRequestDiagnostic: (event) => {
                       if (event.phase === "started")
                         sandboxState.firstProviderRequestStarted = true;
+                      // Only a call that produced a response advances the core
+                      // binding's cache clock at finalization.
+                      observeCodexResponseCompletion(providerTurn, event);
                       if (
                         event.phase === "started" &&
                         eventing.firstModelRequestPreparationStartedAt !== null &&
@@ -755,7 +878,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                         durationSeconds: event.durationMs / 1000,
                       });
                     },
-                    nextRequestId: () => `${dispatchId}:${++codexModelRequestSequence}`,
+                    nextRequestId: () => `${requestIdPrefix}:${++codexModelRequestSequence}`,
                     onModelRequestEvent: async (event) => {
                       if (!eventing.publish || !attempt.turnId) {
                         throw new Error(
@@ -851,7 +974,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 }).webSearch,
               },
               streamIdleTimeoutMs: runSettings.supergrokResponseStreamIdleTimeoutMs,
-              nextRequestId: () => `${dispatchId}:xai:${++xaiModelRequestSequence}`,
+              nextRequestId: () => `${requestIdPrefix}:xai:${++xaiModelRequestSequence}`,
               onModelRequestDiagnostic: (event) => {
                 const requestKey = `${event.requestId}:${event.transportAttempt}`;
                 if (event.phase === "started") {
@@ -959,6 +1082,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                       },
                     },
                   ]);
+                  // SuperGrok places bytes on the wire immediately after this
+                  // awaited audit returns.
+                  if (event.phase === "started") observeProviderDispatch();
                   attempt.providerRecoveryCount = providerRecoveryCountAfterModelRequestPhase(
                     attempt.providerRecoveryCount,
                     event.phase,
@@ -1054,13 +1180,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           const codexSessionTitleContext = codexContext
             ? sessionTitleCodexRequestContext(
                 codexContext,
-                () => `${dispatchId}:title:${++codexSessionTitleRequestSequence}`,
+                () => `${requestIdPrefix}:title:${++codexSessionTitleRequestSequence}`,
+                providerTurn.codexSubscriptionCore?.titleRequests,
               )
             : null;
           const xaiSessionTitleContext = providerTurn.xaiRequestContext
             ? sessionTitleXaiRequestContext(
                 providerTurn.xaiRequestContext,
-                () => `${dispatchId}:xai:title:${++xaiSessionTitleRequestSequence}`,
+                () => `${requestIdPrefix}:xai:title:${++xaiSessionTitleRequestSequence}`,
               )
             : null;
           const withSessionTitleProviderRequestContext = <T>(fn: () => Promise<T>): Promise<T> =>
@@ -1090,6 +1217,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               ),
             );
           const compactionPrep = await prepareCompaction({
+            entitlements,
             input,
             settings: capabilitySettings,
             db,
@@ -1179,7 +1307,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               recovered.instructionReceipts.length ||
               recovered.unavailable
             ) {
-              knowledgeRecoveryNote = `[OpenGeni legacy confirmation recovery]\n${JSON.stringify(recovered)}\nThese are publication receipts for the human's earlier answer. Do not call the retired remember tools or duplicate these entries. Unavailable confirmations were not published. Inspect the current Knowledge or instruction review before taking further action.`;
+              knowledgeRecoveryNote = `[Opengeni legacy confirmation recovery]\n${JSON.stringify(recovered)}\nThese are publication receipts for the human's earlier answer. Do not call the retired remember tools or duplicate these entries. Unavailable confirmations were not published. Inspect the current Knowledge or instruction review before taking further action.`;
               for (const receipt of recovered.instructionReceipts) {
                 await eventing.publish!(
                   [{ type: "instruction.confirmation.recovered", payload: { receipt } }],
@@ -1196,7 +1324,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           } catch {
             cancellationSignal?.throwIfAborted();
             knowledgeRecoveryNote =
-              "[OpenGeni confirmation recovery unavailable] Do not assume an earlier remember confirmation was published. Inspect the current Knowledge or instruction review.";
+              "[Opengeni confirmation recovery unavailable] Do not assume an earlier remember confirmation was published. Inspect the current Knowledge or instruction review.";
           }
           const knowledgeSourcePreparationNote = knowledgeRecoveryNote;
 
@@ -1460,12 +1588,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             fileAuthoritySubjectId,
             capabilitySettings,
             installedApiIntegrations,
-            codexAppsCredentialId,
+            codexAppsCoreConnectionId,
             turnExecutionPolicy,
             trigger,
             runSettings,
             resolvedModel,
             lazyToolTransport,
+            workspaceCreditModelsAllowed,
             turnTools,
             connectionScope,
             sandboxArtifactRuntime,
@@ -1524,6 +1653,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             workspaceAgentIdentity,
             workspaceGovernance,
             structuredWorkspacePolicyActive,
+            workspaceCreditModelsAllowed,
             workspaceMemory,
             rigVersion,
             rigName,
@@ -1543,6 +1673,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             trigger,
             preparationIndependentToolNames,
             codeSearchAvailable: toolRuntime.codeSearchAvailable,
+            promptToolAvailability: toolRuntime.promptToolAvailability,
             videoGenerationAcceptancesByCallId,
             activeSandboxBackend,
             groupBoxBackend,

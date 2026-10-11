@@ -58,7 +58,7 @@ describe("product analytics dimensions", () => {
     }
   });
 
-  test("first-party families come from OpenGeni's own fixed names only", () => {
+  test("first-party families come from Opengeni's own fixed names only", () => {
     expect(firstPartyToolFamily("goal_set")).toBe("goal_set");
     expect(firstPartyToolFamily("exec_command")).toBe("exec_command");
     expect(firstPartyToolFamily("skill_checkout")).toBe("skill_checkout");
@@ -80,7 +80,12 @@ describe("product analytics dimensions", () => {
       `${repoRoot}packages/db/drizzle/0533_turn_surface_analytics.sql`,
       "utf8",
     );
+    // 0636 is the current definition of the model-provider families.
+    const providers = readFileSync(
+      `${repoRoot}packages/db/drizzle/0636_opper_model_providers.sql`,
+      "utf8",
+    );
     for (const surface of SESSION_TURN_SURFACES) expect(sql).toContain(`'${surface}'`);
-    for (const provider of ANALYTICS_MODEL_PROVIDERS) expect(sql).toContain(`'${provider}'`);
+    for (const provider of ANALYTICS_MODEL_PROVIDERS) expect(providers).toContain(`'${provider}'`);
   });
 });

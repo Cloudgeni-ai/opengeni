@@ -138,6 +138,20 @@ describe("connect journey", () => {
     expect(storage.values.size).toBe(0);
   });
 
+  test("a GitHub install request waiting on an owner is not reported as a provider error", () => {
+    const requested = recorder();
+    captureIntegrationConnectReturn({
+      returned: parseIntegrationConnectReturn("?github=requested"),
+      capture: requested.capture,
+      storage: new MemoryStorage() as never,
+    });
+    expect(requested.events[0]![1]).toEqual({
+      integration_class: "github",
+      method: "app_install",
+      outcome: "outcome_unknown",
+    });
+  });
+
   test("returning without an outcome counts as abandoned; a provider success maps its class", () => {
     const storage = new MemoryStorage();
     beginIntegrationConnect("linear", "oauth", {

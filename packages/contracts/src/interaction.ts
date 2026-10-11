@@ -378,7 +378,7 @@ export type AttachedBrowserDevice = z.infer<typeof AttachedBrowserDevice>;
 
 /** One enrolled machine agent currently reporting its browser-bridge inventory.
  * A bridge with zero devices is operational but has no Chrome profile connected
- * through the OpenGeni extension yet. */
+ * through the Opengeni extension yet. */
 export const AttachedBrowserBridge = z
   .object({
     enrollmentId: z.string().uuid(),
@@ -549,7 +549,7 @@ export const BrowserIdentity = z
   .strict();
 export type BrowserIdentity = z.infer<typeof BrowserIdentity>;
 
-/** A non-secret reference to credential authority held by OpenGeni Connections.
+/** A non-secret reference to credential authority held by Opengeni Connections.
  * The subject and provider bindings are copied when the browser-auth resource is
  * configured so a later agent cannot swap the UUID to another credential. */
 export const InteractionCredentialAuthorityRef = z
@@ -2938,6 +2938,8 @@ export const ComputerSessionCapabilities = z
     screenCapture: z.boolean(),
     semanticActions: z.boolean(),
     pointerInput: z.boolean(),
+    /** A causal count-2 click requires its exact confirmed first operation. */
+    pointerClickContinuation: z.boolean().optional(),
     keyboardInput: z.boolean(),
     clipboard: z.boolean(),
     backgroundActions: z.boolean(),
@@ -3097,11 +3099,26 @@ export const ComputerAction = z.discriminatedUnion("type", [
       deltaX: z.number().finite().optional(),
       deltaY: z.number().finite().optional(),
       button: z.enum(["left", "right", "middle"]).optional(),
+      clickCount: z.union([z.literal(1), z.literal(2)]).optional(),
+      continuationOfOperationId: z.string().uuid().optional(),
     })
     .strict()
     .superRefine((action, context) => {
       const hasEnd = action.endX !== undefined || action.endY !== undefined;
       const hasDelta = action.deltaX !== undefined || action.deltaY !== undefined;
+      if (action.action !== "click" && action.clickCount !== undefined) {
+        context.addIssue({
+          code: "custom",
+          message: "pointer clickCount requires click",
+        });
+      }
+      if ((action.clickCount === 2) !== (action.continuationOfOperationId !== undefined)) {
+        context.addIssue({
+          code: "custom",
+          path: ["continuationOfOperationId"],
+          message: "clickCount 2 requires exactly one prior first-click operation",
+        });
+      }
       if (action.action === "drag" && (action.endX === undefined || action.endY === undefined)) {
         context.addIssue({
           code: "custom",
@@ -3198,6 +3215,13 @@ export const ComputerActionCommand = z
       });
     }
     if (command.action.type === "pointer") {
+      if (command.action.continuationOfOperationId === command.operationId) {
+        context.addIssue({
+          code: "custom",
+          path: ["action", "continuationOfOperationId"],
+          message: "a click cannot continue its own operation",
+        });
+      }
       if (command.expectedFrameId !== command.action.frameId) {
         context.addIssue({
           code: "custom",
@@ -3386,3 +3410,65 @@ export const ComputerSessionHeartbeatResponse = z
   })
   .strict();
 export type ComputerSessionHeartbeatResponse = z.infer<typeof ComputerSessionHeartbeatResponse>;
+
+/** Native desktop calls share ComputerSession authority and its operation journal.
+ * CUA owns argument schemas; session/lifecycle authority never comes from callers. */
+export const ComputerNativeCallRequest = z
+  .object({
+    operationId: z.string().uuid(),
+    tool: z
+      .string()
+      .regex(/^[a-z_]+$/)
+      .max(80),
+    arguments: z.record(z.string(), z.unknown()),
+  })
+  .strict();
+export type ComputerNativeCallRequest = z.infer<typeof ComputerNativeCallRequest>;
+export const ComputerNativeCommand = ComputerNativeCallRequest.extend({
+  protocolVersion: z.literal(INTERACTION_PROTOCOL_VERSION),
+  computerSessionId: z.string().uuid(),
+  controllerGeneration: opaqueGeneration,
+  targetId: z.null(),
+  actor: InteractionActor,
+}).strict();
+export type ComputerNativeCommand = z.infer<typeof ComputerNativeCommand>;
+export const ComputerNativeResult = z
+  .object({
+    target: z.null(),
+    computerSessionId: z.string().uuid(),
+    controllerGeneration: opaqueGeneration,
+    tool: z.string(),
+    // Original MCP content, including partial/refusal evidence and images.
+    result: z
+      .object({
+        content: z.array(z.record(z.string(), z.unknown())),
+        structuredContent: z.unknown().optional(),
+        isError: z.boolean().optional(),
+      })
+      .passthrough(),
+    outcome: z.enum(["completed", "failed", "outcome_unknown"]),
+    error: InteractionError.nullable(),
+  })
+  .strict();
+export type ComputerNativeResult = z.infer<typeof ComputerNativeResult>;
+export const ComputerNativeReceipt = z
+  .object({
+    protocolVersion: z.literal(INTERACTION_PROTOCOL_VERSION),
+    operationId: z.string().uuid(),
+    computerSessionId: z.string().uuid(),
+    controllerGeneration: opaqueGeneration,
+    targetId: z.null(),
+    state: InteractionOperationState,
+    dispatchedAt: z.string().datetime({ offset: true }).nullable(),
+    settledAt: z.string().datetime({ offset: true }).nullable(),
+    observation: ComputerNativeResult.nullable(),
+    error: InteractionError.nullable(),
+  })
+  .strict();
+export type ComputerNativeReceipt = z.infer<typeof ComputerNativeReceipt>;
+export const ComputerOperationCommand = z.union([ComputerNativeCommand, ComputerActionCommand]);
+export type ComputerOperationCommand = z.infer<typeof ComputerOperationCommand>;
+export const ComputerOperationReceipt = z.union([ComputerNativeReceipt, ComputerActionReceipt]);
+export type ComputerOperationReceipt = z.infer<typeof ComputerOperationReceipt>;
+export const ComputerOperationObservation = z.union([ComputerNativeResult, ComputerObservation]);
+export type ComputerOperationObservation = z.infer<typeof ComputerOperationObservation>;

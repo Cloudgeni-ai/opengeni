@@ -1,5 +1,5 @@
 import { OpenGeniApiError, type SessionEvent, type SessionGoal } from "@opengeni/sdk";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useEmbeddedGoal, type EmbeddedGoalClientOverride } from "../session-context";
 import { normalizeError } from "../lib/error-message";
 import {
@@ -65,7 +65,8 @@ export type UseGoalResult = {
 /**
  * The session's goal: state, the autonomy counters (`autoContinuations`,
  * `noProgressStreak`), and pause/resume control. A goal-less session yields
- * `goal: null` (the 404 is absorbed). Live-updates on goal, turn, session,
+ * `goal: null`: read through `findGoal` as a successful null when the client
+ * has it, otherwise from an absorbed 404. Live-updates on goal, turn, session,
  * control, and system-update events — pass `options.events` from
  * `useSessionEvents` to reuse its stream.
  */
@@ -84,7 +85,19 @@ export function useGoal(
   const { run, mutating, mutationError, clearMutationError } = useMutationRunner();
   const generation = useRef(0);
   const targetKeyRef = useRef<string | null>(null);
+  // True after the server answered that no goal exists. Only a goal event can
+  // create a goal, so turn/session traffic must not refetch while none exists.
+  const goalAbsentRef = useRef(false);
+  // Refresh events not yet covered by a read: "goal" when any was a goal.*
+  // event. Events that arrive while a read is in flight are decided when it
+  // settles, so the stream's opening burst never re-reads a goal-less session.
+  const pendingRefreshRef = useRef<"none" | "refresh" | "goal">("none");
+  const sharedEventsRef = useRef(sharedEvents);
+  useLayoutEffect(() => {
+    sharedEventsRef.current = sharedEvents;
+  }, [sharedEvents]);
   const loadAbort = useRef<AbortController | null>(null);
+  const scheduleRefreshRef = useRef<() => void>(() => undefined);
 
   const retireLoads = useCallback(() => {
     generation.current += 1;
@@ -97,14 +110,20 @@ export function useGoal(
       return;
     }
     const ticket = ++generation.current;
+    pendingRefreshRef.current = "none";
     loadAbort.current?.abort();
     const controller = new AbortController();
     loadAbort.current = controller;
     try {
-      const fetched = await client.getGoal(workspaceId, sessionId, {
-        signal: controller.signal,
-      });
+      // findGoal reads a goal-less session as a successful null, so no failed
+      // request reaches the browser console. Custom clients without it keep
+      // getGoal, whose 404 is absorbed below (as it is from older servers).
+      const fetched =
+        typeof client.findGoal === "function"
+          ? await client.findGoal(workspaceId, sessionId, { signal: controller.signal })
+          : await client.getGoal(workspaceId, sessionId, { signal: controller.signal });
       if (ticket === generation.current) {
+        goalAbsentRef.current = fetched === null;
         setGoal(fetched);
         setError(null);
         setLoading(false);
@@ -115,6 +134,7 @@ export function useGoal(
       }
       if (cause instanceof OpenGeniApiError && cause.status === 404) {
         // No goal is a normal state, not an error.
+        goalAbsentRef.current = true;
         setGoal(null);
         setError(null);
       } else {
@@ -124,12 +144,34 @@ export function useGoal(
     } finally {
       if (loadAbort.current === controller) loadAbort.current = null;
     }
+    if (ticket !== generation.current || pendingRefreshRef.current === "none") {
+      return;
+    }
+    // Events arrived during this read. A shared feed's first batch reports only
+    // its latest match, so a goal.* event behind newer turn traffic is visible
+    // only in the log: re-read when its latest goal event is not a clear.
+    if (goalAbsentRef.current && pendingRefreshRef.current === "refresh") {
+      const events = sharedEventsRef.current ?? [];
+      let latestGoalEvent: SessionEvent | undefined;
+      for (let index = events.length - 1; index >= 0 && !latestGoalEvent; index -= 1) {
+        const event = events[index];
+        if (event && isGoalEvent(event)) latestGoalEvent = event;
+      }
+      if (!latestGoalEvent || latestGoalEvent.type === "goal.cleared") {
+        pendingRefreshRef.current = "none";
+        return;
+      }
+      pendingRefreshRef.current = "goal";
+    }
+    scheduleRefreshRef.current();
   }, [client, workspaceId, sessionId]);
 
   useEffect(() => {
     const targetKey = `${workspaceId} ${sessionId ?? ""}`;
     if (targetKeyRef.current !== targetKey) {
       targetKeyRef.current = targetKey;
+      goalAbsentRef.current = false;
+      pendingRefreshRef.current = "none";
       setGoal(null);
       setError(null);
     }
@@ -180,8 +222,33 @@ export function useGoal(
     sharedFeed,
   ]);
 
-  const scheduleRefresh = useDebouncedCallback(() => void load());
-  useSessionEventTrigger(client, workspaceId, sessionId, isGoalRefreshEvent, scheduleRefresh, {
+  const scheduleRefresh = useDebouncedCallback(() => {
+    const pending = pendingRefreshRef.current;
+    // An in-flight read settles pending events itself.
+    if (pending === "none" || loadAbort.current !== null) return;
+    if (pending === "refresh" && goalAbsentRef.current) {
+      pendingRefreshRef.current = "none";
+      return;
+    }
+    void load();
+  });
+  useLayoutEffect(() => {
+    scheduleRefreshRef.current = scheduleRefresh;
+  }, [scheduleRefresh]);
+  const isRefreshEvent = useCallback(
+    (event: SessionEvent) =>
+      goalAbsentRef.current ? isGoalEvent(event) : isGoalRefreshEvent(event),
+    [],
+  );
+  const onRefreshEvent = useCallback(
+    (event: SessionEvent) => {
+      if (isGoalEvent(event)) pendingRefreshRef.current = "goal";
+      else if (pendingRefreshRef.current === "none") pendingRefreshRef.current = "refresh";
+      scheduleRefresh();
+    },
+    [scheduleRefresh],
+  );
+  useSessionEventTrigger(client, workspaceId, sessionId, isRefreshEvent, onRefreshEvent, {
     enabled,
     ...(sharedEvents !== undefined ? { events: sharedEvents } : {}),
   });

@@ -11,7 +11,7 @@ Status: **three reasoned exemptions, one of them permanent by construction**
 
 ## The question
 
-Every content table in OpenGeni — sessions, documents, connections, knowledge,
+Every content table in Opengeni — sessions, documents, connections, knowledge,
 variable sets, rigs — is FORCE RLS and genuinely isolated: a query running under
 organization B's context cannot read organization A's row, full stop.
 
@@ -38,7 +38,7 @@ pins the exemption's exact shape so a future widening has to be deliberate.
 | --- | --- | --- |
 | `workspaces` | **No — self-referential.** The predicate's input is produced by a query against the table the predicate would guard. | Permanent exemption |
 | `workspace_memberships` | **No as an unconditional predicate.** The central authorization query derives the account from this table. A bootstrap escape hatch is possible but degenerates to today's posture, and three dormant policies make enabling RLS actively dangerous. | Exemption, revisit only with a redesigned context bootstrap |
-| `auth_identities` | **Malformed question.** Its `account_id` is not a tenant id, and its queries do not run on a connection that can carry an OpenGeni GUC. | Permanent exemption; also correct the table's description |
+| `auth_identities` | **Malformed question.** Its `account_id` is not a tenant id, and its queries do not run on a connection that can carry an Opengeni GUC. | Permanent exemption; also correct the table's description |
 
 ### `workspaces` — the circularity is one function
 
@@ -149,7 +149,7 @@ So `account_id = opengeni_private.current_account_id()` is a type error
 identity in any column.
 
 Even given a tenant column, the queries could not carry a context. Better Auth
-does not use OpenGeni's Drizzle handle: `apps/api/src/auth/managed-auth.ts`
+does not use Opengeni's Drizzle handle: `apps/api/src/auth/managed-auth.ts`
 constructs its own `new Pool({ connectionString })` and hands it to `betterAuth`.
 Every sign-up, sign-in, OAuth link, unlink, and token refresh runs on a
 connection that never executes `set_config('opengeni.*', …)` and has no code path
@@ -334,7 +334,7 @@ finding should be recorded as already-correct rather than as a defect.
 
 `slack_api_rate_limits` is a deliberate non-RLS operational table. Slack applies
 its method limits across tokens sharing an app and Slack workspace, including
-tokens owned by different OpenGeni organizations. An organization predicate
+tokens owned by different Opengeni organizations. An organization predicate
 would split the same provider quota and permit concurrent requests beyond it.
 
 The table stores only a SHA-256 hash of the configured Slack client id, verified
@@ -366,5 +366,5 @@ tokens, and the OAuth callbacks, and it must be its own slice with its own
 rollout. It is not a policy change.
 
 `auth_identities` would not change even then, unless Better Auth were moved onto
-OpenGeni's pooled handle and the table gained a real tenant column — neither of
+Opengeni's pooled handle and the table gained a real tenant column — neither of
 which is desirable for a shared credential store keyed by provider identity.

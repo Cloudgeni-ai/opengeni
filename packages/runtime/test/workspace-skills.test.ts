@@ -190,18 +190,18 @@ describe("workspace repository skills", () => {
   test("repository YAML descriptions preserve folded text", async () => {
     const session = fakeSession({
       ".agents/skills/opengeni/SKILL.md":
-        "---\nname: opengeni\ndescription: >-\n  Maintain OpenGeni\n  source code.\n---\n# Guidance",
+        "---\nname: opengeni\ndescription: >-\n  Maintain Opengeni\n  source code.\n---\n# Guidance",
     });
     const entries = await discoverWorkspaceSkills(session, [
       { path: ".agents/skills", source: "repository" },
     ]);
-    expect(entries[0]?.description).toBe("Maintain OpenGeni source code.");
+    expect(entries[0]?.description).toBe("Maintain Opengeni source code.");
   });
 
   test("advertised repository skills have an explicit live reader", async () => {
     const session = fakeSession({
       ".agents/skills/opengeni/SKILL.md":
-        "---\nname: opengeni\ndescription: Maintain OpenGeni.\n---\n# Guidance",
+        "---\nname: opengeni\ndescription: Maintain Opengeni.\n---\n# Guidance",
     });
     const capability = workspaceSkills([{ path: ".agents/skills", source: "repository" }]).bind(
       session,
@@ -609,7 +609,7 @@ description: Prepare a safe release.
         [{ path: ".agents/skills", source: ".agents/skills" }],
         new Set(["release"]),
       ),
-    ).rejects.toThrow('Workspace skill "release" conflicts with a configured OpenGeni skill');
+    ).rejects.toThrow('Workspace skill "release" conflicts with a configured Opengeni skill');
   });
 
   test("lets native tool-bound Skills deterministically shadow workspace copies", async () => {

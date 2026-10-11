@@ -9,6 +9,8 @@ export type {
 } from "./components/human-input-form";
 export { HumanInputSurface } from "./components/human-input-surface";
 export { ApprovalSurface } from "./components/approval-surface";
+export { ToolActionReviewCard, ToolActionReviewDetails } from "./components/tool-action-review";
+export type { ToolReviewDetailsLoader } from "./components/tool-action-review";
 export type { ApprovalSurfaceProps, ApprovalSurfaceMessages } from "./components/approval-surface";
 export type { HumanInputSurfaceProps } from "./components/human-input-surface";
 export { MessageTimeline, TimelineRow } from "./components/message-timeline";
@@ -65,14 +67,37 @@ export type {
   ToolRenderer,
   ToolRendererProps,
 } from "./timeline";
-export { SessionConversation } from "./components/session-conversation";
+export { SessionConversation, SessionConversationView } from "./components/session-conversation";
+export { useSessionConversation } from "./hooks/use-session-conversation";
+export { useNewConversation } from "./hooks/use-new-conversation";
+export type {
+  NewConversationController,
+  UseNewConversationOptions,
+  NewConversationCreateOptions,
+  CreatedConversation,
+} from "./hooks/use-new-conversation";
+export { NewConversation, NewConversationView } from "./components/new-conversation";
+export type {
+  NewConversationProps,
+  NewConversationViewProps,
+  NewConversationLabels,
+} from "./components/new-conversation";
+export type {
+  SessionConversationController,
+  UseSessionConversationOptions,
+} from "./hooks/use-session-conversation";
 export { SessionList } from "./components/session-list";
 export type { SessionListLabels, SessionListProps } from "./components/session-list";
 export { OpenGeniChat } from "./components/open-geni-chat";
-export type { OpenGeniChatLabels, OpenGeniChatProps } from "./components/open-geni-chat";
+export type {
+  OpenGeniChatCreateOptions,
+  OpenGeniChatLabels,
+  OpenGeniChatProps,
+} from "./components/open-geni-chat";
 export type {
   SessionConversationLabels,
   SessionConversationProps,
+  SessionConversationViewProps,
 } from "./components/session-conversation";
 export type { QueueSurfaceProps } from "./components/queue-surface";
 export {
@@ -95,3 +120,5 @@ export type { KnowledgeActivityActions } from "./timeline/knowledge-receipt";
 export { StartupTimings } from "./timeline/startup-timings";
 export { useStartupDetails, setStartupDetails } from "./timeline/startup-preference";
 export type { GenieLoadingOptions } from "./timeline/genie-loading";
+
+export { ToolReviewHistoryProvider } from "./components/tool-review-history";

@@ -1,6 +1,6 @@
 # Managed preview profile. This is for trusted maintainer/operator previews,
 # not production. It uses disposable in-cluster data-plane fixtures but the
-# real OpenGeni API, web, worker, model provider, and sandbox backend.
+# real Opengeni API, web, worker, model provider, and sandbox backend.
 
 api:
   replicaCount: 1

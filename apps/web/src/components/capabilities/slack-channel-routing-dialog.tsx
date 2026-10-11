@@ -22,7 +22,7 @@ import { hasWorkspacePermission } from "@/lib/permissions";
 const ASK_ONCE = "";
 
 /**
- * Which OpenGeni workspace each Slack channel starts work in.
+ * Which Opengeni workspace each Slack channel starts work in.
  *
  * Opened from the Slack sheet. A channel with no choice is not broken: it asks
  * the first person who uses it and remembers what they pick, so the only reason
@@ -223,7 +223,7 @@ function SlackChannelRoutingDialogBody({
   }
 
   return (
-    <DialogContent className="max-w-lg">
+    <DialogContent>
       <DialogHeader>
         <DialogTitle>Where Slack channels start work</DialogTitle>
         <DialogDescription>

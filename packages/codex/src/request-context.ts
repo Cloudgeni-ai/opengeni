@@ -74,7 +74,18 @@ export type CodexRequestOpaqueArtifacts = {
  * dispatched. Errors are intentionally not classified here: the owning worker
  * must receive typed lease-loss failures unchanged.
  */
-export type CodexBeforeProviderDispatch = () => Promise<void> | void;
+export type CodexProviderRequestIdentity = { requestId: string; transportAttempt: number };
+
+export type CodexProviderRequestSettlement = CodexProviderRequestIdentity & {
+  /** Transport evidence only; response_received is NOT a durable history checkpoint. */
+  outcome: "response_received" | "refused" | "unknown";
+};
+
+// The optional argument preserves credit-admission consumers (notably images)
+// which do not dispatch through the Responses transport and own their own fence.
+export type CodexBeforeProviderDispatch = (
+  request?: CodexProviderRequestIdentity,
+) => Promise<void> | void;
 
 export type CodexRequestPreparationPhase =
   | "transport_entry"
@@ -93,7 +104,7 @@ export type CodexRequestContext = {
    * 99.0% ceiling — Codex CLI parity (the CLI always sends it; its own last-3d
    * token-weighted rate here is 94%). `prompt_cache_key` in the body only
    * influences routing and does NOT pin it. Use the SAME value as
-   * prompt_cache_key (the OpenGeni sessionId) so routing and cache key agree.
+   * prompt_cache_key (the Opengeni sessionId) so routing and cache key agree.
    */
   sessionId?: string;
   /** Worker-supplied: proactive refresh + single-flight + db persist. */
@@ -128,6 +139,8 @@ export type CodexRequestContext = {
    * immediately before each actual provider dispatch, including auth retries.
    */
   beforeProviderDispatch?: CodexBeforeProviderDispatch;
+  /** Independent of audit delivery. Unknown never proves physical quiescence. */
+  onProviderRequestSettled?: (request: CodexProviderRequestSettlement) => Promise<void> | void;
   /** Stable request identity supplied by the owning durable execution. */
   nextRequestId?: () => string;
   /**

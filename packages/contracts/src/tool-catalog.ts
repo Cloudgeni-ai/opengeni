@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { Permission } from "./permissions";
 
 export const ATTEMPT_TOOL_CATALOG_VERSION = 1 as const;
 export const TOOL_GATEWAY_CATALOG_VERSION = 1 as const;
@@ -79,10 +80,34 @@ export const ToolDisplayMetadata = z
   .object({
     toolName: toolIdentifier,
     title: z.string().min(1).max(512).optional(),
+    /** Account to name beside the tool. Set only when the connector has more than one. */
     accountLabel: z.string().min(1).max(1024).optional(),
+    /** The connector the tool belongs to, e.g. "Linear". */
+    connector: z.string().min(1).max(512).optional(),
+    /** The connector's provider, so a host can draw its logo. */
+    providerDomain: z.string().min(1).max(253).optional(),
   })
   .strict();
 export type ToolDisplayMetadata = z.infer<typeof ToolDisplayMetadata>;
+
+/**
+ * How one connector account route is named. The model always gets the full
+ * account in tool descriptions; people see the connector, and the account only
+ * when there is more than one to tell apart.
+ */
+export type McpAccountRouteLabel = {
+  /** Model-facing account description. */
+  model: string;
+  connector: string;
+  providerDomain: string;
+  /** Present only when the connector has several accounts in the turn. */
+  account?: string | undefined;
+};
+
+/** The short account line for approvals: "Linear", or "Linear · alice@example.com". */
+export function mcpAccountRouteReviewLabel(label: McpAccountRouteLabel): string {
+  return label.account ? `${label.connector} · ${label.account}` : label.connector;
+}
 
 export const AttemptToolCatalogEntry = z
   .object({
@@ -182,6 +207,9 @@ export const AttemptToolCatalog = z
     generation: z.number().int().positive(),
     digest: sha256,
     createdAt: z.string().datetime({ offset: true }),
+    /** Native permission ceiling frozen by the worker with this catalog.
+     * Absence is legacy/unknown, not permission to derive a larger live set. */
+    firstPartyMcpPermissions: z.array(Permission).max(128).optional(),
     entries: z.array(AttemptToolCatalogEntry).max(ATTEMPT_TOOL_CATALOG_MAX_ENTRIES),
   })
   .strict()
@@ -385,6 +413,101 @@ export const ToolGatewayCallResponse = z
   .strict();
 export type ToolGatewayCallResponse = z.infer<typeof ToolGatewayCallResponse>;
 
+/** A selector, never an authority claim. Symbolic paths use the canonical projection. */
+export const ToolGatewayTarget = z.union([
+  z.object({ identity: ToolGatewayIdentity }).strict(),
+  z.object({ path: z.array(namespaceSegment).min(2).max(8) }).strict(),
+]);
+export type ToolGatewayTarget = z.infer<typeof ToolGatewayTarget>;
+
+const targetContext = {
+  siteArtifactId: z.string().uuid().optional(),
+  siteVersionId: z.string().uuid().optional(),
+};
+export const ToolGatewayResolveRequest = z
+  .object({
+    target: ToolGatewayTarget,
+    ...targetContext,
+  })
+  .strict()
+  .superRefine(requireCompleteSiteToolContext);
+export type ToolGatewayResolveRequest = z.infer<typeof ToolGatewayResolveRequest>;
+
+export const ToolGatewayResolvedTool = z
+  .object({
+    version: z.literal(1),
+    definitionDigest: sha256,
+    entry: ToolGatewayCatalogEntry,
+  })
+  .strict();
+export type ToolGatewayResolvedTool = z.infer<typeof ToolGatewayResolvedTool>;
+
+export const ToolGatewayInvokeRequest = z
+  .object({
+    target: ToolGatewayTarget,
+    operationId: z.string().uuid(),
+    arguments: jsonObject,
+    /** Omission explicitly selects the current authorized definition. */
+    expectedDefinitionDigest: sha256.optional(),
+    approvalToken: z
+      .string()
+      .regex(/^ogta_[A-Za-z0-9_-]{43}$/u)
+      .optional(),
+    ...targetContext,
+  })
+  .strict()
+  .superRefine(requireCompleteSiteToolContext);
+export type ToolGatewayInvokeRequest = z.infer<typeof ToolGatewayInvokeRequest>;
+
+export const ToolGatewayInvokeResponse = z
+  .object({
+    operationId: z.string().uuid(),
+    tool: ToolGatewayResolvedTool,
+    result: ToolGatewayResult,
+  })
+  .strict();
+export type ToolGatewayInvokeResponse = z.infer<typeof ToolGatewayInvokeResponse>;
+
+export const ToolGatewayTargetApprovalRequest = z
+  .object({
+    identity: ToolGatewayIdentity,
+    operationId: z.string().uuid(),
+    arguments: jsonObject,
+    expectedDefinitionDigest: sha256,
+    ...targetContext,
+  })
+  .strict()
+  .superRefine(requireCompleteSiteToolContext);
+export type ToolGatewayTargetApprovalRequest = z.infer<typeof ToolGatewayTargetApprovalRequest>;
+export const ToolGatewayTargetApprovalResponse = z
+  .object({
+    bindingVersion: z.literal(2),
+    operationId: z.string().uuid(),
+    tool: ToolGatewayResolvedTool,
+    approvalToken: z.string().regex(/^ogta_[A-Za-z0-9_-]{43}$/u),
+    expiresAt: z.string().datetime({ offset: true }),
+  })
+  .strict();
+export type ToolGatewayTargetApprovalResponse = z.infer<typeof ToolGatewayTargetApprovalResponse>;
+
+/** Bounded compatibility manifest, not workspace discovery. */
+export const ToolGatewayManifestRequest = z
+  .object({
+    identities: z.array(ToolGatewayIdentity).max(256),
+    ...targetContext,
+  })
+  .strict()
+  .superRefine(requireCompleteSiteToolContext);
+export type ToolGatewayManifestRequest = z.infer<typeof ToolGatewayManifestRequest>;
+export const ToolGatewayManifestResponse = z
+  .object({
+    version: z.literal(1),
+    digest: sha256,
+    tools: z.array(ToolGatewayResolvedTool).max(256),
+  })
+  .strict();
+export type ToolGatewayManifestResponse = z.infer<typeof ToolGatewayManifestResponse>;
+
 export const ToolGatewayDeclarationsResponse = z
   .object({
     catalogDigest: sha256,
@@ -408,6 +531,7 @@ function requireCompleteSiteToolContext(
 
 export const CodemodeOperationState = z.enum([
   "queued",
+  "waiting_for_approval",
   "running",
   "completed",
   "failed",
@@ -439,6 +563,9 @@ export const CodemodeOperation = z
       message: "Codemode operation caller must be codemode",
     }),
     state: CodemodeOperationState,
+    /** Present only for clients that acknowledged durable approval continuation. */
+    durableApproval: z.literal(true).optional(),
+    approvalRequestId: z.string().uuid().optional(),
     result: AttemptToolResult.nullable(),
     errorCode: z.string().min(1).max(128).nullable(),
     errorMessage: z.string().min(1).max(4_096).nullable(),
@@ -453,6 +580,8 @@ export type CodemodeOperation = z.infer<typeof CodemodeOperation>;
 
 export const CodemodeCallRequest = z
   .object({
+    /** Opt-in transport capability, never permission to execute. */
+    durableApproval: z.literal(true).optional(),
     operationId: z.string().uuid(),
     catalogDigest: sha256,
     identity: AttemptToolIdentity,

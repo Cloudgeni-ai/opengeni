@@ -16,6 +16,7 @@ import { recoveryAwareSessionInstructions } from "./recovery-warning";
 import {
   formatSkillCatalog,
   skillCatalogEntryIds,
+  type AgentPromptToolAvailability,
   type AttemptConnectorActionBinding,
   type BuildAgentOptions,
   type ConnectorActionPolicyHooks,
@@ -46,7 +47,10 @@ import { summarizeCompanyBrainContributions } from "../../model-context-contribu
 import { createTurnCredentialLeases } from "./credential-leases";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { executeGatewayImageGeneration } from "../gateway-image-generation";
-import { executeCodexImageGeneration } from "../codex-image-generation";
+import {
+  executeCodexImageGeneration,
+  executeCoreCodexImageGeneration,
+} from "../codex-image-generation";
 import {
   ImageGenerationReferenceError,
   resolveImageGenerationReferencesForTool,
@@ -57,7 +61,6 @@ import { VideoGenerationRejectedResult, resolveAgentToolFamilies } from "@openge
 
 import {
   structuredToolTransportForTurn,
-  hostedWebSearchForTurn,
   connectedSubscriptionImageGenerationAuthority,
   textVerbosityForTurn,
   reasoningSummaryForTurn,
@@ -80,6 +83,7 @@ import type {
 import { SESSION_TITLE_MODEL_TOOL_NAME } from "./session-title";
 import { resolveTurnSandboxAccess } from "./turn-sandbox-access";
 import { resolveVideoReferenceSandboxAccess } from "./video-reference-sandbox";
+import { turnWebSearchPlan } from "./web-search";
 
 export type BuildTurnAgentDeps = {
   skillCatalog: NonNullable<BuildAgentOptions["skillCatalog"]>;
@@ -116,6 +120,7 @@ export type BuildTurnAgentDeps = {
   workspaceAgentIdentity: GovernanceModelOk["workspaceAgentIdentity"];
   workspaceGovernance: GovernanceModelOk["workspaceGovernance"];
   structuredWorkspacePolicyActive: GovernanceModelOk["structuredWorkspacePolicyActive"];
+  workspaceCreditModelsAllowed: GovernanceModelOk["workspaceCreditModelsAllowed"];
   workspaceMemory: GovernanceModelOk["workspaceMemory"];
   rigVersion: GovernanceModelOk["rigVersion"];
   rigName: GovernanceModelOk["rigName"];
@@ -138,6 +143,11 @@ export type BuildTurnAgentDeps = {
   preparationIndependentToolNames: readonly string[];
   /** The attempt's tool catalog includes the Jev-backed code_search tool. */
   codeSearchAvailable: boolean;
+  /**
+   * Frozen clause availability for the modular instructions; undefined for
+   * sessions without an agent configuration. Rendering input only.
+   */
+  promptToolAvailability?: AgentPromptToolAvailability | undefined;
   videoGenerationAcceptancesByCallId: Map<string, { operationId: string; requestDigest: string }>;
   activeSandboxBackend: Settings["sandboxBackend"] | undefined;
   groupBoxBackend: Settings["sandboxBackend"];
@@ -198,6 +208,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     trigger,
     preparationIndependentToolNames,
     codeSearchAvailable,
+    promptToolAvailability,
     videoGenerationAcceptancesByCallId,
     activeSandboxBackend,
     groupBoxBackend,
@@ -246,7 +257,13 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
           },
         }
       : {};
-  const hostedWebSearch = hostedWebSearchForTurn(resolvedModel, runSettings.webSearchEnabled);
+  // Fallback mode (the default) keeps hosted search exactly as resolved; the
+  // operator's `replace` mode withholds it in favour of provider tools.
+  const hostedWebSearch = turnWebSearchPlan(
+    resolvedModel,
+    runSettings,
+    deps.workspaceCreditModelsAllowed,
+  ).hostedWebSearch;
   const resolveImageReferences = async (
     references: Parameters<typeof resolveImageGenerationReferencesForTool>[0]["references"],
   ) =>
@@ -301,6 +318,47 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     }
 
     if (resolvedModel?.provider.kind === "codex-subscription") {
+      // A turn placed by the shared core funds its image operations through
+      // core operation leases on its own connection, never the legacy tables.
+      const core = providerTurn.codexSubscriptionCore;
+      if (core) {
+        const executionGeneration = leases.codex.generation;
+        if (!codexContext || executionGeneration === null) return {};
+        return {
+          imageGeneration: {
+            kind: "provider_adapter",
+            execute: async ({ prompt, references }, { toolCallId }) => {
+              const referenceResolution = await resolveImageReferences(references);
+              if (referenceResolution.status === "rejected") return referenceResolution.result;
+              const receipt = await executeCoreCodexImageGeneration({
+                db,
+                settings: capabilitySettings,
+                objectStorage,
+                core,
+                executionGeneration,
+                clientVersion: codexContext.clientVersion,
+                assertChatLease: () => leases.codex.assertCurrentForDispatch(),
+                assertCreditAdmission: async () => {
+                  await codexContext.getToken();
+                  await codexContext.beforeProviderDispatch?.();
+                },
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: turn.id,
+                attemptId: input.attemptId,
+                toolCallId,
+                prompt,
+                references: referenceResolution.references,
+                ...(runtimeCancellationSignal ? { abortSignal: runtimeCancellationSignal } : {}),
+              });
+              media.rememberGeneratedImageCreatedThisTurn(receipt);
+              await media.materializeGeneratedImage(receipt);
+              return receipt;
+            },
+          },
+        };
+      }
       const imageAuthority = connectedSubscriptionImageGenerationAuthority(
         codexContext,
         providerTurn.effectiveCodexCredentialId,
@@ -411,7 +469,12 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
   let videoGenerationCredential: VideoGenerationCredentialLease | null = null;
   if (objectStorage && videoGenerationEnabled && resolveAgentToolFamilies(session.agent).media) {
     if (videoGenerationPolicy.fundingSource === "opengeni_credits") {
-      videoGenerationCredential = managedVideoGenerationCredentialLease(eventing.modelRunSettings);
+      // Credit-funded video honors the workspace switch that turns Opengeni
+      // credits off: no credential, so the tool is never offered.
+      videoGenerationCredential =
+        deps.workspaceCreditModelsAllowed === false
+          ? null
+          : managedVideoGenerationCredentialLease(eventing.modelRunSettings);
     } else if (videoGenerationPolicy.fundingSource === "workspace_gateway") {
       const workspaceCredential = await loadWorkspaceVercelAiGatewayCredentialLease(
         db,
@@ -438,6 +501,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
           workspaceId: input.workspaceId,
           subjectId,
           sessionId: input.sessionId,
+          turnId: turn.id,
           authoritySnapshot,
         });
         const selected = providerTurn.effectiveXaiCredentialId
@@ -466,6 +530,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
               workspaceId: input.workspaceId,
               subjectId,
               sessionId: input.sessionId,
+              turnId: turn.id,
               authoritySnapshot,
               credentialId: selected.credentialId,
               pinSource: "policy",
@@ -665,6 +730,9 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
           : {}),
         ...(preparedTools.inputWaitYield ? { inputWaitYield: preparedTools.inputWaitYield } : {}),
         ...(session.agent ? { agentConfig: session.agent, toolRouterInHistory } : {}),
+        ...(session.agent && promptToolAvailability
+          ? { agentPromptToolAvailability: promptToolAvailability }
+          : {}),
         reasoningEffort: requestReasoningEffort,
         ...(reasoningSummary ? { reasoningSummary } : {}),
         latencyMode: turnExecutionPolicy.latencyMode,
@@ -757,8 +825,8 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
               // tool. Gateway Responses routes likewise expose ordinary function
               // tools, not OpenAI-hosted sandbox tools. Tell buildAgent to use
               // function apply_patch and wrap successful view_image results as
-              // typed input_image content. Chat wires have no proven typed image
-              // result transport and therefore receive no view_image tool.
+              // typed input_image content. The Chat adapter projects tool images
+              // into a labelled image envelope after the paired tool results.
               structuredToolTransport: structuredToolTransportForTurn(resolvedModel),
               ...(promptCacheKey ? { promptCacheKey } : {}),
             }

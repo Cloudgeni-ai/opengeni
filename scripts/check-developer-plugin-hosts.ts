@@ -142,6 +142,14 @@ assert.match(codexMcp, /transport: streamable_http/);
 assert.match(codexMcp, /url: https:\/\/app\.opengeni\.ai\/v1\/mcp/);
 assert.match(codexMcp, /bearer_token_env_var: -/);
 assert.deepEqual(nativePlugin.hooks, []);
+// Codex resolves the brand icons from the installed package, not a generic tile.
+const codexInterface = nativePlugin.summary.interface;
+for (const [field, file] of [
+  ["logo", "logo.png"],
+  ["logoDark", "logo-dark.png"],
+  ["composerIcon", "logo.png"],
+] as const)
+  assert.match(String(codexInterface?.[field]), new RegExp(`[\\\\/]assets[\\\\/]${file}$`), field);
 
 // Empirical counterexample: the same package under the legacy manifest recursively registers the guide.
 const legacyRoot = join(scratch, "legacy-marketplace");

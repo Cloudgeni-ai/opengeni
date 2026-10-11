@@ -23,6 +23,7 @@ type PerformCapabilityActionOptions = Parameters<typeof performCapabilityActionU
 const CONNECT_JOURNEY_METHODS: Partial<Record<ConnectAction["type"], IntegrationConnectMethod>> = {
   oauth: "oauth",
   reconnect_oauth: "oauth",
+  add_oauth_account: "oauth",
   social_oauth: "oauth",
   fiken_oauth: "oauth",
   api_key: "api_key",
@@ -184,7 +185,9 @@ async function performCapabilityActionUntracked(
     await refresh();
     onRuntimeChanged();
     await onComplete();
-    toast.success(`Disabled ${item.name}`);
+    toast.success(`Turned off ${item.name} for this workspace`, {
+      description: "Connected accounts are kept.",
+    });
     return;
   }
 
@@ -275,20 +278,54 @@ async function performCapabilityActionUntracked(
       plan.mode === "oauth" ? plan.providerDomain : (item.connectionRef?.providerDomain ?? null);
     const mcpUrl = plan.mode === "oauth" ? plan.mcpUrl : (item.mcpUrl ?? item.endpointUrl ?? null);
     const returnPath = returnPathFor(item.id);
+    const response = await startMcpOAuthWithTimeout(
+      client,
+      action.connectionWorkspaceId ?? workspaceId,
+      {
+        ...(mcpUrl ? { mcpUrl } : {}),
+        ...(providerDomain ? { providerDomain } : {}),
+        // Reuse the existing row when it survives; a null id means the row was
+        // deleted, so OAuth mints a fresh connection and the return handler
+        // re-enables against it.
+        ...(action.connectionId ? { connectionId: action.connectionId } : {}),
+        ownership: action.ownership,
+        returnPath,
+      },
+    );
+    if (!response.authorizationUrl) {
+      throw new Error("The provider did not return an authorization link.");
+    }
+    redirect(response.authorizationUrl);
+    return;
+  }
+
+  if (action.type === "add_oauth_account") {
+    const providerDomain =
+      plan.mode === "oauth" ? plan.providerDomain : (item.connectionRef?.providerDomain ?? null);
+    const mcpUrl = plan.mode === "oauth" ? plan.mcpUrl : (item.mcpUrl ?? item.endpointUrl ?? null);
+    if (!mcpUrl) throw new Error(`${item.name} has no sign-in endpoint.`);
     const response = await startMcpOAuthWithTimeout(client, workspaceId, {
-      ...(mcpUrl ? { mcpUrl } : {}),
+      mcpUrl,
       ...(providerDomain ? { providerDomain } : {}),
-      // Reuse the existing row when it survives; a null id means the row was
-      // deleted, so OAuth mints a fresh connection and the return handler
-      // re-enables against it.
-      ...(action.connectionId ? { connectionId: action.connectionId } : {}),
+      newAccount: true,
       ownership: action.ownership,
-      returnPath,
+      returnPath: returnPathFor(item.id),
     });
     if (!response.authorizationUrl) {
       throw new Error("The provider did not return an authorization link.");
     }
     redirect(response.authorizationUrl);
+    return;
+  }
+
+  if (action.type === "remove_connection") {
+    // The account's own workspace owns the row (a personal account can come
+    // from another workspace); the API re-checks ownership and permission.
+    await client.deleteConnection(action.connection.workspaceId, action.connection.id);
+    await refresh();
+    onRuntimeChanged();
+    await onComplete();
+    toast.success(`Removed the ${item.name} account`);
     return;
   }
 

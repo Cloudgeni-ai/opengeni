@@ -10,6 +10,12 @@ import {
   migrateClaudeSubscriptionPoolCredentials,
 } from "./claude-subscription-pool-migration";
 import {
+  CODEX_SUBSCRIPTION_CORE_CUTOVER_MARKER,
+  CODEX_SUBSCRIPTION_CORE_CUTOVER_MIGRATION,
+  contentFreeCodexCutoverError,
+  migrateCodexSubscriptionCoreCredentials,
+} from "./codex-subscription-core-cutover";
+import {
   SKILL_METADATA_MIGRATION_MARKER,
   createSkillMetadataMigrationStage,
   stageSkillMetadataMigration,
@@ -43,7 +49,10 @@ export interface ConcurrentIndexMigration {
 }
 
 export type MigrationRuntimeOptions = {
-  /** Existing operator key; used only by the closed Claude maintenance conversion. */
+  /**
+   * Existing operator key; used only by the closed Claude (0598) and Codex
+   * (0680) maintenance conversions.
+   */
   environmentsEncryptionKey?: Uint8Array;
   maxNestedAgentDepth?: number;
   /**
@@ -54,7 +63,7 @@ export type MigrationRuntimeOptions = {
    */
   preinstalledVector?: boolean;
   /**
-   * Exact database login roles that may run an OpenGeni API or worker against
+   * Exact database login roles that may run an Opengeni API or worker against
    * this target. Maintenance cutovers use this list to reject a live mixed-
    * version fleet, and rolling ACL migrations use it to preserve old-binary
    * readiness until later role provisioning converges. Dedicated-schema and
@@ -106,7 +115,7 @@ export function parseConcurrentIndexMigration(
   const directive = concurrentIndexDirective.exec(directiveLine);
   if (!directive) {
     if (directiveLine.startsWith("-- opengeni:")) {
-      throw new Error(`Unsupported OpenGeni migration directive in ${file}`);
+      throw new Error(`Unsupported Opengeni migration directive in ${file}`);
     }
     return null;
   }
@@ -210,6 +219,33 @@ export async function executeMigrationFile(
       await transaction.unsafe(parts[1]!);
       await transaction`INSERT INTO schema_migrations(name) VALUES(${file}) ON CONFLICT DO NOTHING`;
     });
+    return;
+  }
+  if (sqlText.includes(CODEX_SUBSCRIPTION_CORE_CUTOVER_MARKER)) {
+    if (file !== CODEX_SUBSCRIPTION_CORE_CUTOVER_MIGRATION)
+      throw new Error("Codex subscription cutover is restricted to migration 0680");
+    const parts = sqlText.split(CODEX_SUBSCRIPTION_CORE_CUTOVER_MARKER);
+    if (parts.length !== 2) throw new Error("0680 requires exactly one Codex cutover stage");
+    // Every failure leaves content-free: driver errors carry the statement's
+    // parameters (ciphertext, labels, emails) and server detail text.
+    await sql
+      .begin(async (transaction) => {
+        await transaction`CREATE TEMP TABLE codex_cutover_stage_0672(completed boolean NOT NULL) ON COMMIT DROP`;
+        await transaction`SELECT
+        pg_catalog.set_config('opengeni.sandbox_recovery_protocol_v2','1',true),
+        pg_catalog.set_config('opengeni.session_variable_set_attachments_v1','1',true)`;
+        await transaction.unsafe(parts[0]!);
+        await migrateCodexSubscriptionCoreCredentials(
+          transaction,
+          options?.environmentsEncryptionKey,
+        );
+        await transaction`INSERT INTO pg_temp.codex_cutover_stage_0672 VALUES(true)`;
+        await transaction.unsafe(parts[1]!);
+        await transaction`INSERT INTO schema_migrations(name) VALUES(${file}) ON CONFLICT DO NOTHING`;
+      })
+      .catch((error: unknown) => {
+        throw contentFreeCodexCutoverError(error);
+      });
     return;
   }
   if (sqlText.includes(SKILL_METADATA_MIGRATION_MARKER)) {
@@ -468,7 +504,7 @@ async function persistDeploymentDepthPolicy(
 }
 
 /**
- * Apply the OpenGeni SQL migration chain.
+ * Apply the Opengeni SQL migration chain.
  *
  * STANDALONE (default, unchanged): `migrate()` / `migrate(databaseUrl)` runs the
  * whole chain with NO search_path manipulation, so every unqualified
@@ -597,7 +633,76 @@ export async function runMigrations(
   await migrate(adminConnection, targetSchema, runtimeOptions);
 }
 
+export type MigrationDeploymentMode = "historical" | "rolling" | "maintenance" | "unclassified";
+
+/**
+ * The reviewed production path a migration declares on its first line.
+ * `historical` covers the early chain (0001–0062) that predates the directive;
+ * a later file without one is `unclassified` and is treated as needing a drain.
+ */
+export function migrationDeploymentMode(file: string, sqlText: string): MigrationDeploymentMode {
+  const firstLine = sqlText.replaceAll("\r\n", "\n").split("\n", 1)[0]?.trim();
+  if (firstLine === "-- deployment-mode: rolling") return "rolling";
+  if (firstLine === "-- deployment-mode: maintenance") return "maintenance";
+  const ordinal = /^(\d{4})_/.exec(file)?.[1];
+  return ordinal && Number(ordinal) < 63 ? "historical" : "unclassified";
+}
+
+export interface MigrationPlan {
+  /** Shipped migrations this database has not applied yet, in apply order. */
+  pending: { name: string; deploymentMode: MigrationDeploymentMode }[];
+  /**
+   * True when any pending migration is not `rolling`. Rolling migrations run
+   * while the previous release keeps serving; anything else needs every
+   * API/control/turn process drained before the migration job runs.
+   */
+  requiresDrain: boolean;
+}
+
+/**
+ * Read-only: compare the shipped migration chain with the database's applied
+ * list. Takes no lock and creates nothing, so it is safe to run against a live
+ * deployment before deciding whether an upgrade needs a drain.
+ */
+export async function planMigrations(
+  databaseUrl = process.env.OPENGENI_MIGRATIONS_DATABASE_URL ??
+    process.env.OPENGENI_DATABASE_URL ??
+    DEFAULT_DATABASE_URL,
+  schema: string | undefined = process.env.OPENGENI_DB_SCHEMA?.trim() || undefined,
+): Promise<MigrationPlan> {
+  const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
+  const files = (await readdir(migrationsDir)).filter((file) => file.endsWith(".sql")).sort();
+  const sql = postgres(databaseUrl, { max: 1 });
+  let applied: Set<string>;
+  try {
+    if (schema) assertIdentifier("OPENGENI_DB_SCHEMA", schema);
+    const qualified = `"${schema ?? "public"}"."schema_migrations"`;
+    const [table] = await sql`SELECT to_regclass(${qualified}) IS NOT NULL AS present`;
+    applied = table?.present
+      ? new Set(
+          (await sql.unsafe(`SELECT "name" FROM ${qualified}`)).map((row) => row.name as string),
+        )
+      : new Set();
+  } finally {
+    await sql.end();
+  }
+  const pending: MigrationPlan["pending"] = [];
+  for (const file of files) {
+    if (applied.has(file)) continue;
+    const sqlText = await readFile(join(migrationsDir, file), "utf8");
+    pending.push({ name: file, deploymentMode: migrationDeploymentMode(file, sqlText) });
+  }
+  return {
+    pending,
+    requiresDrain: pending.some((migration) => migration.deploymentMode !== "rolling"),
+  };
+}
+
 if (import.meta.main) {
-  await migrate();
-  console.log("Applied Drizzle SQL migrations.");
+  if (process.argv.includes("--plan")) {
+    console.log(JSON.stringify(await planMigrations(), null, 2));
+  } else {
+    await migrate();
+    console.log("Applied Drizzle SQL migrations.");
+  }
 }

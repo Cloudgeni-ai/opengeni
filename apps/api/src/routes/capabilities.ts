@@ -84,7 +84,13 @@ export function registerCapabilityRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
     return c.json(
       CapabilityCatalogResponse.parse(
-        await buildCapabilityCatalog({ db, workspaceId, settings, subjectId: grant.subjectId }),
+        await buildCapabilityCatalog({
+          db,
+          workspaceId,
+          settings,
+          subjectId: grant.subjectId,
+          accountId: grant.accountId,
+        }),
       ),
     );
   });
@@ -131,6 +137,8 @@ export function registerCapabilityRoutes(app: Hono, deps: ApiRouteDeps): void {
           grant: access.grant,
           capabilityId: decodeURIComponent(c.req.param("capabilityId")),
           personalOwnerVerified: isPersonalConnectionOwnerPrincipal(access),
+          ...(c.req.query("connectionId") ? { connectionId: c.req.query("connectionId")! } : {}),
+          ...(c.req.query("instanceKey") ? { instanceKey: c.req.query("instanceKey")! } : {}),
         }),
       ),
     );

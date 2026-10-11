@@ -77,7 +77,7 @@ afterAll(async () => {
   await shared?.release();
 }, 180_000);
 
-describe("OpenGeni Lens GitHub installation routes", () => {
+describe("Opengeni Lens GitHub installation routes", () => {
   test("owner-proves one installation, consumes OAuth state once, and routes its signed webhook", async () => {
     if (!client || !workspaceId || !accountId || !subjectId) return;
     const app = new Hono();
@@ -181,7 +181,7 @@ describe("OpenGeni Lens GitHub installation routes", () => {
       headers: { cookie: authorizationCookie },
     });
     expect(authorized.status).toBe(200);
-    expect(await authorized.text()).toContain("OpenGeni Lens connected");
+    expect(await authorized.text()).toContain("Opengeni Lens connected");
 
     const registrations = await listPrReviewAppRegistrations(client.db, accountId, workspaceId);
     expect(registrations).toEqual([

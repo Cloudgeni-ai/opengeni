@@ -10,6 +10,7 @@ import {
   readsTable,
   splitStatements,
   staleAllowlistEntries,
+  stripComments,
   unreviewedFindings,
   writesTable,
 } from "./migration-rls-backfills";
@@ -73,6 +74,50 @@ describe("writesTable", () => {
 });
 
 describe("analyzeMigrationRlsBackfills", () => {
+  test("0697 catalog definition classification requires exact statement bytes", () => {
+    const patch = readFileSync(
+      new URL("../packages/db/drizzle/0697_codex_retry_after_unknown_outcome.sql", import.meta.url),
+      "utf8",
+    );
+    const analyze = (sql: string) =>
+      analyzeMigrationRlsBackfills(
+        fixture({
+          "0001_base.sql": FORCED_TABLE.replaceAll("widgets", "session_turn_attempts"),
+          "0002_patch.sql": sql,
+        }),
+      );
+    expect(analyze(patch)).toEqual([]);
+    // Even comment-only drift loses the exact source classification.
+    expect(analyze(patch.replace("-- An explicit Retry", "-- A changed Retry"))).toMatchObject([
+      { kind: "vacuous-guard", tables: ["session_turn_attempts"] },
+    ]);
+    expect(
+      analyze(
+        patch.replace(
+          "END\n$retry_after_unknown$",
+          "DELETE FROM session_turn_attempts; END\n$retry_after_unknown$",
+        ),
+      ),
+    ).toMatchObject([{ kind: "write", tables: ["session_turn_attempts"] }]);
+    expect(analyze(`${patch}\nDELETE FROM session_turn_attempts;`)).toMatchObject([
+      { kind: "write", statement: 2, tables: ["session_turn_attempts"] },
+    ]);
+    expect(
+      analyze(
+        `${patch}\nDO $guard$ BEGIN IF EXISTS (SELECT 1 FROM session_turn_attempts) THEN RAISE EXCEPTION 'actual guard'; END IF; END $guard$;`,
+      ),
+    ).toMatchObject([{ kind: "vacuous-guard", statement: 2, tables: ["session_turn_attempts"] }]);
+    const changedDynamicSql = patch
+      .replace(/anchor := \$old\$[\s\S]*?\$old\$;/, "anchor := $old$OR REPLACE FUNCTION$old$;")
+      .replace(
+        /\$new\$[\s\S]*?\$new\$/,
+        "$new$TABLE scratch (id int); DELETE FROM session_turn_attempts; CREATE OR REPLACE FUNCTION$new$",
+      );
+    expect(analyze(changedDynamicSql)).toMatchObject([
+      { kind: "write", tables: ["session_turn_attempts"] },
+    ]);
+  });
+
   test("0494 resolver patch is runtime source while real snapshot preflights remain guarded", () => {
     const migration = readFileSync(
       new URL("../packages/db/drizzle/0494_mcp_account_bindings.sql", import.meta.url),
@@ -135,6 +180,104 @@ END $patch$;`;
     expect(
       analyze(patch.replace("EXECUTE replace", "definition := 'SELECT 1'; EXECUTE replace")),
     ).toHaveLength(1);
+  });
+  test("ignores chained pg_get_functiondef replacements but still sees independent writes", () => {
+    const patch = `DO $patch$ DECLARE definition text;
+BEGIN
+definition := pg_get_functiondef('example()'::regprocedure);
+IF definition IS NULL THEN RAISE EXCEPTION 'missing catalog routine'; END IF;
+definition := replace(definition, 'anchor one', 'DELETE FROM widgets;');
+definition := replace(definition, 'anchor two', 'UPDATE widgets SET id = id;');
+EXECUTE definition;
+END $patch$;`;
+    const analyze = (sql: string) =>
+      analyzeMigrationRlsBackfills(
+        fixture({
+          "0001_base.sql": FORCED_TABLE,
+          "0002_patch.sql": sql,
+        }),
+      );
+    expect(analyze(patch)).toHaveLength(0);
+    expect(
+      analyze(
+        patch.replace("EXECUTE definition;", "EXECUTE definition; UPDATE widgets SET id = id;"),
+      ),
+    ).toHaveLength(1);
+    expect(
+      analyze(
+        patch.replace("EXECUTE definition;", "EXECUTE 'DELETE FROM widgets'; EXECUTE definition;"),
+      ),
+    ).toHaveLength(1);
+  });
+  test("treats pg_catalog-qualified routine patch built-ins like their bare forms", () => {
+    // Comment stripping keeps literals whole but still strips code comments.
+    expect(stripComments("SELECT '-- kept' -- don't keep\nFROM t")).toBe(
+      "SELECT '-- kept'  \nFROM t",
+    );
+    expect(stripComments("x := E'it\\'s -- kept\\n'; /* it's gone */ y")).toBe(
+      "x := E'it\\'s -- kept\\n';   y",
+    );
+    expect(stripComments("x := 'a''b -- kept'; z")).toBe("x := 'a''b -- kept'; z");
+    expect(stripComments("DO $b$ BEGIN -- gone\nUPDATE widgets SET id = id; END $b$")).toBe(
+      "DO $b$ BEGIN  \nUPDATE widgets SET id = id; END $b$",
+    );
+    // Comment text can never suppress a finding, even after an apostrophe in a
+    // nested dollar-quoted string keeps that comment visible to the lexer.
+    const analyzeOne = (sql: string) =>
+      analyzeMigrationRlsBackfills(fixture({ "0001_base.sql": FORCED_TABLE, "0002_x.sql": sql }));
+    const nested = `DO $b$ BEGIN
+RAISE NOTICE '%', $m$it's a backfill$m$;
+-- SUPPRESSOR
+UPDATE widgets SET id = id;
+END $b$;`;
+    for (const suppressor of [
+      "TODO: ALTER TABLE widgets NO FORCE ROW LEVEL SECURITY first",
+      "TODO: ALTER TABLE widgets DISABLE ROW LEVEL SECURITY first",
+      "PERFORM set_config('opengeni.workspace_id', 'x', true);",
+    ]) {
+      expect(analyzeOne(nested.replace("SUPPRESSOR", suppressor))).toMatchObject([
+        { kind: "write", tables: ["widgets"] },
+      ]);
+    }
+    expect(
+      analyzeOne("DO $b$ BEGIN PERFORM '--'; UPDATE widgets SET id = id; END $b$;"),
+    ).toMatchObject([{ kind: "write", tables: ["widgets"] }]);
+    const patch = `DO $patch$ DECLARE target regprocedure; definition text;
+BEGIN
+target := pg_catalog.to_regprocedure('example()');
+IF target IS NULL THEN RAISE EXCEPTION 'missing catalog routine'; END IF;
+definition := pg_catalog.pg_get_functiondef(target);
+definition := pg_catalog.replace(definition, 'anchor one', E'  -- runtime note\\n' || E'IF NOT EXISTS (SELECT 1 FROM widgets)\\n');
+definition := pg_catalog.replace(definition, 'anchor two', 'DELETE FROM widgets;');
+EXECUTE definition;
+END $patch$;`;
+    const analyze = (sql: string) =>
+      analyzeMigrationRlsBackfills(
+        fixture({
+          "0001_base.sql": FORCED_TABLE,
+          "0002_patch.sql": sql,
+        }),
+      );
+    expect(analyze(patch)).toHaveLength(0);
+    // Only pg_catalog is equivalent; any other schema stays opaque.
+    expect(
+      analyze(patch.replace("pg_catalog.pg_get_functiondef", "other.pg_get_functiondef")),
+    ).toHaveLength(1);
+    expect(
+      analyze(patch.replaceAll("pg_catalog.replace(definition", "other.replace(definition")),
+    ).toHaveLength(1);
+    // A real guard or write outside the replacements is still visible.
+    expect(
+      analyze(
+        patch.replace(
+          "EXECUTE definition;",
+          "IF EXISTS (SELECT 1 FROM widgets) THEN RAISE EXCEPTION 'real guard'; END IF; EXECUTE definition;",
+        ),
+      ),
+    ).toMatchObject([{ kind: "vacuous-guard", tables: ["widgets"] }]);
+    expect(
+      analyze(patch.replace("EXECUTE definition;", "EXECUTE definition; DELETE FROM widgets;")),
+    ).toMatchObject([{ kind: "write", tables: ["widgets"] }]);
   });
   test("flags a bare backfill over a FORCE-RLS table", () => {
     const directory = fixture({

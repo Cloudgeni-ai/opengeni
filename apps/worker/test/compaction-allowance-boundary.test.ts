@@ -27,6 +27,8 @@ test("stream component retains the completed compaction checkpoint before refusi
     action: "continue",
   } as Awaited<ReturnType<typeof openSuffix.settleOpenSuffixResumeIfNeeded>>);
   const position = spyOn(db, "nextSessionHistoryPosition").mockResolvedValue(2);
+  // The completed checkpoint contains no stored programmatic operations.
+  const operations = spyOn(db, "listTurnCodemodeApprovals").mockResolvedValue([]);
   const allowance = spyOn(db, "checkWorkspaceAllowance").mockImplementation(async (_db, input) => {
     order.push("admission");
     expect(input.subjectId).toBe("user:frozen-initiator");
@@ -69,6 +71,7 @@ test("stream component retains the completed compaction checkpoint before refusi
           initiatingHumanSubjectId: "user:frozen-initiator",
         },
         turnExecutionPolicy: { providerId: "openai" },
+        providerTurn: {},
         trigger: { type: "user.message" },
         eventing: { modelRunSettings: settings },
         historySink: {
@@ -105,6 +108,7 @@ test("stream component retains the completed compaction checkpoint before refusi
     prepared.mockRestore();
     suffix.mockRestore();
     position.mockRestore();
+    operations.mockRestore();
     allowance.mockRestore();
   }
 });

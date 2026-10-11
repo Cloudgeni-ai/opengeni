@@ -396,7 +396,7 @@ describe("P1.2 establishSandboxSessionFromEnvelope (unix_local)", () => {
     // The minimal real-world delta the live failure surfaced even with NO
     // workspace env: stable git identity + HOME (plus an arbitrary extra var).
     const sandboxEnvironment: Record<string, string> = {
-      GIT_AUTHOR_NAME: "OpenGeni Bot",
+      GIT_AUTHOR_NAME: "Opengeni Bot",
       GIT_AUTHOR_EMAIL: "bot@opengeni.dev",
       HOME: "/workspace",
       MY_VAR: "value-123",

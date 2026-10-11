@@ -6,7 +6,7 @@ import { Link } from "@tanstack/react-router";
  * Advanced section. Knowledge source syncs keep a small editor of their own.
  */
 import { Suspense, lazy, useEffect, useId, useMemo, useRef, useState } from "react";
-import { LaptopIcon, ServerIcon } from "lucide-react";
+import { LaptopIcon, MessageSquareIcon, ServerIcon } from "lucide-react";
 import { toast } from "sonner";
 import { MACHINES_COMPOSER_POLL_MS } from "@opengeni/react/machines";
 
@@ -287,6 +287,8 @@ function AgentScheduleForm({
   );
   const defaultSandboxBackend = context.clientConfig.defaultSandboxBackend ?? "modal";
   const machineOnly = defaultSandboxBackend === "selfhosted";
+  // Without a managed sandbox backend a run off a connected machine has no computer.
+  const noManagedSandbox = defaultSandboxBackend === "none";
   const scheduledMachines = useMemo(
     () =>
       fleet.machines.filter(
@@ -646,9 +648,15 @@ function AgentScheduleForm({
   const whereOptions: SelectOption[] = [
     {
       value: "managed",
-      label: "Managed sandbox",
-      description: "A fresh cloud sandbox for each run.",
-      leading: <ServerIcon className="size-4 text-fg-subtle" />,
+      label: noManagedSandbox ? "No computer" : "Managed sandbox",
+      description: noManagedSandbox
+        ? "Each run is a chat without a computer."
+        : "A fresh cloud sandbox for each run.",
+      leading: noManagedSandbox ? (
+        <MessageSquareIcon className="size-4 text-fg-subtle" />
+      ) : (
+        <ServerIcon className="size-4 text-fg-subtle" />
+      ),
       disabled: machineOnly,
       disabledReason: "This Opengeni server doesn't run managed sandboxes.",
     },
@@ -675,7 +683,9 @@ function AgentScheduleForm({
   ];
   const whereLabel =
     draft.executionTarget === "managed"
-      ? "Managed sandbox"
+      ? noManagedSandbox
+        ? "No computer"
+        : "Managed sandbox"
       : (scheduledMachines.find((machine) => machine.sandboxId === draft.machineSandboxId)?.name ??
         "Connected machine");
 
@@ -1064,7 +1074,6 @@ function AgentScheduleForm({
               defaultModelSelection={modelCatalog.defaultSelection}
               modelsLoading={modelCatalog.loading}
               modelsError={modelCatalog.error}
-              canAttachOpenGeniTool={canAttachOpenGeniTool}
               existingChat={draft.runMode === "existing_session"}
               inheritsChatSettings={inheritsChatSettings}
             />
@@ -1145,7 +1154,7 @@ function AgentScheduleForm({
               suppressAutofill
             />
           </Field>
-          {context.clientConfig.agentConfig?.enabled && !inheritsChatSettings ? (
+          {!inheritsChatSettings ? (
             <ScheduleAgentCapabilities
               workspaceId={workspaceId}
               value={draft.agentCapabilities}
@@ -1286,7 +1295,7 @@ function AgentScheduleForm({
 
 /**
  * Server errors read as what happened and what to do inside the form, never
- * "OpenGeni API 422: …". A short validation sentence from the server is kept.
+ * "Opengeni API 422: …". A short validation sentence from the server is kept.
  */
 async function withFriendlyError<T>(lead: string, request: Promise<T>): Promise<T> {
   try {

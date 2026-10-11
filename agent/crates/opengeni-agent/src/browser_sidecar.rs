@@ -56,6 +56,7 @@ struct Sidecar {
     token_digest: blake3::Hash,
     token_file: PathBuf,
     allowed_origins: Vec<String>,
+    pending_update: Option<String>,
 }
 
 /// Process owner for browserd children installed beside the connected agent.
@@ -64,6 +65,7 @@ pub struct BrowserSidecarManager {
     config_dir: PathBuf,
     binary: PathBuf,
     sidecars: Mutex<HashMap<String, Sidecar>>,
+    update_drain: Arc<crate::uploads::update_drain::UpdateDrain>,
 }
 
 impl BrowserSidecarManager {
@@ -97,7 +99,17 @@ impl BrowserSidecarManager {
             config_dir,
             binary,
             sidecars: Mutex::new(HashMap::new()),
+            update_drain: Arc::default(),
         })
+    }
+
+    /// Share the host's admission boundary, including lost descendant cleanup.
+    pub fn with_update_drain(
+        mut self,
+        drain: Arc<crate::uploads::update_drain::UpdateDrain>,
+    ) -> Self {
+        self.update_drain = drain;
+        self
     }
 
     /// Gracefully stops every scoped browser controller so it can terminate
@@ -113,7 +125,12 @@ impl BrowserSidecarManager {
         // Every authority receives its cooperative signal immediately. Serial
         // per-scope waits multiply the stop budget and let the service manager
         // kill later scopes before their profile cleanup even starts.
-        futures::future::join_all(sidecars.into_iter().map(stop_sidecar)).await;
+        futures::future::join_all(
+            sidecars
+                .into_iter()
+                .map(|sidecar| stop_sidecar(sidecar, &self.update_drain)),
+        )
+        .await;
     }
 
     async fn start(
@@ -162,9 +179,11 @@ impl BrowserSidecarManager {
             .spawn()
             .map_err(|error| PlatformError::from_io("start browser controller sidecar", &error))?;
         let stdout = child.stdout.take().ok_or_else(|| {
+            self.update_drain.mark_unsettled();
             PlatformError::os("browser controller sidecar stdout was not captured")
         })?;
         let stderr = child.stderr.take().ok_or_else(|| {
+            self.update_drain.mark_unsettled();
             PlatformError::os("browser controller sidecar stderr was not captured")
         })?;
         let stderr_diagnostic = Arc::new(Mutex::new(Vec::new()));
@@ -182,6 +201,7 @@ impl BrowserSidecarManager {
         let ready = match ready {
             Ok(ready) => ready,
             Err(error) => {
+                self.update_drain.mark_unsettled();
                 return Err(stop_with_startup_diagnostic(
                     child,
                     stderr_task,
@@ -193,6 +213,7 @@ impl BrowserSidecarManager {
             }
         };
         if let Some(mismatches) = ready_document_mismatches(&ready, admin_token) {
+            self.update_drain.mark_unsettled();
             return Err(stop_with_startup_diagnostic(
                 child,
                 stderr_task,
@@ -215,6 +236,7 @@ impl BrowserSidecarManager {
             token_digest: blake3::hash(admin_token.as_bytes()),
             token_file,
             allowed_origins: allowed_origins.to_vec(),
+            pending_update: None,
         })
     }
 }
@@ -268,6 +290,16 @@ async fn add_allowed_origins(
 
 #[async_trait]
 impl BrowserControlBackend for BrowserSidecarManager {
+    async fn begin_update(&self, operation_id: &str) -> PlatformResult<bool> {
+        sidecars_update_admission(self, operation_id, true).await
+    }
+
+    async fn release_update(&self, operation_id: &str) -> PlatformResult<()> {
+        sidecars_update_admission(self, operation_id, false)
+            .await
+            .map(|_| ())
+    }
+
     async fn is_idle(&self) -> PlatformResult<bool> {
         // Hold the generation map across the proof. The supervisor has already
         // fenced routed work; this also prevents an in-flight ensure replacing
@@ -287,9 +319,13 @@ impl BrowserControlBackend for BrowserSidecarManager {
                 if sidecar
                     .child
                     .try_wait()
-                    .map_err(|_| PlatformError::os("browser controller process state unavailable"))?
+                    .map_err(|_| {
+                        self.update_drain.mark_unsettled();
+                        PlatformError::os("browser controller process state unavailable")
+                    })?
                     .is_some()
                 {
+                    self.update_drain.mark_unsettled();
                     // A crashed controller may have left children behind. It
                     // cannot prove idle; ordinary scoped recovery owns cleanup.
                     return Err(PlatformError::os("browser controller is no longer running"));
@@ -325,13 +361,18 @@ impl BrowserControlBackend for BrowserSidecarManager {
                 .child
                 .try_wait()
                 .map_err(|error| {
+                    self.update_drain.mark_unsettled();
                     PlatformError::from_io("inspect browser controller sidecar", &error)
                 })?
                 .is_none();
+            if !live {
+                self.update_drain.mark_unsettled();
+            }
             if live
                 && existing.scope_generation == scope_generation
                 && existing.token_digest == token_digest
             {
+                recover_update_admission(existing, &self.update_drain).await?;
                 let additions = allowed_origins
                     .iter()
                     .filter(|origin| !existing.allowed_origins.contains(origin))
@@ -352,7 +393,7 @@ impl BrowserControlBackend for BrowserSidecarManager {
             ));
         }
         if let Some(stale) = sidecars.remove(scope_id) {
-            stop_sidecar(stale).await;
+            stop_sidecar(stale, &self.update_drain).await;
         }
         let sidecar = self
             .start(scope_id, scope_generation, admin_token, &allowed_origins)
@@ -385,20 +426,120 @@ impl BrowserControlBackend for BrowserSidecarManager {
         if sidecar
             .child
             .try_wait()
-            .map_err(|error| PlatformError::from_io("inspect browser controller sidecar", &error))?
+            .map_err(|error| {
+                self.update_drain.mark_unsettled();
+                PlatformError::from_io("inspect browser controller sidecar", &error)
+            })?
             .is_some()
         {
+            self.update_drain.mark_unsettled();
             sidecar.stderr_task.abort();
             sidecars.remove(scope_id);
             return Err(PlatformError::NotFound(
                 "browser controller sidecar is no longer running".to_string(),
             ));
         }
+        recover_update_admission(sidecar, &self.update_drain).await?;
         Ok(sidecar.endpoint.clone())
     }
 }
 
 async fn sidecar_is_idle(client: &reqwest::Client, sidecar: &Sidecar) -> PlatformResult<bool> {
+    sidecar_runtime_request(client, sidecar, None).await
+}
+
+fn runtime_client() -> PlatformResult<reqwest::Client> {
+    reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(IDLE_PROBE_TIMEOUT)
+        .build()
+        .map_err(|_| PlatformError::os("browser controller update admission unavailable"))
+}
+
+async fn release_sidecar_update(
+    client: &reqwest::Client,
+    sidecar: &mut Sidecar,
+    operation_id: &str,
+) -> PlatformResult<()> {
+    sidecar_runtime_request(client, sidecar, Some((operation_id, false))).await?;
+    if sidecar.pending_update.as_deref() == Some(operation_id) {
+        sidecar.pending_update = None;
+    }
+    Ok(())
+}
+
+async fn recover_update_admission(
+    sidecar: &mut Sidecar,
+    drain: &crate::uploads::update_drain::UpdateDrain,
+) -> PlatformResult<()> {
+    if drain.is_draining() {
+        return Ok(());
+    }
+    if let Some(operation_id) = sidecar.pending_update.clone() {
+        release_sidecar_update(&runtime_client()?, sidecar, &operation_id).await?;
+    }
+    Ok(())
+}
+
+async fn sidecars_update_admission(
+    manager: &BrowserSidecarManager,
+    operation_id: &str,
+    begin: bool,
+) -> PlatformResult<bool> {
+    tokio::time::timeout(IDLE_PROBE_TIMEOUT, async {
+        let mut sidecars = manager.sidecars.lock().await;
+        let client = runtime_client()?;
+        let mut idle = true;
+        let mut failure = None;
+        for sidecar in sidecars.values_mut() {
+            if !matches!(sidecar.child.try_wait(), Ok(None)) {
+                manager.update_drain.mark_unsettled();
+                failure = Some(PlatformError::os("browser controller is no longer running"));
+                continue;
+            }
+            if let Some(previous) = sidecar.pending_update.clone() {
+                if previous != operation_id {
+                    if !begin {
+                        failure =
+                            Some(PlatformError::os("browser controller update owner differs"));
+                        continue;
+                    }
+                    if let Err(error) = release_sidecar_update(&client, sidecar, &previous).await {
+                        failure = Some(error);
+                        continue;
+                    }
+                }
+            }
+            // Remember before dispatch: cancellation or a lost reply does not
+            // prove that the controller failed to install this exact fence.
+            if begin {
+                sidecar.pending_update = Some(operation_id.to_owned());
+            }
+            match sidecar_runtime_request(&client, sidecar, Some((operation_id, begin))).await {
+                Ok(scope_idle) => {
+                    idle &= scope_idle;
+                    if !begin {
+                        sidecar.pending_update = None;
+                    }
+                }
+                Err(error) => failure = Some(error),
+            }
+        }
+        match failure {
+            Some(error) => Err(error),
+            None => Ok(idle),
+        }
+    })
+    .await
+    .map_err(|_| PlatformError::Timeout("browser controller update admission timed out".into()))?
+}
+
+async fn sidecar_runtime_request(
+    client: &reqwest::Client,
+    sidecar: &Sidecar,
+    update: Option<(&str, bool)>,
+) -> PlatformResult<bool> {
     // Read the existing owner-only authority instead of keeping another bearer
     // in the manager's printable state. Refuse mutable authority drift.
     let file = tokio::fs::File::open(&sidecar.token_file)
@@ -413,11 +554,26 @@ async fn sidecar_is_idle(client: &reqwest::Client, sidecar: &Sidecar) -> Platfor
     if blake3::hash(token.as_bytes()) != sidecar.token_digest {
         return Err(PlatformError::os("browser controller authority changed"));
     }
-    let mut response = client
-        .get(format!(
+    let request = match update {
+        Some((operation_id, begin)) => client
+            .request(
+                if begin {
+                    reqwest::Method::POST
+                } else {
+                    reqwest::Method::DELETE
+                },
+                format!(
+                    "http://127.0.0.1:{}/v1/runtime/update",
+                    sidecar.endpoint.port
+                ),
+            )
+            .json(&serde_json::json!({"operationId": operation_id})),
+        None => client.get(format!(
             "http://127.0.0.1:{}/v1/runtime",
             sidecar.endpoint.port
-        ))
+        )),
+    };
+    let mut response = request
         .bearer_auth(token)
         .send()
         .await
@@ -442,7 +598,13 @@ async fn sidecar_is_idle(client: &reqwest::Client, sidecar: &Sidecar) -> Platfor
     }
     let proof: RuntimeIdleResponse = serde_json::from_slice(&body)
         .map_err(|_| PlatformError::os("browser controller idle proof incompatible"))?;
-    if !proof.ok || proof.protocol_version != 1 {
+    if !proof.ok
+        || proof.protocol_version != 1
+        || update.is_some_and(|(operation_id, _)| {
+            proof.data.operation_id.as_deref() != Some(operation_id)
+        })
+        || update.is_some_and(|(_, begin)| !begin && proof.data.released != Some(true))
+    {
         return Err(PlatformError::os(
             "browser controller idle proof incompatible",
         ));
@@ -459,24 +621,34 @@ struct RuntimeIdleResponse {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RuntimeIdleState {
     idle: bool,
+    #[serde(default)]
+    operation_id: Option<String>,
+    #[serde(default)]
+    released: Option<bool>,
 }
 
-async fn stop_sidecar(mut sidecar: Sidecar) {
-    signal_sidecar_termination(&mut sidecar.child);
-    if tokio::time::timeout(
+async fn stop_sidecar(mut sidecar: Sidecar, drain: &crate::uploads::update_drain::UpdateDrain) {
+    let cooperative = matches!(sidecar.child.try_wait(), Ok(None))
+        && signal_sidecar_termination(&mut sidecar.child);
+    match tokio::time::timeout(
         Duration::from_secs(
             opengeni_agent_platform::service::BROWSER_SIDECAR_SHUTDOWN_TIMEOUT_SECS,
         ),
         sidecar.child.wait(),
     )
     .await
-    .is_err()
     {
-        let _ = sidecar.child.kill().await;
-        let _ = sidecar.child.wait().await;
+        Ok(Ok(status)) if cooperative && status.success() => {}
+        result => {
+            drain.mark_unsettled();
+            if result.is_err() {
+                let _ = sidecar.child.kill().await;
+                let _ = sidecar.child.wait().await;
+            }
+        }
     }
     if tokio::time::timeout(Duration::from_secs(1), &mut sidecar.stderr_task)
         .await
@@ -487,7 +659,7 @@ async fn stop_sidecar(mut sidecar: Sidecar) {
 }
 
 #[cfg(unix)]
-fn signal_sidecar_termination(child: &mut Child) {
+fn signal_sidecar_termination(child: &mut Child) -> bool {
     use nix::sys::signal::{kill, Signal};
     use nix::unistd::Pid;
 
@@ -498,13 +670,15 @@ fn signal_sidecar_termination(child: &mut Child) {
         // listener, orphaning its private agent-browser/Chromium daemon. SIGINT
         // is still a cooperative termination request; the bounded wait + exact
         // child kill below remains the hard-stop fallback.
-        let _ = kill(Pid::from_raw(id), Signal::SIGINT);
+        return kill(Pid::from_raw(id), Signal::SIGINT).is_ok();
     }
+    false
 }
 
 #[cfg(windows)]
-fn signal_sidecar_termination(child: &mut Child) {
+fn signal_sidecar_termination(child: &mut Child) -> bool {
     let _ = child.start_kill();
+    false
 }
 
 #[derive(Debug, Deserialize)]
@@ -978,6 +1152,149 @@ mod tests {
         }
         manager.shutdown().await;
         assert!(manager.is_idle().await.unwrap());
+    }
+
+    #[cfg(unix)]
+    async fn serve_update_proofs(
+        listener: tokio::net::TcpListener,
+        operations: Vec<(&str, String, u16)>,
+    ) {
+        use tokio::io::AsyncWriteExt as _;
+        for (method, operation_id, status) in operations {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0; 1024];
+            let (header_end, length) = loop {
+                let count = socket.read(&mut chunk).await.unwrap();
+                assert!(count > 0 && request.len() + count <= 8192);
+                request.extend_from_slice(&chunk[..count]);
+                if let Some(index) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&request[..index]);
+                    assert!(headers.starts_with(&format!("{method} /v1/runtime/update HTTP/1.1")));
+                    let length = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|value| value.trim().parse::<usize>().unwrap())
+                        })
+                        .unwrap();
+                    break (index + 4, length);
+                }
+            };
+            while request.len() < header_end + length {
+                let count = socket.read(&mut chunk).await.unwrap();
+                assert!(count > 0);
+                request.extend_from_slice(&chunk[..count]);
+            }
+            let body: serde_json::Value =
+                serde_json::from_slice(&request[header_end..header_end + length]).unwrap();
+            assert_eq!(body["operationId"], operation_id);
+            if status == 0 {
+                continue;
+            } // Installed fence, lost response.
+            let mut data = serde_json::json!({"idle":true,"operationId":operation_id});
+            if method == "DELETE" {
+                data["released"] = true.into();
+            }
+            let body = serde_json::json!({"protocolVersion":1,"ok":true,"data":data}).to_string();
+            socket.write_all(format!(
+                "HTTP/1.1 {status} Fixture\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{body}", body.len()
+            ).as_bytes()).await.unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn lost_update_release_retains_exact_owner_for_ordinary_recovery() {
+        use crate::uploads::update_drain::{UpdateDrain, UpdateReservation};
+        let directory = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let drain = Arc::new(UpdateDrain::default());
+        let manager = idle_fixture_manager(directory.path(), listener.local_addr().unwrap().port())
+            .with_update_drain(drain.clone());
+        ensure_idle_fixture(&manager, "scope").await;
+        let first = uuid::Uuid::new_v4().to_string();
+        let next = uuid::Uuid::new_v4().to_string();
+        let operations = vec![
+            ("POST", first.clone(), 0),
+            ("DELETE", first.clone(), 500),
+            ("DELETE", first.clone(), 200),
+            ("POST", next.clone(), 200),
+            ("DELETE", next.clone(), 200),
+        ];
+        let server = tokio::spawn(serve_update_proofs(listener, operations));
+        assert_eq!(drain.reserve_update(&first), UpdateReservation::Started);
+        assert!(manager.begin_update(&first).await.is_err());
+        assert!(manager.release_update(&first).await.is_err());
+        assert_eq!(
+            manager.sidecars.lock().await["scope"]
+                .pending_update
+                .as_deref(),
+            Some(first.as_str())
+        );
+        manager
+            .resolve("scope", "fixture-generation")
+            .await
+            .unwrap();
+        assert_eq!(
+            manager.sidecars.lock().await["scope"]
+                .pending_update
+                .as_deref(),
+            Some(first.as_str()),
+            "ordinary recovery cannot release a live updater"
+        );
+        drain.release_update(&first);
+        manager
+            .resolve("scope", "fixture-generation")
+            .await
+            .unwrap();
+        assert!(manager.sidecars.lock().await["scope"]
+            .pending_update
+            .is_none());
+        assert_eq!(drain.reserve_update(&next), UpdateReservation::Started);
+        assert!(manager.begin_update(&next).await.unwrap());
+        manager.release_update(&next).await.unwrap();
+        drain.release_update(&next);
+        server.await.unwrap();
+        manager.shutdown().await;
+        assert_eq!(drain.snapshot().unwrap().routed, 0);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn replacing_a_crashed_controller_does_not_erase_host_uncertainty() {
+        use crate::uploads::update_drain::{UpdateDrain, UpdateReservation};
+        let directory = tempfile::tempdir().unwrap();
+        let drain = Arc::new(UpdateDrain::default());
+        let manager = idle_fixture_manager(directory.path(), 1).with_update_drain(drain.clone());
+        ensure_idle_fixture(&manager, "scope").await;
+        {
+            let mut sidecars = manager.sidecars.lock().await;
+            let old = sidecars.get_mut("scope").unwrap();
+            old.child.kill().await.unwrap();
+            old.child.wait().await.unwrap();
+        }
+        assert!(manager
+            .resolve("scope", "fixture-generation")
+            .await
+            .is_err());
+        assert!(manager.sidecars.lock().await.is_empty());
+        assert_eq!(
+            drain.reserve_update("other-link"),
+            UpdateReservation::Unavailable
+        );
+        // Ordinary scoped recovery still works, but is not descendant-exit proof.
+        ensure_idle_fixture(&manager, "scope").await;
+        assert_eq!(drain.snapshot(), None);
+        assert_eq!(
+            drain.reserve_update("other-link"),
+            UpdateReservation::Unavailable
+        );
+        manager.shutdown().await;
+        assert_eq!(drain.snapshot(), None);
     }
 
     #[cfg(unix)]

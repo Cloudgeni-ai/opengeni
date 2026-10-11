@@ -131,7 +131,114 @@ test("automatic managed directory recovery preserves current authority and refus
   }
 }, 30_000);
 
+test("metadata-only open uses control authority, refuses stale bindings and preserves unknown outcomes", async () => {
+  const directory = await mkdtemp("/tmp/og-api-target-inventory-");
+  const script = join(directory, "synthetic-route.ts");
+  await writeFile(script, `(${automaticBrowserRecoveryFixture.toString()})()`, { mode: 0o600 });
+  const child = Bun.spawn([process.execPath, "--no-env-file", script, routeUrl.href, "inventory"], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  try {
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    expect(stderr).toBe("");
+    expect(code).toBe(0);
+    expect(JSON.parse(stdout)).toEqual([
+      {
+        scenario: "inventory",
+        status: 201,
+        opens: 1,
+        reads: 0,
+        creates: 0,
+        sourceChecks: 1,
+        touches: 1,
+        content: false,
+      },
+      {
+        scenario: "default",
+        status: 201,
+        opens: 1,
+        reads: 0,
+        creates: 0,
+        sourceChecks: 1,
+        touches: 1,
+        content: true,
+      },
+      ...["wrong-session", "wrong-controller", "wrong-target"].map((scenario) => ({
+        scenario,
+        status: 502,
+        opens: 1,
+        reads: 0,
+        creates: 0,
+        sourceChecks: 1,
+        touches: 1,
+        content: false,
+      })),
+      {
+        scenario: "unknown",
+        status: 409,
+        opens: 1,
+        reads: 0,
+        creates: 0,
+        sourceChecks: 1,
+        touches: 1,
+        content: false,
+      },
+      {
+        scenario: "permission-denied",
+        status: 403,
+        opens: 0,
+        reads: 0,
+        creates: 0,
+        sourceChecks: 0,
+        touches: 0,
+        content: false,
+      },
+      {
+        scenario: "access-revoked",
+        status: 404,
+        opens: 0,
+        reads: 0,
+        creates: 0,
+        sourceChecks: 1,
+        touches: 0,
+        content: false,
+      },
+      {
+        scenario: "holder-lost",
+        status: 409,
+        opens: 0,
+        reads: 0,
+        creates: 0,
+        sourceChecks: 1,
+        touches: 1,
+        content: false,
+      },
+      {
+        scenario: "machine-moved",
+        status: 409,
+        opens: 0,
+        reads: 0,
+        creates: 0,
+        sourceChecks: 1,
+        touches: 0,
+        content: false,
+      },
+    ]);
+  } finally {
+    if (child.exitCode === null) child.kill();
+    await child.exited;
+    await rm(directory, { recursive: true, force: true });
+  }
+}, 30_000);
+
 async function automaticBrowserRecoveryFixture() {
+  const inventoryOnly = process.argv[3] === "inventory";
+  let opens = 0;
   const routeHref = process.argv[2]!;
   const apiDirectory = new URL("..", routeHref).pathname;
   const resolveFromApi = (name: string) => Bun.resolveSync(name, apiDirectory);
@@ -211,11 +318,13 @@ async function automaticBrowserRecoveryFixture() {
       id: sourceSessionId,
       workspaceId,
       activeSandboxId:
-        state.missing && state.scenario === "machine-moved" ? randomUUID() : machineId,
+        (state.missing || inventoryOnly) && state.scenario === "machine-moved"
+          ? randomUUID()
+          : machineId,
     }),
     touchBrowserSessionController: async () => {
       state.touches++;
-      return !(state.missing && state.scenario === "holder-lost");
+      return !((state.missing || inventoryOnly) && state.scenario === "holder-lost");
     },
     terminalizeStaleConnectedInteractionPlacement: async () => ({ sourcePlacementChanged: false }),
     markEphemeralBrowserSessionLost: async () => {
@@ -225,10 +334,27 @@ async function automaticBrowserRecoveryFixture() {
   }));
   mock.module(resolveFromApi("@opengeni/core"), () => ({
     ...core,
-    requireAccessGrant: async () => grant,
-    requireSessionAuthorization: async () => {
+    requireAccessGrant: async (
+      _context: unknown,
+      _deps: unknown,
+      _workspace: string,
+      permission: string,
+    ) => {
+      if (inventoryOnly && permission !== "sessions:control")
+        throw new Error("synthetic permission mismatch");
+      if (inventoryOnly && state.scenario === "permission-denied")
+        throw new FixtureHTTPException(403);
+      return grant;
+    },
+    requireSessionAuthorization: async (
+      _deps: unknown,
+      _grant: unknown,
+      input: { operation: string },
+    ) => {
       state.sourceChecks++;
-      if (state.missing && state.scenario === "access-revoked")
+      if (inventoryOnly && input.operation !== "session.control")
+        throw new Error("synthetic source operation mismatch");
+      if ((state.missing || inventoryOnly) && state.scenario === "access-revoked")
         throw new core.SessionAuthorizationDeniedError("revoked");
       return {};
     },
@@ -296,6 +422,32 @@ async function automaticBrowserRecoveryFixture() {
     hostname: "127.0.0.1",
     async fetch(request) {
       const path = new URL(request.url).pathname;
+      if (
+        inventoryOnly &&
+        request.method === "POST" &&
+        (path.endsWith("/open-with-inventory") || path.endsWith("/targets"))
+      ) {
+        opens++;
+        if (request.headers.get("authorization") !== `Bearer ${expectedTokens.controlToken}`)
+          throw new Error("synthetic control authority mismatch");
+        const body = await request.json();
+        if (JSON.stringify(body) !== JSON.stringify({ url: "https://new.example.test/" }))
+          throw new Error("synthetic open request mismatch");
+        if (state.scenario === "unknown") return failure(409, "outcome_unknown");
+        if (state.scenario === "default") return success(observation);
+        return success({
+          browserSessionId: state.scenario === "wrong-session" ? randomUUID() : browserSessionId,
+          controllerGeneration:
+            state.scenario === "wrong-controller" ? randomUUID() : controllerGeneration,
+          targets: [
+            {
+              ...observation.target,
+              controllerGeneration:
+                state.scenario === "wrong-target" ? randomUUID() : controllerGeneration,
+            },
+          ],
+        });
+      }
       if (request.method === "GET" && path.endsWith("/targets")) {
         state.reads++;
         if (request.headers.get("authorization") !== `Bearer ${expectedTokens.viewToken}`)
@@ -338,8 +490,19 @@ async function automaticBrowserRecoveryFixture() {
       _services: unknown,
       _context: unknown,
       callback: (handle: unknown) => Promise<unknown>,
-    ) =>
-      await callback({
+    ) => {
+      if (
+        inventoryOnly &&
+        (_context as { operation: string; retryControllerTransport: boolean }).operation !==
+          "browser.control"
+      )
+        throw new Error("synthetic channel operation mismatch");
+      if (
+        inventoryOnly &&
+        (_context as { retryControllerTransport: boolean }).retryControllerTransport !== false
+      )
+        throw new Error("synthetic mutation replay posture mismatch");
+      return await callback({
         routingSession: {
           prime: async () => ({
             kind: "selfhosted",
@@ -354,7 +517,8 @@ async function automaticBrowserRecoveryFixture() {
             },
           }),
         },
-      }),
+      });
+    },
     withChannelA: async () => {
       throw new Error("unexpected synthetic lifecycle operation");
     },
@@ -380,6 +544,53 @@ async function automaticBrowserRecoveryFixture() {
   };
   try {
     const results = [];
+    if (inventoryOnly) {
+      for (const scenario of [
+        "inventory",
+        "default",
+        "wrong-session",
+        "wrong-controller",
+        "wrong-target",
+        "unknown",
+        "permission-denied",
+        "access-revoked",
+        "holder-lost",
+        "machine-moved",
+      ]) {
+        state = {
+          scenario,
+          missing: false,
+          recovered: true,
+          reads: 0,
+          creates: [],
+          sourceChecks: 0,
+          touches: 0,
+          lost: 0,
+        };
+        opens = 0;
+        const response = await app.request(
+          `https://api.example.test/v1/workspaces/${workspaceId}/browser-sessions/${browserSessionId}/targets${scenario === "default" ? "" : "/open-with-inventory"}`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ url: "https://new.example.test/" }),
+          },
+        );
+        const body = (await response.json()) as Record<string, unknown>;
+        results.push({
+          scenario,
+          status: response.status,
+          opens,
+          reads: state.reads,
+          creates: state.creates.length,
+          sourceChecks: state.sourceChecks,
+          touches: state.touches,
+          content: "semantic" in body,
+        });
+      }
+      console.log(JSON.stringify(results));
+      return;
+    }
     for (const scenario of [
       "recovered",
       "unknown",
@@ -902,6 +1113,7 @@ describe("BrowserSession route discipline", () => {
     );
     expect(route).toContain('operation: "browser.download.save"');
     expect(route).toContain("mayReplaceExisting: save.overwrite && dispatched.dispatchedNow");
+    expect(route).toContain("createParents: true");
   });
 
   test("resolves linked browsers through the exact active ComputerSession placement", async () => {

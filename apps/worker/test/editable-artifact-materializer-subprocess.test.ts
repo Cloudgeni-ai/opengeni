@@ -81,6 +81,56 @@ describe("native editable artifact materializer subprocess", () => {
     });
   });
 
+  test("retries an identity probe that timed out with a larger budget", async () => {
+    const stallFile = join(directory, `identity-stall-${crypto.randomUUID()}`);
+    const spawned: string[][] = [];
+    const port = await createNativeEditableArtifactSubprocessPort({
+      ...options(),
+      probeTimeoutMs: 300,
+      launcher: recordingLauncher(spawned, {
+        FIXTURE_IDENTITY_STALL_FILE: stallFile,
+        FIXTURE_IDENTITY_STALL_COUNT: "1",
+      }),
+    });
+    expect(port.identity).toMatchObject({ kind: "native", sandboxEnforced: true });
+    expect(spawned).toEqual([
+      ["--opengeni-materializer-identity-v1"],
+      ["--opengeni-materializer-identity-v1"],
+    ]);
+    expect(await Bun.file(stallFile).text()).toBe("1");
+  });
+
+  test("gives up after the bounded identity probe retries", async () => {
+    const stallFile = join(directory, `identity-stall-${crypto.randomUUID()}`);
+    const spawned: string[][] = [];
+    const started = performance.now();
+    await expect(
+      createNativeEditableArtifactSubprocessPort({
+        ...options(),
+        probeTimeoutMs: 50,
+        launcher: recordingLauncher(spawned, {
+          FIXTURE_IDENTITY_STALL_FILE: stallFile,
+          FIXTURE_IDENTITY_STALL_COUNT: "100",
+        }),
+      }),
+    ).rejects.toThrow("identity probe timed out after 450ms");
+    // 50 + 150 + 450 ms of budget across exactly three probes.
+    expect(performance.now() - started).toBeGreaterThanOrEqual(650);
+    expect(spawned).toHaveLength(3);
+  });
+
+  test("never retries an identity probe that failed on its own", async () => {
+    const spawned: string[][] = [];
+    await expect(
+      createNativeEditableArtifactSubprocessPort({
+        ...options(),
+        executable: "/bin/false",
+        launcher: recordingLauncher(spawned),
+      }),
+    ).rejects.toThrow("native materializer identity probe failed");
+    expect(spawned).toHaveLength(1);
+  });
+
   test("fails closed when parent launcher isolation is not verified", async () => {
     await expect(
       createNativeEditableArtifactSubprocessPort({
@@ -327,6 +377,22 @@ function testLauncher() {
         cwd: "/",
         env: { ...input.environment },
         stdio: ["pipe", "pipe", "pipe"],
+      });
+    },
+  });
+}
+
+/** The test launcher, recording each spawn and adding fixture-only
+ * environment that the strict child-environment contract does not admit. */
+function recordingLauncher(spawned: string[][], fixtureEnvironment: Record<string, string> = {}) {
+  const launcher = testLauncher();
+  return Object.freeze({
+    ...launcher,
+    spawn(input: Parameters<typeof launcher.spawn>[0]) {
+      spawned.push([...input.args]);
+      return launcher.spawn({
+        ...input,
+        environment: { ...input.environment, ...fixtureEnvironment },
       });
     },
   });

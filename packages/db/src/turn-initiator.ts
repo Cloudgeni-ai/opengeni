@@ -21,7 +21,9 @@ export type FrozenTurnInitiator = {
   initiatingHumanSubjectId?: string | null;
 };
 
-/** A legacy task has no asserted service identity. Its occurrence is still
+/** The scheduler label is frozen authority proof shared with migrations 0275/0414,
+ * not presentation copy. Preserve its exact historical bytes.
+ * A legacy task has no asserted service identity. Its occurrence is still
  * initiated by the scheduler, not by the missing-attribution sentinel. */
 export function frozenScheduledOccurrenceInitiator(
   task: { createdBy: TurnInitiator; createdByContext: TurnInitiatorContext },
@@ -100,6 +102,22 @@ export function initiatorFromStorage(
     subjectId,
     ...(label ? { label } : {}),
   };
+}
+
+/**
+ * Who sent a person's message, for the model: the label frozen with the turn
+ * at acceptance (never re-read). Service, key, agent and scheduler turns have
+ * no person behind the prompt, so they get none.
+ */
+export function humanTurnSenderLabel(row: {
+  initiatorKind: string;
+  initiatorContext: unknown;
+}): string | null {
+  if (row.initiatorKind !== "subject") return null;
+  const context = row.initiatorContext;
+  if (typeof context !== "object" || context === null || Array.isArray(context)) return null;
+  const label = (context as Record<string, unknown>).label;
+  return typeof label === "string" && label.trim() ? label : null;
 }
 
 export function initiatorColumns(value: FrozenTurnInitiator): {

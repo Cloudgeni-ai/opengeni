@@ -172,7 +172,7 @@ describe("time context in durable model history", () => {
     const content = String(history[0]?.item.content);
     expect(content).toStartWith(
       [
-        "[OpenGeni internal updates]",
+        "[Opengeni internal updates]",
         "These platform updates were delivered together for this inference.",
         `Delivered: ${utcMinute(delivered!.deliveredAt!)}`,
         "",

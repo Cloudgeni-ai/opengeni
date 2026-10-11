@@ -186,6 +186,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
   test("ships responsive, accessible variable sets, files, and unified Knowledge", async () => {
     const bootstrap = await configuredContext(
       browser,
+      apiBaseUrl,
       {
         viewport: { width: 1280, height: 900 },
         extraHTTPHeaders: ownerHeaders,
@@ -243,6 +244,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
     for (const matrixCase of matrix) {
       const context = await configuredContext(
         browser,
+        apiBaseUrl,
         {
           viewport: matrixCase.viewport,
           isMobile: matrixCase.isMobile,
@@ -305,6 +307,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
   test("keeps a long schedules list inside the workspace scroll owner", async () => {
     const desktop = await configuredContext(
       browser,
+      apiBaseUrl,
       {
         viewport: { width: 1280, height: 900 },
         extraHTTPHeaders: ownerHeaders,
@@ -326,6 +329,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
 
     const constrained = await configuredContext(
       browser,
+      apiBaseUrl,
       {
         viewport: { width: 375, height: 720 },
         extraHTTPHeaders: ownerHeaders,
@@ -344,6 +348,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
   test("scheduled learning changes remain drafts until Save and Cancel discards them", async () => {
     const context = await configuredContext(
       browser,
+      apiBaseUrl,
       { viewport: { width: 1280, height: 900 }, extraHTTPHeaders: ownerHeaders },
       false,
     );
@@ -455,6 +460,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
   test("keeps the Agent Knowledge overview truthful across responsive breakpoints", async () => {
     const bootstrap = await configuredContext(
       browser,
+      apiBaseUrl,
       {
         viewport: { width: 1280, height: 900 },
         extraHTTPHeaders: ownerHeaders,
@@ -480,6 +486,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
     for (const matrixCase of matrix) {
       const context = await configuredContext(
         browser,
+        apiBaseUrl,
         {
           viewport: matrixCase.viewport,
           isMobile: matrixCase.label === "desktop" ? undefined : true,
@@ -532,6 +539,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
   test("browses nested collections as pages, opens entries and searches across collections", async () => {
     const context = await configuredContext(
       browser,
+      apiBaseUrl,
       { viewport: { width: 1280, height: 900 }, extraHTTPHeaders: ownerHeaders },
       browserTestSettings.sandboxSelfhostedEnabled,
     );
@@ -601,7 +609,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
       await collectionPath.getByText("Acme tree", { exact: true }).waitFor();
       const members = page.getByRole("list", { name: "Entries", exact: true });
       await members.getByRole("button", { name: "Nested renewal", exact: true }).waitFor();
-      await page.getByRole("button", { name: "Knowledge", exact: true }).click();
+      await returnToLibraryFromEntry(page);
       await acmeSection.getByRole("button", { name: "Contracts tree", exact: true }).waitFor();
 
       // A completed page must reauthorize on reopen, even when the browser's
@@ -698,7 +706,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
       await expectNoAxeViolations(page, contentPageSelector, "nested-knowledge-collection-mobile");
 
       // Search reaches entries inside nested collections from the By collection view.
-      await page.getByRole("button", { name: "Knowledge", exact: true }).click();
+      await returnToLibraryFromEntry(page);
       await page.getByRole("heading", { level: 1, name: "Knowledge", exact: true }).waitFor();
       await page
         .getByRole("searchbox", { name: "Search knowledge", exact: true })
@@ -721,6 +729,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
     const expectedMissingKnowledge = new Set<string>();
     const context = await configuredContext(
       browser,
+      apiBaseUrl,
       { viewport: { width: 1280, height: 900 }, extraHTTPHeaders: ownerHeaders },
       false,
       expectedMissingKnowledge,
@@ -1203,7 +1212,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
     await page.getByRole("heading", { level: 1, name: "Retained entry 20", exact: true }).waitFor();
     await page.getByText(tailKnowledgeText, { exact: true }).waitFor();
     await expectNoPageOverflow(page);
-    await page.getByRole("button", { name: "Knowledge", exact: true }).click();
+    await returnToLibraryFromEntry(page);
     await page.getByRole("button", { name: "Add knowledge", exact: true }).click();
     await page.getByRole("heading", { level: 1, name: "Add knowledge", exact: true }).waitFor();
     await page
@@ -1217,7 +1226,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
       .getByRole("heading", { level: 1, name: "Browser-created knowledge", exact: true })
       .waitFor();
     await page.getByText("A useful finding entered by a person.", { exact: true }).waitFor();
-    await page.getByRole("button", { name: "Knowledge", exact: true }).click();
+    await returnToLibraryFromEntry(page);
     await page.getByRole("button", { name: "Browser-created knowledge", exact: true }).waitFor();
     await expectContentPageScrollAndFocus(page, lastLibraryRow(page));
     await expectNoPageOverflow(page);
@@ -1249,11 +1258,21 @@ const diagnostics = new WeakMap<BrowserContext, string[]>();
 
 async function configuredContext(
   browser: Browser,
+  apiBaseUrl: string,
   options: BrowserContextOptions,
   sandboxSelfhostedEnabled: boolean,
   expectedMissingKnowledge: ReadonlySet<string> = new Set(),
 ): Promise<BrowserContext> {
   const context = await browser.newContext(options);
+  // This local-mode fixture exercises real Knowledge APIs and PostgreSQL.
+  // Personal Inbox requires a managed browser identity and is outside its scope.
+  await context.route(`${apiBaseUrl}/v1/inbox`, async (route) => {
+    if (route.request().method() !== "GET") return route.continue();
+    return route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({ items: [], needsYouCount: 0, unreadCount: 0 }),
+    });
+  });
   context.setDefaultTimeout(15_000);
   const problems: string[] = [];
   const expectedMachines404Urls = new Set<string>();
@@ -1593,6 +1612,27 @@ async function openVariableSet(page: Page, fixtures: SeededFixtures): Promise<vo
       .count(),
   ).toBe(1);
   await expectSecretNeverRendered(page);
+}
+
+/** An entry or collection returns to its Library tab, not a page named Knowledge. */
+async function returnToLibraryFromEntry(page: Page): Promise<void> {
+  const detailUrl = new URL(page.url());
+  expect(detailUrl.searchParams.get("entry")).not.toBeNull();
+  const back = page
+    .locator(contentPageSelector)
+    .getByRole("button", { name: "Library", exact: true });
+  expect(await back.count()).toBe(1);
+  await back.click();
+  await page.getByRole("heading", { level: 1, name: "Knowledge", exact: true }).waitFor();
+  expect(
+    await page.getByRole("tab", { name: "Library", exact: true }).getAttribute("aria-selected"),
+  ).toBe("true");
+  const libraryUrl = new URL(page.url());
+  expect(libraryUrl.pathname).toBe(detailUrl.pathname);
+  expect(libraryUrl.searchParams.get("view") ?? "library").toBe("library");
+  for (const key of ["entry", "revision", "page", "proposal", "collection"]) {
+    expect(libraryUrl.searchParams.get(key)).toBeNull();
+  }
 }
 
 /** Opens the Library's Filter menu and checks one option. */

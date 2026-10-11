@@ -23,30 +23,67 @@ import {
   developerSetupKeyRequest,
   developerSetupModelContext,
 } from "@/lib/onboarding-use-case";
+import { clearPendingDeveloperSetup } from "@/lib/pending-developer-setup";
 
-/** Where onboarding sends the person when it finishes somewhere other than home. */
-export type OnboardingDestination = { workspaceId: string; sessionId: string };
+/**
+ * Where onboarding sends the person when it finishes somewhere other than
+ * home: a chat, or a workspace's new-chat page when there is no `sessionId`.
+ */
+export type OnboardingDestination = { workspaceId: string; sessionId?: string };
 
 type DeveloperSetupClient = Pick<
   OpenGeniBrowserClient,
-  "createOrganizationApiKey" | "createWorkspace" | "createVariableSet" | "createSession"
+  | "createOrganizationApiKey"
+  | "listOrganizationApiKeys"
+  | "deleteOrganizationApiKey"
+  | "createWorkspace"
+  | "createVariableSet"
+  | "getNewSessionDraft"
+  | "saveNewSessionDraft"
 >;
 
 type KeyState =
   | { status: "creating" }
   | { status: "ready"; token: string; prefix: string }
+  /** A live setup key from an earlier visit (a reload): its token can't be shown again. */
+  | { status: "existing"; prefix: string; ids: string[] }
   | { status: "failed"; error: unknown };
+
+type KeyOutcome =
+  | { created: { token: string; apiKey: { prefix: string } } }
+  | { existing: { prefix: string; ids: string[] } };
+
+/**
+ * Live keys this step created earlier. A failed listing returns none, so the
+ * step still creates a key (the pre-reload behavior) rather than blocking.
+ */
+async function liveSetupKeys(
+  client: DeveloperSetupClient,
+  organizationId: string,
+): Promise<{ id: string; prefix: string }[]> {
+  try {
+    const name = developerSetupKeyRequest().name;
+    const now = Date.now();
+    return (await client.listOrganizationApiKeys(organizationId)).filter(
+      (key) =>
+        key.name === name && !key.revokedAt && (!key.expiresAt || Date.parse(key.expiresAt) > now),
+    );
+  } catch {
+    return [];
+  }
+}
 
 /**
  * "Add AI agents to my product", after the organization and model steps. The
  * signed-in owner's click on that path is what creates the organization's
  * full-access setup key, once, and shows it only here. From there the
  * person either lets Opengeni implement the integration in a new "Opengeni
- * setup" workspace, or uses their own coding agent: copy the key into the
+ * setup" workspace (its new-chat page opens with the setup chat ready to
+ * send, so it works before any model is connected), or uses their own coding agent: copy the key into the
  * product's server-only env, then copy a prompt that names that variable.
  *
  * The key never enters a chat: the setup chat reads it from a write-only
- * variable set in its sandbox, its model context names only where it is, and
+ * variable set in its sandbox, its instructions name only where it is, and
  * the coding-agent prompt carries the variable name, never the key.
  */
 export function DeveloperSetupStep({
@@ -65,12 +102,11 @@ export function DeveloperSetupStep({
   const [opening, setOpening] = useState(false);
   const [promptCopied, setPromptCopied] = useState(false);
   // One key per attempt, even when React runs the effect twice.
-  const keyRequests = useRef(
-    new Map<number, ReturnType<DeveloperSetupClient["createOrganizationApiKey"]>>(),
-  );
+  const keyRequests = useRef(new Map<number, Promise<KeyOutcome>>());
+  // Earlier setup keys to revoke before the next attempt creates a new one.
+  const replaceKeyIds = useRef<string[]>([]);
   // What "Let Opengeni implement it" already created, so a retry resumes.
   const implementProgress = useRef<{ workspaceId?: string; variableSetId?: string | null }>({});
-  const sessionRequestKey = useRef(`onboarding-developer-setup:${crypto.randomUUID()}`);
   const promptCopy = useCopyToClipboard();
   const keyCopy = useCopyToClipboard();
   const facts = {
@@ -92,13 +128,41 @@ export function DeveloperSetupStep({
     setKey({ status: "creating" });
     let request = keyRequests.current.get(attempt);
     if (!request) {
-      request = client.createOrganizationApiKey(organizationId, developerSetupKeyRequest());
+      const replacing = replaceKeyIds.current;
+      replaceKeyIds.current = [];
+      request = (async (): Promise<KeyOutcome> => {
+        if (replacing.length > 0) {
+          await Promise.all(
+            replacing.map((id) => client.deleteOrganizationApiKey(organizationId, id)),
+          );
+        } else {
+          // A reload must not mint another full-access key.
+          const live = await liveSetupKeys(client, organizationId);
+          if (live.length > 0) {
+            return {
+              existing: { prefix: live[0]!.prefix, ids: live.map((item) => item.id) },
+            };
+          }
+        }
+        return {
+          created: await client.createOrganizationApiKey(
+            organizationId,
+            developerSetupKeyRequest(),
+          ),
+        };
+      })();
       keyRequests.current.set(attempt, request);
     }
     request.then(
-      (created) => {
-        if (active)
-          setKey({ status: "ready", token: created.token, prefix: created.apiKey.prefix });
+      (outcome) => {
+        if (!active) return;
+        if ("existing" in outcome) setKey({ status: "existing", ...outcome.existing });
+        else
+          setKey({
+            status: "ready",
+            token: outcome.created.token,
+            prefix: outcome.created.apiKey.prefix,
+          });
       },
       (error: unknown) => {
         if (active) setKey({ status: "failed", error });
@@ -113,6 +177,7 @@ export function DeveloperSetupStep({
     (via: "copied_prompt" | "skipped") => {
       if (opening) return;
       onboardingJourney().completed("developer_setup", via);
+      clearPendingDeveloperSetup();
       onComplete();
     },
     [onComplete, opening],
@@ -132,7 +197,7 @@ export function DeveloperSetupStep({
       ).id;
       const workspaceId = progress.workspaceId;
       if (token && progress.variableSetId === undefined) {
-        // Without it the chat still starts; its context says no key is attached.
+        // Without it the chat still works; its instructions say no key is attached.
         progress.variableSetId = await client
           .createVariableSet(workspaceId, {
             scope: "workspace",
@@ -146,17 +211,36 @@ export function DeveloperSetupStep({
           );
       }
       const variableSetId = progress.variableSetId ?? null;
-      const session = await client.createSession(workspaceId, {
-        initialMessage: DEVELOPER_SETUP_INITIAL_MESSAGE,
-        modelContext: developerSetupModelContext({
-          ...facts,
-          keyInSandbox: variableSetId !== null,
-        }),
-        ...(variableSetId ? { variableSetIds: [variableSetId] } : {}),
-        idempotencyKey: sessionRequestKey.current,
+      // The setup chat waits in that workspace's composer, ready to send. It
+      // starts on whatever model the person has, and with none yet the
+      // composer offers to connect one, so this works before any model or
+      // credits exist.
+      const draft = await client.getNewSessionDraft(workspaceId);
+      await client.saveNewSessionDraft(workspaceId, {
+        text: DEVELOPER_SETUP_INITIAL_MESSAGE,
+        resources: draft.resources,
+        tools: draft.tools,
+        toolsProvided: draft.toolsProvided,
+        model: draft.model,
+        reasoningEffort: draft.reasoningEffort,
+        latencyMode: draft.latencyMode,
+        ...(draft.modelProvided !== undefined ? { modelProvided: draft.modelProvided } : {}),
+        options: {
+          ...draft.options,
+          ...(variableSetId ? { variableSetIds: [variableSetId], variableSetId } : {}),
+          agent: {
+            ...draft.options.agent,
+            instructions: developerSetupModelContext({
+              ...facts,
+              keyInSandbox: variableSetId !== null,
+            }),
+          },
+        },
+        expectedRevision: draft.revision,
       });
       onboardingJourney().completed("developer_setup", "implement_with_opengeni");
-      onComplete({ workspaceId, sessionId: session.id });
+      clearPendingDeveloperSetup();
+      onComplete({ workspaceId });
     } catch (error) {
       toast.error("Couldn't open your setup chat", { description: userErrorText(error) });
       setOpening(false);
@@ -191,13 +275,41 @@ export function DeveloperSetupStep({
         <p className="mt-2 text-sm leading-relaxed text-fg-muted">
           {ready
             ? "Your API key is ready. Choose who builds the integration."
-            : "Getting your API key ready. Then choose who builds the integration."}
+            : key.status === "existing"
+              ? "Choose who builds the integration."
+              : "Getting your API key ready. Then choose who builds the integration."}
         </p>
 
         {key.status === "creating" ? (
           <div role="status" className="mt-6">
             <Skeleton className="h-10 w-full rounded-[10px]" />
             <span className="sr-only">Creating your API key</span>
+          </div>
+        ) : key.status === "existing" ? (
+          <div className="mt-6 grid gap-2 rounded-[10px] border border-border bg-surface-2 p-3">
+            <p className="text-sm text-fg">
+              You already created a setup key (
+              <code translate="no" className="font-mono">
+                {key.prefix}…
+              </code>
+              ). It's shown only once, so it can't be shown again.
+            </p>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="justify-self-start"
+              disabled={!client || opening}
+              onClick={() => {
+                replaceKeyIds.current = key.ids;
+                setAttempt((value) => value + 1);
+              }}
+            >
+              Replace it with a new key
+            </Button>
+            <p className="text-xs leading-[18px] text-fg-muted">
+              The old key stops working. Keep it if you already saved it.
+            </p>
           </div>
         ) : key.status === "failed" ? (
           <div className="mt-6">
@@ -240,9 +352,9 @@ export function DeveloperSetupStep({
             {opening ? "Opening your setup chat…" : "Let Opengeni implement it"}
           </Button>
           <p className="text-xs leading-[18px] text-fg-muted">
-            Opens a chat in a new {DEVELOPER_SETUP_WORKSPACE_NAME} workspace that already has your
-            key. The agent asks about your product, suggests connecting GitHub, and builds it with
-            you.
+            {key.status === "existing"
+              ? `Opens a new ${DEVELOPER_SETUP_WORKSPACE_NAME} workspace with your setup message ready to send. It can't reuse a key that was already shown, so replace the key above first if the agent should test with it.`
+              : `Opens a new ${DEVELOPER_SETUP_WORKSPACE_NAME} workspace that already has your key, with your setup message ready to send. Send it and the agent asks about your product, suggests connecting GitHub, and builds it with you.`}
           </p>
         </div>
 

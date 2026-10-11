@@ -1,4 +1,5 @@
 import { Permission } from "@opengeni/contracts";
+import { organizationAdministrationAccountIds } from "@opengeni/react/organization-model";
 
 import type { AccessContext } from "@/types";
 import type { Workspace } from "@/types";
@@ -155,9 +156,9 @@ export const defaultApiKeyPermissions = new Set<string>([
 ]);
 
 /**
- * Groups offered for a session's first-party MCP (OpenGeni tool) permission
+ * Groups offered for a session's first-party MCP (Opengeni tool) permission
  * scope — the same grouped idiom as the API key dialog. Account-level scopes
- * are excluded: a session's OpenGeni MCP only ever acts inside its workspace.
+ * are excluded: a session's Opengeni MCP only ever acts inside its workspace.
  */
 export function buildSessionMcpPermissionGroups(): PermissionGroup[] {
   const accountOnly = new Set<string>([
@@ -409,13 +410,24 @@ export function canManageWorkspaceSettings(
   );
 }
 
-export function organizationAdministrationAccountIds(accessContext: AccessContext): string[] {
-  return accessContext.accountGrants
-    .filter(
-      (grant) =>
-        grant.subjectId === accessContext.subjectId &&
-        (grant.role === "owner" || grant.role === "admin"),
-    )
-    .map((grant) => grant.accountId)
-    .sort();
+/**
+ * A shared workspace's Members surface: the viewer's own members:manage grant,
+ * or (in a managed browser session) an active organization owner or admin of
+ * the workspace's organization, with or without a grant here. The API applies
+ * the same organization authority; Personal workspaces never qualify.
+ */
+export function canManageWorkspaceMembers(
+  context: AccessContext | null,
+  workspace: Pick<Workspace, "id" | "accountId" | "kind"> | null,
+  managedSession: boolean,
+): boolean {
+  if (!context || !workspace) return false;
+  if (hasWorkspacePermission(context, workspace.id, "members:manage")) return true;
+  return (
+    managedSession &&
+    workspace.kind === "shared" &&
+    organizationAdministrationAccountIds(context).includes(workspace.accountId)
+  );
 }
+
+export { organizationAdministrationAccountIds };

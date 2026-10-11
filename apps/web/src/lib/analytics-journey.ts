@@ -25,6 +25,9 @@ const PAGES = new Set([
   "variable-sets",
   "environments",
   "rigs",
+  "playground",
+  "read-only-chats",
+  "inbox",
 ]);
 // Top-level routes outside a workspace, by exact path shape. A concrete id in
 // the path is never reported for these; everything unlisted is "other".
@@ -36,6 +39,7 @@ const TOP_LEVEL_PAGES: ReadonlyArray<readonly [RegExp, string]> = [
   [/^\/integrations$/, "integration-return"],
   [/^\/device$/, "device"],
   [/^\/connect-agent$/, "connect-agent"],
+  [/^\/native-sign-in$/, "native-sign-in"],
   [/^\/reset-password$/, "reset-password"],
   [/^\/setup-account$/, "setup-account"],
   [/^\/account-auth$/, "account-auth"],
@@ -97,21 +101,39 @@ export function journeyPage(pathname: string, search = ""): JourneyProperties {
 }
 
 export type JourneyOperation = {
-  operation: "session_create" | "session_command" | "model_connection";
+  operation: "session_create" | "session_command" | "model_connection" | "voice_call" | "dictation";
   properties: JourneyProperties;
 };
 
+export type JourneyMilestoneName =
+  | "checkout_started"
+  | "organization_setup_completed"
+  | "api_key_created";
+export type JourneyMilestone = { name: JourneyMilestoneName; properties: JourneyProperties };
+
 /**
- * Accepted requests that complete a sign-up funnel step. Exact product routes
- * only; request and response bodies are never inspected.
+ * Accepted requests that complete a sign-up or embedding funnel step. Exact
+ * product routes only; request and response bodies are never inspected.
  */
-export function journeyMilestone(
-  pathname: string,
-  method: string,
-): "checkout_started" | "organization_setup_completed" | null {
+export function journeyMilestone(pathname: string, method: string): JourneyMilestone | null {
   if (method.toUpperCase() !== "POST") return null;
-  if (pathname === "/v1/billing/checkout") return "checkout_started";
-  if (pathname === "/v1/auth/organization-onboarding") return "organization_setup_completed";
+  if (pathname === "/v1/billing/checkout") return { name: "checkout_started", properties: {} };
+  if (pathname === "/v1/auth/organization-onboarding")
+    return { name: "organization_setup_completed", properties: {} };
+  const parts = pathname.split("/").filter(Boolean);
+  if (
+    parts.length === 4 &&
+    parts[0] === "v1" &&
+    (parts[1] === "organizations" || parts[1] === "workspaces") &&
+    UUID.test(parts[2] ?? "") &&
+    parts[3] === "api-keys"
+  ) {
+    // The embedding funnel's first server-side step. Which key preset was
+    // minted is in the request body, so it is deliberately not reported.
+    return parts[1] === "organizations"
+      ? { name: "api_key_created", properties: { scope: "organization", account_id: parts[2]! } }
+      : { name: "api_key_created", properties: { scope: "workspace", workspace_id: parts[2]! } };
+  }
   return null;
 }
 
@@ -141,7 +163,31 @@ export function journeyOperation(pathname: string, method: string): JourneyOpera
       return { operation: "session_command", properties: { ...properties, session_id: parts[4]! } };
     }
   }
-  if (["codex", "supergrok", "ai-gateway", "openrouter"].includes(parts[3] ?? "")) {
+  if (
+    parts[1] === "workspaces" &&
+    parts[3] === "sessions" &&
+    parts.length === 6 &&
+    UUID.test(parts[4] ?? "") &&
+    parts[5] === "realtime" &&
+    method.toUpperCase() === "POST"
+  ) {
+    // Entering live voice for one session; heartbeats and negotiation are not new calls.
+    return { operation: "voice_call", properties: { ...properties, session_id: parts[4]! } };
+  }
+  if (
+    parts[1] === "workspaces" &&
+    parts.length === 4 &&
+    method.toUpperCase() === "POST" &&
+    (parts[3] === "transcriptions" || parts[3] === "transcription-recordings")
+  ) {
+    // One dictation: a direct transcription or the start of a long recording.
+    // Recording chunks, finalize, and processing are not new dictations.
+    return {
+      operation: "dictation",
+      properties: { ...properties, mode: parts[3] === "transcriptions" ? "direct" : "recording" },
+    };
+  }
+  if (["codex", "supergrok", "ai-gateway", "openrouter", "opper"].includes(parts[3] ?? "")) {
     // Endpoint leaf names are closed vocabulary, not account IDs or provider responses.
     const action = parts.at(-1)!;
     if (

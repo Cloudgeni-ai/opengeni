@@ -636,6 +636,11 @@ export const browserSessions = pgTable(
       table.networkRouteId,
       table.lifecycle,
     ),
+    // Migration 0705: saved browsers still bound to a controller (cleanup
+    // pending), scanned by list_orphaned_idle_browser_checkpoints.
+    suspendedController: index("browser_sessions_suspended_controller_idx")
+      .on(table.updatedAt, table.id)
+      .where(sql`${table.lifecycle} = 'suspended' and ${table.controllerGeneration} is not null`),
     valuesValid: check(
       "browser_sessions_values_check",
       sql`octet_length(${table.name}) between 1 and 200

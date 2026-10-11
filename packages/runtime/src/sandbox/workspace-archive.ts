@@ -15,7 +15,11 @@ import {
 } from "@opengeni/contracts";
 import { withSandboxProviderCapture } from "./provider-operation-gate";
 import type { VerifiedHostWorkspaceArchive } from "./archive-spool";
-import { captureHostWorkspaceArchive, fingerprintHostWorkspace } from "./host-archive-spool";
+import {
+  captureHostWorkspaceArchive,
+  fingerprintHostWorkspace,
+  type HostWorkspaceRootIdentity,
+} from "./host-archive-spool";
 
 export {
   WORKSPACE_ARCHIVE_DESCRIPTOR_VERSION,
@@ -52,6 +56,7 @@ export async function captureWorkspaceArchiveForStorage(
   objectStorageAvailable: boolean,
 ): Promise<VerifiedWorkspaceArchivePayload> {
   const target = session as WorkspaceSession;
+  await target.assertWorkspaceCaptureAuthority?.();
   const root = hostBackedWorkspaceRoot(target);
   if (
     process.platform !== "linux" ||
@@ -61,24 +66,30 @@ export async function captureWorkspaceArchiveForStorage(
   ) {
     return await captureVerifiedWorkspaceArchive(session, capturedAtMs, options);
   }
-  return await withSandboxProviderCapture(session, async () => {
-    const { spool, workspace } = await captureHostWorkspaceArchive(
-      root,
-      workspaceFingerprintExcludes(target),
-    );
-    return {
-      kind: "host_spool" as const,
-      spool,
-      descriptor: {
-        version: 1 as const,
-        revision: `wa1:${String(capturedAtMs).padStart(13, "0")}:${spool.sha256}`,
-        archiveSha256: spool.sha256,
-        archiveBytes: spool.byteSize,
-        capturedAt: new Date(capturedAtMs).toISOString(),
-        workspace,
-      },
-    };
-  });
+  return await withSandboxProviderCapture(
+    session,
+    async () => {
+      const { spool, workspace } = await captureHostWorkspaceArchive(
+        root,
+        workspaceFingerprintExcludes(target),
+        target.workspaceCaptureRootIdentity,
+        options.signal,
+      );
+      return {
+        kind: "host_spool" as const,
+        spool,
+        descriptor: {
+          version: 1 as const,
+          revision: `wa1:${String(capturedAtMs).padStart(13, "0")}:${spool.sha256}`,
+          archiveSha256: spool.sha256,
+          archiveBytes: spool.byteSize,
+          capturedAt: new Date(capturedAtMs).toISOString(),
+          workspace,
+        },
+      };
+    },
+    options.signal,
+  );
 }
 
 export async function disposeWorkspaceArchive(
@@ -119,6 +130,9 @@ export class WorkspaceArchiveIntegrityError extends Error {
 }
 
 type WorkspaceSession = {
+  /** Present only on the reaper's restricted Docker capture attachment. */
+  assertWorkspaceCaptureAuthority?: () => Promise<void>;
+  workspaceCaptureRootIdentity?: HostWorkspaceRootIdentity;
   exec?: (args: {
     cmd: string;
     yieldTimeMs?: number;
@@ -131,7 +145,7 @@ type WorkspaceSession = {
   }) => Promise<unknown>;
   persistWorkspace?: (options?: WorkspaceArchiveCaptureOptions) => Promise<Uint8Array | undefined>;
   /** Agents Extensions remote sessions expose this protected-at-type-level
-   * primitive on the concrete JS instance. OpenGeni uses it only through an
+   * primitive on the concrete JS instance. Opengeni uses it only through an
    * explicit provider policy to bypass replacing/unledgered native capture. */
   persistWorkspaceTar?: () => Promise<Uint8Array | undefined>;
   state?: {
@@ -153,6 +167,13 @@ type SdkLocalArchiveFile = { path: string; content: Uint8Array };
 export type WorkspaceArchiveCaptureOptions = {
   requestId: string;
   strategy?: "configured" | "portable_tar";
+  /**
+   * Abandons the capture while it still waits for the provider operation gate,
+   * and stops a host-backed spool capture mid-read. A provider-native persist
+   * call that already started is not interrupted: its own settlement remains
+   * authoritative.
+   */
+  signal?: AbortSignal;
 };
 
 function sha256(bytes: Uint8Array): string {
@@ -316,7 +337,11 @@ function stdoutFromExecResult(value: unknown): string {
 
 function execFailureDiagnostic(value: unknown): string {
   if (!value || typeof value !== "object") return "result=unstructured";
-  const result = value as { exitCode?: unknown; status?: unknown; stderr?: unknown };
+  const result = value as {
+    exitCode?: unknown;
+    status?: unknown;
+    stderr?: unknown;
+  };
   const status =
     typeof result.exitCode === "number"
       ? `exitCode=${result.exitCode}`
@@ -332,7 +357,11 @@ function execFailureDiagnostic(value: unknown): string {
 
 function isTransientRootDirectoryFingerprintRace(value: unknown): boolean {
   if (!value || typeof value !== "object") return false;
-  const result = value as { exitCode?: unknown; status?: unknown; stderr?: unknown };
+  const result = value as {
+    exitCode?: unknown;
+    status?: unknown;
+    stderr?: unknown;
+  };
   const exitCode =
     typeof result.exitCode === "number"
       ? result.exitCode
@@ -712,9 +741,16 @@ export async function fingerprintSandboxWorkspace(
   session: unknown,
 ): Promise<WorkspaceTreeFingerprint> {
   const target = session as WorkspaceSession;
+  await target.assertWorkspaceCaptureAuthority?.();
   const hostRoot = hostBackedWorkspaceRoot(target);
   return hostRoot
-    ? await fingerprintHostBackedWorkspace(hostRoot, workspaceFingerprintExcludes(target))
+    ? target.workspaceCaptureRootIdentity && process.platform === "linux"
+      ? await fingerprintHostWorkspace(
+          hostRoot,
+          workspaceFingerprintExcludes(target),
+          target.workspaceCaptureRootIdentity,
+        )
+      : await fingerprintHostBackedWorkspace(hostRoot, workspaceFingerprintExcludes(target))
     : await fingerprintRemoteWorkspace(target);
 }
 
@@ -737,9 +773,11 @@ export async function captureVerifiedWorkspaceArchive(
   capturedAtMs = Date.now(),
   options?: WorkspaceArchiveCaptureOptions,
 ): Promise<VerifiedWorkspaceArchive> {
-  return await withSandboxProviderCapture(session, async () => {
-    return await captureVerifiedWorkspaceArchiveExclusive(session, capturedAtMs, options);
-  });
+  return await withSandboxProviderCapture(
+    session,
+    async () => await captureVerifiedWorkspaceArchiveExclusive(session, capturedAtMs, options),
+    options?.signal,
+  );
 }
 
 async function captureVerifiedWorkspaceArchiveExclusive(
@@ -748,6 +786,7 @@ async function captureVerifiedWorkspaceArchiveExclusive(
   options?: WorkspaceArchiveCaptureOptions,
 ): Promise<VerifiedWorkspaceArchive> {
   const target = session as WorkspaceSession;
+  await target.assertWorkspaceCaptureAuthority?.();
   const portableTar = options?.strategy === "portable_tar";
   const persist = portableTar ? target.persistWorkspaceTar : target.persistWorkspace;
   if (typeof persist !== "function") {

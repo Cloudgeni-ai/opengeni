@@ -1,7 +1,7 @@
 {
   "name": "@opengeni/interaction",
-  "version": "1.0.0",
-  "description": "Provider-neutral browser and computer interaction controller for OpenGeni.",
+  "version": "1.4.4",
+  "description": "Provider-neutral browser and computer interaction controller for Opengeni.",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",

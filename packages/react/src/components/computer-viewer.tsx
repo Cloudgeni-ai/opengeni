@@ -1,5 +1,6 @@
 import type {
   ComputerAction,
+  ComputerActionReceipt,
   ComputerClipboard,
   ComputerFrame,
   ComputerObservation,
@@ -42,7 +43,11 @@ import {
   type ComputerFrameWebSocketFactory,
   useComputerFrameStream,
 } from "../hooks/use-computer-frame-stream";
-import { useComputerSession } from "../hooks/use-computer-session";
+import {
+  computerActionReceiptError,
+  isStaleComputerActionResult,
+  useComputerSession,
+} from "../hooks/use-computer-session";
 import { useComputerInputPosture } from "../hooks/use-computer-input-posture";
 import { useComputerSessions } from "../hooks/use-computer-sessions";
 import { useInteractionInterventions } from "../hooks/use-interaction-interventions";
@@ -57,7 +62,7 @@ import { useViewerMenuDismiss } from "./use-viewer-menu-dismiss";
 export type ComputerViewerNotification = { kind: "error" | "info"; message: string };
 
 export type ComputerViewerProps = EmbeddedComputerInteractionClientOverride & {
-  /** Selected OpenGeni agent/session. Peer ComputerSessions remain visible. */
+  /** Selected Opengeni agent/session. Peer ComputerSessions remain visible. */
   sessionId: string;
   enabled?: boolean | undefined;
   className?: string | undefined;
@@ -174,6 +179,7 @@ export function ComputerViewer({
 
   const notifyError = useCallback(
     (cause: unknown, fallback: string) => {
+      if (isStaleComputerActionResult(cause)) return;
       onNotify?.({
         kind: "error",
         message: cause instanceof Error ? cause.message : fallback,
@@ -490,19 +496,24 @@ export function ComputerViewer({
   ]);
 
   const perform = useCallback(
-    async (action: ComputerAction, frame: ComputerFrame | null): Promise<void> => {
+    async (
+      action: ComputerAction,
+      frame: ComputerFrame | null,
+      operationId?: string,
+    ): Promise<ComputerActionReceipt> => {
       if (computer.controlError) throw computer.controlError;
       if (inputDenied) throw new Error("Desktop is view only. Refresh to check desktop controls.");
       let receipt;
       if (action.type === "pointer") {
         if (!frame) throw new Error("Desktop view is not ready for pointer input.");
-        receipt = await actFromFrame(action, frame);
+        receipt = await actFromFrame(action, frame, operationId);
       } else {
-        receipt = await act(action);
+        receipt = await act(action, operationId);
       }
-      if (receipt.state !== "completed") {
-        throw new Error(receipt.error?.message ?? "Desktop input did not complete.");
+      if (!isStaleComputerActionResult(receipt) && receipt.state !== "completed") {
+        throw computerActionReceiptError(receipt);
       }
+      return receipt;
     },
     [act, actFromFrame, computer.controlError, inputDenied],
   );
@@ -519,14 +530,15 @@ export function ComputerViewer({
         return;
       event.preventDefault();
       event.stopPropagation();
-      void perform({ type: "clipboard", operation: "copy" }, null)
-        .then(() => computer.readClipboard())
-        .then(async (clipboard) => {
-          if (clipboard.text && !(await copyTextToClipboard(clipboard.text))) {
-            throw new Error("Desktop text could not be copied to the local clipboard");
-          }
-        })
-        .catch((cause) => notifyError(cause, "Could not copy from the desktop."));
+      void (async () => {
+        const receipt = await perform({ type: "clipboard", operation: "copy" }, null);
+        if (isStaleComputerActionResult(receipt)) return;
+        const clipboard = await computer.readClipboard();
+        if (isStaleComputerActionResult(receipt) || isStaleComputerActionResult(clipboard)) return;
+        if (clipboard.text && !(await copyTextToClipboard(clipboard.text))) {
+          throw new Error("Desktop text could not be copied to the local clipboard");
+        }
+      })().catch((cause) => notifyError(cause, "Could not copy from the desktop."));
     },
     [computer, notifyError, perform, rfbInputEnabled, rfbStream],
   );
@@ -543,8 +555,11 @@ export function ComputerViewer({
       // ownership is asynchronous, so a successful write response alone does
       // not prove that the graphical seat can already serve the selection.
       void (async () => {
-        await perform({ type: "clipboard", operation: "write", text }, null);
-        assertExactComputerClipboard(await computer.readClipboard(), text);
+        const receipt = await perform({ type: "clipboard", operation: "write", text }, null);
+        if (isStaleComputerActionResult(receipt)) return;
+        const clipboard = await computer.readClipboard();
+        if (isStaleComputerActionResult(receipt) || isStaleComputerActionResult(clipboard)) return;
+        assertExactComputerClipboard(clipboard, text);
         await perform({ type: "clipboard", operation: "paste" }, null);
       })().catch((cause) => notifyError(cause, "Could not paste into the desktop."));
       return true;
@@ -744,11 +759,21 @@ export function ComputerViewer({
                 mutating={computer.mutating}
                 backgroundActions={computer.session?.capabilities?.backgroundActions === true}
                 backgroundInput={computer.session?.capabilities?.backgroundInput === true}
+                allowForegroundInputWithinOwnedSeat={
+                  computer.session?.platform === "linux" &&
+                  computer.session.adapter === "opengeni.cua.linux.v1" &&
+                  computer.session.seatId === `linux-virtual:${computer.session.id}` &&
+                  Boolean(computer.session.displayId)
+                }
                 clipboardEnabled={
                   attachmentInputAllowed && computer.session?.capabilities?.clipboard === true
                 }
                 pointerInput={
                   attachmentInputAllowed && computer.session?.capabilities?.pointerInput === true
+                }
+                pointerClickContinuation={
+                  attachmentInputAllowed &&
+                  computer.session?.capabilities?.pointerClickContinuation === true
                 }
                 keyboardInput={
                   attachmentInputAllowed && computer.session?.capabilities?.keyboardInput === true
@@ -1194,6 +1219,12 @@ function ComputerLifecyclePanel(props: {
   );
 }
 
+type ComputerQueuedAction = {
+  operationId: string;
+  started: Promise<boolean>;
+  completion: Promise<void>;
+};
+
 function ComputerViewport(props: {
   frame: ComputerFrame | null;
   observation: ComputerObservation | null;
@@ -1206,10 +1237,16 @@ function ComputerViewport(props: {
   mutating: boolean;
   backgroundActions: boolean;
   backgroundInput: boolean;
+  allowForegroundInputWithinOwnedSeat: boolean;
   clipboardEnabled: boolean;
   pointerInput: boolean;
+  pointerClickContinuation: boolean;
   keyboardInput: boolean;
-  onAction: (action: ComputerAction, frame: ComputerFrame | null) => Promise<void>;
+  onAction: (
+    action: ComputerAction,
+    frame: ComputerFrame | null,
+    operationId?: string,
+  ) => Promise<ComputerActionReceipt>;
   onReadClipboard: () => Promise<ComputerClipboard>;
   onReconnect: () => void;
   onError: (cause: unknown) => void;
@@ -1224,6 +1261,11 @@ function ComputerViewport(props: {
     x: number;
     y: number;
     frame: ComputerFrame;
+    clientX: number;
+    clientY: number;
+    canvasRect: Pick<DOMRect, "left" | "top" | "width" | "height">;
+    pending: boolean;
+    delivery: ComputerQueuedAction | null;
   } | null>(null);
   const wheelRef = useRef<{
     x: number;
@@ -1238,10 +1280,16 @@ function ComputerViewport(props: {
     timer: ReturnType<typeof setTimeout>;
   } | null>(null);
   const actionRef = useRef(props.onAction);
+  const targetRef = useRef(props.target);
   const readClipboardRef = useRef(props.onReadClipboard);
   const errorRef = useRef(props.onError);
   const actionTailRef = useRef<Promise<void>>(Promise.resolve());
   const actionQueueEpochRef = useRef(0);
+  const queuedTextRef = useRef<{
+    action: Extract<ComputerAction, { type: "keyboard" }>;
+    epoch: number;
+    delivery: ComputerQueuedAction;
+  } | null>(null);
   const queuedFrameRef = useRef<ComputerFrame | null>(null);
   const currentFrameRef = useRef<ComputerFrame | null>(props.frame);
   const paintedFrameRef = useRef<ComputerFrame | null>(null);
@@ -1249,6 +1297,7 @@ function ComputerViewport(props: {
   const decodingFrameRef = useRef(false);
   const mountedRef = useRef(true);
   actionRef.current = props.onAction;
+  targetRef.current = props.target;
   readClipboardRef.current = props.onReadClipboard;
   errorRef.current = props.onError;
   const streamFailed = props.connectionState === "error";
@@ -1258,6 +1307,9 @@ function ComputerViewport(props: {
     !props.controlUnavailable &&
     !props.machineLocked &&
     (props.backgroundInput ||
+      // CUA may activate within its allocated Linux desktop. This does not
+      // grant foreground input to an attached physical desktop.
+      props.allowForegroundInputWithinOwnedSeat ||
       !props.backgroundActions ||
       props.target?.kind === "screen" ||
       props.target?.focused === true);
@@ -1269,6 +1321,7 @@ function ComputerViewport(props: {
     clickTimerRef.current = null;
     wheelRef.current = null;
     pendingTextRef.current = null;
+    queuedTextRef.current = null;
     pointerStartRef.current = null;
     lastClickRef.current = null;
     composingRef.current = false;
@@ -1394,24 +1447,87 @@ function ComputerViewport(props: {
       action: ComputerAction,
       frame: ComputerFrame | null,
       after?: (isCurrent: () => boolean) => Promise<void>,
+      continuation?: ComputerQueuedAction,
     ) => {
       const epoch = actionQueueEpochRef.current;
+      const plainText = action.type === "keyboard" && action.action === "type";
+      const queuedText = queuedTextRef.current;
+      if (
+        plainText &&
+        !frame &&
+        !after &&
+        !continuation &&
+        queuedText?.epoch === epoch &&
+        queuedText.delivery.completion === actionTailRef.current &&
+        queuedText.action.value.length + action.value.length <= 1_000_000
+      ) {
+        // Only combine adjacent text that has not crossed the dispatch boundary.
+        queuedText.action.value += action.value;
+        return queuedText.delivery;
+      }
+      queuedTextRef.current = null;
       const dispatch = actionRef.current;
+      const admittedTarget = targetRef.current;
       const isCurrent = () => mountedRef.current && epoch === actionQueueEpochRef.current;
-      actionTailRef.current = actionTailRef.current
-        .catch(() => undefined)
-        .then(async () => {
-          if (!isCurrent()) return;
-          await dispatch(action, frame);
-          if (!isCurrent()) return;
-          await after?.(isCurrent);
+      const operationId = crypto.randomUUID();
+      let markStarted!: (value: boolean) => void;
+      const started = new Promise<boolean>((resolve) => {
+        markStarted = resolve;
+      });
+      const previous = actionTailRef.current;
+      // Only the real second click may start before its first HTTP receipt.
+      // The controller queue and native causal proof still serialize delivery.
+      const ready =
+        continuation && previous === continuation.completion
+          ? continuation.started
+          : previous.then(() => true);
+      const delivery = ready
+        .then(async (firstStarted) => {
+          if (queuedTextRef.current?.action === action) queuedTextRef.current = null;
+          if (!firstStarted || !isCurrent()) {
+            markStarted(false);
+            return;
+          }
+          const pending = dispatch(action, frame, operationId);
+          markStarted(true);
+          const receipt = await pending;
+          const isCurrentResult = () => isCurrent() && !isStaleComputerActionResult(receipt);
+          if (!isCurrentResult()) return;
+          const observedTarget = receipt.observation?.target;
+          if (
+            !admittedTarget ||
+            receipt.computerSessionId !== admittedTarget.computerSessionId ||
+            receipt.controllerGeneration !== admittedTarget.controllerGeneration ||
+            receipt.targetId !== admittedTarget.id ||
+            (observedTarget &&
+              (observedTarget.computerSessionId !== admittedTarget.computerSessionId ||
+                observedTarget.controllerGeneration !== admittedTarget.controllerGeneration ||
+                observedTarget.id !== admittedTarget.id ||
+                observedTarget.targetGeneration !== admittedTarget.targetGeneration))
+          ) {
+            // Receipt projection can replace the target before React remounts us.
+            actionQueueEpochRef.current += 1;
+            clearBufferedInput();
+            return;
+          }
+          await after?.(isCurrentResult);
         })
         .catch((cause) => {
-          if (!isCurrent()) return;
+          markStarted(false);
+          if (!isCurrent() || isStaleComputerActionResult(cause)) return;
           actionQueueEpochRef.current += 1;
           clearBufferedInput();
           errorRef.current(cause);
         });
+      const completion = continuation
+        ? Promise.all([previous, delivery]).then(() => undefined)
+        : delivery;
+      actionTailRef.current = completion;
+      const queued = { operationId, started, completion };
+      if (plainText && !frame && !after && !continuation) {
+        queuedTextRef.current = { action, epoch, delivery: queued };
+      }
+      return queued;
     },
     [clearBufferedInput],
   );
@@ -1436,6 +1552,7 @@ function ComputerViewport(props: {
     if (clickTimerRef.current) clearTimeout(clickTimerRef.current);
     clickTimerRef.current = null;
     lastClickRef.current = null;
+    if (!pending.pending) return;
     enqueue(
       {
         type: "pointer",
@@ -1469,7 +1586,13 @@ function ComputerViewport(props: {
 
   const pointerDown = (event: PointerEvent<HTMLCanvasElement>) => {
     const frame = paintedFrameRef.current;
-    if (!frame || props.mutating || !rawInputEnabled || event.button !== 0) return;
+    if (
+      !frame ||
+      (!props.pointerClickContinuation && props.mutating) ||
+      !rawInputEnabled ||
+      event.button !== 0
+    )
+      return;
     // Preserve the keyboard sink's focus through the canvas pointer default action.
     event.preventDefault();
     if (keyboardInputEnabled) inputRef.current?.focus({ preventScroll: true });
@@ -1490,6 +1613,7 @@ function ComputerViewport(props: {
     const start = pointerStartRef.current;
     pointerStartRef.current = null;
     if (!start || start.pointerId !== event.pointerId) return;
+    const canvasRect = event.currentTarget.getBoundingClientRect();
     const from = point(start.frame, start.x, start.y);
     const to = point(start.frame, event.clientX, event.clientY);
     if (!from || !to) return;
@@ -1514,8 +1638,18 @@ function ComputerViewport(props: {
     if (
       previous &&
       now - previous.at < 280 &&
-      Math.hypot(previous.x - to.x, previous.y - to.y) < 6 &&
-      sameFrameFence(previous.frame, start.frame)
+      previous.pending === !props.pointerClickContinuation &&
+      (props.pointerClickContinuation
+        ? Math.hypot(previous.clientX - event.clientX, previous.clientY - event.clientY) < 6 &&
+          previous.canvasRect.left === canvasRect.left &&
+          previous.canvasRect.top === canvasRect.top &&
+          previous.canvasRect.width === canvasRect.width &&
+          previous.canvasRect.height === canvasRect.height &&
+          sameComputerTarget(previous.frame, start.frame) &&
+          previous.frame.width === start.frame.width &&
+          previous.frame.height === start.frame.height
+        : Math.hypot(previous.x - to.x, previous.y - to.y) < 6 &&
+          sameFrameFence(previous.frame, start.frame))
     ) {
       if (clickTimerRef.current) clearTimeout(clickTimerRef.current);
       clickTimerRef.current = null;
@@ -1524,15 +1658,47 @@ function ComputerViewport(props: {
         {
           type: "pointer",
           frameId: start.frame.frameId,
-          action: "double_click",
+          action: props.pointerClickContinuation ? "click" : "double_click",
+          ...(props.pointerClickContinuation ? { clickCount: 2 as const } : {}),
+          ...(previous.delivery
+            ? { continuationOfOperationId: previous.delivery.operationId }
+            : {}),
+          x: to.x,
+          y: to.y,
+        },
+        start.frame,
+        undefined,
+        previous.delivery ?? undefined,
+      );
+      return;
+    }
+    flushPendingClick();
+    lastClickRef.current = {
+      at: now,
+      x: to.x,
+      y: to.y,
+      frame: start.frame,
+      clientX: event.clientX,
+      clientY: event.clientY,
+      canvasRect,
+      pending: !props.pointerClickContinuation,
+      delivery: null,
+    };
+    if (props.pointerClickContinuation) {
+      const delivery = enqueue(
+        {
+          type: "pointer",
+          frameId: start.frame.frameId,
+          action: "click",
+          clickCount: 1,
           x: to.x,
           y: to.y,
         },
         start.frame,
       );
+      if (lastClickRef.current) lastClickRef.current.delivery = delivery;
       return;
     }
-    lastClickRef.current = { at: now, x: to.x, y: to.y, frame: start.frame };
     clickTimerRef.current = setTimeout(() => {
       clickTimerRef.current = null;
       lastClickRef.current = null;
@@ -2245,6 +2411,8 @@ function computerFailureMessage(session: ComputerSession): string | null {
       return session.placement.kind === "attached_device"
         ? "Chrome reconnected—open a fresh browser/desktop. Use Browser → New browser → Connected Chrome."
         : "The desktop connection expired. Open a new desktop.";
+    case "idle_released":
+      return "The desktop stopped after it went unused. Open a new desktop.";
     case null:
       return null;
     default:

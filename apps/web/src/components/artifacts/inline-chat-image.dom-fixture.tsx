@@ -55,7 +55,13 @@ const client = {
     return bytes.promise;
   },
 };
-mock.module("@opengeni/react", () => ({ useLightboxOptional: () => ({ open }) }));
+// The real workspace loader, read straight from source: only the lightbox is faked.
+const { createWorkspaceRetainedArtifactLoader } =
+  await import("../../../../../packages/react/src/timeline/retained-loaders");
+mock.module("@opengeni/react", () => ({
+  createWorkspaceRetainedArtifactLoader,
+  useLightboxOptional: () => ({ open }),
+}));
 mock.module("@tanstack/react-router", () => ({
   Link: ({ children, className }: { children: ReactNode; className?: string }) => (
     <a href="#artifact" className={className}>

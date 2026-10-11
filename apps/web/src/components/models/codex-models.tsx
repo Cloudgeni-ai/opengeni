@@ -58,6 +58,7 @@ import {
 import { StatusBadge, type ProductStatus } from "@/components/ui/status-badge";
 import { Switch } from "@/components/ui/switch";
 import { UsageMeterGroup, UsageReadout } from "@/components/ui/usage-meter";
+import { CODEX_EXTRA_CREDITS_DESCRIPTION, CodexCreditBalance } from "./codex-account-usage";
 import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
 
 /* ----------------------------------------------------------------------------
@@ -389,6 +390,7 @@ function SharedCodexSetAsideRow({
       meta={[
         organizationReachLabel(places.scope, access.data),
         planLabel(account.plan, "ChatGPT"),
+        resetsLabel(account.resetCreditAvailableCount),
         reason,
       ]}
       cells={{ usage: NOT_IN_USE }}
@@ -725,8 +727,8 @@ function CodexRow({
         scopeLabel ?? (organizationAccount ? places.scope.organization : places.scope.workspace),
         planLabel(account.plan, "ChatGPT"),
         account.appsDesignated ? "Codex Apps" : null,
-        // Resets can only be redeemed on the account's own page, which org accounts don't have here.
-        organizationAccount ? null : resetsLabel(resets),
+        // An organization account's resets are redeemed on its page in Organization settings.
+        resetsLabel(resets ?? account.resetCreditAvailableCount),
       ]}
       cells={{
         usage:
@@ -942,11 +944,11 @@ function CodexAccountDetail({
           <DetailSection title="Settings">
             <SettingRowGroup className="-my-3">
               <SettingRow
-                label="Available for new chats"
-                description="Turn off to stop sending new chats and schedules to this account. Work already running continues."
+                label="Use for new work"
+                description="When off, this account isn't picked for new chats or schedules. Work already running continues."
                 control={
                   <Switch
-                    aria-label={`${name} is available for new chats`}
+                    aria-label={`Use ${name} for new work`}
                     checked={account.allocatorEnabled}
                     pending={codex.working === `allocator:${account.id}`}
                     disabled={codex.busy}
@@ -954,14 +956,23 @@ function CodexAccountDetail({
                   />
                 }
               />
+              <SettingRow
+                label="Use extra credits"
+                description={CODEX_EXTRA_CREDITS_DESCRIPTION}
+                control={
+                  <Switch
+                    aria-label={`Use extra credits on ${name}`}
+                    checked={account.extraCreditsEnabled ?? false}
+                    pending={codex.working === `extra-credits:${account.id}`}
+                    disabled={codex.busy}
+                    onCheckedChange={(next) => void codex.setExtraCredits(account, next)}
+                  />
+                }
+              />
               {codex.accounts.length > 1 ? (
                 <SettingRow
                   label="Primary account"
-                  description={
-                    account.id === codex.activeAccountId
-                      ? "New work starts here. With Primary only, it's the only account used."
-                      : "Make this the account new work starts with."
-                  }
+                  description="Used for new work when sharing is set to Primary only."
                   control={
                     account.id === codex.activeAccountId ? (
                       <span className="inline-flex h-8 items-center gap-1.5 text-sm font-medium text-fg-muted">
@@ -1077,6 +1088,7 @@ export function CodexUsage({
   account: CodexAccount;
 }) {
   const live = codex.usageMap[account.id];
+  const credits = live?.usage?.credits;
   const overview = codex.overviewMap[account.id];
   const readings = codexUsageReadings(live?.usage, codex.now);
   const fetchedAt = overview?.usage.fetchedAt ?? live?.usage?.fetchedAt ?? null;
@@ -1090,28 +1102,31 @@ export function CodexUsage({
         ? "ChatGPT hasn't reported usage for this account yet."
         : undefined;
   return (
-    <UsageMeterGroup
-      windows={readings}
-      loading={codex.refreshingUsage && !live}
-      checked={
-        fetchedAt ? (
-          <span title={provenance}>
-            <RelativeTime date={fetchedAt} prefix="Checked" now={codex.now} />
-            {overview?.usage.stale ? " · may be out of date" : null}
-          </span>
-        ) : codex.refreshingUsage ? (
-          "Checking…"
-        ) : (
-          "Not checked yet"
-        )
-      }
-      error={error}
-      refreshing={codex.refreshingRow === account.id}
-      refreshDisabledReason={
-        needsReconnect(account) ? "Sign in to ChatGPT again to check usage." : undefined
-      }
-      onRefresh={codex.canManage ? () => void codex.refreshAccountUsage(account.id) : undefined}
-    />
+    <>
+      <UsageMeterGroup
+        windows={readings}
+        loading={codex.refreshingUsage && !live}
+        checked={
+          fetchedAt ? (
+            <span title={provenance}>
+              <RelativeTime date={fetchedAt} prefix="Checked" now={codex.now} />
+              {overview?.usage.stale ? " · may be out of date" : null}
+            </span>
+          ) : codex.refreshingUsage ? (
+            "Checking…"
+          ) : (
+            "Not checked yet"
+          )
+        }
+        error={error}
+        refreshing={codex.refreshingRow === account.id}
+        refreshDisabledReason={
+          needsReconnect(account) ? "Sign in to ChatGPT again to check usage." : undefined
+        }
+        onRefresh={codex.canManage ? () => void codex.refreshAccountUsage(account.id) : undefined}
+      />
+      <CodexCreditBalance credits={credits} />
+    </>
   );
 }
 

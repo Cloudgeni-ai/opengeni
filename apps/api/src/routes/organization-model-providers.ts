@@ -1,4 +1,4 @@
-import { claudeProviderId } from "@opengeni/config";
+import { claudeProviderId, opperCredentialProblem } from "@opengeni/config";
 import {
   CreateOrganizationProviderCustomModelRequest,
   DeleteOrganizationProviderCustomModelRequest,
@@ -26,6 +26,7 @@ import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 
+import { offerClaudeDefaultModels } from "../claude-default-models";
 import { requireOrganizationCodexHuman, requireSameOriginBrowserMutation } from "./codex";
 
 const OrganizationId = z.string().uuid();
@@ -49,7 +50,7 @@ function providerKind(value: string) {
 }
 
 function connectionJson(connection: {
-  providerKind: "vercel_gateway" | "openrouter" | "anthropic" | "claude_subscription";
+  providerKind: "vercel_gateway" | "openrouter" | "anthropic" | "claude_subscription" | "opper";
   status: "active" | "revoked";
   version: number;
   createdAt: Date;
@@ -158,6 +159,8 @@ export function registerOrganizationModelProviderRoutes(app: Hono, deps: ApiRout
       throw new HTTPException(422, {
         message: "Enter an Anthropic API key. Use Claude subscription for setup tokens.",
       });
+    const opperProblem = kind === "opper" ? opperCredentialProblem(payload.apiKey) : null;
+    if (opperProblem) throw new HTTPException(422, { message: opperProblem });
     if (payload.claudeIdentity)
       throw new HTTPException(422, {
         message: "Claude identity is only valid for subscription connections.",
@@ -178,6 +181,12 @@ export function registerOrganizationModelProviderRoutes(app: Hono, deps: ApiRout
           ? {}
           : { expectedVersion: payload.expectedVersion }),
       });
+      if (kind === "anthropic")
+        await offerClaudeDefaultModels(deps, {
+          organizationId,
+          actorSubjectId: human.subjectId,
+          providerKind: kind,
+        });
       return c.json(connectionJson(connection));
     } catch (error) {
       conflict(error);

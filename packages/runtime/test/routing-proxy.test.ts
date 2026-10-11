@@ -27,6 +27,8 @@ import {
   RoutingBackendRecoveryRequiredError,
   RoutingActiveRouteChangedError,
   RoutingMutationOutcomeUnknownError,
+  RoutingMutationOutputRejectedError,
+  RoutingRetainedProcessNotFoundError,
   RoutingSandboxSession,
   RoutingWorkspaceRootChangedError,
   makeActiveBackendResolver,
@@ -40,6 +42,7 @@ import {
   type RoutableSandbox,
   type RoutingSandboxSessionDeps,
 } from "../src/sandbox";
+import { synchronousNativeOutputFixture } from "./synchronous-output-fixture";
 
 const WS = "11111111-1111-1111-1111-111111111111";
 const RELAY = { host: "relay.test", port: 443, tls: true } as const;
@@ -129,6 +132,42 @@ function mutablePointer(initial: ActivePointer = { activeSandboxId: null, active
 }
 
 describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () => {
+  test("tool-scoped finalization preserves reached backends for other durable results", async () => {
+    const acknowledgments: Array<{ backend: string; callIds?: readonly string[] }> = [];
+    const backend = (name: string): RoutableBackendSession => ({
+      exec: async () => ({ stdout: name, exitCode: 0 }),
+      finalizeOpStreamOps: async (callIds) => {
+        acknowledgments.push({ backend: name, callIds });
+      },
+    });
+    const first = backend("first");
+    const second = backend("second");
+    let pointer: ActivePointer = { activeSandboxId: "first", activeEpoch: 1 };
+    const proxy = new RoutingSandboxSession({
+      defaultResolved: { session: first, sandboxId: "first", kind: "selfhosted" },
+      readPointer: async () => pointer,
+      resolveActiveBackend: async () => ({
+        session: pointer.activeSandboxId === "first" ? first : second,
+        sandboxId: pointer.activeSandboxId,
+        kind: "selfhosted",
+      }),
+    });
+    await proxy.exec({ cmd: "first tool" });
+    pointer = { activeSandboxId: "second", activeEpoch: 2 };
+    await proxy.exec({ cmd: "parallel tool on successor route" });
+    await proxy.finalizeOpStreamOps(["call_first"]);
+    await proxy.finalizeOpStreamOps(["call_second"]);
+    await proxy.finalizeOpStreamOps();
+    expect(acknowledgments).toEqual([
+      { backend: "first", callIds: ["call_first"] },
+      { backend: "second", callIds: ["call_first"] },
+      { backend: "first", callIds: ["call_second"] },
+      { backend: "second", callIds: ["call_second"] },
+      { backend: "first", callIds: undefined },
+      { backend: "second", callIds: undefined },
+    ]);
+  });
+
   test("finalizes every machine backend reached across route epochs", async () => {
     const finalized: string[] = [];
     const first: RoutableBackendSession = {
@@ -718,7 +757,7 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
       },
       async exec(args) {
         calls.push(`exec:${(args as { cmd: string }).cmd}`);
-        return { exitCode: 0 };
+        return { stdout: "", stderr: "", exitCode: 0 };
       },
     };
     const proxy = new RoutingSandboxSession({
@@ -752,14 +791,29 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
 
   test("streams placement-private bytes to the exact routed backend when it has no file API", async () => {
     const calls: Array<{ kind: string; value: unknown }> = [];
+    const output = synchronousNativeOutputFixture();
+    // Isolate routing and stdin staging behind the native collector's trusted
+    // page contract; an SDK-formatted Output body alone is not that contract.
     const backend: RoutableBackendSession = {
+      getSynchronousCommandOutput: output.getSynchronousCommandOutput,
       async exec(args) {
         calls.push({ kind: "exec", value: args });
-        return { sessionId: 41 };
+        return output.record(
+          { stdout: "", stderr: "", sessionId: 41, exitCode: null },
+          "",
+          "",
+          null,
+          41,
+        );
       },
       async writeStdin(args) {
         calls.push({ kind: "stdin", value: args });
-        return "Process exited with code 0\n\nOutput:\n__OPENGENI_PLACEMENT_PRIVATE_WRITE_OK__";
+        return output.record(
+          "Process exited with code 0\n\nOutput:\npresentation only",
+          "__OPENGENI_PLACEMENT_PRIVATE_WRITE_OK__",
+          "transfer diagnostic",
+          0,
+        );
       },
     };
     const proxy = new RoutingSandboxSession({
@@ -788,6 +842,25 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
       sessionId: 41,
       chars: Buffer.from("signed-url-is-private").toString("base64"),
     });
+
+    // Removing the trusted contract must not turn a status/marker banner into
+    // complete separate output, nor replay the already-started private write.
+    backend.getSynchronousCommandOutput = undefined;
+    backend.writeStdin = async (args) => {
+      calls.push({ kind: "stdin", value: args });
+      return "Process exited with code 0\n\nOutput:\n__OPENGENI_PLACEMENT_PRIVATE_WRITE_OK__";
+    };
+    await expect(
+      proxy.writePlacementPrivate({
+        path: "/tmp/opengeni-private/workspace-imports/grant",
+        content: "signed-url-is-private",
+        createParents: true,
+      }),
+    ).rejects.toMatchObject({
+      code: "synchronous_command_outcome_unknown",
+      output: { stdout: "", stderr: "" },
+    });
+    expect(calls.map((call) => call.kind)).toEqual(["exec", "stdin", "exec", "stdin"]);
   });
 
   test("cleans private import authority on its admitted backend and rejects output after a swap", async () => {
@@ -1745,6 +1818,156 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
     }
   });
 
+  test("a terminal settlement race after the provider resolved returns durable truth without replay", async () => {
+    for (const terminal of [
+      {
+        sessionId: 82,
+        state: "exited",
+        exitCode: 1,
+        expected: "Process exited with code 1\n\nOutput:\n",
+      },
+      {
+        sessionId: 83,
+        state: "lost",
+        exitCode: null,
+        expected: "write_stdin failed: session not found: 83",
+      },
+    ] as const) {
+      let writes = 0;
+      let admissions = 0;
+      const settlements: string[] = [];
+      const captured: string[] = [];
+      const observed: number[] = [];
+      const backend: RoutableBackendSession = {
+        async execCommand() {
+          return `Process running with session ID ${terminal.sessionId}\n\nOutput:\nstarted`;
+        },
+        async writeStdin() {
+          writes += 1;
+          return "Process exited with code 0\n\nOutput:\nrejected provider bytes";
+        },
+      };
+      const proxy = new RoutingSandboxSession({
+        readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+        resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind: "modal" }),
+        beforeMutation: async () => "parent",
+        afterMutation: async () => undefined,
+        captureProcessOutput: async ({ chunk }) => {
+          captured.push(chunk);
+        },
+        beforeProcessMutation: async () => {
+          admissions += 1;
+          return "stdin-admission";
+        },
+        afterProcessMutation: async ({ outcome }) => {
+          settlements.push(outcome);
+          // The admission committed physically settled, but the reaper had
+          // already recorded the process terminal, so its output was rejected.
+          throw Object.assign(new Error("retained process already settled by the reaper"), {
+            name: "SandboxRetainedProcessTerminalError",
+            code: "process_fenced",
+            state: terminal.state,
+            exitCode: terminal.exitCode,
+          });
+        },
+        settleProcess: async () => {
+          throw new Error("durable terminal truth must not be re-settled from rejected output");
+        },
+        observeProcessTerminal: async ({ process }) => {
+          observed.push(process.providerSessionId);
+        },
+      });
+
+      await proxy.execCommand({ cmd: "start" });
+      captured.length = 0;
+      expect(
+        await proxy.writeStdinForProcessMutation({ sessionId: terminal.sessionId, chars: "" }),
+      ).toBe(terminal.expected);
+      expect(writes).toBe(1);
+      expect(admissions).toBe(1);
+      expect(settlements).toEqual(["resolved"]);
+      expect(captured.join("")).not.toContain("rejected provider bytes");
+      expect(observed).toEqual([terminal.sessionId]);
+      expect(proxy.hasRetainedProcess(terminal.sessionId)).toBe(false);
+      await expect(
+        proxy.writeStdinForProcessMutation({ sessionId: terminal.sessionId, chars: "" }),
+      ).rejects.toBeInstanceOf(RoutingRetainedProcessNotFoundError);
+      expect(writes).toBe(1);
+    }
+  });
+
+  test("a terminal race surfaced by a retried pending settlement returns durable truth without replay", async () => {
+    let writes = 0;
+    let settlementAttempts = 0;
+    const backend: RoutableBackendSession = {
+      async execCommand() {
+        return "Process running with session ID 84\n\nOutput:\nstarted";
+      },
+      async writeStdin() {
+        writes += 1;
+        return "Process running with session ID 84\n\nOutput:\nrunning";
+      },
+    };
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind: "modal" }),
+      beforeMutation: async () => "parent",
+      afterMutation: async () => undefined,
+      beforeProcessMutation: async () => "stdin-admission",
+      afterProcessMutation: async () => {
+        settlementAttempts += 1;
+        if (settlementAttempts === 1) throw new Error("settlement transport unavailable");
+        throw Object.assign(new Error("retained process already settled by the reaper"), {
+          name: "SandboxRetainedProcessTerminalError",
+          code: "process_fenced",
+          state: "exited",
+          exitCode: 3,
+        });
+      },
+    });
+
+    await proxy.execCommand({ cmd: "start" });
+    await expect(
+      proxy.writeStdinForProcessMutation({ sessionId: 84, chars: "" }),
+    ).rejects.toBeInstanceOf(RoutingMutationOutcomeUnknownError);
+    expect(proxy.hasRetainedProcess(84)).toBe(true);
+    expect(await proxy.writeStdinForProcessMutation({ sessionId: 84, chars: "" })).toBe(
+      "Process exited with code 3\n\nOutput:\n",
+    );
+    expect(writes).toBe(1);
+    expect(settlementAttempts).toBe(2);
+    expect(proxy.hasRetainedProcess(84)).toBe(false);
+  });
+
+  test("a non-terminal output rejection after the provider resolved stays turn-fatal", async () => {
+    let writes = 0;
+    const backend: RoutableBackendSession = {
+      async execCommand() {
+        return "Process running with session ID 85\n\nOutput:\nstarted";
+      },
+      async writeStdin() {
+        writes += 1;
+        return "Process running with session ID 85\n\nOutput:\nrunning";
+      },
+    };
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind: "modal" }),
+      beforeMutation: async () => "parent",
+      afterMutation: async () => undefined,
+      beforeProcessMutation: async () => "stdin-admission",
+      afterProcessMutation: async ({ op }) => {
+        throw new RoutingMutationOutputRejectedError(op, "process_fenced");
+      },
+    });
+
+    await proxy.execCommand({ cmd: "start" });
+    await expect(
+      proxy.writeStdinForProcessMutation({ sessionId: 85, chars: "" }),
+    ).rejects.toBeInstanceOf(RoutingMutationOutputRejectedError);
+    expect(writes).toBe(1);
+  });
+
   test("ambiguous process promotion retries the same UUID and exact route before control proceeds", async () => {
     const ptr = mutablePointer();
     let promotions = 0;
@@ -2570,7 +2793,7 @@ describe("makeActiveBackendResolver — heterogeneous default/modal/selfhosted d
     // per-turn provided-session manifest apply throws "Live sandbox sessions cannot
     // change manifest environment variables." The resolver must thread its
     // `environment` into the SelfhostedSession's manifest so it equals the turn's.
-    const env = { GIT_AUTHOR_NAME: "OpenGeni Bot", HOME: "/workspace", DEPLOY_TARGET: "vm2" };
+    const env = { GIT_AUTHOR_NAME: "Opengeni Bot", HOME: "/workspace", DEPLOY_TARGET: "vm2" };
     const resolve = makeActiveBackendResolver({
       workspaceId: WS,
       defaultBackend: new FakeBackend("group-modal"),

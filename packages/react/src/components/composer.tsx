@@ -52,7 +52,8 @@ import {
   ComposerResponsiveContext,
   type ResponsiveBasis,
 } from "../lib/composer-responsive-context";
-import { composerSubmissionErrorMessage, formatBytes, formatRelativeTime } from "../lib/format";
+import { composerSubmissionErrorMessage } from "../lib/format";
+import { defaultChatComposerMessages, type ChatComposerMessages } from "../composer-messages";
 import type { PickerModelRow } from "../model-policy";
 import { useLightboxOptional } from "../timeline/screenshot-lightbox";
 import { OPEN_WORKSTREAM_CONTROL_EVENT } from "../workstream-control-event";
@@ -107,149 +108,8 @@ export type ComposerControlLinks = {
   sessionHref?: ((sessionId: string) => string) | undefined;
 };
 
-export type ChatComposerMessages = {
-  messagePlaceholder: string;
-  pausedPlaceholder: string;
-  inputLabel: string;
-  keyboardHint: string;
-  slashCommandBlocked: string;
-  controlChangedError: string;
-  sendFailedError: string;
-  dropFiles: string;
-  attachFiles: string;
-  pauseAriaLabel: string;
-  pauseTitle: string;
-  /** Stop control shown while a response runs (`runControl="stop"`). */
-  stopAriaLabel?: string | undefined;
-  stopTitle?: string | undefined;
-  sendMessageAriaLabel: string;
-  sendAndResumeAriaLabel: string;
-  sendTitle: string;
-  sendAndResumeTitle: string;
-  annotationNotesRequired: string;
-  workspacePaused: string;
-  pausedHere: string;
-  parentBlocker: string;
-  narrowerPause: string;
-  pausedBy: (displayName: string) => string;
-  queuedAhead: (count: number) => string;
-  resumingAndSending: string;
-  nextMessageResumes: string;
-  resumeThisWorkstream: string;
-  resumeShort: string;
-  hidePauseDetails: string;
-  showPauseDetails: string;
-  pauseReasonsLabel: string;
-  pausedByLabel: string;
-  alsoPausedByLabel: string;
-  resumeWorkspace: string;
-  resumeFromSession: string;
-  sessionCanRun: string;
-  stillPausedBy: (displayName: string) => string;
-  restoredResourcesLabel: string;
-  restoredFile: (fileId: string) => string;
-  removeRestoredResource: (index: number) => string;
-  uploading: string;
-  uploadFailed: string;
-  previewAttachment: (name: string) => string;
-  previewUnavailable?: string | undefined;
-  attachmentPreviewLabel: string;
-  downloadAttachment: (name: string) => string;
-  closeAttachmentPreview: string;
-  retryAttachment: (name: string) => string;
-  retryUpload: string;
-  removeAttachment: (name: string) => string;
-  confirmCommand: (name: string) => string;
-  confirmDescription: (command: SlashCommand) => string;
-  cancel: string;
-  runCommand: (name: string) => string;
-  commands: string;
-  slashCommandsLabel: string;
-  modelLabel: string;
-  close: string;
-  danger: string;
-  draftConflict: string;
-  useOtherDraft: string;
-  keepMine: string;
-  savingDraft: string;
-  formatBytes: (bytes: number) => string;
-  formatRelativeTime: (changedAt: string) => string;
-};
-
-export const defaultChatComposerMessages: ChatComposerMessages = {
-  messagePlaceholder: "Message the agent…",
-  pausedPlaceholder: "Message the agent — it will wait in the queue…",
-  inputLabel: "Message the agent",
-  // Shortcuts live in the send button's title; the footer stays quiet unless
-  // the host supplies its own hint.
-  keyboardHint: "",
-  slashCommandBlocked:
-    "That's a slash command — press Enter in the command list to run it, or edit the line to send a message.",
-  controlChangedError:
-    "This workstream was paused while you were sending. Nothing was sent, and your draft is still here.",
-  sendFailedError: "Sending failed — your draft is still here. Try again.",
-  dropFiles: "Drop files to attach",
-  attachFiles: "Attach files",
-  pauseAriaLabel: "Pause this workstream",
-  pauseTitle: "Pause this workstream; queued prompts and approvals are preserved",
-  stopAriaLabel: "Stop",
-  stopTitle: "Stop the response",
-  sendMessageAriaLabel: "Send message",
-  sendAndResumeAriaLabel: "Add message to queue",
-  sendTitle: "Queue message (Enter); steer with Cmd/Ctrl+Enter",
-  sendAndResumeTitle: "Add to queue (Enter); steer now with Cmd/Ctrl+Enter",
-  annotationNotesRequired: "Add a note to each quote before sending.",
-  workspacePaused: "Workspace paused",
-  pausedHere: "Paused here",
-  parentBlocker: "parent",
-  narrowerPause: "a narrower pause",
-  pausedBy: (displayName) => `Paused by ${displayName}`,
-  queuedAhead: (count) =>
-    `${count} waiting prompt${count === 1 ? "" : "s"}; your message joins the queue.`,
-  resumingAndSending: "Sending…",
-  nextMessageResumes: "Messages wait in the queue until you resume.",
-  resumeThisWorkstream: "Resume this workstream",
-  resumeShort: "Resume",
-  hidePauseDetails: "Hide pause details",
-  showPauseDetails: "Show pause details",
-  pauseReasonsLabel: "Reasons this workstream is paused",
-  pausedByLabel: "Paused by ",
-  alsoPausedByLabel: "Also paused by ",
-  resumeWorkspace: "Resume workspace",
-  resumeFromSession: "Resume from this session",
-  sessionCanRun: "This session will be able to run",
-  stillPausedBy: (displayName) => `Still paused by ${displayName}`,
-  restoredResourcesLabel: "Restored prompt resources",
-  restoredFile: (fileId) => `File ${fileId.slice(0, 8)}`,
-  removeRestoredResource: (index) => `Remove restored resource ${index + 1}`,
-  uploading: "Uploading",
-  uploadFailed: "Upload failed",
-  previewAttachment: (name) => `Preview ${name}`,
-  previewUnavailable: "Preview unavailable",
-  attachmentPreviewLabel: "Attachment preview",
-  downloadAttachment: (name) => `Download ${name}`,
-  closeAttachmentPreview: "Close",
-  retryAttachment: (name) => `Retry ${name}`,
-  retryUpload: "Retry upload",
-  removeAttachment: (name) => `Remove ${name}`,
-  confirmCommand: (name) => `Confirm /${name}`,
-  confirmDescription: (command) => `Run /${command.name}? ${command.description}`,
-  cancel: "Cancel",
-  runCommand: (name) => `Run /${name}`,
-  commands: "Commands",
-  slashCommandsLabel: "Slash commands",
-  modelLabel: "Model",
-  close: "Close",
-  danger: "danger",
-  draftConflict: "This draft changed in another tab. Your local draft is still here.",
-  useOtherDraft: "Use other draft",
-  keepMine: "Keep mine",
-  // Kept for embedder message overrides / back-compat. Routine autosave is
-  // silent — only draft conflicts surface under the composer.
-  savingDraft: "Saving draft…",
-  formatBytes,
-  formatRelativeTime,
-};
+export { defaultChatComposerMessages } from "../composer-messages";
+export type { ChatComposerMessages } from "../composer-messages";
 
 export type ComposerSubmitMode = "queue" | "steer";
 export type ComposerSubmitBlocker =
@@ -264,7 +124,7 @@ export type ComposerSubmitBlocker =
 /**
  * How the composer offers run control.
  * - `pause`: the workstream Pause control and paused-state strip (default; the
- *   OpenGeni console).
+ *   Opengeni console).
  * - `stop`: a Stop control only while a response runs. Stopping pauses this
  *   conversation; the next message continues it, so people never see a paused
  *   state they have to resume. Pauses applied elsewhere still show.
@@ -967,6 +827,7 @@ export const Surface = forwardRef<HTMLDivElement, ComposerSurfaceProps>(function
   const controller = useComposerController();
   return (
     <div
+      data-og-composer-surface=""
       {...props}
       ref={ref}
       onDragOver={controller.attachments ? controller.handleDragOver : undefined}
@@ -1077,7 +938,12 @@ function focusBelongsElsewhere(textarea: HTMLTextAreaElement): boolean {
   if (!active || active === textarea) return false;
   if (active.closest(EDITING_FOCUS_SELECTOR)) return true;
   const popup = active.closest(POPUP_FOCUS_SELECTOR);
-  return popup !== null && !popup.contains(textarea);
+  if (popup) return !popup.contains(textarea);
+  // A dismissed popup can restore a button or link while draft hydration is
+  // still pending. Its focus remains intentional after the popup disappears.
+  return (
+    active !== textarea.ownerDocument.body && active !== textarea.ownerDocument.documentElement
+  );
 }
 
 export const Input = forwardRef<HTMLTextAreaElement, ComposerInputProps>(function ComposerInput(
@@ -1104,6 +970,29 @@ export const Input = forwardRef<HTMLTextAreaElement, ComposerInputProps>(functio
     });
     return () => window.cancelAnimationFrame(frame);
   }, [autoFocus, controller.disabled, controller.textareaRef]);
+
+  // Text rewraps when the box gets narrower or wider (panel resize, viewport
+  // change), so refit the height on width changes, not only on edits.
+  useEffect(() => {
+    const textarea = controller.textareaRef.current;
+    if (!textarea || typeof ResizeObserver === "undefined") return;
+    let width = textarea.clientWidth;
+    let frame: number | null = null;
+    const observer = new ResizeObserver(() => {
+      if (textarea.clientWidth === width) return;
+      width = textarea.clientWidth;
+      if (frame !== null) return;
+      frame = window.requestAnimationFrame(() => {
+        frame = null;
+        applyComposerTextareaHeight(textarea, 220);
+      });
+    });
+    observer.observe(textarea);
+    return () => {
+      observer.disconnect();
+      if (frame !== null) window.cancelAnimationFrame(frame);
+    };
+  }, [controller.textareaRef]);
 
   return (
     <textarea
@@ -1184,7 +1073,9 @@ export const Controls = forwardRef<HTMLSpanElement, ComposerControlsProps>(
         ref={ref}
         className={cn(
           "og-composer-controls flex min-w-0 flex-1 flex-wrap items-center gap-1.5",
-          "max-sm:flex-nowrap max-sm:gap-1",
+          // Phone: 44px touch targets already space themselves; tight gaps leave
+          // the model pill room for its name.
+          "max-sm:flex-nowrap max-sm:gap-0.5",
           className,
         )}
       />
@@ -1225,7 +1116,7 @@ export const Actions = forwardRef<HTMLSpanElement, ComposerActionsProps>(functio
       ref={ref}
       className={cn(
         "og-composer-actions ml-auto flex shrink-0 items-center gap-1.5",
-        "max-sm:flex-nowrap max-sm:gap-1",
+        "max-sm:flex-nowrap max-sm:gap-0.5",
         className,
       )}
     />
@@ -1839,6 +1730,49 @@ function AttachmentChips({
   const previewRequest = useRef<AbortController | null>(null);
   const [previewLoadingId, setPreviewLoadingId] = useState<string | null>(null);
   const [previewErrorId, setPreviewErrorId] = useState<string | null>(null);
+  // Thumbnails always show: an uploaded image without a live local preview (a
+  // restored draft, a revoked or broken object URL) loads its stored copy.
+  const [storedThumbs, setStoredThumbs] = useState<Record<string, string>>({});
+  const [brokenLocal, setBrokenLocal] = useState<ReadonlySet<string>>(() => new Set());
+  const thumbRequests = useRef<Map<string, AbortController>>(new Map());
+  const localPreview = (attachment: UseFileAttachmentsResult["attachments"][number]) =>
+    attachment.previewUrl && !brokenLocal.has(attachment.id) ? attachment.previewUrl : undefined;
+
+  useEffect(() => {
+    if (!onLoadPreview) return;
+    for (const attachment of attachments) {
+      const id = attachment.id;
+      if (
+        attachment.status !== "ready" ||
+        !attachment.file ||
+        !attachment.contentType.startsWith("image/") ||
+        (attachment.previewUrl && !brokenLocal.has(id)) ||
+        storedThumbs[id] ||
+        thumbRequests.current.has(id)
+      ) {
+        continue;
+      }
+      const controller = new AbortController();
+      thumbRequests.current.set(id, controller);
+      void onLoadPreview(id, controller.signal)
+        .then((url) => {
+          if (url && !controller.signal.aborted) {
+            setStoredThumbs((current) => ({ ...current, [id]: url }));
+          }
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          if (thumbRequests.current.get(id) === controller) thumbRequests.current.delete(id);
+        });
+    }
+  }, [attachments, brokenLocal, onLoadPreview, storedThumbs]);
+  useEffect(() => {
+    const requests = thumbRequests.current;
+    return () => {
+      for (const controller of requests.values()) controller.abort();
+      requests.clear();
+    };
+  }, []);
 
   useEffect(() => () => previewRequest.current?.abort(), [onLoadPreview]);
 
@@ -1849,9 +1783,12 @@ function AttachmentChips({
   ) {
     previewRequest.current?.abort();
     const attachmentId = attachment.id;
-    const releaseSource = onRetainPreview(attachmentId);
-    let src = attachment.previewUrl;
-    if (!releaseSource && canLoadPreview) {
+    const local = localPreview(attachment);
+    const releaseSource = local ? onRetainPreview(attachmentId) : undefined;
+    let src = local ?? storedThumbs[attachmentId];
+    // An unretained local URL may already be revoked: prefer the stored copy.
+    if (!releaseSource && canLoadPreview) src = storedThumbs[attachmentId];
+    if (!src && canLoadPreview) {
       const controller = new AbortController();
       previewRequest.current = controller;
       setPreviewLoadingId(attachmentId);
@@ -1893,6 +1830,15 @@ function AttachmentChips({
         const secureContextRequired = attachment.errorCode === "secure_context_required";
         const previewFailed = previewErrorId === attachment.id;
         const previewLoading = previewLoadingId === attachment.id;
+        const local = localPreview(attachment);
+        const thumb = local ?? storedThumbs[attachment.id];
+        // A local object URL that fails (revoked, unreadable) falls back to the stored copy.
+        const onThumbError = local
+          ? () =>
+              setBrokenLocal((current) =>
+                current.has(attachment.id) ? current : new Set(current).add(attachment.id),
+              )
+          : undefined;
         const canLoadPreview = Boolean(
           lightbox &&
           onLoadPreview &&
@@ -1922,12 +1868,12 @@ function AttachmentChips({
                 : "max-w-[240px] border-og-border bg-og-surface-2",
             )}
           >
-            {lightbox && (attachment.previewUrl || canLoadPreview) ? (
+            {lightbox && (thumb || canLoadPreview) ? (
               <button
                 type="button"
                 className={cn(
                   "size-8 shrink-0 overflow-hidden rounded outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent",
-                  !attachment.previewUrl && "flex items-center justify-center disabled:cursor-wait",
+                  !thumb && "flex items-center justify-center disabled:cursor-wait",
                 )}
                 aria-label={messages.previewAttachment(attachment.name)}
                 aria-busy={previewLoading || undefined}
@@ -1936,10 +1882,11 @@ function AttachmentChips({
                   void openPreview(attachment, event.currentTarget, canLoadPreview)
                 }
               >
-                {attachment.previewUrl ? (
+                {thumb ? (
                   <img
-                    src={attachment.previewUrl}
+                    src={thumb}
                     alt=""
+                    onError={onThumbError}
                     className="h-full w-full object-cover transition-opacity hover:opacity-80"
                   />
                 ) : previewLoading ? (
@@ -1948,10 +1895,11 @@ function AttachmentChips({
                   <ImageIcon className="size-4 text-og-fg-muted" />
                 )}
               </button>
-            ) : attachment.previewUrl ? (
+            ) : thumb ? (
               <img
-                src={attachment.previewUrl}
+                src={thumb}
                 alt=""
+                onError={onThumbError}
                 className="size-8 shrink-0 rounded object-cover"
               />
             ) : attachment.contentType.startsWith("image/") ? (

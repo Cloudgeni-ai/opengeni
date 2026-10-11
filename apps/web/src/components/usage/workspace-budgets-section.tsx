@@ -1,10 +1,4 @@
-import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import {
-  getMyUsage,
-  getWorkspaceAllowanceState,
-  type WorkspaceAllowanceState,
-  type WorkspaceUsageResponse,
-} from "@opengeni/sdk/usage-allowances";
+import type { WorkspaceUsageResponse } from "@opengeni/sdk/usage-allowances";
 import { useEffect, useState } from "react";
 
 import { useOrganizationDirectory } from "@/components/organization/organization-directory";
@@ -16,31 +10,11 @@ import { StatusBadge } from "@/components/ui/status-badge";
 import { useAppContext } from "@/context";
 import { formatBudget, formatCredits } from "@/lib/usage-allowances";
 import { cn } from "@/lib/utils";
-import { isForbidden } from "./use-workspace-budget";
+import { loadWorkspaceBudgetRows, type WorkspaceBudgetRow } from "./workspace-budget-rows";
 
 // One fact column: on a phone the list folds a single fact under the name,
 // and "how much of the budget is used" is the one that matters.
 const COLUMNS: RowListColumn[] = [{ id: "month", label: "This month", width: 280 }];
-
-type Row = {
-  state: WorkspaceAllowanceState | null;
-  usage: WorkspaceUsageResponse | null;
-  /** The budget could not be read (no authority, or an error). */
-  unreadable: boolean;
-};
-
-async function loadRow(client: OpenGeniBrowserClient, workspaceId: string): Promise<Row> {
-  const [state, usage] = await Promise.allSettled([
-    getWorkspaceAllowanceState(client, workspaceId),
-    getMyUsage(client, workspaceId),
-  ]);
-  return {
-    state: state.status === "fulfilled" ? state.value : null,
-    // Not a member: the budget still shows; this month's total needs access.
-    usage: usage.status === "fulfilled" ? usage.value : null,
-    unreadable: state.status === "rejected" && !isForbidden(state.reason),
-  };
-}
 
 /** "$146.80 of $500 · 29%" plus a 64px bar; quiet until it matters. */
 function MonthCell({ usage, limit }: { usage: WorkspaceUsageResponse | null; limit: number }) {
@@ -95,24 +69,32 @@ export function WorkspaceBudgetsSection({
 }: {
   onOpenWorkspace: (workspaceId: string) => void;
 }) {
-  const client = useAppContext().client;
+  const { client, accessContext } = useAppContext();
   const directory = useOrganizationDirectory();
   const workspaces = directory.overview.value?.workspaces ?? null;
-  const [rows, setRows] = useState<Map<string, Row>>(() => new Map());
+  const [rows, setRows] = useState<Map<string, WorkspaceBudgetRow>>(() => new Map());
   const ids = workspaces?.map((workspace) => workspace.id).join(",") ?? "";
+  // Workspaces where the viewer holds a grant; only these can answer own usage.
+  const memberIds = accessContext.workspaceGrants
+    .map((grant) => grant.workspaceId)
+    .sort()
+    .join(",");
 
   useEffect(() => {
     if (!ids) return;
     let active = true;
-    void Promise.all(
-      ids.split(",").map(async (id) => [id, await loadRow(client, id)] as const),
-    ).then((entries) => {
-      if (active) setRows(new Map(entries));
+    const readable = new Set(memberIds ? memberIds.split(",") : []);
+    void loadWorkspaceBudgetRows({
+      client,
+      workspaceIds: ids.split(","),
+      canReadUsage: (id) => readable.has(id),
+      isActive: () => active,
+      onRow: (id, row) => setRows((current) => new Map(current).set(id, row)),
     });
     return () => {
       active = false;
     };
-  }, [client, ids]);
+  }, [client, ids, memberIds]);
 
   const description =
     "A monthly limit on what each workspace spends from the organization's credits. Members get an equal share unless an admin changes it.";

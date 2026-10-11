@@ -1,6 +1,6 @@
 # Structured human input
 
-OpenGeni has a built-in `request_human_input` agent tool for questions that need
+Opengeni has a built-in `request_human_input` agent tool for questions that need
 an answer before the current turn can continue. A single request can contain up
 to 20 text, single-select, or multi-select questions. Select questions can
 always accept an inline `Other` free-text value; requests can optionally allow
@@ -13,7 +13,7 @@ install a `requires_action` boundary. The setting defaults to enabled.
 
 This is not tool approval. Approval asks whether an already-proposed tool may
 run and can approve or reject it. Structured human input is itself a tool call:
-when the workspace setting allows it, OpenGeni authorizes that built-in call,
+when the workspace setting allows it, Opengeni authorizes that built-in call,
 freezes it behind the open suffix, and later injects one of these structured outcomes
 into that exact call:
 
@@ -25,7 +25,7 @@ into that exact call:
 The agent sees that outcome as ordinary tool output and decides how to proceed.
 An `Other` answer is returned exactly as entered. The agent may interpret it as
 the answer or issue a new structured request if genuine clarification is still
-needed; OpenGeni never manufactures an automatic reprompt.
+needed; Opengeni never manufactures an automatic reprompt.
 No outcome creates a synthetic `user.message`, no response starts a new logical
 turn, and a host must not translate Skip or expiry into approval rejection.
 
@@ -45,7 +45,7 @@ an `agent_run_states` sentinel, all new human-input rows, the
 requested events, and the session's `requires_action` status. A crash therefore
 cannot expose a request without durable completed-pair history and the open
 suffix, or a suffix without its request. On recovery,
-OpenGeni loads the response selected by the triggering
+Opengeni loads the response selected by the triggering
 `user.humanInputResponse` event, writes the paired history result, and
 continues from history when the interruption group is empty.
 It does not rediscover the response through a best-effort event or tool
@@ -161,7 +161,7 @@ unknown request is a `404`.
 
 Slack treats a reply as a structured answer only when the committed outcome is
 `answered` or `skipped`. If expiry or cancellation wins after Slack reads the
-actionable request, OpenGeni still publishes that terminal settlement but then
+actionable request, Opengeni still publishes that terminal settlement but then
 submits the incoming text as an ordinary message so the conversation never
 silently consumes it.
 
@@ -192,13 +192,13 @@ Each single- and multi-select control includes an inline Other option and text
 field. Hosts submit that exact value in `answer.other`; they should not create a
 synthetic follow-up prompt or coerce it into an option id.
 
-The stock OpenGeni session route mounts the hook plus `HumanInputSurface` at the
+The stock Opengeni session route mounts the hook plus `HumanInputSurface` at the
 timeline tip, so the live question is part of the main conversation rather than
 a detached strip above the composer. An
 embedded product may mount the surface, the single form, compose its own
 renderer over the hook, or use the SDK through its backend proxy. It should not
 maintain an independent request state machine: access control stays at the
-host/OpenGeni API boundary, while the OpenGeni row, turn checkpoint, workflow
+host/Opengeni API boundary, while the Opengeni row, turn checkpoint, workflow
 timer, and response event remain the durable truth.
 
 After a response is accepted, the React timeline keeps a chat-native resolved

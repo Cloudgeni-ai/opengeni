@@ -75,7 +75,7 @@ export function assertIsolatedHome(home: string | undefined): string {
   return home;
 }
 
-/** Ambient variables that can point Git, askpass, or OpenGeni provisioning at
+/** Ambient variables that can point Git, askpass, or Opengeni provisioning at
  *  state outside the fixture HOME (a git hook's GIT_DIR, GIT_CONFIG_* overrides,
  *  OPENGENI_GIT_* credential paths, and similar). Callers re-add what they need. */
 function isAmbientRedirect(name: string): boolean {
@@ -99,7 +99,7 @@ export type IsolatedGitEnvironmentOptions = {
 /**
  * A child-process environment whose HOME, GIT_CONFIG_GLOBAL, and XDG_CONFIG_HOME
  * all resolve inside `overrides.HOME`, which must be an isolated temporary
- * directory. Ambient Git/OpenGeni redirects are dropped; explicit `overrides`
+ * directory. Ambient Git/Opengeni redirects are dropped; explicit `overrides`
  * (other than those three pinned paths) are kept, and `undefined` removes a name.
  */
 export function isolatedGitEnvironment(

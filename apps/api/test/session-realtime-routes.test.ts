@@ -10,15 +10,13 @@ import {
   createConnection,
   createSession,
   encryptEnvironmentValue,
-  ensureCodexRotationSettings,
   ensureManagedAccessForUser,
-  setActiveCodexCredential,
-  upsertCodexSubscriptionCredential,
   withWorkspaceRls,
   withSessionRlsActorContext,
   type Database,
   type DbClient,
 } from "@opengeni/db";
+import { connectSubscriptionCoreCodexConnection } from "@opengeni/db";
 import { signDelegatedAccessToken } from "@opengeni/contracts";
 import { and, eq } from "drizzle-orm";
 import * as schema from "@opengeni/db/schema";
@@ -40,6 +38,8 @@ const settings = testSettings({
   environmentsEncryptionKey: encryptionKey.toString("base64"),
   codexSubscriptionEnabled: true,
   vercelAiGatewayApiKey: "gateway-test-key",
+  azureLiveEndpoint: "https://voice.example.test",
+  azureLiveApiKey: "synthetic-azure-key",
 });
 
 let shared: SharedTestDatabase;
@@ -94,6 +94,14 @@ beforeAll(async () => {
         });
       }
       providerCalls += 1;
+      if (request.url === "https://voice.example.test/openai/v1/live/sessions") {
+        expect(request.headers.get("api-key")).toBe("synthetic-azure-key");
+        return Response.json({
+          transport: {
+            sdp: "v=0\r\na=answer:provider-fixture\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n",
+          },
+        });
+      }
       if (request.url.endsWith("/v1/realtime/client-secrets")) {
         const body = (await request.json()) as { model?: string; expiresIn?: number };
         expect(request.headers.get("authorization")).toBe("Bearer gateway-test-key");
@@ -132,7 +140,14 @@ async function fixture(withConnector = false) {
     subjectId,
   });
   const grant = access.workspaceGrants[0]!;
-  const credential = await upsertCodexSubscriptionCredential(client.db, {
+  // Current lifecycle tests use core operation leases and retain the core gate.
+  const [personal] = await shared.admin`insert into workspaces(account_id, name)
+    values (${grant.accountId}, 'Fixture owner Personal') returning id`;
+  await shared.admin`insert into organization_memberships
+    (account_id, subject_id, role, status, personal_workspace_id)
+    values (${grant.accountId}, ${subjectId}, 'owner', 'active', ${personal!.id})
+    on conflict (account_id, subject_id) do nothing`;
+  const credential = await connectSubscriptionCoreCodexConnection(client.db, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId!,
     credentialEncrypted: encryptEnvironmentValue(
@@ -143,16 +158,17 @@ async function fixture(withConnector = false) {
         id_token: "test-id-token",
       }),
     ),
-    chatgptAccountId: `api-realtime-provider-${suffix}`,
-    scopes: null,
+    providerAccountId: `api-realtime-provider-${suffix}`,
+    providerSubjectId: subjectId,
+    accountEmail: null,
+    label: null,
     planType: "pro",
     isFedramp: false,
     expiresAt: new Date(Date.now() + 60 * 60_000),
     lastRefreshAt: new Date(),
-    connectedBySubjectId: subjectId,
+    subjectId,
   });
-  await ensureCodexRotationSettings(client.db, grant.accountId, grant.workspaceId!);
-  await setActiveCodexCredential(client.db, grant.workspaceId!, credential.id);
+  if (credential.kind !== "connected") throw new Error(`fixture refused: ${credential.reason}`);
   const connector = withConnector
     ? await createConnection(client.db, {
         accountId: grant.accountId,
@@ -557,89 +573,92 @@ describe("session realtime lifecycle HTTP routes (real PostgreSQL)", () => {
     expect(await replay.text()).toContain("rotate with a new operation");
   });
 
-  test("durably completes a provider answer and replays it without a second provider call", async () => {
-    const value = await fixture();
-    const base = `http://x/v1/workspaces/${value.workspaceId}/sessions/${value.sessionId}/realtime`;
-    const proof = {
-      operationId: crypto.randomUUID(),
-      browserInstanceId: `browser-${crypto.randomUUID()}`,
-      ownerKey: `owner-key-${crypto.randomUUID()}-${crypto.randomUUID()}`,
-      model: "gpt-live-1-boulder-alpha",
-    };
-    const startedResponse = await app.request(base, {
-      method: "POST",
-      headers: value.headers,
-      body: JSON.stringify(proof),
-    });
-    const started = (await startedResponse.json()) as { mode: { id: string; version: number } };
-    const request = {
-      realtimeId: started.mode.id,
-      operationId: crypto.randomUUID(),
-      browserInstanceId: proof.browserInstanceId,
-      ownerKey: proof.ownerKey,
-      expectedVersion: started.mode.version,
-      expectedConnectionEpoch: 1,
-      rotate: false,
-      browserActivation: "required",
-      sdp: "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n",
-      version: "v3",
-    };
-    const callsBefore = providerCalls;
-    const first = await app.request(`${base}/webrtc`, {
-      method: "POST",
-      headers: value.headers,
-      body: JSON.stringify(request),
-    });
-    expect(first.status).toBe(200);
-    const answer = (await first.json()) as {
-      sdp: string;
-      connectionId: string;
-      connectionEpoch: number;
-      modeVersion: number;
-      replay: boolean;
-    };
-    expect(answer).toMatchObject({
-      sdp: "v=0\r\na=answer:provider-fixture\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n",
-      connectionEpoch: 1,
-      modeVersion: started.mode.version,
-      replay: false,
-    });
-    expect(providerCalls).toBe(callsBefore + 1);
-
-    const replay = await app.request(`${base}/webrtc`, {
-      method: "POST",
-      headers: value.headers,
-      body: JSON.stringify(request),
-    });
-    expect(replay.status).toBe(200);
-    expect(await replay.json()).toMatchObject({
-      sdp: answer.sdp,
-      connectionId: answer.connectionId,
-      replay: true,
-    });
-    expect(providerCalls).toBe(callsBefore + 1);
-
-    const activated = await app.request(
-      `${base}/${started.mode.id}/connections/${answer.connectionId}/activate`,
-      {
+  test.each(["gpt-live-1-boulder-alpha", "opengeni-azure/gpt-live-1"])(
+    "durably completes %s and replays without a second provider call",
+    async (model) => {
+      const value = await fixture();
+      const base = `http://x/v1/workspaces/${value.workspaceId}/sessions/${value.sessionId}/realtime`;
+      const proof = {
+        operationId: crypto.randomUUID(),
+        browserInstanceId: `browser-${crypto.randomUUID()}`,
+        ownerKey: `owner-key-${crypto.randomUUID()}-${crypto.randomUUID()}`,
+        model,
+      };
+      const startedResponse = await app.request(base, {
         method: "POST",
         headers: value.headers,
-        body: JSON.stringify({
-          browserInstanceId: proof.browserInstanceId,
-          ownerKey: proof.ownerKey,
-          operationId: request.operationId,
-          expectedVersion: started.mode.version,
-          expectedConnectionEpoch: 1,
-          connectionEpoch: answer.connectionEpoch,
-        }),
-      },
-    );
-    expect(activated.status).toBe(200);
-    expect(await activated.json()).toMatchObject({
-      mode: { version: started.mode.version, connectionEpoch: 1 },
-      replay: false,
-    });
-  });
+        body: JSON.stringify(proof),
+      });
+      const started = (await startedResponse.json()) as { mode: { id: string; version: number } };
+      const request = {
+        realtimeId: started.mode.id,
+        operationId: crypto.randomUUID(),
+        browserInstanceId: proof.browserInstanceId,
+        ownerKey: proof.ownerKey,
+        expectedVersion: started.mode.version,
+        expectedConnectionEpoch: 1,
+        rotate: false,
+        browserActivation: "required",
+        sdp: "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n",
+        version: "v3",
+      };
+      const callsBefore = providerCalls;
+      const first = await app.request(`${base}/webrtc`, {
+        method: "POST",
+        headers: value.headers,
+        body: JSON.stringify(request),
+      });
+      expect(first.status).toBe(200);
+      const answer = (await first.json()) as {
+        sdp: string;
+        connectionId: string;
+        connectionEpoch: number;
+        modeVersion: number;
+        replay: boolean;
+      };
+      expect(answer).toMatchObject({
+        sdp: "v=0\r\na=answer:provider-fixture\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n",
+        connectionEpoch: 1,
+        modeVersion: started.mode.version,
+        replay: false,
+      });
+      expect(providerCalls).toBe(callsBefore + 1);
+
+      const replay = await app.request(`${base}/webrtc`, {
+        method: "POST",
+        headers: value.headers,
+        body: JSON.stringify(request),
+      });
+      expect(replay.status).toBe(200);
+      expect(await replay.json()).toMatchObject({
+        sdp: answer.sdp,
+        connectionId: answer.connectionId,
+        replay: true,
+      });
+      expect(providerCalls).toBe(callsBefore + 1);
+
+      const activated = await app.request(
+        `${base}/${started.mode.id}/connections/${answer.connectionId}/activate`,
+        {
+          method: "POST",
+          headers: value.headers,
+          body: JSON.stringify({
+            browserInstanceId: proof.browserInstanceId,
+            ownerKey: proof.ownerKey,
+            operationId: request.operationId,
+            expectedVersion: started.mode.version,
+            expectedConnectionEpoch: 1,
+            connectionEpoch: answer.connectionEpoch,
+          }),
+        },
+      );
+      expect(activated.status).toBe(200);
+      expect(await activated.json()).toMatchObject({
+        mode: { version: started.mode.version, connectionEpoch: 1 },
+        replay: false,
+      });
+    },
+  );
 
   test("mints one single-use Gateway token behind the same owner and activation fences", async () => {
     const value = await fixture();

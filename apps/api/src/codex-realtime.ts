@@ -13,12 +13,19 @@ import {
   type CodexRealtimeCallInput,
 } from "@opengeni/codex";
 import {
-  buildCodexTokenResolver,
+  acquireSubscriptionCoreCodexOperationLease,
+  buildSubscriptionCoreCodexConnectionTokenResolver,
+  buildSubscriptionCoreCodexOperationFetch,
+  listSubscriptionCoreCodexOperationCandidates,
+  readCodexCutoverDisposition,
+  readSubscriptionCoreSessionOwner,
+  releaseSubscriptionCoreCodexOperationLease,
+  renewSubscriptionCoreCodexOperationLease,
+  subscriptionCoreCodexPlanHasVoice,
+  type SubscriptionCoreCodexOperationLeaseRef,
+  type SubscriptionCoreCodexOperationScope,
   getActiveSessionHistoryItems,
-  getCodexCredentialStatus,
   getSessionRealtimeContinuityEntries,
-  getSessionCodexState,
-  listCodexAccountStatuses,
   type Database,
 } from "@opengeni/db";
 import { projectSessionRealtimeInitialItems } from "./session-realtime-context";
@@ -59,6 +66,13 @@ export type CodexRealtimeBrokerDependencies = {
     pinnedCredentialId: string | null;
     activeCredentialId: string | null;
     connectedCredentialIds: ReadonlySet<string>;
+    /**
+     * Connected credentials on a ChatGPT plan without voice (Free): the
+     * provider answers their realtime calls with 404.
+     */
+    voicelessCredentialIds?: ReadonlySet<string>;
+    /** Connected credentials open to new allocations whose plan has voice, in pool order. */
+    voiceCredentialIds?: readonly string[];
   }>;
   loadInitialItems(): Promise<CodexRealtimeInitialItem[]>;
   tokenResolver(credentialId: string): CodexTokenResolver;
@@ -109,6 +123,8 @@ Live context wrapped in <session_human_input_request> means current work is paus
 Live context wrapped in <session_human_input_response> is the authoritative outcome of that pending question. An answered or skipped response came through the structured session UI and is already routed; incorporate it, never delegate it again, and acknowledge briefly only if useful. An expired or cancelled response means the question is no longer active.
 
 Live session updates may describe work that started before this realtime conversation, work sent directly by the user, or work delegated during an earlier realtime connection. Treat those updates as part of this same session even when they have no current delegation identity.
+
+For requests about another session, use the backend to find, select, inspect or act on it while staying in this conversation. Selecting a session alone does not authorize changing its work.
 
 ## Backend use
 
@@ -189,11 +205,17 @@ export async function brokerSessionCodexRealtime(
     );
   }
   const selection = await deps.loadSelection();
-  const credentialId = selectCodexCredentialId({
+  const selected = selectCodexCredentialId({
     sessionPinnedCredentialId: selection.pinnedCredentialId,
     activeCredentialId: selection.activeCredentialId,
     connectedIds: selection.connectedCredentialIds,
   });
+  // A turn may run on a plan without voice; a call then takes another
+  // connected subscription that has it, when there is one.
+  const credentialId =
+    selected && selection.voicelessCredentialIds?.has(selected)
+      ? (selection.voiceCredentialIds?.[0] ?? selected)
+      : selected;
   if (!credentialId) {
     throw new CodexRealtimeBrokerError(
       "credential_unavailable",
@@ -253,59 +275,163 @@ export async function brokerSessionCodexRealtime(
   }
 }
 
-/** Bind the pure broker to OpenGeni's encrypted DB credential lifecycle. */
+async function loadRealtimeInitialItems(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<CodexRealtimeInitialItem[]> {
+  const [history, continuity] = await Promise.all([
+    getActiveSessionHistoryItems(db, workspaceId, sessionId),
+    getSessionRealtimeContinuityEntries(db, workspaceId, sessionId),
+  ]);
+  return projectSessionRealtimeInitialItems(history, continuity);
+}
+
+async function createRealtimeCall(
+  fetchImpl: CodexFetch,
+  auth: CodexAuthHeaders,
+  callInput: CodexRealtimeCallInput,
+  options: { signal?: AbortSignal | undefined },
+): Promise<CodexRealtimeProviderAnswer> {
+  const providerConfig = await fetchCodexRealtimeProviderConfig(auth, fetchImpl, options);
+  return await createCodexRealtimeCall(auth, callInput, fetchImpl, {
+    ...options,
+    providerConfig,
+  });
+}
+
+/**
+ * Codex realtime on the shared subscription core (M3 PR 2c, EP-N05..N07):
+ * each call resolves the session's recorded owner, places one shared
+ * organization- or workspace-scoped connection (the session's explicit
+ * choice first, then the effective primary, preferring a plan with voice),
+ * and holds its own `realtime` operation lease (session-bound, no turn)
+ * through negotiation, with refresh under the per-connection lock. The chat
+ * binding is never written; the client protocol and HTTP error translation
+ * are the legacy broker's.
+ */
+export async function brokerSessionCoreCodexRealtime(
+  db: Database,
+  settings: Settings,
+  context: { accountId: string; workspaceId: string; sessionId: string },
+  input: Omit<CodexRealtimeBrokerInput, "sessionId">,
+  fetchImpl: CodexFetch = fetch,
+): Promise<CodexRealtimeProviderAnswer> {
+  if (!settings.codexSubscriptionEnabled) {
+    throw new CodexRealtimeBrokerError(
+      "subscription_disabled",
+      "Connected Codex subscription realtime is disabled",
+    );
+  }
+  const owner = await readSubscriptionCoreSessionOwner(db, context);
+  if (!owner) {
+    throw new CodexRealtimeBrokerError(
+      "credential_unavailable",
+      "Session is unavailable for Codex realtime",
+    );
+  }
+  const scope: SubscriptionCoreCodexOperationScope = {
+    kind: "session",
+    ...context,
+    sessionOwnerSubjectId: owner.ownerSubjectId,
+  };
+  const candidates = await listSubscriptionCoreCodexOperationCandidates(db, scope);
+  // A turn may run on a plan without voice; a call takes a connection that
+  // has it whenever one exists (legacy parity).
+  const ordered = [
+    ...candidates.filter((candidate) => subscriptionCoreCodexPlanHasVoice(candidate.planType)),
+    ...candidates.filter((candidate) => !subscriptionCoreCodexPlanHasVoice(candidate.planType)),
+  ];
+  const operationId = crypto.randomUUID();
+  const attemptId = crypto.randomUUID();
+  for (const candidate of ordered) {
+    const ref: SubscriptionCoreCodexOperationLeaseRef = {
+      operationId,
+      attemptId,
+      operationKind: "realtime",
+      connectionId: candidate.connectionId,
+      holderId: `realtime:${context.sessionId}`,
+      generation: 1,
+    };
+    const lease = await acquireSubscriptionCoreCodexOperationLease(db, scope, ref);
+    if (lease.kind !== "acquired") continue;
+    try {
+      const resolver = buildSubscriptionCoreCodexConnectionTokenResolver(
+        db,
+        settings,
+        scope,
+        candidate.connectionId,
+        ref,
+      );
+      // Configuration and call creation are separate physical requests, as
+      // are both requests of the single authentication-only retry.
+      const requestFetch = buildSubscriptionCoreCodexOperationFetch(
+        db,
+        scope,
+        ref,
+        candidate.connectionId,
+        fetchImpl,
+      );
+      return await brokerSessionCodexRealtime(
+        {
+          enabled: true,
+          loadSelection: async () => ({
+            pinnedCredentialId: null,
+            activeCredentialId: candidate.connectionId,
+            connectedCredentialIds: new Set([candidate.connectionId]),
+          }),
+          loadInitialItems: () =>
+            loadRealtimeInitialItems(db, context.workspaceId, context.sessionId),
+          tokenResolver: () => resolver,
+          createCall: async (auth, callInput, options) => {
+            // Pre-dispatch fence on the exact operation lease.
+            if (!(await renewSubscriptionCoreCodexOperationLease(db, scope, ref))) {
+              throw new CodexRealtimeBrokerError(
+                "credential_unavailable",
+                "Codex subscription credential is unavailable",
+              );
+            }
+            return await createRealtimeCall(requestFetch, auth, callInput, options);
+          },
+        },
+        { ...input, sessionId: context.sessionId },
+      );
+    } finally {
+      await releaseSubscriptionCoreCodexOperationLease(db, scope, ref).catch(() => false);
+    }
+  }
+  throw new CodexRealtimeBrokerError(
+    "credential_unavailable",
+    "No connected Codex subscription is available for this session",
+  );
+}
+
+/** Bind the pure broker to Opengeni's encrypted DB credential lifecycle. */
 export function buildSessionCodexRealtimeBroker(
   db: Database,
   settings: Settings,
-  workspaceId: string,
-  sessionId: string,
+  context: { accountId: string; workspaceId: string; sessionId: string },
   fetchImpl: CodexFetch = fetch,
 ): (input: Omit<CodexRealtimeBrokerInput, "sessionId">) => Promise<CodexRealtimeProviderAnswer> {
-  return async (input) =>
-    await brokerSessionCodexRealtime(
-      {
-        enabled: settings.codexSubscriptionEnabled,
-        loadSelection: async () => {
-          const [sessionState, status, accounts] = await Promise.all([
-            getSessionCodexState(db, workspaceId, sessionId),
-            getCodexCredentialStatus(db, workspaceId),
-            listCodexAccountStatuses(db, workspaceId),
-          ]);
-          if (!sessionState) {
-            throw new CodexRealtimeBrokerError(
-              "credential_unavailable",
-              "Session is unavailable for Codex realtime",
-            );
-          }
-          return {
-            pinnedCredentialId: sessionState.pinnedCredentialId,
-            activeCredentialId: status?.credentialId ?? null,
-            connectedCredentialIds: new Set(
-              accounts
-                .filter((account) => account.status === "active")
-                .map((account) => account.id),
-            ),
-          };
-        },
-        loadInitialItems: async () => {
-          const [history, continuity] = await Promise.all([
-            getActiveSessionHistoryItems(db, workspaceId, sessionId),
-            getSessionRealtimeContinuityEntries(db, workspaceId, sessionId),
-          ]);
-          return projectSessionRealtimeInitialItems(history, continuity);
-        },
-        tokenResolver: (credentialId) =>
-          buildCodexTokenResolver(db, settings, workspaceId, credentialId),
-        createCall: async (auth, callInput, options) => {
-          const providerConfig = await fetchCodexRealtimeProviderConfig(auth, fetchImpl, options);
-          return await createCodexRealtimeCall(auth, callInput, fetchImpl, {
-            ...options,
-            providerConfig,
-          });
-        },
-      },
-      { ...input, sessionId },
+  const { accountId, workspaceId, sessionId } = context;
+  return async (input) => {
+    // The account is required: without it a disabled cutover could not fail closed.
+    const disposition = await readCodexCutoverDisposition(db, accountId, workspaceId);
+    if (disposition === "maintenance") {
+      // A disabled cutover row is maintenance: fail closed, no legacy read.
+      throw new CodexRealtimeBrokerError(
+        "subscription_disabled",
+        "Connected Codex subscription realtime is disabled",
+      );
+    }
+    return await brokerSessionCoreCodexRealtime(
+      db,
+      settings,
+      { accountId, workspaceId, sessionId },
+      input,
+      fetchImpl,
     );
+  };
 }
 
 function credentialError(error: unknown): CodexRealtimeBrokerError {
@@ -322,6 +448,8 @@ function credentialError(error: unknown): CodexRealtimeBrokerError {
 }
 
 function brokerProviderError(error: unknown): CodexRealtimeBrokerError {
+  // A core pre-dispatch fence refusal is already typed (legacy calls never raise one).
+  if (error instanceof CodexRealtimeBrokerError) return error;
   if (!(error instanceof CodexRealtimeError)) {
     return new CodexRealtimeBrokerError("network_error", "Codex realtime provider request failed");
   }

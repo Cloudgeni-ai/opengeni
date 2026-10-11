@@ -4,13 +4,17 @@ export type SessionSearchRoute = {
   matchSequence?: number;
   matchOffset?: number;
   searchOrigin?: "session-search";
+  /** Open on this event's moment (an inbox item or a notification), not the latest message. */
+  at?: number;
 };
 
 export function parseSessionSearchRoute(search: Record<string, unknown>): SessionSearchRoute {
+  const at = searchInteger(search.at);
+  const moment: SessionSearchRoute = at !== null && at > 0 ? { at } : {};
   if (typeof search.find !== "string" || !search.find.trim() || search.find.length > 200) {
-    return {};
+    return moment;
   }
-  const result: SessionSearchRoute = { find: search.find };
+  const result: SessionSearchRoute = { ...moment, find: search.find };
   if (search.searchOrigin === "session-search") result.searchOrigin = "session-search";
   const sequence = searchInteger(search.matchSequence);
   const offset = searchInteger(search.matchOffset);
@@ -31,6 +35,10 @@ function searchInteger(value: unknown): number | null {
 /** Scoped event: the mounted rail owns dialog state across conversation navigation. */
 export const OPEN_SESSION_SEARCH_EVENT = "opengeni:open-session-search";
 
-export function requestSessionSearch(workspaceId: string): void {
-  window.dispatchEvent(new CustomEvent(OPEN_SESSION_SEARCH_EVENT, { detail: { workspaceId } }));
+export function requestSessionSearch(workspaceId: string, returnFocus?: HTMLElement): void {
+  window.dispatchEvent(
+    new CustomEvent(OPEN_SESSION_SEARCH_EVENT, {
+      detail: { workspaceId, ...(returnFocus ? { returnFocus } : {}) },
+    }),
+  );
 }

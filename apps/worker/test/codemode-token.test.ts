@@ -155,7 +155,7 @@ describe("codemode token mint and sandbox delivery pointers", () => {
   });
 
   test("the token targets the public sandbox-routable API URL, never a cluster-internal one", async () => {
-    // A remote managed sandbox reaches OpenGeni over the public base, so the URL
+    // A remote managed sandbox reaches Opengeni over the public base, so the URL
     // must never resolve to a loopback or cluster-internal address.
     const settings = testSettings({
       sandboxBackend: "modal",

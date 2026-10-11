@@ -236,7 +236,7 @@ describe("handleVercelChatRequest", () => {
     });
   });
 
-  test("OpenGeni tool activity is omitted by default and dynamic when opted in", async () => {
+  test("Opengeni tool activity is omitted by default and dynamic when opted in", async () => {
     const server = fakeServer({
       reply: () => [
         {

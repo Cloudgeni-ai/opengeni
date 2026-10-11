@@ -31,7 +31,7 @@ import {
 } from "@opengeni/config";
 import type { Settings } from "@opengeni/config";
 import { githubAppBotIdentity } from "@opengeni/github";
-import { type Session, type StreamUrlRotatedPayload } from "@opengeni/contracts";
+import { type AccessGrant, type Session, type StreamUrlRotatedPayload } from "@opengeni/contracts";
 import {
   acquireLease,
   getLiveEnrollmentConnection,
@@ -206,6 +206,10 @@ export async function attachViewer(
     /** The authenticated subject attaching this viewer (0281): recorded on
      *  the holder row together with the live session authority epoch. */
     viewerSubjectId?: string;
+    /** The authenticated route grant, when one drives the attach. It resolves
+     *  the session's Sandbox Environment for an agent attempt as its
+     *  initiating human. */
+    grant?: AccessGrant;
     /** Cancel lifecycle waiting when the originating HTTP request disconnects. */
     waitSignal?: AbortSignal;
   },
@@ -236,7 +240,12 @@ export async function attachViewer(
     : null;
   const leaseTtlMs = settings.sandboxLeaseTtlMs;
   const sandboxGroupId = session.sandboxGroupId;
-  const sandboxRuntime = await resolveSessionSandboxRuntime(db, settings, session);
+  const sandboxRuntime = await resolveSessionSandboxRuntime(
+    db,
+    settings,
+    session,
+    input.grant ? { grant: input.grant } : { subjectId: attachSubjectId },
+  );
 
   const release = async (): Promise<void> => {
     await releaseLeaseHolder(db, {
@@ -282,7 +291,7 @@ export async function attachViewer(
       throw new HTTPException(error.reason === "balance" ? 402 : 429, {
         message:
           error.reason === "balance"
-            ? "insufficient OpenGeni credits for an idle sandbox viewer"
+            ? "insufficient Opengeni credits for an idle sandbox viewer"
             : "workspace sandbox warm allowance exhausted",
         cause: error,
       });

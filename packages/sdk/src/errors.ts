@@ -1,4 +1,4 @@
-/** Error for a non-2xx OpenGeni API response. */
+/** Error for a non-2xx Opengeni API response. */
 export class OpenGeniApiError extends Error {
   readonly status: number;
   readonly code: string | undefined;
@@ -29,8 +29,8 @@ export class OpenGeniApiError extends Error {
     const displayMessage =
       options.displayMessage ??
       (gatewayFailure && fromResponse
-        ? (decoded?.message ?? "OpenGeni is temporarily unavailable — retry.")
-        : `OpenGeni API ${status}: ${message}`);
+        ? (decoded?.message ?? "Opengeni is temporarily unavailable — retry.")
+        : `Opengeni API ${status}: ${message}`);
     super(correlationId ? `${displayMessage} Reference: ${correlationId}.` : displayMessage);
     this.name = "OpenGeniApiError";
     this.status = status;
@@ -139,7 +139,7 @@ export class OpenGeniSecureContextRequiredError extends Error {
   constructor(reason: OpenGeniSecureContextRequiredReason) {
     super(
       reason === "insecure_context"
-        ? "Couldn’t attach this file because OpenGeni is open over HTTP. Attachments require a secure HTTPS connection. Open the secure site or configure HTTPS for this deployment."
+        ? "Couldn’t attach this file because Opengeni is open over HTTP. Attachments require a secure HTTPS connection. Open the secure site or configure HTTPS for this deployment."
         : "Couldn’t attach this file because secure browser cryptography is unavailable. Attachments require HTTPS and Web Crypto support. Open a secure site in a supported browser or configure HTTPS for this deployment.",
     );
     this.name = "OpenGeniSecureContextRequiredError";
@@ -235,7 +235,7 @@ export class OpenGeniApiContractMismatchError extends Error {
   readonly actual: string;
 
   constructor(expected: string, actual: string) {
-    super(`OpenGeni API contract mismatch: client expects ${expected}, API serves ${actual}`);
+    super(`Opengeni API contract mismatch: client expects ${expected}, API serves ${actual}`);
     this.name = "OpenGeniApiContractMismatchError";
     this.expected = expected;
     this.actual = actual;

@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { DrizzleQueryError } from "drizzle-orm";
 import { ToolCallError } from "@openai/agents";
-import { SessionEventPersistenceError } from "@opengeni/db";
+import { DatabaseTransactionError, SessionEventPersistenceError } from "@opengeni/db";
 import { RoutingMutationOutcomeUnknownError } from "@opengeni/runtime";
 import { MandatoryHistoryPersistenceError } from "../src/activities/agent-turn/quiescence";
 import {
@@ -33,7 +33,7 @@ test("unwrapped database failures retain SQLSTATE and identifiers without expand
     },
   );
   expect(agentRunFailurePayload(outer)).toEqual({
-    error: "OpenGeni encountered a database error.",
+    error: "Opengeni encountered a database error.",
     code: "db_failure",
     sqlState: "42501",
     database: {
@@ -79,7 +79,7 @@ test("five-character application codes do not become database diagnostics", () =
     routine: "exec_stmt_raise",
   });
   expect(agentRunFailurePayload(driver)).toEqual({
-    error: "OpenGeni encountered a database error.",
+    error: "Opengeni encountered a database error.",
     code: "db_failure",
     sqlState: "E1234",
     database: { severity: "ERROR", routine: "exec_stmt_raise" },
@@ -166,7 +166,7 @@ test("running-turn recovery rejects permanent errors, provider sockets and messa
     uncertain,
     new ToolCallError("Failed to run function tools", uncertain),
     new AggregateError([rawDatabaseFailure("57P01"), uncertain], "parallel tool failure"),
-    ...["23505", "42501", "42601", "40003", "40P01", "40001"].map(
+    ...["23505", "42501", "42601", "40003"].map(
       (code) => new ToolCallError("Failed to run function tools", rawDatabaseFailure(code)),
     ),
     new ToolCallError("Failed query select account_id from workspaces CONNECT_TIMEOUT", "57P01"),
@@ -194,11 +194,66 @@ function runningDatabaseRecovery(error: unknown) {
   return postClaimDatabaseRecoveryFailure({ error, ...identity, requireDatabaseProvenance: true });
 }
 
+test("a running turn's own deadlock or serialization rollback enters exact-attempt recovery", () => {
+  // The victim transaction certainly did not commit, so it is at least as safe
+  // as an own-client outage. A tool wrapper does not grant or remove authority.
+  for (const [sqlState, code] of [
+    ["40P01", "db_deadlock"],
+    ["40001", "db_serialization_failure"],
+  ] as const) {
+    for (const error of [
+      rawDatabaseFailure(sqlState),
+      new ToolCallError("Failed to run function tools", rawDatabaseFailure(sqlState)),
+    ]) {
+      expect(runningDatabaseRecovery(error)).toMatchObject({
+        type: "OpenGeniPostClaimDatabaseRecovery",
+        details: [{ ...identity, code }],
+      });
+    }
+    // An uncertain or no-replay sibling still vetoes recovery.
+    const uncertain = new RoutingMutationOutcomeUnknownError("execCommand", "outcome unknown");
+    expect(
+      runningDatabaseRecovery(new AggregateError([rawDatabaseFailure(sqlState), uncertain])),
+    ).toBeNull();
+    // A driver-shaped error outside our own ORM/persistence boundary is not provenance.
+    expect(
+      runningDatabaseRecovery(
+        Object.assign(new Error("transaction aborted"), { name: "PostgresError", code: sqlState }),
+      ),
+    ).toBeNull();
+  }
+});
+
+test("own transaction provenance includes only the driver branch; rollback retains no-replay vetoes", () => {
+  const closed = Object.assign(new Error("own connection closed"), { code: "CONNECTION_CLOSED" });
+  expect(runningDatabaseRecovery(new DatabaseTransactionError("admission", closed))).toMatchObject({
+    type: "OpenGeniPostClaimDatabaseRecovery",
+  });
+  expect(runningDatabaseRecovery(new DatabaseTransactionError("settlement", closed))).toMatchObject(
+    { type: "OpenGeniPostClaimDatabaseRecovery" },
+  );
+  expect(
+    runningDatabaseRecovery(
+      new DatabaseTransactionError(
+        "settlement",
+        new Error("unclassified driver failure"),
+        Object.assign(new Error("provider connection reset"), { code: "ECONNRESET" }),
+      ),
+    ),
+  ).toBeNull();
+  const unknown = new RoutingMutationOutcomeUnknownError("execCommand", "unknown");
+  expect(
+    runningDatabaseRecovery(new DatabaseTransactionError("settlement", closed, unknown)),
+  ).toBeNull();
+  expect(
+    runningDatabaseRecovery(
+      new DatabaseTransactionError("settlement", closed, rawDatabaseFailure("42501")),
+    ),
+  ).toBeNull();
+});
+
 test("running-turn DB transport recovery has a closed allowlist without changing the legacy lane", () => {
   for (const code of [
-    "CONNECTION_CLOSED",
-    "CONNECTION_DESTROYED",
-    "CONNECTION_ENDED",
     "EAI_AGAIN",
     "ECONNABORTED",
     "EHOSTDOWN",
@@ -237,7 +292,14 @@ test("running-turn DB transport recovery has a closed allowlist without changing
   }
   for (const code of ["57P00", "0800", "08001extra", "08garbage", "0800!"])
     expect(runningDatabaseRecovery(rawDatabaseFailure(code))).toBeNull();
-  for (const code of ["ECONNREFUSED", "ECONNRESET", "CONNECT_TIMEOUT"])
+  for (const code of [
+    "CONNECTION_CLOSED",
+    "CONNECTION_DESTROYED",
+    "CONNECTION_ENDED",
+    "ECONNREFUSED",
+    "ECONNRESET",
+    "CONNECT_TIMEOUT",
+  ])
     expect(
       runningDatabaseRecovery(
         new DrizzleQueryError("select 1", [], Object.assign(new Error("own DB"), { errno: code })),
@@ -362,7 +424,9 @@ test("unreadable graph edges or structured facts cannot manufacture recovery aut
   }
 });
 
-test("positive DB sibling classification is stable, and late rollback siblings stay terminal", () => {
+test("positive DB sibling classification is stable before and after the model starts", () => {
+  // A rolled-back deadlock sibling is a definite non-commit, so it no longer
+  // keeps a running turn terminal; the outage sibling still names the class.
   for (const errors of [
     [rawDatabaseFailure("57P01"), rawDatabaseFailure("40P01")],
     [rawDatabaseFailure("40P01"), rawDatabaseFailure("57P01")],
@@ -370,7 +434,9 @@ test("positive DB sibling classification is stable, and late rollback siblings s
     expect(
       postClaimDatabaseRecoveryFailure({ error: new AggregateError(errors), ...identity }),
     ).toMatchObject({ details: [{ ...identity, code: "db_failure" }] });
-    expect(runningDatabaseRecovery(new AggregateError(errors))).toBeNull();
+    expect(runningDatabaseRecovery(new AggregateError(errors))).toMatchObject({
+      details: [{ ...identity, code: "db_failure" }],
+    });
   }
 });
 
@@ -431,7 +497,7 @@ test("database history wrappers and ORM transport errors keep raw evidence out o
     Object.assign(new Error("fixture-value"), { code: "CONNECTION_CLOSED" }),
   );
   expect(agentRunFailurePayload(transport)).toEqual({
-    error: "OpenGeni encountered a database error.",
+    error: "Opengeni encountered a database error.",
     code: "db_failure",
     sqlState: null,
   });
@@ -441,7 +507,7 @@ test("raw database payloads never expose SQL or acquire provider replay authorit
   for (const sqlState of ["40P01", "40001", "40003", "42501"]) {
     const error = rawDatabaseFailure(sqlState, "rate limit 429 fixture-value");
     const payload = agentRunFailurePayload(error);
-    expect(payload).toMatchObject({ error: "OpenGeni encountered a database error.", sqlState });
+    expect(payload).toMatchObject({ error: "Opengeni encountered a database error.", sqlState });
     expect(payload.retryable).not.toBe(true);
     expect(payload.code).not.toBe("provider_rate_limited");
     expect(JSON.stringify(payload)).not.toContain("fixture-value");

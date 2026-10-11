@@ -237,6 +237,7 @@ export type IntegrationViewModel = {
   outcomes?: Array<{ title: string; description?: string }>;
   /** The tools this connection actually publishes; omitted when unavailable. */
   tools?: IntegrationToolsBlock;
+  toolPermissions?: { workspaceId: string; capabilityId: string };
   /** Optional plain-language notice shown above the blocks (state explanations). */
   notice?: {
     tone: "muted" | "waiting" | "failed";

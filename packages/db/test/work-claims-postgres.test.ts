@@ -232,7 +232,7 @@ function claimInput(
     subjectNamespace: "github",
     subjectType: "pull_request" as const,
     canonicalKey: input.canonicalKey ?? "Cloudgeni-ai/opengeni#384",
-    displayLabel: input.displayLabel ?? "OpenGeni discovery coordination",
+    displayLabel: input.displayLabel ?? "Opengeni discovery coordination",
     role: "working" as const,
     version: input.versionValue
       ? ({ kind: "pull_request_head" as const, value: input.versionValue } as const)
@@ -354,7 +354,7 @@ describe("durable advisory work claims", () => {
       claimInput(attempt, {
         operationId: crypto.randomUUID(),
         expectedRevision: 1,
-        displayLabel: "OpenGeni overlap discovery",
+        displayLabel: "Opengeni overlap discovery",
         versionValue: "head-2",
       }),
     );

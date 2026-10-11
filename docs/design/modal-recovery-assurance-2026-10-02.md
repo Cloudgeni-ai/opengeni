@@ -2,7 +2,7 @@
 
 ## Finding
 
-Short transport interruptions have safe recovery paths, but current OpenGeni
+Short transport interruptions have safe recovery paths, but current Opengeni
 cannot promise that every Modal DNS failure automatically resumes work after
 connectivity returns. A nonfailed parked turn is not proof of eventual recovery.
 Error text also cannot establish whether a provider accepted a mutation.
@@ -45,7 +45,7 @@ turn-recovery/claim protocol. See [run lifecycle](../run-lifecycle.md).
 [Modal's command documentation](https://modal.com/docs/guide/sandbox-spawn)
 separates execution from process/output observation. Its public documentation
 does not establish native router Start deduplication or a durable continuation
-contract for OpenGeni's SDK setup helpers. We therefore verify the installed
+contract for Opengeni's SDK setup helpers. We therefore verify the installed
 protocol and count physical Starts/writes in actual gRPC fault tests.
 
 ## Newly reproduced defects and focused correction
@@ -135,6 +135,29 @@ hashed without caller getters or shared-memory backing. Signing inputs are
 strict, own-data JSON; malformed values return fixed errors. These checks do
 not replace authenticated provider acquisition or lost-COMMIT-ACK reconciliation.
 The earlier audit and all remaining continuity requirements above are unchanged.
+
+The private `modal-native-original-configuration.ts` groundwork samples only own
+explicit deployment token and environment fields and the existing canonical
+32-byte environments-encryption root. Missing or unsupported data is OFF. Its
+HOST-pinned endpoint is the Modal 0.9.0 default `https://api.modal.com:443`, never
+an ambient SDK/profile lookup. The complete original declaration bytes, refs,
+scope, recipe and direct-read profile are bound by a framed, separately derived
+HMAC-SHA256 equality commitment. The pinned read policy includes exact source,
+auth headers, no retries, bounded chain and explicit bundled TLS root digest.
+The environment is retained exactly, including an explicitly supplied empty
+selection; those CP reads do not transmit it. There is no invented default.
+
+The extracted draft is sensitive private storage input, not evidence that any
+configuration, grant or admission committed. Neither equality nor the in-memory
+sample authenticates a host/human or licenses I/O. The real host authorizer must
+join the full original rows and commit declaration/config/grant/reservation and
+outstanding acquisition before prefix I/O. Unknown ACK requires identical-key
+read reconciliation, not another lookup. Original-pair/key/config changes do not
+select former credentials, another key or a successor. Restart reconstruction,
+protected storage and actual caller integration remain separate missing seams.
+Owned mutable transient key/pair buffers are wiped; immutable JS strings are not
+claimed cryptographically erased. Disposal releases only sample memory, never a
+native I/O slot, provider writer, custody grant or operation.
 
 ## Evidence and ownership
 

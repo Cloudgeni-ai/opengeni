@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { createAttemptToolEnvironment } from "@opengeni/codemode";
 import {
+  CUA_DESKTOP_TOOLS,
   BrowserSession as BrowserSessionSchema,
   EPHEMERAL_CHROMIUM_DRIVER_ID,
   ComputerSession as ComputerSessionSchema,
@@ -36,6 +37,202 @@ const computerSessionId = randomUUID();
 const now = "2026-08-10T12:00:00.000Z";
 
 describe("interaction attempt tools", () => {
+  test("browser_act tells the model where upload workspace File IDs come from", () => {
+    const definitions = createInteractionAttemptToolDefinitions({
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_act"],
+      permissions: ["sessions:control"],
+      transport: partialTransport({}),
+    });
+    const act = definitions.find(
+      (definition) => definition.modelName === "interaction__browser_act",
+    )!;
+    expect(act.description).toContain("An upload action takes workspace File IDs");
+    expect(act.description).toContain("artifact.artifactId returned by sandbox_file_publish");
+  });
+
+  test("native platform alternatives admit Linux arguments and retain the session boundary", async () => {
+    let calls = 0;
+    const definitions = createInteractionAttemptToolDefinitions({
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_open", "computer_act"],
+      permissions: ["sessions:control"],
+      transport: partialTransport({
+        callNativeComputerTool: async (_workspace, _computer, request) => {
+          calls++;
+          expect(request.arguments).toEqual({ launch_path: "fixture-app" });
+          return {
+            protocolVersion: 1,
+            operationId: request.operationId,
+            computerSessionId,
+            controllerGeneration: "fixture",
+            targetId: null,
+            state: "failed",
+            dispatchedAt: null,
+            settledAt: now,
+            observation: null,
+            error: { code: "unsupported", message: "Synthetic fixture", retryable: false },
+          };
+        },
+      }),
+    });
+    const environment = createAttemptToolEnvironment({
+      scope: { accountId, workspaceId, sessionId, turnId, attemptId, executionGeneration: 1 },
+      generation: 1,
+      definitions,
+    });
+    await environment.callModel({
+      operationId: randomUUID(),
+      subjectId: "model:fixture",
+      modelName: "interaction__cua_launch_app",
+      arguments: { computerSessionId, launch_path: "fixture-app" },
+    });
+    expect(calls).toBe(1);
+    await expect(
+      environment.callModel({
+        operationId: randomUUID(),
+        subjectId: "model:fixture",
+        modelName: "interaction__cua_launch_app",
+        arguments: { computerSessionId, session: "other", launch_path: "fixture-app" },
+      }),
+    ).rejects.toThrow();
+    expect(calls).toBe(1);
+  });
+  test("oversized native output retains completed operation evidence through the prepared gateway", async () => {
+    const definitions = createInteractionAttemptToolDefinitions({
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_open", "computer_act"],
+      permissions: ["sessions:control"],
+      transport: partialTransport({
+        callNativeComputerTool: async (_workspace, _computer, request) => ({
+          protocolVersion: 1,
+          operationId: request.operationId,
+          computerSessionId,
+          controllerGeneration: "controller-1",
+          targetId: null,
+          state: "completed",
+          dispatchedAt: now,
+          settledAt: now,
+          error: null,
+          observation: {
+            target: null,
+            computerSessionId,
+            controllerGeneration: "controller-1",
+            tool: request.tool,
+            outcome: "completed",
+            error: null,
+            result: {
+              content: [{ type: "text", text: "Large desktop inventory" }],
+              structuredContent: { apps: [], extra: "A".repeat(17 * 1024 * 1024) },
+            },
+          },
+        }),
+      }),
+    });
+    const environment = createAttemptToolEnvironment({
+      scope: { accountId, workspaceId, sessionId, turnId, attemptId, executionGeneration: 1 },
+      generation: 1,
+      definitions,
+    });
+    const operationId = randomUUID();
+    const result = await environment.callModel({
+      operationId,
+      modelName: "interaction__cua_list_apps",
+      subjectId: "model:fixture",
+      arguments: { computerSessionId },
+    });
+    expect(result.isError).toBe(true);
+    expect(result._meta?.opengeniOperation).toMatchObject({ operationId, state: "completed" });
+    expect(JSON.stringify(result)).toContain("Do not repeat the action");
+    expect(JSON.stringify(result).length).toBeLessThan(12 * 1024 * 1024);
+  });
+  test("native CUA definitions retain upstream schemas and raw partial batch evidence", async () => {
+    let calls = 0;
+    const original = {
+      content: [
+        { type: "text", text: "step 2 failed" },
+        { type: "image", mimeType: "image/png", data: "AA==" },
+      ],
+      structuredContent: { ok: false, executed: 2 },
+      isError: true,
+    };
+    const transport = partialTransport({
+      callNativeComputerTool: async (workspace, computer, request) => {
+        expect(workspace).toBe(workspaceId);
+        expect(computer).toBe(computerSessionId);
+        expect(request.arguments).toEqual({
+          steps: [{ tool: "click", args: { pid: 42, window_id: 1, element_token: "snapshot:0" } }],
+          observe: true,
+        });
+        calls++;
+        return {
+          protocolVersion: 1,
+          operationId: request.operationId,
+          computerSessionId,
+          controllerGeneration: "controller-1",
+          targetId: null,
+          state: "outcome_unknown",
+          dispatchedAt: now,
+          settledAt: now,
+          observation: {
+            target: null,
+            computerSessionId,
+            controllerGeneration: "controller-1",
+            tool: request.tool,
+            result: original,
+            outcome: "outcome_unknown",
+            error: { code: "driver_failed", message: "partial", retryable: false },
+          },
+          error: { code: "driver_failed", message: "partial", retryable: false },
+        };
+      },
+    });
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport,
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_open", "computer_act"],
+      permissions: ["sessions:control"],
+    });
+    expect(calls).toBe(0);
+    const batch = definitions.find((tool) => tool.modelName === "interaction__cua_run_actions")!;
+    const upstream = CUA_DESKTOP_TOOLS.find((tool) => tool.name === "run_actions")!;
+    expect((batch.inputSchema.properties as any).steps).toEqual(
+      (upstream.inputSchema.properties as any).steps,
+    );
+    expect((batch.inputSchema.properties as any).session).toBeUndefined();
+    const result = await batch.execute(
+      {
+        computerSessionId,
+        steps: [{ tool: "click", args: { pid: 42, window_id: 1, element_token: "snapshot:0" } }],
+        observe: true,
+      },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:fixture" } },
+    );
+    expect(result.content.slice(0, 2)).toEqual(original.content);
+    expect(result.structuredContent).toEqual(original.structuredContent);
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toContain("Do not replay");
+    expect(calls).toBe(1);
+    for (const options of [
+      { selectedTools: ["computer_open"] as const, permissions: ["sessions:control"] as const },
+      {
+        selectedTools: ["computer_open", "computer_act"] as const,
+        permissions: ["sessions:read"] as const,
+      },
+    ])
+      expect(
+        createInteractionAttemptToolDefinitions({
+          transport,
+          workspaceId,
+          sessionId,
+          ...options,
+        }).some((tool) => tool.modelName.startsWith("interaction__cua_")),
+      ).toBe(false);
+  });
   test("attached Chrome discovery never loads unrelated workspace inventories", async () => {
     const bridge = {
       enrollmentId: randomUUID(),
@@ -121,6 +318,135 @@ describe("interaction attempt tools", () => {
       );
     }
   });
+
+  test.each([false, true])(
+    "browser_open reuse consumes authoritative inventory once (explicit=%s)",
+    async (explicit) => {
+      const session = discoveredBrowserSession(browserSessionId, sessionId);
+      session.lifecycle = "active";
+      session.controller = {
+        controllerId: "synthetic-controller",
+        controllerGeneration: "controller-1",
+        placementInstanceId: "placement-1",
+      };
+      const prior = { ...browserTarget(), selected: false };
+      const opened = {
+        ...browserTarget(),
+        id: "new-tab",
+        url: "https://redirect.example.test/final",
+      };
+      let lists = 0,
+        opens = 0;
+      const definitions = createInteractionAttemptToolDefinitions({
+        transport: partialTransport({
+          getBrowserSession: async () => session,
+          listBrowserSessions: async () => ({ revision: 1, sessions: [session] }),
+          listBrowserTargets: async () => {
+            lists++;
+            return { browserSessionId, controllerGeneration: "controller-1", targets: [prior] };
+          },
+          openBrowserTargetWithInventory: async (workspace, id, request) => {
+            opens++;
+            expect([workspace, id, request?.url]).toEqual([
+              workspaceId,
+              browserSessionId,
+              "https://new.example.test/",
+            ]);
+            return {
+              browserSessionId,
+              controllerGeneration: "controller-1",
+              targets: [prior, opened],
+            };
+          },
+          openBrowserTarget: async () => {
+            throw new Error("full observation must not be discarded");
+          },
+        }),
+        workspaceId,
+        sessionId,
+        selectedTools: ["browser_open"],
+        permissions: ["sessions:control"],
+      });
+      const result = await definitions[0]!.execute(
+        { ...(explicit ? { browserSessionId } : {}), initialUrl: "https://new.example.test/" },
+        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+      );
+      expect(result.structuredContent).toEqual({ session, targets: [prior, opened] });
+      expect(lists).toBe(1);
+      expect(opens).toBe(1);
+    },
+  );
+
+  test.each(["matching", "missing", "unknown", "session", "generation", "target"] as const)(
+    "browser_open reuse preserves no-op, refusal and unknown boundaries (%s)",
+    async (scenario) => {
+      const session = discoveredBrowserSession(browserSessionId, sessionId);
+      session.lifecycle = "active";
+      session.controller = {
+        controllerId: "synthetic-controller",
+        controllerGeneration: "controller-1",
+        placementInstanceId: "placement-1",
+      };
+      const target = browserTarget();
+      let lists = 0,
+        opens = 0;
+      const definitions = createInteractionAttemptToolDefinitions({
+        transport: partialTransport({
+          getBrowserSession: async () => session,
+          listBrowserTargets: async () => {
+            lists++;
+            return { browserSessionId, controllerGeneration: "controller-1", targets: [target] };
+          },
+          ...(scenario === "missing"
+            ? {}
+            : {
+                openBrowserTargetWithInventory: async () => {
+                  opens++;
+                  if (scenario === "unknown") throw new Error("synthetic outcome unknown");
+                  return {
+                    browserSessionId: scenario === "session" ? randomUUID() : browserSessionId,
+                    controllerGeneration:
+                      scenario === "generation" ? "other-controller" : "controller-1",
+                    targets: [
+                      {
+                        ...target,
+                        controllerGeneration:
+                          scenario === "target" ? "other-controller" : "controller-1",
+                      },
+                    ],
+                  };
+                },
+              }),
+          openBrowserTarget: async () => {
+            throw new Error("must not fall back to an observation mutation");
+          },
+        }),
+        workspaceId,
+        sessionId,
+        selectedTools: ["browser_open"],
+        permissions: ["sessions:control"],
+      });
+      const pending = definitions[0]!.execute(
+        {
+          browserSessionId,
+          initialUrl: scenario === "matching" ? target.url : "https://new.example.test/",
+        },
+        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+      );
+      if (scenario === "matching")
+        expect((await pending).structuredContent).toEqual({ session, targets: [target] });
+      else
+        await expect(pending).rejects.toThrow(
+          scenario === "missing"
+            ? "does not support metadata-only"
+            : scenario === "unknown"
+              ? "synthetic outcome unknown"
+              : "another session binding",
+        );
+      expect(lists).toBe(1);
+      expect(opens).toBe(["matching", "missing"].includes(scenario) ? 0 : 1);
+    },
+  );
 
   test("explicit browser selection rejects a storage-mode mismatch before using targets", async () => {
     const session = discoveredBrowserSession(browserSessionId, sessionId);
@@ -349,6 +675,167 @@ describe("interaction attempt tools", () => {
       identities: [{ id: identity.id }],
       attachedBrowserBridges: [{ enrollmentId: bridge.enrollmentId }],
     });
+  });
+
+  test("tab open/select observations support a fenced next action without another page read", async () => {
+    for (const operation of ["open", "select"] as const) {
+      const target = browserTarget();
+      const observation = browserObservation(target);
+      observation.focusedRef = "button-ref";
+      observation.semantic = {
+        kind: "snapshot",
+        nodeCount: 76,
+        roots: Array.from({ length: 76 }, (_, index) => ({
+          ref: index === 0 ? "button-ref" : `text-${index}`,
+          role: index === 0 ? "button" : "text",
+          name: index === 0 ? "Continue" : "Example content ".repeat(30),
+          states: index === 0 ? ["focused"] : [],
+          actions: index === 0 ? ["click"] : [],
+          children: [],
+        })),
+      };
+      // The authoritative inventory can advance independently of this snapshot.
+      const otherTarget = { ...target, id: "tab-2", title: "Other", selected: true };
+      const tabs = {
+        browserSessionId,
+        controllerGeneration: target.controllerGeneration,
+        targets: [{ ...target, selected: false }, otherTarget],
+      };
+      const calls: string[] = [];
+      let actionRequest: BrowserActionRequest | null = null;
+      const unexpectedRead = async () => {
+        throw new Error("The mutation observation already provides the page fences");
+      };
+      const definitions = createInteractionAttemptToolDefinitions({
+        transport: partialTransport({
+          openBrowserTarget: async () => {
+            calls.push("open");
+            return observation;
+          },
+          selectBrowserTarget: async () => {
+            calls.push("select");
+            return observation;
+          },
+          listBrowserTargets: async () => {
+            calls.push("list");
+            return tabs;
+          },
+          observeBrowserTarget: unexpectedRead,
+          getBrowserTargetState: unexpectedRead,
+          actInBrowser: async (_workspace, _browser, request) => {
+            calls.push("act");
+            actionRequest = request;
+            return { ...browserReceipt(request.operationId, observation), observation: null };
+          },
+        }),
+        workspaceId,
+        sessionId,
+        selectedTools: ["browser_tabs", "browser_act"],
+        permissions: ["sessions:control"],
+      });
+      const context = {
+        operationId: randomUUID(),
+        caller: { kind: "model" as const, subjectId: "model:test" },
+      };
+      const result = await definitions
+        .find((definition) => definition.modelName === "interaction__browser_tabs")!
+        .execute(
+          operation === "open"
+            ? { operation, browserSessionId, url: "https://example.test/" }
+            : { operation, browserSessionId, targetId: target.id },
+          context,
+        );
+      expect(result.isError).not.toBe(true);
+      const output = result.structuredContent as {
+        mutationObservation: BrowserObservation & {
+          agentView: { nodes: Array<{ ref: string }>; omittedNodeCount: number };
+        };
+      };
+      const snapshot = output.mutationObservation;
+      expect(result.structuredContent).toMatchObject(tabs);
+      expect(snapshot).toMatchObject({
+        observationId: observation.observationId,
+        browserSessionId,
+        target,
+        frameId: observation.frameId,
+        focusedRef: observation.focusedRef,
+        observedAt: observation.observedAt,
+        semantic: null,
+        agentView: { kind: "compact", sourceNodeCount: 76 },
+      });
+      expect(snapshot.agentView.nodes).toContainEqual(
+        expect.objectContaining({ ref: "button-ref", role: "button", name: "Continue" }),
+      );
+      expect(snapshot.agentView.nodes.length).toBeLessThanOrEqual(60);
+      expect(snapshot.agentView.omittedNodeCount).toBeGreaterThan(0);
+      expect(Buffer.byteLength(JSON.stringify(snapshot.agentView.nodes))).toBeLessThan(12_100);
+      expect(observation.semantic.kind).toBe("snapshot");
+      const actionOperationId = randomUUID();
+      const action = await definitions
+        .find((definition) => definition.modelName === "interaction__browser_act")!
+        .execute(
+          {
+            browserSessionId: snapshot.browserSessionId,
+            targetId: snapshot.target.id,
+            expectedTargetGeneration: snapshot.target.targetGeneration,
+            expectedDocumentGeneration: snapshot.target.documentGeneration,
+            expectedFrameId: snapshot.frameId,
+            view: "none",
+            action: { type: "scroll", deltaX: 0, deltaY: 100 },
+          },
+          { ...context, operationId: actionOperationId },
+        );
+      expect(action.isError).not.toBe(true);
+      expect(actionRequest).toMatchObject({
+        operationId: actionOperationId,
+        targetId: target.id,
+        expectedTargetGeneration: target.targetGeneration,
+        expectedDocumentGeneration: target.documentGeneration,
+        expectedFrameId: observation.frameId,
+        observationMode: "none",
+      });
+      expect(action.structuredContent).toEqual({
+        ...browserReceipt(actionOperationId, observation),
+        observation: null,
+      });
+      expect(calls).toEqual([operation, "list", "act"]);
+    }
+  });
+
+  test("tab list/close preserve their existing output without observing a page", async () => {
+    for (const operation of ["list", "close"] as const) {
+      const target = browserTarget();
+      const tabs = {
+        browserSessionId,
+        controllerGeneration: target.controllerGeneration,
+        targets: [target],
+      };
+      const calls: string[] = [];
+      const definitions = createInteractionAttemptToolDefinitions({
+        transport: partialTransport({
+          listBrowserTargets: async () => {
+            calls.push("list");
+            return tabs;
+          },
+          closeBrowserTarget: async () => {
+            calls.push("close");
+            return tabs;
+          },
+        }),
+        workspaceId,
+        sessionId,
+        selectedTools: ["browser_tabs"],
+        permissions: ["sessions:control"],
+      });
+      const result = await definitions[0]!.execute(
+        operation === "list"
+          ? { operation, browserSessionId }
+          : { operation, browserSessionId, targetId: target.id },
+        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+      );
+      expect(result.structuredContent).toEqual(tabs);
+      expect(calls).toEqual([operation]);
+    }
   });
 
   test("keeps model and Codemode Browser actions on the same durable operation and fences", async () => {
@@ -940,11 +1427,21 @@ describe("interaction attempt tools", () => {
     const observation = browserObservation(target);
     const image = Uint8Array.of(0xff, 0xd8, 0xff, 0xd9);
     let captures = 0;
+    let visual = false;
+    let releaseObservation: ((value: typeof observation) => void) | undefined;
     const definitions = createInteractionAttemptToolDefinitions({
       transport: partialTransport({
-        observeBrowserTarget: async () => observation,
+        observeBrowserTarget: async () =>
+          visual
+            ? await new Promise<typeof observation>((resolve) => {
+                releaseObservation = resolve;
+              })
+            : observation,
         captureBrowserTarget: async () => {
           captures += 1;
+          // The capture must start before the pending page read completes.
+          expect(releaseObservation).toBeDefined();
+          releaseObservation!(observation);
           return {
             frameId: "captured-browser-frame",
             browserSessionId,
@@ -979,20 +1476,149 @@ describe("interaction attempt tools", () => {
     );
     expect(captures).toBe(0);
     expect(semantic.content).toHaveLength(1);
-    const visual = await definitions[0]!.execute(
+    visual = true;
+    const visualResult = await definitions[0]!.execute(
       { browserSessionId, targetId: target.id, includeScreenshot: true },
       context,
     );
     expect(captures).toBe(1);
-    expect(visual.content).toEqual([
-      { type: "text", text: JSON.stringify(visual.structuredContent) },
+    expect(visualResult.content).toEqual([
+      { type: "text", text: JSON.stringify(visualResult.structuredContent) },
       { type: "image", data: Buffer.from(image).toString("base64"), mimeType: "image/jpeg" },
     ]);
-    expect(visual.structuredContent).toMatchObject({
+    expect(visualResult.structuredContent).toMatchObject({
       semantic: null,
       agentView: { kind: "compact", sourceNodeCount: 0, omittedNodeCount: 0 },
     });
   });
+
+  test("a failed page read waits for the parallel capture to settle", async () => {
+    const started = Promise.withResolvers<void>();
+    const capture =
+      Promise.withResolvers<Awaited<ReturnType<InteractionTransport["captureBrowserTarget"]>>>();
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        observeBrowserTarget: async () => {
+          throw new Error("synthetic page failure");
+        },
+        captureBrowserTarget: async () => {
+          started.resolve();
+          return await capture.promise;
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_observe"],
+      permissions: ["sessions:read"],
+    });
+    let settled = false;
+    const pending = definitions[0]!.execute(
+      { browserSessionId, targetId: "tab", includeScreenshot: true },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+    );
+    void pending.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    await started.promise;
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    capture.reject(new Error("synthetic capture failure"));
+    await expect(pending).rejects.toThrow("synthetic page failure");
+    expect(settled).toBe(true);
+  });
+
+  test("a synchronous capture refusal still settles the outstanding page read", async () => {
+    const target = browserTarget();
+    const observed = Promise.withResolvers<BrowserObservation>();
+    const started = Promise.withResolvers<void>();
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        observeBrowserTarget: () => observed.promise,
+        captureBrowserTarget: () => {
+          started.resolve();
+          throw new Error("synthetic synchronous capture refusal");
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_observe"],
+      permissions: ["sessions:read"],
+    });
+    let settled = false;
+    const pending = definitions[0]!.execute(
+      { browserSessionId, targetId: target.id, includeScreenshot: true },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+    );
+    void pending.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    await started.promise;
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    observed.resolve(browserObservation(target));
+    await expect(pending).rejects.toThrow("synthetic synchronous capture refusal");
+    expect(settled).toBe(true);
+  });
+
+  test.each([true, false])(
+    "parallel visual reads retain generation reconciliation (stable=%s)",
+    async (stable) => {
+      const target = browserTarget();
+      let reads = 0;
+      const definitions = createInteractionAttemptToolDefinitions({
+        transport: partialTransport({
+          observeBrowserTarget: async () => {
+            reads++;
+            return browserObservation({
+              ...target,
+              documentGeneration: reads === 1 ? "before" : stable ? "captured" : "after",
+            });
+          },
+          captureBrowserTarget: async () => ({
+            frameId: "captured-frame",
+            browserSessionId,
+            controllerGeneration: target.controllerGeneration,
+            targetId: target.id,
+            targetGeneration: target.targetGeneration,
+            documentGeneration: "captured",
+            sequence: 1,
+            mediaType: "image/jpeg",
+            width: 1,
+            height: 1,
+            deviceScaleFactor: 1,
+            scrollX: 0,
+            scrollY: 0,
+            capturedAt: now,
+            data: Uint8Array.of(0xff, 0xd8, 0xff, 0xd9),
+          }),
+        }),
+        workspaceId,
+        sessionId,
+        selectedTools: ["browser_observe"],
+        permissions: ["sessions:read"],
+      });
+      const pending = definitions[0]!.execute(
+        { browserSessionId, targetId: target.id, includeScreenshot: true },
+        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+      );
+      if (stable)
+        expect((await pending).structuredContent).toMatchObject({
+          target: { documentGeneration: "captured" },
+        });
+      else await expect(pending).rejects.toThrow("browser target changed");
+      expect(reads).toBe(2);
+    },
+  );
 
   test("defaults to a bounded, explicit compact browser view and preserves an exact full mode", async () => {
     const target = browserTarget();
@@ -1377,6 +2003,57 @@ describe("interaction attempt tools", () => {
     },
   );
 
+  test("a known connected-machine read refusal retains its typed control details", async () => {
+    let calls = 0;
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        captureBrowserTarget: async () => {
+          calls += 1;
+          throw new OpenGeniApiError(
+            403,
+            JSON.stringify({
+              error: {
+                code: "forbidden",
+                message: "Screen access is not enabled.",
+                retryable: false,
+                outcomeUnknown: false,
+                requestId: "api-read-42",
+                details: {
+                  interactionLayer: "connected_machine",
+                  interactionSurface: "browser",
+                  controlFailureCode: "consent_required",
+                  controlRequestId: "control-read-42",
+                },
+              },
+            }),
+            { mutation: false },
+          );
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_screenshot"],
+      permissions: ["sessions:read"],
+    });
+    const result = await definitions[0]!.execute(
+      { browserSessionId, targetId: browserTarget().id },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+    );
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent?.error).toMatchObject({
+      outcomeUnknown: false,
+      retryable: false,
+      requestId: "api-read-42",
+      details: {
+        interactionLayer: "connected_machine",
+        interactionSurface: "browser",
+        controlFailureCode: "consent_required",
+        controlRequestId: "control-read-42",
+      },
+    });
+    expect(calls).toBe(1);
+  });
+
   test("does not downgrade a failed browser mutation to a known read failure", async () => {
     const failure = new OpenGeniApiError(504, "mutation failed", { outcomeUnknown: false });
     let calls = 0;
@@ -1449,12 +2126,17 @@ describe("interaction attempt tools", () => {
 
   test("publishes every declared atomic name only once", () => {
     const definitions = createInteractionAttemptToolDefinitions({
-      transport: unusedTransport(),
+      transport: partialTransport({
+        callNativeComputerTool: async () => {
+          throw new Error("must not call during catalog preparation");
+        },
+      }),
       workspaceId,
       sessionId,
     });
     expect(definitions.map((definition) => definition.identity.toolName)).toEqual([
       ...INTERACTION_ATTEMPT_TOOL_NAMES,
+      ...CUA_DESKTOP_TOOLS.map((tool) => "cua_" + tool.name),
     ]);
     expect(new Set(definitions.map((definition) => definition.modelName)).size).toBe(
       definitions.length,

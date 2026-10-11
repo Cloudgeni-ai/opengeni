@@ -1,3 +1,5 @@
+import { CuaNativeTools } from "./native-tools";
+import type { ComputerNativeCallRequest } from "@opengeni/contracts";
 import { createHash, randomUUID } from "node:crypto";
 import type { ComputerSessionCapabilities } from "@opengeni/contracts";
 import {
@@ -14,18 +16,26 @@ import { callDesktop, Windows, WindowState, type CuaDesktopRuntime } from "./wir
 import { locate, projectElements } from "./projection";
 
 type Target = { native: ComputerBackendTarget; pid: number; windowId: number };
-type Frame = { targetId: string; width: number; height: number };
+type Frame = {
+  targetId: string;
+  width: number;
+  height: number;
+  windowWidth: number;
+  windowHeight: number;
+};
 type Operation = {
   name: "click" | "drag" | "scroll" | "set_value" | "type_text" | "press_key";
   args: Record<string, unknown>;
 };
 
-/** CUA owns OS delivery. OpenGeni owns authority, receipts and public media.
+/** CUA owns OS delivery. Opengeni owns authority, receipts and public media.
  * Every call is serialized, including preview captures and shutdown. */
 export class CuaComputerBackend implements ComputerBackend {
-  readonly identity: { platform: "macos" | "windows"; adapterId: string };
+  readonly identity: { platform: "macos" | "windows" | "linux"; adapterId: string };
   readonly initialCapabilities: ComputerSessionCapabilities;
   private readonly session = `opengeni-${randomUUID()}`;
+  private readonly nativeSession = `opengeni-${randomUUID()}`;
+  private nativeSessionStarted = false;
   private readonly targetsById = new Map<string, Target>();
   private readonly observations = new Map<string, ComputerBackendObservation>();
   private readonly frames = new Map<string, Frame>();
@@ -33,11 +43,13 @@ export class CuaComputerBackend implements ComputerBackend {
   private closing = false;
   private closePromise: Promise<void> | null = null;
   private pending = 0;
+  private nativeTools: CuaNativeTools | null = null;
+  private nativeObservations = false;
 
   private constructor(
     private readonly runtime: CuaDesktopRuntime,
     permissions: { accessibility: boolean; screen_recording: boolean },
-    platform: "macos" | "windows",
+    platform: "macos" | "windows" | "linux",
   ) {
     this.identity = { platform, adapterId: `opengeni.cua.${platform}.v1` };
     this.initialCapabilities = {
@@ -48,8 +60,8 @@ export class CuaComputerBackend implements ComputerBackend {
       screenCapture: false,
       semanticActions: permissions.accessibility,
       pointerInput:
-        platform === "macos" && permissions.accessibility && permissions.screen_recording,
-      keyboardInput: platform === "macos" && permissions.accessibility,
+        platform !== "windows" && permissions.accessibility && permissions.screen_recording,
+      keyboardInput: platform !== "windows" && permissions.accessibility,
       clipboard: false,
       backgroundActions: permissions.accessibility,
       backgroundInput: platform === "macos" && permissions.accessibility,
@@ -59,7 +71,7 @@ export class CuaComputerBackend implements ComputerBackend {
 
   static async open(
     runtime: CuaDesktopRuntime,
-    platform: "macos" | "windows" = "macos",
+    platform: "macos" | "windows" | "linux" = "macos",
   ): Promise<CuaComputerBackend> {
     try {
       const permissions = await readPermissions(runtime, platform);
@@ -72,6 +84,35 @@ export class CuaComputerBackend implements ComputerBackend {
     }
   }
 
+  validateNative(request: ComputerNativeCallRequest): Promise<void> {
+    return this.run(async () => {
+      this.nativeTools ??= new CuaNativeTools(
+        this.runtime,
+        this.nativeSession,
+        this.identity.platform,
+      );
+      await this.nativeTools.validate(request);
+    });
+  }
+  callNative(request: ComputerNativeCallRequest) {
+    return this.run(async () => {
+      this.nativeTools ??= new CuaNativeTools(
+        this.runtime,
+        this.nativeSession,
+        this.identity.platform,
+      );
+      await this.nativeTools.validate(request);
+      // CUA reclaims idle sessions independently of ComputerSession. Reassert
+      // the same owned label before dispatch; active snapshots stay intact and
+      // revived sessions reject their expired tokens through CUA's own checks.
+      await callDesktop(this.runtime, "start_session", { session: this.nativeSession });
+      this.nativeSessionStarted = true;
+      this.nativeObservations = true;
+      this.observations.clear();
+      return await this.nativeTools.call(request);
+    });
+  }
+
   capabilities(): Promise<ComputerSessionCapabilities> {
     return this.run(async () => {
       const permissions = await readPermissions(this.runtime, this.identity.platform);
@@ -80,11 +121,14 @@ export class CuaComputerBackend implements ComputerBackend {
         ...this.initialCapabilities,
         semanticObservation: permissions.accessibility,
         semanticActions: permissions.accessibility,
-        keyboardInput: macos && permissions.accessibility,
+        keyboardInput: this.identity.platform !== "windows" && permissions.accessibility,
         backgroundActions: permissions.accessibility,
         backgroundInput: macos && permissions.accessibility,
         windowCapture: permissions.screen_recording,
-        pointerInput: macos && permissions.accessibility && permissions.screen_recording,
+        pointerInput:
+          this.identity.platform !== "windows" &&
+          permissions.accessibility &&
+          permissions.screen_recording,
       };
     });
   }
@@ -128,6 +172,25 @@ export class CuaComputerBackend implements ComputerBackend {
 
   dispatch(command: ComputerBackendActionCommand): Promise<ComputerBackendObservation | null> {
     return this.run(async () => {
+      // Passive previews never change the native action frame. Human pointer
+      // input obtains its own fresh frame under the same serialized queue.
+      // CUA then refuses stale native pixel/zoom input until the agent re-reads.
+      if (command.action.type === "pointer") {
+        await this.operations(command);
+        const source = this.frames.get(command.action.frameId)!;
+        const fresh = await this.captureTarget(command.targetId, undefined, true);
+        const current = this.frames.get(fresh.frameId)!;
+        if (
+          Math.abs(source.windowWidth - current.windowWidth) >= 0.5 ||
+          Math.abs(source.windowHeight - current.windowHeight) >= 0.5
+        )
+          throw new ComputerBackendError(
+            "frame_stale",
+            "Window resized; read a fresh frame before input",
+            false,
+            false,
+          );
+      }
       const operations = await this.operations(command);
       this.observations.delete(command.targetId);
       for (let index = 0; index < operations.length; index++) {
@@ -160,6 +223,8 @@ export class CuaComputerBackend implements ComputerBackend {
     this.closing = true;
     this.closePromise = this.tail.then(async () => {
       try {
+        if (this.nativeSessionStarted)
+          await callDesktop(this.runtime, "end_session", { session: this.nativeSession });
         await callDesktop(this.runtime, "end_session", { session: this.session });
       } finally {
         this.observations.clear();
@@ -181,9 +246,20 @@ export class CuaComputerBackend implements ComputerBackend {
         new ComputerBackendError("unavailable", "CUA backend queue is full", true, false),
       );
     this.pending++;
-    const result = this.tail.then(operation).finally(() => {
-      this.pending--;
-    });
+    const result = this.tail
+      .then(async () => {
+        const { data } = await callDesktop(this.runtime, "start_session", {
+          session: this.session,
+        });
+        if (data.revived === true) {
+          this.observations.clear();
+          this.frames.clear();
+        }
+        return await operation();
+      })
+      .finally(() => {
+        this.pending--;
+      });
     this.tail = result.catch(() => undefined);
     return result;
   }
@@ -244,10 +320,30 @@ export class CuaComputerBackend implements ComputerBackend {
       ![...this.frames.values()].some((frame) => frame.targetId === targetId)
     )
       await this.captureTarget(targetId);
+    // Viewer polling must never retire a native CUA element-token snapshot.
+    // Once native tools own observations, the legacy viewer receives geometry
+    // and pixels only. The native result carries its exact tree unchanged.
+    if (this.nativeObservations) {
+      const observation: ComputerBackendObservation = {
+        observationId: this.session + ":viewer",
+        target: target.native,
+        frameId:
+          [...this.frames.entries()]
+            .reverse()
+            .find(([, frame]) => frame.targetId === targetId)?.[0] ?? null,
+        roots: [],
+        nodeCount: 0,
+        focusedRef: null,
+        changedRegions: [],
+      };
+      this.observations.set(targetId, observation);
+      return observation;
+    }
     const { data } = await callDesktop(this.runtime, "get_window_state", {
       ...this.args(target),
       include_screenshot: false,
       include_accessibility_tree: true,
+      ...(this.identity.platform !== "windows" ? { tree_format: "elements" } : {}),
       max_elements: 2000,
       max_depth: 25,
     });
@@ -282,6 +378,7 @@ export class CuaComputerBackend implements ComputerBackend {
   private async captureTarget(
     targetId: string,
     options?: ComputerBackendCaptureOptions,
+    actionCapture = false,
   ): Promise<ComputerBackendFrame> {
     const target = await this.target(targetId);
     const bounds = target.native.bounds!;
@@ -301,14 +398,15 @@ export class CuaComputerBackend implements ComputerBackend {
       include_accessibility_tree: false,
       include_screenshot: true,
       max_image_dimension: longEdge,
+      ...(this.identity.platform !== "windows" && !actionCapture ? { display_only: true } : {}),
     });
     const state = WindowState.parse(data);
     const image = result.images[0];
     if (
       state.pid !== target.pid ||
       state.window_id !== target.windowId ||
-      !state.capture_id ||
-      (this.identity.platform === "macos"
+      ((actionCapture || this.identity.platform === "windows") && !state.capture_id) ||
+      (this.identity.platform !== "windows"
         ? state.screenshot_frame_valid !== true
         : state.screenshot_frame_valid === false || data.screenshot_error !== undefined) ||
       !state.screenshot_width ||
@@ -347,11 +445,13 @@ export class CuaComputerBackend implements ComputerBackend {
         false,
         false,
       );
-    const frameId = `${this.session}:${state.capture_id}`;
+    const frameId = `${this.session}:${state.capture_id ?? randomUUID()}`;
     this.frames.set(frameId, {
       targetId,
       width: state.screenshot_width,
       height: state.screenshot_height,
+      windowWidth: state.window_bounds?.width ?? bounds.width,
+      windowHeight: state.window_bounds?.height ?? bounds.height,
     });
     while (this.frames.size > 32) this.frames.delete(this.frames.keys().next().value!);
     return {
@@ -367,6 +467,9 @@ export class CuaComputerBackend implements ComputerBackend {
   }
 
   private async operations(command: ComputerBackendActionCommand): Promise<Operation[]> {
+    if (command.action.type === "pointer" && command.action.clickCount === 2) {
+      throw unsupported("CUA click continuation is unavailable");
+    }
     const target = await this.target(command.targetId);
     if (target.native.targetGeneration !== command.expectedTargetGeneration)
       throw new ComputerBackendError("target_stale", "CUA target generation changed", false, false);
@@ -410,7 +513,12 @@ export class CuaComputerBackend implements ComputerBackend {
         .find((entry) => entry.targetId === command.targetId)!;
       const x = (action.x * latest.width) / frame.width,
         y = (action.y * latest.height) / frame.height;
-      const delivery = { ...args, delivery_mode: "background" };
+      // Linux owns an isolated desktop: viewer input may focus within that seat.
+      // Attached physical desktops retain strictly background delivery.
+      const delivery = {
+        ...args,
+        delivery_mode: this.identity.platform === "linux" ? "foreground" : "background",
+      };
       if (action.action === "click" || action.action === "double_click")
         return [
           {
@@ -558,15 +666,31 @@ export class CuaComputerBackend implements ComputerBackend {
       return [
         {
           name: "type_text",
-          args: { ...args, ...focused, text: action.value, delivery_mode: "background" },
+          args: {
+            ...args,
+            ...focused,
+            text: action.value,
+            delivery_mode: this.identity.platform === "linux" ? "foreground" : "background",
+          },
         },
       ];
     const keys = action.value.split("+").map((key) => key.toLowerCase());
     const key = keys.pop()!;
-    const modifiers = keys.map(
-      (modifier) => ({ meta: "cmd", control: "ctrl", alt: "option" })[modifier] ?? modifier,
-    );
-    if (modifiers.some((modifier) => !["cmd", "ctrl", "option", "shift", "fn"].includes(modifier)))
+    const modifierAliases: Record<string, string> =
+      this.identity.platform === "linux"
+        ? { meta: "super", control: "ctrl", option: "alt" }
+        : { meta: "cmd", control: "ctrl", alt: "option" };
+    const modifiers = keys.map((modifier) => modifierAliases[modifier] ?? modifier);
+    if (
+      modifiers.some(
+        (modifier) =>
+          !(
+            this.identity.platform === "linux"
+              ? ["super", "ctrl", "alt", "shift"]
+              : ["cmd", "ctrl", "option", "shift", "fn"]
+          ).includes(modifier),
+      )
+    )
       throw unsupported("CUA keyboard modifier is unsupported");
     return [
       {
@@ -576,28 +700,36 @@ export class CuaComputerBackend implements ComputerBackend {
           ...focused,
           key: key === "enter" ? "return" : key,
           modifiers,
-          delivery_mode: "background",
+          delivery_mode: this.identity.platform === "linux" ? "foreground" : "background",
         },
       },
     ];
   }
 }
 
-async function readPermissions(runtime: CuaDesktopRuntime, platform: "macos" | "windows") {
+async function readPermissions(
+  runtime: CuaDesktopRuntime,
+  platform: "macos" | "windows" | "linux",
+) {
   const { data } = await callDesktop(
     runtime,
     "check_permissions",
-    platform === "windows" ? {} : { prompt: false, probe_direct_capture: false },
+    platform !== "macos" ? {} : { prompt: false, probe_direct_capture: false },
   );
   return {
     accessibility:
       platform === "windows"
         ? data.uia === true && data.post_message === true
-        : data.accessibility === true,
+        : platform === "linux"
+          ? data.atspi === true
+          : data.accessibility === true,
     // Windows has no Screen Recording grant. Interactive-seat admission is
     // checked before opening the SDK; each target capture still must prove its
     // native capture ID, exact window identity, PNG dimensions and bytes.
-    screen_recording: platform === "windows" || data.screen_recording === true,
+    screen_recording:
+      platform === "linux"
+        ? data.x11 === true
+        : platform === "windows" || data.screen_recording === true,
   };
 }
 

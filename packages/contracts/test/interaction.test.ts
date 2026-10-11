@@ -110,6 +110,16 @@ describe("interaction contracts", () => {
     expect(
       ComputerSessionCapabilities.safeParse({ ...native, backgroundInput: "true" }).success,
     ).toBe(false);
+    expect(
+      ComputerSessionCapabilities.parse({ ...native, pointerClickContinuation: true }),
+    ).toEqual({
+      ...native,
+      pointerClickContinuation: true,
+    });
+    expect(
+      ComputerSessionCapabilities.safeParse({ ...native, pointerClickContinuation: "true" })
+        .success,
+    ).toBe(false);
   });
 
   test("keeps public actions actor-free and defaults new browsers to headless", () => {
@@ -334,6 +344,35 @@ describe("interaction contracts", () => {
       },
     };
     expect(ComputerActionRequest.parse(pointer)).toEqual(pointer);
+    for (const clickCount of [1, 2] as const) {
+      const counted = {
+        ...pointer,
+        action: {
+          ...pointer.action,
+          clickCount,
+          ...(clickCount === 2
+            ? { continuationOfOperationId: "22222222-2222-4222-8222-222222222222" }
+            : {}),
+        },
+      };
+      expect(ComputerActionRequest.parse(counted)).toEqual(counted);
+    }
+    for (const change of [
+      { clickCount: 0 },
+      { clickCount: 3 },
+      { clickCount: 2 },
+      { clickCount: 1, continuationOfOperationId: "22222222-2222-4222-8222-222222222222" },
+      { clickCount: 2, continuationOfOperationId: "not-an-operation" },
+      { action: "double_click", clickCount: 2 },
+      { action: "move", clickCount: 1 },
+      { action: "drag", clickCount: 2, endX: 90, endY: 50 },
+      { action: "scroll", clickCount: 2, deltaY: 100 },
+    ]) {
+      expect(
+        ComputerActionRequest.safeParse({ ...pointer, action: { ...pointer.action, ...change } })
+          .success,
+      ).toBe(false);
+    }
     expect(
       ComputerActionRequest.safeParse({
         ...pointer,

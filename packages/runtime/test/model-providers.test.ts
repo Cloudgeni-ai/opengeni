@@ -1,5 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { OpenAIChatCompletionsModel, OpenAIResponsesModel, RunContext } from "@openai/agents";
+import {
+  Agent,
+  Runner,
+  toolSearchTool,
+  webSearchTool,
+  OpenAIChatCompletionsModel,
+  OpenAIResponsesModel,
+  RunContext,
+} from "@openai/agents";
 import { getOrCreateTrace } from "@openai/agents-core";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
@@ -52,6 +60,178 @@ import {
   XaiSubscriptionUnavailableError,
 } from "../src/index";
 import { ReplayableJsonOpenAI, requestBodyText } from "../src/replayable-json-body";
+import { azureModelRequestPolicy } from "../src/model-provider-request-policy";
+import { callModelInputFilterForSettings } from "../src/model-input";
+import { hostedSearchFixture } from "./fixtures/hosted-search";
+
+describe("Azure hosted-search evidence continuity", () => {
+  test("merges supported includes copy-on-write only for attached Azure native search", () => {
+    for (const effort of [undefined, "none", "", "medium"]) {
+      const include = Object.freeze(["reasoning.encrypted_content"]);
+      const body = Object.freeze({
+        input: "Find docs",
+        tools: Object.freeze([{ type: "web_search" }]),
+        reasoning: Object.freeze({ effort }),
+        include,
+      });
+      const projected = azureModelRequestPolicy({ body })!.body!;
+      expect(projected.include).toEqual([
+        "reasoning.encrypted_content",
+        "web_search_call.action.sources",
+        ...(effort === "medium" ? ["web_search_call.results"] : []),
+      ]);
+      expect(azureModelRequestPolicy({ body: projected })).toBeUndefined();
+      expect(body.include).toBe(include);
+      const provider = {
+        id: "fixture",
+        label: "Fixture",
+        kind: "api-key",
+        api: "responses",
+        builtin: false,
+        wireProfile: "openai",
+      } as const;
+      expect(modelRequestPolicyForProvider(provider)({ path: "/responses", body })).toBeUndefined();
+    }
+    for (const tools of [[], [{ type: "function", name: "web_search" }]]) {
+      expect(
+        azureModelRequestPolicy({ body: { input: [], tools, reasoning: { effort: "high" } } }),
+      ).toBeUndefined();
+    }
+    const computer = Object.freeze({ type: "computer_call", action: { type: "screenshot" } });
+    const input = Object.freeze([computer]);
+    const projected = azureModelRequestPolicy({
+      body: { input, tools: [{ type: "web_search_preview" }] },
+    })!.body!;
+    expect(projected.include).toEqual(["web_search_call.action.sources"]);
+    expect(projected.input).toEqual([{ type: "computer_call", actions: [{ type: "screenshot" }] }]);
+    expect(input[0]).toBe(computer);
+    expect(computer).toHaveProperty("action");
+  });
+
+  test("pinned SDK search -> client tool search -> next request exposes snippets without stored IDs, including persisted replay", async () => {
+    const requests: Record<string, any>[] = [];
+    const source = hostedSearchFixture();
+    const provider: ResolvedModelProvider = {
+      id: "azure-search-fixture",
+      label: "Fixture",
+      kind: "api-key",
+      api: "responses",
+      wireProfile: "azure-openai",
+      builtin: false,
+      baseUrl: "https://example.test/v1",
+      apiKey: "fixture",
+    };
+    const client = new ReplayableJsonOpenAI(
+      {
+        apiKey: "fixture",
+        baseURL: provider.baseUrl,
+        maxRetries: 0,
+        fetch: (async (_url, init) => {
+          const body = JSON.parse(await requestBodyText(init?.body));
+          requests.push(body);
+          const first = requests.length === 1;
+          const evidence = body.input.find(
+            (item: any) =>
+              item.type === "message" &&
+              item.role === "assistant" &&
+              JSON.stringify(item.content).includes("exactly seven colors"),
+          );
+          return Response.json({
+            id: `resp_${requests.length}`,
+            object: "response",
+            status: "completed",
+            output: first
+              ? [
+                  { ...source.providerData, status: "completed" },
+                  {
+                    id: "ts_fixture",
+                    type: "tool_search_call",
+                    status: "completed",
+                    call_id: "call_fixture",
+                    execution: "client",
+                    arguments: { query: "checkpoint" },
+                  },
+                ]
+              : [
+                  {
+                    id: "msg_fixture",
+                    type: "message",
+                    role: "assistant",
+                    status: "completed",
+                    content: [
+                      {
+                        type: "output_text",
+                        text: evidence
+                          ? "Seven colors: https://example.test/docs"
+                          : "No visible evidence",
+                        annotations: [],
+                      },
+                    ],
+                  },
+                ],
+            usage: { input_tokens: 100, output_tokens: 30, total_tokens: 130 },
+          });
+        }) as typeof fetch,
+      },
+      { modelRequestPolicy: modelRequestPolicyForProvider(provider) },
+    );
+    let toolExecutions = 0;
+    const agent = new Agent({
+      name: "Fixture",
+      model: new OpenGeniResponsesModel(client, "reasoning-fixture", provider),
+      modelSettings: {
+        reasoning: { effort: "medium" },
+        providerData: { include: ["reasoning.encrypted_content"] },
+      },
+      tools: [
+        webSearchTool(),
+        toolSearchTool({
+          execution: "client",
+          execute: (async () => {
+            toolExecutions += 1;
+            return [];
+          }) as never,
+        }),
+      ],
+    });
+    const runner = () =>
+      new Runner({
+        tracingDisabled: true,
+        callModelInputFilter: callModelInputFilterForSettings(testSettings()),
+      });
+    const result = await runner().run(agent, "Find synthetic docs then discover a tool", {
+      maxTurns: 3,
+    });
+    expect(result.finalOutput).toBe("Seven colors: https://example.test/docs");
+    expect(toolExecutions).toBe(1);
+    expect(requests).toHaveLength(2);
+    expect(requests[0]!.include).toEqual([
+      "reasoning.encrypted_content",
+      "web_search_call.action.sources",
+      "web_search_call.results",
+    ]);
+    const second = requests[1]!.input;
+    expect(second[1]).toMatchObject({ type: "message", role: "assistant" });
+    expect(JSON.stringify(second[1].content)).toContain("exactly seven colors");
+    expect(JSON.stringify(second)).not.toContain("ws_fixture");
+    expect(
+      second
+        .filter((item: any) => item.type?.startsWith("tool_search"))
+        .map((item: any) => item.call_id),
+    ).toEqual(["call_fixture", "call_fixture"]);
+    const persisted = JSON.parse(
+      JSON.stringify(result.history.map(canonicalizePersistedHistoryItem)),
+    );
+    const canonicalSearch = persisted.find((item: any) => item.type === "hosted_tool_call");
+    expect(canonicalSearch.providerData.results).toEqual(source.providerData.results);
+    const before = JSON.stringify(persisted);
+    await runner().run(agent, persisted);
+    expect(JSON.stringify(requests[2]!.input)).toContain("exactly seven colors");
+    expect(JSON.stringify(requests[2]!.input)).not.toContain("ws_fixture");
+    expect(JSON.stringify(persisted)).toBe(before);
+    expect(toolExecutions).toBe(1);
+  });
+});
 
 describe("Vercel AI Gateway request fence", () => {
   test("replaces caller routing for both Gateway billing paths", async () => {
@@ -468,7 +648,7 @@ describe("pinned Responses large-output boundary", () => {
     }
     expect(output.at(-1)).toEqual({
       type: "input_text",
-      text: expect.stringMatching(/^\[OpenGeni omitted \d+ structured array items\]$/),
+      text: expect.stringMatching(/^\[Opengeni omitted \d+ structured array items\]$/),
     });
   });
 
@@ -491,7 +671,7 @@ describe("pinned Responses large-output boundary", () => {
     expect(wire.output).toEqual([
       {
         type: "input_text",
-        text: expect.stringMatching(/^\[OpenGeni omitted file payload: \d+ bytes exceeded/),
+        text: expect.stringMatching(/^\[Opengeni omitted file payload: \d+ bytes exceeded/),
       },
     ]);
     expect(JSON.stringify(wire.output)).not.toContain("file_url");

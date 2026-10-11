@@ -69,7 +69,7 @@ function nextMinute(iso: string): string {
 }
 
 /** Public blocker codes are stable; UI copy must not expose persistence jargon.
- * A timed wait never implies OpenGeni proceeds by itself: only Retry or a new
+ * A timed wait never implies Opengeni proceeds by itself: only Retry or a new
  * message decides again, so the copy names when that becomes possible. */
 export function sandboxRecoveryBlocker(reason: string, availableAt?: string | null): string {
   const message = sandboxRecoveryBlockerMessage(reason);
@@ -102,7 +102,7 @@ function sandboxRecoveryBlockerMessage(reason: string): string {
     provider_lifetime_unexpired:
       "No checkpoint can be restored automatically. Retry can continue with an empty workspace once the lost sandbox's provider lifetime has ended.",
     automatic_recovery_pending:
-      "OpenGeni is already recovering this sandbox automatically. Retry to continue.",
+      "Opengeni is already recovering this sandbox automatically. Retry to continue.",
     retry_tool_outcome_unresolved:
       "A tool call in the failed turn has no recorded outcome, so Retry cannot safely reopen it. Send a new message to continue; the lost sandbox then recovers automatically.",
     checkpoint_unavailable: "No recoverable checkpoint is available.",
@@ -131,7 +131,7 @@ function sandboxRecoveryBlockerMessage(reason: string): string {
 /** What an automatic Retry will do after the managed sandbox was lost. */
 export function automaticRecoveryRetryNotice(projection: SandboxRecoveryProjection): string {
   if (projection.automaticLane === "fresh_workspace") {
-    return "Retry will continue with an empty workspace. OpenGeni cannot restore the previous sandbox files automatically.";
+    return "Retry will continue with an empty workspace. Opengeni cannot restore the previous sandbox files automatically.";
   }
   const capturedAt = projection.checkpoint?.capturedAt;
   return capturedAt

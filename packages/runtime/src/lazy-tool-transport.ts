@@ -10,8 +10,13 @@ import {
   type StreamEvent,
   type Tool,
 } from "@openai/agents";
-import { isSearchableMcpFunctionTool, searchToolPool } from "./codex-tool-search";
+import {
+  isHarnessControlMcpFunctionTool,
+  isSearchableMcpFunctionTool,
+  searchToolPool,
+} from "./codex-tool-search";
 import { MCP_MAX_TOOL_SEARCH_DISCLOSURE_BYTES } from "./mcp-network";
+import { restoreDeferredToolArgumentTypes } from "./deferred-tool-arguments";
 import {
   beforeModelRequest,
   modelResponseSettlement,
@@ -46,6 +51,10 @@ const ALWAYS_VISIBLE_BASE_TOOL_NAMES: ReadonlySet<string> = new Set([
   // enable it; hiding it behind search would spend a model round trip to find
   // the tool that exists to save round trips.
   "code_search",
+  // Provider web search, offered where the model has no hosted search. Hosted
+  // search is never deferred, so neither is its replacement.
+  "web_search",
+  "web_fetch",
 ]);
 const DISPATCH_MARKER_KEY = "opengeni.lazy_dispatch.v1";
 const SEARCH_MARKER_KEY = "opengeni.lazy_search.v1";
@@ -326,6 +335,10 @@ export class LazyToolRuntime {
       this.functionTools.set(tool.name, tool);
       if (ALWAYS_VISIBLE_BASE_TOOL_NAMES.has(tool.name)) continue;
       if (this.preparationIndependentToolNames.has(tool.name)) continue;
+      // Exact first-party harness control tools (goal lifecycle, command
+      // polling, wait_for_input) stay visible on every transport when the
+      // authorized opengeni server listed them; its other tools stay deferred.
+      if (isHarnessControlMcpFunctionTool(tool, this.mcpServerIds, modelServerIds)) continue;
       // Origin, not transport: deferred MCP plus every non-MCP function tool
       // outside the base set. ToolRef.eager still decides the MCP arm.
       const lazy =
@@ -367,6 +380,11 @@ export class LazyToolRuntime {
 
   resolveFunctionTool(name: string): Tool | undefined {
     return this.functionTools.get(name);
+  }
+
+  /** True for a tool disclosed through search rather than sent on every request. */
+  isDeferredFunctionTool(name: string): boolean {
+    return this.searchableToolNames.has(name);
   }
 
   inspectSearchableTools(): ReadonlyArray<{
@@ -624,8 +642,10 @@ export function lazyToolRuntimeForAgent(agent: object): LazyToolRuntime | undefi
  * Install native OpenAI/Azure or generic progressive disclosure on an agent.
  * Deferred schemas stay off the first-request tool block. A remembered raw
  * name binds through resolveMissingFunctionTool after the catalog is ready.
- * Classification is origin, not transport: the always-visible base set and
- * eager MCP tools stay in the first request; everything else is searchable.
+ * Classification is origin, not transport: the always-visible base set, eager
+ * MCP tools, and the first-party harness control tools (goal lifecycle,
+ * command polling, wait_for_input) stay in the first request when listed;
+ * everything else is searchable.
  * Generic dispatch adds stable ordinary tool_search/tool_invoke schemas.
  */
 export function installLazyToolRuntime(
@@ -800,7 +820,7 @@ function transformGenericDispatchCall(candidate: unknown, runtime: LazyToolRunti
   if (candidate.name === TOOL_SEARCH_NAME && typeof candidate.arguments === "string") {
     const providerData = isRecord(candidate.providerData) ? candidate.providerData : {};
     if (SEARCH_MARKER_KEY in providerData) {
-      throw new Error("Provider function call collided with OpenGeni lazy-search metadata");
+      throw new Error("Provider function call collided with Opengeni lazy-search metadata");
     }
     return [
       {
@@ -816,7 +836,7 @@ function transformGenericDispatchCall(candidate: unknown, runtime: LazyToolRunti
     ];
   }
   if (candidate.name !== TOOL_INVOKE_NAME || typeof candidate.arguments !== "string") {
-    return [candidate];
+    return [restoreDirectDeferredCallArgumentTypes(candidate, runtime)];
   }
   const dispatch = parseJsonObject(candidate.arguments);
   const name = dispatch && typeof dispatch.name === "string" ? dispatch.name : null;
@@ -827,7 +847,7 @@ function transformGenericDispatchCall(candidate: unknown, runtime: LazyToolRunti
   }
   const providerData = isRecord(candidate.providerData) ? candidate.providerData : {};
   if (DISPATCH_MARKER_KEY in providerData) {
-    throw new Error("Provider function call collided with OpenGeni lazy-dispatch metadata");
+    throw new Error("Provider function call collided with Opengeni lazy-dispatch metadata");
   }
   return [
     {
@@ -843,6 +863,25 @@ function transformGenericDispatchCall(candidate: unknown, runtime: LazyToolRunti
       },
     } as unknown as FunctionCallItem,
   ];
+}
+
+/**
+ * A direct call by exact name to a search-disclosed tool reaches the provider
+ * without that tool's schema, so its scalar, array and object values can
+ * arrive as strings. Restore the declared types before Runner dispatches it.
+ */
+function restoreDirectDeferredCallArgumentTypes(
+  candidate: Record<string, unknown>,
+  runtime: LazyToolRuntime,
+): Record<string, unknown> {
+  if (typeof candidate.name !== "string" || typeof candidate.arguments !== "string") {
+    return candidate;
+  }
+  if (!runtime.isDeferredFunctionTool(candidate.name)) return candidate;
+  const tool = runtime.resolveFunctionTool(candidate.name);
+  if (!tool || !isFunctionTool(tool)) return candidate;
+  const restored = restoreDeferredToolArgumentTypes(candidate.arguments, tool.parameters);
+  return restored === null ? candidate : { ...candidate, arguments: restored };
 }
 
 export function transformGenericDispatchResponse(

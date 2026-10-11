@@ -1,8 +1,15 @@
 import type { WorkspaceModelAccessPolicy, WorkspaceModelCatalogModel } from "@opengeni/sdk";
-import { PlusIcon, SearchIcon, XIcon } from "lucide-react";
-import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
+import { PlusIcon, XIcon } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
+import {
+  filterModelGroups,
+  groupModelsByProvider,
+  ModelGroup,
+  MODEL_LIST_SEARCH_AT,
+  ModelSearchField,
+} from "@/components/models/model-list";
 import { ModelsFormPage } from "@/components/models/models-ui";
 import { RowButton } from "@/components/ui/page-actions";
 import { Button } from "@/components/ui/button";
@@ -17,13 +24,24 @@ import {
   SettingRowSkeleton,
 } from "@/components/ui/setting-row";
 import { Switch } from "@/components/ui/switch";
+import { userErrorText } from "@/lib/api-error";
+import { modelUsesCredits, payerSummaryForModel } from "@/lib/model-policy";
 import { cn } from "@/lib/utils";
 import { useAppContext } from "@/context";
+import type { OrganizationModelDefaultsState } from "@/components/models/use-organization-model-defaults";
 
 /* ----------------------------------------------------------------------------
-   Allowed models: the one workspace-wide limit on which models new work may
-   use, on top of every connected account. A summary row on the Models page
-   opens a form page to change it.
+   Allowed models: the one limit on which models new work may use, on top of
+   every connected account. The organization sets it once for every
+   workspace; a workspace follows that until its admins give it its own list.
+   A summary row on the Models page opens a form page to change it.
+
+   Use Opengeni credits: a separate workspace switch (the `allowCreditModels`
+   workspace setting). Off blocks every model paid with Opengeni credits,
+   including credit models added later, without turning the allowlist into an
+   exact list (which would also block subscription models connected later) and
+   whichever list the workspace follows. It saves immediately from the Models
+   page; the Allowed models form never sends it.
    -------------------------------------------------------------------------- */
 
 export type ModelAccessPolicyDraft = {
@@ -31,18 +49,47 @@ export type ModelAccessPolicyDraft = {
   selectedModelIds: Set<string>;
   originalPolicy: WorkspaceModelAccessPolicy;
   policyVerdictComplete: boolean;
+  /** A workspace that follows its organization's list rather than its own. */
+  follow: boolean;
+  /** The saved credit switch. Read-only here: only the switch row changes it. */
+  allowCreditModels: boolean;
+  /**
+   * The catalog's `policyAllowed` verdicts come from a workspace with credits
+   * off, so they mix the credit block into the allowlist's own verdict.
+   */
+  verdictBlocksCredits: boolean;
 };
+
+/** Whose list a page edits: one workspace's, or the organization's default. */
+export type ModelPolicyScope =
+  | { kind: "workspace"; workspaceId: string }
+  | {
+      kind: "organization";
+      /** The workspace whose catalog lists the models to choose from. */
+      workspaceId: string;
+      defaults: OrganizationModelDefaultsState;
+    };
+
+const UNRESTRICTED = { allowedProviders: null, allowedModels: null } as const;
 
 export function modelAccessPolicyDraft(
   policy: WorkspaceModelAccessPolicy,
   models: readonly WorkspaceModelCatalogModel[],
+  verdictBlocksCredits = policy.allowCreditModels === false,
 ): ModelAccessPolicyDraft {
+  // Older servers don't say where a policy comes from; treat it as the workspace's own.
+  const follow = policy.source === "organization" || policy.source === "none";
+  // Older servers omit the switch, and the organization's own list has none: credits stay allowed.
+  const allowCreditModels = policy.allowCreditModels !== false;
   if (policy.allowedProviders === null && policy.allowedModels === null) {
     return {
       mode: "unrestricted",
       selectedModelIds: new Set(models.map((model) => model.id)),
       originalPolicy: policy,
       policyVerdictComplete: true,
+      follow,
+      allowCreditModels,
+      verdictBlocksCredits,
     };
   }
 
@@ -60,6 +107,9 @@ export function modelAccessPolicyDraft(
       selectedModelIds,
       originalPolicy: policy,
       policyVerdictComplete,
+      follow,
+      allowCreditModels,
+      verdictBlocksCredits,
     };
   }
 
@@ -68,13 +118,40 @@ export function modelAccessPolicyDraft(
     selectedModelIds: new Set(policy.allowedModels ?? []),
     originalPolicy: policy,
     policyVerdictComplete: true,
+    follow,
+    allowCreditModels,
+    verdictBlocksCredits,
+  };
+}
+
+/** The organization's list a following workspace shows, as a draft. */
+function organizationDraft(
+  saved: ModelAccessPolicyDraft,
+  models: readonly WorkspaceModelCatalogModel[],
+): ModelAccessPolicyDraft {
+  const organization = saved.originalPolicy.organization ?? UNRESTRICTED;
+  return {
+    ...modelAccessPolicyDraft(
+      { ...organization, source: "organization", organization: saved.originalPolicy.organization },
+      models,
+    ),
+    originalPolicy: saved.originalPolicy,
+    allowCreditModels: saved.allowCreditModels,
+    verdictBlocksCredits: saved.verdictBlocksCredits,
   };
 }
 
 export function modelAccessPolicyRequest(
   draft: ModelAccessPolicyDraft,
 ): WorkspaceModelAccessPolicy {
-  if (draft.mode === "provider") return draft.originalPolicy;
+  if (draft.mode === "provider") {
+    // A following workspace that unpins keeps the organization's provider list.
+    const policy =
+      draft.follow || draft.originalPolicy.source !== "organization"
+        ? draft.originalPolicy
+        : (draft.originalPolicy.organization ?? draft.originalPolicy);
+    return { allowedProviders: policy.allowedProviders, allowedModels: policy.allowedModels };
+  }
   if (draft.mode === "unrestricted") {
     return { allowedProviders: null, allowedModels: null };
   }
@@ -85,25 +162,71 @@ export function modelAccessPolicyRequest(
 }
 
 function policyDraftKey(draft: ModelAccessPolicyDraft): string {
-  return JSON.stringify(modelAccessPolicyRequest(draft));
+  return JSON.stringify({ follow: draft.follow, policy: modelAccessPolicyRequest(draft) });
 }
 
-function groupedModels(models: readonly WorkspaceModelCatalogModel[]) {
-  const groups = new Map<string, WorkspaceModelCatalogModel[]>();
-  for (const model of [...models].sort((left, right) => {
-    const provider = left.providerLabel.localeCompare(right.providerLabel);
-    return provider === 0 ? left.label.localeCompare(right.label) : provider;
-  })) {
-    const group = groups.get(model.providerLabel) ?? [];
-    group.push(model);
-    groups.set(model.providerLabel, group);
-  }
-  return [...groups.entries()];
+/** Whether the draft's allowlist lets this catalog model through (credits aside). */
+function allowedByDraft(model: WorkspaceModelCatalogModel, draft: ModelAccessPolicyDraft) {
+  if (draft.mode === "unrestricted") return true;
+  // Opaque provider rules: the server's verdict is the only truth.
+  if (draft.mode === "provider") return model.policyAllowed === true;
+  return draft.selectedModelIds.has(model.id);
+}
+
+/**
+ * How many connected models new work could still run on: ready, allowed by
+ * the draft, and not paid with credits while credits are off. Zero means new
+ * chats and schedules can't start.
+ */
+export function usableModelCount(
+  models: readonly WorkspaceModelCatalogModel[],
+  draft: ModelAccessPolicyDraft,
+  allowCreditModels: boolean,
+): number {
+  return models.filter(
+    (model) =>
+      model.credentialReadiness.status === "ready" &&
+      // Unrunnable for another reason (not entitled, unsupported, unhealthy).
+      // A policy block is the saved list's verdict, which the draft replaces.
+      (model.availability.selectable ||
+        model.availability.reason === "policy_blocked" ||
+        model.availability.reason === "credits_disabled") &&
+      allowedByDraft(model, draft) &&
+      (allowCreditModels || !modelUsesCredits(model)),
+  ).length;
+}
+
+/**
+ * The credit switch shows when credits pay for any model here, or it is
+ * already off. A server that doesn't report the switch can't enforce it, so it
+ * never shows there: saving it would store a value nothing honours yet.
+ */
+export function creditSwitchVisible(
+  models: readonly WorkspaceModelCatalogModel[],
+  draft: ModelAccessPolicyDraft | null,
+): boolean {
+  if (!draft || typeof draft.originalPolicy.allowCreditModels !== "boolean") return false;
+  return !draft.allowCreditModels || models.some((model) => modelUsesCredits(model));
 }
 
 /** The saved policy and the catalog it applies to, reloaded when a connection changes. */
-export function useModelAccessPolicy(workspaceId: string) {
-  const client = useAppContext().client;
+export function useModelAccessPolicy(scopeOrWorkspaceId: string | ModelPolicyScope) {
+  const scope: ModelPolicyScope =
+    typeof scopeOrWorkspaceId === "string"
+      ? { kind: "workspace", workspaceId: scopeOrWorkspaceId }
+      : scopeOrWorkspaceId;
+  const workspaceId = scope.workspaceId;
+  const organizationDefaults = scope.kind === "organization" ? scope.defaults : null;
+  const organizationPolicy = organizationDefaults?.defaults ?? null;
+  const organizationKey = organizationDefaults
+    ? JSON.stringify([
+        organizationDefaults.loading,
+        Boolean(organizationDefaults.error),
+        organizationPolicy?.allowedProviders,
+        organizationPolicy?.allowedModels,
+      ])
+    : "";
+  const { client, refreshWorkspace } = useAppContext();
   const [models, setModels] = useState<WorkspaceModelCatalogModel[]>([]);
   const [saved, setSaved] = useState<ModelAccessPolicyDraft | null>(null);
   const [loading, setLoading] = useState(true);
@@ -115,14 +238,41 @@ export function useModelAccessPolicy(workspaceId: string) {
     const generation = ++loadGeneration.current;
     setLoading(true);
     setError(null);
+    // The organization's list arrives with its defaults; wait for them.
+    if (organizationDefaults?.loading) return;
     try {
-      const [policy, catalog] = await Promise.all([
-        client.getWorkspaceModelAccessPolicy(workspaceId),
+      const [policy, catalog, hostCreditsOff] = await Promise.all([
+        organizationDefaults
+          ? Promise.resolve<WorkspaceModelAccessPolicy | null>(
+              organizationPolicy && {
+                allowedProviders: organizationPolicy.allowedProviders,
+                allowedModels: organizationPolicy.allowedModels,
+              },
+            )
+          : client.getWorkspaceModelAccessPolicy(workspaceId),
         client.getWorkspaceModelCatalog(workspaceId),
+        // The organization's list is shown through this workspace's catalog,
+        // whose verdicts include this workspace's own credit switch.
+        organizationDefaults
+          ? client
+              .getWorkspaceModelAccessPolicy(workspaceId)
+              .then((hosting) => hosting.allowCreditModels === false)
+              // Fail closed: an unknown switch hides "Choose exact models".
+              .catch(() => true)
+          : Promise.resolve(false),
       ]);
       if (generation !== loadGeneration.current) return;
       setModels(catalog.models);
-      setSaved(modelAccessPolicyDraft(policy, catalog.models));
+      setSaved(
+        policy
+          ? modelAccessPolicyDraft(
+              policy,
+              catalog.models,
+              organizationDefaults ? hostCreditsOff : undefined,
+            )
+          : null,
+      );
+      if (!policy && organizationDefaults?.error) throw organizationDefaults.error;
     } catch (caught) {
       if (generation !== loadGeneration.current) return;
       setModels([]);
@@ -131,7 +281,9 @@ export function useModelAccessPolicy(workspaceId: string) {
     } finally {
       if (generation === loadGeneration.current) setLoading(false);
     }
-  }, [client, workspaceId]);
+    // Reload when the organization's saved list changes, not on every render.
+    // oxlint-disable-next-line react-hooks/exhaustive-deps -- keyed by the saved values
+  }, [client, workspaceId, organizationKey]);
 
   useEffect(() => {
     scopeRef.current = { client, mounted: true, workspaceId };
@@ -166,7 +318,16 @@ export function useModelAccessPolicy(workspaceId: string) {
         );
       };
       try {
-        await client.updateWorkspaceModelAccessPolicy(workspaceId, modelAccessPolicyRequest(draft));
+        if (organizationDefaults) {
+          await organizationDefaults.update({ modelPolicy: modelAccessPolicyRequest(draft) });
+        } else if (draft.follow) {
+          await client.deleteWorkspaceModelAccessPolicy(workspaceId);
+        } else {
+          await client.updateWorkspaceModelAccessPolicy(
+            workspaceId,
+            modelAccessPolicyRequest(draft),
+          );
+        }
       } catch (caught) {
         if (!isCurrentScope()) return false;
         // The form page says what to do and keeps an API error's facts in Technical details.
@@ -180,10 +341,56 @@ export function useModelAccessPolicy(workspaceId: string) {
       toast.success("Allowed models saved");
       return true;
     },
-    [client, load, workspaceId],
+    [client, load, organizationDefaults, workspaceId],
   );
 
-  return { models, saved, loading, error, reload: load, save };
+  /**
+   * Saves the workspace credit switch on its own (a workspace setting, so the
+   * allowlists and whose list the workspace follows stay as they are), then
+   * re-reads. Throws the failure for the switch row to show.
+   */
+  const setAllowCreditModels = useCallback(
+    async (allowCreditModels: boolean): Promise<boolean> => {
+      if (organizationDefaults) return false;
+      const saveScope = { client, workspaceId };
+      const isCurrentScope = () => {
+        const current = scopeRef.current;
+        return (
+          current.mounted &&
+          current.client === saveScope.client &&
+          current.workspaceId === saveScope.workspaceId
+        );
+      };
+      // The row only shows when this server reports (and so enforces) the switch.
+      await client.updateWorkspaceSettings(workspaceId, { allowCreditModels });
+      // Pages that read the cached workspace settings (the Knowledge index
+      // notice) follow the switch without a reload.
+      void refreshWorkspace(workspaceId).catch(() => undefined);
+      if (!isCurrentScope()) return false;
+      // The switch shows the saved value before the success toast. A failed
+      // re-read shows on the page itself, never as a failed change.
+      await load();
+      if (!isCurrentScope()) return false;
+      // Every other model picker on the page re-reads the policy and catalog.
+      window.dispatchEvent(new Event("model-connections-changed"));
+      toast.success(
+        allowCreditModels ? "Opengeni credits turned on" : "Opengeni credits turned off",
+      );
+      return true;
+    },
+    [client, load, organizationDefaults, refreshWorkspace, workspaceId],
+  );
+
+  return {
+    scope: scope.kind,
+    models,
+    saved,
+    loading: loading || Boolean(organizationDefaults?.loading),
+    error,
+    reload: load,
+    save,
+    setAllowCreditModels,
+  };
 }
 
 export type ModelAccessPolicyState = ReturnType<typeof useModelAccessPolicy>;
@@ -194,24 +401,48 @@ export function allowedModelsSummary(
 ): string {
   const draft = state.saved;
   if (!draft) return "";
-  if (draft.mode === "unrestricted") return "All models";
-  if (draft.mode === "provider") {
-    const allowed = state.models.filter((model) => model.policyAllowed).length;
-    return draft.policyVerdictComplete
-      ? `${allowed} of ${state.models.length} models`
-      : "Limited by provider";
+  if (draft.mode === "unrestricted") {
+    return draft.allowCreditModels ? "All models" : "All except credits";
   }
-  const count = draft.selectedModelIds.size;
+  if (draft.mode === "provider") {
+    // With credits off, the verdict mixes in the credit block: no count.
+    if (!draft.policyVerdictComplete || draft.verdictBlocksCredits) return "Limited by provider";
+    const allowed = state.models.filter((model) => model.policyAllowed).length;
+    return `${allowed} of ${state.models.length} models`;
+  }
+  // With credits off, a listed credit model can't run: count only the rest.
+  const byId = new Map(state.models.map((model) => [model.id, model]));
+  const count = draft.allowCreditModels
+    ? draft.selectedModelIds.size
+    : [...draft.selectedModelIds].filter((id) => !modelUsesCredits(byId.get(id))).length;
   return count === 0 ? "No models" : count === 1 ? "1 model" : `${count} models`;
+}
+
+/**
+ * Where a workspace's list comes from, in words, or null when the server
+ * doesn't say (or this is the organization's own list).
+ */
+export function allowedModelsSource(
+  state: Pick<ModelAccessPolicyState, "saved" | "scope">,
+  organizationName: string | undefined,
+): string | null {
+  const saved = state.saved;
+  if (state.scope !== "workspace" || !saved?.originalPolicy.source || !organizationName) {
+    return null;
+  }
+  return saved.follow ? `Following ${organizationName}.` : "Changed for this workspace.";
 }
 
 /** The Allowed models row on the Models page: opens its page. */
 export function AllowedModelsRow({
   state,
   onEdit,
+  organizationName,
 }: {
   state: ModelAccessPolicyState;
   onEdit: () => void;
+  /** Names what a workspace follows; omit on the organization's own row. */
+  organizationName?: string | undefined;
 }) {
   if (state.loading && !state.saved) return <SettingRowSkeleton />;
   if (state.error) {
@@ -223,14 +454,26 @@ export function AllowedModelsRow({
       />
     );
   }
-  const blocked = state.saved?.mode === "selected" && state.saved.selectedModelIds.size === 0;
+  const saved = state.saved;
+  const blocked = saved?.mode === "selected" && saved.selectedModelIds.size === 0;
+  const creditsLeaveNothing =
+    saved !== null &&
+    !saved.allowCreditModels &&
+    usableModelCount(state.models, saved, false) === 0;
+  const source = allowedModelsSource(state, organizationName);
   return (
     <SettingNavRow
       label="Allowed models"
       description={
         blocked
-          ? "No model is allowed, so new work can't start."
-          : "The models people can pick for new chats and schedules."
+          ? state.scope === "organization"
+            ? "No model is allowed, so workspaces that follow this can't start new work."
+            : "No model is allowed, so new work can't start."
+          : creditsLeaveNothing
+            ? "Opengeni credits are off and no other model can run, so new work can't start."
+            : source
+              ? `The models people can pick for new chats and schedules. ${source}`
+              : "The models people can pick for new chats and schedules."
       }
       value={allowedModelsSummary(state)}
       onOpen={onEdit}
@@ -238,17 +481,100 @@ export function AllowedModelsRow({
   );
 }
 
-/** The form page. */
+/**
+ * "Use Opengeni credits" on a workspace's Models page: one switch that blocks
+ * every model paid with credits here, now and later, whichever allowlist the
+ * workspace follows. Saves immediately; asks first only when turning it off
+ * would leave no model new work can run on.
+ */
+export function OpengeniCreditsSwitchRow({
+  state,
+  canManage,
+}: {
+  state: ModelAccessPolicyState;
+  canManage: boolean;
+}) {
+  const [pending, setPending] = useState(false);
+  const [confirmingOff, setConfirmingOff] = useState(false);
+  const saved = state.saved;
+  if (state.scope !== "workspace" || !saved || state.error) return null;
+  if (!creditSwitchVisible(state.models, saved)) return null;
+
+  async function apply(next: boolean): Promise<boolean> {
+    setPending(true);
+    try {
+      await state.setAllowCreditModels(next);
+      return true;
+    } catch (caught) {
+      toast.error(userErrorText(caught, "Couldn't change Opengeni credits. Try again."));
+      return false;
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <>
+      <SettingRow
+        label="Use Opengeni credits"
+        description="Lets this workspace spend Opengeni credits. Off blocks credit-billed models (including ones added later), paid web search and semantic Knowledge search; subscriptions and API keys keep working."
+        control={
+          <Switch
+            checked={saved.allowCreditModels}
+            disabled={!canManage || pending}
+            disabledReason={
+              canManage ? undefined : "Only workspace admins can change Opengeni credits."
+            }
+            onCheckedChange={(next) => {
+              if (!next && usableModelCount(state.models, saved, false) === 0) {
+                setConfirmingOff(true);
+                return;
+              }
+              void apply(next);
+            }}
+          />
+        }
+      />
+      <ConfirmDialog
+        open={confirmingOff}
+        onOpenChange={setConfirmingOff}
+        title="Turn off Opengeni credits?"
+        description="No other model can run in this workspace, so new chats and schedules won't start until you connect a subscription or an API key."
+        confirmLabel="Turn off credits"
+        pendingLabel="Turning off…"
+        destructive={false}
+        onConfirm={async () => await apply(false)}
+      />
+    </>
+  );
+}
+
+/** The form page, for one workspace or for the organization's default. */
 export function AllowedModelsFormPage({
   workspaceId,
   canManage,
   onClose,
+  organizationName,
+  organizationDefaults,
 }: {
+  /** The workspace whose list this edits, or whose catalog the organization's list uses. */
   workspaceId: string;
   canManage: boolean;
   onClose: () => void;
+  /** Names the organization a workspace can follow. */
+  organizationName?: string | undefined;
+  /** Edit the organization's default instead of one workspace's list. */
+  organizationDefaults?: OrganizationModelDefaultsState | undefined;
 }) {
-  const state = useModelAccessPolicy(workspaceId);
+  const state = useModelAccessPolicy(
+    organizationDefaults
+      ? { kind: "organization", workspaceId, defaults: organizationDefaults }
+      : { kind: "workspace", workspaceId },
+  );
+  const organizationScope = Boolean(organizationDefaults);
+  // A workspace can follow its organization once the server reports where its list comes from.
+  const canFollow = !organizationScope && Boolean(state.saved?.originalPolicy.source);
+  const organizationLabel = organizationName ?? "your organization";
   const { models, saved } = state;
   const [draft, setDraft] = useState<ModelAccessPolicyDraft | null>(null);
   const [pendingReplacementMode, setPendingReplacementMode] = useState<
@@ -262,7 +588,8 @@ export function AllowedModelsFormPage({
   }, [saved]);
 
   const groups = useMemo(
-    () => groupedModels(models.filter((model) => model.credentialReadiness.status === "ready")),
+    () =>
+      groupModelsByProvider(models.filter((model) => model.credentialReadiness.status === "ready")),
     [models],
   );
   const catalogIds = useMemo(() => new Set(models.map((model) => model.id)), [models]);
@@ -297,19 +624,69 @@ export function AllowedModelsFormPage({
     });
   }
 
-  function setModelSelected(modelId: string, selected: boolean) {
+  function setModelsSelected(modelIds: readonly string[], selected: boolean) {
     setDraft((current) => {
       if (!current) return current;
       const next = new Set(current.selectedModelIds);
-      if (selected) next.add(modelId);
-      else next.delete(modelId);
+      for (const modelId of modelIds) {
+        if (selected) next.add(modelId);
+        else next.delete(modelId);
+      }
       return { ...current, selectedModelIds: next };
     });
   }
 
-  const providerRestrictionActive = draft?.originalPolicy.allowedProviders !== null;
+  function setModelSelected(modelId: string, selected: boolean) {
+    setModelsSelected([modelId], selected);
+  }
+
+  // The credit switch is the workspace's own; the organization's list has none.
+  const creditsOff = !organizationScope && saved !== null && !saved.allowCreditModels;
+  const nothingUsable =
+    draft !== null &&
+    draft.mode !== "provider" &&
+    groups.length > 0 &&
+    usableModelCount(models, draft, !creditsOff) === 0;
+
+  // Choosing exact models replaces a provider limit; say so before saving.
+  const providerRestrictionActive =
+    draft !== null && !draft.follow && draft.originalPolicy.allowedProviders !== null;
   const visiblePolicyAllowedCount = models.filter((model) => model.policyAllowed).length;
-  const disabled = !canManage;
+  const following = canFollow && draft?.follow === true;
+  const disabled = !canManage || following;
+
+  function setFollow(follow: boolean) {
+    setDraft((current) => {
+      if (!current || !saved) return current;
+      // Following shows the organization's list; changing it starts from that list.
+      return follow
+        ? { ...organizationDraft(saved, models), follow: true }
+        : { ...current, follow: false };
+    });
+  }
+
+  const followRow = canFollow ? (
+    <SettingRowGroup className="-mt-3">
+      <SettingRow
+        label={`Use ${organizationLabel}’s allowed models`}
+        description={
+          following
+            ? `Changes ${organizationLabel} makes apply here too. Turn this off to choose this workspace’s own models.`
+            : "This workspace has its own list."
+        }
+        control={
+          <Switch
+            checked={following}
+            disabled={!canManage}
+            disabledReason={
+              !canManage ? "Only workspace admins can change Allowed models." : undefined
+            }
+            onCheckedChange={setFollow}
+          />
+        }
+      />
+    </SettingRowGroup>
+  ) : null;
 
   let body: ReactNode = null;
   if (state.error) {
@@ -325,8 +702,8 @@ export function AllowedModelsFormPage({
         Nothing was changed.
       </ErrorMessage>
     );
-  } else if (draft?.mode === "provider") {
-    body = draft.policyVerdictComplete ? (
+  } else if (draft?.mode === "provider" && organizationScope) {
+    body = (
       <Notice
         tone="info"
         title="Limited to whole providers"
@@ -341,21 +718,65 @@ export function AllowedModelsFormPage({
               >
                 Allow all instead
               </Button>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => setPendingReplacementMode("selected")}
-              >
-                Choose exact models
-              </Button>
+              {/* This workspace's credit block is mixed into the verdicts, so an
+                  exact list built from them would drop every credit model. */}
+              {draft.verdictBlocksCredits ? null : (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setPendingReplacementMode("selected")}
+                >
+                  Choose exact models
+                </Button>
+              )}
             </div>
           ) : undefined
         }
       >
-        This workspace allows {visiblePolicyAllowedCount} of {models.length} models by provider, and
-        may also allow future models from the same providers. It was set through the API; the
-        providers themselves aren't shown here.
+        {organizationLabel} allows models by provider, including future models from the same
+        providers. It was set through the API; the providers themselves aren't shown here.
+        {draft.verdictBlocksCredits
+          ? " Opengeni credits are off in this workspace, so choose exact models from a workspace with credits on."
+          : null}
+      </Notice>
+    );
+  } else if (draft?.mode === "provider") {
+    const providerNotice = draft.policyVerdictComplete ? (
+      <Notice
+        tone="info"
+        title="Limited to whole providers"
+        action={
+          canManage ? (
+            <div className="flex flex-wrap gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setPendingReplacementMode("unrestricted")}
+              >
+                Allow all instead
+              </Button>
+              {/* With credits off the server's verdict can't tell a provider
+                  block from a credit block, so an exact list built from it
+                  would silently drop credit models. */}
+              {draft.verdictBlocksCredits ? null : (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setPendingReplacementMode("selected")}
+                >
+                  Choose exact models
+                </Button>
+              )}
+            </div>
+          ) : undefined
+        }
+      >
+        {creditsOff
+          ? `${following ? organizationLabel : "This workspace"} limits models by provider, and may also allow future models from the same providers. It was set through the API; the providers themselves aren't shown here. Turn Opengeni credits back on to choose exact models instead.`
+          : `${following ? organizationLabel : "This workspace"} allows ${visiblePolicyAllowedCount} of ${models.length} models by provider, and may also allow future models from the same providers. It was set through the API; the providers themselves aren't shown here.`}
       </Notice>
     ) : (
       <Notice tone="waiting" title="Refresh after the update finishes">
@@ -363,9 +784,24 @@ export function AllowedModelsFormPage({
         can't be replaced until you refresh.
       </Notice>
     );
+    body = followRow ? (
+      <div className="flex min-w-0 flex-col gap-4">
+        {followRow}
+        {providerNotice}
+      </div>
+    ) : (
+      providerNotice
+    );
   } else if (draft) {
     body = (
       <div className="flex min-w-0 flex-col gap-4">
+        {followRow}
+        {creditsOff ? (
+          <Notice tone="info" title="Opengeni credits are off">
+            Models paid with credits can't run in this workspace, even if they're allowed here. Turn
+            credits back on from Models.
+          </Notice>
+        ) : null}
         {providerRestrictionActive ? (
           <Notice
             tone="waiting"
@@ -393,20 +829,37 @@ export function AllowedModelsFormPage({
                 checked={draft.mode === "unrestricted"}
                 disabled={disabled}
                 disabledReason={
-                  disabled ? "Only workspace admins can change Allowed models." : undefined
+                  following
+                    ? `Follows ${organizationLabel}. Turn off “Use ${organizationLabel}’s allowed models” to change it.`
+                    : disabled
+                      ? organizationScope
+                        ? "Only organization owners and admins can change this."
+                        : "Only workspace admins can change Allowed models."
+                      : undefined
                 }
                 onCheckedChange={(next) => setMode(next ? "unrestricted" : "selected")}
               />
             }
           />
         </SettingRowGroup>
+        {nothingUsable ? (
+          <Notice tone="waiting" title="No model can run here">
+            {creditsOff
+              ? "New chats and schedules won't start until you allow a model paid by a subscription or API key, connect one, or turn Opengeni credits back on."
+              : organizationScope
+                ? "Workspaces that follow this list can't start new chats or schedules until it allows at least one model."
+                : "New chats and schedules won't start until you allow at least one model."}
+          </Notice>
+        ) : null}
         {draft.mode === "selected" ? (
           <ModelChecklist
             groups={groups}
             customIds={customIds}
             selected={draft.selectedModelIds}
-            canManage={canManage}
+            canManage={canManage && !following}
+            creditsOff={creditsOff}
             onToggle={setModelSelected}
+            onToggleMany={setModelsSelected}
             onAdd={(modelId) => setModelSelected(modelId, true)}
           />
         ) : null}
@@ -418,20 +871,28 @@ export function AllowedModelsFormPage({
     <>
       <ModelsFormPage
         title="Allowed models"
-        description="Choose which models people can pick for new chats and schedules."
+        description={
+          organizationScope
+            ? `Choose which models people can pick in every workspace. A workspace can choose its own instead.`
+            : "Choose which models people can pick for new chats and schedules."
+        }
         onClose={onClose}
         loading={state.loading && !saved}
         submitLabel="Save"
         pendingLabel="Saving…"
-        submitDisabled={!canManage || !dirty || draft?.mode === "provider"}
+        submitDisabled={
+          !canManage || !dirty || (draft?.mode === "provider" && !(draft.follow !== saved?.follow))
+        }
         // The footer shows only while there is something to save.
         className={canManage && dirty ? undefined : "[&>form>footer]:hidden"}
         footerStart={
-          draft && draft.mode !== "provider"
-            ? draft.mode === "unrestricted"
-              ? "Every model allowed"
-              : `${draft.selectedModelIds.size} ${draft.selectedModelIds.size === 1 ? "model" : "models"} allowed`
-            : null
+          following
+            ? `Follows ${organizationLabel}`
+            : draft && draft.mode !== "provider"
+              ? draft.mode === "unrestricted"
+                ? "Every model allowed"
+                : `${draft.selectedModelIds.size} ${draft.selectedModelIds.size === 1 ? "model" : "models"} allowed`
+              : null
         }
         onSubmit={async () => {
           if (!draft || !canManage) return false;
@@ -463,24 +924,29 @@ export function AllowedModelsFormPage({
     </>
   );
 }
-
-/** At this many models the list gets a search field. */
-const SEARCH_AT = 9;
-
-/** Models grouped by provider, one row each, with a checkbox on the right. */
+/**
+ * Models grouped by provider, one row each, with a checkbox on the right. Each
+ * group heading names who pays and has its own checkbox to pick the whole
+ * group at once. With Opengeni credits off, credit models are muted and can't
+ * be changed (their saved choice is kept for when credits come back).
+ */
 function ModelChecklist({
   groups,
   customIds,
   selected,
   canManage,
+  creditsOff,
   onToggle,
+  onToggleMany,
   onAdd,
 }: {
   groups: [string, WorkspaceModelCatalogModel[]][];
   customIds: string[];
   selected: Set<string>;
   canManage: boolean;
+  creditsOff: boolean;
   onToggle: (modelId: string, selected: boolean) => void;
+  onToggleMany: (modelIds: readonly string[], selected: boolean) => void;
   onAdd: (modelId: string) => void;
 }) {
   const [query, setQuery] = useState("");
@@ -489,20 +955,7 @@ function ModelChecklist({
   const [addError, setAddError] = useState<string | null>(null);
   const addInput = useRef<HTMLInputElement>(null);
   const total = groups.reduce((count, [, models]) => count + models.length, 0);
-  const words = query.toLocaleLowerCase().trim().split(/\s+/).filter(Boolean);
-  const shown = groups
-    .map(
-      ([label, models]) =>
-        [
-          label,
-          models.filter((model) =>
-            words.every((word) =>
-              `${model.label} ${model.id} ${label}`.toLocaleLowerCase().includes(word),
-            ),
-          ),
-        ] as const,
-    )
-    .filter(([, models]) => models.length > 0);
+  const shown = filterModelGroups(groups, query);
 
   useEffect(() => {
     if (adding) addInput.current?.focus();
@@ -522,22 +975,8 @@ function ModelChecklist({
 
   return (
     <div role="group" aria-label="Models" className="flex min-w-0 flex-col gap-5">
-      {total >= SEARCH_AT ? (
-        <label className="relative block min-w-0">
-          <span className="sr-only">Search models</span>
-          <SearchIcon
-            aria-hidden="true"
-            className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-fg-subtle"
-          />
-          <TextInput
-            type="search"
-            value={query}
-            placeholder="Search models"
-            suppressAutofill
-            onChange={(event) => setQuery(event.target.value)}
-            className="pl-9"
-          />
-        </label>
+      {total >= MODEL_LIST_SEARCH_AT ? (
+        <ModelSearchField value={query} onChange={setQuery} />
       ) : null}
       {groups.length === 0 ? (
         <p className="text-sm text-fg-muted">
@@ -546,34 +985,75 @@ function ModelChecklist({
       ) : shown.length === 0 ? (
         <p className="text-sm text-fg-muted">No models match “{query.trim()}”.</p>
       ) : (
-        shown.map(([providerLabel, providerModels]) => (
-          <ChecklistGroup key={providerLabel} label={providerLabel}>
-            {providerModels.map((model) => (
-              <li key={model.id} className="min-w-0">
-                <label
-                  title={model.id}
-                  className={cn(
-                    "-mx-3 flex min-h-11 min-w-0 items-center gap-3 rounded-[10px] px-3",
-                    canManage
-                      ? "cursor-pointer transition-colors duration-[120ms] hover:bg-surface-2"
-                      : "opacity-80",
-                  )}
-                >
-                  <span className="min-w-0 flex-1 truncate text-sm text-fg">{model.label}</span>
+        shown.map(([providerLabel, providerModels]) => {
+          const lockedByCredits = (model: WorkspaceModelCatalogModel) =>
+            creditsOff && modelUsesCredits(model);
+          const changeable = providerModels.filter((model) => !lockedByCredits(model));
+          const changeableSelected = changeable.filter((model) => selected.has(model.id)).length;
+          const payers = [...new Set(providerModels.map((model) => payerSummaryForModel(model)))];
+          return (
+            <ModelGroup
+              key={providerLabel}
+              label={providerLabel}
+              meta={payers.length === 1 ? payers[0] : undefined}
+              control={
+                changeable.length > 1 ? (
                   <Checkbox
-                    aria-label={model.label}
-                    checked={selected.has(model.id)}
+                    aria-label={`All ${providerLabel} models`}
+                    checked={changeableSelected === changeable.length}
+                    indeterminate={changeableSelected > 0 && changeableSelected < changeable.length}
                     disabled={!canManage}
-                    onCheckedChange={(checked) => onToggle(model.id, checked)}
+                    onCheckedChange={(checked) =>
+                      onToggleMany(
+                        changeable.map((model) => model.id),
+                        checked,
+                      )
+                    }
                   />
-                </label>
-              </li>
-            ))}
-          </ChecklistGroup>
-        ))
+                ) : null
+              }
+            >
+              {providerModels.map((model) => {
+                const locked = lockedByCredits(model);
+                const interactive = canManage && !locked;
+                return (
+                  <li key={model.id} className="min-w-0">
+                    <label
+                      title={model.id}
+                      className={cn(
+                        "-mx-3 flex min-h-11 min-w-0 items-center gap-3 rounded-[10px] px-3",
+                        interactive
+                          ? "cursor-pointer transition-colors duration-[120ms] hover:bg-surface-2"
+                          : "opacity-80",
+                      )}
+                    >
+                      <span
+                        className={cn(
+                          "min-w-0 flex-1 truncate text-sm",
+                          locked ? "text-fg-muted" : "text-fg",
+                        )}
+                      >
+                        {model.label}
+                      </span>
+                      {locked ? (
+                        <span className="shrink-0 text-xs text-fg-muted">Credits off</span>
+                      ) : null}
+                      <Checkbox
+                        aria-label={model.label}
+                        checked={selected.has(model.id)}
+                        disabled={!interactive}
+                        onCheckedChange={(checked) => onToggle(model.id, checked)}
+                      />
+                    </label>
+                  </li>
+                );
+              })}
+            </ModelGroup>
+          );
+        })
       )}
       {customIds.length > 0 ? (
-        <ChecklistGroup label="Added by ID">
+        <ModelGroup label="Added by ID">
           {customIds.map((modelId) => (
             <li key={modelId} className="flex min-h-11 min-w-0 items-center gap-3">
               <code className="min-w-0 flex-1 truncate font-mono text-xs text-fg">{modelId}</code>
@@ -591,7 +1071,7 @@ function ModelChecklist({
               ) : null}
             </li>
           ))}
-        </ChecklistGroup>
+        </ModelGroup>
       ) : null}
       {canManage ? (
         adding ? (
@@ -654,17 +1134,5 @@ function ModelChecklist({
         )
       ) : null}
     </div>
-  );
-}
-
-function ChecklistGroup({ label, children }: { label: string; children: ReactNode }) {
-  const id = useId();
-  return (
-    <section aria-labelledby={id} className="min-w-0">
-      <h3 id={id} className="pb-1 text-xs leading-4.5 font-medium text-fg">
-        {label}
-      </h3>
-      <ul className="m-0 flex min-w-0 list-none flex-col divide-y divide-border p-0">{children}</ul>
-    </section>
   );
 }

@@ -66,6 +66,12 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
       add column imported_archive_request_hash text,
       add column imported_archive_subject_id text,
       add column imported_archive_next_offset integer,
+      add column keep_live boolean not null default false,
+      add column content_archive_state text,
+      add column content_archive_started_at timestamptz,
+      add column content_archived_at timestamptz,
+      add column content_archive jsonb,
+      add column content_archive_purged_at timestamptz,
       add column mcp_approval_policies jsonb not null default '{}'::jsonb,
       add column admission_block jsonb,
       add column variable_set_ids jsonb not null default '[]'::jsonb,
@@ -79,6 +85,7 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
       add column end_user_id text,
       add column memory_scope text not null default 'workspace',
       add column execution_authority_epoch integer not null default 1,
+      add column execution_context_turn_id uuid,
       add column initial_mcp_account_bindings jsonb,
       add column initial_claude_provider_account_authority_snapshot jsonb not null
         default '{"version":1,"scope":"workspace"}'::jsonb,
@@ -102,6 +109,14 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
     await admin`alter table session_turns add column mcp_account_bindings jsonb`;
     // The current claim adapter reads the 0533 turn surface; removed before 0533 runs.
     await admin`alter table session_turns add column surface text`;
+    // The current turn adapter projects the M3 authority snapshot while this
+    // fixture is deliberately staged before that migration.
+    await admin`alter table session_turns add column subscription_authority jsonb`;
+    // ...and the M3 PR 3b slots on internal updates and their outbox rows.
+    await admin`alter table session_system_updates add column subscription_authority jsonb`;
+    await admin`alter table session_system_update_outbox add column subscription_authority jsonb`;
+    // 0608 owns the receiver context; the historical claim only needs its nullable projection.
+    await admin`alter table session_turns add column execution_context_turn_id uuid`;
     await admin`alter table session_system_updates add column mcp_account_bindings jsonb`;
     await admin`alter table session_system_update_outbox add column mcp_account_bindings jsonb`;
     // Current claim adapters read 0562 lease authority. Remove this temporary
@@ -166,6 +181,28 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
     const runtimeOwner = postgres(ownerUrl, { max: 1, onnotice: () => undefined });
     const db = createDb(adminUrl, { max: 1 });
 
+    // Reading a session back also reads the active turn's core Codex
+    // selection. Supply only the later row shapes that read joins, then
+    // remove them before the deferred chain creates the real tables.
+    await admin`
+      create table subscription_leases (
+        account_id uuid not null,
+        workspace_id uuid not null,
+        turn_id uuid not null,
+        provider text not null,
+        connection_id uuid not null,
+        leased_until timestamptz not null
+      )`;
+    await admin`
+      create table subscription_session_bindings (
+        account_id uuid not null,
+        workspace_id uuid not null,
+        session_id uuid not null,
+        provider text not null,
+        connection_id uuid not null,
+        choice text not null
+      )`;
+    await admin`grant select on subscription_leases, subscription_session_bindings to public`;
     const session = await createSession(db.db, {
       requestedSessionId: crypto.randomUUID(),
       accountId,
@@ -293,6 +330,7 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
     await app.end({ timeout: 5 });
     expect(await applicationSessionCount()).toBe(0);
     await admin`drop table session_event_cursors`;
+    await admin`drop table subscription_leases, subscription_session_bindings`;
     await admin`drop trigger fixture_0343_history_write on session_history_items`;
     await admin`drop function fixture_0343_history_write()`;
     await admin`alter table session_history_items drop column item_ordered`;
@@ -310,6 +348,12 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
       drop column imported_archive_request_hash,
       drop column imported_archive_subject_id,
       drop column imported_archive_next_offset,
+      drop column keep_live,
+      drop column content_archive_state,
+      drop column content_archive_started_at,
+      drop column content_archived_at,
+      drop column content_archive,
+      drop column content_archive_purged_at,
       drop column admission_block,
       drop column variable_set_ids,
       drop column mcp_approval_policies,
@@ -323,6 +367,7 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
       drop column end_user_id,
       drop column memory_scope,
       drop column execution_authority_epoch,
+      drop column execution_context_turn_id,
       drop column initial_mcp_account_bindings,
       drop column initial_claude_provider_account_authority_snapshot,
       drop column code_search_enabled,
@@ -338,6 +383,10 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
     }
     await admin`alter table session_turns drop column mcp_account_bindings`;
     await admin`alter table session_turns drop column surface`;
+    await admin`alter table session_turns drop column subscription_authority`;
+    await admin`alter table session_system_updates drop column subscription_authority`;
+    await admin`alter table session_system_update_outbox drop column subscription_authority`;
+    await admin`alter table session_turns drop column execution_context_turn_id`;
     await admin`alter table session_system_updates drop column mcp_account_bindings`;
     await admin`alter table session_system_update_outbox drop column mcp_account_bindings`;
     await admin`alter table session_realtime_modes

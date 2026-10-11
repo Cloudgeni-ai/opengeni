@@ -229,7 +229,7 @@ describe("tool tokens", () => {
     ).toBe(signature!);
   });
 
-  test("a token too large for OpenGeni's header limit fails at mint time", async () => {
+  test("a token too large for Opengeni's header limit fails at mint time", async () => {
     await expect(mintToolToken({ ...identity, user: "u".repeat(4000) })).rejects.toThrow(
       /header limit/,
     );
@@ -589,7 +589,7 @@ describe("a product MCP server built with the official MCP SDK", () => {
   }
 
   test("the attached token calls tools as the proxy-resolved user only", async () => {
-    // OpenGeni presents exactly the header the proxy attached on create.
+    // Opengeni presents exactly the header the proxy attached on create.
     const { writes, browser } = proxySetup();
     await browser.createSession(WORKSPACE_ID, {
       initialMessage: "hi",

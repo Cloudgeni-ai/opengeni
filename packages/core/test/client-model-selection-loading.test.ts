@@ -1,5 +1,6 @@
-import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { configuredModels, withCodexCatalogProvider } from "@opengeni/config";
+import { EMPTY_ORGANIZATION_MODEL_DEFAULTS } from "@opengeni/contracts";
 import * as opengeniDb from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
 import { requireLimit } from "../src/billing/limits";
@@ -27,9 +28,7 @@ const settings = testSettings({
 describe("fresh model admission versus live discovery", () => {
   let active: boolean;
   let mocks: { mockRestore(): void }[];
-  let availability: ReturnType<
-    typeof spyOn<typeof codexAvailability, "loadWorkspaceCodexModelAvailability">
-  >;
+  let availability: ReturnType<typeof mock<() => Promise<Record<string, any>>>>;
   let restrictions: ReturnType<
     typeof spyOn<typeof opengeniDb, "getWorkspaceConnectionModelRestrictions">
   >;
@@ -43,22 +42,26 @@ describe("fresh model admission versus live discovery", () => {
       {},
     );
     policy = spyOn(opengeniDb, "getWorkspaceModelPolicy").mockResolvedValue(null);
-    availability = spyOn(
-      codexAvailability,
-      "loadWorkspaceCodexModelAvailability",
-    ).mockResolvedValue({});
+    availability = mock(async () => ({}));
     balance = spyOn(opengeniDb, "getBillingBalance").mockResolvedValue({
       accountId: context.accountId,
       balanceMicros: 0,
       currency: "usd",
       updatedAt: "2026-10-01T00:00:00.000Z",
     });
-    allowance = spyOn(opengeniDb, "checkWorkspaceAllowance").mockResolvedValue({
-      code: "allowance_exhausted",
-      scope: "workspace",
-      resetsAt: "2026-11-01T00:00:00.000Z",
-      message: "The workspace usage allowance is exhausted.",
-    });
+    // The real check admits credit-free work unless the allowance opts into
+    // counting unbilled usage.
+    allowance = spyOn(opengeniDb, "checkWorkspaceAllowance").mockImplementation(
+      async (_db, check) =>
+        check.fundedWithoutCredits
+          ? null
+          : {
+              code: "allowance_exhausted",
+              scope: "workspace",
+              resetsAt: "2026-11-01T00:00:00.000Z",
+              message: "The workspace usage allowance is exhausted.",
+            },
+    );
     mocks = [
       spyOn(
         opengeniDb,
@@ -67,29 +70,38 @@ describe("fresh model admission versus live discovery", () => {
       spyOn(opengeniDb, "workspaceClaudeSubscriptionActiveForAuthority").mockResolvedValue(false),
       restrictions,
       policy,
-      availability,
+      // No organization-wide model defaults: the live selections decide.
+      spyOn(opengeniDb, "getOrganizationModelDefaults").mockResolvedValue(
+        EMPTY_ORGANIZATION_MODEL_DEFAULTS,
+      ),
+      spyOn(codexAvailability, "loadWorkspaceCodexCatalogReadiness").mockImplementation(
+        async (_db, _settings, _context, options) => ({
+          active,
+          observations: options?.observeAvailability === false ? {} : await availability(),
+        }),
+      ),
       balance,
       allowance,
-      spyOn(opengeniDb, "workspaceCodexSubscriptionActive").mockImplementation(async () => active),
       spyOn(opengeniDb, "workspaceXaiSubscriptionActive").mockResolvedValue(false),
-      spyOn(opengeniDb, "workspaceVercelAiGatewayConnectionActive").mockResolvedValue(false),
-      spyOn(opengeniDb, "workspaceOpenRouterConnectionActive").mockResolvedValue(false),
-      spyOn(opengeniDb, "organizationModelProviderConnectionActiveForWorkspace").mockResolvedValue(
-        false,
-      ),
-      spyOn(opengeniDb, "listWorkspaceGatewayCustomModels").mockResolvedValue([]),
-      spyOn(opengeniDb, "listWorkspaceOpenRouterCustomModels").mockResolvedValue([]),
-      spyOn(opengeniDb, "listOrganizationModelProviderCustomModelsForWorkspace").mockResolvedValue(
-        [],
-      ),
-      spyOn(opengeniDb, "getWorkspaceProviderApiKeyConnectionMetadata").mockResolvedValue(null),
-      spyOn(opengeniDb, "listWorkspaceProviderCustomModels").mockResolvedValue([]),
+      spyOn(opengeniDb, "listConnectionsMetadata").mockResolvedValue([]),
+      spyOn(opengeniDb, "listWorkspaceProviderCustomModelsByKind").mockResolvedValue({
+        vercel_gateway: [],
+        openrouter: [],
+        anthropic: [],
+        claude_subscription: [],
+      }),
+      spyOn(opengeniDb, "getOrganizationModelProviderCatalogForWorkspace").mockResolvedValue({
+        vercel_gateway: { active: false, models: [] },
+        openrouter: { active: false, models: [] },
+        anthropic: { active: false, models: [] },
+        claude_subscription: { active: false, models: [] },
+      }),
       spyOn(opengeniDb, "isCodexBilledTurn").mockImplementation(async () => active),
     ];
   });
 
   afterEach(() => {
-    for (const mock of mocks) mock.mockRestore();
+    for (const mocked of mocks) mocked.mockRestore();
   });
 
   test("stable admission cannot refresh a subscription onto the zero-credit billing rail", async () => {
@@ -111,7 +123,10 @@ describe("fresh model admission versus live discovery", () => {
     expect(active).toBe(true);
     expect(availability).not.toHaveBeenCalled();
     expect(balance).not.toHaveBeenCalled();
-    expect(allowance).not.toHaveBeenCalled();
+    expect(allowance).toHaveBeenCalledWith(
+      db,
+      expect.objectContaining({ fundedWithoutCredits: true }),
+    );
   });
 
   test("catalog discovery and automatic defaults retain exact live support filtering", async () => {
@@ -172,7 +187,7 @@ describe("fresh model admission versus live discovery", () => {
         opengeniDb,
         "workspaceClaudeSubscriptionActiveForAuthority",
       ).mockResolvedValue(true);
-      const legacy = spyOn(opengeniDb, "getWorkspaceProviderApiKeyConnectionMetadata");
+      const legacy = spyOn(opengeniDb, "workspaceProviderApiKeyConnectionMetadataFromConnections");
       mocks.push(current, pool, legacy);
       const loaded = await loadWorkspaceModelSelectionInput(
         db,
@@ -185,7 +200,7 @@ describe("fresh model admission versus live discovery", () => {
       );
       expect(loaded.claudeConnections?.claude_subscription?.active).toBe(scope === "organization");
       expect(pool.mock.calls[0]?.[2].authoritySnapshot).toEqual(snapshot);
-      expect(legacy.mock.calls.some((call) => call[2] === "claude_subscription")).toBe(false);
+      expect(legacy.mock.calls.some((call) => call[1] === "claude_subscription")).toBe(false);
       expect(availability).not.toHaveBeenCalled();
     },
   );

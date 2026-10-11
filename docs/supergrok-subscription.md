@@ -67,7 +67,7 @@ Connection attribution is audit metadata, not ownership authority. There is no
 per-use consent flow, implicit personal-account selection, or fallback to the
 session creator/current browser user/another member.
 
-At each acceptance boundary OpenGeni freezes an identifier-free
+At each acceptance boundary Opengeni freezes an identifier-free
 `XaiProviderAccountAuthoritySnapshotV1` on the logical turn or scheduled task.
 Workspace scope records only `{version:1, scope:"workspace"}`; organization
 scope records `{version:1, scope:"organization"}`. New acceptance prefers an
@@ -79,8 +79,50 @@ provider subject, label, quota, plan, or token. Direct Send/Steer resolves the
 authenticated subject's current active authority; edits copy the source turn;
 children copy the exact spawning parent turn; goal continuations copy the latest
 finished causal turn; scheduled occurrences copy the task snapshot; compaction,
-agent messages, child results, and coalesced internal updates preserve the same
+child results, and coalesced internal updates preserve the same snapshot.
+The pool belongs to the receiving session, not the sender: Agent Message and
+Agent Steer keep the sender's causal human but take the receiver's execution
+context turn, else its latest accepted turn, else its initial snapshot. A
+user-scoped pool is kept only for its own human (a child's initial snapshot
+belongs to its spawning turn's human); otherwise the receiver uses its
+organization or workspace pool, and a model that only that personal pool
+serves fails closed. Acceptance without an exact human (service and operator actors,
+organization API keys, bridges, non-subject session creators, and internal
+updates without causal authority) resolves the organization or workspace pool
+and never a personal pool. Already accepted work keeps its frozen
 snapshot. Private work additionally requires the exact initiating human.
+
+Pool authority is additive to session access, never a replacement for it.
+Shared (organization or workspace) pools are read and written under the
+synthetic pool-worker database subject (`worker:xai-workspace`, or
+`worker:claude-workspace` for the Claude pool that shares this code). Arming
+and reconciling a shared pool's capacity wait run without a subject
+(`withScopedCapacityWaiterRls`), like Codex waiters; a personal pool acts as
+its initiating human. The waiter lookup, workflow peek, lease, pin and
+last-account operations that run as the pool-worker subject without an ambient
+actor re-establish the acting turn's frozen `initiating_human_subject_id`
+(`withSubscriptionPoolSessionAccess` in
+`packages/db/src/subscription-session-access.ts`). A `user_private` session
+therefore arms, waits and resumes exactly like a shared one, while the pool
+worker still sees no other member's private sessions. A caller with any
+ambient session actor keeps it unchanged; the turn's human is never combined
+with a different subject. Immediate wake-ups (reconnect, allocator, rotation or
+pin changes) first check that the caller holds the shared pool: a subject with
+live authority over the workspace, an active organization member for the
+organization pool, or the provider's pool-worker subject. For such a caller,
+the waiter scan, wake-revision bump and workflow wake then run in the trusted
+service scope, which follows the Codex rule. That reaches every waiter of
+exactly that pool scope in that workspace, including other members'
+`user_private` waiters. Any other caller wakes under its own subject and
+reaches no other member's private waiter. The wake returns nothing, so it
+grants no read access to those sessions and reveals no count of them. A
+personal pool's waiters all belong to its
+owner and wake under the owner's subject. The periodic recheck, at most 60
+seconds away, remains a backstop. If a wait still cannot be armed for a
+non-database reason, the turn fails with the explicit, retryable
+`<provider>_capacity_wait_unavailable` state instead of a generic activity
+failure; operators see the underlying error class and SQLSTATE in the worker
+log, never in the user-visible message.
 
 ## Allocation, pins, and leases
 
@@ -202,7 +244,7 @@ without exposing their session content to the administrator.
 The workspace-scoped REST surface supports device-flow start/poll, metadata
 list/status, active-account selection, rotation enablement, allocator OCC,
 rename, and disconnect. `@opengeni/sdk` exposes matching typed methods;
-`@opengeni/react` exposes `useSuperGrokAccounts`; the OpenGeni web workspace
+`@opengeni/react` exposes `useSuperGrokAccounts`; the Opengeni web workspace
 settings page provides the complete account controls. Workspace is the default
 scope in every client. Private scope must be selected explicitly and succeeds
 only through the managed-browser human boundary above.

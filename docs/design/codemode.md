@@ -21,7 +21,7 @@ approval policy, and MCP discovery, `packages/runtime` freezes one
 
 The model-facing MCP adapter and Codemode dispatcher both invoke that same
 environment. A display name or generated JavaScript path is never parsed back
-into authority. All first-party OpenGeni, Files, Docs, Codex Apps, capability,
+into authority. All first-party Opengeni, Files, Docs, Codex Apps, capability,
 interaction and per-session MCP tools admitted to the attempt can enter
 the catalog. Codemode never rediscovers or reconnects an MCP server.
 
@@ -80,7 +80,7 @@ remains unclaimed and queued, so its lease cannot expire while merely waiting
 for local capacity.
 
 An abandoned claim before the execution-start marker is safe to reclaim. Once
-the marker exists, OpenGeni never automatically replays the tool. Loss of the
+the marker exists, Opengeni never automatically replays the tool. Loss of the
 worker, interruption, or an unclassified failure after that boundary settles as
 `outcome_unknown`, telling the caller to inspect actual state before retrying.
 Claim ids fence stale workers, and attempt/generation fences prevent a late
@@ -133,6 +133,11 @@ ogtool show docs.search
 ogtool call docs.search '{"query":"durable catalogs"}'
 "$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode call docs.search '{"query":"durable catalogs"}'
 ```
+
+`call` prints the tool result once: a plain text block that only repeats
+`structuredContent` as JSON is omitted (the same rule as the model-facing MCP
+projection, `omitStructuredContentTextDuplicates` in `@opengeni/contracts`, and
+mirrored by the native client). `call --full` prints the exact stored result.
 
 Discovery is compact by default: `list` prints callable paths plus descriptions
 bounded to 160 Unicode code points. `--query` matches literal case-sensitive substrings

@@ -122,6 +122,7 @@ const context = {
   session: null,
   accessContext: { subjectId: "rename-qa" },
   sessionChannelProjectionAuthority: new SessionChannelProjectionAuthority(),
+  clientConfig: {},
   setSession: () => {},
   resetSessionView: () => {},
 } as unknown as AppContextValue;

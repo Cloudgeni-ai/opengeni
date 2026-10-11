@@ -14,13 +14,14 @@ GlobalRegistrator.register();
 
 const { ConnectionAccessFormPage, ConnectionAccessRows, useConnectionAccess } =
   await import("./connection-access-settings");
+const { modelsScopeLabels, organizationReachLabel } = await import("./models/models-ui");
 
 afterAll(() => {
   mock.restore();
   GlobalRegistrator.unregister();
 });
 
-for (const kind of ["codex", "supergrok", "vercel_gateway", "openrouter"] as const) {
+for (const kind of ["codex", "supergrok", "vercel_gateway", "openrouter", "opper"] as const) {
   test(`${kind} workspace access stays editable before restrictions and after resetting to all models`, async () => {
     let policy = {
       allowedModels: null as string[] | null,
@@ -296,7 +297,7 @@ for (const kind of ["codex", "supergrok", "vercel_gateway", "openrouter"] as con
       await act(async () => root.render(<Page editing />));
       await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
       expect(container.textContent).not.toContain("Engineering");
-      await choose("Only the workspaces I choose");
+      await choose("Only selected workspaces");
       expect(container.textContent).toContain("Finance");
       await choose("Finance");
       const modelsOnly = [...container.querySelectorAll<HTMLElement>('[role="radio"]')].filter(
@@ -324,6 +325,80 @@ for (const kind of ["codex", "supergrok", "vercel_gateway", "openrouter"] as con
     }
   });
 }
+
+test("an organization account no workspace can use says so, on its tag, row and form", async () => {
+  const access = (allowedWorkspaces: string[] | null, allowPersonalWorkspaces: boolean) => ({
+    policy: { allowedModels: null, allowedWorkspaces, allowPersonalWorkspaces, version: 1 },
+    models: [{ id: "model-a", label: "Model A" }],
+    workspaces: [{ id: "workspace-a", name: "Engineering" }],
+    personalWorkspacesSupported: true,
+  });
+  const labels = modelsScopeLabels("Acme", false);
+  expect(organizationReachLabel(labels, access(null, true))).toBe("Everyone in Acme");
+  expect(organizationReachLabel(labels, access(["workspace-a"], false))).toBe(
+    "Selected workspaces",
+  );
+  expect(organizationReachLabel(labels, access([], true))).toBe("Selected workspaces");
+  expect(organizationReachLabel(labels, access([], false))).toBe("No workspaces");
+  expect(organizationReachLabel(labels, null)).toBe("Shared by Acme");
+
+  const client = Object.assign(new OpenGeniBrowserClient({ baseUrl: "http://localhost" }), {
+    requestJson: async () => access([], false),
+  });
+  function Page({ editing }: { editing: boolean }) {
+    const state = useConnectionAccess({
+      client,
+      organizationId: "org",
+      kind: "codex",
+      connectionId: "account",
+    });
+    return editing ? (
+      <ConnectionAccessFormPage
+        access={state}
+        organization
+        canManage
+        name="Backup"
+        onClose={() => undefined}
+      />
+    ) : (
+      <ConnectionAccessRows access={state} organization canManage onEdit={() => undefined} />
+    );
+  }
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  const settle = () => act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+  try {
+    await act(async () => root.render(<Page editing={false} />));
+    await settle();
+    expect(container.textContent).toContain("No workspaces");
+    expect(container.textContent).not.toContain("0 workspaces");
+
+    await act(async () => root.render(<Page editing />));
+    await settle();
+    expect(container.textContent).toContain("No workspace can use it.");
+    // Ticking a workspace clears the warning.
+    const engineering = [...container.querySelectorAll("label")].find(
+      (label) => label.textContent === "Engineering",
+    )!;
+    await act(async () => document.getElementById(engineering.htmlFor)!.click());
+    expect(container.textContent).not.toContain("No workspace can use it.");
+    // Limiting models and unticking the last one says it serves nothing.
+    const modelsOnly = [...container.querySelectorAll<HTMLElement>('[role="radio"]')].find(
+      (radio) => radio.textContent?.includes("Only the models I choose"),
+    )!;
+    await act(async () => modelsOnly.click());
+    expect(container.textContent).not.toContain("can't serve any model");
+    const modelA = [...container.querySelectorAll("label")].find(
+      (label) => label.textContent === "Model A",
+    )!;
+    await act(async () => document.getElementById(modelA.htmlFor)!.click());
+    expect(container.textContent).toContain("It can't serve any model until you choose one.");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
 
 test("a refused or failed read says what to do, never the raw API error", async () => {
   let failure: Error = new OpenGeniApiError(
@@ -377,7 +452,7 @@ test("a refused or failed read says what to do, never the raw API error", async 
     await act(async () => root.render(<Page editing />));
     expect(container.textContent).toContain("You can't see what this account can serve.");
     expect(buttons()).not.toContain("Try again");
-    expect(container.textContent).not.toContain("OpenGeni API");
+    expect(container.textContent).not.toContain("Opengeni API");
     expect(container.textContent).not.toContain("corr-refused");
 
     // A failure says what happened and what to do; the reference sits in Technical details.
@@ -390,7 +465,7 @@ test("a refused or failed read says what to do, never the raw API error", async 
     expect(container.textContent).toContain("Try again in a moment.");
     expect(buttons()).toContain("Try again");
     expect(container.textContent).toContain("Technical details");
-    expect(container.textContent).not.toContain("OpenGeni API");
+    expect(container.textContent).not.toContain("Opengeni API");
   } finally {
     await act(async () => root.unmount());
     container.remove();

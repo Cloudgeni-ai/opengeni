@@ -80,11 +80,23 @@ export const SANDBOX_FILE_PUBLICATION_RUNTIME_ROUTINES = [
   "list_sandbox_file_publications(uuid, uuid, jsonb)",
 ] as const;
 const SANDBOX_FILE_PUBLICATIONS_TABLE = "sandbox_file_publications";
+export const ARTIFACT_PIN_RUNTIME_ROUTINES = [
+  "update_artifact_pin(uuid, uuid, text, text, boolean)",
+  "list_artifact_pins(uuid, uuid)",
+  "list_sandbox_file_publications_pinned(uuid, uuid, jsonb)",
+] as const;
+const ARTIFACT_PINS_TABLE = "artifact_catalog_pins";
 export const SCHEDULED_SLACK_BOT_MESSAGE_RUNTIME_ROUTINES = [
   "prepare_scheduled_slack_bot_message(uuid, uuid, uuid, uuid, uuid, integer, text, text, text)",
   "read_scheduled_slack_bot_message(uuid, uuid, uuid, uuid)",
+  "set_organization_slack_bot_access(uuid, uuid, uuid, text, boolean)",
+  "read_organization_slack_bot_access(uuid, uuid, uuid)",
+  "list_organization_slack_bots(uuid, uuid)",
+  "prepare_organization_slack_bot_message(uuid, uuid, uuid, uuid, uuid, integer, uuid, bigint, text, text, text)",
+  "read_organization_slack_bot_message(uuid, uuid, uuid, uuid)",
 ] as const;
 const SCHEDULED_SLACK_BOT_MESSAGES_TABLE = "scheduled_slack_bot_messages";
+const ORGANIZATION_SLACK_BOT_ACCESS_TABLE = "organization_slack_bot_access";
 export const ORGANIZATION_SIGNUP_USE_CASE_RUNTIME_ROUTINES = [
   "record_organization_signup_use_case(uuid, text, text)",
 ] as const;
@@ -110,7 +122,38 @@ const MCP_OPERATION_AUTHORITY_TABLES = [
 ] as const;
 const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   "claude_subscription_pool_protocol_v1_active()",
+  // M3 PR 2b: run only by the Codex Apps routines as their owner.
+  "subscription_codex_apps_designation_target(uuid, uuid)",
+  // M3 PR 2c: run only by the Codex connection-seam routines as their owner.
+  "subscription_codex_connection_target(uuid, uuid, uuid, uuid, uuid, text, bigint)",
+  // M3 PR 3b: run only by the Codex writers as their owner (the trigger
+  // function fires without the inserting role holding EXECUTE).
+  "subscription_codex_writer_context(uuid, uuid, text)",
+  "grant_subscription_codex_owner_capability(text, uuid, uuid, text, uuid)",
+  "drop_subscription_codex_owner_capabilities(uuid)",
+  "derive_scheduled_revision_subscription_authority()",
+  // Migration 0707: the provider-neutral writers' owner-only internals.
+  "subscription_core_writer_context(text, uuid, uuid, text)",
+  "grant_subscription_core_owner_capability(text, text, uuid, uuid, text, uuid)",
+  "drop_subscription_core_owner_capabilities(text, uuid)",
+  "subscription_core_connection_target(text, uuid, uuid, uuid, uuid, uuid, text, bigint)",
+  // Migration 0712: owner-only trigger functions of the provider cutover
+  // receipts and the provider-neutral cutover-row identity.
+  "guard_subscription_provider_cutover_receipts()",
+  "keep_subscription_cutover_identity()",
+  // Migration 0689: the owner-only Codex cutover receipt and the trigger that
+  // seeds organizations created later onto the shared core.
+  "subscription_codex_cutover_v1_active()",
+  "seed_subscription_codex_cutover()",
+  "record_subscription_codex_plan_change()",
+  "keep_subscription_codex_cutover_identity()",
+  "apply_subscription_codex_auto_assignments(uuid, uuid, boolean)",
+  "auto_assign_subscription_codex_workspace()",
+  "auto_assign_subscription_codex_personal_workspace()",
   "read_sender_connection(uuid, uuid, uuid, text)",
+  // Migration 0713: the provider-keyed auto-assignment apply path, run by
+  // 0689's two auto-assignment trigger functions as their owner.
+  "apply_subscription_core_auto_assignments(text, uuid, uuid, boolean)",
   // Lifecycle fact writers (migrations 0532 and 0565): owner-run trigger
   // functions and the migration-owner backfill. Runtime roles may still hold
   // EXECUTE until a follow-up migration revokes it once no pre-0565 binary
@@ -175,6 +218,7 @@ const ORGANIZATION_MEMBERSHIP_LIFECYCLE_ROUTINES = [
   "capture_legacy_codex_turn_sources(uuid, uuid)",
   "list_organization_workspace_ids(uuid)",
   "list_organization_codex_workspace_ids(uuid)",
+  "list_organization_subscription_workspace_ids(uuid)",
   "organization_workspace_command(jsonb)",
   "authorize_organization_shared_workspace_administration(uuid, uuid, text)",
   "resolve_organization_workspace_removal_subject(uuid, text, uuid)",
@@ -597,6 +641,8 @@ const PRIVATE_SESSION_CREATE_CAPABILITY_ROUTINES = [
   "close_private_session_create_capability(uuid)",
 ] as const;
 const SESSION_AUTHORITY_ROUTINES = new Set<string>([
+  "lock_live_native_original_origin_v2(jsonb)",
+  "modal_native_origin_member_read_active(uuid, text)",
   LEGACY_FORK_SESSION_CONTENT_ROUTINE,
   FORK_SESSION_CONTENT_ROUTINE,
   MESSAGE_FORK_SESSION_CONTENT_ROUTINE,
@@ -659,6 +705,145 @@ export const SUBSCRIPTION_ACCOUNT_CAPABILITY_ROUTINES = [
   ...CLAUDE_SUBSCRIPTION_CAPABILITY_ROUTINES,
 ];
 const CLAUDE_AUTHORITY_ROUTINE_SET = new Set(CLAUDE_AUTHORITY_ROUTINES);
+/**
+ * Migration 0707: the provider-neutral subscription-core routines (the
+ * provider is their first argument). The runtime requires them; each is a
+ * SECURITY DEFINER routine the runtime role executes and PUBLIC does not.
+ */
+export const SUBSCRIPTION_CORE_NEUTRAL_PRIVATE_ROUTINES = [
+  "subscription_core_owner_capability_held(text, uuid, text[], text, uuid, boolean)",
+  "subscription_core_owner_membership_held(uuid, uuid)",
+  "subscription_core_refresh_write_allowed(text, uuid, uuid, uuid)",
+  "begin_subscription_core_refresh(text, uuid, uuid, uuid, uuid, text, text, uuid, text, bigint)",
+  "persist_subscription_core_refresh(text, uuid, uuid, uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone)",
+  "persist_subscription_core_refresh_with_plan(text, uuid, uuid, uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone, text)",
+  "fail_subscription_core_refresh(text, uuid, uuid, uuid, uuid, uuid, bigint, text)",
+  "quarantine_subscription_core_connection(text, uuid, uuid, uuid, uuid, uuid, text, bigint, bigint, text, text, timestamp with time zone)",
+  "recover_subscription_core_connection_health(text, uuid, uuid, uuid, uuid)",
+  "subscription_core_acceptance_authority_v2(text, uuid, uuid, uuid, text)",
+  "subscription_core_task_authority_v2(text, uuid, uuid, uuid, text)",
+  "subscription_core_revision_authority_v2(uuid, uuid, uuid, bigint)",
+  "read_subscription_core_connection_credential(text, uuid, uuid, uuid, uuid, uuid, text, bigint)",
+  "begin_subscription_core_connection_refresh(text, uuid, uuid, uuid, uuid, uuid, text, bigint)",
+  "persist_subscription_core_connection_refresh(text, uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone)",
+  "fail_subscription_core_connection_refresh(text, uuid, uuid, uuid, bigint, text)",
+  "connect_subscription_core_personal(text, uuid, uuid, text, text, text, text, text, jsonb, timestamp with time zone, timestamp with time zone, text, text, text)",
+  "disconnect_subscription_core_connection(text, uuid, uuid, text, uuid)",
+  "manage_subscription_core_personal(text, uuid, uuid, text, uuid, text, text, boolean, integer)",
+  "subscription_core_personal_connections(text, uuid, uuid, text)",
+  // Migration 0713: an organization connection's reach for workspaces
+  // created later, read and replaced by organization administrators.
+  "subscription_core_reach(text, uuid, uuid)",
+  "set_subscription_core_reach(text, uuid, uuid, boolean, boolean)",
+  // Migration 0714: the organization's rotation switch on the reach row alone.
+  "set_subscription_core_reach_allocator(text, uuid, uuid, boolean)",
+] as const;
+
+/** Migration 0707: the neutral writers' owner-only internals. */
+export const SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES = [
+  "subscription_core_writer_context(text, uuid, uuid, text)",
+  "grant_subscription_core_owner_capability(text, text, uuid, uuid, text, uuid)",
+  "drop_subscription_core_owner_capabilities(text, uuid)",
+  "subscription_core_connection_target(text, uuid, uuid, uuid, uuid, uuid, text, bigint)",
+  // Migration 0713: the auto-assignment apply path, run only by 0689's two
+  // auto-assignment trigger functions (triggers fire without the caller
+  // holding EXECUTE).
+  "apply_subscription_core_auto_assignments(text, uuid, uuid, boolean)",
+] as const;
+
+/**
+ * Migration 0712 (M4 generic precursor): the per-provider cutover receipt
+ * reader. The runtime calls it for readiness and its RLS policies call it.
+ */
+export const SUBSCRIPTION_CORE_PRECURSOR_PRIVATE_ROUTINES = [
+  "subscription_provider_cutover_committed(text)",
+] as const;
+
+/** Migration 0712: owner-only trigger functions in opengeni_subscription_internal. */
+export const SUBSCRIPTION_CORE_PRECURSOR_OWNER_ROUTINES = [
+  "guard_subscription_provider_cutover_receipts()",
+  "keep_subscription_cutover_identity()",
+] as const;
+
+/**
+ * Every provider whose drained subscription-core cutover migration is in this
+ * binary's ledger. The binary refuses to start unless each has its receipt
+ * (`opengeni_private.subscription_provider_cutover_committed`). A provider's
+ * cutover PR adds its entry.
+ */
+export const SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS: Readonly<Record<string, string>> = {
+  codex: "0689_subscription_core_codex_cutover.sql",
+};
+
+export const SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES = [
+  "authorize_subscription_ownerless_session_access(uuid, uuid, uuid, uuid)",
+  "authorize_subscription_personal_placement_access(uuid, uuid, uuid, uuid, text, uuid, bigint, text, text)",
+  "subscription_codex_refresh_write_allowed(uuid, uuid, uuid)",
+  "begin_subscription_codex_refresh(uuid, uuid, uuid, uuid, text, text, uuid, text, bigint)",
+  "persist_subscription_codex_refresh(uuid, uuid, uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone)",
+  "fail_subscription_codex_refresh(uuid, uuid, uuid, uuid, uuid, bigint, text)",
+  // M3 PR 2a: Codex chat waits, connection health and v2 acceptance.
+  "quarantine_subscription_codex_connection(uuid, uuid, uuid, uuid, uuid, text, bigint, bigint, text, text, timestamp with time zone)",
+  "recover_subscription_codex_connection_health(uuid, uuid, uuid, uuid)",
+  "persist_subscription_codex_refresh_with_plan(uuid, uuid, uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone, text)",
+  "subscription_codex_acceptance_authority_v2(uuid, uuid, uuid, text)",
+  // M3 PR 2b: the Codex Apps designation on the core.
+  "resolve_subscription_codex_apps_designation(uuid, uuid)",
+  "read_subscription_codex_apps_credential(uuid, uuid, uuid)",
+  "begin_subscription_codex_apps_refresh(uuid, uuid, uuid)",
+  "persist_subscription_codex_apps_refresh(uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone)",
+  "fail_subscription_codex_apps_refresh(uuid, uuid, uuid, bigint, text)",
+  // M3 PR 2c: the connection-level Codex credential seam for operations.
+  "read_subscription_codex_connection_credential(uuid, uuid, uuid, uuid, uuid, text, bigint)",
+  "begin_subscription_codex_connection_refresh(uuid, uuid, uuid, uuid, uuid, text, bigint)",
+  "persist_subscription_codex_connection_refresh(uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone)",
+  "fail_subscription_codex_connection_refresh(uuid, uuid, uuid, bigint, text)",
+  "subscription_codex_reset_authority(uuid, uuid, uuid, text)",
+  // M3 PR 3b: Codex writers, the owner's personal-connection reader, the
+  // cross-workspace reset-credit fence, the scheduled-task v2 writer and the
+  // owner-only policies' capability helpers.
+  "connect_subscription_codex_personal(uuid, uuid, text, text, text, text, text, jsonb, timestamp with time zone, timestamp with time zone, text, text, text)",
+  "disconnect_subscription_codex_connection(uuid, uuid, text, uuid)",
+  "subscription_codex_personal_connections(uuid, uuid, text)",
+  "subscription_codex_reset_credit_fence(uuid, uuid, uuid, text, text, uuid)",
+  "subscription_codex_task_authority_v2(uuid, uuid, uuid, text)",
+  "subscription_codex_revision_authority_v2(uuid, uuid, uuid, bigint)",
+  "manage_subscription_codex_personal(uuid, uuid, text, uuid, text, text, boolean, integer)",
+  // Migration 0702: the organization connection reach behind the access editor.
+  "subscription_codex_reach(uuid, uuid)",
+  "set_subscription_codex_reach(uuid, uuid, boolean, boolean)",
+  "subscription_codex_owner_capability_held(uuid, text[], text, uuid, boolean)",
+  "subscription_codex_owner_membership_held(uuid, uuid)",
+  // Migration 0707: the provider-neutral equivalents the runtime calls.
+  ...SUBSCRIPTION_CORE_NEUTRAL_PRIVATE_ROUTINES,
+  ...SUBSCRIPTION_CORE_PRECURSOR_PRIVATE_ROUTINES,
+] as const;
+
+/** Owner-only private helpers the runtime role must never be able to execute. */
+export const SUBSCRIPTION_M3_OWNER_ONLY_PRIVATE_ROUTINES = [
+  // M3 PR 2b: returns a full connection row to the Apps routines that run as its owner.
+  "subscription_codex_apps_designation_target(uuid, uuid)",
+  // M3 PR 2c: returns a full connection row to the connection-seam routines.
+  "subscription_codex_connection_target(uuid, uuid, uuid, uuid, uuid, text, bigint)",
+  // M3 PR 3b: the writers' caller check, capability internals and the
+  // revision-authority trigger function.
+  "subscription_codex_writer_context(uuid, uuid, text)",
+  "grant_subscription_codex_owner_capability(text, uuid, uuid, text, uuid)",
+  "drop_subscription_codex_owner_capabilities(uuid)",
+  "derive_scheduled_revision_subscription_authority()",
+  // Migration 0689: the cutover receipt and the two owner-run trigger
+  // functions. Readiness only looks the receipt up; triggers fire without
+  // the caller holding EXECUTE.
+  "subscription_codex_cutover_v1_active()",
+  "seed_subscription_codex_cutover()",
+  "record_subscription_codex_plan_change()",
+  "keep_subscription_codex_cutover_identity()",
+  "apply_subscription_codex_auto_assignments(uuid, uuid, boolean)",
+  "auto_assign_subscription_codex_workspace()",
+  "auto_assign_subscription_codex_personal_workspace()",
+  ...SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES,
+  ...SUBSCRIPTION_CORE_PRECURSOR_OWNER_ROUTINES,
+] as const;
 
 const UNIFIED_KNOWLEDGE_ROUTINES = [
   "knowledge_index_claim(text, integer, integer)",
@@ -700,6 +885,8 @@ const UNIFIED_KNOWLEDGE_AUTHORITY_TABLES = [
   "documents",
 ] as const;
 export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
+  "lock_live_native_original_origin_v2(jsonb)",
+  "modal_native_origin_member_read_active(uuid, text)",
   ...CLAUDE_SUBSCRIPTION_CAPABILITY_ROUTINES,
   "maintain_usage_allowances(integer, integer)",
   "usage_allowance_command(jsonb)",
@@ -773,6 +960,7 @@ export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
   "usage_allowance_members(uuid, uuid)",
   "usage_allowance_effective_period(uuid, jsonb, timestamp with time zone)",
   "count_workspace_allowance_debit()",
+  "count_unbilled_model_allowance_debit()",
   "capture_usage_allowance_attribution()",
   "reverse_video_allowance_refund()",
   "capture_usage_allowance_period(uuid, uuid, jsonb, timestamp with time zone)",
@@ -788,11 +976,13 @@ export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
   SESSION_TENANCY_QUIESCENCE_ROUTINE,
   TENANCY_BACKFILL_ACTIVATION_EVIDENCE_ROUTINE,
   VERIFIED_SIGNUP_TRIAL_SWITCH_SETTER_ROUTINE,
+  "set_credit_promotion_policy(jsonb, text, text)",
   MANAGED_AUTH_NEW_SIGNUPS_SWITCH_SETTER_ROUTINE,
   ...DOCUMENT_MIGRATION_AUDIT_INTERNAL_ROUTINES,
 ] as const;
 
 export const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES = [
+  "set_credit_promotion_policy(jsonb, text, text)",
   CLAUDE_SNAPSHOT_VALIDATOR_ROUTINE,
   "usage_allowance_period(jsonb, timestamp with time zone)",
   "validate_usage_allowance_config(jsonb)",
@@ -888,6 +1078,7 @@ export const FORCE_RLS_TABLES = [
   "connections",
   "connector_action_policies",
   "connector_action_requests",
+  "credit_debit_allocations",
   "credit_ledger_entries",
   "device_enrollment_requests",
   "document_authority_reclassifications",
@@ -913,6 +1104,7 @@ export const FORCE_RLS_TABLES = [
   "editable_artifact_undo_claims",
   "editable_artifact_versions",
   "editable_artifacts",
+  "enrollment_token_redemptions",
   "enrollments",
   "external_identities",
   "external_identity_links",
@@ -1005,6 +1197,7 @@ export const FORCE_RLS_TABLES = [
   "model_call_facts",
   "network_routes",
   "new_session_drafts",
+  "organization_agent_admin_access",
   "organization_api_key_workspaces",
   "organization_codex_rotation_settings",
   "organization_company_profile_agent_policies",
@@ -1017,6 +1210,7 @@ export const FORCE_RLS_TABLES = [
   "organization_membership_lifecycle_events",
   "organization_membership_operation_receipts",
   "organization_memberships",
+  "organization_model_defaults",
   "organization_model_provider_connection_operations",
   "organization_model_provider_connections",
   "organization_model_provider_custom_models",
@@ -1088,6 +1282,7 @@ export const FORCE_RLS_TABLES = [
   "scheduled_task_runs",
   "scheduled_tasks",
   "self_service_organization_setup_receipts",
+  "session_admin_access",
   "session_attempt_codemode_calls",
   "session_attempt_connected_machine_authorizations",
   "session_attempt_interruptions",
@@ -1099,6 +1294,7 @@ export const FORCE_RLS_TABLES = [
   "session_attempt_tool_catalogs",
   "session_background_commands",
   "session_command_receipts",
+  "session_content_blobs",
   "session_event_cursors",
   "session_events",
   "session_goal_revisions",
@@ -1157,6 +1353,22 @@ export const FORCE_RLS_TABLES = [
   "slack_user_link_access_requests",
   "social_connections",
   "social_posts",
+  "subscription_apps_designations",
+  "subscription_capacity_waiters",
+  "subscription_capacity_wake_outbox",
+  "subscription_connection_aliases",
+  "subscription_connection_assignment_policies",
+  "subscription_connection_people",
+  "subscription_connection_quota",
+  "subscription_connection_workspaces",
+  "subscription_connections",
+  "subscription_leases",
+  "subscription_operation_leases",
+  "subscription_person_preferences",
+  "subscription_provider_cutovers",
+  "subscription_session_bindings",
+  "subscription_settings",
+  "subscription_turn_failures",
   "task_note_events",
   "task_note_knowledge_promotion_capabilities",
   "task_note_replacement_receipts",
@@ -1297,6 +1509,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "document_chunks",
   "documents",
   "editable_artifact_replica_leases",
+  "enrollment_token_redemptions",
   "enrollments",
   "file_uploads",
   "files",
@@ -1332,9 +1545,11 @@ export const RUNTIME_FULL_DML_TABLES = [
   "memory_slack_publications",
   "model_call_facts",
   "new_session_drafts",
+  "organization_agent_admin_access",
   "organization_api_key_workspaces",
   "organization_codex_rotation_settings",
   "organization_credential_providers",
+  "organization_model_defaults",
   "organization_model_provider_connection_operations",
   "organization_model_provider_connections",
   "organization_model_provider_custom_models",
@@ -1356,6 +1571,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "sandbox_session_envelopes",
   "sandbox_workspace_mutation_admissions",
   "sandboxes",
+  "session_admin_access",
   "session_attempt_interruptions",
   "session_background_commands",
   "session_command_receipts",
@@ -1397,6 +1613,22 @@ export const RUNTIME_FULL_DML_TABLES = [
   "social_connections",
   "social_posts",
   "stripe_webhook_events",
+  "subscription_apps_designations",
+  "subscription_capacity_waiters",
+  "subscription_capacity_wake_outbox",
+  "subscription_connection_aliases",
+  "subscription_connection_assignment_policies",
+  "subscription_connection_people",
+  "subscription_connection_quota",
+  "subscription_connection_workspaces",
+  "subscription_connections",
+  "subscription_leases",
+  "subscription_operation_leases",
+  "subscription_person_preferences",
+  "subscription_provider_cutovers",
+  "subscription_session_bindings",
+  "subscription_settings",
+  "subscription_turn_failures",
   "tool_gateway_approval_capabilities",
   "transcription_recording_chunks",
   "transcription_recording_objects",
@@ -1470,6 +1702,7 @@ export const RUNTIME_READ_INSERT_TABLES = [
   "browser_revision_components",
   "browser_revisions",
   "company_profile_revisions",
+  "credit_debit_allocations",
   "editable_artifact_blob_refs",
   "editable_artifact_idempotency_receipts",
   "editable_artifact_live_outbox",
@@ -1508,6 +1741,7 @@ export const RUNTIME_READ_INSERT_TABLES = [
   "preference_registry_preferences",
   "preference_registry_revisions",
   "session_attempt_tool_catalogs",
+  "session_content_blobs",
   "session_goal_revisions",
   "session_spawn_denials",
   "slack_shared_task_origins",
@@ -1732,7 +1966,6 @@ export type RuntimeDatabasePostureOptions = {
   targetSchemaForbiddenRoutines?: readonly string[];
   /** Frozen binary contract; current callers require both additive Insights capabilities. */
   modelFactCapabilityRoutines?: readonly string[];
-  organizationTenancyCanonicalActivationEnabled?: boolean;
 };
 
 export type RuntimeDatabaseIdentity = {
@@ -1803,6 +2036,8 @@ export type RuntimePrivateTablePosture = {
   truncate?: boolean;
   references?: boolean;
   trigger?: boolean;
+  /** Effective relation ACL privileges not represented by the named flags. */
+  extraPrivileges?: string[];
 };
 
 export type RuntimeDatabasePosture = {
@@ -1816,9 +2051,17 @@ export type RuntimeDatabasePosture = {
   privateTables: RuntimePrivateTablePosture[];
   targetRoutines: RuntimeTargetRoutinePosture[];
   privateRoutines: RuntimeRoutinePosture[];
-  sessionTenancyProductActivationPresent: boolean;
+  /** Separate owner-only schema: not part of the previous binary's runtime API inventory. */
+  subscriptionOwnerRoutines?: RuntimeRoutinePosture[];
   sessionVariableSetAttachmentsCutoverPresent: boolean;
   claudeSubscriptionPoolActivationPresent: boolean;
+  /** Migration 0689: Codex runs on the shared subscription core. */
+  subscriptionCodexCutoverActivationPresent: boolean;
+  /**
+   * Providers of SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS whose cutover
+   * receipt the database holds (migration 0712's readiness function).
+   */
+  subscriptionProviderCutoverReceipts: string[];
 };
 
 export class RuntimeDatabasePostureError extends Error {
@@ -1942,14 +2185,6 @@ export async function inspectRuntimeDatabasePosture(
         bypassRls: identity.rolbypassrls,
       };
 
-      // The forward-only activation receipt outlives topology. Embedded/scoped
-      // deployments must enforce the same environment interlock as standalone
-      // FORCE-RLS deployments, so inspect the value-free predicate before the
-      // scoped catalog fast-path.
-      const activationRows = resultRows<{ activated: boolean }>(
-        await tx.execute(sql`select session_tenancy_any_product_activation() as activated`),
-      );
-      const sessionTenancyProductActivationPresent = activationRows[0]?.activated === true;
       const variableSetCutoverRows = resultRows<{ present: boolean }>(
         await tx.execute(sql`
           select to_regprocedure(
@@ -1965,6 +2200,30 @@ export async function inspectRuntimeDatabasePosture(
         ) is not null as present`),
       );
       const claudeSubscriptionPoolActivationPresent = claudePoolActivationRows[0]?.present === true;
+      const codexCutoverActivationRows = resultRows<{ present: boolean }>(
+        await tx.execute(sql`select to_regprocedure(
+          'opengeni_private.subscription_codex_cutover_v1_active()'
+        ) is not null as present`),
+      );
+      const subscriptionCodexCutoverActivationPresent =
+        codexCutoverActivationRows[0]?.present === true;
+      // The receipt is read through its boolean readiness function only:
+      // committed_at is never read as a date ('-infinity' for Codex).
+      const receiptReaderRows = resultRows<{ present: boolean }>(
+        await tx.execute(sql`select to_regprocedure(
+          'opengeni_private.subscription_provider_cutover_committed(text)'
+        ) is not null as present`),
+      );
+      const subscriptionProviderCutoverReceipts =
+        receiptReaderRows[0]?.present === true
+          ? resultRows<{ provider: string }>(
+              await tx.execute(sql`select provider from jsonb_array_elements_text(${JSON.stringify(
+                Object.keys(SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS),
+              )}::jsonb) provider
+                where opengeni_private.subscription_provider_cutover_committed(provider)
+                order by provider`),
+            ).map((row) => row.provider)
+          : [];
 
       // Scoped/embedded topology deliberately leaves ownership and isolation to
       // the host. Prove the connection identity is coherent, but do not impose
@@ -1980,9 +2239,10 @@ export async function inspectRuntimeDatabasePosture(
           privateTables: [],
           targetRoutines: [],
           privateRoutines: [],
-          sessionTenancyProductActivationPresent,
           sessionVariableSetAttachmentsCutoverPresent,
           claudeSubscriptionPoolActivationPresent,
+          subscriptionCodexCutoverActivationPresent,
+          subscriptionProviderCutoverReceipts,
         };
       }
 
@@ -2115,6 +2375,7 @@ export async function inspectRuntimeDatabasePosture(
         can_truncate: boolean;
         can_references: boolean;
         can_trigger: boolean;
+        extra_privileges: string[];
       }>(
         await tx.execute(sql`
           select
@@ -2124,25 +2385,31 @@ export async function inspectRuntimeDatabasePosture(
             c.relforcerowsecurity as rls_forced,
             row_security_active(c.oid) as rls_active,
             (select count(*)::int from pg_policy policy where policy.polrelid = c.oid) as policy_count,
-            -- Column-only grants on the inventory stamp are also unsafe; in
-            -- particular INSERT can mint authority without a table grant.
+            -- Column-only grants on capability tables are also unsafe; a pin
+            -- table must remain EXECUTE-only even after column ACL drift.
             (has_table_privilege(current_user, c.oid, 'SELECT') or
-              ((c.relname in ('modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches') or
+              ((c.relname in ('modal_native_origin_read_capabilities','modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches', ${ARTIFACT_PINS_TABLE}) or
                 c.relname in (select jsonb_array_elements_text(${JSON.stringify(RUNTIME_ALLOWANCE_PRIVATE_TABLES)}::jsonb))) and
                 has_any_column_privilege(current_user, c.oid, 'SELECT'))) as can_select,
             (has_table_privilege(current_user, c.oid, 'INSERT') or
-              ((c.relname in ('modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches') or
+              ((c.relname in ('modal_native_origin_read_capabilities','modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches', ${ARTIFACT_PINS_TABLE}) or
                 c.relname in (select jsonb_array_elements_text(${JSON.stringify(RUNTIME_ALLOWANCE_PRIVATE_TABLES)}::jsonb))) and
                 has_any_column_privilege(current_user, c.oid, 'INSERT'))) as can_insert,
             (has_table_privilege(current_user, c.oid, 'UPDATE') or
-              ((c.relname in ('modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches') or
+              ((c.relname in ('modal_native_origin_read_capabilities','modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches', ${ARTIFACT_PINS_TABLE}) or
                 c.relname in (select jsonb_array_elements_text(${JSON.stringify(RUNTIME_ALLOWANCE_PRIVATE_TABLES)}::jsonb))) and
                 has_any_column_privilege(current_user, c.oid, 'UPDATE'))) as can_update,
             has_table_privilege(current_user, c.oid, 'DELETE') as can_delete,
             has_table_privilege(current_user, c.oid, 'TRUNCATE') as can_truncate,
             (has_table_privilege(current_user, c.oid, 'REFERENCES') or
               has_any_column_privilege(current_user, c.oid, 'REFERENCES')) as can_references,
-            has_table_privilege(current_user, c.oid, 'TRIGGER') as can_trigger
+            has_table_privilege(current_user, c.oid, 'TRIGGER') as can_trigger,
+            CASE WHEN c.relname = ${ARTIFACT_PINS_TABLE} THEN ARRAY(
+              SELECT DISTINCT acl.privilege_type FROM aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) acl
+              WHERE acl.privilege_type NOT IN ('SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER')
+                AND CASE WHEN acl.grantee = 0 THEN true ELSE pg_has_role(current_user, acl.grantee, 'USAGE') END
+              ORDER BY acl.privilege_type
+            ) ELSE ARRAY[]::text[] END AS extra_privileges
           from pg_class c
           join pg_namespace n on n.oid = c.relnamespace
           where n.nspname = 'opengeni_private'
@@ -2156,7 +2423,9 @@ export async function inspectRuntimeDatabasePosture(
               ${SCOPED_COMPUTE_CAPABILITY_TABLE},
               ${CONNECTION_TENANCY_BACKFILL_CAPABILITY_TABLE},
               ${SANDBOX_FILE_PUBLICATIONS_TABLE},
+              ${ARTIFACT_PINS_TABLE},
               ${SCHEDULED_SLACK_BOT_MESSAGES_TABLE},
+              ${ORGANIZATION_SLACK_BOT_ACCESS_TABLE},
               ${ORGANIZATION_SIGNUP_USE_CASES_TABLE},
               ${SLACK_FILE_UPLOAD_OPERATIONS_TABLE},
               'organization_usage_read_capabilities',
@@ -2174,8 +2443,10 @@ export async function inspectRuntimeDatabasePosture(
               'session_file_read_capabilities',
               'session_import_batches',
               'modal_inventory_read_capabilities',
+              'modal_native_origin_read_capabilities',
               ${AUTOMATIC_SESSION_TITLE_FANOUT_OUTBOX_TABLE},
               ${VERIFIED_SIGNUP_TRIAL_SWITCH_TABLE},
+              'credit_promotion_policy_revisions',
               ${MANAGED_AUTH_NEW_SIGNUPS_SWITCH_TABLE}
             )
         `),
@@ -2193,6 +2464,7 @@ export async function inspectRuntimeDatabasePosture(
         truncate: row.can_truncate,
         references: row.can_references,
         trigger: row.can_trigger,
+        ...(row.extra_privileges?.length ? { extraPrivileges: row.extra_privileges } : {}),
       }));
 
       const targetRoutines = resultRows<{
@@ -2274,6 +2546,20 @@ export async function inspectRuntimeDatabasePosture(
         configuration: row.configuration,
       }));
 
+      const subscriptionOwnerRoutines = resultRows<RuntimeRoutinePosture>(
+        await tx.execute(sql`
+          select (p.proname || '(' || pg_catalog.oidvectortypes(p.proargtypes) || ')')::text as name,
+            pg_get_userbyid(p.proowner)::text as owner,
+            (has_function_privilege(current_user, p.oid, 'EXECUTE')
+              or has_schema_privilege(current_user, n.oid, 'USAGE')
+              or has_schema_privilege(current_user, n.oid, 'CREATE')) as execute,
+            exists (select 1 from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
+              where acl.grantee = 0 and acl.privilege_type = 'EXECUTE') as "publicExecute",
+            p.prosecdef as "securityDefiner", p.proconfig as configuration
+          from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+          where n.nspname = 'opengeni_subscription_internal' and p.prokind = 'f'
+        `),
+      );
       return {
         identity: mappedIdentity,
         memberships,
@@ -2284,9 +2570,11 @@ export async function inspectRuntimeDatabasePosture(
         privateTables,
         targetRoutines,
         privateRoutines,
-        sessionTenancyProductActivationPresent,
+        subscriptionOwnerRoutines,
         sessionVariableSetAttachmentsCutoverPresent,
         claudeSubscriptionPoolActivationPresent,
+        subscriptionCodexCutoverActivationPresent,
+        subscriptionProviderCutoverReceipts,
       };
     },
     { isolationLevel: "repeatable read", accessMode: "read only" },
@@ -2317,17 +2605,20 @@ export function evaluateRuntimeDatabasePosture(
   if (!posture.claudeSubscriptionPoolActivationPresent)
     violations.push("database is missing the Claude subscription account activation receipt");
 
-  if (!posture.sessionVariableSetAttachmentsCutoverPresent) {
-    violations.push("database is missing the 0352 session Variable Set attachment runtime receipt");
+  if (!posture.subscriptionCodexCutoverActivationPresent)
+    violations.push(
+      "database is missing the 0689 Codex subscription-core cutover receipt; run the drained migration first",
+    );
+  for (const [provider, migration] of Object.entries(SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS)) {
+    if (!posture.subscriptionProviderCutoverReceipts.includes(provider)) {
+      violations.push(
+        `database is missing the ${provider} subscription-core cutover receipt (${migration}); apply the pending migrations first`,
+      );
+    }
   }
 
-  if (
-    posture.sessionTenancyProductActivationPresent &&
-    options.organizationTenancyCanonicalActivationEnabled !== true
-  ) {
-    violations.push(
-      "session-tenancy product activation is durable but OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED is not true",
-    );
+  if (!posture.sessionVariableSetAttachmentsCutoverPresent) {
+    violations.push("database is missing the 0352 session Variable Set attachment runtime receipt");
   }
 
   if (!identity.currentUser || !identity.sessionUser) {
@@ -2403,6 +2694,84 @@ export function evaluateRuntimeDatabasePosture(
   }
 
   const tableByName = new Map(posture.tables.map((table) => [table.name, table]));
+  const privateSchemaOwner = posture.schemas.find(
+    (schema) => schema.name === "opengeni_private",
+  )?.owner;
+  const quotedTargetSchema = `"${targetSchema.replaceAll('"', '""')}"`;
+  const precursorSearchPaths = new Set([
+    `search_path=pg_catalog, ${quotedTargetSchema}, opengeni_private, pg_temp`,
+    `search_path=pg_catalog, ${/^[a-z_][a-z0-9_]*$/.test(targetSchema) ? targetSchema : quotedTargetSchema}, opengeni_private, pg_temp`,
+  ]);
+  for (const expectedRoutine of SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES) {
+    const matches = posture.privateRoutines.filter((routine) => routine.name === expectedRoutine);
+    const safeSearchPath = (routine: RuntimeRoutinePosture) =>
+      routine.name === "subscription_codex_refresh_write_allowed(uuid, uuid, uuid)" ||
+      routine.name === "subscription_core_refresh_write_allowed(text, uuid, uuid, uuid)"
+        ? routine.configuration?.includes("search_path=pg_catalog, opengeni_private, pg_temp")
+        : routine.configuration?.some((configuration) => precursorSearchPaths.has(configuration));
+    if (
+      matches.length !== 1 ||
+      !matches[0]!.execute ||
+      matches[0]!.publicExecute ||
+      !matches[0]!.securityDefiner ||
+      (privateSchemaOwner && matches[0]!.owner !== privateSchemaOwner) ||
+      !safeSearchPath(matches[0]!)
+    ) {
+      violations.push(
+        `subscription M3 precursor private routine ${expectedRoutine} is missing or unsafe`,
+      );
+    }
+  }
+  for (const ownerOnly of SUBSCRIPTION_M3_OWNER_ONLY_PRIVATE_ROUTINES) {
+    const routine = [...posture.privateRoutines, ...(posture.subscriptionOwnerRoutines ?? [])].find(
+      (candidate) => candidate.name === ownerOnly,
+    );
+    if (routine && (routine.execute || routine.publicExecute)) {
+      violations.push(`subscription M3 owner-only private routine ${ownerOnly} is executable`);
+    }
+  }
+  if (
+    posture.subscriptionOwnerRoutines !== undefined &&
+    posture.privateRoutines.some((routine) =>
+      routine.name.startsWith("connect_subscription_codex_personal("),
+    )
+  ) {
+    const required = [
+      "subscription_codex_writer_context(uuid, uuid, text)",
+      "grant_subscription_codex_owner_capability(text, uuid, uuid, text, uuid)",
+      "drop_subscription_codex_owner_capabilities(uuid)",
+      "derive_scheduled_revision_subscription_authority()",
+      ...(posture.privateRoutines.some((routine) =>
+        routine.name.startsWith("connect_subscription_core_personal("),
+      )
+        ? SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES
+        : []),
+      ...(posture.privateRoutines.some((routine) =>
+        routine.name.startsWith("subscription_provider_cutover_committed("),
+      )
+        ? SUBSCRIPTION_CORE_PRECURSOR_OWNER_ROUTINES
+        : []),
+    ];
+    for (const signature of required) {
+      const matches = posture.subscriptionOwnerRoutines.filter(
+        (routine) => routine.name === signature,
+      );
+      if (
+        matches.length !== 1 ||
+        matches[0]!.owner !== privateSchemaOwner ||
+        matches[0]!.execute ||
+        matches[0]!.publicExecute ||
+        !matches[0]!.configuration?.some(
+          (value) =>
+            precursorSearchPaths.has(value) ||
+            value === `search_path=pg_catalog, ${targetSchema}, pg_temp` ||
+            value === `search_path=pg_catalog, ${quotedTargetSchema}, pg_temp`,
+        )
+      ) {
+        violations.push(`subscription owner implementation ${signature} is missing or unsafe`);
+      }
+    }
+  }
   if (tableByName.has("organization_integration_policies")) {
     for (const name of [
       "update_organization_integration_policy(uuid, text, jsonb)",
@@ -3756,6 +4125,23 @@ export function evaluateRuntimeDatabasePosture(
 
   // The trial-credit kill switch is operator state. Runtime roles may read it
   // for the gauge (SELECT is optional) but must never append or rewrite it.
+  const creditPolicyTable = posture.privateTables.find(
+    (table) => table.name === "credit_promotion_policy_revisions",
+  );
+  if (!creditPolicyTable) {
+    violations.push("credit promotion policy table is missing");
+  } else if (!creditPolicyTable.select) {
+    violations.push("runtime role cannot read the credit promotion policy");
+  }
+  if (
+    creditPolicyTable &&
+    (creditPolicyTable.owner === expectedRole ||
+      creditPolicyTable.insert ||
+      creditPolicyTable.update ||
+      creditPolicyTable.delete)
+  ) {
+    violations.push("runtime role has forbidden write authority on the credit promotion policy");
+  }
   const trialSwitchTable = posture.privateTables.find(
     (table) => table.name === VERIFIED_SIGNUP_TRIAL_SWITCH_TABLE,
   );
@@ -3886,6 +4272,47 @@ export function evaluateRuntimeDatabasePosture(
     }
   }
 
+  const pinTables = posture.privateTables.filter((table) => table.name === ARTIFACT_PINS_TABLE);
+  if (pinTables.length !== 1) {
+    if (!options.protectedTables)
+      violations.push("artifact pin private relation is missing or ambiguous");
+  } else {
+    const table = pinTables[0]!;
+    if (!table.rlsEnabled || !table.rlsForced || !table.rlsActive || (table.policyCount ?? 0) < 1)
+      violations.push("artifact pin relation lacks active FORCE-RLS workspace isolation");
+    if (
+      table.select ||
+      table.insert ||
+      table.update ||
+      table.delete ||
+      table.truncate ||
+      table.references ||
+      table.trigger ||
+      table.extraPrivileges?.length ||
+      table.owner === expectedRole
+    )
+      violations.push("runtime role has forbidden direct artifact pin authority");
+    if (tableByName.get("files")?.owner && table.owner !== tableByName.get("files")!.owner)
+      violations.push("artifact pin owner does not match workspace authority");
+    const quotedSchema = `"${targetSchema.replaceAll('"', '""')}"`;
+    const searchPaths = new Set([
+      `search_path=pg_catalog, ${quotedSchema}, pg_temp`,
+      `search_path=pg_catalog, ${/^[a-z_][a-z0-9_]*$/.test(targetSchema) ? targetSchema : quotedSchema}, pg_temp`,
+    ]);
+    for (const name of ARTIFACT_PIN_RUNTIME_ROUTINES) {
+      const routines = posture.privateRoutines.filter((routine) => routine.name === name);
+      if (
+        routines.length !== 1 ||
+        !routines[0]!.execute ||
+        routines[0]!.publicExecute ||
+        !routines[0]!.securityDefiner ||
+        routines[0]!.owner !== table.owner ||
+        !routines[0]!.configuration?.some((configuration) => searchPaths.has(configuration))
+      )
+        violations.push(`artifact pin capability ${name} is missing or unsafe`);
+    }
+  }
+
   const slackFileUploadTables = posture.privateTables.filter(
     (table) => table.name === SLACK_FILE_UPLOAD_OPERATIONS_TABLE,
   );
@@ -3952,6 +4379,31 @@ export function evaluateRuntimeDatabasePosture(
         violations.push(`scheduled Slack bot message capability ${name} is missing or unsafe`);
       }
     }
+  }
+
+  const botAccessTables = posture.privateTables.filter(
+    (table) => table.name === ORGANIZATION_SLACK_BOT_ACCESS_TABLE,
+  );
+  if (botAccessTables.length !== 1) {
+    if (!options.protectedTables)
+      violations.push("organization Slack bot access relation is missing or ambiguous");
+  } else {
+    const table = botAccessTables[0]!;
+    if (!table.rlsEnabled || !table.rlsForced || !table.rlsActive || (table.policyCount ?? 0) < 1)
+      violations.push("organization Slack bot access lacks active FORCE-RLS isolation");
+    if (
+      table.select ||
+      table.insert ||
+      table.update ||
+      table.delete ||
+      table.truncate ||
+      table.references ||
+      table.trigger ||
+      table.owner === expectedRole
+    )
+      violations.push("runtime role has forbidden direct organization Slack bot access authority");
+    if (table.owner !== scheduledSlackMessageTables[0]?.owner)
+      violations.push("organization Slack bot access owner does not match Slack post authority");
   }
 
   const signupUseCaseTables = posture.privateTables.filter(
@@ -4144,6 +4596,30 @@ export function evaluateRuntimeDatabasePosture(
   ) {
     violations.push("usage allowance attribution receipts lack same-owner FORCE-RLS isolation");
   }
+  const nativeOriginCapability = posture.privateTables.find(
+    (table) => table.name === "modal_native_origin_read_capabilities",
+  );
+  const nativeOriginRoutineInstalled = posture.targetRoutines.some(
+    (routine) => routine.name === "lock_live_native_original_origin_v2(jsonb)",
+  );
+  if (
+    (nativeOriginRoutineInstalled || nativeOriginCapability) &&
+    (!nativeOriginCapability ||
+      nativeOriginCapability.owner === expectedRole ||
+      nativeOriginCapability.owner !== tableByName.get("sessions")?.owner ||
+      nativeOriginCapability.owner !== tableByName.get("organization_memberships")?.owner ||
+      !nativeOriginCapability.rlsEnabled ||
+      !nativeOriginCapability.rlsForced ||
+      !nativeOriginCapability.rlsActive ||
+      nativeOriginCapability.select ||
+      nativeOriginCapability.insert ||
+      nativeOriginCapability.update ||
+      nativeOriginCapability.delete ||
+      nativeOriginCapability.truncate ||
+      nativeOriginCapability.references ||
+      nativeOriginCapability.trigger)
+  )
+    violations.push("Native LIVE-origin read capability has unsafe owner, RLS or privileges");
   const modalInventoryCapability = posture.privateTables.find(
     (table) => table.name === "modal_inventory_read_capabilities",
   );
@@ -4282,7 +4758,10 @@ export function evaluateRuntimeDatabasePosture(
     if (routine.owner === expectedRole) {
       violations.push(`runtime role owns private routine ${routine.name}`);
     }
-    if (routine.name === "list_pending_child_terminal_wake_repairs_v1(integer, uuid, uuid)") {
+    if (
+      routine.name === "list_pending_child_terminal_wake_repairs_v1(integer, uuid, uuid)" ||
+      routine.name === "list_quiescence_receipt_wake_repairs_v1(integer, uuid, uuid)"
+    ) {
       const dispatcher = posture.privateRoutines.find(
         (entry) => entry.name === "claim_session_workflow_wakes(integer)",
       );
@@ -4294,7 +4773,9 @@ export function evaluateRuntimeDatabasePosture(
         !routine.execute ||
         !routine.configuration?.includes("search_path=pg_catalog")
       ) {
-        violations.push("child terminal repair inventory has unsafe dispatcher capability posture");
+        violations.push(
+          `wake repair inventory ${routine.name} has unsafe dispatcher capability posture`,
+        );
       }
     }
     const integrationContract = integrationRoutine.find(([name]) => name === routine.name);

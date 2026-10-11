@@ -596,7 +596,7 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
       accountId,
       workspaceId,
       subjectId: "worker:first-party-mcp",
-      subjectLabel: "OpenGeni worker",
+      subjectLabel: "Opengeni worker",
       permissions: ["sessions:create", "sessions:read"],
       metadata: {
         sessionId: parent.id,
@@ -639,7 +639,7 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
       accountId,
       workspaceId,
       subjectId: "worker:first-party-mcp",
-      subjectLabel: "OpenGeni worker",
+      subjectLabel: "Opengeni worker",
       permissions: ["sessions:create", "sessions:read"],
       metadata: {
         sessionId: parent.id,

@@ -1,3 +1,5 @@
+import { ComputerNativeCommand } from "@opengeni/contracts";
+import { boundComputerNativeReceipt } from "@opengeni/interaction";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { connect, type Socket } from "node:net";
 import {
@@ -12,6 +14,7 @@ import {
   type BrowserActionCommand as BrowserActionCommandValue,
   type BrowserExternalAuthCommand as BrowserExternalAuthCommandValue,
   BrowserProtectedAuthFillCommand,
+  BrowserTargetListResponse,
   type BrowserProtectedAuthFillCommand as BrowserProtectedAuthFillCommandValue,
   BrowserWorkspaceFileStageRequest,
   ComputerActionCommand,
@@ -21,7 +24,12 @@ import {
   type InteractionError,
 } from "@opengeni/contracts";
 import { InteractionControllerError, InteractionDefiniteDriverError } from "@opengeni/interaction";
-import { CdpCommandTimeoutError, CdpTransportError } from "./cdp";
+import {
+  CdpCommandTimeoutError,
+  CdpProtocolError,
+  CdpSessionDetachedError,
+  CdpTransportError,
+} from "./cdp";
 import { BrowserWorkingRuntimeUnavailableError } from "./working-runtime-journal";
 import type { ComputerFrameSubscription, ComputerFrameStreamOptions } from "./computer-media";
 import {
@@ -177,6 +185,11 @@ export class BrowserControlServer {
   private readonly server: BrowserServer;
   private stopPromise: Promise<void> | null = null;
   private stopping = false;
+  private activeRequests = 0;
+  private settleRequests: (() => void) | null = null;
+  private updateOperation: string | null = null;
+  private readonly producers = new Set<Promise<void>>();
+  private unsettledProducer = false;
 
   private constructor(options: BrowserControlServerOptions) {
     this.supervisor = options.supervisor;
@@ -240,6 +253,7 @@ export class BrowserControlServer {
     for (const socket of sockets) {
       if (socket.data.expiryTimer) clearTimeout(socket.data.expiryTimer);
       socket.data.expiryTimer = null;
+      this.onSocketClose(socket);
       socket.terminate();
     }
     const subscriptionResults = await Promise.allSettled(
@@ -266,6 +280,17 @@ export class BrowserControlServer {
         if (result.status === "rejected") failures.push(result.reason);
       }
     }
+    // Closing the listener or a viewer is not the lifetime of work it already
+    // accepted. Join real HTTP/native work and queued socket validation too.
+    if (this.activeRequests > 0) {
+      await new Promise<void>((resolve) => {
+        this.settleRequests = resolve;
+      });
+    }
+    while (this.producers.size > 0) {
+      await Promise.allSettled([...this.producers]);
+    }
+    if (this.unsettledProducer) failures.push(new Error("controller producer cleanup is unproved"));
     this.authorities.clear();
     this.computerAuthorities.clear();
     if (failures.length > 0) {
@@ -282,6 +307,9 @@ export class BrowserControlServer {
     if (origin && (!normalizedOrigin || !this.allowedOrigins.has(normalizedOrigin))) {
       return protocolResponse(new ProtocolError("permission_denied", "origin is not allowed", 403));
     }
+    // Count queued JSON and route work before the first await. Supervisor idle
+    // alone does not include an HTTP request still parsing its create payload.
+    this.activeRequests += 1;
     try {
       if (request.method === "OPTIONS") {
         return this.withCors(this.preflight(request), normalizedOrigin);
@@ -292,6 +320,20 @@ export class BrowserControlServer {
             new ProtocolError("resource_unavailable", "browser controller is stopping", 503, true),
           ),
           normalizedOrigin,
+        );
+      }
+      const pathname = new URL(request.url).pathname;
+      if (
+        this.updateOperation !== null &&
+        pathname !== "/healthz" &&
+        pathname !== "/v1/runtime" &&
+        pathname !== "/v1/runtime/update"
+      ) {
+        throw new ProtocolError(
+          "resource_unavailable",
+          "browser controller is draining for update",
+          503,
+          true,
         );
       }
       const response = await this.route(request, server);
@@ -308,7 +350,37 @@ export class BrowserControlServer {
         }
       }
       return this.withCors(protocolResponse(error), normalizedOrigin);
+    } finally {
+      this.activeRequests -= 1;
+      if (this.activeRequests === 0) {
+        this.settleRequests?.();
+        this.settleRequests = null;
+      }
     }
+  }
+
+  private runtimeIdle(): boolean {
+    return (
+      !this.unsettledProducer &&
+      this.activeRequests <= 1 &&
+      this.server.pendingRequests <= 1 &&
+      this.lifecycleTails.size === 0 &&
+      this.sockets.size === 0 &&
+      this.producers.size === 0 &&
+      this.supervisor.isIdle() &&
+      (this.computerSupervisor?.isIdle() ?? true)
+    );
+  }
+
+  private retainProducer(work: Promise<void>): void {
+    this.producers.add(work);
+    void work
+      .catch(() => {
+        this.unsettledProducer = true;
+      })
+      .finally(() => {
+        this.producers.delete(work);
+      });
   }
 
   private async route(request: Request, server: BrowserServer): Promise<Response | undefined> {
@@ -332,8 +404,32 @@ export class BrowserControlServer {
         throw new ProtocolError("invalid_action", "method not allowed", 405);
       }
       return success({
-        idle: this.supervisor.isIdle() && (this.computerSupervisor?.isIdle() ?? true),
+        idle: this.runtimeIdle(),
       });
+    }
+    if (
+      segments.length === 3 &&
+      segments[0] === "v1" &&
+      segments[1] === "runtime" &&
+      segments[2] === "update"
+    ) {
+      this.requireAdmin(request);
+      if (request.method !== "POST" && request.method !== "DELETE")
+        throw new ProtocolError("invalid_action", "method not allowed", 405);
+      const body = await readJsonObject(request);
+      assertOnlyKeys(body, ["operationId"]);
+      const operationId = requireUuid(body.operationId, "update operation id");
+      if (request.method === "DELETE") {
+        if (this.updateOperation !== null && this.updateOperation !== operationId)
+          throw new ProtocolError("resource_unavailable", "update operation owner differs", 409);
+        if (this.updateOperation === operationId) this.updateOperation = null;
+        return success({ idle: this.runtimeIdle(), operationId, released: true });
+      }
+      if (this.updateOperation !== null && this.updateOperation !== operationId)
+        return success({ idle: false, operationId });
+      const idle = this.runtimeIdle();
+      if (idle) this.updateOperation = operationId;
+      return success({ idle, operationId });
     }
     if (segments[0] === "v1" && segments[1] === "computer-sessions") {
       if (!this.computerSupervisor) {
@@ -402,6 +498,22 @@ export class BrowserControlServer {
         return success(target, 201);
       }
       throw new ProtocolError("invalid_action", "method not allowed", 405);
+    }
+    if (
+      segments.length === 5 &&
+      segments[3] === "targets" &&
+      segments[4] === "open-with-inventory"
+    ) {
+      if (request.method !== "POST") {
+        throw new ProtocolError("invalid_action", "method not allowed", 405);
+      }
+      const body = await readJsonObject(request);
+      assertOnlyKeys(body, ["url"]);
+      const targets = await this.supervisor.openTargetWithInventory(
+        reference,
+        body.url === undefined ? undefined : requireString(body.url, "url", 16_384),
+      );
+      return success(BrowserTargetListResponse.parse({ ...reference, targets }), 201);
     }
     if (segments.length === 4 && segments[3] === "actions") {
       if (request.method !== "POST") {
@@ -673,6 +785,18 @@ export class BrowserControlServer {
       if (request.method === "GET") return success(await supervisor.clipboard(reference));
       throw new ProtocolError("invalid_action", "method not allowed", 405);
     }
+    if (segments.length === 4 && segments[3] === "native-calls") {
+      if (request.method !== "POST")
+        throw new ProtocolError("invalid_action", "method not allowed", 405);
+      const command = ComputerNativeCommand.parse(await readJson(request));
+      if (command.computerSessionId !== computerSessionId)
+        throw new ProtocolError(
+          "operation_conflict",
+          "native call targets another computer session",
+          409,
+        );
+      return success(boundComputerNativeReceipt(await supervisor.nativeCall(command)));
+    }
     if (segments.length === 4 && segments[3] === "actions") {
       if (request.method !== "POST") {
         throw new ProtocolError("invalid_action", "method not allowed", 405);
@@ -701,7 +825,7 @@ export class BrowserControlServer {
       const operationId = requireUuid(segments[4], "operation id");
       const receipt = supervisor.receipt(reference, operationId);
       if (!receipt) throw new ProtocolError("resource_not_found", "operation not found", 404);
-      return success(receipt);
+      return success(boundComputerNativeReceipt(receipt));
     }
     if (segments.length !== 6 || segments[3] !== "targets") {
       throw new ProtocolError("resource_not_found", "route not found", 404);
@@ -1373,9 +1497,9 @@ export class BrowserControlServer {
       }, remainingMs);
     }
     if (socket.data.kind === "computer_rfb") {
-      void this.openComputerRfb(socket);
+      this.retainProducer(this.openComputerRfb(socket));
     } else {
-      void this.pumpFrames(socket);
+      this.retainProducer(this.pumpFrames(socket));
     }
   }
 
@@ -1422,6 +1546,7 @@ export class BrowserControlServer {
         data.incomingBytes -= bytes.byteLength;
       }
     });
+    this.retainProducer(data.incoming);
   }
 
   private async validateComputerRfb(socket: BrowserSocket): Promise<void> {
@@ -1495,6 +1620,7 @@ export class BrowserControlServer {
           this.closeSocket(socket, 1008, "RFB authorization is stale");
         }
       });
+      this.retainProducer(data.incoming);
     });
     upstream.on("data", (chunk) => {
       if (data.closed) return;
@@ -1524,12 +1650,21 @@ export class BrowserControlServer {
     socket.data.expiryTimer = null;
     this.sockets.delete(socket);
     if (socket.data.kind === "computer_rfb") {
-      socket.data.upstream?.destroy();
+      const upstream = socket.data.upstream;
+      if (upstream && !upstream.closed) {
+        this.retainProducer(
+          new Promise<void>((resolve) => {
+            upstream.once("close", () => resolve());
+          }),
+        );
+      }
+      upstream?.destroy();
       socket.data.upstream = null;
       socket.data.pending = [];
       socket.data.pendingBytes = 0;
     } else {
-      void socket.data.subscription?.close();
+      const closing = socket.data.subscription?.close();
+      if (closing) this.retainProducer(closing);
     }
   }
 
@@ -1566,7 +1701,9 @@ export class BrowserControlServer {
       let sent = 0;
       for await (const frame of subscription) {
         if (data.closed) break;
-        if (socket.send(encodeBrowserFrameMessage(frame), false) < 0) {
+        // Bun returns -1 when it queued the frame under backpressure. The
+        // socket's 32 MiB backpressure limit bounds a genuinely slow viewer.
+        if (socket.send(encodeBrowserFrameMessage(frame), false) === 0) {
           socket.close(1013, "frame consumer is too slow");
           break;
         }
@@ -1622,7 +1759,9 @@ export class BrowserControlServer {
       data.subscription = subscription;
       for await (const frame of subscription) {
         if (data.closed) break;
-        if (socket.send(encodeComputerFrameMessage(frame), false) < 0) {
+        // A -1 frame is queued, not dropped. Keep the producer alive so the
+        // relay can receive it when the socket drains.
+        if (socket.send(encodeComputerFrameMessage(frame), false) === 0) {
           socket.close(1013, "frame consumer is too slow");
           break;
         }
@@ -1826,7 +1965,12 @@ async function browserReadResponse(
   try {
     return success(await read());
   } catch (error) {
-    if (!(error instanceof CdpTransportError)) throw error;
+    if (
+      !(error instanceof CdpTransportError) &&
+      !(error instanceof CdpSessionDetachedError) &&
+      !(error instanceof CdpProtocolError && error.code === -32_000)
+    )
+      throw error;
     const timeout = error instanceof CdpCommandTimeoutError;
     return failure(
       timeout ? "timeout" : "resource_unavailable",
@@ -1926,12 +2070,16 @@ function routeNeedsControl(segments: readonly string[], request: Request): boole
   }
   if (segments[3] !== "targets") return false;
   if (segments.length === 4) return request.method === "POST";
-  if (segments.length === 5) return request.method === "DELETE";
+  if (segments.length === 5)
+    return (
+      request.method === "DELETE" ||
+      (segments[4] === "open-with-inventory" && request.method === "POST")
+    );
   return segments[5] === "select";
 }
 
 function routeNeedsComputerControl(segments: readonly string[]): boolean {
-  return segments[3] === "actions" || segments[3] === "heartbeat";
+  return segments[3] === "actions" || segments[3] === "native-calls" || segments[3] === "heartbeat";
 }
 
 async function readJson(request: Request): Promise<unknown> {

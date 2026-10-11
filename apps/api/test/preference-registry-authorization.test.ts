@@ -108,12 +108,7 @@ describe("preference registry scope authorization", () => {
   });
 
   test("fails closed for machines, keys, generic grants, and malformed direct-human claims", () => {
-    for (const principalKind of [
-      "agent_attempt",
-      "service",
-      "api_key",
-      "configured_key",
-    ] as const) {
+    for (const principalKind of ["agent_attempt", "service", "api_key"] as const) {
       expectForbidden(() =>
         authorizePreferenceRegistryScopeMutation(authorization({ principalKind }), "user"),
       );
@@ -150,6 +145,48 @@ describe("preference registry scope authorization", () => {
         "organization",
       ),
     );
+  });
+
+  test("a key-only deployment's operator key counts as the person, but never for an agent", () => {
+    const operator = authorization({ principalKind: "configured_key" });
+    expect(() => authorizePreferenceRegistryScopeMutation(operator, "workspace")).not.toThrow();
+    expect(() => authorizePreferenceRegistryScopeMutation(operator, "user")).not.toThrow();
+    expectForbidden(
+      () =>
+        authorizePreferenceRegistryScopeMutation(
+          authorization({
+            principalKind: "configured_key",
+            workspacePermissions: ["workspace:read"],
+          }),
+          "workspace",
+        ),
+      "workspace:admin",
+    );
+    for (const access of [
+      authorization({
+        principalKind: "configured_key",
+        metadata: {
+          sessionId: "session",
+          turnId: "turn",
+          attemptId: "attempt",
+          executionGeneration: 1,
+        },
+      }),
+      authorization({
+        principalKind: "configured_key",
+        serviceInitiator: {
+          kind: "service",
+          subjectId: "service:embedding-host",
+          label: "Embedding host",
+        },
+      }),
+      authorization({
+        principalKind: "configured_key",
+        contextSubjectId: "configured:someone-else",
+      }),
+    ]) {
+      expectForbidden(() => authorizePreferenceRegistryScopeMutation(access, "workspace"));
+    }
   });
 
   test("rejects mismatched account context and mixed authenticated identities or principals", () => {

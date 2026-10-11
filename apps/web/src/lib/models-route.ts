@@ -21,6 +21,7 @@ export type ModelsProvider =
   | "supergrok"
   | "vercel"
   | "openrouter"
+  | "opper"
   | "anthropic"
   | "claude_subscription";
 
@@ -30,6 +31,7 @@ export type ModelsView =
   | `connect:${ModelsProvider}`
   | `connect-org:${ModelsProvider}`
   | "allowed-models"
+  | "compaction"
   | "model-access";
 
 const PROVIDERS: readonly ModelsProvider[] = [
@@ -37,6 +39,7 @@ const PROVIDERS: readonly ModelsProvider[] = [
   "supergrok",
   "vercel",
   "openrouter",
+  "opper",
   "anthropic",
   "claude_subscription",
 ];
@@ -47,6 +50,7 @@ const VIEWS: ReadonlySet<string> = new Set<ModelsView>([
   ...PROVIDERS.map((provider) => `connect:${provider}` as const),
   ...PROVIDERS.map((provider) => `connect-org:${provider}` as const),
   "allowed-models",
+  "compaction",
   "model-access",
 ]);
 
@@ -55,13 +59,13 @@ export function parseModelsView(value: unknown): ModelsView | undefined {
 }
 
 const ACCOUNT_KEY =
-  /^(org:)?((codex|supergrok|claude):[\w-]{1,128}|gateway:(vercel|openrouter|anthropic|claude_subscription))$/;
+  /^(org:)?((codex|supergrok|claude):[\w-]{1,128}|gateway:(vercel|openrouter|opper|anthropic|claude_subscription))$/;
 
 export function parseModelsAccount(value: unknown): string | undefined {
   return typeof value === "string" && ACCOUNT_KEY.test(value) ? value : undefined;
 }
 
-export type GatewayId = "vercel" | "openrouter" | "anthropic" | "claude_subscription";
+export type GatewayId = "vercel" | "openrouter" | "opper" | "anthropic" | "claude_subscription";
 
 export type AccountKey = (
   | { provider: "codex" | "supergrok" | "claude"; id: string }
@@ -81,7 +85,11 @@ export function accountKeyOf(value: string | undefined): AccountKey | null {
   }
   if (
     provider === "gateway" &&
-    (id === "vercel" || id === "openrouter" || id === "anthropic" || id === "claude_subscription")
+    (id === "vercel" ||
+      id === "openrouter" ||
+      id === "opper" ||
+      id === "anthropic" ||
+      id === "claude_subscription")
   ) {
     return { provider, id, organization };
   }

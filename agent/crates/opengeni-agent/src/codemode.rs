@@ -162,7 +162,7 @@ impl CodemodeError {
         };
         json!({ "error": { "operationId": operation_id, "state": state,
             "code": code, "message": self.to_string(),
-            "recovery": operation_id.map(|_| "Observe the existing operation only while its original agent attempt is active. If that attempt ended, inspect retained command output or session tool receipts instead; a new attempt cannot read the old operation. Do not automatically start another call.") } })
+            "recovery": operation_id.map(|_| "Read this operation with the current authorized attempt of the same turn. Approval resumes the stored operation. Do not automatically start another call.") } })
     }
 
     fn observing(self, operation_id: &str) -> Self {
@@ -212,8 +212,14 @@ pub async fn run(args: CodemodeArgs) -> Result<(), CodemodeError> {
             print!("{}", client.catalog().await?.show_output(&args.tool)?);
         }
         CodemodeAction::Call(args) => {
+            let full = args.full;
             let result = client.call(args).await?;
-            println!("{}", serde_json::to_string_pretty(&result)?);
+            let printed = if full {
+                result
+            } else {
+                omit_structured_content_text_duplicates(result)
+            };
+            println!("{}", serde_json::to_string_pretty(&printed)?);
         }
         CodemodeAction::Read { operation_id } => {
             // A GET only. Neither catalog discovery nor submission is needed.
@@ -234,6 +240,92 @@ pub async fn run(args: CodemodeArgs) -> Result<(), CodemodeError> {
         }
     }
     Ok(())
+}
+
+/// IEEE-754 safe-integer bound shared with the JavaScript clients.
+const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
+const MAX_SAFE_INTEGER_F64: f64 = 9_007_199_254_740_991.0;
+
+/// Mirrors `omitStructuredContentTextDuplicates` in
+/// `packages/contracts/src/mcp-structured-content.ts` so `codemode call` and
+/// `ogtool call` print the same result. A plain `{type: "text", text}` block
+/// whose text parses as JSON equal to `structuredContent` (numbers compared by
+/// IEEE-754 value) is omitted. Prose, differing JSON, annotated text, other
+/// block types, and text carrying an integer outside the safe range stay.
+fn omit_structured_content_text_duplicates(mut result: Value) -> Value {
+    let Some(object) = result.as_object_mut() else {
+        return result;
+    };
+    let structured = match object.get("structuredContent") {
+        None | Some(Value::Null) => return result,
+        Some(value) => value.clone(),
+    };
+    if let Some(Value::Array(content)) = object.get_mut("content") {
+        content.retain(|entry| !text_block_duplicates_structured_content(entry, &structured));
+    }
+    result
+}
+
+fn text_block_duplicates_structured_content(entry: &Value, structured: &Value) -> bool {
+    let Some(block) = entry.as_object() else {
+        return false;
+    };
+    // Annotations or _meta are block-level facts the structured value lacks.
+    if block.len() != 2 || block.get("type").and_then(Value::as_str) != Some("text") {
+        return false;
+    }
+    let Some(text) = block.get("text").and_then(Value::as_str) else {
+        return false;
+    };
+    let trimmed = text.trim_start_matches([' ', '\t', '\n', '\r']);
+    if !trimmed.starts_with('{') && !trimmed.starts_with('[') {
+        return false;
+    }
+    let Ok(parsed) = serde_json::from_str::<Value>(text) else {
+        return false;
+    };
+    !contains_unsafe_integer(&parsed) && json_values_equal(&parsed, structured)
+}
+
+fn contains_unsafe_integer(value: &Value) -> bool {
+    match value {
+        Value::Number(number) => {
+            if let Some(integer) = number.as_i64() {
+                integer.unsigned_abs() > MAX_SAFE_INTEGER
+            } else if let Some(integer) = number.as_u64() {
+                integer > MAX_SAFE_INTEGER
+            } else {
+                number.as_f64().is_some_and(|float| {
+                    float.is_finite() && float.fract() == 0.0 && float.abs() > MAX_SAFE_INTEGER_F64
+                })
+            }
+        }
+        Value::Array(entries) => entries.iter().any(contains_unsafe_integer),
+        Value::Object(entries) => entries.values().any(contains_unsafe_integer),
+        _ => false,
+    }
+}
+
+fn json_values_equal(left: &Value, right: &Value) -> bool {
+    match (left, right) {
+        (Value::Number(left), Value::Number(right)) => left.as_f64() == right.as_f64(),
+        (Value::Array(left), Value::Array(right)) => {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right)
+                    .all(|(left, right)| json_values_equal(left, right))
+        }
+        (Value::Object(left), Value::Object(right)) => {
+            left.len() == right.len()
+                && left.iter().all(|(key, left)| {
+                    right
+                        .get(key)
+                        .is_some_and(|right| json_values_equal(left, right))
+                })
+        }
+        _ => left == right,
+    }
 }
 
 /// Mirrors openGeni.artifacts.ids.document: uint64 namespace, nonzero random
@@ -321,6 +413,7 @@ impl CodemodeClient {
         let request = CallRequest {
             operation_id: operation_id.clone(),
             catalog_digest: catalog.digest.clone(),
+            durable_approval: true,
             identity: entry.identity.clone(),
             arguments,
         };
@@ -357,6 +450,14 @@ impl CodemodeClient {
             };
 
             match next.state {
+                OperationState::WaitingForApproval => {
+                    return Err(CodemodeError::Operation {
+                        operation_id: operation_id.clone(),
+                        state: "waiting_for_approval".to_string(),
+                        code: Some("codemode_approval_pending".to_string()),
+                        message: "Waiting for review. The worker resumes this stored operation after approval; read this handle without submitting the arguments again.".to_string(),
+                    });
+                }
                 OperationState::Completed => {
                     return next.result.ok_or_else(|| {
                         CodemodeError::InvalidResponse(
@@ -367,7 +468,8 @@ impl CodemodeClient {
                 }
                 OperationState::Failed
                 | OperationState::Cancelled
-                | OperationState::OutcomeUnknown => {
+                | OperationState::OutcomeUnknown
+                | OperationState::Unknown => {
                     return Err(CodemodeError::Operation {
                         operation_id: operation_id.clone(),
                         state: serde_json::to_value(next.state)?
@@ -401,6 +503,7 @@ impl CodemodeClient {
         let response = self
             .http
             .get(self.url(&format!("calls/{operation_id}"))?)
+            .header("x-opengeni-codemode-capabilities", "durable-approval-v1")
             .bearer_auth(&self.token)
             .send()
             .await
@@ -708,6 +811,7 @@ fn short_description(entry: &CatalogEntry) -> String {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CallRequest {
+    durable_approval: bool,
     operation_id: String,
     catalog_digest: String,
     identity: ToolIdentity,
@@ -723,11 +827,14 @@ struct Submission {
 #[serde(rename_all = "snake_case")]
 enum OperationState {
     Queued,
+    WaitingForApproval,
     Running,
     Completed,
     Failed,
     OutcomeUnknown,
     Cancelled,
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -800,6 +907,52 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::net::{TcpListener, TcpStream};
+
+    #[tokio::test]
+    async fn waiting_returns_a_compact_receipt_without_polling_or_resubmitting() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listen");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("catalog");
+            read_request(&mut stream).await;
+            write_response(&mut stream, &json!({
+                "attemptId": "11111111-1111-4111-8111-111111111111", "digest": "b".repeat(64),
+                "entries": [{ "identity": { "serverId": "mail", "toolName": "change" },
+                    "modelName": "mail__change", "codemodePath": ["mail", "change"],
+                    "inputSchema": { "type": "object" }, "source": "mcp", "approval": "policy" }]
+            })).await;
+            let (mut stream, _) = listener.accept().await.expect("call");
+            let request = read_request(&mut stream).await;
+            write_response(
+                &mut stream,
+                &json!({"operation": {"state": "waiting_for_approval"}}),
+            )
+            .await;
+            request
+        });
+        let client = CodemodeClient::new(
+            &format!("http://{address}/codemode"),
+            "fixture-bearer".to_string(),
+        )
+        .expect("client");
+        let error = tokio::time::timeout(
+            Duration::from_secs(2),
+            client.call(CodemodeCallArgs {
+                tool: "mail.change".to_string(),
+                arguments: "{}".to_string(),
+                full: false,
+            }),
+        )
+        .await
+        .expect("waiting must exit promptly")
+        .expect_err("pending receipt");
+        let receipt = error.receipt();
+        assert_eq!(receipt["error"]["state"], "waiting_for_approval");
+        assert_eq!(receipt["error"]["code"], "codemode_approval_pending");
+        assert!(!receipt.to_string().contains("\"arguments\":"));
+        let request = server.await.expect("server");
+        assert!(request.contains("\"durableApproval\":true"));
+    }
 
     #[test]
     fn document_ids_preserve_namespace_and_sdk_counter_contract() {
@@ -882,6 +1035,52 @@ mod tests {
                 "tool-name"
             );
         }
+    }
+
+    #[test]
+    fn call_output_omits_only_exact_structured_content_text_duplicates() {
+        let structured = json!({ "items": [{ "id": 1, "title": "Bug \"quoted\"" }], "total": 1 });
+        let pretty = serde_json::to_string_pretty(&structured).expect("pretty");
+        let reordered = r#"{"total":1.0,"items":[{"title":"Bug \"quoted\"","id":1}]}"#;
+        let result = json!({
+            "content": [
+                { "type": "text", "text": pretty },
+                { "type": "text", "text": reordered },
+                { "type": "text", "text": "Found 1 issue." },
+                { "type": "text", "text": "{\"total\":2}" },
+                { "type": "text", "text": structured.to_string(), "annotations": { "audience": ["user"] } },
+                { "type": "image", "data": "/9j/2Q==", "mimeType": "image/jpeg" }
+            ],
+            "structuredContent": structured,
+            "isError": false
+        });
+        let printed = omit_structured_content_text_duplicates(result.clone());
+        assert_eq!(
+            printed["content"],
+            json!([
+                result["content"][2],
+                result["content"][3],
+                result["content"][4],
+                result["content"][5]
+            ])
+        );
+        assert_eq!(printed["structuredContent"], result["structuredContent"]);
+        assert_eq!(printed["isError"], false);
+
+        let unsafe_text = r#"{"id":12345678901234567000}"#;
+        let unsafe_result = json!({
+            "content": [{ "type": "text", "text": unsafe_text }],
+            "structuredContent": serde_json::from_str::<Value>(unsafe_text).expect("json")
+        });
+        assert_eq!(
+            omit_structured_content_text_duplicates(unsafe_result.clone()),
+            unsafe_result
+        );
+        let unstructured = json!({ "content": [{ "type": "text", "text": "{}" }] });
+        assert_eq!(
+            omit_structured_content_text_duplicates(unstructured.clone()),
+            unstructured
+        );
     }
 
     #[test]
@@ -1400,6 +1599,7 @@ mod tests {
             .call(CodemodeCallArgs {
                 tool: "demo.lookup".to_string(),
                 arguments: r#"{"query":"hello"}"#.to_string(),
+                full: false,
             })
             .await
             .expect("call");
@@ -1501,6 +1701,7 @@ mod tests {
             .call(CodemodeCallArgs {
                 tool: "demo.mutate".to_string(),
                 arguments: "{}".to_string(),
+                full: false,
             })
             .await
             .expect("recovered call");
@@ -1562,6 +1763,7 @@ mod tests {
                 .call(CodemodeCallArgs {
                     tool: "demo.write".into(),
                     arguments: "{}".into(),
+                    full: false,
                 })
                 .await
                 .unwrap_err();

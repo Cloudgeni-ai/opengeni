@@ -123,8 +123,8 @@ export async function exportDocx(
     comments: { children: context.commentDefinitions },
     features: { trackRevisions: document.trackRevisions },
     evenAndOddHeaderAndFooters,
-    creator: "OpenGeni",
-    lastModifiedBy: "OpenGeni",
+    creator: "Opengeni",
+    lastModifiedBy: "Opengeni",
     revision: document.revision,
   });
   const bytes = await packDocxWithBoundedCompression(file, docx.Packer, [
@@ -2039,7 +2039,7 @@ function deterministicCoreProperties(revision: number): string {
   return (
     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
     '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/">' +
-    "<dc:creator>OpenGeni</dc:creator><cp:lastModifiedBy>OpenGeni</cp:lastModifiedBy>" +
+    "<dc:creator>Opengeni</dc:creator><cp:lastModifiedBy>Opengeni</cp:lastModifiedBy>" +
     `<cp:revision>${revision}</cp:revision></cp:coreProperties>`
   );
 }

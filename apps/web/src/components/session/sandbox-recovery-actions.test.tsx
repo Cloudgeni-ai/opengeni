@@ -143,7 +143,7 @@ for (const lane of ["checkpoint", "fresh_workspace"] as const) {
       );
     } else {
       expect(container.textContent).toContain(
-        "Retry will continue with an empty workspace. OpenGeni cannot restore the previous sandbox files automatically.",
+        "Retry will continue with an empty workspace. Opengeni cannot restore the previous sandbox files automatically.",
       );
       expect(container.textContent).not.toContain("checkpoint from");
     }
@@ -200,7 +200,7 @@ for (const reason of ["restore_retry_backoff", "provider_lifetime_unexpired"] as
         timeStyle: "short",
       })}.`,
     );
-    expect(container.textContent).not.toContain("OpenGeni will");
+    expect(container.textContent).not.toContain("Opengeni will");
     expect(container.textContent).not.toContain("check back");
   });
 }

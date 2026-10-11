@@ -165,7 +165,14 @@ function sessionAuthorizationDb(privateSessionOwner?: string) {
             },
           ];
         }
-        if (tableName === "sessions" && selected.size === 0 && privateSessionOwner) {
+        if (
+          tableName === "sessions" &&
+          selected.size === 3 &&
+          selected.has("id") &&
+          selected.has("accountId") &&
+          selected.has("rootSessionId") &&
+          privateSessionOwner
+        ) {
           return [];
         }
         throw new Error("Unexpected editable artifact route select projection");

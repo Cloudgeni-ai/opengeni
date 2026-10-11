@@ -1,7 +1,7 @@
 {
   "name": "@opengeni/config",
-  "version": "1.0.0",
-  "description": "OpenGeni runtime configuration: settings resolution, deployment knobs, and config validation shared across the server packages.",
+  "version": "1.4.4",
+  "description": "Opengeni runtime configuration: settings resolution, deployment knobs, and config validation shared across the server packages.",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",

@@ -1,86 +1,142 @@
-# CUA desktop pilot
+# CUA desktop adapter
 
-Experimental macOS adapter and narrow Windows experiment for `@trycua/cua-driver` 0.30.4. **Not ready
-for deployment or replacing the native backend.** The native backend remains the
-default. Browsers, attached Chrome, browser profiles and browser input are unchanged.
+The macOS and Linux adapters use CUA Driver source revision
+`35e376ed509cb8eee49624279256a81da83df8cc`, including its non-invalidating preview
+capture and cursor support. `@trycua/cua-driver` 0.34.0 supplies the private-worker
+transport; the source-built executable performs desktop operations. The narrow
+Windows experiment still uses the published SDK in process. CUA is the default
+on macOS and for explicitly selected isolated Linux desktops. Linux host desktops
+and Windows retain the native default.
 
-`ComputerBackend` owns desktop operations. `ComputerDriver` adapts those operations
-to the existing OpenGeni controller, operation receipts and frame stream. The CUA
-adapter translates desktop calls only. It does not add an authorization system or
-another operation journal. Machine/session access remains enforced above it.
+`ComputerBackend` retains the legacy desktop projection and exposes native CUA calls. The existing `ComputerDriver`
+continues to handle OpenGeni sessions, operation receipts and frame streaming.
+There is no second authorization system or operation journal. Structured browser
+control, attached Chrome and browser profiles are unchanged.
 
-Semantic invoke and context-menu actions use CUA's native `button` contract:
-`left` and `right`, respectively. SDK 0.30.4 supports both; upstream 0.31's typed
-click input rejects the older `action` field. This compatibility does not adopt
-the unreleased SDK.
+## Runtime and packaging
 
-For source-mode experiments, select `OPENGENI_BROWSERD_COMPUTER_BACKEND=cua` with
-the existing desktop environment mode. Only one CUA session may own this process's
-physical desktop. Existing macOS accessibility and screen-recording permissions
-are required; the adapter does not request permissions or silently front apps.
-Windows requires an unlocked interactive user session on `WinSta0/Default`;
-the existing-seat allocator reads the actual session and desktop. SSH/service
-Session 0 is refused. Windows identity, UIA roles, advertised Invoke/SetValue
-patterns and native capture IDs remain Windows data through the same controller.
-Windows pointer/keyboard input is not admitted by this experiment.
+macOS configuration selects CUA with the existing desktop. Linux configuration
+retains the existing native desktop unless
+`OPENGENI_BROWSERD_COMPUTER_ENVIRONMENT_MODE=isolated_linux` is explicitly selected;
+that mode defaults to CUA and requires the Linux desktop dependencies listed below.
+The incompatible CUA/existing-Linux combination is still refused.
+`OPENGENI_BROWSERD_COMPUTER_BACKEND=native` preserves the native backend on every
+platform. These choices do not alter browser control.
 
-The macOS adapter advertises `backgroundInput` because pointer and keyboard delivery
-targets the selected window without taking desktop focus. The viewer accepts
-those clicks and keystrokes directly. Native backends that omit this capability
-retain their foreground-window guard; background semantic controls are separate.
+On macOS, upstream's `createPrivateWorker` owns the child and
+its AppKit cursor event loop. The child has no reconnectable endpoint and exits
+when its SDK owner closes. A second session cannot take this process's physical
+desktop while the first owns it. Separate visual cursors do not isolate focus or
+application state.
 
-From this package, run:
+On Linux, each ComputerSession receives its own Xvfb display, accessibility bus,
+home and application profile directories. The worker uses that allocated X11
+seat even when the host has Wayland or Xauthority settings. Its private process
+group is stopped before those directories are removed. This cleans up ordinary
+launched children; programs that deliberately detach into another process session
+are outside that group. Display/profile separation is not an OS security sandbox:
+process inspection and app management retain the host user's authority.
+
+Existing macOS accessibility and screen-recording permissions are required. The
+host application owns permission prompts; CUA does not raise a second prompt.
+The adapter selects Standard authorization and does not bypass CUA refusals.
+Background input targets the selected window without requesting foreground focus.
+Unsupported operations return their limitation rather than switching to foreground.
+
+`stage-cua-runtime.ts` builds the fixed upstream revision, bundles the SDK and
+stages its matching native transport package, worker executable and source
+receipt. Everything joins the existing immutable embedded helper generation.
+Compiled controllers load only their adjacent assets, with no runtime downloads.
+For source development, run the staging command first. An operator can supply an
+unmodified checkout at that exact revision with `OPENGENI_CUA_SOURCE_DIR` during
+build, or an absolute worker path with `OPENGENI_CUA_DRIVER_BINARY` during local
+execution. Neither setting is an agent tool argument.
 
 ```sh
+bun scripts/stage-cua-runtime.ts
 bun run typecheck
 bun test test/cua-backend.test.ts
 OPENGENI_CUA_E2E=1 bun test test/cua-computer.e2e.test.ts
+OPENGENI_CUA_E2E=1 bun test test/cua-linux.e2e.test.ts
 OPENGENI_CUA_PACKAGING_E2E=1 bun test test/cua-runtime-packaging.e2e.test.ts
 ```
 
-The live test compiles a disposable AppKit window, verifies text replacement,
-semantic clicks, replay without a second click, PNG streaming, pixel clicks and
-repeated scrolling. Input is checked against the fixture's independently written
-state. Only its own window is closed. The test also characterizes the following
-known failures; a passing characterization is **not** full adoption acceptance.
-Run it on an unlocked desktop. The packaging test needs no desktop permissions:
-it compiles the actual SDK loader, reads permission status from the staged native
-library, then removes the adjacent SDK and verifies that no ambient installation
-can replace it. The macOS native CI leg runs that test and stages both architectures.
+The opt-in desktop test creates one disposable AppKit window. It checks text
+replacement, semantic clicks, replay without a second click, PNG streaming,
+semantic input while streaming, pixel clicks and repeated scrolling against
+independently written fixture state. It closes only its own window. The packaging
+test builds the real compiled loader and verifies that missing adjacent assets
+cannot be replaced by an ambient installation. Stage first to keep compilation
+outside the test timeout. Building both macOS architectures requires their Rust
+targets and Xcode tools.
+Linux builds require the X11, XTest, XRandR, XFixes, XInput, XRecord and DBus
+development libraries; execution requires Xvfb, an accessibility-enabled desktop,
+DBus, XFWM4, xterm, x11vnc and util-linux `setsid`. The Linux test checks two
+independent displays, cursor and clipboard state, native batches, viewer captures
+and cleanup of a launched non-GUI process. CI builds and runs it on x64 and arm64.
 
-## Remaining acceptance gaps
+## Current limits
 
-- **Semantic actions with a live viewer:** CUA 0.30.4 replaces its accessibility
-  snapshot on screenshot-only reads. A viewer frame invalidates an agent's earlier
-  element handles. Reading the initial image before the initial semantic snapshot
-  fixes cold startup, but does not solve a continuously running viewer. Resolve
-  this at the capture/observation boundary; do not paper over it with retries or
-  guessed replacement element references.
-- **Mac background drag:** the released SDK explicitly rejects it before posting
-  input. The adapter reports unsupported. Foreground delivery needs integration
-  with OpenGeni's explicit desktop focus/control behavior and independent testing.
-- **Compiled releases:** the SDK's platform-library resolver cannot find its
-  native package inside Bun's compiled virtual filesystem. `stage-cua-runtime.ts`
-  bundles its unmodified JavaScript and stages the pinned native package with its
-  notices. Signed native bytes join the existing immutable embedded helper
-  generation, and compiled controllers load that adjacent SDK, including Bun's
-  Windows virtual-filesystem path. Release staging remains macOS-only. Source mode uses
-  the normal pinned package. Canonical release CI and signed application acceptance
-  remain required; packaging alone does not resolve the live-viewer failure.
-- App launch, whole-desktop capture, clipboard, native hover and foreground focus
-  are not yet exposed. Linux and Windows have not completed adoption acceptance.
-  Windows capture has no macOS frame-valid flag: exact native capture identity,
-  PNG bytes/dimensions and absence of a capture error are required. Full Windows
-  capture fidelity still requires acceptance. SDK 0.30.4 omits UIA password
-  metadata, so Windows Edit values are redacted by policy; labels copied from
-  those values are omitted. Exact element references and advertised actions remain.
+- Mac background drag is refused before input. The legacy action projection remains
+  limited; native CUA tools expose app launch, desktop capture, clipboard and cursor
+  controls with upstream arguments and results. Foreground activation is explicit.
+- Background support depends on the target application's native controls. It
+  does not make every desktop application fully operable in the background.
+- Linux supports semantic background actions within its isolated X11 seat;
+  foreground pointer input stays inside that seat. Unsupported native background
+  pointer requests are refused. Web/application acceptance is still required.
+- Windows has not completed adoption acceptance. Windows requires an
+  unlocked interactive session on `WinSta0/Default`; Session 0 is refused.
+  Only Windows semantic actions and window capture are admitted. Edit values
+  and labels copied from those values are redacted when password metadata is absent.
+- Release staging includes macOS and Linux. Runtime defaults take effect only in
+  an installed release containing this change; server deployment alone does not
+  update a connected machine's installed helpers. macOS still requires OS consent.
 
 Pointer frames supply coordinate dimensions, not one-shot action permission.
-Repeated scroll/drag requests may use the same displayed frame. No new screenshot
-is required for each gesture. CUA background pointer delivery remains targeted at
-the selected PID and window. The current scroll API accepts wheel notches rather
-than pixel deltas; the adapter maps a conventional 100-pixel wheel step to one notch.
+Repeated gestures may use the same displayed frame. Passive captures use
+`display_only` to preserve both accessibility tokens and native pixel/zoom state.
+Viewer pointer input takes a fresh capture under the serialized worker queue,
+translates coordinates, and refuses resized windows. The adapter requests structured elements
+for semantic observations. Unknown input outcomes are never automatically replayed.
 
-Upstream references: [SDK 0.30.4 source](https://github.com/trycua/cua/tree/cua-driver-rs-v0.30.4/libs/cua-driver/rust),
-[capture behavior](https://github.com/trycua/cua/blob/cua-driver-rs-v0.30.4/libs/cua-driver/rust/crates/platform-macos/src/tools/get_window_state.rs),
-[Mac drag](https://github.com/trycua/cua/blob/cua-driver-rs-v0.30.4/libs/cua-driver/rust/crates/platform-macos/src/tools/drag.rs).
+[Upstream source](https://github.com/trycua/cua/tree/35e376ed509cb8eee49624279256a81da83df8cc/libs/cua-driver).
+The pin includes the focused X11 coordinate correction proposed in
+[CUA #4890](https://github.com/trycua/cua/pull/4890), on upstream `48cc491`.
+
+## Native agent interface
+
+The release catalog comes from the bundled worker's `listToolsJson()` via
+`bun packages/browserd/scripts/generate-cua-desktop-tools.ts`. It admits desktop
+workflow tools; lifecycle, escalation, configuration, updates and browser tools
+stay outside this interface. macOS and Linux each have a generated catalog;
+agent schemas preserve the union of their native variants, and the selected
+runtime checks its exact platform schema. Other platforms must supply their own
+qualified schemas before native admission.
+Each admitted tool's input/output schemas are checked against the running worker.
+
+Agents use `interaction__cua_<upstream_name>` or Code Mode
+`computer.<upstream_name>`. Arguments remain native snake_case, with
+`computerSessionId` replacing the host-owned CUA `session`. Existing
+`computer_open` and `computer_act` selection plus computer control permission
+are required, including for read-like tools that can write screenshot files.
+No tool-enable UI or separate permission system is added.
+
+`run_actions` retains upstream batching and optional final observation;
+`get_window_state` retains compact Markdown, query limits and diff reads.
+MCP content, structured results and images survive the journal. Responses larger
+than 12 MiB carry an explicit bounded projection, retained operation status and
+no-replay guidance; the original stays in the controller journal. Failed
+or uncertain calls also retain their native evidence and explicit no-replay
+status. Native and legacy calls share one operation-ID namespace. The SDK exposes
+`callNativeComputerTool` and `computers.get(id).callNativeTool`; the native receipt accessor is `getNativeComputerToolReceipt` or
+`nativeReceipt`. Existing legacy receipt methods keep their public types.
+
+After native calls begin, ordinary web-view observation polling returns geometry
+and pixels without minting a new accessibility snapshot. This preserves the
+agent's element tokens; human keyboard input retains a matching observation
+fence. Native tools use their own CUA session identity: after actual viewer
+pointer input changes the pixel frame, stale native pixel/zoom input is refused
+until a new native observation. The native tool result owns the semantic tree.
+The disposable Mac test covers native batching, replay, differently scaled
+preview polling, pixel and zoom clicks, and keyboard/pointer takeover.

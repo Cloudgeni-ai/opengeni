@@ -26,7 +26,7 @@ e2e(
         language: request.headers["accept-language"] ?? null,
       });
       if (authorization !== expectedAuthorization) {
-        response.writeHead(407, { "proxy-authenticate": 'Basic realm="OpenGeni test"' });
+        response.writeHead(407, { "proxy-authenticate": 'Basic realm="Opengeni test"' });
         response.end("proxy authentication required");
         return;
       }

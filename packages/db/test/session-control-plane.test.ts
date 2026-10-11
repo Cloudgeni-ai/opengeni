@@ -160,6 +160,7 @@ async function send(
   sessionId: string,
   text: string,
   delivery: "send" | "steer" = "send",
+  model?: string,
 ) {
   const accepted = await withWorkspaceSubjectSessionActivityRls(
     client.db,
@@ -177,6 +178,7 @@ async function send(
           delivery,
           text,
           resources: [],
+          ...(model ? { model } : {}),
           reasoningEffortFallback: "low",
           source: "user",
         }),
@@ -1442,15 +1444,22 @@ describe("clean session control plane", () => {
       { attemptId: firstAttemptId },
     );
     expect(runningTurn?.id).toBe(first.turn.id);
-    await appendSessionEvents(client.db, grant.workspaceId!, session.id, [
-      {
-        type: "turn.started",
-        turnId: runningTurn!.id,
-        turnGeneration: runningTurn!.executionGeneration,
-        payload: { triggerEventId: runningTurn!.triggerEventId },
-      },
-      { type: "agent.message.completed", payload: { text: "previous claimed response" } },
-    ]);
+    const started = await appendSessionEventsForTurnAttempt(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      runningTurn!.id,
+      runningTurn!.executionGeneration,
+      firstAttemptId,
+      [
+        {
+          type: "turn.started",
+          payload: { triggerEventId: runningTurn!.triggerEventId },
+        },
+        { type: "agent.message.completed", payload: { text: "previous claimed response" } },
+      ],
+    );
+    expect(started.accepted).toBe(true);
     const queuedText = "delegate this newly queued issue";
     const accepted = await send(grant, session.id, queuedText);
     expect(accepted.turn).toMatchObject({ status: "queued", startedAt: null });
@@ -2473,7 +2482,7 @@ describe("clean session control plane", () => {
     ).toBe(true);
     expect(canonicalMixedOutput.at(-1)).toEqual({
       type: "input_text",
-      text: "[OpenGeni omitted 105 structured array items]",
+      text: "[Opengeni omitted 105 structured array items]",
     });
     expect(JSON.stringify(boundModelToolOutputItem(canonicalMixed))).toBe(
       JSON.stringify(canonicalMixed),
@@ -4335,11 +4344,45 @@ describe("clean session control plane", () => {
   });
 
   test("queue projection attaches only the exact next eligible machine-input batch", async () => {
-    const ordinaryFixture = await fixture();
+    async function acceptedOriginFixture() {
+      const f = await fixture();
+      const sender = await createSession(client.db, {
+        accountId: f.grant.accountId,
+        workspaceId: f.grant.workspaceId!,
+        initialMessage: "Prepare context",
+        resources: [],
+        metadata: {},
+        model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "none",
+      });
+      await send(f.grant, sender.id, "Prepare context", "send", "scripted-model");
+      const caller = await claimTestSessionWork(
+        client.db,
+        f.grant.workspaceId!,
+        sender.id,
+        `session-${sender.id}`,
+      );
+      if (!caller?.activeAttemptId) throw new Error("Originating human turn was not claimed");
+      expect(caller.initiatingHumanSubjectId).toBe(f.grant.subjectId);
+      return {
+        ...f,
+        lineage: {
+          callerSessionId: sender.id,
+          callerTurnId: caller.id,
+          callerAttemptId: caller.activeAttemptId,
+          callerExecutionGeneration: caller.executionGeneration,
+        },
+      };
+    }
+    const ordinaryFixture = await acceptedOriginFixture();
     const ordinaryPrompt = await send(
       ordinaryFixture.grant,
       ordinaryFixture.session.id,
       "Use the incoming result",
+      "send",
+      "scripted-model",
     );
     const ordinary = await addSessionSystemUpdate(client.db, {
       accountId: ordinaryFixture.grant.accountId,
@@ -4350,6 +4393,7 @@ describe("clean session control plane", () => {
       sourceId: crypto.randomUUID(),
       dedupeKey: `agent-${crypto.randomUUID()}`,
       summary: "New agent context",
+      lineage: ordinaryFixture.lineage,
       payload: {
         type: "agent_message",
         text: "New agent context",
@@ -4357,6 +4401,22 @@ describe("clean session control plane", () => {
       },
     });
     if (!ordinary.added) throw new Error("ordinary system update was not inserted");
+    const missingOrigin = await addSessionSystemUpdate(client.db, {
+      accountId: ordinaryFixture.grant.accountId,
+      workspaceId: ordinaryFixture.grant.workspaceId!,
+      sessionId: ordinaryFixture.session.id,
+      kind: "agent_message",
+      classification: "info",
+      sourceId: crypto.randomUUID(),
+      dedupeKey: `agent-${crypto.randomUUID()}`,
+      summary: "Context without an origin",
+      payload: {
+        type: "agent_message",
+        text: "Context without an origin",
+        operationId: crypto.randomUUID(),
+      },
+    });
+    if (!missingOrigin.added) throw new Error("origin-less system update was not inserted");
     expect(
       await getSessionQueueSnapshot(
         client.db,
@@ -4369,9 +4429,39 @@ describe("clean session control plane", () => {
         inputIds: [ordinary.update.id],
       },
     });
+    const ordinaryClaim = await claimTestSessionWork(
+      client.db,
+      ordinaryFixture.grant.workspaceId!,
+      ordinaryFixture.session.id,
+      `session-${ordinaryFixture.session.id}`,
+    );
+    expect(ordinaryClaim?.id).toBe(ordinaryPrompt.turn.id);
+    expect(
+      (
+        await listSessionSystemUpdatesForTurn(
+          client.db,
+          ordinaryFixture.grant.workspaceId!,
+          ordinaryFixture.session.id,
+          ordinaryPrompt.turn.id,
+        )
+      ).map((update) => update.id),
+    ).toEqual([ordinary.update.id]);
+    expect(
+      await listOutstandingSessionSystemUpdates(
+        client.db,
+        ordinaryFixture.grant.workspaceId!,
+        ordinaryFixture.session.id,
+      ),
+    ).toMatchObject([{ id: missingOrigin.update.id, state: "pending" }]);
 
-    const agentSteerFixture = await fixture();
-    await send(agentSteerFixture.grant, agentSteerFixture.session.id, "Older queued send");
+    const agentSteerFixture = await acceptedOriginFixture();
+    await send(
+      agentSteerFixture.grant,
+      agentSteerFixture.session.id,
+      "Older queued send",
+      "send",
+      "scripted-model",
+    );
     const agentSteer = await addSessionSystemUpdate(client.db, {
       accountId: agentSteerFixture.grant.accountId,
       workspaceId: agentSteerFixture.grant.workspaceId!,
@@ -4381,6 +4471,7 @@ describe("clean session control plane", () => {
       sourceId: crypto.randomUUID(),
       dedupeKey: `agent-steer-${crypto.randomUUID()}`,
       summary: "Replace the current direction",
+      lineage: agentSteerFixture.lineage,
       payload: {
         type: "agent_steer_instruction",
         instruction: "Replace the current direction",
@@ -4404,6 +4495,7 @@ describe("clean session control plane", () => {
       agentSteerFixture.session.id,
       "Newest human direction",
       "steer",
+      "scripted-model",
     );
     expect(
       await getSessionQueueSnapshot(
@@ -4417,6 +4509,23 @@ describe("clean session control plane", () => {
         inputIds: [agentSteer.update.id],
       },
     });
+    const steerClaim = await claimTestSessionWork(
+      client.db,
+      agentSteerFixture.grant.workspaceId!,
+      agentSteerFixture.session.id,
+      `session-${agentSteerFixture.session.id}`,
+    );
+    expect(steerClaim?.id).toBe(humanSteer.turn.id);
+    expect(
+      (
+        await listSessionSystemUpdatesForTurn(
+          client.db,
+          agentSteerFixture.grant.workspaceId!,
+          agentSteerFixture.session.id,
+          humanSteer.turn.id,
+        )
+      ).map((update) => update.id),
+    ).toEqual([agentSteer.update.id]);
   });
 
   test("claim persists one exact machine-input batch and failure never requeues it", async () => {
@@ -4677,7 +4786,7 @@ describe("clean session control plane", () => {
     ).toEqual([second.update.id]);
   });
 
-  test("a compaction failure holds ordinary internal updates without blocking explicit Compact", async () => {
+  test("a compaction failure holds machine input already pending at the failure without blocking explicit Compact", async () => {
     const { grant, session } = await fixture();
     const first = await addSessionSystemUpdate(client.db, {
       accountId: grant.accountId,
@@ -4703,22 +4812,8 @@ describe("clean session control plane", () => {
       `session-${session.id}`,
       { attemptId: failedAttemptId },
     );
-    await applySessionTurnSettlement(client.db, grant.workspaceId!, {
-      sessionId: session.id,
-      turnId: failedTurn!.id,
-      triggerEventId: failedTurn!.triggerEventId,
-      attemptId: failedAttemptId,
-      turnStatus: "failed",
-      sessionStatus: "idle",
-      activeTurnId: null,
-      events: [
-        {
-          type: "turn.failed",
-          payload: { error: "checkpoint failed", code: "context_compaction_failed" },
-        },
-      ],
-    });
-
+    // This result arrives while the failing attempt runs, so it is pending at
+    // the failure: it saw no newer history and must not retry on its own.
     const held = await addSessionSystemUpdate(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId!,
@@ -4735,6 +4830,22 @@ describe("clean session control plane", () => {
       },
     });
     if (!held.added) throw new Error("held system update was not inserted");
+    await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      turnId: failedTurn!.id,
+      triggerEventId: failedTurn!.triggerEventId,
+      attemptId: failedAttemptId,
+      turnStatus: "failed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [
+        {
+          type: "turn.failed",
+          payload: { error: "checkpoint failed", code: "context_compaction_failed" },
+        },
+      ],
+    });
+
     expect(await peekSessionWork(client.db, grant.workspaceId!, session.id)).toEqual({
       kind: "idle",
     });
@@ -4772,6 +4883,94 @@ describe("clean session control plane", () => {
         (update) => update.id,
       ),
     ).toContain(held.update.id);
+  });
+
+  test("machine input committed after a compaction failure is newer truth and starts one attempt", async () => {
+    const { grant, session } = await fixture();
+    const childResult = (summary: string) => ({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      kind: "child_terminal_result" as const,
+      classification: "success" as const,
+      sourceId: crypto.randomUUID(),
+      dedupeKey: `child-${crypto.randomUUID()}`,
+      summary,
+      payload: {
+        type: "child_terminal_result" as const,
+        childSessionId: crypto.randomUUID(),
+        status: "idle" as const,
+      },
+    });
+    const first = await addSessionSystemUpdate(client.db, childResult("First child result"));
+    if (!first.added) throw new Error("first system update was not inserted");
+    const failedAttemptId = crypto.randomUUID();
+    const failedTurn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId: failedAttemptId },
+    );
+    const held = await addSessionSystemUpdate(client.db, childResult("Held child result"));
+    if (!held.added) throw new Error("held system update was not inserted");
+    await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      turnId: failedTurn!.id,
+      triggerEventId: failedTurn!.triggerEventId,
+      attemptId: failedAttemptId,
+      turnStatus: "failed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [
+        {
+          type: "turn.failed",
+          payload: { error: "checkpoint failed", code: "context_compaction_failed" },
+        },
+      ],
+    });
+    expect(await peekSessionWork(client.db, grant.workspaceId!, session.id)).toEqual({
+      kind: "idle",
+    });
+
+    const newer = await addSessionSystemUpdate(client.db, childResult("Newer child result"));
+    if (!newer.added) throw new Error("newer system update was not inserted");
+    expect(await peekSessionWork(client.db, grant.workspaceId!, session.id)).toEqual({
+      kind: "runnable",
+    });
+    const retryAttemptId = crypto.randomUUID();
+    const retryTurn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId: retryAttemptId },
+    );
+    expect(retryTurn).toMatchObject({ source: "system", status: "running" });
+    // Child results from different children claim in separate batches; the
+    // held backlog leads in canonical order and the newer result follows.
+    const delivered = async (turnId: string) =>
+      (
+        await listSessionSystemUpdatesForTurn(client.db, grant.workspaceId!, session.id, turnId)
+      ).map((entry) => entry.id);
+    expect(await delivered(retryTurn!.id)).toEqual([held.update.id]);
+    await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      turnId: retryTurn!.id,
+      triggerEventId: retryTurn!.triggerEventId,
+      attemptId: retryAttemptId,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [{ type: "turn.completed", payload: {} }],
+    });
+    const nextTurn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+    );
+    expect(await delivered(nextTurn!.id)).toEqual([newer.update.id]);
   });
 
   test("a model-visible goal-continuation notice remains delivered after turn failure", async () => {
@@ -6117,7 +6316,7 @@ describe("clean session control plane", () => {
   });
 
   describe("pending machine input at the final idle settlement fence", () => {
-    async function idleChild(compactionFailed = false) {
+    async function idleChild(compactionFailed = false, heldDirection = false) {
       const { grant, session: parent } = await fixture();
       const child = await createSession(client.db, {
         accountId: grant.accountId,
@@ -6141,6 +6340,22 @@ describe("clean session control plane", () => {
         { attemptId },
       );
       if (!turn) throw new Error("child turn was not claimed");
+      // Input accepted while the failing attempt runs is pending at the
+      // failure, so it saw no newer history and stays held.
+      const held = heldDirection
+        ? await addSessionSystemUpdate(client.db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId!,
+            sessionId: child.id,
+            classification: "info",
+            sourceId: crypto.randomUUID(),
+            dedupeKey: `idle-fence-held-${crypto.randomUUID()}`,
+            summary: "direction pending at the compaction failure",
+            kind: "agent_message",
+            payload: { type: "agent_message", text: "continue", operationId: crypto.randomUUID() },
+          })
+        : null;
+      if (held && !held.added) throw new Error("held machine input was not inserted");
       expect(
         await applySessionTurnSettlement(client.db, grant.workspaceId!, {
           sessionId: child.id,
@@ -6173,8 +6388,28 @@ describe("clean session control plane", () => {
               ),
             ),
         );
-      return { grant, child, idleNotices };
+      return { grant, child, idleNotices, heldUpdateId: held?.update.id ?? null };
     }
+
+    test("input already pending at a compaction failure does not hold idle settlement", async () => {
+      const { grant, child, idleNotices, heldUpdateId } = await idleChild(true, true);
+      // Ordinary input held behind compaction failure is not an autonomous
+      // retry; idle settlement must not acquire a new hold for it.
+      expect(
+        await claimTestSessionWork(client.db, grant.workspaceId!, child.id, `session-${child.id}`, {
+          attemptId: crypto.randomUUID(),
+        }),
+      ).toBeNull();
+      expect(
+        await settleSessionIdleWithParentOutbox(client.db, grant.workspaceId!, child.id),
+      ).toMatchObject({ action: "settled", notifyParent: true });
+      expect(await idleNotices()).toHaveLength(1);
+      expect(
+        (await listOutstandingSessionSystemUpdates(client.db, grant.workspaceId!, child.id)).map(
+          (update) => update.id,
+        ),
+      ).toContain(heldUpdateId!);
+    });
 
     for (const kind of ["agent_message", "agent_steer_instruction"] as const) {
       for (const compactionFailed of [false, true]) {
@@ -6199,22 +6434,8 @@ describe("clean session control plane", () => {
               attemptId,
             });
 
-          if (compactionFailed && kind === "agent_message") {
-            // Ordinary input held behind compaction failure is not an
-            // autonomous retry; idle settlement must not acquire a new hold.
-            expect(await claim()).toBeNull();
-            expect(
-              await settleSessionIdleWithParentOutbox(client.db, grant.workspaceId!, child.id),
-            ).toMatchObject({ action: "settled", notifyParent: true });
-            expect(await idleNotices()).toHaveLength(1);
-            expect(
-              (
-                await listOutstandingSessionSystemUpdates(client.db, grant.workspaceId!, child.id)
-              ).map((update) => update.id),
-            ).toContain(added.update.id);
-            return;
-          }
-
+          // Input committed after the final peek is newer than any compaction
+          // failure, so it reopens the episode exactly like without one.
           expect(
             await settleSessionIdleWithParentOutbox(client.db, grant.workspaceId!, child.id),
           ).toEqual({ action: "stale", episodeKey: null, events: [] });
@@ -7773,7 +7994,7 @@ describe("clean session control plane", () => {
         approvalId: "header-allowed-preview",
         toolName: "header_allowed",
       }),
-    ).toMatchObject({ managed: true, decision: "ask" });
+    ).toMatchObject({ managed: true, decision: "allow" });
     expect(
       await prepareConnectorActionApproval(client.db, firstIdentity, headerBlockedCall),
     ).toMatchObject({ managed: true, decision: "block" });
@@ -7786,13 +8007,14 @@ describe("clean session control plane", () => {
         approvalId: "header-allowed",
         toolName: "header_allowed",
       }),
-    ).toMatchObject({ managed: true, decision: "ask" });
+    ).toMatchObject({ managed: true, decision: "allow" });
     const sensitiveFixture = `sensitive-fixture-${crypto.randomUUID()}`;
     const call = (approvalId: string, action: string, value = sensitiveFixture) => ({
       approvalId,
       connectionId,
       serverId,
       toolName,
+      actionName: action,
       arguments: { action, payload: value },
     });
 
@@ -7805,6 +8027,30 @@ describe("clean session control plane", () => {
       allowed: true,
       managed: false,
     });
+    // A recommended Allow with no explicit rule writes no ledger row or audit
+    // pair; a recommended Ask still creates its durable pending review.
+    const defaultAllow = {
+      ...call("connector-default-allow", "unmanaged"),
+      defaultDecision: "allow" as const,
+    };
+    expect(
+      await prepareConnectorActionApproval(client.db, firstIdentity, defaultAllow),
+    ).toMatchObject({ managed: true, decision: "allow" });
+    expect(await beginConnectorActionExecution(client.db, firstIdentity, defaultAllow)).toEqual({
+      allowed: true,
+      managed: false,
+    });
+    expect(await beginConnectorActionExecution(client.db, firstIdentity, defaultAllow)).toEqual({
+      allowed: true,
+      managed: false,
+    });
+    const defaultAsk = {
+      ...call("connector-default-ask", "unmanaged"),
+      defaultDecision: "ask" as const,
+    };
+    expect(await beginConnectorActionExecution(client.db, firstIdentity, defaultAsk)).toMatchObject(
+      { allowed: false, managed: true, reason: "approval_required" },
+    );
     const capabilityWrite = {
       ...call("connector-capability-write", "unmanaged"),
       approvalMode: "connector_write" as const,
@@ -8090,6 +8336,8 @@ describe("clean session control plane", () => {
       creationAttemptId: firstAttemptId,
       executionAttemptId: secondAttemptId,
     });
+    expect(requestsByApproval.has("connector-default-allow")).toBe(false);
+    expect(requestsByApproval.get("connector-default-ask")?.status).toBe("pending");
     expect(requestsByApproval.get(blockCall.approvalId)?.status).toBe("blocked");
     const wildcardRequest = requestsByApproval.get(wildcardBlockCall.approvalId);
     expect(wildcardRequest).toMatchObject({
@@ -8111,7 +8359,11 @@ describe("clean session control plane", () => {
     expect(connectorAuditActions).toContain("connector.action.blocked");
     expect(connectorAuditActions).toContain("connector.action.execution_started");
     expect(connectorAuditActions).toContain("connector.action.execution_completed");
-    expect(JSON.stringify(evidence)).not.toContain(sensitiveFixture);
+    // Exact review bytes are protected session data, never audit metadata.
+    expect(JSON.stringify(evidence.audits)).not.toContain(sensitiveFixture);
+    expect(requestsByApproval.get(askCall.approvalId)?.reviewArguments).toContain(sensitiveFixture);
+    expect(requestsByApproval.get(allowCall.approvalId)?.reviewArguments).toBeNull();
+    expect(requestsByApproval.get(blockCall.approvalId)?.reviewArguments).toBeNull();
     const wildcardAudits = evidence.audits.filter(
       (row) => row.metadata.requestId === wildcardRequest?.id,
     );
@@ -8236,10 +8488,10 @@ describe("clean session control plane", () => {
     );
     expect(request).toMatchObject({
       status: "uncertain",
-      policySource: "explicit",
+      policySource: "default",
       policyDecision: "ask",
       policyId: null,
-      actionName: "create_issue",
+      actionName: "perform_action",
       executionAttemptId: resumedAttemptId,
       outcome: "retry_after_execution_started",
     });

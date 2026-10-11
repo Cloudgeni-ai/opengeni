@@ -184,7 +184,7 @@ function AtlassianSourceDialogBody({
   const sites = [...new Set(visibleItems.map((item) => item.siteName))];
 
   return (
-    <DialogContent className="max-h-[90vh] max-w-xl grid-rows-[auto_minmax(0,1fr)_auto_auto] overflow-hidden">
+    <DialogContent className="max-h-[90vh] grid-rows-[auto_minmax(0,1fr)_auto_auto] overflow-hidden sm:max-w-xl">
       <DialogHeader>
         <DialogTitle>Choose Jira & Confluence sources</DialogTitle>
         <DialogDescription>
@@ -326,11 +326,11 @@ function previewItems(): AtlassianBrowseItem[] {
     {
       id: "jira_project:preview-cloud:10000",
       cloudId: "preview-cloud",
-      siteName: "OpenGeni Integration Lab",
+      siteName: "Opengeni Integration Lab",
       siteUrl: "https://opengeni-lab.atlassian.net",
       resourceId: "10000",
       key: "KAN",
-      name: "OpenGeni Product Lab",
+      name: "Opengeni Product Lab",
       kind: "jira_project",
       description: null,
       webUrl: "https://opengeni-lab.atlassian.net/jira/software/c/projects/KAN",
@@ -338,7 +338,7 @@ function previewItems(): AtlassianBrowseItem[] {
     {
       id: "confluence_space:preview-cloud:20000",
       cloudId: "preview-cloud",
-      siteName: "OpenGeni Integration Lab",
+      siteName: "Opengeni Integration Lab",
       siteUrl: "https://opengeni-lab.atlassian.net",
       resourceId: "20000",
       key: "SD",
@@ -350,7 +350,7 @@ function previewItems(): AtlassianBrowseItem[] {
     {
       id: "confluence_space:preview-cloud:20001",
       cloudId: "preview-cloud",
-      siteName: "OpenGeni Integration Lab",
+      siteName: "Opengeni Integration Lab",
       siteUrl: "https://opengeni-lab.atlassian.net",
       resourceId: "20001",
       key: "CA",

@@ -134,6 +134,11 @@ function eventFixture(restrictedExisting = false) {
       async (_database, _input, run) => run({} as never),
     ),
   );
+  track(
+    spyOn(db, "withWorkspaceProviderCustomModelReadLock").mockImplementation(
+      async (_database, _input, run) => run({} as never),
+    ),
+  );
   track(spyOn(core, "assertWorkspaceModelPolicyAllows").mockResolvedValue(undefined));
   track(spyOn(core, "canonicalConfiguredModel").mockReturnValue("scripted-model"));
   const record = track(

@@ -282,6 +282,8 @@ export const KnowledgeEntryListRequest = z
     /** Include supporting sources in published discovery; never changes access. */
     includeEvidence: z.boolean().optional(),
     kind: KnowledgeEntryKind.optional(),
+    /** Inclusive original entry creation time; revisions and updates do not reset it. */
+    createdSince: z.string().datetime({ offset: true }).optional(),
     view: z.enum(["published", "needs_review", "archived", "rejected"]).default("published"),
     sessionId: z.uuid().optional(),
     reviewBatchId: z.uuid().optional(),
@@ -319,7 +321,7 @@ export const KnowledgeEntryListResponse = z.object({
   nextCursor: z.string().nullable(),
   searchMode: z.enum(["keyword", "hybrid", "vector"]).optional(),
   fallbackReason: z
-    .enum(["awaiting_funding", "quota", "provider_unavailable", "query_limit"])
+    .enum(["awaiting_funding", "credits_disabled", "quota", "provider_unavailable", "query_limit"])
     .optional(),
 });
 export type KnowledgeEntryListResponse = z.infer<typeof KnowledgeEntryListResponse>;

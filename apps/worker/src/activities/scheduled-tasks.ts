@@ -67,6 +67,7 @@ import {
   getScheduledTaskRunPersonalResourceAuthority,
   getScheduledTaskPersonalResourceAuthoritySubject,
   getScheduledTaskRevisionAuthority,
+  getScheduledTaskSubscriptionAuthority,
   getScheduledTaskXaiProviderAccountAuthoritySnapshot,
   getEnrollment,
   getSandbox,
@@ -96,8 +97,10 @@ import {
 import { publishDurableSessionEvents } from "@opengeni/events";
 import {
   allowedFirstPartyMcpToolsForSession,
+  resolveSessionFirstPartyMcpTools,
   resolveFirstPartyMcpToolPolicy,
   resolveTurnExecutionPolicyV1,
+  TurnExecutionPolicyModelUnavailableError,
 } from "@opengeni/config";
 import { Context } from "@temporalio/activity";
 import { createHash } from "node:crypto";
@@ -633,6 +636,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         acceptedTargetSessionId && targetSessionExecutionBase
           ? await requireSession(db, task.workspaceId, acceptedTargetSessionId)
           : null;
+      const toolWorkspaceSettings = (await requireWorkspace(db, task.workspaceId)).settings;
       const connectionTools = await scheduledConnectionTools(
         db,
         task.workspaceId,
@@ -661,6 +665,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             firstPartyMcpTools,
             firstPartyMcpPermissions,
           },
+          toolWorkspaceSettings,
         ),
       }).catch((error: unknown) => {
         if (error instanceof ConnectionAccountSelectionError) return error;
@@ -801,6 +806,14 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             });
             return {
               ...targetSessionExecutionBase,
+              effectiveFirstPartyMcpTools: resolveSessionFirstPartyMcpTools(
+                settings,
+                {
+                  ...targetSessionExecutionBase,
+                  ...(connectionTarget ? { agent: connectionTarget.agent } : {}),
+                },
+                toolWorkspaceSettings,
+              ),
               effectiveMcpServerIds: [
                 ...new Set(
                   effective.toolRefs.flatMap((tool) => (tool.kind === "mcp" ? [tool.id] : [])),
@@ -905,7 +918,9 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           executionPolicy: targetSessionExecution
             ? {
                 tools: targetSessionExecution.tools,
-                firstPartyMcpTools: targetSessionExecution.firstPartyMcpTools,
+                firstPartyMcpTools:
+                  targetSessionExecution.effectiveFirstPartyMcpTools ??
+                  targetSessionExecution.firstPartyMcpTools,
                 firstPartyMcpPermissions: targetSessionExecution.firstPartyMcpPermissions,
                 variableSetIds: targetSessionExecution.variableSets.map(
                   (variableSet) => variableSet.id,
@@ -945,6 +960,15 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         await getScheduledTaskXaiProviderAccountAuthoritySnapshot(db, task.workspaceId, task.id);
       const taskClaudeProviderAccountAuthoritySnapshot =
         await getScheduledTaskClaudeProviderAccountAuthoritySnapshot(db, task.workspaceId, task.id);
+      // Codex v2 (M3 PR 3b, EP-T15): the task's value frozen at creation,
+      // copied by every firing; empty when another person authorized the
+      // current revision. Never recomputed from current membership.
+      const taskSubscriptionAuthority = await getScheduledTaskSubscriptionAuthority(db, {
+        workspaceId: task.workspaceId,
+        taskId: task.id,
+        revisionAuthorizerSubjectId: taskRevisionAuthority?.subjectId ?? null,
+        taskAuthorityRevision: task.authorityRevision,
+      });
       // A scheduled bot selection was authorized when the task was written,
       // but connection status and tenant/role binding are mutable. Revalidate
       // before any session/model cost and never fall back to a personal Slack
@@ -960,7 +984,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         ? openGeniSlackBotMetadata(slackBotConnection.metadata)
         : null;
       if (slackBotConnection && !slackBotMetadata) {
-        throw new Error("OpenGeni Slack bot connection metadata is invalid");
+        throw new Error("Opengeni Slack bot connection metadata is invalid");
       }
       const xaiAuthoritySubjectId =
         taskXaiProviderAccountAuthoritySnapshot.scope === "user" &&
@@ -1082,8 +1106,9 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             }
           }
         : undefined;
-      const turnExecutionPolicy = scheduledTaskRunExecutionPolicy(
-        resolveTurnExecutionPolicyV1(settings, {
+      let acceptedTurnExecutionPolicy: ReturnType<typeof resolveTurnExecutionPolicyV1>;
+      try {
+        acceptedTurnExecutionPolicy = resolveTurnExecutionPolicyV1(settings, {
           modelId: acceptedModel,
           requestedModelId:
             generatedTarget && task.agentConfig.model ? task.agentConfig.model : null,
@@ -1100,7 +1125,20 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             : "session",
           latencyMode: acceptedLatencyMode,
           latencyModeSource: generatedTarget ? "deployment" : "session",
-        }),
+        });
+      } catch (error) {
+        // A retired or removed model refuses every occurrence until the task
+        // (or its target session) names an available model: record that as a
+        // visible terminal run instead of exhausting activity retries.
+        if (!(error instanceof TurnExecutionPolicyModelUnavailableError)) throw error;
+        return await refuseAdmission(
+          "scheduled_model_unavailable",
+          false,
+          `${error.message}: ${acceptedModel}`,
+        );
+      }
+      const turnExecutionPolicy = scheduledTaskRunExecutionPolicy(
+        acceptedTurnExecutionPolicy,
         input,
         creatorPolicy?.credentialRestriction,
       );
@@ -1499,7 +1537,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 (task.agentConfig.slackBotConnectionId ?? null)
               ) {
                 throw new Error(
-                  "scheduled alert occurrence OpenGeni Slack bot binding does not match its canonical session",
+                  "scheduled alert occurrence Opengeni Slack bot binding does not match its canonical session",
                 );
               }
             }
@@ -1520,6 +1558,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 workspaceId: task.workspaceId,
                 sessionId: session.id,
                 reasoningEffortFallback: reasoningEffort,
+                initialSubscriptionAuthority: taskSubscriptionAuthority,
                 createdEventPayload: {
                   scheduledTaskId:
                     typeof session.metadata.scheduledTaskId === "string"
@@ -1583,6 +1622,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 workspaceId: task.workspaceId,
                 sessionId: session.id,
                 reasoningEffortFallback: reasoningEffort,
+                initialSubscriptionAuthority: taskSubscriptionAuthority,
                 createdEventPayload: {
                   scheduledTaskId:
                     typeof session.metadata.scheduledTaskId === "string"
@@ -1700,6 +1740,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 mcpAccountBindings: taskMcpAccountBindings,
                 xaiProviderAccountAuthoritySnapshot: taskXaiProviderAccountAuthoritySnapshot,
                 claudeProviderAccountAuthoritySnapshot: taskClaudeProviderAccountAuthoritySnapshot,
+                subscriptionAuthority: taskSubscriptionAuthority,
                 scheduledTaskRunId: run.id,
               },
               async (tx, wakeEventId, _updateId, rejectionReason) => {
@@ -1832,6 +1873,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 mcpAccountBindings: taskMcpAccountBindings,
                 xaiProviderAccountAuthoritySnapshot: taskXaiProviderAccountAuthoritySnapshot,
                 claudeProviderAccountAuthoritySnapshot: taskClaudeProviderAccountAuthoritySnapshot,
+                subscriptionAuthority: taskSubscriptionAuthority,
                 scheduledTaskRunId: run.id,
               },
               async (tx, wakeEventId, _updateId, rejectionReason) => {
@@ -2043,7 +2085,7 @@ function assertReusableSessionBindingMatches(
   ) {
     throw new ScheduledRunTerminalAuthorityError(
       "scheduled_reusable_binding_changed",
-      "scheduled task OpenGeni Slack bot binding does not match its reusable session",
+      "scheduled task Opengeni Slack bot binding does not match its reusable session",
     );
   }
 }
@@ -2171,7 +2213,9 @@ async function prepareIncidentTelemetrySource(input: {
     executionPolicy: input.acceptedExecution.targetSessionExecution
       ? {
           tools: input.acceptedExecution.targetSessionExecution.tools,
-          firstPartyMcpTools: input.acceptedExecution.targetSessionExecution.firstPartyMcpTools,
+          firstPartyMcpTools:
+            input.acceptedExecution.targetSessionExecution.effectiveFirstPartyMcpTools ??
+            input.acceptedExecution.targetSessionExecution.firstPartyMcpTools,
           firstPartyMcpPermissions:
             input.acceptedExecution.targetSessionExecution.firstPartyMcpPermissions,
           variableSetIds: input.acceptedExecution.targetSessionExecution.variableSets.map(
@@ -2727,6 +2771,15 @@ async function recoverBoundScheduledTaskDispatch(input: {
         input.acceptedExecution.xaiProviderAccountAuthoritySnapshot,
       claudeProviderAccountAuthoritySnapshot:
         input.acceptedExecution.claudeProviderAccountAuthoritySnapshot,
+      // Codex v2 (M3 PR 3b): the task's value frozen at creation, narrowed to
+      // empty when the accepted revision's authorizer is not the owner.
+      subscriptionAuthority: await getScheduledTaskSubscriptionAuthority(input.db, {
+        workspaceId: task.workspaceId,
+        taskId: task.id,
+        revisionAuthorizerSubjectId:
+          input.acceptedExecution.causalHumanAuthority?.subjectId ?? null,
+        taskAuthorityRevision: task.authorityRevision,
+      }),
       scheduledTaskRunId: input.run.id,
     },
     async (tx, wakeEventId, _updateId, rejectionReason) => {

@@ -42,7 +42,7 @@ test("Site skill composition needs no writable application directory", () => {
       const site = composition.artifacts.find(entry => entry.name === "opengeni-sites");
       if (!index.some(entry => entry.name === "opengeni-sites")) throw new Error("missing skill index");
       const skillMd = site.files.find(entry => entry.path === "SKILL.md");
-      if (!skillMd.content.includes("OpenGeni")) throw new Error("missing skill");
+      if (!skillMd.content.includes("Opengeni")) throw new Error("missing skill");
       if (!site.files.find(entry => entry.path === "agents/openai.yaml")?.content) throw new Error("missing nested asset");
       console.log(site.files.find(entry => entry.path === "package-versions.json").content);
     `,

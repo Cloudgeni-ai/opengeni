@@ -72,6 +72,21 @@ export default defineConfig({
               priority: 21,
             },
             {
+              // The playground is a lazy page around the packaged embedded chat.
+              // Only modules nothing else in the app imports belong here (the
+              // app's rail has its own session list; the provider, the
+              // workspace sessions hook and the approval surface stay with the
+              // eager workspace shell). Public conversation state hooks stay
+              // outside this presentation chunk so headless consumers never
+              // load the embedded view and its conditional panels.
+              // Left floating, these presentation modules merge into the
+              // shared chunks every workspace and direct session loads.
+              name: "embedded-chat",
+              test: /(?:apps[\\/]web[\\/]src[\\/](?:components[\\/]playground[\\/][\w-]+\.(?:tsx?|css)|routes[\\/]playground\.tsx)|packages[\\/]react[\\/]src[\\/](?:lib[\\/]host-theme\.ts|components[\\/](?:open-geni-chat|new-conversation|session-conversation|session-list|session-proxy-scope)\.tsx))$/,
+              includeDependenciesRecursively: false,
+              priority: 21,
+            },
+            {
               // Account setup is interaction-driven. Do not let shared icons
               // co-locate these forms/controllers with the eager session graph.
               name: "connect-setup",
@@ -309,7 +324,7 @@ export default defineConfig({
               // lands in a chunk the workspace route imports and pulls this
               // whole surface into a sessions load.
               name: "workspace-management-surfaces",
-              test: /apps[\\/]web[\\/]src[\\/](?:components[\\/](?:ai-gateway-connection|codex-connection|default-session-model|model-access-policy|permission-picker|supergrok-connection|supergrok-device-poll|transcription-settings|video-generation-settings|workspace-capability-defaults|workspace-developer-settings|workspace-runtime-control)\.(?:ts|tsx)|components[\\/]settings[\\/](?:(?:workspace-settings-shell|settings-sidebar|settings-rail|default-sandbox-environment-row)\.tsx|organization-settings-pages\.ts)|routes[\\/](?:workspace-learning-loader\.ts|workspace-members-section\.tsx|workspace-settings\.tsx))$/,
+              test: /apps[\\/]web[\\/]src[\\/](?:components[\\/](?:ai-gateway-connection|codex-connection|default-session-model|model-access-policy|permission-picker|supergrok-connection|supergrok-device-poll|transcription-settings|video-generation-settings|workspace-capability-defaults|workspace-developer-settings|workspace-runtime-control)\.(?:ts|tsx)|components[\\/]settings[\\/](?:(?:workspace-settings-shell|settings-sidebar|settings-rail|default-sandbox-environment-row)\.tsx|organization-settings-pages\.ts)|routes[\\/](?:workspace-members-section\.tsx|workspace-settings\.tsx))$/,
               includeDependenciesRecursively: false,
               priority: 20,
             },
@@ -543,7 +558,7 @@ export default defineConfig({
             response.end(archive);
           } catch {
             response.statusCode = 503;
-            response.end("OpenGeni Browser extension is not built yet.");
+            response.end("Opengeni Browser extension is not built yet.");
           }
         });
       },

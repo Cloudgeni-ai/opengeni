@@ -176,7 +176,7 @@ export function capabilityErrorToast(
   }
   const serverMessage = cleanApiErrorMessage(apiErrorFacts(error).serverMessage ?? "");
   const probe =
-    /^MCP capability ".+" could not be enabled because OpenGeni could not initialize (\S+?)\.?(?:\s|$)/u.exec(
+    /^MCP capability ".+" could not be enabled because (?:OpenGeni|Opengeni) could not initialize (\S+?)\.?(?:\s|$)/u.exec(
       serverMessage,
     );
   if (probe) {
@@ -185,7 +185,7 @@ export function capabilityErrorToast(
       description: `Opengeni couldn't connect to ${probe[1]}. Check the endpoint address, then try again.`,
     };
   }
-  // Never the raw "OpenGeni API 422: ... Reference: <uuid>." string (DESIGN.md
+  // Never the raw "Opengeni API 422: ... Reference: <uuid>." string (DESIGN.md
   // section 6): API errors become advice, an app error keeps its own sentence.
   return { title: fallbackTitle, description: userErrorText(error) };
 }

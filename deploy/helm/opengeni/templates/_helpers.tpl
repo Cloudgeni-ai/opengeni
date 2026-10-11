@@ -378,3 +378,22 @@ periodSeconds: {{ $probe.periodSeconds | default 10 }}
 timeoutSeconds: {{ $probe.timeoutSeconds | default 1 }}
 failureThreshold: {{ $probe.failureThreshold | default 3 }}
 {{- end -}}
+
+{{/*
+Deployment replica count. When an HPA owns the Deployment, rendering a fixed
+`replicas` would make every `helm upgrade` (including config-only upgrades)
+scale the live Deployment back to `replicaCount` until the HPA reacts, killing
+the pods (and in-flight turns) above that count. So with autoscaling enabled,
+keep the live replica count during upgrades and omit the field otherwise
+(fresh install or `helm template`), leaving the HPA in charge.
+*/}}
+{{- define "opengeni.replicas" -}}
+{{- if (.autoscaling | default dict).enabled -}}
+{{- $live := lookup "apps/v1" "Deployment" .root.Release.Namespace .name -}}
+{{- if and $live $live.spec $live.spec.replicas }}
+replicas: {{ $live.spec.replicas }}
+{{- end -}}
+{{- else }}
+replicas: {{ .replicaCount }}
+{{- end -}}
+{{- end -}}

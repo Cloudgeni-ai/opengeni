@@ -5,18 +5,18 @@ import { fileURLToPath } from "node:url";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
 
+import { createDb, createSession, type DbClient } from "../src";
 import {
-  createDb,
-  createSession,
   disconnectOrganizationCodexAccount,
   getWorkspaceCodexSubscriptionSource,
   setWorkspaceCodexSubscriptionMode,
   setWorkspaceCodexSubscriptionModeInTransaction,
   upsertCodexSubscriptionCredential,
   upsertOrganizationCodexSubscriptionCredential,
+  updateCodexAllocatorEligibility,
+  updateCodexExtraCreditsPolicy,
   withSessionCodexCapacityMutation,
-  type DbClient,
-} from "../src";
+} from "./fixtures/legacy-codex";
 import { FORCE_RLS_TABLES, RUNTIME_FULL_DML_TABLES } from "../src/runtime-posture";
 
 const migrationPath = join(
@@ -61,7 +61,10 @@ async function expectSqlState(action: () => Promise<unknown>, state: string): Pr
 beforeAll(async () => {
   [migration, dbIndexSource, apiCodexRouteSource] = await Promise.all([
     readFile(migrationPath, "utf8"),
-    readFile(dbIndexPath, "utf8"),
+    Promise.all([
+      readFile(dbIndexPath, "utf8"),
+      readFile(new URL("./fixtures/legacy-codex.ts", import.meta.url), "utf8"),
+    ]).then((parts) => parts.join("\n")),
     readFile(apiCodexRoutePath, "utf8"),
   ]);
   if (!requireRealDatabase) return;
@@ -140,12 +143,9 @@ describe("migration 0381 organization Codex subscription inheritance", () => {
     expect(dbIndexSource).toMatch(
       /wakeOrganizationCodexCapacityWaitersInTransaction[\s\S]*?list_organization_codex_workspace_ids[\s\S]*?session-tenancy:/u,
     );
-    expect(apiCodexRouteSource).toMatch(
-      /withSessionCodexCapacityMutation[\s\S]*?sourceBeforeConnect = await getWorkspaceCodexSubscriptionSource[\s\S]*?upsertCodexSubscriptionCredential[\s\S]*?ensureCodexRotationSettings[\s\S]*?setInitialActiveCodexCredential[\s\S]*?setWorkspaceCodexSubscriptionModeInTransaction[\s\S]*?effectiveSourceBeforeMutation: sourceBeforeConnect\.effectiveSource/u,
-    );
-    expect(apiCodexRouteSource).toMatch(
-      /organizations\/:organizationId\/codex\/connect\/poll[\s\S]*?upsertOrganizationCodexSubscriptionCredential[\s\S]*?active turns are using it[\s\S]*?HTTPException\(409/u,
-    );
+    expect(apiCodexRouteSource).not.toContain("withSessionCodexCapacityMutation");
+    expect(apiCodexRouteSource).toContain("coreCodexConnected");
+    expect(apiCodexRouteSource).toContain("coreOrganizationCodexAccounts");
     for (const table of [
       "organization_codex_rotation_settings",
       "workspace_codex_subscription_preferences",
@@ -179,6 +179,166 @@ describe("migration 0381 organization Codex subscription inheritance", () => {
           await transaction.unsafe(activation);
         }),
       "55000",
+    );
+  });
+
+  test("organization pause preserves credential and access policy, audits once, and fences stale writes", async () => {
+    if (!shared || !client) return;
+    const [account] = await shared.admin<{ id: string }[]>`
+      insert into managed_accounts (name) values ('organization-codex-pause') returning id`;
+    const [workspace] = await shared.admin<{ id: string }[]>`
+      insert into workspaces (account_id, name) values (${account!.id}, 'pause fixture') returning id`;
+    await shared.admin`insert into workspace_inference_controls (account_id, workspace_id)
+      values (${account!.id}, ${workspace!.id})`;
+    const subjectId = `user:${crypto.randomUUID()}`;
+    await shared.admin`insert into organization_memberships (account_id, subject_id, role, status, personal_workspace_id)
+      values (${account!.id}, ${subjectId}, 'owner', 'active', ${workspace!.id})`;
+    const credential = await upsertOrganizationCodexSubscriptionCredential(client.db, {
+      organizationId: account!.id,
+      actorSubjectId: subjectId,
+      credentialEncrypted: "fixture-not-a-token",
+      chatgptAccountId: crypto.randomUUID(),
+      scopes: null,
+      planType: "pro",
+      isFedramp: false,
+      expiresAt: null,
+      lastRefreshAt: null,
+    });
+    const input = {
+      accountId: account!.id,
+      workspaceId: null,
+      credentialId: credential.id,
+      subjectId,
+      enabled: false,
+      expectedVersion: 1,
+    };
+    const before =
+      await shared.admin`select version, credential_encrypted, allowed_workspace_ids, allow_personal_workspaces, status
+      from codex_subscription_credentials where id = ${credential.id}`;
+    expect((await updateCodexAllocatorEligibility(client.db, input)).result).toMatchObject({
+      kind: "updated",
+      allocatorEnabled: false,
+      allocatorVersion: 2,
+    });
+    expect((await updateCodexAllocatorEligibility(client.db, input)).result).toMatchObject({
+      kind: "unchanged",
+      allocatorVersion: 2,
+    });
+    expect(
+      (await updateCodexAllocatorEligibility(client.db, { ...input, enabled: true })).result,
+    ).toMatchObject({ kind: "conflict", allocatorEnabled: false, allocatorVersion: 2 });
+    const after =
+      await shared.admin`select version, credential_encrypted, allowed_workspace_ids, allow_personal_workspaces, status
+      from codex_subscription_credentials where id = ${credential.id}`;
+    expect(after).toEqual(before);
+    const audit =
+      await shared.admin`select action from audit_events where account_id = ${account!.id} and target_id = ${credential.id} and action = 'codex.allocator.updated'`;
+    expect(audit).toHaveLength(1);
+    await expect(
+      updateCodexAllocatorEligibility(client.db, {
+        ...input,
+        subjectId: `user:${crypto.randomUUID()}`,
+      }),
+    ).rejects.toThrow();
+    expect(
+      (
+        await updateCodexAllocatorEligibility(client.db, {
+          ...input,
+          credentialId: crypto.randomUUID(),
+        })
+      ).result,
+    ).toEqual({ kind: "not_found" });
+    expect(
+      (
+        await updateCodexAllocatorEligibility(client.db, {
+          ...input,
+          enabled: true,
+          expectedVersion: 2,
+        })
+      ).result,
+    ).toMatchObject({ kind: "updated", allocatorEnabled: true, allocatorVersion: 3 });
+  });
+
+  test("credit consent defaults off, preserves credentials, audits once, and fences stale writes", async () => {
+    if (!shared || !client) return;
+    const [account] = await shared.admin<{ id: string }[]>`
+      insert into managed_accounts (name) values ('organization-codex-pause') returning id`;
+    const [workspace] = await shared.admin<{ id: string }[]>`
+      insert into workspaces (account_id, name) values (${account!.id}, 'pause fixture') returning id`;
+    await shared.admin`insert into workspace_inference_controls (account_id, workspace_id)
+      values (${account!.id}, ${workspace!.id})`;
+    const subjectId = `user:${crypto.randomUUID()}`;
+    await shared.admin`insert into organization_memberships (account_id, subject_id, role, status, personal_workspace_id)
+      values (${account!.id}, ${subjectId}, 'owner', 'active', ${workspace!.id})`;
+    const credential = await upsertOrganizationCodexSubscriptionCredential(client.db, {
+      organizationId: account!.id,
+      actorSubjectId: subjectId,
+      credentialEncrypted: "fixture-not-a-token",
+      chatgptAccountId: crypto.randomUUID(),
+      scopes: null,
+      planType: "pro",
+      isFedramp: false,
+      expiresAt: null,
+      lastRefreshAt: null,
+    });
+    const input = {
+      accountId: account!.id,
+      workspaceId: null,
+      credentialId: credential.id,
+      subjectId,
+      enabled: true,
+      expectedVersion: 1,
+    };
+    const before =
+      await shared.admin`select version, credential_encrypted, allowed_workspace_ids, allow_personal_workspaces, status
+      from codex_subscription_credentials where id = ${credential.id}`;
+    expect((await updateCodexExtraCreditsPolicy(client.db, input)).result).toMatchObject({
+      kind: "updated",
+      extraCreditsEnabled: true,
+      extraCreditsVersion: 2,
+    });
+    expect((await updateCodexExtraCreditsPolicy(client.db, input)).result).toMatchObject({
+      kind: "unchanged",
+      extraCreditsVersion: 2,
+    });
+    expect(
+      (await updateCodexExtraCreditsPolicy(client.db, { ...input, enabled: false })).result,
+    ).toMatchObject({ kind: "conflict", extraCreditsEnabled: true, extraCreditsVersion: 2 });
+    const after =
+      await shared.admin`select version, credential_encrypted, allowed_workspace_ids, allow_personal_workspaces, status
+      from codex_subscription_credentials where id = ${credential.id}`;
+    expect(after).toEqual(before);
+    const audit =
+      await shared.admin`select action from audit_events where account_id = ${account!.id} and target_id = ${credential.id} and action = 'codex.extra_credits.updated'`;
+    expect(audit).toHaveLength(1);
+    await expect(
+      updateCodexExtraCreditsPolicy(client.db, {
+        ...input,
+        subjectId: `user:${crypto.randomUUID()}`,
+      }),
+    ).rejects.toThrow();
+    expect(
+      (
+        await updateCodexExtraCreditsPolicy(client.db, {
+          ...input,
+          credentialId: crypto.randomUUID(),
+        })
+      ).result,
+    ).toEqual({ kind: "not_found" });
+    expect(
+      (
+        await updateCodexExtraCreditsPolicy(client.db, {
+          ...input,
+          enabled: false,
+          expectedVersion: 2,
+        })
+      ).result,
+    ).toMatchObject({ kind: "updated", extraCreditsEnabled: false, extraCreditsVersion: 3 });
+    await setAppContext({ accountId: account!.id, workspaceId: workspace!.id, subjectId });
+    await expectSqlState(
+      () =>
+        app!`update codex_subscription_credentials set extra_credits_enabled = true where id = ${credential.id}`,
+      "42501",
     );
   });
 

@@ -27,7 +27,7 @@ async function* eventsFrom(events: SessionEvent[]): AsyncGenerator<SessionEvent,
 }
 
 describe("proxy re-streaming", () => {
-  test("formatSseEvent matches the OpenGeni server wire format", () => {
+  test("formatSseEvent matches the Opengeni server wire format", () => {
     const event = makeEvent(7);
     expect(formatSseEvent(event)).toBe(
       `id: 7\nevent: agent.message.delta\ndata: ${JSON.stringify(event)}\n\n`,

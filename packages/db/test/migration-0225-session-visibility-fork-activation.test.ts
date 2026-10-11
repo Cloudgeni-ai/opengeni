@@ -462,7 +462,7 @@ describe("migration 0303 session tenancy product activation", () => {
     }
   });
 
-  test("adds restrictive visibility policies to every direct session reference", async () => {
+  test("protects session content by visibility and admin grants by organization", async () => {
     if (!shared) return;
     const missing = await shared.admin<Array<{ tableName: string }>>`
       select distinct relation.relname as "tableName"
@@ -489,7 +489,33 @@ describe("migration 0303 session tenancy product activation", () => {
         )
       order by relation.relname
     `;
-    expect(Array.from(missing)).toEqual([]);
+    // Admin grants are organization authority, not conversation content. Their
+    // resolver reads the grant before establishing session visibility. All other
+    // session references still require the restrictive visibility policy.
+    expect(Array.from(missing)).toEqual([{ tableName: "session_admin_access" }]);
+    const adminPolicies = await shared.admin<
+      Array<{
+        forced: boolean;
+        name: string;
+        using: string;
+        check: string;
+      }>
+    >`
+      select relation.relforcerowsecurity as forced, policy.polname as name,
+        pg_get_expr(policy.polqual, policy.polrelid) as using,
+        pg_get_expr(policy.polwithcheck, policy.polrelid) as check
+      from pg_class relation
+      join pg_policy policy on policy.polrelid = relation.oid
+      where relation.oid = 'session_admin_access'::regclass
+    `;
+    expect(Array.from(adminPolicies)).toEqual([
+      {
+        forced: true,
+        name: "session_admin_access_account",
+        using: "(account_id = opengeni_private.current_account_id())",
+        check: "(account_id = opengeni_private.current_account_id())",
+      },
+    ]);
     const manualTables = [
       "connector_action_requests",
       "memory_slack_publications",

@@ -1,4 +1,4 @@
-// Agents write Markdown for the OpenGeni console, and the Slack bot posts the
+// Agents write Markdown for the Opengeni console, and the Slack bot posts the
 // same reply to a thread. These examples are shaped like real Slack-task
 // replies: headings, bold, links and bullets must turn into Slack syntax, while
 // anything inside code must reach Slack byte for byte.

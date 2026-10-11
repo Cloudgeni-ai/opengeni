@@ -654,16 +654,29 @@ export function mergeSessionDetailReadProjection(
  * List refreshes advance recency consistently for selected and unselected rows.
  * Creation ordering also keeps the list's exact SQL timestamp; route/lineage
  * Date hydration can discard the microseconds that distinguish adjacent rows.
+ * When both agree the session needs a person and the list row is at least as
+ * fresh as the detail, the list's `requiresActionSince` fills in for a detail
+ * read, which never carries it, so selecting a row does not erase how long it
+ * has been waiting.
  */
 export function applySessionRailProjection<T extends Session>(
   current: T,
   projected: Session,
   options: { channelOwned?: boolean } = {},
 ): T {
-  const activity =
+  const timed =
     current.updatedAt === projected.updatedAt && current.createdAt === projected.createdAt
       ? current
       : { ...current, updatedAt: projected.updatedAt, createdAt: projected.createdAt };
+  const activity =
+    timed.requiresActionSince == null &&
+    projected.requiresActionSince != null &&
+    timed.status === "requires_action" &&
+    projected.status === "requires_action" &&
+    // A list row older than the detail may describe an earlier request.
+    projected.lastSequence >= timed.lastSequence
+      ? { ...timed, requiresActionSince: projected.requiresActionSince }
+      : timed;
   const pinned = applySessionPinProjection(activity, projected) ?? activity;
   const merged =
     options.channelOwned === false

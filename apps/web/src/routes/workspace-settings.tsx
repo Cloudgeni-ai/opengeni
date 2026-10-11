@@ -47,7 +47,11 @@ import {
   completeWorkspaceDeletionFollowUp,
   deleteOrganizationWorkspaceWithReconciliation,
 } from "@/lib/workspace-deletion";
-import { canManageWorkspaceSettings, hasWorkspacePermission } from "@/lib/permissions";
+import {
+  canManageWorkspaceMembers,
+  canManageWorkspaceSettings,
+  hasWorkspacePermission,
+} from "@/lib/permissions";
 import { WorkspaceApiKeysPage } from "./workspace-api-keys";
 import type { DeveloperLocation } from "@/lib/developer-route";
 import { hasAccountPermission } from "@/lib/permissions";
@@ -149,10 +153,10 @@ function OperationalWorkspaceSettingsRoute({
     activeWorkspace,
     context.managedSelfContext,
   );
-  const canManageMembers = hasWorkspacePermission(
+  const canManageMembers = canManageWorkspaceMembers(
     context.accessContext,
-    workspaceId,
-    "members:manage",
+    activeWorkspace,
+    context.clientConfig.auth.mode === "managedSession",
   );
   const canAdministerWorkspace = hasWorkspacePermission(
     context.accessContext,
@@ -207,6 +211,12 @@ function OperationalWorkspaceSettingsRoute({
             />
           </Suspense>
         )
+      ) : null}
+
+      {section === "learning" ? (
+        <Suspense fallback={<SettingsRowsFallback label="Loading agent learning" />}>
+          <LazyAgentLearningSettingsPage key={workspaceId} workspaceId={workspaceId} />
+        </Suspense>
       ) : null}
 
       {section === "usage" ? (
@@ -433,23 +443,21 @@ function WorkspaceGeneralSettings({
         title="New session defaults"
         description="Applied when someone starts a new session in this workspace."
       >
-        {context.clientConfig.agentConfig?.enabled ? (
-          <SettingNavRow
-            label="Agent"
-            description="What agents can do and who they are."
-            value={workspaceAgentDefaultsSummary(
-              activeWorkspace.settings,
-              context.clientConfig.agentConfig,
-            )}
-            onOpen={() =>
-              void navigate({
-                to: "/workspaces/$workspaceId/settings",
-                params: { workspaceId },
-                search: { section: "general", view: "agent-defaults" },
-              })
-            }
-          />
-        ) : null}
+        <SettingNavRow
+          label="Agent"
+          description="What agents can do and who they are."
+          value={workspaceAgentDefaultsSummary(
+            activeWorkspace.settings,
+            context.clientConfig.agentConfig,
+          )}
+          onOpen={() =>
+            void navigate({
+              to: "/workspaces/$workspaceId/settings",
+              params: { workspaceId },
+              search: { section: "general", view: "agent-defaults" },
+            })
+          }
+        />
         <DefaultSandboxEnvironmentRow workspaceId={workspaceId} />
         <VoiceInputPreferenceRow workspaceId={workspaceId} canManage={canManageSettings} />
         <VideoGenerationPreferenceRow
@@ -901,6 +909,11 @@ const LazySessionDefaultsPage = lazy(async () => {
 });
 
 // Usage reads load only on their page, never with the rest of settings.
+const LazyAgentLearningSettingsPage = lazy(async () => {
+  const module = await import("@/components/settings/agent-learning-page");
+  return { default: module.AgentLearningSettingsPage };
+});
+
 const LazyWorkspaceUsagePage = lazy(async () => {
   const module = await import("@/components/usage/workspace-usage-page");
   return { default: module.WorkspaceUsagePage };

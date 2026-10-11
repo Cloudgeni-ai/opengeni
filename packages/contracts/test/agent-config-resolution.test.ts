@@ -5,6 +5,7 @@ import {
   AgentConfigError,
   AgentConfigRequest,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
+  CUA_DESKTOP_TOOLS,
   FIRST_PARTY_MCP_TOOL_CAPABILITIES,
   FIRST_PARTY_MCP_TOOL_NAMES,
   ResolvedAgentConfig,
@@ -15,6 +16,7 @@ import {
   allAgentCapabilities,
   legacyEffectiveAgentCapabilities,
   noneAgentCapabilities,
+  agentCapabilityEnabled,
   projectAgentEffectiveTools,
   resolveAgentConfig,
   resolveAgentToolFamilies,
@@ -52,6 +54,17 @@ function errorCode(fn: () => unknown): string | null {
 }
 
 describe("agent config schemas", () => {
+  test("native CUA names obey the existing browser/computer family ceiling", () => {
+    const off = resolveAgentToolFamilies(resolve({ request: { capabilities: "none" } }).config);
+    const on = resolveAgentToolFamilies(resolve({ request: { capabilities: "all" } }).config);
+    const unavailable = resolveAgentToolFamilies(null, { unavailable: ["browser"] });
+    for (const tool of CUA_DESKTOP_TOOLS) {
+      expect(off.allowsFunctionTool("interaction__cua_" + tool.name)).toBe(false);
+      expect(on.allowsFunctionTool("interaction__cua_" + tool.name)).toBe(true);
+      // Legacy configuration still respects runtime unavailability.
+      expect(unavailable.allowsFunctionTool("interaction__cua_" + tool.name)).toBe(false);
+    }
+  });
   test("capability shapes", () => {
     expect(AgentCapabilities.parse("all")).toBe("all");
     expect(AgentCapabilities.parse({ from: "none", goals: true, skills: "manage" })).toEqual({
@@ -271,10 +284,21 @@ describe("write-through", () => {
     ).toEqual({ tools, toolPolicy: policy });
   });
 
-  test('"none" keeps only runtime mechanics', () => {
+  test('"none" keeps runtime mechanics and reaching the person', () => {
+    // "none" still lets the agent ask the person, so humanInput's tools stay.
     expect(
       agentConfigFirstPartyMcpTools(none, DEFAULT_FIRST_PARTY_MCP_TOOLS).sort() as string[],
-    ).toEqual(["command_read", "command_wait", "set_session_title", "wait_for_input"].sort());
+    ).toEqual(
+      [
+        "command_read",
+        "command_wait",
+        "inbox_tidy",
+        "notification_withdraw",
+        "notify_user",
+        "set_session_title",
+        "wait_for_input",
+      ].sort(),
+    );
   });
 
   test("each capability keeps exactly its tools", () => {
@@ -284,7 +308,11 @@ describe("write-through", () => {
       const kept = agentConfigFirstPartyMcpTools(config, FIRST_PARTY_MCP_TOOL_NAMES);
       for (const tool of FIRST_PARTY_MCP_TOOL_NAMES) {
         const owner = FIRST_PARTY_MCP_TOOL_CAPABILITIES[tool];
-        const expected = owner === "runtime" || owner === id;
+        const expected =
+          owner === "runtime" ||
+          owner === "sandbox" ||
+          owner === id ||
+          agentCapabilityEnabled(noneAgentCapabilities(), owner);
         expect({ tool, kept: kept.includes(tool) }).toEqual({ tool, kept: expected });
       }
     }
@@ -559,6 +587,51 @@ describe("effective tools projection", () => {
       "command_read",
       "command_wait",
     ]);
+  });
+  test("background-command tools follow attached compute for every session", () => {
+    const none = resolve({ request: { capabilities: "none" } }).config!;
+    const all = resolve({ request: { capabilities: "all" } }).config!;
+    const selection = ["wait_for_input", "command_read", "command_wait", "goal_set"] as const;
+    for (const config of [none, all, null]) {
+      const detached = resolveAgentToolFamilies(config, { sandboxAttached: false });
+      const attached = resolveAgentToolFamilies(config, { sandboxAttached: true });
+      expect(detached.firstPartyTools(selection)).not.toContain("command_read");
+      expect(detached.firstPartyTools(selection)).not.toContain("command_wait");
+      expect(detached.firstPartyTools(selection)).toContain("wait_for_input");
+      expect(detached.allowsFirstPartyTool("command_wait")).toBe(false);
+      expect(detached.allowsFirstPartyTool("wait_for_input")).toBe(true);
+      expect(attached.firstPartyTools(selection)).toContain("command_read");
+      expect(attached.firstPartyTools(selection)).toContain("command_wait");
+      expect(attached.allowsFirstPartyTool("command_read")).toBe(true);
+    }
+    // A "none" agent still gets them as mechanics once compute is attached.
+    expect(resolveAgentToolFamilies(none, { sandboxAttached: true }).firstPartyTools([])).toEqual([
+      "wait_for_input",
+      "command_read",
+      "command_wait",
+    ]);
+    expect(resolveAgentToolFamilies(none, { sandboxAttached: false }).firstPartyTools([])).toEqual([
+      "wait_for_input",
+    ]);
+    const projection = projectAgentEffectiveTools({
+      config: none,
+      firstPartyMcpTools: ["wait_for_input", "command_read", "command_wait"],
+      mcpServerIds: ["opengeni"],
+      productServerIds: new Set(),
+      environment: { sandboxAttached: false },
+    });
+    expect(projection.tools.map((tool) => tool.name)).toEqual(["opengeni__wait_for_input"]);
+    const withSandbox = projectAgentEffectiveTools({
+      config: none,
+      firstPartyMcpTools: ["wait_for_input", "command_read"],
+      mcpServerIds: ["opengeni"],
+      productServerIds: new Set(),
+      environment: { sandboxAttached: true },
+    });
+    expect(withSandbox.tools.find((tool) => tool.name === "opengeni__command_read")).toMatchObject({
+      capability: "sandbox",
+      source: "first_party",
+    });
   });
   test("lists capability tools and classifies servers", () => {
     const config = resolve({ request: { capabilities: { from: "none", media: true } } }).config!;

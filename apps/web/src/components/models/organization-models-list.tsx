@@ -1,7 +1,12 @@
 import { SubscriptionAccountRow } from "./subscription-account-ui";
 import { subscriptionAccountName } from "./use-subscription-account-pool";
 import type { ClaudeSubscriptions } from "./use-claude-subscriptions";
-import { ClaudeAccountRows, ClaudeSettingRows, claudePlan } from "./claude-subscription-models";
+import {
+  ClaudeAccountRows,
+  ClaudeSettingRows,
+  claudePlan,
+  claudeUsageCell,
+} from "./claude-subscription-models";
 import type {
   CodexAccount,
   ConnectionMetadata,
@@ -22,13 +27,22 @@ import {
 } from "@/components/ai-gateway-connection";
 import { codexAccountName, codexUsageReadings, planLabel } from "@/components/codex-connection";
 import { useConnectionAccess } from "@/components/connection-access-settings";
-import { allowedModelsSummary, modelAccessPolicyDraft } from "@/components/model-access-policy";
+import {
+  AllowedModelsRow,
+  allowedModelsSummary,
+  modelAccessPolicyDraft,
+  useModelAccessPolicy,
+} from "@/components/model-access-policy";
+import { DefaultSessionModelPreferenceRow } from "@/components/default-session-model";
+import { compactionSummary } from "@/components/models/model-compaction-page";
+import type { OrganizationModelDefaultsState } from "@/components/models/use-organization-model-defaults";
 import { ACCOUNT_COLUMNS } from "@/components/models/codex-models";
 import {
   NOT_IN_USE,
   ProviderTile,
   organizationReachLabel,
   payerShortLabel,
+  resetsLabel,
   type ModelsScopeLabels,
 } from "@/components/models/models-ui";
 import { OpenGeniCreditsRow, type OpenGeniCredits } from "@/components/models/opengeni-credits-row";
@@ -53,7 +67,7 @@ import { MetaChip } from "@/components/ui/meta-chip";
 import { RowButton } from "@/components/ui/page-actions";
 import { Section, SectionStack } from "@/components/ui/section";
 import { SegmentedControl } from "@/components/ui/segmented-control";
-import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
+import { SettingNavRow, SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { UsageReadout } from "@/components/ui/usage-meter";
 import { billingClassForModel } from "@/lib/model-policy";
@@ -71,12 +85,13 @@ import { accountKey, type GatewayId } from "@/lib/models-route";
    workspaces use, read-only: only owners and admins add accounts.
    -------------------------------------------------------------------------- */
 
-export const GATEWAYS: readonly GatewayId[] = ["anthropic", "openrouter", "vercel"];
+export const GATEWAYS: readonly GatewayId[] = ["anthropic", "openrouter", "opper", "vercel"];
 
 /** The catalog provider id of an organization key's models. */
 const ORGANIZATION_CATALOG_PROVIDER: Record<GatewayId, string> = {
   vercel: "organization-gateway",
   openrouter: "organization-openrouter",
+  opper: "organization-opper",
   anthropic: "organization-anthropic",
   claude_subscription: "organization-claude-subscription",
 };
@@ -84,6 +99,7 @@ const ORGANIZATION_CATALOG_PROVIDER: Record<GatewayId, string> = {
 const ORGANIZATION_KIND = {
   vercel: "vercel_gateway",
   openrouter: "openrouter",
+  opper: "opper",
   anthropic: "anthropic",
   claude_subscription: "claude_subscription",
 } as const;
@@ -127,6 +143,8 @@ export interface WorkspaceModelsSnapshot {
   defaultModel: string | null;
   /** "All models", "3 models", or null when it can't be read. */
   allowed: string | null;
+  /** It has its own default model, Allowed models or a compaction limit. */
+  changesDefaults: boolean;
 }
 
 async function readWorkspaceModels(
@@ -184,6 +202,10 @@ async function readWorkspaceModels(
             models,
           })
         : null,
+    changesDefaults:
+      Boolean(workspace.savedDefaultModel) ||
+      (policy.status === "fulfilled" && policy.value.source === "workspace") ||
+      models.some((model) => (model.compactionPolicy?.overrideTokens ?? null) !== null),
   };
 }
 
@@ -192,6 +214,8 @@ function useWorkspaceSnapshots(
   client: OpenGeniBrowserClient,
   workspaces: readonly ModelsWorkspace[],
   claudeEnabled: boolean,
+  /** Changes when the organization's defaults change, so what workspaces follow is re-read. */
+  defaultsRevision: string,
 ): Record<string, WorkspaceModelsSnapshot | "loading" | "error"> {
   const [snapshots, setSnapshots] = useState<
     Record<string, WorkspaceModelsSnapshot | "loading" | "error">
@@ -219,12 +243,15 @@ function useWorkspaceSnapshots(
       live = false;
     };
     // oxlint-disable-next-line react-hooks/exhaustive-deps -- re-read when the set of workspaces changes
-  }, [client, key, claudeEnabled]);
+  }, [client, key, claudeEnabled, defaultsRevision]);
   return snapshots;
 }
 
 export function OrganizationModelsList({
   client,
+  organizationDefaults,
+  onEditAllowed,
+  onEditCompaction,
   organizationName,
   administrator,
   claudeEnabled,
@@ -244,6 +271,10 @@ export function OrganizationModelsList({
   onConnect,
 }: {
   client: OpenGeniBrowserClient;
+  /** The defaults every workspace follows; owners and admins only, otherwise null. */
+  organizationDefaults: OrganizationModelDefaultsState | null;
+  onEditAllowed: () => void;
+  onEditCompaction: () => void;
   organizationName: string;
   /** An organization owner or admin: manages accounts and every workspace. */
   administrator: boolean;
@@ -268,7 +299,12 @@ export function OrganizationModelsList({
   onOpenWorkspace: (workspaceId: string, account?: string) => void;
   onConnect: () => void;
 }) {
-  const snapshots = useWorkspaceSnapshots(client, workspaces, claudeEnabled);
+  const snapshots = useWorkspaceSnapshots(
+    client,
+    workspaces,
+    claudeEnabled,
+    organizationDefaults?.defaults?.updatedAt ?? "",
+  );
   const ready = workspaces
     .map((workspace) => ({ workspace, snapshot: snapshots[workspace.id] }))
     .filter(
@@ -318,6 +354,7 @@ export function OrganizationModelsList({
           email={account.email}
           primary={account.active}
           meta={[account.scope === "user" ? tag + " · only you" : tag, claudePlan(account)]}
+          cells={{ usage: claudeUsageCell(account) }}
           indicator={
             account.status !== "active" ? { kind: "attention", label: "Needs reconnect" } : "open"
           }
@@ -408,6 +445,15 @@ export function OrganizationModelsList({
 
   return (
     <SectionStack>
+      {organizationDefaults ? (
+        <OrganizationDefaultsSection
+          organizationName={organizationName}
+          anchorWorkspaceId={anchorWorkspaceId}
+          defaults={organizationDefaults}
+          onEditAllowed={onEditAllowed}
+          onEditCompaction={onEditCompaction}
+        />
+      ) : null}
       <Section
         title="Accounts"
         description={
@@ -448,14 +494,19 @@ export function OrganizationModelsList({
         )}
         {administrator ? null : (
           <p className="m-0 pt-2 pb-3 text-sm leading-5 text-fg-muted">
-            Only organization owners and admins can add accounts.
+            To connect your own account, open one of your workspaces. Only organization owners and
+            admins add accounts for everyone.
           </p>
         )}
       </Section>
 
       <Section
         title="Workspaces"
-        description="Each workspace's default model and the models people can pick there."
+        description={
+          organizationDefaults
+            ? "Each workspace follows the defaults above unless its admins change them there."
+            : "Each workspace's default model and the models people can pick there."
+        }
       >
         <RowList label="Workspaces" flush>
           {[...shared, ...personal].map((workspace) => (
@@ -510,6 +561,64 @@ export function OrganizationModelsList({
         </Section>
       ) : null}
     </SectionStack>
+  );
+}
+
+/**
+ * What every workspace starts with: the default model, Allowed models and
+ * compaction limits. A workspace follows each until its admins change it.
+ */
+export function OrganizationDefaultsSection({
+  organizationName,
+  anchorWorkspaceId,
+  defaults,
+  onEditAllowed,
+  onEditCompaction,
+}: {
+  organizationName: string;
+  /** Whose catalog lists the models to choose from. */
+  anchorWorkspaceId: string;
+  defaults: OrganizationModelDefaultsState;
+  onEditAllowed: () => void;
+  onEditCompaction: () => void;
+}) {
+  const policy = useModelAccessPolicy({
+    kind: "organization",
+    workspaceId: anchorWorkspaceId,
+    defaults,
+  });
+  return (
+    <Section
+      title="Defaults for every workspace"
+      description="Workspaces use these unless their admins change them for one workspace."
+    >
+      {defaults.error ? (
+        <ErrorMessage
+          title={`Couldn't load ${possessive(organizationName)} defaults.`}
+          action={<RowButton onClick={() => void defaults.reload()}>Try again</RowButton>}
+        >
+          Nothing was changed.
+        </ErrorMessage>
+      ) : (
+        <SettingRowGroup>
+          <DefaultSessionModelPreferenceRow
+            workspaceId={anchorWorkspaceId}
+            canManage
+            organizationName={organizationName}
+            organizationDefaults={defaults}
+          />
+          <AllowedModelsRow state={policy} onEdit={onEditAllowed} />
+          <SettingNavRow
+            label="Context & compaction"
+            description="When to summarize long conversations, by model."
+            value={compactionSummary(policy.models, {
+              organizationLimits: defaults.defaults?.modelCompactionThresholds ?? {},
+            })}
+            onOpen={onEditCompaction}
+          />
+        </SettingRowGroup>
+      )}
+    </Section>
   );
 }
 
@@ -591,6 +700,7 @@ function sharedAccountRows(
         title={subscriptionAccountName(account)}
         email={account.email}
         meta={[labels.organization, usedIn(where), claudePlan(account)]}
+        cells={{ usage: claudeUsageCell(account) }}
       />
     )),
     ...[...keys.entries()].map(([id, { models, where }]) => (
@@ -682,7 +792,11 @@ function OrganizationCodexRow({
       leading={<ProviderTile provider="codex" size="lg" />}
       title={codexAccountName(account)}
       titleAddon={primary ? <MetaChip variant="outline">Primary</MetaChip> : null}
-      meta={[organizationReachLabel(labels, access.data), planLabel(account.plan, "ChatGPT")]}
+      meta={[
+        organizationReachLabel(labels, access.data),
+        planLabel(account.plan, "ChatGPT"),
+        resetsLabel(account.resetCreditAvailableCount),
+      ]}
       cells={{
         usage: reconnect ? null : !account.allocatorEnabled ? (
           <StatusBadge status="paused" variant="dot" />
@@ -824,7 +938,11 @@ function WorkspaceRow({
     snapshot === "error"
       ? ["Couldn't load its models"]
       : typeof snapshot === "object"
-        ? [snapshot.defaultModel, snapshot.allowed]
+        ? [
+            snapshot.defaultModel,
+            snapshot.allowed,
+            snapshot.changesDefaults ? "Changes some defaults" : null,
+          ]
         : [];
   return (
     <ListRow

@@ -224,7 +224,7 @@ function TicketRow({
             )}
             {agentConnected ? (
               <span className="inline-flex items-center gap-1.5 text-[10px] font-bold text-[#6558cc]">
-                <SparklesIcon className="size-3" /> OpenGeni
+                <SparklesIcon className="size-3" /> Opengeni
               </span>
             ) : (
               <span className="text-[10px] text-[#9c9b95]">{ticket.id}</span>

@@ -68,13 +68,15 @@ Use the Tailwind semantic names only. No raw hex, no `var(--og-x, #fallback)`, n
 | `status-waiting` | Peach: Needs you, Needs reconnect, Pending review |
 | `status-running` | Amber: Running, Syncing |
 | `danger` | Red: Failed, Expired, destructive actions |
+| `session-update` | Teal: unread-chat dots and Following up markers only. Not a lifecycle color or navigation accent |
 
 **Titles are never grey.** Every title, heading, row title, notice title, empty-state title,
 card title, form label and legend is `fg`. `fg-muted` and `fg-subtle` are only for descriptions,
 meta, placeholders and counts.
 
 The palette is neutral grey everywhere (no blue or slate tint). Color appears only in the
-primary button's teal wash, the soft teal/peach glow and the status hues.
+primary button's teal wash, the soft teal/peach glow, the status hues, and the
+unread-chat / Following up markers (`session-update`: light `#0f766e`, dark `#5ad4c5`).
 
 | | Light | Dark ("graphite") |
 | --- | --- | --- |
@@ -318,7 +320,7 @@ Cancel and the action as the primary.
 - No scopes, IDs, UUIDs, enums, tags, endpoints or registry names outside "Technical details" or a
   CopyField.
 - Unavailable: say why and who can fix it, and disable or hide the action.
-- Errors: what happened + what to do. Never a raw `OpenGeni API 404 ... Reference: <uuid>` string;
+- Errors: what happened + what to do. Never a raw `Opengeni API 404 ... Reference: <uuid>` string;
   the reference goes in Technical details. Use `lib/api-error.ts`: `userErrorText` for toasts and
   form errors, `ErrorMessage {...apiErrorDetails(error)}` for a failed section (what happened, the
   advice, Try again, the reference behind Technical details).
@@ -435,8 +437,16 @@ system; a new main-rail page of things follows them.
   outline, Approve (or "Approve and next") as the primary, and a ⋯ for Open entry and Approve all
   from the same chat. A decision moves straight to the next change, and the last one returns to
   the list. Edit replaces the text with the form on the same page. The learning mode is not a
-  line over the list: it lives in the page's ⋯ ("Learning · Automatic"), and an empty Review
-  says in one sentence why nothing waits, with Learning settings as its action.
+  line over the list: the page's ⋯ shows it ("Agent learning · Automatic") and opens Settings >
+  Agent learning, and an empty Review says in one sentence why nothing waits, with Agent learning
+  as its action. Settings > Agent learning links back to Review with what is waiting.
+- **One home per scope for agent settings.** Decided 4 Oct 2026. Agent learning is always
+  "Agent learning" with modes Off / Review first / Automatic. Workspace and private-chat
+  defaults, and (owners only) the organization identity, are rows on Settings > Agent learning
+  (in the Workspace section of the settings rail, Personal workspaces included; Knowledge's ⋯
+  opens it); one chat's identity, capabilities and Agent learning are the session dock's Agent
+  tab (Identity, Capabilities, Agent learning sections, each saying where its default comes
+  from). Anything else that shows one of these settings is a one-line summary linking there.
 
 ### State and truth on a page
 

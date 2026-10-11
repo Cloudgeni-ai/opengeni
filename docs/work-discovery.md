@@ -1,6 +1,6 @@
 # Advisory work discovery and durable work claims
 
-OpenGeni can surface compact, provider-neutral evidence that another authorized
+Opengeni can surface compact, provider-neutral evidence that another authorized
 session may be working on related material. The feature has two parts:
 
 - **work discovery** searches bounded session titles, active goals, and typed
@@ -60,7 +60,7 @@ workspace-RLS transaction:
 2. For a live agent attempt, reconstruct and validate the exact current
    session/turn/attempt/generation authority.
 3. Resolve an optional embedding host's complete list scope. A host may narrow
-   the result to exact roots/sessions; it cannot widen OpenGeni access.
+   the result to exact roots/sessions; it cannot widen Opengeni access.
 4. Apply workspace tenancy, session visibility, Slack-private, host scope,
    status, `activeOnly`, recency, root, parent, activity-revision, and snapshot
    fences into a materialized authorized session set.
@@ -97,7 +97,7 @@ An exact subject filter contains:
 }
 ```
 
-OpenGeni normalizes the namespace to canonical lowercase text, canonicalizes
+Opengeni normalizes the namespace to canonical lowercase text, canonicalizes
 the key's Unicode/outer whitespace, hashes the tuple with separators, and
 matches the digest plus the original namespace/type. This path never treats a
 display label as identity. Exact-subject matches rank before all text matches

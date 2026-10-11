@@ -1,3 +1,9 @@
+import type { ComputerNativeCallRequest, ComputerNativeReceipt } from "@opengeni/contracts";
+export type {
+  ComputerNativeCallRequest,
+  ComputerNativeReceipt,
+  ComputerOperationReceipt,
+} from "@opengeni/contracts";
 import type { OpenGeniRequestOptions } from "./client";
 import { browserSessionStorageMode } from "@opengeni/contracts/browser-storage";
 import type {
@@ -66,7 +72,7 @@ export type InteractionControlFailure = {
   message: string;
 };
 
-/** Decodes the bounded typed control-failure details emitted by OpenGeni. Raw
+/** Decodes the bounded typed control-failure details emitted by Opengeni. Raw
  * provider/OS detail is intentionally absent; both correlation ids are opaque. */
 export function interactionControlFailureFromError(
   error: unknown,
@@ -1114,6 +1120,8 @@ export type ComputerSessionCapabilities = {
   screenCapture: boolean;
   semanticActions: boolean;
   pointerInput: boolean;
+  /** Causal count-2 input requires its exact confirmed first operation. Absent means unsupported. */
+  pointerClickContinuation?: boolean | undefined;
   keyboardInput: boolean;
   clipboard: boolean;
   backgroundActions: boolean;
@@ -1217,6 +1225,9 @@ export type ComputerAction =
       deltaX?: number | undefined;
       deltaY?: number | undefined;
       button?: "left" | "right" | "middle" | undefined;
+      /** Click only; 2 delivers one second click pair after a completed first click. */
+      clickCount?: 1 | 2 | undefined;
+      continuationOfOperationId?: string | undefined;
     }
   | { type: "keyboard"; action: "type" | "press"; value: string }
   | {
@@ -1511,6 +1522,13 @@ export interface InteractionTransport {
     request?: BrowserOpenTargetRequest,
     options?: OpenGeniRequestOptions,
   ): Promise<BrowserObservation>;
+  /** Optional for custom transports predating metadata-only tab opening. */
+  openBrowserTargetWithInventory?(
+    workspaceId: string,
+    browserSessionId: string,
+    request?: BrowserOpenTargetRequest,
+    options?: OpenGeniRequestOptions,
+  ): Promise<BrowserTargetListResponse>;
   selectBrowserTarget(
     workspaceId: string,
     browserSessionId: string,
@@ -1643,12 +1661,24 @@ export interface InteractionTransport {
     targetId: string,
     options?: OpenGeniRequestOptions,
   ): Promise<ComputerFrame>;
+  callNativeComputerTool?(
+    workspaceId: string,
+    computerSessionId: string,
+    request: ComputerNativeCallRequest,
+    options?: OpenGeniRequestOptions,
+  ): Promise<ComputerNativeReceipt>;
   actInComputer(
     workspaceId: string,
     computerSessionId: string,
     request: ComputerActionRequest,
     options?: OpenGeniRequestOptions,
   ): Promise<ComputerActionReceipt>;
+  getNativeComputerToolReceipt?(
+    workspaceId: string,
+    computerSessionId: string,
+    operationId: string,
+    options?: OpenGeniRequestOptions,
+  ): Promise<ComputerNativeReceipt>;
   getComputerActionReceipt(
     workspaceId: string,
     computerSessionId: string,
@@ -2542,11 +2572,34 @@ export class ComputerSessionResource {
     return await this.transport.captureComputerTarget(this.workspaceId, this.id, targetId, options);
   }
 
+  async callNativeTool(
+    request: ComputerNativeCallRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<ComputerNativeReceipt> {
+    if (!this.transport.callNativeComputerTool)
+      throw new Error("Native CUA tools require a current interaction transport");
+    return await this.transport.callNativeComputerTool(this.workspaceId, this.id, request, options);
+  }
+
   async act(
     request: ComputerActionRequest,
     options: OpenGeniRequestOptions = {},
   ): Promise<ComputerActionReceipt> {
     return await this.transport.actInComputer(this.workspaceId, this.id, request, options);
+  }
+
+  async nativeReceipt(
+    operationId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<ComputerNativeReceipt> {
+    if (!this.transport.getNativeComputerToolReceipt)
+      throw new Error("Native CUA receipts require a current interaction transport");
+    return await this.transport.getNativeComputerToolReceipt(
+      this.workspaceId,
+      this.id,
+      operationId,
+      options,
+    );
   }
 
   async receipt(

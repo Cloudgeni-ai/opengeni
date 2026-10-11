@@ -39,7 +39,7 @@ const baseSettings = () =>
     // exact key an attach-warmed box used to be missing). Desktop-capable so this
     // mirrors the sandbox workspace deployment (ns opengeni-preview).
     sandboxBackend: "modal",
-    gitAuthorName: "OpenGeni Bot",
+    gitAuthorName: "Opengeni Bot",
     gitAuthorEmail: "bot@opengeni.dev",
   });
 
@@ -59,7 +59,7 @@ describe("attach-vs-turn manifest-environment parity (no repo attached)", () => 
     expect(hasNoEnvironmentDelta(attachEnv, turnEnv)).toBe(true);
 
     // And the keys that USED to be missing on an attach-warmed box are present.
-    expect(attachEnv.GIT_AUTHOR_NAME).toBe("OpenGeni Bot");
+    expect(attachEnv.GIT_AUTHOR_NAME).toBe("Opengeni Bot");
     expect(attachEnv.GIT_AUTHOR_EMAIL).toBe("bot@opengeni.dev");
     expect(attachEnv.HOME).toBe("/workspace");
     // TOKEN-BROKER (B1): the STABLE token FILE PATH rides the shared base, so it is
@@ -87,7 +87,7 @@ describe("attach-vs-turn manifest-environment parity (no repo attached)", () => 
     expect(attachEnv.DEPLOY_TARGET).toBe("staging");
     expect(attachEnv.API_KEY).toBe("wsval-123");
     // Platform keys still present alongside the workspace values.
-    expect(attachEnv.GIT_AUTHOR_NAME).toBe("OpenGeni Bot");
+    expect(attachEnv.GIT_AUTHOR_NAME).toBe("Opengeni Bot");
     expect(attachEnv.HOME).toBe("/workspace");
   });
 
@@ -194,7 +194,7 @@ describe("repo-attached attach-vs-turn parity (the viewer-attach cold-create rac
   const repoSettings = () =>
     testSettings({
       sandboxBackend: "modal",
-      gitAuthorName: "OpenGeni Bot",
+      gitAuthorName: "Opengeni Bot",
       gitAuthorEmail: "bot@opengeni.dev",
       githubAppId: "12345",
       githubAppSlug: "opengeni-test",
@@ -216,7 +216,7 @@ describe("repo-attached attach-vs-turn parity (the viewer-attach cold-create rac
     });
     const settings = testSettings({
       sandboxBackend: "modal",
-      gitAuthorName: "OpenGeni Bot",
+      gitAuthorName: "Opengeni Bot",
       gitAuthorEmail: "bot@opengeni.dev",
       githubAppId: "12345",
       githubAppSlug: "opengeni-test",
@@ -266,7 +266,7 @@ describe("repo-attached attach-vs-turn parity (the viewer-attach cold-create rac
       expect(turnEnv.GIT_ASKPASS).toBe("/workspace/.opengeni/askpass");
       expect(turnEnv.GIT_TERMINAL_PROMPT).toBe("0");
       // Deployment git identity wins over the bot fallback (parity on both sides).
-      expect(turnEnv.GIT_AUTHOR_NAME).toBe("OpenGeni Bot");
+      expect(turnEnv.GIT_AUTHOR_NAME).toBe("Opengeni Bot");
     } finally {
       globalThis.fetch = originalFetch;
     }

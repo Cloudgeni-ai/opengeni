@@ -70,7 +70,7 @@ export type ProviderWorkspaceCapturePolicy = {
 };
 
 /**
- * How OpenGeni obtains a non-replacing attachment to the exact persisted
+ * How Opengeni obtains a non-replacing attachment to the exact persisted
  * provider instance.
  *
  * - `ordinary`: SDK `resume()` is already a pure re-address operation; the
@@ -134,7 +134,7 @@ export interface ProviderRegistration {
     preserveWorkspaceForDiscard(session: unknown, sessionState: unknown): void;
   };
   /** Resolve capture semantics from either a live session, a serialized SDK
-   * session state, or OpenGeni's outer session envelope. Required for every
+   * session state, or Opengeni's outer session envelope. Required for every
    * provider so new backends cannot silently inherit unsafe teardown behavior.
    * `null` means the backend has no provider workspace to capture. */
   workspaceCapturePolicy(state: unknown): ProviderWorkspaceCapturePolicy | null;

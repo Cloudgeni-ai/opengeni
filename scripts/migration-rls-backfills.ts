@@ -1,9 +1,9 @@
 /**
  * Static analysis for migration-time backfills that silently no-op
- * under OpenGeni's production migration principal.
+ * under Opengeni's production migration principal.
  *
  * `FORCE ROW LEVEL SECURITY` binds the TABLE OWNER, not merely ordinary roles;
- * only a genuine `SUPERUSER` (or `BYPASSRLS`) escapes it. OpenGeni's documented
+ * only a genuine `SUPERUSER` (or `BYPASSRLS`) escapes it. Opengeni's documented
  * deployment posture (`docs/deployment.md`) runs migrations as a NON-superuser
  * owner without `BYPASSRLS`. During a migration no `opengeni.account_id` /
  * `opengeni.workspace_id` GUC is set, so a GUC-gated `workspace_isolation`
@@ -29,11 +29,20 @@
  * The latter may be set inside the statement or by the exact governed batched-
  * migration runner contract before the statement executes.
  */
+import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { batchedBackfillTransactionLocalSetting } from "../packages/db/src/migration-runner-settings";
 
 export const MIGRATIONS_DIR = "packages/db/drizzle";
+
+// The complete 0697 statement (including comments) only reads catalog source
+// and replaces a routine definition. Its embedded SELECT runs in that routine,
+// not during migration. Bind this classification to reviewed bytes: changed
+// statements keep conservative analysis, as do every adjacent statement and
+// all migration-time backfills. The grandfather lists below remain frozen.
+const REVIEWED_ROUTINE_SOURCE_PATCH_SHA256 =
+  "68249f30d87220cb0cdc78882a237613e32e481122beb96ca5cadde0c64f46e4";
 
 /**
  * Migrations that shipped before this class was identified. Their bytes are
@@ -228,7 +237,61 @@ export function splitStatements(sql: string): string[] {
   return out;
 }
 
-const stripComments = (text: string) =>
+/**
+ * Remove SQL comments, keeping single-quoted literals (including E'' escapes)
+ * intact so a `--` inside a literal cannot swallow its closing quote.
+ * Dollar-quoted bodies are still lexed as code: DO blocks are dollar-quoted.
+ * An apostrophe inside a nested dollar-quoted string can therefore keep later
+ * comment text visible, so suppressors also consult `stripAllCommentText`.
+ */
+export function stripComments(text: string): string {
+  let out = "";
+  let index = 0;
+  while (index < text.length) {
+    const char = text[index]!;
+    const next = text[index + 1];
+    if (char === "-" && next === "-") {
+      const end = text.indexOf("\n", index);
+      out += " ";
+      index = end === -1 ? text.length : end;
+      continue;
+    }
+    if (char === "/" && next === "*") {
+      const end = text.indexOf("*/", index + 2);
+      out += " ";
+      index = end === -1 ? text.length : end + 2;
+      continue;
+    }
+    if (char === "'") {
+      const escapes = /[eE]/.test(text[index - 1] ?? "") && !/\w/.test(text[index - 2] ?? "");
+      let end = index + 1;
+      for (; end < text.length; end += 1) {
+        if (escapes && text[end] === "\\") {
+          end += 1;
+          continue;
+        }
+        if (text[end] === "'") {
+          if (text[end + 1] === "'") {
+            end += 1;
+            continue;
+          }
+          break;
+        }
+      }
+      out += text.slice(index, end + 1);
+      index = end + 1;
+      continue;
+    }
+    out += char;
+    index += 1;
+  }
+  return out;
+}
+
+/** Literal-unaware stripping: removes every `--`/`/* *\/` run, even in
+ * literals. Suppressing tokens must survive this too, so comment text can
+ * never suppress a finding. */
+const stripAllCommentText = (text: string) =>
   text.replace(/--[^\n]*/g, " ").replace(/\/\*[\s\S]*?\*\//g, " ");
 
 const TABLE_REF = (table: string) => `(?:"${table}"|${table})`;
@@ -297,6 +360,63 @@ export function stripRoutineBodies(statement: string): string {
  * source, not an executed migration query. Keep arbitrary EXECUTE strings and
  * every actual query outside the replacement visible to the guard. */
 function stripCatalogRoutinePatchLiterals(statement: string): string {
+  // Chained replacements of a pg_get_functiondef result are also routine
+  // source, provided the resulting definition is the block's sole dynamic
+  // execution. Keep every other statement visible to the backfill analyzer.
+  // The built-ins may be schema-qualified with pg_catalog; no other schema.
+  const source =
+    /\b([a-z_]\w*)\s*:=\s*(?:pg_catalog\s*\.\s*)?pg_get_functiondef\s*\([\s\S]*?\)\s*;/gi;
+  const sources = [...statement.matchAll(source)];
+  if (sources.length === 1) {
+    const variable = sources[0]![1]!;
+    const execution = new RegExp(`\\bEXECUTE\\s+${variable}\\s*;`, "gi");
+    const executions = [...statement.matchAll(execution)];
+    const otherExecutions = [...statement.matchAll(/\bEXECUTE\b/gi)].length;
+    const assignments = [...statement.matchAll(new RegExp(`\\b${variable}\\s*:=`, "gi"))];
+    if (executions.length === 1 && otherExecutions === 1) {
+      const replacements: Array<{ start: number; end: number }> = [];
+      let cursor = sources[0]!.index! + sources[0]![0].length;
+      const assignment = new RegExp(
+        `\\b${variable}\\s*:=\\s*(?:pg_catalog\\s*\\.\\s*)?replace\\s*\\(\\s*${variable}\\s*,`,
+        "gi",
+      );
+      let match: RegExpExecArray | null;
+      while ((match = assignment.exec(statement))) {
+        if (match.index < cursor) continue;
+        let depth = 1;
+        let quoted = false;
+        let end = match.index + match[0].length;
+        for (; end < statement.length; end += 1) {
+          const char = statement[end]!;
+          if (char === "'") {
+            if (quoted && statement[end + 1] === "'") {
+              end += 1;
+              continue;
+            }
+            quoted = !quoted;
+          } else if (!quoted && char === "(") depth += 1;
+          else if (!quoted && char === ")") depth -= 1;
+          else if (!quoted && char === ";" && depth === 0) break;
+        }
+        if (depth !== 0 || quoted || statement[end] !== ";") break;
+        replacements.push({ start: match.index, end: end + 1 });
+        cursor = end + 1;
+        assignment.lastIndex = cursor;
+      }
+      if (replacements.length > 0 && assignments.length === replacements.length + 1) {
+        const ranges = [
+          ...replacements,
+          { start: executions[0]!.index!, end: executions[0]!.index! + executions[0]![0].length },
+        ].sort((left, right) => right.start - left.start);
+        let stripped = statement;
+        for (const range of ranges) {
+          stripped = `${stripped.slice(0, range.start)}${stripped.slice(range.end)}`;
+        }
+        return stripped;
+      }
+    }
+  }
+
   const assignments = /\b([a-z_]\w*)\s*:=\s*(\$[a-z_]\w*\$|\$\$)([\s\S]*?)\2\s*;/gi;
   return statement.replace(assignments, (whole, variable: string, _tag: string) => {
     const outside = statement.replace(whole, `${variable} := NULL;`);
@@ -460,7 +580,13 @@ export function analyzeMigrationRlsBackfills(migrationsDir: string): BackfillFin
 
     for (const rawStatement of splitStatements(raw)) {
       statementNumber += 1;
+      if (
+        createHash("sha256").update(rawStatement).digest("hex") ===
+        REVIEWED_ROUTINE_SOURCE_PATCH_SHA256
+      )
+        continue;
       const statement = stripComments(rawStatement);
+      const commentFreeStatement = stripAllCommentText(rawStatement);
       const head = statement.trim().replace(/\s+/g, " ");
 
       const createdPolicy = ownerCapabilityPolicy(statement);
@@ -482,7 +608,8 @@ export function analyzeMigrationRlsBackfills(migrationsDir: string): BackfillFin
       // backfill" is exactly the shape this repo's authority migrations take.
       if (
         !DDL_ONLY.test(head) &&
-        /set_config\s*\(\s*'opengeni\.(account_id|workspace_id)'/i.test(statement)
+        /set_config\s*\(\s*'opengeni\.(account_id|workspace_id)'/i.test(statement) &&
+        /set_config\s*\(\s*'opengeni\.(account_id|workspace_id)'/i.test(commentFreeStatement)
       ) {
         tenantGuc = true;
       }
@@ -544,21 +671,35 @@ export function analyzeMigrationRlsBackfills(migrationsDir: string): BackfillFin
       if (tenantGuc) continue;
 
       const executable = isBlock ? stripRoutineBodies(statement) : statement;
-      const ownerVisible = activatedOwnerCapabilityTables(
-        executable,
+      const commentFreeExecutable = isBlock
+        ? stripRoutineBodies(commentFreeStatement)
+        : commentFreeStatement;
+      const commentFreeOwnerVisible = activatedOwnerCapabilityTables(
+        commentFreeExecutable,
         ownerCapabilityPolicies,
         runnerCapabilityGuc,
       );
+      const ownerVisible = new Set(
+        [
+          ...activatedOwnerCapabilityTables(
+            executable,
+            ownerCapabilityPolicies,
+            runnerCapabilityGuc,
+          ),
+        ].filter((table) => commentFreeOwnerVisible.has(table)),
+      );
+      const relaxesPosture = (table: string, text: string) =>
+        new RegExp(
+          String.raw`ALTER TABLE\s+${TABLE_REF(table)}\s+(NO FORCE|DISABLE) ROW LEVEL SECURITY`,
+          "i",
+        ).test(text);
       const opaque = [...forced].filter(
         (table) =>
           enabled.has(table) &&
           !unforced.has(table) &&
           !ownerVisible.has(table) &&
           // A DO block that relaxes the posture itself is protected.
-          !new RegExp(
-            String.raw`ALTER TABLE\s+${TABLE_REF(table)}\s+(NO FORCE|DISABLE) ROW LEVEL SECURITY`,
-            "i",
-          ).test(executable),
+          !(relaxesPosture(table, executable) && relaxesPosture(table, commentFreeExecutable)),
       );
 
       const written = opaque.filter((table) => writesTable(executable, table)).sort();

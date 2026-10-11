@@ -1,6 +1,21 @@
+# Optional independent operator job; never uses application/runtime credentials.
+# Retains latest nightly + a Sunday weekly checkpoint. See docs/backups.md.
+backup:
+  enabled: false
+  schedule: "15 3 * * *"
+  checkSchedule: "0 12 * * *"
+  timeZone: UTC
+  existingSecret: ""
+  existingClaim: ""
+  image:
+    repository: opengeni-backup
+    tag: ""
+    digest: ""
+    pullPolicy: IfNotPresent
+
 global:
   # Default to the public GHCR images so a vanilla `helm install` pulls the
-  # released OpenGeni images with no extra config. Per-cloud example values
+  # released Opengeni images with no extra config. Per-cloud example values
   # override this with their own registry. The image tags below are left empty
   # and resolve to the chart appVersion (see the opengeni.image helper).
   imageRegistry: "ghcr.io/cloudgeni-ai"
@@ -25,7 +40,7 @@ opensandbox:
     namespace: opensandbox
 
 # Optional release-local Pod priority tiers. They do not reserve or cap CPU or
-# memory. They tell the kubelet which OpenGeni roles to evict first when the
+# memory. They tell the kubelet which Opengeni roles to evict first when the
 # node is under pressure. `Never` keeps priority from preempting a running pod
 # merely to admit another one.
 priorityClasses:
@@ -49,7 +64,7 @@ networkPolicy:
   enabled: false
   egress:
     enabled: false
-    # Environment-specific rules appended after OpenGeni's canonical recording
+    # Environment-specific rules appended after Opengeni's canonical recording
     # and alert rules. This list never replaces the built-in safety catalog.
     rules: []
   ingressController:
@@ -112,12 +127,6 @@ config:
   # dedicated setupAccountIngress to remain enabled so the request cannot fall
   # through the ordinarily logged/traced primary Ingress.
   OPENGENI_ORGANIZATION_USER_SETUP_QUERY_EDGE_SANITIZATION_CONFIRMED: "false"
-  # Canonical organization-tenancy authority activation. Pinned to the
-  # reversible pre-activation posture so an upgrade can never cross the one-way
-  # boundary implicitly. Flip to "true" only after proving the preconditions in
-  # docs/organization-tenancy.md; setting it back to "false" afterwards is not a
-  # rollback.
-  OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED: "false"
   # See docs/deployment.md.
   OPENGENI_BILLING_MODE: disabled
   # The offer and both new resource charges require separate operator activation.
@@ -138,7 +147,11 @@ config:
   # Optional non-secret JSON values may be supplied here:
   # OPENGENI_MODEL_COST_POLICY_JSON: '{"model-id":"free"}'
   # OPENGENI_MODEL_NOTES_JSON: '{"model-id":"One-line agent guidance."}'
-  # Default for new work while an organization holds OpenGeni credits and has
+  # Code-mode replacement for the managed Gateway/OpenRouter/Opper model lists
+  # (catalog-document entry schemas, no pricing; ignored in database mode).
+  # See docs/model-providers.md "Code-mode managed model lists":
+  # OPENGENI_MANAGED_MODELS_JSON: '{"opperModels":[{"upstreamModelId":"aws/claude-opus-5-5",...}]}'
+  # Default for new work while an organization holds Opengeni credits and has
   # no connected subscription (see docs/model-providers.md):
   # OPENGENI_CREDITS_DEFAULT_MODEL: gpt-6-luna
   # OPENGENI_CREDITS_DEFAULT_REASONING_EFFORT: xhigh
@@ -152,7 +165,7 @@ config:
   OPENGENI_SANDBOX_BACKEND: modal
   OPENGENI_SANDBOX_PREPARATION_PROFILES: none
 
-# Digest-pinned Modal Computer/Browser box. Defaults to OpenGeni's public image
+# Digest-pinned Modal Computer/Browser box. Defaults to Opengeni's public image
 # and overwrites config.OPENGENI_MODAL_IMAGE_REF. Override it with another image
 # built from docker/desktop.Dockerfile, never the headless opengeni-sandbox image.
 desktop:
@@ -170,6 +183,8 @@ secret:
   # an ExternalSecret. Never commit real secrets in values.
   # OPENGENI_OPENROUTER_API_KEY enables the deployment-managed reviewed
   # OpenRouter catalog. It belongs here, never in config or catalog JSON.
+  # OPENGENI_OPPER_API_KEY likewise enables the reviewed Opper catalog
+  # (default: Claude Opus 5.5 EU).
   # Google Drive release-readiness configuration is demonstrated in
   # values.google-drive-readiness.example.yaml. When enabled, this Secret must
   # provide OPENGENI_INTEGRATIONS_STATE_SECRET,
@@ -224,11 +239,13 @@ api:
   extraVolumeMounts: []
   enabled: true
   replicaCount: 2
+  # Surge a replacement before removing a serving pod so capacity never drops during a
+  # rollout, and drain each terminating pod (preStop) before the server stops.
   strategy:
     type: RollingUpdate
     rollingUpdate:
-      maxSurge: 0
-      maxUnavailable: 1
+      maxSurge: 1
+      maxUnavailable: 0
   image:
     repository: opengeni-api
     # Empty tag resolves to the chart appVersion via the opengeni.image helper.
@@ -262,6 +279,9 @@ api:
   podAnnotations: {}
   priorityClassName: ""
   terminationGracePeriodSeconds: 30
+  # Seconds a terminating pod keeps serving in-flight requests after it leaves the Service
+  # endpoints and before SIGTERM. 0 omits the hook (clusters older than k8s 1.30).
+  preStopDrainSeconds: 10
   topologySpreadConstraints:
     enabled: true
     maxSkew: 1
@@ -362,9 +382,8 @@ worker:
         memory: 4Gi
     podDisruptionBudget:
       enabled: true
-      # Bound voluntary node drains to one turn pod. At the 16-turn hard
-      # density this limits simultaneous graceful checkpoint pressure to 16
-      # logical turns regardless of current HPA replica count.
+      # Bound voluntary eviction to one turn pod. This does not govern HPA or
+      # Deployment deletion and does not guarantee checkpoint completion.
       maxUnavailable: 1
     autoscaling:
       enabled: false
@@ -379,6 +398,15 @@ worker:
         enabled: false
         name: opengeni_turn_slot_saturation_ratio
         targetAverageValue: "750m"
+      # Schema-v1 source contract. Requires the new SDK all-activity producer,
+      # Prometheus Operator, UID-complete kube-state-metrics and a verified
+      # Namespace custom.metrics adapter. Adds demand8/queued8/busy1 alongside
+      # CPU70/memory80/agent-inflight8; fixes up0,+4/30s and disables downscale.
+      # This target is experimental, not demonstrated mixed-activity capacity.
+      queueDemand:
+        enabled: false
+        schemaVersion: 1
+        targetAverageValue: "8"
       customMetrics: []
       behavior: {}
   podSecurityContext:
@@ -393,14 +421,11 @@ worker:
         - ALL
   podAnnotations: {}
   priorityClassName: ""
-  # Worker pods checkpoint in-flight agent turns on SIGTERM (graceful
-  # preemption: final conversation-truth reconcile, sandbox envelope,
-  # turn requeue). The Temporal worker cancels in-flight activities
-  # immediately on shutdown and then waits for them to finish, so this pod
-  # grace period is the only bound on the checkpoint window — give it real
-  # room. A SIGKILL after this period surfaces as a heartbeat-timeout
-  # activity failure, which the session workflow survives by re-dispatching
-  # the turn (bounded), but the graceful path loses less.
+  # Worker shutdown starts a recoverable checkpoint path, but does not prove
+  # writer quiescence. The SDK currently allows 5s natural completion before
+  # cancellation and forces shutdown at 100s, inside this 120s Kube grace.
+  # Forced termination may leave uncertain writers and delayed receipt-gated
+  # recovery. See docs/worker-autoscaling.md before enabling downscale.
   terminationGracePeriodSeconds: 120
   topologySpreadConstraints:
     enabled: true
@@ -603,11 +628,13 @@ web:
   # entries. It is mounted read-only; do not reuse the full runtime Secret.
   demoApiCredentialsSecret: ""
   replicaCount: 2
+  # Surge a replacement before removing a serving pod so capacity never drops during a
+  # rollout, and drain each terminating pod (preStop) before the server stops.
   strategy:
     type: RollingUpdate
     rollingUpdate:
-      maxSurge: 0
-      maxUnavailable: 1
+      maxSurge: 1
+      maxUnavailable: 0
   image:
     repository: opengeni-web
     # Empty tag resolves to the chart appVersion via the opengeni.image helper.
@@ -635,6 +662,9 @@ web:
   podAnnotations: {}
   priorityClassName: ""
   terminationGracePeriodSeconds: 30
+  # Seconds a terminating pod keeps serving in-flight requests after it leaves the Service
+  # endpoints and before SIGTERM. 0 omits the hook (clusters older than k8s 1.30).
+  preStopDrainSeconds: 10
   topologySpreadConstraints:
     enabled: true
     maxSkew: 1
@@ -1211,6 +1241,16 @@ nats:
     controlPasswordSecretKey: OPENGENI_SELFHOSTED_NATS_CONTROL_PASSWORD
     calloutPasswordSecretKey: OPENGENI_SELFHOSTED_NATS_CALLOUT_PASSWORD
 
+# Idle-session archive (docs/session-storage-lifecycle.md). Off by default.
+# When enabled, the control worker moves the bulky content of sessions that
+# have been quiet for idleDays to the configured object storage as a verified
+# bundle and purges it from PostgreSQL. Archived sessions stay readable but are
+# read-only; sessions marked keep-live, waiting on a person, a timer, a queue or
+# a schedule are never archived. Requires object storage.
+sessionArchive:
+  enabled: false
+  idleDays: 30
+
 # Bring-your-own-compute (selfhosted SandboxBackend) NON-SECRET wiring threaded
 # into the api/worker configmap. The SECRET values live in the runtime secret
 # (see the DEPLOY NOTES / secret keys below). Disabled by default so existing
@@ -1270,7 +1310,11 @@ observability:
     # Cumulative p95 startup SLOs, measured from the durable turn queue time.
     # Keep these aligned with the canonical Turn Startup dashboard annotations.
     turnStartupQueueP95Seconds: 5
-    turnStartupProviderDispatchP95Seconds: 60
+    # Accepted turn -> first provider dispatch is OpenGeni-owned latency, so it
+    # gets tight tiers: a warning (investigate) and a paging critical tier that
+    # replaces it. Normal p95 is a few seconds.
+    turnStartupProviderDispatchP95Seconds: 20
+    turnStartupProviderDispatchCriticalP95Seconds: 60
     turnStartupFirstByteP95Seconds: 120
     # Exclusive logical-turn first-byte completions divided by completed plus
     # terminal failed-without-byte milestones over the alert window. A failed
@@ -1278,6 +1322,19 @@ observability:
     # latency quantiles; later tool-loop failures cannot downgrade a success.
     turnStartupFirstByteAvailabilityRatio: 0.95
     turnStartupMinSamples: 5
+    # Per model request: SDK model entry -> literal provider dispatch (admission,
+    # durable history/audit checkpoints, credit revalidation). Ours; sub-second
+    # when healthy.
+    modelRequestPreDispatchP95Seconds: 2
+    modelRequestMinSamples: 20
+    # Provider time-to-first-token (dispatch -> first streamed delta) alerts only
+    # relative to that provider's own trailing 24h p90, never on an absolute
+    # number: the 30m p90 must exceed ratio x baseline AND the floor, with
+    # enough recent and baseline requests.
+    providerTtftRegressionRatio: 2
+    providerTtftRegressionFloorSeconds: 5
+    providerTtftRecentMinSamples: 30
+    providerTtftBaselineMinSamples: 200
     labels: {}
     annotations: {}
     rules: []

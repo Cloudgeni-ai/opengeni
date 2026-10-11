@@ -1,5 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { type CodexTokenDeadlineClock, withCodexTokenDeadline } from "../src/codex-token-resolver";
+import type { Settings } from "@opengeni/config";
+import {
+  buildCodexTokenResolver,
+  type CodexAuthDeps,
+  type CodexCredentialForRun,
+  type CodexTokenDeadlineClock,
+  withCodexTokenDeadline,
+} from "../src/codex-token-resolver";
+import type { Database } from "../src/database";
 
 type PendingTimer = { callback: () => void; dueAt: number };
 
@@ -66,6 +74,89 @@ async function expectNoUnhandledRejection(run: () => Promise<void>): Promise<voi
     process.off("unhandledRejection", listener);
   }
 }
+
+function staleCredential(): CodexCredentialForRun {
+  return {
+    id: "credential-shared",
+    version: 1,
+    workspaceId: "workspace-shared",
+    tokens: { accessToken: "old-access", refreshToken: "refresh-1", idToken: "id" },
+    chatgptAccountId: null,
+    scopes: null,
+    planType: null,
+    isFedramp: false,
+    expiresAt: new Date(0),
+    lastRefreshAt: null,
+    status: "active",
+    lastError: null,
+    exhaustedUntil: null,
+    exhaustedKind: null,
+    exhaustedRevision: 0,
+  };
+}
+
+function fakeAuthDeps(overrides: Partial<CodexAuthDeps>): CodexAuthDeps {
+  return {
+    loadCredential: async () => staleCredential(),
+    recordRefresh: async () => true,
+    setStatus: async () => true,
+    refresh: async () => ({ accessToken: "fresh-access", refreshToken: "refresh-2" }),
+    encrypt: () => "encrypted",
+    keyBytes: () => Buffer.alloc(32, 1),
+    withRefreshLock: async (lockedDb, _workspaceId, _credentialId, fn) => await fn(lockedDb),
+    ...overrides,
+  };
+}
+
+describe("buildCodexTokenResolver refresh single-flight", () => {
+  test("SUB-APPS-01: resolvers with different refresh key scopes never adopt each other's in-flight outcome", async () => {
+    const db = {} as Database;
+    const settings = {} as Settings;
+    const appsLock = deferred<void>();
+    let appsLoads = 0;
+    const apps = buildCodexTokenResolver(
+      db,
+      settings,
+      "workspace-shared",
+      "credential-shared",
+      fakeAuthDeps({
+        refreshKeyScope: "codex_apps",
+        // The designation disappears while the Apps refresh waits for the lock.
+        loadCredential: async () => {
+          appsLoads += 1;
+          if (appsLoads > 1) throw new Error("designated Apps credential unavailable");
+          return staleCredential();
+        },
+        withRefreshLock: async (lockedDb, _workspaceId, _credentialId, fn) => {
+          await appsLock.promise;
+          return await fn(lockedDb);
+        },
+      }),
+    );
+    const inference = buildCodexTokenResolver(
+      db,
+      settings,
+      "workspace-shared",
+      "credential-shared",
+      fakeAuthDeps({}),
+    );
+
+    const appsToken = apps.getToken();
+    const appsOutcome = appsToken.then(
+      () => "resolved",
+      (error: unknown) => (error instanceof Error ? error.message : String(error)),
+    );
+    await flushMicrotasks();
+    const first = await Promise.race([
+      inference.getToken().then((token) => token.accessToken),
+      new Promise<string>((resolve) => setTimeout(() => resolve("blocked-on-apps-refresh"), 100)),
+    ]);
+    expect(first).toBe("fresh-access");
+
+    appsLock.resolve();
+    expect(await appsOutcome).toBe("designated Apps credential unavailable");
+  });
+});
 
 describe("withCodexTokenDeadline", () => {
   test("deadline-first consumes a late provider rejection", async () => {

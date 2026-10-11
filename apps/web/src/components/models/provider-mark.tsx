@@ -1,4 +1,4 @@
-import { ClaudeMark, AnthropicMark, OpenRouterMark, GrokMark } from "@opengeni/react";
+import { ClaudeMark, AnthropicMark, OpenRouterMark, OpperMark, GrokMark } from "@opengeni/react";
 import type { SVGProps } from "react";
 
 import { BrandMark } from "@/components/brand-mark";
@@ -10,6 +10,7 @@ export type ModelProviderId =
   | "supergrok"
   | "vercel"
   | "openrouter"
+  | "opper"
   | "anthropic"
   | "claude_subscription"
   | "openai"
@@ -45,6 +46,7 @@ export function ProviderMark({
   if (provider === "claude_subscription") return <ClaudeMark className={className} />;
   if (provider === "anthropic") return <AnthropicMark className={className} />;
   if (provider === "supergrok") return <GrokMark className={className} />;
+  if (provider === "opper") return <OpperMark className={className} />;
   return <OpenRouterMark className={className} />;
 }
 

@@ -22,6 +22,10 @@ import type { ActionCatalogEntry } from "../../apps/api/src/mcp/action-catalog-t
  */
 export const ACTION_CATALOG_EXEMPTIONS: ReadonlyArray<{ pattern: RegExp; reason: string }> = [
   { pattern: /^\/v1\/auth\//, reason: "Opengeni sign-in itself" },
+  {
+    pattern: /^\/v1\/native-app\//,
+    reason: "signing the native app in and out, and its push device: the app's own credential",
+  },
   { pattern: /^\/v1\/identity(\/|$)/, reason: "sign-in methods and account recovery" },
   { pattern: /^\/v1\/mcp-connections\//, reason: "approving an agent sign-in" },
   {
@@ -46,7 +50,109 @@ export function isActionCatalogExempt(path: string): boolean {
   return ACTION_CATALOG_EXEMPTIONS.some((exemption) => exemption.pattern.test(path));
 }
 
+/**
+ * Registered actions no MCP caller can ever complete: they need the person's
+ * own Opengeni browser session, which neither a connected agent (MCP OAuth)
+ * nor an organization API key has. They stay in the catalog, so every route is
+ * accounted for, but the MCP server hides them from search and describe and a
+ * direct call answers with this reason instead of a bare 401. Matched against
+ * "METHOD /path".
+ */
+export const ACTION_CATALOG_BROWSER_ONLY: ReadonlyArray<{ pattern: RegExp; reason: string }> = [
+  {
+    pattern: /^\w+ \/v1\/inbox(\/|$)/,
+    reason: "the person's inbox requires their own signed-in browser session",
+  },
+  {
+    pattern: /^(GET|PUT) \/v1\/workspaces\/:workspaceId\/sessions\/:sessionId\/inbox-mute$/,
+    reason: "the person's session mute requires their own signed-in browser session",
+  },
+  {
+    pattern:
+      /^(POST \/v1\/organizations(\/additional)?|GET \/v1\/organization-(memberships|invitations)|POST \/v1\/organization-invitations\/:invitationId\/accept)$/,
+    reason:
+      "it acts on the person's own account across organizations (creating an organization, listing their memberships or invitations, accepting an invitation), and a connection is limited to one organization",
+  },
+  {
+    pattern: /^\w+ \/v1\/organizations\/:organizationId\/recovery(\/|$)/,
+    reason: "organization recovery is a ceremony in the person's own browser session",
+  },
+  {
+    pattern: /^\w+ \/v1\/workspaces\/:workspaceId\/identity-links(\/|$)/,
+    reason:
+      "linking a product user to an Opengeni account is confirmed by that person signed in to Opengeni, or started by the embedding product as its user",
+  },
+  {
+    pattern:
+      /^(PATCH \/v1\/organizations\/:organizationId\/agent-admin-access|PUT \/v1\/workspaces\/:workspaceId\/sessions\/:sessionId\/admin-access)$/,
+    reason:
+      "giving an agent admin access, or allowing it for the organization, is done by an owner or admin in person in the Opengeni app",
+  },
+];
+
+export function actionCatalogBrowserOnlyReason(method: string, path: string): string | undefined {
+  const key = `${method} ${path}`;
+  return ACTION_CATALOG_BROWSER_ONLY.find((rule) => rule.pattern.test(key))?.reason;
+}
+
 export type RegisteredRoute = { method: string; path: string };
+
+/**
+ * Request bodies the public surface manifest can't name because the SDK sends
+ * them inline, matched against "METHOD /path". Without a name, describe shows
+ * an agent no input and it has to guess the body. Each names a schema exported
+ * by @opengeni/contracts that the route accepts.
+ */
+export const ACTION_REQUEST_SCHEMAS: ReadonlyArray<{ pattern: RegExp; request: string }> = [
+  {
+    pattern:
+      /^PUT \/v1\/(organizations|workspaces)\/:scopeId\/model-connections\/:kind\/:connectionId\/access$/,
+    request: "ModelConnectionAccessPolicy",
+  },
+  {
+    pattern: /^PATCH \/v1\/\w+\/:\w+\/(codex|claude|supergrok)\/accounts\/:accountId$/,
+    request: "SubscriptionAccountRenameRequest",
+  },
+  {
+    pattern:
+      /^PATCH \/v1\/\w+\/:\w+\/(codex|claude|supergrok)\/accounts\/:accountId\/(allocator|extra-credits)$/,
+    request: "SubscriptionAccountToggleRequest",
+  },
+  {
+    pattern: /^PATCH \/v1\/\w+\/:\w+\/(codex|claude|supergrok)\/settings$/,
+    request: "SubscriptionRotationSettingsRequest",
+  },
+  {
+    pattern: /^POST \/v1\/\w+\/:\w+\/(codex|supergrok)\/connect\/poll$/,
+    request: "SubscriptionConnectPollRequest",
+  },
+  {
+    pattern: /^POST \/v1\/workspaces\/:workspaceId\/supergrok\/connect\/start$/,
+    request: "SupergrokConnectStartRequest",
+  },
+  {
+    pattern: /^PATCH \/v1\/workspaces\/:workspaceId\/codex\/source$/,
+    request: "CodexSourceRequest",
+  },
+  {
+    pattern: /^POST \/v1\/workspaces\/:workspaceId\/codex\/apps$/,
+    request: "CodexAppsDesignationRequest",
+  },
+  {
+    pattern: /^POST \/v1\/workspaces\/:workspaceId\/sessions\/:sessionId\/codex-account$/,
+    request: "SessionCodexAccountPinRequest",
+  },
+  {
+    pattern: /^PUT \/v1\/workspaces\/:workspaceId\/model-policy$/,
+    request: "UpdateWorkspaceModelPolicyRequest",
+  },
+];
+
+function inlineRequestSchemas(method: string, path: string): string[] {
+  const key = `${method} ${path}`;
+  const match = ACTION_REQUEST_SCHEMAS.find((rule) => rule.pattern.test(key));
+  return match ? [match.request] : [];
+}
 
 /**
  * Every callable /v1 route the API registers, with every route-gating flag on,
@@ -98,6 +204,12 @@ const GENERIC_SDK_NAMES = new Set([
   "forWorkspace",
 ]);
 
+/**
+ * SDK methods that read a route through an opt-in query variant. The route's
+ * plain method names the action: `findGoal` is `getGoal` with `?absent=null`.
+ */
+const QUERY_VARIANT_SDK_NAMES = new Set(["findGoal"]);
+
 type ManifestRoute = {
   method: string;
   path: string;
@@ -117,30 +229,37 @@ export function buildActionCatalog(
     .map((key) => {
       const [method, path] = [key.slice(0, key.indexOf(" ")), key.slice(key.indexOf(" ") + 1)];
       const route = described.get(key);
+      const request = route?.request ?? [];
       return {
         method,
         path,
         sdk: route?.sdk ?? [],
-        request: route?.request ?? [],
+        request: request.length > 0 ? request : inlineRequestSchemas(method, path),
         response: route?.response ?? [],
       };
     })
     .filter((route) => !isActionCatalogExempt(route.path));
   const preferred = included.map((route) => {
     const names = route.sdk.map((name) => name.split(".").pop()!);
-    return names.find((name) => !GENERIC_SDK_NAMES.has(name)) ?? names[0] ?? null;
+    return (
+      names.find((name) => !GENERIC_SDK_NAMES.has(name) && !QUERY_VARIANT_SDK_NAMES.has(name)) ??
+      names[0] ??
+      null
+    );
   });
   const counts = new Map<string, number>();
   for (const name of preferred) if (name) counts.set(name, (counts.get(name) ?? 0) + 1);
   return included
     .map((route, index) => {
       const name = preferred[index];
+      const browserOnly = actionCatalogBrowserOnlyReason(route.method, route.path);
       return {
         id: name && counts.get(name) === 1 ? name : `${route.method} ${route.path}`,
         method: route.method,
         path: route.path,
         request: [...route.request],
         response: [...route.response],
+        ...(browserOnly ? { browserOnly } : {}),
       };
     })
     .sort((left, right) => left.id.localeCompare(right.id));

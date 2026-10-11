@@ -33,6 +33,8 @@ import {
   type BrowserContextOptions,
   type Page,
   type Response as PlaywrightResponse,
+  type Request as PlaywrightRequest,
+  type Frame as PlaywrightFrame,
   type Route,
 } from "playwright";
 import postgres from "postgres";
@@ -644,18 +646,33 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       }
 
       const paginationRequests: URL[] = [];
-      page.on("request", (request) => {
+      const sessionPageRead = (request: PlaywrightRequest): URL | null => {
         const url = new URL(request.url());
-        if (
-          request.method() === "GET" &&
+        return request.method() === "GET" &&
           url.pathname === `/v1/workspaces/${workspaceId}/sessions` &&
-          url.searchParams.get("view") === "page" &&
-          // The separate Recent sessions panel needs full model/resource data.
-          // Identify sidebar reads by their query shape, independently of projection.
-          (url.searchParams.get("parentSessionId") === "null" ||
-            url.searchParams.has("channelId") ||
-            url.searchParams.get("pinsOnly") === "true")
-        ) {
+          url.searchParams.get("view") === "page"
+          ? url
+          : null;
+      };
+      // The home page's Recent sessions panel also reads top-level roots
+      // (parentSessionId=null), but with the full projection because it shows
+      // model labels. It carries no archive filter, pin or project scope.
+      const isRecentSessionsRead = (url: URL) =>
+        url.searchParams.get("parentSessionId") === "null" &&
+        !url.searchParams.has("archiveStatus") &&
+        !url.searchParams.has("channelId") &&
+        !url.searchParams.has("pinsOnly");
+      // Identify sidebar reads by their query shape, independently of projection:
+      // the rail's root page always sends its archive filter, project windows a
+      // channelId, and the global pin section pinsOnly.
+      const isSidebarRead = (url: URL) =>
+        (url.searchParams.get("parentSessionId") === "null" &&
+          url.searchParams.has("archiveStatus")) ||
+        url.searchParams.has("channelId") ||
+        url.searchParams.get("pinsOnly") === "true";
+      page.on("request", (request) => {
+        const url = sessionPageRead(request);
+        if (url && isSidebarRead(url)) {
           paginationRequests.push(url);
         }
       });
@@ -665,12 +682,21 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
             successfulSessionPageResponse(response, workspaceId, { cursor }) &&
             new URL(response.url()).searchParams.get("channelId") === channelId,
         );
+      const recentSessionsRequest = page.waitForRequest((request) => {
+        const url = sessionPageRead(request);
+        return url !== null && isRecentSessionsRead(url);
+      });
       const [projectAResponse, projectBResponse, emptyProjectResponse] = await Promise.all([
         projectPage(projectA.id, null),
         projectPage(projectB.id, null),
         projectPage(emptyProject.id, null),
         page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions`),
       ]);
+      // Prove the classification instead of depending on request order: the
+      // Recent panel's read is observed on every load and is never counted as
+      // a sidebar read, wherever it lands relative to the project windows.
+      const recentSessionsUrl = sessionPageRead(await recentSessionsRequest)!;
+      expect(isSidebarRead(recentSessionsUrl)).toBe(false);
       const projectAPage = (await projectAResponse.json()) as BrowserSessionPage;
       const projectBPage = (await projectBResponse.json()) as BrowserSessionPage;
       const emptyProjectPage = (await emptyProjectResponse.json()) as BrowserSessionPage;
@@ -2816,11 +2842,19 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await page.goto(parentUrl);
       await page.getByTestId("failed-session-banner").waitFor();
       const delivered = page.locator("details[data-og-machine-input-batch]");
-      await delivered.getByText("2 agent results received", { exact: true }).click();
+      // The pill names the child from session lineage once it is known; a
+      // result only means the child went idle, so it never says "finished".
+      const deliveredLabel = (await delivered.locator("summary").first().textContent()) ?? "";
       expect(
-        await delivered.getByRole("button", { name: "View session", exact: true }).count(),
-      ).toBe(2);
-      await delivered.getByRole("button", { name: "View session", exact: true }).first().click();
+        ["2 agent results received", "2 updates from "].some((label) =>
+          deliveredLabel.startsWith(label),
+        ),
+      ).toBe(true);
+      expect(deliveredLabel).not.toContain("finished");
+      await delivered.locator("summary").first().click();
+      const openChild = delivered.getByRole("button", { name: /^Open / });
+      expect(await openChild.count()).toBe(2);
+      await openChild.first().click();
       await page.waitForURL(`**/sessions/${child.id}`);
       expect(new URL(page.url()).pathname.endsWith(child.id)).toBe(true);
       await page.goBack();
@@ -3991,23 +4025,37 @@ async function navigateWithProjectPages(
   // Workspace rows can paint before independent folder reads finish. Wait for
   // every first page and its loading state before dragging or snapshotting rows.
   const firstPages = new Map<string, Promise<unknown>>();
+  const newDocumentRequests = new Set<PlaywrightRequest>();
+  let navigationCommitted = false;
+  const observeNavigation = (frame: PlaywrightFrame) => {
+    if (frame === page.mainFrame()) navigationCommitted = true;
+  };
+  const observeRequest = (request: PlaywrightRequest) => {
+    if (navigationCommitted) newDocumentRequests.add(request);
+  };
   const observePage = (response: PlaywrightResponse) => {
+    if (!newDocumentRequests.has(response.request())) return;
     if (!successfulSessionPageResponse(response, workspaceId, { cursor: null })) return;
     const channelId = new URL(response.url()).searchParams.get("channelId");
     if (channelId !== null) firstPages.set(channelId, response.json());
   };
+  // Ignore refreshes from the document being replaced by this navigation.
+  page.on("framenavigated", observeNavigation);
+  page.on("request", observeRequest);
   page.on("response", observePage);
   try {
-    const [channelsResponse] = await Promise.all([
-      page.waitForResponse(
-        (response) =>
-          response.ok() &&
-          response.request().method() === "GET" &&
-          new URL(response.url()).pathname === `/v1/workspaces/${workspaceId}/channels`,
-      ),
+    const [channels] = await Promise.all([
+      page
+        .waitForResponse(
+          (response) =>
+            newDocumentRequests.has(response.request()) &&
+            response.ok() &&
+            response.request().method() === "GET" &&
+            new URL(response.url()).pathname === `/v1/workspaces/${workspaceId}/channels`,
+        )
+        .then((response) => response.json() as Promise<BrowserChannel[]>),
       navigate(),
     ]);
-    const channels = (await channelsResponse.json()) as BrowserChannel[];
     const channelIds = ["null", ...channels.map((channel) => channel.id)];
     await waitFor(() => channelIds.every((channelId) => firstPages.has(channelId)), {
       timeoutMs: 30_000,
@@ -4020,6 +4068,8 @@ async function navigateWithProjectPages(
       { timeoutMs: 30_000 },
     );
   } finally {
+    page.off("framenavigated", observeNavigation);
+    page.off("request", observeRequest);
     page.off("response", observePage);
   }
 }

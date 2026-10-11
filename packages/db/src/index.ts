@@ -1,15 +1,168 @@
+export * from "./session-target";
+import { sessionRetentionFromRow } from "./session-archive";
+import { browserDeadlineCheckpoint } from "./browser-deadline-checkpoints";
+import {
+  BrowserSessionNotFoundError,
+  BrowserSessionOperationConflictError,
+  BrowserSessionStateError,
+  clearSuspendedBrowserSessionController,
+} from "./browser-sessions";
+import {
+  buildOrganizationCodexConnectionTokenResolver,
+  findOrganizationCodexConnection,
+  readOrganizationCodexUsage,
+} from "./organization-codex-usage";
+export * from "./organization-slack-bots";
+export * from "./voice-transcription-settlement";
+import {
+  connectionMetadataColumns,
+  connectionSubjectVisibility,
+  getConnectionMetadata,
+  listConnectionsMetadata,
+  mapConnectionMetadata,
+  withConnectionSubjectRls,
+  type ConnectionMetadataWithVerification,
+} from "./connection-metadata";
+export {
+  getConnectionMetadata,
+  listConnectionsMetadata,
+  type ConnectionMetadataWithVerification,
+} from "./connection-metadata";
+export { readCreditPromotionPolicy } from "./credit-promotion-policy";
+import {
+  getBillingBalance,
+  getSpendableCreditBalance,
+  planCreditDebit,
+  planPostUseCreditAllocations,
+  type CreditUsage,
+} from "./credit-balances";
+export {
+  getBillingBalance,
+  getSpendableCreditBalance,
+  spendableCreditMicros,
+  VOICE_CREDIT_USAGE,
+  type CreditUsage,
+} from "./credit-balances";
+import {
+  lockTurnAttemptWriteFenceTx,
+  type TurnAttemptFenceRejectReason,
+} from "./session-attempt-fence";
+export type { TurnAttemptFenceRejectReason } from "./session-attempt-fence";
+export { lockTurnAttemptWriteFenceTx } from "./session-attempt-fence";
+import {
+  CODEX_CREDENTIAL_POLICY_SNAPSHOT_METADATA_KEY,
+  ToolReviewContext,
+  WorkspaceModelCompactionThresholdsPatch,
+  cleanStoredSessionTitle,
+  workspaceSettingsAllowCreditModels,
+} from "@opengeni/contracts";
+import { recordToolApproval } from "@opengeni/observability";
+import { connectorActionFingerprint } from "./connector-action-fingerprint";
+import {
+  resolveConnectorActionPolicy,
+  connectorActionPolicyDecision,
+  connectorActionPoliciesForAccountRoutes,
+  connectorToolPolicyRevision,
+  ConnectorToolPermissionConflictError,
+  type ResolvedConnectorActionPolicy,
+} from "./connector-action-policy";
+export {
+  resolveConnectorActionPolicy,
+  connectorActionPolicyDecision,
+  projectConnectorToolPermission,
+  connectorActionPoliciesForAccountRoutes,
+  connectorToolPolicyRevision,
+  ConnectorToolPermissionConflictError,
+} from "./connector-action-policy";
+import {
+  agentSelectionNotes,
+  loadInboxExecutionContext,
+  turnHuman,
+  inboxOrigin,
+} from "./inbox-execution-context";
+import { parentOutboxAuthorityTx } from "./child-outbox-authority";
+import {
+  compactionFailureHoldSequenceTx,
+  systemUpdatePendingAfterSequenceSql,
+} from "./compaction-failure-hold";
+export {
+  lockLiveNativeOriginalOriginTx,
+  type ModalNativeLiveOriginScope,
+  type ModalNativeLiveOriginProjection,
+  type ModalNativeLiveOriginResult,
+} from "./modal-native-live-origin";
 export { SubscriptionAccountChangedError } from "./subscription-account-conflict";
+export {
+  abandonSubscriptionCapacityWakeDelivery,
+  acquireSubscriptionOperationLease,
+  acquireSubscriptionTurnLease,
+  assertSubscriptionTurnLeaseCurrent,
+  assertSubscriptionOperationLeaseCurrent,
+  claimSubscriptionCapacityWakeDeliveries,
+  createSubscriptionConnection,
+  isSubscriptionProviderCutoverEnabled,
+  listSubscriptionConnectionsForPlacement,
+  listSubscriptionConnectionAssignmentPolicies,
+  listDueSubscriptionCapacityWaiters,
+  markSubscriptionCapacityWakeDelivered,
+  observeSubscriptionCapacityWaiterWake,
+  readSubscriptionEffectiveSettings,
+  readSubscriptionProviderCutoverState,
+  readSubscriptionSessionBinding,
+  resolveSubscriptionConnectionId,
+  releaseSubscriptionOperationLease,
+  releaseSubscriptionTurnLease,
+  renewSubscriptionOperationLease,
+  renewSubscriptionTurnLease,
+  retrySubscriptionCapacityWakeDelivery,
+  upsertSubscriptionCapacityWaiter,
+  wakeSubscriptionCapacityWaiter,
+  writeSubscriptionSessionBinding,
+  type SubscriptionConnectionAssignmentPolicy,
+  type SubscriptionCapacityWaiter,
+  type SubscriptionCapacityWakeDelivery,
+  type DueSubscriptionCapacityWaiter,
+  type SubscriptionOperationKind,
+  type SubscriptionOperationLease,
+  type SubscriptionOperationLeaseIdentity,
+  type SubscriptionTurnLease,
+  type SubscriptionTurnLeaseIdentity,
+  type SubscriptionSessionBinding,
+  type EffectiveSubscriptionSettingsRow,
+} from "./subscription-core-repository";
+export {
+  isSubscriptionPoolWorkerSubject,
+  subscriptionPoolWorkerSubject,
+  withSubscriptionPoolSessionAccess,
+  type SubscriptionPoolProvider,
+} from "./subscription-session-access";
+export {
+  assertSubscriptionCoreAcceptedTurn,
+  withSubscriptionCoreAcceptedTurn,
+  type SubscriptionCoreAcceptedTurnAccessResult,
+  type SubscriptionCoreAcceptedTurnIdentity,
+  type SubscriptionCoreRefreshResult,
+  type SubscriptionCorePlacementWorldRequest,
+  type SubscriptionCorePlacementWorldResult,
+} from "./subscription-core-placement-world";
+export {
+  codexSubscriptionAuthorityV2ActiveInTransaction,
+  codexSubscriptionAuthorityV2ForAcceptanceInTransaction,
+  codexSubscriptionAuthorityV2ForScheduledTaskInTransaction,
+  codexSubscriptionAuthorityV2OrEmptyInTransaction,
+  persistSubscriptionCodexRefresh,
+  persistSubscriptionCodexRefreshWithPlan,
+  withSubscriptionCoreCodexRefreshLock,
+  withSubscriptionCorePlacementWorld,
+  type SubscriptionCoreCodexRefreshResult,
+} from "./subscription-core-codex-bindings";
+import type { GoalAdmissionPausedReason } from "@opengeni/contracts";
+import { SubscriptionPersonalAuthorityV2 } from "@opengeni/contracts";
 import {
   claudeSubscriptionAccountRepository,
   claudeSubscriptionTables,
 } from "./claude-subscription-accounts";
 import { subscriptionExecutionAuthorityFromTurn } from "./accepted-subscription-authority";
-const claudeProviderAccountAuthoritySnapshotForTurnInTransaction = (
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-  turnId: string,
-) => subscriptionAuthorityForTurnInTransaction(db, "claude", workspaceId, sessionId, turnId);
 export const getScheduledTaskClaudeProviderAccountAuthoritySnapshot = (
   db: Database,
   workspaceId: string,
@@ -32,12 +185,16 @@ import {
   getAcceptedSubscriptionTaskAuthority,
   getAcceptedSubscriptionTurnAuthority,
   getAcceptedSubscriptionParentAuthority,
-  subscriptionAuthorityForTurnInTransaction,
+  sharedPoolSubscriptionAuthoritySnapshotsInTransaction,
+} from "./accepted-subscription-authority";
+export {
+  getScheduledTaskSubscriptionAuthority,
+  receiverCodexSubscriptionAuthorityV2InTransaction,
 } from "./accepted-subscription-authority";
 export { resolveClaudeAccountCredential } from "./claude-subscription-account-tokens";
 export * from "./claude-subscription-accounts";
 export * from "./claude-subscription-account-usage";
-import { heartbeatSubscriptionCredentialLeaseUntil } from "./subscription-credential-leases";
+
 import { directModelConnectionSpec, isDirectModelId } from "@opengeni/contracts";
 import {
   normalizeOrganizationAccessPolicy,
@@ -116,7 +273,10 @@ import {
   type ConfigurationEffort,
 } from "@opengeni/codex";
 export { getSessionAttemptMcpApprovalPolicies } from "./session-mcp-approval";
-import { sessionAttemptPendingWritersSql } from "./session-attempt-writers";
+import {
+  crashedWorkerOrphanAdmissionSql,
+  sessionAttemptPendingWritersSql,
+} from "./session-attempt-writers";
 import {
   childRecentTurnOutcomesSql,
   childLifecycleEvidenceCandidatesSql,
@@ -135,14 +295,34 @@ import { retainedProviderCommandPersistence as retainedProviderCommandState } fr
 export const retryFailedSessionInTransaction = createRetryFailedSessionInTransaction(
   sessionEffectiveSandboxRecoveryBlocked,
 );
-import { unresolvedCodexCredentialFailures } from "./codex-failure-eligibility";
-import {
-  mergeCodexPlanEntitlementExclusion,
-  readCodexPlanEntitlementExclusion,
-  serializeCodexPlanEntitlementExclusion,
-  type CodexPlanEntitlementExclusion,
-} from "./codex-plan-entitlement";
+
 export * from "./codex-plan-entitlement";
+export * from "./legacy-subscription-world";
+export * from "./subscription-core-codex";
+export * from "./subscription-core-codex-apps";
+export * from "./subscription-core-codex-compat";
+import type { CodexAccountStatus } from "./codex-account-types";
+export type {
+  CodexAccountStatus,
+  CodexRotationSettings,
+  EffectiveCodexSubscriptionSource,
+  WorkspaceCodexSubscriptionMode,
+  WorkspaceCodexSubscriptionSource,
+} from "./codex-account-types";
+export * from "./subscription-core-codex-operations";
+export * from "./subscription-core-codex-requests";
+export * from "./subscription-core-codex-connections";
+export * from "./subscription-core-codex-catalog";
+import {
+  listSubscriptionCoreCodexServingConnections,
+  readCodexCutoverDispositionForWorkspace,
+  subscriptionCoreCodexConnectionAllowlist,
+} from "./subscription-core-codex-catalog";
+import {
+  listSubscriptionCoreCodexPersonalAccountsInTransaction,
+  projectSubscriptionCoreCodexWorkspace,
+  type SubscriptionCoreCodexWake,
+} from "./subscription-core-codex-compat";
 export * from "./scheduled-task-access";
 export { buildSlackApiRateLimiter } from "./slack-api-rate-limits";
 export * from "./scheduled-human-wait";
@@ -166,6 +346,29 @@ import {
 import { ResolvedAgentConfig } from "@opengeni/contracts";
 import { scanSessionMessages } from "./session-message-search";
 import { withDatabaseStatementTimeout } from "./database";
+import {
+  subscriptionPoolWorkerSubject,
+  withPoolWakeServiceScopeInTransaction,
+  withSubscriptionPoolSessionAccess,
+  withTemporaryPoolSessionAccessInTransaction,
+} from "./subscription-session-access";
+import {
+  readSubscriptionProviderCutoverState as readCoreProviderCutoverState,
+  readSubscriptionSessionBinding as readCoreSessionBinding,
+  resolveSubscriptionConnectionId as resolveCoreConnectionId,
+  writeSubscriptionSessionBinding as writeCoreSessionBinding,
+} from "./subscription-core-repository";
+import {
+  wakeSubscriptionCoreCapacityWaiters,
+  type SubscriptionCoreWakeScope,
+} from "./subscription-core/waiters";
+import { SUBSCRIPTION_CORE_CODEX_PROVIDER } from "./subscription-core-codex-provider";
+import {
+  codexSubscriptionAuthorityV2ForAcceptanceInTransaction,
+  codexSubscriptionAuthorityV2ForScheduledTaskInTransaction,
+  codexSubscriptionAuthorityV2OrEmptyInTransaction,
+} from "./subscription-core-codex-bindings";
+export { EMPTY_SUBSCRIPTION_AUTHORITY_V2 } from "./subscription-core-acceptance-authority";
 export { SessionMessageSearchCursorError } from "./session-message-search";
 export * from "./artifact-catalog";
 export * from "./scheduled-slack-bot-messages";
@@ -184,9 +387,9 @@ import { z } from "zod";
 import {
   latestStartedSessionTurnQuery,
   withEffectiveSessionPolicy,
+  withSessionListModelPolicy,
 } from "./session-execution-policy";
 import {
-  assignedConnectionDefault,
   updateModelConnectionAccess as updateModelConnectionAccessPolicy,
   type ModelConnectionAccess,
   type ModelConnectionTarget,
@@ -203,6 +406,12 @@ import {
   getWorkspaceConnectionModelRestrictions as resolveWorkspaceConnectionModelRestrictions,
 } from "./workspace-model-connection-access";
 export * from "./model-connection-access";
+export {
+  SubscriptionCoreAccessInvalidError,
+  SubscriptionCoreAccessPeopleUnlistableError,
+  SubscriptionCoreAccessPersonNotInOrganizationError,
+  type SubscriptionCoreAccess,
+} from "./subscription-core/access";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import {
   SCHEDULED_HUMAN_WAIT_TIMEOUT_CLIENT_EVENT_PREFIX,
@@ -439,12 +648,12 @@ import {
   closePrivateSessionCreateCapability,
   openPrivateChildSessionCreateCapability,
   openPrivateSessionCreateCapability,
-  sessionTenancyProductActivated,
 } from "./session-tenancy";
 import {
   completeCodemodeOperationInTransaction,
   failCodemodeOperationInTransaction,
 } from "./codemode-operations";
+import { adoptCodemodeApproval } from "./codemode-approvals";
 import {
   cancelTurnInteractionInterventionsInTransaction,
   InteractionResourceStateError,
@@ -523,6 +732,8 @@ import {
   CodexCredentialPolicySnapshotV1,
   OPENROUTER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY,
   OPENROUTER_CREDENTIAL_OPERATION_ID_METADATA_KEY,
+  OPPER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY,
+  OPPER_CREDENTIAL_OPERATION_ID_METADATA_KEY,
   VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY,
   VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY,
 } from "@opengeni/contracts";
@@ -533,6 +744,8 @@ import {
   SANDBOX_DEADLINE_COMMAND_STOP_GRACE_MS,
   WORKSPACE_OPENROUTER_CONNECTION_DOMAIN,
   WORKSPACE_OPENROUTER_CONNECTION_ROLE,
+  WORKSPACE_OPPER_CONNECTION_DOMAIN,
+  WORKSPACE_OPPER_CONNECTION_ROLE,
   VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
   VERCEL_AI_GATEWAY_CONNECTION_ROLE,
   type Settings,
@@ -541,10 +754,9 @@ import { SandboxTransitionWaitBudget } from "./sandbox-transition-wait";
 import { normalizeWorkspaceMembershipPermissions } from "./workspace-membership-permissions";
 import {
   canonicalizePersistedHistoryItem,
-  codexPlanKey,
+  CodexAppsCredentialUnavailable,
   omitOutputOnlyHistoryItemFields,
   isCodexBilledModel,
-  refreshCodexToken,
   type CodexFetch,
 } from "@opengeni/codex";
 // Re-exported so consumers get the whole codex-billed detection surface (the pure
@@ -581,6 +793,7 @@ import {
   creatorColumns,
   frozenInitiatorForCommandActor,
   frozenScheduledOccurrenceInitiator,
+  humanTurnSenderLabel,
   initiatorColumns,
   initiatorFromStorage,
   UNATTRIBUTED_LEGACY_INITIATOR,
@@ -616,6 +829,7 @@ import {
   SessionEventPersistenceError,
   type IdempotentPersistenceTransactionOptions,
 } from "./persistence-errors";
+export { DatabaseTransactionError } from "./persistence-errors";
 import {
   assertCapabilityComponentVersionCanChange,
   effectiveCapabilityOwnerSql,
@@ -623,6 +837,8 @@ import {
 } from "./capability-components";
 import {
   closePendingSessionToolCallsInTransaction,
+  consumeSettledPendingToolCallsForCompletedTurnInTransaction,
+  settleInterruptedCodemodeCallsInTransaction,
   historyCallId,
   historyItemType,
   TOOL_RESULT_TYPE_BY_CALL_TYPE,
@@ -643,9 +859,7 @@ import {
   registerInternalUpdateWakeInTransaction,
   registerSessionWorkflowWakeInTransaction,
   SESSION_DISCOVERY_CONTROL_TITLE_MAX_CHARS,
-  assertSessionAuthoritySnapshot,
   registerSessionTurnAttemptClaim,
-  sessionAuthoritySnapshotMatchesSession,
   reserveSessionCommandReceipt,
   serializeEffectiveSessionControl,
   type SessionDiscoveryControl,
@@ -741,6 +955,7 @@ import {
 export { sql as dbSql } from "drizzle-orm";
 export * from "./child-lifecycle-notices";
 export * from "./child-terminal-wake-repair";
+export * from "./quiescence-receipt-wake-repair";
 export { configureCodeSearchDeploymentPolicy } from "./code-search-policy";
 export { listRecentSessionRepositoryResources } from "./recent-session-repositories";
 export * from "./session-control";
@@ -767,6 +982,7 @@ export * from "./session-queue-commands";
 export * from "./session-realtime";
 export * from "./session-realtime-context";
 export * from "./session-realtime-ledger";
+export * from "./session-realtime-billing";
 export * from "./new-session-drafts";
 export * from "./workspace-instruction-policies";
 export * from "./company-profile";
@@ -817,6 +1033,8 @@ export {
   consumeIntegrationOAuthPendingState,
 } from "./integration-oauth-pending-states";
 export * from "./workspace-integrations";
+export * from "./native-push";
+export * from "./inbox";
 export {
   decryptEnvironmentValue as decryptVariableSetValue,
   encryptEnvironmentValue as encryptVariableSetValue,
@@ -831,7 +1049,10 @@ export * from "./insights-model-bundle";
 export * from "./insights-usage-bundle";
 export * from "./insights-unified";
 export * from "./organization-membership-lifecycle";
-import { assertActiveManagedHumanOrganizationMembership } from "./organization-membership-lifecycle";
+import {
+  assertActiveManagedHumanOrganizationMembership,
+  getOrganizationAdministrationOverview,
+} from "./organization-membership-lifecycle";
 // Deliberately NOT `export *`: `accountIdInRlsScope` is an internal convenience
 // for seams already inside an RLS scope, and publishing it would put a helper
 // that trivially satisfies the in-scope resolver's consistency check on the
@@ -888,6 +1109,7 @@ import {
 } from "./database";
 export {
   createDb,
+  databaseReconnectBackoffSeconds,
   registerDbBinding,
   retrySessionActivityRls,
   rlsContextForWorkspace,
@@ -918,24 +1140,18 @@ export {
   type UserLookup,
   type UserProfileLookup,
 } from "./database";
-export { currentSessionRlsActorIdentityKey, withSessionRlsActorContext } from "./database";
+export {
+  currentSessionRlsActorIdentityKey,
+  currentSessionRlsActorInitiatingHumanSubjectId,
+  withSessionRlsActorContext,
+} from "./database";
 export { withDatabaseTimingObserver, type DatabaseTimingObservation } from "./database-timing";
 export {
   BROKERED_CREDENTIAL_SHAPE_HINT,
   brokeredCredentialBundleProblem,
   normalizedCredentialHeaders,
 } from "./connection-token-resolver";
-import {
-  buildCodexTokenResolver as buildCodexTokenResolverCore,
-  fetchCodexRateLimitResetCreditsForAccount as fetchCodexRateLimitResetCreditsForAccountCore,
-  fetchCodexUsageForAccount as fetchCodexUsageForAccountCore,
-  recheckCodexCredentialPlan as recheckCodexCredentialPlanCore,
-  type CodexAccountUsageSnapshot,
-  type CodexAuthDeps,
-  type CodexCredentialCooldownKind,
-  type CodexCredentialForRun,
-  type CodexCredentialTokens,
-} from "./codex-token-resolver";
+import { type CodexAuthDeps, type CodexCredentialCooldownKind } from "./codex-token-resolver";
 import {
   buildConnectionTokenResolver as buildConnectionTokenResolverCore,
   refreshOAuthConnectionCredential as refreshOAuthConnectionCredentialCore,
@@ -1730,6 +1946,13 @@ export const managedPersonalWorkspacePermissions: Permission[] = [
   "sessions:create",
   "sessions:read",
   "sessions:control",
+  // Live viewing and handoff of the owner's own sessions (browser/computer sign-in handoff, desktop,
+  // terminal, file edits). Without these the owner was refused (403) when joining their own handoff.
+  "stream:view",
+  "stream:control",
+  "stream:acknowledge",
+  "terminal:attach",
+  "files:write",
   "files:upload",
   "files:read",
   "documents:manage",
@@ -3320,6 +3543,24 @@ export async function updateWorkspaceSettings(
     controlLockTimeoutMs?: number;
   } = {},
 ): Promise<Workspace> {
+  const { modelCompactionThresholds, ...ordinaryPatch } = patch;
+  const thresholds =
+    modelCompactionThresholds === undefined
+      ? undefined
+      : WorkspaceModelCompactionThresholdsPatch.parse(modelCompactionThresholds);
+  // Merge each exact-model key inside the SQL update, not a read/modify/write
+  // in the API: simultaneous edits to different models must both survive.
+  const settingsPatch = (
+    base: typeof schema.workspaces.settings | ReturnType<typeof sql>,
+    values: Record<string, unknown>,
+  ) => {
+    const merged = sql`${base} || ${JSON.stringify(values)}::jsonb`;
+    return thresholds === undefined
+      ? merged
+      : sql`jsonb_set((${merged}), '{modelCompactionThresholds}',
+      jsonb_strip_nulls((case when jsonb_typeof(${schema.workspaces.settings}->'modelCompactionThresholds') = 'object'
+        then ${schema.workspaces.settings}->'modelCompactionThresholds' else '{}'::jsonb end) || ${JSON.stringify(thresholds)}::jsonb))`;
+  };
   if (Object.prototype.hasOwnProperty.call(patch, "maxNestedAgentDepth")) {
     const requested = patch.maxNestedAgentDepth;
     if (
@@ -3333,7 +3574,7 @@ export async function updateWorkspaceSettings(
     ) {
       throw new Error("maxNestedAgentDepth must be null or a non-negative 32-bit integer");
     }
-    const nextPatch = { ...patch };
+    const nextPatch = { ...ordinaryPatch };
     if (requested === null) delete nextPatch.maxNestedAgentDepth;
     return await withWorkspaceRls(
       db,
@@ -3353,8 +3594,11 @@ export async function updateWorkspaceSettings(
             .set({
               settings:
                 requested === null
-                  ? sql`(${schema.workspaces.settings} - 'maxNestedAgentDepth') || ${JSON.stringify(nextPatch)}::jsonb`
-                  : sql`${schema.workspaces.settings} || ${JSON.stringify(nextPatch)}::jsonb`,
+                  ? settingsPatch(
+                      sql`(${schema.workspaces.settings} - 'maxNestedAgentDepth')`,
+                      nextPatch,
+                    )
+                  : settingsPatch(schema.workspaces.settings, nextPatch),
               updatedAt: new Date(),
             })
             .where(eq(schema.workspaces.id, workspaceId))
@@ -3368,10 +3612,20 @@ export async function updateWorkspaceSettings(
         }),
     );
   }
+  // A null default model removes the workspace's own choice, so it follows
+  // its organization's default (or the automatic default) again.
+  const clearSessionDefaults = ordinaryPatch.sessionDefaults === null;
+  const plainPatch = { ...ordinaryPatch };
+  if (clearSessionDefaults) delete plainPatch.sessionDefaults;
   const [row] = await db
     .update(schema.workspaces)
     .set({
-      settings: sql`${schema.workspaces.settings} || ${JSON.stringify(patch)}::jsonb`,
+      settings: settingsPatch(
+        clearSessionDefaults
+          ? sql`(${schema.workspaces.settings} - 'sessionDefaults')`
+          : schema.workspaces.settings,
+        plainPatch,
+      ),
       updatedAt: new Date(),
     })
     .where(eq(schema.workspaces.id, workspaceId))
@@ -3454,7 +3708,7 @@ export async function getWorkspaceGrant(
  * EMBEDDED (Step I `userLookup` port): when the handle was built via
  * `createDb({ userLookup })` (or registered with `registerDbBinding`), this
  * delegates to the host's resolver instead — so a host whose identity lives in
- * a different IdP/table/driver never forces OpenGeni to touch `auth_users`. The
+ * a different IdP/table/driver never forces Opengeni to touch `auth_users`. The
  * raw query also assumes the postgres-js array-shaped `db.execute` result; the
  * port is the cross-driver escape hatch for that too.
  *
@@ -3624,11 +3878,17 @@ async function authorizeOrganizationWorkspaceDeletion(
 /**
  * Atomically prove a workspace has no live runtime ownership and delete it.
  *
- * The account/workspace parent locks block concurrent child inserts through
- * their foreign-key key-share locks. Existing session and lease rows are then
- * locked before their state is inspected, so a cold lease cannot become live
- * between a preflight count and the cascade. Schedule ids are copied under the
- * same fence and returned for post-commit Temporal cleanup.
+ * The target takes the canonical writer prefix exclusively (workspace-control
+ * advisory key and inference-control row, then the workspace row), which blocks
+ * concurrent child inserts into that workspace through their foreign-key
+ * key-share locks without inverting the order ordinary writers use. The account
+ * row and sibling workspace rows take only the strength needed to serialize
+ * deletions and the only-workspace check, so ordinary writers in other
+ * workspaces of the same account cannot deadlock with a deletion. Existing
+ * session and lease rows are then locked before their state is inspected, so a
+ * cold lease cannot become live between a preflight count and the cascade.
+ * Schedule ids are copied under the same fence and returned for post-commit
+ * Temporal cleanup.
  */
 export async function deleteWorkspaceIfQuiescent(
   db: Database,
@@ -3671,7 +3931,7 @@ export async function deleteWorkspaceIfQuiescent(
           // already-started cross-workspace adoption. It must also precede the
           // organization-administration seam: that seam takes the account row
           // FOR KEY SHARE, while ordinary deletion takes this lifecycle lock
-          // before upgrading the account row to FOR UPDATE.
+          // before upgrading the account row to FOR NO KEY UPDATE.
           const lifecycleLockStartedAt = performance.now();
           await lockBackgroundCommandWorkspaceLifecycle(tx, [input.workspaceId], "update");
           observeWorkspaceDeletePhase(input.observer, {
@@ -3689,11 +3949,17 @@ export async function deleteWorkspaceIfQuiescent(
           }
 
           const accountWorkspaceLockStartedAt = performance.now();
+          // NO KEY UPDATE serializes concurrent deletions in one account (the
+          // only-workspace check below) without blocking ordinary writers.
+          // Every account-scoped insert takes this row FOR KEY SHARE through
+          // its account FK, often while already holding its own workspace row
+          // the same way; FOR UPDATE here deadlocked those writers against the
+          // workspace locks below.
           const [account] = await tx
             .select({ id: schema.managedAccounts.id })
             .from(schema.managedAccounts)
             .where(eq(schema.managedAccounts.id, input.accountId))
-            .for("update")
+            .for("no key update")
             .limit(1);
           if (!account) {
             observeWorkspaceDeletePhase(input.observer, {
@@ -3704,12 +3970,47 @@ export async function deleteWorkspaceIfQuiescent(
             return { status: "not_found" as const };
           }
 
-          const accountWorkspaces = await tx
+          // The target takes the canonical writer prefix exclusively: the
+          // workspace-control advisory key and inference-control row before
+          // the workspace row. Writers in this workspace (and the membership
+          // lifecycle) hold the control row before reaching the workspace row,
+          // and the cascade below deletes the control row, so locking the
+          // workspace row first would deadlock them.
+          // A missing control row (an unknown workspace, or one created
+          // without it) leaves only the exclusive advisory key held. No writer
+          // can hold a row that does not exist, so the deletion continues and
+          // the workspace lookup below decides whether it is not_found.
+          try {
+            await lockWorkspaceInferenceControl(tx, input.workspaceId, "update");
+          } catch (error) {
+            if (!(error instanceof SessionControlInvariantError)) throw error;
+          }
+          // The target row FOR UPDATE then blocks concurrent child inserts
+          // into this workspace through their workspace FK key-share locks.
+          // Sibling rows only have to stay present for the only-workspace
+          // check, so they take KEY SHARE, which blocks their deletion but not
+          // ordinary writes in those workspaces.
+          const [target] = await tx
             .select({ id: schema.workspaces.id })
             .from(schema.workspaces)
-            .where(eq(schema.workspaces.accountId, input.accountId))
+            .where(
+              and(
+                eq(schema.workspaces.id, input.workspaceId),
+                eq(schema.workspaces.accountId, input.accountId),
+              ),
+            )
             .for("update");
-          if (!accountWorkspaces.some((workspace) => workspace.id === input.workspaceId)) {
+          const accountWorkspaces = target
+            ? await tx
+                .select({ id: schema.workspaces.id })
+                .from(schema.workspaces)
+                .where(eq(schema.workspaces.accountId, input.accountId))
+                .for("key share")
+            : [];
+          if (
+            !target ||
+            !accountWorkspaces.some((workspace) => workspace.id === input.workspaceId)
+          ) {
             observeWorkspaceDeletePhase(input.observer, {
               phase: "account_workspace_lock",
               outcome: "not_found",
@@ -5480,6 +5781,11 @@ export async function recordModelCallFact(
     reasoningTokens?: number | null;
     totalTokens?: number | null;
     occurredAt?: Date;
+    /**
+     * The shared-core subscription connection that served the call (core
+     * Codex turns). Legacy and non-subscription calls leave it NULL.
+     */
+    connectionId?: string | null;
   },
 ): Promise<ModelCallFact> {
   if (input.pricedCostMicros < 0 || !Number.isSafeInteger(input.pricedCostMicros)) {
@@ -5589,6 +5895,7 @@ export async function recordModelCallFact(
           listOutputCostMicros: classes?.output ?? null,
           listCostIsApprox: classes == null ? null : (input.listByClassApprox ?? false),
           contextContributions,
+          connectionId: input.connectionId ?? null,
           occurredAt,
         })
         .onConflictDoUpdate({
@@ -5612,6 +5919,7 @@ export async function recordModelCallFact(
             listOutputCostMicros: sql`coalesce(${schema.modelCallFacts.listOutputCostMicros}, excluded.list_output_cost_micros)`,
             listCostIsApprox: sql`coalesce(${schema.modelCallFacts.listCostIsApprox}, excluded.list_cost_is_approx)`,
             contextContributions: sql`coalesce(${schema.modelCallFacts.contextContributions}, excluded.context_contributions)`,
+            connectionId: sql`coalesce(${schema.modelCallFacts.connectionId}, excluded.connection_id)`,
           },
         })
         .returning();
@@ -5694,31 +6002,47 @@ export async function sumUsageQuantity(
   });
 }
 
+type CreditLedgerEntryInput = {
+  accountId: string;
+  workspaceId?: string | null;
+  type: string;
+  amountMicros: number;
+  eligibleModelIds?: string[] | undefined;
+  sourceType?: string | null;
+  sourceId?: string | null;
+  idempotencyKey: string;
+  metadata?: Record<string, unknown>;
+  occurredAt?: Date;
+};
+
 export async function applyCreditLedgerEntry(
   db: Database,
-  input: {
-    accountId: string;
-    workspaceId?: string | null;
-    type: string;
-    amountMicros: number;
-    sourceType?: string | null;
-    sourceId?: string | null;
-    idempotencyKey: string;
-    metadata?: Record<string, unknown>;
-    occurredAt?: Date;
-  },
+  input: CreditLedgerEntryInput,
 ): Promise<BillingBalance> {
+  return (await applyCreditLedgerEntryOnce(db, input)).balance;
+}
+
+/**
+ * {@link applyCreditLedgerEntry} that also reports whether this call inserted
+ * the row. `inserted` is false when the idempotency key already existed, so a
+ * caller can count a purchase exactly once even when two deliveries race.
+ */
+export async function applyCreditLedgerEntryOnce(
+  db: Database,
+  input: CreditLedgerEntryInput,
+): Promise<{ balance: BillingBalance; inserted: boolean }> {
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId ?? null },
     async (scopedDb) => {
-      await scopedDb
+      const inserted = await scopedDb
         .insert(schema.creditLedgerEntries)
         .values({
           accountId: input.accountId,
           workspaceId: input.workspaceId ?? null,
           type: input.type,
           amountMicros: input.amountMicros,
+          eligibleModelIds: input.eligibleModelIds ?? null,
           sourceType: input.sourceType ?? null,
           sourceId: input.sourceId ?? null,
           idempotencyKey: input.idempotencyKey,
@@ -5727,8 +6051,12 @@ export async function applyCreditLedgerEntry(
         })
         .onConflictDoNothing({
           target: schema.creditLedgerEntries.idempotencyKey,
-        });
-      return await getBillingBalance(scopedDb, input.accountId);
+        })
+        .returning({ id: schema.creditLedgerEntries.id });
+      return {
+        balance: await getBillingBalance(scopedDb, input.accountId),
+        inserted: inserted.length > 0,
+      };
     },
   );
 }
@@ -5740,17 +6068,30 @@ export async function applyCreditDebitUpToBalance(
     workspaceId?: string | null;
     type: string;
     requestedAmountMicros: number;
+    /** Canonical, accepted model ID. Omitted for non-model usage. */
+    modelId?: string;
+    creditPolicyRevision?: number | undefined;
     sourceType?: string | null;
     sourceId?: string | null;
     idempotencyKey: string;
     metadata?: Record<string, unknown>;
     occurredAt?: Date;
   },
-): Promise<{ balance: BillingBalance; debitedMicros: number }> {
+): Promise<{
+  balance: BillingBalance;
+  debitedMicros: number;
+  /**
+   * The part of `debitedMicros` paid by scoped promotional grants (signup
+   * trial, scoped coupon offers). The rest came from general credit. Zero on
+   * an idempotent replay, like `debitedMicros`.
+   */
+  grantDebitedMicros: number;
+}> {
   if (input.requestedAmountMicros <= 0) {
     return {
       balance: await getBillingBalance(db, input.accountId),
       debitedMicros: 0,
+      grantDebitedMicros: 0,
     };
   }
   return await withRlsContext(
@@ -5758,39 +6099,49 @@ export async function applyCreditDebitUpToBalance(
     { accountId: input.accountId, workspaceId: input.workspaceId ?? null },
     async (scopedDb) => {
       await scopedDb.execute(sql`select pg_advisory_xact_lock(hashtext(${input.accountId}))`);
-      const before = await getBillingBalance(scopedDb, input.accountId);
-      const candidateDebitMicros = Math.min(
-        input.requestedAmountMicros,
-        Math.max(0, before.balanceMicros),
-      );
-      let debitedMicros = 0;
-      if (candidateDebitMicros > 0) {
-        const inserted = await scopedDb
-          .insert(schema.creditLedgerEntries)
-          .values({
+      const before = await getBillingBalance(scopedDb, input.accountId, input.creditPolicyRevision);
+      const plan = planCreditDebit(before, input.requestedAmountMicros, input.modelId);
+      const candidateDebitMicros = plan.debitedMicros;
+      // Keep a zero-cost receipt too: retrying after a top-up must not charge
+      // a response that was already settled while the eligible balance was empty.
+      const [inserted] = await scopedDb
+        .insert(schema.creditLedgerEntries)
+        .values({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId ?? null,
+          type: input.type,
+          amountMicros: -candidateDebitMicros,
+          sourceType: input.sourceType ?? null,
+          sourceId: input.sourceId ?? null,
+          idempotencyKey: input.idempotencyKey,
+          metadata: {
+            ...input.metadata,
+            requestedAmountMicros: input.requestedAmountMicros,
+            debitedMicros: candidateDebitMicros,
+            creditPolicyRevision: before.creditPolicyRevision,
+          },
+          occurredAt: input.occurredAt ?? new Date(),
+        })
+        .onConflictDoNothing({
+          target: schema.creditLedgerEntries.idempotencyKey,
+        })
+        .returning({ id: schema.creditLedgerEntries.id });
+      const debitedMicros = inserted ? candidateDebitMicros : 0;
+      if (inserted && plan.allocations.length) {
+        await scopedDb.insert(schema.creditDebitAllocations).values(
+          plan.allocations.map((allocation) => ({
+            ...allocation,
             accountId: input.accountId,
-            workspaceId: input.workspaceId ?? null,
-            type: input.type,
-            amountMicros: -candidateDebitMicros,
-            sourceType: input.sourceType ?? null,
-            sourceId: input.sourceId ?? null,
-            idempotencyKey: input.idempotencyKey,
-            metadata: {
-              ...input.metadata,
-              requestedAmountMicros: input.requestedAmountMicros,
-              debitedMicros: candidateDebitMicros,
-            },
-            occurredAt: input.occurredAt ?? new Date(),
-          })
-          .onConflictDoNothing({
-            target: schema.creditLedgerEntries.idempotencyKey,
-          })
-          .returning({ id: schema.creditLedgerEntries.id });
-        debitedMicros = inserted.length === 1 ? candidateDebitMicros : 0;
+            debitEntryId: inserted.id,
+          })),
+        );
       }
       return {
         balance: await getBillingBalance(scopedDb, input.accountId),
         debitedMicros,
+        grantDebitedMicros: inserted
+          ? plan.allocations.reduce((sum, allocation) => sum + allocation.amountMicros, 0)
+          : 0,
       };
     },
   );
@@ -5814,6 +6165,11 @@ export async function applyCreditDebitAfterUse(
     idempotencyKey: string;
     metadata?: Record<string, unknown>;
     occurredAt?: Date;
+    /**
+     * What the charge paid for. When set, grants covering it pay first (oldest
+     * first) and general credit takes the rest. Omitted: general credit only.
+     */
+    usage?: CreditUsage;
   },
 ): Promise<{ balance: BillingBalance; debitedMicros: number }> {
   if (!Number.isSafeInteger(input.amountMicros) || input.amountMicros <= 0) {
@@ -5823,6 +6179,17 @@ export async function applyCreditDebitAfterUse(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId ?? null },
     async (scopedDb) => {
+      let allocations: { grantEntryId: string; amountMicros: number }[] = [];
+      if (input.usage) {
+        // Same account lock as the model debit, so grant remainders are not
+        // allocated twice by concurrent charges.
+        await scopedDb.execute(sql`select pg_advisory_xact_lock(hashtext(${input.accountId}))`);
+        allocations = planPostUseCreditAllocations(
+          await getBillingBalance(scopedDb, input.accountId),
+          input.amountMicros,
+          input.usage,
+        );
+      }
       const inserted = await scopedDb
         .insert(schema.creditLedgerEntries)
         .values({
@@ -5863,6 +6230,14 @@ export async function applyCreditDebitAfterUse(
             "post-use credit debit idempotency key conflicts with a different charge",
           );
         }
+      } else if (allocations.length) {
+        await scopedDb.insert(schema.creditDebitAllocations).values(
+          allocations.map((allocation) => ({
+            ...allocation,
+            accountId: input.accountId,
+            debitEntryId: inserted[0]!.id,
+          })),
+        );
       }
       return {
         balance: await getBillingBalance(scopedDb, input.accountId),
@@ -6019,25 +6394,8 @@ export async function markStripeWebhookProcessed(db: Database, id: string): Prom
     .where(eq(schema.stripeWebhookEvents.id, id));
 }
 
-export async function getBillingBalance(db: Database, accountId: string): Promise<BillingBalance> {
-  return await withAccountRls(db, accountId, async (scopedDb) => {
-    const [{ balance } = { balance: 0 }] = await scopedDb
-      .select({
-        balance: sql<number>`coalesce(sum(${schema.creditLedgerEntries.amountMicros}), 0)`,
-      })
-      .from(schema.creditLedgerEntries)
-      .where(eq(schema.creditLedgerEntries.accountId, accountId));
-    return {
-      accountId,
-      balanceMicros: Number(balance),
-      currency: "usd",
-      updatedAt: new Date().toISOString(),
-    };
-  });
-}
-
 /**
- * Whether the organization holds a positive OpenGeni credit balance, whatever
+ * Whether the organization holds a positive Opengeni credit balance, whatever
  * its source: a purchase, an operator grant, a test credit, or the one-time
  * verified-signup trial grant. It turns false again once usage brings the
  * balance to zero or below. Read-only; it never gates credit admission.
@@ -6172,7 +6530,7 @@ export type UpdateScheduledTaskInput = Partial<{
    */
   expectedExecutionDigest: string;
   /**
-   * Re-freeze an agent-created task's OpenGeni tools and permissions (the
+   * Re-freeze an agent-created task's Opengeni tools and permissions (the
    * owner's explicit access refresh). Applies only to a row whose creator
    * tools are already frozen; the creator session policy is never rewritten.
    */
@@ -6513,12 +6871,6 @@ export class PersonalGitHubRepositorySelectionUnavailableError extends Error {
     this.name = "PersonalGitHubRepositorySelectionUnavailableError";
   }
 }
-
-/** Server-owned verification facts; public schemas expose them read-only and nullable. */
-export type ConnectionMetadataWithVerification = ConnectionMetadata & {
-  verifiedInstallAt: string | null;
-  verifiedInstallVersion: number | null;
-};
 
 export type SlackBotPostOperation = {
   id: string;
@@ -7475,6 +7827,7 @@ export function durableUserHistoryItem(
   modelContext?: string | null,
   goalSnapshot?: SessionGoalSnapshot,
   sentAt?: Date | null,
+  sender?: string | null,
 ): Record<string, unknown> {
   const attachmentRefs = resources.filter(
     (resource): resource is Extract<ResourceRef, { kind: "file" }> => resource.kind === "file",
@@ -7488,6 +7841,7 @@ export function durableUserHistoryItem(
       modelContext,
       goalSnapshot,
       sentAt,
+      sender,
     ),
     ...(attachmentRefs.length > 0 ? { [MODEL_ATTACHMENT_REFS_FIELD]: attachmentRefs } : {}),
     ...(annotations.length > 0
@@ -7921,43 +8275,94 @@ export async function getRetainedScreenshotArtifact(
           eq(schema.files.id, schema.retainedScreenshotArtifacts.artifactId),
         ),
       )
-      .where(
-        and(
-          eq(schema.retainedScreenshotArtifacts.workspaceId, workspaceId),
-          or(
-            eq(schema.retainedScreenshotArtifacts.sessionId, sessionId),
-            // A fork copies canonical receipts, not the original artifact row.
-            // Require both recorded ancestry and an actually copied image receipt;
-            // knowing an ancestor artifact UUID is not enough. All reads retain RLS.
-            sql`exists (
-              with recursive lineage(id, parent_id) as (
-                select s.id, s.forked_from_session_id from sessions s
-                where s.workspace_id = ${workspaceId} and s.id = ${sessionId}
-                union
-                select s.id, s.forked_from_session_id from sessions s
-                join lineage l on s.id = l.parent_id
-                where s.workspace_id = ${workspaceId}
-              )
-              select 1 from lineage l
-              where l.id = ${schema.retainedScreenshotArtifacts.sessionId}
-                and exists (
-                  select 1 from session_history_items h
-                  where h.workspace_id = ${workspaceId} and h.session_id = ${sessionId}
-                    and h.turn_id is null
-                    and (
-                      h.item @> ${JSON.stringify({ output: { type: "retained_artifact", artifact: { artifactId } } })}::jsonb
-                      or h.item @> ${JSON.stringify({ output: [{ image: { type: "retained_artifact", artifact: { artifactId } } }] })}::jsonb
-                      or h.item @> ${JSON.stringify({ output: { content: [{ image: { type: "retained_artifact", artifact: { artifactId } } }] } })}::jsonb
-                    )
-                )
-            )`,
-          ),
-          eq(schema.retainedScreenshotArtifacts.artifactId, artifactId),
-        ),
-      )
+      .where(retainedScreenshotSessionArtifactPredicate(workspaceId, sessionId, artifactId))
       .limit(1);
     return row ? mapRetainedScreenshotArtifact(row.artifact, row.file) : null;
   });
+}
+
+/**
+ * Lifecycle state of a session-qualified screenshot whose file row the current
+ * file authority hides, such as another member's private image in a shared
+ * session. The file foreign key restricts deleting a file while its artifact
+ * row exists, so an artifact row without a visible file is an authority
+ * exclusion, never a deletion. Returns null when the artifact is absent or its
+ * file is readable. Exposes only workspace-visible lifecycle state: no file,
+ * object key or bytes, and the authority boundary is unchanged.
+ */
+export async function getWithheldRetainedScreenshotArtifactState(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  artifactId: string,
+): Promise<{ status: RetainedScreenshotArtifactStatus; retentionExpiresAt: Date } | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({
+        status: schema.retainedScreenshotArtifacts.status,
+        retentionExpiresAt: schema.retainedScreenshotArtifacts.retentionExpiresAt,
+      })
+      .from(schema.retainedScreenshotArtifacts)
+      .leftJoin(
+        schema.files,
+        and(
+          eq(schema.files.workspaceId, schema.retainedScreenshotArtifacts.workspaceId),
+          eq(schema.files.id, schema.retainedScreenshotArtifacts.artifactId),
+        ),
+      )
+      .where(
+        and(
+          retainedScreenshotSessionArtifactPredicate(workspaceId, sessionId, artifactId),
+          isNull(schema.files.id),
+        ),
+      )
+      .limit(1);
+    return row
+      ? {
+          status: row.status as RetainedScreenshotArtifactStatus,
+          retentionExpiresAt: row.retentionExpiresAt,
+        }
+      : null;
+  });
+}
+
+function retainedScreenshotSessionArtifactPredicate(
+  workspaceId: string,
+  sessionId: string,
+  artifactId: string,
+) {
+  return and(
+    eq(schema.retainedScreenshotArtifacts.workspaceId, workspaceId),
+    or(
+      eq(schema.retainedScreenshotArtifacts.sessionId, sessionId),
+      // A fork copies canonical receipts, not the original artifact row.
+      // Require both recorded ancestry and an actually copied image receipt;
+      // knowing an ancestor artifact UUID is not enough. All reads retain RLS.
+      sql`exists (
+        with recursive lineage(id, parent_id) as (
+          select s.id, s.forked_from_session_id from sessions s
+          where s.workspace_id = ${workspaceId} and s.id = ${sessionId}
+          union
+          select s.id, s.forked_from_session_id from sessions s
+          join lineage l on s.id = l.parent_id
+          where s.workspace_id = ${workspaceId}
+        )
+        select 1 from lineage l
+        where l.id = ${schema.retainedScreenshotArtifacts.sessionId}
+          and exists (
+            select 1 from session_history_items h
+            where h.workspace_id = ${workspaceId} and h.session_id = ${sessionId}
+              and h.turn_id is null
+              and (
+                h.item @> ${JSON.stringify({ output: { type: "retained_artifact", artifact: { artifactId } } })}::jsonb
+                or h.item @> ${JSON.stringify({ output: [{ image: { type: "retained_artifact", artifact: { artifactId } } }] })}::jsonb
+                or h.item @> ${JSON.stringify({ output: { content: [{ image: { type: "retained_artifact", artifact: { artifactId } } }] } })}::jsonb
+              )
+          )
+      )`,
+    ),
+    eq(schema.retainedScreenshotArtifacts.artifactId, artifactId),
+  );
 }
 
 /** Recover a legacy damaged receipt only when its tool call has one exact
@@ -7990,6 +8395,42 @@ export async function getRetainedScreenshotArtifactForToolCall(
     return rows.length === 1
       ? mapRetainedScreenshotArtifact(rows[0]!.artifact, rows[0]!.file)
       : null;
+  });
+}
+
+/** Recover a legacy damaged receipt's artifact id when its tool call has one
+ * exact screenshot in this session whose file the current file authority hides
+ * (see getWithheldRetainedScreenshotArtifactState). Returns only the id; the
+ * caller still applies the withheld lifecycle checks. */
+export async function getWithheldRetainedScreenshotArtifactIdForToolCall(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  toolCallId: string,
+): Promise<string | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select({
+        artifactId: schema.retainedScreenshotArtifacts.artifactId,
+        fileId: schema.files.id,
+      })
+      .from(schema.retainedScreenshotArtifacts)
+      .leftJoin(
+        schema.files,
+        and(
+          eq(schema.files.workspaceId, schema.retainedScreenshotArtifacts.workspaceId),
+          eq(schema.files.id, schema.retainedScreenshotArtifacts.artifactId),
+        ),
+      )
+      .where(
+        and(
+          eq(schema.retainedScreenshotArtifacts.workspaceId, workspaceId),
+          eq(schema.retainedScreenshotArtifacts.sessionId, sessionId),
+          eq(schema.retainedScreenshotArtifacts.toolCallId, toolCallId),
+        ),
+      )
+      .limit(2);
+    return rows.length === 1 && rows[0]!.fileId === null ? rows[0]!.artifactId : null;
   });
 }
 
@@ -10148,6 +10589,14 @@ function skillSourceFromManifest(
   if (source === "library" || source === "github" || source === "skills_sh") {
     return source;
   }
+  // Migration 0482 removed Packs but deliberately kept Skills that another
+  // owner still holds. Their immutable plugin versions still record "pack".
+  // Those Skills carried inline, Opengeni-managed content with no external
+  // origin to re-import from, which "library" is the only public source to
+  // express. Rejecting them failed every catalog read and turn in the workspace.
+  if (source === "pack") {
+    return "library";
+  }
   throw new Error(`Installed Skill ${capabilityId} has invalid immutable source metadata`);
 }
 
@@ -10366,10 +10815,9 @@ export async function listEnabledMcpCapabilityServers(
     const allowedTools = stringArrayConfig(config.allowedTools ?? metadata.allowedTools);
     const timeoutMs = positiveIntegerConfig(config.timeoutMs ?? metadata.timeoutMs);
     const cacheToolsList = booleanConfig(config.cacheToolsList ?? metadata.cacheToolsList);
-    const requireApproval = requireApprovalWithFloor(
+    const requireApproval = resolveMcpApprovalRecommendation(
       config.requireApproval,
       metadata.requireApproval,
-      item.workspaceId === null,
     );
     return [
       {
@@ -10601,37 +11049,6 @@ export function mcpServerIdForCapability(
   return `cap-${body}-${shortHash(capabilityId)}`;
 }
 
-const connectionMetadataColumns = {
-  id: schema.connections.id,
-  authorityId: schema.connections.authorityId,
-  authorityGeneration: schema.connections.authorityGeneration,
-  accountId: schema.connections.accountId,
-  workspaceId: schema.connections.workspaceId,
-  subjectId: schema.connections.subjectId,
-  providerDomain: schema.connections.providerDomain,
-  kind: schema.connections.kind,
-  status: schema.connections.status,
-  grantedScopes: schema.connections.grantedScopes,
-  expiresAt: schema.connections.expiresAt,
-  lastRefreshAt: schema.connections.lastRefreshAt,
-  lastUsedAt: schema.connections.lastUsedAt,
-  lastError: schema.connections.lastError,
-  version: schema.connections.version,
-  verifiedInstallAt: schema.connections.verifiedInstallAt,
-  verifiedInstallVersion: schema.connections.verifiedInstallVersion,
-  metadata: schema.connections.metadata,
-  createdBySubjectId: schema.connections.createdBySubjectId,
-  updatedBySubjectId: schema.connections.updatedBySubjectId,
-  createdAt: schema.connections.createdAt,
-  updatedAt: schema.connections.updatedAt,
-};
-
-function connectionSubjectVisibility(subjectId?: string | null): SQL {
-  return subjectId
-    ? or(isNull(schema.connections.subjectId), eq(schema.connections.subjectId, subjectId))!
-    : isNull(schema.connections.subjectId);
-}
-
 function connectionExactSubject(subjectId?: string | null): SQL {
   return subjectId
     ? eq(schema.connections.subjectId, subjectId)
@@ -10651,17 +11068,6 @@ function personalSlackCanonicalConnectionOrder(): SQL[] {
     desc(schema.connections.createdAt),
     desc(schema.connections.id),
   ];
-}
-
-async function withConnectionSubjectRls<T>(
-  db: Database,
-  workspaceId: string,
-  subjectId: string | null | undefined,
-  fn: (db: Database) => Promise<T>,
-): Promise<T> {
-  return subjectId
-    ? await withWorkspaceSubjectRls(db, workspaceId, subjectId, fn)
-    : await withWorkspaceRls(db, workspaceId, fn);
 }
 
 const connectionAccessPolicyColumns = {
@@ -10847,7 +11253,8 @@ export type WorkspaceProviderApiKeyConnectionKind =
   | "vercel_gateway"
   | "openrouter"
   | "anthropic"
-  | "claude_subscription";
+  | "claude_subscription"
+  | "opper";
 
 type WorkspaceProviderApiKeyConnectionSpec = {
   providerDomain: string;
@@ -10867,6 +11274,15 @@ export function workspaceProviderApiKeyConnectionSpec(
       operationIdMetadataKey: `${providerKind}CredentialOperationId`,
       operationDigestMetadataKey: `${providerKind}CredentialOperationDigest`,
       label: providerKind === "anthropic" ? "Anthropic API" : "Claude subscription",
+    };
+  }
+  if (providerKind === "opper") {
+    return {
+      providerDomain: WORKSPACE_OPPER_CONNECTION_DOMAIN,
+      credentialRole: WORKSPACE_OPPER_CONNECTION_ROLE,
+      operationIdMetadataKey: OPPER_CREDENTIAL_OPERATION_ID_METADATA_KEY,
+      operationDigestMetadataKey: OPPER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY,
+      label: "Opper",
     };
   }
   return providerKind === "vercel_gateway"
@@ -11384,51 +11800,6 @@ export async function persistProviderOAuthConnection(
   );
 }
 
-export async function listConnectionsMetadata(
-  db: Database,
-  workspaceId: string,
-  subjectId?: string | null,
-): Promise<ConnectionMetadataWithVerification[]> {
-  return await withConnectionSubjectRls(db, workspaceId, subjectId, async (scopedDb) => {
-    const rows = await scopedDb
-      .select(connectionMetadataColumns)
-      .from(schema.connections)
-      .where(
-        and(
-          eq(schema.connections.workspaceId, workspaceId),
-          connectionSubjectVisibility(subjectId),
-        ),
-      )
-      // Legacy rows can share created_at. UUID DESC is the immutable stable
-      // tie-breaker, so every caller that intentionally selects the first row
-      // collapses duplicates in the same documented direction.
-      .orderBy(desc(schema.connections.createdAt), desc(schema.connections.id));
-    return rows.map(mapConnectionMetadata);
-  });
-}
-
-export async function getConnectionMetadata(
-  db: Database,
-  workspaceId: string,
-  connectionId: string,
-  subjectId?: string | null,
-): Promise<ConnectionMetadataWithVerification | null> {
-  return await withConnectionSubjectRls(db, workspaceId, subjectId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select(connectionMetadataColumns)
-      .from(schema.connections)
-      .where(
-        and(
-          eq(schema.connections.workspaceId, workspaceId),
-          eq(schema.connections.id, connectionId),
-          connectionSubjectVisibility(subjectId),
-        ),
-      )
-      .limit(1);
-    return row ? mapConnectionMetadata(row) : null;
-  });
-}
-
 function personalGitHubRepositorySelectionStateFromDatabase(
   value: unknown,
 ): PersonalGitHubRepositorySelectionState | null {
@@ -11929,7 +12300,7 @@ export class SlackInstallationBindingConflictError extends Error {
         ? "Slack team has conflicting legacy installations and is quarantined"
         : reason === "stale_reinstall"
           ? "Slack installation changed during reinstall; start again"
-          : "Slack team is already bound to a different OpenGeni installation",
+          : "Slack team is already bound to a different Opengeni installation",
     );
     this.name = "SlackInstallationBindingConflictError";
   }
@@ -12013,7 +12384,11 @@ export async function listSlackInstallationBindings(
         slackTeamName: binding.slackTeamName,
         botId: binding.botId,
         botUserId: binding.botUserId,
-        botDisplayName: binding.botDisplayName as "OpenGeni" | "OpenGeni Staging",
+        botDisplayName: binding.botDisplayName as
+          | "Opengeni"
+          | "Opengeni Staging"
+          | "OpenGeni"
+          | "OpenGeni Staging",
         state: binding.state,
         quarantineReason: binding.quarantineReason,
         version: binding.version,
@@ -13997,7 +14372,7 @@ function slackRowNullableDate(
 
 export class SlackBotLifecycleSuccessAuditError extends Error {
   constructor() {
-    super("OpenGeni Slack bot lifecycle success audit failed");
+    super("Opengeni Slack bot lifecycle success audit failed");
     this.name = "SlackBotLifecycleSuccessAuditError";
   }
 }
@@ -15374,6 +15749,20 @@ export async function getWorkspaceOpenRouterConnectionMetadata(
   return await getWorkspaceProviderApiKeyConnectionMetadata(db, workspaceId, "openrouter");
 }
 
+export async function getWorkspaceOpperConnectionMetadata(
+  db: Database,
+  workspaceId: string,
+): Promise<{ connectionId: string; version: number } | null> {
+  return await getWorkspaceProviderApiKeyConnectionMetadata(db, workspaceId, "opper");
+}
+
+export async function workspaceOpperConnectionActive(
+  db: Database,
+  workspaceId: string,
+): Promise<boolean> {
+  return (await getWorkspaceOpperConnectionMetadata(db, workspaceId)) !== null;
+}
+
 export async function workspaceVercelAiGatewayConnectionActive(
   db: Database,
   workspaceId: string,
@@ -15463,6 +15852,22 @@ export async function loadWorkspaceOpenRouterApiKey(
     workspaceId,
     "openrouter",
     turnModelId?.startsWith("workspace-openrouter/") ? turnModelId : null,
+  );
+}
+
+/** Resolve only the reviewed workspace-shared Opper credential shape. */
+export async function loadWorkspaceOpperApiKey(
+  db: Database,
+  settings: Settings,
+  workspaceId: string,
+  turnModelId?: string | null,
+): Promise<string | null> {
+  return await loadWorkspaceProviderApiKey(
+    db,
+    settings,
+    workspaceId,
+    "opper",
+    turnModelId?.startsWith("workspace-opper/") ? turnModelId : null,
   );
 }
 
@@ -17648,6 +18053,67 @@ export async function createScheduledTask(
       const frozenCreator = await frozenSessionCreatorForInsert(scopedDb, input);
       await setScheduledTaskAuthorityRlsContext(scopedDb, frozenCreator);
       await input.beforeCreateCommit?.(scopedDb);
+      // Low-level callers without a frozen snapshot have no exact accepting
+      // human here, so they resolve the organization or workspace pool.
+      const sharedTaskPool =
+        input.xaiProviderAccountAuthoritySnapshot === undefined ||
+        input.claudeProviderAccountAuthoritySnapshot === undefined
+          ? await sharedPoolSubscriptionAuthoritySnapshotsInTransaction(scopedDb, input.workspaceId)
+          : null;
+      // Codex v2 (M3 PR 3b, EP-T15): frozen once, at creation, for the exact
+      // accepting human under the acceptance rule; firings copy it and never
+      // recompute it. Non-human creators freeze the empty value; nothing
+      // before the cutover.
+      const taskOwnerSubjectId =
+        (input.action?.kind ?? "agent_turn") === "agent_turn"
+          ? (frozenCreator.initiatingHumanSubjectId ??
+            (frozenCreator.initiator.kind === "subject" ? frozenCreator.initiator.subjectId : null))
+          : null;
+      const creatorTurn = input.createdByActor
+        ? (
+            await scopedDb
+              .select({ authority: schema.sessionTurns.subscriptionAuthority })
+              .from(schema.sessionTurns)
+              .where(
+                and(
+                  eq(schema.sessionTurns.accountId, input.accountId),
+                  eq(schema.sessionTurns.workspaceId, input.workspaceId),
+                  eq(schema.sessionTurns.sessionId, input.createdByActor.sessionId),
+                  eq(schema.sessionTurns.id, input.createdByActor.turnId),
+                ),
+              )
+              .limit(1)
+          )[0]
+        : null;
+      const [taskDestination] =
+        input.createdByActor && taskOwnerSubjectId
+          ? await rawRows<{ eligible: boolean }>(
+              scopedDb,
+              sql`select
+            case when ${input.targetSessionId ?? null}::uuid is null then
+              get_workspace_kind(${input.accountId}::uuid, ${input.workspaceId}::uuid) = 'personal'
+            else exists (select 1 from sessions destination
+              where destination.account_id = ${input.accountId}::uuid
+                and destination.workspace_id = ${input.workspaceId}::uuid
+                and destination.id = ${input.targetSessionId ?? null}::uuid
+                and destination.owner_subject_id = ${taskOwnerSubjectId}
+                and (destination.visibility = 'user_private' or
+                  get_workspace_kind(${input.accountId}::uuid, ${input.workspaceId}::uuid) = 'personal'))
+            end as eligible`,
+            )
+          : [];
+      const taskSubscriptionAuthority = input.createdByActor
+        ? await codexSubscriptionAuthorityV2OrEmptyInTransaction(
+            scopedDb,
+            input.accountId,
+            taskDestination?.eligible ? creatorTurn?.authority : null,
+          )
+        : await codexSubscriptionAuthorityV2ForScheduledTaskInTransaction(scopedDb, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            reusableSessionId: input.targetSessionId ?? null,
+            acceptingSubjectId: taskOwnerSubjectId,
+          });
       const [row] = await scopedDb
         .insert(schema.scheduledTasks)
         .values({
@@ -17671,11 +18137,10 @@ export async function createScheduledTask(
           agentConfig: input.agentConfig,
           ...creatorColumns(frozenCreator),
           xaiProviderAccountAuthoritySnapshot:
-            input.xaiProviderAccountAuthoritySnapshot ??
-            WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+            input.xaiProviderAccountAuthoritySnapshot ?? sharedTaskPool!.xai,
           claudeProviderAccountAuthoritySnapshot:
-            input.claudeProviderAccountAuthoritySnapshot ??
-            WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+            input.claudeProviderAccountAuthoritySnapshot ?? sharedTaskPool!.claude,
+          subscriptionAuthority: taskSubscriptionAuthority,
           creatorFirstPartyMcpTools: input.creatorPolicy?.firstPartyMcpTools ?? null,
           creatorFirstPartyMcpPermissions: input.creatorPolicy?.firstPartyMcpPermissions ?? null,
           creatorSessionPolicy: scheduledTaskCreatorSessionPolicyForInsert(input.creatorPolicy),
@@ -18575,6 +19040,7 @@ export type ScheduledTaskAdmissionRefusalReason =
   | "machine_enrollment_inactive"
   | "variable_set_unavailable"
   | "rig_version_unavailable"
+  | "scheduled_model_unavailable"
   | "insufficient_credits"
   | "allowance_exhausted"
   | "monthly_model_cost_limit"
@@ -19477,6 +19943,23 @@ export async function markScheduledTaskRunAuthorityRejectedInTransaction(
   )`);
 }
 
+function scheduledRunPreclaimDenial(
+  run:
+    | Pick<
+        typeof schema.scheduledTaskRuns.$inferSelect,
+        "status" | "error" | "acceptedExecutionSnapshot"
+      >
+    | undefined,
+): string | null {
+  if (!run?.acceptedExecutionSnapshot) return "scheduled_authority_snapshot_missing";
+  if (run.status === "dispatched") return null;
+  return run.status === "skipped" &&
+    (run.error === "scheduled_task_paused_before_claim" ||
+      run.error === "scheduled_task_deleted_before_claim")
+    ? "scheduled_task_inactive_before_claim"
+    : "scheduled_run_terminal_before_claim";
+}
+
 async function validateScheduledTargetExecutionAtClaim(
   tx: Database,
   input: {
@@ -19503,14 +19986,8 @@ async function validateScheduledTargetExecutionAtClaim(
     )
     .limit(1)
     .for("update");
-  if (!run?.acceptedExecutionSnapshot) return "scheduled_authority_snapshot_missing";
-  if (run.status !== "dispatched") {
-    return run.status === "skipped" &&
-      (run.error === "scheduled_task_paused_before_claim" ||
-        run.error === "scheduled_task_deleted_before_claim")
-      ? "scheduled_task_inactive_before_claim"
-      : "scheduled_run_terminal_before_claim";
-  }
+  const preclaimDenial = scheduledRunPreclaimDenial(run);
+  if (preclaimDenial) return preclaimDenial;
   const [liveAuthority] = await rawRows<{ denial: string | null }>(
     tx,
     sql`select validate_scheduled_agent_run_live_authority(
@@ -19520,7 +19997,7 @@ async function validateScheduledTargetExecutionAtClaim(
     ) as denial`,
   );
   if (liveAuthority?.denial) return liveAuthority.denial;
-  const accepted = ScheduledTaskRunAcceptedExecution.parse(run.acceptedExecutionSnapshot);
+  const accepted = ScheduledTaskRunAcceptedExecution.parse(run!.acceptedExecutionSnapshot);
   const target = accepted.targetSessionExecution;
   if (!target) return null;
   const mcpServers = await tx
@@ -21298,9 +21775,24 @@ export async function updateSessionVariableSets(
                   and request_row.session_id = ${input.sessionId}
                   and request_row.status = 'pending')
               then 'pending_human_input'
+            -- Same live-receipt predicate as migration 0658: a receipt stranded
+            -- by a terminal turn whose attempt settled can never be resumed.
             when exists (select 1 from ${schema.sessionPendingToolCalls} tool_row
                 where tool_row.workspace_id = ${input.workspaceId}
-                  and tool_row.session_id = ${input.sessionId})
+                  and tool_row.session_id = ${input.sessionId}
+                  and (exists (select 1 from ${schema.sessionTurns} owner_turn
+                      where owner_turn.workspace_id = tool_row.workspace_id
+                        and owner_turn.id = tool_row.turn_id
+                        and owner_turn.status not in (
+                          'completed', 'failed', 'cancelled', 'superseded', 'withdrawn_for_edit'
+                        ))
+                    or exists (select 1 from ${schema.sessionTurnAttempts} owner_attempt
+                      where owner_attempt.workspace_id = tool_row.workspace_id
+                        and owner_attempt.id = tool_row.attempt_id
+                        and (owner_attempt.state <> 'closed'
+                          or (owner_attempt.quiesced_at is null and exists (
+                            select 1 from ${schema.sessionAttemptInterruptions} interruption
+                            where interruption.attempt_id = owner_attempt.id))))))
               then 'pending_tool_receipt'
             when exists (select 1 from ${schema.agentRunStates} run_state
                 where run_state.workspace_id = ${input.workspaceId}
@@ -21311,10 +21803,10 @@ export async function updateSessionVariableSets(
                   and goal_row.session_id = ${input.sessionId}
                   and goal_row.status = 'active')
               then 'active_goal'
-            when exists (select 1 from ${schema.codexCapacityWaiters} codex_waiter
-                where codex_waiter.workspace_id = ${input.workspaceId}
-                  and codex_waiter.session_id = ${input.sessionId}
-                  and codex_waiter.status = 'waiting')
+            when exists (select 1 from subscription_capacity_waiters core_waiter
+                where core_waiter.workspace_id = ${input.workspaceId}::uuid
+                  and core_waiter.session_id = ${input.sessionId}::uuid
+                  and core_waiter.provider = 'codex')
               or exists (select 1 from ${schema.xaiCapacityWaiters} xai_waiter
                 where xai_waiter.workspace_id = ${input.workspaceId}
                   and xai_waiter.session_id = ${input.sessionId}
@@ -23679,195 +24171,6 @@ export const loadWorkspaceEnvironmentForRun = loadVariableSetForRun;
 /** @deprecated use VariableSetForRun */
 export type WorkspaceEnvironmentForRun = VariableSetForRun;
 
-// ---------------------------------------------------------------------------
-// Codex (ChatGPT) subscription credentials
-//
-// One row per workspace. Secret tokens live inside `credential_encrypted` (v1
-// AES-256-GCM, same envelope as workspace env vars). The caller pre-encrypts the
-// JSON bundle {access_token, refresh_token, id_token} — the db layer never sees
-// plaintext token JSON on the write path. `loadCodexCredentialForRun` is the
-// ONLY decrypt-read accessor and must never be called from an API route;
-// `getCodexCredentialStatus` returns metadata only (never the secret column).
-// ---------------------------------------------------------------------------
-
-export type WorkspaceCodexSubscriptionMode =
-  | "automatic"
-  | "workspace"
-  | "organization"
-  | "disabled";
-export type EffectiveCodexSubscriptionSource = "workspace" | "organization" | "disabled";
-
-export type WorkspaceCodexSubscriptionSource = {
-  accountId: string;
-  workspaceId: string;
-  workspaceKind: "personal" | "shared";
-  mode: WorkspaceCodexSubscriptionMode;
-  effectiveSource: EffectiveCodexSubscriptionSource;
-  workspaceAvailable: boolean;
-  organizationAvailable: boolean;
-};
-
-const workspaceCodexOrganizationInheritanceAvailable = new Map<string, boolean>();
-
-function rememberWorkspaceCodexOrganizationInheritance(
-  workspaceId: string,
-  available: boolean,
-): void {
-  workspaceCodexOrganizationInheritanceAvailable.set(workspaceId, available);
-  if (workspaceCodexOrganizationInheritanceAvailable.size > 10_000) {
-    const oldest = workspaceCodexOrganizationInheritanceAvailable.keys().next().value;
-    if (oldest) workspaceCodexOrganizationInheritanceAvailable.delete(oldest);
-  }
-}
-
-async function queryWorkspaceCodexSubscriptionSource(
-  scopedDb: Database,
-  workspaceId: string,
-): Promise<WorkspaceCodexSubscriptionSource> {
-  const rows = await scopedDb.execute<{
-    account_id: string;
-    workspace_kind: "personal" | "shared";
-    mode: WorkspaceCodexSubscriptionMode;
-    effective_source: EffectiveCodexSubscriptionSource;
-    workspace_available: boolean;
-    organization_available: boolean;
-  }>(sql`
-      select workspace.account_id,
-        get_workspace_kind(workspace.account_id, workspace.id) as workspace_kind,
-        coalesce(preference.mode, 'automatic') as mode,
-        resolve_workspace_codex_subscription_source(workspace.account_id, workspace.id)
-          as effective_source,
-        exists (
-          select 1 from codex_subscription_credentials credential
-          where credential.account_id = workspace.account_id
-            and credential.workspace_id = workspace.id
-            and credential.authority_scope in ('workspace', 'user')
-        ) as workspace_available,
-        exists (
-          select 1 from codex_subscription_credentials credential
-          where credential.account_id = workspace.account_id
-            and credential.organization_id = workspace.account_id
-            and credential.authority_scope = 'organization'
-        ) as organization_available
-      from workspaces workspace
-      left join workspace_codex_subscription_preferences preference
-        on preference.account_id = workspace.account_id
-       and preference.workspace_id = workspace.id
-      where workspace.id = ${workspaceId}
-      limit 1
-    `);
-  const row = rows[0];
-  if (!row) throw new Error(`workspace not found for Codex source: ${workspaceId}`);
-  return {
-    accountId: row.account_id,
-    workspaceId,
-    workspaceKind: row.workspace_kind,
-    mode: row.mode,
-    effectiveSource: row.effective_source,
-    workspaceAvailable: row.workspace_available,
-    organizationAvailable: row.organization_available,
-  };
-}
-
-async function queryLegacyWorkspaceCodexSubscriptionSource(
-  scopedDb: Database,
-  workspaceId: string,
-): Promise<WorkspaceCodexSubscriptionSource> {
-  const rows = await scopedDb.execute<{
-    account_id: string;
-    workspace_available: boolean;
-  }>(sql`
-    select workspace.account_id,
-      exists (
-        select 1 from codex_subscription_credentials credential
-        where credential.account_id = workspace.account_id
-          and credential.workspace_id = workspace.id
-      ) as workspace_available
-    from workspaces workspace
-    where workspace.id = ${workspaceId}
-    limit 1
-  `);
-  const row = rows[0];
-  if (!row) throw new Error(`workspace not found for Codex source: ${workspaceId}`);
-  return {
-    accountId: row.account_id,
-    workspaceId,
-    workspaceKind: "shared",
-    mode: "automatic",
-    effectiveSource: "workspace",
-    workspaceAvailable: row.workspace_available,
-    organizationAvailable: false,
-  };
-}
-
-async function getWorkspaceCodexSubscriptionSourceScoped(
-  scopedDb: Database,
-  workspaceId: string,
-): Promise<WorkspaceCodexSubscriptionSource> {
-  const known = workspaceCodexOrganizationInheritanceAvailable.get(workspaceId);
-  if (known === false) {
-    return await queryLegacyWorkspaceCodexSubscriptionSource(scopedDb, workspaceId);
-  }
-  if (known === true) {
-    return await queryWorkspaceCodexSubscriptionSource(scopedDb, workspaceId);
-  }
-  try {
-    const source = await scopedDb.transaction(async (savepoint) =>
-      queryWorkspaceCodexSubscriptionSource(savepoint as unknown as Database, workspaceId),
-    );
-    rememberWorkspaceCodexOrganizationInheritance(workspaceId, true);
-    return source;
-  } catch (error) {
-    const state = nestedPostgresSqlState(error);
-    if (state !== "42P01" && state !== "42703" && state !== "42883") throw error;
-    rememberWorkspaceCodexOrganizationInheritance(workspaceId, false);
-    return await queryLegacyWorkspaceCodexSubscriptionSource(scopedDb, workspaceId);
-  }
-}
-
-export async function getWorkspaceCodexSubscriptionSource(
-  db: Database,
-  workspaceId: string,
-): Promise<WorkspaceCodexSubscriptionSource> {
-  return await withWorkspaceRls(db, workspaceId, (scopedDb) =>
-    getWorkspaceCodexSubscriptionSourceScoped(scopedDb, workspaceId),
-  );
-}
-
-async function lockWorkspaceCodexSubscriptionSource(
-  scopedDb: Database,
-  workspaceId: string,
-): Promise<void> {
-  await scopedDb.execute(
-    sql`select pg_advisory_xact_lock(hashtextextended(${`codex-subscription-source:${workspaceId}`}, 0))`,
-  );
-}
-
-/** Allocator callers hold the source lock before selecting their pool lock.
- * Metadata-only callers may observe either side of a committed source change.
- */
-async function codexSourceForTurn(
-  tx: Database,
-  workspaceId: string,
-  turnId: string,
-  fallback: EffectiveCodexSubscriptionSource,
-): Promise<EffectiveCodexSubscriptionSource> {
-  const [turn] = await tx
-    .select({ metadata: schema.sessionTurns.metadata })
-    .from(schema.sessionTurns)
-    .where(
-      and(eq(schema.sessionTurns.workspaceId, workspaceId), eq(schema.sessionTurns.id, turnId)),
-    )
-    .limit(1);
-  const accepted = readCodexCredentialPolicySnapshotV1(turn?.metadata);
-  if (accepted.kind === "valid" && accepted.policy.source) return accepted.policy.source;
-  const rows = await tx.execute<{ source: EffectiveCodexSubscriptionSource }>(sql`
-    select source from codex_turn_source_bindings
-    where workspace_id = ${workspaceId} and turn_id = ${turnId}
-  `);
-  return rows[0]?.source ?? fallback;
-}
-
 async function lockOrganizationMembershipLifecycle(
   scopedDb: Database,
   accountId: string,
@@ -23887,155 +24190,6 @@ export class CodexSubscriptionSourceChangeBlockedError extends Error {
 }
 
 /**
- * Preserve pre-source/first-allocation turns without rewriting their history.
- * Called under the source lock BEFORE any preference or credential mutation.
- * Existing bindings and source-bearing snapshots are immutable authority.
- */
-async function captureLegacyCodexTurnSources(
-  scopedDb: Database,
-  workspaceId: string,
-): Promise<void> {
-  await scopedDb.execute(sql`
-    select capture_legacy_codex_turn_sources(
-      opengeni_private.current_account_id(), ${workspaceId}::uuid
-    )
-  `);
-}
-
-function codexCredentialPoolCondition(input: {
-  accountId: string;
-  workspaceId: string;
-  source: Exclude<EffectiveCodexSubscriptionSource, "disabled">;
-}): SQL {
-  return input.source === "organization"
-    ? and(
-        eq(schema.codexSubscriptionCredentials.accountId, input.accountId),
-        eq(schema.codexSubscriptionCredentials.organizationId, input.accountId),
-        eq(schema.codexSubscriptionCredentials.authorityScope, "organization"),
-      )!
-    : and(
-        eq(schema.codexSubscriptionCredentials.accountId, input.accountId),
-        eq(schema.codexSubscriptionCredentials.workspaceId, input.workspaceId),
-        inArray(schema.codexSubscriptionCredentials.authorityScope, ["workspace", "user"]),
-      )!;
-}
-
-async function effectiveCodexCredentialPoolCondition(
-  scopedDb: Database,
-  workspaceId: string,
-): Promise<{ source: WorkspaceCodexSubscriptionSource; condition: SQL | null }> {
-  const source = await getWorkspaceCodexSubscriptionSourceScoped(scopedDb, workspaceId);
-  return {
-    source,
-    condition:
-      source.effectiveSource === "disabled"
-        ? null
-        : codexCredentialPoolCondition({
-            accountId: source.accountId,
-            workspaceId,
-            source: source.effectiveSource,
-          }),
-  };
-}
-
-async function lockOrganizationCodexSubscriptionSources(
-  scopedDb: Database,
-  accountId: string,
-): Promise<string[]> {
-  const rows = await scopedDb.execute<{ workspace_id: string }>(sql`
-    select workspace_id
-    from list_organization_codex_workspace_ids(${accountId}::uuid)
-    order by workspace_id
-  `);
-  const workspaceIds = rows.map((row: { workspace_id: string }) => row.workspace_id);
-  for (const workspaceId of workspaceIds) {
-    // Credential deletion clears session pins/last-used references through FK
-    // SET NULL, including references in Personal or no-longer-inheriting
-    // workspaces. Fence the complete authorized inventory before any source,
-    // pool, or credential lock; the FK's session writes cannot acquire this
-    // prefix after taking their row locks. Keep the UUID order across both
-    // passes, matching ordinary workspace writers' tenancy -> source order.
-    await scopedDb.execute(
-      sql`select pg_advisory_xact_lock_shared(hashtextextended(${`session-tenancy:${workspaceId}`}, 0))`,
-    );
-  }
-  for (const workspaceId of workspaceIds) {
-    // Organization credential mutations can change automatic routing in every
-    // inheriting workspace. Acquire all workspace source locks before the
-    // organization rotation row, matching normal acquisition's source -> pool
-    // lock order and preventing a waiter from observing a half-cutover source.
-    await lockWorkspaceCodexSubscriptionSource(scopedDb, workspaceId);
-  }
-  return workspaceIds;
-}
-
-async function captureOrganizationCodexSubscriptionSources(
-  scopedDb: Database,
-  accountId: string,
-  workspaceIds: readonly string[],
-): Promise<void> {
-  for (const workspaceId of workspaceIds) {
-    await setRlsContext(scopedDb, { accountId, workspaceId });
-    await captureLegacyCodexTurnSources(scopedDb, workspaceId);
-  }
-  await setRlsContext(scopedDb, { accountId, workspaceId: null });
-}
-
-export async function setWorkspaceCodexSubscriptionModeInTransaction(
-  scopedDb: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    subjectId: string | null;
-    mode: WorkspaceCodexSubscriptionMode;
-    /** Compatibility hint only; database capture derives authority before credential writes. */
-    effectiveSourceBeforeMutation?: EffectiveCodexSubscriptionSource;
-  },
-): Promise<WorkspaceCodexSubscriptionSource> {
-  await lockWorkspaceCodexSubscriptionSource(scopedDb, input.workspaceId);
-  const current = await getWorkspaceCodexSubscriptionSourceScoped(scopedDb, input.workspaceId);
-  if (current.accountId !== input.accountId) {
-    throw new Error("Codex source account does not match the workspace account");
-  }
-  await captureLegacyCodexTurnSources(scopedDb, input.workspaceId);
-  let next = current;
-  if (current.mode !== input.mode) {
-    await scopedDb
-      .insert(schema.workspaceCodexSubscriptionPreferences)
-      .values({
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        mode: input.mode,
-        updatedBySubjectId: input.subjectId,
-      })
-      .onConflictDoUpdate({
-        target: schema.workspaceCodexSubscriptionPreferences.workspaceId,
-        set: {
-          mode: input.mode,
-          updatedBySubjectId: input.subjectId,
-          updatedAt: new Date(),
-        },
-      });
-    next = await getWorkspaceCodexSubscriptionSourceScoped(scopedDb, input.workspaceId);
-  }
-  return next;
-}
-
-export async function setWorkspaceCodexSubscriptionMode(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    subjectId: string | null;
-    mode: WorkspaceCodexSubscriptionMode;
-  },
-): Promise<WorkspaceCodexSubscriptionSource> {
-  return await withWorkspaceSessionActivityRls(db, input.workspaceId, (scopedDb) =>
-    setWorkspaceCodexSubscriptionModeInTransaction(scopedDb, input),
-  );
-}
-
-/**
  * Login / rotation write (multi-account P1). Caller passes the PRE-encrypted
  * credential blob. Keyed on the composite partial index (workspace, chatgpt
  * account): re-connecting the SAME ChatGPT account updates that row in place
@@ -24047,154 +24201,6 @@ export async function setWorkspaceCodexSubscriptionMode(
 export type UpsertCodexSubscriptionCredentialResult =
   | { kind: "upserted"; id: string; isNew: boolean }
   | { kind: "unresolved_redemption"; id: string; isNew: false };
-
-export async function upsertCodexSubscriptionCredential(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    credentialEncrypted: string; // v1 envelope of JSON {access_token, refresh_token, id_token}
-    chatgptAccountId: string | null;
-    scopes: string | null;
-    planType: string | null;
-    isFedramp: boolean;
-    expiresAt: Date | null;
-    lastRefreshAt: Date | null;
-    accountEmail?: string | null;
-    label?: string | null;
-    /** Direct managed-cookie human who most recently connected this row. */
-    connectedBySubjectId?: string | null;
-  },
-): Promise<UpsertCodexSubscriptionCredentialResult> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      // Serialize both the initial partial-index insert and ownership-changing
-      // reconnects for this exact provider account. The row lock is shared with
-      // the final redemption-send fence: either reconnect wins before any send,
-      // or it observes durable provider_started truth and cannot replace its
-      // owning human while the upstream outcome is unresolved.
-      await scopedDb.execute(
-        sql`select pg_advisory_xact_lock(hashtextextended(${`codex-credential-upsert:${input.workspaceId}:${input.chatgptAccountId ?? "null"}`}, 0))`,
-      );
-      const [existing] = input.chatgptAccountId
-        ? await scopedDb
-            .select({
-              id: schema.codexSubscriptionCredentials.id,
-              connectedBySubjectId: schema.codexSubscriptionCredentials.connectedBySubjectId,
-            })
-            .from(schema.codexSubscriptionCredentials)
-            .where(
-              and(
-                eq(schema.codexSubscriptionCredentials.workspaceId, input.workspaceId),
-                eq(schema.codexSubscriptionCredentials.chatgptAccountId, input.chatgptAccountId),
-              ),
-            )
-            .for("update")
-            .limit(1)
-        : [];
-      if (existing && existing.connectedBySubjectId !== (input.connectedBySubjectId ?? null)) {
-        const [unresolved] = await scopedDb
-          .select({ id: schema.codexResetRedemptionAttempts.id })
-          .from(schema.codexResetRedemptionAttempts)
-          .where(
-            and(
-              eq(schema.codexResetRedemptionAttempts.workspaceId, input.workspaceId),
-              eq(schema.codexResetRedemptionAttempts.credentialId, existing.id),
-              eq(schema.codexResetRedemptionAttempts.status, "provider_started"),
-            ),
-          )
-          .limit(1);
-        if (unresolved) {
-          return {
-            kind: "unresolved_redemption",
-            id: existing.id,
-            isNew: false,
-          };
-        }
-      }
-      const now = new Date();
-      const [row] = await scopedDb
-        .insert(schema.codexSubscriptionCredentials)
-        .values({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          credentialEncrypted: input.credentialEncrypted,
-          chatgptAccountId: input.chatgptAccountId,
-          scopes: input.scopes,
-          planType: input.planType,
-          // Connecting reads the plan from the fresh id_token.
-          planCheckedAt: input.planType === null ? null : now,
-          planEntitlementExclusion: null,
-          isFedramp: input.isFedramp,
-          expiresAt: input.expiresAt,
-          lastRefreshAt: input.lastRefreshAt,
-          accountEmail: input.accountEmail ?? null,
-          label: input.label ?? null,
-          connectedBySubjectId: input.connectedBySubjectId ?? null,
-          status: "active",
-          lastError: null,
-        })
-        .onConflictDoUpdate({
-          // The unique index is PARTIAL (WHERE chatgpt_account_id IS NOT NULL), so the
-          // conflict target MUST repeat that predicate via targetWhere, else postgres
-          // raises "no unique or exclusion constraint matching the ON CONFLICT".
-          target: [
-            schema.codexSubscriptionCredentials.workspaceId,
-            schema.codexSubscriptionCredentials.chatgptAccountId,
-          ],
-          targetWhere: sql`chatgpt_account_id is not null`,
-          set: {
-            // account_id MUST be re-asserted on conflict. Omitting it leaves a stale
-            // account_id on a row whose owning account changed (e.g. a reconnect
-            // under a different grant), which makes the row RLS-INVISIBLE to every
-            // subsequent scoped read — a permanent phantom "no active subscription".
-            accountId: input.accountId,
-            credentialEncrypted: input.credentialEncrypted,
-            scopes: input.scopes,
-            planType: input.planType,
-            // A reconnect is a fresh plan observation; earlier model refusals
-            // belonged to the replaced token family, but a plan change it
-            // reveals stays recorded as evidence.
-            planCheckedAt: input.planType === null ? null : now,
-            ...(input.planType === null ? {} : codexPlanChangeRecordSet(input.planType, now)),
-            planEntitlementExclusion: null,
-            isFedramp: input.isFedramp,
-            expiresAt: input.expiresAt,
-            lastRefreshAt: input.lastRefreshAt,
-            // Refresh the derived email; keep an existing user-chosen label (only seed
-            // it when still null) so a re-connect never clobbers a rename.
-            accountEmail: input.accountEmail ?? null,
-            label: sql`coalesce(${schema.codexSubscriptionCredentials.label}, ${input.label ?? null})`,
-            // Reconnect refreshes credential material, never ownership. A row
-            // without an owner may be claimed by its first direct managed human;
-            // after that, disconnect is the explicit ownership-reset boundary.
-            connectedBySubjectId: sql`coalesce(${schema.codexSubscriptionCredentials.connectedBySubjectId}, ${input.connectedBySubjectId ?? null})`,
-            status: "active",
-            lastError: null,
-            version: sql`${schema.codexSubscriptionCredentials.version} + 1`,
-            updatedAt: now,
-          },
-        })
-        .returning({
-          id: schema.codexSubscriptionCredentials.id,
-          createdAt: schema.codexSubscriptionCredentials.createdAt,
-          updatedAt: schema.codexSubscriptionCredentials.updatedAt,
-        });
-      // The upsert always returns exactly one row (insert or update).
-      if (!row) {
-        throw new Error("upsertCodexSubscriptionCredential returned no row");
-      }
-      // A fresh INSERT leaves created_at === updated_at (both the same per-txn db
-      // now()). A conflict UPDATE stamps updated_at to our JS `now` while created_at
-      // keeps the original (older) value, so the two diverge. This distinguishes
-      // insert from update without a second read.
-      const isNew = row.createdAt.getTime() === row.updatedAt.getTime();
-      return { kind: "upserted", id: row.id, isNew };
-    },
-  );
-}
 
 async function withOrganizationCodexAdministrator<T>(
   db: Database,
@@ -24222,407 +24228,95 @@ async function withOrganizationCodexAdministrator<T>(
   );
 }
 
-export async function ensureOrganizationCodexRotationSettings(
+export async function fetchOrganizationCodexUsageForAccount(
   db: Database,
-  input: { organizationId: string; actorSubjectId: string },
-): Promise<void> {
-  await withOrganizationCodexAdministrator(db, input, async (scopedDb) => {
-    await scopedDb
-      .insert(schema.organizationCodexRotationSettings)
-      .values({ accountId: input.organizationId })
-      .onConflictDoNothing({ target: schema.organizationCodexRotationSettings.accountId });
-  });
-}
-
-export async function upsertOrganizationCodexSubscriptionCredential(
-  db: Database,
-  input: {
-    organizationId: string;
-    actorSubjectId: string;
-    credentialEncrypted: string;
-    chatgptAccountId: string | null;
-    scopes: string | null;
-    planType: string | null;
-    isFedramp: boolean;
-    expiresAt: Date | null;
-    lastRefreshAt: Date | null;
-    accountEmail?: string | null;
-    label?: string | null;
-  },
-): Promise<{ id: string; isNew: boolean; wakeTargets: CodexCapacityWakeTarget[] }> {
-  return await withOrganizationCodexAdministrator(db, input, async (scopedDb) => {
-    await scopedDb.execute(
-      sql`select pg_advisory_xact_lock(hashtextextended(${`organization-codex-upsert:${input.organizationId}:${input.chatgptAccountId ?? "null"}`}, 0))`,
-    );
-    const organizationWorkspaceIds = await lockOrganizationCodexSubscriptionSources(
-      scopedDb,
-      input.organizationId,
-    );
-    await captureOrganizationCodexSubscriptionSources(
-      scopedDb,
-      input.organizationId,
-      organizationWorkspaceIds,
-    );
-    await scopedDb
-      .insert(schema.organizationCodexRotationSettings)
-      .values({ accountId: input.organizationId })
-      .onConflictDoNothing({ target: schema.organizationCodexRotationSettings.accountId });
-    const [settings] = await scopedDb
-      .select({ activeCredentialId: schema.organizationCodexRotationSettings.activeCredentialId })
-      .from(schema.organizationCodexRotationSettings)
-      .where(eq(schema.organizationCodexRotationSettings.accountId, input.organizationId))
-      .for("update")
-      .limit(1);
-    if (!settings) throw new Error("organization Codex rotation settings are unavailable");
-    // Local administration has no managed-human reset-credit owner.
-    // Keep the same attribution boundary as workspace Codex connections.
-    const connectedBySubjectId = input.actorSubjectId.startsWith("user:")
-      ? input.actorSubjectId
-      : null;
-    const now = new Date();
-    const [row] = await scopedDb
-      .insert(schema.codexSubscriptionCredentials)
-      .values({
-        accountId: input.organizationId,
-        workspaceId: null,
-        organizationId: input.organizationId,
-        authorityScope: "organization",
-        credentialEncrypted: input.credentialEncrypted,
-        chatgptAccountId: input.chatgptAccountId,
-        scopes: input.scopes,
-        planType: input.planType,
-        planCheckedAt: input.planType === null ? null : now,
-        planEntitlementExclusion: null,
-        isFedramp: input.isFedramp,
-        expiresAt: input.expiresAt,
-        lastRefreshAt: input.lastRefreshAt,
-        accountEmail: input.accountEmail ?? null,
-        label: input.label ?? null,
-        connectedBySubjectId,
-        status: "active",
-        lastError: null,
-      })
-      .onConflictDoUpdate({
-        target: [
-          schema.codexSubscriptionCredentials.organizationId,
-          schema.codexSubscriptionCredentials.chatgptAccountId,
-        ],
-        targetWhere: sql`authority_scope = 'organization' and chatgpt_account_id is not null`,
-        set: {
-          credentialEncrypted: input.credentialEncrypted,
-          scopes: input.scopes,
-          planType: input.planType,
-          planCheckedAt: input.planType === null ? null : now,
-          ...(input.planType === null ? {} : codexPlanChangeRecordSet(input.planType, now)),
-          planEntitlementExclusion: null,
-          isFedramp: input.isFedramp,
-          expiresAt: input.expiresAt,
-          lastRefreshAt: input.lastRefreshAt,
-          accountEmail: input.accountEmail ?? null,
-          label: sql`coalesce(${schema.codexSubscriptionCredentials.label}, ${input.label ?? null})`,
-          connectedBySubjectId: sql`coalesce(${connectedBySubjectId}, ${schema.codexSubscriptionCredentials.connectedBySubjectId})`,
-          status: "active",
-          lastError: null,
-          version: sql`${schema.codexSubscriptionCredentials.version} + 1`,
-          updatedAt: now,
-        },
-      })
-      .returning({
-        id: schema.codexSubscriptionCredentials.id,
-        createdAt: schema.codexSubscriptionCredentials.createdAt,
-        updatedAt: schema.codexSubscriptionCredentials.updatedAt,
-      });
-    if (!row) throw new Error("organization Codex credential upsert returned no row");
-    await scopedDb
-      .update(schema.organizationCodexRotationSettings)
-      .set({ activeCredentialId: row.id, updatedAt: now })
-      .where(
-        and(
-          eq(schema.organizationCodexRotationSettings.accountId, input.organizationId),
-          isNull(schema.organizationCodexRotationSettings.activeCredentialId),
-        ),
-      );
-    const wakeTargets = await wakeOrganizationCodexCapacityWaitersInTransaction(scopedDb, {
-      accountId: input.organizationId,
-      reason: "organization_codex_credential_connected",
-      restoreWorkspaceId: null,
-    });
-    return {
-      id: row.id,
-      isNew: row.createdAt.getTime() === row.updatedAt.getTime(),
-      wakeTargets,
-    };
-  });
-}
-
-export async function listOrganizationCodexAccountStatuses(
-  db: Database,
-  input: { organizationId: string; actorSubjectId: string },
-): Promise<CodexAccountStatus[]> {
-  return await withOrganizationCodexAdministrator(db, input, async (scopedDb) => {
-    const [rotation] = await scopedDb
-      .select({ activeCredentialId: schema.organizationCodexRotationSettings.activeCredentialId })
-      .from(schema.organizationCodexRotationSettings)
-      .where(eq(schema.organizationCodexRotationSettings.accountId, input.organizationId))
-      .limit(1);
-    const rows = await scopedDb
-      .select({
-        id: schema.codexSubscriptionCredentials.id,
-        chatgptAccountId: schema.codexSubscriptionCredentials.chatgptAccountId,
-        allowedModelIds: schema.codexSubscriptionCredentials.allowedModelIds,
-        label: schema.codexSubscriptionCredentials.label,
-        accountEmail: schema.codexSubscriptionCredentials.accountEmail,
-        planType: schema.codexSubscriptionCredentials.planType,
-        status: schema.codexSubscriptionCredentials.status,
-        allocatorEnabled: schema.codexSubscriptionCredentials.allocatorEnabled,
-        allocatorVersion: schema.codexSubscriptionCredentials.allocatorVersion,
-        allocatorUpdatedBySubjectId:
-          schema.codexSubscriptionCredentials.allocatorUpdatedBySubjectId,
-        allocatorUpdatedAt: schema.codexSubscriptionCredentials.allocatorUpdatedAt,
-        resetCreditAvailableCount: schema.codexSubscriptionCredentials.resetCreditAvailableCount,
-        resetCreditsCheckedAt: schema.codexSubscriptionCredentials.resetCreditsCheckedAt,
-        connectedBySubjectId: schema.codexSubscriptionCredentials.connectedBySubjectId,
-        expiresAt: schema.codexSubscriptionCredentials.expiresAt,
-        lastRefreshAt: schema.codexSubscriptionCredentials.lastRefreshAt,
-        lastError: schema.codexSubscriptionCredentials.lastError,
-        primaryUsedPercent: schema.codexSubscriptionCredentials.primaryUsedPercent,
-        primaryResetAt: schema.codexSubscriptionCredentials.primaryResetAt,
-        secondaryUsedPercent: schema.codexSubscriptionCredentials.secondaryUsedPercent,
-        secondaryResetAt: schema.codexSubscriptionCredentials.secondaryResetAt,
-        usageCheckedAt: schema.codexSubscriptionCredentials.usageCheckedAt,
-        exhaustedUntil: schema.codexSubscriptionCredentials.exhaustedUntil,
-        exhaustedKind: schema.codexSubscriptionCredentials.exhaustedKind,
-      })
-      .from(schema.codexSubscriptionCredentials)
-      .where(
-        and(
-          eq(schema.codexSubscriptionCredentials.accountId, input.organizationId),
-          eq(schema.codexSubscriptionCredentials.organizationId, input.organizationId),
-          eq(schema.codexSubscriptionCredentials.authorityScope, "organization"),
-        ),
-      )
-      .orderBy(
-        asc(schema.codexSubscriptionCredentials.createdAt),
-        asc(schema.codexSubscriptionCredentials.id),
-      );
-    return rows.map((row) => ({
-      ...row,
-      source: "organization" as const,
-      isActive: row.id === rotation?.activeCredentialId,
-      expiresAt: codexMetadataDate(row.expiresAt),
-      lastRefreshAt: codexMetadataDate(row.lastRefreshAt),
-      allocatorUpdatedAt: codexMetadataDate(row.allocatorUpdatedAt),
-      resetCreditsCheckedAt: codexMetadataDate(row.resetCreditsCheckedAt),
-      primaryResetAt: codexMetadataDate(row.primaryResetAt),
-      secondaryResetAt: codexMetadataDate(row.secondaryResetAt),
-      usageCheckedAt: codexMetadataDate(row.usageCheckedAt),
-      exhaustedUntil: codexMetadataDate(row.exhaustedUntil),
-      exhaustedKind:
-        row.exhaustedKind === "quota" || row.exhaustedKind === "rate_limit"
-          ? row.exhaustedKind
-          : null,
-    }));
-  });
-}
-
-export async function getOrganizationCodexRotationSettings(
-  db: Database,
-  input: { organizationId: string; actorSubjectId: string },
-): Promise<CodexRotationSettings | null> {
-  return await withOrganizationCodexAdministrator(db, input, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select({
-        activeCredentialId: schema.organizationCodexRotationSettings.activeCredentialId,
-        rotationEnabled: schema.organizationCodexRotationSettings.rotationEnabled,
-        rotationStrategy: schema.organizationCodexRotationSettings.rotationStrategy,
-      })
-      .from(schema.organizationCodexRotationSettings)
-      .where(eq(schema.organizationCodexRotationSettings.accountId, input.organizationId))
-      .limit(1);
-    return row ?? null;
-  });
-}
-
-export async function setActiveOrganizationCodexCredential(
-  db: Database,
-  input: { organizationId: string; actorSubjectId: string; credentialId: string },
-): Promise<{ activated: boolean; wakeTargets: CodexCapacityWakeTarget[] }> {
-  return await withOrganizationCodexAdministrator(db, input, async (scopedDb) => {
-    const [settings] = await scopedDb
-      .select({
-        id: schema.organizationCodexRotationSettings.id,
-        activeCredentialId: schema.organizationCodexRotationSettings.activeCredentialId,
-      })
-      .from(schema.organizationCodexRotationSettings)
-      .where(eq(schema.organizationCodexRotationSettings.accountId, input.organizationId))
-      .for("update")
-      .limit(1);
-    if (!settings) return { activated: false, wakeTargets: [] };
-    const [credential] = await scopedDb
-      .select({ id: schema.codexSubscriptionCredentials.id })
-      .from(schema.codexSubscriptionCredentials)
-      .where(
-        and(
-          eq(schema.codexSubscriptionCredentials.id, input.credentialId),
-          eq(schema.codexSubscriptionCredentials.organizationId, input.organizationId),
-          eq(schema.codexSubscriptionCredentials.authorityScope, "organization"),
-        ),
-      )
-      .limit(1);
-    if (!credential) return { activated: false, wakeTargets: [] };
-    const updated = await scopedDb
-      .update(schema.organizationCodexRotationSettings)
-      .set({ activeCredentialId: input.credentialId, updatedAt: new Date() })
-      .where(eq(schema.organizationCodexRotationSettings.accountId, input.organizationId))
-      .returning({ id: schema.organizationCodexRotationSettings.id });
-    if (updated.length === 0) return { activated: false, wakeTargets: [] };
-    const wakeTargets =
-      settings.activeCredentialId === input.credentialId
-        ? []
-        : await wakeOrganizationCodexCapacityWaitersInTransaction(scopedDb, {
-            accountId: input.organizationId,
-            reason: "organization_codex_active_credential_changed",
-            restoreWorkspaceId: null,
-          });
-    return { activated: true, wakeTargets };
-  });
-}
-
-export async function updateOrganizationCodexRotationSettings(
-  db: Database,
-  input: {
-    organizationId: string;
-    actorSubjectId: string;
-    rotationEnabled: boolean;
-  },
-): Promise<(CodexRotationSettings & { wakeTargets: CodexCapacityWakeTarget[] }) | null> {
-  return await withOrganizationCodexAdministrator(db, input, async (scopedDb) => {
-    const [current] = await scopedDb
-      .select({
-        rotationEnabled: schema.organizationCodexRotationSettings.rotationEnabled,
-      })
-      .from(schema.organizationCodexRotationSettings)
-      .where(eq(schema.organizationCodexRotationSettings.accountId, input.organizationId))
-      .for("update")
-      .limit(1);
-    if (!current) return null;
-    const [row] = await scopedDb
-      .update(schema.organizationCodexRotationSettings)
-      .set({
-        rotationEnabled: input.rotationEnabled,
-        updatedAt: new Date(),
-      })
-      .where(eq(schema.organizationCodexRotationSettings.accountId, input.organizationId))
-      .returning({
-        activeCredentialId: schema.organizationCodexRotationSettings.activeCredentialId,
-        rotationEnabled: schema.organizationCodexRotationSettings.rotationEnabled,
-        rotationStrategy: schema.organizationCodexRotationSettings.rotationStrategy,
-      });
-    if (!row) return null;
-    const changed = current.rotationEnabled !== input.rotationEnabled;
-    const wakeTargets = changed
-      ? await wakeOrganizationCodexCapacityWaitersInTransaction(scopedDb, {
-          accountId: input.organizationId,
-          reason: "organization_codex_rotation_settings_changed",
-          restoreWorkspaceId: null,
-        })
-      : [];
-    return { ...row, wakeTargets };
-  });
-}
-
-export async function renameOrganizationCodexAccount(
-  db: Database,
+  settings: Settings,
   input: {
     organizationId: string;
     actorSubjectId: string;
     credentialId: string;
-    label: string | null;
+    mode: "core";
   },
-): Promise<boolean> {
-  return await withOrganizationCodexAdministrator(db, input, async (scopedDb) => {
-    const updated = await scopedDb
-      .update(schema.codexSubscriptionCredentials)
-      .set({ label: input.label, updatedAt: new Date() })
-      .where(
-        and(
-          eq(schema.codexSubscriptionCredentials.id, input.credentialId),
-          eq(schema.codexSubscriptionCredentials.organizationId, input.organizationId),
-          eq(schema.codexSubscriptionCredentials.authorityScope, "organization"),
-        ),
-      )
-      .returning({ id: schema.codexSubscriptionCredentials.id });
-    return updated.length > 0;
-  });
+  fetchImpl: CodexFetch = fetch,
+  refresh?: CodexAuthDeps["refresh"],
+) {
+  return await readOrganizationCodexUsage(
+    db,
+    settings,
+    input,
+    (targetDb, use) => withOrganizationCodexAdministrator(targetDb, input, use),
+    fetchImpl,
+    refresh,
+  );
 }
 
-export async function disconnectOrganizationCodexAccount(
+/**
+ * One organization-managed Codex connection (canonical id or legacy alias)
+ * for an organization administrator; null when the id is not one.
+ */
+export async function findOrganizationCodexConnectionForAdministrator(
   db: Database,
+  settings: Settings,
   input: { organizationId: string; actorSubjectId: string; credentialId: string },
-): Promise<{
-  removed: boolean;
-  newActiveCredentialId: string | null;
-  wakeTargets: CodexCapacityWakeTarget[];
-}> {
-  return await withOrganizationCodexAdministrator(db, input, async (scopedDb) => {
-    const organizationWorkspaceIds = await lockOrganizationCodexSubscriptionSources(
-      scopedDb,
-      input.organizationId,
-    );
-    await captureOrganizationCodexSubscriptionSources(
-      scopedDb,
-      input.organizationId,
-      organizationWorkspaceIds,
-    );
-    const [settings] = await scopedDb
-      .select({ activeCredentialId: schema.organizationCodexRotationSettings.activeCredentialId })
-      .from(schema.organizationCodexRotationSettings)
-      .where(eq(schema.organizationCodexRotationSettings.accountId, input.organizationId))
-      .for("update")
-      .limit(1);
-    const removed = await scopedDb
-      .delete(schema.codexSubscriptionCredentials)
-      .where(
-        and(
-          eq(schema.codexSubscriptionCredentials.id, input.credentialId),
-          eq(schema.codexSubscriptionCredentials.organizationId, input.organizationId),
-          eq(schema.codexSubscriptionCredentials.authorityScope, "organization"),
-        ),
-      )
-      .returning({ id: schema.codexSubscriptionCredentials.id });
-    if (removed.length === 0) {
-      return {
-        removed: false,
-        newActiveCredentialId: settings?.activeCredentialId ?? null,
-        wakeTargets: [],
-      };
-    }
-    let newActiveCredentialId = settings?.activeCredentialId ?? null;
-    if (newActiveCredentialId === input.credentialId) {
-      const [replacement] = await scopedDb
-        .select({ id: schema.codexSubscriptionCredentials.id })
-        .from(schema.codexSubscriptionCredentials)
-        .where(
-          and(
-            eq(schema.codexSubscriptionCredentials.organizationId, input.organizationId),
-            eq(schema.codexSubscriptionCredentials.authorityScope, "organization"),
-          ),
-        )
-        .orderBy(desc(schema.codexSubscriptionCredentials.createdAt))
-        .limit(1);
-      newActiveCredentialId = replacement?.id ?? null;
-      await scopedDb
-        .update(schema.organizationCodexRotationSettings)
-        .set({ activeCredentialId: newActiveCredentialId, updatedAt: new Date() })
-        .where(eq(schema.organizationCodexRotationSettings.accountId, input.organizationId));
-    }
-    const wakeTargets = await wakeOrganizationCodexCapacityWaitersInTransaction(scopedDb, {
-      accountId: input.organizationId,
-      reason: "organization_codex_credential_disconnected",
-      restoreWorkspaceId: null,
-    });
-    return { removed: true, newActiveCredentialId, wakeTargets };
-  });
+) {
+  return await findOrganizationCodexConnection(db, settings, input, (targetDb, use) =>
+    withOrganizationCodexAdministrator(targetDb, input, use),
+  );
+}
+
+/**
+ * The bearer of one organization-managed Codex connection for an
+ * organization administrator (usage limit resets on the organization page).
+ */
+export function buildOrganizationCodexAdministratorTokenResolver(
+  db: Database,
+  settings: Settings,
+  input: { organizationId: string; actorSubjectId: string; credentialId: string },
+  refresh?: CodexAuthDeps["refresh"],
+) {
+  return buildOrganizationCodexConnectionTokenResolver(
+    db,
+    settings,
+    input,
+    (targetDb, use) => withOrganizationCodexAdministrator(targetDb, input, use),
+    refresh,
+  );
+}
+
+/**
+ * The workspace that files an organization administrator's usage limit reset
+ * redemptions for organization-managed accounts (the redemption ledger is
+ * kept per workspace): the oldest workspace they belong to, else the
+ * organization's oldest. The choice is stable, so prepare, redeem and the
+ * overview's recovery read all see the same attempts; the cross-workspace
+ * credit fence still keeps one logical redemption per provider credit.
+ */
+export async function resolveOrganizationCodexRedemptionWorkspace(
+  db: Database,
+  input: { organizationId: string; actorSubjectId: string },
+): Promise<string | null> {
+  const { workspaces } = await getOrganizationAdministrationOverview(db, input);
+  const ordered = [...workspaces].sort(
+    (left, right) =>
+      left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id),
+  );
+  const own = ordered.find((workspace) =>
+    workspace.members.some((member) => member.subjectId === input.actorSubjectId),
+  );
+  return (own ?? ordered[0])?.id ?? null;
+}
+
+/**
+ * The organization administrator check of the organization Codex routes on
+ * its own: the generic administration overview (42501 not authorized, P0002
+ * unknown organization) with no read of the legacy Codex tables, which 0680
+ * left read-only and blanked. The route reads the cutover row after this.
+ */
+export async function assertOrganizationCodexAdministrator(
+  db: Database,
+  input: { organizationId: string; actorSubjectId: string },
+): Promise<void> {
+  await withOrganizationCodexAdministrator(db, input, async () => undefined);
 }
 
 export type CodexAppsSettings = {
@@ -24631,130 +24325,17 @@ export type CodexAppsSettings = {
   designatedAt: Date | null;
 };
 
-export async function getCodexAppsSettings(
-  db: Database,
-  workspaceId: string,
-): Promise<CodexAppsSettings> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select({
-        credentialId: schema.codexAppsSettings.credentialId,
-        version: schema.codexAppsSettings.version,
-        designatedAt: schema.codexAppsSettings.designatedAt,
-      })
-      .from(schema.codexAppsSettings)
-      .where(eq(schema.codexAppsSettings.workspaceId, workspaceId))
-      .limit(1);
-    return row ?? { credentialId: null, version: 0, designatedAt: null };
-  });
-}
-
 export type CodexAppsCredentialAuthorization = {
   credentialId: string;
   ownerSubjectId: string;
 };
 
-function canManageCodexApps(permissions: unknown): boolean {
-  return (
-    Array.isArray(permissions) &&
-    (permissions.includes("connections:write") || permissions.includes("workspace:admin"))
-  );
-}
-
-export class CodexAppsAuthorizationRevokedError extends Error {
+/** A specific designated-credential unavailability observed at request time. */
+export class CodexAppsAuthorizationRevokedError extends CodexAppsCredentialUnavailable {
   constructor() {
     super("Codex Apps authorization is no longer active");
     this.name = "CodexAppsAuthorizationRevokedError";
   }
-}
-
-/** Exact Apps credential and owner, independent of every inference-capacity field. */
-export async function getCodexAppsCredentialAuthorizationForRun(
-  db: Database,
-  workspaceId: string,
-): Promise<CodexAppsCredentialAuthorization | null> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select({
-        credentialId: schema.codexAppsSettings.credentialId,
-        ownerSubjectId: schema.codexSubscriptionCredentials.connectedBySubjectId,
-      })
-      .from(schema.codexAppsSettings)
-      .innerJoin(
-        schema.codexSubscriptionCredentials,
-        and(
-          eq(schema.codexSubscriptionCredentials.id, schema.codexAppsSettings.credentialId),
-          eq(schema.codexSubscriptionCredentials.accountId, schema.codexAppsSettings.accountId),
-          eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),
-          eq(schema.codexSubscriptionCredentials.status, "active"),
-        ),
-      )
-      .where(eq(schema.codexAppsSettings.workspaceId, workspaceId))
-      .limit(1);
-    return row?.credentialId && row.ownerSubjectId
-      ? { credentialId: row.credentialId, ownerSubjectId: row.ownerSubjectId }
-      : null;
-  });
-}
-
-/**
- * Hold the exact designation, credential, and owner-membership authorization
- * stable through one outbound Apps request. Clear/disconnect operations share
- * the workspace advisory lock; credential or membership revocation must wait on
- * the row locks. The callback deliberately runs inside this short transaction so
- * no revocation can commit in the gap between a final check and network dispatch.
- */
-export async function withCodexAppsRequestAuthorization<T>(
-  db: Database,
-  input: { workspaceId: string; credentialId: string },
-  use: () => Promise<T>,
-): Promise<T> {
-  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
-    await scopedDb.execute(
-      sql`select pg_advisory_xact_lock(hashtextextended(${`codex-apps-settings:${input.workspaceId}`}, 0))`,
-    );
-    const [designation] = await scopedDb
-      .select({ credentialId: schema.codexAppsSettings.credentialId })
-      .from(schema.codexAppsSettings)
-      .where(eq(schema.codexAppsSettings.workspaceId, input.workspaceId))
-      .for("share")
-      .limit(1);
-    if (designation?.credentialId !== input.credentialId) {
-      throw new CodexAppsAuthorizationRevokedError();
-    }
-    const [credential] = await scopedDb
-      .select({
-        ownerSubjectId: schema.codexSubscriptionCredentials.connectedBySubjectId,
-        status: schema.codexSubscriptionCredentials.status,
-      })
-      .from(schema.codexSubscriptionCredentials)
-      .where(
-        and(
-          eq(schema.codexSubscriptionCredentials.workspaceId, input.workspaceId),
-          eq(schema.codexSubscriptionCredentials.id, input.credentialId),
-        ),
-      )
-      .for("share")
-      .limit(1);
-    if (!credential?.ownerSubjectId || credential.status !== "active") {
-      throw new CodexAppsAuthorizationRevokedError();
-    }
-    const [membership] = await scopedDb
-      .select({ permissions: schema.workspaceMemberships.permissions })
-      .from(schema.workspaceMemberships)
-      .where(
-        and(
-          eq(schema.workspaceMemberships.workspaceId, input.workspaceId),
-          eq(schema.workspaceMemberships.subjectId, credential.ownerSubjectId),
-        ),
-      )
-      .for("share")
-      .limit(1);
-    if (!canManageCodexApps(membership?.permissions)) {
-      throw new CodexAppsAuthorizationRevokedError();
-    }
-    return await use();
-  });
 }
 
 export type DesignateCodexAppsCredentialResult =
@@ -24765,560 +24346,17 @@ export type DesignateCodexAppsCredentialResult =
   | { kind: "forbidden" }
   | { kind: "unavailable" };
 
-export async function designateCodexAppsCredential(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    credentialId: string;
-    subjectId: string;
-    expectedVersion: number;
-  },
-): Promise<DesignateCodexAppsCredentialResult> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      await scopedDb.execute(
-        sql`select pg_advisory_xact_lock(hashtextextended(${`codex-apps-settings:${input.workspaceId}`}, 0))`,
-      );
-      const [currentRow] = await scopedDb
-        .select()
-        .from(schema.codexAppsSettings)
-        .where(eq(schema.codexAppsSettings.workspaceId, input.workspaceId))
-        .for("update")
-        .limit(1);
-      const current: CodexAppsSettings = currentRow
-        ? {
-            credentialId: currentRow.credentialId,
-            version: currentRow.version,
-            designatedAt: currentRow.designatedAt,
-          }
-        : { credentialId: null, version: 0, designatedAt: null };
-      if (current.version !== input.expectedVersion) return { kind: "conflict", ...current };
-      if (current.credentialId !== null) return { kind: "already_designated", ...current };
-
-      const [credential] = await scopedDb
-        .select({
-          connectedBySubjectId: schema.codexSubscriptionCredentials.connectedBySubjectId,
-          status: schema.codexSubscriptionCredentials.status,
-        })
-        .from(schema.codexSubscriptionCredentials)
-        .where(
-          and(
-            eq(schema.codexSubscriptionCredentials.accountId, input.accountId),
-            eq(schema.codexSubscriptionCredentials.workspaceId, input.workspaceId),
-            eq(schema.codexSubscriptionCredentials.id, input.credentialId),
-          ),
-        )
-        .for("update")
-        .limit(1);
-      if (!credential) return { kind: "not_found" };
-      if (credential.connectedBySubjectId !== input.subjectId) return { kind: "not_owner" };
-      if (credential.status !== "active") return { kind: "unavailable" };
-
-      const [membership] = await scopedDb
-        .select({ permissions: schema.workspaceMemberships.permissions })
-        .from(schema.workspaceMemberships)
-        .where(
-          and(
-            eq(schema.workspaceMemberships.accountId, input.accountId),
-            eq(schema.workspaceMemberships.workspaceId, input.workspaceId),
-            eq(schema.workspaceMemberships.subjectId, input.subjectId),
-          ),
-        )
-        .for("update")
-        .limit(1);
-      if (!canManageCodexApps(membership?.permissions)) return { kind: "forbidden" };
-
-      const now = new Date();
-      const version = current.version + 1;
-      const [updated] = await scopedDb
-        .insert(schema.codexAppsSettings)
-        .values({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          credentialId: input.credentialId,
-          version,
-          designatedAt: now,
-          updatedAt: now,
-        })
-        .onConflictDoUpdate({
-          target: schema.codexAppsSettings.workspaceId,
-          set: {
-            credentialId: input.credentialId,
-            version,
-            designatedAt: now,
-            updatedAt: now,
-          },
-        })
-        .returning({
-          credentialId: schema.codexAppsSettings.credentialId,
-          version: schema.codexAppsSettings.version,
-          designatedAt: schema.codexAppsSettings.designatedAt,
-        });
-      if (!updated?.credentialId || !updated.designatedAt) {
-        throw new Error("Codex Apps designation was not persisted");
-      }
-      await scopedDb.insert(schema.auditEvents).values(
-        withLosslessContentWriteVersion(
-          {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            subjectId: input.subjectId,
-            action: "codex_apps.designated",
-            targetType: "codex_subscription_credential",
-            targetId: input.credentialId,
-            metadata: { version },
-          },
-          "metadata",
-          "metadataCodecVersion",
-        ),
-      );
-      return { kind: "updated", ...updated };
-    },
-  );
-}
-
 export type ClearCodexAppsCredentialResult = {
   kind: "updated" | "unchanged" | "conflict" | "forbidden";
 } & CodexAppsSettings;
 
-export async function clearCodexAppsCredential(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    subjectId: string;
-    expectedVersion: number;
-  },
-): Promise<ClearCodexAppsCredentialResult> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      await scopedDb.execute(
-        sql`select pg_advisory_xact_lock(hashtextextended(${`codex-apps-settings:${input.workspaceId}`}, 0))`,
-      );
-      const [row] = await scopedDb
-        .select()
-        .from(schema.codexAppsSettings)
-        .where(eq(schema.codexAppsSettings.workspaceId, input.workspaceId))
-        .for("update")
-        .limit(1);
-      const current: CodexAppsSettings = row
-        ? {
-            credentialId: row.credentialId,
-            version: row.version,
-            designatedAt: row.designatedAt,
-          }
-        : { credentialId: null, version: 0, designatedAt: null };
-      const [membership] = await scopedDb
-        .select({ permissions: schema.workspaceMemberships.permissions })
-        .from(schema.workspaceMemberships)
-        .where(
-          and(
-            eq(schema.workspaceMemberships.accountId, input.accountId),
-            eq(schema.workspaceMemberships.workspaceId, input.workspaceId),
-            eq(schema.workspaceMemberships.subjectId, input.subjectId),
-          ),
-        )
-        .for("update")
-        .limit(1);
-      if (!canManageCodexApps(membership?.permissions)) {
-        return { kind: "forbidden", ...current };
-      }
-      if (current.version !== input.expectedVersion) return { kind: "conflict", ...current };
-      if (current.credentialId === null) return { kind: "unchanged", ...current };
-
-      const now = new Date();
-      const version = current.version + 1;
-      const [updated] = await scopedDb
-        .update(schema.codexAppsSettings)
-        .set({
-          credentialId: null,
-          version,
-          designatedAt: null,
-          updatedAt: now,
-        })
-        .where(eq(schema.codexAppsSettings.workspaceId, input.workspaceId))
-        .returning({
-          credentialId: schema.codexAppsSettings.credentialId,
-          version: schema.codexAppsSettings.version,
-          designatedAt: schema.codexAppsSettings.designatedAt,
-        });
-      if (!updated) throw new Error("Codex Apps designation clear was not persisted");
-      await scopedDb.insert(schema.auditEvents).values(
-        withLosslessContentWriteVersion(
-          {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            subjectId: input.subjectId,
-            action: "codex_apps.cleared",
-            targetType: "codex_subscription_credential",
-            targetId: current.credentialId,
-            metadata: { version },
-          },
-          "metadata",
-          "metadataCodecVersion",
-        ),
-      );
-      return { kind: "updated", ...updated };
-    },
-  );
-}
-
-/**
- * The ONLY decrypt-read accessor. Fails closed. Never call from an API route that
- * returns the result.
- *
- * The run's account is the resolved pin-or-active credential id, not LIMIT 1: the
- * caller (worker) resolves the effective credential id and passes it here so a
- * pinned session loads its SPECIFIC account. RLS still constrains the row to the
- * workspace; an unknown/disconnected id returns null → the caller treats it as
- * "needs relogin / re-pick".
- */
+/** Historical public authority shape; runtime token loading uses the core. */
 export type CodexAcceptedLeaseAuthority = {
   turnId: string;
   holderId: string;
   generation: number;
 };
-type CodexAcceptedCredentialAuthority =
-  | CodexAcceptedLeaseAuthority
-  | {
-      turnId: string;
-      purpose: "capacity_refresh";
-    };
-
-async function codexCredentialUseCondition(
-  tx: Database,
-  workspaceId: string,
-  authority?: CodexAcceptedCredentialAuthority,
-): Promise<SQL | null> {
-  if (!authority) return (await effectiveCodexCredentialPoolCondition(tx, workspaceId)).condition;
-  if ("purpose" in authority) {
-    return sql`opengeni_private.codex_credential_serves_turn(
-      ${schema.codexSubscriptionCredentials.accountId}, ${workspaceId}::uuid,
-      ${schema.codexSubscriptionCredentials.id}, ${authority.turnId}::uuid)`;
-  }
-  return sql`exists (
-    select 1 from codex_credential_leases lease
-    join session_turns accepted on accepted.id = lease.turn_id
-      and accepted.workspace_id = lease.workspace_id and accepted.account_id = lease.account_id
-    join sessions session on session.id = accepted.session_id
-      and session.workspace_id = accepted.workspace_id and session.account_id = accepted.account_id
-      and session.active_turn_id = accepted.id
-    where lease.workspace_id = ${workspaceId}
-      and lease.credential_id = ${schema.codexSubscriptionCredentials.id}
-      and lease.turn_id = ${authority.turnId} and lease.holder_id = ${authority.holderId}
-      and lease.generation = ${authority.generation}
-      and lease.leased_until > clock_timestamp()
-      and accepted.status = 'running' and accepted.active_attempt_id is not null
-      and opengeni_private.codex_credential_serves_turn(
-        lease.account_id, lease.workspace_id, lease.credential_id, lease.turn_id)
-  )`;
-}
-
-export async function loadCodexCredentialForRun(
-  db: Database,
-  settings: Settings,
-  workspaceId: string,
-  credentialId: string,
-  authority?: CodexAcceptedCredentialAuthority,
-): Promise<CodexCredentialForRun | null> {
-  const key = environmentsEncryptionKeyBytes(settings);
-  if (!key) {
-    throw new Error(
-      "codex credential present but OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is not configured",
-    );
-  }
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const condition = await codexCredentialUseCondition(scopedDb, workspaceId, authority);
-    if (!condition) return null;
-    const [row] = await scopedDb
-      .select()
-      .from(schema.codexSubscriptionCredentials)
-      .where(and(eq(schema.codexSubscriptionCredentials.id, credentialId), condition))
-      .limit(1);
-    if (!row) {
-      return null;
-    }
-    let tokens: CodexCredentialTokens;
-    try {
-      // The stored blob uses OpenAI's snake_case token field names; map to the
-      // camelCase internal shape. Callers (route + worker) write snake_case.
-      const parsed = JSON.parse(decryptEnvironmentValue(key, row.credentialEncrypted)) as {
-        access_token: string;
-        refresh_token: string;
-        id_token: string;
-      };
-      tokens = {
-        accessToken: parsed.access_token,
-        refreshToken: parsed.refresh_token,
-        idToken: parsed.id_token,
-      };
-    } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
-      throw new Error(
-        `failed to decrypt codex credential for workspace ${workspaceId}: ${reason}`,
-        { cause: error },
-      );
-    }
-    return {
-      id: row.id,
-      version: row.version,
-      workspaceId,
-      tokens,
-      chatgptAccountId: row.chatgptAccountId,
-      scopes: row.scopes,
-      planType: row.planType,
-      planPreviousType: row.planPreviousType,
-      planChangedAt: row.planChangedAt,
-      planEntitlementExclusion: readCodexPlanEntitlementExclusion(row.planEntitlementExclusion),
-      isFedramp: row.isFedramp,
-      expiresAt: row.expiresAt,
-      lastRefreshAt: row.lastRefreshAt,
-      status: row.status,
-      lastError: row.lastError,
-      exhaustedUntil: row.exhaustedUntil,
-      exhaustedKind:
-        row.exhaustedKind === "quota" || row.exhaustedKind === "rate_limit"
-          ? row.exhaustedKind
-          : null,
-      exhaustedRevision: row.exhaustedRevision,
-    };
-  });
-}
-
-/**
- * Column updates for one provider plan observation. The plan entitlement
- * exclusion names the plan it was observed under; a different plan retires it
- * in the same statement.
- */
-function codexPlanObservationSet(planType: string, observedAt: Date) {
-  return {
-    planType,
-    planCheckedAt: observedAt,
-    ...codexPlanChangeRecordSet(planType, observedAt),
-    planEntitlementExclusion: sql`case
-      when lower(${schema.codexSubscriptionCredentials.planType}) is distinct from lower(${planType})
-        then null
-      else ${schema.codexSubscriptionCredentials.planEntitlementExclusion}
-    end`,
-  };
-}
-
-/**
- * Record a plan change (the plan before it, and when it was observed) only
- * when a known plan moves to a different one. An observation of the same plan
- * keeps the earlier record, so whichever writer notices a downgrade first
- * (usage read, token refresh, reconnect, or a failing turn's re-check) leaves
- * the evidence for the next ambiguous refusal. UPDATE expressions read the old
- * row, so `plan_type` here is the plan before this observation.
- */
-function codexPlanChangeRecordSet(planType: string, observedAt: Date) {
-  const changed = sql`${schema.codexSubscriptionCredentials.planType} is not null
-      and lower(${schema.codexSubscriptionCredentials.planType}) is distinct from lower(${planType})`;
-  return {
-    planPreviousType: sql`case when ${changed}
-      then left(${schema.codexSubscriptionCredentials.planType}, 128)
-      else ${schema.codexSubscriptionCredentials.planPreviousType}
-    end`,
-    planChangedAt: sql`case when ${changed}
-      then ${observedAt.toISOString()}::timestamptz
-      else ${schema.codexSubscriptionCredentials.planChangedAt}
-    end`,
-  };
-}
-
-/**
- * Persist rotated tokens after a successful refresh. Caller pre-encrypts.
- *
- * COMPARE-AND-SET (P1-c): the write is guarded by the (id, version) the resolver
- * loaded and by the row still being healthy/active. If a disconnect→reconnect
- * replaced/rotated the row, or a definitive model refusal quarantined it while
- * the provider refresh was in flight, the guard matches 0 rows. We therefore do
- * not clobber fresh tokens or reactivate a quarantined credential. Returns true
- * iff the guarded row was updated; false means "credential changed under me —
- * the rotation is moot, drop it."
- */
-export async function recordCodexTokenRefresh(
-  db: Database,
-  input: {
-    id: string;
-    version: number;
-    workspaceId: string;
-    credentialEncrypted: string;
-    expiresAt: Date | null;
-    lastRefreshAt: Date;
-    /**
-     * `chatgpt_plan_type` from the refreshed id_token, when the provider
-     * returned one. A changed plan retires any plan entitlement exclusion.
-     */
-    planType?: string | null | undefined;
-    authority?: CodexAcceptedCredentialAuthority | undefined;
-  },
-): Promise<boolean> {
-  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
-    const condition = await codexCredentialUseCondition(
-      scopedDb,
-      input.workspaceId,
-      input.authority,
-    );
-    if (!condition) return false;
-    const updated = await scopedDb
-      .update(schema.codexSubscriptionCredentials)
-      .set({
-        credentialEncrypted: input.credentialEncrypted,
-        expiresAt: input.expiresAt,
-        lastRefreshAt: input.lastRefreshAt,
-        ...(typeof input.planType === "string" && input.planType.length > 0
-          ? codexPlanObservationSet(input.planType, input.lastRefreshAt)
-          : {}),
-        status: "active",
-        lastError: null,
-        version: sql`${schema.codexSubscriptionCredentials.version} + 1`,
-        updatedAt: new Date(),
-      })
-      .where(
-        and(
-          eq(schema.codexSubscriptionCredentials.id, input.id),
-          condition,
-          eq(schema.codexSubscriptionCredentials.version, input.version),
-          eq(schema.codexSubscriptionCredentials.status, "active"),
-        ),
-      )
-      .returning({ id: schema.codexSubscriptionCredentials.id });
-    return updated.length > 0;
-  });
-}
-
-/**
- * Cross-process single-flight boundary for one workspace credential refresh.
- * The callback must re-read the credential after entering: a waiter normally
- * observes the winner's incremented version and skips the provider refresh.
- * Holding one DB connection over the short OAuth request is deliberate—the
- * alternative can double-spend a rotating refresh token before CAS runs.
- */
-export async function withCodexCredentialRefreshLock<T>(
-  db: Database,
-  workspaceId: string,
-  credentialId: string,
-  fn: (lockedDb: Database) => Promise<T>,
-): Promise<T> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    await scopedDb.execute(sql`set local lock_timeout = '30s'`);
-    await scopedDb.execute(
-      sql`select pg_advisory_xact_lock(hashtextextended(${`codex-refresh:${credentialId}`}, 0))`,
-    );
-    return await fn(scopedDb);
-  });
-}
-
-/**
- * Surface a permanent or transient failure on a SPECIFIC credential row.
- *
- * COMPARE-AND-SET (P1-c): the status is stamped only if the row STILL matches the
- * (id, version) the resolver loaded, and only while the row remains active. This
- * stops a refresh that began before a disconnect→reconnect (or a concurrent
- * definitive model quarantine) from stamping `needs_relogin` on the brand-new or
- * already-quarantined credential — with N accounts per workspace a workspace-wide
- * write would be flat-out wrong (it would scribble on every account). Returns
- * true iff the guarded row was updated.
- */
-export async function setCodexCredentialStatus(
-  db: Database,
-  workspaceId: string,
-  status: "active" | "needs_relogin" | "error",
-  lastError: string | null,
-  target: { id: string; version: number },
-  authority?: CodexAcceptedCredentialAuthority,
-): Promise<boolean> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const condition = await codexCredentialUseCondition(scopedDb, workspaceId, authority);
-    if (!condition) return false;
-    const updated = await scopedDb
-      .update(schema.codexSubscriptionCredentials)
-      .set({ status, lastError, updatedAt: new Date() })
-      .where(
-        and(
-          eq(schema.codexSubscriptionCredentials.id, target.id),
-          condition,
-          eq(schema.codexSubscriptionCredentials.version, target.version),
-          eq(schema.codexSubscriptionCredentials.status, "active"),
-        ),
-      )
-      .returning({ id: schema.codexSubscriptionCredentials.id });
-    return updated.length > 0;
-  });
-}
-
-/**
- * Metadata-only runtime quarantine for a credential selected by id. The version
- * is read and written in one RLS-scoped transaction, so a reconnect that rotates
- * the credential family between those statements makes the CAS miss instead of
- * poisoning the fresh tokens. This is used after a model request still returns
- * 401 after the transport's forced-refresh retry.
- */
-export async function setCodexCredentialStatusById(
-  db: Database,
-  workspaceId: string,
-  credentialId: string,
-  status: "active" | "needs_relogin" | "error",
-  lastError: string | null,
-): Promise<boolean> {
-  const mutation = await withCodexCapacityMutation(
-    db,
-    { workspaceId, reason: "credential_status_changed", mutationSource: "effective" },
-    async (scopedDb) => {
-      const pool = await effectiveCodexCredentialPoolCondition(scopedDb, workspaceId);
-      if (!pool.condition) return { result: false, changed: false };
-      const [row] = await scopedDb
-        .select({
-          version: schema.codexSubscriptionCredentials.version,
-          status: schema.codexSubscriptionCredentials.status,
-        })
-        .from(schema.codexSubscriptionCredentials)
-        .where(and(eq(schema.codexSubscriptionCredentials.id, credentialId), pool.condition))
-        .limit(1);
-      if (!row) {
-        return { result: false, changed: false };
-      }
-      const updated = await scopedDb
-        .update(schema.codexSubscriptionCredentials)
-        .set({
-          status,
-          lastError,
-          updatedAt: new Date(),
-          // Explicit reactivation is a new credential-health generation. A
-          // same-turn status refusal can recover only after this or reconnect.
-          ...(status === "active" && row.status !== "active" ? { version: row.version + 1 } : {}),
-        })
-        .where(
-          and(
-            eq(schema.codexSubscriptionCredentials.id, credentialId),
-            pool.condition,
-            eq(schema.codexSubscriptionCredentials.version, row.version),
-            eq(schema.codexSubscriptionCredentials.status, row.status),
-          ),
-        )
-        .returning({ id: schema.codexSubscriptionCredentials.id });
-      return { result: updated.length > 0, changed: updated.length > 0 };
-    },
-  );
-  return mutation.result;
-}
-
-/**
- * Metadata-only read for API routes, repointed to the per-workspace ACTIVE
- * credential. NEVER selects credential_encrypted.
- *
- * Reads codex_rotation_settings.active_credential_id and joins the credential by
- * id (deterministic). If the pointer is NULL but credentials exist (the
- * mid-disconnect window), it falls back to the most-recently-connected row and
- * lazily repairs the pointer so the next read is deterministic. The returned
- * `credentialId` is the active row's id (null when no credential exists at all).
- */
+/** Public metadata compatibility projection; never contains credential material. */
 export type CodexCredentialStatus = {
   connected: boolean;
   credentialId: string | null;
@@ -25331,114 +24369,6 @@ export type CodexCredentialStatus = {
   lastError: string | null;
 };
 
-async function getCodexCredentialStatusScoped(
-  scopedDb: Database,
-  workspaceId: string,
-): Promise<CodexCredentialStatus | null> {
-  const pool = await effectiveCodexCredentialPoolCondition(scopedDb, workspaceId);
-  if (!pool.condition || pool.source.effectiveSource === "disabled") return null;
-  const cols = {
-    id: schema.codexSubscriptionCredentials.id,
-    chatgptAccountId: schema.codexSubscriptionCredentials.chatgptAccountId,
-    scopes: schema.codexSubscriptionCredentials.scopes,
-    planType: schema.codexSubscriptionCredentials.planType,
-    status: schema.codexSubscriptionCredentials.status,
-    expiresAt: schema.codexSubscriptionCredentials.expiresAt,
-    lastRefreshAt: schema.codexSubscriptionCredentials.lastRefreshAt,
-    lastError: schema.codexSubscriptionCredentials.lastError,
-  } as const;
-  const organizationSource = pool.source.effectiveSource === "organization";
-  const [settingsRow] = organizationSource
-    ? await scopedDb
-        .select({
-          activeCredentialId: schema.organizationCodexRotationSettings.activeCredentialId,
-        })
-        .from(schema.organizationCodexRotationSettings)
-        .where(eq(schema.organizationCodexRotationSettings.accountId, pool.source.accountId))
-        .for("update")
-        .limit(1)
-    : await scopedDb
-        .select({
-          activeCredentialId: schema.codexRotationSettings.activeCredentialId,
-        })
-        .from(schema.codexRotationSettings)
-        .where(eq(schema.codexRotationSettings.workspaceId, workspaceId))
-        .for("update")
-        .limit(1);
-
-  let row:
-    | {
-        id: string;
-        chatgptAccountId: string | null;
-        scopes: string | null;
-        planType: string | null;
-        status: string;
-        expiresAt: Date | null;
-        lastRefreshAt: Date | null;
-        lastError: string | null;
-      }
-    | undefined;
-  if (settingsRow?.activeCredentialId) {
-    [row] = await scopedDb
-      .select(cols)
-      .from(schema.codexSubscriptionCredentials)
-      .where(
-        and(
-          eq(schema.codexSubscriptionCredentials.id, settingsRow.activeCredentialId),
-          pool.condition,
-        ),
-      )
-      .limit(1);
-  }
-  if (!row) {
-    // No active pointer (or it dangles): fall back to the most-recently-connected
-    // credential and lazily repair the pointer so the active account is stable.
-    [row] = await scopedDb
-      .select(cols)
-      .from(schema.codexSubscriptionCredentials)
-      .where(
-        organizationSource
-          ? and(
-              pool.condition,
-              eq(schema.codexSubscriptionCredentials.status, "active"),
-              eq(schema.codexSubscriptionCredentials.allocatorEnabled, true),
-            )
-          : pool.condition,
-      )
-      .orderBy(
-        organizationSource
-          ? asc(schema.codexSubscriptionCredentials.createdAt)
-          : desc(schema.codexSubscriptionCredentials.createdAt),
-        asc(schema.codexSubscriptionCredentials.id),
-      )
-      .limit(1);
-    // An organization default can be deliberately unassigned here. A local
-    // readiness read must never rewrite that organization's default.
-    if (row && settingsRow && !organizationSource && settingsRow.activeCredentialId !== row.id) {
-      await scopedDb
-        .update(schema.codexRotationSettings)
-        .set({ activeCredentialId: row.id, updatedAt: new Date() })
-        .where(eq(schema.codexRotationSettings.workspaceId, workspaceId));
-    }
-  }
-  if (!row) {
-    return null;
-  }
-  const { id, ...rest } = row;
-  return { connected: rest.status === "active", credentialId: id, ...rest };
-}
-
-export async function getCodexCredentialStatus(
-  db: Database,
-  workspaceId: string,
-): Promise<CodexCredentialStatus | null> {
-  return await withWorkspaceRls(
-    db,
-    workspaceId,
-    async (scopedDb) => await getCodexCredentialStatusScoped(scopedDb, workspaceId),
-  );
-}
-
 /**
  * Single source of truth for "this workspace has an ACTIVE ChatGPT/Codex
  * subscription connected AND the feature is enabled for this deployment."
@@ -25446,16 +24376,42 @@ export async function getCodexCredentialStatus(
  * This is the SAME condition `settingsWithCodexCredential` (worker) uses to
  * decide whether to inject the synthetic codex-subscription provider, so billing
  * and provider-injection cannot drift. Metadata-only read (never the secret).
+ *
+ * Gated by the organization's Codex cutover row (M3 PR4): a missing or disabled
+ * row is maintenance (false); an enabled row asks the shared core whether a connection
+ * can serve new work of `context.subjectId` here (shared capacity only
+ * without a human subject). Retired decision tables are never read.
  */
 export async function workspaceCodexSubscriptionActive(
   db: Database,
   settings: Pick<Settings, "codexSubscriptionEnabled">,
   workspaceId: string,
   acceptedTurnId?: string,
+  context: { accountId?: string | null; subjectId?: string | null } = {},
 ): Promise<boolean> {
   if (!settings.codexSubscriptionEnabled) {
     return false;
   }
+  return await withCodexActiveReadRetry(async () => {
+    const { accountId, disposition } = await readCodexCutoverDispositionForWorkspace(
+      db,
+      workspaceId,
+      context.accountId,
+    );
+    if (disposition === "maintenance") return false;
+    if (disposition === "core") {
+      const serving = await listSubscriptionCoreCodexServingConnections(db, {
+        accountId,
+        workspaceId,
+        subjectId: context.subjectId ?? null,
+      });
+      return serving.length > 0;
+    }
+    return false;
+  });
+}
+
+async function withCodexActiveReadRetry(read: () => Promise<boolean>): Promise<boolean> {
   // Bounded re-read. A TRANSIENT read failure (a pooled-connection blip or a
   // lost RLS GUC — now thrown loud by withRlsContext's read-back guard rather
   // than silently returning zero rows) must never permanently decide a
@@ -25468,36 +24424,7 @@ export async function workspaceCodexSubscriptionActive(
   let lastError: unknown;
   for (let attempt = 0; attempt < CODEX_ACTIVE_READ_ATTEMPTS; attempt++) {
     try {
-      return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-        const pool = await effectiveCodexCredentialPoolCondition(scopedDb, workspaceId);
-        if (acceptedTurnId) {
-          const acceptedSource = await codexSourceForTurn(
-            scopedDb,
-            workspaceId,
-            acceptedTurnId,
-            pool.source.effectiveSource,
-          );
-          pool.source.effectiveSource = acceptedSource;
-          pool.condition =
-            acceptedSource === "disabled"
-              ? null
-              : codexCredentialPoolCondition({
-                  accountId: pool.source.accountId,
-                  workspaceId,
-                  source: acceptedSource,
-                });
-        }
-        if (!pool.condition || pool.source.effectiveSource === "disabled") return false;
-        // Provider admission is pool-aware even when rotation is disabled. The
-        // active pointer governs allocation policy, not whether the connected
-        // subscription provider exists for billing and routing.
-        const [row] = await scopedDb
-          .select({ id: schema.codexSubscriptionCredentials.id })
-          .from(schema.codexSubscriptionCredentials)
-          .where(and(pool.condition, eq(schema.codexSubscriptionCredentials.status, "active")))
-          .limit(1);
-        return Boolean(row);
-      });
+      return await read();
     } catch (error) {
       lastError = error;
       if (attempt < CODEX_ACTIVE_READ_ATTEMPTS - 1) {
@@ -25530,8 +24457,8 @@ const CODEX_ACTIVE_READ_RETRY_MS = 50;
  * True iff: the turn's model is a `codex/<slug>` id (`isCodexBilledModel`) AND
  * the deployment flag is on AND the workspace has an ACTIVE credential. A true
  * result means the turn is paid by the USER's ChatGPT/Codex plan and MUST consume
- * ZERO OpenGeni credits: callers skip the credit-balance / model-cost / token
- * gates and skip OpenGeni pricing + credit debit.
+ * ZERO Opengeni credits: callers skip the credit-balance / model-cost / token
+ * gates and skip Opengeni pricing + credit debit.
  *
  * The prefix ALONE never returns true: an unconnected user typing `codex/...`
  * gets the normal gates (and the worker fails the turn for a missing credential),
@@ -25542,69 +24469,54 @@ export async function isCodexBilledTurn(input: {
   settings: Pick<Settings, "codexSubscriptionEnabled">;
   workspaceId: string;
   model: string | null | undefined;
+  /** The organization, when the caller holds it (saves one lookup). */
+  accountId?: string | null;
+  /**
+   * The accepted work's causal human. On the shared core their own personal
+   * Codex connection in their Personal workspace also funds the turn.
+   */
+  subjectId?: string | null;
   /**
    * Precomputed `workspaceCodexSubscriptionActive` result (P2-b). When the caller
    * already resolved the active flag for provider injection, pass it here so the
    * billed-turn predicate and the routing overlay read the credential ONCE and
    * cannot disagree across a concurrent disconnect/reconnect — a drift that would
-   * either wrongly debit OpenGeni credits for a ChatGPT-paid turn or the inverse.
+   * either wrongly debit Opengeni credits for a ChatGPT-paid turn or the inverse.
    */
   active?: boolean;
+  /** Exact durable work; required for personal funding outside a Personal workspace. */
+  acceptedTurn?: { sessionId: string; turnId: string };
 }): Promise<boolean> {
   if (!isCodexBilledModel(input.model)) {
     return false; // cheap; no db hit on the common path
   }
+  if (!input.settings.codexSubscriptionEnabled) return false;
+  if (input.acceptedTurn) {
+    const accountId =
+      input.accountId ?? (await rlsContextForWorkspace(input.db, input.workspaceId)).accountId;
+    const { readCodexCutoverDisposition } = await import("./subscription-core-codex-compat");
+    const disposition = await readCodexCutoverDisposition(input.db, accountId, input.workspaceId);
+    if (disposition !== "core") return false;
+    const { subscriptionCoreAcceptedCodexTurnIsFunded } = await import("./subscription-core-codex");
+    return subscriptionCoreAcceptedCodexTurnIsFunded(input.db, {
+      accountId,
+      workspaceId: input.workspaceId,
+      ...input.acceptedTurn,
+      productModelId: input.model!,
+    });
+  }
   if (input.active !== undefined) {
     return input.active;
   }
-  return workspaceCodexSubscriptionActive(input.db, input.settings, input.workspaceId);
+  return workspaceCodexSubscriptionActive(input.db, input.settings, input.workspaceId, undefined, {
+    accountId: input.accountId ?? null,
+    subjectId: input.subjectId ?? null,
+  });
 }
 
 // ---------------------------------------------------------------------------
 // Multi-account (P1) metadata accessors. All metadata-only — NEVER decrypt.
 // ---------------------------------------------------------------------------
-
-export type CodexAccountStatus = {
-  allowedModelIds?: string[] | null;
-  id: string;
-  source: Exclude<EffectiveCodexSubscriptionSource, "disabled">;
-  chatgptAccountId: string | null;
-  label: string | null;
-  accountEmail: string | null;
-  planType: string | null;
-  /** Last provider plan observation; absent on pre-plan-tracking fixtures. */
-  planCheckedAt?: Date | null;
-  /** Plan before the most recent observed plan change, and when it was seen. */
-  planPreviousType?: string | null;
-  planChangedAt?: Date | null;
-  /** Models the current plan was proven not to include (see codex-plan-entitlement). */
-  planEntitlementExclusion?: CodexPlanEntitlementExclusion | null;
-  status: string; // active | needs_relogin | error
-  /** New automatic allocations only; health/refresh and existing turns remain independent. */
-  allocatorEnabled: boolean;
-  allocatorVersion: number;
-  allocatorUpdatedBySubjectId: string | null;
-  allocatorUpdatedAt: Date | null;
-  resetCreditAvailableCount: number | null;
-  resetCreditsCheckedAt: Date | null;
-  connectedBySubjectId: string | null;
-  isActive: boolean;
-  expiresAt: Date | null;
-  lastRefreshAt: Date | null;
-  lastError: string | null;
-  // P2 cached usage (plaintext metadata; rides along on this metadata-only read
-  // with ZERO provider calls and ZERO decrypts). null until the first refresh.
-  primaryUsedPercent: number | null;
-  primaryResetAt: Date | null;
-  secondaryUsedPercent: number | null;
-  secondaryResetAt: Date | null;
-  usageCheckedAt: Date | null;
-  // P3 rotation cooldown: when set and in the future, this account is cooling-down
-  // (rotated-off after a usage cap) and the engine skips it. null ⇒ not cooling.
-  exhaustedUntil: Date | null;
-  /** Typed provider-refusal provenance; null for legacy/cleared cooldowns. */
-  exhaustedKind: CodexCredentialCooldownKind | null;
-};
 
 /**
  * A metadata-only scheduling candidate observed while the workspace's rotation
@@ -25745,50 +24657,6 @@ export class CodexCredentialFailoverExhaustedError extends Error {
   }
 }
 
-function codexFailoverMetadata(metadata: Record<string, unknown> | null | undefined): {
-  failedCredentialIds: Set<string>;
-  failoverCount: number;
-  maxFailovers: number | null;
-  exhausted: boolean;
-} {
-  const failedCredentialIds = new Set(
-    Array.isArray(metadata?.codexCredentialFailedIds)
-      ? metadata.codexCredentialFailedIds.filter(
-          (value): value is string => typeof value === "string" && value.length > 0,
-        )
-      : [],
-  );
-  const rawCount = metadata?.codexCredentialFailovers;
-  const failoverCount =
-    typeof rawCount === "number" && Number.isSafeInteger(rawCount) && rawCount >= 0
-      ? rawCount
-      : failedCredentialIds.size;
-  const rawLimit = metadata?.codexCredentialFailoverLimit;
-  const maxFailovers =
-    typeof rawLimit === "number" && Number.isSafeInteger(rawLimit) && rawLimit >= 1
-      ? rawLimit
-      : null;
-  return {
-    failedCredentialIds,
-    failoverCount,
-    maxFailovers,
-    exhausted:
-      metadata?.codexCredentialFailoverExhausted === true ||
-      (maxFailovers !== null && failoverCount > maxFailovers),
-  };
-}
-
-function codexCredentialFailoverLimitForLease(
-  accounts: readonly CodexLeaseAccountStatus[],
-  servingCredentialId: string | null,
-): number {
-  const allocatableCount = accounts.filter((account) => account.allocatorEnabled).length;
-  const servingIsAllocatable = accounts.some(
-    (account) => account.id === servingCredentialId && account.allocatorEnabled,
-  );
-  return Math.max(1, allocatableCount - (servingIsAllocatable ? 1 : 0));
-}
-
 /**
  * Five minutes is deliberately much longer than the one-minute heartbeat and
  * much shorter than a five-hour allowance window. A killed worker therefore
@@ -25797,679 +24665,9 @@ function codexCredentialFailoverLimitForLease(
  */
 export const CODEX_CREDENTIAL_LEASE_TTL_MS = 5 * 60_000;
 
-type CodexLeaseCandidateRow = {
-  allowed_model_ids: string[] | null;
-  id: string;
-  chatgpt_account_id: string | null;
-  label: string | null;
-  account_email: string | null;
-  plan_type: string | null;
-  plan_checked_at?: Date | string | null;
-  plan_entitlement_exclusion?: unknown;
-  status: string;
-  allocator_enabled: boolean;
-  expires_at: Date | string | null;
-  last_refresh_at: Date | string | null;
-  last_error: string | null;
-  primary_used_percent: number | null;
-  primary_reset_at: Date | string | null;
-  secondary_used_percent: number | null;
-  secondary_reset_at: Date | string | null;
-  usage_checked_at: Date | string | null;
-  exhausted_until: Date | string | null;
-  exhausted_kind: string | null;
-  exhausted_revision?: number | string | null;
-  credential_version?: number | string | null;
-  selection_count: number;
-  last_selected_at: Date | string | null;
-  active_lease_count: number;
-};
-
 function codexMetadataDate(value: Date | string | null | undefined): Date | null {
   if (value == null) return null;
   return value instanceof Date ? value : new Date(value);
-}
-
-function mapCodexLeaseCandidate(
-  row: CodexLeaseCandidateRow,
-  activeCredentialId: string | null,
-): CodexLeaseAccountStatus {
-  return {
-    id: row.id,
-    chatgptAccountId: row.chatgpt_account_id,
-    allowedModelIds: row.allowed_model_ids,
-    label: row.label,
-    accountEmail: row.account_email,
-    planType: row.plan_type,
-    planCheckedAt: codexMetadataDate(row.plan_checked_at),
-    planEntitlementExclusion: readCodexPlanEntitlementExclusion(row.plan_entitlement_exclusion),
-    status: row.status,
-    allocatorEnabled: row.allocator_enabled,
-    isActive: row.id === activeCredentialId,
-    expiresAt: codexMetadataDate(row.expires_at),
-    lastRefreshAt: codexMetadataDate(row.last_refresh_at),
-    lastError: row.last_error,
-    primaryUsedPercent: row.primary_used_percent,
-    primaryResetAt: codexMetadataDate(row.primary_reset_at),
-    secondaryUsedPercent: row.secondary_used_percent,
-    secondaryResetAt: codexMetadataDate(row.secondary_reset_at),
-    usageCheckedAt: codexMetadataDate(row.usage_checked_at),
-    exhaustedUntil: codexMetadataDate(row.exhausted_until),
-    exhaustedRevision: Number(row.exhausted_revision ?? 0),
-    credentialVersion: Number(row.credential_version ?? 0),
-    exhaustedKind:
-      row.exhausted_kind === "quota" || row.exhausted_kind === "rate_limit"
-        ? row.exhausted_kind
-        : null,
-    selectionCount: Number(row.selection_count),
-    lastSelectedAt: codexMetadataDate(row.last_selected_at),
-    activeLeaseCount: Number(row.active_lease_count),
-  };
-}
-
-function filterCodexLeaseCandidatesForPolicy<TPolicyScope, TUnavailableDiagnostic>(
-  accounts: CodexLeaseAccountStatus[],
-  policyScope: TPolicyScope | null,
-  filter: CodexCredentialLeaseCandidateFilter<TPolicyScope, TUnavailableDiagnostic> | undefined,
-): {
-  accounts: CodexLeaseAccountStatus[];
-  unavailableDiagnostics: readonly TUnavailableDiagnostic[];
-} {
-  const filtered = filter?.({ accounts, policyScope });
-  if (!filtered) return { accounts, unavailableDiagnostics: [] };
-  const structured = Array.isArray(filtered)
-    ? null
-    : (filtered as CodexCredentialLeaseCandidateFilterResult<TUnavailableDiagnostic>);
-  const filteredAccounts = structured?.accounts ?? (filtered as readonly CodexLeaseAccountStatus[]);
-  const unavailableDiagnostics = structured?.unavailableDiagnostics ?? [];
-  const workspaceIds = new Set(accounts.map((account) => account.id));
-  const filteredIds = new Set<string>();
-  for (const account of filteredAccounts) {
-    if (!workspaceIds.has(account.id) || filteredIds.has(account.id)) {
-      throw new Error("Codex lease candidate filter returned a foreign or duplicate credential");
-    }
-    filteredIds.add(account.id);
-  }
-  return { accounts: [...filteredAccounts], unavailableDiagnostics };
-}
-
-async function listCodexLeaseCandidatesInTransaction(
-  tx: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    activeCredentialId: string | null;
-    source: Exclude<EffectiveCodexSubscriptionSource, "disabled">;
-    excludeTurnId?: string | null;
-  },
-): Promise<CodexLeaseAccountStatus[]> {
-  const legacyWorkspaceOnly =
-    input.source === "workspace" &&
-    workspaceCodexOrganizationInheritanceAvailable.get(input.workspaceId) === false;
-  const rows = await tx.execute(sql<CodexLeaseCandidateRow>`
-    select
-      c.id,
-      c.chatgpt_account_id,
-      c.version as credential_version,
-      c.allowed_model_ids,
-      c.label,
-      c.account_email,
-      c.plan_type,
-      c.status,
-      c.allocator_enabled,
-      c.expires_at,
-      c.last_refresh_at,
-      c.last_error,
-      c.primary_used_percent,
-      c.primary_reset_at,
-      c.secondary_used_percent,
-      c.secondary_reset_at,
-      c.usage_checked_at,
-      c.exhausted_until,
-      -- Migration 0383 adds typed cooldown provenance after the original
-      -- lease rollout. Keep this allocator query executable against the
-      -- pre-0383 compatibility schema while returning the real value once the
-      -- additive column exists.
-      to_jsonb(c) ->> 'exhausted_kind' as exhausted_kind,
-      to_jsonb(c) ->> 'exhausted_revision' as exhausted_revision,
-      -- Plan entitlement columns follow the same compatibility pattern.
-      to_jsonb(c) ->> 'plan_checked_at' as plan_checked_at,
-      to_jsonb(c) -> 'plan_entitlement_exclusion' as plan_entitlement_exclusion,
-      c.selection_count,
-      c.last_selected_at,
-      ${
-        input.source === "organization"
-          ? sql`opengeni_private.codex_organization_live_lease_count(
-              ${input.accountId}::uuid,
-              c.id,
-              ${input.excludeTurnId ?? null}::uuid
-            )`
-          : sql`count(l.id) filter (
-              where l.leased_until > clock_timestamp()
-                and (${input.excludeTurnId ?? null}::uuid is null or l.turn_id <> ${input.excludeTurnId ?? null})
-            )::int`
-      } as active_lease_count
-    from codex_subscription_credentials c
-    left join codex_credential_leases l
-      on ${input.source === "organization" ? sql`false` : sql`l.workspace_id = ${input.workspaceId} and l.credential_id = c.id`}
-    where c.account_id = ${input.accountId}
-      and ${
-        input.source === "organization"
-          ? sql`c.authority_scope = 'organization' and c.organization_id = ${input.accountId}`
-          : legacyWorkspaceOnly
-            ? sql`c.workspace_id = ${input.workspaceId}`
-            : sql`c.authority_scope in ('workspace', 'user') and c.workspace_id = ${input.workspaceId}`
-      }
-    group by c.id
-    order by c.created_at asc, c.id asc
-  `);
-  return (rows as unknown as CodexLeaseCandidateRow[]).map((row) =>
-    mapCodexLeaseCandidate(row, input.activeCredentialId),
-  );
-}
-
-/**
- * Atomically choose and lease one workspace-owned Codex credential for a turn.
- *
- * The per-workspace `codex_rotation_settings` row is the serialization point:
- * every worker replica blocks on the same plain `FOR UPDATE`, observes all live
- * leases, runs the caller's pure policy, persists the chosen holder, advances
- * the fairness cursor, and only then releases the transaction. A retried
- * activity for the same turn is idempotent and exposes its existing holder to
- * the policy so worker death does not silently switch accounts.
- *
- * The callback receives metadata only. Its chosen id is revalidated against the
- * RLS-scoped candidate set before any write, closing a malicious/buggy callback
- * from naming another workspace's row.
- */
-export async function acquireCodexCredentialLease<
-  T,
-  TPolicyScope = never,
-  TUnavailableDiagnostic = never,
->(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    sessionId: string;
-    turnId: string;
-    attemptId: string;
-    executionGeneration: number;
-    workflowId: string;
-    workflowRunId: string;
-    dispatchId: string;
-    expectedRedispatches: number;
-    /** Unique Temporal/local activity execution id used as the zombie fence. */
-    holderId: string;
-    /** Pins must not move the workspace-global cursor. */
-    advanceActivePointer: boolean;
-    /**
-     * Optional downstream parser for private accepted-turn policy metadata.
-     * It is pure, runs under the turn/rotation transaction, and must not query
-     * pool membership itself. This module stores or interprets no pool identifiers.
-     */
-    resolvePolicyScope?: CodexCredentialLeasePolicyScopeResolver<TPolicyScope>;
-    /**
-     * Optional downstream membership policy for NEW allocations only. A live
-     * exact-turn lease is offered to the selector against the complete workspace
-     * rows first and can never be filtered out here.
-     */
-    filterNewAllocationCandidates?: CodexCredentialLeaseCandidateFilter<
-      TPolicyScope,
-      TUnavailableDiagnostic
-    >;
-    leaseTtlMs?: number;
-  },
-  select: (
-    context: CodexCredentialLeaseSelectionContext<TPolicyScope, TUnavailableDiagnostic>,
-    sessionCodexState: CodexCredentialLeaseSessionState,
-  ) => CodexCredentialLeaseSelection<T>,
-): Promise<CodexCredentialLeaseResult<T, TUnavailableDiagnostic>> {
-  const leaseTtlMs = input.leaseTtlMs ?? CODEX_CREDENTIAL_LEASE_TTL_MS;
-  if (!Number.isFinite(leaseTtlMs) || leaseTtlMs <= 0) {
-    throw new Error("Codex credential lease TTL must be positive");
-  }
-  if (!input.holderId.trim()) {
-    throw new Error("Codex credential lease holder id is required");
-  }
-  if (!Number.isSafeInteger(input.executionGeneration) || input.executionGeneration < 1) {
-    throw new Error("Codex credential lease execution generation must be positive");
-  }
-  if (!Number.isSafeInteger(input.expectedRedispatches) || input.expectedRedispatches < 0) {
-    throw new Error("Codex credential lease redispatch fence must be non-negative");
-  }
-  return await withSessionActivityRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (tx) => {
-      await lockWorkspaceCodexSubscriptionSource(tx, input.workspaceId);
-      const source = await getWorkspaceCodexSubscriptionSourceScoped(tx, input.workspaceId);
-      if (source.accountId !== input.accountId) {
-        throw new Error("Codex subscription source account does not match the turn account");
-      }
-      const allocationSource = await codexSourceForTurn(
-        tx,
-        input.workspaceId,
-        input.turnId,
-        source.effectiveSource,
-      );
-      const organizationSource = allocationSource === "organization";
-      if (organizationSource) {
-        await tx.execute(sql`
-          insert into organization_codex_rotation_settings
-            (account_id)
-          values (${input.accountId})
-          on conflict (account_id) do nothing
-        `);
-      } else {
-        await tx.execute(sql`
-          insert into codex_rotation_settings
-            (account_id, workspace_id)
-          values (${input.accountId}, ${input.workspaceId})
-          on conflict (workspace_id) do nothing
-        `);
-      }
-      const settingsRows = organizationSource
-        ? await tx.execute(sql<{
-            active_credential_id: string | null;
-            rotation_enabled: boolean;
-            rotation_strategy: string;
-          }>`
-            select active_credential_id, rotation_enabled, rotation_strategy
-            from organization_codex_rotation_settings
-            where account_id = ${input.accountId}
-            for update
-          `)
-        : await tx.execute(sql<{
-            active_credential_id: string | null;
-            rotation_enabled: boolean;
-            rotation_strategy: string;
-          }>`
-        select active_credential_id, rotation_enabled, rotation_strategy
-        from codex_rotation_settings
-        where account_id = ${input.accountId} and workspace_id = ${input.workspaceId}
-        for update
-      `);
-      const settingsRow = settingsRows[0];
-      if (!settingsRow) {
-        throw new Error(`Codex rotation settings not visible for workspace ${input.workspaceId}`);
-      }
-      const workspaceControl = await lockWorkspaceInferenceControl(
-        tx as unknown as Database,
-        input.workspaceId,
-        "share",
-      );
-      // Lease FKs need the workspace identity. Take it before any session/turn
-      // locks, matching capacity and connection-use lifecycle writers; a late
-      // FK request can otherwise wait behind a workspace writer needing our turn.
-      await lockSessionEventWriteRows(tx, {
-        workspaceId: input.workspaceId,
-        controlLock: "already_locked",
-      });
-      // Rotation row -> durable turn is the common allocator/waiter lock order.
-      // Fail closed before taking a credential: the turn and allocator must be
-      // inside exactly the same RLS-scoped workspace/account. A downstream
-      // accepted-turn policy is parsed from this locked metadata while the
-      // rotation transaction is held.
-      const sessions = await tx.execute(sql<{
-        id: string;
-        status: string;
-        active_turn_id: string | null;
-        codex_pinned_credential_id: string | null;
-        codex_pin_source: string | null;
-        codex_last_credential_id: string | null;
-      }>`
-        select id, status, active_turn_id,
-               codex_pinned_credential_id, codex_pin_source, codex_last_credential_id
-        from sessions
-        where account_id = ${input.accountId}
-          and workspace_id = ${input.workspaceId}
-          and id = ${input.sessionId}
-        for share
-      `);
-      const turns = await tx.execute(sql<{
-        id: string;
-        session_id: string;
-        status: string;
-        active_attempt_id: string | null;
-        execution_generation: number;
-        metadata: Record<string, unknown> | null;
-        model: string;
-      }>`
-        select id, session_id, status, active_attempt_id, execution_generation, metadata, model
-        from session_turns
-        where account_id = ${input.accountId}
-          and workspace_id = ${input.workspaceId}
-          and id = ${input.turnId}
-        for update
-      `);
-      const attempts = await tx.execute(sql<{
-        id: string;
-        state: string;
-        execution_generation: number;
-        temporal_workflow_id: string;
-        temporal_workflow_run_id: string;
-        temporal_activity_id: string;
-      }>`
-        select id, state, execution_generation, temporal_workflow_id,
-               temporal_workflow_run_id, temporal_activity_id
-        from session_turn_attempts
-        where account_id = ${input.accountId}
-          and workspace_id = ${input.workspaceId}
-          and session_id = ${input.sessionId}
-          and turn_id = ${input.turnId}
-          and id = ${input.attemptId}
-        for share
-      `);
-      const session = sessions[0];
-      const turn = turns[0];
-      const attempt = attempts[0];
-      if (!turn) {
-        throw new Error(`Session turn not found for Codex lease: ${input.turnId}`);
-      }
-      const dispatch = readTurnDispatchMetadata(turn.metadata);
-      const currentRedispatches = Number(turn.metadata?.workerDeathRedispatches ?? 0);
-      const effectiveControl = await evaluateSessionControl(
-        tx as unknown as Database,
-        input.workspaceId,
-        input.sessionId,
-        { workspaceControl },
-      );
-      if (
-        !session ||
-        !attempt ||
-        effectiveControl.state !== "active" ||
-        session.status !== "running" ||
-        session.active_turn_id !== input.turnId ||
-        turn.session_id !== input.sessionId ||
-        turn.status !== "running" ||
-        turn.active_attempt_id !== input.attemptId ||
-        Number(turn.execution_generation) !== input.executionGeneration ||
-        (attempt.state !== "claimed" && attempt.state !== "running") ||
-        Number(attempt.execution_generation) !== input.executionGeneration ||
-        attempt.temporal_workflow_id !== input.workflowId ||
-        attempt.temporal_workflow_run_id !== input.workflowRunId ||
-        attempt.temporal_activity_id !== input.dispatchId ||
-        dispatch.kind !== "valid" ||
-        dispatch.attempt?.id !== input.dispatchId ||
-        currentRedispatches !== input.expectedRedispatches
-      ) {
-        throw new CodexCredentialLeaseAttemptFencedError();
-      }
-      const sessionCodexState: CodexCredentialLeaseSessionState = {
-        pinnedCredentialId: session.codex_pinned_credential_id,
-        pinSource:
-          session.codex_pin_source === "manual" || session.codex_pin_source === "policy"
-            ? session.codex_pin_source
-            : null,
-        lastCredentialId: session.codex_last_credential_id,
-      };
-      const acceptedCodexPolicy = readCodexCredentialPolicySnapshotV1(turn.metadata);
-      const codexPolicySnapshot =
-        acceptedCodexPolicy.kind === "valid" ? acceptedCodexPolicy.policy : null;
-      // Legacy policies use the pre-change sidecar binding, when present.
-      // Never reinterpret a source-less accepted policy after a source cutover.
-      const acceptedSource = codexPolicySnapshot?.source ?? allocationSource;
-      const acceptedDisabledSource = acceptedSource === "disabled";
-      const acceptedOrganizationSource = acceptedSource === "organization";
-      const acceptedSessionCodexState: CodexCredentialLeaseSessionState = codexPolicySnapshot
-        ? {
-            pinnedCredentialId: codexPolicySnapshot.pinnedCredentialId,
-            pinSource: codexPolicySnapshot.pinSource,
-            lastCredentialId: codexPolicySnapshot.lastCredentialId,
-          }
-        : sessionCodexState;
-      const failoverMetadata = codexFailoverMetadata(turn.metadata);
-      if (failoverMetadata.exhausted && failoverMetadata.maxFailovers !== null) {
-        throw new CodexCredentialFailoverExhaustedError(
-          failoverMetadata.failoverCount,
-          failoverMetadata.maxFailovers,
-        );
-      }
-      const policyScope = input.resolvePolicyScope?.(turn.metadata ?? {}) ?? null;
-      let activeCredentialId = codexPolicySnapshot
-        ? codexPolicySnapshot.activeCredentialId
-        : settingsRow.active_credential_id;
-      const rotationEnabled = codexPolicySnapshot
-        ? codexPolicySnapshot.rotationEnabled
-        : settingsRow.rotation_enabled;
-      const rotationStrategy = codexPolicySnapshot
-        ? codexPolicySnapshot.rotationStrategy
-        : settingsRow.rotation_strategy;
-
-      await tx.execute(sql`
-        delete from codex_credential_leases
-        where workspace_id = ${input.workspaceId} and leased_until <= clock_timestamp()
-      `);
-      const existingRows = await tx.execute(
-        sql<{
-          credential_id: string;
-          holder_id: string;
-          generation: number;
-        }>`
-          select credential_id, holder_id, generation from codex_credential_leases
-          where workspace_id = ${input.workspaceId}
-            and turn_id = ${input.turnId}
-            and leased_until > clock_timestamp()
-          limit 1
-        `,
-      );
-      const existingCredentialId = existingRows[0]?.credential_id ?? null;
-
-      const allAccounts = acceptedDisabledSource
-        ? []
-        : await listCodexLeaseCandidatesInTransaction(tx as unknown as Database, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            activeCredentialId,
-            source: acceptedOrganizationSource ? "organization" : "workspace",
-            excludeTurnId: input.turnId,
-          });
-      if (organizationSource) {
-        activeCredentialId = assignedConnectionDefault(activeCredentialId, allAccounts);
-        for (const account of allAccounts) account.isActive = account.id === activeCredentialId;
-      }
-      const sameTurnCredentialId = existingCredentialId;
-      const selectionContext = (
-        accounts: CodexLeaseAccountStatus[],
-        unavailableDiagnostics: readonly TUnavailableDiagnostic[],
-      ) => ({
-        accounts,
-        activeCredentialId,
-        rotationEnabled,
-        rotationStrategy,
-        existingCredentialId,
-        failedCredentialIds: unresolvedCodexCredentialFailures(turn.metadata, accounts),
-        failoverExhausted: failoverMetadata.exhausted,
-        modelId: turn.model,
-        policyScope,
-        unavailableDiagnostics,
-      });
-      let accounts = allAccounts;
-      let unavailableDiagnostics: readonly TUnavailableDiagnostic[] = [];
-      let selected: CodexCredentialLeaseSelection<T> | undefined;
-      if (sameTurnCredentialId !== null) {
-        const sameTurnSelection = select(
-          selectionContext(allAccounts, []),
-          acceptedSessionCodexState,
-        );
-        if (sameTurnSelection.credentialId === sameTurnCredentialId) {
-          selected = sameTurnSelection;
-        }
-      }
-
-      // A live exact-turn lease is resolved before any future pool membership
-      // filter. The normal selector still owns health validation: a quarantined
-      // row falls through to scoped new acquisition rather than being reused.
-      if (!selected) {
-        const filtered = filterCodexLeaseCandidatesForPolicy(
-          allAccounts,
-          policyScope,
-          input.filterNewAllocationCandidates,
-        );
-        accounts = filtered.accounts;
-        unavailableDiagnostics = filtered.unavailableDiagnostics;
-        selected = select(
-          selectionContext(accounts, unavailableDiagnostics),
-          acceptedSessionCodexState,
-        );
-      }
-
-      // Capture the accepted policy before returning either a credential or a
-      // durable no-credential result. A turn that enters its first capacity
-      // wait must not remain free to observe later rotation/pin mutations.
-      const acceptedSnapshot =
-        codexPolicySnapshot ??
-        CodexCredentialPolicySnapshotV1.parse({
-          schemaVersion: 1,
-          activeCredentialId: settingsRow.active_credential_id,
-          rotationEnabled: settingsRow.rotation_enabled,
-          rotationStrategy: settingsRow.rotation_strategy,
-          source: allocationSource,
-          pinnedCredentialId: sessionCodexState.pinnedCredentialId,
-          pinSource: sessionCodexState.pinSource,
-          lastCredentialId: sessionCodexState.lastCredentialId,
-        });
-      if (codexPolicySnapshot === null) {
-        const [snapshottedTurn] = await tx
-          .update(schema.sessionTurns)
-          .set({
-            metadata: metadataWithCodexCredentialPolicySnapshotV1(turn.metadata, acceptedSnapshot),
-            updatedAt: new Date(),
-          })
-          .where(
-            and(
-              eq(schema.sessionTurns.accountId, input.accountId),
-              eq(schema.sessionTurns.workspaceId, input.workspaceId),
-              eq(schema.sessionTurns.id, input.turnId),
-              eq(schema.sessionTurns.sessionId, input.sessionId),
-              eq(schema.sessionTurns.status, "running"),
-              eq(schema.sessionTurns.activeAttemptId, input.attemptId),
-              eq(schema.sessionTurns.executionGeneration, input.executionGeneration),
-            ),
-          )
-          .returning({ id: schema.sessionTurns.id });
-        if (!snapshottedTurn) {
-          throw new CodexCredentialLeaseAttemptFencedError();
-        }
-      }
-      if (selected.credentialId === null) {
-        if (existingCredentialId !== null) {
-          await tx.execute(sql`
-            delete from codex_credential_leases
-            where workspace_id = ${input.workspaceId} and turn_id = ${input.turnId}
-          `);
-        }
-        return {
-          decision: selected.decision,
-          accounts,
-          activeCredentialId,
-          rotationEnabled,
-          rotationStrategy,
-          sessionCodexState: acceptedSessionCodexState,
-          poolAccountCount: allAccounts.length,
-          codexPolicySnapshot: acceptedSnapshot,
-          codexPolicySnapshotReused: codexPolicySnapshot !== null,
-          credentialId: null,
-          reused: false,
-          holderId: null,
-          generation: null,
-          leasedUntil: null,
-          unavailableDiagnostics,
-          advanceActivePointer: false,
-          failoverLimit:
-            failoverMetadata.maxFailovers ?? codexCredentialFailoverLimitForLease(accounts, null),
-        };
-      }
-      const selectedAccount = accounts.find((account) => account.id === selected.credentialId);
-      if (!selectedAccount) {
-        throw new Error("Codex lease selector returned a credential outside the workspace pool");
-      }
-      if (!selectedAccount.allocatorEnabled && selectedAccount.id !== existingCredentialId) {
-        throw new Error("Codex lease selector returned a credential disabled for new allocations");
-      }
-
-      const advanceActivePointer =
-        codexPolicySnapshot === null &&
-        input.advanceActivePointer &&
-        acceptedSessionCodexState.pinnedCredentialId === null &&
-        selected.advanceActivePointer !== false;
-
-      const reused = existingCredentialId === selected.credentialId;
-      const leaseRows = await tx.execute(
-        sql<{
-          holder_id: string;
-          generation: number;
-          leased_until: Date | string;
-        }>`
-        insert into codex_credential_leases
-          (account_id, workspace_id, credential_id, turn_id, holder_id, generation, leased_until)
-        values
-          (${input.accountId}, ${input.workspaceId}, ${selected.credentialId}, ${input.turnId}, ${input.holderId}, 1, clock_timestamp() + (${leaseTtlMs} * interval '1 millisecond'))
-        on conflict (workspace_id, turn_id) do update set
-          credential_id = excluded.credential_id,
-          holder_id = excluded.holder_id,
-          generation = case
-            when codex_credential_leases.holder_id = excluded.holder_id
-              then codex_credential_leases.generation
-            else codex_credential_leases.generation + 1
-          end,
-          leased_until = excluded.leased_until,
-          updated_at = now()
-        returning holder_id, generation, leased_until
-      `,
-      );
-      const leasedUntil = codexMetadataDate(leaseRows[0]?.leased_until);
-      if (!leasedUntil) {
-        throw new Error("Codex credential lease insert returned no expiry");
-      }
-      if (!reused) {
-        await tx.execute(sql`
-          update codex_subscription_credentials
-          set selection_count = selection_count + 1,
-              last_selected_at = now()
-          where account_id = ${input.accountId}
-            and id = ${selected.credentialId}
-        `);
-      }
-      if (advanceActivePointer && activeCredentialId !== selected.credentialId) {
-        if (organizationSource) {
-          await tx.execute(sql`
-            update organization_codex_rotation_settings
-            set active_credential_id = ${selected.credentialId}, updated_at = now()
-            where account_id = ${input.accountId}
-          `);
-        } else {
-          await tx.execute(sql`
-            update codex_rotation_settings
-            set active_credential_id = ${selected.credentialId}, updated_at = now()
-            where account_id = ${input.accountId} and workspace_id = ${input.workspaceId}
-          `);
-        }
-      }
-      return {
-        decision: selected.decision,
-        accounts,
-        activeCredentialId,
-        rotationEnabled,
-        rotationStrategy,
-        sessionCodexState: acceptedSessionCodexState,
-        poolAccountCount: allAccounts.length,
-        codexPolicySnapshot: acceptedSnapshot,
-        codexPolicySnapshotReused: codexPolicySnapshot !== null,
-        credentialId: selected.credentialId,
-        reused,
-        holderId: leaseRows[0]?.holder_id ?? input.holderId,
-        generation: Number(leaseRows[0]?.generation),
-        leasedUntil,
-        unavailableDiagnostics,
-        advanceActivePointer,
-        failoverLimit:
-          failoverMetadata.maxFailovers ??
-          codexCredentialFailoverLimitForLease(accounts, selected.credentialId),
-      };
-    },
-  );
 }
 
 // ---------------------------------------------------------------------------
@@ -26586,129 +24784,209 @@ export function codexCapacityRefreshBackoffMs(attempt: number): number {
   return Math.min(CODEX_CAPACITY_REFRESH_MIN_MS * 2 ** safeAttempt, CODEX_CAPACITY_REFRESH_MAX_MS);
 }
 
-function mapCodexCapacityWaiter(
-  row: typeof schema.codexCapacityWaiters.$inferSelect,
-): CodexCapacityWait {
+// ---------------------------------------------------------------------------
+// Durable Codex capacity waits on the shared subscription core (M3 PR 2a).
+//
+// The waiter row lives in subscription_capacity_waiters (one per session) and
+// exists only while the blocked turn waits: resuming or superseding deletes
+// it, so a stale timer or signal carrying an older waiter id finds nothing.
+// Workflow activity names, signal names and argument shapes are unchanged:
+// a core waiter is addressed by the same { waiterId, generation, nextCheckAt,
+// wakeRevision } reference as a legacy Codex waiter, and the activities look
+// the waiter id up in the core table first, then in the legacy table.
+// ---------------------------------------------------------------------------
+
+export type SubscriptionCoreCodexCapacityWait = {
+  waiterId: string;
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  blockedTurnId: string;
+  blockedTurnGeneration: number | null;
+  generation: number;
+  wakeRevision: number;
+  observedWakeRevision: number;
+  waitReason: string;
+  resetKind: string | null;
+  refreshAttempt: number;
+  earliestResetAt: Date | null;
+  nextCheckAt: Date;
+  goalId: string | null;
+  goalVersion: number | null;
+  lastWakeReason: string | null;
+  /**
+   * False when the row no longer belongs to the session's active turn in
+   * `waiting_capacity` (a Steer, Cancel or other transition left it behind).
+   * Only lookups compute it; rows returned by arm/reconcile are live.
+   */
+  blockedTurnLive?: boolean;
+};
+
+type SubscriptionCoreCodexWaiterRow = {
+  waiter_id: string;
+  account_id: string;
+  workspace_id: string;
+  session_id: string;
+  turn_id: string;
+  blocked_turn_generation: number | string | null;
+  generation: number | string;
+  wake_revision: number | string;
+  observed_wake_revision: number | string;
+  wait_reason: string;
+  reset_kind: string | null;
+  refresh_attempt: number | string;
+  earliest_reset_at: Date | string | null;
+  next_check_at: Date | string | null;
+  goal_id: string | null;
+  goal_version: number | string | null;
+  last_wake_reason: string | null;
+  updated_at: Date | string;
+  blocked_turn_live?: boolean | null;
+};
+
+const SUBSCRIPTION_CORE_CODEX_WAITER_COLUMNS = sql.raw(`waiter_id::text as waiter_id,
+  account_id::text as account_id, workspace_id::text as workspace_id,
+  session_id::text as session_id, turn_id::text as turn_id, blocked_turn_generation,
+  generation, wake_revision, observed_wake_revision, wait_reason, reset_kind,
+  refresh_attempt, earliest_reset_at, next_check_at, goal_id::text as goal_id,
+  goal_version, last_wake_reason, updated_at`);
+
+function mapSubscriptionCoreCodexWaiter(
+  row: SubscriptionCoreCodexWaiterRow,
+): SubscriptionCoreCodexCapacityWait {
   return {
-    id: row.id,
-    accountId: row.accountId,
-    workspaceId: row.workspaceId,
-    sessionId: row.sessionId,
-    goalId: row.goalId,
-    blockedTurnId: row.blockedTurnId,
-    blockedTurnGeneration: row.blockedTurnGeneration,
-    workflowId: row.workflowId,
-    generation: row.generation,
-    status: row.status as CodexCapacityWaitStatus,
-    goalVersion: row.goalVersion,
-    policyHash: row.policyHash,
-    earliestResetAt: row.earliestResetAt,
-    nextCheckAt: row.nextCheckAt,
-    resetKind: row.resetKind as CodexCapacityResetKind,
-    refreshAttempt: row.refreshAttempt,
-    wakeRevision: row.wakeRevision,
-    observedWakeRevision: row.observedWakeRevision,
-    lastWakeReason: row.lastWakeReason,
-    resumedUpdateId: row.resumedUpdateId,
-    createdAt: row.createdAt,
-    updatedAt: row.updatedAt,
+    waiterId: row.waiter_id,
+    accountId: row.account_id,
+    workspaceId: row.workspace_id,
+    sessionId: row.session_id,
+    blockedTurnId: row.turn_id,
+    blockedTurnGeneration:
+      row.blocked_turn_generation === null ? null : Number(row.blocked_turn_generation),
+    generation: Number(row.generation),
+    wakeRevision: Number(row.wake_revision),
+    observedWakeRevision: Number(row.observed_wake_revision),
+    waitReason: row.wait_reason,
+    resetKind: row.reset_kind,
+    refreshAttempt: Number(row.refresh_attempt),
+    earliestResetAt: row.earliest_reset_at === null ? null : new Date(row.earliest_reset_at),
+    nextCheckAt: new Date(row.next_check_at ?? row.updated_at),
+    goalId: row.goal_id,
+    goalVersion: row.goal_version === null ? null : Number(row.goal_version),
+    lastWakeReason: row.last_wake_reason,
+    ...(row.blocked_turn_live === undefined || row.blocked_turn_live === null
+      ? {}
+      : { blockedTurnLive: row.blocked_turn_live }),
   };
 }
 
-function codexCapacityPolicyHashFromTurnMetadata(
-  metadata: Record<string, unknown> | null | undefined,
-): string | null {
-  const value = metadata?.codexCredentialPolicyHash;
-  return typeof value === "string" && value.length > 0 ? value : null;
+/**
+ * The workflow reference for a core waiter, in the legacy Codex shape. An
+ * unobserved wake revision (a capacity change whose signal may have been
+ * lost, or that landed across continue-as-new) becomes an immediate check,
+ * and so does a row that no longer belongs to the session's active waiting
+ * turn: the reconcile then supersedes and deletes it instead of the workflow
+ * sleeping on it until its next check.
+ */
+export function subscriptionCoreCodexCapacityWaitRef(wait: SubscriptionCoreCodexCapacityWait): {
+  waiterId: string;
+  generation: number;
+  nextCheckAt: string;
+  wakeRevision: number;
+} {
+  return {
+    waiterId: wait.waiterId,
+    generation: wait.generation,
+    nextCheckAt:
+      wait.wakeRevision > wait.observedWakeRevision || wait.blockedTurnLive === false
+        ? new Date(0).toISOString()
+        : wait.nextCheckAt.toISOString(),
+    wakeRevision: wait.wakeRevision,
+  };
 }
 
-async function lockExistingCodexRotationSettingsForCapacity(
+async function readSubscriptionCoreCodexWaiterInTransaction(
   tx: Database,
-  workspaceId: string,
-  turnId?: string,
-  mutationSource?: "workspace" | "organization",
-): Promise<{
-  accountId: string;
-  source: EffectiveCodexSubscriptionSource;
-  activeCredentialId: string | null;
-  rotationEnabled: boolean;
-  rotationStrategy: string;
-} | null> {
-  await lockWorkspaceCodexSubscriptionSource(tx, workspaceId);
-  const source = await getWorkspaceCodexSubscriptionSourceScoped(tx, workspaceId);
-  if (turnId) {
-    source.effectiveSource = await codexSourceForTurn(
-      tx,
-      workspaceId,
-      turnId,
-      source.effectiveSource,
-    );
-  } else if (mutationSource) {
-    source.effectiveSource = mutationSource;
-  }
-  const rows =
-    source.effectiveSource === "organization"
-      ? await tx.execute(sql<{
-          account_id: string;
-          active_credential_id: string | null;
-          rotation_enabled: boolean;
-          rotation_strategy: string;
-        }>`
-        select account_id, active_credential_id, rotation_enabled, rotation_strategy
-        from organization_codex_rotation_settings
-        where account_id = ${source.accountId}
-        for update
-      `)
-      : await tx.execute(sql<{
-          account_id: string;
-          active_credential_id: string | null;
-          rotation_enabled: boolean;
-          rotation_strategy: string;
-        }>`
-        select account_id, active_credential_id, rotation_enabled, rotation_strategy
-        from codex_rotation_settings
-        where workspace_id = ${workspaceId}
-        for update
-      `);
-  const row = rows[0];
-  return row
-    ? {
-        accountId: row.account_id,
-        source: source.effectiveSource,
-        activeCredentialId: row.active_credential_id,
-        rotationEnabled: row.rotation_enabled,
-        rotationStrategy: row.rotation_strategy,
-      }
-    : null;
+  input: { workspaceId: string; sessionId: string; waiterId?: string; forUpdate?: boolean },
+): Promise<SubscriptionCoreCodexCapacityWait | null> {
+  const [row] = await rawRows<SubscriptionCoreCodexWaiterRow>(
+    tx,
+    sql`select ${SUBSCRIPTION_CORE_CODEX_WAITER_COLUMNS},
+        exists (
+          select 1 from sessions s
+          join session_turns t on t.workspace_id = s.workspace_id and t.id = s.active_turn_id
+          where s.workspace_id = w.workspace_id and s.id = w.session_id
+            and s.active_turn_id = w.turn_id and s.status = 'waiting_capacity'
+            and t.status = 'waiting_capacity'
+        ) as blocked_turn_live
+      from subscription_capacity_waiters w
+      where workspace_id = ${input.workspaceId}::uuid and session_id = ${input.sessionId}::uuid
+        and provider = 'codex'
+        ${input.waiterId ? sql`and waiter_id = ${input.waiterId}::uuid` : sql``}
+      ${input.forUpdate ? sql`for update` : sql``}`,
+  );
+  return row ? mapSubscriptionCoreCodexWaiter(row) : null;
 }
 
-function nextCodexCapacityCheckAt(
-  earliestResetAt: Date | null,
-  resetKind: CodexCapacityResetKind,
-  refreshAttempt: number,
-  now: Date,
-): Date {
-  if (
-    resetKind === "authoritative" &&
-    earliestResetAt !== null &&
-    earliestResetAt.getTime() > now.getTime()
-  ) {
-    return earliestResetAt;
-  }
-  return new Date(now.getTime() + codexCapacityRefreshBackoffMs(refreshAttempt));
+/** The session's waiting core Codex waiter, if any (workflow peek and recovery). */
+export async function getSubscriptionCoreCodexCapacityWaitForSession(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<SubscriptionCoreCodexCapacityWait | null> {
+  return await withWorkspaceRls(db, workspaceId, (scopedDb) =>
+    readSubscriptionCoreCodexWaiterInTransaction(scopedDb, { workspaceId, sessionId }),
+  );
+}
+
+/** Same lookup by the exact waiter id a workflow history recorded. */
+export async function getSubscriptionCoreCodexCapacityWaitById(
+  db: Database,
+  input: { workspaceId: string; sessionId: string; waiterId: string },
+): Promise<SubscriptionCoreCodexCapacityWait | null> {
+  return await withWorkspaceRls(db, input.workspaceId, (scopedDb) =>
+    readSubscriptionCoreCodexWaiterInTransaction(scopedDb, input),
+  );
 }
 
 /**
- * Atomically close one all-unavailable attempt and arm exactly one durable wait
- * for the same logical turn. Lock order is workspace source advisory -> allocator
- * rotation row -> workspace
- * control -> actual workspace -> session -> exact turn -> exact attempt ->
- * optional goal -> live lease (when a reactive failure owns one) -> waiter.
- * The waiting turn/session pointer, durable events, exact lease release, and
- * waiter generation commit together; a crash cannot leave only half of the
- * boundary visible.
+ * When a core waiter checks again: at the earliest known reset when there is
+ * one (authoritative), else at a quarantine's end when sooner than the bounded
+ * control-plane backoff (no provider call is made at a check, only placement).
  */
-export async function armCodexCapacityWait(
+export function subscriptionCoreCodexNextCheckAt(input: {
+  earliestResetAt: Date | null;
+  healthRetryAt: Date | null;
+  refreshAttempt: number;
+  now: Date;
+}): { nextCheckAt: Date; resetKind: "authoritative" | "mutation_only" } {
+  const { now } = input;
+  if (input.earliestResetAt && input.earliestResetAt.getTime() > now.getTime()) {
+    return { nextCheckAt: input.earliestResetAt, resetKind: "authoritative" };
+  }
+  const backoff = now.getTime() + codexCapacityRefreshBackoffMs(input.refreshAttempt);
+  const retryAt = input.healthRetryAt?.getTime();
+  return {
+    nextCheckAt: new Date(
+      retryAt !== undefined && retryAt > now.getTime() ? Math.min(retryAt, backoff) : backoff,
+    ),
+    resetKind: "mutation_only",
+  };
+}
+
+export type ArmSubscriptionCoreCodexCapacityWaitResult =
+  | { action: "waiting"; waiter: SubscriptionCoreCodexCapacityWait; events: SessionEvent[] }
+  | { action: "stopped"; sessionStatus: "queued" | "failed"; events: SessionEvent[] }
+  | { action: "stale"; events: SessionEvent[] };
+
+/**
+ * Atomically close one attempt whose core placement said wait and park the
+ * same logical turn on the session's core waiter. Same lock order and
+ * boundary as the legacy Codex arm: workspace control -> workspace -> session
+ * -> exact turn -> exact attempt -> optional goal -> live core lease (when a
+ * reactive failure owns one) -> waiter. The waiting turn/session pointers,
+ * durable events, exact lease release and waiter generation commit together.
+ */
+export async function armSubscriptionCoreCodexCapacityWait(
   db: Database,
   input: {
     accountId: string;
@@ -26716,20 +24994,17 @@ export async function armCodexCapacityWait(
     sessionId: string;
     turnId: string;
     attemptId: string;
-    workflowId: string;
     goalId?: string | null;
     goalVersion?: number | null;
-    policyHash?: string | null;
+    waitReason: string;
     earliestResetAt: Date | null;
-    resetKind: CodexCapacityResetKind;
+    healthRetryAt?: Date | null;
     failurePayload: Record<string, unknown>;
-    /** Required on reactive failures that already own a credential lease. */
-    leaseFence?: { holderId: string; generation: number };
-    /** Worker-death dispatch generation observed before model execution. */
-    expectedRedispatches?: number;
+    /** The live core lease a reactive refusal still holds; released atomically. */
+    leaseFence?: { connectionId: string; holderId: string; generation: number };
     now?: Date;
   },
-): Promise<ArmCodexCapacityWaitResult> {
+): Promise<ArmSubscriptionCoreCodexCapacityWaitResult> {
   const now = input.now ?? new Date();
   const goalId = input.goalId ?? null;
   const goalVersion = input.goalVersion ?? null;
@@ -26737,28 +25012,26 @@ export async function armCodexCapacityWait(
     (goalId === null) !== (goalVersion === null) ||
     (goalVersion !== null && (!Number.isSafeInteger(goalVersion) || goalVersion < 1))
   ) {
-    throw new Error("Codex capacity goal fence must be absent or contain a positive version");
+    throw new Error("Core Codex capacity goal fence must be absent or contain a positive version");
+  }
+  if (!/^[a-z][a-z0-9_]{0,127}$/.test(input.waitReason)) {
+    throw new Error("Core Codex wait reason must be a bounded identifier");
   }
   return await retrySessionActivityRls(
     db,
     input.workspaceId,
     {
-      stage: "session_lifecycle_outbox.arm_codex_capacity_wait",
+      stage: "session_lifecycle_outbox.arm_subscription_core_codex_capacity_wait",
       eventTypes: ["codex.capacity.waiting", "turn.failed", "session.status.changed"],
       maxAttempts: 3,
     },
     async (scopedDb) =>
       await withSessionActivitySavepoint(scopedDb, async (tx) => {
-        const rotation = await lockExistingCodexRotationSettingsForCapacity(
-          tx,
-          input.workspaceId,
-          input.turnId,
-        );
-        if (!rotation || rotation.accountId !== input.accountId) {
-          return { action: "stale", waiter: null, events: [] } as const;
-        }
-        // Child-lifecycle prefix: the parent session is locked with the child
-        // so the capacity-wait notice can be enqueued in this same commit.
+        const cutover = await readCoreProviderCutoverState(tx, {
+          accountId: input.accountId,
+          provider: "codex",
+        });
+        if (cutover !== "enabled") return { action: "stale", events: [] } as const;
         const locks = await lockChildLifecycleOutboxWriteRowsTx(tx, input.workspaceId, {
           sessionId: input.sessionId,
           turnId: input.turnId,
@@ -26787,28 +25060,23 @@ export async function armCodexCapacityWait(
               .limit(1)
           : [];
         const leaseRows = input.leaseFence
-          ? await tx.execute(sql<{ holder_id: string; generation: number }>`
-              select holder_id, generation
-              from codex_credential_leases
-              where account_id = ${input.accountId}
-                and workspace_id = ${input.workspaceId}
-                and turn_id = ${input.turnId}
-                and leased_until > clock_timestamp()
-              for update
-            `)
+          ? await rawRows<{ holder_id: string; generation: number | string }>(
+              tx,
+              sql`select holder_id, generation from subscription_leases
+                where account_id = ${input.accountId}::uuid
+                  and workspace_id = ${input.workspaceId}::uuid
+                  and session_id = ${input.sessionId}::uuid
+                  and turn_id = ${input.turnId}::uuid and provider = 'codex'
+                  and connection_id = ${input.leaseFence.connectionId}::uuid
+                  and leased_until > clock_timestamp()
+                for update`,
+            )
           : [];
-        const [existing] = await tx
-          .select()
-          .from(schema.codexCapacityWaiters)
-          .where(
-            and(
-              eq(schema.codexCapacityWaiters.workspaceId, input.workspaceId),
-              eq(schema.codexCapacityWaiters.sessionId, input.sessionId),
-            ),
-          )
-          .for("update")
-          .limit(1);
-
+        const existing = await readSubscriptionCoreCodexWaiterInTransaction(tx, {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          forUpdate: true,
+        });
         const exactRowsMatch =
           session?.accountId === input.accountId &&
           turn?.accountId === input.accountId &&
@@ -26817,36 +25085,22 @@ export async function armCodexCapacityWait(
           attempt?.sessionId === input.sessionId &&
           attempt?.turnId === input.turnId &&
           attempt?.executionGeneration === turn?.executionGeneration;
-        if (!exactRowsMatch) {
-          return {
-            action: "stale",
-            waiter: existing ? mapCodexCapacityWaiter(existing) : null,
-            events: [],
-          } as const;
-        }
+        if (!exactRowsMatch) return { action: "stale", events: [] } as const;
         if (
-          existing?.status === "waiting" &&
+          existing &&
           existing.blockedTurnId === input.turnId &&
           existing.blockedTurnGeneration === turn?.executionGeneration &&
           turn?.status === "waiting_capacity" &&
           session?.status === "waiting_capacity" &&
           session.activeTurnId === input.turnId
         ) {
-          return {
-            action: "waiting",
-            waiter: mapCodexCapacityWaiter(existing),
-            events: [],
-          } as const;
+          return { action: "waiting", waiter: existing, events: [] } as const;
         }
-        const policyHash =
-          input.policyHash ?? codexCapacityPolicyHashFromTurnMetadata(turn?.metadata);
-        const currentRedispatches = Number(turn?.metadata?.workerDeathRedispatches ?? 0);
         const lease = leaseRows[0];
         const leaseFenceValid =
           !input.leaseFence ||
           (lease?.holder_id === input.leaseFence.holderId &&
-            Number(lease.generation) === input.leaseFence.generation &&
-            currentRedispatches === (input.expectedRedispatches ?? currentRedispatches));
+            Number(lease.generation) === input.leaseFence.generation);
         if (
           !session ||
           !turn ||
@@ -26858,27 +25112,18 @@ export async function armCodexCapacityWait(
             (!goal || goal.status !== "active" || goal.version !== goalVersion)) ||
           turn.status !== "running" ||
           turn.activeAttemptId !== input.attemptId ||
-          !leaseFenceValid ||
-          codexCapacityPolicyHashFromTurnMetadata(turn.metadata) !== policyHash
+          !leaseFenceValid
         ) {
-          return {
-            action: "stale",
-            waiter: existing ? mapCodexCapacityWaiter(existing) : null,
-            events: [],
-          } as const;
+          return { action: "stale", events: [] } as const;
         }
 
+        // A resumed attempt that lands straight back on unavailable capacity
+        // without completing a model call is a false resumption; the same
+        // bounded budget and persisted backoff as the legacy Codex wait apply.
         const recovery = readCodexCapacityRecovery(turn.metadata);
         const falseResumption =
           recovery.resumeGeneration !== null &&
-          recovery.resumeGeneration <= turn.executionGeneration &&
-          existing?.status === "resumed" &&
-          existing.blockedTurnId === turn.id &&
-          existing.blockedTurnGeneration + 1 === recovery.resumeGeneration;
-        // A worker-death redispatch or credential failover can replace the first
-        // resumed attempt without making progress. Keep its one resumption
-        // receipt until an exact current attempt closes it or proves progress.
-        // The active-attempt/generation checks above reject stale predecessors.
+          recovery.resumeGeneration <= turn.executionGeneration;
         const falseResumptions = recovery.falseResumptions + (falseResumption ? 1 : 0);
         const stopped = falseResumptions >= CODEX_CAPACITY_FALSE_RESUMPTION_LIMIT;
         const retryNotBefore =
@@ -26921,51 +25166,63 @@ export async function armCodexCapacityWait(
           closedAt: now,
         });
 
-        const generation = (existing?.generation ?? 0) + 1;
-        const capacityCheckAt = nextCodexCapacityCheckAt(
-          input.earliestResetAt,
-          input.resetKind,
-          0,
-          now,
-        );
-        const nextCheckAt = new Date(
-          Math.max(capacityCheckAt.getTime(), retryNotBefore ? Date.parse(retryNotBefore) : 0),
-        );
-        const wakeRevision = (existing?.wakeRevision ?? 0) + 1;
-        const waiterValues = {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          goalId,
-          blockedTurnId: input.turnId,
-          blockedTurnGeneration: turn.executionGeneration,
-          workflowId: input.workflowId,
-          generation,
-          status: stopped ? "superseded" : "waiting",
-          goalVersion,
-          policyHash,
+        const scheduled = subscriptionCoreCodexNextCheckAt({
           earliestResetAt: input.earliestResetAt,
-          nextCheckAt,
-          resetKind: input.resetKind,
+          healthRetryAt: input.healthRetryAt ?? null,
           refreshAttempt: 0,
-          // Arming follows an allocator evaluation in this same transaction,
-          // so this generation has already observed its own initial revision.
-          // Only a later capacity mutation creates pending outbox work.
-          wakeRevision,
-          observedWakeRevision: wakeRevision,
-          lastWakeReason: stopped ? "capacity_recovery_stopped" : "capacity_wait_armed",
-          resumedUpdateId: null,
-          updatedAt: now,
-        } as const;
-        const [waiterRow] = existing
-          ? await tx
-              .update(schema.codexCapacityWaiters)
-              .set(waiterValues)
-              .where(eq(schema.codexCapacityWaiters.id, existing.id))
-              .returning()
-          : await tx.insert(schema.codexCapacityWaiters).values(waiterValues).returning();
-        if (!waiterRow) {
-          throw new Error("Codex capacity wait arm returned no waiter row");
+          now,
+        });
+        const nextCheckAt = new Date(
+          Math.max(
+            scheduled.nextCheckAt.getTime(),
+            retryNotBefore ? Date.parse(retryNotBefore) : 0,
+          ),
+        );
+        let waiter: SubscriptionCoreCodexCapacityWait | null = null;
+        if (stopped) {
+          await tx.execute(sql`delete from subscription_capacity_waiters
+            where workspace_id = ${input.workspaceId}::uuid
+              and session_id = ${input.sessionId}::uuid and provider = 'codex'`);
+        } else {
+          // Arming follows a placement evaluation, so this generation has
+          // already observed its own initial revision; only a later capacity
+          // change creates pending wake work.
+          const generation = (existing?.generation ?? 0) + 1;
+          const wakeRevision = (existing?.wakeRevision ?? 0) + 1;
+          const [row] = await rawRows<SubscriptionCoreCodexWaiterRow>(
+            tx,
+            sql`insert into subscription_capacity_waiters (
+                account_id, workspace_id, session_id, turn_id, provider, wait_reason,
+                policy_hash, reset_kind, refresh_attempt, resumed_update_id, earliest_reset_at,
+                generation, wake_revision, observed_wake_revision, next_check_at,
+                blocked_turn_generation, goal_id, goal_version, last_wake_reason, updated_at
+              ) values (
+                ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.sessionId}::uuid,
+                ${input.turnId}::uuid, 'codex', ${input.waitReason}, null,
+                ${scheduled.resetKind}, 0, null,
+                ${input.earliestResetAt?.toISOString() ?? null}::timestamptz,
+                ${generation}, ${wakeRevision}, ${wakeRevision},
+                ${nextCheckAt.toISOString()}::timestamptz, ${turn.executionGeneration},
+                ${goalId}::uuid, ${goalVersion}, 'capacity_wait_armed',
+                ${now.toISOString()}::timestamptz
+              )
+              on conflict (workspace_id, session_id) do update
+                set turn_id = excluded.turn_id, provider = excluded.provider,
+                    wait_reason = excluded.wait_reason, policy_hash = null,
+                    reset_kind = excluded.reset_kind, refresh_attempt = 0,
+                    resumed_update_id = null, earliest_reset_at = excluded.earliest_reset_at,
+                    generation = excluded.generation, wake_revision = excluded.wake_revision,
+                    observed_wake_revision = excluded.observed_wake_revision,
+                    next_check_at = excluded.next_check_at,
+                    blocked_turn_generation = excluded.blocked_turn_generation,
+                    goal_id = excluded.goal_id, goal_version = excluded.goal_version,
+                    last_wake_reason = excluded.last_wake_reason,
+                    updated_at = excluded.updated_at
+                where subscription_capacity_waiters.account_id = excluded.account_id
+              returning ${SUBSCRIPTION_CORE_CODEX_WAITER_COLUMNS}`,
+          );
+          if (!row) throw new Error("Core Codex capacity wait arm returned no waiter row");
+          waiter = mapSubscriptionCoreCodexWaiter(row);
         }
 
         let sequence = session.lastSequence;
@@ -26996,13 +25253,13 @@ export async function armCodexCapacityWait(
                     recovery: "codex_capacity",
                     retryable: true,
                     rotated: true,
-                    waiterId: waiterRow.id,
-                    generation: waiterRow.generation,
+                    waiterId: waiter?.waiterId ?? existing?.waiterId ?? null,
+                    generation: waiter?.generation ?? existing?.generation ?? null,
                     goalId,
                     goalVersion,
                     blockedTurnGeneration: turn.executionGeneration,
-                    policyHash,
-                    resetKind: input.resetKind,
+                    policyHash: null,
+                    resetKind: scheduled.resetKind,
                     earliestResetAt: input.earliestResetAt?.toISOString() ?? null,
                     nextCheckAt: nextCheckAt.toISOString(),
                     falseResumptions,
@@ -27065,9 +25322,7 @@ export async function armCodexCapacityWait(
             ),
           )
           .returning({ id: schema.sessionTurns.id });
-        if (!waitingTurn) {
-          throw new Error("Codex capacity blocked turn changed during atomic arm");
-        }
+        if (!waitingTurn) throw new Error("Core Codex capacity blocked turn changed during arm");
         const [waitingSession] = await tx
           .update(schema.sessions)
           .set({
@@ -27086,9 +25341,7 @@ export async function armCodexCapacityWait(
             ),
           )
           .returning({ id: schema.sessions.id });
-        if (!waitingSession) {
-          throw new Error("Codex capacity session changed during atomic arm");
-        }
+        if (!waitingSession) throw new Error("Core Codex capacity session changed during arm");
         if (stopped) {
           await cancelTurnInteractionInterventionsInTransaction(tx, input);
           await settleSessionMaintenanceInTransaction(tx, input);
@@ -27117,426 +25370,66 @@ export async function armCodexCapacityWait(
                 eq(schema.sessionGoals.status, "active"),
               ),
             );
-        } else
+        } else {
           await enqueueChildWaitingCapacityOutboxTx(tx, input.workspaceId, session, {
             turnId: input.turnId,
-            waiterId: waiterRow.id,
+            waiterId: waiter!.waiterId,
             provider: "codex",
             nextCheckAt,
           });
-        if (input.leaseFence) {
-          await tx.execute(sql`
-            delete from codex_credential_leases
-            where account_id = ${input.accountId}
-              and workspace_id = ${input.workspaceId}
-              and turn_id = ${input.turnId}
-              and holder_id = ${input.leaseFence.holderId}
-              and generation = ${input.leaseFence.generation}
-          `);
         }
-        if (stopped)
+        if (input.leaseFence) {
+          await tx.execute(sql`delete from subscription_leases
+            where account_id = ${input.accountId}::uuid
+              and workspace_id = ${input.workspaceId}::uuid
+              and session_id = ${input.sessionId}::uuid
+              and turn_id = ${input.turnId}::uuid and provider = 'codex'
+              and connection_id = ${input.leaseFence.connectionId}::uuid
+              and holder_id = ${input.leaseFence.holderId}
+              and generation = ${input.leaseFence.generation}`);
+        }
+        const events = [...closedTools.events, ...inserted.map(mapEvent)];
+        if (stopped) {
           return {
             action: "stopped",
             sessionStatus: waitingPrompt ? "queued" : "failed",
-            waiter: mapCodexCapacityWaiter(waiterRow),
-            events: [...closedTools.events, ...inserted.map(mapEvent)],
+            events,
           } as const;
-        return {
-          action: "waiting",
-          waiter: mapCodexCapacityWaiter(waiterRow),
-          events: [...closedTools.events, ...inserted.map(mapEvent)],
-        } as const;
+        }
+        return { action: "waiting", waiter: waiter!, events } as const;
       }),
   );
 }
 
-export async function getCodexCapacityWaitForSession(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-): Promise<CodexCapacityWait | null> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select()
-      .from(schema.codexCapacityWaiters)
-      .where(
-        and(
-          eq(schema.codexCapacityWaiters.workspaceId, workspaceId),
-          eq(schema.codexCapacityWaiters.sessionId, sessionId),
-          eq(schema.codexCapacityWaiters.status, "waiting"),
-        ),
-      )
-      .limit(1);
-    return row ? mapCodexCapacityWaiter(row) : null;
-  });
-}
-
-type CodexCapacityMutationInput = {
-  acceptedTurnId?: string | undefined;
-  /** Local management writes do not follow the live source preference. */
-  mutationSource?: "workspace" | "organization" | "effective";
-  workspaceId: string;
-  reason: string;
-  policyHash?: string | null;
-};
-
-async function wakeCodexCapacityWaitersInWorkspaceInTransaction(
-  tx: Database,
-  input: CodexCapacityMutationInput,
-  acceptedSource?: EffectiveCodexSubscriptionSource,
-): Promise<CodexCapacityWakeTarget[]> {
-  const rows = await tx
-    .update(schema.codexCapacityWaiters)
-    .set({
-      wakeRevision: sql`${schema.codexCapacityWaiters.wakeRevision} + 1`,
-      lastWakeReason: input.reason,
-      updatedAt: new Date(),
-    })
-    .where(
-      and(
-        eq(schema.codexCapacityWaiters.workspaceId, input.workspaceId),
-        eq(schema.codexCapacityWaiters.status, "waiting"),
-        ...(acceptedSource
-          ? [
-              sql`exists (
-          select 1 from session_turns accepted
-          left join codex_turn_source_bindings binding
-            on binding.turn_id = accepted.id and binding.workspace_id = accepted.workspace_id
-          where accepted.id = ${schema.codexCapacityWaiters.blockedTurnId}
-            and accepted.workspace_id = ${schema.codexCapacityWaiters.workspaceId}
-            and accepted.account_id = ${schema.codexCapacityWaiters.accountId}
-            and coalesce(accepted.metadata #>> '{codexCredentialPolicySnapshotV1,source}',
-              binding.source, resolve_workspace_codex_subscription_source(accepted.account_id, accepted.workspace_id)) = ${acceptedSource}
-        )`,
-            ]
-          : []),
-        ...(input.policyHash !== undefined
-          ? [
-              input.policyHash === null
-                ? isNull(schema.codexCapacityWaiters.policyHash)
-                : eq(schema.codexCapacityWaiters.policyHash, input.policyHash),
-            ]
-          : []),
-      ),
-    )
-    .returning();
-  const wakeTargets: CodexCapacityWakeTarget[] = [];
-  for (const row of rows) {
-    const workflowWakeRevision = await enqueueSessionWorkflowWakeInTransaction(tx, {
-      accountId: row.accountId,
-      workspaceId: row.workspaceId,
-      sessionId: row.sessionId,
-      temporalWorkflowId: row.workflowId,
-      reason: "codex_capacity",
-    });
-    wakeTargets.push({
-      accountId: row.accountId,
-      workspaceId: row.workspaceId,
-      sessionId: row.sessionId,
-      workflowId: row.workflowId,
-      waiterId: row.id,
-      generation: row.generation,
-      wakeRevision: row.wakeRevision,
-      workflowWakeRevision,
-    });
-  }
-  return wakeTargets;
-}
-
-async function wakeOrganizationCodexCapacityWaitersInTransaction(
-  tx: Database,
-  input: {
-    accountId: string;
-    reason: string;
-    policyHash?: string | null;
-    restoreWorkspaceId: string | null;
-  },
-): Promise<CodexCapacityWakeTarget[]> {
-  const wakeTargets: CodexCapacityWakeTarget[] = [];
-  await setRlsContext(tx, { accountId: input.accountId, workspaceId: null });
-  const workspaceRows = await tx.execute<{ workspace_id: string }>(sql`
-    select workspace_id from list_organization_codex_workspace_ids(${input.accountId}::uuid)
-    order by workspace_id
-  `);
-  for (const { workspace_id: workspaceId } of workspaceRows) {
-    await setRlsContext(tx, { accountId: input.accountId, workspaceId });
-    await tx.execute(
-      sql`select pg_advisory_xact_lock_shared(hashtextextended(${`session-tenancy:${workspaceId}`}, 0))`,
-    );
-    // Current settings do not describe accepted waiters. A workspace that
-    // switched away may still have an organization-backed turn. Wakes only
-    // request reconciliation; each waiter rechecks its own immutable pool.
-    wakeTargets.push(
-      ...(await wakeCodexCapacityWaitersInWorkspaceInTransaction(
-        tx,
-        {
-          workspaceId,
-          reason: input.reason,
-          ...(input.policyHash !== undefined ? { policyHash: input.policyHash } : {}),
-        },
-        "organization",
-      )),
-    );
-  }
-  await setRlsContext(tx, {
-    accountId: input.accountId,
-    workspaceId: input.restoreWorkspaceId,
-  });
-  return wakeTargets;
-}
-
-async function mutateCodexCapacityInTransaction<T, TDatabase extends Database>(
-  tx: TDatabase,
-  input: CodexCapacityMutationInput,
-  mutate: (tx: TDatabase) => Promise<{ result: T; changed: boolean }>,
-): Promise<CodexCapacityMutationResult<T>> {
-  await lockWorkspaceCodexSubscriptionSource(tx, input.workspaceId);
-  await captureLegacyCodexTurnSources(tx, input.workspaceId);
-  const current = await getWorkspaceCodexSubscriptionSourceScoped(tx, input.workspaceId);
-  const mutationSource = input.acceptedTurnId
-    ? await codexSourceForTurn(tx, input.workspaceId, input.acceptedTurnId, current.effectiveSource)
-    : input.mutationSource === "effective"
-      ? current.effectiveSource
-      : (input.mutationSource ?? "workspace");
-  await lockExistingCodexRotationSettingsForCapacity(
-    tx,
-    input.workspaceId,
-    input.acceptedTurnId,
-    input.mutationSource === "effective" ? undefined : (input.mutationSource ?? "workspace"),
-  );
-  const mutation = await mutate(tx);
-  if (!mutation.changed) {
-    return { result: mutation.result, wakeTargets: [] };
-  }
-  const wakeTargets =
-    mutationSource === "disabled"
-      ? []
-      : mutationSource === "organization"
-        ? await wakeOrganizationCodexCapacityWaitersInTransaction(tx, {
-            accountId: current.accountId,
-            reason: input.reason,
-            ...(input.policyHash !== undefined ? { policyHash: input.policyHash } : {}),
-            restoreWorkspaceId: input.workspaceId,
-          })
-        : await wakeCodexCapacityWaitersInWorkspaceInTransaction(tx, input, "workspace");
-  return {
-    result: mutation.result,
-    wakeTargets,
-  };
-}
-
-/**
- * Same-transaction capacity-mutation/outbox seam for eligibility and
- * membership/default changes. Local management writes target the workspace
- * pool; runtime writers opt into the effective/accepted pool. The source lock
- * precedes that pool's rotation row. Mutations report whether capacity truth changed; only then are
- * matching waiter wake revisions advanced and returned for best-effort signal.
- */
-export async function withCodexCapacityMutation<T>(
-  db: Database,
-  input: CodexCapacityMutationInput,
-  mutate: (tx: Database) => Promise<{ result: T; changed: boolean }>,
-): Promise<CodexCapacityMutationResult<T>> {
-  return await withWorkspaceRls(db, input.workspaceId, (tx) =>
-    mutateCodexCapacityInTransaction(tx, input, mutate),
-  );
-}
-
-/** Capacity mutation whose atomic callback also changes session activity. */
-export async function withSessionCodexCapacityMutation<T>(
-  db: Database,
-  input: CodexCapacityMutationInput,
-  mutate: (tx: SessionActivityDatabase) => Promise<{ result: T; changed: boolean }>,
-): Promise<CodexCapacityMutationResult<T>> {
-  return await withWorkspaceSessionActivityRls(db, input.workspaceId, (tx) =>
-    mutateCodexCapacityInTransaction(tx, input, mutate),
-  );
-}
-
-export async function listPendingCodexCapacityWakeTargets(
-  db: Database,
-  workspaceId: string,
-): Promise<CodexCapacityWakeTarget[]> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const rows = await scopedDb
-      .select({
-        waiter: schema.codexCapacityWaiters,
-        workflowWakeRevision: schema.sessionWorkflowWakeOutbox.wakeRevision,
-      })
-      .from(schema.codexCapacityWaiters)
-      .innerJoin(
-        schema.sessionWorkflowWakeOutbox,
-        and(
-          eq(schema.sessionWorkflowWakeOutbox.workspaceId, schema.codexCapacityWaiters.workspaceId),
-          eq(schema.sessionWorkflowWakeOutbox.sessionId, schema.codexCapacityWaiters.sessionId),
-        ),
-      )
-      .where(
-        and(
-          eq(schema.codexCapacityWaiters.workspaceId, workspaceId),
-          eq(schema.codexCapacityWaiters.status, "waiting"),
-          sql`${schema.codexCapacityWaiters.wakeRevision} > ${schema.codexCapacityWaiters.observedWakeRevision}`,
-        ),
-      );
-    return rows.map(({ waiter: row, workflowWakeRevision }) => ({
-      accountId: row.accountId,
-      workspaceId: row.workspaceId,
-      sessionId: row.sessionId,
-      workflowId: row.workflowId,
-      waiterId: row.id,
-      generation: row.generation,
-      wakeRevision: row.wakeRevision,
-      workflowWakeRevision,
-    }));
-  });
-}
-
-async function supersedeCodexCapacityWaitInTransaction(
-  tx: SessionActivityDatabase,
-  input: {
-    session: typeof schema.sessions.$inferSelect;
-    blockedTurn: typeof schema.sessionTurns.$inferSelect;
-    waiter: typeof schema.codexCapacityWaiters.$inferSelect;
-    reason: string;
-    now: Date;
-  },
-): Promise<{ waiter: CodexCapacityWait; events: SessionEvent[] }> {
-  const [updated] = await tx
-    .update(schema.codexCapacityWaiters)
-    .set({
-      status: "superseded",
-      observedWakeRevision: input.waiter.wakeRevision,
-      lastWakeReason: input.reason,
-      updatedAt: input.now,
-    })
-    .where(
-      and(
-        eq(schema.codexCapacityWaiters.id, input.waiter.id),
-        eq(schema.codexCapacityWaiters.status, "waiting"),
-      ),
-    )
-    .returning();
-  if (!updated) {
-    return { waiter: mapCodexCapacityWaiter(input.waiter), events: [] };
-  }
-  const turnWasCurrent = input.session.activeTurnId === input.blockedTurn.id;
-  const turnStillWaiting = input.blockedTurn.status === "waiting_capacity";
-  const terminalTurnStatus = input.session.status === "cancelled" ? "cancelled" : "superseded";
-  if (turnStillWaiting) {
-    const [supersededTurn] = await tx
-      .update(schema.sessionTurns)
-      .set({
-        status: terminalTurnStatus,
-        activeAttemptId: null,
-        cancelledBy: "codex_capacity_reconcile",
-        cancelReason: input.reason,
-        version: input.blockedTurn.version + 1,
-        finishedAt: input.now,
-        updatedAt: input.now,
-      })
-      .where(
-        and(
-          eq(schema.sessionTurns.workspaceId, input.session.workspaceId),
-          eq(schema.sessionTurns.id, input.blockedTurn.id),
-          eq(schema.sessionTurns.status, "waiting_capacity"),
-          isNull(schema.sessionTurns.activeAttemptId),
-          eq(schema.sessionTurns.executionGeneration, input.waiter.blockedTurnGeneration),
-        ),
-      )
-      .returning({ id: schema.sessionTurns.id });
-    if (!supersededTurn) {
-      throw new Error("Codex capacity blocked turn changed during atomic supersession");
+/** What core placement says about a blocked turn, evaluated before the reconcile transaction. */
+export type SubscriptionCoreCodexWaitEvaluation =
+  | { kind: "run" }
+  | {
+      kind: "wait";
+      waitReason: string;
+      earliestResetAt: Date | null;
+      healthRetryAt: Date | null;
     }
-  }
-  const [queued] = turnWasCurrent
-    ? await tx
-        .select({ id: schema.sessionTurns.id })
-        .from(schema.sessionTurns)
-        .where(
-          and(
-            eq(schema.sessionTurns.workspaceId, input.session.workspaceId),
-            eq(schema.sessionTurns.sessionId, input.session.id),
-            eq(schema.sessionTurns.status, "queued"),
-          ),
-        )
-        .limit(1)
-    : [];
-  const nextSessionStatus =
-    input.session.status === "cancelled" ? "cancelled" : queued ? "queued" : "idle";
-  const eventValues: SessionEventInsertWithPayload[] = [
-    {
-      accountId: input.session.accountId,
-      workspaceId: input.session.workspaceId,
-      sessionId: input.session.id,
-      sequence: input.session.lastSequence + 1,
-      type: "codex.capacity.superseded",
-      payload: {
-        waiterId: updated.id,
-        generation: updated.generation,
-        reason: input.reason,
-      },
-      turnId: updated.blockedTurnId,
-      turnGeneration: input.blockedTurn.executionGeneration,
-      ...(turnWasCurrent ? { turnAssociation: "current" } : {}),
-      occurredAt: input.now,
-    },
-  ];
-  if (turnWasCurrent && input.session.status !== nextSessionStatus) {
-    eventValues.push({
-      accountId: input.session.accountId,
-      workspaceId: input.session.workspaceId,
-      sessionId: input.session.id,
-      sequence: input.session.lastSequence + 2,
-      type: "session.status.changed",
-      payload: { status: nextSessionStatus, reason: input.reason },
-      turnId: updated.blockedTurnId,
-      turnGeneration: input.blockedTurn.executionGeneration,
-      turnAssociation: "current",
-      occurredAt: input.now,
-    });
-  }
-  const inserted = await tx
-    .insert(schema.sessionEvents)
-    .values(withLosslessContentWriteVersion(eventValues, "payload", "payloadCodecVersion"))
-    .returning();
-  const lastSequence = input.session.lastSequence + inserted.length;
-  const [updatedSession] = await tx
-    .update(schema.sessions)
-    .set({
-      ...(turnWasCurrent ? { status: nextSessionStatus, activeTurnId: null } : {}),
-      lastSequence,
-      updatedAt: input.now,
-    })
-    .where(
-      and(
-        eq(schema.sessions.workspaceId, input.session.workspaceId),
-        eq(schema.sessions.id, input.session.id),
-        ...(turnWasCurrent ? [eq(schema.sessions.activeTurnId, input.blockedTurn.id)] : []),
-      ),
-    )
-    .returning({ id: schema.sessions.id });
-  if (!updatedSession) {
-    throw new Error("Codex capacity session changed during atomic supersession");
-  }
-  return {
-    waiter: mapCodexCapacityWaiter(updated),
-    events: inserted.map(mapEvent),
-  };
-}
+  /** The accepted turn can no longer use the core under its frozen authority. */
+  | { kind: "revoked" }
+  /** The cutover is switched off: keep the work parked (maintenance), check later. */
+  | { kind: "paused" };
+
+export type ReconcileSubscriptionCoreCodexCapacityWaitResult =
+  | { action: "waiting"; waiter: SubscriptionCoreCodexCapacityWait; events: SessionEvent[] }
+  | { action: "resumed" | "superseded"; events: SessionEvent[] }
+  | { action: "paused" | "stale"; events: SessionEvent[] };
 
 /**
- * Row-lock and re-evaluate one waiter. Availability is decided by a pure
- * caller supplied policy over the same rotation-row transaction as normal
- * acquisition. If available, the exact blocked turn becomes `recovering`;
- * duplicate timers/signals observe status=resumed and do no work. Effective
- * Pause leaves the waiter untouched, ordinary queued prompts remain behind the
- * current inference, and only an explicit semantic fence change supersedes the
- * waiter/blocked turn without inference.
+ * Row-lock and settle one core waiter after the caller evaluated placement
+ * for its blocked turn (without leasing). Resuming makes the exact blocked
+ * turn `recovering` and deletes the waiter; waiting acknowledges only the
+ * wake revision the evaluation actually observed, so a capacity change that
+ * lands during the evaluation is checked again immediately. Pause leaves the
+ * waiter untouched; a changed goal, turn or session supersedes it without
+ * inference, as for the legacy Codex waiter.
  */
-export async function reconcileCodexCapacityWait<
-  TPolicyScope = never,
-  TUnavailableDiagnostic = never,
->(
+export async function reconcileSubscriptionCoreCodexCapacityWait(
   db: Database,
   input: {
     accountId: string;
@@ -27544,66 +25437,29 @@ export async function reconcileCodexCapacityWait<
     sessionId: string;
     waiterId: string;
     generation: number;
+    /** The waiter's wake revision when the evaluation started. */
+    evaluatedWakeRevision: number;
+    evaluation: SubscriptionCoreCodexWaitEvaluation;
     now?: Date;
-    /** True only after the caller performed the due bounded metadata refresh. */
-    boundedRefreshAttempted?: boolean;
   },
-  decide: (
-    context: CodexCapacitySelectionContext<TPolicyScope, TUnavailableDiagnostic>,
-  ) => CodexCapacityAvailabilityDecision,
-  policy?: {
-    resolvePolicyScope?: CodexCredentialLeasePolicyScopeResolver<TPolicyScope>;
-    filterNewAllocationCandidates?: CodexCredentialLeaseCandidateFilter<
-      TPolicyScope,
-      TUnavailableDiagnostic
-    >;
-  },
-): Promise<ReconcileCodexCapacityWaitResult> {
+): Promise<ReconcileSubscriptionCoreCodexCapacityWaitResult> {
   const now = input.now ?? new Date();
   return await withSessionActivityRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
       await withSessionActivitySavepoint(scopedDb, async (tx) => {
-        const [acceptedWaiter] = await tx
-          .select({ turnId: schema.codexCapacityWaiters.blockedTurnId })
-          .from(schema.codexCapacityWaiters)
-          .where(
-            and(
-              eq(schema.codexCapacityWaiters.workspaceId, input.workspaceId),
-              eq(schema.codexCapacityWaiters.id, input.waiterId),
-            ),
-          )
-          .limit(1);
-        const rotation = await lockExistingCodexRotationSettingsForCapacity(
-          tx,
-          input.workspaceId,
-          acceptedWaiter?.turnId,
-        );
-        if (!rotation || rotation.accountId !== input.accountId) {
-          return { action: "stale", waiter: null, events: [] } as const;
-        }
         const prefix = await lockSessionEventWriteRows(tx, {
           workspaceId: input.workspaceId,
           controlLock: "share",
         });
-        const [waiterRead] = await tx
-          .select()
-          .from(schema.codexCapacityWaiters)
-          .where(
-            and(
-              eq(schema.codexCapacityWaiters.workspaceId, input.workspaceId),
-              eq(schema.codexCapacityWaiters.id, input.waiterId),
-              eq(schema.codexCapacityWaiters.sessionId, input.sessionId),
-            ),
-          )
-          .limit(1);
+        const waiterRead = await readSubscriptionCoreCodexWaiterInTransaction(tx, {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          waiterId: input.waiterId,
+        });
         if (!waiterRead || waiterRead.generation !== input.generation) {
-          return {
-            action: "stale",
-            waiter: waiterRead ? mapCodexCapacityWaiter(waiterRead) : null,
-            events: [],
-          } as const;
+          return { action: "stale", events: [] } as const;
         }
         const locks = await lockSessionEventWriteRows(tx, {
           workspaceId: input.workspaceId,
@@ -27633,12 +25489,12 @@ export async function reconcileCodexCapacityWait<
               .for("update")
               .limit(1)
           : [];
-        const [waiter] = await tx
-          .select()
-          .from(schema.codexCapacityWaiters)
-          .where(eq(schema.codexCapacityWaiters.id, input.waiterId))
-          .for("update")
-          .limit(1);
+        const waiter = await readSubscriptionCoreCodexWaiterInTransaction(tx, {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          waiterId: input.waiterId,
+          forUpdate: true,
+        });
         if (
           !session ||
           !blockedTurn ||
@@ -27647,37 +25503,22 @@ export async function reconcileCodexCapacityWait<
           blockedTurn.accountId !== input.accountId ||
           blockedTurn.sessionId !== input.sessionId ||
           waiter.accountId !== input.accountId ||
-          waiter.workspaceId !== input.workspaceId ||
-          waiter.sessionId !== input.sessionId ||
           waiter.blockedTurnId !== blockedTurn.id ||
-          waiter.generation !== input.generation ||
-          waiter.status !== "waiting"
+          waiter.generation !== input.generation
         ) {
-          return {
-            action: "stale",
-            waiter: waiter ? mapCodexCapacityWaiter(waiter) : null,
-            events: [],
-          } as const;
+          return { action: "stale", events: [] } as const;
         }
         if (effectiveControl?.state !== "active" || effectiveControl.settlement !== null) {
-          return {
-            action: "paused",
-            waiter: mapCodexCapacityWaiter(waiter),
-            events: [],
-          } as const;
+          return { action: "paused", events: [] } as const;
         }
 
-        const currentPolicyHash = codexCapacityPolicyHashFromTurnMetadata(blockedTurn.metadata);
         let supersedeReason: string | null = null;
-        if (session.status === "cancelled") {
-          supersedeReason = "session_cancelled";
-        } else if (
+        if (session.status === "cancelled") supersedeReason = "session_cancelled";
+        else if (
           waiter.goalId !== null &&
           (!goal || goal.status !== "active" || goal.version !== waiter.goalVersion)
         ) {
           supersedeReason = "goal_changed";
-        } else if (currentPolicyHash !== waiter.policyHash) {
-          supersedeReason = "credential_policy_changed";
         } else if (session.activeTurnId !== blockedTurn.id) {
           supersedeReason = "active_turn_changed";
         } else if (session.status !== "waiting_capacity") {
@@ -27688,141 +25529,73 @@ export async function reconcileCodexCapacityWait<
           blockedTurn.executionGeneration !== waiter.blockedTurnGeneration
         ) {
           supersedeReason = "blocked_turn_changed";
+        } else if (input.evaluation.kind === "revoked") {
+          supersedeReason = "subscription_access_revoked";
         }
         if (supersedeReason) {
-          const superseded = await supersedeCodexCapacityWaitInTransaction(tx, {
+          return await supersedeSubscriptionCoreCodexCapacityWaitInTransaction(tx, {
             session,
             blockedTurn,
             waiter,
             reason: supersedeReason,
             now,
           });
-          return { action: "superseded", ...superseded } as const;
         }
 
+        // Only the revision the evaluation saw is acknowledged.
+        const observed = Math.min(waiter.wakeRevision, input.evaluatedWakeRevision);
         const recovery = readCodexCapacityRecovery(blockedTurn.metadata);
-        // Account revisions can prompt a recheck, but cannot bypass a persisted
-        // false-resumption delay. Acknowledge the wake to avoid a signal spin.
-        if (recovery.retryNotBefore && Date.parse(recovery.retryNotBefore) > now.getTime()) {
-          const [delayed] = await tx
-            .update(schema.codexCapacityWaiters)
-            .set({
-              nextCheckAt: new Date(recovery.retryNotBefore),
-              observedWakeRevision: waiter.wakeRevision,
-              updatedAt: now,
-            })
-            .where(eq(schema.codexCapacityWaiters.id, waiter.id))
-            .returning();
-          return {
-            action: "waiting",
-            waiter: mapCodexCapacityWaiter(delayed!),
-            events: [],
-          } as const;
-        }
-        const acceptedCodexPolicy = readCodexCredentialPolicySnapshotV1(blockedTurn.metadata);
-        const codexPolicySnapshot =
-          acceptedCodexPolicy.kind === "valid" ? acceptedCodexPolicy.policy : null;
-        // A post-wait source cutover must not move an already accepted turn to
-        // another credential pool. The rotation lock was selected using the
-        // legacy sidecar when the accepted snapshot predates its source field.
-        const acceptedSource = codexPolicySnapshot?.source ?? rotation.source;
-        const activeCredentialId = codexPolicySnapshot
-          ? codexPolicySnapshot.activeCredentialId
-          : rotation.activeCredentialId;
-        const rotationEnabled = codexPolicySnapshot
-          ? codexPolicySnapshot.rotationEnabled
-          : rotation.rotationEnabled;
-        const rotationStrategy = codexPolicySnapshot
-          ? codexPolicySnapshot.rotationStrategy
-          : rotation.rotationStrategy;
-        const sessionPinnedCredentialId = codexPolicySnapshot
-          ? codexPolicySnapshot.pinnedCredentialId
-          : session.codexPinnedCredentialId;
-        const sessionPinSource = codexPolicySnapshot
-          ? codexPolicySnapshot.pinSource
-          : ((session.codexPinSource as CodexPinSource | null) ?? null);
-        const sessionLastCredentialId = codexPolicySnapshot
-          ? codexPolicySnapshot.lastCredentialId
-          : session.codexLastCredentialId;
-        const allAccounts =
-          acceptedSource === "disabled"
-            ? []
-            : await listCodexLeaseCandidatesInTransaction(tx, {
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                activeCredentialId,
-                source: acceptedSource,
-                excludeTurnId: waiter.blockedTurnId,
-              });
-        const policyScope = policy?.resolvePolicyScope?.(blockedTurn.metadata ?? {}) ?? null;
-        const filtered = filterCodexLeaseCandidatesForPolicy(
-          allAccounts,
-          policyScope,
-          policy?.filterNewAllocationCandidates,
-        );
-        const decision = decide({
-          accounts: filtered.accounts,
-          activeCredentialId,
-          rotationEnabled,
-          rotationStrategy,
-          existingCredentialId: null,
-          failedCredentialIds: unresolvedCodexCredentialFailures(
-            blockedTurn.metadata,
-            filtered.accounts,
+        const evaluation = input.evaluation;
+        if (
+          evaluation.kind !== "run" ||
+          (recovery.retryNotBefore && Date.parse(recovery.retryNotBefore) > now.getTime())
+        ) {
+          const waitEvaluation =
+            evaluation.kind === "wait"
+              ? evaluation
+              : {
+                  kind: "wait" as const,
+                  waitReason: waiter.waitReason,
+                  earliestResetAt: null,
+                  healthRetryAt: null,
+                };
+          const authoritative =
+            waitEvaluation.earliestResetAt !== null &&
+            waitEvaluation.earliestResetAt.getTime() > now.getTime();
+          const refreshAttempt = authoritative ? 0 : waiter.refreshAttempt + 1;
+          const scheduled = subscriptionCoreCodexNextCheckAt({
+            earliestResetAt: waitEvaluation.earliestResetAt,
+            healthRetryAt: waitEvaluation.healthRetryAt,
+            refreshAttempt,
             now,
-          ),
-          failoverExhausted: codexFailoverMetadata(blockedTurn.metadata).exhausted,
-          modelId: blockedTurn.model,
-          policyScope,
-          unavailableDiagnostics: filtered.unavailableDiagnostics,
-          sessionId: session.id,
-          sessionPinnedCredentialId,
-          sessionPinSource,
-          sessionLastCredentialId,
-          policyHash: waiter.policyHash,
-        });
-        if (decision.kind === "unavailable") {
-          const boundedRefreshAdvanced =
-            decision.resetKind === "bounded_refresh" && input.boundedRefreshAttempted === true;
-          const refreshAttempt =
-            decision.resetKind === "bounded_refresh"
-              ? waiter.refreshAttempt + (boundedRefreshAdvanced ? 1 : 0)
-              : 0;
-          const nextCheckAt =
-            decision.resetKind === "bounded_refresh" &&
-            !boundedRefreshAdvanced &&
-            waiter.resetKind === "bounded_refresh"
-              ? waiter.nextCheckAt
-              : nextCodexCapacityCheckAt(
-                  decision.earliestResetAt,
-                  decision.resetKind,
-                  refreshAttempt,
-                  now,
-                );
-          const [updated] = await tx
-            .update(schema.codexCapacityWaiters)
-            .set({
-              earliestResetAt: decision.earliestResetAt,
-              nextCheckAt,
-              resetKind: decision.resetKind,
-              refreshAttempt,
-              observedWakeRevision: waiter.wakeRevision,
-              updatedAt: now,
-            })
-            .where(
-              and(
-                eq(schema.codexCapacityWaiters.id, waiter.id),
-                eq(schema.codexCapacityWaiters.status, "waiting"),
-                eq(schema.codexCapacityWaiters.generation, waiter.generation),
-              ),
-            )
-            .returning();
-          if (!updated) {
-            return { action: "stale", waiter: null, events: [] } as const;
-          }
+          });
+          // Capacity changes can prompt a recheck but never bypass a persisted
+          // false-resumption delay.
+          const nextCheckAt = new Date(
+            Math.max(
+              scheduled.nextCheckAt.getTime(),
+              recovery.retryNotBefore ? Date.parse(recovery.retryNotBefore) : 0,
+            ),
+          );
+          const [row] = await rawRows<SubscriptionCoreCodexWaiterRow>(
+            tx,
+            sql`update subscription_capacity_waiters
+              set wait_reason = ${waitEvaluation.waitReason},
+                  earliest_reset_at = ${waitEvaluation.earliestResetAt?.toISOString() ?? null}::timestamptz,
+                  next_check_at = ${nextCheckAt.toISOString()}::timestamptz,
+                  reset_kind = ${scheduled.resetKind},
+                  refresh_attempt = ${refreshAttempt},
+                  observed_wake_revision = greatest(observed_wake_revision, ${observed}),
+                  updated_at = ${now.toISOString()}::timestamptz
+              where workspace_id = ${input.workspaceId}::uuid
+                and session_id = ${input.sessionId}::uuid
+                and waiter_id = ${waiter.waiterId}::uuid and generation = ${waiter.generation}
+              returning ${SUBSCRIPTION_CORE_CODEX_WAITER_COLUMNS}`,
+          );
+          if (!row) return { action: "stale", events: [] } as const;
           return {
             action: "waiting",
-            waiter: mapCodexCapacityWaiter(updated),
+            waiter: mapSubscriptionCoreCodexWaiter(row),
             events: [],
           } as const;
         }
@@ -27839,14 +25612,14 @@ export async function reconcileCodexCapacityWait<
                   sequence: session.lastSequence + 1,
                   type: "codex.capacity.resumed",
                   payload: {
-                    waiterId: waiter.id,
+                    waiterId: waiter.waiterId,
                     generation: waiter.generation,
                     wakeRevision: waiter.wakeRevision,
                     goalId: waiter.goalId,
                     goalVersion: waiter.goalVersion,
                     blockedTurnGeneration: waiter.blockedTurnGeneration,
-                    policyHash: waiter.policyHash,
-                    diagnostic: decision.diagnostic ?? null,
+                    policyHash: null,
+                    diagnostic: null,
                   },
                   turnId: blockedTurn.id,
                   turnGeneration: blockedTurn.executionGeneration,
@@ -27871,26 +25644,15 @@ export async function reconcileCodexCapacityWait<
             ),
           )
           .returning();
-        const [updatedWaiter] = await tx
-          .update(schema.codexCapacityWaiters)
-          .set({
-            status: "resumed",
-            resumedUpdateId: null,
-            observedWakeRevision: waiter.wakeRevision,
-            lastWakeReason: "capacity_available",
-            updatedAt: now,
-          })
-          .where(
-            and(
-              eq(schema.codexCapacityWaiters.id, waiter.id),
-              eq(schema.codexCapacityWaiters.status, "waiting"),
-              eq(schema.codexCapacityWaiters.generation, waiter.generation),
-            ),
-          )
-          .returning();
-        if (!updatedWaiter) {
-          throw new Error("Codex capacity waiter changed during atomic resume");
-        }
+        const deleted = await rawRows<{ waiter_id: string }>(
+          tx,
+          sql`delete from subscription_capacity_waiters
+            where workspace_id = ${input.workspaceId}::uuid
+              and session_id = ${input.sessionId}::uuid
+              and waiter_id = ${waiter.waiterId}::uuid and generation = ${waiter.generation}
+            returning waiter_id::text as waiter_id`,
+        );
+        if (deleted.length !== 1) throw new Error("Core Codex waiter changed during atomic resume");
         const [recoveringTurn] = await tx
           .update(schema.sessionTurns)
           .set({
@@ -27913,12 +25675,12 @@ export async function reconcileCodexCapacityWait<
               eq(schema.sessionTurns.id, blockedTurn.id),
               eq(schema.sessionTurns.status, "waiting_capacity"),
               isNull(schema.sessionTurns.activeAttemptId),
-              eq(schema.sessionTurns.executionGeneration, waiter.blockedTurnGeneration),
+              eq(schema.sessionTurns.executionGeneration, waiter.blockedTurnGeneration ?? -1),
             ),
           )
           .returning({ id: schema.sessionTurns.id });
         if (!recoveringTurn) {
-          throw new Error("Codex capacity blocked turn changed during atomic resume");
+          throw new Error("Core Codex capacity blocked turn changed during atomic resume");
         }
         const [recoveringSession] = await tx
           .update(schema.sessions)
@@ -27938,14 +25700,180 @@ export async function reconcileCodexCapacityWait<
           )
           .returning({ id: schema.sessions.id });
         if (!recoveringSession) {
-          throw new Error("Codex capacity session changed during atomic resume");
+          throw new Error("Core Codex capacity session changed during atomic resume");
         }
-        return {
-          action: "resumed",
-          waiter: mapCodexCapacityWaiter(updatedWaiter),
-          events: events.map(mapEvent),
-        } as const;
+        return { action: "resumed", events: events.map(mapEvent) } as const;
       }),
+  );
+}
+
+async function supersedeSubscriptionCoreCodexCapacityWaitInTransaction(
+  tx: SessionActivityDatabase,
+  input: {
+    session: typeof schema.sessions.$inferSelect;
+    blockedTurn: typeof schema.sessionTurns.$inferSelect;
+    waiter: SubscriptionCoreCodexCapacityWait;
+    reason: string;
+    now: Date;
+  },
+): Promise<{ action: "superseded"; events: SessionEvent[] }> {
+  const deleted = await rawRows<{ waiter_id: string }>(
+    tx,
+    sql`delete from subscription_capacity_waiters
+      where workspace_id = ${input.session.workspaceId}::uuid
+        and session_id = ${input.session.id}::uuid
+        and waiter_id = ${input.waiter.waiterId}::uuid and generation = ${input.waiter.generation}
+      returning waiter_id::text as waiter_id`,
+  );
+  if (deleted.length !== 1) return { action: "superseded", events: [] };
+  const turnWasCurrent = input.session.activeTurnId === input.blockedTurn.id;
+  const terminalTurnStatus = input.session.status === "cancelled" ? "cancelled" : "superseded";
+  if (input.blockedTurn.status === "waiting_capacity") {
+    const [supersededTurn] = await tx
+      .update(schema.sessionTurns)
+      .set({
+        status: terminalTurnStatus,
+        activeAttemptId: null,
+        cancelledBy: "codex_capacity_reconcile",
+        cancelReason: input.reason,
+        version: input.blockedTurn.version + 1,
+        finishedAt: input.now,
+        updatedAt: input.now,
+      })
+      .where(
+        and(
+          eq(schema.sessionTurns.workspaceId, input.session.workspaceId),
+          eq(schema.sessionTurns.id, input.blockedTurn.id),
+          eq(schema.sessionTurns.status, "waiting_capacity"),
+          isNull(schema.sessionTurns.activeAttemptId),
+          eq(schema.sessionTurns.executionGeneration, input.waiter.blockedTurnGeneration ?? -1),
+        ),
+      )
+      .returning({ id: schema.sessionTurns.id });
+    if (!supersededTurn) {
+      throw new Error("Core Codex capacity blocked turn changed during atomic supersession");
+    }
+  }
+  const [queued] = turnWasCurrent
+    ? await tx
+        .select({ id: schema.sessionTurns.id })
+        .from(schema.sessionTurns)
+        .where(
+          and(
+            eq(schema.sessionTurns.workspaceId, input.session.workspaceId),
+            eq(schema.sessionTurns.sessionId, input.session.id),
+            eq(schema.sessionTurns.status, "queued"),
+          ),
+        )
+        .limit(1)
+    : [];
+  const nextSessionStatus =
+    input.session.status === "cancelled" ? "cancelled" : queued ? "queued" : "idle";
+  const eventValues: SessionEventInsertWithPayload[] = [
+    {
+      accountId: input.session.accountId,
+      workspaceId: input.session.workspaceId,
+      sessionId: input.session.id,
+      sequence: input.session.lastSequence + 1,
+      type: "codex.capacity.superseded",
+      payload: {
+        waiterId: input.waiter.waiterId,
+        generation: input.waiter.generation,
+        reason: input.reason,
+      },
+      turnId: input.blockedTurn.id,
+      turnGeneration: input.blockedTurn.executionGeneration,
+      ...(turnWasCurrent ? { turnAssociation: "current" } : {}),
+      occurredAt: input.now,
+    },
+  ];
+  if (turnWasCurrent && input.session.status !== nextSessionStatus) {
+    eventValues.push({
+      accountId: input.session.accountId,
+      workspaceId: input.session.workspaceId,
+      sessionId: input.session.id,
+      sequence: input.session.lastSequence + 2,
+      type: "session.status.changed",
+      payload: { status: nextSessionStatus, reason: input.reason },
+      turnId: input.blockedTurn.id,
+      turnGeneration: input.blockedTurn.executionGeneration,
+      turnAssociation: "current",
+      occurredAt: input.now,
+    });
+  }
+  const inserted = await tx
+    .insert(schema.sessionEvents)
+    .values(withLosslessContentWriteVersion(eventValues, "payload", "payloadCodecVersion"))
+    .returning();
+  const [updatedSession] = await tx
+    .update(schema.sessions)
+    .set({
+      ...(turnWasCurrent ? { status: nextSessionStatus, activeTurnId: null } : {}),
+      lastSequence: input.session.lastSequence + inserted.length,
+      updatedAt: input.now,
+    })
+    .where(
+      and(
+        eq(schema.sessions.workspaceId, input.session.workspaceId),
+        eq(schema.sessions.id, input.session.id),
+        ...(turnWasCurrent ? [eq(schema.sessions.activeTurnId, input.blockedTurn.id)] : []),
+      ),
+    )
+    .returning({ id: schema.sessions.id });
+  if (!updatedSession) throw new Error("Core Codex capacity session changed during supersession");
+  return { action: "superseded", events: inserted.map(mapEvent) };
+}
+
+/**
+ * The trusted empty-subject worker scope the provider-neutral wake outbox
+ * requires (its own RLS policy), for exactly one account and workspace, even
+ * when the caller runs under a turn's ambient session actor.
+ */
+export async function withSubscriptionCapacityWakeOutboxScope<T>(
+  db: Database,
+  scope: { accountId: string; workspaceId: string },
+  operation: (tx: Database) => Promise<T>,
+): Promise<T> {
+  return await withRlsContext(db, scope, (tx) =>
+    withPoolWakeServiceScopeInTransaction(tx, () => operation(tx)),
+  );
+}
+
+/** One workspace whose core waiters were woken; deliver its outbox after commit. */
+export type SubscriptionCoreCodexWakeScope = SubscriptionCoreWakeScope;
+
+/**
+ * Capacity changed for the account's Codex pool (a quota exhaustion ended, a
+ * quarantine cleared, a plan changed, a binding or assignment changed):
+ * advance every waiting core Codex waiter's wake revision, record the typed
+ * wake in the provider-neutral outbox and the generic session workflow wake
+ * in the same transaction. Codex's binding of the provider-neutral
+ * `wakeSubscriptionCoreCapacityWaiters`, with its own validation texts.
+ * Returns the workspaces whose outbox the caller should drain after commit.
+ */
+export async function wakeSubscriptionCoreCodexCapacityWaiters(
+  db: Database,
+  input: {
+    accountId: string;
+    reason: string;
+    workspaceIds?: readonly string[];
+    /**
+     * Wake only these sessions' waiters (for example a session pin, which
+     * changes nothing another session can place on). Requires exactly one
+     * workspace in `workspaceIds`.
+     */
+    sessionIds?: readonly string[];
+  },
+): Promise<SubscriptionCoreCodexWakeScope[]> {
+  if (!/^[a-z][a-z0-9_]{0,127}$/.test(input.reason))
+    throw new Error("Core Codex wake reason must be a bounded identifier");
+  if (input.sessionIds !== undefined && input.workspaceIds?.length !== 1)
+    throw new Error("A session-scoped core Codex wake names exactly one workspace");
+  return await wakeSubscriptionCoreCapacityWaiters(
+    db,
+    SUBSCRIPTION_CORE_CODEX_PROVIDER,
+    input,
+    enqueueSessionWorkflowWakeInTransaction,
   );
 }
 
@@ -28148,21 +26076,32 @@ function createScopedSubscriptionCapacityWaiters(options: {
     const subjectId =
       snapshot.scope === "user" ? turn.initiatingHumanSubjectId : options.workerSubject;
     if (!subjectId) return null;
-    return await withTemporarySubjectRls(tx, subjectId, async () => {
-      const [row] = await tx
-        .select()
-        .from(tables.capacityWaiters)
-        .where(
-          and(
-            eq(tables.capacityWaiters.workspaceId, workspaceId),
-            eq(tables.capacityWaiters.sessionId, sessionId),
-            eq(tables.capacityWaiters.blockedTurnId, turn.id),
-            eq(tables.capacityWaiters.status, "waiting"),
-          ),
-        )
-        .limit(1);
-      return row ? mapXaiCapacityWaiter(row) : null;
-    });
+    // The pool-worker subject must not hide the caller's own private session:
+    // keep the turn's initiating human, which the caller just read itself.
+    return await withTemporarySubjectRls(
+      tx,
+      subjectId,
+      async () =>
+        await withTemporaryPoolSessionAccessInTransaction(
+          tx,
+          subjectId === options.workerSubject ? turn.initiatingHumanSubjectId : null,
+          async () => {
+            const [row] = await tx
+              .select()
+              .from(tables.capacityWaiters)
+              .where(
+                and(
+                  eq(tables.capacityWaiters.workspaceId, workspaceId),
+                  eq(tables.capacityWaiters.sessionId, sessionId),
+                  eq(tables.capacityWaiters.blockedTurnId, turn.id),
+                  eq(tables.capacityWaiters.status, "waiting"),
+                ),
+              )
+              .limit(1);
+            return row ? mapXaiCapacityWaiter(row) : null;
+          },
+        ),
+    );
   }
 
   async function resolveXaiPoolMembershipInTransaction(
@@ -28199,6 +26138,28 @@ function createScopedSubscriptionCapacityWaiters(options: {
       stableJson(current.data) === stableJson(snapshot) &&
       (snapshot.scope !== "user" || turn.initiatingHumanSubjectId === subjectId)
     );
+  }
+
+  /**
+   * Open one waiter transaction. A user pool acts as its initiating human, who
+   * owns any private session that runs on it. Workspace and organization pool
+   * policies do not read the subject, and their synthetic worker subject would
+   * make session-visibility RLS hide a member's private session (and its
+   * waiter rows) from that session's own turn, so they run without one.
+   */
+  async function withScopedCapacityWaiterRls<T>(
+    db: Database,
+    workspaceId: string,
+    subjectId: string,
+    snapshot: XaiProviderAccountAuthoritySnapshotV1,
+    fn: (db: SessionActivityDatabase) => Promise<T>,
+  ): Promise<T> {
+    if (!subjectId.trim()) {
+      throw new Error(options.label + " capacity waiter requires a non-empty subjectId");
+    }
+    return snapshot.scope === "user"
+      ? await withWorkspaceSubjectSessionActivityRls(db, workspaceId, subjectId, fn)
+      : await withWorkspaceSessionActivityRls(db, workspaceId, fn);
   }
 
   /**
@@ -28253,10 +26214,11 @@ function createScopedSubscriptionCapacityWaiters(options: {
     ) {
       throw new Error(options.label + " credential cooldown must end in the future");
     }
-    return await withWorkspaceSubjectSessionActivityRls(
+    return await withScopedCapacityWaiterRls(
       db,
       input.workspaceId,
       input.subjectId,
+      snapshot,
       async (scopedDb) =>
         await withSessionActivitySavepoint(scopedDb, async (tx) => {
           const ownerOrganizationMembershipId = await resolveXaiPoolMembershipInTransaction(tx, {
@@ -28684,21 +26646,26 @@ function createScopedSubscriptionCapacityWaiters(options: {
   ): Promise<XaiCapacityWait | null> {
     const authority = await resolveXaiWaiterSubject(db, workspaceId, sessionId);
     if (!authority) return null;
-    return await withWorkspaceSubjectRls(db, workspaceId, authority.subjectId, async (scopedDb) => {
-      const [row] = await scopedDb
-        .select()
-        .from(tables.capacityWaiters)
-        .where(
-          and(
-            eq(tables.capacityWaiters.workspaceId, workspaceId),
-            eq(tables.capacityWaiters.sessionId, sessionId),
-            eq(tables.capacityWaiters.blockedTurnId, authority.turnId),
-            eq(tables.capacityWaiters.status, "waiting"),
-          ),
-        )
-        .limit(1);
-      return row ? mapXaiCapacityWaiter(row) : null;
-    });
+    return await withSubscriptionPoolSessionAccess(
+      db,
+      { workspaceId, subjectId: authority.subjectId, sessionId, turnId: authority.turnId },
+      async () =>
+        await withWorkspaceSubjectRls(db, workspaceId, authority.subjectId, async (scopedDb) => {
+          const [row] = await scopedDb
+            .select()
+            .from(tables.capacityWaiters)
+            .where(
+              and(
+                eq(tables.capacityWaiters.workspaceId, workspaceId),
+                eq(tables.capacityWaiters.sessionId, sessionId),
+                eq(tables.capacityWaiters.blockedTurnId, authority.turnId),
+                eq(tables.capacityWaiters.status, "waiting"),
+              ),
+            )
+            .limit(1);
+          return row ? mapXaiCapacityWaiter(row) : null;
+        }),
+    );
   }
 
   async function supersedeXaiCapacityWaitInTransaction(
@@ -28843,10 +26810,11 @@ function createScopedSubscriptionCapacityWaiters(options: {
     const now = input.now ?? new Date();
     const authority = await resolveXaiWaiterSubject(db, input.workspaceId, input.sessionId);
     if (!authority) return { action: "stale", waiter: null, events: [] };
-    return await withWorkspaceSubjectSessionActivityRls(
+    return await withScopedCapacityWaiterRls(
       db,
       input.workspaceId,
       authority.subjectId,
+      authority.snapshot,
       async (scopedDb) =>
         await withSessionActivitySavepoint(scopedDb, async (tx) => {
           const ownerOrganizationMembershipId = await resolveXaiPoolMembershipInTransaction(tx, {
@@ -29189,7 +27157,7 @@ const xaiCapacityRepository = createScopedSubscriptionCapacityWaiters({
   provider: "xai",
   label: "SuperGrok",
   wireProvider: "supergrok-subscription",
-  workerSubject: "worker:xai-workspace",
+  workerSubject: subscriptionPoolWorkerSubject("xai"),
   snapshotColumn: "xaiProviderAccountAuthoritySnapshot",
   resolvePoolFunction: "resolve_xai_authority_pool",
   tables: {
@@ -29207,7 +27175,7 @@ const claudeCapacityRepository = createScopedSubscriptionCapacityWaiters({
   provider: "claude",
   label: "Claude",
   wireProvider: "claude-subscription",
-  workerSubject: "worker:claude-workspace",
+  workerSubject: subscriptionPoolWorkerSubject("claude"),
   snapshotColumn: "claudeProviderAccountAuthoritySnapshot",
   resolvePoolFunction: "resolve_claude_authority_pool",
   tables: claudeSubscriptionTables,
@@ -29238,82 +27206,9 @@ export type ArmClaudeCapacityWaitResult = ArmXaiCapacityWaitResult;
 export type ReconcileClaudeCapacityWaitResult = ReconcileXaiCapacityWaitResult;
 export type ClaudeCredentialLeaseQuarantine = XaiCredentialLeaseQuarantine;
 
-/**
- * Extend a live holder and return the database-confirmed expiry. A
- * missing/expired/released row returns null. A successful result lets the worker
- * derive a conservative monotonic deadline from the request start and configured
- * TTL, without comparing the Postgres and worker wall clocks; the worker still
- * rejects a response that returns after its prior confirmed deadline.
- */
-export async function heartbeatCodexCredentialLeaseUntil(
-  db: Database,
-  accountId: string,
-  workspaceId: string,
-  turnId: string,
-  holderId: string,
-  generation: number,
-  leaseTtlMs: number = CODEX_CREDENTIAL_LEASE_TTL_MS,
-): Promise<Date | null> {
-  return await withRlsContext(db, { accountId, workspaceId }, async (scopedDb) => {
-    return heartbeatSubscriptionCredentialLeaseUntil(scopedDb, "codex_credential_leases", {
-      workspaceId,
-      turnId,
-      holderId,
-      generation,
-      ttlMs: leaseTtlMs,
-    });
-  });
-}
-
-/** Extend a live holder. Compatibility wrapper for boolean-only callers. */
-export async function heartbeatCodexCredentialLease(
-  db: Database,
-  accountId: string,
-  workspaceId: string,
-  turnId: string,
-  holderId: string,
-  generation: number,
-  leaseTtlMs: number = CODEX_CREDENTIAL_LEASE_TTL_MS,
-): Promise<boolean> {
-  return (
-    (await heartbeatCodexCredentialLeaseUntil(
-      db,
-      accountId,
-      workspaceId,
-      turnId,
-      holderId,
-      generation,
-      leaseTtlMs,
-    )) !== null
-  );
-}
-
-/** Idempotent turn-end release. */
-export async function releaseCodexCredentialLease(
-  db: Database,
-  accountId: string,
-  workspaceId: string,
-  turnId: string,
-  holderId: string,
-  generation: number,
-): Promise<boolean> {
-  return await withRlsContext(db, { accountId, workspaceId }, async (scopedDb) => {
-    const rows = await scopedDb
-      .delete(schema.codexCredentialLeases)
-      .where(
-        and(
-          eq(schema.codexCredentialLeases.workspaceId, workspaceId),
-          eq(schema.codexCredentialLeases.turnId, turnId),
-          eq(schema.codexCredentialLeases.holderId, holderId),
-          eq(schema.codexCredentialLeases.generation, generation),
-        ),
-      )
-      .returning({ id: schema.codexCredentialLeases.id });
-    return rows.length > 0;
-  });
-}
-
 export type CodexCredentialLeaseQuarantine =
+  | { kind: "included_usage"; until: Date }
+  | { kind: "usage_verification"; until: Date }
   | {
       kind: "status";
       status: "needs_relogin" | "error";
@@ -29353,271 +27248,6 @@ export type CodexCredentialLeaseQuarantineResult =
     }
   | { action: "stale"; failoverCount: number; maxFailovers: number };
 
-/**
- * Quarantine the credential served by one exact live attempt and token family.
- * The attempt, dispatch, lease, and credential version are checked before the
- * write. The same transaction freezes the accepted turn's alternate budget and
- * records the attempted credential, so waiter/database recovery cannot reset
- * accounting or return to an already-consumed account under rotation policy.
- */
-export async function quarantineCodexCredentialForLease(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    sessionId: string;
-    turnId: string;
-    attemptId: string;
-    executionGeneration: number;
-    workflowId: string;
-    workflowRunId: string;
-    dispatchId: string;
-    expectedRedispatches: number;
-    credentialId: string;
-    credentialVersion: number;
-    holderId: string;
-    generation: number;
-    maxFailovers: number;
-    quarantine: CodexCredentialLeaseQuarantine;
-  },
-): Promise<CodexCredentialLeaseQuarantineResult> {
-  if (!Number.isSafeInteger(input.credentialVersion) || input.credentialVersion < 1) {
-    throw new Error("Codex quarantine credential version must be positive");
-  }
-  if (!Number.isSafeInteger(input.maxFailovers) || input.maxFailovers < 1) {
-    throw new Error("Codex quarantine failover bound must be positive");
-  }
-  return await withSessionActivityRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) =>
-      await scopedDb.transaction(async (tx) => {
-        const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
-          workspaceId: input.workspaceId,
-          controlLock: "share",
-          sessionIds: [input.sessionId],
-          turnIds: [input.turnId],
-          attemptIds: [input.attemptId],
-        });
-        const session = locks.sessions[0];
-        const turn = locks.turns[0];
-        const attempt = locks.attempts[0];
-        const metadata = codexFailoverMetadata(turn?.metadata);
-        const maxFailovers = metadata.maxFailovers ?? input.maxFailovers;
-        const currentRedispatches = Number(turn?.metadata?.workerDeathRedispatches ?? 0);
-        const dispatch = readTurnDispatchMetadata(turn?.metadata);
-        const effectiveControl = await evaluateSessionControl(
-          tx as unknown as Database,
-          input.workspaceId,
-          input.sessionId,
-          { workspaceControl: locks.control ?? undefined },
-        );
-        if (
-          !locks.workspace ||
-          !session ||
-          !turn ||
-          !attempt ||
-          session.accountId !== input.accountId ||
-          session.activeTurnId !== input.turnId ||
-          session.status !== "running" ||
-          turn.accountId !== input.accountId ||
-          turn.sessionId !== input.sessionId ||
-          turn.status !== "running" ||
-          turn.activeAttemptId !== input.attemptId ||
-          turn.executionGeneration !== input.executionGeneration ||
-          attempt.accountId !== input.accountId ||
-          attempt.sessionId !== input.sessionId ||
-          attempt.turnId !== input.turnId ||
-          (attempt.state !== "claimed" && attempt.state !== "running") ||
-          attempt.executionGeneration !== input.executionGeneration ||
-          attempt.temporalWorkflowId !== input.workflowId ||
-          attempt.temporalWorkflowRunId !== input.workflowRunId ||
-          attempt.temporalActivityId !== input.dispatchId ||
-          dispatch.kind !== "valid" ||
-          dispatch.attempt?.id !== input.dispatchId ||
-          currentRedispatches !== input.expectedRedispatches ||
-          effectiveControl.state !== "active"
-        ) {
-          return {
-            action: "stale",
-            failoverCount: metadata.failoverCount,
-            maxFailovers,
-          } as const;
-        }
-        const leaseRows = await tx.execute(sql<{ id: string }>`
-          select id from codex_credential_leases
-          where account_id = ${input.accountId}
-            and workspace_id = ${input.workspaceId}
-            and turn_id = ${input.turnId}
-            and credential_id = ${input.credentialId}
-            and holder_id = ${input.holderId}
-            and generation = ${input.generation}
-            and leased_until > clock_timestamp()
-          for update
-        `);
-        if (!leaseRows[0]) {
-          return {
-            action: "stale",
-            failoverCount: metadata.failoverCount,
-            maxFailovers,
-          } as const;
-        }
-        const condition = await codexCredentialUseCondition(tx, input.workspaceId, {
-          turnId: input.turnId,
-          holderId: input.holderId,
-          generation: input.generation,
-        });
-        if (!condition) {
-          return {
-            action: "stale",
-            failoverCount: metadata.failoverCount,
-            maxFailovers,
-          } as const;
-        }
-        const [credential] = await tx
-          .select({
-            version: schema.codexSubscriptionCredentials.version,
-            exhaustedRevision:
-              input.quarantine.kind === "cooldown"
-                ? schema.codexSubscriptionCredentials.exhaustedRevision
-                : sql<number>`0`,
-            planEntitlementExclusion: schema.codexSubscriptionCredentials.planEntitlementExclusion,
-          })
-          .from(schema.codexSubscriptionCredentials)
-          .where(
-            and(
-              eq(schema.codexSubscriptionCredentials.accountId, input.accountId),
-              eq(schema.codexSubscriptionCredentials.id, input.credentialId),
-              condition,
-            ),
-          )
-          .for("update")
-          .limit(1);
-        if (!credential) {
-          return {
-            action: "stale",
-            failoverCount: metadata.failoverCount,
-            maxFailovers,
-          } as const;
-        }
-        if (credential.version !== input.credentialVersion) {
-          return {
-            action: "credential_changed",
-            failoverCount: metadata.failoverCount,
-            maxFailovers,
-            currentCredentialVersion: credential.version,
-          } as const;
-        }
-        const planKey =
-          input.quarantine.kind === "plan_entitlement"
-            ? codexPlanKey(input.quarantine.planType)
-            : null;
-        const updated = await tx
-          .update(schema.codexSubscriptionCredentials)
-          .set(
-            input.quarantine.kind === "status"
-              ? {
-                  status: input.quarantine.status,
-                  lastError: input.quarantine.lastError,
-                  updatedAt: new Date(),
-                }
-              : input.quarantine.kind === "plan_entitlement"
-                ? {
-                    planEntitlementExclusion: serializeCodexPlanEntitlementExclusion(
-                      mergeCodexPlanEntitlementExclusion(
-                        readCodexPlanEntitlementExclusion(credential.planEntitlementExclusion),
-                        input.quarantine.planType,
-                        input.quarantine.modelId,
-                        new Date(),
-                      ),
-                    ),
-                    updatedAt: new Date(),
-                  }
-                : {
-                    exhaustedUntil: input.quarantine.until,
-                    exhaustedKind: input.quarantine.cooldownKind,
-                    exhaustedRevision: sql`${schema.codexSubscriptionCredentials.exhaustedRevision} + 1`,
-                  },
-          )
-          .where(
-            and(
-              eq(schema.codexSubscriptionCredentials.accountId, input.accountId),
-              eq(schema.codexSubscriptionCredentials.id, input.credentialId),
-              eq(schema.codexSubscriptionCredentials.version, input.credentialVersion),
-              condition,
-            ),
-          )
-          .returning({ id: schema.codexSubscriptionCredentials.id });
-        if (updated.length === 0) {
-          return {
-            action: "stale",
-            failoverCount: metadata.failoverCount,
-            maxFailovers,
-          } as const;
-        }
-        const alreadyRecorded = metadata.failedCredentialIds.has(input.credentialId);
-        const failedCredentialIds = alreadyRecorded
-          ? [...metadata.failedCredentialIds]
-          : [...metadata.failedCredentialIds, input.credentialId];
-        const failoverCount = alreadyRecorded
-          ? metadata.failoverCount
-          : Math.max(metadata.failoverCount + 1, failedCredentialIds.length);
-        const exhausted = failoverCount > maxFailovers;
-        const [accountedTurn] = await tx
-          .update(schema.sessionTurns)
-          .set({
-            metadata: {
-              ...turn.metadata,
-              codexCredentialFailureAccountingVersion: 1,
-              codexCredentialFailedIds: failedCredentialIds,
-              codexCredentialFailureCooldownRevisions: {
-                ...(turn.metadata?.codexCredentialFailureCooldownRevisions as
-                  | Record<string, unknown>
-                  | undefined),
-                [input.credentialId]:
-                  input.quarantine.kind === "cooldown" ? credential.exhaustedRevision + 1 : null,
-              },
-              codexCredentialFailureEvidenceV1: {
-                ...(turn.metadata?.codexCredentialFailureEvidenceV1 as
-                  | Record<string, unknown>
-                  | undefined),
-                [input.credentialId]:
-                  input.quarantine.kind === "status"
-                    ? { kind: "status", credentialVersion: credential.version }
-                    : input.quarantine.kind === "plan_entitlement"
-                      ? {
-                          kind: "plan",
-                          credentialVersion: credential.version,
-                          planType: input.quarantine.planObserved === false ? null : planKey,
-                        }
-                      : {
-                          kind: input.quarantine.cooldownKind,
-                          cooldownRevision: credential.exhaustedRevision + 1,
-                        },
-              },
-              codexCredentialFailovers: failoverCount,
-              codexCredentialFailoverLimit: maxFailovers,
-              codexCredentialFailoverExhausted: exhausted,
-            },
-            updatedAt: new Date(),
-          })
-          .where(
-            and(
-              eq(schema.sessionTurns.workspaceId, input.workspaceId),
-              eq(schema.sessionTurns.id, input.turnId),
-              eq(schema.sessionTurns.activeAttemptId, input.attemptId),
-              eq(schema.sessionTurns.executionGeneration, input.executionGeneration),
-            ),
-          )
-          .returning({ id: schema.sessionTurns.id });
-        if (!accountedTurn) {
-          throw new Error("Codex quarantine lost its exact turn accounting fence");
-        }
-        return { action: "recorded", failoverCount, maxFailovers, exhausted } as const;
-      }),
-  );
-}
-
 /** Commit organization subscription policy and its durable capacity wake atomically. */
 export async function updateModelConnectionAccess(
   db: Database,
@@ -29644,23 +27274,7 @@ export async function updateModelConnectionAccess(
         updateModelConnectionAccessPolicy(scopedDb, target, policy),
       );
     }
-    // Match ordinary organization mutations: workspace source locks, then pool,
-    // then credential and waiter rows. Keep Personal inventory internal.
-    await lockOrganizationCodexSubscriptionSources(tx, target.accountId);
-    await tx
-      .select({ accountId: schema.organizationCodexRotationSettings.accountId })
-      .from(schema.organizationCodexRotationSettings)
-      .where(eq(schema.organizationCodexRotationSettings.accountId, target.accountId))
-      .for("update");
-    const updated = await updateModelConnectionAccessPolicy(tx, target, policy);
-    if (updated) {
-      await wakeOrganizationCodexCapacityWaitersInTransaction(tx, {
-        accountId: target.accountId,
-        reason: "organization_codex_connection_access_changed",
-        restoreWorkspaceId: null,
-      });
-    }
-    return updated;
+    return null;
   });
 }
 
@@ -29672,223 +27286,46 @@ export async function getWorkspaceConnectionModelRestrictions(
   authoritySnapshot?: XaiProviderAccountAuthoritySnapshotV1,
   claudeAuthoritySnapshot?: ClaudeProviderAccountAuthoritySnapshotV1,
 ) {
-  const [accounts, rotation] = await Promise.all([
-    listCodexAccountStatuses(db, workspaceId),
-    getCodexRotationSettings(db, workspaceId),
-  ]);
-  const selectableAccounts = rotation?.rotationEnabled
-    ? accounts
-    : accounts.filter((account) => account.id === rotation?.activeCredentialId);
   return await resolveWorkspaceConnectionModelRestrictions(
     db,
     workspaceId,
     subjectId,
-    selectableAccounts,
+    await codexAccountsForModelRestrictions(db, workspaceId, subjectId),
     authoritySnapshot,
     claudeAuthoritySnapshot,
   );
 }
 
 /**
- * Metadata-only list of every connected Codex account in the workspace, for the
- * accounts UI + the worker's selection resolver. NEVER decrypts. `isActive` marks
- * the workspace active pointer. Ordered by created_at ASC (stable list order).
+ * The Codex accounts whose model allowlists bound the `codex/` restriction,
+ * by the organization's Codex cutover row (M3 PR 3): the legacy selectable
+ * pool without a row; the core connections that can serve this subject's new
+ * work with an enabled row; none (every Codex model closed) while the
+ * cutover is disabled. No legacy table is read for an organization with a
+ * row.
  */
-export async function listCodexAccountStatuses(
+async function codexAccountsForModelRestrictions(
   db: Database,
   workspaceId: string,
-  acceptedTurnId?: string,
-): Promise<CodexAccountStatus[]> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const pool = await effectiveCodexCredentialPoolCondition(scopedDb, workspaceId);
-    if (acceptedTurnId) {
-      const source = await codexSourceForTurn(
-        scopedDb,
-        workspaceId,
-        acceptedTurnId,
-        pool.source.effectiveSource,
-      );
-      pool.source.effectiveSource = source;
-      pool.condition =
-        source === "disabled"
-          ? null
-          : codexCredentialPoolCondition({
-              accountId: pool.source.accountId,
-              workspaceId,
-              source,
-            });
-    }
-    if (!pool.condition || pool.source.effectiveSource === "disabled") return [];
-    const accountSource: "workspace" | "organization" = pool.source.effectiveSource;
-    const [settingsRow] =
-      pool.source.effectiveSource === "organization"
-        ? await scopedDb
-            .select({
-              activeCredentialId: schema.organizationCodexRotationSettings.activeCredentialId,
-            })
-            .from(schema.organizationCodexRotationSettings)
-            .where(eq(schema.organizationCodexRotationSettings.accountId, pool.source.accountId))
-            .limit(1)
-        : await scopedDb
-            .select({
-              activeCredentialId: schema.codexRotationSettings.activeCredentialId,
-            })
-            .from(schema.codexRotationSettings)
-            .where(eq(schema.codexRotationSettings.workspaceId, workspaceId))
-            .limit(1);
-    let activeId = settingsRow?.activeCredentialId ?? null;
-    const rows = await scopedDb
-      .select({
-        id: schema.codexSubscriptionCredentials.id,
-        chatgptAccountId: schema.codexSubscriptionCredentials.chatgptAccountId,
-        allowedModelIds: schema.codexSubscriptionCredentials.allowedModelIds,
-        label: schema.codexSubscriptionCredentials.label,
-        accountEmail: schema.codexSubscriptionCredentials.accountEmail,
-        planType: schema.codexSubscriptionCredentials.planType,
-        planCheckedAt: schema.codexSubscriptionCredentials.planCheckedAt,
-        planPreviousType: schema.codexSubscriptionCredentials.planPreviousType,
-        planChangedAt: schema.codexSubscriptionCredentials.planChangedAt,
-        planEntitlementExclusion: schema.codexSubscriptionCredentials.planEntitlementExclusion,
-        status: schema.codexSubscriptionCredentials.status,
-        allocatorEnabled: schema.codexSubscriptionCredentials.allocatorEnabled,
-        allocatorVersion: schema.codexSubscriptionCredentials.allocatorVersion,
-        allocatorUpdatedBySubjectId:
-          schema.codexSubscriptionCredentials.allocatorUpdatedBySubjectId,
-        allocatorUpdatedAt: schema.codexSubscriptionCredentials.allocatorUpdatedAt,
-        resetCreditAvailableCount: schema.codexSubscriptionCredentials.resetCreditAvailableCount,
-        resetCreditsCheckedAt: schema.codexSubscriptionCredentials.resetCreditsCheckedAt,
-        connectedBySubjectId: schema.codexSubscriptionCredentials.connectedBySubjectId,
-        expiresAt: schema.codexSubscriptionCredentials.expiresAt,
-        lastRefreshAt: schema.codexSubscriptionCredentials.lastRefreshAt,
-        lastError: schema.codexSubscriptionCredentials.lastError,
-        // P2/P3 cached capacity metadata is strictly workspace-local.
-        primaryUsedPercent: schema.codexSubscriptionCredentials.primaryUsedPercent,
-        primaryResetAt: schema.codexSubscriptionCredentials.primaryResetAt,
-        secondaryUsedPercent: schema.codexSubscriptionCredentials.secondaryUsedPercent,
-        secondaryResetAt: schema.codexSubscriptionCredentials.secondaryResetAt,
-        usageCheckedAt: schema.codexSubscriptionCredentials.usageCheckedAt,
-        exhaustedUntil: schema.codexSubscriptionCredentials.exhaustedUntil,
-        exhaustedKind: schema.codexSubscriptionCredentials.exhaustedKind,
-      })
-      .from(schema.codexSubscriptionCredentials)
-      .where(pool.condition)
-      .orderBy(
-        asc(schema.codexSubscriptionCredentials.createdAt),
-        asc(schema.codexSubscriptionCredentials.id),
-      );
-    if (accountSource === "organization") activeId = assignedConnectionDefault(activeId, rows);
-    return rows.map((row) => ({
-      ...row,
-      source: accountSource,
-      planCheckedAt: codexMetadataDate(row.planCheckedAt),
-      planChangedAt: codexMetadataDate(row.planChangedAt),
-      planEntitlementExclusion: readCodexPlanEntitlementExclusion(row.planEntitlementExclusion),
-      expiresAt: codexMetadataDate(row.expiresAt),
-      lastRefreshAt: codexMetadataDate(row.lastRefreshAt),
-      allocatorUpdatedAt: codexMetadataDate(row.allocatorUpdatedAt),
-      resetCreditsCheckedAt: codexMetadataDate(row.resetCreditsCheckedAt),
-      primaryResetAt: codexMetadataDate(row.primaryResetAt),
-      secondaryResetAt: codexMetadataDate(row.secondaryResetAt),
-      usageCheckedAt: codexMetadataDate(row.usageCheckedAt),
-      exhaustedUntil: codexMetadataDate(row.exhaustedUntil),
-      exhaustedKind:
-        row.exhaustedKind === "quota" || row.exhaustedKind === "rate_limit"
-          ? row.exhaustedKind
-          : null,
-      isActive: row.id === activeId,
+  subjectId: string,
+): Promise<
+  Array<{ status: string; allocatorEnabled: boolean; allowedModelIds?: string[] | null }>
+> {
+  const { accountId, disposition } = await readCodexCutoverDispositionForWorkspace(db, workspaceId);
+  if (disposition === "maintenance") return [];
+  if (disposition === "core") {
+    const serving = await listSubscriptionCoreCodexServingConnections(db, {
+      accountId,
+      workspaceId,
+      subjectId,
+    });
+    return serving.map((connection) => ({
+      status: "active",
+      allocatorEnabled: true,
+      allowedModelIds: subscriptionCoreCodexConnectionAllowlist(connection),
     }));
-  });
-}
-
-/** Session-authorized metadata projection. The caller authorizes the session;
- * its locked active pointer, never a client-supplied turn/source, selects the
- * accepted pool. Running turns retain their display account while choices for
- * new work follow current settings. No credential material or Apps grants. */
-export async function getSessionCodexAccounts(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-) {
-  return await withWorkspaceRls(db, workspaceId, async (tx) => {
-    await tx.execute(
-      sql`select pg_advisory_xact_lock_shared(hashtextextended(${`codex-subscription-source:${workspaceId}`}, 0))`,
-    );
-    const [session] = await tx
-      .select()
-      .from(schema.sessions)
-      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
-      .for("share")
-      .limit(1);
-    if (!session) return null;
-    const [turn] = session.activeTurnId
-      ? await tx
-          .select({
-            id: schema.sessionTurns.id,
-            metadata: schema.sessionTurns.metadata,
-            status: schema.sessionTurns.status,
-            credentialId: schema.codexCredentialLeases.credentialId,
-          })
-          .from(schema.sessionTurns)
-          .leftJoin(
-            schema.codexCredentialLeases,
-            and(
-              eq(schema.codexCredentialLeases.workspaceId, schema.sessionTurns.workspaceId),
-              eq(schema.codexCredentialLeases.turnId, schema.sessionTurns.id),
-              sql`${schema.codexCredentialLeases.leasedUntil} > clock_timestamp()`,
-            ),
-          )
-          .where(
-            and(
-              eq(schema.sessionTurns.workspaceId, workspaceId),
-              eq(schema.sessionTurns.accountId, session.accountId),
-              eq(schema.sessionTurns.sessionId, session.id),
-              eq(schema.sessionTurns.id, session.activeTurnId),
-              inArray(schema.sessionTurns.status, [
-                "running",
-                "recovering",
-                "waiting_capacity",
-                "requires_action",
-              ]),
-              sql`${schema.sessionTurns.model} like 'codex/%'`,
-            ),
-          )
-          .limit(1)
-      : [];
-    const accepted = readCodexCredentialPolicySnapshotV1(turn?.metadata);
-    const policy = accepted.kind === "valid" ? accepted.policy : null;
-    const waiting = turn?.status === "waiting_capacity";
-    const currentSelection = turn
-      ? {
-          waiting,
-          credentialId: waiting
-            ? !policy && session.codexPinSource !== "policy"
-              ? session.codexPinnedCredentialId
-              : policy?.pinSource === "manual"
-                ? policy.pinnedCredentialId
-                : policy?.rotationEnabled === false
-                  ? policy.activeCredentialId
-                  : null
-            : turn.credentialId,
-        }
-      : null;
-    const acceptedTurnId = waiting ? turn.id : undefined;
-    const accounts = await listCodexAccountStatuses(tx, workspaceId, acceptedTurnId);
-    const rotation = await getCodexRotationSettings(tx, workspaceId, acceptedTurnId);
-    const currentAccounts =
-      turn && !waiting && currentSelection?.credentialId
-        ? await listCodexAccountStatuses(tx, workspaceId, turn.id)
-        : accounts;
-    return {
-      accounts,
-      rotation,
-      currentSelection,
-      currentAccount:
-        currentAccounts.find((account) => account.id === currentSelection?.credentialId) ?? null,
-      pinnedAccountId:
-        waiting && policy ? policy.pinnedCredentialId : session.codexPinnedCredentialId,
-      lastAccountId: session.codexLastCredentialId,
-    };
-  });
+  }
+  return [];
 }
 
 export type CodexAllocatorUpdateResult =
@@ -29908,129 +27345,22 @@ export type CodexAllocatorUpdateResult =
     }
   | { kind: "not_found" };
 
-/**
- * Toggle only NEW allocator eligibility under credential-row OCC.
- *
- * Same-state writes are idempotent even when `expectedVersion` is stale. A real
- * state transition requires the exact current version, increments only the
- * allocator version, and writes one audit row in the same transaction. It never
- * touches credential `version`, health, encrypted material, cooldown, or quota.
- */
-export async function updateCodexAllocatorEligibility(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    credentialId: string;
-    subjectId: string;
-    enabled: boolean;
-    expectedVersion: number;
-  },
-): Promise<CodexCapacityMutationResult<CodexAllocatorUpdateResult>> {
-  return await withCodexCapacityMutation<CodexAllocatorUpdateResult>(
-    db,
-    {
-      workspaceId: input.workspaceId,
-      reason: "codex_allocator_eligibility_changed",
-    },
-    async (tx) => {
-      const [row] = await tx
-        .select({
-          allocatorEnabled: schema.codexSubscriptionCredentials.allocatorEnabled,
-          allocatorVersion: schema.codexSubscriptionCredentials.allocatorVersion,
-          allocatorUpdatedBySubjectId:
-            schema.codexSubscriptionCredentials.allocatorUpdatedBySubjectId,
-          allocatorUpdatedAt: schema.codexSubscriptionCredentials.allocatorUpdatedAt,
-        })
-        .from(schema.codexSubscriptionCredentials)
-        .where(
-          and(
-            eq(schema.codexSubscriptionCredentials.accountId, input.accountId),
-            eq(schema.codexSubscriptionCredentials.workspaceId, input.workspaceId),
-            eq(schema.codexSubscriptionCredentials.id, input.credentialId),
-          ),
-        )
-        .for("update")
-        .limit(1);
-      if (!row) return { result: { kind: "not_found" } as const, changed: false };
-      const current = {
-        allocatorEnabled: row.allocatorEnabled,
-        allocatorVersion: row.allocatorVersion,
-        allocatorUpdatedBySubjectId: row.allocatorUpdatedBySubjectId,
-        allocatorUpdatedAt: codexMetadataDate(row.allocatorUpdatedAt),
-      };
-      if (row.allocatorEnabled === input.enabled) {
-        return {
-          result: { kind: "unchanged", ...current } as const,
-          changed: false,
-        };
-      }
-      if (row.allocatorVersion !== input.expectedVersion) {
-        return {
-          result: { kind: "conflict", ...current } as const,
-          changed: false,
-        };
-      }
-
-      const changedAt = new Date();
-      const [updated] = await tx
-        .update(schema.codexSubscriptionCredentials)
-        .set({
-          allocatorEnabled: input.enabled,
-          allocatorVersion: sql`${schema.codexSubscriptionCredentials.allocatorVersion} + 1`,
-          allocatorUpdatedBySubjectId: input.subjectId,
-          allocatorUpdatedAt: changedAt,
-          // Deliberately no credential version/updatedAt write.
-        })
-        .where(
-          and(
-            eq(schema.codexSubscriptionCredentials.accountId, input.accountId),
-            eq(schema.codexSubscriptionCredentials.workspaceId, input.workspaceId),
-            eq(schema.codexSubscriptionCredentials.id, input.credentialId),
-            eq(schema.codexSubscriptionCredentials.allocatorVersion, input.expectedVersion),
-          ),
-        )
-        .returning({
-          allocatorEnabled: schema.codexSubscriptionCredentials.allocatorEnabled,
-          allocatorVersion: schema.codexSubscriptionCredentials.allocatorVersion,
-          allocatorUpdatedBySubjectId:
-            schema.codexSubscriptionCredentials.allocatorUpdatedBySubjectId,
-          allocatorUpdatedAt: schema.codexSubscriptionCredentials.allocatorUpdatedAt,
-        });
-      if (!updated) {
-        throw new Error("Codex allocator row changed while locked");
-      }
-      await tx.insert(schema.auditEvents).values(
-        withLosslessContentWriteVersion(
-          {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            subjectId: input.subjectId,
-            action: "codex.allocator.updated",
-            targetType: "codex_subscription_credential",
-            targetId: input.credentialId,
-            metadata: {
-              allocatorEnabled: updated.allocatorEnabled,
-              allocatorVersion: updated.allocatorVersion,
-            },
-          },
-          "metadata",
-          "metadataCodecVersion",
-        ),
-      );
-      return {
-        result: {
-          kind: "updated",
-          allocatorEnabled: updated.allocatorEnabled,
-          allocatorVersion: updated.allocatorVersion,
-          allocatorUpdatedBySubjectId: updated.allocatorUpdatedBySubjectId,
-          allocatorUpdatedAt: codexMetadataDate(updated.allocatorUpdatedAt),
-        } as const,
-        changed: true,
-      };
-    },
-  );
-}
+export type CodexExtraCreditsUpdateResult =
+  | {
+      kind: "updated" | "unchanged";
+      extraCreditsEnabled: boolean;
+      extraCreditsVersion: number;
+      extraCreditsUpdatedBySubjectId: string | null;
+      extraCreditsUpdatedAt: Date | null;
+    }
+  | {
+      kind: "conflict";
+      extraCreditsEnabled: boolean;
+      extraCreditsVersion: number;
+      extraCreditsUpdatedBySubjectId: string | null;
+      extraCreditsUpdatedAt: Date | null;
+    }
+  | { kind: "not_found" };
 
 export const CODEX_RESET_REDEMPTION_OUTCOMES = [
   "reset",
@@ -30123,66 +27453,35 @@ export type CodexResetRedemptionRecovery = {
 };
 
 /**
- * Cookie-owner discovery source for durable ambiguous/completed attempts.
- * Browser storage is never required to recover these non-secret identifiers.
+ * Who may redeem a credential's reset credits, read (and share-locked
+ * against disconnect or credential replacement) inside the ledger
+ * transaction. `null` is an unknown credential in this workspace. The legacy
+ * rule is the human who connected it; the shared core supplies its own
+ * section 6.3 authority (M3 PR 2c).
  */
-export async function listCodexResetRedemptionRecoveries(
-  db: Database,
-  input: { accountId: string; workspaceId: string; subjectId: string },
-): Promise<CodexResetRedemptionRecovery[]> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      const rows = await scopedDb
-        .select({
-          attemptId: schema.codexResetRedemptionAttempts.id,
-          credentialId: schema.codexResetRedemptionAttempts.credentialId,
-          creditId: schema.codexResetRedemptionAttempts.creditId,
-          status: schema.codexResetRedemptionAttempts.status,
-          outcome: schema.codexResetRedemptionAttempts.outcome,
-          providerStartedAt: schema.codexResetRedemptionAttempts.providerStartedAt,
-          completedAt: schema.codexResetRedemptionAttempts.completedAt,
-          createdAt: schema.codexResetRedemptionAttempts.createdAt,
-          updatedAt: schema.codexResetRedemptionAttempts.updatedAt,
-        })
-        .from(schema.codexResetRedemptionAttempts)
-        .innerJoin(
-          schema.codexSubscriptionCredentials,
-          and(
-            eq(
-              schema.codexSubscriptionCredentials.id,
-              schema.codexResetRedemptionAttempts.credentialId,
-            ),
-            eq(
-              schema.codexSubscriptionCredentials.workspaceId,
-              schema.codexResetRedemptionAttempts.workspaceId,
-            ),
-          ),
-        )
-        .where(
-          and(
-            eq(schema.codexResetRedemptionAttempts.workspaceId, input.workspaceId),
-            eq(schema.codexResetRedemptionAttempts.subjectId, input.subjectId),
-            eq(schema.codexSubscriptionCredentials.connectedBySubjectId, input.subjectId),
-            inArray(schema.codexResetRedemptionAttempts.status, ["provider_started", "completed"]),
-          ),
-        )
-        .orderBy(desc(schema.codexResetRedemptionAttempts.createdAt));
-      return rows.map((row) => ({
-        attemptId: row.attemptId,
-        credentialId: row.credentialId,
-        creditId: row.creditId,
-        status: row.status as "provider_started" | "completed",
-        outcome: row.outcome as CodexResetRedemptionOutcome | null,
-        providerStartedAt: codexMetadataDate(row.providerStartedAt),
-        completedAt: codexMetadataDate(row.completedAt),
-        createdAt: codexMetadataDate(row.createdAt)!,
-        updatedAt: codexMetadataDate(row.updatedAt)!,
-      }));
-    },
-  );
-}
+export type CodexResetRedemptionCredentialAuthority = (
+  tx: Database,
+  input: { accountId: string; workspaceId: string; credentialId: string; subjectId: string },
+) => Promise<{ status: string; owned: boolean } | null>;
+
+/**
+ * The cross-workspace fence of one provider credit (M3 PR 3b): `clear` when
+ * no other workspace holds the credit, `refiled` when the caller's own
+ * logical attempt was moved here from another workspace for recovery,
+ * `held_elsewhere` when another workspace holds it, `refused` without
+ * redemption authority. The legacy ledger passes none (per-workspace).
+ */
+export type CodexResetCreditFence = (
+  tx: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    credentialId: string;
+    subjectId: string;
+    creditId: string;
+    attemptId: string;
+  },
+) => Promise<"clear" | "refiled" | "held_elsewhere" | "refused">;
 
 export type AdoptCodexResetRedemptionResult =
   | { kind: "current" | "adopted"; attempt: CodexResetRedemptionAttempt }
@@ -30203,27 +27502,16 @@ export async function adoptCodexResetRedemptionAttempt(
     subjectId: string;
     browserSessionHash: string;
   },
+  authority: CodexResetRedemptionCredentialAuthority,
 ): Promise<AdoptCodexResetRedemptionResult> {
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
-        const [credential] = await tx
-          .select({
-            connectedBySubjectId: schema.codexSubscriptionCredentials.connectedBySubjectId,
-          })
-          .from(schema.codexSubscriptionCredentials)
-          .where(
-            and(
-              eq(schema.codexSubscriptionCredentials.id, input.credentialId),
-              eq(schema.codexSubscriptionCredentials.workspaceId, input.workspaceId),
-            ),
-          )
-          .for("share")
-          .limit(1);
+        const credential = await authority(tx as unknown as Database, input);
         if (!credential) return { kind: "not_found" } as const;
-        if (credential.connectedBySubjectId !== input.subjectId) {
+        if (!credential.owned) {
           return { kind: "forbidden" } as const;
         }
         const [attempt] = await tx
@@ -30309,6 +27597,8 @@ export async function claimCodexResetRedemption(
     claimHolderId: string;
     claimTtlMs?: number;
   },
+  authority: CodexResetRedemptionCredentialAuthority,
+  creditFence: CodexResetCreditFence | null = null,
 ): Promise<ClaimCodexResetRedemptionResult> {
   const claimTtlMs = input.claimTtlMs ?? 60_000;
   if (!Number.isFinite(claimTtlMs) || claimTtlMs <= 0) {
@@ -30334,22 +27624,23 @@ export async function claimCodexResetRedemption(
         await tx.execute(
           sql`select pg_advisory_xact_lock(hashtextextended(${`codex-reset-credit:${input.workspaceId}:${input.credentialId}:${input.creditId}`}, 0))`,
         );
-        const [credential] = await tx
-          .select({
-            connectedBySubjectId: schema.codexSubscriptionCredentials.connectedBySubjectId,
-            status: schema.codexSubscriptionCredentials.status,
-          })
-          .from(schema.codexSubscriptionCredentials)
-          .where(
-            and(
-              eq(schema.codexSubscriptionCredentials.accountId, input.accountId),
-              eq(schema.codexSubscriptionCredentials.workspaceId, input.workspaceId),
-              eq(schema.codexSubscriptionCredentials.id, input.credentialId),
-            ),
-          )
-          .for("share")
-          .limit(1);
+        const credential = await authority(tx as unknown as Database, input);
         if (!credential) return { kind: "not_found" } as const;
+        // The core ledger also fences the credit across workspaces: another
+        // workspace's open or consumed attempt for the same credit wins, and
+        // the caller's own attempt filed elsewhere is moved here to recover.
+        if (creditFence) {
+          const fence = await creditFence(tx as unknown as Database, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            credentialId: input.credentialId,
+            subjectId: input.subjectId,
+            creditId: input.creditId,
+            attemptId: input.id,
+          });
+          if (fence === "refused") return { kind: "forbidden" } as const;
+          if (fence === "held_elsewhere") return { kind: "conflict" } as const;
+        }
         const [existing] = await tx
           .select()
           .from(schema.codexResetRedemptionAttempts)
@@ -30372,7 +27663,7 @@ export async function claimCodexResetRedemption(
           ) {
             return { kind: "conflict" } as const;
           }
-          if (credential.connectedBySubjectId !== input.subjectId) {
+          if (!credential.owned) {
             return { kind: "forbidden" } as const;
           }
           const mapped = mapCodexResetRedemptionAttempt(existing);
@@ -30414,7 +27705,7 @@ export async function claimCodexResetRedemption(
 
         // Authorize before looking up credit-attempt state so a non-owner cannot
         // distinguish an unused provider credit from one with an existing attempt.
-        if (credential.status !== "active" || credential.connectedBySubjectId !== input.subjectId) {
+        if (credential.status !== "active" || !credential.owned) {
           return { kind: "forbidden" } as const;
         }
 
@@ -30515,6 +27806,7 @@ export async function fenceCodexResetRedemptionSend(
     browserSessionHash: string;
     sendLeaseMs?: number;
   },
+  authority: CodexResetRedemptionCredentialAuthority,
 ): Promise<FenceCodexResetRedemptionSendResult> {
   const sendLeaseMs = input.sendLeaseMs ?? 30_000;
   if (!Number.isFinite(sendLeaseMs) || sendLeaseMs <= 10_000) {
@@ -30525,21 +27817,7 @@ export async function fenceCodexResetRedemptionSend(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
-        const [credential] = await tx
-          .select({
-            connectedBySubjectId: schema.codexSubscriptionCredentials.connectedBySubjectId,
-            status: schema.codexSubscriptionCredentials.status,
-          })
-          .from(schema.codexSubscriptionCredentials)
-          .where(
-            and(
-              eq(schema.codexSubscriptionCredentials.accountId, input.accountId),
-              eq(schema.codexSubscriptionCredentials.workspaceId, input.workspaceId),
-              eq(schema.codexSubscriptionCredentials.id, input.credentialId),
-            ),
-          )
-          .for("share")
-          .limit(1);
+        const credential = await authority(tx as unknown as Database, input);
         const [attempt] = await tx
           .select()
           .from(schema.codexResetRedemptionAttempts)
@@ -30576,11 +27854,7 @@ export async function fenceCodexResetRedemptionSend(
         let reason: CodexResetRedemptionSendNotReadyReason;
         if (!liveness?.claim_live) reason = "claim_expired";
         else if (!liveness.confirmation_live) reason = "confirmation_expired";
-        else if (
-          !credential ||
-          credential.status !== "active" ||
-          credential.connectedBySubjectId !== input.subjectId
-        ) {
+        else if (!credential || credential.status !== "active" || !credential.owned) {
           reason = "credential_unavailable";
         } else {
           const [ready] = await tx
@@ -30691,8 +27965,72 @@ export async function releaseCodexResetRedemptionClaim(
   );
 }
 
-/** Persist the exact provider outcome, cooldown repair, and audit atomically. */
-export async function completeCodexResetRedemption(
+/**
+ * Section 6.3 reset-credit authority on the shared core (M3 PR 2c): the
+ * database decides, inside the ledger transaction, whether the RLS subject is
+ * an organization administrator or an administrator of the workspace that
+ * manages this shared Codex connection, and share-locks the connection
+ * against disconnect or credential replacement. Nothing without an enabled
+ * Codex cutover.
+ */
+export const subscriptionCoreCodexResetAuthority: CodexResetRedemptionCredentialAuthority = async (
+  tx,
+  input,
+) => {
+  const [row] = await rawRows<{ status: string; authorized: boolean }>(
+    tx,
+    sql`select status, authorized from opengeni_private.subscription_codex_reset_authority(
+      ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.credentialId}::uuid,
+      ${input.subjectId}
+    )`,
+  );
+  return row ? { status: row.status, owned: row.authorized === true } : null;
+};
+
+/** The core ledger's cross-workspace credit fence (`subscription_codex_reset_credit_fence`). */
+export const subscriptionCoreCodexResetCreditFence: CodexResetCreditFence = async (tx, input) => {
+  const [row] = await rawRows<{ outcome: string }>(
+    tx,
+    sql`select outcome from opengeni_private.subscription_codex_reset_credit_fence(
+      ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.credentialId}::uuid,
+      ${input.subjectId}, ${input.creditId}, ${input.attemptId}::uuid
+    )`,
+  );
+  const outcome = row?.outcome;
+  return outcome === "clear" || outcome === "refiled" || outcome === "held_elsewhere"
+    ? outcome
+    : "refused";
+};
+
+/**
+ * Run the cross-workspace credit fence on its own (redemption prepare): a
+ * person recovering their own attempt from another workspace gets it moved
+ * here, so the ordinary adopt and claim continue on the same upstream key.
+ */
+export async function fenceSubscriptionCoreCodexResetCredit(
+  db: Database,
+  input: Parameters<CodexResetCreditFence>[1],
+): Promise<Awaited<ReturnType<CodexResetCreditFence>>> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(
+        async (tx) => await subscriptionCoreCodexResetCreditFence(tx as unknown as Database, input),
+      ),
+  );
+}
+
+/**
+ * Persist the exact provider outcome of a core redemption with its audit
+ * record. A credit that restores capacity clears the connection's stored
+ * exhaustion only when it was observed with the connection's current
+ * refresh generation (an observation of an older credential is left for the
+ * generation fence to discard), and returns a core wake for the caller to
+ * deliver after commit. The legacy credential columns and outbox are never
+ * touched.
+ */
+export async function completeSubscriptionCoreCodexResetRedemption(
   db: Database,
   input: {
     accountId: string;
@@ -30701,135 +28039,166 @@ export async function completeCodexResetRedemption(
     claimHolderId: string;
     outcome: CodexResetRedemptionOutcome;
   },
-): Promise<CodexCapacityMutationResult<CodexResetRedemptionAttempt | null>> {
+): Promise<{
+  attempt: CodexResetRedemptionAttempt | null;
+  wake: SubscriptionCoreCodexWake | null;
+}> {
   if (!CODEX_RESET_REDEMPTION_OUTCOMES.includes(input.outcome)) {
     throw new Error("Unknown Codex redemption outcome");
   }
-  return await withCodexCapacityMutation(
+  return await withRlsContext(
     db,
-    { workspaceId: input.workspaceId, reason: "codex_reset_credit_redeemed" },
-    async (tx) => {
-      // Claims take this lock before touching the credential and attempt rows.
-      // Completion takes the same fence after the canonical capacity lock, so
-      // a claim cannot hold a credential SHARE lock while waiting for an
-      // attempt row that this transaction already owns.
-      await tx.execute(
-        sql`select pg_advisory_xact_lock(hashtextextended(${`codex-reset-attempt:${input.attemptId}`}, 0))`,
-      );
-      const [current] = await tx
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        await tx.execute(
+          sql`select pg_advisory_xact_lock(hashtextextended(${`codex-reset-attempt:${input.attemptId}`}, 0))`,
+        );
+        const [current] = await tx
+          .select()
+          .from(schema.codexResetRedemptionAttempts)
+          .where(
+            and(
+              eq(schema.codexResetRedemptionAttempts.accountId, input.accountId),
+              eq(schema.codexResetRedemptionAttempts.workspaceId, input.workspaceId),
+              eq(schema.codexResetRedemptionAttempts.id, input.attemptId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (!current) return { attempt: null, wake: null };
+        if (current.status === "completed") {
+          return { attempt: mapCodexResetRedemptionAttempt(current), wake: null };
+        }
+        if (
+          current.status !== "provider_started" ||
+          current.claimHolderId !== input.claimHolderId
+        ) {
+          return { attempt: null, wake: null };
+        }
+        const completedAt = new Date();
+        const [completed] = await tx
+          .update(schema.codexResetRedemptionAttempts)
+          .set({
+            status: "completed",
+            outcome: input.outcome,
+            completedAt,
+            claimHolderId: null,
+            claimExpiresAt: null,
+            lastFailureKind: null,
+            updatedAt: completedAt,
+          })
+          .where(
+            and(
+              eq(schema.codexResetRedemptionAttempts.accountId, input.accountId),
+              eq(schema.codexResetRedemptionAttempts.workspaceId, input.workspaceId),
+              eq(schema.codexResetRedemptionAttempts.id, input.attemptId),
+            ),
+          )
+          .returning();
+        if (!completed) throw new Error("Codex redemption completion returned no row");
+        const restoresCapacity = input.outcome === "reset" || input.outcome === "alreadyRedeemed";
+        if (restoresCapacity) {
+          await tx.execute(sql`
+            update subscription_connection_quota quota
+            set quota = quota.quota || '{"exhaustedUntil": null, "exhaustedKind": null}'::jsonb,
+                revision = quota.revision + 1,
+                updated_at = clock_timestamp()
+            from subscription_connections connection
+            where quota.account_id = ${input.accountId}::uuid
+              and quota.connection_id = ${current.credentialId}::uuid
+              and connection.account_id = quota.account_id
+              and connection.id = quota.connection_id
+              and connection.provider = 'codex'
+              and quota.observed_refresh_generation = connection.refresh_generation
+              and quota.quota->>'exhaustedUntil' is not null`);
+        }
+        await tx.insert(schema.auditEvents).values(
+          withLosslessContentWriteVersion(
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              subjectId: current.subjectId,
+              action: "codex.reset_credit.redemption.completed",
+              targetType: "codex_reset_redemption_attempt",
+              targetId: input.attemptId,
+              metadata: { outcome: input.outcome },
+            },
+            "metadata",
+            "metadataCodecVersion",
+          ),
+        );
+        return {
+          attempt: mapCodexResetRedemptionAttempt(completed),
+          // A successful or already-applied reset can make waiters eligible
+          // even when no exhaustion was stored.
+          wake: restoresCapacity
+            ? { accountId: input.accountId, reason: "codex_reset_credit_redeemed" }
+            : null,
+        };
+      }),
+  );
+}
+
+/**
+ * The owner's durable ambiguous/completed core redemptions in this
+ * workspace, limited to connections the same person may still redeem on
+ * (the section 6.3 authority, read in the same transaction).
+ */
+export async function listSubscriptionCoreCodexResetRedemptionRecoveries(
+  db: Database,
+  input: { accountId: string; workspaceId: string; subjectId: string },
+): Promise<CodexResetRedemptionRecovery[]> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb
         .select()
         .from(schema.codexResetRedemptionAttempts)
         .where(
           and(
-            eq(schema.codexResetRedemptionAttempts.accountId, input.accountId),
             eq(schema.codexResetRedemptionAttempts.workspaceId, input.workspaceId),
-            eq(schema.codexResetRedemptionAttempts.id, input.attemptId),
+            eq(schema.codexResetRedemptionAttempts.subjectId, input.subjectId),
+            inArray(schema.codexResetRedemptionAttempts.status, ["provider_started", "completed"]),
           ),
         )
-        .for("update")
-        .limit(1);
-      if (!current) return { result: null, changed: false };
-      if (current.status === "completed") {
-        return {
-          result: mapCodexResetRedemptionAttempt(current),
-          changed: false,
-        };
+        .orderBy(desc(schema.codexResetRedemptionAttempts.createdAt));
+      const allowed = new Map<string, boolean>();
+      for (const credentialId of new Set(rows.map((row) => row.credentialId))) {
+        const authority = await subscriptionCoreCodexResetAuthority(scopedDb, {
+          ...input,
+          credentialId,
+        });
+        allowed.set(credentialId, authority?.owned === true);
       }
-      if (current.status !== "provider_started" || current.claimHolderId !== input.claimHolderId) {
-        return { result: null, changed: false };
-      }
-      const completedAt = new Date();
-      const [completed] = await tx
-        .update(schema.codexResetRedemptionAttempts)
-        .set({
-          status: "completed",
-          outcome: input.outcome,
-          completedAt,
-          claimHolderId: null,
-          claimExpiresAt: null,
-          lastFailureKind: null,
-          updatedAt: completedAt,
-        })
-        .where(
-          and(
-            eq(schema.codexResetRedemptionAttempts.accountId, input.accountId),
-            eq(schema.codexResetRedemptionAttempts.workspaceId, input.workspaceId),
-            eq(schema.codexResetRedemptionAttempts.id, input.attemptId),
-          ),
-        )
-        .returning();
-      if (!completed) throw new Error("Codex redemption completion returned no row");
-      const restoresCapacity = input.outcome === "reset" || input.outcome === "alreadyRedeemed";
-      if (restoresCapacity) {
-        await tx
-          .update(schema.codexSubscriptionCredentials)
-          .set({
-            exhaustedUntil: null,
-            exhaustedKind: null,
-            exhaustedRevision: sql`${schema.codexSubscriptionCredentials.exhaustedRevision} + 1`,
-          })
-          .where(
-            and(
-              eq(schema.codexSubscriptionCredentials.accountId, input.accountId),
-              eq(schema.codexSubscriptionCredentials.workspaceId, input.workspaceId),
-              eq(schema.codexSubscriptionCredentials.id, current.credentialId),
-            ),
-          );
-      }
-      await tx.insert(schema.auditEvents).values(
-        withLosslessContentWriteVersion(
-          {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            subjectId: current.subjectId,
-            action: "codex.reset_credit.redemption.completed",
-            targetType: "codex_reset_redemption_attempt",
-            targetId: input.attemptId,
-            metadata: { outcome: input.outcome },
-          },
-          "metadata",
-          "metadataCodecVersion",
-        ),
-      );
-      return {
-        result: mapCodexResetRedemptionAttempt(completed),
-        // A successful/already-applied upstream reset can make durable waiters
-        // eligible immediately even when the local cooldown was already null.
-        changed: restoresCapacity,
-      };
+      return rows
+        .filter((row) => allowed.get(row.credentialId) === true)
+        .map((row) => ({
+          attemptId: row.id,
+          credentialId: row.credentialId,
+          creditId: row.creditId,
+          status: row.status as "provider_started" | "completed",
+          outcome: row.outcome as CodexResetRedemptionOutcome | null,
+          providerStartedAt: codexMetadataDate(row.providerStartedAt),
+          completedAt: codexMetadataDate(row.completedAt),
+          createdAt: codexMetadataDate(row.createdAt)!,
+          updatedAt: codexMetadataDate(row.updatedAt)!,
+        }));
     },
   );
 }
 
-/** The P2 usage-cache snapshot written by the refreshing usage wrapper. */
-
-/**
- * Cache-write for P2 quota bars and revision-fenced quota cooldown repair on a
- * SPECIFIC credential row. NEVER touches credential_encrypted. RLS-scoped, guarded
- * by (id, workspace_id) so it can only write a row the workspace owns. Returns true
- * iff a row was updated (false ⇒ the credential was disconnected under us — the
- * snapshot is moot, drop it). This is the only writer of the usage_checked_at TTL
- * clock that `listCodexAccountStatuses` reads back.
- */
-export async function recordCodexAccountUsage(
+/** Per-connection redemption authority for the caller, read outside the ledger. */
+export async function readSubscriptionCoreCodexResetAuthority(
   db: Database,
-  workspaceId: string,
-  credentialId: string,
-  snapshot: CodexAccountUsageSnapshot,
-): Promise<boolean> {
-  return (await recordCodexAccountUsageWithWakeTargets(db, workspaceId, credentialId, snapshot))
-    .result;
-}
-
-/** Usage-cache mutation plus its committed durable capacity-wake outbox. */
-export async function recordCodexAccountUsageWithWakeTargets(
-  db: Database,
-  workspaceId: string,
-  credentialId: string,
-  snapshot: CodexAccountUsageSnapshot,
-  authority?: CodexAcceptedCredentialAuthority,
-): Promise<CodexCapacityMutationResult<boolean>> {
-  return mutateCodexAccountUsage(db, workspaceId, credentialId, snapshot, authority);
+  input: { accountId: string; workspaceId: string; credentialId: string; subjectId: string },
+): Promise<{ status: string; owned: boolean } | null> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (tx) => await subscriptionCoreCodexResetAuthority(tx, input),
+  );
 }
 
 export type CodexFinalizationUsageAuthority = CodexAcceptedLeaseAuthority & {
@@ -30839,250 +28208,130 @@ export type CodexFinalizationUsageAuthority = CodexAcceptedLeaseAuthority & {
   credentialVersion: number;
 };
 
-/** Write-only cleanup authority: never usable by a token/decrypt accessor. */
-export async function recordCodexAccountUsageForFinalization(
-  db: Database,
-  workspaceId: string,
-  credentialId: string,
-  snapshot: CodexAccountUsageSnapshot,
-  authority: CodexFinalizationUsageAuthority,
-): Promise<CodexCapacityMutationResult<boolean>> {
-  return mutateCodexAccountUsage(db, workspaceId, credentialId, snapshot, authority, authority);
-}
-
-async function codexFinalizationUsageCondition(
-  tx: Database,
-  workspaceId: string,
-  credentialId: string,
-  snapshot: CodexAccountUsageSnapshot,
-  authority: CodexFinalizationUsageAuthority,
-): Promise<SQL | null> {
-  // The normal fence supplies canonical control/workspace/session/turn/attempt
-  // locks. Only this metadata writer admits its exact successfully settled owner.
-  const fence = await lockTurnAttemptWriteFenceTx(tx, { ...authority, workspaceId });
-  const { session, turn, attempt } = fence;
-  if (!session || !turn || !attempt || !snapshot.checkedAt) return null;
-  let authoritySnapshot;
-  try {
-    authoritySnapshot = assertSessionAuthoritySnapshot({
-      attemptId: authority.attemptId,
-      ...attempt,
-    });
-  } catch {
-    return null;
-  }
-  const terminalOwner =
-    ["completed", "failed"].includes(turn.status) &&
-    turn.activeAttemptId === null &&
-    turn.executionGeneration === authority.executionGeneration &&
-    turn.sessionId === authority.sessionId &&
-    turn.accountId === session.accountId &&
-    attempt.accountId === session.accountId &&
-    attempt.sessionId === session.id &&
-    attempt.turnId === turn.id &&
-    attempt.executionGeneration === authority.executionGeneration &&
-    attempt.state === "closed" &&
-    attempt.outcome === turn.status &&
-    attempt.closedAt !== null &&
-    snapshot.checkedAt <= attempt.closedAt &&
-    snapshot.checkedAt >= attempt.startedAt &&
-    session.status !== "cancelled" &&
-    sessionAuthoritySnapshotMatchesSession(authoritySnapshot, session) &&
-    (fence.allowed || (fence.reason !== "workspace_paused" && fence.reason !== "session_paused"));
-  if (!fence.allowed && !terminalOwner) return null;
-  const [interruption] = await tx
-    .select({ id: schema.sessionAttemptInterruptions.id })
-    .from(schema.sessionAttemptInterruptions)
-    .where(
-      and(
-        eq(schema.sessionAttemptInterruptions.workspaceId, workspaceId),
-        eq(schema.sessionAttemptInterruptions.attemptId, authority.attemptId),
-        inArray(schema.sessionAttemptInterruptions.state, ["pending", "delivered", "acknowledged"]),
-      ),
-    )
-    .limit(1);
-  if (interruption) return null;
-  const leases = await tx.execute(sql`
-    select turn_id from codex_credential_leases
-    where account_id = ${session.accountId} and workspace_id = ${workspaceId}
-      and turn_id = ${authority.turnId} and credential_id = ${credentialId}
-      and holder_id = ${authority.holderId} and generation = ${authority.generation}
-      and leased_until > clock_timestamp()
-    for update
-  `);
-  if (!leases.length) return null;
-  const source = await codexSourceForTurn(tx, workspaceId, turn.id, "disabled");
-  if (source === "disabled") return null;
-  return and(
-    codexCredentialPoolCondition({ accountId: session.accountId, workspaceId, source }),
-    eq(schema.codexSubscriptionCredentials.version, authority.credentialVersion),
-    eq(schema.codexSubscriptionCredentials.status, "active"),
-    // Old cleanup must not replace a fresher poll/header snapshot.
-    sql`(${schema.codexSubscriptionCredentials.usageCheckedAt} is null or
-      ${schema.codexSubscriptionCredentials.usageCheckedAt} <= ${snapshot.checkedAt.toISOString()}::timestamptz)`,
-  )!;
-}
-
-async function mutateCodexAccountUsage(
-  db: Database,
-  workspaceId: string,
-  credentialId: string,
-  snapshot: CodexAccountUsageSnapshot,
-  authority?: CodexAcceptedCredentialAuthority,
-  finalizationAuthority?: CodexFinalizationUsageAuthority,
-): Promise<CodexCapacityMutationResult<boolean>> {
-  return await withSessionCodexCapacityMutation(
-    db,
-    {
-      workspaceId,
-      reason: "codex_usage_refreshed",
-      acceptedTurnId: authority?.turnId,
-      mutationSource: "effective",
-    },
-    async (tx) => {
-      const condition = finalizationAuthority
-        ? await codexFinalizationUsageCondition(
-            tx,
-            workspaceId,
-            credentialId,
-            snapshot,
-            finalizationAuthority,
-          )
-        : await codexCredentialUseCondition(tx, workspaceId, authority);
-      if (!condition) return { result: false, changed: false };
-      const [previous] = await tx
-        .select({
-          primaryUsedPercent: schema.codexSubscriptionCredentials.primaryUsedPercent,
-          primaryResetAt: schema.codexSubscriptionCredentials.primaryResetAt,
-          secondaryUsedPercent: schema.codexSubscriptionCredentials.secondaryUsedPercent,
-          secondaryResetAt: schema.codexSubscriptionCredentials.secondaryResetAt,
-          exhaustedUntil: schema.codexSubscriptionCredentials.exhaustedUntil,
-          exhaustedKind: schema.codexSubscriptionCredentials.exhaustedKind,
-          exhaustedRevision: schema.codexSubscriptionCredentials.exhaustedRevision,
-          planType: schema.codexSubscriptionCredentials.planType,
-          planEntitlementExclusion: schema.codexSubscriptionCredentials.planEntitlementExclusion,
-        })
-        .from(schema.codexSubscriptionCredentials)
-        .where(and(eq(schema.codexSubscriptionCredentials.id, credentialId), condition))
-        .for("update");
-      if (!previous) {
-        return { result: false, changed: false };
-      }
-      const clearQuotaCooldown =
-        snapshot.checkedAt !== undefined &&
-        Number.isSafeInteger(snapshot.clearQuotaCooldownRevision) &&
-        snapshot.clearQuotaCooldownRevision === previous.exhaustedRevision &&
-        previous.exhaustedKind === "quota" &&
-        previous.exhaustedUntil !== null;
-      // /wham/usage reports the account's current plan independently of its
-      // quota windows (a Free account may return no windows at all).
-      const observedPlanType =
-        typeof snapshot.planType === "string" && snapshot.planType.trim().length > 0
-          ? snapshot.planType.trim()
-          : null;
-      const planExclusionRetired =
-        observedPlanType !== null &&
-        previous.planType?.toLowerCase() !== observedPlanType.toLowerCase() &&
-        readCodexPlanEntitlementExclusion(previous.planEntitlementExclusion) !== null;
-      const updated = await tx
-        .update(schema.codexSubscriptionCredentials)
-        .set({
-          ...(observedPlanType !== null
-            ? codexPlanObservationSet(
-                observedPlanType,
-                snapshot.planCheckedAt ?? snapshot.checkedAt ?? new Date(),
-              )
-            : {}),
-          ...(snapshot.checkedAt !== undefined
-            ? {
-                primaryUsedPercent: snapshot.primaryUsedPercent ?? null,
-                primaryResetAt: snapshot.primaryResetAt ?? null,
-                secondaryUsedPercent: snapshot.secondaryUsedPercent ?? null,
-                secondaryResetAt: snapshot.secondaryResetAt ?? null,
-                usageCheckedAt: snapshot.checkedAt,
-              }
-            : {}),
-          ...(snapshot.resetCreditAvailableCount !== undefined
-            ? {
-                resetCreditAvailableCount: snapshot.resetCreditAvailableCount,
-                resetCreditsCheckedAt: snapshot.resetCreditsCheckedAt ?? null,
-              }
-            : {}),
-          ...(clearQuotaCooldown
-            ? {
-                exhaustedUntil: null,
-                exhaustedKind: null,
-                exhaustedRevision: sql`${schema.codexSubscriptionCredentials.exhaustedRevision} + 1`,
-              }
-            : {}),
-          // NB: no `version` bump and no `updatedAt` touch — usage is non-credential
-          // metadata and must NOT race the (id, version) refresh CAS in
-          // recordCodexTokenRefresh / setCodexCredentialStatus.
-        })
-        .where(and(eq(schema.codexSubscriptionCredentials.id, credentialId), condition))
-        .returning({ id: schema.codexSubscriptionCredentials.id });
-      const rowUpdated = updated.length > 0;
-      const timestampChanged = (before: Date | null, after: Date | null): boolean =>
-        before?.getTime() !== after?.getTime();
-      const capacityChanged =
-        rowUpdated &&
-        snapshot.checkedAt !== undefined &&
-        (previous.primaryUsedPercent !== (snapshot.primaryUsedPercent ?? null) ||
-          timestampChanged(previous.primaryResetAt, snapshot.primaryResetAt ?? null) ||
-          previous.secondaryUsedPercent !== (snapshot.secondaryUsedPercent ?? null) ||
-          timestampChanged(previous.secondaryResetAt, snapshot.secondaryResetAt ?? null) ||
-          (clearQuotaCooldown && previous.exhaustedUntil! > snapshot.checkedAt));
-      return {
-        result: rowUpdated,
-        changed: capacityChanged || (rowUpdated && planExclusionRetired),
-      };
-    },
-  );
-}
-
-export type CodexRotationSettings = {
-  activeCredentialId: string | null;
-  /** False keeps new allocations on the active account; true permits pool failover. */
-  rotationEnabled: boolean;
-  rotationStrategy: string; // P1: 'most_remaining' (unused)
-};
-
 /**
- * Per-workspace model/provider availability policy. NULL fields = unrestricted
- * (identical to no row — the default for every workspace). Non-null
- * allowedProviders is a strict allowlist over resolved provider identities;
- * non-null allowedModels an additional exact model-id allowlist. Consumers:
- * the API model choke points (fail 422) and the worker's post-resolution gate
- * (a blocked provider never reaches a model call and never silently remaps).
+ * Per-workspace model/provider availability policy. NULL fields = unrestricted.
+ * Non-null allowedProviders is a strict allowlist over resolved provider
+ * identities; non-null allowedModels an additional exact model-id allowlist.
+ * Consumers: the API model choke points (fail 422) and the worker's
+ * post-resolution gate (a blocked provider never reaches a model call and
+ * never silently remaps).
+ *
+ * A workspace row is the workspace's own choice. Without one, the workspace
+ * follows its organization's default allowlist (organization_model_defaults);
+ * with neither, every model is allowed.
  */
 export type WorkspaceModelPolicy = {
   allowedProviders: string[] | null;
   allowedModels: string[] | null;
 };
 
-/** The per-workspace model policy row (null when none exists = unrestricted). */
-export async function getWorkspaceModelPolicy(
+/**
+ * The policy a workspace runs with: the allowlists it follows plus its own
+ * credit switch (`allowCreditModels`, the workspace setting). The switch is
+ * independent of where the allowlists come from, so following the
+ * organization's allowlists never turns credits back on.
+ */
+export type EffectiveWorkspaceModelPolicy = WorkspaceModelPolicy & {
+  /** False blocks every model billed in Opengeni credits, current and future. */
+  allowCreditModels: boolean;
+};
+
+function restrictsAnything(policy: WorkspaceModelPolicy | null | undefined): boolean {
+  return Boolean(policy && (policy.allowedProviders !== null || policy.allowedModels !== null));
+}
+
+/**
+ * The workspace's own policy row and the organization default it would
+ * follow without one. `organization` is null when the organization allows
+ * every model.
+ */
+export async function getWorkspaceModelPolicyLayers(
   db: Database,
   workspaceId: string,
-): Promise<WorkspaceModelPolicy | null> {
+): Promise<{
+  workspace: WorkspaceModelPolicy | null;
+  organization: WorkspaceModelPolicy | null;
+  /** The workspace's credit switch; true unless its setting is explicitly false. */
+  allowCreditModels: boolean;
+}> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb
       .select({
-        allowedProviders: schema.workspaceModelPolicies.allowedProviders,
-        allowedModels: schema.workspaceModelPolicies.allowedModels,
+        workspaceSettings: schema.workspaces.settings,
+        workspaceAllowedProviders: schema.workspaceModelPolicies.allowedProviders,
+        workspaceAllowedModels: schema.workspaceModelPolicies.allowedModels,
+        workspacePolicyId: schema.workspaceModelPolicies.id,
+        organizationAllowedProviders: schema.organizationModelDefaults.allowedProviders,
+        organizationAllowedModels: schema.organizationModelDefaults.allowedModels,
       })
-      .from(schema.workspaceModelPolicies)
-      .where(eq(schema.workspaceModelPolicies.workspaceId, workspaceId))
+      .from(schema.workspaces)
+      .leftJoin(
+        schema.workspaceModelPolicies,
+        eq(schema.workspaceModelPolicies.workspaceId, schema.workspaces.id),
+      )
+      .leftJoin(
+        schema.organizationModelDefaults,
+        eq(schema.organizationModelDefaults.accountId, schema.workspaces.accountId),
+      )
+      .where(eq(schema.workspaces.id, workspaceId))
       .limit(1);
-    return row ?? null;
+    if (!row) return { workspace: null, organization: null, allowCreditModels: true };
+    const organization = {
+      allowedProviders: row.organizationAllowedProviders ?? null,
+      allowedModels: row.organizationAllowedModels ?? null,
+    };
+    return {
+      workspace: row.workspacePolicyId
+        ? {
+            allowedProviders: row.workspaceAllowedProviders ?? null,
+            allowedModels: row.workspaceAllowedModels ?? null,
+          }
+        : null,
+      organization: restrictsAnything(organization) ? organization : null,
+      allowCreditModels: workspaceSettingsAllowCreditModels(row.workspaceSettings),
+    };
   });
 }
 
 /**
- * Create or replace the workspace's model policy. Passing null for a field
- * clears that restriction; a policy of {null, null} is kept as an explicit
- * "unrestricted" row (delete is not needed for correctness — it reads the same
- * as no row).
+ * The policy this workspace runs with: the allowlists of its own row, else of
+ * its organization's default, plus its credit switch. Null only when nothing
+ * is restricted (every model allowed and credits on).
+ */
+export async function getWorkspaceModelPolicy(
+  db: Database,
+  workspaceId: string,
+): Promise<EffectiveWorkspaceModelPolicy | null> {
+  const layers = await getWorkspaceModelPolicyLayers(db, workspaceId);
+  const allowlists = layers.workspace ?? layers.organization;
+  if (!allowlists && layers.allowCreditModels) return null;
+  return {
+    allowedProviders: allowlists?.allowedProviders ?? null,
+    allowedModels: allowlists?.allowedModels ?? null,
+    allowCreditModels: layers.allowCreditModels,
+  };
+}
+
+/** Remove the workspace's own policy so it follows its organization's default. */
+export async function deleteWorkspaceModelPolicy(
+  db: Database,
+  input: { accountId: string; workspaceId: string },
+): Promise<void> {
+  await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      await scopedDb
+        .delete(schema.workspaceModelPolicies)
+        .where(eq(schema.workspaceModelPolicies.workspaceId, input.workspaceId));
+    },
+  );
+}
+
+/**
+ * Create or replace the workspace's own model policy. Passing null for a field
+ * clears that restriction; a policy of {null, null} is kept as the workspace's
+ * explicit choice to allow every model even when its organization restricts.
  */
 export async function upsertWorkspaceModelPolicy(
   db: Database,
@@ -31122,210 +28371,6 @@ export async function upsertWorkspaceModelPolicy(
   );
 }
 
-/** The per-workspace rotation/active-pointer row (null when none exists yet). */
-export async function getCodexRotationSettings(
-  db: Database,
-  workspaceId: string,
-  acceptedTurnId?: string,
-): Promise<CodexRotationSettings | null> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const source = await getWorkspaceCodexSubscriptionSourceScoped(scopedDb, workspaceId);
-    if (acceptedTurnId) {
-      source.effectiveSource = await codexSourceForTurn(
-        scopedDb,
-        workspaceId,
-        acceptedTurnId,
-        source.effectiveSource,
-      );
-    }
-    if (source.effectiveSource === "disabled") return null;
-    const [row] =
-      source.effectiveSource === "organization"
-        ? await scopedDb
-            .select({
-              activeCredentialId: schema.organizationCodexRotationSettings.activeCredentialId,
-              rotationEnabled: schema.organizationCodexRotationSettings.rotationEnabled,
-              rotationStrategy: schema.organizationCodexRotationSettings.rotationStrategy,
-            })
-            .from(schema.organizationCodexRotationSettings)
-            .where(eq(schema.organizationCodexRotationSettings.accountId, source.accountId))
-            .limit(1)
-        : await scopedDb
-            .select({
-              activeCredentialId: schema.codexRotationSettings.activeCredentialId,
-              rotationEnabled: schema.codexRotationSettings.rotationEnabled,
-              rotationStrategy: schema.codexRotationSettings.rotationStrategy,
-            })
-            .from(schema.codexRotationSettings)
-            .where(eq(schema.codexRotationSettings.workspaceId, workspaceId))
-            .limit(1);
-    if (row && source.effectiveSource === "organization") {
-      const accounts = await listCodexAccountStatuses(scopedDb, workspaceId, acceptedTurnId);
-      return {
-        ...row,
-        activeCredentialId: assignedConnectionDefault(row.activeCredentialId, accounts),
-      };
-    }
-    return row ?? null;
-  });
-}
-
-/** Idempotently ensure the per-workspace rotation-settings row exists. */
-export async function ensureCodexRotationSettings(
-  db: Database,
-  accountId: string,
-  workspaceId: string,
-): Promise<void> {
-  await withRlsContext(db, { accountId, workspaceId }, async (scopedDb) => {
-    await scopedDb
-      .insert(schema.codexRotationSettings)
-      .values({
-        accountId,
-        workspaceId,
-      })
-      .onConflictDoNothing({
-        target: [schema.codexRotationSettings.workspaceId],
-      });
-  });
-}
-
-/**
- * THE manual-switch primitive (workspace scope). Validates the credential id
- * belongs to the workspace, then one-cell UPDATEs active_credential_id. Returns
- * false if the id is unknown (so the route can 404).
- */
-export async function setActiveCodexCredential(
-  db: Database,
-  workspaceId: string,
-  credentialId: string,
-): Promise<boolean> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    await scopedDb.execute(sql`
-      select id from codex_rotation_settings
-      where workspace_id = ${workspaceId}
-      for update
-    `);
-    const [cred] = await scopedDb
-      .select({ id: schema.codexSubscriptionCredentials.id })
-      .from(schema.codexSubscriptionCredentials)
-      .where(
-        and(
-          eq(schema.codexSubscriptionCredentials.id, credentialId),
-          eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),
-        ),
-      )
-      .limit(1);
-    if (!cred) {
-      return false;
-    }
-    const updated = await scopedDb
-      .update(schema.codexRotationSettings)
-      .set({ activeCredentialId: credentialId, updatedAt: new Date() })
-      .where(eq(schema.codexRotationSettings.workspaceId, workspaceId))
-      .returning({ id: schema.codexRotationSettings.id });
-    return updated.length > 0;
-  });
-}
-
-/** First-connect activation that never overwrites a concurrent manual choice. */
-export async function setInitialActiveCodexCredential(
-  db: Database,
-  workspaceId: string,
-  credentialId: string,
-): Promise<boolean> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    await scopedDb.execute(sql`
-      select id from codex_rotation_settings
-      where workspace_id = ${workspaceId}
-      for update
-    `);
-    const [cred] = await scopedDb
-      .select({ id: schema.codexSubscriptionCredentials.id })
-      .from(schema.codexSubscriptionCredentials)
-      .where(
-        and(
-          eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),
-          eq(schema.codexSubscriptionCredentials.id, credentialId),
-        ),
-      )
-      .limit(1);
-    if (!cred) return false;
-    const rows = await scopedDb
-      .update(schema.codexRotationSettings)
-      .set({ activeCredentialId: credentialId, updatedAt: new Date() })
-      .where(
-        and(
-          eq(schema.codexRotationSettings.workspaceId, workspaceId),
-          isNull(schema.codexRotationSettings.activeCredentialId),
-        ),
-      )
-      .returning({ id: schema.codexRotationSettings.id });
-    return rows.length > 0;
-  });
-}
-
-/**
- * P3 rotation cooldown writer: stamp `exhausted_until` on a SPECIFIC credential row so the
- * rotation engine treats it as cooling-down (capped) until `until`. Pass `until = null` to
- * clear the cooldown. Modeled EXACTLY on recordCodexAccountUsage: RLS-scoped, guarded by
- * (id, workspace_id), and — critically — NO `version` bump and NO `updatedAt` touch, so it can
- * never race the (id, version) token-refresh CAS in recordCodexTokenRefresh / setCodexCredentialStatus.
- * Returns true iff a row was updated (false ⇒ the credential was disconnected under us).
- */
-export async function setCodexCredentialExhausted(
-  db: Database,
-  workspaceId: string,
-  credentialId: string,
-  until: Date | null,
-  cooldownKind: CodexCredentialCooldownKind | null,
-): Promise<boolean> {
-  return (
-    await setCodexCredentialExhaustedWithWakeTargets(
-      db,
-      workspaceId,
-      credentialId,
-      until,
-      cooldownKind,
-    )
-  ).result;
-}
-
-/** Cooldown mutation plus its committed durable capacity-wake outbox. */
-export async function setCodexCredentialExhaustedWithWakeTargets(
-  db: Database,
-  workspaceId: string,
-  credentialId: string,
-  until: Date | null,
-  cooldownKind: CodexCredentialCooldownKind | null,
-): Promise<CodexCapacityMutationResult<boolean>> {
-  if ((until === null) !== (cooldownKind === null)) {
-    throw new Error("Codex cooldown timestamp and kind must be set or cleared together");
-  }
-  return await withCodexCapacityMutation(
-    db,
-    {
-      workspaceId,
-      reason: until === null ? "codex_cooldown_cleared" : "codex_cooldown_changed",
-      mutationSource: "effective",
-    },
-    async (tx) => {
-      const pool = await effectiveCodexCredentialPoolCondition(tx, workspaceId);
-      if (!pool.condition) return { result: false, changed: false };
-      const updated = await tx
-        .update(schema.codexSubscriptionCredentials)
-        .set({
-          exhaustedUntil: until,
-          exhaustedKind: cooldownKind,
-          exhaustedRevision: sql`${schema.codexSubscriptionCredentials.exhaustedRevision} + 1`,
-        })
-        .where(and(eq(schema.codexSubscriptionCredentials.id, credentialId), pool.condition))
-        .returning({ id: schema.codexSubscriptionCredentials.id });
-      const changed = updated.length > 0;
-      return { result: changed, changed };
-    },
-  );
-}
-
 /** The supported rotation strategies (P3). */
 export const CODEX_ROTATION_STRATEGIES = [
   "most_remaining",
@@ -31339,69 +28384,6 @@ export const CODEX_ROTATION_STRATEGIES = [
   "sharded",
 ] as const;
 export type CodexRotationStrategy = (typeof CODEX_ROTATION_STRATEGIES)[number];
-
-/**
- * P3 rotation-settings write path: one-cell UPDATE of `rotation_enabled` and/or
- * `rotation_strategy` on the per-workspace row. Validates the strategy enum (rejects unknown).
- * Guarded by workspaceId; ensureCodexRotationSettings guarantees the row exists. Returns the
- * effective settings after the patch (null when no row exists yet — caller should ensure first).
- */
-export async function updateCodexRotationSettings(
-  db: Database,
-  workspaceId: string,
-  patch: {
-    rotationEnabled?: boolean;
-    rotationStrategy?: CodexRotationStrategy;
-  },
-): Promise<CodexRotationSettings | null> {
-  if (
-    patch.rotationStrategy !== undefined &&
-    !CODEX_ROTATION_STRATEGIES.includes(patch.rotationStrategy)
-  ) {
-    throw new Error(`invalid codex rotation strategy: ${patch.rotationStrategy}`);
-  }
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const set: Record<string, unknown> = { updatedAt: new Date() };
-    if (patch.rotationEnabled !== undefined) {
-      set.rotationEnabled = patch.rotationEnabled;
-    }
-    if (patch.rotationStrategy !== undefined) {
-      set.rotationStrategy = patch.rotationStrategy;
-    }
-    const [row] = await scopedDb
-      .update(schema.codexRotationSettings)
-      .set(set)
-      .where(eq(schema.codexRotationSettings.workspaceId, workspaceId))
-      .returning({
-        activeCredentialId: schema.codexRotationSettings.activeCredentialId,
-        rotationEnabled: schema.codexRotationSettings.rotationEnabled,
-        rotationStrategy: schema.codexRotationSettings.rotationStrategy,
-      });
-    return row ?? null;
-  });
-}
-
-/** P1 rename (label only); P3 widens to rotation fields. */
-export async function renameCodexAccount(
-  db: Database,
-  workspaceId: string,
-  credentialId: string,
-  label: string | null,
-): Promise<boolean> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const updated = await scopedDb
-      .update(schema.codexSubscriptionCredentials)
-      .set({ label, updatedAt: new Date() })
-      .where(
-        and(
-          eq(schema.codexSubscriptionCredentials.id, credentialId),
-          eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),
-        ),
-      )
-      .returning({ id: schema.codexSubscriptionCredentials.id });
-    return updated.length > 0;
-  });
-}
 
 /** The two sources of a per-session codex pin (AM-2). See sessions.codex_pin_source. */
 export type CodexPinSource = "manual" | "policy";
@@ -31419,315 +28401,14 @@ export type SetSessionCodexPinOptions = {
   expected?: Pick<SessionCodexState, "pinnedCredentialId" | "pinSource">;
 };
 
-/** The session's pin (+ source) + last-ran-on Codex account (drives the worker resolver + indicator). */
-export async function getSessionCodexState(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-): Promise<SessionCodexState | null> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select({
-        pinnedCredentialId: schema.sessions.codexPinnedCredentialId,
-        lastCredentialId: schema.sessions.codexLastCredentialId,
-        pinSource: schema.sessions.codexPinSource,
-      })
-      .from(schema.sessions)
-      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
-      .limit(1);
-    if (!row) {
-      return null;
-    }
-    return {
-      pinnedCredentialId: row.pinnedCredentialId,
-      lastCredentialId: row.lastCredentialId,
-      pinSource: (row.pinSource as CodexPinSource | null) ?? null,
-    };
-  });
-}
-
 /**
- * Per-session pin. pinnedCredentialId === null clears the pin (follow the workspace
- * active) and clears the source. A non-null pin records `source` — 'manual' (the
- * default; the user's in-session switcher, which no policy path ever moves) or
- * 'policy' (the sharded strategy's deterministic home, re-shardable on cap).
- * Validates the id belongs to the workspace when non-null. Returns false if the
- * session is unknown or the id is invalid.
+ * The core counterpart of `recordSessionCodexSelectionForTurnAttempt`: the
+ * same attempt-fenced, idempotent `codex.credential.selected` (and
+ * `codex.account.switched`) events, but the previous account comes from the
+ * session's core binding and the legacy `sessions.codex_last_credential_id`
+ * pointer is never written with a core connection id.
  */
-export async function setSessionCodexPinInTransaction(
-  db: SessionActivityDatabase,
-  workspaceId: string,
-  sessionId: string,
-  pinnedCredentialId: string | null,
-  source: CodexPinSource = "manual",
-  options: SetSessionCodexPinOptions = {},
-): Promise<boolean> {
-  if (pinnedCredentialId !== null) {
-    const pool = await effectiveCodexCredentialPoolCondition(db, workspaceId);
-    if (!pool.condition) return false;
-    const [cred] = await db
-      .select({ id: schema.codexSubscriptionCredentials.id })
-      .from(schema.codexSubscriptionCredentials)
-      .where(and(eq(schema.codexSubscriptionCredentials.id, pinnedCredentialId), pool.condition))
-      .limit(1);
-    if (!cred) {
-      return false;
-    }
-  }
-  const conditions = [
-    eq(schema.sessions.workspaceId, workspaceId),
-    eq(schema.sessions.id, sessionId),
-  ];
-  if (options.expected) {
-    conditions.push(
-      options.expected.pinnedCredentialId === null
-        ? isNull(schema.sessions.codexPinnedCredentialId)
-        : eq(schema.sessions.codexPinnedCredentialId, options.expected.pinnedCredentialId),
-      options.expected.pinSource === null
-        ? isNull(schema.sessions.codexPinSource)
-        : eq(schema.sessions.codexPinSource, options.expected.pinSource),
-    );
-  }
-  const updated = await db
-    .update(schema.sessions)
-    .set({
-      codexPinnedCredentialId: pinnedCredentialId,
-      // Source travels with the pin: a cleared pin (null) clears the source too.
-      codexPinSource: pinnedCredentialId === null ? null : source,
-      // Only an explicit session account switch is conversation activity.
-      ...(source === "manual" ? { updatedAt: new Date() } : {}),
-    })
-    .where(and(...conditions))
-    .returning({ id: schema.sessions.id });
-  return updated.length > 0;
-}
-
-/** Explicit session control, unlike background pin/pool bookkeeping. The allocator
- * lock serializes this override with both waiter reconciliation and lease claim.
- * Only a closed capacity attempt may change its accepted selection. */
-export async function switchSessionCodexAccount(
-  db: Database,
-  input: { workspaceId: string; sessionId: string; credentialId: string | null; subjectId: string },
-) {
-  return await withWorkspaceSessionActivityRls(db, input.workspaceId, async (scopedDb) => {
-    await lockWorkspaceCodexSubscriptionSource(scopedDb, input.workspaceId);
-    await captureLegacyCodexTurnSources(scopedDb, input.workspaceId);
-    const [observed] = await scopedDb
-      .select()
-      .from(schema.sessions)
-      .where(
-        and(
-          eq(schema.sessions.workspaceId, input.workspaceId),
-          eq(schema.sessions.id, input.sessionId),
-        ),
-      )
-      .limit(1);
-    const acceptedTurnId =
-      observed?.status === "waiting_capacity" ? (observed.activeTurnId ?? undefined) : undefined;
-    return await mutateCodexCapacityInTransaction<
-      {
-        changed: boolean;
-        appliedTo: "waiting_turn" | "next_turn";
-        events: SessionEvent[];
-      },
-      SessionActivityDatabase
-    >(
-      scopedDb,
-      {
-        workspaceId: input.workspaceId,
-        reason: "codex_manual_session_pin_changed",
-        acceptedTurnId,
-        mutationSource: "effective",
-      },
-      async (tx) => {
-        const rotation = await lockExistingCodexRotationSettingsForCapacity(
-          tx,
-          input.workspaceId,
-          acceptedTurnId,
-        );
-        const events: SessionEvent[] = [];
-        let appliedTo: "waiting_turn" | "next_turn" = "next_turn";
-        const locks = await lockSessionEventWriteRows(tx, {
-          workspaceId: input.workspaceId,
-          controlLock: "none",
-          sessionIds: [input.sessionId],
-        });
-        const session = locks.sessions[0];
-        // The source advisory serializes allocation, but settlement can still move
-        // the session. Never apply a choice validated for a different boundary.
-        if (
-          !session ||
-          session.status !== observed?.status ||
-          session.activeTurnId !== observed?.activeTurnId
-        ) {
-          return { result: { changed: false, appliedTo, events }, changed: false };
-        }
-        if (input.credentialId !== null) {
-          if (!rotation || rotation.source === "disabled")
-            return { result: { changed: false, appliedTo, events }, changed: false };
-          const [credential] = await tx
-            .select({ id: schema.codexSubscriptionCredentials.id })
-            .from(schema.codexSubscriptionCredentials)
-            .where(
-              and(
-                eq(schema.codexSubscriptionCredentials.id, input.credentialId),
-                codexCredentialPoolCondition({
-                  accountId: session.accountId,
-                  workspaceId: input.workspaceId,
-                  source: rotation.source,
-                }),
-              ),
-            )
-            .limit(1);
-          if (!credential) return { result: { changed: false, appliedTo, events }, changed: false };
-        }
-        if (session.status === "waiting_capacity" && session.activeTurnId) {
-          const [turn] = await tx
-            .select()
-            .from(schema.sessionTurns)
-            .where(
-              and(
-                eq(schema.sessionTurns.workspaceId, input.workspaceId),
-                eq(schema.sessionTurns.sessionId, input.sessionId),
-                eq(schema.sessionTurns.id, session.activeTurnId),
-              ),
-            )
-            .for("update");
-          const [waiter] = await tx
-            .select()
-            .from(schema.codexCapacityWaiters)
-            .where(
-              and(
-                eq(schema.codexCapacityWaiters.workspaceId, input.workspaceId),
-                eq(schema.codexCapacityWaiters.sessionId, input.sessionId),
-                eq(schema.codexCapacityWaiters.status, "waiting"),
-              ),
-            )
-            .for("update");
-          if (
-            turn?.status === "waiting_capacity" &&
-            turn.activeAttemptId === null &&
-            waiter &&
-            waiter.blockedTurnId === turn.id &&
-            waiter.blockedTurnGeneration === turn.executionGeneration
-          ) {
-            const accepted = readCodexCredentialPolicySnapshotV1(turn.metadata);
-            if (accepted.kind === "valid") {
-              // Never use an explicit pin override to cross the accepted authority/pool boundary.
-              if (
-                !rotation ||
-                (accepted.policy.source && accepted.policy.source !== rotation.source)
-              ) {
-                throw new Error("Cannot switch a waiting Codex turn across credential sources");
-              }
-              const policy = {
-                ...accepted.policy,
-                source: rotation.source,
-                pinnedCredentialId: input.credentialId,
-                pinSource: input.credentialId === null ? null : ("manual" as const),
-                // Auto explicitly requests the current defaults within the SAME accepted pool.
-                ...(input.credentialId === null
-                  ? {
-                      activeCredentialId: rotation.activeCredentialId,
-                      rotationEnabled: rotation.rotationEnabled,
-                      rotationStrategy: rotation.rotationStrategy,
-                      lastCredentialId: null,
-                    }
-                  : {}),
-              };
-              await tx
-                .update(schema.sessionTurns)
-                .set({
-                  metadata: metadataWithCodexCredentialPolicySnapshotV1(turn.metadata, policy),
-                  version: turn.version + 1,
-                  updatedAt: new Date(),
-                })
-                .where(eq(schema.sessionTurns.id, turn.id));
-            }
-            appliedTo = "waiting_turn";
-          }
-        }
-        await tx
-          .update(schema.sessions)
-          .set({
-            codexPinnedCredentialId: input.credentialId,
-            codexPinSource: input.credentialId === null ? null : "manual",
-            updatedAt: new Date(),
-          })
-          .where(
-            and(
-              eq(schema.sessions.workspaceId, input.workspaceId),
-              eq(schema.sessions.id, input.sessionId),
-            ),
-          );
-        const inserted = await tx
-          .insert(schema.sessionEvents)
-          .values(
-            withLosslessContentWriteVersion(
-              [
-                {
-                  accountId: session.accountId,
-                  workspaceId: input.workspaceId,
-                  sessionId: input.sessionId,
-                  sequence: session.lastSequence + 1,
-                  type: "codex.account.selection.changed",
-                  payload: {
-                    credentialId: input.credentialId,
-                    appliedTo,
-                    turnId: appliedTo === "waiting_turn" ? session.activeTurnId : null,
-                    subjectId: input.subjectId,
-                  },
-                  // This is a user control receipt, not output from a running attempt.
-                  occurredAt: new Date(),
-                },
-              ],
-              "payload",
-              "payloadCodecVersion",
-            ),
-          )
-          .returning();
-        await tx
-          .update(schema.sessions)
-          .set({ lastSequence: session.lastSequence + 1 })
-          .where(
-            and(
-              eq(schema.sessions.workspaceId, input.workspaceId),
-              eq(schema.sessions.id, input.sessionId),
-            ),
-          );
-        events.push(...inserted.map(mapEvent));
-        return { result: { changed: true, appliedTo, events }, changed: true };
-      },
-    );
-  });
-}
-
-export async function setSessionCodexPin(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-  pinnedCredentialId: string | null,
-  source: CodexPinSource = "manual",
-  options: SetSessionCodexPinOptions = {},
-): Promise<boolean> {
-  return await withWorkspaceSessionActivityRls(db, workspaceId, (tx) =>
-    setSessionCodexPinInTransaction(
-      tx,
-      workspaceId,
-      sessionId,
-      pinnedCredentialId,
-      source,
-      options,
-    ),
-  );
-}
-
-/** Written by the worker at the turn boundary; drives the in-session indicator. */
-/** Commit observed assignment and its events together under the exact live attempt.
- * Allocation still uses its frozen policy snapshot; this is observation only.
- * Replays return the same receipt and never manufacture a second switch.
- */
-export async function recordSessionCodexSelectionForTurnAttempt(
+export async function recordSubscriptionCoreCodexSelectionForTurnAttempt(
   db: Database,
   input: {
     workspaceId: string;
@@ -31736,10 +28417,10 @@ export async function recordSessionCodexSelectionForTurnAttempt(
     attemptId: string;
     executionGeneration: number;
     credentialId: string;
+    previousCredentialId: string | null;
     strategy: string;
     reusedLease: boolean;
     pinnedCredentialId: string | null;
-    pinSource: "manual" | "policy" | null;
     eligibleCount: number;
     connectedCount: number;
   },
@@ -31781,8 +28462,11 @@ export async function recordSessionCodexSelectionForTurnAttempt(
         } as ReturnType<typeof codexSelectionDiagnostics>,
       };
     }
-    const previousCredentialId = fence.session.codexLastCredentialId;
-    const diagnostics = codexSelectionDiagnostics({ ...input, previousCredentialId });
+    const previousCredentialId = input.previousCredentialId;
+    const diagnostics = codexSelectionDiagnostics({
+      ...input,
+      pinSource: input.pinnedCredentialId ? "manual" : null,
+    });
     const events: AppendEventInput[] = [];
     if (previousCredentialId !== null && previousCredentialId !== input.credentialId) {
       events.push({
@@ -31808,15 +28492,6 @@ export async function recordSessionCodexSelectionForTurnAttempt(
         reused: input.reusedLease,
       },
     });
-    await tx
-      .update(schema.sessions)
-      .set({ codexLastCredentialId: input.credentialId })
-      .where(
-        and(
-          eq(schema.sessions.workspaceId, input.workspaceId),
-          eq(schema.sessions.id, input.sessionId),
-        ),
-      );
     const appended = await appendSessionEventsForTurnAttempt(
       tx,
       input.workspaceId,
@@ -31831,254 +28506,417 @@ export async function recordSessionCodexSelectionForTurnAttempt(
   });
 }
 
-export async function recordSessionActiveCodexCredential(
+/**
+ * The session Codex projection (`GET .../sessions/:id/codex-accounts`) for an
+ * organization whose Codex cutover is enabled: the same shape as
+ * `getSessionCodexAccounts`, projected from the session's core binding, the
+ * active turn's core lease and the workspace's core account pool. The
+ * "Running on" account of a running turn is its live core lease; a waiting
+ * turn shows only an explicit choice. Never reads a legacy Codex table.
+ *
+ * A turn running on a personal connection shows it only to that connection's
+ * owner (`viewerSubjectId`), read through the owner-only reader (M3 PR 3b);
+ * anyone else sees the id with a null account, as before.
+ */
+export async function getSubscriptionCoreSessionCodexAccounts(
   db: Database,
-  workspaceId: string,
-  sessionId: string,
-  credentialId: string,
-): Promise<void> {
-  await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) => {
-    await scopedDb
-      .update(schema.sessions)
-      .set({ codexLastCredentialId: credentialId })
-      .where(
-        and(
-          eq(schema.sessions.workspaceId, workspaceId),
-          eq(schema.sessions.id, sessionId),
-          sql`${schema.sessions.codexLastCredentialId} is distinct from ${credentialId}`,
-        ),
-      );
-  });
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    viewerSubjectId?: string | null;
+  },
+) {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (tx) => {
+      const [session] = await tx
+        .select({
+          id: schema.sessions.id,
+          activeTurnId: schema.sessions.activeTurnId,
+        })
+        .from(schema.sessions)
+        .where(
+          and(
+            eq(schema.sessions.workspaceId, input.workspaceId),
+            eq(schema.sessions.id, input.sessionId),
+          ),
+        )
+        .limit(1);
+      if (!session) return null;
+      const projection = await projectSubscriptionCoreCodexWorkspace(tx, input);
+      const binding = await readCoreSessionBinding(tx, {
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+      });
+      const codexBinding = binding?.provider === "codex" ? binding : null;
+      const [turn] = session.activeTurnId
+        ? await rawRows<{ id: string; status: string; connection_id: string | null }>(
+            tx,
+            sql`select turn.id::text as id, turn.status, lease.connection_id::text as connection_id
+              from session_turns turn
+              left join subscription_leases lease
+                on lease.account_id = turn.account_id and lease.workspace_id = turn.workspace_id
+                  and lease.turn_id = turn.id and lease.provider = 'codex'
+                  and lease.leased_until > clock_timestamp()
+              where turn.account_id = ${input.accountId}::uuid
+                and turn.workspace_id = ${input.workspaceId}::uuid
+                and turn.session_id = ${input.sessionId}::uuid
+                and turn.id = ${session.activeTurnId}::uuid
+                and turn.status in ('running', 'recovering', 'waiting_capacity', 'requires_action')
+                and turn.model like 'codex/%'
+              limit 1`,
+          )
+        : [];
+      const waiting = turn?.status === "waiting_capacity";
+      const pinnedAccountId =
+        codexBinding?.choice === "explicit" ? codexBinding.connectionId : null;
+      const currentSelection = turn
+        ? { waiting, credentialId: waiting ? pinnedAccountId : turn.connection_id }
+        : null;
+      let currentAccount =
+        projection.accounts.find((account) => account.id === currentSelection?.credentialId) ??
+        null;
+      if (!currentAccount && currentSelection?.credentialId && input.viewerSubjectId) {
+        const personal = await listSubscriptionCoreCodexPersonalAccountsInTransaction(tx, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId: input.viewerSubjectId,
+        });
+        currentAccount =
+          personal.find((account) => account.id === currentSelection.credentialId) ?? null;
+      }
+      return {
+        accounts: projection.accounts,
+        rotation: projection.rotation,
+        currentSelection,
+        currentAccount,
+        pinnedAccountId,
+        lastAccountId: codexBinding?.connectionId ?? null,
+      };
+    },
+  );
 }
 
 /**
- * Disconnect ONE account. DELETE WHERE id = credentialId AND workspace_id. If it
- * was the active pointer, the FK ON DELETE SET NULL clears it; this fn then
- * re-picks the most-recently-connected remaining account as active, atomically in
- * the same RLS txn. Returns whether a row was removed + the new active id.
+ * The legacy session pointers (`codexPinnedCredentialId`,
+ * `codexLastCredentialId`) of core sessions, projected from their bindings.
+ * A core session without a Codex binding projects nulls: the legacy columns
+ * are never written with core ids and are not shown after the cutover.
  */
-export async function disconnectCodexAccount(
+export async function getSubscriptionCoreCodexSessionPointers(
   db: Database,
-  workspaceId: string,
-  credentialId: string,
-  actorSubjectId: string | null = null,
-): Promise<{
-  removed: boolean;
-  newActiveCredentialId: string | null;
-  blockedByUnresolvedRedemption: boolean;
-}> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    await scopedDb.execute(sql`
-      select id from codex_rotation_settings
-      where workspace_id = ${workspaceId}
-      for update
-    `);
-    await scopedDb.execute(
-      sql`select pg_advisory_xact_lock(hashtextextended(${`codex-apps-settings:${workspaceId}`}, 0))`,
-    );
-    const [appsSettings] = await scopedDb
-      .select()
-      .from(schema.codexAppsSettings)
-      .where(eq(schema.codexAppsSettings.workspaceId, workspaceId))
-      .for("update")
-      .limit(1);
-    const [credential] = await scopedDb
-      .select({
-        id: schema.codexSubscriptionCredentials.id,
-        accountId: schema.codexSubscriptionCredentials.accountId,
-      })
-      .from(schema.codexSubscriptionCredentials)
-      .where(
-        and(
-          eq(schema.codexSubscriptionCredentials.id, credentialId),
-          eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),
-        ),
-      )
-      .for("update")
-      .limit(1);
-    const [settingsBefore] = await scopedDb
-      .select({
-        activeCredentialId: schema.codexRotationSettings.activeCredentialId,
-      })
-      .from(schema.codexRotationSettings)
-      .where(eq(schema.codexRotationSettings.workspaceId, workspaceId))
-      .limit(1);
-    if (!credential) {
-      return {
-        removed: false,
-        newActiveCredentialId: settingsBefore?.activeCredentialId ?? null,
-        blockedByUnresolvedRedemption: false,
-      };
-    }
-    const [unresolved] = await scopedDb
-      .select({ id: schema.codexResetRedemptionAttempts.id })
-      .from(schema.codexResetRedemptionAttempts)
-      .where(
-        and(
-          eq(schema.codexResetRedemptionAttempts.workspaceId, workspaceId),
-          eq(schema.codexResetRedemptionAttempts.credentialId, credentialId),
-          eq(schema.codexResetRedemptionAttempts.status, "provider_started"),
-        ),
-      )
-      .limit(1);
-    if (unresolved) {
-      return {
-        removed: false,
-        newActiveCredentialId: settingsBefore?.activeCredentialId ?? null,
-        blockedByUnresolvedRedemption: true,
-      };
-    }
-    if (appsSettings?.credentialId === credentialId) {
-      const version = appsSettings.version + 1;
-      await scopedDb
-        .update(schema.codexAppsSettings)
-        .set({
-          credentialId: null,
-          version,
-          designatedAt: null,
-          updatedAt: new Date(),
-        })
-        .where(eq(schema.codexAppsSettings.id, appsSettings.id));
-      await scopedDb.insert(schema.auditEvents).values(
-        withLosslessContentWriteVersion(
-          {
-            accountId: credential.accountId,
-            workspaceId,
-            subjectId: actorSubjectId,
-            action: "codex_apps.cleared_on_disconnect",
-            targetType: "codex_subscription_credential",
-            targetId: credentialId,
-            metadata: { version },
-          },
-          "metadata",
-          "metadataCodecVersion",
-        ),
-      );
-    }
-    const removedRows = await scopedDb
-      .delete(schema.codexSubscriptionCredentials)
-      .where(
-        and(
-          eq(schema.codexSubscriptionCredentials.id, credentialId),
-          eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),
-        ),
-      )
-      .returning({ id: schema.codexSubscriptionCredentials.id });
-    // The FK SET NULL already cleared the pointer if we deleted the active row.
-    const [settingsRow] = await scopedDb
-      .select({
-        activeCredentialId: schema.codexRotationSettings.activeCredentialId,
-      })
-      .from(schema.codexRotationSettings)
-      .where(eq(schema.codexRotationSettings.workspaceId, workspaceId))
-      .limit(1);
-    if (removedRows.length === 0) {
-      return {
-        removed: false,
-        newActiveCredentialId: settingsRow?.activeCredentialId ?? null,
-        blockedByUnresolvedRedemption: false,
-      };
-    }
-    let newActive = settingsRow?.activeCredentialId ?? null;
-    if (newActive === null) {
-      const [next] = await scopedDb
-        .select({ id: schema.codexSubscriptionCredentials.id })
-        .from(schema.codexSubscriptionCredentials)
-        .where(eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId))
-        .orderBy(desc(schema.codexSubscriptionCredentials.createdAt))
-        .limit(1);
-      newActive = next?.id ?? null;
-      if (settingsRow) {
-        await scopedDb
-          .update(schema.codexRotationSettings)
-          .set({ activeCredentialId: newActive, updatedAt: new Date() })
-          .where(eq(schema.codexRotationSettings.workspaceId, workspaceId));
-      }
-    }
-    return {
-      removed: true,
-      newActiveCredentialId: newActive,
-      blockedByUnresolvedRedemption: false,
-    };
-  });
+  input: { accountId: string; workspaceId: string; sessionIds: readonly string[] },
+): Promise<Map<string, { pinnedCredentialId: string | null; lastCredentialId: string | null }>> {
+  const pointers = new Map<
+    string,
+    { pinnedCredentialId: string | null; lastCredentialId: string | null }
+  >();
+  const ids = [...new Set(input.sessionIds)];
+  for (const id of ids) pointers.set(id, { pinnedCredentialId: null, lastCredentialId: null });
+  if (ids.length === 0) return pointers;
+  const rows = await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (tx) =>
+      await rawRows<{ session_id: string; connection_id: string | null; choice: string }>(
+        tx,
+        sql`select session_id::text as session_id, connection_id::text as connection_id, choice
+          from subscription_session_bindings
+          where account_id = ${input.accountId}::uuid
+            and workspace_id = ${input.workspaceId}::uuid and provider = 'codex'
+            and session_id in (${sql.join(
+              ids.map((id) => sql`${id}::uuid`),
+              sql`, `,
+            )})`,
+      ),
+  );
+  for (const row of rows) {
+    pointers.set(row.session_id, {
+      pinnedCredentialId: row.choice === "explicit" ? row.connection_id : null,
+      lastCredentialId: row.connection_id,
+    });
+  }
+  return pointers;
 }
 
-/** Legacy "disconnect all"; atomically rejects when any provider work is unresolved. */
-export async function disconnectAllCodexAccounts(
+/**
+ * The legacy `codexCurrentSelection` of core sessions (M3 PR 3): for an
+ * active Codex turn, the live core lease of a running turn, or the session's
+ * explicit core choice while it waits for capacity; null otherwise. The same
+ * rule as `getSubscriptionCoreSessionCodexAccounts`. Never reads a legacy
+ * Codex table (the legacy lease and pin columns are frozen after 0680).
+ */
+export async function getSubscriptionCoreCodexCurrentSelections(
   db: Database,
-  workspaceId: string,
-  actorSubjectId: string | null = null,
-): Promise<{ removed: number; blockedCredentialIds: string[] }> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    await scopedDb.execute(
-      sql`select pg_advisory_xact_lock(hashtextextended(${`codex-apps-settings:${workspaceId}`}, 0))`,
-    );
-    const [appsSettings] = await scopedDb
-      .select()
-      .from(schema.codexAppsSettings)
-      .where(eq(schema.codexAppsSettings.workspaceId, workspaceId))
-      .for("update")
-      .limit(1);
-    const credentials = await scopedDb
-      .select({
-        id: schema.codexSubscriptionCredentials.id,
-        accountId: schema.codexSubscriptionCredentials.accountId,
-      })
-      .from(schema.codexSubscriptionCredentials)
-      .where(eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId))
-      .orderBy(asc(schema.codexSubscriptionCredentials.id))
-      .for("update");
-    if (credentials.length === 0) return { removed: 0, blockedCredentialIds: [] };
-    const blocked = await scopedDb
-      .selectDistinct({
-        credentialId: schema.codexResetRedemptionAttempts.credentialId,
-      })
-      .from(schema.codexResetRedemptionAttempts)
-      .where(
-        and(
-          eq(schema.codexResetRedemptionAttempts.workspaceId, workspaceId),
-          eq(schema.codexResetRedemptionAttempts.status, "provider_started"),
-        ),
+  input: { accountId: string; workspaceId: string; sessionIds: readonly string[] },
+): Promise<Map<string, { credentialId: string | null; waiting: boolean }>> {
+  const selections = new Map<string, { credentialId: string | null; waiting: boolean }>();
+  const ids = [...new Set(input.sessionIds)];
+  if (ids.length === 0) return selections;
+  const rows = await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (tx) =>
+      await rawRows<{
+        session_id: string;
+        status: string;
+        lease_connection_id: string | null;
+        binding_connection_id: string | null;
+        binding_choice: string | null;
+      }>(
+        tx,
+        sql`select session.id::text as session_id, turn.status,
+            lease.connection_id::text as lease_connection_id,
+            binding.connection_id::text as binding_connection_id,
+            binding.choice as binding_choice
+          from sessions session
+          join session_turns turn on turn.account_id = session.account_id
+            and turn.workspace_id = session.workspace_id and turn.session_id = session.id
+            and turn.id = session.active_turn_id
+          left join subscription_leases lease
+            on lease.account_id = turn.account_id and lease.workspace_id = turn.workspace_id
+              and lease.turn_id = turn.id and lease.provider = 'codex'
+              and lease.leased_until > clock_timestamp()
+          left join subscription_session_bindings binding
+            on binding.account_id = session.account_id
+              and binding.workspace_id = session.workspace_id
+              and binding.session_id = session.id and binding.provider = 'codex'
+          where session.account_id = ${input.accountId}::uuid
+            and session.workspace_id = ${input.workspaceId}::uuid
+            and session.id in (${sql.join(
+              ids.map((id) => sql`${id}::uuid`),
+              sql`, `,
+            )})
+            and turn.status in ('running', 'recovering', 'waiting_capacity', 'requires_action')
+            and turn.model like 'codex/%'`,
+      ),
+  );
+  for (const row of rows) {
+    const waiting = row.status === "waiting_capacity";
+    selections.set(row.session_id, {
+      waiting,
+      credentialId: waiting
+        ? row.binding_choice === "explicit"
+          ? row.binding_connection_id
+          : null
+        : row.lease_connection_id,
+    });
+  }
+  return selections;
+}
+
+/**
+ * Explicit session account choice on the core: a uuid makes the session's
+ * binding `explicit` on that connection; `null` ("auto") returns it to
+ * automatic placement. The binding guard enforces that the connection is
+ * active and eligible for this session (personal connections only in their
+ * owner's own session). Emits the legacy `codex.account.selection.changed`
+ * receipt. A waiting turn re-places at its next check, which the returned
+ * wake triggers; a running attempt keeps its account.
+ */
+export async function pinSubscriptionCoreSessionCodexAccount(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    connectionId: string | null;
+    subjectId: string;
+  },
+): Promise<{
+  result: { changed: boolean; appliedTo: "waiting_turn" | "next_turn"; events: SessionEvent[] };
+  wake: SubscriptionCoreCodexWake | null;
+}> {
+  return await withWorkspaceSubjectSessionActivityRls(
+    db,
+    input.workspaceId,
+    input.subjectId,
+    async (scopedDb) => {
+      const tx = scopedDb as unknown as Database;
+      // The binding guard authorizes the choosing human.
+      await tx.execute(
+        sql`select set_config('opengeni.initiating_human_subject_id', ${input.subjectId}, true)`,
       );
-    if (blocked.length > 0) {
-      return {
-        removed: 0,
-        blockedCredentialIds: blocked.map((row) => row.credentialId).sort(),
+      // The legacy pin's lock contract: a preference change admits no
+      // inference (waiter reconciliation rechecks Pause), so the canonical
+      // session-events lock is taken without the workspace control prefix.
+      const locks = await lockSessionEventWriteRows(tx, {
+        workspaceId: input.workspaceId,
+        controlLock: "none",
+        sessionIds: [input.sessionId],
+        sessionLock: "no_key_update",
+      });
+      const session = locks.sessions.find((row) => row.id === input.sessionId);
+      const unchanged = {
+        result: { changed: false, appliedTo: "next_turn" as const, events: [] },
+        wake: null,
       };
-    }
-    if (appsSettings?.credentialId) {
-      const version = appsSettings.version + 1;
-      await scopedDb
-        .update(schema.codexAppsSettings)
-        .set({
-          credentialId: null,
-          version,
-          designatedAt: null,
-          updatedAt: new Date(),
-        })
-        .where(eq(schema.codexAppsSettings.id, appsSettings.id));
-      await scopedDb.insert(schema.auditEvents).values(
-        withLosslessContentWriteVersion(
-          {
-            accountId: credentials[0]!.accountId,
-            workspaceId,
-            subjectId: actorSubjectId,
-            action: "codex_apps.cleared_on_disconnect",
-            targetType: "codex_subscription_credential",
-            targetId: appsSettings.credentialId,
-            metadata: { version },
-          },
-          "metadata",
-          "metadataCodecVersion",
-        ),
+      if (!session || session.accountId !== input.accountId) return unchanged;
+      // Lock the binding: a running turn's placement or cache-warmth touch
+      // (`writeSubscriptionSessionBinding`, `touchSubscriptionCoreCodexBinding`)
+      // advances its version, and an unlocked read would lose the version
+      // compare-and-swap below to it and report the choice as not found.
+      const [lockedBinding] = await rawRows<{ choice: string; version: number | string }>(
+        tx,
+        sql`select choice, version from subscription_session_bindings
+          where workspace_id = ${input.workspaceId}::uuid and session_id = ${input.sessionId}::uuid
+          for update`,
       );
-    }
-    const rows = await scopedDb
-      .delete(schema.codexSubscriptionCredentials)
-      .where(eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId))
-      .returning({ id: schema.codexSubscriptionCredentials.id });
-    return { removed: rows.length, blockedCredentialIds: [] };
-  });
+      const binding = lockedBinding
+        ? { choice: lockedBinding.choice, version: Number(lockedBinding.version) }
+        : null;
+      let connectionId: string | null = null;
+      if (input.connectionId !== null) {
+        // Canonical or visible alias; otherwise the raw id, which the binding
+        // guard alone judges (a personal connection is invisible here until
+        // the guard grants this exact session's owner access to it).
+        connectionId =
+          (await resolveCoreConnectionId(tx, {
+            accountId: input.accountId,
+            provider: "codex",
+            connectionId: input.connectionId,
+          })) ?? input.connectionId;
+      }
+      try {
+        const written = await tx.transaction(async (savepoint) => {
+          const scoped = savepoint as unknown as Database;
+          if (connectionId === null) {
+            if (!binding || binding.choice !== "explicit") return true;
+            // Leave connection_id alone: only the choice changes, so the
+            // connection guard (which needs an active connection) is not run.
+            const rows = await rawRows<{ version: number | string }>(
+              scoped,
+              sql`update subscription_session_bindings
+                set choice = 'automatic', version = version + 1
+                where workspace_id = ${input.workspaceId}::uuid
+                  and session_id = ${input.sessionId}::uuid and version = ${binding.version}
+                returning version`,
+            );
+            return rows.length > 0;
+          }
+          if (binding) {
+            const rows = await rawRows<{ version: number | string }>(
+              scoped,
+              sql`update subscription_session_bindings
+                set provider = 'codex', connection_id = ${connectionId}::uuid,
+                    choice = 'explicit', last_switch_reason = 'explicit_choice',
+                    version = version + 1
+                where workspace_id = ${input.workspaceId}::uuid
+                  and session_id = ${input.sessionId}::uuid and version = ${binding.version}
+                returning version`,
+            );
+            return rows.length > 0;
+          }
+          const version = await writeCoreSessionBinding(scoped, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            provider: "codex",
+            connectionId,
+            modelId: session.model,
+            choice: "explicit",
+            onlyThisModel: false,
+            lastModelCallAt: null,
+            lastSwitchReason: "explicit_choice",
+          });
+          return version !== null;
+        });
+        if (!written) return unchanged;
+      } catch (error) {
+        const code =
+          (error as { code?: unknown } | null)?.code ??
+          (error as { cause?: { code?: unknown } } | null)?.cause?.code;
+        // The guard refuses a connection this session may not use.
+        if (code === "42501") return unchanged;
+        throw error;
+      }
+      const appliedTo: "waiting_turn" | "next_turn" =
+        session.status === "waiting_capacity" && session.activeTurnId
+          ? "waiting_turn"
+          : "next_turn";
+      const inserted = await tx
+        .insert(schema.sessionEvents)
+        .values(
+          withLosslessContentWriteVersion(
+            [
+              {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                sequence: session.lastSequence + 1,
+                type: "codex.account.selection.changed",
+                payload: {
+                  credentialId: connectionId,
+                  appliedTo,
+                  turnId: appliedTo === "waiting_turn" ? session.activeTurnId : null,
+                  subjectId: input.subjectId,
+                },
+                occurredAt: new Date(),
+              },
+            ],
+            "payload",
+            "payloadCodecVersion",
+          ),
+        )
+        .returning();
+      await tx
+        .update(schema.sessions)
+        .set({ lastSequence: session.lastSequence + 1, updatedAt: new Date() })
+        .where(
+          and(
+            eq(schema.sessions.workspaceId, input.workspaceId),
+            eq(schema.sessions.id, input.sessionId),
+          ),
+        );
+      return {
+        result: { changed: true, appliedTo, events: inserted.map(mapEvent) },
+        // Legacy woke only this session: a pin changes nothing another
+        // session's waiter can place on.
+        wake: {
+          accountId: input.accountId,
+          reason: "core_codex_session_pin_changed",
+          workspaceIds: [input.workspaceId],
+          sessionIds: [input.sessionId],
+        },
+      };
+    },
+  );
+}
+
+/**
+ * Deliver a core Codex wake after the mutation that caused it committed. A
+ * failed wake never fails the committed change: every core waiter also has
+ * its own bounded recheck, so the change is observed at the latest then. The
+ * failure is logged (identifiers and error class only).
+ */
+export async function deliverSubscriptionCoreCodexWake(
+  db: Database,
+  wake: SubscriptionCoreCodexWake | null,
+): Promise<void> {
+  if (!wake) return;
+  try {
+    await wakeSubscriptionCoreCodexCapacityWaiters(db, {
+      accountId: wake.accountId,
+      reason: wake.reason,
+      ...(wake.workspaceIds ? { workspaceIds: wake.workspaceIds } : {}),
+      ...(wake.sessionIds ? { sessionIds: wake.sessionIds } : {}),
+    });
+  } catch (error) {
+    // Bounded waiter recheck is the backstop (see above).
+    console.warn("core Codex wake delivery failed; waiters recheck on their own timer", {
+      accountId: wake.accountId,
+      reason: wake.reason,
+      workspaceIds: wake.workspaceIds ?? null,
+      sessionIds: wake.sessionIds ?? null,
+      error: error instanceof Error ? error.name : typeof error,
+      code:
+        (error as { code?: unknown } | null)?.code ??
+        (error as { cause?: { code?: unknown } } | null)?.cause?.code ??
+        null,
+    });
+  }
 }
 
 export async function recordAuditEvent(
@@ -32391,7 +29229,7 @@ async function updateSessionMcpApprovalPolicyInTransaction(
       .limit(1);
     if (!session) return { server: null, changed: false };
     const policy =
-      requireApprovalWithFloor(input.requireApproval, inherited.approvalFloor, true) ?? false;
+      resolveMcpApprovalRecommendation(input.requireApproval, inherited.approvalFloor) ?? false;
     const server = { id: input.serverId, source: "workspace" as const, requireApproval: policy };
     if (
       Object.hasOwn(session.policies, input.serverId) &&
@@ -32522,7 +29360,12 @@ export type ConnectorActionInvocation = {
   serverId: string;
   toolName: string;
   arguments: unknown;
-  /** Explicit per-session approval or capability-authorized mutation ledger mode. */
+  reviewContext?: import("@opengeni/contracts").ToolReviewContext;
+  /** Recommended decision when no explicit user choice matches. */
+  defaultDecision?: "allow" | "ask";
+  /** Schema-validated discriminator supplied by the trusted tool adapter. */
+  actionName?: string;
+  /** Legacy recommendation or capability-authorized mutation ledger mode. */
   approvalMode?: "session_mcp" | "connector_write";
 };
 
@@ -32532,6 +29375,7 @@ export type PrepareConnectorActionApprovalResult =
       managed: true;
       decision: ConnectorActionPolicyDecision;
       requestId?: string;
+      approvalStatus?: string;
       actionFingerprint: string;
     };
 
@@ -32571,118 +29415,10 @@ function boundedConnectorActionText(value: string, label: string, max: number): 
   return trimmed;
 }
 
-/**
- * Resolve the request's policy selector. This caller-controlled value is used
- * only transiently to match the attempt-frozen policy snapshot; it must never
- * be copied into a request row or audit event.
- */
-function connectorActionPolicySelector(toolName: string, args: unknown): string {
-  if (args && typeof args === "object" && !Array.isArray(args)) {
-    const action = (args as Record<string, unknown>).action;
-    if (typeof action === "string" && action.trim().length > 0) {
-      return boundedConnectorActionText(action, "connector action name", CONNECTOR_ACTION_NAME_MAX);
-    }
-  }
-  return toolName;
-}
-
 function connectorActionEvidenceName(
   resolved: Exclude<ResolvedConnectorActionPolicy, { managed: false }>,
 ): string {
   return resolved.entry?.actionName ?? ("actionName" in resolved ? resolved.actionName : "*");
-}
-
-function connectorActionPolicyDecision(
-  resolved: Exclude<ResolvedConnectorActionPolicy, { managed: false }>,
-): ConnectorActionPolicyDecision {
-  if (resolved.entry) return resolved.entry.policy;
-  return resolved.decision;
-}
-
-function connectorActionFingerprint(input: {
-  workspaceId: string;
-  connectionId: string;
-  serverId: string;
-  toolName: string;
-  actionName: string;
-  arguments: unknown;
-}): string {
-  return createHash("sha256")
-    .update(
-      stableJson({
-        workspaceId: input.workspaceId,
-        connectionId: input.connectionId,
-        serverId: input.serverId,
-        toolName: input.toolName,
-        actionName: input.actionName,
-        arguments: input.arguments ?? null,
-      }),
-      "utf8",
-    )
-    .digest("hex");
-}
-
-type ResolvedConnectorActionPolicy =
-  | { managed: false }
-  | {
-      managed: true;
-      source: "explicit";
-      entry: ConnectorActionPolicySnapshotEntry;
-    }
-  | {
-      managed: true;
-      source: "explicit";
-      entry: null;
-      decision: "allow" | "ask";
-      actionName: string;
-    }
-  | {
-      managed: true;
-      source: "ambiguous";
-      entry: null;
-      decision: "block";
-    };
-
-/** Resolve one immutable attempt snapshot with exact-over-wildcard precedence. */
-export function resolveConnectorActionPolicy(
-  snapshot: readonly ConnectorActionPolicySnapshotEntry[],
-  input: {
-    connectionId: string;
-    serverId: string;
-    toolName: string;
-    actionName: string;
-  },
-): ResolvedConnectorActionPolicy {
-  const candidates = snapshot
-    .filter(
-      (entry) =>
-        entry.connectionId === input.connectionId &&
-        (entry.serverId === input.serverId || entry.serverId === "*") &&
-        (entry.toolName === input.toolName || entry.toolName === "*") &&
-        (entry.actionName === input.actionName || entry.actionName === "*"),
-    )
-    .map((entry) => ({
-      entry,
-      specificity:
-        Number(entry.serverId !== "*") +
-        Number(entry.toolName !== "*") +
-        Number(entry.actionName !== "*"),
-    }))
-    .sort(
-      (left, right) =>
-        right.specificity - left.specificity || left.entry.id.localeCompare(right.entry.id),
-    );
-  const selected = candidates[0];
-  if (!selected) return { managed: false };
-  if (candidates[1]?.specificity === selected.specificity) {
-    return {
-      managed: true,
-      source: "ambiguous",
-      entry: null,
-      decision: "block",
-    };
-  }
-  return { managed: true, source: "explicit", entry: selected.entry };
 }
 
 function connectorActionAuditMetadata(
@@ -32750,7 +29486,9 @@ function normalizedConnectorActionInvocation(
   toolName: string;
   policyActionSelector: string;
   arguments: unknown;
+  reviewContext?: import("@opengeni/contracts").ToolReviewContext;
   approvalMode: "connector" | "session_mcp" | "connector_write";
+  defaultDecision?: "allow" | "ask";
 } {
   const approvalId = boundedConnectorActionText(
     invocation.approvalId,
@@ -32767,7 +29505,14 @@ function normalizedConnectorActionInvocation(
     "connector tool name",
     CONNECTOR_ACTION_NAME_MAX,
   );
-  const policyActionSelector = connectorActionPolicySelector(toolName, invocation.arguments);
+  const policyActionSelector =
+    invocation.actionName === undefined
+      ? toolName
+      : boundedConnectorActionText(
+          invocation.actionName,
+          "connector action name",
+          CONNECTOR_ACTION_NAME_MAX,
+        );
   const connectionId = invocation.connectionId?.trim()
     ? boundedConnectorActionText(
         invocation.connectionId,
@@ -32793,43 +29538,18 @@ function normalizedConnectorActionInvocation(
     toolName,
     policyActionSelector,
     arguments: invocation.arguments,
+    ...(invocation.reviewContext
+      ? { reviewContext: ToolReviewContext.parse(invocation.reviewContext) }
+      : {}),
     approvalMode,
+    ...(invocation.defaultDecision !== undefined
+      ? { defaultDecision: invocation.defaultDecision }
+      : approvalMode === "session_mcp"
+        ? { defaultDecision: "ask" as const }
+        : approvalMode === "connector_write"
+          ? { defaultDecision: "allow" as const }
+          : {}),
   };
-}
-
-function resolvedSessionMcpApproval(
-  actionName: string,
-): Exclude<ResolvedConnectorActionPolicy, { managed: false }> {
-  return {
-    managed: true,
-    source: "explicit",
-    entry: null,
-    decision: "ask",
-    actionName,
-  };
-}
-
-function resolvedConnectorWritePolicy(
-  resolved: ResolvedConnectorActionPolicy,
-  approvalMode: "connector" | "connector_write" | "session_mcp",
-  actionName: string,
-): ResolvedConnectorActionPolicy {
-  if (approvalMode === "session_mcp") {
-    // Explicit Block still wins for header-backed / credential-free servers.
-    // Allow cannot lower the separately frozen session approval floor.
-    return resolved.managed && connectorActionPolicyDecision(resolved) !== "allow"
-      ? resolved
-      : resolvedSessionMcpApproval(actionName);
-  }
-  return approvalMode === "connector_write" && !resolved.managed
-    ? {
-        managed: true,
-        source: "explicit",
-        entry: null,
-        decision: "allow",
-        actionName,
-      }
-    : resolved;
 }
 
 function durableConnectorActionInvocation(
@@ -32845,14 +29565,29 @@ function durableConnectorActionInvocation(
   toolName: string;
   actionName: string;
   actionFingerprint: string;
+  reviewArguments: string;
+  reviewContext?: import("@opengeni/contracts").ToolReviewContext;
 } {
   const actionName = connectorActionEvidenceName(resolved);
+  const reviewArguments = JSON.stringify(invocation.arguments) ?? "null";
+  const reviewContext = invocation.reviewContext
+    ? ToolReviewContext.parse(invocation.reviewContext)
+    : undefined;
+  if (
+    Buffer.byteLength(reviewArguments, "utf8") > 4 * 1024 * 1024 ||
+    (reviewContext && Buffer.byteLength(JSON.stringify(reviewContext), "utf8") > 4 * 1024 * 1024)
+  ) {
+    recordToolApproval("size_rejected");
+    throw new Error("Tool review exceeds the supported size. Prepare smaller independent actions.");
+  }
   return {
     approvalId: invocation.approvalId,
     connectionId: invocation.connectionId,
     serverId: invocation.serverId,
     toolName: invocation.toolName,
     actionName,
+    reviewArguments,
+    ...(reviewContext ? { reviewContext } : {}),
     actionFingerprint: connectorActionFingerprint({
       workspaceId: identity.workspaceId,
       connectionId: invocation.connectionId,
@@ -32876,8 +29611,16 @@ async function connectorActionAttemptSnapshot(
       executionGeneration: schema.sessionTurnAttempts.executionGeneration,
       state: schema.sessionTurnAttempts.state,
       connectorActionPolicies: schema.sessionTurnAttempts.connectorActionPolicies,
+      mcpAccountBindings: schema.sessionTurns.mcpAccountBindings,
     })
     .from(schema.sessionTurnAttempts)
+    .innerJoin(
+      schema.sessionTurns,
+      and(
+        eq(schema.sessionTurns.id, schema.sessionTurnAttempts.turnId),
+        eq(schema.sessionTurns.workspaceId, schema.sessionTurnAttempts.workspaceId),
+      ),
+    )
     .where(
       and(
         eq(schema.sessionTurnAttempts.workspaceId, identity.workspaceId),
@@ -32898,7 +29641,10 @@ async function connectorActionAttemptSnapshot(
   if (attempt.connectorActionPolicies.length > CONNECTOR_ACTION_POLICY_SNAPSHOT_MAX) {
     throw new Error("connector action policy snapshot exceeds the runtime bound");
   }
-  return attempt.connectorActionPolicies;
+  return connectorActionPoliciesForAccountRoutes(
+    attempt.connectorActionPolicies,
+    attempt.mcpAccountBindings,
+  );
 }
 
 function connectorActionRequestMatches(
@@ -32995,6 +29741,12 @@ async function insertConnectorActionRequest(
       policySource: input.resolved.source,
       policyDecision: connectorActionPolicyDecision(input.resolved),
       actionFingerprint: input.invocation.actionFingerprint!,
+      ...(input.status === "pending"
+        ? {
+            reviewArguments: input.invocation.reviewArguments,
+            reviewContext: input.invocation.reviewContext ?? null,
+          }
+        : {}),
       status: input.status,
       ...(input.status === "executing"
         ? {
@@ -33393,6 +30145,84 @@ export async function ensureConnectorActionPolicyDefault(
   );
 }
 
+/** An already prepared action keeps its original choice across resumed attempts. */
+async function priorConnectorActionPreparation(
+  db: Database,
+  identity: ConnectorActionAttemptIdentity,
+  invocation: ReturnType<typeof normalizedConnectorActionInvocation>,
+): Promise<PrepareConnectorActionApprovalResult | null> {
+  const [row] = await db
+    .select()
+    .from(schema.connectorActionRequests)
+    .where(
+      and(
+        eq(schema.connectorActionRequests.workspaceId, identity.workspaceId),
+        eq(schema.connectorActionRequests.sessionId, identity.sessionId),
+        eq(schema.connectorActionRequests.turnId, identity.turnId),
+        eq(schema.connectorActionRequests.approvalId, invocation.approvalId),
+      ),
+    )
+    .limit(1);
+  if (!row) return null;
+  if (!connectorActionRequestMatchesLogicalCall(row, identity, invocation)) {
+    throw new Error("connector action approval id conflicts with different immutable inputs");
+  }
+  return {
+    managed: true,
+    decision: row.policyDecision,
+    approvalStatus: row.status,
+    requestId: row.id,
+    actionFingerprint: row.actionFingerprint,
+  };
+}
+
+/** Exact rows of one attempt whose canonical write prefix a ledger write takes. */
+type ConnectorActionLedgerPrefix = (scope: {
+  sessionId: string;
+  turnId: string;
+  attemptId: string;
+}) => Promise<void>;
+
+/**
+ * One idempotent connector-ledger transaction. Before its first ledger write it
+ * takes the canonical session event-write prefix (workspace KEY SHARE, session,
+ * event cursor, exact turn, exact attempt): a ledger row's attempt FK otherwise
+ * KEY SHAREs the attempt outside that order while parallel tool calls of the
+ * same attempt append events and settle receipts. Reads before the prefix take
+ * no row locks. The whole transaction retries on 40P01/40001; it never contains
+ * a provider effect, so a retry cannot replay one.
+ */
+async function runConnectorActionLedgerTransaction<T>(
+  db: Database,
+  input: { accountId: string; workspaceId: string; stage: string; correlationId: string },
+  fn: (tx: Database, lockPrefix: ConnectorActionLedgerPrefix) => Promise<T>,
+): Promise<T> {
+  return await retryRlsPersistence(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    { stage: input.stage, correlationId: input.correlationId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        let locked: string | null = null;
+        return await fn(tx, async (scope) => {
+          const key = `${scope.sessionId}:${scope.turnId}:${scope.attemptId}`;
+          if (locked === key) return;
+          if (locked) throw new Error("connector ledger transaction spans two attempts");
+          await lockSessionEventWriteRows(tx, {
+            workspaceId: input.workspaceId,
+            controlLock: "none",
+            sessionLock: "key_share",
+            sessionIds: [scope.sessionId],
+            turnIds: [scope.turnId],
+            attemptIds: [scope.attemptId],
+          });
+          locked = key;
+        });
+      }),
+  );
+}
+
 export async function prepareConnectorActionApproval(
   db: Database,
   identity: ConnectorActionAttemptIdentity,
@@ -33402,60 +30232,66 @@ export async function prepareConnectorActionApproval(
   if (!normalized.connectionId) {
     return { managed: false, decision: "unmanaged" };
   }
-  return await withRlsContext(
+  return await runConnectorActionLedgerTransaction(
     db,
-    { accountId: identity.accountId, workspaceId: identity.workspaceId },
-    async (scopedDb) =>
-      await scopedDb.transaction(async (tx) => {
-        const snapshot = await connectorActionAttemptSnapshot(tx as unknown as Database, identity);
-        const resolved = resolvedConnectorWritePolicy(
-          resolveConnectorActionPolicy(snapshot, {
-            connectionId: normalized.connectionId!,
-            serverId: normalized.serverId,
-            toolName: normalized.toolName,
-            actionName: normalized.policyActionSelector,
-          }),
-          normalized.approvalMode,
-          normalized.policyActionSelector,
-        );
-        if (!resolved.managed) return { managed: false, decision: "unmanaged" } as const;
-        const durable = durableConnectorActionInvocation(
-          identity,
-          { ...normalized, connectionId: normalized.connectionId! },
-          resolved,
-        );
-        const decision = connectorActionPolicyDecision(resolved);
-        if (decision === "allow") {
-          return {
-            managed: true,
-            decision,
-            actionFingerprint: durable.actionFingerprint,
-          } as const;
-        }
-        const { row, inserted } = await insertConnectorActionRequest(tx as unknown as Database, {
-          identity,
-          invocation: durable,
-          resolved,
-          status: decision === "ask" ? "pending" : "blocked",
-        });
-        if (inserted) {
-          await insertConnectorActionAudit(tx as unknown as Database, {
-            row,
-            action:
-              decision === "ask"
-                ? "connector.action.approval_requested"
-                : "connector.action.blocked",
-            subjectId: identity.initiator.subjectId,
-            extra: { outcome: decision },
-          });
-        }
+    {
+      accountId: identity.accountId,
+      workspaceId: identity.workspaceId,
+      stage: "connector_action_prepare",
+      correlationId: normalized.approvalId,
+    },
+    async (tx, lockPrefix) => {
+      const snapshot = await connectorActionAttemptSnapshot(tx, identity);
+      const prior = await priorConnectorActionPreparation(tx, identity, normalized);
+      if (prior) return prior;
+      const resolved = resolveConnectorActionPolicy(snapshot, {
+        connectionId: normalized.connectionId!,
+        serverId: normalized.serverId,
+        toolName: normalized.toolName,
+        actionName: normalized.policyActionSelector,
+        ...(normalized.defaultDecision !== undefined
+          ? { defaultDecision: normalized.defaultDecision }
+          : {}),
+      });
+      if (!resolved.managed) return { managed: false, decision: "unmanaged" } as const;
+      const durable = durableConnectorActionInvocation(
+        identity,
+        { ...normalized, connectionId: normalized.connectionId! },
+        resolved,
+      );
+      const decision = connectorActionPolicyDecision(resolved);
+      recordToolApproval(decision, resolved.source);
+      if (decision === "allow") {
         return {
           managed: true,
           decision,
-          requestId: row.id,
-          actionFingerprint: row.actionFingerprint,
+          actionFingerprint: durable.actionFingerprint,
         } as const;
-      }),
+      }
+      await lockPrefix(identity);
+      const { row, inserted } = await insertConnectorActionRequest(tx, {
+        identity,
+        invocation: durable,
+        resolved,
+        status: decision === "ask" ? "pending" : "blocked",
+      });
+      if (inserted) {
+        await insertConnectorActionAudit(tx, {
+          row,
+          action:
+            decision === "ask" ? "connector.action.approval_requested" : "connector.action.blocked",
+          subjectId: identity.initiator.subjectId,
+          extra: { outcome: decision },
+        });
+      }
+      return {
+        managed: true,
+        decision,
+        approvalStatus: row.status,
+        requestId: row.id,
+        actionFingerprint: row.actionFingerprint,
+      } as const;
+    },
   );
 }
 
@@ -33474,16 +30310,17 @@ export async function previewConnectorActionApproval(
     { accountId: identity.accountId, workspaceId: identity.workspaceId },
     async (scopedDb) => {
       const snapshot = await connectorActionAttemptSnapshot(scopedDb, identity);
-      const resolved = resolvedConnectorWritePolicy(
-        resolveConnectorActionPolicy(snapshot, {
-          connectionId: normalized.connectionId!,
-          serverId: normalized.serverId,
-          toolName: normalized.toolName,
-          actionName: normalized.policyActionSelector,
-        }),
-        normalized.approvalMode,
-        normalized.policyActionSelector,
-      );
+      const prior = await priorConnectorActionPreparation(scopedDb, identity, normalized);
+      if (prior) return prior;
+      const resolved = resolveConnectorActionPolicy(snapshot, {
+        connectionId: normalized.connectionId!,
+        serverId: normalized.serverId,
+        toolName: normalized.toolName,
+        actionName: normalized.policyActionSelector,
+        ...(normalized.defaultDecision !== undefined
+          ? { defaultDecision: normalized.defaultDecision }
+          : {}),
+      });
       if (!resolved.managed) return { managed: false, decision: "unmanaged" } as const;
       const durable = durableConnectorActionInvocation(
         identity,
@@ -33508,13 +30345,28 @@ export async function beginConnectorActionExecution(
   if (!normalized.connectionId) {
     return { allowed: true, managed: false };
   }
-  return await withRlsContext(
+  const resolveFrom = (snapshot: ConnectorActionPolicySnapshotEntry[]) =>
+    resolveConnectorActionPolicy(snapshot, {
+      connectionId: normalized.connectionId!,
+      serverId: normalized.serverId,
+      toolName: normalized.toolName,
+      actionName: normalized.policyActionSelector,
+      ...(normalized.defaultDecision !== undefined
+        ? { defaultDecision: normalized.defaultDecision }
+        : {}),
+    });
+  return await runConnectorActionLedgerTransaction(
     db,
-    { accountId: identity.accountId, workspaceId: identity.workspaceId },
-    async (scopedDb) =>
-      await scopedDb.transaction(async (tx) => {
-        const snapshot = await connectorActionAttemptSnapshot(tx as unknown as Database, identity);
-        const [existing] = await tx
+    {
+      accountId: identity.accountId,
+      workspaceId: identity.workspaceId,
+      stage: "connector_action_begin",
+      correlationId: normalized.approvalId,
+    },
+    async (tx, lockPrefix) => {
+      const snapshot = await connectorActionAttemptSnapshot(tx, identity);
+      const existingRequest = () =>
+        tx
           .select()
           .from(schema.connectorActionRequests)
           .where(
@@ -33524,74 +30376,89 @@ export async function beginConnectorActionExecution(
               eq(schema.connectorActionRequests.turnId, identity.turnId),
               eq(schema.connectorActionRequests.approvalId, normalized.approvalId),
             ),
-          )
-          .for("update")
-          .limit(1);
-        if (existing && !connectorActionRequestMatchesLogicalCall(existing, identity, normalized)) {
-          throw new Error("connector action approval id conflicts with different immutable inputs");
-        }
-        let row = existing;
-        let inserted = false;
-        if (!row) {
-          const resolved = resolvedConnectorWritePolicy(
-            resolveConnectorActionPolicy(snapshot, {
-              connectionId: normalized.connectionId!,
-              serverId: normalized.serverId,
-              toolName: normalized.toolName,
-              actionName: normalized.policyActionSelector,
-            }),
-            normalized.approvalMode,
-            normalized.policyActionSelector,
           );
-          if (!resolved.managed) return { allowed: true, managed: false } as const;
-          const durable = durableConnectorActionInvocation(
-            identity,
-            { ...normalized, connectionId: normalized.connectionId! },
-            resolved,
-          );
-          const decision = connectorActionPolicyDecision(resolved);
-          const created = await insertConnectorActionRequest(tx as unknown as Database, {
-            identity,
-            invocation: durable,
-            resolved,
-            status: decision === "ask" ? "pending" : decision === "block" ? "blocked" : "executing",
-          });
-          row = created.row;
-          inserted = created.inserted;
-          if (inserted) {
-            await insertConnectorActionAudit(tx as unknown as Database, {
-              row,
-              action:
-                decision === "ask"
-                  ? "connector.action.approval_requested"
-                  : decision === "block"
-                    ? "connector.action.blocked"
-                    : "connector.action.execution_started",
-              subjectId: identity.initiator.subjectId,
-              extra: { outcome: decision === "allow" ? "started" : decision },
-            });
-          }
+      const [unlocked] = await existingRequest().limit(1);
+      if (!unlocked) {
+        const resolved = resolveFrom(snapshot);
+        if (!resolved.managed) return { allowed: true, managed: false } as const;
+        // A recommended Allow with no explicit rule is ordinary tool use, not
+        // a reviewed action: no ledger row, audit pair, or row lock. Every Ask,
+        // Block, explicit rule, and connector write keeps its execute-once record.
+        if (
+          resolved.source === "default" &&
+          connectorActionPolicyDecision(resolved) === "allow" &&
+          normalized.approvalMode === "connector"
+        ) {
+          return { allowed: true, managed: false } as const;
         }
-        if (row.status === "approved") {
-          const [executing] = await tx
-            .update(schema.connectorActionRequests)
-            .set({
-              status: "executing",
-              executionAttemptId: identity.attemptId,
-              executionAttemptGeneration: identity.executionGeneration,
-              executionStartedAt: new Date(),
-              updatedAt: new Date(),
-            })
-            .where(eq(schema.connectorActionRequests.id, row.id))
-            .returning();
-          if (!executing) throw new Error("Approved connector action request disappeared");
-          row = executing;
-          await insertConnectorActionAudit(tx as unknown as Database, {
+      }
+      await lockPrefix(identity);
+      const [existing] = await existingRequest().for("update").limit(1);
+      if (existing && !connectorActionRequestMatchesLogicalCall(existing, identity, normalized)) {
+        throw new Error("connector action approval id conflicts with different immutable inputs");
+      }
+      let row = existing;
+      let inserted = false;
+      if (!row) {
+        const resolved = resolveFrom(snapshot);
+        if (!resolved.managed) return { allowed: true, managed: false } as const;
+        const decision = connectorActionPolicyDecision(resolved);
+        const durable = durableConnectorActionInvocation(
+          identity,
+          { ...normalized, connectionId: normalized.connectionId! },
+          resolved,
+        );
+        const created = await insertConnectorActionRequest(tx, {
+          identity,
+          invocation: durable,
+          resolved,
+          status: decision === "ask" ? "pending" : decision === "block" ? "blocked" : "executing",
+        });
+        row = created.row;
+        inserted = created.inserted;
+        if (inserted) {
+          await insertConnectorActionAudit(tx, {
             row,
-            action: "connector.action.execution_started",
+            action:
+              decision === "ask"
+                ? "connector.action.approval_requested"
+                : decision === "block"
+                  ? "connector.action.blocked"
+                  : "connector.action.execution_started",
             subjectId: identity.initiator.subjectId,
-            extra: { outcome: "started" },
+            extra: { outcome: decision === "allow" ? "started" : decision },
           });
+        }
+      }
+      if (row.status === "approved") {
+        const [executing] = await tx
+          .update(schema.connectorActionRequests)
+          .set({
+            status: "executing",
+            executionAttemptId: identity.attemptId,
+            executionAttemptGeneration: identity.executionGeneration,
+            executionStartedAt: new Date(),
+            updatedAt: new Date(),
+          })
+          .where(eq(schema.connectorActionRequests.id, row.id))
+          .returning();
+        if (!executing) throw new Error("Approved connector action request disappeared");
+        row = executing;
+        await insertConnectorActionAudit(tx, {
+          row,
+          action: "connector.action.execution_started",
+          subjectId: identity.initiator.subjectId,
+          extra: { outcome: "started" },
+        });
+        return {
+          allowed: true,
+          managed: true,
+          requestId: row.id,
+          actionFingerprint: row.actionFingerprint,
+        } as const;
+      }
+      if (row.status === "executing") {
+        if (inserted) {
           return {
             allowed: true,
             managed: true,
@@ -33599,58 +30466,49 @@ export async function beginConnectorActionExecution(
             actionFingerprint: row.actionFingerprint,
           } as const;
         }
-        if (row.status === "executing") {
-          if (inserted) {
-            return {
-              allowed: true,
-              managed: true,
-              requestId: row.id,
-              actionFingerprint: row.actionFingerprint,
-            } as const;
-          }
-          const [uncertain] = await tx
-            .update(schema.connectorActionRequests)
-            .set({
-              status: "uncertain",
-              outcome: "retry_after_execution_started",
-              executionFinishedAt: new Date(),
-              updatedAt: new Date(),
-            })
-            .where(eq(schema.connectorActionRequests.id, row.id))
-            .returning();
-          if (!uncertain) throw new Error("Executing connector action request disappeared");
-          await insertConnectorActionAudit(tx as unknown as Database, {
-            row: uncertain,
-            action: "connector.action.execution_uncertain",
-            subjectId: identity.initiator.subjectId,
-            extra: { outcome: "retry_denied" },
-          });
-          return {
-            allowed: false,
-            managed: true,
-            reason: "uncertain_retry",
-            requestId: uncertain.id,
-            actionFingerprint: uncertain.actionFingerprint,
-          } as const;
-        }
-        const reason =
-          row.status === "pending"
-            ? "approval_required"
-            : row.status === "rejected"
-              ? "rejected"
-              : row.status === "blocked"
-                ? "blocked"
-                : row.status === "failed"
-                  ? "not_executed"
-                  : "already_executed";
+        const [uncertain] = await tx
+          .update(schema.connectorActionRequests)
+          .set({
+            status: "uncertain",
+            outcome: "retry_after_execution_started",
+            executionFinishedAt: new Date(),
+            updatedAt: new Date(),
+          })
+          .where(eq(schema.connectorActionRequests.id, row.id))
+          .returning();
+        if (!uncertain) throw new Error("Executing connector action request disappeared");
+        await insertConnectorActionAudit(tx, {
+          row: uncertain,
+          action: "connector.action.execution_uncertain",
+          subjectId: identity.initiator.subjectId,
+          extra: { outcome: "retry_denied" },
+        });
         return {
           allowed: false,
           managed: true,
-          reason,
-          requestId: row.id,
-          actionFingerprint: row.actionFingerprint,
+          reason: "uncertain_retry",
+          requestId: uncertain.id,
+          actionFingerprint: uncertain.actionFingerprint,
         } as const;
-      }),
+      }
+      const reason =
+        row.status === "pending"
+          ? "approval_required"
+          : row.status === "rejected"
+            ? "rejected"
+            : row.status === "blocked"
+              ? "blocked"
+              : row.status === "failed"
+                ? "not_executed"
+                : "already_executed";
+      return {
+        allowed: false,
+        managed: true,
+        reason,
+        requestId: row.id,
+        actionFingerprint: row.actionFingerprint,
+      } as const;
+    },
   );
 }
 
@@ -33664,12 +30522,17 @@ export async function completeConnectorActionExecution(
     outcome: "completed" | "uncertain" | "not_executed";
   },
 ): Promise<void> {
-  await withRlsContext(
+  await runConnectorActionLedgerTransaction(
     db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) =>
-      await scopedDb.transaction(async (tx) => {
-        const [existing] = await tx
+    {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      stage: "connector_action_complete",
+      correlationId: input.requestId,
+    },
+    async (tx, lockPrefix) => {
+      const request = () =>
+        tx
           .select()
           .from(schema.connectorActionRequests)
           .where(
@@ -33678,43 +30541,51 @@ export async function completeConnectorActionExecution(
               eq(schema.connectorActionRequests.id, input.requestId),
               eq(schema.connectorActionRequests.executionAttemptId, input.attemptId),
             ),
-          )
-          .for("update")
-          .limit(1);
-        if (!existing) throw new Error("Connector action request not found for completion");
-        // A not-executed completion is a terminal failure whose provider
-        // request never happened; it keeps the existing status vocabulary.
-        // Reaching the terminal status is idempotent even when a concurrent
-        // begin already settled the row with a different uncertain outcome
-        // (retry_after_execution_started).
-        const terminalStatus = input.outcome === "not_executed" ? "failed" : input.outcome;
-        if (existing.status === terminalStatus) return;
-        if (existing.status !== "executing") {
-          throw new Error(`Connector action request cannot complete from ${existing.status}`);
-        }
-        const [row] = await tx
-          .update(schema.connectorActionRequests)
-          .set({
-            status: terminalStatus,
-            outcome: input.outcome,
-            executionFinishedAt: new Date(),
-            updatedAt: new Date(),
-          })
-          .where(eq(schema.connectorActionRequests.id, existing.id))
-          .returning();
-        if (!row) throw new Error("Connector action request disappeared during completion");
-        await insertConnectorActionAudit(tx as unknown as Database, {
-          row,
-          action:
-            input.outcome === "completed"
-              ? "connector.action.execution_completed"
-              : input.outcome === "not_executed"
-                ? "connector.action.execution_not_executed"
-                : "connector.action.execution_uncertain",
-          subjectId: row.initiatorSubjectId,
-          extra: { outcome: input.outcome },
-        });
-      }),
+          );
+      const [located] = await request().limit(1);
+      if (!located) throw new Error("Connector action request not found for completion");
+      // Settlement is not admission: it takes the canonical prefix but never the
+      // Pause/Steer write fence, so an interrupted attempt still settles.
+      await lockPrefix({
+        sessionId: located.sessionId,
+        turnId: located.turnId,
+        attemptId: input.attemptId,
+      });
+      const [existing] = await request().for("update").limit(1);
+      if (!existing) throw new Error("Connector action request not found for completion");
+      // A not-executed completion is a terminal failure whose provider
+      // request never happened; it keeps the existing status vocabulary.
+      // Reaching the terminal status is idempotent even when a concurrent
+      // begin already settled the row with a different uncertain outcome
+      // (retry_after_execution_started).
+      const terminalStatus = input.outcome === "not_executed" ? "failed" : input.outcome;
+      if (existing.status === terminalStatus) return;
+      if (existing.status !== "executing") {
+        throw new Error(`Connector action request cannot complete from ${existing.status}`);
+      }
+      const [row] = await tx
+        .update(schema.connectorActionRequests)
+        .set({
+          status: terminalStatus,
+          outcome: input.outcome,
+          executionFinishedAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.connectorActionRequests.id, existing.id))
+        .returning();
+      if (!row) throw new Error("Connector action request disappeared during completion");
+      await insertConnectorActionAudit(tx, {
+        row,
+        action:
+          input.outcome === "completed"
+            ? "connector.action.execution_completed"
+            : input.outcome === "not_executed"
+              ? "connector.action.execution_not_executed"
+              : "connector.action.execution_uncertain",
+        subjectId: row.initiatorSubjectId,
+        extra: { outcome: input.outcome },
+      });
+    },
   );
 }
 
@@ -34532,15 +31403,23 @@ async function createSessionInTransaction(
 
   // Do not run mutable creator validation before keyed denial replay above.
   const frozenCreator = await frozenSessionCreatorForInsert(tx, input);
+  // A subject creator resolves their own current pool. A creator that is not a
+  // subject (service, organization API key, bridge) has no exact human, so it
+  // resolves the organization or workspace pool and never a personal pool.
+  const subjectCreatorId =
+    frozenCreator.initiator.kind === "subject" && input.subjectId ? input.subjectId : null;
+  const sharedCreatorPool =
+    !subjectCreatorId &&
+    (input.initialXaiProviderAccountAuthoritySnapshot === undefined ||
+      input.initialClaudeProviderAccountAuthoritySnapshot === undefined)
+      ? await sharedPoolSubscriptionAuthoritySnapshotsInTransaction(tx, input.workspaceId)
+      : null;
   let initialXaiProviderAccountAuthoritySnapshot =
     input.initialXaiProviderAccountAuthoritySnapshot ??
+    sharedCreatorPool?.xai ??
     WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1;
-  if (
-    input.initialXaiProviderAccountAuthoritySnapshot === undefined &&
-    frozenCreator.initiator.kind === "subject" &&
-    input.subjectId
-  ) {
-    await setSubjectRlsContext(tx, input.subjectId);
+  if (input.initialXaiProviderAccountAuthoritySnapshot === undefined && subjectCreatorId) {
+    await setSubjectRlsContext(tx, subjectCreatorId);
     initialXaiProviderAccountAuthoritySnapshot =
       await resolveXaiProviderAccountAuthoritySnapshotForAcceptanceInTransaction(tx, {
         workspaceId: input.workspaceId,
@@ -34548,13 +31427,10 @@ async function createSessionInTransaction(
   }
   let initialClaudeProviderAccountAuthoritySnapshot =
     input.initialClaudeProviderAccountAuthoritySnapshot ??
+    sharedCreatorPool?.claude ??
     WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1;
-  if (
-    input.initialClaudeProviderAccountAuthoritySnapshot === undefined &&
-    frozenCreator.initiator.kind === "subject" &&
-    input.subjectId
-  ) {
-    await setSubjectRlsContext(tx, input.subjectId);
+  if (input.initialClaudeProviderAccountAuthoritySnapshot === undefined && subjectCreatorId) {
+    await setSubjectRlsContext(tx, subjectCreatorId);
     initialClaudeProviderAccountAuthoritySnapshot =
       await resolveClaudeProviderAccountAuthoritySnapshotForAcceptanceInTransaction(tx, {
         workspaceId: input.workspaceId,
@@ -34580,13 +31456,14 @@ async function createSessionInTransaction(
   let privateCreateOwnerSubjectId: string | null = null;
   if (createRequestedVisibility === "user_private") {
     if (input.parentSessionId) {
-      if (
-        frozenCreator.initiator.kind !== "subject" ||
-        !input.createdByActor ||
-        input.createdByActor.sessionId !== input.parentSessionId
-      ) {
+      if (!input.createdByActor || input.createdByActor.sessionId !== input.parentSessionId) {
         throw new Error("Private child session creation requires its exact parent attempt");
       }
+      // Internal-update turns retain service audit attribution. The capability
+      // below derives the distinct causal human from the locked parent turn
+      // and verifies that human owns the private parent, alongside the live
+      // attempt/generation and interruption fences. Do not confuse attribution
+      // with authority or rewrite the child's service creator as a human.
       const capability = await openPrivateChildSessionCreateCapability(tx, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
@@ -35107,6 +31984,26 @@ export async function getInitializedSessionCreateReplay(
   );
 }
 
+/** Read target identity for authorization without expanding chat content or controls. */
+export async function getSessionAuthorizationTargetProjection(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<Pick<Session, "id" | "accountId" | "rootSessionId"> | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({
+        id: schema.sessions.id,
+        accountId: schema.sessions.accountId,
+        rootSessionId: schema.sessions.rootSessionId,
+      })
+      .from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+      .limit(1);
+    return row ?? null;
+  });
+}
+
 export async function getSession(
   db: Database,
   workspaceId: string,
@@ -35124,6 +32021,117 @@ export async function getSession(
     const grouped = await sessionMcpServerMetadataForSessions(scopedDb, workspaceId, [row.id]);
     return await mapSessionWithControl(scopedDb, session, grouped.get(row.id) ?? []);
   });
+}
+
+export type DiscardUninitializedSessionShellResult =
+  | "discarded"
+  | "initialized"
+  | "keyed"
+  | "not_found"
+  | "referenced";
+
+/**
+ * Remove a just-created session shell whose start failed before the atomic
+ * initializer committed its first event or turn.
+ *
+ * Session creation commits the shell first and initializes it in a later
+ * transaction. When that second step fails for a create without an
+ * idempotency key, the caller receives an error and has no way to resume
+ * that session, so the bare row must not stay visible as a queued session
+ * that nothing will ever run. A keyed shell is kept: a retry with the same
+ * key repairs it with the parameters it was first accepted with. The row lock
+ * serializes with the initializer, so a shell that gained any event or turn
+ * (including an outcome-unknown initializer commit) is left untouched.
+ */
+export async function discardUninitializedSessionShell(
+  db: Database,
+  input: { accountId: string; workspaceId: string; sessionId: string },
+): Promise<DiscardUninitializedSessionShellResult> {
+  try {
+    return await withSessionActivityRlsContext(
+      db,
+      { accountId: input.accountId, workspaceId: input.workspaceId },
+      async (scopedDb) =>
+        await scopedDb.transaction(async (txRaw) => {
+          const tx = txRaw as unknown as Database;
+          await lockWorkspaceInferenceControl(tx, input.workspaceId, "share");
+          const [shell] = await tx
+            .select({
+              id: schema.sessions.id,
+              lastSequence: schema.sessions.lastSequence,
+              createIdempotencyKey: schema.sessions.createIdempotencyKey,
+            })
+            .from(schema.sessions)
+            .where(
+              and(
+                eq(schema.sessions.workspaceId, input.workspaceId),
+                eq(schema.sessions.id, input.sessionId),
+              ),
+            )
+            .for("update")
+            .limit(1);
+          if (!shell) return "not_found" as const;
+          if (shell.createIdempotencyKey !== null) return "keyed" as const;
+          if (shell.lastSequence !== 0) return "initialized" as const;
+          const [[event], [turn], [child]] = await Promise.all([
+            tx
+              .select({ id: schema.sessionEvents.id })
+              .from(schema.sessionEvents)
+              .where(
+                and(
+                  eq(schema.sessionEvents.workspaceId, input.workspaceId),
+                  eq(schema.sessionEvents.sessionId, input.sessionId),
+                ),
+              )
+              .limit(1),
+            tx
+              .select({ id: schema.sessionTurns.id })
+              .from(schema.sessionTurns)
+              .where(
+                and(
+                  eq(schema.sessionTurns.workspaceId, input.workspaceId),
+                  eq(schema.sessionTurns.sessionId, input.sessionId),
+                ),
+              )
+              .limit(1),
+            tx
+              .select({ id: schema.sessions.id })
+              .from(schema.sessions)
+              .where(
+                and(
+                  eq(schema.sessions.workspaceId, input.workspaceId),
+                  eq(schema.sessions.parentSessionId, input.sessionId),
+                ),
+              )
+              .limit(1),
+          ]);
+          if (event || turn || child) return "initialized" as const;
+          const deleted = await tx
+            .delete(schema.sessions)
+            .where(
+              and(
+                eq(schema.sessions.workspaceId, input.workspaceId),
+                eq(schema.sessions.id, input.sessionId),
+              ),
+            )
+            .returning({ id: schema.sessions.id });
+          return deleted.length === 1 ? ("discarded" as const) : ("not_found" as const);
+        }),
+    );
+  } catch (error) {
+    // A durable reference that deliberately restricts deletion (for example a
+    // scheduled run bound to this session) keeps the shell; its owner settles it.
+    const code =
+      typeof error === "object" && error && "code" in error
+        ? (error as { code?: unknown }).code
+        : undefined;
+    const causeCode =
+      typeof error === "object" && error && "cause" in error
+        ? ((error as { cause?: { code?: unknown } }).cause?.code ?? undefined)
+        : undefined;
+    if (code === "23503" || causeCode === "23503") return "referenced";
+    throw error;
+  }
 }
 
 export type DeleteSessionTreeIfQuiescentResult =
@@ -35660,15 +32668,6 @@ export async function getSessionParentMcpAccountBindings(
   });
 }
 
-async function xaiProviderAccountAuthoritySnapshotForTurnInTransaction(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-  turnId: string,
-): Promise<XaiProviderAccountAuthoritySnapshotV1> {
-  return subscriptionAuthorityForTurnInTransaction(db, "xai", workspaceId, sessionId, turnId);
-}
-
 export async function getSessionTurnXaiProviderAccountAuthoritySnapshot(
   db: Database,
   workspaceId: string,
@@ -35968,6 +32967,8 @@ export type SessionListFilterOptions = {
   createdBefore?: Date;
   /** Restrict root pages to workstreams requiring human attention. */
   needsYouOnly?: boolean;
+  /** Only sessions moved to the idle-session archive (read-only). */
+  contentArchivedOnly?: boolean;
   /** Exact opaque end-user label pair (both parts). */
   scopeSubjectId?: SessionScopeSubjectId;
 };
@@ -37101,6 +34102,7 @@ function sessionFilters(
     | "createdBefore"
     | "scopeSubjectId"
     | "needsYouOnly"
+    | "contentArchivedOnly"
   >,
 ): SQL[] {
   const filters: SQL[] = [
@@ -37114,6 +34116,9 @@ function sessionFilters(
     )`,
   ];
   if (options.needsYouOnly) filters.push(sessionNeedsYouSql(options.authorizationScope));
+  if (options.contentArchivedOnly) {
+    filters.push(sql`${schema.sessions.contentArchiveState} = 'archived'`);
+  }
   if (options.originSiteId) {
     filters.push(
       sql`${schema.sessions.metadata}->'_opengeniSiteOrigin'->>'siteId' = ${options.originSiteId}`,
@@ -37361,7 +34366,8 @@ function sessionListFilterIdentity(options: SessionListFilterOptions): string {
     !options.createdFrom &&
     !options.createdBefore &&
     !options.scopeSubjectId &&
-    !options.needsYouOnly
+    !options.needsYouOnly &&
+    !options.contentArchivedOnly
   ) {
     return "all";
   }
@@ -37375,6 +34381,7 @@ function sessionListFilterIdentity(options: SessionListFilterOptions): string {
     options.createdBefore ? ["createdBefore", options.createdBefore.toISOString()] : null,
     options.scopeSubjectId ? ["scopeSubjectId", options.scopeSubjectId] : null,
     ...(options.needsYouOnly ? [["needsYouOnly", true]] : []),
+    ...(options.contentArchivedOnly ? [["contentArchivedOnly", true]] : []),
   ]);
 }
 
@@ -37682,11 +34689,6 @@ async function readSessionListForSubject(
         ) {
           throw new SessionListAccessError();
         }
-
-        const tenancyActivated = await sessionTenancyProductActivated(
-          tx as unknown as Database,
-          workspaceId,
-        );
 
         const archiveMode = options.archiveStatus ?? (options.archivedOnly ? "archived" : "active");
         const sortBy = options.sortBy ?? (archiveMode === "archived" ? "archivedAt" : "updatedAt");
@@ -38072,12 +35074,17 @@ async function readSessionListForSubject(
           ...pinnedRows.map((row) => row.session.id),
           ...pageRows.map((row) => row.session.id),
         ];
-        const canonicalSessions = await canonicalSessionRowsFromEventCursors(
+        const canonicalRows = await canonicalSessionRowsFromEventCursors(
           tx,
           workspaceId,
           [...pinnedRows, ...pageRows].map((row) => row.session),
           !summary,
         );
+        // Compact rows skip the unbounded effective-policy walk but still name
+        // the model with two fixed index probes per row.
+        const canonicalSessions = summary
+          ? await withSessionListModelPolicy(tx, workspaceId, canonicalRows)
+          : canonicalRows;
         const canonicalSessionById = new Map(
           canonicalSessions.map((session) => [session.id, session]),
         );
@@ -38137,7 +35144,7 @@ async function readSessionListForSubject(
                       ? { archivedAt: exactArchiveTimestamps.get(session.id)! }
                       : {}),
                   },
-                  { subjectId: options.subjectId, activated: tenancyActivated },
+                  { subjectId: options.subjectId },
                 ),
                 ...(sortBy === "updatedAt" && exactOrdinaryTimestamps.has(session.id)
                   ? { updatedAt: exactOrdinaryTimestamps.get(session.id)! }
@@ -38157,6 +35164,7 @@ async function readSessionListForSubject(
             projection: "summary",
             ...(totals ? { totals } : {}),
             ...(options.needsYouOnly ? { needsYouOnly: true as const } : {}),
+            ...(options.contentArchivedOnly ? { contentArchivedOnly: true as const } : {}),
             pinned: pinnedRows.map((row) => sessionListEntry(mapListSession(row))),
             pinnedTruncated,
             sessions: pageRows.map((row) => sessionListEntry(mapListSession(row))),
@@ -38167,6 +35175,7 @@ async function readSessionListForSubject(
         return {
           ...(totals ? { totals } : {}),
           ...(options.needsYouOnly ? { needsYouOnly: true as const } : {}),
+          ...(options.contentArchivedOnly ? { contentArchivedOnly: true as const } : {}),
           pinned: pinnedRows.map(mapListSession),
           pinnedTruncated,
           sessions: pageRows.map(mapListSession),
@@ -38393,7 +35402,6 @@ export async function getSessionForSubject(
     const mcpServers = await sessionMcpServerMetadataForSessions(scopedDb, workspaceId, [
       sessionId,
     ]);
-    const tenancyActivated = await sessionTenancyProductActivated(scopedDb, workspaceId);
     const failureDiagnostics = await sessionFailureDiagnostics(scopedDb, workspaceId, session);
     return projectSessionForRelatedAccess(
       {
@@ -38405,7 +35413,7 @@ export async function getSessionForSubject(
           mapSessionAttention(session, row.pin),
           mapSessionArchive(row.pin),
           undefined,
-          { subjectId, activated: tenancyActivated },
+          { subjectId },
         )),
         failureDiagnostics,
       },
@@ -40741,6 +37749,38 @@ type SessionEventProjectionSource = {
 };
 
 /**
+ * The last sequence a reader positioned after `after` may treat as covered
+ * because storage intentionally holds nothing there (an archived session's
+ * purged telemetry, for example). Sequences are allocated under the session
+ * row lock, so a committed later event or `last_sequence` proves every lower
+ * sequence already committed or was removed. One statement reads both in one
+ * snapshot: the next stored sequence minus one, or `last_sequence` when
+ * nothing is stored after `after`. Never less than `after`.
+ */
+export async function readSessionEventStorageGapEnd(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  after: number,
+): Promise<number> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await rawRows<{ next: number | null; last: number | null }>(
+      scopedDb,
+      sql`select
+          (select min(e.sequence) from session_events e
+            where e.workspace_id = ${workspaceId}::uuid
+              and e.session_id = ${sessionId}::uuid
+              and e.sequence > ${after}) as next,
+          (select s.last_sequence from sessions s
+            where s.workspace_id = ${workspaceId}::uuid and s.id = ${sessionId}::uuid) as last`,
+    );
+    const next = row?.next === null || row?.next === undefined ? null : Number(row.next);
+    const last = row?.last === null || row?.last === undefined ? after : Number(row.last);
+    return Math.max(after, next === null ? last : next - 1);
+  });
+}
+
+/**
  * Read one direction-aware session-event page. Full mode selects the canonical
  * row exactly, allowing one oversized event alone so its cursor can progress.
  * The byte budget bounds page selection, never retained payloads. Summary/none modes derive
@@ -42562,144 +39602,6 @@ export async function getHumanInputResumeForEvent(
     : null;
 }
 
-export type TurnAttemptFenceRejectReason =
-  | "workspace_paused"
-  | "session_paused"
-  | "pending_control"
-  | "active_turn_changed"
-  | "generation_changed"
-  | "attempt_changed"
-  | "turn_terminal"
-  | "not_found";
-
-type TurnAttemptFenceResult =
-  | {
-      allowed: true;
-      workspace: typeof schema.workspaces.$inferSelect;
-      session: typeof schema.sessions.$inferSelect;
-      turn: typeof schema.sessionTurns.$inferSelect;
-      attempt: typeof schema.sessionTurnAttempts.$inferSelect;
-    }
-  | {
-      allowed: false;
-      reason: TurnAttemptFenceRejectReason;
-      workspace: typeof schema.workspaces.$inferSelect | null;
-      session: typeof schema.sessions.$inferSelect | null;
-      turn: typeof schema.sessionTurns.$inferSelect | null;
-      attempt: typeof schema.sessionTurnAttempts.$inferSelect | null;
-    };
-
-/**
- * Lock order for every activity write fence: workspace control -> actual
- * workspace -> session -> exact turn -> exact attempt.
- *
- * Activity writes only need a shared workspace admission lock: concurrent
- * sessions may write independently, while an exclusive workspace Pause/Resume
- * still waits for every admitted write and prevents later writes from crossing
- * the control boundary. Using FOR UPDATE here serialized every active session in
- * one workspace behind a single row and turned streaming into a workspace-wide
- * lock queue.
- */
-async function lockTurnAttemptWriteFenceTx(
-  tx: Database,
-  input: {
-    workspaceId: string;
-    sessionId: string;
-    turnId: string;
-    executionGeneration: number;
-    attemptId: string;
-    sessionLock?: "no_key_update" | "key_share";
-  },
-): Promise<TurnAttemptFenceResult> {
-  const locks = await lockSessionEventWriteRows(tx, {
-    workspaceId: input.workspaceId,
-    controlLock: "share",
-    sessionLock: input.sessionLock ?? "no_key_update",
-    sessionIds: [input.sessionId],
-    turnIds: [input.turnId],
-    attemptIds: [input.attemptId],
-  });
-  const workspace = locks.workspace;
-  const session = locks.sessions.find((row) => row.id === input.sessionId) ?? null;
-  const turn = locks.turns.find((row) => row.id === input.turnId) ?? null;
-  const attempt = locks.attempts.find((row) => row.id === input.attemptId) ?? null;
-  const base = { workspace, session, turn, attempt };
-  if (!workspace || !session || !turn || !attempt) {
-    return { allowed: false, reason: "not_found", ...base };
-  }
-  const effectiveControl = await evaluateSessionWriteAdmissionControl(
-    tx,
-    input.workspaceId,
-    input.sessionId,
-    {
-      workspaceControl: locks.control ?? undefined,
-    },
-  );
-  if (effectiveControl.state === "paused") {
-    return {
-      allowed: false,
-      reason:
-        effectiveControl.primaryBlockerKind === "workspace" ? "workspace_paused" : "session_paused",
-      ...base,
-    };
-  }
-  if (session.activeTurnId !== input.turnId) {
-    return { allowed: false, reason: "active_turn_changed", ...base };
-  }
-  if (turn.executionGeneration !== input.executionGeneration) {
-    return { allowed: false, reason: "generation_changed", ...base };
-  }
-  if (turn.activeAttemptId !== input.attemptId) {
-    return { allowed: false, reason: "attempt_changed", ...base };
-  }
-  if (
-    turn.accountId !== session.accountId ||
-    turn.sessionId !== input.sessionId ||
-    attempt.accountId !== session.accountId ||
-    attempt.sessionId !== input.sessionId ||
-    attempt.turnId !== input.turnId ||
-    attempt.executionGeneration !== input.executionGeneration ||
-    !["claimed", "running"].includes(attempt.state)
-  ) {
-    return { allowed: false, reason: "attempt_changed", ...base };
-  }
-  let authoritySnapshot;
-  try {
-    authoritySnapshot = assertSessionAuthoritySnapshot({
-      attemptId: input.attemptId,
-      authorityEpoch: attempt.authorityEpoch,
-      authorityVisibility: attempt.authorityVisibility,
-      authorityOwnerOrganizationMembershipId: attempt.authorityOwnerOrganizationMembershipId,
-    });
-  } catch {
-    // The 0222 insert trigger keeps old writers rolling-safe, but no missing
-    // or partial tuple may cross an accepted-attempt write fence.
-    return { allowed: false, reason: "attempt_changed", ...base };
-  }
-  if (!sessionAuthoritySnapshotMatchesSession(authoritySnapshot, session)) {
-    return { allowed: false, reason: "attempt_changed", ...base };
-  }
-  const [interruption] = await tx
-    .select({ id: schema.sessionAttemptInterruptions.id })
-    .from(schema.sessionAttemptInterruptions)
-    .where(
-      and(
-        eq(schema.sessionAttemptInterruptions.workspaceId, input.workspaceId),
-        eq(schema.sessionAttemptInterruptions.sessionId, input.sessionId),
-        eq(schema.sessionAttemptInterruptions.attemptId, input.attemptId),
-        inArray(schema.sessionAttemptInterruptions.state, ["pending", "delivered", "acknowledged"]),
-      ),
-    )
-    .limit(1);
-  if (interruption) {
-    return { allowed: false, reason: "pending_control", ...base };
-  }
-  if (!["running", "requires_action"].includes(turn.status)) {
-    return { allowed: false, reason: "turn_terminal", ...base };
-  }
-  return { allowed: true, workspace, session, turn, attempt };
-}
-
 export class SessionBackgroundCommandAdoptionFencedError extends Error {
   readonly name = "SessionBackgroundCommandAdoptionFencedError";
 
@@ -43333,9 +40235,12 @@ export async function appendSessionHistoryItems(
   if (input.items.length === 0) {
     return true;
   }
-  return await withRlsContext(
+  // One idempotent transaction: a deadlock/serialization victim rolled back
+  // entirely, so it retries as a unit; it contains no external effect.
+  return await retryRlsPersistence(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
+    { stage: "session_history_append", correlationId: input.expectedAttemptId },
     async (scopedDb) => {
       return await scopedDb.transaction(async (tx) => {
         const allowed = await lockTurnAttemptWriteFenceTx(tx, {
@@ -43649,9 +40554,12 @@ export async function recordPendingSessionToolCallResult(
     };
   },
 ): Promise<{ accepted: boolean; recorded: boolean }> {
-  return await withRlsContext(
+  // One idempotent transaction: a deadlock/serialization victim rolled back
+  // entirely, so it retries as a unit; it contains no external effect.
+  return await retryRlsPersistence(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
+    { stage: "session_pending_tool_call_result", correlationId: input.callId },
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
         const fence = await lockTurnAttemptWriteFenceTx(tx, {
@@ -44560,6 +41468,19 @@ export async function applyContextCompaction(
             ),
           );
         const supersededFrom = Math.floor(Number(maxPosition)) + 1;
+        // Installing a successful summary is model progress, including a
+        // maintenance turn that never enters the ordinary response stream.
+        // Clear only provider recovery under the same locked attempt fence.
+        if (providerRecoveryCountFromTurnMetadata(fence.turn!.metadata) > 0) {
+          await tx
+            .update(schema.sessionTurns)
+            .set({
+              metadata: metadataWithoutProviderRecoveryCount(fence.turn!.metadata),
+              version: fence.turn!.version + 1,
+              updatedAt: new Date(),
+            })
+            .where(eq(schema.sessionTurns.id, input.turnId));
+        }
         await tx
           .update(schema.sessionHistoryItems)
           .set({ active: false })
@@ -44696,10 +41617,12 @@ export async function recordStartedContextCompaction(
     trigger: "auto" | "operator" | "proactive" | "overflow";
     implementation?: string;
     estimatedTokensBefore?: number;
+    /** One request-byte recovery per logical turn, including recovered attempts. */
+    requestSizeRecovery?: Record<string, number>;
   },
 ): Promise<
   | { recorded: true; events: SessionEvent[] }
-  | { recorded: false; reason: TurnAttemptFenceRejectReason }
+  | { recorded: false; reason: TurnAttemptFenceRejectReason | "request_size_recovery_exhausted" }
 > {
   return await withSessionActivityRlsContext(
     db,
@@ -44714,6 +41637,18 @@ export async function recordStartedContextCompaction(
           attemptId: input.expectedAttemptId,
         });
         if (!fence.allowed) return { recorded: false as const, reason: fence.reason };
+        if (input.requestSizeRecovery) {
+          if (fence.turn!.metadata.claudeRequestSizeRecoveryUsed === true)
+            return { recorded: false as const, reason: "request_size_recovery_exhausted" as const };
+          await tx
+            .update(schema.sessionTurns)
+            .set({
+              metadata: { ...fence.turn!.metadata, claudeRequestSizeRecoveryUsed: true },
+              version: fence.turn!.version + 1,
+              updatedAt: new Date(),
+            })
+            .where(eq(schema.sessionTurns.id, input.turnId));
+        }
         const inserted = await tx
           .insert(schema.sessionEvents)
           .values(
@@ -44730,6 +41665,7 @@ export async function recordStartedContextCompaction(
                 type: "session.context.compaction.started",
                 payload: {
                   trigger: input.trigger,
+                  ...(input.requestSizeRecovery ? { requestSize: input.requestSizeRecovery } : {}),
                   ...(input.implementation ? { implementation: input.implementation } : {}),
                   ...(typeof input.estimatedTokensBefore === "number"
                     ? { estimatedTokensBefore: input.estimatedTokensBefore }
@@ -46101,6 +43037,9 @@ type LeaseRow = {
   /** Transaction-local PostgreSQL-clock projection used only by bounded waiters. */
   archive_capture_remaining_ms?: number | string | null;
   archive_capture_published_at: Date | string | null;
+  archive_capture_concurrent_capture_id?: string | null;
+  untracked_writer_since?: Date | string | null;
+  deadline_forced_admission_ids?: string[] | null;
   reaper_hold_id: string | null;
   reaper_hold_until: Date | string | null;
   reaper_hold_reason: string | null;
@@ -46170,6 +43109,10 @@ export interface LeaseSnapshot {
   /** True only when the current verified archive represents the exact current
    * workspace generation. This is numeric/boolean truth, never archive content. */
   archiveComplete: boolean;
+  /** Earliest attach of a viewer or interaction (writers that bypass
+   * generation admissions) that no capture taken with none attached has
+   * covered yet. Null when every such write is in the archive. */
+  untrackedWriterSince: Date | null;
   /** Exact provider capture currently holding the lease-local admission gate. */
   archiveCapture: {
     id: string;
@@ -46678,7 +43621,7 @@ export class SandboxPaidComputeAdmissionError extends Error {
     public readonly workspaceId: string,
     public readonly sandboxGroupId: string,
   ) {
-    super("Insufficient OpenGeni credits to admit paid sandbox compute");
+    super("Insufficient Opengeni credits to admit paid sandbox compute");
   }
 }
 
@@ -46861,6 +43804,23 @@ export class SandboxRigConflictError extends Error {
   }
 }
 
+/** True when `/workspace` may hold writes that bypassed generation
+ * admissions and no capture covers yet: a viewer or interaction attached since
+ * the last capture taken with none attached (`untrackedWriterSince`), or a
+ * viewer, or a holder that is neither a turn nor a viewer (an interaction
+ * controller among them), attached now. Such a box is not proven clean by a
+ * complete archive; the capture claim decides exactly. */
+export function leaseMayHaveUntrackedWriters(
+  lease: Pick<LeaseSnapshot, "refcount" | "turnHolders" | "viewerHolders"> &
+    Partial<Pick<LeaseSnapshot, "untrackedWriterSince">>,
+): boolean {
+  return (
+    (lease.untrackedWriterSince ?? null) !== null ||
+    lease.viewerHolders > 0 ||
+    lease.refcount > lease.turnHolders + lease.viewerHolders
+  );
+}
+
 function mapLeaseRow(row: LeaseRow): LeaseSnapshot {
   const workspaceGeneration = Number(row.workspace_generation);
   const archiveGeneration = row.archive_generation === null ? null : Number(row.archive_generation);
@@ -46890,6 +43850,12 @@ function mapLeaseRow(row: LeaseRow): LeaseSnapshot {
       recovery.archive.status === "available" &&
       archiveGeneration !== null &&
       archiveGeneration === workspaceGeneration,
+    untrackedWriterSince:
+      row.untracked_writer_since === null || row.untracked_writer_since === undefined
+        ? null
+        : row.untracked_writer_since instanceof Date
+          ? row.untracked_writer_since
+          : new Date(row.untracked_writer_since),
     archiveCapture:
       row.archive_capture_id === null ||
       row.archive_capture_operation_id === null ||
@@ -47617,10 +44583,12 @@ async function recomputeAndStampLease(
     total: number;
     turns: number;
     viewers: number;
+    untracked_writers: number;
   }>(sql`
     select count(*)::int as total,
            count(*) filter (where kind = 'turn')::int   as turns,
-           count(*) filter (where kind = 'viewer')::int as viewers
+           count(*) filter (where kind = 'viewer')::int as viewers,
+           count(*) filter (where kind in ('viewer', 'interaction'))::int as untracked_writers
     from sandbox_lease_holders where lease_id = ${leaseId}
   `);
   const c = counts[0]!;
@@ -47629,6 +44597,15 @@ async function recomputeAndStampLease(
       refcount       = ${c.total},
       turn_holders   = ${c.turns},
       viewer_holders = ${c.viewers},
+      -- A viewer or interaction can write /workspace without a generation
+      -- admission. Remember the earliest such attach until a capture taken
+      -- with none attached covers it, so a writer that detached before the
+      -- next capture still leaves the box dirty.
+      ${
+        c.untracked_writers > 0
+          ? sql`untracked_writer_since = coalesce(untracked_writer_since, now()),`
+          : sql``
+      }
       expires_at     = now() + (${String(leaseTtlMs)} || ' milliseconds')::interval,
       ${setLiveness ? sql`liveness = ${setLiveness},` : sql``}
       updated_at     = now()
@@ -47843,7 +44820,7 @@ async function acquireLeaseOnce(
                 refusal,
               );
             }
-            const balance = await getBillingBalance(tx, accountId);
+            const balance = await getSpendableCreditBalance(tx, accountId);
             if (balance.balanceMicros <= 0) {
               throw new SandboxPaidComputeAdmissionError(workspaceId, sandboxGroupId);
             }
@@ -48250,7 +45227,12 @@ function validatedLegacyNativeSnapshotAdoption(
  * holds the workspace inference fence, which also serializes new claims. */
 async function hasSandboxGroupAttemptActivityTx(
   tx: Database,
-  input: { workspaceId: string; sandboxGroupId: string; idleGraceMs: number },
+  input: {
+    workspaceId: string;
+    sandboxGroupId: string;
+    idleGraceMs: number;
+    writerMode?: "physical" | "containment";
+  },
 ): Promise<boolean> {
   const sessions = await tx.execute<{ id: string; active: boolean }>(sql`
     select session.id, exists(select 1 from session_turn_attempts attempt
@@ -48267,6 +45249,7 @@ async function hasSandboxGroupAttemptActivityTx(
       (await hasPendingSessionAttemptQuiescenceTx(tx, {
         workspaceId: input.workspaceId,
         sessionId: session.id,
+        writerMode: input.writerMode ?? "physical",
       }))
     )
       return true;
@@ -48382,7 +45365,7 @@ const DEFINITIVE_CHECKPOINT_FAILURES: ReadonlySet<string> = new Set([
   "archive_hash_mismatch",
   "checkpoint_artifact_invalid",
 ]);
-/** OpenGeni validates OPENGENI_MODAL_TIMEOUT_SECONDS to at most 24h, Modal's
+/** Opengeni validates OPENGENI_MODAL_TIMEOUT_SECONDS to at most 24h, Modal's
  * own hard cap, and Modal lifetimes are never renewed. */
 const MODAL_SANDBOX_MAX_LIFETIME_MS = 24 * 60 * 60_000;
 /** A recorded deadline is stamped from the create call's start; the provider
@@ -48834,7 +45817,7 @@ async function automaticRecoveryLaneTx(
       loss,
     };
   }
-  // No checkpoint OpenGeni can restore automatically. An empty workspace is
+  // No checkpoint Opengeni can restore automatically. An empty workspace is
   // irreversible for the running sandbox, so it additionally waits until the
   // lost object is past its hard provider lifetime: no Modal sandbox outlives
   // it in any workspace, so a misconfigured credential or namespace cannot
@@ -52804,8 +49787,8 @@ type LostProviderBlockerScope = {
 };
 
 /** Take the session-event write prefix (workspace control share, workspace,
- * sessions, cursors) for every session whose background command is linked to
- * an active process in the exact lost-provider scope. Call it before the
+ * sessions, cursors) for linked background commands and attempt owners in the
+ * exact lost-provider scope. Call it before the
  * process/admission/PTY/lease locks so terminal command delivery keeps the
  * canonical control -> session -> process -> admission -> lease order. */
 async function linkedLostProviderCommandSessionIdsTx(
@@ -52815,7 +49798,8 @@ async function linkedLostProviderCommandSessionIdsTx(
   const sessions = await rawRows<{ session_id: string }>(
     tx,
     sql`
-      select distinct command.session_id
+      select distinct session_id from (
+      select command.session_id
       from session_background_commands command
       join sandbox_retained_processes process on process.id = command.retained_process_id
         and process.workspace_id = command.workspace_id
@@ -52829,7 +49813,44 @@ async function linkedLostProviderCommandSessionIdsTx(
         and process.provider_instance_id = ${input.lostInstanceId}
         and process.state = 'active'
         and command.state in ('running', 'stopping')
-      order by command.session_id
+      union
+      select process.session_id
+      from sandbox_retained_processes process
+      join session_turn_attempts attempt on attempt.id = process.owner_attempt_id
+        and attempt.workspace_id = process.workspace_id
+        and attempt.session_id = process.session_id
+      where process.account_id = ${input.accountId}
+        and process.workspace_id = ${input.workspaceId}
+        and process.lease_id = ${input.leaseId}
+        and process.sandbox_group_id = ${input.sandboxGroupId}
+        and process.lease_epoch = ${input.lostEpoch}
+        and process.provider_backend = ${input.lostBackend}
+        and process.provider_instance_id = ${input.lostInstanceId}
+        and process.state = 'active'
+      union
+      -- A closed, unquiesced owner of an open request on the lost box is woken
+      -- by the settlement; lock its session in the canonical prefix first. A
+      -- process actor's request (e.g. supervised stdin) pins the attempt that
+      -- owns its process.
+      select attempt.session_id
+      from sandbox_workspace_mutation_admissions admission
+      left join sandbox_retained_processes actor_process
+        on admission.actor_kind = 'process'
+        and actor_process.id = admission.actor_id
+        and actor_process.workspace_id = admission.workspace_id
+      join session_turn_attempts attempt
+        on attempt.id = coalesce(admission.attempt_id, actor_process.owner_attempt_id)
+        and attempt.workspace_id = admission.workspace_id
+      where admission.account_id = ${input.accountId}
+        and admission.workspace_id = ${input.workspaceId}
+        and admission.lease_id = ${input.leaseId}
+        and admission.sandbox_group_id = ${input.sandboxGroupId}
+        and admission.lease_epoch = ${input.lostEpoch}
+        and admission.provider_backend = ${input.lostBackend}
+        and admission.provider_instance_id = ${input.lostInstanceId}
+        and admission.settled_at is null
+        and attempt.state = 'closed' and attempt.quiesced_at is null
+      ) owners order by session_id
     `,
   );
   return sessions.map((row) => row.session_id);
@@ -53048,6 +50069,73 @@ async function settleExactLostProviderWorkspaceBlockersTx(
         mutation,
       );
       delivery.events.push(...mutation.events);
+    }
+  }
+
+  if (lostProcesses.length) {
+    // The session prefix was locked before blockers and revalidated afterward.
+    // Unadopted writers have no background-command delivery to wake their owner;
+    // persist that obligation atomically with physical provider settlement.
+    const owners = await rawRows<{ session_id: string; temporal_workflow_id: string }>(
+      tx,
+      sql`
+        select distinct attempt.session_id, attempt.temporal_workflow_id
+        from session_turn_attempts attempt
+        join sandbox_retained_processes process on process.owner_attempt_id = attempt.id
+          and process.workspace_id = attempt.workspace_id
+          and process.session_id = attempt.session_id
+        where attempt.workspace_id = ${input.workspaceId}
+          and attempt.account_id = ${input.accountId}
+          and attempt.state = 'closed' and attempt.quiesced_at is null
+          and attempt.temporal_workflow_id is not null
+          and process.id = any(${`{${lostProcesses.map((p) => p.id).join(",")}}`}::uuid[])
+        order by attempt.session_id, attempt.temporal_workflow_id
+      `,
+    );
+    for (const owner of owners) {
+      await enqueueSessionWorkflowWakeInTransaction(tx, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: owner.session_id,
+        temporalWorkflowId: owner.temporal_workflow_id,
+        reason: "attempt_writer_provider_settled",
+      });
+    }
+  }
+
+  if (rejectedAdmissions.length) {
+    // A rejected request whose closed owner still awaits its quiescence receipt
+    // (a crashed worker's orphan, or a process actor's request whose process
+    // owner closed) has no process delivery to wake that owner either; the
+    // receipt reconciliation runs from this durable wake.
+    const owners = await rawRows<{ session_id: string; temporal_workflow_id: string }>(
+      tx,
+      sql`
+        select distinct attempt.session_id, attempt.temporal_workflow_id
+        from sandbox_workspace_mutation_admissions admission
+        left join sandbox_retained_processes actor_process
+          on admission.actor_kind = 'process'
+          and actor_process.id = admission.actor_id
+          and actor_process.workspace_id = admission.workspace_id
+        join session_turn_attempts attempt
+          on attempt.id = coalesce(admission.attempt_id, actor_process.owner_attempt_id)
+          and attempt.workspace_id = admission.workspace_id
+        where attempt.workspace_id = ${input.workspaceId}
+          and attempt.account_id = ${input.accountId}
+          and attempt.state = 'closed' and attempt.quiesced_at is null
+          and attempt.temporal_workflow_id is not null
+          and admission.id = any(${`{${rejectedAdmissions.map((a) => a.id).join(",")}}`}::uuid[])
+        order by attempt.session_id, attempt.temporal_workflow_id
+      `,
+    );
+    for (const owner of owners) {
+      await enqueueSessionWorkflowWakeInTransaction(tx, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: owner.session_id,
+        temporalWorkflowId: owner.temporal_workflow_id,
+        reason: "attempt_writer_provider_settled",
+      });
     }
   }
 
@@ -53460,6 +50548,109 @@ export async function reconcileColdLostLeaseInstanceBlockers(
   });
 }
 
+export type EndedEpochBlockerTuple = {
+  accountId: string;
+  workspaceId: string;
+  leaseId: string;
+  sandboxGroupId: string;
+  lostEpoch: number;
+  lostBackend: string;
+  lostInstanceId: string;
+};
+
+/**
+ * Exact provider tuples (lease, epoch, Modal box) that still hold an open
+ * request although the lease has moved to a later epoch and another box. (An
+ * open PTY always belongs to an active process on its tuple.) Lease succession alone does not prove the old box is gone: the caller
+ * inspects it and settles only on a terminal observation
+ * (`settleEndedEpochWorkspaceBlockers`). Tuples with an active retained
+ * process are left to retained-process reconciliation.
+ */
+export async function listEndedEpochWorkspaceBlockers(
+  db: Database,
+  input: { limit: number },
+): Promise<EndedEpochBlockerTuple[]> {
+  if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 500) {
+    throw new Error("Ended-epoch blocker batch is invalid");
+  }
+  const rows = await rawRows<{
+    account_id: string;
+    workspace_id: string;
+    lease_id: string;
+    sandbox_group_id: string;
+    lease_epoch: number | string;
+    provider_backend: string;
+    provider_instance_id: string;
+  }>(
+    db,
+    sql`select * from opengeni_private.list_sandbox_ended_epoch_blockers(${input.limit}::integer)`,
+  );
+  return rows.map((row) => ({
+    accountId: row.account_id,
+    workspaceId: row.workspace_id,
+    leaseId: row.lease_id,
+    sandboxGroupId: row.sandbox_group_id,
+    lostEpoch: Number(row.lease_epoch),
+    lostBackend: row.provider_backend,
+    lostInstanceId: row.provider_instance_id,
+  }));
+}
+
+/**
+ * Settle the open requests and PTYs of one listed tuple after the caller
+ * observed its exact Modal box terminated. Requests are rejected (never
+ * replayed), PTYs closed and closed unquiesced owners woken, through the same
+ * full-identity settlement as provider loss, in the canonical
+ * session -> blocker -> lease lock order. The lease must still be past the
+ * tuple's epoch on another box, and no active retained process may remain on
+ * the tuple (its own reconciliation owns it). Returns null when that no longer
+ * holds.
+ */
+export async function settleEndedEpochWorkspaceBlockers(
+  db: Database,
+  tuple: EndedEpochBlockerTuple,
+): Promise<LostProviderWorkspaceSettlement | null> {
+  const scope: LostProviderBlockerScope = { ...tuple };
+  return await withLostProviderCommandSessionRetry(async () => {
+    return await withSessionActivityRlsContext(
+      db,
+      { accountId: scope.accountId, workspaceId: scope.workspaceId },
+      async (tx) => {
+        const lockedCommandSessions = await lockLostProviderCommandSessionsTx(tx, scope);
+        await lockExactLostProviderWorkspaceBlockersTx(tx, scope);
+        const [lease] = await rawRows<{ ended: boolean }>(
+          tx,
+          sql`
+            select (
+              lease.backend = 'modal'
+              and ${scope.lostBackend} = 'modal'
+              and lease.lease_epoch > ${scope.lostEpoch}
+              and lease.instance_id is distinct from ${scope.lostInstanceId}
+              and not exists (
+                select 1 from sandbox_retained_processes process
+                where process.lease_id = lease.id
+                  and process.lease_epoch = ${scope.lostEpoch}
+                  and process.provider_backend = ${scope.lostBackend}
+                  and process.provider_instance_id = ${scope.lostInstanceId}
+                  and process.state = 'active'
+              )
+            ) as ended
+            from sandbox_leases lease
+            where lease.id = ${scope.leaseId}
+              and lease.account_id = ${scope.accountId}
+              and lease.workspace_id = ${scope.workspaceId}
+              and lease.sandbox_group_id = ${scope.sandboxGroupId}
+            for update of lease
+          `,
+        );
+        if (lease?.ended !== true) return null;
+        await assertLostProviderCommandSessionsLockedTx(tx, scope, lockedCommandSessions);
+        return await settleExactLostProviderWorkspaceBlockersTx(tx, scope);
+      },
+    );
+  });
+}
+
 // §4.3 — caught spawn failure: warming -> cold (W3). Holders are intentionally
 // left intact — the arrival that triggered the spawn still wants a box, so the
 // next acquireLease re-CAS cold->warming.
@@ -53624,6 +50815,10 @@ export async function releaseLeaseHolder(
      * resolved, rejected, or been physically quiesced. A cancellation listener
      * that merely prevents a holder leak must leave this false. */
     workspaceWritersQuiesced?: boolean;
+    /** Keep the holder-set clock when the box stays warm: an idle save's
+     * cleanup is not use, so it must not restart retained-command
+     * containment's idle window. */
+    preserveHoldersChangedAt?: boolean;
   },
 ): Promise<{ liveness: SandboxLeaseLiveness; refcount: number } | null> {
   if (input.kind === "process") {
@@ -53690,6 +50885,14 @@ export async function releaseLeaseHolder(
       `);
         const row = rows[0];
         if (!row) return null; // already cold-and-reaped; release is an idempotent no-op
+        const priorHoldersChangedAt = input.preserveHoldersChangedAt
+          ? (
+              await rawRows<{ at: string }>(
+                tx,
+                sql`select holders_changed_at::text as at from sandbox_leases where id = ${row.id}`,
+              )
+            )[0]!.at
+          : null;
 
         // Cancellation can delete the holder before the shared rig coordinator
         // catches its abort. That coordinator must then fail closed because its
@@ -53752,6 +50955,13 @@ export async function releaseLeaseHolder(
         where id = ${row.id}
         returning *
       `);
+        if (input.preserveHoldersChangedAt && !enterDraining) {
+          // A separate statement: the counter trigger re-stamps the clock.
+          await tx.execute(sql`
+            update sandbox_leases set holders_changed_at = ${priorHoldersChangedAt}::timestamptz
+            where id = ${row.id}
+          `);
+        }
         return { liveness: updated[0]!.liveness, refcount: Number(c.total) };
       }),
   );
@@ -53937,7 +51147,7 @@ export async function heartbeatLeaseHolderStatus(
           (input.billingMode ?? snapshot?.mode) === "credits" &&
           snapshot?.mode === "credits" &&
           snapshot.rateMicrosPerSecond > 0 &&
-          (await getBillingBalance(tx, input.accountId)).balanceMicros <= 0
+          (await getSpendableCreditBalance(tx, input.accountId)).balanceMicros <= 0
         ) {
           // Touching the holder above is essential: the running writer remains
           // protected while it winds down. The provider/lease TTL is not renewed.
@@ -54593,34 +51803,89 @@ export async function reapStaleLeaseHolders(
 }
 
 /** Settlement reasons for legacy retained commands that containment stopped
- * after a verified checkpoint. Neither is exit proof: the command settles
+ * after a verified checkpoint. None is exit proof: the command settles
  * `lost` with no exit code. */
 export const IDLE_COMMAND_CONTAINMENT_REASON = "idle_containment";
 export const DEADLINE_COMMAND_CONTAINMENT_REASON = "provider_deadline_containment";
+export const QUIESCENCE_COMMAND_CONTAINMENT_REASON = "quiescence_containment";
+
+type SettledCommandOwner = {
+  sessionId: string;
+  attemptId: string;
+  temporalWorkflowId: string;
+  temporalWorkflowRunId: string;
+  temporalActivityId: string;
+};
+
+/** Exact dispatch settlement is enrollment authority, never physical proof. */
+async function settledCommandOwnerMatchesTx(
+  tx: Database,
+  input: { accountId: string; workspaceId: string; sandboxGroupId: string },
+  owner: SettledCommandOwner,
+): Promise<boolean> {
+  const [row] = await rawRows<{ eligible: boolean }>(
+    tx,
+    sql`
+    select exists (
+      select 1 from session_turn_attempts attempt
+      join sessions session on session.id = attempt.session_id
+        and session.workspace_id = attempt.workspace_id
+      where attempt.account_id = ${input.accountId}
+        and attempt.workspace_id = ${input.workspaceId}
+        and attempt.session_id = ${owner.sessionId} and attempt.id = ${owner.attemptId}
+        and attempt.temporal_workflow_id = ${owner.temporalWorkflowId}
+        and attempt.temporal_workflow_run_id = ${owner.temporalWorkflowRunId}
+        and attempt.temporal_activity_id = ${owner.temporalActivityId}
+        and attempt.state = 'closed' and attempt.quiesced_at is null
+        and session.sandbox_group_id = ${input.sandboxGroupId}
+        and not exists (select 1 from session_attempt_interruptions interruption
+          where interruption.workspace_id = attempt.workspace_id
+            and interruption.session_id = attempt.session_id and interruption.attempt_id = attempt.id
+            and interruption.state in ('pending', 'delivered', 'acknowledged'))
+    ) and not exists (
+      select 1 from session_turn_attempts live
+      join sessions member on member.id = live.session_id and member.workspace_id = live.workspace_id
+      where live.workspace_id = ${input.workspaceId}
+        and member.sandbox_group_id = ${input.sandboxGroupId} and live.state <> 'closed'
+    ) as eligible
+  `,
+  );
+  return row?.eligible === true;
+}
 
 /** Bounded per-candidate containment inspection outcomes (metric labels). */
 export type CommandContainmentInspection =
   | "idle_enrolled"
   | "deadline_enrolled"
+  | "forced_deadline_enrolled"
+  | "quiescence_enrolled"
   | "resumed_enrolled"
   | "not_eligible"
   | "inspection_failed";
 
 export type CommandContainmentEnrollment = ReapDrainable & {
-  /** `idle`/`deadline` newly enrolled this call; `resumed` continues an
+  /** `idle`/`deadline`/`quiescence` newly enrolled this call; `resumed` continues an
    * existing enrollment whose drain has not committed yet. */
-  mode: "idle" | "deadline" | "resumed";
+  mode: "idle" | "deadline" | "forced_deadline" | "quiescence" | "resumed";
 };
 
 /** Whole-group "unused" from durable facts only. Every session of the group,
  * and every session owning a process on the lease, must have no open turn
- * (queued, running, requires_action, waiting_capacity), no unpaused recovery, no
- * non-closed attempt, no pending quiescence and no held `wait_for_input`; and
- * the newest attempt close, turn finish, holder-set change and admission (or
- * settlement) on this lease epoch must all be older than the window. A held input wait means
- * the agent is deliberately waiting on its background work, so the command is
- * not abandoned: only the provider-deadline backstop may stop it. Process age
- * is deliberately not a fact here. */
+ * (queued, running, waiting_capacity), no unpaused recovery, no non-closed
+ * attempt and no pending quiescence; the newest attempt close, turn finish,
+ * holder-set change and admission (or settlement) on this lease epoch must all
+ * be older than the window; and no active command on the lease may have
+ * printed output inside the window.
+ *
+ * A wait is not use. A held `wait_for_input` or a turn parked in
+ * `requires_action` waits for a person, a child or a timer, none of which needs
+ * the machine; the wait's start is already on the clock as its turn finish or
+ * attempt close, and the box resumes on demand. The only work that keeps the
+ * box is a command that is visibly busy: the retained-process reconciler drains
+ * a running command's output into durable `sandbox.command.output.delta`
+ * events at most five minutes apart, so a command that printed nothing for the
+ * whole window is treated as idle whatever the agent is waiting for. Process
+ * age is deliberately not a fact here. */
 async function sandboxGroupIdleForCommandContainmentTx(
   tx: Database,
   input: {
@@ -54628,13 +51893,13 @@ async function sandboxGroupIdleForCommandContainmentTx(
     sandboxGroupId: string;
     leaseId: string;
     windowMs: number;
+    writerMode: "physical" | "containment";
   },
 ): Promise<boolean> {
   const [facts] = await rawRows<{
     idle: boolean;
     session_ids: string[];
     recovering_session_ids: string[];
-    idle_before: Date | string;
   }>(
     tx,
     sql`
@@ -54658,8 +51923,7 @@ async function sandboxGroupIdleForCommandContainmentTx(
             select 1 from session_turns turn
             where turn.workspace_id = ${input.workspaceId}
               and turn.session_id in (select id from member_sessions)
-              and turn.status in ('queued', 'running', 'requires_action',
-                'waiting_capacity'))
+              and turn.status in ('queued', 'running', 'waiting_capacity'))
           and coalesce(greatest(
             (select lease.holders_changed_at from sandbox_leases lease
               where lease.id = ${input.leaseId}),
@@ -54693,13 +51957,28 @@ async function sandboxGroupIdleForCommandContainmentTx(
               join sandbox_leases lease on lease.id = admission.lease_id
               where admission.lease_id = ${input.leaseId}
                 and admission.lease_epoch = lease.lease_epoch)
-          ) < now() - (${input.windowMs}::bigint * interval '1 millisecond'), false) as idle,
+          ) < now() - (${input.windowMs}::bigint * interval '1 millisecond'), false)
+          -- A command that printed inside the window is working, not idle.
+          -- Only each command's newest output row is read (backward over the
+          -- output page index), so the cost does not grow with its history.
+          and not exists (
+            select 1 from sandbox_retained_processes busy
+            where busy.lease_id = ${input.leaseId} and busy.state = 'active'
+              and (
+                select output.created_at from session_events output
+                where output.workspace_id = busy.workspace_id
+                  and output.session_id = busy.session_id
+                  and output.type = 'sandbox.command.output.delta'
+                  and output.payload->>'commandId' = busy.id::text
+                order by output.sequence desc
+                limit 1
+              ) >= now() - (${input.windowMs}::bigint * interval '1 millisecond')
+          ) as idle,
         array(select id from member_sessions order by id) as session_ids,
         array(select distinct turn.session_id from session_turns turn
           where turn.workspace_id = ${input.workspaceId}
             and turn.session_id in (select id from member_sessions)
-            and turn.status = 'recovering') as recovering_session_ids,
-        now() - (${input.windowMs}::bigint * interval '1 millisecond') as idle_before
+            and turn.status = 'recovering') as recovering_session_ids
     `,
   );
   if (!facts?.idle) return false;
@@ -54713,36 +51992,13 @@ async function sandboxGroupIdleForCommandContainmentTx(
     });
     if (control.state !== "paused") return false;
   }
-  const idleBefore = new Date(facts.idle_before).getTime();
-  const sessions = facts.session_ids.length
-    ? await tx
-        .select({
-          id: schema.sessions.id,
-          inputWaitTurnId: schema.sessions.inputWaitTurnId,
-          inputWaitUntil: schema.sessions.inputWaitUntil,
-        })
-        .from(schema.sessions)
-        .where(
-          and(
-            eq(schema.sessions.workspaceId, input.workspaceId),
-            inArray(schema.sessions.id, facts.session_ids),
-          ),
-        )
-        .orderBy(schema.sessions.id)
-    : [];
-  for (const session of sessions) {
-    // A wait that is not superseded puts its deadline on the idle clock: held
-    // until it ends, then the window runs from the deadline, so a timeout
-    // settlement that cannot run (a paused session) never pins the box.
-    const wait = await sessionInputWaitStateTx(tx, input.workspaceId, session.id, session);
+  for (const sessionId of facts.session_ids) {
     if (
-      ((wait.disposition === "held" || wait.disposition === "timeout") &&
-        session.inputWaitUntil !== null &&
-        session.inputWaitUntil.getTime() >= idleBefore) ||
-      (await hasPendingSessionAttemptQuiescenceTx(tx, {
+      await hasPendingSessionAttemptQuiescenceTx(tx, {
         workspaceId: input.workspaceId,
-        sessionId: session.id,
-      }))
+        sessionId,
+        writerMode: input.writerMode,
+      })
     )
       return false;
   }
@@ -54768,12 +52024,34 @@ export const COMMAND_CONTAINMENT_TURN_STARTING_UPDATE_KINDS = (() => {
   };
 })();
 
+/** Whether a lease's provider capture images the paused box at one instant
+ * (Modal native filesystem/directory snapshots). Mirrors the runtime's
+ * `providerWorkspaceCaptureIsPointInTime` for the lease envelope: only such a
+ * capture may run around a crashed worker's orphaned request, so
+ * containment may treat the orphan as non-blocking only then; otherwise its
+ * drain could never capture and the box would stay fenced until it died. */
+function leaseCaptureIsPointInTime(backend: string, resumeState: unknown): boolean {
+  if (backend !== "modal" || !resumeState || typeof resumeState !== "object") return false;
+  const sessionState = (resumeState as { sessionState?: unknown }).sessionState;
+  const session =
+    sessionState && typeof sessionState === "object"
+      ? (sessionState as Record<string, unknown>)
+      : (resumeState as Record<string, unknown>);
+  const providerState =
+    session.providerState && typeof session.providerState === "object"
+      ? (session.providerState as Record<string, unknown>)
+      : null;
+  const persistence = providerState?.workspacePersistence ?? session.workspacePersistence;
+  return persistence === "snapshot_filesystem" || persistence === "snapshot_directory";
+}
+
 /** The deadline backstop's owner test is the idle rule's: a closed turn owner
  * must hold no pending quiescence (unsettled interruption or attempt writer). */
 async function deadlineOwnerQuiescencePending(
   tx: Database,
   workspaceId: string,
   processes: readonly { session_id: string; owner_attempt_id: string | null }[],
+  writerMode: "physical" | "containment",
 ): Promise<boolean> {
   for (const process of processes) {
     if (
@@ -54782,6 +52060,7 @@ async function deadlineOwnerQuiescencePending(
         workspaceId,
         sessionId: process.session_id,
         attemptId: process.owner_attempt_id,
+        writerMode,
       }))
     )
       return true;
@@ -54812,6 +52091,12 @@ export async function enrollRetainedCommandContainment(
     sandboxGroupId: string;
     /** Omit to evaluate only the provider-deadline rule. */
     idleCommandContainmentMs?: number | undefined;
+    /** Inside this window before the provider deadline the deadline save is
+     * mandatory (see `sandboxDeadlineMandatoryCaptureLeadMs`). Omit to keep
+     * only the orderly deadline rule. */
+    deadlineMandatoryCaptureLeadMs?: number | undefined;
+    /** Internal recovery authority: caller verified exact Temporal settlement. */
+    settledOwner?: SettledCommandOwner;
   },
 ): Promise<CommandContainmentEnrollment | null> {
   const screened = await withRlsContext(db, input, async (tx) => {
@@ -54824,12 +52109,17 @@ export async function enrollRetainedCommandContainment(
       // Enrolled drains resume; any requested rotation also refreshes command
       // observation backoff below and may meet the deadline rule.
       (Boolean(lease.unobservableCommandDrainIds?.length) ||
+        (input.settledOwner !== undefined &&
+          (await settledCommandOwnerMatchesTx(tx, input, input.settledOwner))) ||
         lease.rotationRequestedAt !== null ||
         (input.idleCommandContainmentMs !== undefined &&
           (await sandboxGroupIdleForCommandContainmentTx(tx, {
             ...input,
             leaseId: lease.id,
             windowMs: input.idleCommandContainmentMs,
+            writerMode: leaseCaptureIsPointInTime(lease.backend, lease.resumeState)
+              ? "containment"
+              : "physical",
           }))));
     // Round-robin inventory: an ineligible live lease cannot starve later rows.
     // This updates only the inspection cursor, never provider/holder authority.
@@ -54873,11 +52163,17 @@ export async function enrollRetainedCommandContainment(
       supervised: boolean;
       owned: boolean;
       deadline_ready: boolean;
+      adopted: boolean;
     }>(
       tx,
       sql`
       select process.id, process.session_id, process.owner_attempt_id,
         process.parent_admission_id, process.holder_id,
+        exists (select 1 from session_background_commands background
+          where background.retained_process_id = process.id
+            and background.workspace_id = process.workspace_id
+            and background.session_id = process.session_id
+            and background.state in ('running', 'stopping')) as adopted,
         (coalesce(process.provider_command, '{}'::jsonb) ? 'supervision') as supervised,
         (process.lease_epoch = ${initial.leaseEpoch}
           and process.provider_instance_id = ${initial.instanceId}
@@ -54901,17 +52197,35 @@ export async function enrollRetainedCommandContainment(
       order by process.id for update of process
     `,
     );
-    const admissions = await rawRows<{ id: string }>(
+    const admissions = await rawRows<{ id: string; orphaned: boolean; exact: boolean }>(
       tx,
       sql`
-      select id from sandbox_workspace_mutation_admissions
-      where lease_id = ${initial.id} and settled_at is null order by id for update
+      select admission.id,
+        (admission.lease_epoch = ${initial.leaseEpoch}
+          and admission.provider_instance_id = ${initial.instanceId}
+          and ${crashedWorkerOrphanAdmissionSql(sql`admission`)}) as orphaned,
+        (admission.lease_epoch = ${initial.leaseEpoch}
+          and admission.provider_instance_id = ${initial.instanceId}) as exact
+      from sandbox_workspace_mutation_admissions admission
+      where admission.lease_id = ${initial.id} and admission.settled_at is null
+      order by admission.id for update of admission
     `,
     );
-    const rows = await tx.execute<LeaseRow>(sql`
-      select * from sandbox_leases where id = ${initial.id} for update
+    const rows = await tx.execute<LeaseRow & { deadline_mandatory: boolean }>(sql`
+      select *,
+        (rotation_requested_at is not null
+          and ${input.deadlineMandatoryCaptureLeadMs ?? null}::bigint is not null
+          and provider_deadline_at is not null
+          and provider_deadline_at <= now() +
+            (${input.deadlineMandatoryCaptureLeadMs ?? null}::bigint * interval '1 millisecond'))
+          as deadline_mandatory
+      from sandbox_leases where id = ${initial.id} for update
     `);
     const lease = rows[0];
+    // Close to the provider deadline the save is mandatory: an orderly
+    // shutdown can no longer finish in time, and waiting means the provider
+    // kills the box uncaptured.
+    const mandatory = lease?.deadline_mandatory === true;
     if (
       !lease ||
       Number(lease.lease_epoch) !== initial.leaseEpoch ||
@@ -54929,8 +52243,28 @@ export async function enrollRetainedCommandContainment(
       processes.some((p) => !ids.includes(p.id))
     )
       return null;
+    // A request a crashed worker left on this exact box is not a writer that
+    // can finish. Only a point-in-time drain captures around it (the cold
+    // commit settles it once the box is terminated); for a tar-style capture
+    // it stays a blocker, or the enrolled drain could never capture.
+    const pointInTime = leaseCaptureIsPointInTime(initial.backend, initial.resumeState);
+    const writerMode = pointInTime ? ("containment" as const) : ("physical" as const);
     const parents = new Set(processes.map((p) => p.parent_admission_id));
-    if (admissions.some((a) => !parents.has(a.id))) return null;
+    // A tolerated orphan is captured around only by a point-in-time drain.
+    const tolerated = (a: { id: string; orphaned: boolean }) =>
+      parents.has(a.id) || (pointInTime && a.orphaned);
+    // A mandatory deadline save captures around every other request still
+    // open on this exact box (a stdin write in flight, a request whose owner
+    // vanished, an orphan under a tar-style capture) and settles it with the
+    // box after termination. Requests on an older epoch or instance do not
+    // touch this box's capture.
+    const forced = mandatory
+      ? admissions.filter((a) => a.exact && !tolerated(a)).map((a) => a.id)
+      : [];
+    if (
+      admissions.some((a) => !tolerated(a) && !(mandatory && (forced.includes(a.id) || !a.exact)))
+    )
+      return null;
     const holders = await rawRows<{ kind: string; holder_id: string }>(
       tx,
       sql`
@@ -54951,14 +52285,32 @@ export async function enrollRetainedCommandContainment(
     };
     if (enrolled) return { ...target, mode: "resumed" };
     if (lease.archive_capture_id !== null) return null;
-    let mode: "idle" | "deadline" | null = null;
-    if (
+    let mode: "idle" | "deadline" | "forced_deadline" | "quiescence" | null = null;
+    if (mandatory) {
+      // No stop grace, owner quiescence or sibling activity can be waited for
+      // any longer. Holders were checked above: a live turn, viewer or direct
+      // request on the box still blocks, and supervised commands keep their
+      // separate proof gate.
+      mode = "forced_deadline";
+    } else if (
+      input.settledOwner !== undefined &&
+      processes.every(
+        (p) =>
+          p.owner_attempt_id === input.settledOwner!.attemptId &&
+          p.session_id === input.settledOwner!.sessionId &&
+          !p.adopted,
+      ) &&
+      (await settledCommandOwnerMatchesTx(tx, input, input.settledOwner))
+    ) {
+      mode = "quiescence";
+    } else if (
       deadlineRotation &&
       processes.every((p) => p.deadline_ready) &&
-      !(await deadlineOwnerQuiescencePending(tx, input.workspaceId, processes)) &&
+      !(await deadlineOwnerQuiescencePending(tx, input.workspaceId, processes, writerMode)) &&
       !(await hasSandboxGroupAttemptActivityTx(tx, {
         ...input,
         idleGraceMs: deadlineStopGraceMs,
+        writerMode,
       }))
     ) {
       mode = "deadline";
@@ -54968,6 +52320,7 @@ export async function enrollRetainedCommandContainment(
         ...input,
         leaseId: lease.id,
         windowMs: input.idleCommandContainmentMs,
+        writerMode,
       }))
     ) {
       mode = "idle";
@@ -54975,10 +52328,13 @@ export async function enrollRetainedCommandContainment(
     if (!mode) return null;
     await tx.execute(sql`
       update sandbox_leases set unobservable_command_drain_ids = ${`{${ids.join(",")}}`}::uuid[],
+        deadline_forced_admission_ids = ${forced.length ? `{${forced.join(",")}}` : null}::uuid[],
         command_containment_reason = ${
-          mode === "deadline"
-            ? DEADLINE_COMMAND_CONTAINMENT_REASON
-            : IDLE_COMMAND_CONTAINMENT_REASON
+          mode === "quiescence"
+            ? QUIESCENCE_COMMAND_CONTAINMENT_REASON
+            : mode === "deadline" || mode === "forced_deadline"
+              ? DEADLINE_COMMAND_CONTAINMENT_REASON
+              : IDLE_COMMAND_CONTAINMENT_REASON
         },
         liveness = 'draining', rotation_requested_at = coalesce(rotation_requested_at, now()),
         rotation_reason = coalesce(rotation_reason, 'operator'), expires_at = now(), updated_at = now()
@@ -54986,6 +52342,397 @@ export async function enrollRetainedCommandContainment(
     `);
     return { ...target, mode };
   });
+}
+
+/** Bounded per-candidate idle interaction outcomes (metric labels). */
+export type IdleInteractionInspection =
+  | "released"
+  | "checkpointing"
+  | "not_eligible"
+  | "inspection_failed";
+
+export type IdleInteractionRelease = {
+  /** Set when the box lost its last holder and drains now. */
+  drainable: ReapDrainable | null;
+  /** Browsers whose idle save was prepared; their holders stay until saved. */
+  checkpoints: number;
+  /** Browsers and desktops released without a save (marked lost). */
+  released: number;
+};
+
+/** Failure code of a browser or desktop stopped because nobody used it. */
+export const IDLE_INTERACTION_RELEASED = "idle_released";
+
+const INTERACTION_HOLDER_RESOURCE =
+  /^(browser-session|computer-session):([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
+
+/**
+ * An idle browser or desktop does not keep its Modal box warm. Activity is
+ * deliberate and durable: the newest of the interaction holder heartbeat and
+ * the resource's last use and controller heartbeat. Every controller request
+ * moves all three - an agent tool call, a person's input, and the live view's
+ * poll and heartbeat, which run only while the page is visible - so a hidden
+ * tab or a closed view stops counting within seconds. An in-flight lifecycle
+ * operation counts too. Interventions waiting for a person do not: a wait is
+ * not use (see `sandboxGroupIdleForCommandContainmentTx`).
+ *
+ * When every browser and desktop on the box, and the whole sandbox group by
+ * the general idle rule, have been unused for `idleMs` (the sandbox idle
+ * grace), all are released at once. A checkpoint-capable browser gets the
+ * system profile save (the provider-deadline checkpoint with an `idle`
+ * reason) and keeps its holder until that save is committed; anything else is
+ * marked lost with `idle_released` and its holder is deleted. With no holder
+ * left the box drains immediately: the ordinary drain saves /workspace and
+ * stops it, and the next acquire restores it.
+ *
+ * The workspace control fence and lease -> holder -> operation -> resource
+ * row locks serialize the decision with controller requests, which lock the
+ * lease and holder before touching their resource.
+ */
+export async function releaseIdleInteractionHolders(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    idleMs: number;
+    /** False when the worker cannot save browser profiles (no object storage,
+     * delegation secret or encryption key, or no Temporal checkpoint worker);
+     * browsers are then released like desktops. */
+    browserCheckpoints: boolean;
+  },
+): Promise<IdleInteractionRelease | null> {
+  if (!Number.isSafeInteger(input.idleMs) || input.idleMs < 60_000) {
+    throw new Error("Idle interaction release needs an idle window of at least one minute");
+  }
+  const screened = await withRlsContext(db, input, async (tx) => {
+    const lease = await readLease(tx, input.workspaceId, input.sandboxGroupId);
+    return (
+      lease !== null &&
+      lease.backend === "modal" &&
+      lease.liveness === "warm" &&
+      (await sandboxGroupIdleForCommandContainmentTx(tx, {
+        ...input,
+        leaseId: lease.id,
+        windowMs: input.idleMs,
+        writerMode: leaseCaptureIsPointInTime(lease.backend, lease.resumeState)
+          ? "containment"
+          : "physical",
+      }))
+    );
+  });
+  if (!screened) return null;
+  return await withRlsContext(db, input, async (tx) => {
+    await lockWorkspaceInferenceControl(tx, input.workspaceId, "update");
+    const [lease] = await rawRows<LeaseRow & { idle: boolean; prior_holders_changed_at: string }>(
+      tx,
+      sql`
+      select *, holders_changed_at::text as prior_holders_changed_at,
+        holders_changed_at < now() - (${input.idleMs}::bigint * interval '1 millisecond') as idle
+      from sandbox_leases
+      where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
+      for update
+    `,
+    );
+    if (
+      !lease ||
+      !lease.idle ||
+      lease.backend !== "modal" ||
+      lease.liveness !== "warm" ||
+      !lease.instance_id ||
+      lease.rotation_requested_at !== null ||
+      lease.archive_capture_id !== null ||
+      Boolean(lease.unobservable_command_drain_ids?.length) ||
+      (lease.reaper_hold_until && new Date(lease.reaper_hold_until).getTime() > Date.now())
+    )
+      return null;
+    const holders = await rawRows<{
+      id: string;
+      kind: string;
+      holder_id: string;
+      idle: boolean;
+    }>(
+      tx,
+      sql`
+      select id, kind, holder_id,
+        last_heartbeat_at < now() - (${input.idleMs}::bigint * interval '1 millisecond') as idle
+      from sandbox_lease_holders where lease_id = ${lease.id} order by id for update
+    `,
+    );
+    const interactions = holders.filter((holder) => holder.kind === "interaction");
+    if (
+      interactions.length === 0 ||
+      holders.some((holder) => holder.kind !== "interaction" && holder.kind !== "process") ||
+      interactions.some((holder) => !holder.idle)
+    )
+      return null;
+    if (
+      !(await sandboxGroupIdleForCommandContainmentTx(tx, {
+        ...input,
+        leaseId: lease.id,
+        windowMs: input.idleMs,
+        writerMode: leaseCaptureIsPointInTime(lease.backend, lease.resume_state)
+          ? "containment"
+          : "physical",
+      }))
+    )
+      return null;
+    const resources = interactions.map((holder) => {
+      const match = INTERACTION_HOLDER_RESOURCE.exec(holder.holder_id);
+      return {
+        holder,
+        kind:
+          match?.[1] === "browser-session"
+            ? ("browser_session" as const)
+            : match
+              ? ("computer_session" as const)
+              : null,
+        id: match?.[2] ?? null,
+      };
+    });
+    const browserIds = resources.filter((r) => r.kind === "browser_session").map((r) => r.id!);
+    const computerIds = resources.filter((r) => r.kind === "computer_session").map((r) => r.id!);
+    const uuidList = (ids: string[]) =>
+      ids.length
+        ? sql`(${sql.join(
+            ids.map((id) => sql`${id}::uuid`),
+            sql`, `,
+          )})`
+        : sql`(null::uuid)`;
+    const operations = await rawRows<{ operation_id: string }>(
+      tx,
+      sql`
+      select operation_id from interaction_operations
+      where workspace_id = ${input.workspaceId} and state in ('prepared', 'dispatched')
+        and ((resource_kind = 'browser_session' and resource_id in ${uuidList(browserIds)})
+          or (resource_kind = 'computer_session' and resource_id in ${uuidList(computerIds)}))
+      order by operation_id for update
+    `,
+    );
+    if (operations.length > 0) return null;
+    const idleBefore = sql`now() - (${input.idleMs}::bigint * interval '1 millisecond')`;
+    const browsers = await rawRows<{
+      id: string;
+      lifecycle: string;
+      idle: boolean;
+      checkpoint: boolean;
+      controller_generation: string | null;
+    }>(
+      tx,
+      sql`
+      select id, lifecycle, controller_generation,
+        coalesce(greatest(last_used_at, controller_heartbeat_at) < ${idleBefore}, true) as idle,
+        (placement_kind = 'sandbox_group'
+          and controller_host_sandbox_group_id = ${input.sandboxGroupId}
+          and placement_instance_id = ${lease.instance_id}
+          and controller_generation is not null and controller_id is not null
+          and capabilities->>'privateCheckpoint' = 'true') as checkpoint
+      from browser_sessions
+      where workspace_id = ${input.workspaceId} and account_id = ${input.accountId}
+        and id in ${uuidList(browserIds)}
+      order by id for update
+    `,
+    );
+    const computers = await rawRows<{ id: string; lifecycle: string; idle: boolean }>(
+      tx,
+      sql`
+      select id, lifecycle,
+        coalesce(greatest(last_used_at, controller_heartbeat_at) < ${idleBefore}, true) as idle
+      from computer_sessions
+      where workspace_id = ${input.workspaceId} and account_id = ${input.accountId}
+        and id in ${uuidList(computerIds)}
+      order by id for update
+    `,
+    );
+    const terminal = new Set(["ended", "failed", "lost"]);
+    // A transition (starting, suspending, restoring, ending) or a saved
+    // browser awaiting cleanup is not idle: the transition reaper and the
+    // checkpoint own them. Any recently used resource keeps the whole box.
+    if (
+      [...browsers, ...computers].some(
+        (resource) =>
+          !resource.idle || (resource.lifecycle !== "active" && !terminal.has(resource.lifecycle)),
+      )
+    )
+      return null;
+    const checkpointed = new Set<string>();
+    if (input.browserCheckpoints) {
+      for (const browser of browsers) {
+        if (browser.lifecycle !== "active" || !browser.checkpoint) continue;
+        // Null when an idle save of this exact controller generation already
+        // failed: the browser is then released without a second attempt.
+        const claim = await browserDeadlineCheckpoint(
+          tx,
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sandboxGroupId: input.sandboxGroupId,
+            leaseId: lease.id,
+            leaseEpoch: Number(lease.lease_epoch),
+            instanceId: lease.instance_id,
+            browserSessionId: browser.id,
+            controllerGeneration: browser.controller_generation!,
+            reason: "idle",
+            idleMs: input.idleMs,
+          },
+          { prepare: true },
+        );
+        if (claim?.state === "prepared") checkpointed.add(browser.id);
+      }
+    }
+    const lostBrowsers = browsers.filter(
+      (b) => b.lifecycle === "active" && !checkpointed.has(b.id),
+    );
+    const lostComputers = computers.filter((c) => c.lifecycle === "active");
+    if (lostBrowsers.length > 0) {
+      await tx.execute(sql`
+        update browser_sessions
+        set lifecycle = 'lost', failure_code = ${IDLE_INTERACTION_RELEASED}, updated_at = now()
+        where workspace_id = ${input.workspaceId}
+          and id in ${uuidList(lostBrowsers.map((b) => b.id))} and lifecycle = 'active'
+      `);
+    }
+    if (lostComputers.length > 0) {
+      await tx.execute(sql`
+        update computer_sessions
+        set lifecycle = 'lost', failure_code = ${IDLE_INTERACTION_RELEASED}, updated_at = now()
+        where workspace_id = ${input.workspaceId}
+          and id in ${uuidList(lostComputers.map((c) => c.id))} and lifecycle = 'active'
+      `);
+    }
+    const released = resources
+      .filter((r) => !(r.kind === "browser_session" && checkpointed.has(r.id!)))
+      .map((r) => r.holder.id);
+    if (released.length > 0) {
+      await tx.execute(sql`
+        delete from sandbox_lease_holders
+        where lease_id = ${lease.id} and id in ${uuidList(released)}
+      `);
+    }
+    if (lostBrowsers.length + lostComputers.length > 0) {
+      await tx.execute(sql`
+        update workspace_interaction_revisions set revision = revision + 1, updated_at = now()
+        where workspace_id = ${input.workspaceId}
+      `);
+    }
+    const [counts] = await rawRows<{ total: number; turns: number; viewers: number }>(
+      tx,
+      sql`
+      select count(*)::int as total,
+        count(*) filter (where kind = 'turn')::int as turns,
+        count(*) filter (where kind = 'viewer')::int as viewers
+      from sandbox_lease_holders where lease_id = ${lease.id}
+    `,
+    );
+    const drain = counts!.total === 0;
+    await tx.execute(sql`
+      update sandbox_leases set
+        refcount = ${counts!.total}, turn_holders = ${counts!.turns},
+        viewer_holders = ${counts!.viewers},
+        ${drain ? sql`liveness = 'draining', expires_at = now() - interval '1 millisecond',` : sql``}
+        updated_at = now()
+      where id = ${lease.id}
+    `);
+    if (!drain) {
+      // The holder-set clock measures use, not this release: a box left
+      // with legacy retained commands keeps its containment clock, so
+      // containment does not wait another full window because of it.
+      await tx.execute(sql`
+        update sandbox_leases set holders_changed_at = ${lease.prior_holders_changed_at}::timestamptz
+        where id = ${lease.id}
+      `);
+    }
+    return {
+      drainable: drain
+        ? {
+            workspaceId: input.workspaceId,
+            sandboxGroupId: input.sandboxGroupId,
+            instanceId: lease.instance_id,
+            leaseEpoch: Number(lease.lease_epoch),
+          }
+        : null,
+      checkpoints: checkpointed.size,
+      released: lostBrowsers.length + lostComputers.length,
+    };
+  });
+}
+
+export type IdleCheckpointCandidate = {
+  accountId: string;
+  workspaceId: string;
+  sandboxGroupId: string;
+  leaseEpoch: number;
+  instanceId: string;
+};
+
+/** Global inventory of warm Modal boxes that no turn holds and that viewers,
+ * browser/computer interactions or running background commands (supervised or
+ * not) keep warm, whose workspace has writes the newest archive may not cover, and
+ * whose last capture attempt and last idle checkpoint attempt are both at least
+ * `intervalMs` old (least recently tried first). Discovery only: the exact
+ * warm capture claim (`claimWorkspaceArchiveCapture` with `idleCheckpoint`)
+ * re-checks every fact under the lease lock before any provider capture. */
+export async function listIdleCheckpointCandidates(
+  db: Database,
+  input: { limit: number; intervalMs: number },
+): Promise<IdleCheckpointCandidate[]> {
+  if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 100) {
+    throw new Error("Idle checkpoint batch is invalid");
+  }
+  if (!Number.isSafeInteger(input.intervalMs) || input.intervalMs < 1) {
+    throw new Error("Idle checkpoint interval is invalid");
+  }
+  const rows = await rawRows<{
+    account_id: string;
+    workspace_id: string;
+    sandbox_group_id: string;
+    lease_epoch: number | string;
+    instance_id: string;
+  }>(
+    db,
+    sql`select * from opengeni_private.list_idle_checkpoint_candidates(
+      ${input.limit}::integer, ${input.intervalMs}::bigint)`,
+  );
+  return rows.map((row) => ({
+    accountId: row.account_id,
+    workspaceId: row.workspace_id,
+    sandboxGroupId: row.sandbox_group_id,
+    leaseEpoch: Number(row.lease_epoch),
+    instanceId: row.instance_id,
+  }));
+}
+
+/** Stamp an idle checkpoint attempt on the exact warm box before the sweep
+ * tries it, whatever the outcome. The inventory lists a box again only after
+ * the snapshot interval, so a box whose claim is refused or whose provider
+ * fails cannot hold a batch slot on every sweep and starve the others. */
+export async function recordIdleCheckpointAttempt(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    expectedEpoch: number;
+    expectedInstanceId: string;
+  },
+): Promise<boolean> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb.execute<{ id: string }>(sql`
+        update sandbox_leases set idle_checkpoint_attempted_at = now()
+        where account_id = ${input.accountId}
+          and workspace_id = ${input.workspaceId}
+          and sandbox_group_id = ${input.sandboxGroupId}
+          and liveness = 'warm'
+          and lease_epoch = ${input.expectedEpoch}
+          and instance_id = ${input.expectedInstanceId}
+        returning id
+      `);
+      return rows.length === 1;
+    },
+  );
 }
 
 // §4.6 (global) — the cross-workspace reaper sweep (OD-3). Calls the
@@ -55008,8 +52755,17 @@ export async function reapStaleLeaseHoldersGlobal(
     /** Whole-group idle window for legacy retained-command containment.
      * Omitted: only the provider-deadline rule may enroll commands. */
     idleCommandContainmentMs?: number | undefined;
+    /** Mandatory pre-deadline save window (sandboxDeadlineMandatoryCaptureLeadMs). */
+    deadlineMandatoryCaptureLeadMs?: number | undefined;
     onCommandContainment?: (outcome: CommandContainmentInspection) => void;
     onCommandContainmentError?: (error: unknown) => void;
+    /** The general sandbox idle grace. Browsers and desktops unused for this
+     * long stop holding their box (`releaseIdleInteractionHolders`). Omitted:
+     * interaction holders keep their box until the provider deadline. */
+    idleInteractionReleaseMs?: number | undefined;
+    /** Whether idle checkpoint-capable browsers are saved before release. */
+    idleBrowserCheckpoints?: boolean;
+    onIdleInteractionRelease?: (outcome: IdleInteractionInspection) => void;
   },
 ): Promise<ReapDrainable[]> {
   // Active interaction holders represent durable BrowserSession/ComputerSession
@@ -55063,6 +52819,82 @@ export async function reapStaleLeaseHoldersGlobal(
     ((error: unknown) => {
       console.warn("sandbox reaper: retained command containment inspection failed", error);
     });
+  const pushDrainable = (drainable: ReapDrainable) => {
+    if (
+      !ordinary.some(
+        (r) =>
+          r.workspaceId === drainable.workspaceId && r.sandboxGroupId === drainable.sandboxGroupId,
+      )
+    )
+      ordinary.push(drainable);
+  };
+  if (input.idleInteractionReleaseMs !== undefined) {
+    // Before containment: a box whose idle browsers and desktops are released
+    // here may be left with only legacy commands, which containment then sees.
+    const idleLeases = await rawRows<{
+      account_id: string;
+      workspace_id: string;
+      sandbox_group_id: string;
+    }>(
+      db,
+      sql`select * from opengeni_private.list_idle_interaction_leases(
+        32, ${input.idleInteractionReleaseMs}::bigint)`,
+    ).catch((error) => {
+      reportContainmentError(error);
+      return [];
+    });
+    for (const candidate of idleLeases) {
+      const release = await releaseIdleInteractionHolders(db, {
+        accountId: candidate.account_id,
+        workspaceId: candidate.workspace_id,
+        sandboxGroupId: candidate.sandbox_group_id,
+        idleMs: input.idleInteractionReleaseMs,
+        browserCheckpoints: input.idleBrowserCheckpoints === true,
+      }).catch((error: unknown) => {
+        reportContainmentError(error);
+        input.onIdleInteractionRelease?.("inspection_failed");
+        return undefined;
+      });
+      if (release === undefined) continue;
+      input.onIdleInteractionRelease?.(
+        !release ? "not_eligible" : release.checkpoints > 0 ? "checkpointing" : "released",
+      );
+      if (release?.drainable) pushDrainable(release.drainable);
+    }
+  }
+  {
+    // An idle-saved browser whose box went away before its local cleanup ran
+    // keeps a durable profile; clear only the stale controller so it resumes.
+    // Always on, so browsers saved before idle release was disabled resume.
+    const orphaned = await rawRows<{
+      account_id: string;
+      workspace_id: string;
+      browser_session_id: string;
+      controller_generation: string;
+    }>(db, sql`select * from opengeni_private.list_orphaned_idle_browser_checkpoints(32)`).catch(
+      (error) => {
+        reportContainmentError(error);
+        return [];
+      },
+    );
+    for (const browser of orphaned) {
+      await clearSuspendedBrowserSessionController(db, {
+        accountId: browser.account_id,
+        workspaceId: browser.workspace_id,
+        browserSessionId: browser.browser_session_id,
+        expectedControllerGeneration: browser.controller_generation,
+      }).catch((error: unknown) => {
+        // Ended, deleted or already cleared since the inventory: nothing to do.
+        if (
+          error instanceof BrowserSessionNotFoundError ||
+          error instanceof BrowserSessionStateError ||
+          error instanceof BrowserSessionOperationConflictError
+        )
+          return;
+        reportContainmentError(error);
+      });
+    }
+  }
   const candidates = await rawRows<{
     account_id: string;
     workspace_id: string;
@@ -55083,6 +52915,9 @@ export async function reapStaleLeaseHoldersGlobal(
       ...(input.idleCommandContainmentMs === undefined
         ? {}
         : { idleCommandContainmentMs: input.idleCommandContainmentMs }),
+      ...(input.deadlineMandatoryCaptureLeadMs === undefined
+        ? {}
+        : { deadlineMandatoryCaptureLeadMs: input.deadlineMandatoryCaptureLeadMs }),
     }).catch((error: unknown) => {
       reportContainmentError(error);
       input.onCommandContainment?.("inspection_failed");
@@ -55090,14 +52925,8 @@ export async function reapStaleLeaseHoldersGlobal(
     });
     if (enrolled === undefined) continue;
     input.onCommandContainment?.(enrolled ? `${enrolled.mode}_enrolled` : "not_eligible");
-    if (
-      enrolled &&
-      !ordinary.some(
-        (r) =>
-          r.workspaceId === enrolled.workspaceId && r.sandboxGroupId === enrolled.sandboxGroupId,
-      )
-    )
-      ordinary.push({
+    if (enrolled)
+      pushDrainable({
         workspaceId: enrolled.workspaceId,
         sandboxGroupId: enrolled.sandboxGroupId,
         instanceId: enrolled.instanceId,
@@ -55187,6 +53016,51 @@ export async function countSessionRecoveryBacklog(
     if (row.state in counts) counts[row.state] = Number(row.count);
   }
   return counts;
+}
+
+export type SessionRecoveryBacklogStateSummary = {
+  /** Every candidate in this state (the same set countSessionRecoveryBacklog counts). */
+  count: number;
+  /** Candidates still inside the backoff their recovery request recorded. */
+  scheduled: number;
+  /** How long the single oldest candidate has been past its due time; 0 when none is. */
+  oldestOverdueSeconds: number;
+};
+
+/**
+ * Content-free cross-workspace recovery summary (migration 0633). A recovery
+ * is due at its exact attempt's close plus the continueDelayMs recorded on that
+ * attempt's turn.recovery.requested event, so a session sleeping in provider
+ * Retry-After or connectivity backoff is `scheduled`, not overdue.
+ */
+export async function summarizeSessionRecoveryBacklog(
+  db: Database,
+): Promise<Record<SessionRecoveryBacklogState, SessionRecoveryBacklogStateSummary>> {
+  const summary: Record<SessionRecoveryBacklogState, SessionRecoveryBacklogStateSummary> = {
+    quiescence_missing: { count: 0, scheduled: 0, oldestOverdueSeconds: 0 },
+    projection_stale: { count: 0, scheduled: 0, oldestOverdueSeconds: 0 },
+  };
+  const rows = await rawRows<{
+    state: SessionRecoveryBacklogState;
+    count: number | string;
+    scheduled: number | string;
+    oldest_overdue_seconds: number | string;
+  }>(
+    db,
+    sql`
+      select state, count, scheduled, oldest_overdue_seconds
+      from opengeni_private.summarize_session_recovery_backlog()
+    `,
+  );
+  for (const row of rows) {
+    if (!(row.state in summary)) continue;
+    summary[row.state] = {
+      count: Number(row.count),
+      scheduled: Number(row.scheduled),
+      oldestOverdueSeconds: Number(row.oldest_overdue_seconds),
+    };
+  }
+  return summary;
 }
 
 export type ContextCompactionPendingSummary = {
@@ -55334,7 +53208,7 @@ export async function reArmDrainingLease(
             ? snapshot.mode === "credits" && snapshot.rateMicrosPerSecond > 0
             : input.warmBilling?.rateMicrosPerSecond !== undefined &&
               input.warmBilling.rateMicrosPerSecond > 0) &&
-          (await getBillingBalance(tx, input.accountId)).balanceMicros <= 0
+          (await getSpendableCreditBalance(tx, input.accountId)).balanceMicros <= 0
         ) {
           throw new SandboxPaidComputeAdmissionError(input.workspaceId, input.sandboxGroupId);
         }
@@ -55419,8 +53293,18 @@ export async function confirmDrainCold(
     providerMissingBeforeCapture?: boolean;
     /** The idle window named in contained commands' agent notice. */
     idleCommandContainmentMs?: number | undefined;
+    /** The reaper stopped the exact provider box (or proved it gone) before
+     * this commit. Only then may a crashed worker's orphaned request on it be
+     * settled; a selfhosted machine or backend-less lease is never stopped. */
+    providerStopped?: boolean;
   },
-): Promise<{ wentCold: boolean; backgroundCommandEvents?: SessionEvent[] }> {
+): Promise<{
+  wentCold: boolean;
+  /** The missing provider was an unpublished warming replacement: its loss
+   *  recorded no lost workspace (see `unpublishedWarmingLoss`). */
+  unpublishedProviderLost?: boolean;
+  backgroundCommandEvents?: SessionEvent[];
+}> {
   const backgroundCommandEvents: SessionEvent[] = [];
   // Settling a command appends its terminal session event and agent input, so
   // the cold commit runs inside the session activity gate.
@@ -55463,8 +53347,67 @@ export async function confirmDrainCold(
         ) {
           return { wentCold: false };
         }
+        // The box is stopped (or proven gone) before this commit, and the cold
+        // commit retires its epoch for good. Every open blocker it leaves on
+        // that exact box can therefore never progress: a request a crashed
+        // worker left behind (the capture ran around it), a request of an
+        // attempt that already recorded quiescence, a deadline-forced request,
+        // or an unheld process (with its terminals).
+        // Settle them all here with the exact provider blockers. Left open on
+        // an old epoch they would pin their attempt's quiescence, and with it
+        // the session, forever. A selfhosted machine or backend-less lease is
+        // never stopped by a drain and keeps its rows. A supervised command
+        // settles as lost only with the missing-provider truth (0496), so a
+        // stopped box keeps it to its own supervision path.
+        const staleBlockers =
+          observed.instance_id &&
+          (input.providerStopped === true || input.providerMissingBeforeCapture === true)
+            ? await rawRows<{ present: boolean }>(
+                tx,
+                sql`
+                  select (
+                    exists (
+                      select 1 from sandbox_workspace_mutation_admissions admission
+                      where admission.lease_id = ${observed.id}
+                        and admission.lease_epoch = ${input.expectedEpoch}
+                        and admission.provider_backend = ${observed.backend}
+                        and admission.provider_instance_id = ${observed.instance_id}
+                        and admission.settled_at is null
+                    ) or exists (
+                      select 1 from sandbox_pty_sessions pty
+                      where pty.lease_id = ${observed.id}
+                        and pty.lease_epoch = ${input.expectedEpoch}
+                        and pty.provider_backend = ${observed.backend}
+                        and pty.provider_instance_id = ${observed.instance_id}
+                        and pty.status = 'open'
+                    ) or exists (
+                      select 1 from sandbox_retained_processes process
+                      where process.lease_id = ${observed.id}
+                        and process.lease_epoch = ${input.expectedEpoch}
+                        and process.provider_backend = ${observed.backend}
+                        and process.provider_instance_id = ${observed.instance_id}
+                        and process.state = 'active'
+                    )
+                  ) and (
+                    ${input.providerMissingBeforeCapture === true}
+                    or not exists (
+                      select 1 from sandbox_retained_processes supervised
+                      where supervised.lease_id = ${observed.id}
+                        and supervised.lease_epoch = ${input.expectedEpoch}
+                        and supervised.provider_backend = ${observed.backend}
+                        and supervised.provider_instance_id = ${observed.instance_id}
+                        and supervised.state = 'active'
+                        and supervised.provider_command ? 'supervision'
+                    )
+                  ) as present
+                `,
+              )
+            : [];
         const blockerScope =
-          (input.providerMissingBeforeCapture || observed.unobservable_command_drain_ids?.length) &&
+          (input.providerMissingBeforeCapture ||
+            observed.unobservable_command_drain_ids?.length ||
+            observed.deadline_forced_admission_ids?.length ||
+            staleBlockers[0]?.present === true) &&
           observed.instance_id
             ? {
                 accountId: input.accountId,
@@ -55518,7 +53461,8 @@ export async function confirmDrainCold(
             !input.providerMissingBeforeCapture &&
             row.archive_capture_published_at !== null &&
             (reason === IDLE_COMMAND_CONTAINMENT_REASON ||
-              reason === DEADLINE_COMMAND_CONTAINMENT_REASON) &&
+              reason === DEADLINE_COMMAND_CONTAINMENT_REASON ||
+              reason === QUIESCENCE_COMMAND_CONTAINMENT_REASON) &&
             row.unobservable_command_drain_ids?.length
               ? row.unobservable_command_drain_ids
               : [];
@@ -55542,9 +53486,27 @@ export async function confirmDrainCold(
         const hasArchive = current.archive.status !== "none";
         const archiveComplete = hasCompleteWorkspaceArchive(row);
         const now = new Date().toISOString();
+        // A warming replacement whose creator died (worker shutdown/crash)
+        // before commitWarmingToWarm was never published: no holder attached
+        // to it and no workspace mutation can be admitted on a non-warm lease.
+        // The reaper's warming-death drain (c2) is the only way such a box
+        // reaches here. Its disappearance therefore loses nothing beyond what
+        // the pre-warming cold row already recorded; mirror failWarmingToCold
+        // instead of minting a lost-workspace verdict that would block every
+        // later turn of the session. A published box keeps the loss contract.
+        const unpublishedWarmingLoss =
+          input.providerMissingBeforeCapture === true &&
+          current.provider.status === "creating" &&
+          current.provider.instanceId !== null &&
+          current.provider.instanceId === row.instance_id;
+        const workspaceLost =
+          input.providerMissingBeforeCapture === true && !unpublishedWarmingLoss;
         const lateArchiveCapture =
-          input.providerMissingBeforeCapture &&
+          workspaceLost &&
           row.archive_capture_id !== null &&
+          // A warm claim that ran around commands may predate their writes; a
+          // late adoption would publish it as the complete workspace.
+          row.archive_capture_concurrent_capture_id !== row.archive_capture_id &&
           row.archive_capture_provider_request_id !== null &&
           row.archive_capture_generation !== null &&
           row.archive_capture_published_at === null &&
@@ -55568,18 +53530,27 @@ export async function confirmDrainCold(
             ? "pending"
             : hasArchive
               ? "degraded"
-              : input.providerMissingBeforeCapture || freshPending
+              : workspaceLost || freshPending
                 ? "unrecoverable"
                 : "not_required";
         const recovery: SandboxRecoveryState = {
-          provider: {
-            status: input.providerMissingBeforeCapture ? "missing" : "not_created",
-            instanceId: input.providerMissingBeforeCapture ? row.instance_id : null,
-            observedAt: now,
-            ...(input.providerMissingBeforeCapture
-              ? { diagnostic: "provider_not_found_before_workspace_capture" }
-              : {}),
-          },
+          provider: unpublishedWarmingLoss
+            ? {
+                // Same shape failWarmingToCold records for a failed replacement:
+                // proves nothing about the workspace, never a loss record.
+                status: "not_created",
+                instanceId: row.instance_id,
+                observedAt: now,
+                diagnostic: REPLACEMENT_FAILED_DIAGNOSTIC,
+              }
+            : {
+                status: workspaceLost ? "missing" : "not_created",
+                instanceId: workspaceLost ? row.instance_id : null,
+                observedAt: now,
+                ...(workspaceLost
+                  ? { diagnostic: "provider_not_found_before_workspace_capture" }
+                  : {}),
+              },
           archive: current.archive,
           restore: {
             status: restoreStatus,
@@ -55619,9 +53590,7 @@ export async function confirmDrainCold(
               archiveOnlyResumeState(
                 row,
                 recovery,
-                input.providerMissingBeforeCapture
-                  ? providerLossRecordForLostRow(row, "drain_probe", now)
-                  : undefined,
+                workspaceLost ? providerLossRecordForLostRow(row, "drain_probe", now) : undefined,
               ),
             )
           : null;
@@ -55670,7 +53639,7 @@ export async function confirmDrainCold(
           and archive_capture_id is not distinct from ${input.expectedCaptureId ?? null}::uuid
         returning id
       `);
-        if (rows.length > 0 && input.providerMissingBeforeCapture) {
+        if (rows.length > 0 && workspaceLost) {
           const eventId = crypto.randomUUID();
           await tx.insert(schema.auditEvents).values(
             withLosslessContentWriteVersion(
@@ -55700,7 +53669,10 @@ export async function confirmDrainCold(
         if (rows.length > 0 && row.rotation_requested_at !== null) {
           await wakeSandboxLifecycleWaitersTx(tx, input);
         }
-        return { wentCold: rows.length > 0 };
+        return {
+          wentCold: rows.length > 0,
+          ...(rows.length > 0 && unpublishedWarmingLoss ? { unpublishedProviderLost: true } : {}),
+        };
       },
     );
   });
@@ -55804,6 +53776,65 @@ export type SandboxWorkspaceMutationAdmission = {
 };
 
 export type SandboxWorkspaceMutationProviderOutcome = "resolved" | "rejected";
+
+/** Evidence from a committed exact admission settlement. It establishes the
+ * physical provider outcome only; mutable output authority remains rejected. */
+export type SandboxWorkspaceMutationPhysicalSettlement = Readonly<{
+  accountId: string;
+  workspaceId: string;
+  admission: Readonly<SandboxWorkspaceMutationAdmission>;
+  operation: string;
+  outcome: "resolved";
+}>;
+
+/** Durable terminal truth of the retained process whose concurrent settlement
+ * fenced a physically settled mutation's output. */
+export type SandboxRetainedProcessTerminalState = Readonly<{
+  state: "exited" | "lost";
+  exitCode: number | null;
+}>;
+
+/** The exact provider outcome committed before its output failed an acceptance
+ * fence. A generic admission fence or failed transaction carries no receipt.
+ * This error never authorizes accepting output or replaying provider work. */
+export class SandboxWorkspaceMutationOutputRejectedError extends SandboxWorkspaceMutationFencedError {
+  readonly name = "SandboxWorkspaceMutationOutputRejectedError";
+  readonly physicalSettlement: SandboxWorkspaceMutationPhysicalSettlement;
+  /** Non-null only when the fence was the retained process itself having
+   * already reached a durable terminal state (for example the reaper settled
+   * the exit between admission and settlement). The output stays rejected;
+   * callers may report this stored terminal truth instead of failing. */
+  readonly retainedProcessTerminal: SandboxRetainedProcessTerminalState | null;
+
+  constructor(
+    code: SandboxWorkspaceMutationFencedError["code"],
+    message: string,
+    physicalSettlement: SandboxWorkspaceMutationPhysicalSettlement,
+    retainedProcessTerminal: SandboxRetainedProcessTerminalState | null = null,
+  ) {
+    super(code, message);
+    this.physicalSettlement = Object.freeze({
+      ...physicalSettlement,
+      admission: Object.freeze({ ...physicalSettlement.admission }),
+    });
+    this.retainedProcessTerminal = retainedProcessTerminal
+      ? Object.freeze({
+          state: retainedProcessTerminal.state,
+          exitCode: retainedProcessTerminal.exitCode,
+        })
+      : null;
+  }
+
+  matchesPhysicalSettlement(input: {
+    accountId: string;
+    workspaceId: string;
+    admission: SandboxWorkspaceMutationAdmission;
+    operation: string;
+    outcome: SandboxWorkspaceMutationProviderOutcome;
+  }): boolean {
+    return isDeepStrictEqual(this.physicalSettlement, input);
+  }
+}
 
 export type SandboxRetainedProcessState = "active" | "exited" | "lost";
 
@@ -55983,6 +54014,8 @@ type SandboxWorkspaceMutationSettlementResult =
         | "authority_unattributed"
         | "authority_revoked";
       detail: string;
+      physicallySettled?: true;
+      retainedProcessTerminal?: SandboxRetainedProcessTerminalState;
     };
 
 type TurnWorkspaceMutationAuthority = {
@@ -56247,7 +54280,14 @@ async function lockWorkspaceMutationSessionTx(
  * an acknowledged edge-trigger. */
 async function hasPendingSessionAttemptQuiescenceTx(
   tx: Database,
-  input: { workspaceId: string; sessionId: string; attemptId?: string },
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    attemptId?: string;
+    /** `containment` ignores crashed-worker orphan requests, which sandbox
+     * containment and drains settle themselves after exact termination. */
+    writerMode?: "physical" | "containment";
+  },
 ): Promise<boolean> {
   const [row] = await tx.execute<{ pending: boolean }>(sql`
     select exists (
@@ -56259,7 +54299,7 @@ async function hasPendingSessionAttemptQuiescenceTx(
         and attempt.state = 'closed'
         and attempt.quiesced_at is null
         and (
-          ${sessionAttemptPendingWritersSql(sql`attempt`)}
+          ${sessionAttemptPendingWritersSql(sql`attempt`, input.writerMode ?? "physical")}
           or exists (
             select 1
             from session_attempt_interruptions interruption
@@ -57260,6 +55300,13 @@ function workspaceMutationAuthorityFailure(
   ) {
     return null;
   }
+  if (error instanceof SandboxRetainedProcessTerminalError) {
+    return {
+      failure: error.code,
+      detail: error.message,
+      retainedProcessTerminal: { state: error.state, exitCode: error.exitCode },
+    };
+  }
   return { failure: error.code, detail: error.message };
 }
 
@@ -57338,6 +55385,10 @@ async function verifyWorkspaceMutationSettlementForAuthority(
   },
 ): Promise<void> {
   const operation = normalizeWorkspaceMutationOperation(input.operation);
+  const admissionSnapshot = { ...input.admission };
+  const outcome = input.outcome;
+  // Savepoint release cannot prove an outer caller-owned transaction committed.
+  const ownsCommit = typeof (db as Database & { rollback?: unknown }).rollback !== "function";
   const settleOnce = async (): Promise<SandboxWorkspaceMutationSettlementResult> =>
     await withRlsContext(
       db,
@@ -57379,19 +55430,20 @@ async function verifyWorkspaceMutationSettlementForAuthority(
           const admission = await selectExactAdmissionForUpdate(tx, {
             accountId: authorityInput.accountId,
             workspaceId: authorityInput.workspaceId,
-            admissionId: input.admission.id,
+            admissionId: admissionSnapshot.id,
             actorKind,
             actorId,
             sessionId: authorityInput.sessionId,
-            admittedWorkspaceGeneration: input.admission.workspaceGeneration,
+            admittedWorkspaceGeneration: admissionSnapshot.workspaceGeneration,
             operation,
           });
           if (
             !admission ||
-            !admissionMatchesSnapshot(admission, input.admission) ||
-            !admissionSnapshotMatchesAuthorityInput(input.admission, authorityInput) ||
+            !admissionMatchesSnapshot(admission, admissionSnapshot) ||
+            !admissionMatchesAuthorityInput(admission, authorityInput) ||
             admission.provider_outcome === "retained" ||
-            (admission.provider_outcome && admission.provider_outcome !== input.outcome)
+            (admission.provider_outcome && admission.provider_outcome !== outcome) ||
+            (admission.settled_at && admission.provider_outcome !== outcome)
           ) {
             return {
               failure: "admission_fenced" as const,
@@ -57404,11 +55456,21 @@ async function verifyWorkspaceMutationSettlementForAuthority(
               authorityInput.workspaceId,
               authorityInput.sessionId,
             );
-            await tx.execute(sql`
+            const [physical] = await tx.execute<{
+              provider_outcome: string;
+              settled_at: Date;
+            }>(sql`
               update sandbox_workspace_mutation_admissions set
-                provider_outcome = ${input.outcome}, settled_at = now()
-              where id = ${input.admission.id} and settled_at is null
+                provider_outcome = ${outcome}, settled_at = now()
+              where id = ${admissionSnapshot.id} and settled_at is null
+              returning provider_outcome, settled_at
             `);
+            if (physical?.provider_outcome !== outcome || !physical.settled_at) {
+              return {
+                failure: "admission_fenced" as const,
+                detail: "Workspace mutation settlement did not commit its exact provider outcome",
+              };
+            }
             if (
               pendingAttempt ||
               (authorityInput.kind !== "direct" &&
@@ -57440,12 +55502,15 @@ async function verifyWorkspaceMutationSettlementForAuthority(
               });
             }
           }
-          if (input.outcome === "rejected") return { failure: null };
-          if (authorityFailure) return authorityFailure;
+          if (outcome === "rejected") return { failure: null };
+          if (authorityFailure) return { ...authorityFailure, physicallySettled: true };
           if (!authority) {
             throw new Error("Workspace mutation settlement lost its locked authority");
           }
-          return await verifyResolvedAdmissionAuthority(tx, authority, admission);
+          const acceptance = await verifyResolvedAdmissionAuthority(tx, authority, admission);
+          return acceptance.failure === null
+            ? acceptance
+            : { ...acceptance, physicallySettled: true };
         }),
     );
   const settlement = await runIdempotentPersistenceTransaction(
@@ -57456,6 +55521,23 @@ async function verifyWorkspaceMutationSettlementForAuthority(
     settleOnce,
   );
   if (settlement.failure !== null) {
+    if (settlement.physicallySettled && ownsCommit) {
+      // This branch is reached only after the transaction committed a matching
+      // terminal admission. A failed commit or contradictory receipt never
+      // reaches it, even when the provider returned successfully.
+      throw new SandboxWorkspaceMutationOutputRejectedError(
+        settlement.failure,
+        settlement.detail,
+        {
+          accountId: authorityInput.accountId,
+          workspaceId: authorityInput.workspaceId,
+          admission: admissionSnapshot,
+          operation,
+          outcome: "resolved",
+        },
+        settlement.retainedProcessTerminal ?? null,
+      );
+    }
     throw new SandboxWorkspaceMutationFencedError(settlement.failure, settlement.detail);
   }
 }
@@ -58763,7 +56845,9 @@ async function settleRetainedProcessWithAuthority(
 
 /** Legacy containment never substitutes for native-supervisor terminal proof.
  * Presence, not successful descriptor parsing, is the fail-closed boundary.
- * Check the whole lease, including stale/already-enrolled process IDs. */
+ * Check the whole lease, including stale/already-enrolled process IDs. A warm
+ * point-in-time capture marked concurrent is the one exception: it never
+ * terminates the box (see `concurrentLeaseProcess`). */
 function noActiveSupervisedProcesses(leaseId: SQL): SQL {
   return sql`not exists (
     select 1 from sandbox_retained_processes supervised_process
@@ -58771,6 +56855,80 @@ function noActiveSupervisedProcesses(leaseId: SQL): SQL {
       and supervised_process.state = 'active'
       and coalesce(supervised_process.provider_command, '{}'::jsonb) ? 'supervision'
   )`;
+}
+
+/** The exact active background command on one lease epoch and provider
+ * instance. Such a command may keep running across a warm checkpoint:
+ * Modal pauses the whole box while it snapshots, so the command is frozen rather
+ * than racing the read, but a file it was in the middle of writing can be saved
+ * half-written. That is deliberate. A long-running command used to
+ * refuse every checkpoint for the box's whole lifetime, so an uncaptured
+ * provider death lost everything since the last capture. A supervised command
+ * runs through one too: its terminal receipt lives in the supervisor's memory
+ * behind its control socket, never in the snapshot, and a warm concurrent
+ * capture neither terminates the box nor settles the command. Drains,
+ * containment and every other publication still keep the supervised proof
+ * gate (`noActiveSupervisedProcesses`), and the database guard
+ * `supervised_command_capture_guard` admits only the warm concurrent claim
+ * and fold. Every other holder and every in-flight request still blocks the
+ * capture. */
+function concurrentLeaseProcess(
+  process: SQL,
+  lease: { id: SQL; epoch: SQL; instanceId: SQL },
+): SQL {
+  return sql`${process}.lease_id = ${lease.id}
+    and ${process}.lease_epoch = ${lease.epoch}
+    and ${process}.provider_instance_id = ${lease.instanceId}
+    and ${process}.state = 'active'`;
+}
+
+/** A process holder owned by a background command that may run through a warm
+ * checkpoint (see `concurrentLeaseProcess`). */
+function concurrentCommandHolder(
+  holder: SQL,
+  lease: { id: SQL; epoch: SQL; instanceId: SQL },
+): SQL {
+  return sql`(${holder}.kind = 'process' and exists (
+    select 1 from sandbox_retained_processes concurrent_process
+    where concurrent_process.holder_id = ${holder}.holder_id
+      and ${concurrentLeaseProcess(sql`concurrent_process`, lease)}
+  ))`;
+}
+
+/** A holder whose writes a warm point-in-time checkpoint may run around: a
+ * background command (see `concurrentCommandHolder`), or a viewer / browser
+ * interaction attach. A viewer's noVNC/PTY tunnel and a browser controller can
+ * change `/workspace` without a generation admission, so their presence marks
+ * the claim concurrent (archive one generation behind) instead of refusing it.
+ * Refusing it starved every checkpoint for as long as a desktop or terminal tab
+ * stayed open. `direct` and other process holders still block. */
+function concurrentWriterHolder(holder: SQL, lease: { id: SQL; epoch: SQL; instanceId: SQL }): SQL {
+  return sql`(${holder}.kind in ('viewer', 'interaction') or ${concurrentCommandHolder(holder, lease)})`;
+}
+
+/** The parent admission of a background command that may run through a warm
+ * checkpoint. It stays open for the command's lifetime; it is not an in-flight
+ * request, and treating it as one starved checkpoints for hours. */
+function concurrentCommandAdmission(
+  admission: SQL,
+  lease: { id: SQL; epoch: SQL; instanceId: SQL },
+): SQL {
+  return sql`exists (
+    select 1 from sandbox_retained_processes concurrent_process
+    where concurrent_process.parent_admission_id = ${admission}.id
+      and ${concurrentLeaseProcess(sql`concurrent_process`, lease)}
+  )`;
+}
+
+/** True when this exact capture claim ran around active background commands
+ * (recorded at claim time, see `claimWorkspaceArchiveCapture`). Its snapshot is
+ * a real recovery point but may predate their later writes: the warm
+ * publication records it one generation behind the workspace, so later
+ * periodic captures continue and a loss restore carries the discontinuity
+ * warning; every other publication path must not present it as complete. */
+function captureRanAroundCommands(lease: SQL): SQL {
+  return sql`(${lease}.archive_capture_id is not null
+    and ${lease}.archive_capture_concurrent_capture_id is not distinct from ${lease}.archive_capture_id)`;
 }
 
 /** Read the exact generation a verified capture must later fold. This is a
@@ -58838,6 +56996,8 @@ export async function readWorkspaceArchiveCapturePreflight(
                   and process.parent_admission_id = admission.id and process.lease_id = lease.id
                   and process.lease_epoch = lease.lease_epoch
                   and process.provider_instance_id = lease.instance_id)
+              and not ${crashedWorkerOrphanAdmissionSql(sql`admission`)}
+              and not (admission.id = any(coalesce(lease.deadline_forced_admission_ids, '{}'::uuid[])))
               and (admission.actor_kind <> 'turn' or attempt.quiesced_at is null)
           )
         limit 1
@@ -59139,7 +57299,10 @@ export type ClaimWorkspaceArchiveCaptureResult =
         | "capture_in_progress"
         | "holder_in_progress"
         | "mutation_in_progress"
-        | "throttled";
+        | "throttled"
+        // A warm point-in-time capture found the archive already complete and
+        // no writer that bypasses generation admissions on the box.
+        | "clean";
     };
 
 /**
@@ -59174,6 +57337,25 @@ export async function claimWorkspaceArchiveCapture(
       attemptId: string;
       holderId: string;
     };
+    /** The provider capture is a point-in-time image of a paused box (Modal
+     * native filesystem/directory snapshots). A warm one may run around active
+     * background commands, and any may run around a crashed worker's orphaned
+     * request. Tar-style captures read files one by one from a
+     * running box and keep both as blockers. */
+    pointInTimeCapture?: boolean;
+    /** Draining only: inside this window before a requested provider-deadline
+     * rotation's deadline the save is mandatory. Requests still open on the
+     * exact box are recorded in deadline_forced_admission_ids, captured
+     * around, and settled with the box after termination. */
+    deadlineMandatoryCaptureLeadMs?: number;
+    /** Warm point-in-time checkpoint of a box no turn holds, kept warm by
+     * viewers, browser/computer interactions or active background commands
+     * (supervised or not) (e.g. while the session waits for one or for input). Requires
+     * `pointInTimeCapture` and no `warmAttempt`: with no turn attempt to fence,
+     * no other holder may be on the box, at least one of those must be (a box
+     * no holder keeps warm belongs to the idle drain), and every other open
+     * request still blocks. */
+    idleCheckpoint?: boolean;
   },
 ): Promise<ClaimWorkspaceArchiveCaptureResult> {
   if (
@@ -59206,7 +57388,16 @@ export async function claimWorkspaceArchiveCapture(
   ) {
     throw new Error("Workspace archive capture interval is invalid");
   }
-  if ((input.liveness === "warm") !== (input.warmAttempt !== undefined)) {
+  const idleCheckpoint = input.idleCheckpoint === true;
+  if (
+    idleCheckpoint &&
+    (input.liveness !== "warm" ||
+      input.warmAttempt !== undefined ||
+      input.pointInTimeCapture !== true)
+  ) {
+    throw new Error("Idle workspace checkpoint must be a warm point-in-time capture");
+  }
+  if ((input.liveness === "warm") !== (input.warmAttempt !== undefined || idleCheckpoint)) {
     throw new Error("Warm workspace archive capture requires its exact turn attempt");
   }
   return await withRlsContext(
@@ -59313,11 +57504,40 @@ export async function claimWorkspaceArchiveCapture(
       ) {
         return { status: "lease_fenced" as const };
       }
-      if (input.liveness === "draining" && row.reaper_hold_active) {
+      if ((input.liveness === "draining" || idleCheckpoint) && row.reaper_hold_active) {
         return { status: "reaper_held" as const };
       }
+      // Inventory is only discovery: a later rotation owns this box's final
+      // checkpoint. Fence the idle child under the same lease lock, without
+      // blocking a turn's mandatory rotation checkpoint.
+      if (idleCheckpoint && row.rotation_requested_at !== null) {
+        return { status: "lease_fenced" as const };
+      }
+      // A box no holder keeps warm belongs to the idle drain, which captures
+      // it before teardown; an idle checkpoint would duplicate that capture.
+      if (idleCheckpoint && Number(row.refcount) === 0) {
+        return { status: "lease_fenced" as const };
+      }
+      // Neither a new process nor a new admission can appear while this claim
+      // is held, so "a command was running at claim time" is exactly the
+      // condition under which the snapshot may miss later writes.
+      const aroundCommands =
+        (input.warmAttempt !== undefined || idleCheckpoint) && input.pointInTimeCapture === true;
+      // A supervised command allows only a warm point-in-time capture that
+      // runs around it on its own box: such a claim is always marked
+      // concurrent below (the command is a concurrent process), publishes one
+      // generation behind and never terminates the box. Drains and tar-style
+      // captures keep waiting for its receipt.
       const [supervision] = await scopedDb.execute<{ safe: boolean }>(sql`
-        select ${noActiveSupervisedProcesses(sql`${row.id}::uuid`)} as safe
+        select ${noActiveSupervisedProcesses(sql`${row.id}::uuid`)}
+          or (${aroundCommands && input.liveness === "warm"} and not exists (
+            select 1 from sandbox_retained_processes supervised_process
+            where supervised_process.lease_id = ${row.id}
+              and supervised_process.state = 'active'
+              and coalesce(supervised_process.provider_command, '{}'::jsonb) ? 'supervision'
+              and not (supervised_process.lease_epoch = ${Number(row.lease_epoch)}
+                and supervised_process.provider_instance_id = ${input.expectedInstanceId})
+          )) as safe
       `);
       if (!supervision?.safe) return { status: "mutation_in_progress" as const };
       if (row.archive_capture_id !== null) {
@@ -59326,24 +57546,35 @@ export async function claimWorkspaceArchiveCapture(
       if (input.minIntervalMs > 0 && row.periodic_capture_throttled) {
         return { status: "throttled" as const };
       }
-      const holderCounts = input.warmAttempt
-        ? await scopedDb.execute<{
-            total: number;
-            exact: number;
-          }>(sql`
+      const leaseIdentity = {
+        id: sql`${row.id}::uuid`,
+        epoch: sql`${Number(row.lease_epoch)}`,
+        instanceId: sql`${input.expectedInstanceId}`,
+      };
+      const holderCounts =
+        input.liveness === "warm"
+          ? await scopedDb.execute<{
+              total: number;
+              exact: number;
+            }>(sql`
             select
               count(*)::integer as total,
               count(*) filter (
                 where kind = 'turn'
-                  and holder_id = ${input.warmAttempt.holderId}
+                  and holder_id = ${input.warmAttempt?.holderId ?? null}
               )::integer as exact
             from sandbox_lease_holders
             where lease_id = ${row.id}
+              ${
+                aroundCommands
+                  ? sql`and not ${concurrentWriterHolder(sql`sandbox_lease_holders`, leaseIdentity)}`
+                  : sql``
+              }
           `)
-        : await scopedDb.execute<{
-            total: number;
-            exact: number;
-          }>(sql`
+          : await scopedDb.execute<{
+              total: number;
+              exact: number;
+            }>(sql`
             select count(*)::integer as total, 0::integer as exact
             from sandbox_lease_holders
             where lease_id = ${row.id}
@@ -59358,19 +57589,26 @@ export async function claimWorkspaceArchiveCapture(
         return { status: "attempt_fenced" as const };
       }
       // The durable claim blocks new acquisitions. Requiring the warm owner to
-      // be the sole holder means every other worker/session has relinquished its
-      // provider handle before capture can pause the box. A viewer is not
-      // passive: its scoped noVNC/PTY tunnel can mutate the workspace without a
-      // control-plane generation admission. Never delete a live viewer receipt
-      // and snapshot behind that still-valid tunnel. A skipped turn-end capture
-      // is recovered by the zero-holder drain capture after the viewer detaches.
+      // be the sole blocking holder means every other worker/session has
+      // relinquished its provider handle before capture can pause the box.
+      // A warm point-in-time capture runs around writers that never release on
+      // their own schedule: an active background command, and a
+      // viewer or browser-interaction attach. A viewer is not passive (its
+      // noVNC/PTY tunnel can mutate the workspace without a generation
+      // admission), so the claim is marked concurrent below and the archive is
+      // published one generation behind; the next capture after the writer
+      // leaves completes it. Waiting for them instead starved checkpoints for as
+      // long as a tab stayed open or a command ran. See
+      // `concurrentLeaseProcess` for the torn-file trade-off. An idle
+      // checkpoint has no owner holder of its own. Tar-style and drain captures
+      // keep requiring every holder gone.
       const expectedHolderCount = input.warmAttempt ? 1 : 0;
       if ((holderCounts[0]?.total ?? 0) !== expectedHolderCount) {
         return { status: "holder_in_progress" as const };
       }
-      const unsettled = await scopedDb.execute<{ present: boolean }>(sql`
-        select exists (
-          select 1
+      const forcedAdmissionIds = row.deadline_forced_admission_ids ?? [];
+      const unsettled = await scopedDb.execute<{ id: string }>(sql`
+          select admission.id
           from sandbox_workspace_mutation_admissions admission
           left join session_turn_attempts attempt
             on attempt.account_id = admission.account_id
@@ -59389,12 +57627,76 @@ export async function claimWorkspaceArchiveCapture(
             and not exists(select 1 from sandbox_retained_processes process
               where process.id = any(${`{${(row.unobservable_command_drain_ids ?? []).join(",")}}`}::uuid[])
                 and process.parent_admission_id = admission.id and process.lease_id = ${row.id})
+            ${
+              aroundCommands
+                ? sql`and not ${concurrentCommandAdmission(sql`admission`, leaseIdentity)}`
+                : sql``
+            }
+            ${
+              // A crashed worker's request may still be running a command. Only
+              // a point-in-time capture may run around it: a warm one marks the
+              // claim below, a drain terminates the box next. A file-by-file
+              // tar read of the running box could publish torn state as complete.
+              input.pointInTimeCapture === true
+                ? sql`and not ${crashedWorkerOrphanAdmissionSql(sql`admission`)}`
+                : sql``
+            }
+            ${
+              input.liveness === "draining"
+                ? sql`and not (admission.id = any(${`{${forcedAdmissionIds.join(",")}}`}::uuid[]))`
+                : sql``
+            }
             and (admission.actor_kind <> 'turn' or attempt.quiesced_at is null)
-        ) as present
+          order by admission.id
       `);
-      if (unsettled[0]?.present) {
-        return { status: "mutation_in_progress" as const };
+      if (unsettled.length > 0) {
+        // Any requested rotation counts: an earlier operator rotation keeps the
+        // due provider-deadline rotation from being stamped separately.
+        const lead = input.deadlineMandatoryCaptureLeadMs;
+        const [deadline] =
+          input.liveness === "draining" && lead !== undefined && Number.isSafeInteger(lead)
+            ? await scopedDb.execute<{ mandatory: boolean }>(sql`
+                select (
+                  ${row.rotation_requested_at !== null}
+                  and ${row.provider_deadline_at ?? null}::timestamptz is not null
+                  and ${row.provider_deadline_at ?? null}::timestamptz
+                    <= now() + (${lead}::bigint * interval '1 millisecond')
+                ) as mandatory
+              `)
+            : [];
+        if (deadline?.mandatory !== true) {
+          return { status: "mutation_in_progress" as const };
+        }
+        // Mandatory pre-deadline save: no holder is left on the box (checked
+        // above), so these requests cannot finish into a capture in time.
+        // Record exactly them; publication excludes them, and the cold commit
+        // settles them only after the box is terminated.
+        await scopedDb.execute(sql`
+          update sandbox_leases set deadline_forced_admission_ids = ${`{${[
+            ...forcedAdmissionIds,
+            ...unsettled.map((admission: { id: string }) => admission.id),
+          ].join(",")}}`}::uuid[], updated_at = now()
+          where id = ${row.id}
+        `);
       }
+      const [concurrentCommands] = aroundCommands
+        ? await scopedDb.execute<{ present: boolean }>(sql`
+            select exists (
+              select 1 from sandbox_retained_processes concurrent_process
+              where ${concurrentLeaseProcess(sql`concurrent_process`, leaseIdentity)}
+            ) or exists (
+              select 1 from sandbox_lease_holders concurrent_writer
+              where concurrent_writer.lease_id = ${row.id}
+                and concurrent_writer.kind in ('viewer', 'interaction')
+            ) or exists (
+              select 1 from sandbox_workspace_mutation_admissions orphaned_request
+              where orphaned_request.lease_id = ${row.id}
+                and orphaned_request.lease_epoch = ${input.expectedEpoch}
+                and orphaned_request.provider_instance_id = ${input.expectedInstanceId}
+                and ${crashedWorkerOrphanAdmissionSql(sql`orphaned_request`)}
+            ) as present
+          `)
+        : [];
       const sessionState =
         row.resume_state?.sessionState && typeof row.resume_state.sessionState === "object"
           ? (row.resume_state.sessionState as Record<string, unknown>)
@@ -59407,6 +57709,21 @@ export async function claimWorkspaceArchiveCapture(
         archiveGeneration !== null &&
         archiveGeneration === Number(row.workspace_generation) &&
         recoveryStateFromLeaseRow(row).archive.status === "available";
+      // Every admitted write advances the generation, and a capture taken
+      // while an untracked writer was attached is published one generation
+      // behind, so a complete archive with no such writer attached now, and
+      // none attached since the last capture taken with none attached, has
+      // nothing new to save. A viewer that attached after that capture keeps
+      // the box dirty even after it detached, though the generation did not
+      // move.
+      if (
+        aroundCommands &&
+        archiveComplete &&
+        concurrentCommands?.present !== true &&
+        (row.untracked_writer_since ?? null) === null
+      ) {
+        return { status: "clean" as const };
+      }
       if (
         input.minIntervalMs > 0 &&
         Number.isFinite(priorAtMs) &&
@@ -59434,6 +57751,9 @@ export async function claimWorkspaceArchiveCapture(
           archive_capture_deadline_at = now() +
             (${input.captureTimeoutMs}::bigint * interval '1 millisecond'),
           archive_capture_published_at = null,
+          archive_capture_concurrent_capture_id = ${
+            concurrentCommands?.present === true ? input.captureId : null
+          }::uuid,
           updated_at = now()
         where id = ${row.id}
           and archive_capture_id is null
@@ -59489,6 +57809,13 @@ export async function releaseWorkspaceArchiveCapture(
     captureId: string;
     expectedEpoch: number;
     expectedInstanceId: string;
+    /** Take over a warm claim whose owner died: release it only when it is
+     * past its database deadline, was recorded takeover-safe (a late provider
+     * result can never publish under a replacement capture id), and no turn
+     * holds the box. A box kept warm by background commands never drains, so
+     * without this a dead checkpoint worker's claim fenced every later turn
+     * and checkpoint until the provider deadline. */
+    onlyExpiredWarmTakeover?: boolean;
   },
 ): Promise<boolean> {
   return await withRlsContext(
@@ -59507,6 +57834,14 @@ export async function releaseWorkspaceArchiveCapture(
             and instance_id = ${input.expectedInstanceId}
             and archive_capture_id = ${input.captureId}::uuid
             and archive_capture_published_at is null
+            ${
+              input.onlyExpiredWarmTakeover === true
+                ? sql`and liveness = 'warm'
+                  and archive_capture_deadline_at <= now()
+                  and archive_capture_takeover_safe
+                  and turn_holders = 0`
+                : sql``
+            }
           for update
         )
         update sandbox_leases set
@@ -59590,6 +57925,13 @@ export async function replaceWorkspaceArchiveCaptureAfterProof(
           archive_capture_id = ${input.captureId}::uuid,
           archive_capture_operation_id = ${input.operationId}::uuid,
           archive_capture_attempt = ${input.attempt},
+          -- A replayed provider request would return the warm-time snapshot of
+          -- a claim that ran around commands; request a fresh one.
+          archive_capture_provider_request_id = case
+            when ${captureRanAroundCommands(sql`lease`)} then ${randomUUID()}::uuid
+            else lease.archive_capture_provider_request_id
+          end,
+          archive_capture_concurrent_capture_id = null,
           archive_capture_generation = lease.workspace_generation,
           archive_capture_started_at = now(),
           archive_capture_deadline_at = now() +
@@ -59648,6 +57990,8 @@ export async function replaceWorkspaceArchiveCaptureAfterProof(
                   and process.parent_admission_id = admission.id and process.lease_id = lease.id
                   and process.lease_epoch = lease.lease_epoch
                   and process.provider_instance_id = lease.instance_id)
+              and not ${crashedWorkerOrphanAdmissionSql(sql`admission`)}
+              and not (admission.id = any(coalesce(lease.deadline_forced_admission_ids, '{}'::uuid[])))
               and (admission.actor_kind <> 'turn' or attempt.quiesced_at is null)
           )
         returning lease.*
@@ -60135,6 +58479,33 @@ export async function readSandboxRotationBacklog(db: Database): Promise<SandboxR
   };
 }
 
+export type SandboxCheckpointStaleness = {
+  /** Live Modal boxes holding a write their last checkpoint did not capture. */
+  dirty: number;
+  stale4h: number;
+  stale12h: number;
+  /** Age of the oldest such write (clamped to box creation), seconds. */
+  maxAgeSeconds: number;
+};
+
+/** Content-free fleet signal: how long live boxes have held unsaved changes. */
+export async function readSandboxCheckpointStaleness(
+  db: Database,
+): Promise<SandboxCheckpointStaleness> {
+  const [row] = await rawRows<{
+    dirty: number | string;
+    stale_4h: number | string;
+    stale_12h: number | string;
+    max_age_seconds: number | string;
+  }>(db, sql`select * from opengeni_private.sandbox_checkpoint_staleness()`);
+  return {
+    dirty: Number(row?.dirty ?? 0),
+    stale4h: Number(row?.stale_4h ?? 0),
+    stale12h: Number(row?.stale_12h ?? 0),
+    maxAgeSeconds: Number(row?.max_age_seconds ?? 0),
+  };
+}
+
 /** Content-free, cross-workspace operator signal reconstructed from committed
  * audit receipts. Unlike process-local counters, a worker crash after commit
  * cannot erase this short-lived warning window. */
@@ -60586,11 +58957,18 @@ export async function persistDrainSnapshot(
              and attempt.execution_generation = admission.execution_generation
              and admission.actor_kind = 'turn'
             where admission.lease_id = lease.id
+              -- Only requests on this exact box can race its capture; an open
+              -- request left on an older epoch or instance must not refuse
+              -- every later publication.
+              and admission.lease_epoch = lease.lease_epoch
+              and admission.provider_instance_id = lease.instance_id
               and admission.workspace_generation <= ${input.expectedWorkspaceGeneration}
               and admission.settled_at is null
               and not exists(select 1 from sandbox_retained_processes process
                 where process.id = any(lease.unobservable_command_drain_ids)
                   and process.parent_admission_id = admission.id and process.lease_id = lease.id)
+              and not ${crashedWorkerOrphanAdmissionSql(sql`admission`)}
+              and not (admission.id = any(coalesce(lease.deadline_forced_admission_ids, '{}'::uuid[])))
               and (admission.actor_kind <> 'turn' or attempt.quiesced_at is null)
           ) as unsettled_mutation
         from sandbox_leases as lease
@@ -60889,7 +59267,11 @@ async function foldWorkspaceArchiveOntoLease(
   const currentInstanceId = input.livenessGuard === "cold_late" ? null : input.expectedInstanceId;
   const livenessGuard =
     input.livenessGuard === "draining"
-      ? sql`lease.liveness = 'draining' and (lease.refcount = 0 or lease.unobservable_command_drain_ids is not null)`
+      ? // A warm claim that ran around commands may predate their last writes;
+        // it can never publish the final drain archive. Its release
+        // lets the drain recapture the now-quiet box.
+        sql`lease.liveness = 'draining' and (lease.refcount = 0 or lease.unobservable_command_drain_ids is not null)
+          and not ${captureRanAroundCommands(sql`lease`)}`
       : input.livenessGuard === "warm"
         ? sql`lease.liveness = 'warm'`
         : sql`lease.liveness = 'cold' and lease.refcount = 0 and lease.archive_capture_id is null`;
@@ -60996,6 +59378,11 @@ async function foldWorkspaceArchiveOntoLease(
     `);
     if (candidate.length !== 1) return false;
   }
+  const warmLeaseIdentity = {
+    id: sql`lease.id`,
+    epoch: sql`lease.lease_epoch`,
+    instanceId: sql`lease.instance_id`,
+  };
   const rows = await scopedDb.execute<{ id: string }>(sql`
     update sandbox_leases as lease set
       resume_state = ${foldedJson}::jsonb,
@@ -61005,6 +59392,20 @@ async function foldWorkspaceArchiveOntoLease(
       ${
         input.livenessGuard === "warm"
           ? sql`
+              workspace_generation = case
+                when ${captureRanAroundCommands(sql`lease`)}
+                  then lease.workspace_generation + 1
+                else lease.workspace_generation
+              end,
+              -- A capture claimed with no viewer or interaction attached (none
+              -- can attach while the claim is held) covers every write they
+              -- made before it.
+              untracked_writer_since = case
+                when ${captureRanAroundCommands(sql`lease`)}
+                  then lease.untracked_writer_since
+                else null
+              end,
+              archive_capture_concurrent_capture_id = null,
               archive_capture_id = null,
               archive_capture_operation_id = null,
               archive_capture_provider_request_id = null,
@@ -61017,14 +59418,20 @@ async function foldWorkspaceArchiveOntoLease(
               archive_capture_published_at = null,
             `
           : input.livenessGuard === "draining"
-            ? sql`archive_capture_published_at = now(),`
+            ? // A drain claims with no holder at all, so it covers every
+              // earlier viewer or interaction write.
+              sql`archive_capture_published_at = now(), untracked_writer_since = null,`
             : sql``
       }
       updated_at = now()
     where lease.workspace_id = ${input.workspaceId}
       and lease.sandbox_group_id = ${input.sandboxGroupId}
       and ${livenessGuard}
-      and ${noActiveSupervisedProcesses(sql`lease.id`)}
+      and (${noActiveSupervisedProcesses(sql`lease.id`)}${
+        // A warm claim that ran around a supervised command publishes one
+        // generation behind and leaves the box and command running.
+        input.livenessGuard === "warm" ? sql` or ${captureRanAroundCommands(sql`lease`)}` : sql``
+      })
       and lease.lease_epoch = ${currentLeaseEpoch}
       and lease.instance_id is not distinct from ${currentInstanceId}
       and lease.workspace_generation = ${input.expectedWorkspaceGeneration}
@@ -61072,6 +59479,13 @@ async function foldWorkspaceArchiveOntoLease(
               and process.parent_admission_id = admission.id and process.lease_id = lease.id
               and process.lease_epoch = lease.lease_epoch
               and process.provider_instance_id = lease.instance_id)
+          ${
+            input.livenessGuard === "warm"
+              ? sql`and not ${concurrentCommandAdmission(sql`admission`, warmLeaseIdentity)}`
+              : sql``
+          }
+          and not ${crashedWorkerOrphanAdmissionSql(sql`admission`)}
+          and not (admission.id = any(coalesce(lease.deadline_forced_admission_ids, '{}'::uuid[])))
           and (admission.actor_kind <> 'turn' or attempt.quiesced_at is null)
       )
     returning lease.id
@@ -61140,9 +59554,6 @@ export async function persistWarmSnapshot(
   input: {
     accountId: string;
     workspaceId: string;
-    sessionId: string;
-    turnId: string;
-    attemptId: string;
     sandboxGroupId: string;
     expectedEpoch: number;
     expectedInstanceId: string;
@@ -61164,7 +59575,17 @@ export async function persistWarmSnapshot(
      *  and landed late must never overwrite a fresher turn-end snapshot or refresh
      *  the throttle clock). Defaults to Date.now() for legacy callers/tests. */
     capturedAtMs?: number;
-  },
+  } & (
+    | { sessionId: string; turnId: string; attemptId: string; idleCheckpoint?: never }
+    | {
+        /** The capture was claimed with `idleCheckpoint`: no turn attempt
+         * owns it, and the exact capture claim is the only owner fence. */
+        idleCheckpoint: true;
+        sessionId?: never;
+        turnId?: never;
+        attemptId?: never;
+      }
+  ),
 ): Promise<{
   wrote: boolean;
   throttled: boolean;
@@ -61195,43 +59616,47 @@ export async function persistWarmSnapshot(
       // interruption first and the late snapshot becomes a no-op. An in-process
       // AbortSignal cannot close this database race.
       await lockWorkspaceInferenceControl(scopedDb, input.workspaceId, "share");
-      const [attempt] = await scopedDb
-        .select({
-          accountId: schema.sessionTurnAttempts.accountId,
-          state: schema.sessionTurnAttempts.state,
-          outcome: schema.sessionTurnAttempts.outcome,
-          sandboxGroupId: schema.sessions.sandboxGroupId,
-        })
-        .from(schema.sessionTurnAttempts)
-        .innerJoin(
-          schema.sessions,
-          and(
-            eq(schema.sessions.id, schema.sessionTurnAttempts.sessionId),
-            eq(schema.sessions.workspaceId, schema.sessionTurnAttempts.workspaceId),
-          ),
-        )
-        .where(
-          and(
-            eq(schema.sessionTurnAttempts.workspaceId, input.workspaceId),
-            eq(schema.sessionTurnAttempts.sessionId, input.sessionId),
-            eq(schema.sessionTurnAttempts.turnId, input.turnId),
-            eq(schema.sessionTurnAttempts.id, input.attemptId),
-          ),
-        )
-        .limit(1);
-      const [interruption] = attempt
-        ? await scopedDb
-            .select({ id: schema.sessionAttemptInterruptions.id })
-            .from(schema.sessionAttemptInterruptions)
-            .where(
+      const turnOwner = input.idleCheckpoint === true ? null : input;
+      const [attempt] = !turnOwner
+        ? []
+        : await scopedDb
+            .select({
+              accountId: schema.sessionTurnAttempts.accountId,
+              state: schema.sessionTurnAttempts.state,
+              outcome: schema.sessionTurnAttempts.outcome,
+              sandboxGroupId: schema.sessions.sandboxGroupId,
+            })
+            .from(schema.sessionTurnAttempts)
+            .innerJoin(
+              schema.sessions,
               and(
-                eq(schema.sessionAttemptInterruptions.workspaceId, input.workspaceId),
-                eq(schema.sessionAttemptInterruptions.sessionId, input.sessionId),
-                eq(schema.sessionAttemptInterruptions.attemptId, input.attemptId),
+                eq(schema.sessions.id, schema.sessionTurnAttempts.sessionId),
+                eq(schema.sessions.workspaceId, schema.sessionTurnAttempts.workspaceId),
               ),
             )
-            .limit(1)
-        : [];
+            .where(
+              and(
+                eq(schema.sessionTurnAttempts.workspaceId, input.workspaceId),
+                eq(schema.sessionTurnAttempts.sessionId, turnOwner.sessionId),
+                eq(schema.sessionTurnAttempts.turnId, turnOwner.turnId),
+                eq(schema.sessionTurnAttempts.id, turnOwner.attemptId),
+              ),
+            )
+            .limit(1);
+      const [interruption] =
+        attempt && turnOwner
+          ? await scopedDb
+              .select({ id: schema.sessionAttemptInterruptions.id })
+              .from(schema.sessionAttemptInterruptions)
+              .where(
+                and(
+                  eq(schema.sessionAttemptInterruptions.workspaceId, input.workspaceId),
+                  eq(schema.sessionAttemptInterruptions.sessionId, turnOwner.sessionId),
+                  eq(schema.sessionAttemptInterruptions.attemptId, turnOwner.attemptId),
+                ),
+              )
+              .limit(1)
+          : [];
       const attemptMayPersistWorkspace =
         attempt !== undefined &&
         (attempt.state === "claimed" || attempt.state === "running"
@@ -61261,11 +59686,12 @@ export async function persistWarmSnapshot(
         candidateLease[0]?.resume_state,
       );
       if (
-        !attempt ||
-        attempt.accountId !== input.accountId ||
-        attempt.sandboxGroupId !== input.sandboxGroupId ||
-        interruption ||
-        !attemptMayPersistWorkspace
+        turnOwner &&
+        (!attempt ||
+          attempt.accountId !== input.accountId ||
+          attempt.sandboxGroupId !== input.sandboxGroupId ||
+          interruption ||
+          !attemptMayPersistWorkspace)
       ) {
         return {
           wrote: false,
@@ -61320,6 +59746,15 @@ export async function persistWarmSnapshot(
               and admission.provider_instance_id = lease.instance_id
               and admission.workspace_generation <= ${input.expectedWorkspaceGeneration}
               and admission.settled_at is null
+              and not (
+                lease.liveness = 'warm'
+                and ${concurrentCommandAdmission(sql`admission`, {
+                  id: sql`lease.id`,
+                  epoch: sql`lease.lease_epoch`,
+                  instanceId: sql`lease.instance_id`,
+                })}
+              )
+              and not ${crashedWorkerOrphanAdmissionSql(sql`admission`)}
               and (admission.actor_kind <> 'turn' or attempt.quiesced_at is null)
           )
         for update
@@ -63244,41 +61679,12 @@ export async function removeEnrollment(
           })),
         );
 
-        const activePointerTurn = activePointers.find((pointer) => pointer.activeTurnId !== null);
-        if (activePointerTurn) {
-          const result: MachineRemovalResult = {
-            ...baseResult,
-            outcome: "blocked",
-            removed: false,
-            code: "active_commands",
-            message: `Machine is selected by session ${activePointerTurn.title?.trim() || activePointerTurn.sessionId} while it has an active turn.`,
-            action: "Wait for or stop the active turn, then retry removal.",
-          };
-          await scopedDb.insert(schema.machineRemovalOperations).values({
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            enrollmentId: enrollment.id,
-            operationKey,
-            requestFingerprint,
-            outcome: result.outcome,
-            result,
-          });
-          await scopedDb.insert(schema.auditEvents).values({
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            subjectId: input.subjectId ?? null,
-            action: "connected_machine.removal_blocked",
-            targetType: "enrollment",
-            targetId: enrollment.id,
-            metadata: {
-              code: result.code,
-              sessionId: activePointerTurn.sessionId,
-              turnId: activePointerTurn.activeTurnId,
-              message: result.message,
-            },
-          });
-          return result;
-        }
+        // A conversation with a queued, paused or recovering turn is not work
+        // running on the machine; only the machine's lease below proves that.
+        // Such conversations are detached like idle ones: their next attempt
+        // finds no machine route and uses their managed sandbox instead.
+        // ("active_commands" remains a valid code in stored older results.)
+        const waitingTurns = activePointers.filter((pointer) => pointer.activeTurnId !== null);
 
         const [lease] = await scopedDb
           .select({
@@ -63386,6 +61792,9 @@ export async function removeEnrollment(
             targetId: enrollment.id,
             metadata: {
               sessionIds: detached.map((session) => session.sessionId),
+              // Turns that were waiting (queued, paused or recovering) when
+              // the machine was detached from their conversations.
+              waitingTurnIds: waitingTurns.map((pointer) => pointer.activeTurnId),
               replacementBackend: "none",
             },
           });
@@ -63679,10 +62088,18 @@ export async function setEnrollmentDisplayState(
     desktopUnavailableReason: string | null;
     /** Live snapshots update the desktop bit without rewriting release/update metadata. */
     runtimeDesktop?: boolean;
+    /** Live macOS permission snapshot, merged into the runtime capabilities. */
+    macPermissions?: EnrollmentMacPermissions;
     /** When present, fence the update to the exact still-live runner. */
     connectionInstanceId?: string;
   },
 ): Promise<{ updated: boolean }> {
+  const runtime: Record<string, boolean> = {
+    ...(input.runtimeDesktop !== undefined ? { desktop: input.runtimeDesktop } : {}),
+    ...(input.macPermissions ? enrollmentMacPermissionCapabilities(input.macPermissions) : {}),
+  };
+  const runtimeJson = JSON.stringify(runtime);
+  const mergeRuntime = Object.keys(runtime).length > 0;
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -63692,10 +62109,10 @@ export async function setEnrollmentDisplayState(
         .set({
           hasDisplay: input.hasDisplay,
           desktopUnavailableReason: input.desktopUnavailableReason,
-          ...(input.runtimeDesktop !== undefined
+          ...(mergeRuntime
             ? {
                 agentCapabilities: sql`coalesce(${schema.enrollments.agentCapabilities}, '{}'::jsonb)
-                  || jsonb_build_object('desktop', ${input.runtimeDesktop}::boolean)`,
+                  || ${runtimeJson}::jsonb`,
               }
             : {}),
           updatedAt: new Date(),
@@ -63717,9 +62134,9 @@ export async function setEnrollmentDisplayState(
             or(
               ne(schema.enrollments.hasDisplay, input.hasDisplay),
               sql`${schema.enrollments.desktopUnavailableReason} IS DISTINCT FROM ${input.desktopUnavailableReason}`,
-              ...(input.runtimeDesktop !== undefined
+              ...(mergeRuntime
                 ? [
-                    sql`${schema.enrollments.agentCapabilities}->'desktop' IS DISTINCT FROM to_jsonb(${input.runtimeDesktop}::boolean)`,
+                    sql`not (coalesce(${schema.enrollments.agentCapabilities}, '{}'::jsonb) @> ${runtimeJson}::jsonb)`,
                   ]
                 : []),
             ),
@@ -63727,6 +62144,106 @@ export async function setEnrollmentDisplayState(
         )
         .returning({ id: schema.enrollments.id });
       return { updated: rows.length > 0 };
+    },
+  );
+}
+
+/** The three macOS desktop permissions a Mac agent reports. */
+export type EnrollmentMacPermissions = {
+  screenRecording: boolean;
+  accessibility: boolean;
+  inputMonitoring: boolean;
+};
+
+const MAC_PERMISSION_CAPABILITY_KEYS = {
+  screenRecording: "macScreenRecording",
+  accessibility: "macAccessibility",
+  inputMonitoring: "macInputMonitoring",
+} as const;
+
+/** Runtime-capability keys under which a Mac's permission snapshot is stored. */
+export function enrollmentMacPermissionCapabilities(
+  permissions: EnrollmentMacPermissions,
+): Record<string, boolean> {
+  return {
+    [MAC_PERMISSION_CAPABILITY_KEYS.screenRecording]: permissions.screenRecording,
+    [MAC_PERMISSION_CAPABILITY_KEYS.accessibility]: permissions.accessibility,
+    [MAC_PERMISSION_CAPABILITY_KEYS.inputMonitoring]: permissions.inputMonitoring,
+  };
+}
+
+/** The stored Mac permission snapshot, or null when the agent never reported one. */
+export function enrollmentMacPermissions(
+  capabilities: Record<string, boolean> | null | undefined,
+): EnrollmentMacPermissions | null {
+  const read = (key: string) => capabilities?.[key];
+  const screenRecording = read(MAC_PERMISSION_CAPABILITY_KEYS.screenRecording);
+  const accessibility = read(MAC_PERMISSION_CAPABILITY_KEYS.accessibility);
+  const inputMonitoring = read(MAC_PERMISSION_CAPABILITY_KEYS.inputMonitoring);
+  if (
+    typeof screenRecording !== "boolean" ||
+    typeof accessibility !== "boolean" ||
+    typeof inputMonitoring !== "boolean"
+  ) {
+    return null;
+  }
+  return { screenRecording, accessibility, inputMonitoring };
+}
+
+/**
+ * Allow screen control on one active enrollment, in place: same id, scope,
+ * owner and credential generation. The machine's next credential renewal (the
+ * control plane requests one immediately when it is online) carries the
+ * consent. Only the screen-control bit changes, and the change is audited with
+ * the actor (a person or an agent attempt acting for one). `active` is false
+ * when the enrollment is gone or no longer active.
+ */
+export async function allowEnrollmentScreenControl(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    enrollmentId: string;
+    subjectId: string | null;
+    sessionId?: string | null;
+    attemptId?: string | null;
+  },
+): Promise<{ updated: boolean; active: boolean }> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const target = and(
+        eq(schema.enrollments.workspaceId, input.workspaceId),
+        eq(schema.enrollments.id, input.enrollmentId),
+        eq(schema.enrollments.status, "active"),
+      );
+      const rows = await scopedDb
+        .update(schema.enrollments)
+        .set({ allowScreenControl: true, updatedAt: new Date() })
+        .where(and(target, eq(schema.enrollments.allowScreenControl, false)))
+        .returning({ id: schema.enrollments.id });
+      if (rows.length === 0) {
+        const [current] = await scopedDb
+          .select({ id: schema.enrollments.id })
+          .from(schema.enrollments)
+          .where(target)
+          .limit(1);
+        return { updated: false, active: current !== undefined };
+      }
+      await scopedDb.insert(schema.auditEvents).values({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: input.subjectId,
+        action: "connected_machine.screen_control.allowed",
+        targetType: "enrollment",
+        targetId: input.enrollmentId,
+        metadata: {
+          ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+          ...(input.attemptId ? { attemptId: input.attemptId } : {}),
+        },
+      });
+      return { updated: true, active: true };
     },
   );
 }
@@ -64399,6 +62916,20 @@ async function finalizeEnrollmentInScope(
 // end state as approveDeviceEnrollmentRequest — an enrollments row + a selfhosted
 // sandbox row — but WITHOUT a pending device-flow request (a stateless `oget_`
 // token carries the grant). Idempotent via the shared finalize core's upsert.
+//
+// A token with an id (`jti`) is single-use: its redemption is recorded in the
+// same transaction as the enrollment, so it connects exactly one machine. The
+// same machine (same public key) may repeat the exchange while its enrollment is
+// still active; any other machine, or a machine removed since, gets
+// EnrollTokenAlreadyRedeemedError and nothing is written. Legacy tokens without
+// an id keep their old multi-use behavior until they expire.
+export class EnrollTokenAlreadyRedeemedError extends Error {
+  constructor() {
+    super("enroll token was already used to connect another machine");
+    this.name = "EnrollTokenAlreadyRedeemedError";
+  }
+}
+
 export async function finalizeEnrollmentByToken(
   db: Database,
   input: {
@@ -64410,15 +62941,59 @@ export async function finalizeEnrollmentByToken(
     os: EnrollmentOs;
     arch: string;
     sandboxName: string;
+    /** The token's `jti`; when present the token is single-use. */
+    tokenId?: string | null;
+    /** The token's expiry; required with tokenId (bounds redemption retention). */
+    tokenExpiresAt?: Date | null;
     now?: Date;
   },
 ): Promise<{ enrollment: EnrollmentRecord; sandbox: SandboxRecord }> {
   const now = input.now ?? new Date();
+  const tokenId = input.tokenId ?? null;
+  if (tokenId !== null && !input.tokenExpiresAt) {
+    throw new Error("a single-use enroll token requires its expiry");
+  }
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
-      return await finalizeEnrollmentInScope(scopedDb, {
+      if (tokenId !== null) {
+        // Expired redemptions can never match a live token; drop them so the
+        // ledger stays bounded per workspace.
+        await scopedDb.execute(sql`
+          delete from enrollment_token_redemptions
+          where workspace_id = ${input.workspaceId}::uuid
+            and expires_at < ${new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString()}::timestamptz`);
+        // Claim the token first. A concurrent claim by another machine blocks on
+        // the primary key, then sees this row and is refused.
+        const claimed = await rawRows<{ tokenId: string }>(
+          scopedDb,
+          sql`insert into enrollment_token_redemptions
+                (token_id, account_id, workspace_id, pubkey, expires_at, redeemed_at)
+              values (${tokenId}, ${input.accountId}::uuid, ${input.workspaceId}::uuid,
+                ${input.pubkey}, ${input.tokenExpiresAt!.toISOString()}::timestamptz,
+                ${now.toISOString()}::timestamptz)
+              on conflict (token_id) do nothing
+              returning token_id as "tokenId"`,
+        );
+        if (claimed.length === 0) {
+          // A repeat by the same machine is a retry only while the machine it
+          // connected is still enrolled; a removed machine needs a new token.
+          const [existing] = await rawRows<{ pubkey: string; enrollmentActive: boolean }>(
+            scopedDb,
+            sql`select r.pubkey,
+                       coalesce(e.status = 'active', false) as "enrollmentActive"
+                from enrollment_token_redemptions r
+                left join enrollments e on e.id = r.enrollment_id
+                where r.token_id = ${tokenId}
+                  and r.workspace_id = ${input.workspaceId}::uuid`,
+          );
+          if (!existing || existing.pubkey !== input.pubkey || !existing.enrollmentActive) {
+            throw new EnrollTokenAlreadyRedeemedError();
+          }
+        }
+      }
+      const finalized = await finalizeEnrollmentInScope(scopedDb, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
         pubkey: input.pubkey,
@@ -64429,6 +63004,14 @@ export async function finalizeEnrollmentByToken(
         sandboxName: input.sandboxName,
         now,
       });
+      if (tokenId !== null) {
+        await scopedDb.execute(sql`
+          update enrollment_token_redemptions
+          set enrollment_id = ${finalized.enrollment.id}::uuid
+          where token_id = ${tokenId}
+            and workspace_id = ${input.workspaceId}::uuid`);
+      }
+      return finalized;
     },
   );
 }
@@ -65458,7 +64041,7 @@ export async function revokeViewer(
 // Warm-time metering (P2.1) — the COST hole the lease design opens.
 //
 // A box held warm by a viewer with no agent turn running emits ZERO model usage
-// today; the provider bills by wall-clock and OpenGeni meters nothing. Warm-time
+// today; the provider bills by wall-clock and Opengeni meters nothing. Warm-time
 // accrues on TWO stateless ticks: (a) the turn's existing activity heartbeat
 // (while a turn runs); (b) the reaper sweep (for viewer-only boxes between turns).
 //
@@ -66257,19 +64840,22 @@ export async function getSessionGoalWithContinuation(
           ),
         )
         .limit(1);
-      const [capacityWait] = await tx
-        .select({ nextCheckAt: schema.codexCapacityWaiters.nextCheckAt })
-        .from(schema.codexCapacityWaiters)
-        .where(
-          and(
-            eq(schema.codexCapacityWaiters.workspaceId, workspaceId),
-            eq(schema.codexCapacityWaiters.sessionId, sessionId),
-            eq(schema.codexCapacityWaiters.goalId, goal.id),
-            eq(schema.codexCapacityWaiters.goalVersion, goal.version),
-            eq(schema.codexCapacityWaiters.status, "waiting"),
-          ),
-        )
-        .limit(1);
+
+      // A shared-core Codex waiter for the same goal fence (the only kind
+      // written after 0680; the legacy table is frozen).
+      const coreCapacityWait = await readSubscriptionCoreCodexWaiterInTransaction(
+        tx as unknown as Database,
+        {
+          workspaceId,
+          sessionId,
+        },
+      );
+      const capacityWait =
+        coreCapacityWait &&
+        coreCapacityWait.goalId === goal.id &&
+        coreCapacityWait.goalVersion === goal.version
+          ? { nextCheckAt: coreCapacityWait.nextCheckAt }
+          : undefined;
       const xaiCapacityWait = await getXaiCapacityWaitForSessionInTransaction(
         tx,
         workspaceId,
@@ -68339,6 +66925,16 @@ export async function updateSessionTitleWithEvent(
   );
 }
 
+/** Read-only admission at a locked paused-to-active transition. */
+export type SessionGoalResumeValidation = (
+  tx: Database,
+  session: Pick<
+    Session,
+    "accountId" | "workspaceId" | "model" | "codexCompactionMode" | "latencyMode"
+  >,
+  causalTurn: { id: string; initiatingHumanSubjectId: string | null } | null,
+) => Promise<void>;
+
 /**
  * Status transition helper. Idempotent: requesting the current status returns
  * `changed: false` so callers can skip emitting a duplicate event. `completed`
@@ -68358,6 +66954,8 @@ export async function setSessionGoalStatus(
     reportDeliveries?: SessionGoalReportDelivery[];
     reportArtifactActor?: ReportArtifactActor;
     commandActor?: Extract<SessionCommandActor, { type: "agent_attempt" }>;
+    /** Runs under the canonical control/session/goal locks, before a paused goal changes. */
+    beforeResume?: SessionGoalResumeValidation;
   },
 ): Promise<{
   goal: SessionGoal;
@@ -68406,6 +67004,51 @@ export async function setSessionGoalStatus(
     }
     if (existing.status === "completed") {
       throw new Error("session goal is completed; set a new goal to continue");
+    }
+    if (input.status === "active" && input.beforeResume) {
+      const [effectiveSession] = await withEffectiveSessionPolicy(scopedDb, workspaceId, [session]);
+      // An accepted running turn owns the work the goal will continue after it
+      // settles. An idle Resume uses the exact latest-finished causal row.
+      const causalTurnFilter = session.activeTurnId
+        ? or(
+            eq(schema.sessionTurns.id, session.activeTurnId),
+            sql`${schema.sessionTurns.finishedAt} is not null`,
+          )
+        : sql`${schema.sessionTurns.finishedAt} is not null`;
+      const [causalTurn] = await scopedDb
+        .select({
+          id: schema.sessionTurns.id,
+          initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
+        })
+        .from(schema.sessionTurns)
+        .where(
+          and(
+            eq(schema.sessionTurns.workspaceId, workspaceId),
+            eq(schema.sessionTurns.sessionId, sessionId),
+            causalTurnFilter,
+          ),
+        )
+        .orderBy(
+          ...(session.activeTurnId
+            ? [desc(sql`${schema.sessionTurns.id} = ${session.activeTurnId}`)]
+            : []),
+          desc(schema.sessionTurns.finishedAt),
+          desc(schema.sessionTurns.position),
+          desc(schema.sessionTurns.createdAt),
+          desc(schema.sessionTurns.id),
+        )
+        .limit(1);
+      await input.beforeResume(
+        scopedDb,
+        {
+          accountId: session.accountId,
+          workspaceId,
+          model: effectiveSession!.model,
+          latencyMode: effectiveSession!.latencyMode as Session["latencyMode"],
+          codexCompactionMode: session.codexCompactionMode as Session["codexCompactionMode"],
+        },
+        causalTurn ?? null,
+      );
     }
     if (input.status === "completed") {
       await verifyGoalReportDeliveries(scopedDb, {
@@ -68500,6 +67143,7 @@ export async function setSessionGoalStatusWithEvent(
     reportDeliveries?: SessionGoalReportDelivery[];
     reportArtifactActor?: ReportArtifactActor;
     commandActor?: Extract<SessionCommandActor, { type: "agent_attempt" }>;
+    beforeResume?: SessionGoalResumeValidation;
     event: SetSessionGoalStatusEvent;
   },
 ): Promise<{
@@ -68533,6 +67177,7 @@ export async function setSessionGoalStatusWithEvent(
           : {}),
         ...(input.reportArtifactActor ? { reportArtifactActor: input.reportArtifactActor } : {}),
         ...(input.commandActor ? { commandActor: input.commandActor } : {}),
+        ...(input.beforeResume ? { beforeResume: input.beforeResume } : {}),
         ...(input.evidence !== undefined ? { evidence: input.evidence } : {}),
         ...(input.rationale !== undefined ? { rationale: input.rationale } : {}),
         ...(input.pausedReason !== undefined ? { pausedReason: input.pausedReason } : {}),
@@ -68631,7 +67276,7 @@ export type GoalContinuationDecision =
   | { decision: "queue" }
   | {
       decision: "paused";
-      reason: "max_auto_continuations" | "limits" | "allowance";
+      reason: "max_auto_continuations" | "limits" | GoalAdmissionPausedReason;
       goal: SessionGoal;
     }
   | {
@@ -68664,33 +67309,6 @@ async function turnHasFailureCodeTx(
   return Boolean(failure);
 }
 
-async function latestFinishedTurnHasFailureCodeTx(
-  tx: Database,
-  workspaceId: string,
-  sessionId: string,
-  code: string,
-): Promise<boolean> {
-  const [latestFinished] = await tx
-    .select({ id: schema.sessionTurns.id })
-    .from(schema.sessionTurns)
-    .where(
-      and(
-        eq(schema.sessionTurns.workspaceId, workspaceId),
-        eq(schema.sessionTurns.sessionId, sessionId),
-        sql`${schema.sessionTurns.finishedAt} is not null`,
-      ),
-    )
-    .orderBy(
-      desc(schema.sessionTurns.finishedAt),
-      desc(schema.sessionTurns.position),
-      desc(schema.sessionTurns.createdAt),
-    )
-    .limit(1);
-  return latestFinished
-    ? await turnHasFailureCodeTx(tx, workspaceId, sessionId, latestFinished.id, code)
-    : false;
-}
-
 /**
  * Core continuation decision, taken in one transaction with the goal row
  * locked. Queued work always wins; any non-terminal turn (queued, running, or
@@ -68710,7 +67328,7 @@ export async function evaluateGoalContinuation(
     // decision (before the counter bump) so a budget pause never consumes
     // continuation budget.
     budgetBlocked?: string | null;
-    budgetPausedReason?: "limits" | "allowance" | undefined;
+    budgetPausedReason?: "limits" | GoalAdmissionPausedReason | undefined;
   },
 ): Promise<GoalContinuationDecision> {
   return await withWorkspaceRls(
@@ -68972,7 +67590,7 @@ export async function materializeGoalContinuation(
     workflowId: string;
     defaultMaxAutoContinuations?: number | null;
     budgetBlocked?: string | null;
-    budgetPausedReason?: "limits" | "allowance" | undefined;
+    budgetPausedReason?: "limits" | GoalAdmissionPausedReason | undefined;
     /** Trusted worker admission, evaluated under the same session/goal locks
      * as lineage materialization. Never substitutes a mutable latest human. */
     admission?: (
@@ -68980,7 +67598,7 @@ export async function materializeGoalContinuation(
       causalTurn: { id: string; initiatingHumanSubjectId: string | null } | null,
     ) => Promise<{
       budgetBlocked: string | null;
-      budgetPausedReason?: "limits" | "allowance";
+      budgetPausedReason?: "limits" | GoalAdmissionPausedReason;
     }>;
     idleBackoff?: GoalIdleBackoffPolicy | null;
     policy: {
@@ -69182,17 +67800,14 @@ export async function materializeGoalContinuation(
           } as const;
         }
 
-        const [capacityWait] = await tx
-          .select({ id: schema.codexCapacityWaiters.id })
-          .from(schema.codexCapacityWaiters)
-          .where(
-            and(
-              eq(schema.codexCapacityWaiters.workspaceId, input.workspaceId),
-              eq(schema.codexCapacityWaiters.sessionId, input.sessionId),
-              eq(schema.codexCapacityWaiters.status, "waiting"),
-            ),
-          )
-          .limit(1);
+        // A shared-core Codex waiter (the only kind written after 0680).
+        const coreCapacityWait = await readSubscriptionCoreCodexWaiterInTransaction(
+          tx as unknown as Database,
+          {
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+          },
+        );
         const xaiCapacityWait = await getXaiCapacityWaitForSessionInTransaction(
           tx,
           input.workspaceId,
@@ -69203,27 +67818,33 @@ export async function materializeGoalContinuation(
           input.workspaceId,
           input.sessionId,
         );
-        if (capacityWait || xaiCapacityWait || claudeCapacityWait) {
+        if (coreCapacityWait || xaiCapacityWait || claudeCapacityWait) {
           return { action: "none", events: [] } as const;
         }
 
         // Pending machine input is real model input that the next claim
         // delivers. The workflow evaluates a session-level wait before calling
         // this goal materializer, so any pending update reaching this locked
-        // boundary wins over a synthesized continuation.
-        const pendingMachineInput = await pendingSystemUpdateWakeClassesTx(
+        // boundary wins over a synthesized continuation. After a terminal
+        // compaction failure only input committed after that failure (or an
+        // Agent Steer) is new truth; the held backlog alone leaves the goal
+        // inert below instead of retrying unchanged state.
+        const compactionHoldSequence = await compactionFailureHoldSequenceTx(
           tx,
           input.workspaceId,
           input.sessionId,
         );
+        const pendingMachineInput = await pendingSystemUpdateWakeClassesTx(
+          tx,
+          input.workspaceId,
+          input.sessionId,
+          { pendingAfterSequence: compactionHoldSequence },
+        );
         if (
-          (pendingMachineInput.immediate || pendingMachineInput.deferred) &&
-          !(await latestFinishedTurnHasFailureCodeTx(
-            tx,
-            input.workspaceId,
-            input.sessionId,
-            "context_compaction_failed",
-          ))
+          pendingMachineInput.immediate ||
+          pendingMachineInput.deferred ||
+          (compactionHoldSequence !== null &&
+            (await pendingAgentSteerExistsTx(tx, input.workspaceId, input.sessionId)))
         ) {
           return { action: "queue", events: [] } as const;
         }
@@ -69343,6 +67964,7 @@ export async function materializeGoalContinuation(
               schema.sessionTurns.xaiProviderAccountAuthoritySnapshot,
             claudeProviderAccountAuthoritySnapshot:
               schema.sessionTurns.claudeProviderAccountAuthoritySnapshot,
+            metadata: schema.sessionTurns.metadata,
           })
           .from(schema.sessionTurns)
           .where(
@@ -69439,16 +68061,24 @@ export async function materializeGoalContinuation(
               `session_turns:${input.workspaceId}:${input.sessionId}:${causalTurn.id}`,
             )
           : [];
+        // Without a finished causal turn there is no accepted pool or human to
+        // carry, so resolve the organization or workspace pool (never personal).
+        const sharedGoalPool = causalTurn
+          ? null
+          : await sharedPoolSubscriptionAuthoritySnapshotsInTransaction(tx, input.workspaceId);
         const xaiProviderAccountAuthoritySnapshot = causalTurn
           ? XaiProviderAccountAuthoritySnapshotV1.parse(
               causalTurn.xaiProviderAccountAuthoritySnapshot,
             )
-          : WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1;
+          : sharedGoalPool!.xai;
         const claudeProviderAccountAuthoritySnapshot = causalTurn
           ? ClaudeProviderAccountAuthoritySnapshotV1.parse(
               causalTurn.claudeProviderAccountAuthoritySnapshot,
             )
-          : WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1;
+          : sharedGoalPool!.claude;
+        const causalCodexPolicy = causalTurn
+          ? readCodexCredentialPolicySnapshotV1(causalTurn.metadata)
+          : { kind: "absent" as const };
         const xaiAuthoritySubjectId =
           causalTurn && xaiProviderAccountAuthoritySnapshot.scope === "user"
             ? (causalTurn.initiatingHumanSubjectId ??
@@ -69510,6 +68140,11 @@ export async function materializeGoalContinuation(
                       : {}),
                     ...(xaiAuthoritySubjectId ? { xaiAuthoritySubjectId } : {}),
                     ...(claudeAuthoritySubjectId ? { claudeAuthoritySubjectId } : {}),
+                    ...(causalCodexPolicy.kind === "valid"
+                      ? {
+                          [CODEX_CREDENTIAL_POLICY_SNAPSHOT_METADATA_KEY]: causalCodexPolicy.policy,
+                        }
+                      : {}),
                   },
                   personalConnectionDelegations,
                   mcpAccountBindings: parseAcceptedMcpAccountBindings(
@@ -69660,6 +68295,12 @@ export type InitializeSessionStartInput = {
   turnExecutionPolicy?: TurnExecutionPolicyV1;
   /** Content-free product surface the create request entered through. */
   surface?: SessionTurnSurface | null;
+  /**
+   * Codex v2 (M3 PR 3b) frozen by a trusted producer for the first turn: a
+   * scheduled firing passes its task's value, which is copied, never
+   * recomputed. Omitted by every other caller (the acceptance rule applies).
+   */
+  initialSubscriptionAuthority?: SubscriptionPersonalAuthorityV2 | null;
   createdEventPayload: Record<string, unknown>;
   /** Trusted backend-only capture for a newly inserted initial turn. Runs under
    * the canonical activity transaction; failure rolls back events and turn.
@@ -70162,12 +68803,14 @@ export async function initializeSessionStartAtomically(
           );
           let initialTurnInitiatingHumanSubjectId =
             creator.initiator.kind === "subject" ? creator.initiator.subjectId : null;
+          let causalParentSubscriptionAuthority: SubscriptionPersonalAuthorityV2 | null = null;
           if (session.parentSessionId && session.parentTurnId) {
             const [causalParentTurn] = await tx
               .select({
                 initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
                 initiatorKind: schema.sessionTurns.initiatorKind,
                 initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
+                subscriptionAuthority: schema.sessionTurns.subscriptionAuthority,
               })
               .from(schema.sessionTurns)
               .where(
@@ -70187,6 +68830,7 @@ export async function initializeSessionStartAtomically(
               (causalParentTurn.initiatorKind === "subject"
                 ? causalParentTurn.initiatorSubjectId
                 : null);
+            causalParentSubscriptionAuthority = causalParentTurn.subscriptionAuthority ?? null;
           }
           if (initialPersonalConnectionDelegations.length > 0) {
             if (!initialTurnInitiatingHumanSubjectId) {
@@ -70202,6 +68846,42 @@ export async function initializeSessionStartAtomically(
           }
           queueTailPosition += 1;
           const acceptedAt = new Date();
+          // Codex v2 accepted authority (M3 PR 2a): only the owner's own
+          // initial message freezes personal authority. A scheduled firing
+          // copies its task's frozen value (M3 PR 3b). A child session's first
+          // turn takes its exact causal parent turn's immutable value (M3 PR 3,
+          // design 3.7 EP-T13), never a fresh computation: it gains nothing the
+          // parent did not hold, and the database rechecks owner, session and
+          // generation before any personal lease. A parent with no v2 value
+          // yields the empty value once the cutover is enabled.
+          const initialSubscriptionAuthority =
+            input.initialSubscriptionAuthority !== undefined
+              ? await codexSubscriptionAuthorityV2OrEmptyInTransaction(
+                  tx as unknown as Database,
+                  session.accountId,
+                  input.initialSubscriptionAuthority,
+                )
+              : session.parentSessionId
+                ? causalParentSubscriptionAuthority !== null
+                  ? causalParentSubscriptionAuthority
+                  : await codexSubscriptionAuthorityV2ForAcceptanceInTransaction(
+                      tx as unknown as Database,
+                      {
+                        accountId: session.accountId,
+                        workspaceId: input.workspaceId,
+                        sessionId: session.id,
+                        acceptingSubjectId: null,
+                      },
+                    )
+                : await codexSubscriptionAuthorityV2ForAcceptanceInTransaction(
+                    tx as unknown as Database,
+                    {
+                      accountId: session.accountId,
+                      workspaceId: input.workspaceId,
+                      sessionId: session.id,
+                      acceptingSubjectId: initialTurnInitiatingHumanSubjectId,
+                    },
+                  );
           [turn] = await tx
             .insert(schema.sessionTurns)
             .values(
@@ -70241,6 +68921,7 @@ export async function initializeSessionStartAtomically(
                     session.initialXaiProviderAccountAuthoritySnapshot,
                   claudeProviderAccountAuthoritySnapshot:
                     session.initialClaudeProviderAccountAuthoritySnapshot,
+                  subscriptionAuthority: initialSubscriptionAuthority,
                   createdAt: acceptedAt,
                   updatedAt: acceptedAt,
                 },
@@ -70528,6 +69209,16 @@ export async function enqueueSessionTurn(
             )
           `);
         }
+        // Callers that froze no pool resolve the organization or workspace
+        // pool; a personal pool always requires an explicit frozen snapshot.
+        const sharedTurnPool =
+          input.xaiProviderAccountAuthoritySnapshot === undefined ||
+          input.claudeProviderAccountAuthoritySnapshot === undefined
+            ? await sharedPoolSubscriptionAuthoritySnapshotsInTransaction(
+                tx as unknown as Database,
+                input.workspaceId,
+              )
+            : null;
         const [row] = await tx
           .insert(schema.sessionTurns)
           .values(
@@ -70563,11 +69254,21 @@ export async function enqueueSessionTurn(
                 personalConnectionDelegations: input.personalConnectionDelegations ?? [],
                 mcpAccountBindings: parseAcceptedMcpAccountBindings(input.mcpAccountBindings),
                 xaiProviderAccountAuthoritySnapshot:
-                  input.xaiProviderAccountAuthoritySnapshot ??
-                  WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+                  input.xaiProviderAccountAuthoritySnapshot ?? sharedTurnPool!.xai,
                 claudeProviderAccountAuthoritySnapshot:
-                  input.claudeProviderAccountAuthoritySnapshot ??
-                  WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+                  input.claudeProviderAccountAuthoritySnapshot ?? sharedTurnPool!.claude,
+                // This exported low-level enqueue is also an acceptance boundary.
+                // Freeze the named human (or empty service authority) exactly once,
+                // just like the canonical prompt path; never leave postcutover NULL.
+                subscriptionAuthority: await codexSubscriptionAuthorityV2ForAcceptanceInTransaction(
+                  tx as unknown as Database,
+                  {
+                    accountId: input.accountId,
+                    workspaceId: input.workspaceId,
+                    sessionId: input.sessionId,
+                    acceptingSubjectId: initiatingHumanSubjectId,
+                  },
+                ),
                 createdAt: acceptedAt,
                 updatedAt: acceptedAt,
               },
@@ -70623,6 +69324,7 @@ type BoundedSystemUpdate = Pick<
   | "xaiProviderAccountAuthoritySnapshot"
   | "claudeProviderAccountAuthoritySnapshot"
   | "scheduledTaskRunId"
+  | "subscriptionAuthority"
 >;
 
 export type FrozenXaiExecutionAuthority = {
@@ -70659,13 +69361,6 @@ const frozenClaudeExecutionAuthority = (
   update: Parameters<typeof frozenSubscriptionExecutionAuthority>[0],
 ) => frozenSubscriptionExecutionAuthority(update, "claude");
 
-function frozenXaiExecutionAuthorityKey(authority: FrozenXaiExecutionAuthority): string {
-  return stableJson({
-    snapshot: authority.snapshot,
-    subjectId: authority.subjectId,
-  });
-}
-
 function systemUpdateExecutionAuthorityKey(update: BoundedSystemUpdate): string {
   const personalConnectionDelegations = parsedPersonalConnectionDelegations(
     update.personalConnectionDelegations,
@@ -70681,6 +69376,9 @@ function systemUpdateExecutionAuthorityKey(update: BoundedSystemUpdate): string 
         ? (update.lineage.connectionAuthoritySubjectId ?? null)
         : null,
     scheduledTaskRunId: update.scheduledTaskRunId,
+    // Codex v2 (M3 PR 3b): updates frozen with different values never share
+    // one internal turn.
+    codexV2: update.subscriptionAuthority ?? null,
   });
 }
 
@@ -70900,6 +69598,131 @@ function selectBoundedSystemUpdateBatch<T extends BoundedSystemUpdate>(
     selectedBytes += updateBytes;
   }
   return selected;
+}
+
+function recognizedInboxPayload(
+  update: Pick<
+    typeof schema.sessionSystemUpdates.$inferSelect,
+    "kind" | "payload" | "payloadCodecVersion"
+  >,
+): SessionSystemUpdatePayload | null {
+  const parsed = SessionSystemUpdatePayload.safeParse(
+    fromPostgresLosslessJson(update.payload, update.payloadCodecVersion),
+  );
+  return SessionSystemUpdateKindSchema.safeParse(update.kind).success && parsed.success
+    ? parsed.data
+    : null;
+}
+
+/** Match claim's bounded read before validation, including goal supersession.
+ * Callers retain database ordering; Date would discard timestamp precision. */
+function pendingInboxReadWindow(
+  updates: Array<typeof schema.sessionSystemUpdates.$inferSelect>,
+  supersedeGoalContinuations: boolean,
+) {
+  const steer = updates.find((update) => update.kind === "agent_steer_instruction");
+  const ordinary = updates
+    .filter(
+      (update) =>
+        update.kind !== "agent_steer_instruction" &&
+        (!(steer || supersedeGoalContinuations) || update.kind !== "goal_continuation"),
+    )
+    .slice(0, MAX_INTERNAL_UPDATE_BATCH_MEMBERS + (steer ? 0 : 1));
+  return steer ? [steer, ...ordinary] : ordinary;
+}
+
+/** Select execution ownership before grouping canonical input; never rewrite producer receipts. */
+async function planInboxBatch(
+  tx: Database,
+  session: Pick<
+    typeof schema.sessions.$inferSelect,
+    "id" | "accountId" | "workspaceId" | "executionContextTurnId"
+  >,
+  updates: Array<typeof schema.sessionSystemUpdates.$inferSelect>,
+  receivingTurn?: typeof schema.sessionTurns.$inferSelect,
+) {
+  const loaded = await loadInboxExecutionContext(tx, {
+    accountId: session.accountId,
+    workspaceId: session.workspaceId,
+    sessionId: session.id,
+    contextTurnId: receivingTurn?.id ?? session.executionContextTurnId,
+    updates,
+  });
+  const compatible = (update: typeof schema.sessionSystemUpdates.$inferSelect) => {
+    if (loaded.eligibleIds.has(update.id)) return true;
+    const context = loaded.context;
+    if (
+      context &&
+      receivingTurn?.metadata.delivery === "steer" &&
+      update.kind === "agent_steer_instruction"
+    ) {
+      const actor = inboxOrigin(update, session.id);
+      const origin = actor ? loaded.origins.get(actor.turnId) : undefined;
+      return Boolean(
+        origin &&
+        origin.sessionId === actor?.sessionId &&
+        !origin.externalLink &&
+        turnHuman(origin) &&
+        turnHuman(origin) === turnHuman(context),
+      );
+    }
+    if (
+      !context ||
+      update.scheduledTaskRunId ||
+      update.kind === "agent_steer_instruction" ||
+      update.kind === "agent_message" ||
+      isChildLifecycleSystemUpdateKind(update.kind)
+    )
+      return false;
+    const human = turnHuman(context);
+    const contextReceipt = {
+      ...update,
+      personalConnectionDelegations: context.personalConnectionDelegations,
+      mcpAccountBindings: context.mcpAccountBindings,
+      xaiProviderAccountAuthoritySnapshot: context.xaiProviderAccountAuthoritySnapshot,
+      claudeProviderAccountAuthoritySnapshot: context.claudeProviderAccountAuthoritySnapshot,
+      // A Codex v2 value frozen on the update must equal the context's; an
+      // update that froze none follows the v1 rule above and the delivering
+      // turn copies the receiving context's value.
+      subscriptionAuthority:
+        update.subscriptionAuthority == null ? null : context.subscriptionAuthority,
+      lineage: {
+        connectionAuthoritySubjectId: human,
+        xaiAuthoritySubjectId: human,
+        claudeAuthoritySubjectId: human,
+      },
+    };
+    const causalKey = systemUpdateCausalExecutionKey(update, loaded.causalKeys, session.id);
+    const ownKey = loaded.causalKeys.get(`${session.id}:${context.id}`);
+    return (
+      systemUpdateExecutionAuthorityKey(update) ===
+        systemUpdateExecutionAuthorityKey(contextReceipt) &&
+      (causalKey === null || (ownKey !== null && causalKey === `target-human:${ownKey}`))
+    );
+  };
+  const receiverOwned = Boolean(
+    receivingTurn ||
+    (updates[0] &&
+      loaded.context &&
+      !loaded.context.externalLink &&
+      (loaded.eligibleIds.has(updates[0].id) ||
+        (updates[0].kind === "goal_continuation" && compatible(updates[0])))),
+  );
+  const candidates = receiverOwned && updates[0] && !compatible(updates[0]) ? [] : updates;
+  const selected = selectBoundedSystemUpdateBatch(
+    candidates,
+    (prior, candidate) =>
+      receiverOwned
+        ? compatible(candidate)
+        : systemUpdatesCanCoalesceForExecution(prior, candidate, loaded.causalKeys, session.id),
+    true,
+  );
+  const receiver = receiverOwned ? loaded.context : null;
+  return {
+    updates: selected,
+    receiverContext: receiver,
+    selectionNotes: receiver ? agentSelectionNotes(selected, receiver, loaded.origins) : {},
+  };
 }
 
 export type ClaimSessionWorkForAttemptInput = {
@@ -72117,7 +70940,12 @@ export async function claimSessionWorkForAttempt(
       stage: "session_attempts.claim",
       eventTypes: ["session.turn.attempt_claimed"],
       maxAttempts: 3,
-      organizationMembershipFence: true,
+      // No organization-membership fence, not even shared: the claim never
+      // takes that key (no trigger or function it reaches does since the
+      // host-MCP authority writers were retired), so it cannot invert the
+      // membership -> tenancy -> control -> session prefix. A membership
+      // removal racing a claim is caught at execution time: workspace-writer
+      // admission, connection and MCP authority revalidate live membership.
     },
     async (scopedDb) =>
       await withSessionActivitySavepoint(scopedDb, async (tx) => {
@@ -72128,15 +70956,16 @@ export async function claimSessionWorkForAttempt(
           nextSequence: number,
           occurredAt: Date,
           triggerEventId?: string,
-          expectedXaiAuthority?: FrozenXaiExecutionAuthority,
           options: {
             supersedeGoalContinuations?: boolean;
             deliverUpdates?: boolean;
             pendingEventSequenceBeforeOrAt?: number;
             commandOnlyMayRun?: boolean;
-            claudeAuthority?: FrozenXaiExecutionAuthority;
+            receivingTurn?: typeof schema.sessionTurns.$inferSelect;
           } = {},
         ): Promise<{
+          receiverContext: typeof schema.sessionTurns.$inferSelect | null;
+          selectionNotes: Record<string, string>;
           count: number;
           lastSequence: number;
           triggerEventId: string | null;
@@ -72245,16 +71074,24 @@ export async function claimSessionWorkForAttempt(
                   )
                   .orderBy(
                     // Command notices are retained context, not a reason to
-                    // strand later actionable input behind the read limit.
-                    sql`case when ${schema.sessionSystemUpdates.kind} = 'background_command_result' then 1 else 0 end`,
+                    // strand later actionable input behind the read limit. A
+                    // passive idle-containment notice sorts after real command
+                    // results so it can only ride along, never lead a batch
+                    // that the planner then closes on it alone.
+                    sql`case when ${passiveCommandNoticeSql()} then 2 when ${schema.sessionSystemUpdates.kind} = 'background_command_result' then 1 else 0 end`,
                     asc(schema.sessionSystemUpdates.createdAt),
                     asc(schema.sessionSystemUpdates.id),
                   )
                   .limit(MAX_INTERNAL_UPDATE_BATCH_MEMBERS + (agentSteer ? 0 : 1))
                   .for("update");
-          const updates = agentSteer ? [agentSteer, ...ordinary] : ordinary;
+          const updates = pendingInboxReadWindow(
+            agentSteer ? [agentSteer, ...ordinary] : ordinary,
+            options.supersedeGoalContinuations === true,
+          );
           if (updates.length === 0 && supersededGoalUpdateIds.length === 0) {
             return {
+              receiverContext: null,
+              selectionNotes: {},
               count: 0,
               lastSequence: nextSequence - 1,
               triggerEventId: null,
@@ -72281,14 +71118,9 @@ export async function claimSessionWorkForAttempt(
             // condition, never an endless re-peek: mark that one row failed
             // and record `unrecognized_kind` on the timeline; the rest of the
             // batch is claimed normally.
-            const parsedPayload = SessionSystemUpdatePayload.safeParse(
-              fromPostgresLosslessJson(update.payload, update.payloadCodecVersion),
-            );
-            if (parsedPayload.success) parsedPayloadsById.set(update.id, parsedPayload.data);
-            if (
-              !SessionSystemUpdateKindSchema.safeParse(update.kind).success ||
-              !parsedPayload.success
-            ) {
+            const parsedPayload = recognizedInboxPayload(update);
+            if (parsedPayload) parsedPayloadsById.set(update.id, parsedPayload);
+            if (!parsedPayload) {
               await tx
                 .update(schema.sessionSystemUpdates)
                 .set({ state: "failed" })
@@ -72379,135 +71211,23 @@ export async function claimSessionWorkForAttempt(
             }
             validUpdates.push(update);
           }
-          const candidates = validUpdates.filter(
-            (update) =>
-              (!expectedXaiAuthority ||
-                frozenXaiExecutionAuthorityKey(frozenXaiExecutionAuthority(update)) ===
-                  frozenXaiExecutionAuthorityKey(expectedXaiAuthority)) &&
-              (!options.claudeAuthority ||
-                frozenXaiExecutionAuthorityKey(frozenClaudeExecutionAuthority(update)) ===
-                  frozenXaiExecutionAuthorityKey(options.claudeAuthority)),
-          );
+          // Command results alone start a turn only under a held wait, and an
+          // idle-containment notice never does: when every input that opened
+          // the claim was rejected above, the notice waits for the next turn.
           if (
-            options.commandOnlyMayRun === false &&
-            candidates.every((update) => update.kind === "background_command_result")
+            validUpdates.every((update) => update.kind === "background_command_result") &&
+            (options.commandOnlyMayRun === false ||
+              (options.commandOnlyMayRun === true && validUpdates.every(isPassiveCommandNotice)))
           ) {
-            candidates.length = 0;
+            validUpdates.length = 0;
           }
-          const causalTurnIds = [
-            ...new Set(
-              candidates
-                .map(
-                  (update) =>
-                    systemUpdateCausalHumanTurnId(update) ??
-                    (update.kind === "agent_message"
-                      ? (agentCommandCausalActor(update)?.turnId ?? null)
-                      : null),
-                )
-                .filter((id): id is string => id !== null),
-            ),
-          ];
-          const causalTurns =
-            causalTurnIds.length === 0
-              ? []
-              : await tx
-                  .select({
-                    id: schema.sessionTurns.id,
-                    sessionId: schema.sessionTurns.sessionId,
-                    human: schema.sessionTurns.initiatingHumanSubjectId,
-                    initiatorKind: schema.sessionTurns.initiatorKind,
-                    initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
-                    // Inheritance copies these permissions from the first
-                    // causal turn. Equivalence must include all of them,
-                    // including revoked snapshots (never native fallback).
-                    externalLink: sql<unknown>`(select a.canonical_snapshot
-                      from external_link_turn_authorities a
-                      where a.account_id = ${accountId}::uuid
-                        and a.workspace_id = ${workspaceId}::uuid
-                        and a.session_id = ${schema.sessionTurns.sessionId}
-                        and a.turn_id = ${schema.sessionTurns.id})`,
-                  })
-                  .from(schema.sessionTurns)
-                  .where(
-                    and(
-                      eq(schema.sessionTurns.accountId, accountId),
-                      eq(schema.sessionTurns.workspaceId, workspaceId),
-                      inArray(schema.sessionTurns.id, causalTurnIds),
-                    ),
-                  );
-          // Host authority is owner-scoped. Resolve one batch per causal
-          // human, never mistake RLS-hidden selections for an empty grant set.
-          const turnsByHuman = new Map<string, string[]>();
-          for (const turn of causalTurns) {
-            const human =
-              turn.human ?? (turn.initiatorKind === "subject" ? turn.initiatorSubjectId : null);
-            if (!human) continue;
-            turnsByHuman.set(human, [...(turnsByHuman.get(human) ?? []), turn.id]);
-          }
-          const hostAuthorityByTurn = new Map<string, unknown[]>();
-          const incomingSubjectId = await rlsSubjectIdOrEmpty(tx);
-          try {
-            for (const [human, turnIds] of turnsByHuman) {
-              const authorities = await withWorkspaceSubjectRls(
-                tx,
-                workspaceId,
-                human,
-                async (subjectTx) =>
-                  subjectTx
-                    .select({
-                      turnId: schema.hostMcpTurnAuthorities.turnId,
-                      authority: sql<unknown>`${schema.hostMcpTurnAuthorities.canonicalSnapshot} - 'acceptedWork' - 'source'`,
-                    })
-                    .from(schema.hostMcpTurnAuthorities)
-                    .where(
-                      and(
-                        eq(schema.hostMcpTurnAuthorities.accountId, accountId),
-                        eq(schema.hostMcpTurnAuthorities.workspaceId, workspaceId),
-                        eq(schema.hostMcpTurnAuthorities.ownerSubjectId, human),
-                        inArray(schema.hostMcpTurnAuthorities.turnId, turnIds),
-                      ),
-                    )
-                    .orderBy(asc(schema.hostMcpTurnAuthorities.serverId)),
-              );
-              for (const row of authorities) {
-                hostAuthorityByTurn.set(row.turnId, [
-                  ...(hostAuthorityByTurn.get(row.turnId) ?? []),
-                  row.authority,
-                ]);
-              }
-            }
-          } finally {
-            await tx.execute(sql`select set_config(
-              'opengeni.subject_id', ${incomingSubjectId}, true
-            )`);
-          }
-          const causalExecutionKeys = new Map(
-            causalTurns.map((turn) => {
-              const human =
-                turn.human ?? (turn.initiatorKind === "subject" ? turn.initiatorSubjectId : null);
-              return [
-                `${turn.sessionId}:${turn.id}`,
-                human
-                  ? stableJson({
-                      human,
-                      externalLink: turn.externalLink,
-                      hostMcp: hostAuthorityByTurn.get(turn.id) ?? [],
-                    })
-                  : null,
-              ] as const;
-            }),
+          const planned = await planInboxBatch(
+            tx as unknown as Database,
+            session!,
+            validUpdates,
+            options.receivingTurn,
           );
-          const deliverable = selectBoundedSystemUpdateBatch(
-            candidates,
-            (selected, candidate) =>
-              systemUpdatesCanCoalesceForExecution(
-                selected,
-                candidate,
-                causalExecutionKeys,
-                sessionId,
-              ),
-            true,
-          );
+          const deliverable = planned.updates;
           if (deliverable.length === 0) {
             let sequence = nextSequence - 1;
             const cancellationEvents: SessionEventInsertWithPayload[] = [];
@@ -72609,6 +71329,8 @@ export async function claimSessionWorkForAttempt(
               });
             }
             return {
+              receiverContext: null,
+              selectionNotes: {},
               count: 0,
               lastSequence: sequence,
               triggerEventId: null,
@@ -72626,7 +71348,7 @@ export async function claimSessionWorkForAttempt(
           const historyItem = sessionSystemUpdateBatchHistoryItem(
             modelOrdered.map((update) => mapSessionSystemUpdate(update)),
             undefined,
-            { deliveredAt: occurredAt },
+            { deliveredAt: occurredAt, selectionNotes: planned.selectionNotes },
           ) as Record<string, unknown>;
           await tx
             .update(schema.sessionSystemUpdates)
@@ -72782,6 +71504,8 @@ export async function claimSessionWorkForAttempt(
           };
           events.push(event);
           return {
+            receiverContext: planned.receiverContext,
+            selectionNotes: planned.selectionNotes,
             count: deliverable.length,
             lastSequence: sequence,
             triggerEventId: eventId,
@@ -72836,7 +71560,10 @@ export async function claimSessionWorkForAttempt(
                             mapSessionSystemUpdate(update),
                           ),
                           goalSnapshot,
-                          { deliveredAt: delivered.deliveredAt },
+                          {
+                            deliveredAt: delivered.deliveredAt,
+                            selectionNotes: delivered.selectionNotes,
+                          },
                         )
                       : delivered.historyItem),
                 ),
@@ -72967,10 +71694,9 @@ export async function claimSessionWorkForAttempt(
                 !Object.hasOwn(mcpApprovalPolicies, server.id)
               ) {
                 mcpApprovalPolicies[server.id] =
-                  requireApprovalWithFloor(
+                  resolveMcpApprovalRecommendation(
                     inheritedPolicies[server.id],
                     server.approvalFloor,
-                    true,
                   ) ?? false;
               }
             }
@@ -73240,9 +71966,6 @@ export async function claimSessionWorkForAttempt(
                 }
                 pendingEventSequenceBeforeOrAt = legacyResumeTrigger.sequence;
               }
-              const xaiSnapshot = XaiProviderAccountAuthoritySnapshotV1.parse(
-                activeTurn.xaiProviderAccountAuthoritySnapshot,
-              );
               const delivered = await deliverPendingUpdates(
                 session.accountId,
                 activeTurn.id,
@@ -73251,18 +71974,8 @@ export async function claimSessionWorkForAttempt(
                 now,
                 undefined,
                 {
-                  snapshot: xaiSnapshot,
-                  subjectId:
-                    xaiSnapshot.scope === "user"
-                      ? (activeTurn.initiatingHumanSubjectId ??
-                        (activeTurn.initiatorKind === "subject"
-                          ? activeTurn.initiatorSubjectId
-                          : null))
-                      : null,
-                },
-                {
                   pendingEventSequenceBeforeOrAt,
-                  claudeAuthority: subscriptionExecutionAuthorityFromTurn(activeTurn, "claude"),
+                  receivingTurn: activeTurn,
                 },
               );
               await persistDeliveredUpdateBatch(delivered, session.accountId, activeTurn.id);
@@ -73402,17 +72115,14 @@ export async function claimSessionWorkForAttempt(
               }
             }
             if (activeTurn.status === "waiting_capacity") {
-              const [codexWaiter] = await tx
-                .select({ id: schema.codexCapacityWaiters.id })
-                .from(schema.codexCapacityWaiters)
-                .where(
-                  and(
-                    eq(schema.codexCapacityWaiters.workspaceId, workspaceId),
-                    eq(schema.codexCapacityWaiters.sessionId, sessionId),
-                    eq(schema.codexCapacityWaiters.status, "waiting"),
-                  ),
-                )
-                .limit(1);
+              // A shared-core Codex waiter (the only kind written after 0680).
+              const coreWaiter = await readSubscriptionCoreCodexWaiterInTransaction(
+                tx as unknown as Database,
+                {
+                  workspaceId,
+                  sessionId,
+                },
+              );
               const xaiWaiter = await getXaiCapacityWaitForSessionInTransaction(
                 tx as unknown as Database,
                 workspaceId,
@@ -73423,7 +72133,7 @@ export async function claimSessionWorkForAttempt(
                 workspaceId,
                 sessionId,
               );
-              if (codexWaiter || xaiWaiter || claudeWaiter) {
+              if (coreWaiter || xaiWaiter || claudeWaiter) {
                 return { action: "unclaimed", reason: "no-work" };
               }
             }
@@ -73626,7 +72336,7 @@ export async function claimSessionWorkForAttempt(
               initiator: {
                 kind: "service",
                 subjectId: "compaction",
-                label: "OpenGeni compaction",
+                label: "Opengeni compaction",
               },
               context: {},
             };
@@ -73652,6 +72362,12 @@ export async function claimSessionWorkForAttempt(
               [session],
             );
             await tx.execute(sql`set local opengeni.session_inference_claim = '1'`);
+            const sharedCompactionPool = latestStarted
+              ? null
+              : await sharedPoolSubscriptionAuthoritySnapshotsInTransaction(
+                  tx as unknown as Database,
+                  workspaceId,
+                );
             const [compactionTurn] = await tx
               .insert(schema.sessionTurns)
               .values(
@@ -73703,10 +72419,15 @@ export async function claimSessionWorkForAttempt(
                     mcpAccountBindings: [],
                     xaiProviderAccountAuthoritySnapshot:
                       latestStarted?.xaiProviderAccountAuthoritySnapshot ??
-                      WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+                      sharedCompactionPool!.xai,
                     claudeProviderAccountAuthoritySnapshot:
                       latestStarted?.claudeProviderAccountAuthoritySnapshot ??
-                      WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+                      sharedCompactionPool!.claude,
+                    // The immutable v2 accepted authority of the turn this
+                    // compacts after (NULL without a Codex cutover, so the
+                    // legacy path is unchanged). A session with no started
+                    // turn has none: shared capacity only.
+                    subscriptionAuthority: latestStarted?.subscriptionAuthority ?? null,
                     startedAt: now,
                     createdAt: now,
                     updatedAt: now,
@@ -73767,23 +72488,22 @@ export async function claimSessionWorkForAttempt(
             };
           }
 
-          if (
-            !pendingAgentSteer &&
-            (await latestFinishedTurnHasFailureCodeTx(
-              tx as unknown as Database,
-              workspaceId,
-              sessionId,
-              "context_compaction_failed",
-            ))
-          ) {
-            // Ordinary machine updates must not turn one failed compaction into
-            // an autonomous retry loop. They remain pending and will attach to
-            // the next human/API, Steer, or explicitly requested Compact run.
-            return { action: "unclaimed", reason: "no-work" };
-          }
-
+          // Machine updates that were already pending at a terminal compaction
+          // failure must not turn it into an autonomous retry loop: they stay
+          // held and attach to the next human/API, Steer, explicitly requested
+          // Compact, or newer machine input. Input committed after the failure
+          // is new truth; it makes one attempt and the held backlog rides along.
+          const compactionHoldSequence = pendingAgentSteer
+            ? null
+            : await compactionFailureHoldSequenceTx(
+                tx as unknown as Database,
+                workspaceId,
+                sessionId,
+              );
           const commandWait = await sessionInputWaitStateTx(tx, workspaceId, sessionId, session);
-          const wakeClasses = await pendingSystemUpdateWakeClassesTx(tx, workspaceId, sessionId);
+          const wakeClasses = await pendingSystemUpdateWakeClassesTx(tx, workspaceId, sessionId, {
+            pendingAfterSequence: compactionHoldSequence,
+          });
           if (
             !wakeClasses.immediate &&
             !wakeClasses.deferred &&
@@ -73829,7 +72549,6 @@ export async function claimSessionWorkForAttempt(
             session.lastSequence + 1,
             now,
             triggerEventId,
-            undefined,
             { commandOnlyMayRun: commandWait.disposition === "held" },
           );
           if (delivered.count === 0) {
@@ -73880,7 +72599,7 @@ export async function claimSessionWorkForAttempt(
             initiator: {
               kind: "service",
               subjectId: "internal-update",
-              label: "OpenGeni internal update",
+              label: "Opengeni internal update",
             },
             context: {
               updateIds: delivered.updates.map((update) => update.id),
@@ -73888,18 +72607,44 @@ export async function claimSessionWorkForAttempt(
             },
           });
           let internalInitiator: FrozenTurnInitiator;
+          const receiverContext = delivered.receiverContext;
           const authorityUpdate = delivered.updates[0];
           if (!authorityUpdate) throw new Error("Delivered update batch has no authority source");
           const internalPersonalConnectionDelegations = parsedPersonalConnectionDelegations(
-            authorityUpdate.personalConnectionDelegations,
+            receiverContext?.personalConnectionDelegations ??
+              authorityUpdate.personalConnectionDelegations,
             `session_system_updates:${workspaceId}:${sessionId}:${authorityUpdate.id}`,
           );
-          const internalXaiAuthority = frozenXaiExecutionAuthority(authorityUpdate);
-          const internalClaudeAuthority = frozenClaudeExecutionAuthority(authorityUpdate);
-          // Messages and Steer inherit the exact admitted sender turn, even
-          // with no personal connections. Other notices are context; they
-          // cannot replace the command's causal human.
-          if (agentCommandUpdate) {
+          const internalXaiAuthority = receiverContext
+            ? subscriptionExecutionAuthorityFromTurn(receiverContext, "xai")
+            : frozenXaiExecutionAuthority(authorityUpdate);
+          const internalClaudeAuthority = receiverContext
+            ? subscriptionExecutionAuthorityFromTurn(receiverContext, "claude")
+            : frozenClaudeExecutionAuthority(authorityUpdate);
+          // Informational input retains the receiving context. Explicit control
+          // and restricted/foreign requests retain their admitted source.
+          if (receiverContext) {
+            internalInitiator = {
+              initiator: {
+                kind: "service",
+                subjectId: "internal-update",
+                label: "Opengeni internal update",
+              },
+              initiatingHumanSubjectId: turnHuman(receiverContext),
+              context: contextForCausalTurn(
+                {},
+                {
+                  initiator: initiatorFromStorage(
+                    receiverContext.initiatorKind,
+                    receiverContext.initiatorSubjectId,
+                    receiverContext.initiatorContext,
+                  ),
+                  context: receiverContext.initiatorContext,
+                },
+                { sessionId, turnId: receiverContext.id },
+              ),
+            };
+          } else if (agentCommandUpdate) {
             const actor = agentCommandCausalActor(agentCommandUpdate);
             if (!actor) {
               // Corrupt/hand-inserted historical rows must not wedge every
@@ -73939,7 +72684,7 @@ export async function claimSessionWorkForAttempt(
               initiator: {
                 kind: "service",
                 subjectId: "goal-continuation",
-                label: "OpenGeni goal continuation",
+                label: "Opengeni goal continuation",
               },
               context: {
                 updateIds: delivered.updates.map((update) => update.id),
@@ -74012,7 +72757,7 @@ export async function claimSessionWorkForAttempt(
           );
           let tools = Array.isArray(goalPolicy?.tools)
             ? goalPolicy.tools
-            : (latestStarted?.tools ?? session.tools);
+            : (receiverContext?.tools ?? latestStarted?.tools ?? session.tools);
           let sandboxBackend =
             typeof goalPolicy?.sandboxBackend === "string"
               ? goalPolicy.sandboxBackend
@@ -74026,6 +72771,7 @@ export async function claimSessionWorkForAttempt(
               ? "agent"
               : sessionTurnSurfaceOrNull(latestStarted?.surface);
           let scheduledEffectiveMcpServerIds: string[] | null = null;
+          let scheduledFirstPartyMcpTools: FirstPartyMcpToolName[] | null = null;
           let sandboxOs = latestStarted?.sandboxOs ?? session.sandboxOs;
           if (scheduledTaskRunId) {
             const [scheduledRun] = await tx
@@ -74069,6 +72815,8 @@ export async function claimSessionWorkForAttempt(
             const targetPolicy = accepted.targetSessionExecution;
             if (targetPolicy) {
               scheduledEffectiveMcpServerIds = targetPolicy.effectiveMcpServerIds;
+              scheduledFirstPartyMcpTools =
+                targetPolicy.effectiveFirstPartyMcpTools ?? targetPolicy.firstPartyMcpTools;
               const targetMcpServers = await tx
                 .select({ id: schema.sessionMcpServers.serverId })
                 .from(schema.sessionMcpServers)
@@ -74163,6 +72911,7 @@ export async function claimSessionWorkForAttempt(
               ? internalInitiator.initiator.subjectId
               : null);
           const connectionAuthoritySubjectValue =
+            !receiverContext &&
             authorityUpdate.lineage &&
             typeof authorityUpdate.lineage === "object" &&
             !Array.isArray(authorityUpdate.lineage)
@@ -74184,9 +72933,11 @@ export async function claimSessionWorkForAttempt(
             }
             initiatingHumanSubjectId = connectionAuthoritySubjectId;
           }
-          const causalHumanTurnId = delivered.updates
-            .map((update) => systemUpdateCausalHumanTurnId(update))
-            .find((causalTurnId): causalTurnId is string => causalTurnId !== null);
+          const causalHumanTurnId =
+            receiverContext?.id ??
+            delivered.updates
+              .map((update) => systemUpdateCausalHumanTurnId(update))
+              .find((causalTurnId): causalTurnId is string => causalTurnId !== null);
           if (causalHumanTurnId) {
             // Child lifecycle notices freeze the parent turn that spawned the
             // child. Resolve that exact row on the receiving parent session;
@@ -74294,10 +73045,15 @@ export async function claimSessionWorkForAttempt(
           // coalesced message, including a later restricted sender. A frozen
           // goal/schedule model policy cannot remove this inherited ceiling.
           const initialCredentialPolicy = readTurnExecutionPolicyV1(session.metadata);
+          const receivingCredentialPolicy = readTurnExecutionPolicyV1(receiverContext?.metadata);
           internalInitiator.context = contextWithFrozenCredentialRestrictions(
             internalInitiator.context,
             [
               ...delivered.updates.map((update) => update.lineage),
+              receivingCredentialPolicy.kind === "valid" &&
+              receivingCredentialPolicy.policy.credentialRestriction === "developer_setup"
+                ? { credentialRestriction: "developer_setup" }
+                : undefined,
               initialCredentialPolicy.kind === "valid" &&
               initialCredentialPolicy.policy.credentialRestriction === "developer_setup"
                 ? { credentialRestriction: "developer_setup" }
@@ -74313,6 +73069,77 @@ export async function claimSessionWorkForAttempt(
               credentialRestriction: "developer_setup",
             };
           }
+          const baseInternalTurnMetadata = frozenTurnExecutionPolicy
+            ? metadataWithTurnExecutionPolicyV1(
+                {
+                  internalUpdateCount: delivered.count,
+                  ...(routingGoalUpdate ? { goalId: routingGoalUpdate.payload.goalId } : {}),
+                  ...(scheduledEffectiveMcpServerIds ? { scheduledEffectiveMcpServerIds } : {}),
+                  ...(scheduledFirstPartyMcpTools ? { scheduledFirstPartyMcpTools } : {}),
+                },
+                frozenTurnExecutionPolicy,
+              )
+            : {
+                internalUpdateCount: delivered.count,
+                ...(routingGoalUpdate ? { goalId: routingGoalUpdate.payload.goalId } : {}),
+                ...(scheduledEffectiveMcpServerIds ? { scheduledEffectiveMcpServerIds } : {}),
+                ...(scheduledFirstPartyMcpTools ? { scheduledFirstPartyMcpTools } : {}),
+              };
+          const continuationCodexPolicy = routingGoalUpdate
+            ? readCodexCredentialPolicySnapshotV1(routingGoalUpdate.lineage)
+            : { kind: "absent" as const };
+          const acceptedInternalTurnMetadata =
+            continuationCodexPolicy.kind === "valid"
+              ? metadataWithCodexCredentialPolicySnapshotV1(
+                  baseInternalTurnMetadata,
+                  continuationCodexPolicy.policy,
+                )
+              : baseInternalTurnMetadata;
+          // Codex v2 accepted authority (M3 PR 2a, 3b): a pure goal
+          // continuation inherits the exact causal turn's frozen value when
+          // that turn's human is this turn's human. Every other delivery
+          // copies, exactly as its v1 pools: the receiving context turn's
+          // value for informational input, otherwise the value frozen on the
+          // delivered update (agent messages and Steer, child results,
+          // background results, scheduled occurrences; a batch only shares a
+          // turn when those values are equal). Nothing is recomputed; once
+          // the cutover is active a missing value is the empty value.
+          const goalCausalTurnId = pureGoalUpdate
+            ? systemUpdateCausalHumanTurnId(pureGoalUpdate)
+            : null;
+          let internalSubscriptionAuthority: SubscriptionPersonalAuthorityV2 | null = null;
+          if (!pureGoalUpdate) {
+            internalSubscriptionAuthority = receiverContext
+              ? (receiverContext.subscriptionAuthority ?? null)
+              : (authorityUpdate.subscriptionAuthority ?? null);
+          }
+          if (goalCausalTurnId && initiatingHumanSubjectId) {
+            const [goalCausalTurn] = await tx
+              .select({
+                subscriptionAuthority: schema.sessionTurns.subscriptionAuthority,
+                initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
+              })
+              .from(schema.sessionTurns)
+              .where(
+                and(
+                  eq(schema.sessionTurns.workspaceId, workspaceId),
+                  eq(schema.sessionTurns.sessionId, sessionId),
+                  eq(schema.sessionTurns.id, goalCausalTurnId),
+                ),
+              )
+              .limit(1);
+            if (
+              goalCausalTurn?.subscriptionAuthority != null &&
+              goalCausalTurn.initiatingHumanSubjectId === initiatingHumanSubjectId
+            ) {
+              internalSubscriptionAuthority = goalCausalTurn.subscriptionAuthority;
+            }
+          }
+          internalSubscriptionAuthority = await codexSubscriptionAuthorityV2OrEmptyInTransaction(
+            tx as unknown as Database,
+            session.accountId,
+            internalSubscriptionAuthority,
+          );
           await tx.execute(sql`set local opengeni.session_inference_claim = '1'`);
           const [internalTurn] = await tx
             .insert(schema.sessionTurns)
@@ -74339,40 +73166,24 @@ export async function claimSessionWorkForAttempt(
                   latencyMode,
                   sandboxBackend,
                   sandboxOs,
-                  metadata: metadataWithTurnDispatchAttempt(
-                    frozenTurnExecutionPolicy
-                      ? metadataWithTurnExecutionPolicyV1(
-                          {
-                            internalUpdateCount: delivered.count,
-                            ...(routingGoalUpdate
-                              ? { goalId: routingGoalUpdate.payload.goalId }
-                              : {}),
-                            ...(scheduledEffectiveMcpServerIds
-                              ? { scheduledEffectiveMcpServerIds }
-                              : {}),
-                          },
-                          frozenTurnExecutionPolicy,
-                        )
-                      : {
-                          internalUpdateCount: delivered.count,
-                          ...(routingGoalUpdate
-                            ? { goalId: routingGoalUpdate.payload.goalId }
-                            : {}),
-                          ...(scheduledEffectiveMcpServerIds
-                            ? { scheduledEffectiveMcpServerIds }
-                            : {}),
-                        },
-                    { id: input.dispatchId, generation: 1, triggerEventId },
-                  ),
+                  metadata: metadataWithTurnDispatchAttempt(acceptedInternalTurnMetadata, {
+                    id: input.dispatchId,
+                    generation: 1,
+                    triggerEventId,
+                  }),
                   ...initiatorColumns(internalInitiator),
                   initiatingHumanSubjectId,
+                  executionContextTurnId: receiverContext?.id ?? null,
                   personalConnectionDelegations: internalPersonalConnectionDelegations,
                   mcpAccountBindings: parseAcceptedMcpAccountBindings(
-                    authorityUpdate.mcpAccountBindings,
+                    receiverContext
+                      ? receiverContext.mcpAccountBindings
+                      : authorityUpdate.mcpAccountBindings,
                   ),
                   scheduledTaskRunId,
                   xaiProviderAccountAuthoritySnapshot: internalXaiAuthority.snapshot,
                   claudeProviderAccountAuthoritySnapshot: internalClaudeAuthority.snapshot,
+                  subscriptionAuthority: internalSubscriptionAuthority,
                   startedAt: now,
                   createdAt: now,
                   updatedAt: now,
@@ -74400,6 +73211,7 @@ export async function claimSessionWorkForAttempt(
               contextualUpdates.length > 0
                 ? renderSessionSystemUpdateBatch(contextualUpdates, {
                     deliveredAt: delivered.deliveredAt,
+                    selectionNotes: delivered.selectionNotes,
                   })
                 : undefined,
               frozenGoalSnapshot,
@@ -74431,7 +73243,20 @@ export async function claimSessionWorkForAttempt(
               turnId: internalTurn.id,
               runId: scheduledTaskRunId,
             });
-          } else if (causalHumanTurnId && initiatingHumanSubjectId) {
+          } else if (
+            agentCommandUpdate &&
+            !receiverContext &&
+            agentCommandCausalActor(agentCommandUpdate)
+          ) {
+            await inheritExternalLinkTurnAuthority(tx as unknown as Database, {
+              accountId: session.accountId,
+              workspaceId,
+              sessionId,
+              turnId: internalTurn.id,
+              sourceTurnId: agentCommandCausalActor(agentCommandUpdate)!.turnId,
+              kind: "agent",
+            });
+          } else if (!receiverContext && causalHumanTurnId && initiatingHumanSubjectId) {
             await inheritExternalLinkTurnAuthority(tx as unknown as Database, {
               accountId: session.accountId,
               workspaceId,
@@ -74565,6 +73390,7 @@ export async function claimSessionWorkForAttempt(
                   // Acceptance time, not claim time: a queued message keeps the
                   // moment the user sent it.
                   row.createdAt,
+                  humanTurnSenderLabel(row),
                 ),
               ),
             },
@@ -74586,7 +73412,6 @@ export async function claimSessionWorkForAttempt(
               session.lastSequence + 1,
               now,
               undefined,
-              undefined,
               { supersedeGoalContinuations: true, deliverUpdates: false },
             )
           : await deliverPendingUpdates(
@@ -74597,20 +73422,8 @@ export async function claimSessionWorkForAttempt(
               now,
               undefined,
               {
-                snapshot: XaiProviderAccountAuthoritySnapshotV1.parse(
-                  row.xaiProviderAccountAuthoritySnapshot,
-                ),
-                subjectId:
-                  XaiProviderAccountAuthoritySnapshotV1.parse(
-                    row.xaiProviderAccountAuthoritySnapshot,
-                  ).scope === "user"
-                    ? (row.initiatingHumanSubjectId ??
-                      (row.initiatorKind === "subject" ? row.initiatorSubjectId : null))
-                    : null,
-              },
-              {
                 supersedeGoalContinuations: true,
-                claudeAuthority: subscriptionExecutionAuthorityFromTurn(row, "claude"),
+                receivingTurn: row,
               },
             );
         await persistDeliveredUpdateBatch(delivered, session.accountId, row.id);
@@ -75268,6 +74081,28 @@ export async function reconcileSessionAttemptQuiescence(
     };
   }
   if (!input.activitySettled || eligibility.writer_pending) {
+    if (input.activitySettled && eligibility.writer_pending) {
+      const group = await withRlsContext(db, input, async (tx) => {
+        const [row] = await tx
+          .select({ id: schema.sessions.sandboxGroupId })
+          .from(schema.sessions)
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+            ),
+          )
+          .limit(1);
+        return row?.id;
+      });
+      if (group)
+        await enrollRetainedCommandContainment(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sandboxGroupId: group,
+          settledOwner: input,
+        });
+    }
     return { action: "pending", events: [] };
   }
   const events = await markSessionAttemptQuiesced(db, {
@@ -75972,26 +74807,76 @@ async function queuedSteerHasUnquiescedPredecessor(
   return row !== undefined;
 }
 
-/** Read durable session state without reserving a turn-worker slot or mutating it. */
-/**
- * Which wake classes are represented among a session's pending machine inputs.
- * `immediate` kinds make the session runnable even against a current
- * `wait_for_input` declaration; deferred child notices only do so without one.
- * Command results are separate: only a current explicit wait lets them wake.
- */
-async function pendingSystemUpdateWakeClassesTx(
+/** A pending background-command result that reports an idle containment
+ * stop. Nothing used the box, so the notice wakes nothing on its own, not even
+ * a held wait: it rides along with the next turn, which a person, another
+ * input or the wait's timeout starts. */
+function passiveCommandNoticeSql() {
+  return sql<boolean>`(${schema.sessionSystemUpdates.kind} = 'background_command_result'
+    and ${schema.sessionSystemUpdates.payload} ->> 'state' = 'lost'
+    and ${schema.sessionSystemUpdates.payload} ->> 'reason' = ${IDLE_COMMAND_CONTAINMENT_REASON})`;
+}
+
+/** The in-memory twin of `passiveCommandNoticeSql`, for updates already read. */
+function isPassiveCommandNotice(update: { kind: string; payload: Record<string, unknown> }) {
+  return (
+    update.kind === "background_command_result" &&
+    update.payload.state === "lost" &&
+    update.payload.reason === IDLE_COMMAND_CONTAINMENT_REASON
+  );
+}
+
+async function pendingAgentSteerExistsTx(
   db: Database,
   workspaceId: string,
   sessionId: string,
-): Promise<{ immediate: boolean; deferred: boolean; command: boolean }> {
-  const rows = await db
-    .selectDistinct({ kind: schema.sessionSystemUpdates.kind })
+): Promise<boolean> {
+  const [row] = await db
+    .select({ id: schema.sessionSystemUpdates.id })
     .from(schema.sessionSystemUpdates)
     .where(
       and(
         eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
         eq(schema.sessionSystemUpdates.sessionId, sessionId),
         eq(schema.sessionSystemUpdates.state, "pending"),
+        eq(schema.sessionSystemUpdates.kind, "agent_steer_instruction"),
+      ),
+    )
+    .limit(1);
+  return row !== undefined;
+}
+
+/** Read durable session state without reserving a turn-worker slot or mutating it. */
+/**
+ * Which wake classes are represented among a session's pending machine inputs.
+ * `immediate` kinds make the session runnable even against a current
+ * `wait_for_input` declaration; deferred child notices only do so without one.
+ * Command results are separate: only a current explicit wait lets them wake,
+ * and an idle-containment notice never does (see `passiveCommandNoticeSql`).
+ * `pendingAfterSequence` limits the answer to inputs whose pending event is
+ * newer than a compaction-failure hold (`compactionFailureHoldSequenceTx`).
+ */
+async function pendingSystemUpdateWakeClassesTx(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  options: { pendingAfterSequence?: number | null } = {},
+): Promise<{ immediate: boolean; deferred: boolean; command: boolean }> {
+  const pendingAfterSequence = options.pendingAfterSequence ?? null;
+  const rows = await db
+    .selectDistinct({
+      kind: schema.sessionSystemUpdates.kind,
+      passive: passiveCommandNoticeSql(),
+    })
+    .from(schema.sessionSystemUpdates)
+    .where(
+      and(
+        eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
+        eq(schema.sessionSystemUpdates.sessionId, sessionId),
+        eq(schema.sessionSystemUpdates.state, "pending"),
+        pendingAfterSequence === null
+          ? undefined
+          : systemUpdatePendingAfterSequenceSql(db, workspaceId, sessionId, pendingAfterSequence),
       ),
     );
   let immediate = false;
@@ -75999,7 +74884,7 @@ async function pendingSystemUpdateWakeClassesTx(
   let command = false;
   for (const row of rows) {
     if (row.kind === "background_command_result") {
-      command = true;
+      if (!row.passive) command = true;
       continue;
     }
     const wakeClass =
@@ -76186,29 +75071,19 @@ export async function peekSessionWork(
 
     if (session.admissionBlock) return { kind: "admission-blocked" };
 
-    const [capacityWait] = await scopedDb
-      .select()
-      .from(schema.codexCapacityWaiters)
-      .where(
-        and(
-          eq(schema.codexCapacityWaiters.workspaceId, workspaceId),
-          eq(schema.codexCapacityWaiters.sessionId, sessionId),
-          eq(schema.codexCapacityWaiters.status, "waiting"),
-        ),
-      )
-      .limit(1);
-    if (capacityWait) {
+    // A core Codex waiter (M3) is the only waiter written after the Codex
+    // cutover; it keeps the legacy Codex reference shape, so the workflow
+    // waits on it exactly as on a legacy waiter. A row that no longer belongs
+    // to the session's active waiting turn becomes an immediate check, whose
+    // reconcile deletes it, rather than a sleep until its next check.
+    const coreCapacityWait = await readSubscriptionCoreCodexWaiterInTransaction(scopedDb, {
+      workspaceId,
+      sessionId,
+    });
+    if (coreCapacityWait) {
       return {
         kind: "capacity-wait",
-        ref: {
-          waiterId: capacityWait.id,
-          generation: capacityWait.generation,
-          nextCheckAt:
-            capacityWait.wakeRevision > capacityWait.observedWakeRevision
-              ? new Date(0).toISOString()
-              : capacityWait.nextCheckAt.toISOString(),
-          wakeRevision: capacityWait.wakeRevision,
-        },
+        ref: subscriptionCoreCodexCapacityWaitRef(coreCapacityWait),
       };
     }
 
@@ -76510,36 +75385,26 @@ export async function peekSessionWork(
       )
       .limit(1);
     if (!pendingUpdate) return inputWaitPeek ?? { kind: "idle" };
+    // After a terminal compaction failure, inputs that were already pending
+    // saw the unchanged history and stay held; only an Agent Steer or input
+    // committed after the failure is new truth that may start one attempt.
+    const holdSequence = await compactionFailureHoldSequenceTx(scopedDb, workspaceId, sessionId);
     if (
-      !(await latestFinishedTurnHasFailureCodeTx(
-        scopedDb,
-        workspaceId,
-        sessionId,
-        "context_compaction_failed",
-      ))
+      holdSequence !== null &&
+      (await pendingAgentSteerExistsTx(scopedDb, workspaceId, sessionId))
     ) {
-      // Immediate machine input wakes a wait and becomes the next turn. Deferred
-      // child status notices stay parked until the wait times out, is superseded
-      // by newer input, or an immediate input arrives.
-      const wakeClasses = await pendingSystemUpdateWakeClassesTx(scopedDb, workspaceId, sessionId);
-      if (wakeClasses.immediate || (wakeClasses.command && waitState.disposition === "held")) {
-        return runnable;
-      }
-      return inputWaitPeek ?? (wakeClasses.deferred ? runnable : { kind: "idle" });
+      return runnable;
     }
-    const [pendingAgentSteer] = await scopedDb
-      .select({ id: schema.sessionSystemUpdates.id })
-      .from(schema.sessionSystemUpdates)
-      .where(
-        and(
-          eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
-          eq(schema.sessionSystemUpdates.sessionId, sessionId),
-          eq(schema.sessionSystemUpdates.state, "pending"),
-          eq(schema.sessionSystemUpdates.kind, "agent_steer_instruction"),
-        ),
-      )
-      .limit(1);
-    return pendingAgentSteer ? runnable : (inputWaitPeek ?? { kind: "idle" });
+    // Immediate machine input wakes a wait and becomes the next turn. Deferred
+    // child status notices stay parked until the wait times out, is superseded
+    // by newer input, or an immediate input arrives.
+    const wakeClasses = await pendingSystemUpdateWakeClassesTx(scopedDb, workspaceId, sessionId, {
+      pendingAfterSequence: holdSequence,
+    });
+    if (wakeClasses.immediate || (wakeClasses.command && waitState.disposition === "held")) {
+      return runnable;
+    }
+    return inputWaitPeek ?? (wakeClasses.deferred ? runnable : { kind: "idle" });
   };
   return observerAccountId
     ? await withRlsContext(db, { accountId: observerAccountId, workspaceId }, observe)
@@ -76611,12 +75476,16 @@ async function settleSessionInputWaitInActivity(
           kind: "session_wait_timeout",
           personalConnectionDelegations: causalAuthority?.personalConnectionDelegations ?? [],
           mcpAccountBindings: causalAuthority?.mcpAccountBindings ?? null,
-          xaiProviderAccountAuthoritySnapshot:
-            causalAuthority?.xaiProviderAccountAuthoritySnapshot ??
-            WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
-          claudeProviderAccountAuthoritySnapshot:
-            causalAuthority?.claudeProviderAccountAuthoritySnapshot ??
-            WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+          // Missing causal authority resolves the shared pool on insert.
+          ...(causalAuthority
+            ? {
+                xaiProviderAccountAuthoritySnapshot:
+                  causalAuthority.xaiProviderAccountAuthoritySnapshot,
+                claudeProviderAccountAuthoritySnapshot:
+                  causalAuthority.claudeProviderAccountAuthoritySnapshot,
+                subscriptionAuthority: causalAuthority.subscriptionAuthority,
+              }
+            : {}),
           lineage: causalAuthority?.lineage ?? {},
           classification: "info",
           sourceId: input.waitTurnId,
@@ -77068,17 +75937,14 @@ export async function failSessionWorkBeforeAttemptClaim(
               return { action: "stale", turnId: null, events: [] } as const;
             }
             if (turn.status === "waiting_capacity") {
-              const [codexWaiter] = await tx
-                .select({ id: schema.codexCapacityWaiters.id })
-                .from(schema.codexCapacityWaiters)
-                .where(
-                  and(
-                    eq(schema.codexCapacityWaiters.workspaceId, workspaceId),
-                    eq(schema.codexCapacityWaiters.sessionId, input.sessionId),
-                    eq(schema.codexCapacityWaiters.status, "waiting"),
-                  ),
-                )
-                .limit(1);
+              // A shared-core Codex waiter (the only kind written after 0680).
+              const coreWaiter = await readSubscriptionCoreCodexWaiterInTransaction(
+                tx as unknown as Database,
+                {
+                  workspaceId,
+                  sessionId: input.sessionId,
+                },
+              );
               const xaiWaiter = await getXaiCapacityWaitForSessionInTransaction(
                 tx as unknown as Database,
                 workspaceId,
@@ -77089,7 +75955,7 @@ export async function failSessionWorkBeforeAttemptClaim(
                 workspaceId,
                 input.sessionId,
               );
-              if (codexWaiter || xaiWaiter || claudeWaiter) {
+              if (coreWaiter || xaiWaiter || claudeWaiter) {
                 return { action: "stale", turnId: null, events: [] } as const;
               }
             }
@@ -77145,17 +76011,15 @@ export async function failSessionWorkBeforeAttemptClaim(
               return { action: "stale", turnId: null, events: [] } as const;
             }
           } else if (!session.compactRequested) {
-            if (
-              !pendingAgentSteer &&
-              (await latestFinishedTurnHasFailureCodeTx(
-                tx as unknown as Database,
-                workspaceId,
-                input.sessionId,
-                "context_compaction_failed",
-              ))
-            ) {
-              return { action: "stale", turnId: null, events: [] } as const;
-            }
+            // Mirrors the claim: input held by a terminal compaction failure
+            // is not runnable work unless an Agent Steer or newer input exists.
+            const compactionHoldSequence = pendingAgentSteer
+              ? null
+              : await compactionFailureHoldSequenceTx(
+                  tx as unknown as Database,
+                  workspaceId,
+                  input.sessionId,
+                );
             const [pendingUpdate] = await tx
               .select({ id: schema.sessionSystemUpdates.id })
               .from(schema.sessionSystemUpdates)
@@ -77164,6 +76028,14 @@ export async function failSessionWorkBeforeAttemptClaim(
                   eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
                   eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
                   eq(schema.sessionSystemUpdates.state, "pending"),
+                  compactionHoldSequence === null
+                    ? undefined
+                    : systemUpdatePendingAfterSequenceSql(
+                        tx as unknown as Database,
+                        workspaceId,
+                        input.sessionId,
+                        compactionHoldSequence,
+                      ),
                 ),
               )
               .limit(1)
@@ -78112,8 +76984,27 @@ export async function settleSessionIdleWithParentOutbox(
       // results do not reopen finished work. A late child notice likewise only
       // reserves new work when its producer queued the session; active goals
       // and held/due waits are independently protected below.
+      // After a terminal compaction failure only input committed after that
+      // failure is runnable (`compactionFailureHoldSequenceTx`); the held
+      // backlog does not reopen the episode on its own.
+      const compactionHoldSequence = await compactionFailureHoldSequenceTx(
+        tx as unknown as Database,
+        workspaceId,
+        sessionId,
+      );
       const pendingInputs = await tx
-        .selectDistinct({ kind: schema.sessionSystemUpdates.kind })
+        .selectDistinct({
+          kind: schema.sessionSystemUpdates.kind,
+          runnable:
+            compactionHoldSequence === null
+              ? sql<boolean>`true`
+              : sql<boolean>`${systemUpdatePendingAfterSequenceSql(
+                  tx as unknown as Database,
+                  workspaceId,
+                  sessionId,
+                  compactionHoldSequence,
+                )}`,
+        })
         .from(schema.sessionSystemUpdates)
         .where(
           and(
@@ -78124,22 +77015,14 @@ export async function settleSessionIdleWithParentOutbox(
         );
       const pendingSteer = pendingInputs.some(({ kind }) => kind === "agent_steer_instruction");
       const pendingImmediate = pendingInputs.some(
-        ({ kind }) =>
+        ({ kind, runnable }) =>
+          runnable &&
           SESSION_SYSTEM_UPDATE_WAKE_CLASS[kind as SessionSystemUpdateKind] === "immediate" &&
           kind !== "background_command_result" &&
           (!isChildLifecycleSystemUpdateKind(kind as SessionSystemUpdateKind) ||
             session.status === "queued"),
       );
-      if (
-        pendingSteer ||
-        (pendingImmediate &&
-          !(await latestFinishedTurnHasFailureCodeTx(
-            tx as unknown as Database,
-            workspaceId,
-            sessionId,
-            "context_compaction_failed",
-          )))
-      ) {
+      if (pendingSteer || pendingImmediate) {
         return { action: "stale", episodeKey: null, events: [] } as const;
       }
       const [{ episodeSequence } = { episodeSequence: 0 }] = await tx
@@ -78842,6 +77725,8 @@ function metadataWithoutProviderRecoveryCount(
 ): Record<string, unknown> {
   const next = { ...(metadata ?? {}) };
   delete next.providerRecoveryCount;
+  delete next.providerRecoveryStartedAt;
+  delete next.providerRecoveryReason;
   return next;
 }
 
@@ -79805,6 +78690,23 @@ export async function applySessionTurnSettlement(
               : {}),
           }
         : null;
+      if (input.turnStatus === "completed") {
+        await settleInterruptedCodemodeCallsInTransaction(tx as unknown as Database, {
+          workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          reason: "turn_completed",
+          now,
+        });
+        await consumeSettledPendingToolCallsForCompletedTurnInTransaction(
+          tx as unknown as Database,
+          {
+            workspaceId,
+            sessionId: input.sessionId,
+            turnId: input.turnId,
+          },
+        );
+      }
       const terminalHumanInputRows = ["completed", "failed", "cancelled", "superseded"].includes(
         input.turnStatus,
       )
@@ -80255,709 +79157,6 @@ export type SettleCodexCredentialLeaseLossResult =
   | { action: "failed"; events: SessionEvent[] }
   | { action: "stale"; events: [] };
 
-/**
- * Settle an activity that discovered its Codex lease was lost before it could
- * make more model progress. A current attempt is checkpointed for recovery;
- * when that checkpoint failed, the turn fails honestly instead of replaying
- * unpersisted work. A successor holder or worker-death redispatch makes the
- * caller stale and therefore unable to mutate the shared turn/session.
- *
- * The lease row may be absent because another turn reaped its expired row. The
- * persisted worker-death counter is the second dispatch fence for that case.
- */
-export async function settleCodexCredentialLeaseLoss(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    sessionId: string;
-    turnId: string;
-    attemptId: string;
-    holderId: string;
-    generation: number;
-    expectedRedispatches: number;
-    checkpointDurable: boolean;
-    recoveryPayload: Record<string, unknown>;
-    failedPayload: Record<string, unknown>;
-  },
-): Promise<SettleCodexCredentialLeaseLossResult> {
-  if (!Number.isInteger(input.expectedRedispatches) || input.expectedRedispatches < 0) {
-    throw new Error("Codex lease-loss redispatch fence must be a non-negative integer");
-  }
-  return await withSessionActivityRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) =>
-      await scopedDb.transaction(async (tx) => {
-        const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
-          workspaceId: input.workspaceId,
-          controlLock: "share",
-          sessionIds: [input.sessionId],
-          turnIds: [input.turnId],
-          attemptIds: [input.attemptId],
-        });
-        const session = locks.sessions[0];
-        const turn = locks.turns[0];
-        const attempt = locks.attempts[0];
-        const effectiveControl = await evaluateSessionControl(
-          tx as unknown as Database,
-          input.workspaceId,
-          input.sessionId,
-          { workspaceControl: locks.control ?? undefined },
-        );
-        const currentRedispatches = Number(turn?.metadata?.workerDeathRedispatches ?? 0);
-        if (
-          !locks.workspace ||
-          !session ||
-          !turn ||
-          !attempt ||
-          session.accountId !== input.accountId ||
-          turn.accountId !== input.accountId ||
-          turn.sessionId !== input.sessionId ||
-          attempt.accountId !== input.accountId ||
-          attempt.sessionId !== input.sessionId ||
-          attempt.turnId !== input.turnId ||
-          attempt.executionGeneration !== turn.executionGeneration ||
-          effectiveControl.state !== "active" ||
-          session.activeTurnId !== input.turnId ||
-          !["running", "requires_action"].includes(turn.status) ||
-          turn.activeAttemptId !== input.attemptId ||
-          currentRedispatches !== input.expectedRedispatches
-        ) {
-          return { action: "stale", events: [] } as const;
-        }
-
-        const leaseRows = await tx.execute(
-          sql<{ holder_id: string; generation: number }>`
-            select holder_id, generation from codex_credential_leases
-            where account_id = ${input.accountId}
-              and workspace_id = ${input.workspaceId}
-              and turn_id = ${input.turnId}
-            for update
-          `,
-        );
-        const lease = leaseRows[0];
-        if (
-          lease &&
-          (lease.holder_id !== input.holderId || Number(lease.generation) !== input.generation)
-        ) {
-          return { action: "stale", events: [] } as const;
-        }
-
-        const now = new Date();
-        await closeSessionTurnAttemptInTransaction(tx as unknown as Database, {
-          id: input.attemptId,
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          turnId: input.turnId,
-          executionGeneration: turn.executionGeneration,
-          outcome: input.checkpointDurable ? "lease_lost_recoverable" : "failed",
-          closedAt: now,
-        });
-        let sequence = session.lastSequence;
-        const closedTools = await closePendingSessionToolCallsInTransaction(
-          tx as unknown as Database,
-          {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId: input.turnId,
-            reason: "codex_credential_lease_loss",
-            sequence,
-            now,
-            preserveInterruptionRows: input.checkpointDurable,
-          },
-        );
-        sequence = closedTools.sequence;
-        const inserted = input.checkpointDurable
-          ? await tx
-              .insert(schema.sessionEvents)
-              .values(
-                withLosslessContentWriteVersion(
-                  [
-                    {
-                      accountId: input.accountId,
-                      workspaceId: input.workspaceId,
-                      sessionId: input.sessionId,
-                      sequence: ++sequence,
-                      type: "turn.recovery.requested",
-                      payload: input.recoveryPayload,
-                      turnId: input.turnId,
-                      turnGeneration: turn.executionGeneration,
-                      turnAttemptId: input.attemptId,
-                      turnAssociation: "current",
-                      occurredAt: now,
-                    },
-                    {
-                      accountId: input.accountId,
-                      workspaceId: input.workspaceId,
-                      sessionId: input.sessionId,
-                      sequence: ++sequence,
-                      type: "session.status.changed",
-                      payload: { status: "recovering" },
-                      turnId: input.turnId,
-                      turnGeneration: turn.executionGeneration,
-                      turnAttemptId: input.attemptId,
-                      turnAssociation: "current",
-                      occurredAt: now,
-                    },
-                  ],
-                  "payload",
-                  "payloadCodecVersion",
-                ),
-              )
-              .returning()
-          : await tx
-              .insert(schema.sessionEvents)
-              .values(
-                withLosslessContentWriteVersion(
-                  [
-                    {
-                      accountId: input.accountId,
-                      workspaceId: input.workspaceId,
-                      sessionId: input.sessionId,
-                      sequence: ++sequence,
-                      type: "turn.failed",
-                      payload: input.failedPayload,
-                      turnId: input.turnId,
-                      turnGeneration: turn.executionGeneration,
-                      turnAttemptId: input.attemptId,
-                      turnAssociation: "current",
-                      occurredAt: now,
-                    },
-                    {
-                      accountId: input.accountId,
-                      workspaceId: input.workspaceId,
-                      sessionId: input.sessionId,
-                      sequence: ++sequence,
-                      type: "session.status.changed",
-                      payload: { status: "failed" },
-                      turnId: input.turnId,
-                      turnGeneration: turn.executionGeneration,
-                      turnAttemptId: input.attemptId,
-                      turnAssociation: "current",
-                      occurredAt: now,
-                    },
-                  ],
-                  "payload",
-                  "payloadCodecVersion",
-                ),
-              )
-              .returning();
-        const settlementEvent = inserted[0];
-        if (!settlementEvent) {
-          throw new Error("Codex lease-loss settlement did not persist its checkpoint event");
-        }
-        if (!input.checkpointDurable) {
-          await projectSessionRealtimeDelegationTerminalInTransaction(tx as unknown as Database, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId: input.turnId,
-            turnStatus: "failed",
-            terminalEvent: {
-              id: settlementEvent.id,
-              type: "turn.failed",
-              payload: sessionEventPayloadRecord(
-                settlementEvent.payload,
-                settlementEvent.payloadCodecVersion,
-              ),
-            },
-            now,
-          });
-        }
-
-        await tx
-          .update(schema.sessionTurns)
-          .set(
-            input.checkpointDurable
-              ? {
-                  status: "recovering",
-                  activeAttemptId: null,
-                  finishedAt: null,
-                  updatedAt: now,
-                }
-              : {
-                  status: "failed",
-                  activeAttemptId: null,
-                  finishedAt: now,
-                  updatedAt: now,
-                },
-          )
-          .where(
-            and(
-              eq(schema.sessionTurns.workspaceId, input.workspaceId),
-              eq(schema.sessionTurns.id, input.turnId),
-            ),
-          );
-        await tx
-          .update(schema.sessions)
-          .set({
-            status: input.checkpointDurable ? "recovering" : "failed",
-            activeTurnId: input.checkpointDurable ? input.turnId : null,
-            lastSequence: sequence,
-            updatedAt: now,
-          })
-          .where(
-            and(
-              eq(schema.sessions.workspaceId, input.workspaceId),
-              eq(schema.sessions.id, input.sessionId),
-              eq(schema.sessions.activeTurnId, input.turnId),
-            ),
-          );
-        await tx.execute(sql`
-          delete from codex_credential_leases
-          where account_id = ${input.accountId}
-            and workspace_id = ${input.workspaceId}
-            and turn_id = ${input.turnId}
-            and holder_id = ${input.holderId}
-            and generation = ${input.generation}
-        `);
-        return {
-          action: input.checkpointDurable ? "recovering" : "failed",
-          events: [...closedTools.events, ...inserted.map(mapEvent)],
-        } as const;
-      }),
-  );
-}
-
-/**
- * Atomically settle a definitive Codex credential failover. Conversation
- * history/RunState is persisted by the caller first; this transaction then
- * fences the exact activity lease, consumes the quarantine transaction's
- * bounded same-turn receipt, appends durable recovery or terminal events,
- * updates the turn/session, and releases the lease together. Exhaustion also
- * suppresses autonomous goal continuation and enqueues a failed-child notice in
- * this transaction. The exact holder remains provable if its row just expired
- * or was reaped; a successor, redispatch, or closed inference gate makes the
- * caller stale without a second settlement path.
- */
-export async function settleCodexCredentialFailover(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    sessionId: string;
-    turnId: string;
-    attemptId: string;
-    holderId?: string | null;
-    generation?: number | null;
-    expectedRedispatches: number;
-    maxFailovers: number;
-    recoveryPayload: Record<string, unknown>;
-    failedPayload?: Record<string, unknown>;
-  },
-): Promise<SettleCodexCredentialFailoverResult> {
-  if (!Number.isInteger(input.expectedRedispatches) || input.expectedRedispatches < 0) {
-    throw new Error("Codex failover redispatch fence must be a non-negative integer");
-  }
-  if (!Number.isInteger(input.maxFailovers) || input.maxFailovers < 1) {
-    throw new Error("Codex failover bound must be a positive integer");
-  }
-  if ((input.holderId == null) !== (input.generation == null)) {
-    throw new Error("Codex failover lease fence must be fully present or absent");
-  }
-  return await retrySessionActivityRls(
-    db,
-    input.workspaceId,
-    {
-      stage: "session_lifecycle_outbox.settle_codex_credential_failover",
-      eventTypes: ["turn.recovery.requested", "turn.failed", "session.status.changed"],
-      maxAttempts: 3,
-    },
-    async (scopedDb) =>
-      await scopedDb.transaction(async (tx) => {
-        const locks = await lockChildLifecycleOutboxWriteRowsTx(
-          tx as unknown as Database,
-          input.workspaceId,
-          {
-            sessionId: input.sessionId,
-            turnId: input.turnId,
-            attemptId: input.attemptId,
-          },
-        );
-        const session = locks.session;
-        const turn = locks.turns[0];
-        const attempt = locks.attempts[0];
-        const effectiveControl = await evaluateSessionControl(
-          tx as unknown as Database,
-          input.workspaceId,
-          input.sessionId,
-          { workspaceControl: locks.control ?? undefined },
-        );
-        const currentFailovers = Number(turn?.metadata?.codexCredentialFailovers ?? 0);
-        const currentRedispatches = Number(turn?.metadata?.workerDeathRedispatches ?? 0);
-        if (
-          !locks.workspace ||
-          !session ||
-          !turn ||
-          !attempt ||
-          session.accountId !== input.accountId ||
-          turn.accountId !== input.accountId ||
-          turn.sessionId !== input.sessionId ||
-          attempt.accountId !== input.accountId ||
-          attempt.sessionId !== input.sessionId ||
-          attempt.turnId !== input.turnId ||
-          attempt.executionGeneration !== turn.executionGeneration ||
-          effectiveControl.state !== "active" ||
-          session.activeTurnId !== input.turnId ||
-          !["running", "requires_action"].includes(turn.status) ||
-          turn.activeAttemptId !== input.attemptId ||
-          currentRedispatches !== input.expectedRedispatches
-        ) {
-          return {
-            action: "stale",
-            failoverCount: currentFailovers,
-            events: [],
-          } as const;
-        }
-
-        const leaseRows = await tx.execute(
-          sql<{ holder_id: string; generation: number }>`
-          select holder_id, generation from codex_credential_leases
-          where account_id = ${input.accountId}
-            and workspace_id = ${input.workspaceId}
-            and turn_id = ${input.turnId}
-          for update
-        `,
-        );
-        const lease = leaseRows[0];
-        if (
-          lease &&
-          input.holderId != null &&
-          input.generation != null &&
-          (lease.holder_id !== input.holderId || Number(lease.generation) !== input.generation)
-        ) {
-          return {
-            action: "stale",
-            failoverCount: currentFailovers,
-            events: [],
-          } as const;
-        }
-
-        const persistedMaxFailovers = turn.metadata?.codexCredentialFailoverLimit;
-        if (
-          persistedMaxFailovers !== undefined &&
-          (typeof persistedMaxFailovers !== "number" ||
-            !Number.isSafeInteger(persistedMaxFailovers) ||
-            persistedMaxFailovers < 1)
-        ) {
-          throw new Error("Persisted Codex failover bound must be a positive safe integer");
-        }
-        const maxFailovers = persistedMaxFailovers ?? input.maxFailovers;
-        const receiptRecorded = turn.metadata?.codexCredentialFailureAccountingVersion === 1;
-        const failoverCount = receiptRecorded ? currentFailovers : currentFailovers + 1;
-        if (failoverCount > maxFailovers) {
-          const now = new Date();
-          await closeSessionTurnAttemptInTransaction(tx as unknown as Database, {
-            id: input.attemptId,
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId: input.turnId,
-            executionGeneration: turn.executionGeneration,
-            outcome: "failed",
-            closedAt: now,
-          });
-          await cancelTurnInteractionInterventionsInTransaction(tx as unknown as Database, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId: input.turnId,
-          });
-          await settleSessionMaintenanceInTransaction(tx as unknown as Database, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-          });
-          let sequence = session.lastSequence;
-          const closedTools = await closePendingSessionToolCallsInTransaction(
-            tx as unknown as Database,
-            {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              turnId: input.turnId,
-              reason: "turn_failed",
-              sequence,
-              now,
-            },
-          );
-          sequence = closedTools.sequence;
-          const [waitingPrompt] = await tx
-            .select({ id: schema.sessionTurns.id })
-            .from(schema.sessionTurns)
-            .where(
-              and(
-                eq(schema.sessionTurns.workspaceId, input.workspaceId),
-                eq(schema.sessionTurns.sessionId, input.sessionId),
-                eq(schema.sessionTurns.status, "queued"),
-                inArray(schema.sessionTurns.source, ["user", "api"]),
-              ),
-            )
-            .limit(1);
-          const sessionStatus = waitingPrompt ? "queued" : "idle";
-          const failurePayload = {
-            error:
-              "Automatic Codex credential failover stopped after every bounded account attempt was consumed. Send a new message after checking account health or capacity.",
-            code: "codex_credential_failover_exhausted",
-            retryable: false,
-            recovery: "user_message",
-            ...(input.failedPayload ?? {}),
-            failoverCount,
-            maxFailovers,
-          };
-          const inserted = await tx
-            .insert(schema.sessionEvents)
-            .values(
-              withLosslessContentWriteVersion(
-                [
-                  {
-                    accountId: input.accountId,
-                    workspaceId: input.workspaceId,
-                    sessionId: input.sessionId,
-                    sequence: ++sequence,
-                    type: "turn.failed",
-                    payload: failurePayload,
-                    turnId: input.turnId,
-                    turnGeneration: turn.executionGeneration,
-                    turnAttemptId: input.attemptId,
-                    turnAssociation: "current",
-                    occurredAt: now,
-                  },
-                  {
-                    accountId: input.accountId,
-                    workspaceId: input.workspaceId,
-                    sessionId: input.sessionId,
-                    sequence: ++sequence,
-                    type: "session.status.changed",
-                    payload: { status: sessionStatus },
-                    turnId: input.turnId,
-                    turnGeneration: turn.executionGeneration,
-                    turnAttemptId: input.attemptId,
-                    turnAssociation: "current",
-                    occurredAt: now,
-                  },
-                ],
-                "payload",
-                "payloadCodecVersion",
-              ),
-            )
-            .returning();
-          const terminalEvent = inserted[0];
-          if (!terminalEvent) {
-            throw new Error("Codex failover exhaustion did not persist its terminal event");
-          }
-          await projectSessionRealtimeDelegationTerminalInTransaction(tx as unknown as Database, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId: input.turnId,
-            turnStatus: "failed",
-            terminalEvent: {
-              id: terminalEvent.id,
-              type: "turn.failed",
-              payload: sessionEventPayloadRecord(
-                terminalEvent.payload,
-                terminalEvent.payloadCodecVersion,
-              ),
-            },
-            now,
-          });
-          await tx
-            .update(schema.sessionTurns)
-            .set({
-              status: "failed",
-              activeAttemptId: null,
-              metadata: {
-                ...turn.metadata,
-                codexCredentialFailovers: failoverCount,
-                codexCredentialFailoverLimit: maxFailovers,
-                codexCredentialFailoverExhausted: true,
-              },
-              version: turn.version + 1,
-              finishedAt: now,
-              updatedAt: now,
-            })
-            .where(
-              and(
-                eq(schema.sessionTurns.workspaceId, input.workspaceId),
-                eq(schema.sessionTurns.id, input.turnId),
-              ),
-            );
-          await enqueueFailedChildOutboxForTurnTx(
-            tx as unknown as Database,
-            input.workspaceId,
-            session,
-            turn,
-          );
-          await tx
-            .update(schema.sessions)
-            .set({
-              status: sessionStatus,
-              activeTurnId: null,
-              lastSequence: sequence,
-              queueVersion: session.queueVersion + 1,
-              updatedAt: now,
-            })
-            .where(
-              and(
-                eq(schema.sessions.workspaceId, input.workspaceId),
-                eq(schema.sessions.id, input.sessionId),
-              ),
-            );
-          await tx
-            .update(schema.sessionGoals)
-            .set({ continuationSuppressedTurnId: input.turnId, updatedAt: now })
-            .where(
-              and(
-                eq(schema.sessionGoals.workspaceId, input.workspaceId),
-                eq(schema.sessionGoals.sessionId, input.sessionId),
-                eq(schema.sessionGoals.status, "active"),
-              ),
-            );
-          await tx.execute(sql`
-            delete from codex_credential_leases
-            where account_id = ${input.accountId}
-              and workspace_id = ${input.workspaceId}
-              and turn_id = ${input.turnId}
-              and (
-                ${input.holderId ?? null}::text is null
-                or (
-                  holder_id = ${input.holderId ?? null}
-                  and generation = ${input.generation ?? null}
-                )
-              )
-          `);
-          return {
-            action: "limit_exceeded",
-            failoverCount,
-            maxFailovers,
-            events: [...closedTools.events, ...inserted.map(mapEvent)],
-          } as const;
-        }
-        const now = new Date();
-        await closeSessionTurnAttemptInTransaction(tx as unknown as Database, {
-          id: input.attemptId,
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          turnId: input.turnId,
-          executionGeneration: turn.executionGeneration,
-          outcome: "lease_lost_recoverable",
-          closedAt: now,
-        });
-        let sequence = session.lastSequence;
-        const closedTools = await closePendingSessionToolCallsInTransaction(
-          tx as unknown as Database,
-          {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId: input.turnId,
-            reason: "codex_credential_failover",
-            sequence,
-            now,
-            preserveInterruptionRows: true,
-          },
-        );
-        sequence = closedTools.sequence;
-        const inserted = await tx
-          .insert(schema.sessionEvents)
-          .values(
-            withLosslessContentWriteVersion(
-              [
-                {
-                  accountId: input.accountId,
-                  workspaceId: input.workspaceId,
-                  sessionId: input.sessionId,
-                  sequence: ++sequence,
-                  type: "turn.recovery.requested",
-                  payload: {
-                    ...input.recoveryPayload,
-                    failoverCount,
-                  },
-                  turnId: input.turnId,
-                  turnGeneration: turn.executionGeneration,
-                  turnAttemptId: input.attemptId,
-                  turnAssociation: "current",
-                  occurredAt: now,
-                },
-                {
-                  accountId: input.accountId,
-                  workspaceId: input.workspaceId,
-                  sessionId: input.sessionId,
-                  sequence: ++sequence,
-                  type: "session.status.changed",
-                  payload: { status: "recovering" },
-                  turnId: input.turnId,
-                  turnGeneration: turn.executionGeneration,
-                  turnAttemptId: input.attemptId,
-                  turnAssociation: "current",
-                  occurredAt: now,
-                },
-              ],
-              "payload",
-              "payloadCodecVersion",
-            ),
-          )
-          .returning();
-        if (!inserted[0]) {
-          throw new Error("Codex failover did not persist its checkpoint event");
-        }
-
-        await tx
-          .update(schema.sessionTurns)
-          .set({
-            status: "recovering",
-            activeAttemptId: null,
-            metadata: {
-              ...turn.metadata,
-              codexCredentialFailovers: failoverCount,
-              codexCredentialFailoverLimit: maxFailovers,
-            },
-            finishedAt: null,
-            updatedAt: now,
-          })
-          .where(
-            and(
-              eq(schema.sessionTurns.workspaceId, input.workspaceId),
-              eq(schema.sessionTurns.id, input.turnId),
-            ),
-          );
-        await tx
-          .update(schema.sessions)
-          .set({
-            status: "recovering",
-            activeTurnId: input.turnId,
-            lastSequence: sequence,
-            updatedAt: now,
-          })
-          .where(
-            and(
-              eq(schema.sessions.workspaceId, input.workspaceId),
-              eq(schema.sessions.id, input.sessionId),
-              eq(schema.sessions.activeTurnId, input.turnId),
-            ),
-          );
-        await tx.execute(sql`
-          delete from codex_credential_leases
-          where account_id = ${input.accountId}
-            and workspace_id = ${input.workspaceId}
-            and turn_id = ${input.turnId}
-            and holder_id = ${input.holderId}
-            and generation = ${input.generation}
-        `);
-        return {
-          action: "recovering",
-          failoverCount,
-          events: [...closedTools.events, ...inserted.map(mapEvent)],
-        } as const;
-      }),
-  );
-}
-
 export type RequestSessionTurnRecoveryInput = {
   sessionId: string;
   turnId: string;
@@ -80973,6 +79172,12 @@ export type RequestSessionTurnRecoveryInput = {
   providerRecoveryCount?: number;
   /** One rejected-token renewal per serving account generation on this turn. */
   claudeAuthRecovery?: { credentialId: string; credentialVersion: number };
+  /**
+   * The consecutive shared-core lease-busy chain this recovery continues: when
+   * it started and the execution generation that recorded it. The worker
+   * bounds the chain; the database only stores it on the turn.
+   */
+  subscriptionLeaseBusy?: { startedAt: string; executionGeneration: number };
   fromStatuses?: SessionTurnStatus[];
   providerArtifactInvalidation?: {
     historyItemIds: string[];
@@ -81013,6 +79218,13 @@ export async function requestSessionTurnRecovery(
       input.claudeAuthRecovery.credentialVersion < 1)
   )
     throw new Error("Invalid Claude authentication recovery identity");
+  if (
+    input.subscriptionLeaseBusy &&
+    (!Number.isFinite(Date.parse(input.subscriptionLeaseBusy.startedAt)) ||
+      !Number.isSafeInteger(input.subscriptionLeaseBusy.executionGeneration) ||
+      input.subscriptionLeaseBusy.executionGeneration < 1)
+  )
+    throw new Error("Invalid subscription lease-busy recovery chain");
   const fromStatuses = input.fromStatuses ?? ["running", "requires_action"];
   return await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) => {
     return await scopedDb.transaction(async (tx) => {
@@ -81261,6 +79473,14 @@ export async function requestSessionTurnRecovery(
           metadata: {
             ...recoveryTurnMetadata(turn.metadata, input.sandboxLifecycleWait),
             ...(input.claudeAuthRecovery ? { claudeAuthRecovery: input.claudeAuthRecovery } : {}),
+            ...(input.subscriptionLeaseBusy
+              ? {
+                  subscriptionLeaseBusy: {
+                    startedAt: input.subscriptionLeaseBusy.startedAt,
+                    executionGeneration: input.subscriptionLeaseBusy.executionGeneration,
+                  },
+                }
+              : {}),
             ...(input.sandboxSetupOutcomeUnknown
               ? {
                   [SANDBOX_SETUP_OUTCOME_UNKNOWN_METADATA_KEY]: {
@@ -81284,7 +79504,15 @@ export async function requestSessionTurnRecovery(
                 }
               : {}),
             ...(input.providerRecoveryCount !== undefined
-              ? { providerRecoveryCount: input.providerRecoveryCount }
+              ? {
+                  providerRecoveryCount: input.providerRecoveryCount,
+                  providerRecoveryStartedAt:
+                    providerRecoveryCountFromTurnMetadata(turn.metadata) > 0 &&
+                    typeof turn.metadata?.providerRecoveryStartedAt === "string"
+                      ? turn.metadata.providerRecoveryStartedAt
+                      : now.toISOString(),
+                  providerRecoveryReason: input.reason,
+                }
               : {}),
           },
           updatedAt: now,
@@ -82324,6 +80552,9 @@ export async function getSessionQueueSnapshot(
       )
       .orderBy(
         sql`case when ${schema.sessionSystemUpdates.kind} = 'agent_steer_instruction' then 0 else 1 end`,
+        sql`case when ${schema.sessionSystemUpdates.kind} = 'agent_steer_instruction' then ${schema.sessionSystemUpdates.createdAt} end desc`,
+        sql`case when ${schema.sessionSystemUpdates.kind} = 'agent_steer_instruction' then ${schema.sessionSystemUpdates.id} end desc`,
+        sql`case when ${passiveCommandNoticeSql()} then 2 when ${schema.sessionSystemUpdates.kind} = 'background_command_result' then 1 else 0 end`,
         asc(schema.sessionSystemUpdates.createdAt),
         asc(schema.sessionSystemUpdates.id),
       );
@@ -82353,13 +80584,50 @@ export async function getSessionQueueSnapshot(
         sessionId,
         queuedSteerPredecessorIds,
       ));
-    const nextInputBatch = selectBoundedSystemUpdateBatch(pendingInputs);
+
     const hasPendingAgentSteer = pendingInputs.some(
       (update) => update.kind === "agent_steer_instruction",
     );
     const attachmentTurn = hasPendingAgentSteer
       ? physicalItems.find((turn) => turn.metadata.delivery === "steer")
       : physicalItems[0];
+    const attachmentRow = attachmentTurn
+      ? rows.find((row) => row.id === attachmentTurn.id)
+      : undefined;
+    let nextInputBatch: typeof pendingInputs = [];
+    if (attachmentRow && !isSessionRealtimeDelegationTurnMetadata(attachmentRow.metadata)) {
+      const window = pendingInboxReadWindow(pendingInputs, true);
+      const runIds = [...new Set(window.flatMap((update) => update.scheduledTaskRunId ?? []))];
+      const runs =
+        runIds.length === 0
+          ? []
+          : await scopedDb
+              .select({
+                id: schema.scheduledTaskRuns.id,
+                status: schema.scheduledTaskRuns.status,
+                error: schema.scheduledTaskRuns.error,
+                acceptedExecutionSnapshot: schema.scheduledTaskRuns.acceptedExecutionSnapshot,
+              })
+              .from(schema.scheduledTaskRuns)
+              .where(
+                and(
+                  eq(schema.scheduledTaskRuns.accountId, session.accountId),
+                  eq(schema.scheduledTaskRuns.workspaceId, workspaceId),
+                  eq(schema.scheduledTaskRuns.sessionId, sessionId),
+                  inArray(schema.scheduledTaskRuns.id, runIds),
+                ),
+              );
+      const runsById = new Map(runs.map((run) => [run.id, run]));
+      // Preview only reads durable rejection facts. Live authority and worker
+      // admission are revalidated under claim's locks and can still change.
+      const candidates = window.filter(
+        (update) =>
+          recognizedInboxPayload(update) &&
+          (!update.scheduledTaskRunId ||
+            scheduledRunPreclaimDenial(runsById.get(update.scheduledTaskRunId)) === null),
+      );
+      nextInputBatch = (await planInboxBatch(scopedDb, session, candidates, attachmentRow)).updates;
+    }
     return {
       version: session.queueVersion,
       effectiveControl: serializeEffectiveSessionControl(effectiveControl),
@@ -82367,15 +80635,19 @@ export async function getSessionQueueSnapshot(
       stoppingPreviousAttempt,
       items,
       pendingInputs: pendingInputs.map((update) => {
-        const canonical = mapSessionSystemUpdate(update);
+        // Queue labels do not expose the payload. A malformed payload remains
+        // visible here until claim records its failure, without breaking reads.
         return {
-          id: canonical.id,
-          sessionId: canonical.sessionId,
-          kind: canonical.kind,
-          classification: canonical.classification,
-          sourceId: boundedInternalUpdateEventText(canonical.sourceId, 256).text,
-          summary: boundedInternalUpdateEventText(canonical.summary, 512).text,
-          createdAt: canonical.createdAt,
+          id: update.id,
+          sessionId: update.sessionId,
+          kind: update.kind as SessionSystemUpdateKind,
+          classification: update.classification as SystemUpdateClassification,
+          sourceId: boundedInternalUpdateEventText(update.sourceId, 256).text,
+          summary: boundedInternalUpdateEventText(
+            fromPostgresLosslessText(update.summary, update.summaryCodecVersion),
+            512,
+          ).text,
+          createdAt: update.createdAt.toISOString(),
         };
       }),
       pendingInputAttachment:
@@ -82412,114 +80684,6 @@ type ChildOutboxSession = Pick<
   typeof schema.sessions.$inferSelect,
   "id" | "accountId" | "parentSessionId" | "parentTurnId"
 >;
-
-/**
- * The exact private authority a child lifecycle notice copies from its causal
- * parent turn: same-session-successor personal connection delegations, the
- * parent's xAI provider authority snapshot, and the bounded subject lineage the
- * parent's claim later revalidates. Every child -> parent outbox producer uses
- * this one resolution so the notice kinds cannot drift in authority.
- */
-async function parentOutboxAuthorityTx(
-  tx: Database,
-  workspaceId: string,
-  session: ChildOutboxSession & { parentSessionId: string },
-): Promise<{
-  personalConnectionDelegations: McpPersonalConnectionDelegation[];
-  mcpAccountBindings: McpConnectionAccountBinding[] | null;
-  xaiProviderAccountAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1;
-  claudeProviderAccountAuthoritySnapshot: ClaudeProviderAccountAuthoritySnapshotV1;
-  lineage: Record<string, unknown>;
-}> {
-  const personalConnectionDelegations = session.parentTurnId
-    ? await personalConnectionDelegationsForTurnInTransaction(
-        tx,
-        workspaceId,
-        session.parentSessionId,
-        session.parentTurnId,
-      )
-    : [];
-  const mcpAccountBindings = session.parentTurnId
-    ? await mcpAccountBindingsForTurnInTransaction(
-        tx,
-        workspaceId,
-        session.parentSessionId,
-        session.parentTurnId,
-      )
-    : null;
-  const xaiProviderAccountAuthoritySnapshot = session.parentTurnId
-    ? await xaiProviderAccountAuthoritySnapshotForTurnInTransaction(
-        tx,
-        workspaceId,
-        session.parentSessionId,
-        session.parentTurnId,
-      )
-    : WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1;
-  const claudeProviderAccountAuthoritySnapshot = session.parentTurnId
-    ? await claudeProviderAccountAuthoritySnapshotForTurnInTransaction(
-        tx,
-        workspaceId,
-        session.parentSessionId,
-        session.parentTurnId,
-      )
-    : WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1;
-  const [parentTurn] = session.parentTurnId
-    ? await tx
-        .select({
-          initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
-          initiatorKind: schema.sessionTurns.initiatorKind,
-          initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
-        })
-        .from(schema.sessionTurns)
-        .where(
-          and(
-            eq(schema.sessionTurns.workspaceId, workspaceId),
-            eq(schema.sessionTurns.sessionId, session.parentSessionId),
-            eq(schema.sessionTurns.id, session.parentTurnId),
-          ),
-        )
-        .limit(1)
-    : [];
-  const xaiAuthoritySubjectId =
-    xaiProviderAccountAuthoritySnapshot.scope === "user"
-      ? (parentTurn?.initiatingHumanSubjectId ??
-        (parentTurn?.initiatorKind === "subject" ? parentTurn.initiatorSubjectId : null))
-      : null;
-  const claudeAuthoritySubjectId =
-    claudeProviderAccountAuthoritySnapshot.scope === "user"
-      ? (parentTurn?.initiatingHumanSubjectId ??
-        (parentTurn?.initiatorKind === "subject" ? parentTurn.initiatorSubjectId : null))
-      : null;
-  if (xaiProviderAccountAuthoritySnapshot.scope === "user" && !xaiAuthoritySubjectId) {
-    throw new Error("Child lifecycle outbox lost its parent xAI authority subject");
-  }
-  if (claudeProviderAccountAuthoritySnapshot.scope === "user" && !claudeAuthoritySubjectId) {
-    throw new Error("Child lifecycle outbox lost its parent Claude authority subject");
-  }
-  const connectionAuthoritySubjectId =
-    parentTurn?.initiatingHumanSubjectId ??
-    (parentTurn?.initiatorKind === "subject" ? parentTurn.initiatorSubjectId : null);
-  const hasPersonalConnections = personalConnectionDelegations.length > 0;
-  if (hasPersonalConnections && !connectionAuthoritySubjectId) {
-    throw new Error("Child lifecycle outbox lost its parent connection authority subject");
-  }
-  return {
-    personalConnectionDelegations,
-    mcpAccountBindings,
-    xaiProviderAccountAuthoritySnapshot,
-    claudeProviderAccountAuthoritySnapshot,
-    lineage: {
-      childSessionId: session.id,
-      parentSessionId: session.parentSessionId,
-      ...(session.parentTurnId ? { parentTurnId: session.parentTurnId } : {}),
-      ...(connectionAuthoritySubjectId && hasPersonalConnections
-        ? { connectionAuthoritySubjectId }
-        : {}),
-      ...(xaiAuthoritySubjectId ? { xaiAuthoritySubjectId } : {}),
-      ...(claudeAuthoritySubjectId ? { claudeAuthoritySubjectId } : {}),
-    },
-  };
-}
 
 type ChildLifecycleOutboxPayload = Extract<
   SessionSystemUpdatePayload,
@@ -82601,6 +80765,7 @@ async function enqueueChildLifecycleNoticeOutboxTx(
             xaiProviderAccountAuthoritySnapshot: authority.xaiProviderAccountAuthoritySnapshot,
             claudeProviderAccountAuthoritySnapshot:
               authority.claudeProviderAccountAuthoritySnapshot,
+            subscriptionAuthority: authority.subscriptionAuthority,
           },
           "summary",
           "summaryCodecVersion",
@@ -82894,6 +81059,8 @@ export type SessionSystemUpdateOutboxDelivery = {
   mcpAccountBindings: McpConnectionAccountBinding[] | null;
   xaiProviderAccountAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1;
   claudeProviderAccountAuthoritySnapshot: ClaudeProviderAccountAuthoritySnapshotV1;
+  /** Codex v2 (M3 PR 3b): the exact spawning parent turn's frozen value. */
+  subscriptionAuthority: SubscriptionPersonalAuthorityV2 | null;
 };
 
 /** Narrow an outbox row back to its correlated typed kind/payload input variant. */
@@ -82928,6 +81095,8 @@ function mapSystemUpdateOutboxRow(row: {
   mcp_account_bindings: unknown;
   xai_provider_account_authority_snapshot: unknown;
   claude_provider_account_authority_snapshot: unknown;
+  /** Absent from the claim routine's fixed columns; filled in after the claim. */
+  subscription_authority?: unknown;
 }): SessionSystemUpdateOutboxDelivery {
   const typed = parseChildLifecycleOutboxPayload(
     fromPostgresLosslessJson(row.payload, row.payload_codec_version),
@@ -82958,7 +81127,49 @@ function mapSystemUpdateOutboxRow(row: {
     claudeProviderAccountAuthoritySnapshot: ClaudeProviderAccountAuthoritySnapshotV1.parse(
       row.claude_provider_account_authority_snapshot,
     ),
+    subscriptionAuthority: frozenSubscriptionAuthorityV2(row.subscription_authority),
   };
+}
+
+/** A carrier's frozen Codex v2 value (M3 PR 3b), or null when it froze none. */
+function frozenSubscriptionAuthorityV2(value: unknown): SubscriptionPersonalAuthorityV2 | null {
+  return value === null || value === undefined
+    ? null
+    : SubscriptionPersonalAuthorityV2.parse(value);
+}
+
+/**
+ * The Codex v2 value of a child's exact spawning parent turn (M3 PR 3b): a
+ * child-lifecycle notice carries it like the v1 pools, never recomputed.
+ */
+async function childNoticeParentSubscriptionAuthorityTx(
+  tx: Database,
+  workspaceId: string,
+  childSessionId: string,
+): Promise<SubscriptionPersonalAuthorityV2 | null> {
+  const [child] = await tx
+    .select({
+      parentSessionId: schema.sessions.parentSessionId,
+      parentTurnId: schema.sessions.parentTurnId,
+    })
+    .from(schema.sessions)
+    .where(
+      and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, childSessionId)),
+    )
+    .limit(1);
+  if (!child?.parentSessionId || !child.parentTurnId) return null;
+  const [parentTurn] = await tx
+    .select({ subscriptionAuthority: schema.sessionTurns.subscriptionAuthority })
+    .from(schema.sessionTurns)
+    .where(
+      and(
+        eq(schema.sessionTurns.workspaceId, workspaceId),
+        eq(schema.sessionTurns.sessionId, child.parentSessionId),
+        eq(schema.sessionTurns.id, child.parentTurnId),
+      ),
+    )
+    .limit(1);
+  return frozenSubscriptionAuthorityV2(parentTurn?.subscriptionAuthority);
 }
 
 /**
@@ -83014,6 +81225,7 @@ export async function getSessionSystemUpdateOutboxByDedupeKey(
         claudeProviderAccountAuthoritySnapshot: ClaudeProviderAccountAuthoritySnapshotV1.parse(
           row.claudeProviderAccountAuthoritySnapshot,
         ),
+        subscriptionAuthority: frozenSubscriptionAuthorityV2(row.subscriptionAuthority),
       };
     },
   );
@@ -83073,6 +81285,40 @@ export async function claimPendingSessionSystemUpdateOutbox(
             );
         },
       );
+    }
+  }
+  // The claim routine's fixed columns predate the Codex v2 slot (M3 PR 3b):
+  // read the frozen values of the claimed rows, one query per workspace.
+  const byWorkspace = new Map<string, SessionSystemUpdateOutboxDelivery[]>();
+  for (const delivery of deliveries) {
+    const group = byWorkspace.get(delivery.workspaceId) ?? [];
+    group.push(delivery);
+    byWorkspace.set(delivery.workspaceId, group);
+  }
+  for (const [workspaceId, group] of byWorkspace) {
+    const values = await withRlsContext(
+      db,
+      { accountId: group[0]!.accountId, workspaceId },
+      async (scopedDb) =>
+        await scopedDb
+          .select({
+            id: schema.sessionSystemUpdateOutbox.id,
+            subscriptionAuthority: schema.sessionSystemUpdateOutbox.subscriptionAuthority,
+          })
+          .from(schema.sessionSystemUpdateOutbox)
+          .where(
+            and(
+              eq(schema.sessionSystemUpdateOutbox.workspaceId, workspaceId),
+              inArray(
+                schema.sessionSystemUpdateOutbox.id,
+                group.map((delivery) => delivery.id),
+              ),
+            ),
+          ),
+    );
+    const frozen = new Map(values.map((value) => [value.id, value.subscriptionAuthority]));
+    for (const delivery of group) {
+      delivery.subscriptionAuthority = frozenSubscriptionAuthorityV2(frozen.get(delivery.id));
     }
   }
   return deliveries;
@@ -83457,14 +81703,34 @@ export async function markSessionWorkflowWakeDelivered(
                 input.sessionId,
                 session,
               );
+              // Input held by a terminal compaction failure is not admissible
+              // until newer truth arrives (see `peekSessionWork`); keeping the
+              // wake open for it would only re-signal a workflow that has
+              // nothing to claim, forever.
+              const compactionHoldSequence = await compactionFailureHoldSequenceTx(
+                tx as unknown as Database,
+                input.workspaceId,
+                input.sessionId,
+              );
               const pending = await tx
-                .selectDistinct({ kind: schema.sessionSystemUpdates.kind })
+                .selectDistinct({
+                  kind: schema.sessionSystemUpdates.kind,
+                  passive: passiveCommandNoticeSql(),
+                })
                 .from(schema.sessionSystemUpdates)
                 .where(
                   and(
                     eq(schema.sessionSystemUpdates.workspaceId, input.workspaceId),
                     eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
                     eq(schema.sessionSystemUpdates.state, "pending"),
+                    compactionHoldSequence === null
+                      ? undefined
+                      : systemUpdatePendingAfterSequenceSql(
+                          tx as unknown as Database,
+                          input.workspaceId,
+                          input.sessionId,
+                          compactionHoldSequence,
+                        ),
                   ),
                 );
               const [goal] = await tx
@@ -83479,7 +81745,8 @@ export async function markSessionWorkflowWakeDelivered(
                 .limit(1);
               if (
                 pending.some(
-                  ({ kind }) =>
+                  ({ kind, passive }) =>
+                    !passive &&
                     SESSION_SYSTEM_UPDATE_WAKE_CLASS[kind as SessionSystemUpdateKind] ===
                       "immediate" &&
                     (kind !== "background_command_result" || wait.disposition === "held") &&
@@ -83583,7 +81850,10 @@ export async function markSessionWorkflowWakeFailed(
 
 export async function getOrCreateSessionSystemUpdateOutbox(
   db: Database,
-  input: Omit<SessionSystemUpdateOutboxDelivery, "id" | "status">,
+  input: Omit<SessionSystemUpdateOutboxDelivery, "id" | "status" | "subscriptionAuthority"> & {
+    /** Default: the source child's exact spawning parent turn's value. */
+    subscriptionAuthority?: SubscriptionPersonalAuthorityV2 | null;
+  },
 ): Promise<SessionSystemUpdateOutboxDelivery> {
   const persistence = {
     stage: "session_lifecycle_outbox.get_or_create",
@@ -83649,6 +81919,14 @@ export async function getOrCreateSessionSystemUpdateOutbox(
               mcpAccountBindings: input.mcpAccountBindings,
               xaiProviderAccountAuthoritySnapshot: input.xaiProviderAccountAuthoritySnapshot,
               claudeProviderAccountAuthoritySnapshot: input.claudeProviderAccountAuthoritySnapshot,
+              subscriptionAuthority:
+                input.subscriptionAuthority !== undefined
+                  ? input.subscriptionAuthority
+                  : await childNoticeParentSubscriptionAuthorityTx(
+                      scopedDb as unknown as Database,
+                      input.workspaceId,
+                      input.sourceSessionId,
+                    ),
             },
             "summary",
             "summaryCodecVersion",
@@ -83743,6 +82021,7 @@ export async function getOrCreateSessionSystemUpdateOutbox(
       claudeProviderAccountAuthoritySnapshot: ClaudeProviderAccountAuthoritySnapshotV1.parse(
         row.claudeProviderAccountAuthoritySnapshot,
       ),
+      subscriptionAuthority: frozenSubscriptionAuthorityV2(row.subscriptionAuthority),
     };
   });
 }
@@ -83855,6 +82134,12 @@ export type AddSessionSystemUpdateInput = {
   xaiProviderAccountAuthoritySnapshot?: XaiProviderAccountAuthoritySnapshotV1;
   claudeProviderAccountAuthoritySnapshot?: ClaudeProviderAccountAuthoritySnapshotV1;
   scheduledTaskRunId?: string | null;
+  /**
+   * Codex v2 (M3 PR 3b) frozen by the producer (a child notice's parent turn,
+   * a scheduled task, a causal turn). Absent means none; the delivering turn
+   * then copies its receiving context or takes the empty value.
+   */
+  subscriptionAuthority?: SubscriptionPersonalAuthorityV2 | null;
 } & SessionSystemUpdateInputVariant;
 
 export type AddSessionSystemUpdateResult<RequireIdleSession extends boolean = boolean> =
@@ -83904,7 +82189,10 @@ export async function addSessionSystemUpdateWithSourceMutation<
     rejectionReason: "session_cancelled" | "session_not_idle" | null,
   ) => Promise<void>,
   options: {
-    /** Admit only when the already-locked session is at its idle boundary. */
+    /**
+     * Admit only when the already-locked session has no work in progress:
+     * idle, or failed (its last turn ended and it accepts new turns).
+     */
     requireIdleSession?: RequireIdleSession;
     /** Runs under the locked session/source transaction before any update/event insert. */
     prepareSource?: (
@@ -83938,7 +82226,10 @@ export async function addSessionSystemUpdateWithSourceMutation<
           input.sessionId,
           { workspaceControl: locks.control ?? undefined },
         );
-        if (session.status === "cancelled") {
+        // An archived session is read-only: machine input addressed to it (a
+        // late child result, schedule or media completion) is settled exactly
+        // like input to a cancelled session instead of being retried forever.
+        if (session.status === "cancelled" || session.contentArchiveState !== null) {
           await mutateSource(tx as unknown as Database, null, null, "session_cancelled");
           return { added: false, reason: "session_cancelled" } as const;
         }
@@ -83987,7 +82278,13 @@ export async function addSessionSystemUpdateWithSourceMutation<
           } as const;
         };
 
-        if (options.requireIdleSession && session.status !== "idle") {
+        // A failed session has finished its work and accepts new turns; only
+        // work still in progress (or awaiting a person) overlaps a new run.
+        if (
+          options.requireIdleSession &&
+          session.status !== "idle" &&
+          session.status !== "failed"
+        ) {
           const replayed = await replayExistingUpdate([]);
           if (replayed) {
             return replayed;
@@ -84026,6 +82323,16 @@ export async function addSessionSystemUpdateWithSourceMutation<
             payload: input.payload,
           }));
 
+        // Producers without causal authority have no exact human: resolve the
+        // organization or workspace pool rather than assuming workspace.
+        const sharedUpdatePool =
+          input.xaiProviderAccountAuthoritySnapshot === undefined ||
+          input.claudeProviderAccountAuthoritySnapshot === undefined
+            ? await sharedPoolSubscriptionAuthoritySnapshotsInTransaction(
+                tx as unknown as Database,
+                input.workspaceId,
+              )
+            : null;
         const [inserted] = await tx
           .insert(schema.sessionSystemUpdates)
           .values(
@@ -84045,11 +82352,10 @@ export async function addSessionSystemUpdateWithSourceMutation<
                   personalConnectionDelegations: input.personalConnectionDelegations ?? [],
                   mcpAccountBindings: parseAcceptedMcpAccountBindings(input.mcpAccountBindings),
                   xaiProviderAccountAuthoritySnapshot:
-                    input.xaiProviderAccountAuthoritySnapshot ??
-                    WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+                    input.xaiProviderAccountAuthoritySnapshot ?? sharedUpdatePool!.xai,
                   claudeProviderAccountAuthoritySnapshot:
-                    input.claudeProviderAccountAuthoritySnapshot ??
-                    WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+                    input.claudeProviderAccountAuthoritySnapshot ?? sharedUpdatePool!.claude,
+                  subscriptionAuthority: input.subscriptionAuthority ?? null,
                   scheduledTaskRunId: input.scheduledTaskRunId ?? null,
                   state: consumedByParentRead ? "superseded" : "pending",
                 },
@@ -84367,6 +82673,8 @@ async function sameSessionCausalAuthorityTx(
     personalConnectionDelegations,
     xaiProviderAccountAuthoritySnapshot,
     claudeProviderAccountAuthoritySnapshot,
+    // Codex v2 (M3 PR 3b): the causal turn's frozen value, copied.
+    subscriptionAuthority: frozenSubscriptionAuthorityV2(turn.subscriptionAuthority),
     lineage: {
       causalTurnId: turn.id,
       ...(human && personalConnectionDelegations.length > 0
@@ -84453,6 +82761,13 @@ async function backgroundCommandCausalAuthorityTx(
       }
     : null;
 }
+
+/** Loss reasons that mean the whole sandbox box is gone, not just one exec. */
+const SANDBOX_GONE_COMMAND_REASONS: ReadonlySet<string> = new Set([
+  "provider_instance_lost",
+  "provider_instance_not_found",
+  "provider_instance_terminated",
+]);
 
 function backgroundCommandTerminalMutation(input: {
   accountId: string;
@@ -84579,14 +82894,16 @@ function backgroundCommandTerminalMutation(input: {
       const summary = command.failure
         ? `${commandLabel}: output delivery failed (${command.failure.code}); process exit code ${command.exitCode ?? "unknown"} is not a successful command result.`
         : command.state === "lost" && reason === IDLE_COMMAND_CONTAINMENT_REASON
-          ? `\`${commandLabel}\` was stopped because nobody used this session${idleMinutes ? ` for ${idleMinutes} minute${idleMinutes === 1 ? "" : "s"}` : ""} and nothing was waiting on it; the workspace was saved. Restart it if you still need it.`
+          ? `\`${commandLabel}\` was stopped because nobody used this session${idleMinutes ? ` for ${idleMinutes} minute${idleMinutes === 1 ? "" : "s"} and it printed no output in that time` : " and it printed no output"}; the workspace was saved. Restart it if you still need it.`
           : command.state === "lost" && reason === DEADLINE_COMMAND_CONTAINMENT_REASON
             ? `\`${commandLabel}\` was stopped because the sandbox reached its maximum lifetime; the workspace was saved. Restart it if you still need it.`
-            : command.state === "lost"
-              ? `${commandLabel}: result unavailable. Its exit status could not be confirmed.`
-              : command.exitCode === 0
-                ? `${commandLabel}: completed successfully.`
-                : `${commandLabel}: exited with code ${command.exitCode ?? "unknown"}.`;
+            : command.state === "lost" && SANDBOX_GONE_COMMAND_REASONS.has(reason)
+              ? `\`${commandLabel}\` is no longer running because its sandbox was shut down or lost; whether it finished is unknown. Check its effects before running it again.`
+              : command.state === "lost"
+                ? `${commandLabel}: result unavailable. Its exit status could not be confirmed.`
+                : command.exitCode === 0
+                  ? `${commandLabel}: completed successfully.`
+                  : `${commandLabel}: exited with code ${command.exitCode ?? "unknown"}.`;
       const payload = {
         type: "background_command_result" as const,
         commandId: command.id,
@@ -84600,6 +82917,12 @@ function backgroundCommandTerminalMutation(input: {
         ...input,
         commandId: command.id,
       });
+      const sharedCommandPool = causalAuthority
+        ? null
+        : await sharedPoolSubscriptionAuthoritySnapshotsInTransaction(
+            tx as unknown as Database,
+            input.workspaceId,
+          );
       const [insertedUpdate] = await tx
         .insert(schema.sessionSystemUpdates)
         .values(
@@ -84618,11 +82941,11 @@ function backgroundCommandTerminalMutation(input: {
                 personalConnectionDelegations: causalAuthority?.personalConnectionDelegations ?? [],
                 mcpAccountBindings: causalAuthority?.mcpAccountBindings ?? null,
                 xaiProviderAccountAuthoritySnapshot:
-                  causalAuthority?.xaiProviderAccountAuthoritySnapshot ??
-                  WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+                  causalAuthority?.xaiProviderAccountAuthoritySnapshot ?? sharedCommandPool!.xai,
                 claudeProviderAccountAuthoritySnapshot:
                   causalAuthority?.claudeProviderAccountAuthoritySnapshot ??
-                  WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+                  sharedCommandPool!.claude,
+                subscriptionAuthority: causalAuthority?.subscriptionAuthority ?? null,
                 lineage: {
                   commandId: command.id,
                   provider: command.provider,
@@ -84684,7 +83007,12 @@ function backgroundCommandTerminalMutation(input: {
         input.sessionId,
         session,
       );
-      const waitingForInput = commandWait.disposition === "held";
+      // An idle-containment notice never wakes a wait: nothing used the box,
+      // and waking would end a wait for a person, spend a model turn and
+      // invite a restart every window. It is delivered with the next turn.
+      const waitingForInput =
+        commandWait.disposition === "held" &&
+        !(command.state === "lost" && reason === IDLE_COMMAND_CONTAINMENT_REASON);
       const autoResumed = waitingForInput
         ? await autoResumeGoalPausedByCapInTransaction(tx, {
             workspaceId: input.workspaceId,
@@ -85067,6 +83395,7 @@ function sessionMutationAdvancesActivity(update: {
   firstPartyMcpTools?: FirstPartyMcpToolName[];
   agentConfig?: ResolvedAgentConfig | null;
   instructions?: string | null;
+  skills?: SessionSkill[];
   toolPolicy?: SessionToolPolicy;
   toolPolicyVersion?: number;
   expectedToolPolicyVersion?: number;
@@ -85521,6 +83850,8 @@ export async function acceptSessionApprovalDecision(
 export type ExpireSessionInteractionInterventionResult = {
   action: "expired" | "stale" | "not_found";
   events: SessionEvent[];
+  /** Content-free facts for telemetry on the expired transition only. */
+  intervention?: { kind: string; createdAt: Date };
 };
 
 /**
@@ -85737,6 +84068,8 @@ export async function expireSessionInteractionIntervention(
       const [row] = await scopedDb
         .select({
           id: schema.interactionInterventions.id,
+          kind: schema.interactionInterventions.kind,
+          createdAt: schema.interactionInterventions.createdAt,
           status: schema.interactionInterventions.status,
           version: schema.interactionInterventions.version,
           expiresAt: schema.interactionInterventions.expiresAt,
@@ -85785,7 +84118,11 @@ export async function expireSessionInteractionIntervention(
     },
   });
   return result.action === "accepted"
-    ? { action: "expired", events: result.events }
+    ? {
+        action: "expired",
+        events: result.events,
+        intervention: { kind: intervention.kind, createdAt: intervention.createdAt },
+      }
     : { action: "stale", events: [] };
 }
 
@@ -85952,20 +84289,12 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
             workspaceId,
             activityGateOpen,
             async (tx) => {
-              const mutationApplied = await runSessionEventAppendPhase(
-                observer,
-                { ...phaseInput, phase: "mutation" },
-                async () => await mutate(tx),
-                (applied) => (applied ? "ok" : "mutation_skipped"),
-              );
-              if (!mutationApplied) {
-                return {
-                  events: [],
-                  accepted: false,
-                  mutationApplied: false,
-                  canonicalStartupMilestones: [],
-                };
-              }
+              // Canonical prefix BEFORE the caller's mutation. The mutation
+              // locks a session-owned row (the Codemode journal row on
+              // terminal settlement); taking it first and the session prefix
+              // second inverted the order of every prefix holder that then
+              // locks the same row (a Codemode re-submit or claim), which
+              // deadlocked POST /codemode/calls in production (40P01).
               const fence = await runSessionEventAppendPhase(
                 observer,
                 { ...phaseInput, phase: "turn_attempt_fence" },
@@ -85985,6 +84314,20 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
               if (!session) throw new Error(`Session not found: ${sessionId}`);
               if (!activityGateOpen && !fence.allowed) {
                 throw new SessionActivityGateEscalation();
+              }
+              const mutationApplied = await runSessionEventAppendPhase(
+                observer,
+                { ...phaseInput, phase: "mutation" },
+                async () => await mutate(tx),
+                (applied) => (applied ? "ok" : "mutation_skipped"),
+              );
+              if (!mutationApplied) {
+                return {
+                  events: [],
+                  accepted: false,
+                  mutationApplied: false,
+                  canonicalStartupMilestones: [],
+                };
               }
               let sequence = session.lastSequence;
               const now = new Date();
@@ -86289,6 +84632,51 @@ export type SettleCodemodeOperationWithOutputInput = {
  * ordinary durable event replay repairs; it cannot leave a completed call
  * permanently spinning in the timeline.
  */
+export async function adoptCodemodeApprovalWithOutput(
+  db: Database,
+  input: Parameters<typeof adoptCodemodeApproval>[1],
+) {
+  const events: SessionEvent[] = [];
+  const operation = await withSessionActivityRlsContext(db, input, (scoped) =>
+    adoptCodemodeApproval(scoped, input, async (tx, terminal) => {
+      const appended = await appendSessionEventsForTurnAttempt(
+        tx,
+        input.workspaceId,
+        input.sessionId,
+        input.turnId,
+        input.executionGeneration,
+        input.attemptId,
+        [
+          {
+            type: "agent.toolCall.output",
+            clientEventId: `opengeni:codemode-terminal:${terminal.operationId}`,
+            turnId: input.turnId,
+            turnGeneration: input.executionGeneration,
+            turnAttemptId: input.attemptId,
+            producerId: terminal.caller.subjectId,
+            payload: {
+              id: terminal.operationId,
+              origin: "codemode",
+              subjectId: terminal.caller.subjectId,
+              error: true,
+              output: {
+                isError: true,
+                content: [
+                  { type: "text", text: terminal.errorMessage ?? "Action ended before execution." },
+                ],
+                _meta: { codemodeState: terminal.state, errorCode: terminal.errorCode },
+              },
+            },
+          },
+        ],
+      );
+      if (!appended.accepted) throw new Error("Continuation lost its execution fence");
+      events.push(...appended.events);
+    }),
+  );
+  return { operation, events };
+}
+
 export async function settleCodemodeOperationWithOutput(
   db: Database,
   input: SettleCodemodeOperationWithOutputInput,
@@ -86547,6 +84935,8 @@ type LockedSessionUpdateResult = {
     agentConfig?: ResolvedAgentConfig | null;
     /** Session instructions (the `agent.instructions` alias). */
     instructions?: string | null;
+    /** The Skills the session carries itself; written with the tool-policy CAS. */
+    skills?: SessionSkill[];
     toolPolicy?: SessionToolPolicy;
     toolPolicyVersion?: number;
     expectedToolPolicyVersion?: number;
@@ -86716,6 +85106,7 @@ export async function appendSessionEventsWithLockedSessionUpdate(
               : {}),
             ...(update.agentConfig !== undefined ? { agentConfig: update.agentConfig } : {}),
             ...(update.instructions !== undefined ? { instructions: update.instructions } : {}),
+            ...(update.skills !== undefined ? { skills: update.skills } : {}),
             ...(update.toolPolicy !== undefined ? { toolPolicy: update.toolPolicy } : {}),
             ...(update.toolPolicyVersion !== undefined
               ? { toolPolicyVersion: update.toolPolicyVersion }
@@ -86792,7 +85183,7 @@ async function mapSessionWithControl(
   },
   archive: Pick<Session, "archived" | "archivedAt" | "archiveVersion"> = mapSessionArchive(null),
   workspaceControl?: WorkspaceControlRow,
-  tenancyViewer?: { subjectId: string; activated: boolean },
+  tenancyViewer?: { subjectId: string },
 ): Promise<Session> {
   const controls = await sessionControlProjections(db, row.workspaceId, [row.id], workspaceControl);
   const control = controls.get(row.id);
@@ -86840,52 +85231,15 @@ async function mapSessionWithControl(
       lastError: pending ? wake.lastError : null,
     };
   }
-  if (row.activeTurnId) {
-    const [turn] = await db
-      .select({
-        metadata: schema.sessionTurns.metadata,
-        status: schema.sessionTurns.status,
-        credentialId: schema.codexCredentialLeases.credentialId,
+  // A selection belongs to the active turn; without one there is none to read.
+  const selections = row.activeTurnId
+    ? await getSubscriptionCoreCodexCurrentSelections(db, {
+        accountId: row.accountId,
+        workspaceId: row.workspaceId,
+        sessionIds: [row.id],
       })
-      .from(schema.sessionTurns)
-      .leftJoin(
-        schema.codexCredentialLeases,
-        and(
-          eq(schema.codexCredentialLeases.workspaceId, schema.sessionTurns.workspaceId),
-          eq(schema.codexCredentialLeases.turnId, schema.sessionTurns.id),
-          sql`${schema.codexCredentialLeases.leasedUntil} > clock_timestamp()`,
-        ),
-      )
-      .where(
-        and(
-          eq(schema.sessionTurns.workspaceId, row.workspaceId),
-          eq(schema.sessionTurns.sessionId, row.id),
-          eq(schema.sessionTurns.id, row.activeTurnId),
-          sql`${schema.sessionTurns.model} like 'codex/%'`,
-        ),
-      )
-      .limit(1);
-    if (
-      turn &&
-      ["running", "recovering", "waiting_capacity", "requires_action"].includes(turn.status)
-    ) {
-      const accepted = readCodexCredentialPolicySnapshotV1(turn.metadata);
-      const policy = accepted.kind === "valid" ? accepted.policy : null;
-      mapped.codexCurrentSelection = {
-        waiting: turn.status === "waiting_capacity",
-        credentialId:
-          turn.status === "waiting_capacity"
-            ? !policy && row.codexPinSource !== "policy"
-              ? row.codexPinnedCredentialId
-              : policy?.pinSource === "manual"
-                ? policy.pinnedCredentialId
-                : policy?.rotationEnabled === false
-                  ? policy.activeCredentialId
-                  : null
-            : turn.credentialId,
-      };
-    }
-  }
+    : null;
+  mapped.codexCurrentSelection = selections?.get(row.id) ?? null;
   return mapped;
 }
 
@@ -86929,7 +85283,7 @@ function mapSession(
     attentionVersion: 0,
   },
   archive: Pick<Session, "archived" | "archivedAt" | "archiveVersion"> = mapSessionArchive(null),
-  tenancyViewer?: { subjectId: string; activated: boolean },
+  tenancyViewer?: { subjectId: string },
 ): Session {
   const bundledSkillIds = bundledSkillSelectionFromMetadata(row.metadata);
   return {
@@ -86946,9 +85300,10 @@ function mapSession(
           },
         }
       : {}),
+    retention: sessionRetentionFromRow(row),
     admissionBlock: projectSessionAdmissionBlock(row.admissionBlock),
     initialMessage: fromPostgresLosslessText(row.initialMessage, row.initialMessageCodecVersion),
-    title: row.title ?? null,
+    title: cleanStoredSessionTitle(row.title, row.titleSource),
     titleSource: (row.titleSource as "user" | "agent" | null) ?? null,
     instructions: row.instructions ?? null,
     policyRole: row.policyRole ?? null,
@@ -86963,9 +85318,7 @@ function mapSession(
     toolPolicyVersion: Number(row.toolPolicyVersion),
     mcpApprovalPolicies: row.mcpApprovalPolicies,
     metadata: row.metadata,
-    ...(tenancyViewer?.activated
-      ? { tenancy: mapSessionTenancy(row, tenancyViewer.subjectId) }
-      : {}),
+    ...(tenancyViewer ? { tenancy: mapSessionTenancy(row, tenancyViewer.subjectId) } : {}),
     createdBy: initiatorFromStorage(
       row.createdByKind,
       row.createdBySubjectId,
@@ -87545,67 +85898,6 @@ function projectInstallationConfig(config: Record<string, unknown>): Record<stri
   return { ...rest, headerNames: Object.keys(headersEncrypted).sort() };
 }
 
-function mapConnectionMetadata(row: {
-  id: string;
-  authorityId?: string | null;
-  authorityGeneration: number;
-  accountId: string;
-  workspaceId: string;
-  subjectId: string | null;
-  providerDomain: string;
-  kind: string;
-  status: string;
-  grantedScopes: string[];
-  expiresAt: Date | null;
-  lastRefreshAt: Date | null;
-  lastUsedAt: Date | null;
-  lastError: string | null;
-  version: number;
-  verifiedInstallAt: Date | null;
-  verifiedInstallVersion: number | null;
-  metadata: Record<string, unknown>;
-  createdBySubjectId: string | null;
-  updatedBySubjectId: string | null;
-  createdAt: Date;
-  updatedAt: Date;
-}): ConnectionMetadataWithVerification {
-  const {
-    [OPENROUTER_CREDENTIAL_OPERATION_ID_METADATA_KEY]: _openRouterOperationId,
-    [OPENROUTER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY]: _openRouterOperationDigest,
-    [VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY]: _operationId,
-    [VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY]: _operationDigest,
-    anthropicCredentialOperationId: _anthropicOperationId,
-    anthropicCredentialOperationDigest: _anthropicOperationDigest,
-    claude_subscriptionCredentialOperationId: _claudeOperationId,
-    claude_subscriptionCredentialOperationDigest: _claudeOperationDigest,
-    ...publicMetadata
-  } = row.metadata;
-  return {
-    id: row.id,
-    ...(row.subjectId !== null && row.authorityId ? { authorityId: row.authorityId } : {}),
-    connectionAuthorityGeneration: row.authorityGeneration,
-    accountId: row.accountId,
-    workspaceId: row.workspaceId,
-    subjectId: row.subjectId,
-    providerDomain: row.providerDomain,
-    kind: row.kind as ConnectionKind,
-    status: row.status as ConnectionStatus,
-    grantedScopes: row.grantedScopes,
-    expiresAt: row.expiresAt?.toISOString() ?? null,
-    lastRefreshAt: row.lastRefreshAt?.toISOString() ?? null,
-    lastUsedAt: row.lastUsedAt?.toISOString() ?? null,
-    lastError: row.lastError,
-    version: row.version,
-    verifiedInstallAt: row.verifiedInstallAt?.toISOString() ?? null,
-    verifiedInstallVersion: row.verifiedInstallVersion,
-    metadata: publicMetadata,
-    createdBySubjectId: row.createdBySubjectId,
-    updatedBySubjectId: row.updatedBySubjectId,
-    createdAt: row.createdAt.toISOString(),
-    updatedAt: row.updatedAt.toISOString(),
-  };
-}
-
 function mapSlackBotPostOperation(
   row: typeof schema.slackBotPostOperations.$inferSelect,
 ): SlackBotPostOperation {
@@ -87859,29 +86151,21 @@ function sessionMcpApprovalPolicyConfig(value: unknown): SessionMcpApprovalPolic
   return parsed.success ? parsed.data : undefined;
 }
 
-/**
- * Unions a workspace's configured approval policy with a global catalog row's
- * mandated floor, so `enableCapability`'s ordinary config override can only
- * ADD approval requirements beyond a curated minimum, never remove one -
- * closing the gap where a bare `??` let a workspace-supplied `false` or a
- * narrower array silently erase a reviewed row's mandate (e.g. Gmail's
- * approval-gated send tools). `true` on either side is maximal. Applies only
- * to global rows (`workspaceId === null`): a workspace's own custom MCP
- * registration owns its policy outright, with no OpenGeni-reviewed floor to
- * protect.
- */
+/** Resolve explicit configuration before the provider recommendation. */
+export function resolveMcpApprovalRecommendation(
+  rawConfigValue: unknown,
+  rawMetadataValue: unknown,
+): SessionMcpApprovalPolicy | undefined {
+  return sessionMcpApprovalPolicyConfig(rawConfigValue ?? rawMetadataValue);
+}
+
+/** @deprecated Compatibility alias. Recommendations never impose an approval floor. */
 export function requireApprovalWithFloor(
   rawConfigValue: unknown,
   rawMetadataValue: unknown,
-  isGlobalRow: boolean,
+  _isGlobalRow: boolean,
 ): SessionMcpApprovalPolicy | undefined {
-  const resolved = sessionMcpApprovalPolicyConfig(rawConfigValue ?? rawMetadataValue);
-  if (!isGlobalRow) return resolved;
-  const floor = sessionMcpApprovalPolicyConfig(rawMetadataValue);
-  if (floor === undefined || floor === false) return resolved;
-  if (floor === true || resolved === true) return true;
-  const resolvedNames = resolved === undefined || resolved === false ? [] : resolved;
-  return [...new Set([...resolvedNames, ...floor])].sort();
+  return resolveMcpApprovalRecommendation(rawConfigValue, rawMetadataValue);
 }
 
 function cleanDbString(value: string | undefined | null): string | undefined {
@@ -88016,59 +86300,6 @@ function shortHash(value: string): string {
   return (hash >>> 0).toString(36).padStart(7, "0").slice(0, 7);
 }
 
-/**
- * A token refresh observed a different plan and retired a plan exclusion.
- * Bump the durable capacity-waiter wake revision (delivered by the normal
- * wake dispatcher) so a wait blocked partly by that exclusion re-evaluates,
- * exactly as a usage observation that retires one does.
- */
-async function wakeCodexCapacityAfterPlanChange(
-  db: Database,
-  workspaceId: string,
-  acceptedTurnId: string | undefined,
-): Promise<void> {
-  await withSessionCodexCapacityMutation(
-    db,
-    {
-      workspaceId,
-      reason: "codex_plan_changed",
-      acceptedTurnId,
-      mutationSource: "effective",
-    },
-    async () => ({ result: undefined, changed: true }),
-  );
-}
-
-// The resolver modules are cycle-free orchestration leaves. The root barrel is
-// the composition point that supplies their existing persistence accessors while
-// retaining the historical public builder/fetcher signatures.
-function codexAuthDeps(authority?: CodexAcceptedCredentialAuthority): CodexAuthDeps {
-  return {
-    loadCredential: (db, settings, workspaceId, credentialId) =>
-      loadCodexCredentialForRun(db, settings, workspaceId, credentialId, authority),
-    recordRefresh: (db, input) => recordCodexTokenRefresh(db, { ...input, authority }),
-    setStatus: (db, workspaceId, status, lastError, target) =>
-      setCodexCredentialStatus(db, workspaceId, status, lastError, target, authority),
-    refresh: refreshCodexToken,
-    encrypt: encryptEnvironmentValue,
-    keyBytes: environmentsEncryptionKeyBytes,
-    withRefreshLock: withCodexCredentialRefreshLock,
-    recordUsage: async (db, workspaceId, credentialId, snapshot) =>
-      (
-        await recordCodexAccountUsageWithWakeTargets(
-          db,
-          workspaceId,
-          credentialId,
-          snapshot,
-          authority,
-        )
-      ).result,
-    onPlanExclusionRetired: async (db, workspaceId) => {
-      await wakeCodexCapacityAfterPlanChange(db, workspaceId, authority?.turnId);
-    },
-  };
-}
-
 function connectionBrokerDeps(): ConnectionBrokerDeps {
   return {
     loadCredential: loadConnectionCredentialForBroker,
@@ -88083,96 +86314,12 @@ function connectionBrokerDeps(): ConnectionBrokerDeps {
   };
 }
 
-export function buildCodexTokenResolver(
-  db: Database,
-  settings: Settings,
-  workspaceId: string,
-  credentialId: string,
-  deps: CodexAuthDeps = codexAuthDeps(),
-  authority?: CodexAcceptedLeaseAuthority,
-): ReturnType<typeof buildCodexTokenResolverCore> {
-  if (authority) {
-    deps = {
-      ...deps,
-      loadCredential: (targetDb, targetSettings, targetWorkspaceId, targetCredentialId) =>
-        loadCodexCredentialForRun(
-          targetDb,
-          targetSettings,
-          targetWorkspaceId,
-          targetCredentialId,
-          authority,
-        ),
-      recordRefresh: (targetDb, input) =>
-        recordCodexTokenRefresh(targetDb, { ...input, authority }),
-      setStatus: (targetDb, targetWorkspaceId, status, lastError, target) =>
-        setCodexCredentialStatus(targetDb, targetWorkspaceId, status, lastError, target, authority),
-      onPlanExclusionRetired: (targetDb, targetWorkspaceId) =>
-        wakeCodexCapacityAfterPlanChange(targetDb, targetWorkspaceId, authority.turnId),
-    };
-  }
-  return buildCodexTokenResolverCore(db, settings, workspaceId, credentialId, deps);
-}
-
-export async function fetchCodexUsageForAccount(
-  db: Database,
-  settings: Settings,
-  workspaceId: string,
-  credentialId: string,
-  fetchImpl: CodexFetch = fetch,
-  acceptedTurnId?: string,
-): ReturnType<typeof fetchCodexUsageForAccountCore> {
-  return await fetchCodexUsageForAccountCore(
-    db,
-    settings,
-    workspaceId,
-    credentialId,
-    codexAuthDeps(
-      acceptedTurnId ? { turnId: acceptedTurnId, purpose: "capacity_refresh" } : undefined,
-    ),
-    fetchImpl,
-  );
-}
-
-/**
- * Re-check the CURRENT ChatGPT plan of one credential under exact accepted
- * authority: the live lease holder of a failing attempt, or capacity-refresh
- * authority for a turn being admitted. Persists the observation; see
- * codex-token-resolver `recheckCodexCredentialPlan`.
- */
-export async function recheckCodexCredentialPlan(
-  db: Database,
-  settings: Settings,
-  workspaceId: string,
-  credentialId: string,
-  authority: CodexAcceptedLeaseAuthority | { turnId: string; purpose: "capacity_refresh" },
-  fetchImpl: CodexFetch = fetch,
-): ReturnType<typeof recheckCodexCredentialPlanCore> {
-  return await recheckCodexCredentialPlanCore(
-    db,
-    settings,
-    workspaceId,
-    credentialId,
-    codexAuthDeps(authority),
-    fetchImpl,
-  );
-}
-
-export async function fetchCodexRateLimitResetCreditsForAccount(
-  db: Database,
-  settings: Settings,
-  workspaceId: string,
-  credentialId: string,
-  fetchImpl: CodexFetch = fetch,
-): ReturnType<typeof fetchCodexRateLimitResetCreditsForAccountCore> {
-  return await fetchCodexRateLimitResetCreditsForAccountCore(
-    db,
-    settings,
-    workspaceId,
-    credentialId,
-    codexAuthDeps(),
-    fetchImpl,
-  );
-}
+export type CodexAppsRequestAuth = {
+  clientVersion: string;
+  withAuthorization: <T>(
+    use: (token: { accessToken: string; chatgptAccountId: string | null }) => Promise<T>,
+  ) => Promise<T>;
+};
 
 export function buildConnectionTokenResolver(
   db: Database,
@@ -88184,6 +86331,7 @@ export function buildConnectionTokenResolver(
 }
 
 export {
+  buildCodexTokenResolver,
   withCodexTokenDeadline,
   type CodexAccountUsageSnapshot,
   type CodexAuthDeps,
@@ -88247,9 +86395,16 @@ export * from "./editable-artifacts";
 export * from "./editable-artifact-materialization";
 export * from "./attempt-tool-catalogs";
 export * from "./model-context-snapshots";
+export * from "./session-content-blobs";
+export * from "./session-content-compaction";
+export * from "./session-archive";
+export * from "./session-delta-folding";
 export * from "./codemode-operations";
+export * from "./codemode-approvals";
+export * from "./tool-action-reviews";
 export * from "./browser-sessions";
 export * from "./browser-deadline-checkpoints";
+export * from "./sandbox-interaction-idle";
 export * from "./computer-sessions";
 export * from "./browser-identities";
 export * from "./browser-state-artifacts";
@@ -88265,6 +86420,8 @@ export * from "./session-tenancy";
 export * from "./governed-learning-activation";
 export * from "./automations";
 export * from "./organization-model-providers";
+export * from "./organization-model-defaults";
+export * from "./session-admin-access";
 export * from "./claude-subscription-usage";
 export * from "./claude-subscription-tokens";
 
@@ -88307,6 +86464,37 @@ export async function listConnectorToolPermissionPolicies(
   );
 }
 
+/** A reset notice lasts until that exact policy version is changed by the user. */
+export async function listChangedConnectorToolPermissions(
+  db: Database,
+  input: { accountId: string; workspaceId: string; connectionId: string; serverId: string },
+): Promise<string[]> {
+  return withRlsContext(db, input, async (tx) => {
+    const rows = await tx
+      .selectDistinct({ toolName: schema.connectorActionPolicies.toolName })
+      .from(schema.connectorActionPolicies)
+      .innerJoin(
+        schema.auditEvents,
+        and(
+          eq(schema.auditEvents.workspaceId, input.workspaceId),
+          eq(schema.auditEvents.action, "connector.action.policy_reset"),
+          sql`${schema.auditEvents.targetId} = ${schema.connectorActionPolicies.id}::text`,
+          sql`${schema.auditEvents.metadata}->>'version' = ${schema.connectorActionPolicies.version}::text`,
+        ),
+      )
+      .where(
+        and(
+          eq(schema.connectorActionPolicies.workspaceId, input.workspaceId),
+          eq(schema.connectorActionPolicies.connectionId, input.connectionId),
+          eq(schema.connectorActionPolicies.serverId, input.serverId),
+          eq(schema.connectorActionPolicies.policy, "ask"),
+        ),
+      )
+      .limit(2048);
+    return rows.map((row) => row.toolName);
+  });
+}
+
 /** All tools in a group change together, and never exceed the attempt snapshot bound. */
 export async function updateConnectorToolPermissionPolicies(
   db: Database,
@@ -88317,7 +86505,9 @@ export async function updateConnectorToolPermissionPolicies(
     connectionId: string;
     serverId: string;
     toolNames: string[];
-    policy: ConnectorToolPermission;
+    policy: ConnectorToolPermission | null;
+    actionName?: string;
+    expectedRevision?: string;
   },
 ): Promise<void> {
   await withRlsContext(db, input, async (scoped) =>
@@ -88329,7 +86519,57 @@ export async function updateConnectorToolPermissionPolicies(
         .select()
         .from(schema.connectorActionPolicies)
         .where(eq(schema.connectorActionPolicies.workspaceId, input.workspaceId));
+      if (
+        input.expectedRevision !== undefined &&
+        input.expectedRevision !==
+          connectorToolPolicyRevision(existing, input.connectionId, input.serverId)
+      ) {
+        throw new ConnectorToolPermissionConflictError();
+      }
       const names = [...new Set(input.toolNames)].sort((left, right) => left.localeCompare(right));
+      // A whole-tool choice replaces its action exceptions. Reset removes only
+      // the selected overrides and reveals the inherited recommendation again.
+      const removed =
+        input.policy !== null && input.actionName !== undefined
+          ? []
+          : await tx
+              .delete(schema.connectorActionPolicies)
+              .where(
+                and(
+                  eq(schema.connectorActionPolicies.workspaceId, input.workspaceId),
+                  eq(schema.connectorActionPolicies.connectionId, input.connectionId),
+                  eq(schema.connectorActionPolicies.serverId, input.serverId),
+                  inArray(schema.connectorActionPolicies.toolName, names),
+                  ...(input.actionName !== undefined
+                    ? [eq(schema.connectorActionPolicies.actionName, input.actionName)]
+                    : []),
+                  ...(input.policy !== null
+                    ? [ne(schema.connectorActionPolicies.actionName, "*")]
+                    : []),
+                ),
+              )
+              .returning();
+      if (removed.length)
+        await tx.insert(schema.auditEvents).values(
+          withLosslessContentWriteVersion(
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              subjectId: input.subjectId,
+              action: "connector.action.preferences_replaced",
+              targetType: "connector_action_policy",
+              targetId: input.connectionId,
+              metadata: {
+                serverId: input.serverId,
+                policyIds: removed.map((row) => row.id),
+                reset: input.policy === null,
+              },
+            },
+            "metadata",
+            "metadataCodecVersion",
+          ),
+        );
+      if (input.policy === null) return;
       const added = names.filter(
         (name) =>
           !existing.some(
@@ -88337,13 +86577,18 @@ export async function updateConnectorToolPermissionPolicies(
               row.connectionId === input.connectionId &&
               row.serverId === input.serverId &&
               row.toolName === name &&
-              row.actionName === "*",
+              row.actionName === (input.actionName ?? "*"),
           ),
       );
-      if (existing.length + added.length > 2048)
+      if (existing.length - removed.length + added.length > 2048)
         throw new Error("The workspace tool permission limit has been reached");
       for (const toolName of names) {
-        await upsertConnectorActionPolicy(tx, { ...input, toolName, actionName: "*" });
+        await upsertConnectorActionPolicy(tx, {
+          ...input,
+          policy: input.policy,
+          toolName,
+          actionName: input.actionName ?? "*",
+        });
       }
     }),
   );
@@ -88384,3 +86629,4 @@ export async function loadDirectModelProviderConnection(
   });
   return { ...metadata, apiKey: connection.credential.apiKey };
 }
+export { apiIntegrationToolEffect } from "./api-integration-approvals";

@@ -89,6 +89,7 @@ import {
   githubConnectFailureHtml,
   githubInstallationChooserHtml,
   githubSetupPendingHtml,
+  githubOwnerApprovedHtml,
   githubSetupSuccessHtml,
   githubSuccessHtml,
   type GitHubConnectFailure,
@@ -299,7 +300,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   // Start with user authorization, not GitHub's install/configure selector.
   // This lets an owner link an already-installed App without relying on
-  // GitHub's Configure page to preserve or return OpenGeni state.
+  // GitHub's Configure page to preserve or return Opengeni state.
   app.get("/v1/workspaces/:workspaceId/github/connect", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const state = c.req.query("state");
@@ -512,7 +513,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
       workspaceId: grant.workspaceId,
     });
     setGitHubStateCookie(c, deps, state);
-    const appName = payload.appName?.trim() || "OpenGeni";
+    const appName = payload.appName?.trim() || "Opengeni";
     const manifest = buildGitHubAppManifest({
       appName,
       baseUrl,
@@ -569,6 +570,16 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
         );
       });
     if (!state) {
+      // An organization owner approving a member's request (or installing
+      // straight from GitHub) arrives with no Opengeni state. Nothing names a
+      // workspace, so nothing is connected: explain the remaining step instead
+      // of an "expired link" error. No provider or database call happens here.
+      if (
+        c.req.query("setup_action") === "install" &&
+        parsePositiveInteger(c.req.query("installation_id")) !== null
+      ) {
+        return c.html(githubOwnerApprovedHtml(githubFailureReturnUrl(deps, c)));
+      }
       throw new HTTPException(400, { message: "missing GitHub installation state" });
     }
     const statePayload = readSignedState(state, githubStateSecret);
@@ -590,7 +601,17 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     const setupAction = c.req.query("setup_action");
     if (setupAction === "request") {
-      return c.html(githubSetupPendingHtml());
+      return c.html(
+        githubSetupPendingHtml(
+          openGeniReturnUrl(
+            settings,
+            c,
+            grant.workspaceId,
+            typeof statePayload.returnPath === "string" ? statePayload.returnPath : null,
+            "requested",
+          ),
+        ),
+      );
     }
     if (setupAction !== "install" && setupAction !== "update") {
       throw new HTTPException(400, { message: "unsupported GitHub setup action" });
@@ -1138,13 +1159,14 @@ function openGeniReturnUrl(
   c: Context,
   workspaceId: string,
   returnPath: string | null = null,
+  outcome: "connected" | "requested" = "connected",
 ): string {
   const baseUrl = openGeniBaseUrl(settings, c) || new URL(c.req.url).origin;
   const safeReturnPath = githubSessionReturnPath(returnPath, workspaceId);
   const url = safeReturnPath ? new URL(safeReturnPath, `${baseUrl}/`) : new URL(baseUrl);
   if (safeReturnPath) {
     url.searchParams.delete("capability_auth");
-    url.searchParams.set("github", "connected");
+    url.searchParams.set("github", outcome);
     return url.toString();
   }
   url.searchParams.set("workspaceId", workspaceId);
@@ -1192,7 +1214,7 @@ function githubBrowserFailureDetail(error: unknown): string | null {
 /**
  * The failure page links back to the workspace integrations page when the
  * request names a workspace (its path, or a correctly signed state even if it
- * aged out); otherwise to the OpenGeni home. This is only a link target, so an
+ * aged out); otherwise to the Opengeni home. This is only a link target, so an
  * expired state is acceptable evidence of where the user came from.
  */
 function githubFailureReturnUrl(deps: ApiRouteDeps, c: Context): string {

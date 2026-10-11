@@ -2,6 +2,11 @@ import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import * as opengeniDb from "@opengeni/db";
 import {
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
+  OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
+  OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
+  OPENGENI_SLACK_BOT_REQUIRED_SCOPES,
+  OPENGENI_SLACK_BOT_SESSION_METADATA_KEY,
+  SCHEDULED_SLACK_BOT_POSTING_TOOLS,
   metadataWithTurnExecutionPolicyV1,
   readTurnExecutionPolicyV1,
   TurnExecutionPolicyV1,
@@ -10,6 +15,7 @@ import { resolveFirstPartyMcpToolPolicy } from "@opengeni/config";
 import {
   bootstrapWorkspace,
   createDb,
+  createConnection,
   createScheduledTask,
   createSession,
   claimSessionWorkForAttempt,
@@ -94,6 +100,7 @@ async function generatedTask(
   grant: Awaited<ReturnType<typeof workspaceGrant>>,
   creatorPolicy: ScheduledTaskCreatorPolicy | null,
   target?: { runMode: "existing_session" | "reusable_session"; targetSessionId?: string },
+  destination: { slackBotConnectionId?: string; slackBotChannelId?: string } = {},
 ) {
   return await createScheduledTask(client.db, {
     accountId: grant.accountId,
@@ -111,9 +118,37 @@ async function generatedTask(
       resources: [],
       tools: [],
       metadata: {},
+      ...destination,
     },
     metadata: {},
     creatorPolicy,
+  });
+}
+
+async function botConnection(grant: Awaited<ReturnType<typeof workspaceGrant>>) {
+  const identity = crypto.randomUUID().replaceAll("-", "");
+  return await createConnection(client.db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    subjectId: null,
+    providerDomain: "slack.com",
+    kind: "app_install",
+    credentialEncrypted: "scheduled-creator-bot-fixture",
+    grantedScopes: [...OPENGENI_SLACK_BOT_REQUIRED_SCOPES],
+    verifiedInstallAt: new Date(0),
+    verifiedInstallVersion: 1,
+    metadata: {
+      credentialRole: OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
+      credentialLabel: OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
+      slackTeamId: `T${identity}`,
+      slackTeamName: "Creator policy fixture",
+      botUserId: `U${identity}`,
+      botId: `B${identity}`,
+      // The verified installation binding requires the canonical bot identity.
+      botDisplayName: "Opengeni",
+      verifiedAt: new Date(0).toISOString(),
+    },
+    createdBySubjectId: grant.subjectId,
   });
 }
 
@@ -155,16 +190,72 @@ async function dispatchGeneratedSession(
 }
 
 describe("scheduled-task creator policy inheritance (real PostgreSQL)", () => {
-  test("a human/API-created task keeps the deployment default for its generated session", async () => {
+  test("existing targets freeze effective built-ins separately from their admission proof", async () => {
+    if (!available) return;
+    const grant = await workspaceGrant();
+    const { settings } = activities();
+    const target = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "Follow built-in defaults",
+      resources: [],
+      tools: [],
+      metadata: {},
+      model: settings.openaiModel,
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      firstPartyMcpTools: ["set_session_title"],
+      toolPolicy: {
+        mode: "workspace_default",
+        inheritedFromSessionId: null,
+        firstPartyMode: "workspace_default",
+      },
+    });
+    await shared!
+      .admin`update workspaces set settings = settings || '{"sessionToolDefaults":{"firstPartyMcpTools":["session_get"]}}'::jsonb where id = ${grant.workspaceId}`;
+    const task = await generatedTask(grant, null, {
+      runMode: "existing_session",
+      targetSessionId: target.id,
+    });
+    const { session, accepted, result } = await dispatchGeneratedSession(grant, task.id);
+    expect(accepted!.targetSessionExecution!.firstPartyMcpTools).toEqual(["set_session_title"]);
+    expect(accepted!.targetSessionExecution!.effectiveFirstPartyMcpTools).toEqual(["session_get"]);
+    expect(accepted!.targetSessionExecution!.toolPolicy).toEqual(target.toolPolicy);
+    // Later defaults must not change a previously accepted scheduled occurrence.
+    await shared!
+      .admin`update workspaces set settings = settings || '{"sessionToolDefaults":{"firstPartyMcpTools":[]}}'::jsonb where id = ${grant.workspaceId}`;
+    const claimed = await claimSessionWorkForAttempt(client.db, grant.workspaceId, {
+      sessionId: session.id,
+      workflowId: result.workflowId,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (claimed.action !== "claimed") throw new Error(`unexpected claim: ${claimed.action}`);
+    expect(claimed.turn.metadata.scheduledFirstPartyMcpTools).toEqual(["session_get"]);
+    expect((await getSession(client.db, grant.workspaceId, target.id))!.firstPartyMcpTools).toEqual(
+      ["set_session_title"],
+    );
+  }, 60_000);
+
+  test("a human/API-created task keeps deployment defaults within the scheduled destination boundary", async () => {
     if (!available) return;
     const grant = await workspaceGrant();
     const task = await generatedTask(grant, null);
     const { settings, session, accepted } = await dispatchGeneratedSession(grant, task.id);
-    expect(session.firstPartyMcpTools).toEqual(resolveFirstPartyMcpToolPolicy(settings).default);
+    const defaults = resolveFirstPartyMcpToolPolicy(settings).default;
+    const posting = new Set<string>(SCHEDULED_SLACK_BOT_POSTING_TOOLS);
+    // Ordinary-chat discovery is not a grant to post from an unattended task.
+    // Every other deployment default remains inherited, in the same order.
+    expect(session.firstPartyMcpTools).toEqual(defaults.filter((tool) => !posting.has(tool)));
+    for (const tool of posting) {
+      expect(defaults).toContain(tool);
+      expect(session.firstPartyMcpTools).not.toContain(tool);
+    }
     expect(session.firstPartyMcpPermissions).toEqual([...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS]);
-    expect(accepted?.resolvedFirstPartyMcpTools).toEqual(
-      resolveFirstPartyMcpToolPolicy(settings).default,
-    );
+    expect(accepted?.resolvedFirstPartyMcpTools).toEqual(session.firstPartyMcpTools);
     expect(accepted?.resolvedFirstPartyMcpPermissions).toEqual([
       ...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
     ]);
@@ -173,6 +264,67 @@ describe("scheduled-task creator policy inheritance (real PostgreSQL)", () => {
     ).toBeUndefined();
     expect(readTurnExecutionPolicyV1(session.metadata)).toEqual({ kind: "absent" });
   }, 60_000);
+
+  test.each(["omitted", "connection only"] as const)(
+    "even an explicit creator selection cannot post with destination %s",
+    async (destination) => {
+      if (!available) return;
+      const grant = await workspaceGrant();
+      const connection = destination === "connection only" ? await botConnection(grant) : null;
+      const creatorPolicy: ScheduledTaskCreatorPolicy = {
+        firstPartyMcpTools: ["set_session_title", ...SCHEDULED_SLACK_BOT_POSTING_TOOLS],
+        firstPartyMcpPermissions: ["sessions:read"],
+        sessionPolicy: null,
+      };
+      const task = await generatedTask(
+        grant,
+        creatorPolicy,
+        undefined,
+        connection ? { slackBotConnectionId: connection.id } : {},
+      );
+      const { session, accepted } = await dispatchGeneratedSession(grant, task.id);
+      expect(session.firstPartyMcpTools).toEqual(["set_session_title"]);
+      expect(accepted?.resolvedFirstPartyMcpTools).toEqual(session.firstPartyMcpTools);
+      expect(session.firstPartyMcpPermissions).toEqual(creatorPolicy.firstPartyMcpPermissions);
+      expect(accepted?.resolvedFirstPartyMcpPermissions).toEqual(session.firstPartyMcpPermissions);
+      expect(accepted?.task.agentConfig.slackBotChannelId).toBeUndefined();
+      for (const tool of SCHEDULED_SLACK_BOT_POSTING_TOOLS)
+        expect(session.firstPartyMcpTools).not.toContain(tool);
+    },
+    60_000,
+  );
+
+  test.each(["allowed", "disallowed"] as const)(
+    "a chosen channel adds only destination-bound posting under the deployment ceiling: %s",
+    async (posting) => {
+      if (!available) return;
+      const grant = await workspaceGrant();
+      const connection = await botConnection(grant);
+      const creatorPolicy: ScheduledTaskCreatorPolicy = {
+        firstPartyMcpTools: ["set_session_title"],
+        firstPartyMcpPermissions: ["sessions:read", "connections:read"],
+        sessionPolicy: null,
+      };
+      const destination = { slackBotConnectionId: connection.id, slackBotChannelId: "C0CREATOR01" };
+      const task = await generatedTask(grant, creatorPolicy, undefined, destination);
+      const allowed = [
+        "set_session_title" as const,
+        ...(posting === "allowed" ? SCHEDULED_SLACK_BOT_POSTING_TOOLS : []),
+      ];
+      const { session, accepted } = await dispatchGeneratedSession(grant, task.id, {
+        allowedFirstPartyMcpTools: allowed,
+      });
+      expect(session.firstPartyMcpTools).toEqual(allowed);
+      expect(accepted?.resolvedFirstPartyMcpTools).toEqual(session.firstPartyMcpTools);
+      expect(session.firstPartyMcpPermissions).toEqual(creatorPolicy.firstPartyMcpPermissions);
+      expect(accepted?.resolvedFirstPartyMcpPermissions).toEqual(session.firstPartyMcpPermissions);
+      expect(accepted?.task.agentConfig).toMatchObject(destination);
+      expect(session.metadata[OPENGENI_SLACK_BOT_SESSION_METADATA_KEY]).toBe(connection.id);
+      expect(session.firstPartyMcpTools).not.toContain("slack_bot_post_message");
+      expect(session.firstPartyMcpTools).not.toContain("scheduled_tasks_list");
+    },
+    60_000,
+  );
 
   test("an agent-created task's generated session inherits the frozen creator boundary", async () => {
     if (!available) return;

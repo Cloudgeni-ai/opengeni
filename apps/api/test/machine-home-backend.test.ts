@@ -34,6 +34,7 @@ import {
   createEnrollment,
   createSandbox,
   claimEnrollmentConnection,
+  discardUninitializedSessionShell,
   type Database,
   type DbClient,
 } from "@opengeni/db";
@@ -404,6 +405,83 @@ describe("Stage-D honest label: machine-targeted home sandbox_backend", () => {
     expect(capturedInitialTurns).toHaveLength(1);
   }, 60_000);
 
+  test("an unkeyed start that fails before its first turn leaves no queued session behind", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const bus = new MemoryEventBus();
+    const createInput = (options: { key?: string; failStart: boolean }) => ({
+      db,
+      bus,
+      workflowClient: stubWorkflowClient(),
+      accountId,
+      workspaceId,
+      initialMessage: "start me",
+      resources: [],
+      tools: [],
+      toolPolicy: { mode: "explicit" as const, inheritedFromSessionId: null },
+      model: settings.openaiModel,
+      reasoningEffort: settings.openaiReasoningEffort,
+      turnExecutionPolicy: resolveTurnExecutionPolicyV1(settings, {
+        modelId: settings.openaiModel,
+        requestedModelId: null,
+        modelSource: "deployment",
+        reasoningEffort: settings.openaiReasoningEffort,
+        reasoningSource: "deployment",
+      }),
+      sandboxBackend: "modal" as const,
+      metadata: {},
+      firstPartyMcpTools: [],
+      ...(options.key ? { createIdempotencyKey: options.key } : {}),
+      captureInitialTurnAuthority: async () => {
+        if (options.failStart) {
+          throw Object.assign(new Error("permission denied for initial turn authority"), {
+            code: "42501",
+          });
+        }
+      },
+    });
+    const sessionCount = async () => {
+      const [row] = await admin<{ count: number }[]>`
+        select count(*)::int as count from sessions where workspace_id = ${workspaceId}`;
+      return row?.count ?? -1;
+    };
+
+    await expect(
+      createAndStartSessionWithOutcome(createInput({ failStart: true })),
+    ).rejects.toThrow("permission denied for initial turn authority");
+    expect(await sessionCount()).toBe(0);
+
+    // An initialized session is never discarded.
+    const started = await createAndStartSessionWithOutcome(createInput({ failStart: false }));
+    expect(
+      await discardUninitializedSessionShell(db, {
+        accountId,
+        workspaceId,
+        sessionId: started.session.id,
+      }),
+    ).toBe("initialized");
+    expect(await sessionCount()).toBe(1);
+
+    // A keyed shell stays durable, and a retry with the same key repairs it.
+    const key = crypto.randomUUID();
+    await expect(
+      createAndStartSessionWithOutcome(createInput({ key, failStart: true })),
+    ).rejects.toThrow("permission denied for initial turn authority");
+    expect(await sessionCount()).toBe(2);
+    const retried = await createAndStartSessionWithOutcome(createInput({ key, failStart: false }));
+    expect(retried.outcome).toBe("repaired");
+    expect(retried.session.initialTurnId).toBeTruthy();
+    expect(await sessionCount()).toBe(2);
+    expect(
+      await discardUninitializedSessionShell(db, {
+        accountId,
+        workspaceId,
+        sessionId: retried.session.id,
+      }),
+    ).toBe("keyed");
+    expect(await sessionCount()).toBe(2);
+  }, 60_000);
+
   test("a direct terminal command without op-stream fails closed without a phantom lease", async () => {
     if (!available) return;
     const { accountId, workspaceId, sandboxId, bus } = await seedMachine();
@@ -654,6 +732,44 @@ describe("Stage-D honest label: machine-targeted home sandbox_backend", () => {
     expect(turnRow).toEqual({
       sandbox_backend: "selfhosted",
       sandbox_os: "macos",
+    });
+  }, 60_000);
+
+  test("a child naming its creator's own group inherits the creator's machine route", async () => {
+    if (!available) return;
+    const selfhostedOnly = testSettings({
+      ...settings,
+      sandboxBackend: "selfhosted",
+    });
+    const { accountId, workspaceId, sandboxId, bus } = await seedMachine("linux");
+    const parent = await createSessionForRequest(
+      deps(bus, selfhostedOnly),
+      grant(accountId, workspaceId),
+      workspaceId,
+      {
+        initialMessage: "manager on the connected machine",
+        targetSandboxId: sandboxId,
+        workingDir: "workers/parent",
+      },
+    );
+    expect(parent.activeSandboxId).toBe(sandboxId);
+
+    const child = await createSessionForRequest(
+      deps(bus, selfhostedOnly),
+      grant(accountId, workspaceId, parent.id),
+      workspaceId,
+      {
+        initialMessage: "share my box by naming its group",
+        sandbox: { groupId: parent.sandboxGroupId },
+      },
+    );
+
+    expect(child).toMatchObject({
+      parentSessionId: parent.id,
+      sandboxBackend: "selfhosted",
+      sandboxGroupId: parent.sandboxGroupId,
+      activeSandboxId: sandboxId,
+      workingDir: parent.workingDir,
     });
   }, 60_000);
 

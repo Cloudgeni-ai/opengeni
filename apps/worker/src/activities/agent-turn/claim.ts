@@ -2,13 +2,19 @@ import { withDirectModelProviders } from "@opengeni/config";
 import { loadDirectModelProviderConnection } from "@opengeni/db";
 import { FILESYSTEM_DISCONTINUITY_PROTOCOL } from "./recovery-warning";
 import {
+  claimCodexActiveFromCutover,
+  claimMayResolveCoreCodexApps,
+  readClaimCodexCutoverState,
+  readSubscriptionLeaseBusyChain,
+  type ClaimCodexCutoverState,
+} from "./codex-core-claim";
+import {
   applySessionTurnSettlement,
   claimSessionWorkForAttempt,
   getSessionEvent,
   getHumanInputResumeForEvent,
   getInteractionInterventionResumeForEvent,
   installOrReadTurnExecutionPolicyForAttempt,
-  workspaceCodexSubscriptionActive,
   requireSession,
   type AppendEventInput,
   type ApiIntegrationRuntime,
@@ -30,6 +36,7 @@ import {
   settingsWithEnabledCapabilityMcpServers,
   settingsWithWorkspaceGatewayCredential,
   settingsWithWorkspaceOpenRouterCredential,
+  settingsWithWorkspaceOpperCredential,
   settingsWithOrganizationProviderCredentials,
   withXaiSubscriptionProvider,
 } from "../capabilities";
@@ -37,7 +44,7 @@ import { validateIncidentTelemetrySystemUpdateAuthority } from "../incident-tele
 import {
   assertSessionAllowsProductModel,
   resolveCatalogSettings,
-  resolveCodexAppsCredentialIdForRun,
+  resolveCodexAppsDesignationForRun,
 } from "@opengeni/core";
 import { TurnAttemptFencedError } from "../turn-attempt-fenced";
 import { currentActivityContext, startActivityHeartbeat } from "../streaming";
@@ -60,6 +67,8 @@ import { createTurnCredentialLeases } from "./credential-leases";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { readTurnExecutionPolicyV1 } from "@opengeni/contracts";
 import { turnCredentialRestriction } from "./credential-restriction";
+import { readProviderRecoveryObservation } from "./provider-recovery-metrics";
+import { readProviderRecoveryStartedAt } from "./provider-recovery-policy";
 
 import {
   credentialSubjectIdForTurnInitiator,
@@ -113,7 +122,8 @@ export type ClaimTurnOk = {
   credentialSubjectId: string | undefined;
   fileAuthoritySubjectId: string | null;
   capabilitySettings: Settings;
-  codexAppsCredentialId: string | null;
+  /** The core Codex Apps designation (enabled Codex cutover only). */
+  codexAppsCoreConnectionId?: string | null;
   turnExecutionPolicy: TurnExecutionPolicyV1;
   trigger: NonNullable<Awaited<ReturnType<typeof getSessionEvent>>>;
   humanInputResume: Awaited<ReturnType<typeof getHumanInputResumeForEvent>>;
@@ -237,6 +247,12 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   attempt.dispatchId = dispatchId;
   attempt.executionGeneration = turn.executionGeneration;
   attempt.providerRecoveryCount = providerRecoveryCountFromMetadata(turn.metadata);
+  attempt.providerRecoveryPolicyCode =
+    typeof turn.metadata.providerRecoveryReason === "string"
+      ? turn.metadata.providerRecoveryReason
+      : undefined;
+  attempt.providerRecoveryObservation = readProviderRecoveryObservation(turn.metadata ?? {});
+  attempt.providerRecoveryStartedAt = readProviderRecoveryStartedAt(turn.metadata);
   const authRecovery = turn.metadata?.claudeAuthRecovery;
   attempt.claudeAuthRecovery =
     authRecovery &&
@@ -253,6 +269,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
         }
       : undefined;
   attempt.triggerEventId = turn.triggerEventId;
+  attempt.subscriptionLeaseBusy = readSubscriptionLeaseBusyChain(turn.metadata);
   // The durable attempt UUID is stable for a Temporal retry of this activity
   // input and freshly generated for worker-death redispatch/continue-as-new.
   // Keep dispatchId separate: it remains the Temporal activity identity used
@@ -269,6 +286,26 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   let installedApiIntegrations: readonly ApiIntegrationRuntime[] = [];
   const credentialSubjectId = credentialSubjectIdForTurnInitiator(turn);
   const fileAuthoritySubjectId = turn.initiatingHumanSubjectId ?? null;
+  // Resolve the core gate once with bounded retry. Missing or disabled is
+  // maintenance; no claim path consults retired Codex decision state.
+  let codexCutoverRead: Promise<ClaimCodexCutoverState> | null = null;
+  const codexCutoverState = () =>
+    (codexCutoverRead ??= readClaimCodexCutoverState(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+    }));
+  // The core Apps designation is rechecked by the database on every request;
+  // missing or disabled cutover state resolves none. The
+  // organization and cutover are known here, so neither is read again.
+  const codexAppsDesignationRead = deploymentCatalogSettings.codexConnectedAppsEnabled
+    ? resolveCodexAppsDesignationForRun(db, input.workspaceId, {
+        accountId: input.accountId,
+        disposition: codexCutoverState().then((cutover) =>
+          cutover === "enabled" ? "core" : "maintenance",
+        ),
+      })
+    : Promise.resolve(null);
+  void codexAppsDesignationRead.catch(() => undefined);
   // Both are fresh scoped reads on the root pool after exact claim ownership.
   // Neither consumes the other's result; retain the capability helper's own
   // subject/delegation authority and await both before credential/policy gates.
@@ -299,18 +336,18 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
           onResolvedApiIntegrations: (integrations) => {
             installedApiIntegrations = integrations;
           },
+          codexApps: codexAppsDesignationRead,
         }),
     ),
   ]);
   // Read the active-credential flag once for the runtime capability overlay.
   // Accepted billing/provider identity comes from the turn policy below,
   // never from this mutable health snapshot.
-  const codexSubscriptionActive = await workspaceCodexSubscriptionActive(
-    db,
-    mcpSettings,
-    input.workspaceId,
-    turn.id,
-  );
+  // Shared-core placement decides accepted-turn availability. The catalog
+  // overlay is installed only with an enabled cutover, for every turn model.
+  const codexSubscriptionActive = mcpSettings.codexSubscriptionEnabled
+    ? claimCodexActiveFromCutover(await codexCutoverState())
+    : false;
   const codexSettings = await settingsWithCodexCredential(
     db,
     input.workspaceId,
@@ -327,11 +364,18 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
     xaiSettings,
     claimedPolicy.kind === "valid" ? claimedPolicy.policy.productModelId : turn.model,
   );
-  const workspaceProviderSettings = await settingsWithWorkspaceOpenRouterCredential(
+  const openRouterSettings = await settingsWithWorkspaceOpenRouterCredential(
     db,
     input.accountId,
     input.workspaceId,
     gatewaySettings,
+    claimedPolicy.kind === "valid" ? claimedPolicy.policy.productModelId : turn.model,
+  );
+  const workspaceProviderSettings = await settingsWithWorkspaceOpperCredential(
+    db,
+    input.accountId,
+    input.workspaceId,
+    openRouterSettings,
     claimedPolicy.kind === "valid" ? claimedPolicy.policy.productModelId : turn.model,
   );
   let capabilitySettings = await settingsWithOrganizationProviderCredentials(
@@ -352,9 +396,18 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   if (selectedDirectConnection) {
     capabilitySettings = withDirectModelProviders(capabilitySettings, [selectedDirectConnection]);
   }
-  const codexAppsCredentialId = capabilitySettings.codexConnectedAppsEnabled
-    ? await resolveCodexAppsCredentialIdForRun(db, input.workspaceId)
+  // Reuse the exact core designation already resolved above.
+  const codexAppsDesignation = capabilitySettings.codexConnectedAppsEnabled
+    ? await codexAppsDesignationRead
     : null;
+  const codexAppsCoreConnectionId =
+    codexAppsDesignation?.source === "core" &&
+    claimMayResolveCoreCodexApps({
+      codexConnectedAppsEnabled: true,
+      cutover: await codexCutoverState(),
+    })
+      ? codexAppsDesignation.connectionId
+      : null;
   const candidatePolicy =
     claimedPolicy.kind === "valid"
       ? claimedPolicy.policy
@@ -391,6 +444,11 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       latencyMode: turn.latencyMode,
     },
   );
+  // The durable same-turn recovery lane owns provider retries. Hidden SDK
+  // retries multiply that budget and keep the UI looking active during backoff.
+  // Apply before configuring/resolving clients so main, compaction and title
+  // requests all share this policy; standalone runtime consumers keep theirs.
+  capabilitySettings = { ...capabilitySettings, openaiMaxRetries: 0 };
   runtime.configure(capabilitySettings);
   const verifiedExecutionPolicy = assertTurnExecutionPolicyMatchesConfigV1(
     capabilitySettings,
@@ -402,6 +460,15 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
     },
   );
   const turnExecutionPolicy = verifiedExecutionPolicy.policy;
+  attempt.modelMetricRoute = {
+    provider: turnExecutionPolicy.providerId,
+    model: turnExecutionPolicy.productModelId,
+  };
+  attempt.modelRoutePresentation = {
+    model: turnExecutionPolicy.productModelId,
+    modelLabel: verifiedExecutionPolicy.model.label,
+    providerLabel: verifiedExecutionPolicy.model.providerLabel,
+  };
   assertSessionAllowsProductModel(session, turnExecutionPolicy.productModelId);
   const billingIdentity = turnExecutionPolicyBillingIdentity(turnExecutionPolicy);
   billingState.isExternallyBilledTurn = billingIdentity.externallyBilled;
@@ -446,7 +513,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   };
   turnLifecycleMetricsFor(observability).start({ attemptId: input.attemptId });
   // §7.5 P3 — pass the accepted billing attribution (externally funded turns
-  // bypass OpenGeni credit/token gates)
+  // bypass Opengeni credit/token gates)
   // AND the optional host `entitlements` port (when bound, its admitRun replaces
   // the local credit read). Unset port → today's local-ledger path.
   let allowanceRefusal: AllowanceRefusal | null = null;
@@ -462,6 +529,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
         billingState.chargesOpenGeniCredits,
         billingState.countsTowardTokenCap,
         turn.initiatingHumanSubjectId,
+        turnExecutionPolicy.productModelId,
       ),
       cancellationSignal,
       undefined,
@@ -730,7 +798,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       credentialSubjectId,
       fileAuthoritySubjectId,
       capabilitySettings,
-      codexAppsCredentialId,
+      codexAppsCoreConnectionId,
       turnExecutionPolicy,
       trigger,
       humanInputResume,

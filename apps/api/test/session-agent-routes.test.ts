@@ -43,7 +43,16 @@ const AGENT_PERMISSIONS: Permission[] = [
   "goals:manage",
   "workspace:read",
 ];
-const RUNTIME_TOOLS = ["command_read", "command_wait", "set_session_title", "wait_for_input"];
+// What "none" keeps: runtime mechanics plus reaching the person (humanInput).
+const RUNTIME_TOOLS = [
+  "command_read",
+  "command_wait",
+  "inbox_tidy",
+  "notification_withdraw",
+  "notify_user",
+  "set_session_title",
+  "wait_for_input",
+];
 
 let available = true;
 let shared: SharedTestDatabase | null = null;

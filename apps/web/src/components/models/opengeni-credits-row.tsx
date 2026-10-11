@@ -11,13 +11,13 @@ import { currentPageReturnTo, returnToSearch } from "@/lib/return-to";
 import type { ClientConfig } from "@/types";
 
 /* ----------------------------------------------------------------------------
-   OpenGeni credits in Settings > Models: on a deployment that bills credits,
+   Opengeni credits in Settings > Models: on a deployment that bills credits,
    the organization's credit balance pays for credit models, so it is the
    first row of the Accounts list. Billing admins open organization Billing
    from it; everyone else sees a plain row.
    -------------------------------------------------------------------------- */
 
-/** This deployment bills OpenGeni credits: Stripe billing and at least one credit model. */
+/** This deployment bills Opengeni credits: Stripe billing and at least one credit model. */
 export function deploymentBillsCredits(config: Pick<ClientConfig, "billingMode" | "models">) {
   return config.billingMode === "stripe" && config.models.some((model) => modelUsesCredits(model));
 }

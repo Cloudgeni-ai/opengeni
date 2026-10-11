@@ -14,7 +14,7 @@ output "aks_oidc_issuer_url" {
 }
 
 output "acr_login_server" {
-  description = "ACR login server for OpenGeni images."
+  description = "ACR login server for Opengeni images."
   value       = azurerm_container_registry.this.login_server
 }
 
@@ -152,7 +152,7 @@ output "object_storage_azure_connection_string" {
 }
 
 output "helm_set_values" {
-  description = "Non-secret Helm values that connect OpenGeni workloads to this Azure substrate."
+  description = "Non-secret Helm values that connect Opengeni workloads to this Azure substrate."
   value = {
     "global.imageRegistry"                       = azurerm_container_registry.this.login_server
     "config.OPENGENI_TEMPORAL_HOST"              = var.temporal.mode == "officialChart" ? "opengeni-temporal-frontend.opengeni-platform.svc.cluster.local:7233" : try(var.temporal.existing_host, null)

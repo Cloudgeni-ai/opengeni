@@ -6,6 +6,7 @@ import {
   type ExternalIdentity,
 } from "@opengeni/contracts/external-identities";
 import {
+  accessContextHasInbox,
   verifyDelegatedAccessToken,
   DEVELOPER_SETUP_API_KEY_PRESET,
   organizationAccessPresetPermissions,
@@ -24,6 +25,8 @@ import {
   ensureManagedAccessForUser,
   getManagedUserProfilesByIds,
   ensureExternalIdentity,
+  ensureExternalWorkspaceMemberOnFirstUse,
+  USER_ISOLATION_WORKSPACE_SOURCE_PREFIX,
   lockExternalWorkspaceMembershipLifecycle,
   resolveExternalIdentityLink,
   managedPersonalWorkspacePermissions,
@@ -41,7 +44,11 @@ import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import type { ManagedAuth } from "../managed-auth-type";
-import { getManagedSession } from "../managed-session";
+import {
+  getManagedSession,
+  getNativeAppManagedSession,
+  NATIVE_APP_CREDENTIAL_PREFIX,
+} from "../managed-session";
 import type { ManagedAuthSessionAdapter } from "../managed-auth-session-sets";
 import type { UserPresenceRecorder } from "../user-presence";
 import { serviceInitiatorFromHeaders } from "./service-initiator";
@@ -348,8 +355,29 @@ const externalActorContexts = new WeakMap<
     workspaceScope: OrganizationWorkspaceScope;
     permissionMode: "legacy" | "explicit";
     linked?: NonNullable<Awaited<ReturnType<typeof resolveExternalIdentityLink>>>;
+    /**
+     * Plain external mode (no native link, no service-initiator attribution):
+     * the only lane where a missing shared-workspace membership may be created
+     * on first use. See {@link provisionExternalMemberOnFirstUse}.
+     */
+    firstUseMembership: boolean;
   }
 >();
+
+/**
+ * Default permissions for a membership created on an external user's first
+ * request. Keep equal to `CONVERSATION_PERMISSIONS` in
+ * `packages/sdk/src/tenant-workspaces.ts`: conversation use only, no admin.
+ */
+export const EXTERNAL_FIRST_USE_MEMBER_PERMISSIONS: readonly Permission[] = [
+  "workspace:read",
+  "sessions:create",
+  "sessions:read",
+  "sessions:control",
+  "files:upload",
+  "files:read",
+  "mcp_servers:attach",
+];
 function attributionForExternalContext(context: AccessContext): ExternalActorAttribution {
   const external = externalActorContexts.get(context);
   if (!external) throw new Error("Verified external context required");
@@ -822,7 +850,11 @@ export async function requireAccessGrantAuthorization(
   permission?: Permission,
 ): Promise<AccessGrantAuthorization> {
   const context = await requireAccessContext(c, deps);
-  return await accessGrantAuthorization(context, deps, workspaceId, permission);
+  // Request entry only: a fresh re-check of a live connection never re-creates
+  // a membership that was removed while the connection was open.
+  return await accessGrantAuthorization(context, deps, workspaceId, permission, {
+    firstUseMembership: true,
+  });
 }
 
 /**
@@ -863,11 +895,133 @@ export async function requireWorkspaceSettingsGrant(
   });
 }
 
+/**
+ * Authority for a shared workspace's own Members surface (list, candidates,
+ * add, change, remove). A holder of the requested workspace permission keeps
+ * the ordinary grant. Otherwise an active organization owner or administrator,
+ * authenticated by the canonical managed cookie, manages any shared workspace
+ * in their organization exactly as through the organization control plane,
+ * with or without an operational membership row there. Every other principal
+ * (API keys, delegated bearers, agents, services, local/configured access)
+ * and every Personal workspace keeps the original refusal. The database
+ * functions re-derive the organization role under the organization fence.
+ */
+export async function requireWorkspaceMemberManagementAuthority(
+  c: Context,
+  deps: AccessDeps,
+  workspaceId: string,
+  permission: "members:manage" | "workspace:read",
+): Promise<{ grant: AccessGrant; organizationAdministrator: boolean }> {
+  try {
+    return {
+      grant: await requireAccessGrant(c, deps, workspaceId, permission),
+      organizationAdministrator: false,
+    };
+  } catch (error) {
+    if (!(error instanceof HTTPException) || error.status !== 403) throw error;
+    const context = await requireAccessContext(c, deps);
+    if (!canonicalManagedCookieContexts.has(context) || !context.subjectId.startsWith("user:")) {
+      throw error;
+    }
+    const workspace = await requireWorkspace(deps.db, workspaceId).catch(() => null);
+    if (!workspace || workspace.kind !== "shared") throw error;
+    const organizationRole = context.accountGrants.find(
+      (candidate) =>
+        candidate.accountId === workspace.accountId && candidate.subjectId === context.subjectId,
+    )?.role;
+    if (organizationRole !== "owner" && organizationRole !== "admin") throw error;
+    return {
+      grant: {
+        workspaceId,
+        accountId: workspace.accountId,
+        subjectId: context.subjectId,
+        ...(context.subjectLabel ? { subjectLabel: context.subjectLabel } : {}),
+        principalKind: "human_session",
+        permissions: ["workspace:read", "members:manage"],
+      },
+      organizationAdministrator: true,
+    };
+  }
+}
+
+/**
+ * Automatic membership for an organization key acting as an external user
+ * (`asUser`): the first request to a shared workspace in the key's own
+ * organization creates the user's missing membership with
+ * {@link EXTERNAL_FIRST_USE_MEMBER_PERMISSIONS}, then the request continues.
+ * It is exactly the authority of explicit `addExternalWorkspaceMember`: the
+ * calling key must hold `members:manage` (or legacy `workspace:admin`) plus
+ * every default permission, with the workspace in its scope, re-checked live
+ * under the organization membership fence together with the identity's own
+ * active status. Never for linked native identities, service-initiator
+ * requests, or any non-key principal (agent attempts, delegated/bearer user
+ * tokens, browser sessions), which never reach the external lane; never for
+ * Personal or SDK per-user workspaces; never when the request needs a
+ * permission outside the defaults. Never changes an existing membership.
+ * Returns true only when a membership now exists; any refusal leaves the
+ * ordinary 403 in place.
+ */
+async function provisionExternalMemberOnFirstUse(
+  deps: AccessDeps,
+  context: AccessContext,
+  external: NonNullable<ReturnType<typeof externalActorContexts.get>>,
+  workspaceId: string,
+  permission: Permission | undefined,
+): Promise<boolean> {
+  if (
+    !external.firstUseMembership ||
+    external.linked ||
+    // A request that would 403 on its own permission anyway creates nothing.
+    (permission !== undefined && !EXTERNAL_FIRST_USE_MEMBER_PERMISSIONS.includes(permission)) ||
+    context.subjectId !== external.identity.subjectId ||
+    !hasPermission(external.permissions, "members:manage", external.permissionMode) ||
+    EXTERNAL_FIRST_USE_MEMBER_PERMISSIONS.some(
+      (required) => !hasPermission(external.permissions, required, external.permissionMode),
+    )
+  )
+    return false;
+  const workspace = await requireWorkspace(deps.db, workspaceId).catch(() => null);
+  if (
+    !workspace ||
+    workspace.kind !== "shared" ||
+    workspace.accountId !== external.identity.accountId ||
+    // SDK per-user workspaces stay single-user: the SDK adds their owner.
+    workspace.externalSource?.startsWith(USER_ISOLATION_WORKSPACE_SOURCE_PREFIX)
+  )
+    return false;
+  try {
+    await ensureExternalWorkspaceMemberOnFirstUse(
+      deps.db,
+      {
+        organizationId: external.identity.accountId,
+        workspaceId,
+        actorSubjectId: `api_key:${external.keyId}`,
+      },
+      {
+        subjectId: external.identity.subjectId,
+        identity: { source: external.identity.source, externalId: external.identity.externalId },
+        permissions: EXTERNAL_FIRST_USE_MEMBER_PERMISSIONS,
+      },
+    );
+    return true;
+  } catch (error) {
+    // A changed/revoked key, narrowed policy or workspace scope keeps the
+    // ordinary denial. Anything else is an infrastructure failure.
+    if (
+      (error as { code?: unknown } | null)?.code === "42501" ||
+      nestedPostgresSqlState(error) === "42501"
+    )
+      return false;
+    throw error;
+  }
+}
+
 async function accessGrantAuthorization(
   context: AccessContext,
   deps: AccessDeps,
   workspaceId: string,
   permission?: Permission,
+  options: { firstUseMembership?: boolean } = {},
 ): Promise<AccessGrantAuthorization> {
   // No named-subject or organization-key fallback may widen verified OAuth
   // bounds. These grants came from this resolution's live native access only.
@@ -892,21 +1046,32 @@ async function accessGrantAuthorization(
           message: "organization policy requires a shared workspace",
         });
     }
-    const grant: AccessGrant | null =
+    const personal =
       workspaceId ===
-      (external.linked?.personalWorkspaceId ?? external.identity.personalWorkspaceId)
-        ? {
-            accountId: external.identity.accountId,
-            workspaceId,
-            subjectId: context.subjectId,
-            principalKind: "human_session",
-            permissions: [...managedPersonalWorkspacePermissions],
-          }
-        : await withWorkspaceSubjectRls(deps.db, workspaceId, context.subjectId, (tx) =>
-            getWorkspaceGrant(tx, context.subjectId, workspaceId, {
-              principalKind: "human_session",
-            }),
-          );
+      (external.linked?.personalWorkspaceId ?? external.identity.personalWorkspaceId);
+    const membershipGrant = () =>
+      withWorkspaceSubjectRls(deps.db, workspaceId, context.subjectId, (tx) =>
+        getWorkspaceGrant(tx, context.subjectId, workspaceId, {
+          principalKind: "human_session",
+        }),
+      );
+    let grant: AccessGrant | null = personal
+      ? {
+          accountId: external.identity.accountId,
+          workspaceId,
+          subjectId: context.subjectId,
+          principalKind: "human_session",
+          permissions: [...managedPersonalWorkspacePermissions],
+        }
+      : await membershipGrant();
+    if (
+      !grant &&
+      !personal &&
+      options.firstUseMembership === true &&
+      (await provisionExternalMemberOnFirstUse(deps, context, external, workspaceId, permission))
+    ) {
+      grant = await membershipGrant();
+    }
     if (!grant || grant.accountId !== external.identity.accountId) {
       throw new HTTPException(403, { message: "external workspace access denied" });
     }
@@ -1052,6 +1217,26 @@ function isCanonicalManagedHumanSession(context: AccessContext, grant: AccessGra
     grant.subjectId === context.subjectId &&
     grant.subjectId.startsWith("user:")
   );
+}
+
+/**
+ * The subject whose inbox this request may read, or null when it has none.
+ * A signed-in person (`user:`, no key) requires verified managed-human
+ * provenance, including approved native app credentials. The local
+ * install's human qualifies only when the in-process local bootstrap produced
+ * this context (so a delegated bearer naming `dev` cannot borrow it), with the
+ * human-session, non-delegated, non-service, keyless shape of
+ * {@link accessContextHasInbox}.
+ */
+export function inboxSubjectForContext(context: AccessContext): string | null {
+  if (!accessContextHasInbox(context)) return null;
+  if (context.subjectId.startsWith("user:")) {
+    return canonicalManagedCookieContexts.has(context) ? context.subjectId : null;
+  }
+  return canonicalLocalHumanContexts.has(context) &&
+    context.workspaceGrants.every((grant) => isCanonicalLocalHumanSession(context, grant))
+    ? context.subjectId
+    : null;
 }
 
 function isCanonicalLocalHumanSession(context: AccessContext, grant: AccessGrant): boolean {
@@ -1210,6 +1395,24 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
 
   const bearer = bearerToken(c);
   if (bearer) {
+    if (bearer.startsWith(NATIVE_APP_CREDENTIAL_PREFIX)) {
+      // A native app account: the person approved this device from a signed-in
+      // browser, so it carries the same human authority as that browser.
+      if (!deps.managedAuth) return null;
+      const session = await getNativeAppManagedSession(deps.managedAuth, bearer, deps.db);
+      if (!session?.user) return null;
+      const context = await ensureManagedAccessForUser(deps.db, {
+        userId: session.user.id,
+        email: session.user.email,
+        name: session.user.name,
+        emailVerified: session.user.emailVerified,
+        provisionFallbackOrganization: false,
+        bindPendingInvitations: false,
+      });
+      canonicalManagedCookieContexts.add(context);
+      recordUserPresence(c, deps, context.subjectId);
+      return context;
+    }
     const delegated = await delegatedAccessContext(c, deps, "managed", bearer);
     if (delegated) {
       return delegated;
@@ -1450,6 +1653,7 @@ async function apiKeyAccessContext(
       workspaceScope: apiKey.workspaceScope ?? { kind: "all" },
       permissionMode: apiKey.permissionMode ?? "legacy",
       ...(linked ? { linked } : {}),
+      firstUseMembership: selection.mode !== "linked_native" && !linked && !service,
     });
     if (organizationApiKeyAccess(apiKey.permissions) === "developer_setup") {
       developerSetupApiKeyContexts.add(context);

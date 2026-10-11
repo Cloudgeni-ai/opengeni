@@ -42,6 +42,7 @@ export type {
   MachineInputBatchItem,
   MachineInputMember,
   MemoryItem,
+  MessageSender,
   KnowledgeItem,
   NoticeItem,
   ReasoningItem,
@@ -61,9 +62,20 @@ export type {
 
 // renderer registry
 export { createToolRegistry, rawTypeOf } from "./registry";
+export {
+  createSessionRetainedScreenshotLoader,
+  createWorkspaceRetainedArtifactLoader,
+  createWorkspaceRetainedVideoLoader,
+} from "./retained-loaders";
+export type {
+  RetainedArtifactLoaderClient,
+  RetainedScreenshotLoaderClient,
+  RetainedVideoLoaderClient,
+} from "./retained-loaders";
 export type {
   CreateToolRegistryOptions,
   RetainedArtifactLoader,
+  RetainedArtifactLoadOptions,
   RetainedScreenshotLoader,
   VideoArtifactPlaybackLoader,
   ToolRegistry,

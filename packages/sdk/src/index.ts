@@ -1,4 +1,19 @@
-// Types only: a value re-export would pull the contracts runtime into the root entry.
+export { parseCustomMcpSetupRequest } from "./prepared-mcp-setup";
+export type {
+  AvailableOpenGeniSlackBots,
+  OpenGeniSlackBotOrganizationAccess,
+  UpdateOpenGeniSlackBotOrganizationAccess,
+} from "./types";
+export type {
+  ToolActionReview,
+  ToolReviewDetailsPage,
+  ToolReviewStatus,
+} from "@opengeni/contracts";
+export {
+  toolReviewAction,
+  toolReviewFields,
+  toolReviewDetails,
+} from "@opengeni/contracts/tool-review-presentation";
 export type {
   SubscriptionAccountSummary,
   SubscriptionPoolSettings,
@@ -7,6 +22,7 @@ export type {
   ClaudeSubscriptionAccountsResponse,
 } from "@opengeni/contracts";
 export type {
+  ArtifactPinResponse,
   ArtifactCatalogKind,
   ArtifactCatalogItem,
   ArtifactCatalogListOptions,
@@ -128,7 +144,11 @@ export type {
   ExternalIdentityLinkPreview,
   ExternalIdentityLinkPage,
 } from "@opengeni/contracts/external-identities";
-export type { ModelConnectionAccessPolicy, ModelConnectionAccessResponse } from "./types";
+export type {
+  ModelConnectionAccessKind,
+  ModelConnectionAccessPolicy,
+  ModelConnectionAccessResponse,
+} from "./types";
 export {
   OpenGeniToolCallError,
   OpenGeniToolReapprovalRequiredError,
@@ -184,6 +204,15 @@ export type {
 } from "./site";
 export type {
   ToolGatewayCallRequest,
+  ToolGatewayTarget,
+  ToolGatewayResolveRequest,
+  ToolGatewayResolvedTool,
+  ToolGatewayInvokeRequest,
+  ToolGatewayInvokeResponse,
+  ToolGatewayTargetApprovalRequest,
+  ToolGatewayTargetApprovalResponse,
+  ToolGatewayManifestRequest,
+  ToolGatewayManifestResponse,
   ToolGatewayCallResponse,
   ToolGatewayApprovalRequest,
   ToolGatewayApprovalResponse,
@@ -340,9 +369,11 @@ export type {
   CodexRealtimeControllerStatus,
   CodexRealtimeMicrophoneState,
   CodexRealtimeOwnerStorage,
+  CodexRealtimeRefusal,
   CreateCodexRealtimeControllerOptions,
   RealtimeControllerTransportStarter,
 } from "./codex-realtime-controller";
+export { codexRealtimeRefusal } from "./codex-realtime-controller";
 export {
   createGatewayRealtimeTransportStarter,
   createXaiSubscriptionRealtimeTransportStarter,
@@ -621,6 +652,8 @@ export type {
   AgentToolCallOutputPayload,
   ApiKey,
   BillingBalance,
+  PromotionalCreditScope,
+  PromotionalCreditBalance,
   BillingEntitlementsResponse,
   BillingMode,
   BillingSummary,
@@ -731,6 +764,7 @@ export type {
   SessionRealtimeMode,
   SessionRealtimeModel,
   SessionRealtimeMutationResponse,
+  SessionRealtimeStopInstruction,
   SessionRealtimeState,
   WorkspaceModelCatalogModel,
   WorkspaceModelCatalogResponse,
@@ -744,6 +778,10 @@ export type {
   WorkspaceOpenRouterCustomModelsResponse,
   CreateWorkspaceOpenRouterCustomModelRequest,
   DeleteWorkspaceOpenRouterCustomModelRequest,
+  WorkspaceOpperCustomModel,
+  WorkspaceOpperCustomModelsResponse,
+  CreateWorkspaceOpperCustomModelRequest,
+  DeleteWorkspaceOpperCustomModelRequest,
   OrganizationModelProviderKind,
   ClaudeSubscriptionUsage,
   ClaudeSubscriptionOAuthStartResponse,
@@ -759,6 +797,11 @@ export type {
   CreateOrganizationProviderCustomModelRequest,
   DeleteOrganizationProviderCustomModelRequest,
   WorkspaceModelAccessPolicy,
+  OrganizationModelDefaults,
+  UpdateOrganizationModelDefaultsRequest,
+  OrganizationAgentAdminAccess,
+  UpdateOrganizationAgentAdminAccessRequest,
+  SessionAdminAccess,
   WorkspaceRealtimeModelCatalogItem,
   WorkspaceRealtimeModelCatalogResponse,
   CodexAccount,
@@ -842,6 +885,25 @@ export type {
   UpdateOrganizationServiceAccountRequest,
   McpConnectionRequest,
   McpConnectionDecision,
+  NativeAppPlatform,
+  NativeAppAuthorizeInput,
+  NativeAppTokenInput,
+  NativeAppToken,
+  NativePushDevice,
+  NativePushRule,
+  InboxItem,
+  InboxItemChoice,
+  InboxItemFact,
+  InboxItemLink,
+  InboxItemKind,
+  InboxItemSender,
+  InboxSettings,
+  MemberNotificationsSetting,
+  SessionInboxMute,
+  InboxTidyPolicy,
+  ListInboxResponse,
+  UpdateInboxItemInput,
+  RegisterNativePushDeviceInput,
   CreateCapabilityCatalogItemRequest,
   OpenGeniSlackBotInstallRequest,
   OpenGeniSlackBotInstallStart,
@@ -1067,6 +1129,7 @@ export type {
   ScheduledTaskStatus,
   ScheduledTaskTriggerType,
   Session,
+  SessionAdmissionBlock,
   SessionBackgroundCommand,
   SessionBackgroundCommandReconciliation,
   SessionBackgroundCommandActivity,
@@ -1265,6 +1328,8 @@ export type {
   UpdateSessionMcpApprovalPolicyResponse,
   UpdateSessionAttentionRequest,
   UpdateSessionArchiveRequest,
+  UpdateSessionRetentionRequest,
+  SessionRetention,
   UpdateSessionPinRequest,
   UpdateSessionRequest,
   UpdateSessionVariableSetsRequest,
@@ -1399,6 +1464,11 @@ export type {
   MachineUpdateState,
   MachineRuntime,
   UpdateMachineAgentResponse,
+  EnableMachineScreenControlResponse,
+  MachineMacPermissions,
+  MachinePrivacySettingsPane,
+  OpenMachinePrivacySettingsRequest,
+  OpenMachinePrivacySettingsResponse,
   MachineOperationPolicy,
   UpdateMachineOperationPolicyRequest,
   MachineView,

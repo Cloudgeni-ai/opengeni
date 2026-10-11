@@ -30,6 +30,7 @@ import {
   type SandboxRecord,
 } from "@opengeni/db";
 import type { EventBus } from "@opengeni/events";
+import { HTTPException } from "hono/http-exception";
 import {
   NatsControlRpc,
   NatsOpStreamTransport,
@@ -668,6 +669,9 @@ export async function swapActiveSandbox(
     try {
       readinessHold = await services.ensureSessionGroupReady(ctx);
     } catch (error) {
+      // An explicit refusal (e.g. the session's Sandbox Environment is not
+      // available to this caller) is not a recovery state; surface it as is.
+      if (error instanceof HTTPException && error.status === 403) throw error;
       const lease = await readLease(services.db, ctx.workspaceId, ctx.sessionGroupId);
       const restore = lease?.recovery.restore.status;
       const code =
@@ -823,7 +827,7 @@ export type RunOnOptions = {
 };
 
 function runOnOperationAdmission(
-  services: FleetServices,
+  services: Pick<FleetServices, "settings" | "bus">,
   enrollment: EnrollmentRecord | null,
 ): SelfhostedOperationAdmission | null {
   if (!enrollment?.connectionInstanceId || !enrollment.workspaceRoot) return null;
@@ -845,6 +849,7 @@ function runOnOperationAdmission(
     operationResourcePolicy: enrollment.operationPolicy,
     operationResourcePolicySupported: enrollment.agentCapabilities.operationResourcePolicy === true,
     operationCpuQuotaSupported: enrollment.agentCapabilities.operationCpuQuota === true,
+    transactionalFsWriteSupported: enrollment.agentCapabilities.transactionalFsWrite === true,
   };
 }
 
@@ -949,6 +954,56 @@ export async function executeRunOnSelfhostedMachine(
     // release replay/output retention instead of waiting for TTL cleanup.
     await session.finalizeOpStreamOps().catch(() => undefined);
   }
+}
+
+/**
+ * Run one short command on a specific enrolled machine for an action a person
+ * or agent took outside a session's routing (opening a macOS settings pane).
+ * The caller has already authorized the actor for this enrollment; `access` is
+ * the same scope the caller used to read it. `execTimeoutMs` bounds the command.
+ */
+export async function runOnEnrollmentDirect(
+  services: Pick<FleetServices, "db" | "settings" | "bus">,
+  input: {
+    access: string | { accountId: string; workspaceId: string; subjectId: string };
+    enrollmentId: string;
+    /** Display label for results (machine name or sandbox id). */
+    target: string;
+    cmd: string;
+    execTimeoutMs: number;
+  },
+): Promise<RunOnResult> {
+  const live = await getLiveEnrollmentConnection(services.db, input.access, input.enrollmentId);
+  if (!live || live.status !== "active" || !live.connectionInstanceId || !live.workspaceRoot) {
+    return { target: input.target, kind: "exec", ok: false, reason: "machine is not connected" };
+  }
+  return await executeRunOnSelfhostedMachine(
+    {
+      workspaceId: live.workspaceId,
+      agentId: input.enrollmentId,
+      connectionInstanceId: live.connectionInstanceId,
+      workspaceRoot: live.workspaceRoot,
+      controlRpc: controlRpc(services.bus),
+      relay: relayConfigFromSettings(services.settings),
+      controlTimeoutMs: services.settings.sandboxSelfhostedControlTimeoutMs,
+      execTimeoutMs: input.execTimeoutMs,
+      operationResourcePolicy: live.operationPolicy,
+      operationResourcePolicySupported: live.agentCapabilities.operationResourcePolicy === true,
+      operationCpuQuotaSupported: live.agentCapabilities.operationCpuQuota === true,
+      resolveOperationAdmission: async () => {
+        try {
+          return runOnOperationAdmission(
+            services,
+            await getLiveEnrollmentConnection(services.db, input.access, input.enrollmentId),
+          );
+        } catch {
+          return null;
+        }
+      },
+    },
+    input.target,
+    { kind: "exec", cmd: input.cmd },
+  );
 }
 
 /**
@@ -1165,7 +1220,7 @@ export async function provisionSandbox(
     return {
       kind: "selfhosted",
       instructions:
-        "Share one of these deployment-specific commands with a human operator. It installs the OpenGeni agent and starts `opengeni-agent connect` for this exact deployment and workspace; do not run a second bare `connect`. Complete the device-flow at the verification URL (the loud whole-machine + screen-control consent), and the machine then appears here as an attachable selfhosted sandbox. Existing connections to other OpenGeni workspaces or deployments are preserved.",
+        "Share one of these deployment-specific commands with a human operator. It installs the Opengeni agent and starts `opengeni-agent connect` for this exact deployment and workspace; do not run a second bare `connect`. Complete the device-flow at the verification URL (the loud whole-machine + screen-control consent), and the machine then appears here as an attachable selfhosted sandbox. Existing connections to other Opengeni workspaces or deployments are preserved.",
       // Install from THIS control plane's origin (not a hardcoded public CDN): the
       // served install script is rewritten to pull the per-SHA agent baked into
       // this exact deployment (see apps/api/src/routes/install.ts), so a deployed

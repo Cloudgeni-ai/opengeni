@@ -1810,7 +1810,7 @@ describe("buildTools", () => {
     ]);
   });
 
-  test("combines OpenGeni with document tools", () => {
+  test("combines Opengeni with document tools", () => {
     expect(buildTools(undefined, ["opengeni", "docs"])).toEqual([
       { kind: "mcp", id: "opengeni" },
       { kind: "mcp", id: "docs" },
@@ -1932,12 +1932,12 @@ describe("buildTools", () => {
     ]);
   });
 
-  test("keeps only mandatory OpenGeni infrastructure out of selectable server catalogs", () => {
+  test("keeps only mandatory Opengeni infrastructure out of selectable server catalogs", () => {
     const config = {
       mcpServers: [
         {
           id: "opengeni",
-          name: "OpenGeni",
+          name: "Opengeni",
           url: "https://example.test/opengeni",
         },
         { id: "files", name: "Files", url: "https://example.test/files" },
@@ -2087,7 +2087,7 @@ describe("capability catalog helpers", () => {
       capabilityErrorToast(
         Object.assign(
           new Error(
-            'OpenGeni API 422: MCP capability "4fetch" could not be enabled because OpenGeni could not initialize api.4fetch.com. Check the endpoint configuration or try again. Reference: req-probe.',
+            'Opengeni API 422: MCP capability "4fetch" could not be enabled because Opengeni could not initialize api.4fetch.com. Check the endpoint configuration or try again. Reference: req-probe.',
           ),
           { status: 422 },
         ),
@@ -2103,7 +2103,7 @@ describe("capability catalog helpers", () => {
   test("never shows the raw API error string", () => {
     const refused = Object.assign(
       new Error(
-        "OpenGeni API 403: missing permission: workspace:admin Reference: 0f0e0d0c-0b0a-4908-8706-050403020100.",
+        "Opengeni API 403: missing permission: workspace:admin Reference: 0f0e0d0c-0b0a-4908-8706-050403020100.",
       ),
       { status: 403 },
     );
@@ -2164,7 +2164,7 @@ describe("scheduled task form helpers", () => {
     });
   });
 
-  test("initializes OpenGeni tool checkbox from existing tools", () => {
+  test("initializes Opengeni tool checkbox from existing tools", () => {
     expect(
       formStateFromScheduledTask(scheduledTask({ type: "interval", everySeconds: 60 }))
         .includeOpenGeniTool,
@@ -2179,7 +2179,7 @@ describe("scheduled task form helpers", () => {
     ).toBe(false);
   });
 
-  test("preserves existing agent config while updating prompt and OpenGeni tool", () => {
+  test("preserves existing agent config while updating prompt and Opengeni tool", () => {
     const resources: ResourceRef[] = [
       {
         kind: "repository",

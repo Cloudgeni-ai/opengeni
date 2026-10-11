@@ -183,6 +183,37 @@ describe("modular composer: module selection (AC12)", () => {
     });
   }
 
+  test("standing session attachments are not presented as new input", () => {
+    const composed = compose(allAgentCapabilities(), {
+      ...NO_RESOURCES,
+      managedSandbox: true,
+      attachments: true,
+    }).composed;
+    expect(composed).toContain(
+      "Files attached to the session stay mounted on every turn and may be old; treat one as part of the current request only when the latest message refers to it.",
+    );
+  });
+
+  test("background-command guidance needs a sandbox or Connected Machine", () => {
+    for (const capabilities of [allAgentCapabilities(), noneAgentCapabilities()]) {
+      const detached = compose(capabilities, NO_RESOURCES).composed;
+      expect(detached).not.toContain("## Background commands");
+      expect(detached).not.toContain("command_wait");
+      expect(detached).not.toContain("command_read");
+      expect(detached).not.toContain("a command");
+      expect(detached).toContain("`wait_for_input`");
+      for (const resources of [
+        { ...NO_RESOURCES, managedSandbox: true },
+        { ...NO_RESOURCES, connectedMachine: true },
+      ]) {
+        const attached = compose(capabilities, resources).composed;
+        expect(attached).toContain("## Background commands");
+        expect(attached).toContain("`command_read`");
+        expect(attached).toContain("`command_wait`");
+      }
+    }
+  });
+
   test("sandbox guidance appears for a Connected Machine alone", () => {
     const result = compose(allAgentCapabilities(), { ...NO_RESOURCES, connectedMachine: true });
     expect(moduleIds(result)).toEqual(expect.arrayContaining(["sandbox", "connected_machine"]));
@@ -272,7 +303,7 @@ describe("modular composer: identity and precedence (AC12, AC14)", () => {
       agentConfig: { ...base, identity: "You are Acme Assistant." },
     });
     expect(custom.layers[0]).toMatchObject({ id: "identity", content: "You are Acme Assistant." });
-    expect(custom.composed).not.toContain("OpenGeni workspace agent");
+    expect(custom.composed).not.toContain("Opengeni workspace agent");
     expect(custom.layers.slice(1)).toEqual(standard.layers.slice(1));
   });
 

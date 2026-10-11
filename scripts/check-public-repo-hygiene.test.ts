@@ -7,6 +7,123 @@ import {
 } from "./check-public-repo-hygiene";
 
 describe("public repository hygiene", () => {
+  test("preserves only the four byte-exact upstream license copyright contacts", () => {
+    const file = "packages/runtime/THIRD_PARTY_NOTICES";
+    const source = readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
+    const copyrightLines = [
+      `Copyright(c) 2012 - 2015 fengmk2 <${["fengmk2@", "gmail.com"].join("")}>`,
+      `Copyright (c) 2015-2020, Matteo Collina <${["matteo.collina@", "gmail.com"].join("")}>`,
+      `Copyright 2014–present Olivier Lalonde <${["olalonde@", "gmail.com"].join("")}>, James Talmage <james@talmage.io>, Ruben Verborgh`,
+      `Copyright (c) 2018 Zejin Zhuang <${["heineiuo@", "gmail.com"].join("")}>`,
+    ];
+    expect(auditPublicText(file, source)).toEqual([]);
+    for (const line of copyrightLines) {
+      expect(source.split("\n")).toContain(line);
+      // A copied contact line alone is not the reviewed license context.
+      expect(auditPublicText(file, line)).toEqual([
+        { file, line: 1, reason: "personal email address" },
+      ]);
+    }
+  });
+
+  test("bounds upstream license contacts to the exact notices path and all reviewed bytes", () => {
+    const file = "packages/runtime/THIRD_PARTY_NOTICES";
+    const source = readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
+    for (const [path, text] of [
+      ["fixture.txt", source],
+      ["packages/runtime/src/THIRD_PARTY_NOTICES", source],
+      [file, source.replace("agentkeepalive 4.6.0", "agentkeepalive 4.6.1")],
+      [file, `${source} `],
+      [file, source.slice(1)],
+      [file, source.replaceAll("\n", "\r\n")],
+    ]) {
+      expect(
+        auditPublicText(path!, text!).some(
+          (finding) => finding.reason === "personal email address",
+        ),
+      ).toBe(true);
+    }
+    const contacts = [...source.matchAll(/\b[\w.+-]+@gmail\.com\b/g)];
+    expect(contacts).toHaveLength(4);
+    for (const [contact] of contacts) {
+      const altered = source.replace(contact, `x${contact.slice(1)}`);
+      expect(Buffer.byteLength(altered, "utf8")).toBe(Buffer.byteLength(source, "utf8"));
+      expect(
+        auditPublicText(file, altered).some(
+          (finding) => finding.reason === "personal email address",
+        ),
+      ).toBe(true);
+    }
+  });
+
+  test("does not exempt private workspace metadata added to upstream license notices", () => {
+    const file = "packages/runtime/THIRD_PARTY_NOTICES";
+    const source = readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
+    for (const [metadata, reason] of [
+      [["private-user@", "gmail.com"].join(""), "personal email address"],
+      [["/home/", "private-license-owner/repo"].join(""), "non-generic home path"],
+      [[".claude/", "worktrees/private-branch"].join(""), "private worktree path"],
+      [[".agent/", "private-plan.md"].join(""), "private .agent document reference"],
+      [["OPE", "-123"].join(""), "internal issue reference"],
+    ]) {
+      expect(auditPublicText(file, `${source}\nworkspace metadata: ${metadata}`)).toContainEqual({
+        file,
+        line: source.split("\n").length + 1,
+        reason,
+      });
+    }
+  });
+
+  test("bounds upstream label exemptions to exact paths and bytes", () => {
+    for (const file of [
+      "agent/vendor/async-nats/tests/configs/digests/digester_test_bytes_010000.txt",
+      "agent/vendor/async-nats/tests/configs/digests/digester_test_bytes_100000.txt",
+      "packages/contracts/src/cua-desktop-tools.gen.json",
+      "packages/contracts/src/cua-desktop-tools.linux.gen.json",
+    ]) {
+      const source = readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
+      expect(auditPublicText(file, source)).toEqual([]);
+      for (const [path, text] of [
+        ["fixture.txt", source],
+        [file, `${source} `],
+        [file, source.slice(1)],
+      ]) {
+        expect(
+          auditPublicText(path!, text!).some(
+            (finding) => finding.reason === "retired milestone label",
+          ),
+        ).toBe(true);
+      }
+      const personalMail = ["example-user@", "gmail.com"].join("");
+      const altered = auditPublicText(file, `${source}\n${personalMail}`);
+      expect(altered.map((finding) => finding.reason)).toContain("personal email address");
+      expect(altered.map((finding) => finding.reason)).toContain("retired milestone label");
+    }
+  });
+
+  test("only exempts the reviewed upstream Rust field primitive", () => {
+    const file = "agent/vendor/async-nats/src/lib.rs";
+    const source = readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
+    const fieldType = ["i", "8"].join("");
+    const field = `pub proto: ${fieldType},`;
+    expect(source.slice(9_379 - 11, 9_379 + 3)).toBe(field);
+    expect(auditPublicText(file, source)).toEqual([]);
+    for (const text of [
+      source.replace(field, `pub proto: ${fieldType.toUpperCase()},`),
+      `${source}\n`,
+    ]) {
+      expect(
+        auditPublicText(file, text).some((finding) => finding.reason === "retired milestone label"),
+      ).toBe(true);
+    }
+    const label = ["i", "8"].join("");
+    expect(
+      auditPublicText(file, `let label = "${label}";\n// ${label}\n/* ${label} */`).map(
+        (finding) => finding.reason,
+      ),
+    ).toEqual(Array(3).fill("retired milestone label"));
+  });
+
   test("the committed catalog quarantines restricted clients and keeps counts consistent", () => {
     const snapshot = JSON.parse(
       readFileSync(new URL("../data/catalog/integrations-snapshot.json", import.meta.url), "utf8"),
@@ -139,6 +256,36 @@ describe("public repository hygiene", () => {
         `-- historical source: ${privatePlan}`,
       ),
     ).toEqual([]);
+  });
+
+  test("pins the released disconnect migration exception to its exact bytes and issue offset", () => {
+    const file = "packages/db/drizzle/0691_subscription_core_codex_disconnect.sql";
+    const source = readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
+    expect(auditPublicText(file, source)).toEqual([]);
+    for (const [path, text] of [
+      ["packages/db/drizzle/9999_new_migration.sql", source],
+      [file, `${source} `],
+      [file, source.replace("SET LOCAL", "set local")],
+      [file, source.replaceAll("\n", "\r\n")],
+    ]) {
+      expect(
+        auditPublicText(path!, text!).some(
+          (finding) => finding.reason === "internal issue reference",
+        ),
+      ).toBe(true);
+    }
+    for (const [metadata, reason] of [
+      [["private-user@", "gmail.com"].join(""), "personal email address"],
+      [["/home/", "private-owner/repo"].join(""), "non-generic home path"],
+      [[".agent/", "private-plan.md"].join(""), "private .agent document reference"],
+      [["OPE", "-999"].join(""), "internal issue reference"],
+    ]) {
+      expect(auditPublicText(file, `${source}\n${metadata}`)).toContainEqual({
+        file,
+        line: source.split("\n").length + 1,
+        reason,
+      });
+    }
   });
 
   test("does not exempt newly added migrations", () => {

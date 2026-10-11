@@ -32,10 +32,25 @@ export default defineConfig({
     "src/session.ts",
     "src/connect.ts",
     "src/sites.ts",
+    "src/native-previews.ts",
     "src/session-ui.ts",
     "src/machines.ts",
     "src/usage.ts",
     "src/model-policy.ts",
+    "src/queue-presentation-model.ts",
+    "src/composer-messages.ts",
+    "src/sandbox-label-model.ts",
+    "src/model-picker-model.ts",
+    "src/model-mark-paths.ts",
+    "src/timeline-model.ts",
+    "src/organization-model.ts",
+    "src/session-agents-model.ts",
+    "src/session-realtime.ts",
+    "src/new-session-draft.ts",
+    "src/session-list-model.ts",
+    "src/session-feedback-model.ts",
+    "src/session-attention-model.ts",
+    "src/testing/session-scenarios.ts",
     "src/realtime.ts",
     "src/artifacts.ts",
     "src/artifacts-spreadsheet.ts",
@@ -52,6 +67,11 @@ export default defineConfig({
   target: "es2022",
   dts: true,
   sourcemap: true,
+  // Every entry is browser UI (hooks, context, DOM). Marking the output as a
+  // client module lets a Next.js App Router Server Component render
+  // <OpenGeniChat /> directly instead of failing with
+  // "createContext is not a function" during prerender.
+  banner: { js: '"use client";' },
   clean: true,
   external,
   esbuildOptions(options) {

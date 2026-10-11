@@ -1,7 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import type { AttemptToolCatalog, AttemptToolResult } from "@opengeni/contracts";
 
-import { CodemodeClient, createCodemodeSiteRequestHandler } from "../src";
+import {
+  CodemodeClient,
+  createCodemodeSiteRequestHandler,
+  createAttemptToolEnvironment,
+} from "../src";
 
 const catalog: AttemptToolCatalog = {
   version: 1,
@@ -28,6 +32,126 @@ const catalog: AttemptToolCatalog = {
 };
 
 describe("local Site Codemode handler", () => {
+  test.each(["invoke", "calls"] as const)(
+    "real client never refreshes a pinned Site submission into a changed executable definition (%s)",
+    async (endpoint) => {
+      const definition = { ...catalog.entries[0]!, execute: () => ({ content: [] }) };
+      const { accountId, workspaceId, sessionId, turnId, attemptId, executionGeneration } = catalog;
+      const scope = { accountId, workspaceId, sessionId, turnId, attemptId, executionGeneration };
+      const first = createAttemptToolEnvironment({
+        scope,
+        generation: 1,
+        definitions: [definition],
+      }).catalog;
+      const next = createAttemptToolEnvironment({
+        scope,
+        generation: 2,
+        definitions: [
+          {
+            ...definition,
+            inputSchema: { type: "object", properties: { changed: { type: "boolean" } } },
+          },
+        ],
+      }).catalog;
+      let reads = 0;
+      let submissions = 0;
+      let effects = 0;
+      const client = new CodemodeClient({
+        baseUrl: "https://codemode.invalid",
+        token: "test",
+        fetch: (async (input) => {
+          if (String(input).endsWith("/catalog"))
+            return Response.json(++reads === 1 ? first : next);
+          if (++submissions === 1)
+            return Response.json(
+              {
+                error: {
+                  code: "conflict",
+                  retryable: true,
+                  outcomeUnknown: false,
+                  details: { code: "codemode_catalog_stale" },
+                },
+              },
+              { status: 409 },
+            );
+          effects++;
+          throw new Error("Changed schema must never be submitted");
+        }) as typeof fetch,
+      });
+      const handler = createCodemodeSiteRequestHandler(client);
+      const target = { identity: definition.identity };
+      const resolve = await handler(
+        new Request("https://preview.invalid/__opengeni/site-tools/resolve", {
+          method: "POST",
+          body: JSON.stringify({ target }),
+        }),
+      );
+      const tool = await resolve.json();
+      const response = await handler(
+        new Request(`https://preview.invalid/__opengeni/site-tools/${endpoint}`, {
+          method: "POST",
+          body: JSON.stringify({
+            ...(endpoint === "invoke"
+              ? { target, expectedDefinitionDigest: tool.definitionDigest }
+              : { identity: definition.identity, catalogDigest: first.digest }),
+            arguments: {},
+            operationId: crypto.randomUUID(),
+          }),
+        }),
+      );
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({
+        error: {
+          code: endpoint === "invoke" ? "tool_definition_stale" : "catalog_stale",
+          retryable: true,
+        },
+      });
+      expect(reads).toBe(2);
+      expect(submissions).toBe(1);
+      expect(effects).toBe(0);
+    },
+  );
+  test("targeted preview uses only the frozen attempt and rejects stale or host-only authority before execution", async () => {
+    const calls: unknown[] = [];
+    const handler = createCodemodeSiteRequestHandler({
+      catalog: async () => catalog,
+      call: async (...args: unknown[]) => {
+        calls.push(args);
+        return { content: [], structuredContent: { ok: true } };
+      },
+    } as unknown as CodemodeClient);
+    const request = (method: string, body: unknown) =>
+      handler(
+        new Request(`http://localhost/__opengeni/site-tools/${method}`, {
+          method: "POST",
+          body: JSON.stringify(body),
+        }),
+      );
+    const target = { identity: catalog.entries[0]!.identity };
+    const resolved = await (await request("resolve", { target })).json();
+    expect(resolved).toMatchObject({ version: 1, entry: catalog.entries[0] });
+    const invocation = {
+      target,
+      operationId: "66666666-6666-4666-8666-666666666666",
+      arguments: { first: 10 },
+      expectedDefinitionDigest: resolved.definitionDigest,
+    };
+    expect(
+      (await request("invoke", { ...invocation, expectedDefinitionDigest: "b".repeat(64) })).status,
+    ).toBe(409);
+    expect(
+      (await request("invoke", { ...invocation, approvalToken: `ogta_${"a".repeat(43)}` })).status,
+    ).toBe(400);
+    expect(calls).toHaveLength(0);
+    expect((await request("invoke", invocation)).status).toBe(200);
+    expect(calls).toEqual([
+      [
+        catalog.entries[0]!.identity,
+        { first: 10 },
+        expect.objectContaining({ operationId: invocation.operationId }),
+      ],
+    ]);
+  });
   test("forwards configuration and control routes for normal API authorization", async () => {
     const forwarded: string[] = [];
     const client = new CodemodeClient({

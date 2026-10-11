@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { getSettings } from "../src";
 
-// Managed deployment billing OpenGeni credits through Stripe; the default
+// Managed deployment billing Opengeni credits through Stripe; the default
 // OpenAI catalog prices gpt-6-astra, gpt-6-sol and gpt-6-luna as credits.
 const stripeEnv = {
   OPENGENI_ENVIRONMENT: "production",

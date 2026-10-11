@@ -25,12 +25,13 @@ describe("streaming health dashboard", () => {
     expect(serialized).not.toContain("sessionId");
   });
 
-  test("shows the live first-token warning threshold on the latency chart", async () => {
+  test("keeps absolute TTFT as an unalerted view and splits Opengeni from provider latency", async () => {
     const dashboard = JSON.parse(
       await readFile(new URL("./streaming-health.json", import.meta.url), "utf8"),
     ) as {
       panels: Array<{
         title?: string;
+        targets?: Array<{ expr?: string }>;
         fieldConfig?: {
           defaults?: {
             thresholds?: { steps?: Array<{ color?: string; value?: number | null }> };
@@ -39,13 +40,31 @@ describe("streaming health dashboard", () => {
         };
       }>;
     };
-    const ttft = dashboard.panels.find(
-      (panel) => panel.title === "Time-to-first-token p99 / p95 / p50 by provider",
+    const byTitle = (title: string) => dashboard.panels.find((panel) => panel.title === title);
+    const absolute = byTitle(
+      "User-perceived time-to-first-token p99 / p95 / p50 by provider (absolute)",
     );
-    expect(ttft?.fieldConfig?.defaults?.thresholds?.steps).toContainEqual({
+    expect(absolute?.targets?.[0]?.expr).toContain("opengeni_stream_ttft_seconds_bucket");
+    // No alert reads the absolute view, so it must not draw a stale alert line.
+    expect(absolute?.fieldConfig?.defaults?.custom?.thresholdsStyle?.mode).toBe("off");
+
+    const provider = byTitle("Provider TTFT p90 / p50 by provider (dispatch -> first delta)");
+    const exprs = (provider?.targets ?? []).map((target) => target.expr ?? "");
+    expect(exprs.some((expr) => expr.includes('content="any"'))).toBe(true);
+    expect(exprs.some((expr) => expr.includes('content="text"'))).toBe(true);
+
+    const baseline = byTitle("Provider TTFT p90: last 30m vs trailing 24h baseline");
+    expect(JSON.stringify(baseline?.targets)).toContain(
+      "opengeni:model_provider_ttft_seconds:p90_24h_baseline",
+    );
+
+    const ours = byTitle("Opengeni pre-dispatch p95 / p50 (model entry -> provider dispatch)");
+    expect(ours?.targets?.[0]?.expr).toContain(
+      "opengeni_model_request_pre_dispatch_seconds_bucket",
+    );
+    expect(ours?.fieldConfig?.defaults?.thresholds?.steps).toContainEqual({
       color: "red",
-      value: 8,
+      value: 2,
     });
-    expect(ttft?.fieldConfig?.defaults?.custom?.thresholdsStyle?.mode).toBe("line");
   });
 });

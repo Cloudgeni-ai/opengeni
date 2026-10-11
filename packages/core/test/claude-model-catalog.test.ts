@@ -227,7 +227,10 @@ test.each(["workspace", "organization"] as const)(
       const catalog = configuredModels(settings).filter(
         (model) => model.providerId === `${scope}-${kind}`,
       );
-      for (const id of ["claude-opus-5-5", "claude-sonnet-5-5"]) {
+      for (const [id, autoCompactTokenLimit] of [
+        ["claude-opus-5-5", 300_000],
+        ["claude-sonnet-5-5", 800_000],
+      ] as const) {
         const model = catalog.find((candidate) => candidate.upstreamModelId === id)!;
         expect(model.capabilities.reasoning).toMatchObject({
           runnable: true,
@@ -237,7 +240,7 @@ test.each(["workspace", "organization"] as const)(
         expect(model.executionLimits).toMatchObject({
           contextWindowTokens: 1_000_000,
           effectiveContextWindowTokens: 872_000,
-          autoCompactTokenLimit: 800_000,
+          autoCompactTokenLimit,
         });
       }
       expect(

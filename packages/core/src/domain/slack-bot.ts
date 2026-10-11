@@ -15,6 +15,8 @@ import {
 } from "@opengeni/contracts";
 import {
   getConnectionMetadata,
+  availableSlackBotConnectionMetadata,
+  requireWorkspace,
   type ConnectionMetadataWithVerification,
   type Database,
 } from "@opengeni/db";
@@ -74,15 +76,22 @@ export async function requireOpenGeniSlackBotConnection(
   workspaceId: string,
   connectionId: string,
 ): Promise<ConnectionMetadata> {
-  const connection = await getConnectionMetadata(db, workspaceId, connectionId, null);
+  const local = await getConnectionMetadata(db, workspaceId, connectionId, null);
+  const workspace = await requireWorkspace(db, workspaceId);
+  const connection =
+    local ??
+    (
+      await availableSlackBotConnectionMetadata(db, { accountId: workspace.accountId, workspaceId })
+    ).find((candidate) => candidate.id === connectionId) ??
+    null;
   if (!connection || !isOpenGeniSlackBotConnection(connection)) {
     throw new HTTPException(422, {
-      message: "slackBotConnectionId must reference an OpenGeni Slack bot connection",
+      message: "slackBotConnectionId must reference an Opengeni Slack bot connection",
     });
   }
   if (connection.status !== "active") {
     throw new HTTPException(422, {
-      message: `OpenGeni Slack bot connection is not active (${connection.status})`,
+      message: `Opengeni Slack bot connection is not active (${connection.status})`,
     });
   }
   return connection;
@@ -166,7 +175,7 @@ export function isAuthenticatedPersonAuthorization(
 }
 
 /**
- * A scheduled task may post as the OpenGeni workspace bot only to the one
+ * A scheduled task may post as the Opengeni workspace bot only to the one
  * Slack channel a person chose on the task. Choosing or changing that channel
  * therefore needs a signed-in person with `connections:write`, and the bot's
  * membership is verified at that moment. Keeping or clearing the existing
@@ -243,9 +252,12 @@ export function withScheduledSlackBotPostingTools(
   agentConfig: Pick<ScheduledTaskAgentConfig, "slackBotConnectionId" | "slackBotChannelId">,
   allowedTools: readonly FirstPartyMcpToolName[],
 ): FirstPartyMcpToolName[] {
-  if (!agentConfig.slackBotConnectionId || !agentConfig.slackBotChannelId) return [...tools];
+  const posting = new Set<FirstPartyMcpToolName>(SCHEDULED_SLACK_BOT_POSTING_TOOLS);
+  // Ordinary-chat defaults include these tools, but an unattended occurrence
+  // must have its own person-chosen destination before receiving them.
+  const next = tools.filter((tool) => !posting.has(tool));
+  if (!agentConfig.slackBotConnectionId || !agentConfig.slackBotChannelId) return next;
   const allowed = new Set(allowedTools);
-  const next = [...tools];
   for (const tool of SCHEDULED_SLACK_BOT_POSTING_TOOLS) {
     if (allowed.has(tool) && !next.includes(tool)) next.push(tool);
   }

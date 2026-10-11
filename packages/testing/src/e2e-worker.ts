@@ -10,6 +10,7 @@ import {
 } from "@opengeni/worker-bundle";
 import type { Model, ModelRequest, ModelResponse, StreamEvent } from "@openai/agents";
 import {
+  assistantMessage,
   functionCall,
   latestExecCommandState,
   ScriptedModel,
@@ -54,7 +55,7 @@ const { worker, connection } = await createOpenGeniWorker({
 });
 
 console.log(
-  `OpenGeni ${role} test worker listening on ${settings.temporalTaskQueue} ` +
+  `Opengeni ${role} test worker listening on ${settings.temporalTaskQueue} ` +
     `(ownership=${settings.sandboxOwnershipEnabled} capture=${settings.workspaceCaptureEnabled} storage=${Boolean(settings.objectStorageEndpoint)})`,
 );
 try {
@@ -244,7 +245,7 @@ function workspaceCaptureShellStep(): ScriptedModelStep {
             "mkdir -p api web",
             "git -C api init -q",
             "git -C api config user.email e2e@opengeni.dev",
-            "git -C api config user.name 'OpenGeni E2E'",
+            "git -C api config user.name 'Opengeni E2E'",
             "printf 'base api\\n' > api/app.txt",
             "git -C api add app.txt",
             "git -C api commit -qm base",
@@ -252,7 +253,7 @@ function workspaceCaptureShellStep(): ScriptedModelStep {
             "printf 'untracked api\\n' > api/notes.txt",
             "git -C web init -q",
             "git -C web config user.email e2e@opengeni.dev",
-            "git -C web config user.name 'OpenGeni E2E'",
+            "git -C web config user.name 'Opengeni E2E'",
             "printf 'rename me\\n' > web/old.txt",
             "printf 'delete me\\n' > web/deleted.txt",
             "git -C web add -A",
@@ -393,6 +394,8 @@ class HeldWaitPersonTurnModel implements Model {
       if (!body.includes("opengeni__wait_for_input"))
         return {
           output: [
+            // A person's turn must say something visible before it waits.
+            assistantMessage("HELD_WAIT_STARTED: a child is counting; I'll wait for it."),
             functionCall(name("wait_for_input"), {
               reason: "Waiting for the child's count",
               timeoutSeconds: 600,
@@ -455,6 +458,8 @@ class HeldWaitConsumedByPersonTurnModel implements Model {
         }
         return {
           output: [
+            // A person's turn must say something visible before it waits.
+            assistantMessage("CONSUMED_WAIT_STARTED: a child is counting; I'll wait for it."),
             functionCall(name("wait_for_input"), {
               reason: "Waiting for the child's count",
               timeoutSeconds: 45,

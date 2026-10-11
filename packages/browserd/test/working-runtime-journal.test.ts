@@ -108,6 +108,45 @@ describe("existing controller journal read-only inspection", () => {
 });
 
 describe("durable working-runtime launch receipts", () => {
+  test("only completed suspension with exact launch authority permits recovery", async () => {
+    await withJournal(async ({ journal, receipt }) => {
+      const suspended = journal.suspend(receipt);
+      expect(suspended.process).toEqual(receipt.process);
+      expect(() =>
+        assertWorkingRuntimeReceipt(journal.latest(), authority, launchDigest, receipt.profile),
+      ).toThrow("preserved");
+      const completed = journal.complete(suspended, suspended.process);
+      expect(() =>
+        assertWorkingRuntimeReceipt(journal.latest(), authority, launchDigest, receipt.profile),
+      ).not.toThrow();
+      for (const changed of [
+        { ...completed, state: "prepared" as const },
+        { ...completed, state: "outcome_unknown" as const },
+        { ...completed, directoryLaunchAllowed: false },
+        { ...completed, process: null },
+        { ...completed, authority: { ...authority, tokenGeneration: 2 } },
+        { ...completed, launchDigest: "e".repeat(64) },
+        { ...completed, profile: { ...receipt.profile, inode: receipt.profile.inode + 1 } },
+      ])
+        expect(() =>
+          assertWorkingRuntimeReceipt(changed, authority, launchDigest, receipt.profile),
+        ).toThrow("preserved");
+      for (const changed of [
+        { ...receipt, state: "dispatched" as const },
+        { ...receipt, directoryLaunchAllowed: false },
+        { ...receipt, process: null },
+        completed,
+      ])
+        expect(() => journal.suspend(changed)).toThrow("preserved");
+      const retired = journal.retire(completed);
+      journal.complete(retired, null);
+      expect(() => journal.suspend(journal.latest()!)).toThrow("preserved");
+      expect(() =>
+        assertWorkingRuntimeReceipt(journal.latest(), authority, launchDigest, receipt.profile),
+      ).toThrow("preserved");
+    });
+  });
+
   test.each(["prepared", "dispatched", "outcome_unknown"] as const)(
     "newer %s launch shadows completed authority and is never replayed",
     async (state) => {

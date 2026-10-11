@@ -72,9 +72,29 @@ export function createModelImageSizer(maxDimension: number, maxEncodedBytes = 10
         const encodedBudget = Math.min(maxEncodedBytes, data.length);
         let resized = await pipeline.clone().png().toBuffer({ resolveWithObject: true });
         let outputType = "image/png";
-        for (const quality of [90, 75, 60, 45, 30, 15, 1]) {
+        for (const quality of [90, 65, 45]) {
           if (Math.ceil(resized.data.length / 3) * 4 <= encodedBudget) break;
           resized = await pipeline.clone().webp({ quality }).toBuffer({ resolveWithObject: true });
+          outputType = "image/webp";
+        }
+        // Prefer a smaller, readable rendition to progressively destroying
+        // high-frequency detail at the lowest codec quality.
+        // Reduce dimensions deterministically instead of admitting a larger
+        // payload or failing merely because compression could not fit it.
+        let dimension = Math.min(maxDimension, Math.max(metadata.width, metadata.height));
+        while (Math.ceil(resized.data.length / 3) * 4 > encodedBudget && dimension > 1) {
+          dimension = Math.max(1, Math.floor(dimension * 0.75));
+          resized = await decoder
+            .clone()
+            .autoOrient()
+            .resize({
+              width: dimension,
+              height: dimension,
+              fit: "inside",
+              withoutEnlargement: true,
+            })
+            .webp({ quality: 75 })
+            .toBuffer({ resolveWithObject: true });
           outputType = "image/webp";
         }
         if (Math.ceil(resized.data.length / 3) * 4 > encodedBudget) throw new Error();

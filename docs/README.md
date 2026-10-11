@@ -1,4 +1,4 @@
-# OpenGeni Docs Map
+# Opengeni Docs Map
 
 This map defines who each doc tier serves and where volatile facts belong.
 
@@ -6,12 +6,12 @@ This map defines who each doc tier serves and where volatile facts belong.
 
 | Audience | Reads | Notes |
 | --- | --- | --- |
-| Integrator | `docs/product-integration.md`, `packages/sdk/README.md`, `packages/react/README.md`, `docs/embedding-workbench.md`, `examples/chat-quickstart` | Products consuming a standalone OpenGeni deployment; start with the default `SessionConversation` embed behind `createSessionProxyHandler`; the `@opengeni/sdk/chat` facade and chat quickstart are a text-only fallback for existing chat UIs; `docs/embedding.md` is only for advanced in-process hosts. |
+| Integrator | `docs/product-integration.md`, `packages/sdk/README.md`, `packages/react/README.md`, `docs/embedding-workbench.md`, `examples/chat-quickstart` | Products consuming a standalone Opengeni deployment; start with the default `SessionConversation` embed behind `createSessionProxyHandler`; the `@opengeni/sdk/chat` facade and chat quickstart are a text-only fallback for existing chat UIs; `docs/embedding.md` is only for advanced in-process hosts. |
 | Maintainer | `CONTRIBUTING.md`, `docs/local-development.md`, `docs/architecture.md`, topic docs | Contributors changing code, packages, workflows, or release mechanics. |
 | Repo agent | `AGENTS.md`, `.agents/skills/opengeni/SKILL.md`, this map | Coding agents working in this repository. |
 | Integration agent | `.agents/skills/opengeni-client/SKILL.md` and its references | Customer-side coding agents choosing and implementing a product integration shape. |
 | Product agent | Curated opt-in Skills in `packages/runtime/src/curated_skill_library` plus native tool-bound Skills in `packages/runtime/src/bundled_artifact_skills`, `packages/runtime/src/bundled_site_skills`, and `packages/runtime/src/bundled_video_skills` | Versioned product content; not covered by this freshness system. |
-| Operator | `docs/deployment.md`, deployment contracts and chart docs | People deploying and operating OpenGeni. |
+| Operator | `docs/deployment.md`, deployment contracts and chart docs | People deploying and operating Opengeni. |
 | Record | `docs/design/**` | Public-safe point-in-time architecture and product-design records; never raw operator evidence. |
 | Product user / evaluator | `docs-site/` (published at docs.opengeni.ai) | Public product docs built with Mintlify from `main`; concept and workflow level, linking to the canonical homes below for volatile details. |
 
@@ -32,27 +32,31 @@ This map defines who each doc tier serves and where volatile facts belong.
 | Run lifecycle | `docs/run-lifecycle.md` | `AGENTS.md`, `.agents/skills/opengeni/SKILL.md`, architecture summaries should link. |
 | Codex subscription rotation | `docs/codex-subscription-rotation.md` | `docs/run-lifecycle.md`, `docs/architecture.md`, and operator notes should link instead of restating allocator/failure semantics. |
 | SuperGrok/xAI subscription authority and rotation | `docs/supergrok-subscription.md` | `docs/run-lifecycle.md`, `docs/architecture.md`, provider/operator docs, SDK/React docs, and UI copy should link instead of restating authority or capacity semantics. |
+| Provider-neutral subscription account contract (target behaviour, requirement IDs, decision log) | `docs/subscription-accounts.md` | Provider subscription docs describe current behaviour and link here for the shared target; `docs/subscription-accounts-inventory.md` holds the entry-point inventory and Codex audit. |
 | Per-session MCP servers | `docs/session-mcp-servers.md` | `docs/architecture.md`, SDK/client examples should link instead of restating credential semantics. |
 | Connected machines | `docs/connected-machines.md` | `README.md`, `AGENTS.md`, client docs and skills should link. |
 | Deployment | `docs/deployment.md` | `README.md`, `AGENTS.md`, Helm/Terraform notes should link. |
 | Launch monitoring and alert first actions | `docs/launch-monitoring.md` | Deployment-specific dashboard, alert-channel and verified rollout links stay in the private ops delivery record. |
 | Organization tenancy authority, activation, and rollback boundary | `docs/organization-tenancy.md` | `docs/deployment.md` owns the operator cutover procedure; `docs/architecture.md`, `AGENTS.md`, and chart/config comments should link instead of restating the boundary, the preconditions, or the pre-activation opt-out switch. |
 | Organization recovery custody, immutable workspace ownership, and rollout | `docs/organization-recovery.md` | `docs/organization-tenancy.md` owns the broader tenancy model; deployment, API, SDK, and UI notes should link instead of weakening the quorum, actor-fence, notification, or unsupported-operation boundaries. |
+| Session storage: content-addressed session content, legacy compaction, disk reclamation, and the idle-session archive | `docs/session-storage-lifecycle.md` | `docs/architecture.md`, deployment notes, and table comments should link instead of restating the encoding, the compaction proof, or archive semantics. |
 | FORCE-RLS migration backfills | `docs/force-rls-migration-backfills.md` | `AGENTS.md`, `docs/deployment.md`, and migration comments should link instead of restating the owner-only `NO FORCE` window, the guard, or the classification inventory. |
 | Release/publishing | `CONTRIBUTING.md` § Release / Publishing, plus workflow files as executable truth | `README.md`, package READMEs, architecture release notes should link. |
 | Pull-request delivery across moving `main` | `AGENTS.md` § Pull-request delivery across moving `main`; hotfix freeze-head admission in `.github/workflows/source-admission.yml` and `scripts/check-source-admission.mjs`; promote/hotfix loop in `CONTRIBUTING.md` § Release / Publishing | `.agents/skills/opengeni/SKILL.md`, the PR template, and `docs/deployment.md` must preserve the same immutable-candidate distinction. Ordinary PRs into `main` do not run source admission. |
 | Client/SDK method reference | `packages/sdk/README.md` | `docs/product-integration.md`, `README.md`, `packages/react/README.md`, and customer integration skills should link rather than duplicating volatile signatures. |
 | Jev-backed `code_search` tool and Jev settings | `docs/code-search.md` | Architecture, deployment notes, and the `@opengeni/jev` README should link instead of restating the switches or the sandbox command contract. |
+| Agent web search (hosted vs provider), search providers, and their settings and billing | `docs/web-search.md` | Architecture, model-provider, and deployment notes should link instead of restating the provider list, modes, or prices. |
 | Composer voice input | `docs/transcription.md` | Architecture, SDK/React docs, and host-app guides should link instead of restating provider selection or microphone lifecycle rules. |
+| Stateless single model calls (OpenAI-compatible Chat Completions) and title-model routing | `docs/chat-completions.md` | `docs/model-providers.md`, `docs/http-api.md`, and architecture should link instead of restating supported parameters, billing, or subscription admission. |
 | Workbench embedding & production acceptance | `docs/embedding-workbench.md`, `docs/workbench-acceptance.md` | Host-app guides should link instead of weakening or restating the live evidence contract. |
 | Agent behavior eval (real model, manual/nightly) | `scripts/agent-behavior-eval/README.md` | Scenario scoring, variants, and the prompt/agent-configuration release gate; not a CI lane. |
 | Credential taxonomy | `docs/credentials.md` | `docs/embedding.md`, `docs/capabilities.md`, route comments should link instead of re-listing token types. |
 | GitHub App workspace binding | `docs/github-app.md` | `README.md`, `docs/architecture.md`, API/MCP/UI copy should summarize without weakening the authority matrix. |
 | Personal GitHub identity, repository authority, local setup, and propagation | `docs/personal-github.md` | `docs/github-app.md`, `docs/deployment.md`, API/runtime/UI copy should link instead of restating token custody or grant semantics. |
-| OpenGeni Review Bot PR-review automation | `docs/pr-review.md` | `docs/github-app.md`, architecture, SDK, and UI copy should link instead of restating provider permissions, delivery semantics, or exact-head authority. |
+| Opengeni Review Bot PR-review automation | `docs/pr-review.md` | `docs/github-app.md`, architecture, SDK, and UI copy should link instead of restating provider permissions, delivery semantics, or exact-head authority. |
 | Google Drive connection, scheduled source sync, and release readiness | `docs/google-drive.md` | Capabilities UI, connector code, and deployment guides should link instead of restating OAuth scope, explicit enablement, bounded sync/retry behavior, release gates, or ACL/citation boundaries. |
 | Scheduled task access drift, owner refresh, and failed-access notices | `docs/scheduled-task-access.md` | Schedules UI copy, `docs/agent-session-authority.md`, and `AGENTS.md` should link instead of restating the refresh authority or the notice semantics. |
-| OpenGeni Slack bot connection | `docs/slack-bot.md` | Capabilities/scheduled-task UI and architecture should link instead of restating manifest or routing rules. |
+| Opengeni Slack bot connection | `docs/slack-bot.md` | Capabilities/scheduled-task UI and architecture should link instead of restating manifest or routing rules. |
 | Social connectors (X / Reddit) | `docs/social-connectors.md` | `docs/architecture.md`, capability UI copy and marketing guidance should link instead of restating OAuth endpoints, scopes, or token-handling rules. |
 | Fiken connector (accounting) | `docs/fiken.md` | Capabilities UI copy and architecture should link instead of restating token verification, company scoping, or the single-concurrent-request rule. |
 | First-party local MCP bridges | `docs/design/first-party-mcp-bridges.md` | Provider bridge adapters, catalog/runtime registration, and follow-ups must preserve its authority, destination, and mutation-replay contract. |
@@ -70,6 +74,7 @@ This map defines who each doc tier serves and where volatile facts belong.
 | Scoped knowledge provenance | `docs/scoped-knowledge.md` | Source/document bridges, future connectors, claim retrieval, and policy/preference materialization should link here instead of weakening fixed authority, ACL intersection, tombstone, legacy non-widening, or proposal-only invariants. |
 | MCP surface selection | `docs/mcp-surfaces.md` | `docs/architecture.md`, `docs/capabilities.md`, `docs/session-mcp-servers.md` should link. |
 | Gmail tools and original file delivery | `docs/gmail.md` | `docs/capabilities.md` owns connection setup; runtime owns provider operations and worker owns transactional filesystem delivery. |
+| Tool permissions, durable approval and portable review | `docs/tool-approvals.md` | `docs/mcp-surfaces.md`, `docs/run-lifecycle.md`, SDK, React and Codemode READMEs link or summarize their boundaries. |
 | First-party MCP response contracts | `docs/mcp-response-contracts.md` | Mutation handlers, consumer migration notes, and release notes should link instead of restating the receipt schema and tool classification. |
 | Codemode programmatic tool access | `docs/mcp-surfaces.md`, `docs/architecture.md`; record design in `docs/design/codemode.md` | Runtime/API/worker comments should link instead of restating security invariants. |
 | Public API compatibility policy, public surface, deprecation, and enforcement | `docs/design/api-compatibility-policy.md` (accepted ADR, append-only exception log; the one design record that is current policy) | `docs/architecture.md` §3.10 summarizes; `packages/sdk/README.md`, `AGENTS.md`, the PR template, and release notes link instead of restating the rules. |

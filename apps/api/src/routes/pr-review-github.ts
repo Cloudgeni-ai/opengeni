@@ -53,6 +53,11 @@ import {
 import { deleteCookie, setCookie } from "hono/cookie";
 import { HTTPException } from "hono/http-exception";
 import { githubBrowserBaseUrl } from "../github-browser-flow";
+import {
+  prReviewInstallationChooserHtml,
+  prReviewSetupPendingHtml,
+  prReviewSetupSuccessHtml,
+} from "./github-browser-pages";
 import { acceptAutomationEvent, readAutomationWebhookBody } from "./automations";
 import {
   completeGitHubAppConnect,
@@ -61,13 +66,13 @@ import {
 
 const stateCookie = "opengeni_pr_review_github_state";
 const bindingStateMaxAgeSeconds = 10 * 60;
-const appName = "OpenGeni Lens" as const;
+const appName = "Opengeni Lens" as const;
 
 export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/webhooks/pr-review/github", async (c) => {
     const secret = deps.settings.prReviewGithubWebhookSecret?.trim();
     if (!secret) {
-      throw new HTTPException(503, { message: "OpenGeni Lens webhook is unavailable" });
+      throw new HTTPException(503, { message: "Opengeni Lens webhook is unavailable" });
     }
     const rawBody = await readAutomationWebhookBody(c.req.raw, AUTOMATION_WEBHOOK_MAX_BYTES);
     if (
@@ -79,13 +84,13 @@ export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
         webhookUsername: null,
       })
     ) {
-      throw new HTTPException(401, { message: "OpenGeni Lens signature is invalid" });
+      throw new HTTPException(401, { message: "Opengeni Lens signature is invalid" });
     }
     let payload: unknown;
     try {
       payload = JSON.parse(new TextDecoder().decode(rawBody));
     } catch {
-      throw new HTTPException(400, { message: "OpenGeni Lens payload is invalid JSON" });
+      throw new HTTPException(400, { message: "Opengeni Lens payload is invalid JSON" });
     }
     const record = asRecord(payload);
     const installationId = positiveInteger(asRecord(record?.installation)?.id);
@@ -201,7 +206,7 @@ export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
 
   app.get("/v1/workspaces/:workspaceId/pr-review/github/connect", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const state = requireStateQuery(c, "missing OpenGeni Lens installation state");
+    const state = requireStateQuery(c, "missing Opengeni Lens installation state");
     const payload = requireFreshState(state, deps, "pr_review_github_authority", workspaceId);
     await requirePrReviewManageGrant(c, deps, workspaceId, payload);
 
@@ -228,10 +233,10 @@ export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
     async (c) => {
       const workspaceId = c.req.param("workspaceId");
       const installationId = positiveInteger(c.req.param("installationId"));
-      const state = requireStateQuery(c, "missing OpenGeni Lens configuration state");
+      const state = requireStateQuery(c, "missing Opengeni Lens configuration state");
       const payload = requireFreshState(state, deps, "pr_review_github_install", workspaceId);
       if (installationId === null || payload.expectedInstallationId !== installationId) {
-        throw new HTTPException(400, { message: "invalid OpenGeni Lens installation" });
+        throw new HTTPException(400, { message: "invalid Opengeni Lens installation" });
       }
       await requirePrReviewManageGrant(c, deps, workspaceId, payload);
 
@@ -247,7 +252,7 @@ export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
           candidate.installationId === String(installationId),
       );
       if (!registration) {
-        throw new HTTPException(404, { message: "OpenGeni Lens installation is not connected" });
+        throw new HTTPException(404, { message: "Opengeni Lens installation is not connected" });
       }
       setStateCookie(c, deps, state);
       const configureUrl = githubInstallationSettingsUrl(
@@ -276,14 +281,14 @@ export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
         const payload = readSignedState(candidate, deps.githubStateSecret);
         return payload?.intent === "pr_review_github_install" && isFreshState(payload);
       });
-    if (!state) throw new HTTPException(400, { message: "missing OpenGeni Lens state" });
+    if (!state) throw new HTTPException(400, { message: "missing Opengeni Lens state" });
     const payload = requireFreshState(state, deps, "pr_review_github_install");
     requireStateCookie(c, state);
     await requirePrReviewManageGrant(c, deps, payload.workspaceId!, payload);
 
     assertManagedCompute(deps);
     const setupAction = c.req.query("setup_action");
-    if (setupAction === "request") return c.html(setupPendingHtml());
+    if (setupAction === "request") return c.html(prReviewSetupPendingHtml());
     if (setupAction !== "install" && setupAction !== "update") {
       throw new HTTPException(400, { message: "unsupported GitHub setup action" });
     }
@@ -296,7 +301,7 @@ export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
       payload.expectedInstallationId !== installationId
     ) {
       throw new HTTPException(409, {
-        message: "GitHub returned a different OpenGeni Lens installation",
+        message: "GitHub returned a different Opengeni Lens installation",
       });
     }
     requireConfiguredApp(deps);
@@ -332,7 +337,7 @@ export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
     const code = c.req.query("code");
     const state = c.req.query("state");
     if (!code || !state) {
-      throw new HTTPException(400, { message: "missing OpenGeni Lens OAuth code or state" });
+      throw new HTTPException(400, { message: "missing Opengeni Lens OAuth code or state" });
     }
     const payload = requireFreshState(state, deps);
     requireStateCookie(c, state);
@@ -358,7 +363,7 @@ export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
       }
       if (!candidates || !consistentCandidates(candidates)) {
         throw new HTTPException(409, {
-          message: "OpenGeni Lens could not prove owner-authorized installations",
+          message: "Opengeni Lens could not prove owner-authorized installations",
         });
       }
       const selectionState = createSignedState(deps.githubStateSecret, {
@@ -379,16 +384,20 @@ export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
       }
       setStateCookie(c, deps, selectionState);
       return c.html(
-        installationChooserHtml(candidates, selectionState, grant.workspaceId, deps, c),
+        prReviewInstallationChooserHtml(
+          candidates,
+          selectionState,
+          `${openGeniBaseUrl(deps, c)}/v1/workspaces/${grant.workspaceId}/pr-review/github/installations/select`,
+        ),
       );
     }
 
     if (payload.intent !== "pr_review_github_oauth") {
-      throw new HTTPException(400, { message: "invalid or expired OpenGeni Lens OAuth state" });
+      throw new HTTPException(400, { message: "invalid or expired Opengeni Lens OAuth state" });
     }
     const installationId = positiveInteger(payload.installationId);
     if (installationId === null) {
-      throw new HTTPException(400, { message: "invalid OpenGeni Lens installation id" });
+      throw new HTTPException(400, { message: "invalid Opengeni Lens installation id" });
     }
     let proof: GitHubInstallationBindingProof | null;
     try {
@@ -405,7 +414,7 @@ export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
     }
     if (!proof || !consistentProof(proof, installationId)) {
       throw new HTTPException(409, {
-        message: "OpenGeni Lens installation proof is stale or invalid",
+        message: "Opengeni Lens installation proof is stale or invalid",
       });
     }
     const repositoryIds = new Set(proof.repositories.map((repository) => repository.id));
@@ -417,7 +426,7 @@ export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
     const encryptionKey = environmentsEncryptionKeyBytes(deps.settings);
     if (!encryptionKey) {
       throw new HTTPException(503, {
-        message: "OpenGeni Lens requires configured secret encryption",
+        message: "Opengeni Lens requires configured secret encryption",
       });
     }
     let synchronized;
@@ -461,7 +470,7 @@ export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
       if (nestedPostgresSqlState(error) === "23505") {
         throw new HTTPException(409, {
           message:
-            "One of these repositories is already connected to OpenGeni Lens in another workspace",
+            "One of these repositories is already connected to Opengeni Lens in another workspace",
         });
       }
       throw error;
@@ -483,7 +492,7 @@ export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
     });
     deleteCookie(c, stateCookie, { path: "/v1" });
     return c.html(
-      setupSuccessHtml(
+      prReviewSetupSuccessHtml(
         proof.installation.accountLogin ?? `installation ${installationId}`,
         `${openGeniBaseUrl(deps, c)}/workspaces/${grant.workspaceId}/capabilities`,
       ),
@@ -492,7 +501,7 @@ export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
 
   app.get("/v1/workspaces/:workspaceId/pr-review/github/installations/select", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const state = requireStateQuery(c, "missing OpenGeni Lens selection state");
+    const state = requireStateQuery(c, "missing Opengeni Lens selection state");
     const payload = requireFreshState(state, deps, "pr_review_github_selection", workspaceId);
     requireStateCookie(c, state);
     await requirePrReviewManageGrant(c, deps, workspaceId, payload);
@@ -517,14 +526,14 @@ function requireConfiguredApp(deps: ApiRouteDeps): void {
   const missing = prReviewGitHubAppMissingSettings(deps.settings);
   if (missing.length > 0) {
     throw new HTTPException(409, {
-      message: JSON.stringify({ message: "OpenGeni Lens is not configured", missing }),
+      message: JSON.stringify({ message: "Opengeni Lens is not configured", missing }),
     });
   }
 }
 
 function assertManagedCompute(deps: ApiRouteDeps): void {
   if (deps.settings.sandboxBackend === "selfhosted") {
-    throw new HTTPException(409, { message: "OpenGeni Lens requires managed compute" });
+    throw new HTTPException(409, { message: "Opengeni Lens requires managed compute" });
   }
 }
 
@@ -556,14 +565,14 @@ async function requirePrReviewManageGrant(
           current.subjectId !== handedOff.subjectId
         )
           throw new HTTPException(403, {
-            message: "OpenGeni Lens browser handoff expired or changed",
+            message: "Opengeni Lens browser handoff expired or changed",
           });
       },
     };
   }
   requirePermission(grant, "secrets:write");
   if (grant.accountId !== state.accountId) {
-    throw new HTTPException(403, { message: "OpenGeni Lens state does not match this workspace" });
+    throw new HTTPException(403, { message: "Opengeni Lens state does not match this workspace" });
   }
   return grant;
 }
@@ -625,7 +634,7 @@ function redirectToInstallation(c: Context, deps: ApiRouteDeps, sourceState: str
   const payload = readSignedState(sourceState, deps.githubStateSecret);
   const slug = deps.settings.prReviewGithubAppSlug?.trim();
   if (!payload?.accountId || !payload.workspaceId || !slug) {
-    throw new HTTPException(409, { message: "OpenGeni Lens installation is unavailable" });
+    throw new HTTPException(409, { message: "Opengeni Lens installation is unavailable" });
   }
   const installState = createSignedState(deps.githubStateSecret, {
     accountId: payload.accountId,
@@ -648,7 +657,7 @@ function redirectToExactAuthorization(
   const payload = readSignedState(sourceState, deps.githubStateSecret);
   const clientId = deps.settings.prReviewGithubClientId?.trim();
   if (!payload?.accountId || !payload.workspaceId || !clientId) {
-    throw new HTTPException(409, { message: "OpenGeni Lens authorization is unavailable" });
+    throw new HTTPException(409, { message: "Opengeni Lens authorization is unavailable" });
   }
   const oauthState = createSignedState(deps.githubStateSecret, {
     accountId: payload.accountId,
@@ -682,7 +691,7 @@ function requireFreshState(
     (intent !== undefined && payload.intent !== intent) ||
     (workspaceId !== undefined && payload.workspaceId !== workspaceId)
   ) {
-    throw new HTTPException(400, { message: "invalid or expired OpenGeni Lens state" });
+    throw new HTTPException(400, { message: "invalid or expired Opengeni Lens state" });
   }
   return payload;
 }
@@ -713,7 +722,7 @@ function setStateCookie(c: Context, deps: ApiRouteDeps, state: string): void {
 
 function requireStateCookie(c: Context, state: string): void {
   if (!allCookieValues(c, stateCookie).includes(state)) {
-    throw new HTTPException(400, { message: "invalid OpenGeni Lens browser state" });
+    throw new HTTPException(400, { message: "invalid Opengeni Lens browser state" });
   }
 }
 
@@ -804,7 +813,7 @@ function authorityHttpError(error: unknown): HTTPException {
   if (error instanceof GitHubAppApiError) {
     return new HTTPException(502, { message: error.message });
   }
-  return new HTTPException(502, { message: "OpenGeni Lens authority verification failed" });
+  return new HTTPException(502, { message: "Opengeni Lens authority verification failed" });
 }
 
 function positiveInteger(value: unknown): number | null {
@@ -846,36 +855,4 @@ function githubInstallationSettingsUrl(
 
 function openGeniBaseUrl(deps: ApiRouteDeps, c: Context): string {
   return githubBrowserBaseUrl(deps.settings, new URL(c.req.url).origin);
-}
-
-function escapeHtml(value: string): string {
-  return value.replace(
-    /[&<>"']/g,
-    (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]!,
-  );
-}
-
-function installationChooserHtml(
-  candidates: GitHubInstallationBindingCandidate[],
-  state: string,
-  workspaceId: string,
-  deps: ApiRouteDeps,
-  c: Context,
-): string {
-  const action = `${openGeniBaseUrl(deps, c)}/v1/workspaces/${workspaceId}/pr-review/github/installations/select`;
-  const options = candidates
-    .map(
-      ({ installation, authorityKind }) =>
-        `<label class="option"><input type="radio" name="installation_id" value="${installation.installationId}" required><span><strong>${escapeHtml(installation.accountLogin!)}</strong><small>${authorityKind === "personal_owner" ? "Personal account" : "Organization owner"}</small></span></label>`,
-    )
-    .join("");
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Choose GitHub account</title><style>body{font-family:system-ui,sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:#0b0b0d;color:#f4f4f5}main{width:min(640px,calc(100vw - 32px));border:1px solid #27272a;border-radius:12px;padding:28px;background:#111114}h1{margin:0 0 10px;font-size:24px}p{color:#d4d4d8}.options{display:grid;gap:8px;margin-bottom:18px}.option{display:flex;gap:12px;border:1px solid #3f3f46;border-radius:8px;padding:12px}.option span{display:grid}.option small{color:#a1a1aa}button{min-height:38px;border-radius:7px;border:1px solid #3f3f46;padding:0 14px;font-weight:600}.secondary{margin-left:8px;background:transparent;color:#f4f4f5}</style></head><body><main><h1>Connect OpenGeni Lens</h1><p>Choose an account where GitHub proved you are the owner.</p><form method="get" action="${escapeHtml(action)}"><input type="hidden" name="state" value="${escapeHtml(state)}"><div class="options">${options}</div><button type="submit">Connect selected</button><button class="secondary" type="submit" name="installation_id" value="new" formnovalidate>Install on another account</button></form></main></body></html>`;
-}
-
-function setupSuccessHtml(account: string, returnUrl: string): string {
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>OpenGeni Lens Connected</title><style>body{font-family:system-ui,sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:#0b0b0d;color:#f4f4f5}main{width:min(640px,calc(100vw - 32px));border:1px solid #27272a;border-radius:8px;padding:28px;background:#111114}p{color:#d4d4d8}.button{display:inline-flex;min-height:36px;align-items:center;border-radius:6px;padding:0 12px;background:#f4f4f5;color:#09090b;font-weight:600;text-decoration:none}</style></head><body><main><h1>OpenGeni Lens connected</h1><p>${escapeHtml(account)} and its selected repositories are ready for pull-request review.</p><a class="button" href="${escapeHtml(returnUrl)}">Back to OpenGeni</a></main></body></html>`;
-}
-
-function setupPendingHtml(): string {
-  return `<!doctype html><html><head><meta charset="utf-8"><title>OpenGeni Lens Requested</title></head><body><main><h1>Installation requested</h1><p>A GitHub organization owner must approve OpenGeni Lens. No repository was connected yet.</p></main></body></html>`;
 }

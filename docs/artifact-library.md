@@ -24,6 +24,31 @@ the viewer and query and expires after one hour. A bounded scan through denied
 candidates can return an empty page with `nextCursor`; that is not the end of the
 listing.
 
+Pins are persisted, workspace-shared discovery metadata for every catalog kind.
+`client.updateArtifactPin(workspaceId, kind, artifactId, pinned)` idempotently sets
+the pin through `PUT /v1/workspaces/:workspaceId/artifact-catalog/:kind/:artifactId/pin`
+with `{ pinned: boolean }`, returning only `{ kind, artifactId, pinned }`. Await
+that response, then refresh the catalog from its first page. `ArtifactCatalogItem.pinned`
+is optional for compatibility with older servers; absence means unpinned.
+
+Normal kind, status, title and source-session filters still apply. Pins sort
+**globally first**, before the selected sort and `kind:id` tie-breaker, including
+subsequent pages and the bounded published-file branch. Pin changes, like title
+changes, can move items across a live cursor; refresh to restart traversal.
+Legacy unpinned cursor frontiers remain accepted by the new API.
+
+Pinning and unpinning require `artifacts:publish` plus the target's existing
+`artifacts:read` or `files:read` authority. Editable targets pass the read-only
+application seam, and private files remain owner-filtered. Missing, hidden,
+foreign-workspace and kind-mismatched targets are not pin-mutable. A pin never
+grants content access or exposes otherwise unreadable items or provenance.
+Migration `0610_artifact_catalog_pins.sql` adds only private FORCE-RLS metadata
+and fixed-search-path, tenant-scoped EXECUTE capabilities; runtime roles get no
+direct pin-table privileges. The original publication capability is unchanged
+so pre-pin binaries retain their schema/runtime-posture contract during rollout.
+Pin endpoints and pin-aware continuation requests must reach upgraded API
+instances; older instances remain safe but cannot serve this additive feature.
+
 The web console keeps loaded catalog views in memory per client, credential
 generation, workspace, and filters, so switching tabs or returning to the page
 renders at once. A view older than 30 seconds, or one a session's tool output has
@@ -74,6 +99,20 @@ switches to flat rows and is remembered in the browser
 search, and a Filter menu for archived items and sorting. The session panel
 uses the same catalog with a source-session filter. Both open the existing
 type-specific viewers. Published files use `/workspaces/:workspaceId/artifacts/files/:artifactId`.
+
+Workspace-library tabs, search, sorting and archive filters travel in the URL
+when opening a viewer. The Artifacts back link and browser Back return to that
+same query, with the library's scroll position and loaded pages restored in the
+current browser app session. Gallery/List remains the remembered browser choice.
+Previous/Next and Left/Right browse that filtered catalog order without wrapping;
+Next loads another catalog page when needed. Sibling navigation replaces the
+viewer history entry, so browser Back still returns directly to the library.
+Cold-cache viewers load cursor pages until the current artifact is found or the
+catalog ends. Returning libraries wait for retained pages and successful loads
+before restoring their saved scroll position.
+Shortcuts leave editors, dialogs, menus and embedded content alone. Direct links
+without library context and embedded session viewers do not acquire a workspace
+browsing sequence. A full reload preserves URL filters, not in-memory positions.
 
 Images load from retained storage, not the compute filesystem. Image publication
 results are primary chat output and reuse the retained-image viewer/lightbox.

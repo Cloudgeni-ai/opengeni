@@ -453,6 +453,24 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     expect(exec.shell).toBe(true);
   });
 
+  test("controller stdin is exact, snapshotted before admission, and absent from argv/environment", async () => {
+    const mock = new MockAgentResponder();
+    const session = sessionWith(mock);
+    const stdin = new TextEncoder().encode("private synthetic input\n");
+    const expected = stdin.slice();
+    const pending = session.execWithInput({ cmd: "cat", stdin, shell: "/bin/sh", login: false });
+    stdin.fill(0);
+    await pending;
+    const request = streamedExecRequest(mock, 0);
+    expect(request.stdin).toEqual(expected);
+    expect(request.command).toEqual(["/bin/sh", "-c", "cat"]);
+    expect(request.env).toEqual({});
+    await expect(
+      session.execWithInput({ cmd: "cat", stdin: new Uint8Array(128 * 1024 + 1) }),
+    ).rejects.toThrow("input is too large");
+    expect(mock.requests.filter((call) => call.req.op?.$case === "opStart")).toHaveLength(1);
+  });
+
   test("exec honors explicit POSIX shell and login choices through direct argv", async () => {
     const mock = new MockAgentResponder();
     const session = sessionWith(mock);
@@ -818,7 +836,7 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     // environment variables" unless the session manifest's environment EQUALS the
     // turn's. The session must carry the run's declared environment for parity.
     const env = {
-      GIT_AUTHOR_NAME: "OpenGeni Bot",
+      GIT_AUTHOR_NAME: "Opengeni Bot",
       HOME: "/workspace",
       DEPLOY_TARGET: "vm2",
     };

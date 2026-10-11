@@ -1,4 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { Agent, RunContext, RunState } from "@openai/agents";
+import { OPEN_SUFFIX_RUN_STATE_BLOB } from "@opengeni/contracts";
 import { environmentsEncryptionKeyBytes } from "@opengeni/config";
 import {
   AttemptToolApprovalRequiredError,
@@ -9,6 +11,12 @@ import {
   type AttemptToolDefinition,
 } from "@opengeni/codemode";
 import {
+  prepareConnectorActionApproval,
+  beginConnectorActionExecution,
+  completeConnectorActionExecution,
+  applySessionTurnSettlement,
+  saveRunState,
+  acceptSessionApprovalDecision,
   bootstrapWorkspace,
   claimCodemodeOperation,
   claimSessionWorkForAttempt,
@@ -33,6 +41,11 @@ import {
   type SharedTestDatabase,
   testSettings,
 } from "@opengeni/testing";
+import {
+  InputWaitYield,
+  extractOpenSuffixFromRunState,
+  assertOpenSuffixResumable,
+} from "@opengeni/runtime";
 import { connectionTokenResolverForTurn } from "../src/activities/mcp-credentials";
 import {
   CodemodeAttemptDispatcher,
@@ -170,6 +183,48 @@ async function waitForToolEventCount(
 }
 
 describe("CodemodeAttemptDispatcher", () => {
+  test("first-request recovery joins lazy tool preparation only when stored work must resume", async () => {
+    const { scope, environment } = await fixture(async () => "unused");
+    const caller = `sandbox:${scope.attemptId}`;
+    let preparedReads = 0;
+    // A lazy MCP server that never finishes connecting must not delay a turn
+    // with nothing unfinished in its journal.
+    const ordinary = await Promise.race([
+      CodemodeAttemptDispatcher.resumeApproved(client.db, scope, caller, undefined, () => {
+        preparedReads++;
+        return new Promise<never>(() => undefined);
+      }),
+      Bun.sleep(5_000).then(() => "timed_out" as const),
+    ]);
+    expect(ordinary).toEqual([]);
+    expect(preparedReads).toBe(0);
+
+    await submitCodemodeOperation(client.db, {
+      ...scope,
+      durableApproval: true,
+      call: {
+        operationId: crypto.randomUUID(),
+        catalogDigest: environment.catalog.digest,
+        identity: { serverId: "docs", toolName: "search" },
+        arguments: {},
+        caller: { kind: "codemode", subjectId: caller },
+      },
+    });
+    let ready!: (dispatcher: CodemodeAttemptDispatcher | null) => void;
+    const pending = CodemodeAttemptDispatcher.resumeApproved(
+      client.db,
+      scope,
+      caller,
+      undefined,
+      () => new Promise((resolve) => (ready = resolve)),
+    );
+    expect(await Promise.race([pending, Bun.sleep(200).then(() => "waiting" as const)])).toBe(
+      "waiting",
+    );
+    ready(null);
+    expect(await pending).toEqual([]);
+  });
+
   test("native OAuth credentials use the live canonical attempt during Codemode dispatch", async () => {
     if (!available) throw new Error("This execution test requires PostgreSQL");
     let resolveNative!: ReturnType<typeof connectionTokenResolverForTurn>;
@@ -926,3 +981,382 @@ describe("CodemodeAttemptDispatcher", () => {
     }
   });
 });
+
+test("one hundred pending reviews release all execution slots and retain exact bounded facts", async () => {
+  if (!available) throw new Error("PostgreSQL required");
+  let effects = 0;
+  let identity: Parameters<typeof prepareConnectorActionApproval>[1];
+  const { scope, environment, turn } = await fixture(
+    async () => {
+      effects++;
+      return "unused";
+    },
+    { type: "object" },
+    {
+      prepare: async ({ call }) => {
+        const prepared = await prepareConnectorActionApproval(client.db, identity, {
+          approvalId: call.operationId,
+          connectionId: "session-mcp:docs:synthetic",
+          serverId: "docs",
+          toolName: "search",
+          arguments: call.arguments,
+          approvalMode: "session_mcp",
+        });
+        if (!prepared.managed || !prepared.requestId) throw new Error("Exact request required");
+        return {
+          waitingForApproval: {
+            requestId: prepared.requestId,
+            actionFingerprint: prepared.actionFingerprint,
+          },
+        };
+      },
+    },
+  );
+  identity = { ...scope, initiator: turn.initiator };
+  const bus = new MemoryEventBus(),
+    gate = new InputWaitYield();
+  const dispatcher = new CodemodeAttemptDispatcher(
+    client.db,
+    bus,
+    environment,
+    scope,
+    undefined,
+    2,
+    {},
+    undefined,
+    undefined,
+    gate,
+  );
+  dispatcher.start();
+  const ids = Array.from({ length: 100 }, () => crypto.randomUUID());
+  try {
+    await Promise.all(
+      ids.map((operationId) =>
+        submitCodemodeOperation(client.db, {
+          ...scope,
+          durableApproval: true,
+          call: {
+            operationId,
+            catalogDigest: environment.catalog.digest,
+            identity: { serverId: "docs", toolName: "search" },
+            arguments: {
+              messageIds: Array.from({ length: 600 }, (_, index) => `synthetic-${index}`),
+            },
+            caller: { kind: "codemode", subjectId: `sandbox:${scope.attemptId}` },
+          },
+        }),
+      ),
+    );
+    // Every operation is submitted while the first reviews remain pending. Two
+    // physical slots must serve all one hundred; no human decision is supplied.
+    for (const operationId of ids) {
+      const deadline = Date.now() + 10_000;
+      while (true) {
+        await bus.request(
+          codemodeDispatchSubject(scope.workspaceId, scope.attemptId),
+          encodeCodemodeDispatchRequest({
+            version: 1,
+            operationId,
+            catalogDigest: environment.catalog.digest,
+          }),
+          { timeoutMs: 5000 },
+        );
+        const operation = await getCodemodeOperation(client.db, { ...scope, operationId });
+        if (operation?.state === "waiting_for_approval") {
+          expect(operation).toMatchObject({ executionStartedAt: null, claimedAt: null });
+          break;
+        }
+        if (Date.now() > deadline) throw new Error("Waiting reviews retained execution capacity");
+        await Bun.sleep(10);
+      }
+    }
+    expect(effects).toBe(0);
+    expect(gate.requested).toBe(true);
+  } finally {
+    await dispatcher.close();
+  }
+}, 180_000);
+
+test("waiting releases the claim and approved continuation executes stored arguments exactly once", async () => {
+  if (!available) throw new Error("PostgreSQL required");
+  let effects = 0;
+  let identity: Parameters<typeof prepareConnectorActionApproval>[1];
+  const lifecycle: NonNullable<AttemptToolDefinition["lifecycle"]> = {
+    prepare: async ({ call }) => {
+      const invocation = {
+        approvalId: call.operationId,
+        connectionId: "session-mcp:docs:synthetic",
+        serverId: "docs",
+        toolName: "search",
+        arguments: call.arguments,
+        approvalMode: "session_mcp" as const,
+      };
+      const prepared = await prepareConnectorActionApproval(client.db, identity, invocation);
+      if (!prepared.managed || !prepared.requestId) throw new Error("Exact request required");
+      if (prepared.approvalStatus !== "approved")
+        return {
+          waitingForApproval: {
+            requestId: prepared.requestId,
+            actionFingerprint: prepared.actionFingerprint,
+          },
+        };
+      return {
+        begin: async () => {
+          const admitted = await beginConnectorActionExecution(client.db, identity, invocation);
+          if (!admitted.allowed) throw new Error("Not admitted");
+        },
+        complete: async () => {
+          await completeConnectorActionExecution(client.db, {
+            accountId: identity.accountId,
+            workspaceId: identity.workspaceId,
+            requestId: prepared.requestId!,
+            attemptId: identity.attemptId,
+            outcome: "completed",
+          });
+        },
+      };
+    },
+  };
+  const { scope, environment, turn } = await fixture(
+    async () => {
+      effects++;
+      return "Synthetic effect";
+    },
+    { type: "object" },
+    lifecycle,
+  );
+  identity = { ...scope, initiator: turn.initiator };
+  const bus = new MemoryEventBus(),
+    gate = new InputWaitYield();
+  const dispatcher = new CodemodeAttemptDispatcher(
+    client.db,
+    bus,
+    environment,
+    scope,
+    undefined,
+    1,
+    {},
+    undefined,
+    undefined,
+    gate,
+  );
+  dispatcher.start();
+  const operationId = crypto.randomUUID();
+  await submitCodemodeOperation(client.db, {
+    ...scope,
+    durableApproval: true,
+    call: {
+      operationId,
+      catalogDigest: environment.catalog.digest,
+      identity: { serverId: "docs", toolName: "search" },
+      arguments: { ids: ["synthetic-id"] },
+      caller: { kind: "codemode", subjectId: `sandbox:${scope.attemptId}` },
+    },
+  });
+  await bus.request(
+    codemodeDispatchSubject(scope.workspaceId, scope.attemptId),
+    encodeCodemodeDispatchRequest({
+      version: 1,
+      operationId,
+      catalogDigest: environment.catalog.digest,
+    }),
+    { timeoutMs: 5000 },
+  );
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    if (
+      (await getCodemodeOperation(client.db, { ...scope, operationId }))?.state ===
+      "waiting_for_approval"
+    )
+      break;
+    await Bun.sleep(10);
+  }
+  expect(await getCodemodeOperation(client.db, { ...scope, operationId })).toMatchObject({
+    state: "waiting_for_approval",
+    executionStartedAt: null,
+    claimedAt: null,
+  });
+  expect(effects).toBe(0);
+  expect(gate.requested).toBe(true);
+  await dispatcher.close();
+  // The SDK exec call has returned the durable waiting handle. There is no
+  // interrupted SDK call, and canonical history omits output-only statuses.
+  const pausedState = new RunState(
+    new RunContext(),
+    [
+      { type: "message", role: "assistant", content: [{ type: "output_text", text: "Ready" }] },
+      { type: "function_call", callId: "call_exec", name: "exec_command", arguments: "{}" },
+      {
+        type: "function_call_result",
+        callId: "call_exec",
+        name: "exec_command",
+        output: {
+          type: "text",
+          text: JSON.stringify({ operationId, state: "waiting_for_approval" }),
+        },
+      },
+    ] as never,
+    new Agent({ name: "Test agent" }),
+    null,
+  );
+  const suffix = extractOpenSuffixFromRunState(pausedState);
+  expect(suffix).toEqual([]);
+  assertOpenSuffixResumable(suffix, []);
+  await saveRunState(client.db, {
+    ...scope,
+    expectedExecutionGeneration: scope.executionGeneration,
+    expectedAttemptId: scope.attemptId,
+    serializedRunState: OPEN_SUFFIX_RUN_STATE_BLOB,
+    pendingApprovals: [{ id: operationId, source: "codemode" }],
+  });
+  await applySessionTurnSettlement(client.db, scope.workspaceId, {
+    sessionId: scope.sessionId,
+    turnId: scope.turnId,
+    triggerEventId: turn.triggerEventId,
+    attemptId: scope.attemptId,
+    turnStatus: "requires_action",
+    sessionStatus: "requires_action",
+    activeTurnId: scope.turnId,
+    events: [],
+  });
+  const decision = await acceptSessionApprovalDecision(client.db, {
+    accountId: scope.accountId,
+    workspaceId: scope.workspaceId,
+    sessionId: scope.sessionId,
+    subjectId: "human:fixture",
+    payload: { approvalId: operationId, decision: "approve" },
+    clientEventId: crypto.randomUUID(),
+  });
+  if (decision.action !== "accepted") throw new Error("Decision not accepted");
+  const attemptId = crypto.randomUUID();
+  const claimed = await claimSessionWorkForAttempt(client.db, scope.workspaceId, {
+    sessionId: scope.sessionId,
+    workflowId: `session-${scope.sessionId}`,
+    workflowRunId: crypto.randomUUID(),
+    dispatchId: crypto.randomUUID(),
+    attemptId,
+    trigger: { kind: "approval", triggerEventId: decision.event.id },
+  });
+  if (claimed.action !== "claimed") throw new Error("Resume not claimed");
+  const current = { ...scope, attemptId, executionGeneration: claimed.turn.executionGeneration };
+  identity = { ...current, initiator: claimed.turn.initiator };
+  const resumedEnvironment = createAttemptToolEnvironment({
+    scope: current,
+    generation: 1,
+    definitions: [
+      {
+        identity: { serverId: "docs", toolName: "search" },
+        modelName: "docs__search",
+        inputSchema: { type: "object" },
+        source: "docs",
+        approval: "none",
+        lifecycle,
+        execute: (args) => {
+          expect(args).toEqual({ ids: ["synthetic-id"] });
+          effects++;
+          return { content: [{ type: "text", text: "Synthetic effect" }] };
+        },
+      },
+    ],
+  });
+  await persistAttemptToolCatalog(client.db, resumedEnvironment.catalog);
+  const resumed = new CodemodeAttemptDispatcher(
+    client.db,
+    bus,
+    resumedEnvironment,
+    current,
+    undefined,
+    1,
+    {},
+    undefined,
+    undefined,
+    new InputWaitYield(),
+  );
+  resumed.start();
+  try {
+    expect(await resumed.resumeApproved(`sandbox:${attemptId}`)).toMatchObject([
+      { operationId, state: "completed", attemptId: scope.attemptId },
+    ]);
+    await resumed.resumeApproved(`sandbox:${attemptId}`);
+    expect(effects).toBe(1);
+    const events = await listSessionEvents(client.db, scope.workspaceId, scope.sessionId, 0, 100);
+    expect(events.filter((event) => event.type === "agent.toolCall.created")).toHaveLength(1);
+    expect(events.filter((event) => event.type === "agent.toolCall.output")).toHaveLength(1);
+  } finally {
+    await resumed.close();
+  }
+});
+
+test("a durable-capable call arriving mid model request still executes an allowed tool", async () => {
+  if (!available) throw new Error("PostgreSQL required");
+  let effects = 0;
+  const seenMeta: unknown[] = [];
+  const { scope, environment } = await fixture(
+    async () => {
+      effects++;
+      return "Synthetic allowed effect";
+    },
+    { type: "object" },
+    {
+      prepare: async ({ context }) => {
+        seenMeta.push(context.transportMeta?.durableApproval ?? null);
+        return {};
+      },
+    },
+  );
+  const bus = new MemoryEventBus(),
+    gate = new InputWaitYield();
+  // A model request is in flight: the wait gate is sealed for this stream.
+  const stream = gate.beginStream();
+  await stream.modelDispatchFilter({ modelData: {} } as never);
+  expect(() => gate.beginWait()).toThrow("sealed");
+  const dispatcher = new CodemodeAttemptDispatcher(
+    client.db,
+    bus,
+    environment,
+    scope,
+    undefined,
+    1,
+    {},
+    undefined,
+    undefined,
+    gate,
+  );
+  dispatcher.start();
+  const operationId = crypto.randomUUID();
+  try {
+    await submitCodemodeOperation(client.db, {
+      ...scope,
+      durableApproval: true,
+      call: {
+        operationId,
+        catalogDigest: environment.catalog.digest,
+        identity: { serverId: "docs", toolName: "search" },
+        arguments: {},
+        caller: { kind: "codemode", subjectId: `sandbox:${scope.attemptId}` },
+      },
+    });
+    await bus.request(
+      codemodeDispatchSubject(scope.workspaceId, scope.attemptId),
+      encodeCodemodeDispatchRequest({
+        version: 1,
+        operationId,
+        catalogDigest: environment.catalog.digest,
+      }),
+      { timeoutMs: 5000 },
+    );
+    const deadline = Date.now() + 5000;
+    let operation = await getCodemodeOperation(client.db, { ...scope, operationId });
+    while (operation?.state !== "completed" && Date.now() < deadline) {
+      await Bun.sleep(10);
+      operation = await getCodemodeOperation(client.db, { ...scope, operationId });
+    }
+    expect(operation).toMatchObject({ state: "completed" });
+    expect(effects).toBe(1);
+    // Prepared like a non-waiting client: no durable wait could be accepted.
+    expect(seenMeta).toEqual([null]);
+    expect(gate.requested).toBe(false);
+  } finally {
+    await dispatcher.close();
+  }
+}, 60_000);

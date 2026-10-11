@@ -1,13 +1,13 @@
 # `@opengeni/artifact-tool`
 
-OpenGeni's Office-artifact engine. The package root is the synchronous exact
+Opengeni's Office-artifact engine. The package root is the synchronous exact
 native skill facade; hosts must configure its manifest-pinned N-API runtime
 before creating an artifact. `@opengeni/artifact-tool/reference` is the
 explicit universal TypeScript fixture/codec model, while browser production
 editing is owned by the SDK Worker and paired WASM kernel.
 
 The public authoring API intentionally follows the artifact workflows shipped
-with OpenGeni's spreadsheet and presentation skills:
+with Opengeni's spreadsheet and presentation skills:
 
 ```ts
 import { SpreadsheetFile, Workbook } from "@opengeni/artifact-tool";

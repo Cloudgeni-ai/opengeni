@@ -1,0 +1,48 @@
+{
+  "name": "@opengeni/subscriptions",
+  "version": "1.4.4",
+  "description": "Pure, provider-neutral subscription account policy for Opengeni: contract types, effective settings, eligibility, placement, failover order, cache coldness, the shared quota model and adapter interfaces. No database, provider SDK or network dependency.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Cloudgeni-ai/opengeni.git",
+    "directory": "packages/subscriptions"
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "main": "./src/index.ts",
+  "module": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./reference": {
+      "types": "./src/reference.ts",
+      "default": "./src/reference.ts"
+    }
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "bun ../../scripts/build-typescript-package.ts",
+    "prepublishOnly": "bash ../../scripts/prepublish-guard"
+  },
+  "devDependencies": {
+    "@opengeni/testing": "workspace:*",
+    "tsup": "^8.5.0",
+    "typescript": "7.0.2"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

@@ -8,6 +8,7 @@ import {
   installPortableSkill,
   replayPortableSkillInstall,
   listSkillDescriptors,
+  SkillLifecycleRefusedError,
   type Database,
   type InstallPortableSkillInput,
 } from "@opengeni/db";
@@ -48,6 +49,43 @@ import {
   type SkillCheckoutObservation,
 } from "./skill-checkout";
 import type { SkillFileSystem } from "./skill-transfer";
+import type { AttemptToolDefinition } from "@opengeni/codemode";
+
+/** What a refused Skill change means for the agent, in words it can act on. */
+export function skillRefusalMessage(error: SkillLifecycleRefusedError): string {
+  if (error.message === "Skill outside accepted learning scope") {
+    return "Nothing was saved. This Skill is in a different scope (personal or workspace) than this chat's Agent learning saves to, so it can't be changed from this chat. A person can edit it under Skills, or it can be changed from a chat whose learning saves to that scope. Do not copy it into another scope as a workaround.";
+  }
+  if (error.code === "40001" || error.code === "23505") {
+    return `Nothing was saved: ${error.message}. Read the Skill again for its current revision and scope version, then retry with a new operation ID if the change still applies.`;
+  }
+  return `Nothing was saved: ${error.message}.`;
+}
+
+/**
+ * The lifecycle rolls a refused change back as a whole, so report it as a
+ * definite refusal with its reason, not a failure whose outcome is unknown.
+ */
+function withDefiniteSkillRefusals(definition: AttemptToolDefinition): AttemptToolDefinition {
+  return {
+    ...definition,
+    execute: async (args, context) => {
+      try {
+        return await definition.execute(args, context);
+      } catch (error) {
+        if (!(error instanceof SkillLifecycleRefusedError)) throw error;
+        const message = skillRefusalMessage(error);
+        return {
+          isError: true,
+          content: [{ type: "text", text: message }],
+          structuredContent: {
+            error: { code: "skill_change_refused", message, retryable: error.retryable },
+          },
+        };
+      }
+    },
+  };
+}
 
 export function createWorkspaceSkillTools(input: {
   db: Database;
@@ -77,19 +115,24 @@ export function createWorkspaceSkillTools(input: {
   };
   const authorize = () => assertSkillReadAttempt(input.db, { ...context, actor: input.actor });
   const selected = new Map(input.selected.map((entry) => [entry.id, entry.artifact]));
+  const shadowed = sessionShadowedSkillNames(input.selected);
   // Readable Skills that skill_search returned in this attempt.
   const searchedSkillIds = new Set<string>();
-  const list = async () =>
+  const listAll = async () =>
     (await listSkillDescriptors(input.db, context)).filter(
       (entry) => entry.activationMode === "workspace_managed",
     );
+  // The workspace Skills this session sees by name: one that a session Skill
+  // shadows stays readable only by its exact id.
+  const list = async () => withoutSessionShadowedSkills(await listAll(), shadowed);
   // Both text reads and inventory resolve through this same authorized source.
   // Selected artifacts have no ledger revision identity; never synthesize one.
   const load = async (identifier: string): Promise<SkillReadContent | SelectedSkillReadContent> => {
     const exact = selected.get(identifier);
     if (exact) return selectedSkillContent(identifier, exact);
-    const descriptors = await list();
-    const exactWorkspace = descriptors.find((entry) => entry.id === identifier);
+    const all = await listAll();
+    const descriptors = withoutSessionShadowedSkills(all, shadowed);
+    const exactWorkspace = all.find((entry) => entry.id === identifier);
     const matches = exactWorkspace
       ? [exactWorkspace]
       : descriptors.filter((entry) => entry.title === identifier || entry.stableKey === identifier);
@@ -312,7 +355,7 @@ export function createWorkspaceSkillTools(input: {
       },
     }),
     createSkillPublishAttemptToolDefinition({ authorize, filesystem: input.filesystem, save }),
-  ];
+  ].map(withDefiniteSkillRefusals);
 }
 
 function registrySkillSource(scope: SkillScope): SkillReadOrigin["source"] {
@@ -352,4 +395,28 @@ function fileMetadata(files: readonly SkillTextFile[]) {
     byteSize: Buffer.byteLength(file.content),
     contentSha256: createHash("sha256").update(file.content, "utf8").digest("hex"),
   }));
+}
+
+/**
+ * Names of the Skills a session carries itself. The session's creator chose
+ * that copy for this conversation, so it shadows a workspace Skill of the same
+ * name in the Skill index, skill_search and by-name reads; offering both lets
+ * the model pick either one.
+ */
+export function sessionShadowedSkillNames(
+  selected: readonly { id: string; artifact: Pick<RuntimeSkillArtifact, "name"> }[],
+): ReadonlySet<string> {
+  return new Set(
+    selected.filter((entry) => entry.id.startsWith("session:")).map((entry) => entry.artifact.name),
+  );
+}
+
+/** Workspace Skill descriptors without the ones a session Skill shadows. */
+export function withoutSessionShadowedSkills<T extends { title: string }>(
+  descriptors: readonly T[],
+  shadowed: ReadonlySet<string>,
+): T[] {
+  return shadowed.size === 0
+    ? [...descriptors]
+    : descriptors.filter((entry) => !shadowed.has(entry.title));
 }

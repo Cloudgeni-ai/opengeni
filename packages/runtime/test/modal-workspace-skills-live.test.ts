@@ -82,13 +82,14 @@ describe("Modal workspace skill discovery (opt-in live service)", () => {
       try {
         const fresh = await client.create();
         state = fresh.state;
-        await expect(discoverWorkspaceSkills(fresh, searchPaths)).resolves.toEqual([]);
+        const initiallyDiscovered = await discoverWorkspaceSkills(fresh, searchPaths);
+        expect(initiallyDiscovered).toEqual([]);
         await exec(
           fresh,
           "mkdir -p /workspace/.agents/skills/release && printf '%s' '---\nname: release\ndescription: Prepare a safe release.\n---\n' > /workspace/.agents/skills/release/SKILL.md",
         );
         await waitForNativeRead(fresh, ".agents/skills/release/SKILL.md");
-        await expect(discoverWorkspaceSkills(fresh, searchPaths)).resolves.toEqual([
+        expect(await discoverWorkspaceSkills(fresh, searchPaths)).toEqual([
           expect.objectContaining({
             name: "release",
             description: "Prepare a safe release.",
@@ -97,7 +98,7 @@ describe("Modal workspace skill discovery (opt-in live service)", () => {
         ]);
 
         const resumed = await client.resume(state);
-        await expect(discoverWorkspaceSkills(resumed, searchPaths)).resolves.toEqual([
+        expect(await discoverWorkspaceSkills(resumed, searchPaths)).toEqual([
           expect.objectContaining({ name: "release" }),
         ]);
       } finally {

@@ -57,8 +57,9 @@ async function json(url: string, request: typeof fetch): Promise<unknown> {
 
 export async function reconcile(runGh = gh, request: typeof fetch = fetch): Promise<void> {
   const sourceSha = deployedSource(await json("https://app.opengeni.ai/healthz", request));
-  const candidate = JSON.parse(
-    runGh(
+  let candidateJson: string;
+  try {
+    candidateJson = runGh(
       "release",
       "download",
       `opengeni-candidate-${sourceSha}`,
@@ -68,8 +69,17 @@ export async function reconcile(runGh = gh, request: typeof fetch = fetch): Prom
       "release-candidate.json",
       "--output",
       "-",
-    ),
-  );
+    );
+  } catch (error) {
+    // A deploy that bypassed the release pipeline has no candidate, so there is
+    // no package set this job may publish. Packages for it are published by hand.
+    if (error instanceof Error && /release not found/i.test(error.message)) {
+      console.log(`${sourceSha}: no release candidate (direct deploy); nothing to reconcile`);
+      return;
+    }
+    throw error;
+  }
+  const candidate = JSON.parse(candidateJson);
   const packages = candidatePackages(candidate, sourceSha);
   // Probe availability only. The publisher independently verifies source CI,
   // production ancestry, the complete package closure and registry identity.

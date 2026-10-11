@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { access, mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
+import { UnsettledCleanupError } from "../src/cleanup-error";
 import type {
   ComputerActionCommand,
   ComputerObservation,
@@ -19,6 +20,96 @@ const computerSessionId = "11111111-1111-4111-8111-111111111111";
 const controllerGeneration = "controller-1";
 
 describe("ComputerSupervisor", () => {
+  test.each([false, true])(
+    "retains nested creation cleanup only when unconfirmed (%s)",
+    async (failed) => {
+      const rootDirectory = await mkdtemp("/tmp/og-computer-failed-cleanup-");
+      let environmentClosed = false;
+      const allocator = fixtureEnvironmentAllocator();
+      const supervisor = await ComputerSupervisor.open({
+        rootDirectory,
+        environmentAllocator: {
+          async allocate(context) {
+            const lease = await allocator.allocate(context);
+            return {
+              ...lease,
+              async close() {
+                environmentClosed = true;
+                await lease.close();
+              },
+            };
+          },
+        },
+        createDriver: async () => {
+          if (failed) throw new UnsettledCleanupError([], "fixture helper cleanup failed");
+          throw new Error("fixture launch failed cleanly");
+        },
+      });
+      try {
+        await expect(supervisor.createSession(options())).rejects.toThrow();
+        expect(supervisor.listSessions()).toEqual([]);
+        expect(supervisor.isIdle()).toBe(!failed);
+        expect(environmentClosed).toBe(!failed);
+        expect(
+          await Bun.file(
+            join(rootDirectory, "computer-sessions", computerSessionId, "operations.sqlite"),
+          ).exists(),
+        ).toBe(failed);
+        if (failed) {
+          await expect(supervisor.close()).rejects.toThrow("computer supervisor shutdown failed");
+          await expect(supervisor.close()).rejects.toThrow("computer supervisor shutdown failed");
+        } else await supervisor.close();
+      } finally {
+        await rm(rootDirectory, { recursive: true, force: true });
+      }
+    },
+  );
+  test("preserves the desktop profile when a running driver cannot stop", async () => {
+    const rootDirectory = await mkdtemp("/tmp/og-computer-stop-failed-");
+    let environmentClosed = false;
+    const allocator = fixtureEnvironmentAllocator();
+    const supervisor = await ComputerSupervisor.open({
+      rootDirectory,
+      environmentAllocator: {
+        async allocate(context) {
+          const lease = await allocator.allocate(context);
+          return {
+            ...lease,
+            async close() {
+              environmentClosed = true;
+              await lease.close();
+            },
+          };
+        },
+      },
+      createDriver: async (context) => {
+        const driver = new FixtureComputerDriver(
+          context.computerSessionId,
+          context.controllerGeneration,
+        );
+        driver.close = async () => {
+          throw new UnsettledCleanupError([], "fixture child still running");
+        };
+        return driver;
+      },
+    });
+    try {
+      await supervisor.createSession(options());
+      await expect(supervisor.endSession(options(), { removeState: true })).rejects.toThrow(
+        "cleanup",
+      );
+      expect(environmentClosed).toBe(false);
+      expect(
+        await Bun.file(
+          join(rootDirectory, "computer-sessions", computerSessionId, "operations.sqlite"),
+        ).exists(),
+      ).toBe(true);
+      expect(supervisor.isIdle()).toBe(false);
+      await expect(supervisor.close()).rejects.toThrow("shutdown");
+    } finally {
+      await rm(rootDirectory, { recursive: true, force: true });
+    }
+  });
   test.each([false, true])(
     "protects accepted create and pending shutdown from idle proof (shared seat: %s)",
     async (displaceExistingSessions) => {

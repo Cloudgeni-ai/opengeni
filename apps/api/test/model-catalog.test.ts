@@ -21,6 +21,12 @@ import {
 import { modelPickerBillingClassFor } from "@opengeni/contracts/model-picker-order";
 import { resolveWorkspaceModelSelection } from "@opengeni/core";
 
+test("client catalog retains configured model logos", () => {
+  const model = configuredModels(testSettings())[0]!;
+  const logoUrl = "https://cdn.example.test/model.svg";
+  expect(projectClientModel({ ...model, logoUrl }).logoUrl).toBe(logoUrl);
+});
+
 test("public Claude catalog preserves provider and payment identity without leaking credentials", () => {
   let settings = withClaudeConnectionCatalog(testSettings({ claudeSubscriptionEnabled: true }), {
     anthropic: { models: [{ upstreamModelId: "claude-opus-5-5" }] },
@@ -210,7 +216,7 @@ describe("workspace model catalog availability", () => {
     });
   });
 
-  test("projects OpenGeni topology safely and gates the workspace Gateway rail", () => {
+  test("projects Opengeni topology safely and gates the workspace Gateway rail", () => {
     const settings = testSettings({
       codexSubscriptionEnabled: false,
       modelProvidersJson: "[]",
@@ -225,7 +231,7 @@ describe("workspace model catalog availability", () => {
     const managed = disconnected.models.find((model) => model.id === "deepseek-v4-flash-0731")!;
     expect(managed).toMatchObject({
       provider: "opengeni",
-      providerLabel: "OpenGeni",
+      providerLabel: "Opengeni",
       source: "opengeni",
       billing: { upstreamPayer: "deployment", metering: "opengeni_credits" },
     });
@@ -410,6 +416,39 @@ describe("workspace model catalog availability", () => {
       basis: "configuration",
       checkedAt: null,
     });
+  });
+
+  test("credits turned off reports credits_disabled only when credits are the sole blocker", () => {
+    const settings = testSettings({ codexSubscriptionEnabled: false });
+    const find = (policy: Parameters<typeof buildWorkspaceModelCatalog>[0]["policy"]) =>
+      buildWorkspaceModelCatalog({ settings, policy, codexSubscriptionActive: false }).models;
+    const creditModel = find(null).find((candidate) => candidate.cost === "credits")!;
+    expect(creditModel).toBeDefined();
+
+    const creditsOff = find({
+      allowedProviders: null,
+      allowedModels: null,
+      allowCreditModels: false,
+    });
+    expect(creditsOff.find((candidate) => candidate.id === creditModel.id)!.availability).toEqual({
+      status: "unavailable",
+      selectable: false,
+      reason: "credits_disabled",
+      checkedAt: null,
+    });
+    // Models that do not spend credits stay selectable.
+    for (const model of creditsOff.filter((candidate) => candidate.cost !== "credits")) {
+      expect(model.availability.reason).not.toBe("credits_disabled");
+    }
+
+    // An allowlist that also excludes the model keeps the generic reason, so
+    // turning credits back on is never suggested as the fix.
+    const alsoBlocked = find({
+      allowedProviders: [],
+      allowedModels: null,
+      allowCreditModels: false,
+    }).find((candidate) => candidate.id === creditModel.id)!;
+    expect(alsoBlocked.availability.reason).toBe("policy_blocked");
   });
 
   test("XAI Grok availability requires fresh successful health evidence", () => {
@@ -611,7 +650,7 @@ describe("workspace model catalog availability", () => {
     }).models.find((candidate) => candidate.id === settings.openaiModel)!;
     expect(unresolved).toMatchObject({
       provider: "opengeni",
-      providerLabel: "OpenGeni",
+      providerLabel: "Opengeni",
       source: "opengeni",
       credentialReadiness: {
         status: "not_ready",
@@ -960,7 +999,8 @@ describe("workspace model catalog route discipline", () => {
     expect(grant).toBeGreaterThanOrEqual(0);
     expect(handler).toContain('"workspace:read"');
     expect(handler.indexOf("getWorkspaceModelPolicy")).toBeGreaterThan(grant);
-    expect(handler.indexOf("workspaceCodexSubscriptionActive")).toBeGreaterThan(grant);
+    // Codex readiness follows the organization's Codex cutover row.
+    expect(handler.indexOf("loadWorkspaceCodexCatalogReadiness")).toBeGreaterThan(grant);
     expect(handler.indexOf("workspaceXaiSubscriptionActive")).toBeGreaterThan(grant);
     expect(handler).toContain("xaiSubscriptionActive,");
     expect(handler).toContain('"private, no-store"');

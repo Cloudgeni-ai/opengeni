@@ -3,13 +3,19 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { isDeepStrictEqual } from "node:util";
 import { withLockedCapabilityInstallation } from "@opengeni/db/capability-reconciliation";
-import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
+import {
+  environmentsEncryptionKeyBytes,
+  findIntegrationsOauthClient,
+  parseIntegrationsOauthClientsJson,
+  type Settings,
+} from "@opengeni/config";
 import { pinnedFetch } from "@opengeni/network";
 import {
   CapabilityCatalogItem,
   capabilityCatalogItemIsTrustedForExposure,
   FIKEN_PROVIDER_DOMAIN,
   FIRST_PARTY_MCP_TOOL_NAMES,
+  OPENGENI_BROWSER_EXTENSION_URL,
   type AccessGrant,
   type CapabilityAction,
   type CapabilityCatalogResponse,
@@ -37,8 +43,12 @@ import {
   getCapabilityCatalogItem,
   getCapabilityInstallation,
   getConnectionMetadata,
-  getCodexAppsCredentialAuthorizationForRun,
-  getWorkspaceGrant,
+  readCodexCutoverDisposition,
+  resolveSubscriptionCoreCodexAppsDesignation,
+  rlsContextForWorkspace,
+  subscriptionCoreCodexAppsRequestAuth,
+  type SubscriptionCoreCodexAppsRequestAuth,
+  type CodexCutoverDisposition,
   getStoredCapabilityHeaderCiphertext,
   listCapabilityCatalogItems,
   listCapabilityInstallations,
@@ -59,7 +69,7 @@ import {
   withOrganizationIntegrationAcquisition,
   withOrganizationIntegrationPolicyFence,
 } from "@opengeni/db/organization-integration-policy";
-import { hasPermission } from "../access";
+
 import { isFikenConnection, preferredFikenConnection } from "./fiken";
 import { listSkillLibraryEntries, type SkillLibraryEntry } from "@opengeni/runtime/skill-library";
 import { assertNativeMcpConnectionRef } from "./native-mcp-connection-admission";
@@ -79,6 +89,8 @@ export async function buildCapabilityCatalog(input: {
   workspaceId: string;
   settings: Settings;
   subjectId?: string | null;
+  /** The workspace's organization, when the caller knows it (skips a lookup). */
+  accountId?: string;
 }): Promise<CapabilityCatalogResponse> {
   const [
     persistedItems,
@@ -87,7 +99,7 @@ export async function buildCapabilityCatalog(input: {
     workspaceConnections,
     curatedLibrarySkills,
     installedSkills,
-    codexAppsCredentialId,
+    codexAppsDesignation,
     runnableMcpServers,
   ] = await Promise.all([
     listCapabilityCatalogItems(input.db, input.workspaceId),
@@ -97,11 +109,16 @@ export async function buildCapabilityCatalog(input: {
     discoverCuratedSkillLibraryItems(),
     listInstalledSkills(input.db, input.workspaceId),
     input.settings.codexConnectedAppsEnabled
-      ? resolveCodexAppsCredentialIdForRun(input.db, input.workspaceId)
+      ? resolveCodexAppsDesignationForRun(
+          input.db,
+          input.workspaceId,
+          input.accountId ? { accountId: input.accountId } : {},
+        )
       : Promise.resolve(null),
     listEnabledMcpCapabilityServers(input.db, input.workspaceId),
   ]);
   const runnableCapabilityIds = new Set(runnableMcpServers.map((server) => server.capabilityId));
+  const operatorOAuthClientConfigured = operatorOAuthClientResolver(input.settings);
   const catalogInstallations = capabilityInstallations.filter(
     (installation) => installation.kind === "mcp",
   );
@@ -126,7 +143,7 @@ export async function buildCapabilityCatalog(input: {
       .map(installedSkillCatalogItem),
   ];
   const codexApps = input.settings.codexConnectedAppsEnabled
-    ? codexAppsCatalogItem(codexAppsCredentialId !== null)
+    ? codexAppsCatalogItem(codexAppsDesignation !== null)
     : null;
   const items = dedupeCatalogItems([
     ...builtIns,
@@ -164,12 +181,48 @@ export async function buildCapabilityCatalog(input: {
               },
             }
           : projected;
-      return applyCapabilityLifecycle(runtimeProjected);
+      return applyCapabilityLifecycle(
+        applyOperatorOAuthClientRequirement(runtimeProjected, operatorOAuthClientConfigured),
+      );
     })
     .sort(compareCatalogItems);
   return {
     items,
     installations: catalogInstallations,
+  };
+}
+
+/**
+ * `metadata.oauthClientRequirement` is stamped by the catalog import from
+ * `data/catalog/oauth-client-requirements.json` for providers that refuse
+ * OAuth self-registration. Whether the row can connect here is a deployment
+ * fact, so the catalog projects it rather than every surface guessing. The
+ * matcher is the one the OAuth start uses to find an operator client.
+ */
+function operatorOAuthClientResolver(settings: Settings): (issuer: string) => boolean {
+  let configured: ReturnType<typeof parseIntegrationsOauthClientsJson> = {};
+  try {
+    configured = parseIntegrationsOauthClientsJson(settings.integrationsOauthClientsJson);
+  } catch {
+    // Startup validates this setting; a malformed value can configure nothing.
+  }
+  return (issuer) => findIntegrationsOauthClient(configured, [issuer]) !== null;
+}
+
+export function applyOperatorOAuthClientRequirement(
+  item: CapabilityCatalogItem,
+  configured: (issuer: string) => boolean,
+): CapabilityCatalogItem {
+  if (item.kind !== "mcp") return item;
+  const requirement = item.metadata.oauthClientRequirement;
+  const issuer =
+    requirement && typeof requirement === "object" && !Array.isArray(requirement)
+      ? (requirement as Record<string, unknown>).issuer
+      : undefined;
+  if (typeof issuer !== "string" || !issuer) return item;
+  return {
+    ...item,
+    runtime: { ...item.runtime, operatorOAuthClient: { configured: configured(issuer) } },
   };
 }
 
@@ -248,6 +301,14 @@ type EnableCapabilityInput = {
   capabilityId: string;
   payload: EnableCapabilityRequest;
   probeMcpServer?: McpCapabilityProbe;
+  /** Server-owned receipt from a just-verified native Connect credential.
+   * Never projected into EnableCapabilityRequest or accepted from a client. */
+  verifiedConnection?: {
+    id: string;
+    version: number;
+    endpointUrl: string;
+    connectivity: Record<string, unknown>;
+  };
 };
 
 export async function enableCapability(
@@ -345,21 +406,26 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
           }),
       };
     }
-    const headers = await resolveMcpCredentialHeaders(input, item);
+    const headers = input.verifiedConnection
+      ? null
+      : await resolveMcpCredentialHeaders(input, item);
     const connectionRef = input.payload.connectionRef
       ? await validateMcpCapabilityConnectionRef(input, item, input.payload.connectionRef)
       : null;
     assertRequiredMcpCredentialHeaders(item, headers, connectionRef);
+    if (input.verifiedConnection) await validateVerifiedMcpConnection(input, item);
     installationMetadata = {
       ...installationMetadata,
-      ...(connectionRef && !headers
-        ? authDeferredMcpConnectivity()
-        : await validateMcpCapabilityConnection(
-            item,
-            input.probeMcpServer,
-            headers ?? undefined,
-            input.settings,
-          )),
+      ...(input.verifiedConnection
+        ? input.verifiedConnection.connectivity
+        : connectionRef && !headers
+          ? authDeferredMcpConnectivity()
+          : await validateMcpCapabilityConnection(
+              item,
+              input.probeMcpServer,
+              headers ?? undefined,
+              input.settings,
+            )),
     };
     if (connectionRef) {
       installationConfig.connectionRef = connectionRef;
@@ -383,11 +449,44 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
   return {
     commit: (db: Database) =>
       item.kind === "mcp"
-        ? withOrganizationIntegrationAcquisition(db, installation, ["custom:mcp"], (tx) =>
-            enableCapabilityInstallation(tx, installation),
-          )
+        ? withOrganizationIntegrationAcquisition(db, installation, ["custom:mcp"], async (tx) => {
+            if (input.verifiedConnection)
+              await validateVerifiedMcpConnection({ ...input, db: tx }, item);
+            return enableCapabilityInstallation(tx, installation);
+          })
         : enableCapabilityInstallation(db, installation),
   };
+}
+
+async function validateVerifiedMcpConnection(
+  input: EnableCapabilityInput,
+  item: CapabilityCatalogItem,
+) {
+  const proof = input.verifiedConnection;
+  const ref = input.payload.connectionRef;
+  if (
+    !proof ||
+    !ref ||
+    item.endpointUrl !== proof.endpointUrl ||
+    ref.resource !== proof.endpointUrl
+  )
+    throw new HTTPException(409, { message: "MCP verification no longer matches the connection" });
+  const connection = await getConnectionMetadata(
+    input.db,
+    input.workspaceId,
+    proof.id,
+    input.grant.subjectId,
+  );
+  if (
+    !connection ||
+    connection.version !== proof.version ||
+    connection.status !== "active" ||
+    connection.providerDomain !== ref.providerDomain ||
+    connection.kind !== ref.kind ||
+    connection.subjectId !== (ref.subjectScope === "subject" ? input.grant.subjectId : null) ||
+    connection.metadata.mcpUrl !== proof.endpointUrl
+  )
+    throw new HTTPException(409, { message: "MCP connection changed after verification" });
 }
 
 /** A no-effect reconciliation is not a new acquisition. Validate ordinary
@@ -779,9 +878,9 @@ function mcpProbeErrorMessage(error: unknown, endpointUrl: string): string {
       normalized,
     )
   ) {
-    return `OpenGeni could not reach a valid Streamable HTTP MCP server at ${endpoint}. Check the endpoint URL or choose a different catalog entry.`;
+    return `Opengeni could not reach a valid Streamable HTTP MCP server at ${endpoint}. Check the endpoint URL or choose a different catalog entry.`;
   }
-  return `OpenGeni could not initialize ${endpoint}. Check the endpoint configuration or try again.`;
+  return `Opengeni could not initialize ${endpoint}. Check the endpoint configuration or try again.`;
 }
 
 function safeEndpointLabel(endpointUrl: string): string {
@@ -843,6 +942,11 @@ export async function settingsWithEnabledCapabilityMcpServers(
     subjectId?: string;
     personalConnectionDelegations?: readonly McpPersonalConnectionDelegation[];
     onResolvedApiIntegrations?: (integrations: readonly ApiIntegrationRuntime[]) => void;
+    /**
+     * The Codex Apps designation the caller already resolves (a claim reads
+     * its cutover once), or what it knows for resolving it here.
+     */
+    codexApps?: Promise<CodexAppsDesignationForRun | null> | CodexAppsRunContext;
   },
 ): Promise<Settings> {
   const apiIntegrationsPromise = options?.subjectId
@@ -852,10 +956,16 @@ export async function settingsWithEnabledCapabilityMcpServers(
         workspaceId,
         options?.personalConnectionDelegations ?? [],
       );
-  const [enabled, apiIntegrations, codexAppsCredentialId] = await Promise.all([
+  const [enabled, apiIntegrations, codexAppsDesignation] = await Promise.all([
     listEnabledMcpCapabilityServers(db, workspaceId),
     apiIntegrationsPromise,
-    resolveCodexAppsCredentialIdForRun(db, workspaceId),
+    // Registration is dropped below when Apps are off for the deployment, so
+    // resolving the designation then would be pure cost.
+    !settings.codexConnectedAppsEnabled
+      ? Promise.resolve(null)
+      : options?.codexApps instanceof Promise
+        ? options.codexApps
+        : resolveCodexAppsDesignationForRun(db, workspaceId, options?.codexApps ?? {}),
   ]);
   options?.onResolvedApiIntegrations?.(apiIntegrations);
   return settingsWithCodexAppsMcpServer(
@@ -863,7 +973,7 @@ export async function settingsWithEnabledCapabilityMcpServers(
       settingsWithMcpCapabilityServers(settings, enabled),
       apiIntegrations,
     ),
-    codexAppsCredentialId !== null,
+    codexAppsDesignation !== null,
   );
 }
 
@@ -943,19 +1053,77 @@ export function settingsWithApiIntegrationServers(
 }
 
 /**
- * Resolve executable Apps authority. The connector must remain active and its
- * exact owner must still hold workspace connection-management permission.
+ * The workspace's executable Codex Apps designation. Without a Codex cutover
+ * row this is the legacy designation (`resolveCodexAppsCredentialIdForRun`).
+ * With an enabled cutover it is the core designation, which the database
+ * rechecks (designated shared Codex connection, still in the workspace's
+ * scope, active). A disabled cutover row designates nothing and reads no
+ * legacy Codex table.
+ */
+export type CodexAppsDesignationForRun = {
+  source: "core";
+  accountId: string;
+  connectionId: string;
+};
+
+/**
+ * What the caller already knows, so the resolver does not read it again: the
+ * workspace's organization (skips the workspace lookup) and the organization's
+ * Codex cutover disposition (skips the cutover read; a claim has read it).
+ */
+export type CodexAppsRunContext = {
+  accountId?: string;
+  disposition?: CodexCutoverDisposition | Promise<CodexCutoverDisposition>;
+};
+
+export async function resolveCodexAppsDesignationForRun(
+  db: Database,
+  workspaceId: string,
+  known: CodexAppsRunContext = {},
+): Promise<CodexAppsDesignationForRun | null> {
+  let owner = known.accountId;
+  const accountId = async () =>
+    (owner ??= (await rlsContextForWorkspace(db, workspaceId)).accountId);
+  const disposition =
+    known.disposition !== undefined
+      ? await known.disposition
+      : await readCodexCutoverDisposition(db, await accountId(), workspaceId);
+  if (disposition === "maintenance") return null;
+  const coreAccountId = await accountId();
+  const designation = await resolveSubscriptionCoreCodexAppsDesignation(db, {
+    accountId: coreAccountId,
+    workspaceId,
+  });
+  return designation?.status === "active"
+    ? { source: "core", accountId: coreAccountId, connectionId: designation.connectionId }
+    : null;
+}
+
+/** Runtime Apps authentication for whichever designation `resolveCodexAppsDesignationForRun` returned. */
+export function codexAppsRequestAuthForDesignation(
+  db: Database,
+  settings: Settings,
+  workspaceId: string,
+  designation: CodexAppsDesignationForRun,
+): SubscriptionCoreCodexAppsRequestAuth {
+  return subscriptionCoreCodexAppsRequestAuth(db, settings, {
+    accountId: designation.accountId,
+    workspaceId,
+    connectionId: designation.connectionId,
+  });
+}
+
+/**
+ * Resolve the legacy executable Apps authority. Organizations with a Codex
+ * cutover row (enabled or disabled) have none here: their designation lives
+ * on the core (`resolveCodexAppsDesignationForRun`).
  */
 export async function resolveCodexAppsCredentialIdForRun(
   db: Database,
   workspaceId: string,
 ): Promise<string | null> {
-  const authorization = await getCodexAppsCredentialAuthorizationForRun(db, workspaceId);
-  if (!authorization) return null;
-  const grant = await getWorkspaceGrant(db, authorization.ownerSubjectId, workspaceId);
-  return grant && hasPermission(grant.permissions, "connections:write")
-    ? authorization.credentialId
-    : null;
+  const designation = await resolveCodexAppsDesignationForRun(db, workspaceId);
+  return designation?.connectionId ?? null;
 }
 
 /**
@@ -1159,7 +1327,7 @@ async function requireCatalogItem(
 function configuredMcpCatalogItems(settings: Settings): CapabilityCatalogItem[] {
   return (
     settings.mcpServers
-      // OpenGeni, Files, and Document Search are native runtime surfaces. They
+      // Opengeni, Files, and Document Search are native runtime surfaces. They
       // remain available to sessions through configuration, but are not things a
       // user installs, connects, or enables in the Capabilities control center.
       .filter(
@@ -1192,7 +1360,7 @@ function configuredMcpCatalogItems(settings: Settings): CapabilityCatalogItem[] 
             available: true,
             mcpServerId: server.id,
             transport: "streamable-http",
-            notes: "Managed by this OpenGeni deployment through OPENGENI_MCP_SERVERS.",
+            notes: "Managed by this Opengeni deployment through OPENGENI_MCP_SERVERS.",
           },
           metadata: {
             mcpServerId: server.id,
@@ -1328,7 +1496,7 @@ function fikenCatalogItem(fikenConnections: ConnectionMetadata[]): CapabilityCat
     runtime: {
       available: true,
       mcpServerId: "opengeni",
-      notes: "Fiken access is provided through OpenGeni's first-party fiken tools.",
+      notes: "Fiken access is provided through Opengeni's first-party fiken tools.",
     },
     enabled: fikenEnabled,
     enabledReason: fikenEnabled
@@ -1371,11 +1539,11 @@ function providerIntegrationCatalogItems(
         available: true,
         mcpServerId: "opengeni",
         notes:
-          "OpenGeni's social provider adapter routes every call through an exact visible account Connection.",
+          "Opengeni's social provider adapter routes every call through an exact visible account Connection.",
       },
       enabled,
       enabledReason: socialConnectionSummary(counts),
-      provenance: "OpenGeni provider adapter",
+      provenance: "Opengeni provider adapter",
       metadata: {
         providerAdapter: "social",
         provider: definition.provider,
@@ -1393,14 +1561,21 @@ function providerIntegrationCatalogItems(
  * recommend the owning product flow without manufacturing an enabled catalog
  * row for GitHub resources, Documents, schedules, or other platform features.
  */
-export function nativeConnectionCapabilityRecommendations(): CapabilityCatalogItem[] {
-  return [
+/** The in-chat card id for connecting a person's own computer. */
+export const CONNECTED_MACHINE_CAPABILITY_ID = "api:connected-machine";
+
+export { OPENGENI_BROWSER_EXTENSION_URL };
+
+export function nativeConnectionCapabilityRecommendations(
+  options: { connectedMachines?: boolean } = {},
+): CapabilityCatalogItem[] {
+  const items = [
     CapabilityCatalogItem.parse({
       id: "api:github-app",
       kind: "api",
       source: "built_in",
       name: "GitHub App",
-      description: "Connect repositories through OpenGeni's GitHub resource picker.",
+      description: "Connect repositories through Opengeni's GitHub resource picker.",
       category: "source-control",
       tags: ["github", "repositories", "source-control"],
       homepageUrl: "https://github.com",
@@ -1428,6 +1603,66 @@ export function nativeConnectionCapabilityRecommendations(): CapabilityCatalogIt
       },
     }),
   ];
+  if (options.connectedMachines) {
+    items.push(
+      CapabilityCatalogItem.parse({
+        id: CONNECTED_MACHINE_CAPABILITY_ID,
+        kind: "api",
+        source: "built_in",
+        name: "Connected Machine",
+        description:
+          "Run this chat on the person's own computer or server (Mac, Linux or Windows), and optionally let agents use their Chrome through the OpenGeni Browser extension.",
+        category: "compute",
+        tags: [
+          "machine",
+          "computer",
+          "laptop",
+          "desktop",
+          "mac",
+          "macbook",
+          "linux",
+          "windows",
+          "server",
+          "gpu",
+          "local",
+          "self-hosted",
+          "chrome",
+          "browser",
+          "extension",
+          "terminal",
+        ],
+        homepageUrl: null,
+        providerDomain: "opengeni.ai",
+        authModel: "connected_machine_enrollment",
+        authKind: "none",
+        surfaceType: "first_party_connected_machine",
+        tools: [{ kind: "mcp", id: "opengeni" }],
+        runtime: {
+          available: true,
+          notes: `The person runs a one-line connect command on their machine from the chat card. The OpenGeni Browser Chrome extension (${OPENGENI_BROWSER_EXTENSION_URL}) works only after the machine is connected.`,
+        },
+        lifecycle: {
+          status: "available",
+          readiness: "setup_required",
+          detail: "Connect a machine from the chat card.",
+          managedBy: "platform",
+        },
+        actions: ["connect", "inspect"],
+        metadata: {
+          firstPartyMcpTools: [
+            "sandboxes_list",
+            "sandbox_swap",
+            "run_on",
+            "connected_machine_enroll_token",
+            "connected_machine_enable_screen_control",
+          ],
+          browserExtensionUrl: OPENGENI_BROWSER_EXTENSION_URL,
+          recommendationOnly: true,
+        },
+      }),
+    );
+  }
+  return items;
 }
 
 function socialConnectionCounts(
@@ -1775,7 +2010,7 @@ function installationConnectionRef(
   if (authoritySource === "host") {
     // The internal installation/runtime ref retains the exact host binding.
     // Public capability catalogs use the existing null representation for an
-    // enabled capability without a native OpenGeni connection, so indefinitely
+    // enabled capability without a native Opengeni connection, so indefinitely
     // open old browser bundles cannot treat a host UUID as native OAuth state.
     return null;
   }
@@ -1829,13 +2064,42 @@ export type CapabilityCatalogSearchMatch = {
   item: CapabilityCatalogItem;
   score: number;
   matchedOn: Array<"name" | "provider" | "tag" | "category" | "description" | "id">;
+  /**
+   * True when the item matched only through the typo-tolerant tier (an edit
+   * distance hit), never through an exact, prefix, or substring hit.
+   */
+  approximate: boolean;
 };
+
+export type CapabilityCatalogSuggestion = {
+  item: CapabilityCatalogItem;
+  /** Name similarity to the query in [0, 1]; 1 means identical once normalized. */
+  similarity: number;
+};
+
+// Typo tolerance stays deterministic and bounded: tokens shorter than four
+// characters never fuzz, compared strings are capped, and only identity fields
+// (name, provider domain, tags) participate in the fuzzy tier.
+const FUZZY_MIN_TOKEN_LENGTH = 4;
+const FUZZY_PREFIX_MIN_TOKEN_LENGTH = 5;
+const FUZZY_MAX_COMPARED_LENGTH = 48;
+const FUZZY_MAX_TOKENS = 8;
+const FUZZY_FIELDS = new Set<CapabilityCatalogSearchMatch["matchedOn"][number]>([
+  "name",
+  "provider",
+  "tag",
+]);
 
 /**
  * Deterministically rank the already-merged workspace catalog for an agent.
  * The caller still owns live authorization checks (GitHub binding, OAuth row,
  * and so on); this function searches metadata only and never probes a provider
  * or exposes credential/setup prose to the model.
+ *
+ * Exact word, prefix, and substring hits rank first. A typo-tolerant tier
+ * (bounded Damerau-Levenshtein on name, provider-domain, and tag words, plus
+ * the space-stripped name against the space-stripped query) contributes a
+ * smaller score so a one-letter spelling difference still finds the entry.
  */
 export function searchCapabilityCatalogItems(
   items: readonly CapabilityCatalogItem[],
@@ -1845,11 +2109,13 @@ export function searchCapabilityCatalogItems(
   const phrase = normalizeCapabilitySearchText(query);
   const tokens = [...new Set(phrase.split(" ").filter(Boolean))].slice(0, 24);
   if (tokens.length === 0) return [];
+  const compactPhrase = phrase.replaceAll(" ", "");
+  const fuzzyTokens = tokens.slice(0, FUZZY_MAX_TOKENS);
   const boundedLimit = Math.min(20, Math.max(1, Math.trunc(limit)));
   const weightedFields = (item: CapabilityCatalogItem) =>
     [
       ["name", item.name, 100],
-      ["provider", item.providerDomain ?? "", 80],
+      ["provider", capabilityCatalogSearchProviderDomain(item) ?? "", 80],
       ["tag", item.tags.join(" "), 50],
       ["category", item.category, 30],
       ["id", item.id, 25],
@@ -1860,25 +2126,54 @@ export function searchCapabilityCatalogItems(
     .filter((item) => capabilityCatalogItemIsTrustedForExposure(item))
     .flatMap((item): CapabilityCatalogSearchMatch[] => {
       let score = 0;
+      let approximate = true;
       const matchedOn = new Set<CapabilityCatalogSearchMatch["matchedOn"][number]>();
+      const hit = (
+        field: CapabilityCatalogSearchMatch["matchedOn"][number],
+        points: number,
+        fuzzy = false,
+      ) => {
+        score += points;
+        matchedOn.add(field);
+        if (!fuzzy) approximate = false;
+      };
       for (const [field, raw, weight] of weightedFields(item)) {
         const value = normalizeCapabilitySearchText(raw);
         if (!value) continue;
         const words = value.split(" ");
+        const fuzzyField = FUZZY_FIELDS.has(field);
         if (value.includes(phrase)) {
-          score += Math.round(weight * 1.5);
-          matchedOn.add(field);
+          hit(field, Math.round(weight * 1.5));
+        } else if (fuzzyField && compactPhrase.length >= FUZZY_MIN_TOKEN_LENGTH) {
+          // Compare with separators removed so "wispr flow" meets "WisprFlow"
+          // and "wisprflow" meets "Wispr Flow"; a near miss is typo-tolerant.
+          const compactValue = value.replaceAll(" ", "");
+          const budget = fuzzyEditBudget(compactPhrase.length);
+          if (compactValue.includes(compactPhrase)) {
+            hit(field, weight);
+          } else {
+            const distance = boundedEditDistance(compactPhrase, compactValue, budget);
+            if (distance.whole <= budget) {
+              hit(field, Math.round(weight * 0.5), true);
+            } else if (
+              compactPhrase.length >= FUZZY_PREFIX_MIN_TOKEN_LENGTH &&
+              distance.prefix <= budget
+            ) {
+              hit(field, Math.round(weight * 0.3), true);
+            }
+          }
         }
         for (const token of tokens) {
           if (words.includes(token)) {
-            score += weight;
-            matchedOn.add(field);
+            hit(field, weight);
           } else if (words.some((word) => word.startsWith(token) || token.startsWith(word))) {
-            score += Math.round(weight * 0.7);
-            matchedOn.add(field);
+            hit(field, Math.round(weight * 0.7));
           } else if (value.includes(token)) {
-            score += Math.round(weight * 0.4);
-            matchedOn.add(field);
+            hit(field, Math.round(weight * 0.4));
+          } else if (fuzzyField && fuzzyTokens.includes(token)) {
+            const fuzzy = fuzzyWordMatch(token, words);
+            if (fuzzy === "word") hit(field, Math.round(weight * 0.3), true);
+            else if (fuzzy === "prefix") hit(field, Math.round(weight * 0.2), true);
           }
         }
       }
@@ -1886,7 +2181,7 @@ export function searchCapabilityCatalogItems(
       if (item.enabled) score += 12;
       if (item.tier === "verified") score += 8;
       if (item.source === "built_in") score += 6;
-      return [{ item, score, matchedOn: [...matchedOn] }];
+      return [{ item, score, matchedOn: [...matchedOn], approximate }];
     })
     .sort(
       (left, right) =>
@@ -1896,6 +2191,167 @@ export function searchCapabilityCatalogItems(
         left.item.id.localeCompare(right.item.id),
     )
     .slice(0, boundedLimit);
+}
+
+/**
+ * Closest catalog names for a query that matched nothing. A miss must never
+ * read as "this integration does not exist" while the workspace has entries,
+ * so callers surface these as explicitly labelled suggestions. An empty
+ * (all-punctuation) query returns the first entries by name for browsing.
+ */
+export function suggestCapabilityCatalogItems(
+  items: readonly CapabilityCatalogItem[],
+  query: string,
+  limit = 5,
+): CapabilityCatalogSuggestion[] {
+  const boundedLimit = Math.min(20, Math.max(1, Math.trunc(limit)));
+  const compactPhrase = normalizeCapabilitySearchText(query)
+    .replaceAll(" ", "")
+    .slice(0, FUZZY_MAX_COMPARED_LENGTH);
+  return items
+    .filter((item) => capabilityCatalogItemIsTrustedForExposure(item))
+    .map((item): CapabilityCatalogSuggestion => {
+      if (!compactPhrase) return { item, similarity: 0 };
+      let best = 0;
+      for (const raw of [item.name, capabilityCatalogSearchProviderDomain(item) ?? ""]) {
+        const candidate = normalizeCapabilitySearchText(raw)
+          .replaceAll(" ", "")
+          .slice(0, FUZZY_MAX_COMPARED_LENGTH);
+        if (!candidate) continue;
+        const distance = boundedEditDistance(compactPhrase, candidate, FUZZY_MAX_COMPARED_LENGTH);
+        best = Math.max(
+          best,
+          1 - distance.whole / Math.max(compactPhrase.length, candidate.length),
+          // A query that resembles the start of a longer name ("wspr" for
+          // "Whisprflow") is as informative as a whole-name resemblance.
+          1 - distance.prefix / compactPhrase.length,
+        );
+      }
+      return { item, similarity: Math.round(Math.max(0, best) * 100) / 100 };
+    })
+    .sort(
+      (left, right) =>
+        right.similarity - left.similarity ||
+        Number(right.item.enabled) - Number(left.item.enabled) ||
+        left.item.name.localeCompare(right.item.name) ||
+        left.item.id.localeCompare(right.item.id),
+    )
+    .slice(0, boundedLimit);
+}
+
+/**
+ * The vendor domain search may match. A stored providerDomain wins. Workspace
+ * and operator entries (manual, configured, built-in) without one fall back to
+ * the registrable domain of their endpoint (api.wisprflow.ai -> wisprflow.ai).
+ * Registry rows do not: their endpoints may sit on a third-party host. This is
+ * a search-only projection and never changes the stored item or any
+ * connection/authority matching.
+ */
+export function capabilityCatalogSearchProviderDomain(item: CapabilityCatalogItem): string | null {
+  const stored = item.providerDomain?.trim();
+  if (stored) return stored;
+  if (item.source === "registry" || item.source === "public_registry") return null;
+  for (const candidate of [item.endpointUrl, item.mcpUrl, item.homepageUrl]) {
+    if (!candidate) continue;
+    const domain = registrableDomain(candidate);
+    if (domain) return domain;
+  }
+  return null;
+}
+
+// Common two-label public suffixes. Without a full public-suffix list this
+// keeps hosts such as api.example.co.uk on example.co.uk rather than co.uk.
+const TWO_LABEL_PUBLIC_SUFFIXES = new Set([
+  "ac.uk",
+  "co.uk",
+  "gov.uk",
+  "org.uk",
+  "com.au",
+  "net.au",
+  "org.au",
+  "co.nz",
+  "co.jp",
+  "co.kr",
+  "co.in",
+  "co.za",
+  "com.br",
+  "com.cn",
+  "com.mx",
+  "com.sg",
+  "com.tr",
+]);
+
+function registrableDomain(url: string): string | null {
+  let hostname: string;
+  try {
+    hostname = new URL(url).hostname.toLowerCase().replace(/\.$/, "");
+  } catch {
+    return null;
+  }
+  if (!hostname || hostname.includes(":") || /^\d+(\.\d+){3}$/.test(hostname)) return null;
+  const labels = hostname.split(".").filter(Boolean);
+  if (labels.length <= 2) return labels.join(".") || null;
+  const lastTwo = labels.slice(-2).join(".");
+  return TWO_LABEL_PUBLIC_SUFFIXES.has(lastTwo) ? labels.slice(-3).join(".") : lastTwo;
+}
+
+function fuzzyEditBudget(length: number): number {
+  if (length < FUZZY_MIN_TOKEN_LENGTH) return 0;
+  return length >= 8 ? 2 : 1;
+}
+
+function fuzzyWordMatch(token: string, words: readonly string[]): "word" | "prefix" | null {
+  const budget = fuzzyEditBudget(token.length);
+  if (budget === 0 || token.length > FUZZY_MAX_COMPARED_LENGTH) return null;
+  let prefixHit = false;
+  for (const word of words) {
+    const lengthGap = Math.abs(word.length - token.length);
+    const prefixCandidate =
+      token.length >= FUZZY_PREFIX_MIN_TOKEN_LENGTH && word.length > token.length;
+    if (lengthGap > budget && !prefixCandidate) continue;
+    const distance = boundedEditDistance(token, word, budget);
+    if (lengthGap <= budget && distance.whole <= budget) return "word";
+    if (prefixCandidate && distance.prefix <= budget) prefixHit = true;
+  }
+  return prefixHit ? "prefix" : null;
+}
+
+/**
+ * Optimal-string-alignment (restricted Damerau-Levenshtein) distance from
+ * `source` to all of `target` (`whole`) and to its closest prefix (`prefix`).
+ * Both inputs are capped at FUZZY_MAX_COMPARED_LENGTH, and the computation
+ * stops early once every cell of a row exceeds `budget`, returning budget + 1.
+ */
+function boundedEditDistance(
+  source: string,
+  target: string,
+  budget: number,
+): { whole: number; prefix: number } {
+  const a = source.slice(0, FUZZY_MAX_COMPARED_LENGTH);
+  const b = target.slice(0, FUZZY_MAX_COMPARED_LENGTH);
+  const over = budget + 1;
+  const width = b.length + 1;
+  let previousPrevious = new Array<number>(width).fill(0);
+  let previous = Array.from({ length: width }, (_, index) => index);
+  let current = new Array<number>(width).fill(0);
+  for (let i = 1; i <= a.length; i += 1) {
+    current[0] = i;
+    let rowMinimum = current[0];
+    for (let j = 1; j <= b.length; j += 1) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      let value = Math.min(previous[j]! + 1, current[j - 1]! + 1, previous[j - 1]! + cost);
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) {
+        value = Math.min(value, previousPrevious[j - 2]! + 1);
+      }
+      current[j] = value;
+      if (value < rowMinimum) rowMinimum = value;
+    }
+    if (rowMinimum > budget) return { whole: over, prefix: over };
+    [previousPrevious, previous, current] = [previous, current, previousPrevious];
+  }
+  let prefix = previous[0]!;
+  for (let j = 1; j <= b.length; j += 1) prefix = Math.min(prefix, previous[j]!);
+  return { whole: Math.min(previous[b.length]!, over), prefix: Math.min(prefix, over) };
 }
 
 function normalizeCapabilitySearchText(value: string): string {

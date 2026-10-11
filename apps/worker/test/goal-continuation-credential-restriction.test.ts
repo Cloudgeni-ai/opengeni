@@ -77,8 +77,12 @@ async function continuationFixture(
       metadata: options.sessionMetadata ?? {},
     } as Awaited<ReturnType<typeof db.requireSession>>),
     spyOn(db, "getWorkspaceModelPolicy").mockResolvedValue(null),
-    spyOn(core, "resolveCatalogSettings").mockResolvedValue({ settings } as Awaited<
-      ReturnType<typeof core.resolveCatalogSettings>
+    spyOn(db, "requireWorkspace").mockResolvedValue({
+      id: scope.workspaceId,
+      settings: {},
+    } as Awaited<ReturnType<typeof db.requireWorkspace>>),
+    spyOn(core, "resolveWorkspaceCatalogSettings").mockResolvedValue({ settings } as Awaited<
+      ReturnType<typeof core.resolveWorkspaceCatalogSettings>
     >),
     spyOn(db, "materializeGoalContinuation").mockImplementation(async (_db, input) => {
       // Mirror the production materializer's order: select the locked causal

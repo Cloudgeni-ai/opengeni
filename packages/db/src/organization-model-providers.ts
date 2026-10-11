@@ -1,18 +1,24 @@
 import { createHash } from "node:crypto";
-import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
+import {
+  CLAUDE_DEFAULT_CONNECTION_MODEL_IDS,
+  environmentsEncryptionKeyBytes,
+  type Settings,
+} from "@opengeni/config";
 import { ClaudeProviderAccountAuthoritySnapshotV1 } from "@opengeni/contracts";
 import { and, count, eq, exists, inArray, isNull, sql } from "drizzle-orm";
 
 import { type Database, rawRows, setSubjectRlsContext, withRlsContext } from "./database";
 import { workspaceClaudeSubscriptionActiveForAuthority } from "./claude-subscription-accounts";
 import { decryptEnvironmentValue } from "./environment-crypto";
+import { defaultModelRequestHash } from "./model-catalog";
 import * as schema from "./schema";
 
 export type OrganizationModelProviderKind =
   | "vercel_gateway"
   | "openrouter"
   | "anthropic"
-  | "claude_subscription";
+  | "claude_subscription"
+  | "opper";
 export type OrganizationModelProviderConnection = {
   providerKind: OrganizationModelProviderKind;
   status: "active" | "revoked";
@@ -403,6 +409,7 @@ export async function getOrganizationModelProviderCatalogForWorkspace(
     openrouter: { active: false, models: [] },
     anthropic: { active: false, models: [] },
     claude_subscription: { active: false, models: [] },
+    opper: { active: false, models: [] },
   };
   if (input.providerKinds.length === 0) return catalog;
   return await withRlsContext(db, input, async (scopedDb) => {
@@ -583,6 +590,49 @@ export async function listOrganizationModelProviderCustomModels(
         ),
       );
     return rows.map(mapModel);
+  });
+}
+
+/**
+ * First connection of a Claude account for the organization: offer the
+ * default models. Does nothing once the organization has any Claude model
+ * record of this kind, active or removed, so a configured or trimmed list is
+ * never changed. Returns how many models were added.
+ */
+export async function seedOrganizationClaudeDefaultModels(
+  db: Database,
+  input: {
+    organizationId: string;
+    actorSubjectId: string;
+    providerKind: "anthropic" | "claude_subscription";
+  },
+): Promise<number> {
+  return await withOrganizationProviderAdministrator(db, input, async (scopedDb) => {
+    await scopedDb.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(${`organization-model-provider-models:${input.organizationId}:${input.providerKind}`}, 0))`,
+    );
+    const [existing] = await scopedDb
+      .select({ value: count() })
+      .from(schema.organizationModelProviderCustomModels)
+      .where(
+        and(
+          eq(schema.organizationModelProviderCustomModels.accountId, input.organizationId),
+          eq(schema.organizationModelProviderCustomModels.providerKind, input.providerKind),
+        ),
+      );
+    if (Number(existing?.value ?? 0) > 0) return 0;
+    await scopedDb.insert(schema.organizationModelProviderCustomModels).values(
+      CLAUDE_DEFAULT_CONNECTION_MODEL_IDS.map((upstreamModelId) => ({
+        accountId: input.organizationId,
+        providerKind: input.providerKind,
+        upstreamModelId,
+        label: null,
+        createOperationId: crypto.randomUUID(),
+        createRequestHash: defaultModelRequestHash(upstreamModelId),
+        createdBySubjectId: input.actorSubjectId,
+      })),
+    );
+    return CLAUDE_DEFAULT_CONNECTION_MODEL_IDS.length;
   });
 }
 

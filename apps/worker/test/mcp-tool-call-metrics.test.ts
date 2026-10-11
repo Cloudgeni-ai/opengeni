@@ -25,7 +25,7 @@ test("every model and MCP call exports measured spans under the physical attempt
   withTraceContext(parent, () => {
     for (let i = 0; i < 3; i++) {
       hooks.onModelCall?.({ provider: "openai", outcome: "completed", durationSeconds: 1 });
-      hooks.onMcpToolCall?.({ outcome: "success", durationSeconds: 0.5 });
+      hooks.onMcpToolCall?.({ outcome: "success", tool: "session_create", durationSeconds: 0.5 });
     }
   });
   await observability.flush();
@@ -41,31 +41,42 @@ test("every model and MCP call exports measured spans under the physical attempt
     );
   }
   expect(bodies).toHaveLength(1);
-  hooks.onMcpToolCall?.({ outcome: "provider_declared_error", durationSeconds: 0.5 });
+  hooks.onMcpToolCall?.({
+    outcome: "provider_declared_error",
+    tool: "external",
+    durationSeconds: 0.5,
+  });
   await observability.flush();
   expect(bodies[1].resourceSpans[0].scopeSpans[0].spans[0].status.code).toBe(2);
 });
 
-test("MCP tool-call metrics expose only the closed structural outcome", async () => {
+test("MCP tool-call metrics expose only the closed outcome and bounded tool label", async () => {
   const observability = createObservability(testSettings(), { component: "worker" });
   const hooks = runtimeMetricsHooksForObservability(observability);
 
   MCP_TOOL_CALL_OUTCOMES.forEach((outcome, index) => {
-    hooks.onMcpToolCall?.({ outcome, durationSeconds: index + 0.25 });
+    hooks.onMcpToolCall?.({ outcome, tool: "session_create", durationSeconds: index + 0.25 });
+  });
+  // A raw user-defined name that slipped past the runtime still collapses.
+  hooks.onMcpToolCall?.({
+    outcome: "success",
+    tool: "acme_customer_lookup",
+    durationSeconds: 20,
   });
 
   const metrics = await observability.prometheusMetrics();
   for (const outcome of MCP_TOOL_CALL_OUTCOMES) {
+    const labels = `[^}]*outcome="${outcome}"[^}]*tool="session_create"[^}]*`;
+    expect(metrics).toMatch(new RegExp(`opengeni_mcp_tool_calls_total\\{${labels}\\} 1\\b`));
     expect(metrics).toMatch(
-      new RegExp(`opengeni_mcp_tool_calls_total\\{[^}]*outcome="${outcome}"[^}]*\\} 1\\b`),
-    );
-    expect(metrics).toMatch(
-      new RegExp(
-        `opengeni_mcp_tool_call_duration_seconds_count\\{[^}]*outcome="${outcome}"[^}]*\\} 1\\b`,
-      ),
+      new RegExp(`opengeni_mcp_tool_call_duration_seconds_count\\{${labels}\\} 1\\b`),
     );
   }
-  expect(metrics).not.toMatch(/server(_id)?=|tool(_name)?=|workspace(_id)?=|session(_id)?=/);
+  expect(metrics).toMatch(
+    /opengeni_mcp_tool_call_duration_seconds_count\{[^}]*outcome="success"[^}]*tool="external"[^}]*\} 1\b/,
+  );
+  expect(metrics).not.toContain("acme_customer_lookup");
+  expect(metrics).not.toMatch(/server(_id)?=|tool_name=|workspace(_id)?=|session(_id)?=/);
 });
 
 test("MCP lifecycle metrics expose only bounded structural dimensions", async () => {

@@ -1,9 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { acquireBlankTestDatabase } from "@opengeni/testing";
+import { acquireOwnerMigratedTestDatabase } from "@opengeni/testing";
+import { sql as query } from "drizzle-orm";
 import postgres from "postgres";
-import { createDb, createSession } from "../src/index";
+import { createDb, withSessionRlsActorContext } from "../src/index";
+import { withSessionActivityRlsContext } from "../src/database";
+import { LOSSLESS_CONTENT_WRITER_APPLICATION_NAME } from "../src/lossless-json";
 
 import { migrate } from "../src/migrate";
 import { embeddingMigrationTail } from "./embedding-migration-tail";
@@ -42,13 +45,9 @@ const scheduledSessionTargetIndexMigrationName = "0408_scheduled_session_target_
 const scheduledProducerMaterializationMigrationName =
   "0414_scheduled_generated_producer_materialization.sql";
 const scheduledInheritedToolAdmissionMigrationName = "0416_scheduled_inherited_tool_admission.sql";
-// Reuse the shared dependency tail, extending only this fixture's replay.
-// 0598 clones the 0345 waiter fence and extends the 0275/0402 authority ledgers;
-// none may be treated as installed while those prerequisites are absent.
-const cutoverMigrationTail = [
-  ...embeddingMigrationTail,
-  "0598_claude_subscription_account_pools.sql",
-].sort();
+// The shared tail includes every dependent authority cutover. Replay in ledger
+// order after restoring this fixture's withheld prerequisites.
+const cutoverMigrationTail = [...embeddingMigrationTail].sort();
 
 describe("migration 0264 connection authority runtime activation", () => {
   test("is a drained exact-attempt cutover with canonical snapshots and idempotent audit", async () => {
@@ -81,11 +80,22 @@ describe("migration 0264 connection authority runtime activation", () => {
   });
 
   test("rejects a live application writer and explicit pre-activation queued authority", async () => {
-    const blank = await acquireBlankTestDatabase("migration-0264-cutover-drain");
+    const blank = await acquireOwnerMigratedTestDatabase("migration-0264-cutover-drain");
     if (!blank) return;
-    const sql = postgres(blank.databaseUrl, { max: 2, onnotice: () => undefined });
+    const sql = postgres(blank.adminUrl, {
+      max: 2,
+      onnotice: () => undefined,
+      connection: { application_name: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME },
+    });
+    const owner = postgres(blank.ownerUrl, { max: 1, onnotice: () => undefined });
+    const migrateFixture = () =>
+      migrate(blank.ownerUrl, undefined, { applicationDatabaseRoles: ["opengeni_app"] });
     try {
-      await sql`
+      const [ownerRole] = await owner`
+        select rolsuper, rolbypassrls from pg_roles where rolname = current_user
+      `;
+      expect(ownerRole).toMatchObject({ rolsuper: false, rolbypassrls: false });
+      await owner`
         create table schema_migrations (
           name text primary key,
           applied_at timestamptz not null default now()
@@ -111,26 +121,13 @@ describe("migration 0264 connection authority runtime activation", () => {
           (${scheduledInheritedToolAdmissionMigrationName})
       `;
       await sql`insert into schema_migrations (name) select unnest(${cutoverMigrationTail}::text[])`;
-      await migrate(blank.databaseUrl);
-      // Current session adapters select the complete sessions row while this
-      // fixture intentionally withholds 0402. Supply only its later columns
-      // during fixture setup, then remove them before the ordered replay.
-      await sql`
-        alter table sessions
-        add column imported_archive_import_id text,
-        add column imported_archive_imported_at timestamptz,
-        add column imported_archive_request_hash text,
-        add column imported_archive_subject_id text,
-        add column imported_archive_next_offset integer,
-        add column scope_subject_id text,
-        add column input_wait_turn_id uuid,
-        add column input_wait_until timestamptz,
-        add column input_wait_reason text,
-        add column input_wait_set_at timestamptz,
-        add column initial_claude_provider_account_authority_snapshot jsonb
-          not null default '{"version":1,"scope":"workspace"}'::jsonb
+      await migrateFixture();
+      const [historicalRoutines] = await sql`
+        select
+          to_regprocedure('opengeni_private.capture_accepted_turn_connection_authorities()') as current_capture,
+          to_regprocedure('opengeni_private.capture_accepted_turn_connection_authorities_0264()') as retired_capture
       `;
-
+      expect(historicalRoutines).toMatchObject({ current_capture: null, retired_capture: null });
       const [account] = await sql<{ id: string }[]>`
         insert into managed_accounts (name) values ('connection cutover drain') returning id
       `;
@@ -168,25 +165,37 @@ describe("migration 0264 connection authority runtime activation", () => {
         `;
         return row!;
       });
-      const cutoverClient = createDb(blank.databaseUrl, { max: 1 });
-      const session = await createSession(cutoverClient.db, {
-        accountId: account!.id,
-        workspaceId: target!.id,
-        initialMessage: "pre-activation authority",
-        resources: [],
-        tools: [],
-        metadata: {},
-        createdBy: { kind: "subject", subjectId },
-        model: "test-model",
-        reasoningEffort: "medium" as const,
-        latencyMode: "standard" as const,
-        sandboxBackend: "none",
-        subjectId,
-        // This is pre-0264 work, not fresh subscription selection. 0598 is
-        // withheld with its scheduled-ledger prerequisites in the shared tail.
-        initialClaudeProviderAccountAuthoritySnapshot: { version: 1, scope: "workspace" },
-      });
-      await cutoverClient.close();
+      // This is a pre-0264 row, not a current runtime create. The current
+      // mapper requires subscription-core tables deliberately withheld here.
+      // Seed historical facts directly; do not add fake current reader columns
+      // or restore a production legacy fallback to construct this fixture.
+      const session = { id: crypto.randomUUID() };
+      const cutoverClient = createDb(blank.adminUrl, { max: 1 });
+      try {
+        await withSessionRlsActorContext({ subjectId }, () =>
+          withSessionActivityRlsContext(
+            cutoverClient.db,
+            { accountId: account!.id, workspaceId: target!.id },
+            (tx) =>
+              tx.execute(query`
+          insert into sessions (
+            id, account_id, workspace_id, initial_message, model, sandbox_backend,
+            reasoning_effort, latency_mode,
+            sandbox_group_id, tool_policy, root_session_id, nested_agent_depth,
+            effective_max_nested_agent_depth, nested_agent_depth_policy_source,
+            nested_agent_depth_policy_session_id, created_by_kind, created_by_subject_id
+          ) values (
+            ${session.id}, ${account!.id}, ${target!.id}, 'pre-activation authority',
+            'test-model', 'none', 'medium', 'standard', ${session.id},
+            ${JSON.stringify({ mode: "workspace_default", inheritedFromSessionId: null })}::jsonb,
+            ${session.id}, 0, 5, 'session', ${session.id}, 'subject', ${subjectId}
+          )
+        `),
+          ),
+        );
+      } finally {
+        await cutoverClient.close();
+      }
       const explicitDelegation = [
         {
           serverId: "example",
@@ -209,7 +218,11 @@ describe("migration 0264 connection authority runtime activation", () => {
           },
         },
       ];
-      const [preActivationTurn] = await sql<{ id: string }[]>`
+      const [preActivationTurn] = await sql.begin(async (tx) => {
+        await tx`select set_config('opengeni.account_id', ${account!.id}, true)`;
+        await tx`select set_config('opengeni.workspace_id', ${target!.id}, true)`;
+        await tx`select set_config('opengeni.subject_id', ${subjectId}, true)`;
+        return tx<{ id: string }[]>`
         insert into session_turns (
           account_id, workspace_id, session_id, trigger_event_id,
           temporal_workflow_id, status, execution_generation, position, prompt,
@@ -221,9 +234,10 @@ describe("migration 0264 connection authority runtime activation", () => {
           ${`cutover-${crypto.randomUUID()}`}, 'queued', 1, 1, 'queued authority',
           'test-model', 'medium', 'standard', 'none', 'user',
           'subject', ${subjectId}, ${subjectId},
-          ${sql.json(explicitDelegation)}::jsonb
+          ${tx.json(explicitDelegation)}::jsonb
         ) returning id
-      `;
+        `;
+      });
       await sql`
         delete from schema_migrations
         where name = any(${cutoverMigrationTail}::text[]) or name in (
@@ -244,7 +258,24 @@ describe("migration 0264 connection authority runtime activation", () => {
           ${scheduledInheritedToolAdmissionMigrationName}
         )
       `;
-      await expect(migrate(blank.databaseUrl)).rejects.toMatchObject({ code: "55000" });
+      // 0264's historical global preflight predates owner-only backfill windows.
+      // This synthetic schema already has later FORCE-RLS policies, which would
+      // hide the queued work from a non-bypass migration owner. Relax only owner
+      // visibility in this disposable fixture; opengeni_app is not the owner and
+      // remains policy-bound. Restore and verify FORCE RLS after the replay.
+      await owner`
+        alter table sessions no force row level security;
+        alter table session_turns no force row level security;
+        alter table session_system_updates no force row level security;
+        alter table session_system_update_outbox no force row level security;
+        alter table scheduled_tasks no force row level security;
+        alter table connections no force row level security;
+      `.simple();
+      await expect(migrateFixture()).rejects.toMatchObject({
+        code: "55000",
+        message:
+          "0264 requires draining or superseding executable pre-activation common-user connection work",
+      });
 
       await sql`
         update sessions set status = 'recovering', active_turn_id = ${preActivationTurn!.id}
@@ -254,47 +285,80 @@ describe("migration 0264 connection authority runtime activation", () => {
         update session_turns set status = 'recovering', active_attempt_id = null
         where id = ${preActivationTurn!.id}
       `;
-      await expect(migrate(blank.databaseUrl)).rejects.toMatchObject({ code: "55000" });
+      await expect(migrateFixture()).rejects.toMatchObject({
+        code: "55000",
+        message:
+          "0264 requires draining or superseding executable pre-activation common-user connection work",
+      });
 
       await sql`delete from session_turns where session_id = ${session.id}`;
-      await sql`
-        do $role$
-        begin
-          if not exists (select 1 from pg_roles where rolname = 'opengeni_app') then
-            create role opengeni_app login password 'cutover-test';
-          else
-            alter role opengeni_app login password 'cutover-test';
-          end if;
-        end
-        $role$
-      `;
-      await sql`grant connect on database ${sql(blank.databaseUrl.split("/").at(-1)!)} to opengeni_app`;
-      const appUrl = new URL(blank.databaseUrl);
+      // The canonical harness owns this cluster-wide role and password. Do not
+      // rotate it from a historical fixture while other test files use it.
+      await sql`grant connect on database ${sql(new URL(blank.adminUrl).pathname.slice(1))} to opengeni_app`;
+      const appUrl = new URL(blank.adminUrl);
       appUrl.username = "opengeni_app";
-      appUrl.password = "cutover-test";
-      const appSql = postgres(appUrl.toString(), { max: 1 });
+      appUrl.password = blank.appPassword;
+      const appSql = postgres(appUrl.toString(), {
+        max: 1,
+        connection: { application_name: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME },
+      });
       try {
-        await appSql`select 1`;
-        await expect(migrate(blank.databaseUrl)).rejects.toMatchObject({ code: "55000" });
+        const [appRole] = await appSql`
+          select rolsuper, rolbypassrls,
+            pg_has_role(current_user, ${blank.ownerRole}, 'MEMBER') as inherits_owner
+          from pg_roles where rolname = current_user
+        `;
+        expect(appRole).toMatchObject({
+          rolsuper: false,
+          rolbypassrls: false,
+          inherits_owner: false,
+        });
+        await expect(migrateFixture()).rejects.toMatchObject({
+          code: "55000",
+          message:
+            "0264 connection authority activation requires all opengeni_app sessions to be stopped",
+        });
       } finally {
         await appSql.end({ timeout: 1 });
       }
 
-      await sql`
-        alter table sessions
-        drop column imported_archive_import_id,
-        drop column imported_archive_imported_at,
-        drop column imported_archive_request_hash,
-        drop column imported_archive_subject_id,
-        drop column imported_archive_next_offset,
-        drop column scope_subject_id,
-        drop column input_wait_turn_id,
-        drop column input_wait_until,
-        drop column input_wait_reason,
-        drop column input_wait_set_at,
-        drop column initial_claude_provider_account_authority_snapshot
+      await migrateFixture();
+      await owner`
+        alter table sessions force row level security;
+        alter table session_turns force row level security;
+        alter table session_system_updates force row level security;
+        alter table session_system_update_outbox force row level security;
+        alter table scheduled_tasks force row level security;
+        alter table connections force row level security;
+      `.simple();
+      const posture = await sql`
+        select relname, relrowsecurity, relforcerowsecurity from pg_class
+        where oid = any(array[
+          'sessions'::regclass, 'session_turns'::regclass,
+          'session_system_updates'::regclass, 'session_system_update_outbox'::regclass,
+          'scheduled_tasks'::regclass, 'connections'::regclass
+        ])
       `;
-      await migrate(blank.databaseUrl);
+      expect(posture.every((table) => table.relrowsecurity && table.relforcerowsecurity)).toBe(
+        true,
+      );
+      const [capture] = await sql`
+        select routine.proname, role.rolsuper, role.rolbypassrls
+        from pg_trigger trigger
+        join pg_proc routine on routine.oid = trigger.tgfoid
+        join pg_roles role on role.oid = routine.proowner
+        where trigger.tgrelid = 'session_turns'::regclass
+          and trigger.tgname = 'accepted_turn_connection_authority_capture'
+      `;
+      expect(capture).toMatchObject({
+        proname: "capture_accepted_turn_connection_authorities",
+        rolsuper: false,
+        rolbypassrls: false,
+      });
+      const [retired] = await sql`
+        select to_regprocedure('opengeni_private.capture_accepted_turn_connection_authorities_0264()') as capture
+      `;
+      expect(retired!.capture).toBeNull();
       const receipts = await sql<Array<{ name: string }>>`
         select name from schema_migrations
         where name = any(${cutoverMigrationTail}::text[]) or name in (
@@ -337,6 +401,7 @@ describe("migration 0264 connection authority runtime activation", () => {
         ].sort(),
       );
     } finally {
+      await owner.end({ timeout: 1 });
       await sql.end({ timeout: 1 });
       await blank.release();
     }

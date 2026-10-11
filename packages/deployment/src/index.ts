@@ -248,6 +248,41 @@ export const JEV_CODE_SEARCH_PASSTHROUGH_ENV: readonly string[] = [
   "OPENGENI_CODE_SEARCH_MODE",
 ];
 
+/** Provider-agnostic web search (`web_search` / `web_fetch` agent tools).
+ * Keys are server runtime secrets: the worker calls the provider and the keys
+ * never reach a sandbox. Unset keeps the tools off. Mirrors
+ * `webSearchEnvironmentVariables()` in @opengeni/config. */
+export const WEB_SEARCH_PROVIDER_PASSTHROUGH_ENV: readonly string[] = [
+  "OPENGENI_WEB_SEARCH_PROVIDER",
+  "OPENGENI_WEB_FETCH_PROVIDER",
+  "OPENGENI_WEB_SEARCH_PREFER",
+  "OPENGENI_WEB_SEARCH_PRICING_JSON",
+  "OPENGENI_WEB_SEARCH_REQUEST_TIMEOUT_MS",
+  "OPENGENI_WEB_TINYFISH_API_KEY",
+  "OPENGENI_WEB_TINYFISH_BASE_URL",
+  "OPENGENI_WEB_PARALLEL_API_KEY",
+  "OPENGENI_WEB_PARALLEL_BASE_URL",
+  "OPENGENI_WEB_PERPLEXITY_API_KEY",
+  "OPENGENI_WEB_PERPLEXITY_BASE_URL",
+  "OPENGENI_WEB_EXA_API_KEY",
+  "OPENGENI_WEB_EXA_BASE_URL",
+  "OPENGENI_WEB_TAVILY_API_KEY",
+  "OPENGENI_WEB_TAVILY_BASE_URL",
+  "OPENGENI_WEB_FIRECRAWL_API_KEY",
+  "OPENGENI_WEB_FIRECRAWL_BASE_URL",
+  "OPENGENI_WEB_BRAVE_API_KEY",
+  "OPENGENI_WEB_BRAVE_BASE_URL",
+  "OPENGENI_WEB_JINA_API_KEY",
+  "OPENGENI_WEB_JINA_BASE_URL",
+  "OPENGENI_WEB_SEARXNG_API_KEY",
+  "OPENGENI_WEB_SEARXNG_BASE_URL",
+  "OPENGENI_WEB_SEARCH_API_KEY",
+  "OPENGENI_WEB_SEARCH_BASE_URL",
+  "OPENGENI_WEB_FETCH_API_KEY",
+  "OPENGENI_WEB_FETCH_BASE_URL",
+  "OPENGENI_WEB_SEARCH_PROVIDER_MODE",
+];
+
 /** Public workspace MCP OAuth rollout settings. The enable switch is
  * deployment-sensitive because OAuth needs a canonical managed/local human
  * session and one stable public issuer origin. */
@@ -886,7 +921,7 @@ export const deploymentProfiles: Record<DeploymentProfileId, DeploymentContract>
       external: {
         secretRef: { name: "opengeni-temporal", key: "OPENGENI_TEMPORAL_HOST" },
         notes:
-          "Temporal Cloud, customer-provided Temporal, or the official Temporal chart managed outside the OpenGeni chart.",
+          "Temporal Cloud, customer-provided Temporal, or the official Temporal chart managed outside the Opengeni chart.",
       },
     },
     nats: {
@@ -894,7 +929,7 @@ export const deploymentProfiles: Record<DeploymentProfileId, DeploymentContract>
       external: {
         secretRef: { name: "opengeni-nats", key: "OPENGENI_NATS_URL" },
         notes:
-          "Customer-provided NATS or the official NATS chart managed outside the OpenGeni chart.",
+          "Customer-provided NATS or the official NATS chart managed outside the Opengeni chart.",
       },
     },
     objectStorage: {
@@ -1002,7 +1037,7 @@ export const deploymentProfiles: Record<DeploymentProfileId, DeploymentContract>
       external: {
         secretRef: { name: "opengeni-temporal", key: "OPENGENI_TEMPORAL_HOST" },
         notes:
-          "Temporal Cloud, customer-provided Temporal, or the official Temporal chart managed outside the OpenGeni chart.",
+          "Temporal Cloud, customer-provided Temporal, or the official Temporal chart managed outside the Opengeni chart.",
       },
     },
     nats: {
@@ -1010,7 +1045,7 @@ export const deploymentProfiles: Record<DeploymentProfileId, DeploymentContract>
       external: {
         secretRef: { name: "opengeni-nats", key: "OPENGENI_NATS_URL" },
         notes:
-          "Customer-provided NATS or the official NATS chart managed outside the OpenGeni chart.",
+          "Customer-provided NATS or the official NATS chart managed outside the Opengeni chart.",
       },
     },
     objectStorage: {
@@ -1115,7 +1150,7 @@ export const deploymentProfiles: Record<DeploymentProfileId, DeploymentContract>
       external: {
         secretRef: { name: "opengeni-temporal", key: "OPENGENI_TEMPORAL_HOST" },
         notes:
-          "Temporal Cloud, customer-provided Temporal, or the official Temporal chart managed outside the OpenGeni chart.",
+          "Temporal Cloud, customer-provided Temporal, or the official Temporal chart managed outside the Opengeni chart.",
       },
     },
     nats: {
@@ -1123,7 +1158,7 @@ export const deploymentProfiles: Record<DeploymentProfileId, DeploymentContract>
       external: {
         secretRef: { name: "opengeni-nats", key: "OPENGENI_NATS_URL" },
         notes:
-          "Customer-provided NATS or the official NATS chart managed outside the OpenGeni chart.",
+          "Customer-provided NATS or the official NATS chart managed outside the Opengeni chart.",
       },
     },
     objectStorage: {
@@ -1328,7 +1363,7 @@ export function preflightChecksFor(contract: DeploymentContract): PreflightCheck
       check(
         "container-registry",
         true,
-        "Verify immutable OpenGeni images can be pulled by the workload plane.",
+        "Verify immutable Opengeni images can be pulled by the workload plane.",
       ),
     );
   }
@@ -1455,7 +1490,7 @@ export function preflightChecksFor(contract: DeploymentContract): PreflightCheck
     check(
       "conformance-session",
       true,
-      "Verify a scripted OpenGeni session can create, stream, replay, run, and complete.",
+      "Verify a scripted Opengeni session can create, stream, replay, run, and complete.",
     ),
   );
   return checks;
@@ -1499,9 +1534,11 @@ export function requiredRuntimeEnvVars(
     "OPENGENI_MODEL_CATALOG_SOURCE",
     "OPENGENI_MODEL_COST_POLICY_JSON",
     "OPENGENI_MODEL_NOTES_JSON",
+    "OPENGENI_MANAGED_MODELS_JSON",
     "OPENGENI_CREDITS_DEFAULT_MODEL",
     "OPENGENI_CREDITS_DEFAULT_REASONING_EFFORT",
     "OPENGENI_OPENROUTER_API_KEY",
+    "OPENGENI_OPPER_API_KEY",
   ] as const) {
     if (env[key]) vars.push(key);
   }
@@ -1728,12 +1765,12 @@ export function generateRuntimeArtifacts(
   return {
     profile: contract.profile,
     helmValuesYaml: [
-      "# Generated by OpenGeni deployment runtime artifacts. Do not commit generated copies.",
+      "# Generated by Opengeni deployment runtime artifacts. Do not commit generated copies.",
       renderYaml(helmValues).trimEnd(),
       "",
     ].join("\n"),
     runtimeEnv: [
-      "# Generated by OpenGeni deployment runtime artifacts. Do not commit generated copies.",
+      "# Generated by Opengeni deployment runtime artifacts. Do not commit generated copies.",
       "# Values in this file are intended for a private Kubernetes Secret.",
       ...envLines,
       "",
@@ -1779,8 +1816,8 @@ function helmValuesFileFor(contract: DeploymentContract): string | null {
 
 function createdResourceClasses(contract: DeploymentContract): string[] {
   const out = [
-    "OpenGeni Kubernetes namespace",
-    "OpenGeni Helm release",
+    "Opengeni Kubernetes namespace",
+    "Opengeni Helm release",
     "runtime secret or external secret reference",
   ];
   if (contract.runtime.cloud === "azure" && contract.profile === "azure-managed") {
@@ -2290,7 +2327,7 @@ function platformDependencyPlans(contract: DeploymentContract): PlatformDependen
         "helm uninstall opengeni-nats --namespace opengeni-platform --ignore-not-found",
       ],
       notes: [
-        "The official NATS chart is lifecycle-managed by the stack wrapper, not by the OpenGeni app chart.",
+        "The official NATS chart is lifecycle-managed by the stack wrapper, not by the Opengeni app chart.",
         "The service is ClusterIP-only; do not expose NATS with LoadBalancer or public ingress for the default stack.",
       ],
     });
@@ -2349,8 +2386,8 @@ function platformDependencyPlans(contract: DeploymentContract): PlatformDependen
         "helm uninstall opengeni-temporal --namespace opengeni-platform --ignore-not-found",
       ],
       notes: [
-        "The official Temporal chart is lifecycle-managed by the stack wrapper, not by the OpenGeni app chart.",
-        "The example values require an existing Postgres database/schema pair for Temporal persistence; use managed cloud Postgres or a customer database, not the OpenGeni chart's disposable Postgres fixture.",
+        "The official Temporal chart is lifecycle-managed by the stack wrapper, not by the Opengeni app chart.",
+        "The example values require an existing Postgres database/schema pair for Temporal persistence; use managed cloud Postgres or a customer database, not the Opengeni chart's disposable Postgres fixture.",
       ],
     });
   }
@@ -2410,13 +2447,13 @@ function platformDependencyPlans(contract: DeploymentContract): PlatformDependen
         "kubectl delete crd batchsandboxes.sandbox.opensandbox.io pools.sandbox.opensandbox.io sandboxsnapshots.sandbox.opensandbox.io --ignore-not-found",
       ],
       notes: [
-        "OpenSandbox is lifecycle-managed from the exact upstream source commit and checksums in deploy/stacks/opensandbox-source.lock; its templates are not copied into the OpenGeni app chart.",
+        "OpenSandbox is lifecycle-managed from the exact upstream source commit and checksums in deploy/stacks/opensandbox-source.lock; its templates are not copied into the Opengeni app chart.",
         "The lifecycle service is ClusterIP-only and its lifecycle routes are API-key authenticated. Exec and files stay on that private server-proxy. Channel B (browserd, noVNC, ttyd) uses the ClusterIP ingress gateway in URI mode with OSEP-0011 signed endpoints; put a TLS terminator in front of that ClusterIP in production rather than forking the upstream Service to LoadBalancer.",
         "Official server v0.2.2 ignores OPENSANDBOX_SECURE_ACCESS_* env. The image post-renderer adds an initContainer that materializes [ingress.secure_access] into a writable runtime TOML from Secret opensandbox-secure-access so keys never enter git or the server ConfigMap. Helm 4 cannot pass a script to --post-renderer; use helm template | scripts/operator/opensandbox-image-post-renderer.sh | kubectl apply -f -.",
         contract.runtime.cloud === "azure"
           ? "The Azure BatchSandbox template requires the optional Terraform sandbox node pool label and taint contract."
           : "The generic BatchSandbox template has no cloud-specific node selector and works on ordinary Kubernetes or k3s nodes.",
-        "Native OpenSandbox snapshots remain disabled; OpenGeni portable workspace archives in object storage are authoritative in v1.",
+        "Native OpenSandbox snapshots remain disabled; Opengeni portable workspace archives in object storage are authoritative in v1.",
       ],
     });
   }
@@ -2447,12 +2484,12 @@ function planNotes(
   }
   if (contract.nats.mode === "external") {
     notes.push(
-      "NATS is intentionally outside the OpenGeni app chart; use an existing endpoint or the official NATS Helm chart.",
+      "NATS is intentionally outside the Opengeni app chart; use an existing endpoint or the official NATS Helm chart.",
     );
   }
   if (contract.temporal.mode === "external") {
     notes.push(
-      "Temporal is intentionally outside the OpenGeni app chart; use Temporal Cloud, an existing endpoint, or the official Temporal Helm chart.",
+      "Temporal is intentionally outside the Opengeni app chart; use Temporal Cloud, an existing endpoint, or the official Temporal Helm chart.",
     );
   }
   if (contract.sandbox.backend === "opensandbox") {
@@ -2698,7 +2735,7 @@ function runtimeEnvValues(
           requiredEnv("OPENGENI_RESEND_API_KEY", env.OPENGENI_RESEND_API_KEY),
           valueEnv(
             "OPENGENI_EMAIL_FROM",
-            env.OPENGENI_EMAIL_FROM ?? "OpenGeni <auth@mail.opengeni.ai>",
+            env.OPENGENI_EMAIL_FROM ?? "Opengeni <auth@mail.opengeni.ai>",
           ),
           valueEnv(
             "OPENGENI_GITHUB_APP_MANIFEST_BASE_URL",
@@ -2805,6 +2842,7 @@ function runtimeEnvValues(
     valueEnv("OPENGENI_MODEL_CATALOG_SOURCE", env.OPENGENI_MODEL_CATALOG_SOURCE),
     valueEnv("OPENGENI_MODEL_COST_POLICY_JSON", env.OPENGENI_MODEL_COST_POLICY_JSON),
     valueEnv("OPENGENI_MODEL_NOTES_JSON", env.OPENGENI_MODEL_NOTES_JSON),
+    valueEnv("OPENGENI_MANAGED_MODELS_JSON", env.OPENGENI_MANAGED_MODELS_JSON),
     valueEnv("OPENGENI_CREDITS_DEFAULT_MODEL", env.OPENGENI_CREDITS_DEFAULT_MODEL),
     valueEnv(
       "OPENGENI_CREDITS_DEFAULT_REASONING_EFFORT",
@@ -2835,6 +2873,9 @@ function runtimeEnvValues(
       : []),
     ...(env.OPENGENI_OPENROUTER_API_KEY
       ? [requiredEnv("OPENGENI_OPENROUTER_API_KEY", env.OPENGENI_OPENROUTER_API_KEY)]
+      : []),
+    ...(env.OPENGENI_OPPER_API_KEY
+      ? [requiredEnv("OPENGENI_OPPER_API_KEY", env.OPENGENI_OPPER_API_KEY)]
       : []),
   ];
 
@@ -2991,6 +3032,9 @@ function runtimeEnvValues(
     entries.push(valueEnv(key, env[key]));
   }
   for (const key of JEV_CODE_SEARCH_PASSTHROUGH_ENV) {
+    entries.push(valueEnv(key, env[key]));
+  }
+  for (const key of WEB_SEARCH_PROVIDER_PASSTHROUGH_ENV) {
     entries.push(valueEnv(key, env[key]));
   }
 

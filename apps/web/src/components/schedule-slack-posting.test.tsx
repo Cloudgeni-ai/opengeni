@@ -32,7 +32,13 @@ const listScheduledTaskSlackChannels = mock(
 );
 
 const context = {
-  client: { listConnections, listScheduledTaskSlackChannels },
+  client: {
+    listAvailableOpenGeniSlackBots: async (workspaceId: string) => ({
+      connections: await listConnections(workspaceId),
+      organizationSharedConnectionIds: [],
+    }),
+    listScheduledTaskSlackChannels,
+  },
   accessContext: accessContext(["scheduled_tasks:manage", "connections:read", "connections:write"]),
 };
 
@@ -69,7 +75,7 @@ function botConnection(): ConnectionMetadata {
       slackTeamName: "Example team",
       botId: "B0BOT01",
       botUserId: "U0BOT01",
-      botDisplayName: "OpenGeni",
+      botDisplayName: "Opengeni",
     },
     createdBySubjectId: "user:admin",
     updatedBySubjectId: "user:admin",
@@ -142,6 +148,21 @@ async function openChannelMenu(container: HTMLElement): Promise<HTMLButtonElemen
 }
 
 describe("ScheduleSlackPosting", () => {
+  test("a bot shared from another Opengeni workspace is selectable in this schedule", async () => {
+    listConnections.mockImplementationOnce(async () => [
+      { ...botConnection(), workspaceId: "installation-home" },
+    ]);
+    const { container, onChange, root } = await render();
+    expect(container.textContent).toContain("Post to Slack");
+    expect(listScheduledTaskSlackChannels).toHaveBeenCalledWith(WORKSPACE_ID, BOT_ID, undefined);
+    await openChannelMenu(container);
+    await act(async () => {
+      document.querySelectorAll<HTMLElement>('[role="option"]')[1]!.click();
+      await flush();
+    });
+    expect(onChange).toHaveBeenCalledWith({ connectionId: BOT_ID, channelId: "C0SCHED01" });
+    await act(async () => root.unmount());
+  });
   test("a materialized chat without a bot cannot offer an impossible posting choice", async () => {
     const { container, onChange, root } = await render(
       "",
@@ -197,7 +218,7 @@ describe("ScheduleSlackPosting", () => {
     );
     expect(container.querySelectorAll('[role="combobox"]')).toHaveLength(1);
     expect(container.textContent).toContain("Slack workspace");
-    expect(container.textContent).toContain("Example team · OpenGeni");
+    expect(container.textContent).toContain("Example team · Opengeni");
     expect(container.textContent).not.toContain("Second example team");
     await openChannelMenu(container);
     await act(async () => {

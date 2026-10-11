@@ -9,6 +9,7 @@ import {
   TechnicalDetails,
 } from "@/components/capabilities/capability-page";
 import { integrationDisclosureElementId } from "@/components/capabilities/integration-sheet";
+import { ConnectorToolPermissions } from "./connector-tool-permissions";
 import {
   INTEGRATION_LOCKED_SENTENCE,
   type IntegrationAccess,
@@ -27,7 +28,7 @@ import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
 
 /* ----------------------------------------------------------------------------
-   The page for an integration OpenGeni runs itself (Slack bot, GitHub, Google
+   The page for an integration Opengeni runs itself (Slack bot, GitHub, Google
    Drive, Jira & Confluence sync, Outlook, OneDrive). Same view-model the old
    sheet rendered, laid out on the one Capabilities page anatomy: the connect
    or repair action in the header, Disconnect in the ⋯ menu, accounts and
@@ -48,7 +49,7 @@ export function IntegrationPage({
   model: IntegrationViewModel;
   onBack: () => void;
   backLabel?: string;
-  /** The verb for the setup action, "Add OpenGeni to Slack". Defaults to "Connect <name>". */
+  /** The verb for the setup action, "Add Opengeni to Slack". Defaults to "Connect <name>". */
   setupLabel?: string;
 }) {
   const about = model.presentation?.summary;
@@ -160,6 +161,14 @@ export function IntegrationPage({
       ) : null}
 
       {model.access ? <AccessSection access={model.access} /> : null}
+      {model.toolPermissions ? (
+        <DetailSection
+          title="Approvals"
+          description="Choose which actions run automatically and which need your review."
+        >
+          <ConnectorToolPermissions {...model.toolPermissions} bare />
+        </DetailSection>
+      ) : null}
 
       {model.options.length > 0 ? (
         <DetailSection title="Settings">

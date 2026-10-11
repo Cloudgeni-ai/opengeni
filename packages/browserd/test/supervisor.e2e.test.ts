@@ -17,6 +17,130 @@ import {
 
 const e2e = process.env.OPENGENI_BROWSERD_E2E === "1" ? test : test.skip;
 
+// Positive directory recovery needs a complete process inventory and the exact
+// Chromium executable. CI runs this separately in an owned PID namespace.
+const recoveryE2e =
+  process.platform === "linux" && process.env.OPENGENI_BROWSERD_RECOVERY_E2E === "1"
+    ? e2e
+    : test.skip;
+recoveryE2e(
+  "graceful shutdown recovers the same managed profile and stored page state",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-graceful-e2e-");
+    const socketRootDirectory = await mkdtemp("/tmp/ogg-");
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: () =>
+        new Response(
+          `<!doctype html><title>Recovery fixture</title>
+      <button id="counter">Counter</button><p id="cookie"></p><script>
+        const render = () => {
+          counter.textContent = 'Counter ' + (localStorage.getItem('count') || '0');
+          cookie.textContent = 'Cookie ' + (document.cookie || 'empty');
+        };
+        counter.onclick = () => {
+          const count = Number(localStorage.getItem('count') || '0') + 1;
+          localStorage.setItem('count', String(count));
+          document.cookie = 'counter=' + count + '; Max-Age=3600; Path=/';
+          render();
+        }; render();
+      </script>`,
+          { headers: { "content-type": "text/html" } },
+        ),
+    });
+    const open = () =>
+      BrowserSupervisor.open({
+        rootDirectory: join(directory, "state"),
+        socketRootDirectory,
+        createDriver: async (context) => {
+          // Keep the actual executable in ownership receipts while applying
+          // the same container launch flags as the other Chromium CI fixtures.
+          const runner = await AgentBrowserJsonRunner.create({
+            namespace: "og",
+            sessionName: `r${randomUUID().replaceAll("-", "").slice(0, 16)}`,
+            socketDirectory: context.socketDirectory,
+            profileDirectory: context.profileDirectory,
+            downloadDirectory: context.downloadDirectory,
+            screenshotDirectory: context.screenshotDirectory,
+            headed: context.headed,
+            ...(context.browserExecutablePath
+              ? { browserExecutablePath: context.browserExecutablePath }
+              : {}),
+            launchArguments: ["--no-sandbox", "--disable-gpu"],
+            ...(context.recoverOwnedProcess
+              ? {
+                  recoverOwnedProcess: context.recoverOwnedProcess,
+                  allowOwnedProcessLaunch: context.allowOwnedProcessLaunch,
+                }
+              : {}),
+          });
+          return new AgentBrowserDriver({
+            browserSessionId: context.browserSessionId,
+            controllerGeneration: context.controllerGeneration,
+            runner,
+            focusEmulation: true,
+            downloadDirectory: context.downloadDirectory,
+            ...(context.downloadEvents ? { downloadEvents: context.downloadEvents } : {}),
+            resolveWorkspaceFiles: context.resolveWorkspaceFiles,
+          });
+        },
+      });
+    const options = {
+      ...reference(),
+      headed: false,
+      initialUrl: `http://127.0.0.1:${server.port}/`,
+      browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE ?? "/usr/bin/chromium",
+      workingRuntimeAuthority: {
+        tokenGeneration: 1,
+        placementDigest: "a".repeat(64),
+        controlDigest: "b".repeat(64),
+        viewDigest: "c".repeat(64),
+      },
+    };
+    const first = await open();
+    let second: BrowserSupervisor | undefined;
+    const failures: unknown[] = [];
+    try {
+      const created = await first.createSession(options);
+      const clicked = await first.action(clickCommand(created.observation));
+      expect(clicked.state).toBe("completed");
+      expect(names(clicked.observation!)).toContain("Counter 1");
+      const profile = join(directory, "state", "sessions", options.browserSessionId, "profile");
+      const inode = (await stat(profile)).ino;
+      await first.close();
+      second = await open();
+      const { initialUrl, ...recoveryOptions } = options;
+      const recovered = await second.createSession({
+        ...recoveryOptions,
+        recoverExistingWorkingDirectory: true,
+      });
+      expect(recovered.browserSessionId).toBe(options.browserSessionId);
+      expect(recovered.controllerGeneration).toBe(options.controllerGeneration);
+      expect((await stat(profile)).ino).toBe(inode);
+      const page = await second.openTarget(options, initialUrl);
+      expect(names(page)).toContain("Counter 1");
+      expect(names(page).join(" ")).toContain("Cookie counter=1");
+      await second.endSession(options, { removeState: true });
+    } catch (error) {
+      failures.push(error);
+    } finally {
+      const cleanup = await Promise.allSettled([first.close(), second?.close()]);
+      server.stop(true);
+      const cleanupFailures = cleanup.flatMap((result) =>
+        result.status === "rejected" ? [result.reason] : [],
+      );
+      failures.push(...cleanupFailures);
+      if (!cleanupFailures.length) {
+        await rm(directory, { recursive: true, force: true });
+        await rm(socketRootDirectory, { recursive: true, force: true });
+      }
+    }
+    if (failures.length) throw new AggregateError(failures, "managed recovery fixture failed");
+  },
+  60_000,
+);
+
 e2e("runs multiple real browser sessions through one placement supervisor", async () => {
   const directory = await mkdtemp("/tmp/ogb-supervisor-e2e-");
   const socketDirectory = await mkdtemp("/tmp/ogs-");

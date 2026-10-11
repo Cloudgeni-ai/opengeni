@@ -50,6 +50,11 @@ import {
   type ChannelASession,
 } from "../src/sandbox";
 import { createSandboxClientForBackend } from "../src/index";
+import { createTurnToolCancellationController } from "../src/sandbox/turn-tool-cancellation";
+import {
+  executeSynchronousCommand,
+  type SynchronousCommandPage,
+} from "../src/sandbox/synchronous-command";
 
 const NUL = String.fromCharCode(0);
 
@@ -205,6 +210,10 @@ function makeModalLikeExecOnlySession(
     beforeExec?: (
       args: Parameters<NonNullable<ChannelASession["execCommand"]>>[0],
     ) => void | Promise<void>;
+    transformStdout?: (
+      stdout: string,
+      args: Parameters<NonNullable<ChannelASession["execCommand"]>>[0],
+    ) => string;
     env?: Record<string, string>;
   } = {},
 ): {
@@ -213,8 +222,13 @@ function makeModalLikeExecOnlySession(
 } {
   const retainedOutputChars = 1024 * 1024;
   let truncated = 0;
+  // This host-shell facade is not a shipped provider adapter. Its trusted
+  // receipts come from the actual child's separate pipes and terminal status,
+  // never from its intentionally merged/capped human-facing banner.
+  const pages = new Map<unknown, SynchronousCommandPage>();
   return {
     session: {
+      getSynchronousCommandOutput: (raw) => pages.get(raw) ?? null,
       execCommand: async (args) => {
         await options.beforeExec?.(args);
         const child = Bun.spawn(["/bin/bash", "-c", args.cmd], {
@@ -235,11 +249,12 @@ function makeModalLikeExecOnlySession(
           stdout: "pipe",
           stderr: "pipe",
         });
-        const [stdout, stderr, exitCode] = await Promise.all([
+        const [rawStdout, stderr, exitCode] = await Promise.all([
           new Response(child.stdout).text(),
           new Response(child.stderr).text(),
           child.exited,
         ]);
+        const stdout = options.transformStdout?.(rawStdout, args) ?? rawStdout;
         let output = [stdout, stderr]
           .filter((value) => value.length > 0)
           .map((value) => value.trimEnd())
@@ -252,13 +267,15 @@ function makeModalLikeExecOnlySession(
             -retainedOutputChars,
           )}`;
         }
-        return [
-          "Chunk ID: modal-like",
+        const receipt = [
+          `Chunk ID: host-command-${crypto.randomUUID()}`,
           "Wall time: 0.0000 seconds",
           `Process exited with code ${exitCode}`,
           "Output:",
           output,
         ].join("\n");
+        pages.set(receipt, { stdout, stderr, exitCode, wallTimeSeconds: 0 });
+        return receipt;
       },
     },
     truncatedResponses: () => truncated,
@@ -323,6 +340,83 @@ function framedConfinedOutput(command: string, payload = "", status = 0, prelude
 }
 
 describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
+  test("the host-command fixture collects raw streams independently of capped presentation", async () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-channel-a-raw-fixture-"));
+    temporaryRoots.push(root);
+    let starts = 0;
+    const fixture = makeModalLikeExecOnlySession(root, {
+      beforeExec: () => {
+        starts++;
+      },
+    });
+    const result = await executeSynchronousCommand(fixture.session, {
+      cmd: "printf %01050000d 0; printf 'separate error\\n' >&2; exit 7",
+      maxOutputTokens: 1,
+    });
+    expect(result.exitCode).toBe(7);
+    expect(result.stdout).toBe("0".repeat(1_050_000));
+    expect(result.stderr).toBe("separate error\n");
+    expect(fixture.truncatedResponses()).toBe(1);
+    expect(starts).toBe(1);
+
+    // Removing the trusted surface does not authorize parsing the banner or
+    // replaying even this harmless command.
+    const unsupported = { execCommand: fixture.session.execCommand };
+    await expect(
+      executeSynchronousCommand(unsupported, { cmd: "printf harmless" }),
+    ).rejects.toMatchObject({ code: "synchronous_command_outcome_unknown" });
+    expect(starts).toBe(2);
+  });
+
+  test("multi-batch filesystem writes stay below the provider argument limit", async () => {
+    const { session, root } = await makeBox();
+    const controller = createTurnToolCancellationController();
+    const files = Array.from({ length: 8 }, (_, index) => ({
+      path: `file-${index}.txt`,
+      content: "x".repeat(12_000),
+    }));
+    let synchronousRuns = 0;
+    const service = new SandboxChannelAService({
+      session,
+      workspaceRoot: root,
+      commandRunner: (target, args) => {
+        synchronousRuns++;
+        return controller.runSandboxCommandSynchronous(target, args);
+      },
+    });
+
+    const result = await service.fsWriteFiles({ directory: "large-write", files });
+    await controller.waitForQuiescence();
+
+    expect(result.written).toEqual(files.map((file) => file.path));
+    expect(synchronousRuns).toBeGreaterThan(2);
+    for (const file of files) {
+      expect(readFileSync(join(root, "large-write", file.path), "utf8")).toBe(file.content);
+    }
+  });
+
+  test("internal synchronous cancellation waits for the compact command's process group", async () => {
+    const { session, root } = await makeBox();
+    const startedPath = `${root}/sync-cancel-started-${crypto.randomUUID()}`;
+    const latePath = `${root}/sync-cancel-late-${crypto.randomUUID()}`;
+    const abort = new AbortController();
+    const controller = createTurnToolCancellationController(abort.signal);
+    const operation = controller.runSandboxCommandSynchronous(session, {
+      cmd: `printf started > '${startedPath}'; trap '' INT TERM; sleep 2; printf late > '${latePath}'`,
+    });
+
+    for (let attempt = 0; attempt < 200 && !existsSync(startedPath); attempt += 1) {
+      await Bun.sleep(10);
+    }
+    expect(existsSync(startedPath)).toBe(true);
+    abort.abort(new Error("steered during internal filesystem command"));
+    await expect(operation).rejects.toThrow("steered during internal filesystem command");
+    await controller.waitForQuiescence();
+    await Bun.sleep(2_200);
+
+    expect(existsSync(latePath)).toBe(false);
+  });
+
   test("a filesystem-root workspace permits real child file operations", async () => {
     const directory = realpathSync(mkdtempSync(join(tmpdir(), "opengeni-root-workspace-")));
     temporaryRoots.push(directory);
@@ -748,7 +842,7 @@ describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
     expect(command).toContain("__OPENGENI_FS_LIST_TRUNCATED__");
   });
 
-  test("fsListPruned fails closed when the provider command is still running", async () => {
+  test("fsListPruned reports pending when a running provider command cannot be observed", async () => {
     const svc = new SandboxChannelAService({
       session: {
         exec: async () => ({
@@ -764,7 +858,7 @@ describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
       svc.fsListPruned({ path: "", depth: 8, maxEntries: 10, includeHidden: true }, [
         "node_modules",
       ]),
-    ).rejects.toBeInstanceOf(ChannelAUnavailableError);
+    ).rejects.toMatchObject({ code: "synchronous_command_outcome_unknown", sessionId: 17 });
   });
 
   test("fsList retries one completed transient probe and uses a profile-free control shell", async () => {
@@ -1622,6 +1716,54 @@ describe("Workspace file import (real local box)", () => {
     }
   });
 
+  test("creates missing destination folders inside the workspace only", async () => {
+    const { session, root } = await makeBox();
+    const placement = withPlacementPrivateStaging(session);
+    const outside = mkdtempSync(join(tmpdir(), "opengeni-import-outside-"));
+    temporaryRoots.push(outside);
+    symlinkSync(outside, join(root, "linked"));
+    const bytes = Buffer.from("report bytes");
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const server = Bun.serve({ port: 0, fetch: () => new Response(bytes) });
+    const service = new SandboxChannelAService({
+      session: placement.session,
+      workspaceRoot: root,
+    });
+    const source = {
+      url: server.url.toString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    };
+    try {
+      const saved = await service.importWorkspaceFile({
+        operationId: "00000000-0000-4000-8000-000000000086",
+        destinationPath: "reports/2026/report.pdf",
+        overwrite: false,
+        mayReplaceExisting: false,
+        createParents: true,
+        sizeBytes: bytes.byteLength,
+        sha256,
+        source,
+      });
+      expect(saved.destinationPath).toBe("reports/2026/report.pdf");
+      expect(readFileSync(join(root, "reports/2026/report.pdf"))).toEqual(bytes);
+      await expect(
+        service.importWorkspaceFile({
+          operationId: "00000000-0000-4000-8000-000000000087",
+          destinationPath: "linked/new/escape.pdf",
+          overwrite: false,
+          mayReplaceExisting: false,
+          createParents: true,
+          sizeBytes: bytes.byteLength,
+          sha256,
+          source,
+        }),
+      ).rejects.toThrow(/outside workspace/);
+      expect(existsSync(join(outside, "new"))).toBeFalse();
+    } finally {
+      server.stop(true);
+    }
+  });
+
   test("rejects corrupt source bytes without publishing a target", async () => {
     const { session, root } = await makeBox();
     const placement = withPlacementPrivateStaging(session);
@@ -1867,7 +2009,12 @@ describe("P4.4 SandboxChannelAService — Git (real local box)", () => {
       ].join(" && "),
     );
 
-    const modalLike = makeModalLikeExecOnlySession(root);
+    const modalLike = makeModalLikeExecOnlySession(root, {
+      transformStdout: (stdout, args) =>
+        args.cmd.includes("diff --no-color -z --numstat")
+          ? stdout.replace("__OPENGENI_GIT_CHUNK_V1__", "__OPENGENI_GIT_CHUNK_INVALID__")
+          : stdout,
+    });
     const execCommand = modalLike.session.execCommand!;
     let siblingSettled = false;
     modalLike.session.execCommand = async (args) => {
@@ -1878,10 +2025,7 @@ describe("P4.4 SandboxChannelAService — Git (real local box)", () => {
         siblingSettled = true;
         return output;
       }
-      const output = await running;
-      return args.cmd.includes("diff --no-color -z --numstat")
-        ? output.replace("__OPENGENI_GIT_CHUNK_V1__", "__OPENGENI_GIT_CHUNK_INVALID__")
-        : output;
+      return await running;
     };
 
     const svc = new SandboxChannelAService({ session: modalLike.session, workspaceRoot: root });
@@ -2030,7 +2174,7 @@ describe("P4.4 SandboxChannelAService — Git (real local box)", () => {
         `printf 'outside secret' > '${outside}'`,
         "git init -q",
         "git config user.email test@opengeni.local",
-        "git config user.name OpenGeni",
+        "git config user.name Opengeni",
         "git config commit.gpgsign false",
         `printf 'export const marker = "BASE";\\n' > server.ts`,
         `printf 'base\\n' > staged-and-unstaged.txt`,
@@ -2275,17 +2419,16 @@ describe("P4.4 SandboxChannelAService — Git (real local box)", () => {
     const root = mkdtempSync(join(tmpdir(), "opengeni-channel-a-regular-frame-"));
     temporaryRoots.push(root);
     runFixtureCommand(root, "git init -q && printf 'frame body\\n' > notes.txt");
-    const modalLike = makeModalLikeExecOnlySession(root);
-    const execCommand = modalLike.session.execCommand!;
     let corrupted = false;
-    modalLike.session.execCommand = async (args) => {
-      const output = await execCommand(args);
-      if (!corrupted && args.cmd.includes("line_count=") && output.includes("GIT_CHUNK_END_V1")) {
-        corrupted = true;
-        return output.replace("__OPENGENI_GIT_CHUNK_END_V1__", "");
-      }
-      return output;
-    };
+    const modalLike = makeModalLikeExecOnlySession(root, {
+      transformStdout: (stdout, args) => {
+        if (!corrupted && args.cmd.includes("line_count=") && stdout.includes("GIT_CHUNK_END_V1")) {
+          corrupted = true;
+          return stdout.replace("__OPENGENI_GIT_CHUNK_END_V1__", "");
+        }
+        return stdout;
+      },
+    });
     const svc = new SandboxChannelAService({
       session: modalLike.session,
       workspaceRoot: root,
@@ -2312,17 +2455,16 @@ describe("P4.4 SandboxChannelAService — Git (real local box)", () => {
       root,
       "git init -q && printf target > target.txt && ln -s target.txt link.txt",
     );
-    const modalLike = makeModalLikeExecOnlySession(root);
-    const execCommand = modalLike.session.execCommand!;
     let corrupted = false;
-    modalLike.session.execCommand = async (args) => {
-      const output = await execCommand(args);
-      if (!corrupted && args.cmd.includes("readlink -n") && output.includes("GIT_CHUNK_V1")) {
-        corrupted = true;
-        return output.replace("__OPENGENI_GIT_CHUNK_V1__", "__OPENGENI_GIT_CHUNK_V0__");
-      }
-      return output;
-    };
+    const modalLike = makeModalLikeExecOnlySession(root, {
+      transformStdout: (stdout, args) => {
+        if (!corrupted && args.cmd.includes("readlink -n") && stdout.includes("GIT_CHUNK_V1")) {
+          corrupted = true;
+          return stdout.replace("__OPENGENI_GIT_CHUNK_V1__", "__OPENGENI_GIT_CHUNK_V0__");
+        }
+        return stdout;
+      },
+    });
     const svc = new SandboxChannelAService({
       session: modalLike.session,
       workspaceRoot: root,
@@ -2350,7 +2492,7 @@ describe("P4.4 SandboxChannelAService — Git (real local box)", () => {
       const invalidPath = Buffer.concat([Buffer.from(`${root}/tracked-`), Buffer.from([0xff])]);
       runFixtureCommand(
         root,
-        "git init -q && git config user.email test@opengeni.local && git config user.name OpenGeni && git config commit.gpgsign false",
+        "git init -q && git config user.email test@opengeni.local && git config user.name Opengeni && git config commit.gpgsign false",
       );
       writeInvalidBytePath(invalidPath, "base\n");
       runFixtureCommand(root, "git add -A && git commit -q -m baseline");

@@ -30,6 +30,7 @@ import {
   ToolGatewayPathCollisionError as AttemptToolPathCollisionError,
   ToolGatewayToolNotFoundError as AttemptToolNotFoundError,
   digestCanonicalJson,
+  digestToolGatewayDefinition,
   prepareToolGatewayDefinitions,
   type PreparedToolGatewayCall,
   type ToolGatewayCallLifecycle,
@@ -75,6 +76,8 @@ export type AttemptToolAuthorization = (input: {
 export type CreateAttemptToolEnvironmentInput = {
   scope: AttemptToolScope;
   generation: number;
+  /** Trusted host's accepted native permission set, never caller input. */
+  firstPartyMcpPermissions?: AttemptToolCatalogValue["firstPartyMcpPermissions"];
   definitions: readonly AttemptToolDefinition[];
   createdAt?: Date;
   authorize?: AttemptToolAuthorization;
@@ -137,6 +140,23 @@ export class CodemodeOperationError extends Error {
   ) {
     super(operation.errorMessage ?? `Codemode operation ${operation.state}`);
     this.name = "CodemodeOperationError";
+    // Preserve the public operation property without dumping protected arguments into error logs.
+    Object.defineProperty(this, "operation", { value: operation, enumerable: false });
+  }
+}
+
+/** Compact receipt: payloads remain in the protected operation journal. */
+export class CodemodeApprovalPendingError extends Error {
+  readonly code = "codemode_approval_pending";
+  readonly state = "waiting_for_approval";
+  constructor(
+    readonly operationId: string,
+    readonly approvalRequestId: string | undefined,
+  ) {
+    super(
+      `Operation ${operationId} is waiting for approval. After review, read or resume this handle; do not submit its arguments again.`,
+    );
+    this.name = "CodemodeApprovalPendingError";
   }
 }
 
@@ -153,6 +173,8 @@ export type CodemodeClientOptions = {
 
 export type CodemodeCallOptions = {
   operationId?: string;
+  /** Optional public entry pin, checked again after a pre-submission stale refresh. */
+  expectedDefinitionDigest?: string;
   /** Stops client observation only; it never cancels an already-created server operation. */
   signal?: AbortSignal;
   timeoutMs?: number;
@@ -253,6 +275,18 @@ export class CodemodeClient {
     let catalog = await this.catalog(options.signal ? { signal: options.signal } : {});
     let entry = resolveEntry(catalog);
     if (!entry) throw new AttemptToolNotFoundError();
+    const assertDefinition = () => {
+      if (
+        options.expectedDefinitionDigest !== undefined &&
+        options.expectedDefinitionDigest !== digestToolGatewayDefinition(catalog, entry!)
+      )
+        throw new CodemodeTransportError("The tool definition changed before execution", 409, {
+          code: "tool_definition_stale",
+          retryable: true,
+          outcomeUnknown: false,
+        });
+    };
+    assertDefinition();
     const operationId = options.operationId ?? randomUUID();
     const deadline =
       Date.now() + boundedPositiveInteger(options.timeoutMs ?? this.timeoutMs, 1_000, 60 * 60_000);
@@ -287,6 +321,8 @@ export class CodemodeClient {
             operation === null &&
             !staleRefreshAttempted &&
             error instanceof CodemodeTransportError &&
+            error.outcomeUnknown !== true &&
+            error.retryable !== false &&
             error.remoteCode === "codemode_catalog_stale"
           ) {
             staleRefreshAttempted = true;
@@ -296,6 +332,7 @@ export class CodemodeClient {
             });
             entry = resolveEntry(catalog);
             if (!entry) throw new AttemptToolNotFoundError();
+            assertDefinition();
             submitted = false;
             nextNotifyAt = 0;
             continue;
@@ -333,6 +370,9 @@ export class CodemodeClient {
         }
       } else {
         operation = await this.read(operationId, options.signal);
+      }
+      if (operation.state === "waiting_for_approval") {
+        throw new CodemodeApprovalPendingError(operation.operationId, operation.approvalRequestId);
       }
       if (operation.state === "completed") {
         return { result: AttemptToolResult.parse(operation.result), entry };
@@ -404,26 +444,73 @@ export class CodemodeClient {
     argumentsValue: Record<string, unknown>,
     signal?: AbortSignal,
   ): Promise<CodemodeOperationValue> {
-    const response = await this.request("/calls", {
-      method: "POST",
-      ...(signal ? { signal } : {}),
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        operationId,
-        catalogDigest,
-        identity,
-        arguments: argumentsValue,
-      }),
+    // Submission is idempotent by the caller-owned operation id: identical
+    // bytes replay the same journal row, so a known-outcome transient server
+    // failure (for example a database contention 503) is resubmitted as is.
+    return await retryTransientCodemodeRequest(signal, async () => {
+      const response = await this.request("/calls", {
+        method: "POST",
+        ...(signal ? { signal } : {}),
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          operationId,
+          catalogDigest,
+          identity,
+          arguments: argumentsValue,
+          durableApproval: true,
+        }),
+      });
+      return CodemodeCallSubmission.parse(await response.json()).operation;
     });
-    return CodemodeCallSubmission.parse(await response.json()).operation;
+  }
+
+  /** Observe a durable handle using the current attempt, without resubmitting its payload. */
+  async status(operationId: string, signal?: AbortSignal) {
+    const operation = await this.read(operationId, signal);
+    return {
+      operationId: operation.operationId,
+      state: operation.state,
+      approvalRequestId: operation.approvalRequestId,
+      result: operation.result,
+      errorCode: operation.errorCode,
+      errorMessage: operation.errorMessage,
+    };
+  }
+
+  /** Observe continuation after review. Human approval wakes the worker; this never grants permission. */
+  async resume(
+    operationId: string,
+    options: Omit<CodemodeCallOptions, "operationId"> = {},
+  ): Promise<AttemptToolResultValue> {
+    const deadline =
+      Date.now() + boundedPositiveInteger(options.timeoutMs ?? this.timeoutMs, 1_000, 60 * 60_000);
+    while (true) {
+      throwIfAborted(options.signal);
+      const operation = await this.read(operationId, options.signal);
+      if (operation.state === "waiting_for_approval")
+        throw new CodemodeApprovalPendingError(operation.operationId, operation.approvalRequestId);
+      if (operation.state === "completed") return AttemptToolResult.parse(operation.result);
+      if (["failed", "outcome_unknown", "cancelled"].includes(operation.state))
+        throw new CodemodeOperationError(
+          operation,
+          operation.errorCode ?? `codemode_${operation.state}`,
+        );
+      if (Date.now() >= deadline)
+        throw new CodemodeTransportError(
+          `Codemode operation ${operationId} did not settle before the client deadline`,
+        );
+      await abortableDelay(this.pollIntervalMs, options.signal);
+    }
   }
 
   private async read(operationId: string, signal?: AbortSignal): Promise<CodemodeOperationValue> {
-    const response = await this.request(`/calls/${operationId}`, {
-      method: "GET",
-      ...(signal ? { signal } : {}),
+    return await retryTransientCodemodeRequest(signal, async () => {
+      const response = await this.request(`/calls/${operationId}`, {
+        method: "GET",
+        ...(signal ? { signal } : {}),
+      });
+      return CodemodeOperation.parse(await response.json());
     });
-    return CodemodeOperation.parse(await response.json());
   }
 
   /** Server-side Site preview forwarding. The attempt bearer never enters the
@@ -442,6 +529,7 @@ export class CodemodeClient {
       headers: {
         ...Object.fromEntries(new Headers(init.headers).entries()),
         authorization: `Bearer ${token}`,
+        "x-opengeni-codemode-capabilities": "durable-approval-v1",
       },
     });
     if (!response.ok && throwOnError) {
@@ -562,6 +650,10 @@ export class AttemptToolEnvironment {
     return await this.gateway.prepareCall(call, context);
   }
 
+  effectDigest(identity: AttemptToolIdentity): string {
+    return this.gateway.effectDigest(identity);
+  }
+
   async callModel(input: ModelAttemptToolCall): Promise<AttemptToolResultValue> {
     return await this.gateway.callModel(input);
   }
@@ -588,6 +680,9 @@ export function createAttemptToolEnvironment(
     ...input.scope,
     generation: input.generation,
     createdAt,
+    ...(input.firstPartyMcpPermissions !== undefined
+      ? { firstPartyMcpPermissions: [...input.firstPartyMcpPermissions] }
+      : {}),
     entries: [...prepared.entries],
   };
   const catalog = AttemptToolCatalog.parse({
@@ -750,6 +845,37 @@ function parseCodemodeApiError(input: unknown): {
     : null;
 }
 
+const CODEMODE_TRANSIENT_RETRY_DELAYS_MS = [100, 250, 500, 1_000, 2_000] as const;
+
+/** A server-declared transient failure whose outcome is known: nothing was applied. */
+export function isTransientCodemodeTransportError(error: unknown): boolean {
+  return (
+    error instanceof CodemodeTransportError &&
+    error.status !== null &&
+    error.status >= 500 &&
+    error.retryable === true &&
+    error.outcomeUnknown !== true
+  );
+}
+
+/** Bounded retry for idempotent journal requests (submit by operation id, read). */
+async function retryTransientCodemodeRequest<T>(
+  signal: AbortSignal | undefined,
+  request: () => Promise<T>,
+): Promise<T> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await request();
+    } catch (error) {
+      const delayMs = CODEMODE_TRANSIENT_RETRY_DELAYS_MS[attempt];
+      if (delayMs === undefined || signal?.aborted || !isTransientCodemodeTransportError(error)) {
+        throw error;
+      }
+      await abortableDelay(delayMs + Math.floor(Math.random() * delayMs), signal);
+    }
+  }
+}
+
 async function abortableDelay(delayMs: number, signal?: AbortSignal): Promise<void> {
   if (!signal) {
     await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
@@ -776,3 +902,5 @@ export * from "./artifacts";
 export * from "./structured";
 export * from "./declarations";
 export * from "./site";
+
+export * from "./pagination";

@@ -1,4 +1,4 @@
-# Contributing To OpenGeni
+# Contributing To Opengeni
 
 Thanks for considering a contribution.
 
@@ -91,7 +91,45 @@ Release and publishing guidance starts here; executable truth lives in [`package
 
 **Staging:** dispatch `staging-canary-dispatch.yml` with any `main` SHA whose `canary-sha-*` tags already exist. Pending changesets are allowed. Missing tags fail closed; do not rebuild unsigned `:ci` images.
 
-**Canary npm:** dispatch `publish-canary.yml` to publish `{next-patch}-canary.N` with dist-tag `canary` (committed `1.0.0` publishes `1.0.2-canary.N`, skipping a retired patch), so canaries sort after the committed release. This does not consume changeset files or move `latest`.
+**Canary packages:** dispatch `publish-canary.yml` on `main` with `source_sha` equal to that workflow run's exact `main` commit. The workflow, checked-out source, and publisher must all be that commit; an older ancestor is rejected. The workflow uses pinned Bun to build and pack, then the official publishing library under Bun with registry-token authentication and GitHub OIDC provenance. It publishes `{next-patch}-canary.N` with dist-tag `canary` (committed `1.0.0` publishes `1.0.2-canary.N`, skipping a retired patch), so canaries sort after the committed release. It does not consume changeset files or move `latest`; a new package with no `latest` tag remains without one.
+
+All archives are packed and frozen before the first write. Each topological
+publication retains an intent and a positive library HTTP acknowledgement before
+the next write; write retries are disabled. Receipt visibility is checked afterward
+in one bounded read-only phase, preserving latest, archive integrity, canary tag
+and provenance metadata checks. Site pins appear only after the complete cohort
+matches. Acknowledgements are not independent signed-byte acceptance. An uncertain
+write stops without replay. Bounded safe receipts survive ordinary workflow failure;
+a lost runner can still lose its artifact. Existing versions are never repaired in place.
+The final gate rereads the complete cohort within the original shared deadline,
+read quota and custody caps. These reads do not claim an atomic registry snapshot.
+Post-write receipt polling selects the current dist-tags document and the exact
+immutable version manifest rather than unrelated historical versions. Both GETs
+count toward the same 256-request budget and share one per-observation signal;
+the 180-second deadline and existing byte limits are unchanged. Pre-write discovery
+and occupied-version/stable-tag guards still use their existing metadata path.
+
+**Receipt-only recovery:** after a failed canary workflow has acknowledged its
+entire cohort, `reconcile-canary-publication.yml` can observe that exact source,
+run and attempt without publishing again. The protected current controller reads
+historical source only as immutable JSON data. It requires the original provider
+failure, absent Site artifact, bounded receipt artifact, complete linked positive
+acknowledgements and zero unknown writes. It verifies actual archive/manifest
+hashes and official GitHub provenance, then runs the unchanged bounded metadata
+poller and final complete-cohort reread. Unknown writes, expired/ambiguous artifacts,
+unsupported producer protocols, changed latest or superseded canary tags fail
+closed; this command cannot repair tags, rebuild packages or dispatch another run.
+The new `canary-publication-reconciliation-*` receipt and
+`reconciled-site-package-versions-*` artifact retain both controller and failed
+origin identities and set `promotionEligible: false`. They never replace the
+failed publisher conclusion or masquerade as its missing Site artifact.
+Consumers need explicit manual staging authority for this distinct contract;
+normal production, promotion, scheduling and image/source checks remain mandatory.
+Additional archive/provider GETs have a separate 15-minute stage deadline and
+finite byte/request quotas. Metadata still has one 180-second/256-GET/four-parallel
+phase with its original custody caps. Official `gh attestation verify` retains
+its default public-good TUF trust fetches outside the controlled GET byte quota;
+each verifier child, stdio and cache is bounded separately.
 
 In GitHub Actions, `N` has a floor derived from the workflow run ID and attempt
 (`run ID * 1000 + attempt`), so retries do not reuse versions hidden by stale
@@ -177,5 +215,5 @@ profiles and regression fixtures when extending the supported closure.
 
 ## Migration Authoring
 
-- Migrations must be schema-agnostic: they run under a caller-selected schema/search path. Use `current_schema()` in policy/guard queries, and never pin OpenGeni tables to `public` or issue `SET search_path` inside a migration.
+- Migrations must be schema-agnostic: they run under a caller-selected schema/search path. Use `current_schema()` in policy/guard queries, and never pin Opengeni tables to `public` or issue `SET search_path` inside a migration.
 - `opengeni_app` grant blocks must also be schema-agnostic: use `current_schema()` with dynamic SQL (`EXECUTE format(... %I ...)`) instead of `IN SCHEMA public`, and include default privileges when future tables or sequences must inherit app-role access.

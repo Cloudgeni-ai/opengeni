@@ -8,6 +8,7 @@ import {
   MAX_SELECTED_VARIABLE_SETS,
   Permission,
   SESSION_INSTRUCTIONS_MAX_CHARACTERS,
+  SESSION_ADMIN_ACCESS_TOOL_NAME_SET,
   SESSION_TITLE_MAX_CHARACTERS,
   WORK_DISCOVERY_QUERY_MAX_CHARS,
   type AccessGrant,
@@ -696,7 +697,7 @@ describe("first-party MCP tool visibility policy", () => {
     ).rejects.toThrow("sessions_list query must be at most 200 characters");
   });
 
-  test("ordinary omission excludes connector tools while explicit authorized selection stays exact", () => {
+  test("an attempt without an accepted tool selection never receives connector tools", () => {
     const ordinary = buildOpenGeniMcpServer(
       deps(),
       grant([...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS]),
@@ -792,8 +793,13 @@ describe("first-party MCP tool visibility policy", () => {
       const tool = (await client.listTools()).tools.find(
         (candidate) => candidate.name === "session_create",
       );
-      expect(tool?.description).toContain("non-delegating leaf");
-      expect(tool?.description).toContain("do not use a child-local depth override");
+      expect(tool?.description).toContain(
+        "Normally omit tools, mcpServers, and firstPartyMcpTools",
+      );
+      expect(tool?.description).toContain("capabilities: { from: 'all', subagents: false }");
+      expect(tool?.description).toContain("cannot start, message, or follow other sessions");
+      expect(tool?.description).toContain("Explicit tool arrays replace the inherited selection");
+      expect(tool?.description).toContain("Do not use a child-local depth override");
       expect(tool?.description).toContain("concise semantic title");
       const serialized = JSON.stringify(tool?.inputSchema);
       expect(serialized).not.toContain("maxNestedAgentDepth");
@@ -942,7 +948,7 @@ describe("first-party MCP tool visibility policy", () => {
       structuredContent: {
         error: {
           code: "session_create_failed",
-          message: "OpenGeni could not complete the request.",
+          message: "Opengeni could not complete the request.",
         },
       },
     });
@@ -975,7 +981,7 @@ describe("first-party MCP tool visibility policy", () => {
       structuredContent: {
         error: {
           code: "session_create_failed",
-          message: "OpenGeni could not complete the request.",
+          message: "Opengeni could not complete the request.",
         },
       },
     });
@@ -1201,7 +1207,7 @@ describe("first-party MCP tool visibility policy", () => {
       expect(result.isError).toBe(true);
       expect(result.structuredContent?.error).toMatchObject({
         code: `${tool}_failed`,
-        message: "OpenGeni could not complete the request.",
+        message: "Opengeni could not complete the request.",
         diagnosticExport: "disabled",
         diagnostic: { sessionId, turnId, attemptId, executionGeneration: 1, sqlState: "42501" },
       });
@@ -1221,7 +1227,10 @@ describe("first-party MCP tool visibility policy", () => {
 
     const broad = registeredToolNames(server);
     expect(broad).toEqual(
-      FIRST_PARTY_REMOTE_MCP_TOOL_NAMES.filter((name) => name !== "slack_bot_search").sort(),
+      FIRST_PARTY_REMOTE_MCP_TOOL_NAMES.filter(
+        // Admin tools come from the session's admin access, not its selection.
+        (name) => name !== "slack_bot_search" && !SESSION_ADMIN_ACCESS_TOOL_NAME_SET.has(name),
+      ).sort(),
     );
     // Generic agent calls cannot supply Slack's trusted interaction action token,
     // even after an approved deployment enables full Slack access.
@@ -1308,9 +1317,9 @@ describe("first-party MCP tool visibility policy", () => {
     }
   });
 
-  test("scheduled Slack posting tools take no destination and stay explicit-only", async () => {
-    expect(DEFAULT_FIRST_PARTY_MCP_TOOLS).not.toContain("slack_bot_prepare_message");
-    expect(DEFAULT_FIRST_PARTY_MCP_TOOLS).not.toContain("slack_bot_send_prepared_message");
+  test("bot posting is default-discoverable and accepts an ordinary chat destination", async () => {
+    expect(DEFAULT_FIRST_PARTY_MCP_TOOLS).toContain("slack_bot_prepare_message");
+    expect(DEFAULT_FIRST_PARTY_MCP_TOOLS).toContain("slack_bot_send_prepared_message");
     const server = buildOpenGeniMcpServer(
       deps(),
       grant(["connections:read"], ["slack_bot_prepare_message", "slack_bot_send_prepared_message"]),
@@ -1323,8 +1332,10 @@ describe("first-party MCP tool visibility policy", () => {
       const tools = (await client.listTools()).tools;
       const prepare = tools.find((tool) => tool.name === "slack_bot_prepare_message");
       const send = tools.find((tool) => tool.name === "slack_bot_send_prepared_message");
-      // The agent cannot name a channel, user, or bot connection.
+      // Ordinary chats choose a channel; scheduled execution enforces its fixed destination.
       expect(Object.keys(prepare?.inputSchema.properties ?? {}).sort()).toEqual([
+        "channelId",
+        "connectionId",
         "text",
         "threadTimestamp",
       ]);
@@ -1406,7 +1417,14 @@ describe("first-party MCP tool visibility policy", () => {
       expect(request?.inputSchema).toMatchObject({
         required: expect.arrayContaining(["capabilityId", "rationale"]),
       });
-      expect(custom?.description).toContain("cannot add, enable, or contact");
+      // The review card itself contacts nothing; the authorized native lifecycle
+      // requires the existing connection-management permissions.
+      expect(custom?.description).toContain(
+        "Posting this card does not contact or connect the server.",
+      );
+      expect(custom?.description).toContain(
+        "delegated connections:read, connections:write and capabilities:manage",
+      );
       expect(custom?.inputSchema).toMatchObject({
         required: expect.arrayContaining(["name", "endpointUrl", "rationale"]),
       });
@@ -1459,6 +1477,55 @@ describe("first-party MCP tool visibility policy", () => {
     } finally {
       await Promise.all([client.close(), server.close()]);
     }
+  });
+});
+
+describe("session admin access tools", () => {
+  const adminTools = ["admin_action_call", "admin_action_describe", "admin_actions_search"];
+  const access = {
+    origin: "http://opengeni.test",
+    dispatch: async () => new Response(null, { status: 500 }),
+  };
+  const admin = (server: unknown) =>
+    registeredToolNames(server).filter((name) => name.startsWith("admin_"));
+
+  test("are never selected by default", () => {
+    for (const name of adminTools) {
+      expect(DEFAULT_FIRST_PARTY_MCP_TOOLS as readonly string[]).not.toContain(name);
+    }
+    expect(
+      admin(buildOpenGeniMcpServer(deps(), grant([...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS]))),
+    ).toEqual([]);
+  });
+
+  test("appear only while the session has admin access, whatever its selection or permissions", () => {
+    // An empty selection and no permissions: admin access alone adds them.
+    expect(
+      admin(buildOpenGeniMcpServer(deps(), grant([], []), { sessionAdminAccess: access })),
+    ).toEqual(adminTools);
+    // Selecting them by name without admin access never registers them.
+    expect(
+      admin(
+        buildOpenGeniMcpServer(
+          deps(),
+          grant([...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS], adminTools as FirstPartyMcpToolName[]),
+          { sessionAdminAccess: null },
+        ),
+      ),
+    ).toEqual([]);
+  });
+
+  test("need an agent turn bound to a session", () => {
+    const human: AccessGrant = {
+      accountId,
+      workspaceId,
+      subjectId: "user:someone",
+      principalKind: "human_session",
+      permissions: [...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS],
+    };
+    expect(admin(buildOpenGeniMcpServer(deps(), human, { sessionAdminAccess: access }))).toEqual(
+      [],
+    );
   });
 });
 

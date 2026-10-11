@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   verify:
-    name: Verify anonymous OpenGeni image access
+    name: Verify anonymous Opengeni image access
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

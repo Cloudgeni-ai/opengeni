@@ -31,7 +31,7 @@
 
 use crate::uploads::update_drain::{UpdateDrain, UpdateReservation, WorkReservation};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -54,6 +54,7 @@ use tracing::{debug, error, info, warn};
 use crate::backoff::Backoff;
 use crate::browser_bridge::BrowserBridgeInventory;
 use crate::config::StoredCredentials;
+use crate::credential_renewal::{renew_now, RenewNowError};
 use crate::dispatch::{self, DispatchContext};
 use crate::engine::Engine;
 
@@ -95,9 +96,9 @@ pub enum SupervisorError {
 
 /// Heuristically classify a NATS connect error as an AUTHENTICATION denial (the
 /// callout rejected the bearer) vs a generic transport disconnect. async-nats
-/// surfaces an auth failure as an error whose message names "authorization"
-/// /"authentication"; we match on that so the agent can log the auth denial clearly
-/// instead of treating a deny as an indistinguishable blip.
+/// surfaces both denials and handshake timeouts using "authorization" or
+/// "authentication". A timeout does not establish a credential rejection, so
+/// exclude it before recognizing denial messages.
 fn is_authentication_error(err: &async_nats::ConnectError) -> bool {
     message_is_authentication_denial(&err.to_string())
 }
@@ -106,6 +107,9 @@ fn is_authentication_error(err: &async_nats::ConnectError) -> bool {
 /// unit-testable without constructing an `async_nats::ConnectError`.
 fn message_is_authentication_denial(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
+    if lower.contains("timeout") || lower.contains("timed out") {
+        return false;
+    }
     lower.contains("authorization")
         || lower.contains("authentication")
         || lower.contains("auth violation")
@@ -392,6 +396,37 @@ impl<P: Platform> WorkspaceLink<P> {
         }
     }
 
+    /// Only an exact process subject at the same local connection and origin
+    /// may inherit the lane captured by an existing op's frame sink. A changed
+    /// bearer is deliberately not part of that identity: the new transport
+    /// authenticates with it while retained ops keep their original subject.
+    fn same_frame_scope(&self, candidate: &SupervisorLink<P>) -> bool {
+        self.connection_id == candidate.connection_id
+            && self.api_url == candidate.api_url
+            && self.creds.workspace_id == candidate.credentials.workspace_id
+            && self.creds.agent_id == candidate.credentials.agent_id
+            && self.connection_instance_id == candidate.connection_instance_id
+            && self.subject_prefix()
+                == format!(
+                    "agent.{}.{}.connection.{}",
+                    candidate.credentials.workspace_id,
+                    candidate.credentials.agent_id,
+                    candidate.connection_instance_id
+                )
+    }
+
+    fn replacing_definition(definition: SupervisorLink<P>, previous: &Self) -> Self {
+        let reuse_lane = previous.same_frame_scope(&definition);
+        let mut replacement = Self::from_definition(definition);
+        if reuse_lane {
+            // The previous serve task has cleared its sender before returning.
+            // Rebinding this same Arc lets retained pumps replay through the
+            // successor's authenticated bulk connection.
+            replacement.bulk_tx = previous.bulk_tx.clone();
+        }
+        replacement
+    }
+
     fn subject_prefix(&self) -> String {
         format!(
             "agent.{}.{}.connection.{}",
@@ -508,6 +543,13 @@ impl<P: Platform + 'static> Supervisor<P> {
         self
     }
 
+    /// All ingress transports share one process-wide accepted-work boundary.
+    #[must_use]
+    pub fn with_update_drain(mut self, update_drain: Arc<UpdateDrain>) -> Self {
+        self.update_drain = update_drain;
+        self
+    }
+
     /// A handle that, when [`request`](ShutdownSignal::request)ed, drives a clean
     /// shutdown of the run loop. Wired to SIGINT/SIGTERM by [`crate::run`].
     #[must_use]
@@ -572,6 +614,7 @@ impl<P: Platform + 'static> Supervisor<P> {
             .map(|link| (link.connection_id.clone(), link))
             .collect();
         let mut active: HashMap<String, Arc<WorkspaceLink<P>>> = HashMap::new();
+        let mut removed_or_rescoped = HashSet::new();
         let mut serves = FuturesUnordered::new();
         for definition in desired.values().cloned() {
             let link = Arc::new(WorkspaceLink::from_definition(definition));
@@ -607,7 +650,15 @@ impl<P: Platform + 'static> Supervisor<P> {
                         .collect();
 
                     for (id, link) in &active {
-                        let unchanged = next.get(id).is_some_and(|candidate| {
+                        let same_scope = next.get(id).is_some_and(|candidate| {
+                            link.same_frame_scope(candidate)
+                        });
+                        if !same_scope {
+                            // Removal or an authority change is not a credential
+                            // refresh, even if the same name later reappears.
+                            removed_or_rescoped.insert(id.clone());
+                        }
+                        let unchanged = same_scope && next.get(id).is_some_and(|candidate| {
                             candidate.credentials == link.creds
                         });
                         if !unchanged {
@@ -625,9 +676,14 @@ impl<P: Platform + 'static> Supervisor<P> {
                 }
                 finished = serves.next(), if !serves.is_empty() => {
                     if let Some(id) = finished {
-                        active.remove(&id);
+                        let previous = active.remove(&id);
+                        let may_reuse = !removed_or_rescoped.remove(&id);
                         if let Some(definition) = desired.get(&id).cloned() {
-                            let link = Arc::new(WorkspaceLink::from_definition(definition));
+                            let link = Arc::new(match (previous.as_deref(), may_reuse) {
+                                (Some(previous), true) =>
+                                    WorkspaceLink::replacing_definition(definition, previous),
+                                _ => WorkspaceLink::from_definition(definition),
+                            });
                             active.insert(id.clone(), link.clone());
                             serves.push(self.run_owned_link(link));
                         }
@@ -657,6 +713,7 @@ impl<P: Platform + 'static> Supervisor<P> {
             *link.desktop_status.write().expect("desktop status lock") = Some(v1::DesktopStatus {
                 available: capabilities.desktop,
                 unavailable_reason: capabilities.desktop_unavailable_reason,
+                mac_permissions: capabilities.mac_permissions,
             });
             tokio::time::sleep(DEFAULT_HEARTBEAT).await;
         }
@@ -875,8 +932,8 @@ impl<P: Platform + 'static> Supervisor<P> {
             }
             tokio::select! {
                 biased;
-                // Stop accepting work immediately. Accepted work is cancelled below
-                // before we announce going-offline and return.
+                // Stop accepting work immediately. Generation waiters retire below;
+                // the actual accepted work retains its reservation independently.
                 () = self.link_stop_notified(link) => {
                     break ConnectionOutcome::CleanShutdown;
                 }
@@ -935,10 +992,9 @@ impl<P: Platform + 'static> Supervisor<P> {
             }
         };
 
-        // Reply and op-start handshake tasks belong to this connection
-        // generation. Once it ends, they cannot publish a useful reply. This
-        // count deliberately excludes already-established op-stream jobs: those
-        // detach below, keep running, and replay after the next connection.
+        // This count covers generation waiters, not the accepted workers. Those
+        // workers keep executing and settle on their original client. Established
+        // op-stream jobs also detach and replay after the next connection.
         let generation_bound_tasks = rpc_tasks.len();
         if generation_bound_tasks > 0 {
             let reason = match &outcome {
@@ -1017,12 +1073,17 @@ impl<P: Platform + 'static> Supervisor<P> {
         let reservation = if upload
             || !matches!(
                 &route,
-                Route::Liveness | Route::OpControl | Route::AgentUpdate(_)
+                Route::Liveness | Route::AgentUpdate(_) | Route::CredentialRenew
             ) {
             let identity = upload
                 .then(|| crate::uploads::identity(&request, &link.connection_id))
                 .flatten();
-            let Some(reservation) = self.update_drain.reserve_work(identity) else {
+            let admitted = if matches!(route, Route::OpControl) {
+                self.update_drain.reserve_control()
+            } else {
+                self.update_drain.reserve_work(identity)
+            };
+            let Some(reservation) = admitted else {
                 publish_response(
                     client,
                     reply,
@@ -1043,10 +1104,11 @@ impl<P: Platform + 'static> Supervisor<P> {
             let shutdown = link.shutdown.clone();
             let global_shutdown = self.shutdown.clone();
             let client = client.clone();
-            rpc_tasks.spawn(async move {
+            let reply_reservation = reservation.expect("upload reservation");
+            let worker_reservation = reply_reservation.clone();
+            spawn_admitted_rpc(rpc_tasks, reply_reservation, async move {
                 // A blocking filesystem call outlives cancellation of its reply task.
-                let response = tokio::task::spawn_blocking(move || {
-                    let reservation = reservation.expect("upload reservation");
+                let response = opengeni_agent_platform::spawn_blocking_reserved(move || {
                     uploads.lock().expect("upload registry").serve_reserved(
                         platform.as_ref(),
                         &request,
@@ -1054,7 +1116,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                         // subject. Session route epochs are pinned per upload;
                         // they are not a machine-wide generation.
                         &|| !shutdown.is_requested() && !global_shutdown.is_requested(),
-                        &reservation,
+                        &worker_reservation,
                     )
                 })
                 .await;
@@ -1105,13 +1167,35 @@ impl<P: Platform + 'static> Supervisor<P> {
                 );
             }
             Route::OpControl => {
-                let response =
-                    serve_op_control(&self.engine, &link.connection_id, request_id, &request);
-                publish_response(client, reply, response, label, max_payload).await;
+                let engine = self.engine.clone();
+                let connection_id = link.connection_id.clone();
+                let client = client.clone();
+                spawn_admitted_rpc(
+                    rpc_tasks,
+                    reservation.expect("control reservation"),
+                    async move {
+                        let response =
+                            serve_op_control(&engine, &connection_id, request_id, &request);
+                        publish_response(&client, reply, response, label, max_payload).await;
+                    },
+                );
             }
             Route::AgentUpdate(update) => {
                 self.spawn_agent_update(link, client, &request, update, reply)
                     .await;
+            }
+            Route::CredentialRenew => {
+                // Bounded by the renewal HTTP timeout. Detached so adopting the
+                // renewed file (which restarts this link) cannot cut the reply.
+                let connection_id = link.connection_id.clone();
+                let client = client.clone();
+                tokio::spawn(async move {
+                    let response =
+                        credential_renew_response(request_id, renew_now(&connection_id).await);
+                    publish_response(&client, reply, response, label, max_payload).await;
+                    // Adopting the renewed file restarts this link; send first.
+                    let _ = client.flush().await;
+                });
             }
             Route::LegacyGit(git) => {
                 let resource_policy = request.resource_policy;
@@ -1133,21 +1217,27 @@ impl<P: Platform + 'static> Supervisor<P> {
                 let engine = self.engine.clone();
                 let ctx = self.ctx(link, max_payload);
                 let scope = link.connection_id.clone();
-                rpc_tasks.spawn(async move {
-                    let _reservation = reservation;
-                    let op = crate::engine::scoped_op_id(&scope, &request_id);
-                    let origin = crate::engine::scoped_origin(&scope, crate::engine::LEGACY_ORIGIN);
-                    let ticket = match engine.admit(&op, class, &origin).await {
-                        Ok(ticket) => ticket,
-                        Err(reason) => {
-                            let response = dispatch::breaker_reply_error(request_id, label, reason);
-                            publish_response(&client, reply, response, label, max_payload).await;
-                            return;
-                        }
-                    };
-                    serve_request(&client, reply, request, &platform, &ctx, max_payload).await;
-                    drop(ticket);
-                });
+                spawn_admitted_rpc(
+                    rpc_tasks,
+                    reservation.expect("work reservation"),
+                    async move {
+                        let op = crate::engine::scoped_op_id(&scope, &request_id);
+                        let origin =
+                            crate::engine::scoped_origin(&scope, crate::engine::LEGACY_ORIGIN);
+                        let ticket = match engine.admit(&op, class, &origin).await {
+                            Ok(ticket) => ticket,
+                            Err(reason) => {
+                                let response =
+                                    dispatch::breaker_reply_error(request_id, label, reason);
+                                publish_response(&client, reply, response, label, max_payload)
+                                    .await;
+                                return;
+                            }
+                        };
+                        serve_request(&client, reply, request, &platform, &ctx, max_payload).await;
+                        drop(ticket);
+                    },
+                );
             }
         }
     }
@@ -1282,17 +1372,30 @@ impl<P: Platform + 'static> Supervisor<P> {
             // accepted work remains, preserving its independent lifetime.
             let mut busy_code = update_busy_code(&update_drain, &engine);
             if busy_code.is_none() {
-                if let Some(backend) = browser_control {
-                    busy_code = match backend.is_idle().await {
+                if let Some(backend) = browser_control.as_ref() {
+                    busy_code = match backend.begin_update(&update.operation_id).await {
                         Ok(true) => None,
                         Ok(false) => Some("update_busy_work"),
                         Err(_) => Some("update_state_unavailable"),
                     };
                 }
             }
+            // Controller fencing awaits external IO. Recheck the shared fence:
+            // an admitted control on any link may have arrived during that proof.
+            if busy_code.is_none() {
+                busy_code = update_busy_code(&update_drain, &engine);
+                if busy_code.is_none() && !update_drain.seal_update(&update.operation_id) {
+                    busy_code = Some("update_busy_work");
+                }
+            }
             if let Some(code) = busy_code {
-                // Reopen admission before publishing the terminal receipt so a
-                // caller observing failure can immediately continue ordinary work.
+                if let Some(backend) = browser_control.as_ref() {
+                    if backend.release_update(&update.operation_id).await.is_err() {
+                        warn!("browser controller update fence could not be released");
+                    }
+                }
+                // Reopen host admission. Any lost controller-release receipt
+                // retains its exact owner for ordinary scoped recovery.
                 update_drain.release_update(&update.operation_id);
                 publish_agent_update_progress(
                     &client,
@@ -1355,6 +1458,11 @@ impl<P: Platform + 'static> Supervisor<P> {
                     shutdown.request_update();
                 }
                 Ok(Err(code)) => {
+                    if let Some(backend) = browser_control.as_ref() {
+                        if backend.release_update(&update.operation_id).await.is_err() {
+                            warn!("browser controller update fence could not be released");
+                        }
+                    }
                     let rolled_back = matches!(
                         code.as_str(),
                         "startup_preflight_failed_rolled_back"
@@ -1376,6 +1484,11 @@ impl<P: Platform + 'static> Supervisor<P> {
                     update_drain.release_update(&update.operation_id);
                 }
                 Err(error) => {
+                    if let Some(backend) = browser_control.as_ref() {
+                        if backend.release_update(&update.operation_id).await.is_err() {
+                            warn!("browser controller update fence could not be released");
+                        }
+                    }
                     warn!(%error, "self-update worker failed");
                     publish_agent_update_progress(
                         &client,
@@ -1425,8 +1538,7 @@ impl<P: Platform + 'static> Supervisor<P> {
         let scope = link.connection_id.clone();
         let (request_epoch, held_epoch) = (request.epoch, self.ctx(link, max_payload).epoch);
         let request_id = request.request_id.clone();
-        rpc_tasks.spawn(async move {
-            let _reservation = reservation;
+        spawn_admitted_rpc(rpc_tasks, reservation, async move {
             let response = if request_epoch != 0 && request_epoch < held_epoch {
                 dispatch::fenced_reply(request_id, request_epoch, held_epoch)
             } else {
@@ -1484,8 +1596,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                 debug!("bulk lane full/closed; op frame dropped (replay heals)");
             }
         });
-        rpc_tasks.spawn(async move {
-            let _reservation = reservation;
+        spawn_admitted_rpc(rpc_tasks, reservation, async move {
             let response = if request_epoch != 0 && request_epoch < held_epoch {
                 dispatch::fenced_reply(request_id, request_epoch, held_epoch)
             } else {
@@ -1655,11 +1766,15 @@ impl<P: Platform + 'static> Supervisor<P> {
         // (both are synchronous OS calls): a display can physically exist while the OS
         // withholds the screen-capture grant (macOS Screen Recording / TCC), in which
         // case capture would yield nothing and the model would see a blank.
-        let (display, capture_blocked) = tokio::task::spawn_blocking(move || {
-            (desktop.probe(), desktop.capture_blocked_reason())
+        let (display, capture_blocked, mac_permissions) = tokio::task::spawn_blocking(move || {
+            (
+                desktop.probe(),
+                desktop.capture_blocked_reason(),
+                mac_desktop_permissions(),
+            )
         })
         .await
-        .unwrap_or((None, None));
+        .unwrap_or((None, None, None));
         let has_relay = link.platform.stream_registry().is_some();
         // A desktop is available only when a display probes, we can stream it, AND the
         // OS actually permits capture. Advertising `desktop: true` on a machine that
@@ -1688,6 +1803,8 @@ impl<P: Platform + 'static> Supervisor<P> {
             operation_resource_policy: link.platform.operation_resource_policy_supported(),
             operation_cpu_quota: link.platform.operation_cpu_quota_supported(),
             transactional_fs_write: link.platform.transactional_fs_write_supported(),
+            credential_renew: true,
+            mac_permissions,
         }
     }
 
@@ -1808,6 +1925,8 @@ enum Route {
     OpControl,
     /// Process-global signed self-update, coordinated outside host admission.
     AgentUpdate(v1::AgentUpdateApplyRequest),
+    /// Renew this connection's credentials now; touches no host work.
+    CredentialRenew,
     /// Runs on its own task behind an engine admission ticket of this class.
     Work(JobClass),
 }
@@ -1823,6 +1942,7 @@ fn classify(request: &ControlRequest) -> Route {
         Some(Op::OpStart(start)) => Route::OpStart(start.clone()),
         Some(Op::OpCancel(_) | Op::OpQuery(_) | Op::OpAttach(_)) => Route::OpControl,
         Some(Op::AgentUpdateApply(update)) => Route::AgentUpdate(update.clone()),
+        Some(Op::CredentialRenew(_)) => Route::CredentialRenew,
         _ => Route::Work(JobClass::Light),
     }
 }
@@ -1848,6 +1968,57 @@ fn serve_op_control(
             crate::ops::serve_op_attach_scoped(engine, scope, request_id, attach)
         }
         _ => unreachable!("classified OpControl"),
+    }
+}
+
+/// The three macOS desktop permissions, read without prompting. `None` off
+/// macOS desktop builds, where the control plane must treat them as unknown.
+#[cfg(all(target_os = "macos", feature = "macos-desktop"))]
+fn mac_desktop_permissions() -> Option<v1::MacDesktopPermissions> {
+    let grants = opengeni_agent_platform::desktop_grants();
+    Some(v1::MacDesktopPermissions {
+        screen_recording: grants.screen_recording,
+        accessibility: grants.accessibility,
+        input_monitoring: grants.input_monitoring,
+    })
+}
+
+#[cfg(not(all(target_os = "macos", feature = "macos-desktop")))]
+fn mac_desktop_permissions() -> Option<v1::MacDesktopPermissions> {
+    None
+}
+
+/// The reply to a CredentialRenewRequest. Failures carry a stable
+/// `failure_code` so the control plane can explain them without parsing text.
+fn credential_renew_response(
+    request_id: String,
+    outcome: Result<bool, RenewNowError>,
+) -> v1::ControlResponse {
+    match outcome {
+        Ok(consented_screen_control) => v1::ControlResponse {
+            request_id,
+            error: None,
+            result: Some(v1::control_response::Result::CredentialRenew(
+                v1::CredentialRenewResponse {
+                    renewed: true,
+                    consented_screen_control,
+                },
+            )),
+        },
+        Err(error) => {
+            let mut detail = HashMap::new();
+            detail.insert("failure_code".to_string(), error.code().to_string());
+            v1::ControlResponse {
+                request_id,
+                error: Some(v1::AgentError {
+                    code: v1::ErrorCode::Os as i32,
+                    message: format!("credential renewal failed: {}", error.code()),
+                    retryable: error.retryable(),
+                    detail,
+                }),
+                result: None,
+            }
+        }
     }
 }
 
@@ -1946,8 +2117,8 @@ async fn housekeeping_loop(engine: Arc<Engine>) {
 }
 
 /// Dispatch one already-decoded request and publish its typed response. This
-/// function owns no connection-generation state, so the generation's `JoinSet`
-/// can cancel it deterministically on disconnect or shutdown. (No duration
+/// function owns no connection-generation state. The generation waits on its
+/// independently retained execution; disconnect does not cancel accepted work. (No duration
 /// policing here: an op producing output is healthy at any age — the
 /// LIMITS-DOCTRINE health rule; liveness is the op-stream progress cadence.)
 async fn serve_request<P: Platform>(
@@ -1971,6 +2142,24 @@ async fn serve_request<P: Platform>(
     publish_response(client, reply, response, label, max_payload).await;
 }
 
+/// Generation tasks wait on, but do not own, accepted physical work. Dropping
+/// their JoinHandle detaches the actual worker; its guard covers execution and
+/// transport settlement on the original client, even after another link updates.
+fn spawn_admitted_rpc<F>(tasks: &mut JoinSet<()>, reservation: WorkReservation, work: F)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let actual = tokio::spawn(opengeni_agent_platform::with_work_reservation(
+        Some(reservation),
+        work,
+    ));
+    tasks.spawn(async move {
+        if let Err(error) = actual.await {
+            warn!(%error, "accepted control worker ended without a complete receipt");
+        }
+    });
+}
+
 /// Encode and publish a response with the generic negotiated-payload guard. A
 /// payload failure remains an operation-level typed outcome and never changes
 /// heartbeat or machine-liveness state.
@@ -1981,6 +2170,7 @@ async fn publish_response(
     label: &'static str,
     max_payload: usize,
 ) {
+    let reservation = opengeni_agent_platform::current_work_reservation();
     let request_id = response.request_id.clone();
     let encoded = response.encode_to_vec();
     let payload = if max_payload > 0 && encoded.len() > max_payload {
@@ -1998,12 +2188,16 @@ async fn publish_response(
         encoded
     };
 
-    if let Err(publish_error) = client.publish(reply, payload.into()).await {
-        warn!(
-            error = %publish_error,
-            op = label,
-            "failed to publish control rpc reply"
-        );
+    if let Some(reservation) = reservation {
+        // Attach the reply's receipt to its actual publication command. A
+        // reconnect must fail that receipt rather than redeem it on a socket
+        // that never wrote the old reply. This is not a consumer storage ACK.
+        if let Err(flush_error) = client.publish_with_flush(reply, payload.into()).await {
+            reservation.mark_unsettled();
+            warn!(error = %flush_error, op = label, "control rpc reply transport did not settle");
+        }
+    } else if let Err(publish_error) = client.publish(reply, payload.into()).await {
+        warn!(error = %publish_error, op = label, "failed to publish control rpc reply");
     }
 }
 
@@ -2045,6 +2239,7 @@ fn op_label(req: &ControlRequest) -> &'static str {
         Some(Op::BrowserFramesOpen(_)) => "browser_frames_open",
         Some(Op::ComputerFramesOpen(_)) => "computer_frames_open",
         Some(Op::AgentUpdateApply(_)) => "agent_update_apply",
+        Some(Op::CredentialRenew(_)) => "credential_renew",
         Some(Op::Metrics(_)) => "metrics",
         Some(Op::UpdateMayProceed(_)) => "update_may_proceed",
         // Op-stream (v1.1) — wire types present; no runtime serves them yet.
@@ -2124,6 +2319,258 @@ fn update_busy_code(update_drain: &UpdateDrain, engine: &Engine) -> Option<&'sta
 
 #[cfg(test)]
 mod tests {
+    /// A real async-nats client over TCP with its actual writer backpressured.
+    /// `Client::flush` settles socket writes, not a server or consumer ACK.
+    async fn paused_reply_transport() -> (
+        async_nats::Client,
+        tokio::sync::oneshot::Receiver<v1::ControlResponse>,
+        tokio::sync::oneshot::Sender<()>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        // Bound the advertised receive window before accept. The host's
+        // default buffering can otherwise settle every queued write while
+        // this fixture's reader is paused, which is a legal flush completion.
+        socket.set_recv_buffer_size(64 * 1024).unwrap();
+        let receive_buffer = socket.recv_buffer_size().unwrap();
+        assert!(
+            receive_buffer <= 1024 * 1024,
+            "fixture receive buffer: {receive_buffer}"
+        );
+        socket.bind(([127, 0, 0, 1], 0).into()).unwrap();
+        let listener = socket.listen(1).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (published, received) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let (paused, waiting) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let (read, mut write) = socket.into_split();
+            let mut read = BufReader::new(read);
+            write.write_all(format!(
+                "INFO {{\"server_id\":\"fixture\",\"version\":\"2.10.0\",\"proto\":1,\"host\":\"127.0.0.1\",\"port\":{port},\"max_payload\":67108864}}\r\n"
+            ).as_bytes()).await.unwrap();
+            let mut published = Some(published);
+            let mut released = Some(released);
+            let mut paused = Some(paused);
+            loop {
+                let mut line = String::new();
+                if read.read_line(&mut line).await.unwrap() == 0 {
+                    break;
+                }
+                if line.starts_with("PUB ") {
+                    let length: usize = line.split_whitespace().last().unwrap().parse().unwrap();
+                    assert!(length <= 32 * 1024 * 1024);
+                    let mut body = vec![0; length + 2];
+                    read.read_exact(&mut body).await.unwrap();
+                    assert_eq!(&body[length..], b"\r\n");
+                    if line.split_whitespace().nth(1) == Some("fixture.backpressure") {
+                        continue;
+                    }
+                    let response = v1::ControlResponse::decode(&body[..length]).unwrap();
+                    published.take().unwrap().send(response).unwrap();
+                } else if line == "PING\r\n" {
+                    write.write_all(b"PONG\r\n").await.unwrap();
+                    if let Some(gate) = released.take() {
+                        paused.take().unwrap().send(()).unwrap();
+                        gate.await.unwrap();
+                    }
+                }
+            }
+        });
+        let client = async_nats::connect(format!("nats://127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), waiting)
+            .await
+            .unwrap()
+            .unwrap();
+        // Prove the actual writer is backpressured before testing ownership;
+        // entry into the admitted task is not transport-pending evidence. Host
+        // send buffering varies, so fill it within an explicit 256 MiB bound.
+        let mut backpressured = false;
+        for _ in 0..8 {
+            match tokio::time::timeout(
+                Duration::from_millis(100),
+                client.publish_with_flush("fixture.backpressure", vec![0; 32 * 1024 * 1024].into()),
+            )
+            .await
+            {
+                Err(_) => {
+                    backpressured = true;
+                    break;
+                }
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => panic!("fixture publication did not settle: {error}"),
+            }
+        }
+        assert!(
+            backpressured,
+            "fixture writer never blocked before its reader was released"
+        );
+        (client, received, release, server)
+    }
+
+    #[tokio::test]
+    async fn reply_settlement_retains_work_after_its_generation_waiter_is_cancelled() {
+        let (client, received, release, server) = paused_reply_transport().await;
+        let drain = Arc::new(UpdateDrain::default());
+        let mut waiters = JoinSet::new();
+        let publisher = client.clone();
+        let (started, executing) = tokio::sync::oneshot::channel();
+        spawn_admitted_rpc(
+            &mut waiters,
+            drain.reserve_work(None).unwrap(),
+            async move {
+                started.send(()).unwrap();
+                publish_response(
+                    &publisher,
+                    "fixture.reply".into(),
+                    v1::ControlResponse {
+                        request_id: "synthetic-reply".into(),
+                        ..Default::default()
+                    },
+                    "fs_read",
+                    1_048_576,
+                )
+                .await;
+            },
+        );
+        tokio::time::timeout(Duration::from_secs(2), executing)
+            .await
+            .unwrap()
+            .unwrap();
+        waiters.shutdown().await;
+        assert_eq!(drain.snapshot().unwrap().routed, 1);
+        assert_eq!(
+            drain.reserve_update("other-link"),
+            UpdateReservation::Started
+        );
+        assert!(!drain.seal_update("other-link"));
+        release.send(()).unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(5), received)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.request_id, "synthetic-reply");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while drain.snapshot().unwrap().routed != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(drain.seal_update("other-link"));
+        drop(client);
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn committed_upload_retains_its_final_reply_until_the_original_transport_settles() {
+        use opengeni_agent_platform::NativePlatform;
+        let directory = tempfile::tempdir().unwrap();
+        let platform = Arc::new(NativePlatform::with_root(directory.path()));
+        let drain = Arc::new(UpdateDrain::default());
+        let bytes = b"synthetic upload";
+        let start = v1::ControlRequest {
+            request_id: "fsw-reply".into(),
+            epoch: 7,
+            op: Some(v1::control_request::Op::OpStart(v1::OpStart {
+                op: Some(v1::op_start::Op::FsWrite(v1::FsWriteBegin {
+                    path: "document".into(),
+                    expected_absent: true,
+                    content_size: Some(bytes.len() as u64),
+                    content_digest: blake3::hash(bytes).to_hex().to_string(),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let mut uploads = crate::uploads::Uploads::default();
+        let begin = drain
+            .reserve_work(crate::uploads::identity(&start, "fixture-link"))
+            .unwrap();
+        assert!(uploads
+            .serve_reserved(platform.as_ref(), &start, &|| true, &begin)
+            .error
+            .is_none());
+        drop(begin);
+        assert_eq!(drain.snapshot().unwrap().uploads, 1);
+        let chunk = v1::ControlRequest {
+            request_id: "final-chunk".into(),
+            epoch: 7,
+            op: Some(v1::control_request::Op::WriteChunk(v1::WriteChunk {
+                op_id: "fsw-reply".into(),
+                bytes: bytes.to_vec().into(),
+                last: true,
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let reservation = drain
+            .reserve_work(crate::uploads::identity(&chunk, "fixture-link"))
+            .unwrap();
+        let worker = reservation.clone();
+        let (client, received, release, server) = paused_reply_transport().await;
+        let mut waiters = JoinSet::new();
+        let publisher = client.clone();
+        let (committed, commit_done) = tokio::sync::oneshot::channel();
+        spawn_admitted_rpc(&mut waiters, reservation, async move {
+            let response = opengeni_agent_platform::spawn_blocking_reserved(move || {
+                uploads.serve_reserved(platform.as_ref(), &chunk, &|| true, &worker)
+            })
+            .await
+            .unwrap();
+            committed.send(response.error.is_none()).unwrap();
+            publish_response(
+                &publisher,
+                "fixture.reply".into(),
+                response,
+                "fs_write",
+                1_048_576,
+            )
+            .await;
+        });
+        let successful = tokio::time::timeout(Duration::from_secs(2), commit_done)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(successful);
+        assert_eq!(
+            std::fs::read(directory.path().join("document")).unwrap(),
+            bytes
+        );
+        waiters.shutdown().await;
+        assert_eq!(drain.snapshot().unwrap().uploads, 0);
+        assert_eq!(drain.snapshot().unwrap().routed, 1);
+        assert_eq!(
+            drain.reserve_update("other-link"),
+            UpdateReservation::Started
+        );
+        assert!(!drain.seal_update("other-link"));
+        release.send(()).unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(5), received)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(response.error.is_none(), "{response:?}");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while drain.snapshot().unwrap().routed != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(drain.seal_update("other-link"));
+        drop(client);
+        server.abort();
+        let _ = server.await;
+    }
+
     #[cfg(unix)]
     async fn retained_update_result(
         engine: &Arc<Engine>,
@@ -2410,6 +2857,12 @@ mod tests {
         struct InteractionProof(AtomicU8);
         #[async_trait::async_trait]
         impl BrowserControlBackend for InteractionProof {
+            async fn begin_update(&self, _: &str) -> PlatformResult<bool> {
+                self.is_idle().await
+            }
+            async fn release_update(&self, _: &str) -> PlatformResult<()> {
+                Ok(())
+            }
             async fn is_idle(&self) -> PlatformResult<bool> {
                 match self.0.load(Ordering::Acquire) {
                     0 => Ok(false),
@@ -3056,9 +3509,21 @@ mod tests {
             "user authentication expired"
         ));
         assert!(message_is_authentication_denial("AUTH VIOLATION"));
+        assert!(message_is_authentication_denial(
+            "nats: authentication error"
+        ));
         // A plain transport drop is NOT an auth denial.
         assert!(!message_is_authentication_denial("connection refused"));
         assert!(!message_is_authentication_denial("broken pipe"));
+        // An unfinished auth handshake does not prove the credentials were rejected.
+        for message in [
+            "IO error: nats: Authentication Timeout",
+            "authentication timed out",
+            "authorization timeout",
+            "authorization timed out",
+        ] {
+            assert!(!message_is_authentication_denial(message), "{message}");
+        }
     }
 
     #[test]
@@ -3147,6 +3612,44 @@ mod tests {
             classify(&ControlRequest::default()),
             Route::Work(JobClass::Light)
         ));
+        // Credential renewal is served by the supervisor outside host admission.
+        let renew = request(Op::CredentialRenew(v1::CredentialRenewRequest {}));
+        assert!(matches!(classify(&renew), Route::CredentialRenew));
+        assert_eq!(op_label(&renew), "credential_renew");
+    }
+
+    #[test]
+    fn credential_renew_replies_carry_consent_or_a_stable_failure_code() {
+        let ok = credential_renew_response("r1".into(), Ok(true));
+        assert!(ok.error.is_none());
+        assert!(matches!(
+            ok.result,
+            Some(v1::control_response::Result::CredentialRenew(
+                v1::CredentialRenewResponse {
+                    renewed: true,
+                    consented_screen_control: true,
+                }
+            ))
+        ));
+        for (failure, code, retryable) in [
+            (RenewNowError::Renewal, "renewal_failed", true),
+            (
+                RenewNowError::ConnectionMissing,
+                "connection_missing",
+                false,
+            ),
+            (RenewNowError::LegacyOrigin, "legacy_origin", false),
+            (RenewNowError::LocalState, "local_state_unavailable", false),
+        ] {
+            let response = credential_renew_response("r2".into(), Err(failure));
+            assert!(response.result.is_none());
+            let error = response.error.expect("error");
+            assert_eq!(error.retryable, retryable);
+            assert_eq!(
+                error.detail.get("failure_code").map(String::as_str),
+                Some(code)
+            );
+        }
     }
 
     #[tokio::test]
@@ -3716,6 +4219,286 @@ mod tests {
         let _ = tokio::time::timeout(Duration::from_secs(5), run).await;
     }
 
+    #[test]
+    fn replacement_reuses_only_the_exact_frame_scope() {
+        use opengeni_agent_platform::NativePlatform;
+
+        let directory = tempfile::tempdir().expect("synthetic host directory");
+        let platform = Arc::new(NativePlatform::with_root(directory.path()));
+        let mut credentials = it::test_credentials("nats://127.0.0.1:1");
+        credentials.workspace_id = "example-workspace-a".into();
+        credentials.agent_id = "example-agent-a".into();
+        let definition = SupervisorLink::new("example-connection-a", platform, credentials)
+            .with_api_url("https://example.test")
+            .with_connection_instance_id("example-instance-a");
+        let original = WorkspaceLink::from_definition(definition.clone());
+
+        let mut refreshed = definition.clone();
+        refreshed.credentials.nats_bearer = "example-refreshed-bearer".into();
+        let successor = WorkspaceLink::replacing_definition(refreshed, &original);
+        assert!(Arc::ptr_eq(&original.bulk_tx, &successor.bulk_tx));
+        assert!(!Arc::ptr_eq(&original.epoch, &successor.epoch));
+        assert!(!Arc::ptr_eq(&original.uploads, &successor.uploads));
+
+        let mut different_instance = definition.clone();
+        different_instance.connection_instance_id = "example-instance-b".into();
+        let successor = WorkspaceLink::replacing_definition(different_instance, &original);
+        assert!(!Arc::ptr_eq(&original.bulk_tx, &successor.bulk_tx));
+
+        let mut different_workspace = definition.clone();
+        different_workspace.credentials.workspace_id = "example-workspace-b".into();
+        let successor = WorkspaceLink::replacing_definition(different_workspace, &original);
+        assert!(!Arc::ptr_eq(&original.bulk_tx, &successor.bulk_tx));
+
+        let mut different_agent = definition.clone();
+        different_agent.credentials.agent_id = "example-agent-b".into();
+        let successor = WorkspaceLink::replacing_definition(different_agent, &original);
+        assert!(!Arc::ptr_eq(&original.bulk_tx, &successor.bulk_tx));
+
+        let mut different_origin = definition.clone();
+        different_origin.api_url = Some("https://other.example.test".into());
+        let successor = WorkspaceLink::replacing_definition(different_origin, &original);
+        assert!(!Arc::ptr_eq(&original.bulk_tx, &successor.bulk_tx));
+
+        let mut different_connection = definition;
+        different_connection.connection_id = "example-connection-b".into();
+        let successor = WorkspaceLink::replacing_definition(different_connection, &original);
+        assert!(!Arc::ptr_eq(&original.bulk_tx, &successor.bulk_tx));
+    }
+
+    /// A completed op still owns its original frame sink when local credentials
+    /// refresh. The replacement link must make that sink publish into the new
+    /// bulk generation for the same exact process subject.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::too_many_lines)] // one real transport replacement and replay
+    async fn credential_refresh_replays_retained_op_on_the_same_subject() {
+        use opengeni_agent_platform::NativePlatform;
+
+        let Some(nats_bin) = it::find_nats_server() else {
+            eprintln!("SKIP credential_refresh_replays_retained_op: no nats-server");
+            return;
+        };
+        let port = it::free_local_port();
+        let _server = it::NatsServerGuard::spawn(&nats_bin, port);
+        let url = format!("nats://127.0.0.1:{port}");
+        let client = it::connect_with_retry(&url, Duration::from_secs(5)).await;
+        let directory = tempfile::tempdir().expect("synthetic host directory");
+        let platform = Arc::new(NativePlatform::with_root(directory.path()));
+        let mut first_creds = it::test_credentials(&url);
+        first_creds.workspace_id = "example-workspace-a".into();
+        first_creds.agent_id = "example-agent-a".into();
+        let mut second_creds = it::test_credentials(&url);
+        second_creds.workspace_id = "example-workspace-b".into();
+        second_creds.agent_id = "example-agent-b".into();
+        let first = SupervisorLink::new("example-connection-a", platform.clone(), first_creds)
+            .with_connection_instance_id("example-instance-a");
+        let second = SupervisorLink::new("example-connection-b", platform, second_creds)
+            .with_connection_instance_id("example-instance-b");
+        let first_link = WorkspaceLink::from_definition(first.clone());
+        let second_link = WorkspaceLink::from_definition(second.clone());
+        let op_id = "example-retained-op";
+        let mut frames = client
+            .subscribe(first_link.op_subject(op_id))
+            .await
+            .expect("subscribe before start");
+        let mut first_events = client
+            .subscribe(first_link.events_subject())
+            .await
+            .expect("first events");
+        let mut second_events = client
+            .subscribe(second_link.events_subject())
+            .await
+            .expect("second events");
+        let supervisor = Supervisor::new_links(&[first.clone(), second.clone()], "test-0.0.0");
+        let shutdown = supervisor.shutdown_handle();
+        let (updates_tx, updates_rx) =
+            tokio::sync::watch::channel(vec![first.clone(), second.clone()]);
+        let run = tokio::spawn(async move { supervisor.run_with_updates(updates_rx).await });
+        for events in [&mut first_events, &mut second_events] {
+            assert!(
+                it::wait_for_event(events, Duration::from_secs(10), |event| {
+                    matches!(event.event, Some(Event::Heartbeat(_)))
+                })
+                .await,
+                "both workspaces become live"
+            );
+        }
+
+        let start = ControlRequest {
+            request_id: op_id.into(),
+            epoch: 0,
+            resource_policy: None,
+            op: Some(v1::control_request::Op::OpStart(v1::OpStart {
+                op: Some(v1::op_start::Op::Exec(v1::ExecRequest {
+                    command: vec!["printf retained-example".into()],
+                    shell: true,
+                    ..Default::default()
+                })),
+                window_bytes: 1 << 20,
+                deadline_ms: 0,
+                origin_id: "example-session".into(),
+            })),
+        };
+        let started = client
+            .request(first_link.rpc_subject(), start.encode_to_vec().into())
+            .await
+            .expect("start request");
+        let started = ControlResponse::decode(started.payload.as_ref()).expect("start response");
+        assert!(
+            matches!(started.result, Some(v1::control_response::Result::OpStart(s)) if s.accepted)
+        );
+        let mut initial = Vec::new();
+        loop {
+            let message = tokio::time::timeout(Duration::from_secs(5), frames.next())
+                .await
+                .expect("initial frame deadline")
+                .expect("initial frame");
+            let frame = v1::OpFrame::decode(message.payload.as_ref()).expect("frame decodes");
+            match frame.body {
+                Some(v1::op_frame::Body::Data(data)) => initial.extend_from_slice(&data.bytes),
+                Some(v1::op_frame::Body::Exit(exit)) => {
+                    assert_eq!(exit.exit_code, 0);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(initial, b"retained-example");
+
+        let mut refreshed = first;
+        refreshed.credentials.nats_bearer = "example-refreshed-bearer".into();
+        assert_eq!(
+            refreshed.connection_instance_id,
+            first_link.connection_instance_id
+        );
+        updates_tx
+            .send(vec![refreshed.clone(), second.clone()])
+            .expect("credential refresh");
+        assert!(
+            it::wait_for_event(&mut first_events, Duration::from_secs(5), |event| {
+                matches!(event.event, Some(Event::GoingOffline(_)))
+            })
+            .await,
+            "old generation goes offline"
+        );
+        assert!(
+            it::wait_for_event(&mut first_events, Duration::from_secs(10), |event| {
+                matches!(event.event, Some(Event::Heartbeat(_)))
+            })
+            .await,
+            "replacement generation becomes live"
+        );
+
+        let attach = ControlRequest {
+            request_id: "example-attach".into(),
+            epoch: 0,
+            resource_policy: None,
+            op: Some(v1::control_request::Op::OpAttach(v1::OpAttach {
+                op_id: op_id.into(),
+                from_seq: 0,
+                attach_generation: 2,
+                window_bytes: 1 << 20,
+            })),
+        };
+        let reply = client
+            .request(first_link.rpc_subject(), attach.encode_to_vec().into())
+            .await
+            .expect("attach request");
+        let reply = ControlResponse::decode(reply.payload.as_ref()).expect("attach response");
+        assert!(
+            matches!(reply.result, Some(v1::control_response::Result::OpStatus(s))
+            if s.state == v1::OpState::Complete as i32)
+        );
+        let mut replayed = Vec::new();
+        loop {
+            let message = tokio::time::timeout(Duration::from_secs(3), frames.next())
+                .await
+                .expect("retained replay frame deadline")
+                .expect("replayed frame");
+            let frame = v1::OpFrame::decode(message.payload.as_ref()).expect("replay decodes");
+            match frame.body {
+                Some(v1::op_frame::Body::Data(data)) => replayed.extend_from_slice(&data.bytes),
+                Some(v1::op_frame::Body::Exit(exit)) => {
+                    assert_eq!(exit.exit_code, 0);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(replayed, b"retained-example");
+
+        let ping = ControlRequest {
+            request_id: "example-other-workspace".into(),
+            epoch: 0,
+            resource_policy: None,
+            op: Some(v1::control_request::Op::Ping(v1::PingRequest { nonce: 7 })),
+        };
+        let response = client
+            .request(second_link.rpc_subject(), ping.encode_to_vec().into())
+            .await
+            .expect("other workspace remains live");
+        assert!(ControlResponse::decode(response.payload.as_ref())
+            .expect("ping response")
+            .error
+            .is_none());
+
+        // Removing the link ends its authority to inherit the old frame sink.
+        // Re-adding the same definition must create a fresh lane while leaving
+        // the other workspace's link live.
+        updates_tx
+            .send(vec![second.clone()])
+            .expect("remove first link");
+        assert!(
+            it::wait_for_event(&mut first_events, Duration::from_secs(5), |event| {
+                matches!(event.event, Some(Event::GoingOffline(_)))
+            })
+            .await,
+            "removed generation goes offline"
+        );
+        updates_tx
+            .send(vec![refreshed, second])
+            .expect("re-add first link");
+        assert!(
+            it::wait_for_event(&mut first_events, Duration::from_secs(10), |event| {
+                matches!(event.event, Some(Event::Heartbeat(_)))
+            })
+            .await,
+            "re-added generation becomes live"
+        );
+        let reattach = ControlRequest {
+            request_id: "example-reattach".into(),
+            epoch: 0,
+            resource_policy: None,
+            op: Some(v1::control_request::Op::OpAttach(v1::OpAttach {
+                op_id: op_id.into(),
+                from_seq: 0,
+                attach_generation: 3,
+                window_bytes: 1 << 20,
+            })),
+        };
+        let reply = client
+            .request(first_link.rpc_subject(), reattach.encode_to_vec().into())
+            .await
+            .expect("reattach request");
+        let reply = ControlResponse::decode(reply.payload.as_ref()).expect("reattach response");
+        assert!(
+            matches!(reply.result, Some(v1::control_response::Result::OpStatus(s))
+            if s.state == v1::OpState::Complete as i32)
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), frames.next())
+                .await
+                .is_err(),
+            "removed connection must not inherit a retained frame sink"
+        );
+        shutdown.request();
+        tokio::time::timeout(Duration::from_secs(5), run)
+            .await
+            .expect("supervisor stops")
+            .expect("run task")
+            .expect("clean stop");
+    }
+
     /// Real control RPC proof: bounded chunks, exact epoch, private staging,
     /// terminal receipt, and lost final acknowledgement replay without frames.
     #[cfg(target_os = "linux")]
@@ -3754,7 +4537,9 @@ mod tests {
             .await
             .expect("frames");
         let supervisor = Supervisor::new_links(&[definition], "test-0.0.0");
-        assert!(supervisor.capabilities(&link).await.transactional_fs_write);
+        let capabilities = supervisor.capabilities(&link).await;
+        assert!(capabilities.transactional_fs_write);
+        assert!(capabilities.credential_renew);
         let shutdown = supervisor.shutdown_handle();
         let run = tokio::spawn(async move { supervisor.run().await });
         assert!(

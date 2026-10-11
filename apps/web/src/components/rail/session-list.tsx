@@ -35,6 +35,7 @@ import { toast } from "sonner";
 import {
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -49,11 +50,13 @@ import { useRail } from "@/components/rail/rail-context";
 import {
   ActiveWorkMark,
   RailTrailingMetadata,
-  SessionRowHoverDetails,
   SessionRowContent,
   sessionRowAccessibleName,
 } from "@/components/rail/session-row-content";
+import { SessionRowHoverDetails } from "@/components/rail/session-row-hover-details";
 export { RailTrailingMetadata } from "@/components/rail/session-row-content";
+import { isPersonalWorkspace } from "@/lib/managed-self-context";
+import { sessionHoverDescription, sessionHoverFacts } from "@/lib/session-hover-facts";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import {
@@ -340,7 +343,8 @@ export function SessionList() {
   // refresh; the previous index relied on a one-shot load.
   const [searchDraft, setSearchDraft] = useState("");
   const openSearchDialog = useCallback(
-    () => requestSessionSearch(rail.workspaceId),
+    (event: MouseEvent<HTMLButtonElement>) =>
+      requestSessionSearch(rail.workspaceId, event.currentTarget),
     [rail.workspaceId],
   );
   const [search, setSearch] = useState("");
@@ -1755,7 +1759,11 @@ export function SessionList() {
   const onDeleteSession = useCallback(async (): Promise<boolean> => {
     if (!sessionPendingDelete) return false;
     try {
-      const result = await context.client.deleteSession(rail.workspaceId, sessionPendingDelete.id);
+      const result = await deleteStoppingIfRunning(
+        context.client,
+        rail.workspaceId,
+        sessionPendingDelete.id,
+      );
       deletedRootIds.current.add(sessionPendingDelete.id);
       setArchiveOverrides((current) => {
         if (!current.has(sessionPendingDelete.id)) return current;
@@ -1803,12 +1811,12 @@ export function SessionList() {
       await refreshSessionPages();
       toast.success(
         result.deletedSessionCount === 1
-          ? "Session deleted"
-          : `${result.deletedSessionCount} sessions deleted`,
+          ? "Chat deleted"
+          : `${result.deletedSessionCount} chats deleted`,
       );
       return true;
     } catch (deleteError) {
-      toast.error("Couldn't delete the workstream.", {
+      toast.error("Couldn't delete the chat.", {
         description: deleteError instanceof Error ? deleteError.message : String(deleteError),
       });
       return false;
@@ -2949,6 +2957,21 @@ export function SessionList() {
               showEmptyGroups={showEmptyGroups}
               onShowEmptyGroupsChange={(show) => updateBrowsePreferences({ showEmptyGroups: show })}
             />
+            {context.clientConfig.sessionArchive ? (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  onSelect={() =>
+                    void navigate({
+                      to: "/workspaces/$workspaceId/read-only-chats",
+                      params: { workspaceId: rail.workspaceId },
+                    })
+                  }
+                >
+                  Read-only chats
+                </DropdownMenuItem>
+              </>
+            ) : null}
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
@@ -3307,10 +3330,10 @@ export function SessionList() {
         }
         description={
           sessionPendingDelete?.treeStats?.totalDescendants
-            ? `This permanently deletes the complete workstream and its ${sessionPendingDelete.treeStats.totalDescendants} spawned sessions. This cannot be undone.`
-            : "This permanently deletes the session and its history. This cannot be undone."
+            ? `This permanently deletes the chat and its ${sessionPendingDelete.treeStats.totalDescendants} sub-chats. A running chat is stopped first. This cannot be undone.`
+            : "This permanently deletes the chat and its history. A running chat is stopped first. This cannot be undone."
         }
-        confirmLabel="Delete workstream"
+        confirmLabel="Delete"
         cancelAutoFocus
         onConfirm={onDeleteSession}
       />
@@ -3993,7 +4016,24 @@ function SessionRow(props: {
   const contextPinSelection = useRef(false);
   const hasChildren = props.hasChildren;
   const creator = railRowCreator(props.session);
+  // Who started a session only adds information where other people work too.
+  const personalWorkspace = isPersonalWorkspace(
+    context.workspaces?.find((workspace) => workspace.id === rail.workspaceId) ?? null,
+    null,
+  );
   const stateLabel = sessionStateLabel(props.session);
+  const hoverDescendantCount = props.session.treeStats?.totalDescendants ?? props.childCount;
+  const hoverDescendantCountTruncated =
+    props.session.treeStats?.truncated ?? props.childCountTruncated;
+  // The hover card is pointer/focus-only and not announced, so the row also
+  // describes the same facts to assistive technology.
+  const hoverDescriptionId = `session-hover-${useId().replaceAll(":", "")}`;
+  const hoverDescription = sessionHoverDescription(
+    sessionHoverFacts(props.session, {
+      descendantCount: hoverDescendantCount,
+      descendantCountTruncated: hoverDescendantCountTruncated,
+    }),
+  );
   const waiting = Boolean(sessionInputWait(props.session));
   const [, refreshWaitClock] = useState(0);
   useEffect(() => {
@@ -4123,6 +4163,7 @@ function SessionRow(props: {
                     : null,
                   creator,
                 })}
+                aria-describedby={hoverDescription ? hoverDescriptionId : undefined}
                 onFocus={props.onFocus}
                 onClick={(event) => {
                   if (isModifiedNavigationClick(event)) return;
@@ -4201,18 +4242,26 @@ function SessionRow(props: {
                 />
               </Link>
             </HoverCardTrigger>
-            <HoverCardContent side="right" collisionPadding={8}>
+            <HoverCardContent
+              // The narrow rail fills the screen, so there is no room beside it.
+              side={rail.isMobile ? "bottom" : "right"}
+              collisionPadding={8}
+              className="w-80 max-w-[calc(100vw-16px)] p-3.5"
+            >
               <SessionRowHoverDetails
+                session={props.session}
                 title={title}
-                createdAt={props.session.createdAt}
-                createdBy={props.session.createdBy}
-                descendantCount={props.session.treeStats?.totalDescendants ?? props.childCount}
-                descendantCountTruncated={
-                  props.session.treeStats?.truncated ?? props.childCountTruncated
-                }
+                descendantCount={hoverDescendantCount}
+                descendantCountTruncated={hoverDescendantCountTruncated}
+                showCreator={!personalWorkspace}
               />
             </HoverCardContent>
           </HoverCard>
+          {hoverDescription ? (
+            <span id={hoverDescriptionId} hidden>
+              {hoverDescription}
+            </span>
+          ) : null}
           <RowQuickActions
             session={props.session}
             onPin={props.onPin}
@@ -4294,7 +4343,7 @@ function SessionRow(props: {
             onSelect={() => props.onRequestDelete(props.session)}
           >
             <Trash2Icon className="size-4" />
-            Delete workstream
+            Delete chat
           </ContextMenuItem>
         ) : null}
         {props.channels.length > 0 &&
@@ -4521,7 +4570,7 @@ function RowActionsMenu({
             onClick={(event) => event.stopPropagation()}
           >
             <Trash2Icon className="size-4" />
-            Delete workstream
+            Delete chat
           </DropdownMenuItem>
         ) : null}
         {canMove ? (
@@ -4602,7 +4651,7 @@ export function CollapsedSessionsButton() {
             variant="ghost"
             size="icon-sm"
             aria-label="Search sessions"
-            onClick={() => requestSessionSearch(rail.workspaceId)}
+            onClick={(event) => requestSessionSearch(rail.workspaceId, event.currentTarget)}
             className="text-fg-label hover:text-fg"
           >
             <SearchIcon className="size-4" />
@@ -4660,4 +4709,51 @@ function SessionListSkeleton() {
       ))}
     </div>
   );
+}
+
+/**
+ * Delete a chat, stopping it first when it is still running. The API refuses
+ * to delete a chat with an active turn (409), so the person's "Delete" stops
+ * the chat (terminal cancel) and retries until its turn has wound down. Every
+ * other 409 (saved outputs or forks depend on it, background commands, a
+ * sub-chat) is permanent: surface it as-is and never cancel the chat for it.
+ */
+async function deleteStoppingIfRunning(
+  client: {
+    deleteSession(workspaceId: string, sessionId: string): Promise<{ deletedSessionCount: number }>;
+    cancelSession(
+      workspaceId: string,
+      sessionId: string,
+      options: { reason?: string },
+    ): Promise<unknown>;
+  },
+  workspaceId: string,
+  sessionId: string,
+): Promise<{ deletedSessionCount: number }> {
+  try {
+    return await client.deleteSession(workspaceId, sessionId);
+  } catch (error) {
+    if (!isStillRunningDeleteRefusal(error)) throw error;
+  }
+  await client.cancelSession(workspaceId, sessionId, { reason: "Deleted by user" });
+  const deadline = Date.now() + 30_000;
+  for (let delay = 500; ; delay = Math.min(delay * 2, 4_000)) {
+    await new Promise((resolve) => setTimeout(resolve, delay));
+    try {
+      return await client.deleteSession(workspaceId, sessionId);
+    } catch (error) {
+      if (!isStillRunningDeleteRefusal(error) || Date.now() > deadline) throw error;
+    }
+  }
+}
+
+/** Only "still running" (or a box still shutting down) is worth stopping the chat and retrying for. */
+export function isStillRunningDeleteRefusal(error: unknown): boolean {
+  if (!(error instanceof OpenGeniApiError) || error.status !== 409) return false;
+  const code = error.details?.code;
+  if (typeof code === "string") {
+    return code === "session_delete_active_sessions" || code === "session_delete_live_sandboxes";
+  }
+  // Servers before structured refusal codes: keep the old behaviour only for the running case.
+  return /still running|still shutting down/i.test(error.message);
 }

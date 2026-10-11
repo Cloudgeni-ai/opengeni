@@ -1,4 +1,14 @@
-import { isOpenAIResponsesRawModelStreamEvent, type RunStreamEvent } from "@openai/agents";
+import {
+  isOpenAIChatCompletionsRawModelStreamEvent,
+  isOpenAIResponsesRawModelStreamEvent,
+  type RunStreamEvent,
+} from "@openai/agents";
+import {
+  chatReasoning,
+  chatReasoningDetails,
+  chatReasoningDetailsText,
+  primaryChatChoice,
+} from "./chat-reasoning";
 import {
   INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME,
   approvalIdentifier,
@@ -261,6 +271,8 @@ function assistantMessageText(rawItem: unknown): string | undefined {
 export type ModelResponseUsage = {
   responseId?: string;
   serviceTier?: string;
+  /** Provider-run web searches billed for this response, when the provider reports them. */
+  webSearchRequests?: number;
   gatewayBilling?: {
     finalProvider: string;
     inferenceCostUsd: string;
@@ -541,6 +553,17 @@ export function normalizeSdkEvent(
     }
     return out;
   }
+  if (isOpenAIChatCompletionsRawModelStreamEvent(event)) {
+    const delta = primaryChatChoice(event.data.event)?.delta;
+    const text =
+      chatReasoning(delta)?.text ?? chatReasoningDetailsText(chatReasoningDetails(delta));
+    if (text)
+      out.push({
+        type: "agent.reasoning.delta",
+        payload: { text },
+      });
+    return out;
+  }
   if (event.type === "agent_updated_stream_event") {
     out.push({
       type: "agent.updated",
@@ -666,12 +689,23 @@ export function modelResponseUsageFromResponse(response: unknown): ModelResponse
   const responseId = modelResponseIdFromResponse(response);
   const serviceTier = modelResponseServiceTierFromResponse(response);
   const gatewayBilling = gatewayBillingFromResponse(response);
+  const webSearchRequests = webSearchRequestsFromResponse(response);
   return {
     ...(responseId ? { responseId } : {}),
     ...(serviceTier ? { serviceTier } : {}),
     ...(gatewayBilling ? { gatewayBilling } : {}),
+    ...(webSearchRequests ? { webSearchRequests } : {}),
     usage,
   };
+}
+
+/** Claude reports its billed server-side searches; the transport keeps the count. */
+function webSearchRequestsFromResponse(response: unknown): number | undefined {
+  const value = (response as { providerData?: { anthropic?: { webSearchRequests?: unknown } } })
+    ?.providerData?.anthropic?.webSearchRequests;
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 && value <= 10_000
+    ? value
+    : undefined;
 }
 
 function modelResponseIdFromResponse(response: unknown): string | undefined {
@@ -707,6 +741,14 @@ function gatewayBillingFromResponse(
     Array.isArray(metadataCandidate)
   ) {
     return null;
+  }
+  const opper = (metadataCandidate as Record<string, unknown>).opper;
+  if (opper && typeof opper === "object" && !Array.isArray(opper)) {
+    // Attached only by the Chat adapter from Opper's `usage.opper.cost.total`.
+    const costUsd = (opper as Record<string, unknown>).costUsd;
+    return typeof costUsd === "string" && /^(0|[1-9]\d*)(?:\.\d{1,18})?$/.test(costUsd)
+      ? { finalProvider: "opper", inferenceCostUsd: costUsd }
+      : null;
   }
   const gateway = (metadataCandidate as Record<string, unknown>).gateway;
   if (!gateway || typeof gateway !== "object" || Array.isArray(gateway)) {

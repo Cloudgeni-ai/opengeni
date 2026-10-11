@@ -1,5 +1,8 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { DEFAULT_FIRST_PARTY_MCP_TOOLS } from "@opengeni/contracts";
+import {
+  DEFAULT_FIRST_PARTY_MCP_TOOLS,
+  SCHEDULED_SLACK_BOT_POSTING_TOOLS,
+} from "@opengeni/contracts";
 import { resolveFirstPartyMcpToolPolicy } from "@opengeni/config";
 import {
   bootstrapWorkspace,
@@ -172,14 +175,73 @@ async function queuedAgentRun(
 // it through to the generated session and freezes it in the accepted execution.
 
 describe("scheduled-task agent configuration (real PostgreSQL)", () => {
-  test("a task without agent resolves all with the default generated tools", async () => {
+  test("a task without agent resolves all within the scheduled generated-tool boundary", async () => {
     if (!available) return;
     const grant = await workspaceGrant();
     const task = await generatedTask(grant, null);
     const { settings, session, accepted } = await dispatchGeneratedSession(grant, task.id);
     expect(session.agent).toMatchObject({ from: "all", source: "deployment_default" });
     expect(accepted?.resolvedAgentConfig).toEqual(session.agent!);
-    expect(session.firstPartyMcpTools).toEqual(resolveFirstPartyMcpToolPolicy(settings).default);
+    const defaults = resolveFirstPartyMcpToolPolicy(settings).default;
+    const posting = new Set<string>(SCHEDULED_SLACK_BOT_POSTING_TOOLS);
+    // Ordinary-chat discovery is not an unattended posting grant. Preserve
+    // every other default, but no bot posting without a person-chosen channel.
+    expect(session.firstPartyMcpTools).toEqual(defaults.filter((tool) => !posting.has(tool)));
+    expect(accepted?.resolvedFirstPartyMcpTools).toEqual(session.firstPartyMcpTools);
+    for (const tool of posting) {
+      expect(defaults).toContain(tool);
+      expect(session.firstPartyMcpTools).not.toContain(tool);
+    }
+  }, 60_000);
+
+  test.each([
+    ["posting allowed", ["goal_set", ...SCHEDULED_SLACK_BOT_POSTING_TOOLS]],
+    ["posting disallowed", ["goal_set"]],
+  ] as const)(
+    "explicit defaults stay destination-bound and under the ceiling: %s",
+    async (_label, allowed) => {
+      if (!available) return;
+      const grant = await workspaceGrant();
+      const task = await generatedTask(grant, null);
+      const { session, accepted } = await dispatchGeneratedSession(grant, task.id, {
+        defaultFirstPartyMcpTools: ["goal_set", ...SCHEDULED_SLACK_BOT_POSTING_TOOLS],
+        allowedFirstPartyMcpTools: [...allowed],
+      });
+      expect(session.agent).toMatchObject({ from: "all", source: "deployment_default" });
+      expect(session.firstPartyMcpTools).toEqual(["goal_set"]);
+      expect(accepted?.resolvedFirstPartyMcpTools).toEqual(session.firstPartyMcpTools);
+      expect(accepted?.resolvedAgentConfig).toEqual(session.agent);
+    },
+    60_000,
+  );
+
+  test("queued all recovery cannot expand the frozen selection when defaults grow", async () => {
+    if (!available) return;
+    const grant = await workspaceGrant();
+    const task = await generatedTask(grant, null);
+    const { accepted } = await dispatchGeneratedSession(grant, task.id, {
+      defaultFirstPartyMcpTools: ["goal_set", ...SCHEDULED_SLACK_BOT_POSTING_TOOLS],
+    });
+    expect(accepted?.resolvedFirstPartyMcpTools).toEqual(["goal_set"]);
+    const { producerKey } = await queuedAgentRun(grant, accepted!);
+    const { activities: scheduled } = activities({
+      defaultFirstPartyMcpTools: [
+        "goal_set",
+        "knowledge_search",
+        ...SCHEDULED_SLACK_BOT_POSTING_TOOLS,
+      ],
+    });
+    const recovered = await scheduled.dispatchScheduledTaskRun({
+      workspaceId: grant.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+      producerKey,
+    });
+    expect(recovered.action).toBe("start");
+    if (recovered.action !== "start") throw new Error("queued recovery did not start");
+    const stored = await getSession(client.db, grant.workspaceId, recovered.sessionId);
+    expect(stored?.firstPartyMcpTools).toEqual(accepted!.resolvedFirstPartyMcpTools);
+    expect(stored?.agent).toEqual(accepted!.resolvedAgentConfig);
   }, 60_000);
 
   test("a task agent resolves at dispatch, narrows the scheduled baseline and is frozen", async () => {
@@ -206,6 +268,9 @@ describe("scheduled-task agent configuration (real PostgreSQL)", () => {
         "goal_resume",
         "goal_set",
         "goal_update",
+        "inbox_tidy",
+        "notification_withdraw",
+        "notify_user",
         "set_session_title",
         "wait_for_input",
       ].filter((tool) => DEFAULT_FIRST_PARTY_MCP_TOOLS.includes(tool as never)),

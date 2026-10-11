@@ -53,6 +53,8 @@ import {
 const GATEWAY_KEYS: Record<GatewayId, { prefix: string; where: string }> = {
   vercel: { prefix: "vck_", where: "Create one in Vercel under AI Gateway, then API keys." },
   openrouter: { prefix: "sk-or-", where: "Create one on openrouter.ai under Keys." },
+  // Opper key format is unverified; accept any key in this dev preview.
+  opper: { prefix: "", where: "Create one at platform.opper.ai under API keys." },
 };
 
 const NEW_ACCOUNT_NAMES = ["design@acme.dev", "support@acme.dev", "data@acme.dev"];
@@ -179,11 +181,10 @@ export function ConnectPage({
     // opens its page instead: there is nothing left to connect.
     const choices = [
       { id: "codex" as const, title: "Codex", summary: "Pay with your ChatGPT plan" },
-      ...(["openrouter", "vercel"] as const).map((id) => ({
+      ...(["openrouter", "opper", "vercel"] as const).map((id) => ({
         id,
         title: gateways[id].name,
-        summary:
-          id === "openrouter" ? "Pay per token through OpenRouter" : "Pay per token through Vercel",
+        summary: `Pay per token through ${id === "vercel" ? "Vercel" : gateways[id].name}`,
       })),
     ];
     return (
@@ -750,7 +751,8 @@ function DisconnectDialog({ target, onClose }: { target: DetailTarget; onClose: 
     ];
     const choices = modelChoices(data, questions, scenario);
     const defaultChoice = choices.find((each) => each.id === data.defaultModelId);
-    const payer = target.id === "openrouter" ? "OpenRouter" : "AI Gateway";
+    const payer =
+      target.id === "openrouter" ? "OpenRouter" : target.id === "opper" ? "Opper" : "AI Gateway";
     if (target.scope === "workspace" && defaultChoice?.payer === payer) {
       dependencies = [
         {
@@ -861,7 +863,7 @@ function useAllowedForm(target: AllowedTarget) {
   if (target.kind === "workspace") {
     options = choices;
     current = data.allowedModels;
-  } else if (target.id === "openrouter" || target.id === "vercel") {
+  } else if (target.id === "openrouter" || target.id === "opper" || target.id === "vercel") {
     const gateway = data.gateways[target.scope][target.id];
     name = gateway.name;
     current = gateway.modelsServed;
@@ -881,7 +883,7 @@ function useAllowedForm(target: AllowedTarget) {
   const save = (value: "all" | string[]) => {
     setData((state) => {
       if (target.kind === "workspace") return { ...state, allowedModels: value };
-      if (target.id === "openrouter" || target.id === "vercel") {
+      if (target.id === "openrouter" || target.id === "opper" || target.id === "vercel") {
         return updateGateway(state, target.scope, target.id, { modelsServed: value });
       }
       return updateAccount(state, target.scope, target.id, { modelsServed: value });

@@ -586,7 +586,7 @@ const VIDEO_PAYER_OPTIONS = [
   },
   {
     value: "credits",
-    label: "OpenGeni credits",
+    label: "Opengeni credits",
     disabled: true,
     disabledReason: "No credit balance. An owner can buy credits.",
   },

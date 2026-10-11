@@ -1,6 +1,7 @@
 import {
   materializeRigVersionForAttempt,
   getWorkspaceModelPolicy,
+  getOrganizationModelDefaults,
   getFilesForSubject,
   getWorkspace,
   resolveCompanyBrainContextSelection,
@@ -11,6 +12,7 @@ import {
   getOrCreateWorkspaceInstructionPolicySnapshot,
   PreferenceRegistryInitiatorError,
   resolveSessionAttemptPersonalResources,
+  freezeAgentLearningPolicy,
 } from "@opengeni/db";
 import {
   projectHistoryForProvider,
@@ -22,6 +24,7 @@ import {
 } from "@opengeni/runtime";
 import {
   codeSearchDeploymentPolicy,
+  policyChargesCreditsForModel,
   settingsWithResolvedModelContext,
   type Settings,
 } from "@opengeni/config";
@@ -59,12 +62,14 @@ import {
   lazyToolTransportForTurn,
   openAiHostedImageProviderBindingForTurn,
   modelAttachmentInputPolicyForTurn,
+  resolveAcceptedTurnModel,
 } from "./tool-policy";
 
 import type { ClaimTurnOk } from "./claim";
 import type { EventingState, WorkspaceRefState } from "./turn-context";
 
 export type GovernanceModelDeps = {
+  learningPolicy: Awaited<ReturnType<typeof freezeAgentLearningPolicy>>;
   input: RunAgentTurnInput;
   db: ActivityServices["db"];
   observability: ActivityServices["observability"];
@@ -108,6 +113,8 @@ export type GovernanceModelOk = {
   workspaceAgentIdentity: string | null;
   workspaceGovernance: ReturnType<typeof renderWorkspaceGovernanceContext>;
   structuredWorkspacePolicyActive: boolean;
+  /** False when the workspace turned Opengeni credits off (model policy). */
+  workspaceCreditModelsAllowed: boolean;
   workspaceMemory: string | null | undefined;
   buildCompanyBrainContributionReceiptFor: (
     skillCatalogText: string,
@@ -213,6 +220,7 @@ export async function prepareGovernanceAndModel(
     rigMaterialization,
     [workspace, companyProfileSnapshot, instructionPolicySnapshot, preferenceSnapshot],
     workspaceModelPolicy,
+    organizationModelDefaults,
   ] = await Promise.all([
     session.rigId && session.rigVersionId
       ? (async () =>
@@ -236,6 +244,7 @@ export async function prepareGovernanceAndModel(
       ),
     ]),
     getWorkspaceModelPolicy(db, input.workspaceId),
+    getOrganizationModelDefaults(db, input.accountId),
   ]);
   const rigVersion = rigMaterialization?.version ?? null;
   // Rig display name for the doctrine block + setup events/errors (only on a
@@ -266,6 +275,7 @@ export async function prepareGovernanceAndModel(
   const companyProfileIncluded = contextSelection.receipt.companyProfileIncluded;
   const workspaceGovernance = renderWorkspaceGovernanceContext(
     {
+      learningPolicy: deps.learningPolicy,
       companyProfile: companyProfileSnapshot,
       instructionPolicy: instructionPolicySnapshot,
       preferences: preferenceSnapshot,
@@ -361,10 +371,11 @@ export async function prepareGovernanceAndModel(
   // a chat-only Fireworks model. Resolving against the default-model settings
   // keeps gating consistent with the router. Cost accounting covers registry
   // models via configuredModelPricing.
-  const resolvedModel = runtime.resolveTurnModel(
-    capabilitySettings,
-    turnExecutionPolicy.productModelId,
-  );
+  //
+  // The accepted policy is then projected back onto the resolved shape: a
+  // turn frozen before hosted web search was enabled keeps its frozen tool set
+  // on every attempt, so recovery never adds a tool mid-turn.
+  const resolvedModel = resolveAcceptedTurnModel(runtime, capabilitySettings, turnExecutionPolicy);
   const providerApi = resolvedModel?.provider.api ?? "responses";
   const nativeImageProviderBinding =
     providerApi === "responses"
@@ -372,10 +383,8 @@ export async function prepareGovernanceAndModel(
       : null;
   const lazyToolTransport = lazyToolTransportForTurn(resolvedModel);
   const modelInputPolicy = modelAttachmentInputPolicyForTurn(resolvedModel);
-  // Use the proven wire capability, not the catalogue modality alone. Chat
-  // providers may advertise vision, but OpenGeni intentionally has no typed
-  // image transport for that wire yet; exposing view_image there would turn
-  // pixels into a multi-megabyte text/base64 function result.
+  // The shared input policy combines model modality with the supported wire
+  // transport, including typed image projection for vision-capable Chat models.
   const supportsImageInput = modelInputPolicy.supportsImageInput;
   media.modelCanReceiveRetainedSessionImages = supportsImageInput;
   const attachmentProjector = createModelHistoryAttachmentProjector(
@@ -433,7 +442,12 @@ export async function prepareGovernanceAndModel(
   // catalog values and must reach pre-turn compaction, history guards, and
   // every model call together.
   eventing.modelRunSettings = resolvedModel
-    ? settingsWithResolvedModelContext(runSettings, resolvedModel.configured)
+    ? settingsWithResolvedModelContext(
+        runSettings,
+        resolvedModel.configured,
+        workspace.settings,
+        organizationModelDefaults,
+      )
     : runSettings;
   // WORKSPACE MODEL POLICY — the authoritative hard gate. Runs immediately
   // after resolution and BEFORE any model call (the compaction summarizer
@@ -448,6 +462,11 @@ export async function prepareGovernanceAndModel(
       const verdict = evaluateWorkspaceModelPolicy(workspaceModelPolicy, {
         providerId: turnExecutionPolicy.providerId,
         modelId: turnExecutionPolicy.productModelId,
+        // The same cost class the claim bills (`chargesOpenGeniCredits`):
+        // the resolved definition when present, else the frozen product id.
+        chargesCredits: resolvedModel
+          ? resolvedModel.configured.cost === "credits"
+          : policyChargesCreditsForModel(capabilitySettings, turnExecutionPolicy.productModelId),
       });
       if (!verdict.allowed) {
         throw new WorkspaceModelPolicyBlockedError(
@@ -508,6 +527,7 @@ export async function prepareGovernanceAndModel(
       workspaceAgentIdentity,
       workspaceGovernance,
       structuredWorkspacePolicyActive,
+      workspaceCreditModelsAllowed: workspaceModelPolicy?.allowCreditModels !== false,
       workspaceMemory,
       buildCompanyBrainContributionReceiptFor,
       logicalSandboxSettings,

@@ -6,7 +6,7 @@
 
 ## One object, several clients
 
-An editable artifact has one authoritative head in OpenGeni. Postgres owns its
+An editable artifact has one authoritative head in Opengeni. Postgres owns its
 identity, authorization, causal transaction log, receipts, and checkpoints;
 object storage owns immutable snapshots, source imports, media, and exported
 bytes. The Rust kernel is the only authority allowed to turn typed commands
@@ -75,6 +75,10 @@ Office files are import/export representations only:
   name, MIME, size, hash, artifact id, and source head.
 - Export does not write into a sandbox. If code genuinely needs local bytes, it
   uses the existing Files tool to download that returned file.
+- Export exists only where the materializer runs. Without
+  `OPENGENI_ARTIFACT_MATERIALIZER_DEPLOYED=true` the export tools are outside
+  the first-party ceiling and the REST enqueue route refuses; editing and
+  import are unaffected (see `docs/deployment.md`).
 - Re-import always creates a new artifact. It never overwrites another
   artifact or changes the meaning of an existing Office source.
 
@@ -95,6 +99,19 @@ head. A tool inspection reports the exact `headSequence` and `stateHash` it
 read; a successful mutation reports the new receipt. Live clients reconcile
 through the existing durable outbox and binary protocol.
 
+Spreadsheet editing stays usable while commands are accepted locally and await
+server acknowledgement. The grid shows pending sync separately from local
+acceptance, retains pending cell input when refocused, and keeps independent
+failed edits visible. Retry never replays an older range over newer overlapping
+edits. Read-only authority removes both editing and resize controls.
+
+Row and column header boundaries resize the same canonical spreadsheet used in
+the dock, full-page route, and embedded workbench. Dragging updates only a
+frame-coalesced preview; releasing writes one generation-pinned command. Focus a
+boundary to resize with arrow keys (8 px, or 1 px with Shift), Home to reset to
+the default, and Escape to cancel. Resizes use sparse per-dimension causal
+registers, not browser storage or an XLSX shadow.
+
 ## Modality parity
 
 The agent surface exposes only commands already implemented by the durable
@@ -103,7 +120,7 @@ excuse to switch mutable truth back to an Office file.
 
 | Modality | Durable agent edits now | Explicit gaps |
 | --- | --- | --- |
-| Spreadsheet | sheet create/rename/delete, rectangular value/formula write, range clear; workbook metadata and bounded viewport inspection | styles, merges, dimensions, validation, comments, charts, drawings |
+| Spreadsheet | sheet create/rename/delete, rectangular value/formula write, range clear, row height/column width set/reset; workbook metadata and bounded viewport inspection with sparse dimensions | styles, merges, validation, comments, charts, drawings |
 | Document | document flags; paragraph add/edit/format/style; table add/style; page breaks; sections/page geometry; comments/replies/resolution; tracked changes; summary/body/story/section/review inspection | fields, notes, figures/media, footnotes/endnotes, arbitrary block deletion/reordering |
 | Presentation | masters/layouts/slides; titles/layout/notes; shape/group/connector/chart/table node insert/delete/move/bounds/transform/content; slide size; metadata/catalog/editor/resolved-slide/viewport inspection | new media upload, animation/timing, executable media, arbitrary OOXML relationship editing |
 

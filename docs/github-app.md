@@ -1,6 +1,6 @@
 # GitHub App workspace bindings
 
-OpenGeni uses a GitHub App for repository discovery and short-lived,
+Opengeni uses a GitHub App for repository discovery and short-lived,
 repository-scoped Git credentials. App server configuration and workspace
 authority are separate facts: configured App credentials do not make a
 workspace binding healthy.
@@ -38,13 +38,13 @@ remains a status/manager-link tool; reading status never posts a setup card.
 
 Creating the App and binding an installation are distinct operations. A caller
 with `github:manage` receives a signed, ten-minute browser handoff and first
-authorizes the App as a GitHub user. OpenGeni discovers existing installations
+authorizes the App as a GitHub user. Opengeni discovers existing installations
 visible to that user, but retains only exact personal-account ownership or live
 active organization-owner membership. Any retained installation produces an
 owner-only chooser that also offers installing the App on another account; none
 enters GitHub's new installation UI directly. This lets an existing installation
 connect without preventing the owner from adding a different personal account or
-organization, and does not depend on GitHub's Configure page to return OpenGeni
+organization, and does not depend on GitHub's Configure page to return Opengeni
 state.
 
 In the native Connect dialog, **Continue** on an account selection opens the
@@ -68,14 +68,14 @@ callback verifies:
    is queried again after repository enumeration, immediately before the proof
    is handed to the durable bind, and any revocation or unavailable recheck
    fails closed; and
-3. the exact OpenGeni account, workspace, managing subject, signed-state nonce,
+3. the exact Opengeni account, workspace, managing subject, signed-state nonce,
    installation ID, immutable GitHub account ID, GitHub actor ID, and explicit
    repository IDs committed by one transaction.
 
 The transaction accepts proof for at most ten minutes, checks the database clock
 before and after all writes, and consumes the nonce globally once. Replays,
 cross-workspace nonce reuse, and concurrent duplicate commits fail closed. One
-GitHub installation may be deliberately bound to multiple OpenGeni workspaces,
+GitHub installation may be deliberately bound to multiple Opengeni workspaces,
 but every workspace requires an independent owner proof and owns an independent
 repository allowlist.
 
@@ -88,7 +88,7 @@ installation-token APIs.
 
 An existing binding exposes a workspace-scoped **Change repositories** action
 that opens a new tab and preserves the current chat. The workspace refreshes
-GitHub status when the original tab regains focus. OpenGeni
+GitHub status when the original tab regains focus. Opengeni
 mints fresh signed browser state before opening GitHub's installation settings.
 The setup callback accepts that state from GitHub or the same-site browser
 cookie, then repeats exact OAuth authority proof before updating the binding.
@@ -110,7 +110,7 @@ authorization popup takes focus.
 The browser-navigation routes (`/github/connect`, `/github/setup`,
 `/github/install/callback`, `/github/oauth/callback`,
 `/github/installations/select`, installation `configure`, and the manifest
-callback) answer failures with a readable page and a **Back to OpenGeni** link to
+callback) answer failures with a readable page and a **Back to Opengeni** link to
 the workspace Plugins page, never a JSON body. The HTTP status is the one the API
 error handler gives that failure. An expired or reused link, GitHub's **Cancel**
 (`error=access_denied`), a non-owner's authority denial, a missing permission, an
@@ -151,15 +151,15 @@ installation settings link in a new tab.
 | --- | --- | --- |
 | Personal-account installation owner | Supported | Fresh authorized user ID must equal the installation account ID. |
 | Active organization owner | Supported when GitHub exposes it | The authenticated membership endpoint must return the exact organization ID, `state=active`, and `role=admin`. The App requests **Members: read**; existing installations must approve that permission. |
-| Organization policy requires approval | Pending only | `setup_action=request` produces truthful pending UX and no binding. Retry after an owner approves and GitHub returns `install` or `update`. |
+| Organization member requests the App | Pending only | GitHub's native **Request** flow returns `setup_action=request`. Opengeni shows a calm pending page that returns to the originating chat with `github=requested`; the web GitHub card then shows "Waiting for your GitHub organization owner" (a browser-local display hint, never authority) and the Connect dialog shows the same state. No binding is created. When an owner approves, GitHub redirects the **owner** to the setup URL with `setup_action=install` and no Opengeni state; that renders an explanatory page and connects nothing, because the redirect cannot name a workspace. An organization owner then connects it from Opengeni through the normal owner-proof flow, and the requester's card picks it up through its ordinary status refresh. An approved installation is never linked to the requester's workspace automatically: the App is shared across tenants, so an installation is not consent for any particular workspace. |
 | Non-owner repository administrator | Denied | Repository `admin` or `maintain` permission is not installation/configuration authority. |
 | Ordinary collaborator | Denied | Repository visibility and collaboration do not confer installation authority. |
 | GitHub App Manager without organization ownership | Unsupported / denied | GitHub exposes no equivalent current-authority receipt accepted by this flow. |
-| Membership hidden by policy, missing permission, or provider API failure | Unsupported / unverified | OpenGeni cannot prove ownership and fails closed. |
+| Membership hidden by policy, missing permission, or provider API failure | Unsupported / unverified | Opengeni cannot prove ownership and fails closed. |
 | Pending or stale organization membership | Denied | Membership must be active at authorization time. |
 | Suspended or deleted installation | Denied / unbound | It cannot be newly bound, enumerate repositories, or mint a usable token. |
 
-OpenGeni never infers installation or configuration authority from
+Opengeni never infers installation or configuration authority from
 `GET /user/installations`, setup callback IDs, App Manager metadata, repository
 permission bits, or repository administration. A human-managed token injected
 into an agent sandbox is also not a product binding mechanism.
@@ -208,7 +208,7 @@ token that never reaches the sandbox, bounded to 10 seconds) supplies GitHub's
 repository id, and the resource is stamped for that turn only when exactly one
 allowlist holds that id. The allowlist, `github_installation_repositories`,
 stores repository ids rather than names, so this resolution cannot be completed
-from Postgres alone and is therefore performed where OpenGeni already talks to
+from Postgres alone and is therefore performed where Opengeni already talks to
 GitHub rather than at session create. Results (positive and negative) are
 memoized per worker process for ten minutes keyed by workspace, installation,
 and `owner/name`, so recovered attempts and sibling children do not re-read
@@ -219,7 +219,7 @@ installation leaves the resource bare and posts a visible
 within that window; resolution never fails the turn or the session, and a
 GitHub outage proceeds bare after the bound timeout.
 
-Connected Machines do not receive OpenGeni GitHub App credentials and continue
+Connected Machines do not receive Opengeni GitHub App credentials and continue
 to use their machine's ambient Git authentication.
 
 ## Operational notes
@@ -235,7 +235,7 @@ to use their machine's ambient Git authentication.
 - Managed deployments expose only install/connect UI and keep App registration
   identifiers and operator manifest creation server-side. Configured/local
   deployments retain the operator setup flow.
-- Workspace unlink deletes only that OpenGeni binding. It does not uninstall the
+- Workspace unlink deletes only that Opengeni binding. It does not uninstall the
   App from GitHub or change another workspace's independent binding.
 
 ## Operator setup
@@ -257,10 +257,10 @@ From the web app (configured/local deployments):
 7. Restart the API and worker, or restart everything with `bun run dev`.
 8. Reopen the repository picker and click **Connect GitHub**. Complete GitHub's installation/configuration screen and fresh user authorization as the personal-account owner or an active organization owner.
 
-OpenGeni reports App server configuration and workspace binding separately as
+Opengeni reports App server configuration and workspace binding separately as
 `disabled`, `unbound`, or `bound` (see [Status contract](#status-contract)). It
 binds only after fresh GitHub authorization proves exact personal ownership or
-active organization ownership and then atomically stores the OpenGeni
+active organization ownership and then atomically stores the Opengeni
 account/workspace/subject, GitHub actor/account/installation, one-time proof,
 and explicit repository IDs. An organization approval request remains pending
 and unbound.

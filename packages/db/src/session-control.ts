@@ -1,9 +1,9 @@
+import { parentOutboxAuthorityTx } from "./child-outbox-authority";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import {
   boundWorkspaceControlEvent,
   childPausedClassification,
-  McpPersonalConnectionDelegations,
   workspaceControlUtf8Bytes,
   type WorkspacePauseTimerRequest,
   type SessionMcpApprovalPolicy,
@@ -24,6 +24,7 @@ import {
   childRequiresActionResolvedSummary,
 } from "./child-lifecycle-notices";
 import { closePendingSessionToolCallsInTransaction } from "./session-tool-call-settlement";
+import { deleteSubscriptionCoreCodexWaitersForTurns } from "./subscription-core-codex-waiter-cleanup";
 import {
   mirrorSessionRealtimeContextInTransaction,
   renderRealtimeHumanInputResponseContext,
@@ -252,10 +253,21 @@ export async function assertAgentCommandAuthorityInTransaction(
     workspaceId: string;
     actor: Extract<SessionCommandActor, { type: "agent_attempt" }>;
     targetSessionId: string;
-    action: "pause" | "resume" | "steer" | "message" | "goal" | "wait" | "model_settings";
+    action:
+      | "pause"
+      | "resume"
+      | "steer"
+      | "message"
+      | "goal"
+      | "wait"
+      | "model_settings"
+      | "context";
   },
 ): Promise<void> {
-  if (["goal", "wait"].includes(input.action) && input.targetSessionId !== input.actor.sessionId) {
+  if (
+    ["goal", "wait", "context"].includes(input.action) &&
+    input.targetSessionId !== input.actor.sessionId
+  ) {
     throw new SessionControlInvariantError("An agent self command must target its own session");
   }
   // Every command caller establishes the control/workspace prefix first.
@@ -2940,37 +2952,10 @@ async function insertChildOutboxRowInTransaction(
       `Child outbox ${input.kind} payload discriminator mismatch`,
     );
   }
-  let personalConnectionDelegations: (typeof schema.sessionTurns.$inferSelect)["personalConnectionDelegations"] =
-    [];
-  let mcpAccountBindings: (typeof schema.sessionTurns.$inferSelect)["mcpAccountBindings"] = null;
-  if (input.childSession.parentTurnId) {
-    const [parentTurn] = await db
-      .select({
-        delegations: schema.sessionTurns.personalConnectionDelegations,
-        mcpAccountBindings: schema.sessionTurns.mcpAccountBindings,
-      })
-      .from(schema.sessionTurns)
-      .where(
-        and(
-          eq(schema.sessionTurns.workspaceId, input.workspaceId),
-          eq(schema.sessionTurns.sessionId, parentSessionId),
-          eq(schema.sessionTurns.id, input.childSession.parentTurnId),
-        ),
-      )
-      .limit(1);
-    if (parentTurn) {
-      mcpAccountBindings = parentTurn.mcpAccountBindings;
-      const parsed = McpPersonalConnectionDelegations.safeParse(parentTurn.delegations);
-      if (!parsed.success) {
-        throw new SessionControlInvariantError(
-          `Invalid personal MCP delegation snapshot at session_turns:${input.workspaceId}:${parentSessionId}:${input.childSession.parentTurnId}`,
-        );
-      }
-      personalConnectionDelegations = parsed.data.map((delegation) => ({
-        ...delegation,
-      }));
-    }
-  }
+  const authority = await parentOutboxAuthorityTx(db, input.workspaceId, {
+    ...input.childSession,
+    parentSessionId,
+  });
   await db
     .insert(schema.sessionSystemUpdateOutbox)
     .values(
@@ -2987,16 +2972,8 @@ async function insertChildOutboxRowInTransaction(
             sourceId: input.childSession.id,
             summary: input.summary,
             payload: input.payload,
-            lineage: {
-              childSessionId: input.childSession.id,
-              parentSessionId,
-              ...(input.childSession.parentTurnId
-                ? { parentTurnId: input.childSession.parentTurnId }
-                : {}),
-              ...(input.lineage ?? {}),
-            },
-            personalConnectionDelegations,
-            mcpAccountBindings,
+            ...authority,
+            lineage: { ...authority.lineage, ...(input.lineage ?? {}) },
           },
           "summary",
           "summaryCodecVersion",
@@ -3275,20 +3252,12 @@ async function cancelSessionSubtreeInTransaction(
         turnGeneration: schema.sessionHumanInputRequests.turnGeneration,
         questions: schema.sessionHumanInputRequests.questions,
       });
-    await db
-      .update(schema.codexCapacityWaiters)
-      .set({
-        status: "superseded",
-        lastWakeReason: "session_cancelled",
-        updatedAt: now,
-      })
-      .where(
-        and(
-          eq(schema.codexCapacityWaiters.workspaceId, input.workspaceId),
-          inArray(schema.codexCapacityWaiters.blockedTurnId, immediatelyCancelledTurnIds),
-          eq(schema.codexCapacityWaiters.status, "waiting"),
-        ),
-      );
+    // A core Codex waiter exists only while its turn waits; cancelling the
+    // turn removes it (and its pending wake deliveries) in the same commit.
+    await deleteSubscriptionCoreCodexWaitersForTurns(db, {
+      workspaceId: input.workspaceId,
+      turnIds: immediatelyCancelledTurnIds,
+    });
   }
   const cancelledSystemUpdates = await db
     .update(schema.sessionSystemUpdates)

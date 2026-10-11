@@ -14,8 +14,8 @@ test("signed-out page presents the landing copy around the existing social/email
       />
     </SignedOutPage>,
   );
-  expect(html).toContain("Infrastructure");
-  expect(html).toContain("that actually finish the job.");
+  expect(html).toContain("Agents in your product.");
+  expect(html).toContain("Infrastructure out of the box.");
   expect(html).toContain("Build AI products without building the infrastructure from scratch.");
   expect(html).toContain("Durable sessions that keep working, even when you close your laptop");
   expect(html).toContain("Tools and sandboxes, with approvals and permissions");

@@ -1,14 +1,31 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { signDelegatedAccessToken, type AccessContext } from "@opengeni/contracts";
-import { resolveCodexAppsCredentialIdForRun } from "@opengeni/core";
+import {
+  resolveCodexAppsCredentialIdForRun,
+  stampDelegatedHumanAuthorization,
+} from "@opengeni/core";
+import {
+  CodexAppsCredentialUnavailable,
+  CodexReloginRequired,
+  isCodexAppsCredentialUnavailable,
+} from "@opengeni/codex";
 import {
   createDb,
+  decryptEnvironmentValue,
   encryptEnvironmentValue,
   ensureManagedAccessForUserWithOrganizationMemberships,
-  listCodexAccountStatuses,
   synchronizeCanonicalHumanLoginBindings,
-  upsertCodexSubscriptionCredential,
   type DbClient,
+} from "@opengeni/db";
+import {
+  buildSubscriptionCoreCodexAppsTokenResolver,
+  subscriptionCoreCodexAppsRequestAuth,
+  connectSubscriptionCoreCodexConnection,
+  getSubscriptionCoreCodexWorkspaceProjection,
+  setSubscriptionCoreWorkspaceCodexSource,
+  listSubscriptionCoreCodexServingConnections,
+  type Database,
+  type SubscriptionCoreCodexAppsDeps,
 } from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
 import {
@@ -41,6 +58,125 @@ const settings = testSettings({
   codexSubscriptionEnabled: true,
   codexConnectedAppsEnabled: true,
 });
+
+// Current-core setup adapters retain the historical scenarios' compact fixture
+// vocabulary. Every exercised HTTP route and credential/Apps operation is live
+// production core code; no retired persistence helper is executed here.
+type CredentialFixtureInput = Parameters<
+  typeof import("../../../packages/db/test/fixtures/legacy-codex").upsertCodexSubscriptionCredential
+>[1];
+async function upsertCodexSubscriptionCredential(db: Database, input: CredentialFixtureInput) {
+  const result = await connectSubscriptionCoreCodexConnection(db, {
+    ...input,
+    subjectId: input.connectedBySubjectId ?? `user:${OWNER_USER_ID}`,
+    providerAccountId: input.chatgptAccountId,
+    providerSubjectId: input.chatgptUserId ?? `fixture:${input.chatgptAccountId}`,
+    accountEmail: input.accountEmail ?? null,
+    label: input.label ?? null,
+  });
+  if (result.kind !== "connected") throw new Error(`core fixture refused: ${result.reason}`);
+  return result;
+}
+async function upsertOrganizationCodexSubscriptionCredential(
+  db: Database,
+  input: Omit<CredentialFixtureInput, "accountId" | "workspaceId"> & {
+    organizationId: string;
+    actorSubjectId: string;
+  },
+) {
+  const result = await connectSubscriptionCoreCodexConnection(db, {
+    ...input,
+    accountId: input.organizationId,
+    workspaceId: null,
+    subjectId: input.actorSubjectId,
+    providerAccountId: input.chatgptAccountId,
+    providerSubjectId: `fixture:${input.chatgptAccountId}`,
+    accountEmail: input.accountEmail ?? null,
+    label: input.label ?? null,
+  });
+  if (result.kind !== "connected") throw new Error(`core fixture refused: ${result.reason}`);
+  return result;
+}
+async function coreTarget(workspaceId: string, connectionId: string) {
+  const [row] = await admin`select account_id from workspaces where id = ${workspaceId}`;
+  if (!row) throw new Error("fixture workspace missing");
+  return { accountId: row.account_id as string, workspaceId, connectionId };
+}
+async function getWorkspaceCodexSubscriptionSource(db: Database, workspaceId: string) {
+  return (
+    await getSubscriptionCoreCodexWorkspaceProjection(db, {
+      ...(await coreTarget(workspaceId, "")),
+      viewerSubjectId: `user:${OWNER_USER_ID}`,
+    })
+  ).source;
+}
+async function listCodexAccountStatuses(db: Database, workspaceId: string) {
+  return (
+    await getSubscriptionCoreCodexWorkspaceProjection(db, {
+      ...(await coreTarget(workspaceId, "")),
+      viewerSubjectId: `user:${OWNER_USER_ID}`,
+    })
+  ).accounts;
+}
+async function setWorkspaceCodexSubscriptionMode(
+  db: Database,
+  input: Parameters<typeof setSubscriptionCoreWorkspaceCodexSource>[1],
+) {
+  return await setSubscriptionCoreWorkspaceCodexSource(db, input);
+}
+async function loadCodexCredentialForRun(
+  db: Database,
+  _settings: typeof settings,
+  workspaceId: string,
+  credentialId: string,
+) {
+  const target = await coreTarget(workspaceId, credentialId);
+  const rows = await listSubscriptionCoreCodexServingConnections(db, {
+    ...target,
+    subjectId: `user:${OWNER_USER_ID}`,
+  });
+  return rows.some((row) => row.connectionId === credentialId) ? { id: credentialId } : null;
+}
+function buildCodexAppsTokenResolver(
+  db: Database,
+  runtimeSettings: typeof settings,
+  workspaceId: string,
+  credentialId: string,
+  deps: SubscriptionCoreCodexAppsDeps = {},
+) {
+  return {
+    getToken: async () =>
+      await buildSubscriptionCoreCodexAppsTokenResolver(
+        db,
+        runtimeSettings,
+        await coreTarget(workspaceId, credentialId),
+        deps,
+      )(),
+  };
+}
+function codexAppsRequestAuth(
+  db: Database,
+  runtimeSettings: typeof settings,
+  input: { workspaceId: string; credentialId: string },
+) {
+  return {
+    withAuthorization: async <T>(
+      use: (token: { accessToken: string; chatgptAccountId: string | null }) => Promise<T>,
+    ) =>
+      await subscriptionCoreCodexAppsRequestAuth(
+        db,
+        runtimeSettings,
+        await coreTarget(input.workspaceId, input.credentialId),
+      ).withAuthorization(use),
+  };
+}
+async function withCodexAppsRequestAuthorization<T>(
+  db: Database,
+  input: { workspaceId: string; credentialId: string },
+  use: () => Promise<T>,
+) {
+  return await codexAppsRequestAuth(db, settings, input).withAuthorization(use);
+}
 
 async function acquireDatabase(): Promise<SharedTestDatabase | null> {
   const adminUrl = process.env.OPENGENI_CODEX_QUOTA_POSTGRES_ADMIN_URL;
@@ -236,6 +372,115 @@ async function prepare(
   };
 }
 
+function encryptedCodexTokens(accessToken: string, refreshToken: string): string {
+  return encryptEnvironmentValue(
+    Buffer.from(settings.environmentsEncryptionKey!, "base64"),
+    JSON.stringify({ access_token: accessToken, refresh_token: refreshToken, id_token: "id" }),
+  );
+}
+
+/** A workspace whose owner may manage Apps, with designation-ready credentials. */
+async function appsRoutingFixture(api: ReturnType<typeof app>) {
+  const access = await api.request("/v1/access/me", { headers: { cookie: OWNER_COOKIE } });
+  const accountId = ((await access.json()) as AccessContext).defaultAccountId!;
+  const workspaceId = crypto.randomUUID();
+  await admin`
+    insert into workspaces (id, account_id, name)
+    values (${workspaceId}, ${accountId}, ${`apps-routing-${workspaceId}`})`;
+  await admin`
+    insert into workspace_memberships (
+      account_id, workspace_id, subject_id, subject_label, role, permissions
+    ) values (
+      ${accountId}, ${workspaceId}, ${`user:${OWNER_USER_ID}`}, 'Apps owner', 'member',
+      ${admin.json(["workspace:read", "connections:write"])}
+    )`;
+  const connect = async (label: string, expiresAt: Date) =>
+    await upsertCodexSubscriptionCredential(client.db, {
+      accountId,
+      workspaceId,
+      credentialEncrypted: encryptedCodexTokens(`${label}-token`, `${label}-refresh-1`),
+      chatgptAccountId: `${label}-${crypto.randomUUID()}`,
+      scopes: null,
+      planType: "pro",
+      isFedramp: false,
+      expiresAt,
+      lastRefreshAt: new Date(Date.now() - 60 * 60_000),
+      connectedBySubjectId: `user:${OWNER_USER_ID}`,
+    });
+  const connectOrganization = async () => {
+    const connection = await upsertOrganizationCodexSubscriptionCredential(client.db, {
+      organizationId: accountId,
+      actorSubjectId: `user:${OWNER_USER_ID}`,
+      credentialEncrypted: encryptedCodexTokens("org-token", "org-refresh-1"),
+      chatgptAccountId: `org-${crypto.randomUUID()}`,
+      scopes: null,
+      planType: "pro",
+      isFedramp: false,
+      expiresAt: new Date(Date.now() - 60_000),
+      lastRefreshAt: new Date(Date.now() - 60 * 60_000),
+    });
+    // Keep this organization's test connection out of sibling fixtures while
+    // retaining organization management and the organization inference source.
+    await admin.begin(async (tx) => {
+      await tx`select set_config('opengeni.account_id', ${accountId}, true),
+        set_config('opengeni.subject_id', ${`user:${OWNER_USER_ID}`}, true)`;
+      await tx`update subscription_connections set scope_kind = 'workspaces'
+        where id = ${connection.id}`;
+    });
+    await admin`insert into subscription_connection_workspaces
+      (account_id, connection_id, workspace_id)
+      values (${accountId}, ${connection.id}, ${workspaceId})`;
+    return connection;
+  };
+  const designate = async (credentialId: string, expectedVersion: number) => {
+    const response = await api.request(`/v1/workspaces/${workspaceId}/codex/apps`, {
+      method: "POST",
+      headers: browserHeaders(OWNER_COOKIE),
+      body: JSON.stringify({ accountId: credentialId, expectedVersion }),
+    });
+    expect(response.status).toBe(200);
+    return ((await response.json()) as { version: number }).version;
+  };
+  const routeToOrganization = async () => {
+    await setWorkspaceCodexSubscriptionMode(client.db, {
+      accountId,
+      workspaceId,
+      subjectId: `user:${OWNER_USER_ID}`,
+      mode: "organization",
+    });
+    expect(
+      (await getWorkspaceCodexSubscriptionSource(client.db, workspaceId)).effectiveSource,
+    ).toBe("organization");
+  };
+  return { accountId, workspaceId, connect, connectOrganization, designate, routeToOrganization };
+}
+
+async function credentialRow(credentialId: string) {
+  const [row] = await admin<
+    { version: number; status: string; credential_encrypted: string }[]
+  >`select refresh_generation as version, status, credential_encrypted
+    from subscription_connections where id = ${credentialId}`;
+  return { ...row!, version: Number(row!.version) };
+}
+
+function storedTokens(row: { credential_encrypted: string }) {
+  return JSON.parse(
+    decryptEnvironmentValue(
+      Buffer.from(settings.environmentsEncryptionKey!, "base64"),
+      row.credential_encrypted,
+    ),
+  ) as { access_token: string; refresh_token: string };
+}
+
+async function rejection(promise: Promise<unknown>): Promise<unknown> {
+  try {
+    await promise;
+  } catch (error) {
+    return error;
+  }
+  throw new Error("expected rejection");
+}
+
 beforeAll(async () => {
   shared = await acquireDatabase();
   if (!shared) {
@@ -247,6 +492,7 @@ beforeAll(async () => {
     return;
   }
   admin = shared.admin;
+  // Keep the seeded enabled core gate: these are current HTTP/authority tests.
   client = createDb(shared.appUrl, { max: 16 });
 
   for (const userId of [OWNER_USER_ID, OTHER_USER_ID]) {
@@ -298,6 +544,287 @@ afterAll(async () => {
 });
 
 describe("Codex quota managed-cookie-only reset redemption API", () => {
+  test("managed-cookie device connect start and poll refuse cross-origin browser mutations", async () => {
+    if (!available) return;
+    const api = app();
+    const { workspaceId } = await appsRoutingFixture(api);
+    for (const operation of ["start", "poll"]) {
+      const response = await api.request(
+        `/v1/workspaces/${workspaceId}/codex/connect/${operation}`,
+        {
+          method: "POST",
+          headers: { ...browserHeaders(), origin: "https://other.example.test" },
+          body: JSON.stringify({ state: "untrusted" }),
+        },
+      );
+      expect(response.status).toBe(403);
+      expect(await response.text()).toContain("same-origin");
+    }
+  });
+  test("SUB-APPS-01: a workspace Apps designation under organization routing loads its token, persists refreshes, and can be cleared", async () => {
+    if (!available) return;
+    const api = app();
+    const fixture = await appsRoutingFixture(api);
+    const { workspaceId } = fixture;
+    const designated = await fixture.connect("apps", new Date(Date.now() - 60_000));
+    const designationVersion = await fixture.designate(designated.id, 0);
+    await fixture.connectOrganization();
+    await fixture.routeToOrganization();
+
+    // Inference routing now excludes the workspace credential (control); the
+    // Apps designation is still the executable Apps authority.
+    expect(await loadCodexCredentialForRun(client.db, settings, workspaceId, designated.id)).toBe(
+      null,
+    );
+    expect(await resolveCodexAppsCredentialIdForRun(client.db, workspaceId)).toBe(designated.id);
+
+    const before = await credentialRow(designated.id);
+    const refreshed: string[] = [];
+    const token = await buildCodexAppsTokenResolver(
+      client.db,
+      settings,
+      workspaceId,
+      designated.id,
+      {
+        refresh: async (refreshToken) => {
+          refreshed.push(refreshToken);
+          return { accessToken: "apps-fresh-token", refreshToken: "apps-refresh-2" };
+        },
+      },
+    ).getToken();
+    expect(token.accessToken).toBe("apps-fresh-token");
+    expect(refreshed).toEqual(["apps-refresh-1"]);
+    const after = await credentialRow(designated.id);
+    expect(after.version).toBe(before.version + 1);
+    expect(after.status).toBe("active");
+    expect(storedTokens(after)).toMatchObject({
+      access_token: "apps-fresh-token",
+      refresh_token: "apps-refresh-2",
+    });
+
+    // The runtime request path uses the persisted token without another refresh
+    // and rechecks the designation before handing the bearer to dispatch.
+    const requestAuth = codexAppsRequestAuth(client.db, settings, {
+      workspaceId,
+      credentialId: designated.id,
+    });
+    expect((await requestAuth.withAuthorization(async (bearer) => bearer)).accessToken).toBe(
+      "apps-fresh-token",
+    );
+    expect((await credentialRow(designated.id)).version).toBe(after.version);
+
+    // Turning Apps off is reported as possible and works in organization mode.
+    const accounts = await api.request(`/v1/workspaces/${workspaceId}/codex/accounts`, {
+      headers: { cookie: OWNER_COOKIE },
+    });
+    expect(accounts.status).toBe(200);
+    expect(((await accounts.json()) as any).apps).toMatchObject({
+      credentialId: designated.id,
+      version: designationVersion,
+      canDisable: true,
+    });
+    const cleared = await api.request(`/v1/workspaces/${workspaceId}/codex/apps`, {
+      method: "DELETE",
+      headers: browserHeaders(OWNER_COOKIE),
+      body: JSON.stringify({ expectedVersion: designationVersion }),
+    });
+    expect(cleared.status).toBe(200);
+    expect(await cleared.json()).toMatchObject({ credentialId: null, version: 0, changed: true });
+    expect(await resolveCodexAppsCredentialIdForRun(client.db, workspaceId)).toBeNull();
+    const afterClear = await api.request(`/v1/workspaces/${workspaceId}/codex/accounts`, {
+      headers: { cookie: OWNER_COOKIE },
+    });
+    expect(((await afterClear.json()) as any).apps).toMatchObject({
+      credentialId: null,
+      canDisable: false,
+    });
+
+    // A cleared designation is classified as unavailable, not a refresh failure.
+    const revoked = await rejection(requestAuth.withAuthorization(async (bearer) => bearer));
+    expect(revoked).toBeInstanceOf(CodexAppsCredentialUnavailable);
+
+    // A stale opaque version cannot designate after a clear (which projects 0).
+    const redesignate = await api.request(`/v1/workspaces/${workspaceId}/codex/apps`, {
+      method: "POST",
+      headers: browserHeaders(OWNER_COOKIE),
+      body: JSON.stringify({ accountId: designated.id, expectedVersion: designationVersion }),
+    });
+    expect(redesignate.status).toBe(409);
+  });
+
+  test("SUB-APPS-01: organization routing cannot reach a credential that is not the Apps designation", async () => {
+    if (!available) return;
+    const api = app();
+    const fixture = await appsRoutingFixture(api);
+    const { workspaceId } = fixture;
+    const designated = await fixture.connect("apps", new Date(Date.now() + 60 * 60_000));
+    const sibling = await fixture.connect("sibling", new Date(Date.now() - 60_000));
+    await fixture.designate(designated.id, 0);
+    const organization = await fixture.connectOrganization();
+    await fixture.routeToOrganization();
+
+    // A different workspace's own designated credential.
+    const foreign = await appsRoutingFixture(api);
+    const foreignDesignated = await foreign.connect("foreign", new Date(Date.now() - 60_000));
+    await foreign.designate(foreignDesignated.id, 0);
+
+    // The organization credential is in this workspace's effective inference
+    // pool, but that never makes it reachable as Apps.
+    expect(
+      (await loadCodexCredentialForRun(client.db, settings, workspaceId, organization.id))?.id,
+    ).toBe(organization.id);
+
+    for (const credentialId of [organization.id, sibling.id, foreignDesignated.id]) {
+      const before = await admin<{ version: number }[]>`
+        select refresh_generation as version from subscription_connections where id = ${credentialId}`;
+      let refreshCalls = 0;
+      const tokenError = await rejection(
+        buildCodexAppsTokenResolver(client.db, settings, workspaceId, credentialId, {
+          refresh: async () => {
+            refreshCalls += 1;
+            return { accessToken: "must-not-be-used", refreshToken: "must-not-be-used" };
+          },
+        }).getToken(),
+      );
+      expect(isCodexAppsCredentialUnavailable(tokenError)).toBe(true);
+      expect(refreshCalls).toBe(0);
+      const requestError = await rejection(
+        codexAppsRequestAuth(client.db, settings, { workspaceId, credentialId }).withAuthorization(
+          async (bearer) => bearer,
+        ),
+      );
+      expect(isCodexAppsCredentialUnavailable(requestError)).toBe(true);
+      const after = await admin<{ version: number }[]>`
+        select refresh_generation as version from subscription_connections where id = ${credentialId}`;
+      expect(after[0]!.version).toBe(before[0]!.version);
+    }
+
+    // Positive control: the exact designation is reachable.
+    expect(
+      (
+        await codexAppsRequestAuth(client.db, settings, {
+          workspaceId,
+          credentialId: designated.id,
+        }).withAuthorization(async (bearer) => bearer)
+      ).accessToken,
+    ).toBe("apps-token");
+
+    // The designation cannot outlive the connection's current workspace scope.
+    await admin`delete from subscription_connection_workspaces
+      where workspace_id = ${workspaceId} and connection_id = ${designated.id}`;
+    const ownerRevoked = await rejection(
+      buildCodexAppsTokenResolver(client.db, settings, workspaceId, designated.id).getToken(),
+    );
+    expect(isCodexAppsCredentialUnavailable(ownerRevoked)).toBe(true);
+  });
+
+  test("SUB-APPS-01: an Apps refresh persists its rotated tokens when the designation is cleared mid-refresh, and clearing works with subscriptions disabled", async () => {
+    if (!available) return;
+    const api = app();
+    const fixture = await appsRoutingFixture(api);
+    const { accountId, workspaceId } = fixture;
+    const designated = await fixture.connect("apps", new Date(Date.now() - 60_000));
+    const designationVersion = await fixture.designate(designated.id, 0);
+    await setWorkspaceCodexSubscriptionMode(client.db, {
+      accountId,
+      workspaceId,
+      subjectId: `user:${OWNER_USER_ID}`,
+      mode: "disabled",
+    });
+    expect(
+      (await getWorkspaceCodexSubscriptionSource(client.db, workspaceId)).effectiveSource,
+    ).toBe("disabled");
+    const accounts = await api.request(`/v1/workspaces/${workspaceId}/codex/accounts`, {
+      headers: { cookie: OWNER_COOKIE },
+    });
+    expect(((await accounts.json()) as any).apps).toMatchObject({
+      credentialId: designated.id,
+      canDisable: true,
+    });
+
+    const before = await credentialRow(designated.id);
+    let clearStatus = 0;
+    const token = await buildCodexAppsTokenResolver(
+      client.db,
+      settings,
+      workspaceId,
+      designated.id,
+      {
+        // The provider has spent apps-refresh-1 by the time Apps is turned off.
+        refresh: async () => {
+          const cleared = await api.request(`/v1/workspaces/${workspaceId}/codex/apps`, {
+            method: "DELETE",
+            headers: browserHeaders(OWNER_COOKIE),
+            body: JSON.stringify({ expectedVersion: designationVersion }),
+          });
+          clearStatus = cleared.status;
+          return { accessToken: "apps-rotated-token", refreshToken: "apps-refresh-2" };
+        },
+      },
+    ).getToken();
+    expect(clearStatus).toBe(200);
+    expect(token.accessToken).toBe("apps-rotated-token");
+    const after = await credentialRow(designated.id);
+    expect(after.version).toBe(before.version + 1);
+    expect(after.status).toBe("active");
+    expect(storedTokens(after)).toMatchObject({
+      access_token: "apps-rotated-token",
+      refresh_token: "apps-refresh-2",
+    });
+
+    // The persisted rotation grants no use: the cleared designation is unavailable.
+    expect(await resolveCodexAppsCredentialIdForRun(client.db, workspaceId)).toBeNull();
+    const revoked = await rejection(
+      codexAppsRequestAuth(client.db, settings, {
+        workspaceId,
+        credentialId: designated.id,
+      }).withAuthorization(async (bearer) => bearer),
+    );
+    expect(isCodexAppsCredentialUnavailable(revoked)).toBe(true);
+  });
+
+  test("SUB-APPS-01: a permanent Apps refresh failure under organization routing stamps needs_relogin and stays a relogin, not unavailable", async () => {
+    if (!available) return;
+    const api = app();
+    const fixture = await appsRoutingFixture(api);
+    const { workspaceId } = fixture;
+    const designated = await fixture.connect("apps", new Date(Date.now() - 60_000));
+    await fixture.designate(designated.id, 0);
+    await fixture.connectOrganization();
+    await fixture.routeToOrganization();
+
+    const before = await credentialRow(designated.id);
+    const refreshFailure = await rejection(
+      buildCodexAppsTokenResolver(client.db, settings, workspaceId, designated.id, {
+        refresh: async () => {
+          throw new CodexReloginRequired("refresh token was revoked");
+        },
+      }).getToken(),
+    );
+    expect(refreshFailure).toBeInstanceOf(CodexReloginRequired);
+    expect(isCodexAppsCredentialUnavailable(refreshFailure)).toBe(false);
+    const after = await credentialRow(designated.id);
+    expect(after.status).toBe("needs_relogin");
+    expect(after.version).toBe(before.version);
+
+    // Later attempts still describe a relogin of the designated account.
+    const later = await rejection(
+      buildCodexAppsTokenResolver(client.db, settings, workspaceId, designated.id).getToken(),
+    );
+    expect(later).toBeInstanceOf(CodexReloginRequired);
+    expect(isCodexAppsCredentialUnavailable(later)).toBe(false);
+
+    // The request-time recheck classifies the same state as a relogin too.
+    const atDispatch = await rejection(
+      withCodexAppsRequestAuthorization(
+        client.db,
+        { workspaceId, credentialId: designated.id },
+        async () => "must-not-send",
+      ),
+    );
+    expect(atDispatch).toBeInstanceOf(CodexReloginRequired);
+  });
+
   test("an actual Better Auth sign-in cookie can prepare its owning credential", async () => {
     if (!available) return;
     const actualSettings = testSettings({
@@ -455,7 +982,7 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
       error: {
         status: 503,
         code: "upstream_unavailable",
-        message: "OpenGeni is temporarily unavailable — retry.",
+        message: "Opengeni is temporarily unavailable — retry.",
         retryable: true,
       },
     });
@@ -463,7 +990,7 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
     expect(provider.calls).toBe(callsBefore);
   });
 
-  test("Codex Apps is owner-enabled, scoped-disableable, browser-only, and OCC-safe", async () => {
+  test("Codex Apps is core-admin enabled, scoped-disableable, browser-only, and opaque-version OCC-safe", async () => {
     if (!available) return;
     const api = app();
     const access = await api.request("/v1/access/me", { headers: { cookie: OWNER_COOKIE } });
@@ -514,7 +1041,9 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
       version: 0,
       canDisable: false,
     });
-    expect(initialBody.accounts[0]).toMatchObject({
+    expect(
+      initialBody.accounts.find((row: { id: string }) => row.id === connected.id),
+    ).toMatchObject({
       id: connected.id,
       appsDesignated: false,
       canEnableApps: true,
@@ -526,9 +1055,12 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
       body: JSON.stringify({ accountId: connected.id, expectedVersion: 0 }),
     });
     expect(enabled.status).toBe(200);
-    expect(await enabled.json()).toMatchObject({
+    const enabledBody = (await enabled.json()) as { version: number };
+    const designationVersion = enabledBody.version;
+    expect(designationVersion).toBeGreaterThan(0);
+    expect(enabledBody).toMatchObject({
       credentialId: connected.id,
-      version: 1,
+      version: designationVersion,
       changed: true,
     });
 
@@ -539,12 +1071,12 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
     const unscopedDisable = await api.request(`/v1/workspaces/${workspaceId}/codex/apps`, {
       method: "DELETE",
       headers: browserHeaders(OTHER_COOKIE),
-      body: JSON.stringify({ expectedVersion: 1 }),
+      body: JSON.stringify({ expectedVersion: designationVersion }),
     });
     expect(unscopedDisable.status).toBe(403);
     await admin`
       update workspace_memberships
-      set permissions = ${admin.json(["workspace:read", "connections:write"])}
+      set role = 'admin', permissions = ${admin.json(["workspace:admin"])}
       where workspace_id = ${workspaceId} and subject_id = ${`user:${OTHER_USER_ID}`}`;
 
     const bearer = await signDelegatedAccessToken(DELEGATION_SECRET, {
@@ -561,60 +1093,61 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
         ...browserHeaders(OWNER_COOKIE),
         authorization: `Bearer ${bearer}`,
       },
-      body: JSON.stringify({ expectedVersion: 1 }),
+      body: JSON.stringify({ expectedVersion: designationVersion }),
     });
     expect(bearerAttempt.status).toBe(403);
     const crossSiteAttempt = await api.request(`/v1/workspaces/${workspaceId}/codex/apps`, {
       method: "DELETE",
       headers: { ...browserHeaders(OWNER_COOKIE), origin: "https://attacker.test" },
-      body: JSON.stringify({ expectedVersion: 1 }),
+      body: JSON.stringify({ expectedVersion: designationVersion }),
     });
     expect(crossSiteAttempt.status).toBe(403);
 
     const disabledByManager = await api.request(`/v1/workspaces/${workspaceId}/codex/apps`, {
       method: "DELETE",
       headers: browserHeaders(OTHER_COOKIE),
-      body: JSON.stringify({ expectedVersion: 1 }),
+      body: JSON.stringify({ expectedVersion: designationVersion }),
     });
     expect(disabledByManager.status).toBe(200);
     expect(await disabledByManager.json()).toMatchObject({
       credentialId: null,
-      version: 2,
+      version: 0,
       changed: true,
     });
 
+    await admin`update workspace_memberships set role = 'member',
+      permissions = ${admin.json(["workspace:read"])}
+      where workspace_id = ${workspaceId} and subject_id = ${`user:${OTHER_USER_ID}`}`;
     const otherCannotEnable = await api.request(`/v1/workspaces/${workspaceId}/codex/apps`, {
       method: "POST",
       headers: browserHeaders(OTHER_COOKIE),
-      body: JSON.stringify({ accountId: connected.id, expectedVersion: 2 }),
+      body: JSON.stringify({ accountId: connected.id, expectedVersion: 0 }),
     });
     expect(otherCannotEnable.status).toBe(403);
 
     const reenabled = await api.request(`/v1/workspaces/${workspaceId}/codex/apps`, {
       method: "POST",
       headers: browserHeaders(OWNER_COOKIE),
-      body: JSON.stringify({ accountId: connected.id, expectedVersion: 2 }),
+      body: JSON.stringify({ accountId: connected.id, expectedVersion: 0 }),
     });
     expect(reenabled.status).toBe(200);
+    const reenabledVersion = ((await reenabled.json()) as { version: number }).version;
+    expect(reenabledVersion).toBeGreaterThan(designationVersion);
     expect(await resolveCodexAppsCredentialIdForRun(client.db, workspaceId)).toBe(connected.id);
 
-    // Designation is not durable authority: removing the exact owner's current
-    // connection-management permission makes Apps unavailable immediately.
-    await admin`
-      update workspace_memberships
-      set permissions = ${admin.json(["workspace:read"])}
-      where workspace_id = ${workspaceId} and subject_id = ${`user:${OWNER_USER_ID}`}`;
+    // Current scope, not a historical connector identity, authorizes use.
+    await admin`delete from subscription_connection_workspaces
+      where workspace_id = ${workspaceId} and connection_id = ${connected.id}`;
     expect(await resolveCodexAppsCredentialIdForRun(client.db, workspaceId)).toBeNull();
-    await admin`
-      update workspace_memberships
-      set permissions = ${admin.json(["workspace:read", "connections:write"])}
-      where workspace_id = ${workspaceId} and subject_id = ${`user:${OWNER_USER_ID}`}`;
+    await admin`insert into subscription_connection_workspaces
+      (account_id, workspace_id, connection_id)
+      values (${accountId}, ${workspaceId}, ${connected.id})`;
     expect(await resolveCodexAppsCredentialIdForRun(client.db, workspaceId)).toBe(connected.id);
 
     const staleReplay = await api.request(`/v1/workspaces/${workspaceId}/codex/apps`, {
       method: "POST",
       headers: browserHeaders(OWNER_COOKIE),
-      body: JSON.stringify({ accountId: connected.id, expectedVersion: 2 }),
+      body: JSON.stringify({ accountId: connected.id, expectedVersion: 0 }),
     });
     expect(staleReplay.status).toBe(409);
     expect(provider.calls).toBe(callsBefore);
@@ -627,11 +1160,14 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
     });
     const disabledReadBody = (await disabledRead.json()) as any;
     expect(disabledReadBody.apps.available).toBe(false);
-    expect(disabledReadBody.accounts[0].canEnableApps).toBe(false);
+    expect(
+      disabledReadBody.accounts.find((row: { id: string }) => row.id === connected.id)
+        .canEnableApps,
+    ).toBe(false);
     const disabledEnable = await disabledApi.request(`/v1/workspaces/${workspaceId}/codex/apps`, {
       method: "POST",
       headers: browserHeaders(OWNER_COOKIE),
-      body: JSON.stringify({ accountId: connected.id, expectedVersion: 3 }),
+      body: JSON.stringify({ accountId: connected.id, expectedVersion: reenabledVersion }),
     });
     expect(disabledEnable.status).toBe(409);
 
@@ -645,7 +1181,7 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
     });
   });
 
-  test("owner cookie works; overview/allocator never consume; another admin and nonhuman auth fail closed", async () => {
+  test("core administrators can prepare shared reset credits; overview/allocator never consume and foreign/nonhuman auth fail closed", async () => {
     if (!available) return;
     provider.calls = 0;
     provider.consumeBodies = [];
@@ -741,11 +1277,11 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
     });
     expect(unownedOverview.status).toBe(200);
     expect(((await unownedOverview.json()) as any).accounts[unowned.id]).toMatchObject({
-      canRedeem: false,
-      canResumeRedemption: false,
+      canRedeem: true,
+      canResumeRedemption: true,
       redemptionAccess: {
-        ownership: "unowned",
-        canClaimUnownedViaReconnect: true,
+        ownership: "current_human",
+        canClaimUnownedViaReconnect: false,
       },
     });
     const claimed = await upsertCodexSubscriptionCredential(client.db, {
@@ -767,7 +1303,7 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
       lastRefreshAt: new Date(),
       connectedBySubjectId: `user:${OWNER_USER_ID}`,
     });
-    expect(claimed).toMatchObject({ kind: "upserted", id: unowned.id, isNew: false });
+    expect(claimed).toMatchObject({ kind: "connected", id: unowned.id, isNew: false });
     const claimedOverview = await api.request(`/v1/workspaces/${workspaceId}/codex/overview`, {
       headers: { cookie: OWNER_COOKIE },
     });
@@ -800,9 +1336,9 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
       connectedBySubjectId: `user:${OWNER_USER_ID}`,
     });
     await admin`
-      update codex_subscription_credentials
+      update subscription_connections
       set status = 'error', last_error = 'injected unhealthy credential'
-      where workspace_id = ${workspaceId} and id = ${unhealthy.id}`;
+      where id = ${unhealthy.id}`;
     const unhealthyOverview = await api.request(`/v1/workspaces/${workspaceId}/codex/overview`, {
       headers: { cookie: OWNER_COOKIE },
     });
@@ -857,9 +1393,9 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
     });
     expect(otherOverview.status).toBe(200);
     expect(((await otherOverview.json()) as any).accounts[connected.id]).toMatchObject({
-      canRedeem: false,
+      canRedeem: true,
       redemptionAccess: {
-        ownership: "different_human",
+        ownership: "current_human",
         canClaimUnownedViaReconnect: false,
       },
     });
@@ -871,13 +1407,16 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
       crypto.randomUUID(),
       browserHeaders(OTHER_COOKIE),
     );
-    expect(otherPrepared.response.status).toBe(403);
+    expect(otherPrepared.response.status).toBe(200);
+    expect(provider.consumeBodies).toHaveLength(1);
 
     const [foreignAccount] = await admin<{ id: string }[]>`
       insert into managed_accounts (name) values (${`codex-quota-foreign-${RUN_ID}`}) returning id`;
     const [foreignWorkspace] = await admin<{ id: string }[]>`
       insert into workspaces (account_id, name)
       values (${foreignAccount!.id}, ${`codex-quota-foreign-${RUN_ID}`}) returning id`;
+    await admin`insert into organization_memberships(account_id, subject_id, role, status, personal_workspace_id)
+      values (${foreignAccount!.id}, ${`user:${OWNER_USER_ID}`}, 'owner', 'active', ${foreignWorkspace!.id})`;
     const foreignCredential = await upsertCodexSubscriptionCredential(client.db, {
       accountId: foreignAccount!.id,
       workspaceId: foreignWorkspace!.id,
@@ -897,6 +1436,8 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
       lastRefreshAt: new Date(),
       connectedBySubjectId: `user:${OWNER_USER_ID}`,
     });
+    await admin`update organization_memberships set status = 'suspended'
+      where account_id = ${foreignAccount!.id} and subject_id = ${`user:${OWNER_USER_ID}`}`;
     const providerCallsBeforeForeign = provider.calls;
     const foreignPrepared = await prepare(
       api,
@@ -1007,7 +1548,9 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
     const body = (await response.json()) as any;
     expect(Object.keys(body.accounts).sort()).toEqual(accounts.map((account) => account.id).sort());
     for (const account of accounts) {
-      expect(body.accounts[account.id].usage.error).toBeString();
+      // Core overview projects durable usage (possibly an empty cached row),
+      // while reset-credit detail is bounded by the live provider deadline.
+      expect(body.accounts[account.id].usage).toBeDefined();
       expect(body.accounts[account.id].resetCredits.error).toBeString();
       expect(
         body.accounts[account.id].resetCredits.credits.every(
@@ -1025,7 +1568,9 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
     });
     const context = (await access.json()) as AccessContext;
     const workspaceId = context.defaultWorkspaceId!;
-    const account = (await listCodexAccountStatuses(client.db, workspaceId))[0]!;
+    const account = (await listCodexAccountStatuses(client.db, workspaceId)).find(
+      (row) => row.status === "active" && row.allocatorEnabled,
+    )!;
     const callsBefore = provider.calls;
     const missingOrigin = browserHeaders();
     delete missingOrigin.origin;
@@ -1179,9 +1724,9 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
     // token-health transition cannot erase durable completion or require a
     // provider overview readback.
     await admin`
-      update codex_subscription_credentials
+      update subscription_connections
       set status = 'needs_relogin', last_error = 'injected after durable completion'
-      where workspace_id = ${workspaceId} and id = ${account.id}`;
+      where id = ${account.id}`;
     const replayPreparation = await prepare(
       api,
       workspaceId,
@@ -1284,7 +1829,7 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
     await admin`
       update codex_reset_redemption_attempts
       set confirmation_expires_at = now() - interval '1 second'
-      where workspace_id = ${workspaceId} and id = ${prepared.attemptId}`;
+      where id = ${prepared.attemptId}`;
     releasePreflight();
     const response = await redeeming;
     expect(response.status).toBe(403);
@@ -1296,32 +1841,154 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
     const [remaining] = await admin<{ count: number }[]>`
       select count(*)::int as count
       from codex_reset_redemption_attempts
-      where workspace_id = ${workspaceId} and id = ${prepared.attemptId}`;
+      where id = ${prepared.attemptId}`;
     expect(remaining?.count).toBe(0);
   }, 30_000);
 
-  test("timeout ambiguity survives reload/prepare and retries the same upstream key", async () => {
+  test.each([false, true])(
+    "timeout ambiguity survives browser recovery or is fenced by graceful disconnect (disconnect=%s)",
+    async (disconnect) => {
+      if (!available) return;
+      provider.ambiguousFailures = 0;
+      const api = app();
+      const access = await api.request("/v1/access/me", {
+        headers: { cookie: OWNER_COOKIE },
+      });
+      const context = (await access.json()) as AccessContext;
+      const workspaceId = context.defaultWorkspaceId!;
+      const key = Buffer.from(settings.environmentsEncryptionKey!, "base64");
+      const account = await upsertCodexSubscriptionCredential(client.db, {
+        accountId: context.defaultAccountId!,
+        workspaceId,
+        credentialEncrypted: encryptEnvironmentValue(
+          key,
+          JSON.stringify({
+            access_token: "token",
+            refresh_token: "refresh",
+            id_token: "id",
+          }),
+        ),
+        chatgptAccountId: `session-rotation-${crypto.randomUUID()}`,
+        scopes: null,
+        planType: "pro",
+        isFedramp: false,
+        expiresAt: new Date(Date.now() + 60 * 60_000),
+        lastRefreshAt: new Date(),
+        connectedBySubjectId: `user:${OWNER_USER_ID}`,
+      });
+      const attemptId = crypto.randomUUID();
+      const firstPreparation = await prepare(
+        api,
+        workspaceId,
+        account.id,
+        "credit-ambiguous",
+        attemptId,
+      );
+      const redeem = (confirmationToken: string, headers = browserHeaders()) =>
+        api.request(
+          `/v1/workspaces/${workspaceId}/codex/accounts/${account.id}/reset-credits/redeem`,
+          {
+            method: "POST",
+            headers,
+            body: JSON.stringify({
+              attemptId,
+              creditId: "credit-ambiguous",
+              confirmationToken,
+              confirmation: "REDEEM_USAGE_LIMIT_RESET",
+            }),
+          },
+        );
+      const first = await redeem(firstPreparation.body.confirmationToken);
+      expect(first.status).toBe(503);
+      expect((await first.json()) as any).toMatchObject({
+        status: "ambiguous",
+        retryable: true,
+      });
+
+      if (disconnect) {
+        const consumedBeforeDisconnect = provider.consumeBodies.length;
+        const disconnectOne = await api.request(
+          `/v1/workspaces/${workspaceId}/codex/accounts/${account.id}`,
+          { method: "DELETE", headers: { cookie: OWNER_COOKIE } },
+        );
+        expect(disconnectOne.status).toBe(200);
+        const disconnectAll = await api.request(`/v1/workspaces/${workspaceId}/codex`, {
+          method: "DELETE",
+          headers: { cookie: OWNER_COOKIE },
+        });
+        expect(disconnectAll.status).toBe(200);
+        const refused = await redeem(firstPreparation.body.confirmationToken);
+        expect(refused.status).toBeGreaterThanOrEqual(400);
+        expect(provider.consumeBodies).toHaveLength(consumedBeforeDisconnect);
+        const [durable] = await admin`
+        select status from codex_reset_redemption_attempts where id = ${attemptId}`;
+        expect(durable!.status).toBe("provider_started");
+        return;
+      }
+
+      // A second authenticated browser session for the same owning human has no
+      // local/sessionStorage hint. The owner-scoped overview is the discovery
+      // authority and returns the exact durable attempt id without provider keys.
+      const rotatedOverview = await api.request(`/v1/workspaces/${workspaceId}/codex/overview`, {
+        headers: { cookie: ROTATED_OWNER_COOKIE },
+      });
+      expect(rotatedOverview.status).toBe(200);
+      const rotatedBody = (await rotatedOverview.json()) as any;
+      expect(rotatedBody.accounts[account.id].redemptions).toContainEqual(
+        expect.objectContaining({
+          attemptId,
+          creditId: "credit-ambiguous",
+          status: "provider_started",
+          outcome: null,
+        }),
+      );
+
+      // The rotated session asks for a fresh five-minute confirmation and adopts
+      // the same logical attempt. Durable provider_started state skips a new
+      // availability preflight and reuses the one server key.
+      const resumedPreparation = await prepare(
+        api,
+        workspaceId,
+        account.id,
+        "credit-ambiguous",
+        attemptId,
+        browserHeaders(ROTATED_OWNER_COOKIE),
+      );
+      expect(resumedPreparation.body.resumable).toBe(true);
+      expect(resumedPreparation.body.recoveryStatus).toBe("provider_started");
+      const second = await redeem(
+        resumedPreparation.body.confirmationToken,
+        browserHeaders(ROTATED_OWNER_COOKIE),
+      );
+      expect(second.status).toBe(200);
+      expect((await second.json()) as any).toMatchObject({
+        status: "completed",
+        outcome: "alreadyRedeemed",
+        overview: null,
+      });
+      const bodies = provider.consumeBodies.filter((body) => body.credit_id === "credit-ambiguous");
+      expect(bodies).toHaveLength(2);
+      expect(new Set(bodies.map((body) => body.redeem_request_id)).size).toBe(1);
+    },
+    60_000,
+  );
+
+  test("an agent the owner signed in (organization MCP) cannot bypass the core browser-human reset fence", async () => {
     if (!available) return;
-    provider.ambiguousFailures = 0;
     const api = app();
-    const access = await api.request("/v1/access/me", {
-      headers: { cookie: OWNER_COOKIE },
-    });
+    const access = await api.request("/v1/access/me", { headers: { cookie: OWNER_COOKIE } });
     const context = (await access.json()) as AccessContext;
     const workspaceId = context.defaultWorkspaceId!;
+    const accountId = context.defaultAccountId!;
     const key = Buffer.from(settings.environmentsEncryptionKey!, "base64");
-    const account = await upsertCodexSubscriptionCredential(client.db, {
-      accountId: context.defaultAccountId!,
+    const connected = await upsertCodexSubscriptionCredential(client.db, {
+      accountId,
       workspaceId,
       credentialEncrypted: encryptEnvironmentValue(
         key,
-        JSON.stringify({
-          access_token: "token",
-          refresh_token: "refresh",
-          id_token: "id",
-        }),
+        JSON.stringify({ access_token: "token", refresh_token: "refresh", id_token: "id" }),
       ),
-      chatgptAccountId: `session-rotation-${crypto.randomUUID()}`,
+      chatgptAccountId: `agent-${crypto.randomUUID()}`,
       scopes: null,
       planType: "pro",
       isFedramp: false,
@@ -1329,88 +1996,404 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
       lastRefreshAt: new Date(),
       connectedBySubjectId: `user:${OWNER_USER_ID}`,
     });
-    const attemptId = crypto.randomUUID();
-    const firstPreparation = await prepare(
-      api,
-      workspaceId,
-      account.id,
-      "credit-ambiguous",
-      attemptId,
-    );
-    const redeem = (confirmationToken: string, headers = browserHeaders()) =>
-      api.request(
-        `/v1/workspaces/${workspaceId}/codex/accounts/${account.id}/reset-credits/redeem`,
+    // Exactly what organization-mcp dispatches for a signed-in person: no
+    // cookie, no bearer, no browser headers, and a stamped person proof.
+    const agentRequest = (
+      action: "prepare" | "redeem",
+      body: unknown,
+      permissions: string[] = ["connections:write", "workspace:read"],
+    ) => {
+      const payload = JSON.stringify(body);
+      const request = new Request(
+        `${PUBLIC_ORIGIN}/v1/workspaces/${workspaceId}/codex/accounts/${connected.id}/reset-credits/${action}`,
         {
+          method: "POST",
+          headers: {
+            accept: "application/json",
+            "content-type": "application/json",
+            "content-length": String(Buffer.byteLength(payload)),
+          },
+          body: payload,
+        },
+      );
+      stampDelegatedHumanAuthorization(request, {
+        organizationId: accountId,
+        subjectId: `user:${OWNER_USER_ID}`,
+        permissions: permissions as never,
+        workspaceScope: { kind: "all" },
+      });
+      return api.fetch(request);
+    };
+
+    const consumedBefore = provider.consumeBodies.length;
+    const attemptId = crypto.randomUUID();
+    const prepared = await agentRequest("prepare", { attemptId, creditId: "credit-reset" });
+    expect(prepared.status).toBe(403);
+    expect(provider.consumeBodies.length).toBe(consumedBefore);
+    const redeemed = await agentRequest("redeem", {
+      attemptId,
+      creditId: "credit-reset",
+      confirmationToken: "not-issued-to-agent",
+      confirmation: "REDEEM_USAGE_LIMIT_RESET",
+    });
+    expect(redeemed.status).toBe(403);
+    expect(provider.consumeBodies.length).toBe(consumedBefore);
+
+    // The connection's access still bounds it: no connections:write, no redemption.
+    const refused = await agentRequest(
+      "prepare",
+      { attemptId: crypto.randomUUID(), creditId: "credit-reset" },
+      ["workspace:read"],
+    );
+    expect(refused.status).toBe(403);
+    // A plain bearer token (not an agent acting as a person) is still refused.
+    const bearer = await api.request(
+      `/v1/workspaces/${workspaceId}/codex/accounts/${connected.id}/reset-credits/prepare`,
+      {
+        method: "POST",
+        headers: { ...browserHeaders(), authorization: "Bearer not-a-person" },
+        body: JSON.stringify({ attemptId: crypto.randomUUID(), creditId: "credit-reset" }),
+      },
+    );
+    expect(bearer.status).toBe(403);
+    expect(provider.consumeBodies.length).toBe(consumedBefore);
+  }, 60_000);
+});
+
+describe("Codex reset credits and overview on the shared core (M3 PR 2c)", () => {
+  test("a browser organization administrator redeems a workspace-managed core connection through its alias; agents, bearers and strangers are refused", async () => {
+    if (!available) return;
+    const api = app();
+    const access = await api.request("/v1/access/me", { headers: { cookie: OWNER_COOKIE } });
+    const accountId = ((await access.json()) as AccessContext).defaultAccountId!;
+    const workspaceId = crypto.randomUUID();
+    await admin`
+      insert into workspaces (id, account_id, name)
+      values (${workspaceId}, ${accountId}, ${`core-reset-${workspaceId}`})`;
+    await admin`
+      insert into workspace_memberships (
+        account_id, workspace_id, subject_id, subject_label, role, permissions
+      ) values (
+        ${accountId}, ${workspaceId}, ${`user:${OWNER_USER_ID}`}, 'Core owner', 'member',
+        ${admin.json(["workspace:read", "connections:write"])}
+      )`;
+    const [connection] = await admin<{ id: string }[]>`
+      insert into subscription_connections (
+        account_id, provider, kind, credential_encrypted, ownership, scope_kind,
+        provider_account_id, plan_type, provider_state, expires_at, managed_by_workspace_id, label
+      ) values (
+        ${accountId}::uuid, 'codex', 'subscription', ${encryptedCodexTokens("core-token", "core-refresh")},
+        'shared', 'workspaces', ${`core-${crypto.randomUUID()}`}, 'pro', '{}'::jsonb,
+        ${new Date(Date.now() + 60 * 60_000).toISOString()}::timestamptz, ${workspaceId}::uuid, 'Core'
+      ) returning id::text as id`;
+    const connectionId = connection!.id;
+    await admin`
+      insert into subscription_connection_workspaces (account_id, connection_id, workspace_id)
+      values (${accountId}::uuid, ${connectionId}::uuid, ${workspaceId}::uuid)`;
+    await admin`
+      insert into subscription_connection_assignment_policies (
+        account_id, connection_id, workspace_id, inference_pool
+      ) values (${accountId}::uuid, ${connectionId}::uuid, ${workspaceId}::uuid, 'workspace')`;
+    await admin`
+      insert into subscription_settings (
+        account_id, rotation, providers, cross_provider_failover, fallback_order,
+        personal_connections_allowed, personal_fallback_allowed
+      )
+      select ${accountId}::uuid, ${admin.json({ codex: { mode: "spread" } })}::jsonb,
+        '{}'::jsonb, false, '{}'::jsonb, false, false
+      where not exists (
+        select 1 from subscription_settings
+        where account_id = ${accountId}::uuid and workspace_id is null
+      )`;
+    const alias = crypto.randomUUID();
+    await admin`
+      insert into subscription_connection_aliases (account_id, provider, alias_connection_id, connection_id)
+      values (${accountId}::uuid, 'codex', ${alias}::uuid, ${connectionId}::uuid)`;
+    await admin`
+      insert into subscription_provider_cutovers (account_id, provider, enabled)
+      values (${accountId}::uuid, 'codex', true)
+      on conflict (account_id, provider) do update set enabled = true`;
+    try {
+      const consumedBefore = provider.consumeBodies.length;
+      // Through the legacy alias: prepare, then redeem, then replay.
+      const prepared = await prepare(api, workspaceId, alias, "credit-reset");
+      expect(prepared.response.status).toBe(200);
+      const redeem = (attemptId: string, confirmationToken: string, headers = browserHeaders()) =>
+        api.request(`/v1/workspaces/${workspaceId}/codex/accounts/${alias}/reset-credits/redeem`, {
           method: "POST",
           headers,
           body: JSON.stringify({
             attemptId,
-            creditId: "credit-ambiguous",
+            creditId: "credit-reset",
             confirmationToken,
             confirmation: "REDEEM_USAGE_LIMIT_RESET",
           }),
+        });
+      const redeemed = await redeem(prepared.attemptId, prepared.body.confirmationToken);
+      expect(redeemed.status).toBe(200);
+      expect((await redeemed.json()) as any).toMatchObject({
+        status: "completed",
+        outcome: "reset",
+      });
+      expect(provider.consumeBodies.length).toBe(consumedBefore + 1);
+      const [attempt] = await admin<{ credential_id: string; upstream: string }[]>`
+        select credential_id::text as credential_id, upstream_idempotency_key::text as upstream
+        from codex_reset_redemption_attempts where id = ${prepared.attemptId}::uuid`;
+      // The ledger holds the canonical core id; the provider saw its one key.
+      expect(attempt!.credential_id).toBe(connectionId);
+      expect(provider.consumeBodies.at(-1)!.redeem_request_id).toBe(attempt!.upstream);
+      // Single use: a lost response replays the durable outcome, no second consume.
+      const replay = await redeem(prepared.attemptId, prepared.body.confirmationToken);
+      expect((await replay.json()) as any).toMatchObject({ status: "completed", outcome: "reset" });
+      expect(provider.consumeBodies.length).toBe(consumedBefore + 1);
+      // The canonical id reaches the same connection.
+      expect(
+        (await prepare(api, workspaceId, connectionId, "credit-ambiguous")).response.status,
+      ).toBe(200);
+
+      // A bearer, another organization's administrator and an agent acting as
+      // the person are refused before any provider call.
+      const bearer = await api.request(
+        `/v1/workspaces/${workspaceId}/codex/accounts/${alias}/reset-credits/prepare`,
+        {
+          method: "POST",
+          headers: { ...browserHeaders(), authorization: "Bearer not-a-person" },
+          body: JSON.stringify({ attemptId: crypto.randomUUID(), creditId: "credit-reset" }),
         },
       );
-    const first = await redeem(firstPreparation.body.confirmationToken);
-    expect(first.status).toBe(503);
-    expect((await first.json()) as any).toMatchObject({
-      status: "ambiguous",
-      retryable: true,
-    });
+      expect(bearer.status).toBe(403);
+      const stranger = await prepare(
+        api,
+        workspaceId,
+        alias,
+        "credit-reset",
+        undefined,
+        browserHeaders(OTHER_COOKIE),
+      );
+      expect(stranger.response.status).toBeGreaterThanOrEqual(403);
+      const agentPayload = JSON.stringify({
+        attemptId: crypto.randomUUID(),
+        creditId: "credit-reset",
+      });
+      const agentRequest = new Request(
+        `${PUBLIC_ORIGIN}/v1/workspaces/${workspaceId}/codex/accounts/${alias}/reset-credits/prepare`,
+        {
+          method: "POST",
+          headers: {
+            accept: "application/json",
+            "content-type": "application/json",
+            "content-length": String(Buffer.byteLength(agentPayload)),
+          },
+          body: agentPayload,
+        },
+      );
+      stampDelegatedHumanAuthorization(agentRequest, {
+        organizationId: accountId,
+        subjectId: `user:${OWNER_USER_ID}`,
+        permissions: ["connections:write", "workspace:read"] as never,
+        workspaceScope: { kind: "all" },
+      });
+      // The same stamped request is accepted by the legacy route (see the
+      // organization MCP test above); on the core it is refused (design 6.3).
+      const agentResponse = await api.fetch(agentRequest);
+      expect(agentResponse.status).toBe(403);
+      expect(((await agentResponse.json()) as any).error?.message ?? "").toContain(
+        "managed browser session",
+      );
+      expect(provider.consumeBodies.length).toBe(consumedBefore + 1);
 
-    const disconnectOne = await api.request(
-      `/v1/workspaces/${workspaceId}/codex/accounts/${account.id}`,
-      { method: "DELETE", headers: { cookie: OWNER_COOKIE } },
-    );
-    expect(disconnectOne.status).toBe(409);
-    const disconnectAll = await api.request(`/v1/workspaces/${workspaceId}/codex`, {
-      method: "DELETE",
-      headers: { cookie: OWNER_COOKIE },
-    });
-    expect(disconnectAll.status).toBe(409);
+      // The overview serves the core pool with redemption authority for the browser human.
+      const overview = await api.request(`/v1/workspaces/${workspaceId}/codex/overview`, {
+        headers: browserHeaders(),
+      });
+      expect(overview.status).toBe(200);
+      const body = (await overview.json()) as any;
+      expect(Object.keys(body.accounts)).toEqual([connectionId]);
+      expect(body.accounts[connectionId]).toMatchObject({
+        canRedeem: true,
+        canResumeRedemption: true,
+        redemptionAccess: { ownership: "current_human" },
+        usage: { source: "provider" },
+        resetCredits: { source: "provider", detailState: "detailed" },
+      });
+      expect(body.accounts[connectionId].redemptions).toEqual([
+        expect.objectContaining({
+          attemptId: prepared.attemptId,
+          status: "completed",
+          outcome: "reset",
+        }),
+      ]);
+      expect(provider.consumeBodies.length).toBe(consumedBefore + 1);
 
-    // A second authenticated browser session for the same owning human has no
-    // local/sessionStorage hint. The owner-scoped overview is the discovery
-    // authority and returns the exact durable attempt id without provider keys.
-    const rotatedOverview = await api.request(`/v1/workspaces/${workspaceId}/codex/overview`, {
-      headers: { cookie: ROTATED_OWNER_COOKIE },
-    });
-    expect(rotatedOverview.status).toBe(200);
-    const rotatedBody = (await rotatedOverview.json()) as any;
-    expect(rotatedBody.accounts[account.id].redemptions).toContainEqual(
-      expect.objectContaining({
-        attemptId,
-        creditId: "credit-ambiguous",
-        status: "provider_started",
-        outcome: null,
-      }),
-    );
+      // A disabled cutover row fails closed with the typed 503.
+      await admin`update subscription_provider_cutovers set enabled = false
+        where account_id = ${accountId}::uuid and provider = 'codex'`;
+      expect((await prepare(api, workspaceId, alias, "credit-reset")).response.status).toBe(503);
+    } finally {
+      await admin`delete from subscription_provider_cutovers
+        where account_id = ${accountId}::uuid and provider = 'codex'`;
+    }
+  });
 
-    // The rotated session asks for a fresh five-minute confirmation and adopts
-    // the same logical attempt. Durable provider_started state skips a new
-    // availability preflight and reuses the one server key.
-    const resumedPreparation = await prepare(
-      api,
-      workspaceId,
-      account.id,
-      "credit-ambiguous",
-      attemptId,
-      browserHeaders(ROTATED_OWNER_COOKIE),
-    );
-    expect(resumedPreparation.body.resumable).toBe(true);
-    expect(resumedPreparation.body.recoveryStatus).toBe("provider_started");
-    const second = await redeem(
-      resumedPreparation.body.confirmationToken,
-      browserHeaders(ROTATED_OWNER_COOKIE),
-    );
-    expect(second.status).toBe(200);
-    expect((await second.json()) as any).toMatchObject({
-      status: "completed",
-      outcome: "alreadyRedeemed",
-      overview: null,
+  test("an organization administrator redeems an organization account that serves no workspace from the organization page; agents, bearers and strangers are refused", async () => {
+    if (!available) return;
+    const api = app();
+    const access = await api.request("/v1/access/me", { headers: { cookie: OWNER_COOKIE } });
+    const organizationId = ((await access.json()) as AccessContext).defaultAccountId!;
+    await admin`
+      insert into subscription_provider_cutovers (account_id, provider, enabled)
+      values (${organizationId}::uuid, 'codex', true)
+      on conflict (account_id, provider) do update set enabled = true`;
+    const connection = await upsertOrganizationCodexSubscriptionCredential(client.db, {
+      organizationId,
+      actorSubjectId: `user:${OWNER_USER_ID}`,
+      credentialEncrypted: encryptedCodexTokens("org-reset-token", "org-reset-refresh"),
+      chatgptAccountId: `org-reset-${crypto.randomUUID()}`,
+      scopes: null,
+      planType: "pro",
+      isFedramp: false,
+      expiresAt: new Date(Date.now() + 60 * 60_000),
+      lastRefreshAt: new Date(),
     });
-    const bodies = provider.consumeBodies.filter((body) => body.credit_id === "credit-ambiguous");
-    expect(bodies).toHaveLength(2);
-    expect(new Set(bodies.map((body) => body.redeem_request_id)).size).toBe(1);
-  }, 60_000);
+    // Available in no workspace: no workspace pool can reach it.
+    await admin.begin(async (tx) => {
+      await tx`select set_config('opengeni.account_id', ${organizationId}, true),
+        set_config('opengeni.subject_id', ${`user:${OWNER_USER_ID}`}, true)`;
+      await tx`update subscription_connections set scope_kind = 'workspaces'
+        where id = ${connection.id}`;
+    });
+    const base = `/v1/organizations/${organizationId}/codex/accounts/${connection.id}`;
+    const orgPrepare = (
+      creditId: string,
+      attemptId = crypto.randomUUID(),
+      headers = browserHeaders(),
+    ) =>
+      api.request(`${base}/reset-credits/prepare`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ attemptId, creditId }),
+      });
+    const orgRedeem = (attemptId: string, confirmationToken: string) =>
+      api.request(`${base}/reset-credits/redeem`, {
+        method: "POST",
+        headers: browserHeaders(),
+        body: JSON.stringify({
+          attemptId,
+          creditId: "credit-reset",
+          confirmationToken,
+          confirmation: "REDEEM_USAGE_LIMIT_RESET",
+        }),
+      });
+    const consumedBefore = provider.consumeBodies.length;
+    try {
+      // The account's page shows its resets with redemption authority.
+      const overview = await api.request(`${base}/overview`, { headers: browserHeaders() });
+      expect(overview.status).toBe(200);
+      const before = (await overview.json()) as any;
+      expect(before).toMatchObject({
+        accountId: connection.id,
+        canRedeem: true,
+        canResumeRedemption: true,
+        redemptionAccess: { ownership: "current_human" },
+        resetCredits: { source: "provider", detailState: "detailed", availableCount: 2 },
+      });
+      expect(
+        before.resetCredits.credits
+          .filter((credit: any) => credit.actionable)
+          .map((c: any) => c.id),
+      ).toEqual(["credit-reset", "credit-ambiguous"]);
+
+      const attemptId = crypto.randomUUID();
+      const prepared = await orgPrepare("credit-reset", attemptId);
+      expect(prepared.status).toBe(200);
+      const { confirmationToken } = (await prepared.json()) as any;
+      const redeemed = await orgRedeem(attemptId, confirmationToken);
+      expect(redeemed.status).toBe(200);
+      expect((await redeemed.json()) as any).toMatchObject({
+        status: "completed",
+        outcome: "reset",
+      });
+      expect(provider.consumeBodies.length).toBe(consumedBefore + 1);
+      const [attempt] = await admin<
+        { credential_id: string; account_id: string; upstream: string }[]
+      >`select credential_id::text as credential_id, account_id::text as account_id,
+          upstream_idempotency_key::text as upstream
+        from codex_reset_redemption_attempts where id = ${attemptId}::uuid`;
+      expect(attempt).toMatchObject({ credential_id: connection.id, account_id: organizationId });
+      expect(provider.consumeBodies.at(-1)!.redeem_request_id).toBe(attempt!.upstream);
+      // Single use: a lost response replays the durable outcome.
+      const replay = await orgRedeem(attemptId, confirmationToken);
+      expect((await replay.json()) as any).toMatchObject({ status: "completed", outcome: "reset" });
+      expect(provider.consumeBodies.length).toBe(consumedBefore + 1);
+      const after = (await (
+        await api.request(`${base}/overview`, { headers: browserHeaders() })
+      ).json()) as any;
+      expect(after.redemptions).toEqual([
+        expect.objectContaining({ attemptId, status: "completed", outcome: "reset" }),
+      ]);
+
+      // Refused before any provider call: a bearer, a stranger and an agent
+      // acting as the administrator (who may still read the resets).
+      const bearer = await orgPrepare("credit-ambiguous", crypto.randomUUID(), {
+        ...browserHeaders(),
+        authorization: "Bearer not-a-person",
+      });
+      expect(bearer.status).toBe(403);
+      const stranger = await orgPrepare(
+        "credit-ambiguous",
+        crypto.randomUUID(),
+        browserHeaders(OTHER_COOKIE),
+      );
+      expect(stranger.status).toBeGreaterThanOrEqual(403);
+      const agent = (path: string, method: "GET" | "POST") => {
+        const payload =
+          method === "POST"
+            ? JSON.stringify({ attemptId: crypto.randomUUID(), creditId: "credit-ambiguous" })
+            : undefined;
+        const request = new Request(`${PUBLIC_ORIGIN}${base}${path}`, {
+          method,
+          headers: {
+            accept: "application/json",
+            ...(payload
+              ? {
+                  "content-type": "application/json",
+                  "content-length": String(Buffer.byteLength(payload)),
+                }
+              : {}),
+          },
+          ...(payload ? { body: payload } : {}),
+        });
+        stampDelegatedHumanAuthorization(request, {
+          organizationId,
+          subjectId: `user:${OWNER_USER_ID}`,
+          permissions: ["account:read", "account:admin"] as never,
+          workspaceScope: { kind: "all" },
+        });
+        return api.fetch(request);
+      };
+      const agentPrepare = await agent("/reset-credits/prepare", "POST");
+      expect(agentPrepare.status).toBe(403);
+      expect(((await agentPrepare.json()) as any).error?.message ?? "").toContain(
+        "has to be done by the person",
+      );
+      const agentRead = await agent("/overview", "GET");
+      expect(agentRead.status).toBe(200);
+      expect((await agentRead.json()) as any).toMatchObject({
+        canRedeem: false,
+        redemptionAccess: { ownership: "managed_human_unavailable" },
+        resetCredits: { availableCount: 2 },
+      });
+      expect(provider.consumeBodies.length).toBe(consumedBefore + 1);
+
+      // A workspace-managed account is not reachable through the organization route.
+      const missing = await api.request(
+        `/v1/organizations/${organizationId}/codex/accounts/${crypto.randomUUID()}/overview`,
+        { headers: browserHeaders() },
+      );
+      expect(missing.status).toBe(404);
+    } finally {
+      await admin`delete from subscription_provider_cutovers
+        where account_id = ${organizationId}::uuid and provider = 'codex'`;
+    }
+  });
 });

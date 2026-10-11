@@ -92,18 +92,16 @@ pages for one exact resource kind, include the opaque resource/origin identity,
 and return only grants targeting the route workspace. Resource kind derives the
 only accepted action (`connection.use`, `document.read`, `variable_set.use`,
 `rig.use`, or `connected_machine.use`) and its exact product permission gate.
-For a canonical managed human with that permission, an organization without
-the version-1 activation receipt has exactly zero usable personal authorities,
-so discovery returns an empty page. Issue, revoke, and runtime use remain
-activation-gated; the empty discovery answer does not activate the product or
-weaken any mutation fence.
+Since migration 0611 every organization is session-tenancy activated, so
+discovery, issue, revoke, and runtime use need no per-organization receipt;
+every principal, permission, membership, and epoch fence is unchanged.
 The managed personal-workspace projection includes `rigs:use`, allowing its
 owner to discover and propose changes to personal Sandbox Environments without granting the
 administrative `rigs:manage` capability.
 
 Public issuance supports `session` and `always`. Session grants are authorized
 through the ordinary session authorization seam after all target-free
-principal, permission, and activation gates, and require the caller's expected
+principal and permission gates, and require the caller's expected
 authority epoch; missing and inaccessible targets share the ordinary
 non-enumerating session denial. Always grants remain unbound and require
 session-create authority. Shared context requires the durable acknowledgement.
@@ -474,7 +472,7 @@ else, so each is a broken feature, not an authority hole:
   authority views/functions in 0234. Migration 0303 repairs
   `transition_session_visibility` and `fork_session_content` with the exact
   active-membership personal-workspace-or-ordinary-membership disjunction. The
-  API/core/SDK caller is now active for explicitly activated organizations;
+  API/core/SDK caller is active for every organization (0611);
   the web console is its managed-human caller. Visibility transitions and
   private-source forks remain owner-only, while any currently authorized
   workspace member may fork a shared source into fresh authority of their own.
@@ -569,6 +567,25 @@ existing permissions and concurrency preconditions; DELETE does not perform
 them. There is currently no supported workspace archive/retirement endpoint,
 so this containment does not remove the retained workspace from inventory.
 Do not delete audit/history rows or weaken their foreign keys to force cleanup.
+Editable documents, spreadsheets, and presentations are such retained records:
+each `editable_artifacts` row references its workspace with `ON DELETE
+RESTRICT` and owns immutable version history, so a workspace that ever held one
+returns that `409` (the message names them) until the organization retention
+lifecycle erases them.
+
+Deletion must not invert the canonical writer prefix described under the 0299
+lock order below. `deleteWorkspaceIfQuiescent` takes the background-command
+lifecycle key, locks the organization row only `FOR NO KEY UPDATE`, takes the
+target's workspace-control prefix exclusively (advisory key and
+inference-control row) before its `workspaces` row `FOR UPDATE`, and locks
+sibling workspaces only `FOR KEY SHARE`. That still serializes concurrent
+deletions and the only-workspace check. Ordinary writers, which hold their
+control and `workspaces` rows and then reach `managed_accounts` through an
+account FK check, cannot deadlock with it; only transactions that lock, delete,
+or re-key a sibling `workspaces` row wait for the deletion to commit. Locking
+the organization or sibling rows `FOR UPDATE`, or the target `workspaces` row
+before its control row, turned deletions into `40P01` victims, surfaced as
+retryable `503 DATABASE_CONTENTION`.
 
 The organization overview, organization/shared-workspace metadata, member
 inventory, retention, and organization Codex routes require either a direct
@@ -581,7 +598,7 @@ the local exception.
 ### Pre-registration invitations and signup convergence (0314)
 
 Migration `0314_unregistered_organization_invitations.sql` lets an owner or
-administrator record an invitation before its target has an OpenGeni login.
+administrator record an invitation before its target has an Opengeni login.
 The durable row keeps the normalized email, optional display name, role, and a
 bounded set of initial shared-workspace ids, while `target_subject_id` stays
 null. The public response never reveals whether that email is registered, and
@@ -638,7 +655,7 @@ unsolicited link. Before auto sign-in the victim met a sign-in wall and had to
 reset the password, which revokes sessions and locks the other party out; now
 the victim is signed in and may start using an account whose password someone
 else holds. Every verification email therefore says to ignore it if the
-recipient did not create an OpenGeni account. Signing in only when the link is
+recipient did not create an Opengeni account. Signing in only when the link is
 opened in the browser that signed up would close that edge and remains a
 possible follow-up.
 
@@ -685,7 +702,7 @@ because granting owner there would be a privilege event rather than a repair.
 No migration-time backfill over a FORCE-RLS table is needed.
 
 The stock web console may then show a skippable product step to connect a
-model or buy OpenGeni credits. When the deployment bills credits and the new
+model or buy Opengeni credits. When the deployment bills credits and the new
 Personal workspace's model catalog reports a server-resolved default
 (`defaultSelection`) that is a selectable credits-billed model, the step reads
 the organization's balance (`GET /v1/billing`) and, while it is positive (for
@@ -752,9 +769,10 @@ converge; changed operation-id reuse fails closed. A subject-scoped transaction
 lock atomically enforces a lifetime allowance of ten organizations created
 through this self-service lifecycle. Organizations joined by invitation do not
 consume that allowance, and exact retries still replay after it is full. Once
-the deployment has a session-tenancy activation witness, the same transaction
-validates the exact fresh graph and writes its activation, enabled
-private-session setting, event, and immutable evidence. The application role
+the deployment has a session-tenancy activation witness (any receipt row), the
+same transaction validates the exact fresh graph and writes its receipt,
+enabled private-session setting, event, and immutable evidence. Since 0611 the
+receipt is evidence only and Only me is on by default without it. The application role
 can execute only the public creation capability and has no direct DML on either
 receipt table or access to the owner-only activation helper.
 
@@ -1094,6 +1112,28 @@ members, cross-organization membership ids, and every Personal workspace fail
 closed. Organization membership role changes keep the 0263 sole-owner
 invariant; workspace roles do not alter organization roles.
 
+That authority covers every shared workspace in the organization and every
+active member, the acting owner or administrator included. A workspace an
+organization key provisions (an embedding product's per-tenant
+`ensureWorkspace`/`og.workspaceId({ tenant })`) is an ordinary shared workspace
+in this inventory even though no human is a member of it, so an owner who
+cannot open a tenant's sessions grants themself (or anyone else) a role on it
+from Organization → Workspaces (**Join**) or Organization → People → the person →
+**Workspace access**, both of which call the same
+`PUT /v1/organizations/:organizationId/workspaces/:workspaceId/members/:membershipId`
+lifecycle. Lists longer than eight shared workspaces offer a name search.
+Migration `0634_organization_admin_self_workspace_removal.sql` (rolling)
+completes the self case: the removal-actor guard's "a member cannot remove
+their own workspace membership" rule is waived only for the transaction-local
+organization-administration capability that the organization revoke route
+opens, exactly like the last-administering-member guard; a workspace admin
+still cannot remove themself through the workspace's own Members route.
+Grants and revocations of one's own access write the same receipts and
+`organization_workspace_lifecycle_events` rows as any other. Organization keys
+still never manage human workspace membership: these routes require a managed
+human session (or an agent acting as that person), and the key keeps only its
+existing external-member administration. Personal workspaces stay owner-only.
+
 Create, rename, grant, and revoke are operation-id idempotent. Renames and
 access replacement/removal are exact-timestamp CAS fenced. Immutable FORCE-RLS
 receipt and event tables record the actor membership, shared workspace, target
@@ -1115,7 +1155,19 @@ page is the scoped editor for that workspace: a holder of `members:manage` may
 choose from a bounded list of active same-organization humans who do not already
 have access, add the selected organization membership, change that member's
 workspace role or fine-grained permissions, and revoke that exact workspace
-grant. It cannot invite people into the organization, change organization
+grant. Since migration `0635_organization_admin_workspace_member_management.sql`
+(rolling) an active organization owner or administrator may do the same on any
+shared workspace in their organization from that page, with or without their
+own workspace grant (or with one lacking `members:manage`): the API's
+`requireWorkspaceMemberManagementAuthority` admits only a canonical managed-cookie
+session whose organization role is owner/admin for a shared workspace, the two
+SECURITY DEFINER checks (`list_workspace_member_management_candidates`,
+`assert_workspace_member_management_candidate`) re-derive that active
+owner/admin `user:` membership, and removal opens the organization
+administration capability. The page keeps its own self and
+last-administering-member guards for every actor; ordinary members still need
+`members:manage` or `workspace:admin` on their own row, and API keys, delegated
+bearers, agents, and services keep the original refusal. It cannot invite people into the organization, change organization
 roles, enumerate unrelated workspace access, or administer Personal
 workspaces. The separate Slack access-request queue keeps its existing
 workspace-admin lifecycle.
@@ -1124,7 +1176,7 @@ workspace-admin lifecycle.
 
 An external product integrates through the organization boundary documented in
 [`product-integration.md`](product-integration.md): its backend holds an
-**organization API key**, maps each product tenant to one OpenGeni
+**organization API key**, maps each product tenant to one Opengeni
 **organization workspace**, and then uses ordinary workspace-scoped operational
 routes for sessions, files, events, and tools.
 
@@ -1170,7 +1222,7 @@ accounts; only an organization administrator can make one an admin.
   keys that were already revoked get a deleted one.
 
 The external backend also remains the source of truth for product Skills. It
-stores and versions them outside OpenGeni and passes the selected definitions
+stores and versions them outside Opengeni and passes the selected definitions
 inline in `CreateSessionRequest.skills` for each product-created session. There
 is no organization-wide Skill registry or Skill inheritance in this product
 integration contract, and workspace tenancy must not be widened by treating an
@@ -1455,6 +1507,20 @@ recreates this deadlock. Serialize on the advisory key instead. CAS on
 idempotency, and every fail-closed authorization check are unchanged by 0299 -
 only lock strength and lock class moved.
 
+**The turn claim is not on this key.** `claimSessionWorkForAttempt` takes
+neither the exclusive nor the shared `organization-membership:<organization
+id>` advisory lock, and nothing it reaches takes it: the host-MCP authority
+guard triggers (migrations 0445-0448) that once took it exclusively from inside
+the claim sit on tables with no remaining writer. A claim therefore holds only
+the shared tenancy fence and the canonical control/workspace/session/turn/
+attempt prefix, so it cannot invert the order above, and claims in one
+organization never serialize each other. A membership removal that commits
+while a claim is in flight is enforced at execution time instead: workspace
+writer admission refuses a revoked grant with `authority_revoked`, and
+connection and MCP authority revalidate live membership on every use. Do not
+add a membership lock, or a write whose trigger takes one, to the claim.
+`packages/db/test/claim-organization-membership-fence.test.ts` pins this.
+
 `packages/db/test/migration-0299-organization-membership-lock-order.test.ts`
 holds the regression evidence: a deterministic cycle probe, a parallel-load
 probe that asserts PostgreSQL's own `pg_stat_database.deadlocks` counter does
@@ -1513,7 +1579,7 @@ depends on, so an `account_id = current_account_id()` predicate over them is
 circular for the first two and type-incoherent for the third — `auth_identities`
 holds Better Auth's provider subject string in `account_id`, not a tenant id,
 and Better Auth queries it over its own connection pool that never carries an
-OpenGeni GUC. Consequently a query that reached the database layer without going
+Opengeni GUC. Consequently a query that reached the database layer without going
 through the access layer can read another organization's workspace and
 membership _metadata_, though never its content: every content table remains
 FORCE RLS and genuinely isolated.
@@ -1612,9 +1678,10 @@ and fresh-session configuration while narrowing the history spool.
 
 `0225_session_visibility_fork_activation.sql` shipped the first database
 surface; `0303_session_tenancy_product_activation.sql` replaces its unsafe
-mutation contract. The database prerequisite and first public caller are now
-both present, but the caller remains inert for every organization without its
-exact version-1 activation receipt.
+mutation contract. Rolling migration
+`0611_universal_session_tenancy_activation.sql` activated every organization:
+the per-organization version-1 `session_tenancy_activations` receipt is no
+longer a runtime prerequisite anywhere (history below).
 
 **Active today.** These parts of 0225 run in production on every deployment:
 
@@ -1643,40 +1710,37 @@ carry a `workspace_memberships` row.
 
 Migration 0311 adds atomic private visibility at session creation. The public
 create request defaults to workspace visibility; an explicit Only-me choice is
-accepted only for the exact canonical managed human in an activated
-organization and is inserted with owner provenance, visibility, and the first
+accepted only for the exact canonical managed human holding an active
+organization membership and is inserted with owner provenance, visibility, and the first
 event/turn in the existing create transaction. The web checks the capability
 before presenting Only me, omits the locked choice when Workspace is the only
 valid value, and never sends a restored private draft while that preflight is
 pending or denied.
 
-Migration 0323 separates operator readiness from product enablement for shared
-organization workspaces. The version-1 `session_tenancy_activations` row
-remains the drained, evidence-backed operator prerequisite for every private
-create. A distinct FORCE-RLS `organization_private_session_settings` row is the
-owner/admin product decision for shared organization workspaces on top of that
-receipt. Its managed-session `GET`/`PATCH
+Migration 0323 adds product enablement for shared organization workspaces. A
+FORCE-RLS `organization_private_session_settings` row is the owner/admin
+product decision for shared organization workspaces and, since 0611, the only
+organization-level gate on Only me. Its managed-session `GET`/`PATCH
 /v1/organizations/:organizationId/private-session-settings` API is backed by
 subject-bound SECURITY DEFINER functions with active-membership owner/admin
 role checks, optimistic versioning, and idempotent operation receipts; it never
-consults the organization members endpoint. Existing organizations that were
-already operator-activated are backfilled enabled so the rolling migration does
-not remove a shipped capability. For later activations, an owner or
-administrator must enable Only-me chats before use; the setting cannot be
-enabled before the receipt exists. Enablement does not grant access: any active
+consults the organization members endpoint. Since 0611 a missing row means
+enabled, so every organization has Only-me chats on by default; an owner or
+administrator disabling them writes an explicit disabled row (version 1 or
+later). Enablement does not grant access: any active
 member may use it only in a workspace where their ordinary grant carries
 `sessions:create`, and the private-create transaction rechecks their exact
 organization membership plus workspace membership. The setting is enforced by
 `open_private_session_create_capability` under the organization advisory fence
 and after keyed replay resolution, so a committed keyed create still replays
 after the setting is disabled while a fresh create fails closed
-(`SESSION_TENANCY_NOT_ACTIVATED`). A managed human's own Personal workspace
-keeps the exact 0311 rule: the receipt alone admits an explicit Only-me create
-there, and the setting is not consulted. Personal-workspace creates are not
+(`SESSION_TENANCY_NOT_ACTIVATED`, a wire code kept for client compatibility).
+A managed human's own Personal workspace keeps the exact 0311 rule: an explicit
+Only-me create there needs no setting. Personal-workspace creates are not
 forced private by the server; the web still sends the ordinary workspace-default
 wire path for a Personal workspace.
 
-**Mutation-active only after an explicit per-organization cutover.**
+**Mutation-active for every organization.**
 `transition_session_visibility` and `fork_session_content` exist, are SECURITY
 DEFINER, are granted to the runtime role, are listed in
 `RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES`, and have a first-class adapter at
@@ -1685,21 +1749,16 @@ adapter call, reached by `PUT .../sessions/:id/visibility` and
 `POST .../sessions/:id/forks`; `@opengeni/sdk` exposes matching methods. Both
 routes require the canonical managed-cookie owner, the exact workspace/session
 permissions, and the corresponding host authorization operation. The web
-console calls only these SDK methods after the activation-gated `tenancy`
-projection proves current ownership; worker, MCP, runtime, and the React
+console calls only these SDK methods after the `tenancy` projection proves
+current ownership; worker, MCP, runtime, and the React
 package remain non-callers. The SQL function remains the sole
 writer of `session.visibility.changed`; core fetches the returned durable event
 id and sequence and performs best-effort live publication without appending a
 second event or waking a workflow.
 
-Migration 0303 itself is rolling and supplies platform readiness, not the
-owner/admin product preference. The drained
-`bun run db:activate-session-tenancy -- --organization-id <uuid> --activated-by <operator>`
-command verifies the canonical opt-in, required migrations, zero-valued tenancy
-parity gates plus exact drainable/bounded lanes, while retaining the inventory
-as contextual evidence, before inserting one immutable
-`session_tenancy_activations` receipt. A mutation without that exact version-1
-organization receipt fails closed.
+History: 0303 made platform readiness a per-organization receipt written by a
+drained operator command behind `OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED`;
+0611 retired the command, the switch, and the receipt prerequisite.
 
 0303 was also an intentional signature cutover: it removes the historical
 eight-argument transition and fork routines and installs only the corresponding
@@ -1709,7 +1768,7 @@ existed at the signature cutover, and an omitted version must fail with
 undefined-function rather than infer or bypass activation. The 0225/0289
 migration bodies remain historical checkpoints;
 anything running against the fully migrated schema, including later migration
-tests, must supply version `1` and operate under the exact durable receipt.
+tests, must supply version `1` (universally activated since 0611).
 Migration 0336 is a rolling expansion on top of that cutover. It retains the
 nine-argument private-only overload for an in-flight old caller's exact retry
 and adds the ten-argument product overload with an explicit acknowledgement
@@ -1733,6 +1792,11 @@ The activated database contract is intentionally narrow:
   interaction holders are all quiescent. The stale 0225 auto-cancellation
   behavior is not ported. The nested quiescence helper is owner-internal and
   ungranted; only the fully authorized lifecycle functions may invoke it.
+  Rolling migration 0658 counts only live tool receipts: one whose turn is
+  nonterminal or whose attempt is open or lacks its interruption quiescence
+  receipt. A receipt stranded by a completed turn cannot be resumed or
+  resolved, so it no longer blocks transitions, whole-session forks or
+  Variable Set changes. This is the same predicate Retry already uses.
 - Transition-to-private additionally requires a singleton sandbox group. A
   fresh transition to private in a shared workspace also requires the 0323
   organization setting. Migration 0344 fences the actual visibility update,
@@ -1762,8 +1826,8 @@ The activated database contract is intentionally narrow:
 - Both adapters return the exact durable event id and sequence required by a
   later core publisher.
 
-The practical product consequence is deliberately bounded. Only an activated
-organization's canonical managed-human owner may change an otherwise quiescent
+The practical product consequence is deliberately bounded. Only the canonical
+managed-human owner may change an otherwise quiescent
 same-workspace session between `workspace_shared` and `user_private`, or fork a
 private source. Any canonical managed human with current access to a
 workspace-shared source may make an independent same-workspace private or
@@ -1775,9 +1839,8 @@ Fork requests additionally require an explicit destination visibility and
 acknowledgement boolean; visibility changes require the current public authority epoch.
 Applied fork replay still requires the exact actor's live workspace authority
 and cannot be used to discover another destination or source.
-Subject-authorized session reads expose the secret-safe `tenancy` projection
-only after activation. The console renders state only when that projection is
-present. Its app-lifetime controller retains one exact operation key across
+Subject-authorized session reads expose the secret-safe `tenancy` projection.
+The console renders state only when that projection is present. Its app-lifetime controller retains one exact operation key across
 same-target component reload and outcome-unknown/replay recovery, while exact
 principal, workspace-transition, and session changes retire old keys. A replay
 refetches current tenancy before presentation, so a superseding epoch or missing
@@ -1790,11 +1853,10 @@ boundary; the web component and Chromium acceptance tests pin the browser
 boundary.
 
 The stock new-session composer reads the server's create capabilities for
-Personal workspaces as well as shared workspaces. When private-session tenancy
-is unavailable, a Personal session uses workspace visibility inside the existing
-owner-only workspace boundary. It does not require the organization Only-me
-setting or claim that session-tenancy activation has happened. When supported,
-it retains the private-session create path.
+Personal workspaces as well as shared workspaces. When the caller cannot create
+a private session (for example no active organization membership), a Personal
+session uses workspace visibility inside the existing owner-only workspace
+boundary. It never requires the organization Only-me setting there.
 
 
 ## Referential integrity
@@ -2095,20 +2157,24 @@ keys for an apply. Earlier unresolved receipts remain immutable evidence; a
 later recheck records current truth rather than rewriting history. The 0347
 inspector uses its own target-schema-local, invocation-exact, SELECT-only
 FORCE-RLS capability. It cannot inherit 0340's connection update capability or
-collide with a second OpenGeni schema in the same database.
+collide with a second Opengeni schema in the same database.
 
 Migration 0340 also closes both ways this compatibility population could reopen.
-After an organization activates, `bind_connection_authority` refuses to mint a
-new personal connection without a live membership, surviving `legacy_user`
-rows are invisible to runtime reads, and the worker refuses a pre-snapshot
-workspace reference without an exact connection id before resolving any
-credential. Pre-activation behavior remains unchanged, so rollback is still
-permitted until the activation receipt is written.
+For an organization holding a `session_tenancy_activations` receipt (written
+only by the retired operator command, or by the 0349/0399 greenfield helpers
+while a receipt witness existed), `bind_connection_authority` refuses to mint a
+new personal connection without a live membership, surviving `legacy_user` rows
+are invisible to runtime reads, and the worker refuses a pre-snapshot workspace
+reference without an exact connection id before resolving any credential. Since
+0611 this receipt-keyed lane retirement
+(`opengeni_private.session_tenancy_account_activated`) gates no product
+surface, and 0611 writes no receipts: every other organization keeps the
+compatibility lane exactly as before, so no stored authority becomes invisible.
 
 Both of those paths depend on one seam,
 `opengeni_private.bind_connection_owner_authority`, and it exists because
 `organization_memberships` and `organization_user_resource_authorities` are
-`FORCE ROW LEVEL SECURITY` and OpenGeni runs its SECURITY DEFINER routines as a
+`FORCE ROW LEVEL SECURITY` and Opengeni runs its SECURITY DEFINER routines as a
 NON-superuser owner without `BYPASSRLS`. Migration 0256's inline
 `SELECT ... FOR SHARE` plus authority `INSERT` therefore matched nothing on
 every real deployment: a personal connection whose subject _did_ hold a live
@@ -2403,7 +2469,7 @@ The closed lane set is `TENANCY_COMPATIBILITY_LANES` in
 `packages/observability/src/index.ts`; an unreviewed name is ignored rather
 than minting a series. Every lane is published at zero on process start, so an
 operator can tell "this lane is dead" from "this lane was never wired up". The
-lane name is the only label OpenGeni adds - never an organization, workspace,
+lane name is the only label Opengeni adds - never an organization, workspace,
 session, subject, connection, resource, provider, or server identity - and a
 registry failure is swallowed at the telemetry boundary, so counting can never
 change an authorization or credential outcome.
@@ -2494,8 +2560,8 @@ fencing is delivered by migration 0222.
 Migration 0225 delivered the first database half. Migration 0303 replaces its
 auto-cancelling mutation functions with the activated, proven-quiescent
 contract described in "Session-visibility and fork public activation".
-The bounded API/core/SDK managed-human caller is now active behind the
-per-organization receipt. The managed web UI keeps visibility changes and
+The bounded API/core/SDK managed-human caller is active for every organization
+(0611). The managed web UI keeps visibility changes and
 private-source forks owner-only, and exposes shared-source forks to current
 workspace members.
 Worker, MCP, runtime, and `packages/react` remain non-callers; cross-workspace
@@ -2590,10 +2656,8 @@ before canonical activation" is a per-subsystem statement:
   membership, null fork provenance, `authority_scope = 'workspace'`), so a
   compatible earlier application image can still read and write them and an
   image rollback remains an ordinary deployment decision.
-- **Already one way.** Two tenancy migrations declare
-  `-- deployment-mode: maintenance` and have globally crossed their boundary;
-  session tenancy additionally crosses per organization through a durable
-  activation receipt.
+- **Already one way.** Three tenancy migrations declare
+  `-- deployment-mode: maintenance` and have globally crossed their boundary.
   - `0264_connection_authority_runtime_activation.sql` proves there are no other
     `opengeni_app` sessions both before and after taking `ACCESS EXCLUSIVE` locks
     on `sessions`, `session_turns`, `session_system_updates`,
@@ -2615,14 +2679,13 @@ before canonical activation" is a per-subsystem statement:
     active organization member. An old writer must never be restarted after it
     either; see [`architecture.md`](architecture.md) and
     [`deployment.md`](deployment.md).
-  - `0303_session_tenancy_product_activation.sql` is rolling and inert at
-    migration time, but each per-organization activation receipt is a one-way
-    boundary. The operator command requires the exact application-role
-    inventory, canonical env opt-in, required migrations, and clean
-    inventory/parity evidence, then inserts the receipt only under a
-    double-checked drain and write-blocking locks. Earlier images fail the
-    current runtime-posture contract because they do not declare the receipt
-    table or hardened routine signatures.
+  - `0611_universal_session_tenancy_activation.sql` (rolling) activates
+    session tenancy for every organization by rewriting routine predicates
+    only: no product path consults a receipt, the retired startup interlock
+    answers false, and a missing Only-me setting row means enabled. It writes
+    no receipt and backfills nothing; the receipt-keyed legacy-lane retirement
+    predicate is kept (see Connection authority convergence). Old and new
+    images may run side by side.
 
 The remaining phase-F work named in [F. Activate](#f-activate) has therefore not
 crossed its boundary yet.
@@ -2651,162 +2714,28 @@ Once an activation migration commits for a subsystem:
 - recovery is forward only: fix the new runtime and roll forward, remaining in
   maintenance while doing so.
 
-### Preconditions for permitting an activation
+### Retired session-tenancy activation machinery
 
-All of the following must hold, per organization, before an activation migration
-is run:
+History: 0303-0586 activated session tenancy per organization through a
+drained `db:activate-session-tenancy` command, settled backfill receipts, and
+the `OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED` switch with a
+startup interlock. Migration 0611 made activation universal; the variable is
+now accepted and ignored with a deprecation warning.
 
-1. **Complete backfill and quiet observation window.** Run both
-   `bun run db:inventory-tenancy --organization-id <uuid>` and the canonical
-   migration-0298 parity report. The inventory is retained and hashed as the
-   content-free population snapshot; it is not a universal drain-to-zero gate.
-   The parity report must have zero violations in every invariant gate and zero
-   in each current activation lane: `connectionsLegacyUser`,
-   `workspaceWriterAdmissionsLegacyUnattributedInWindow`,
-   `workspaceWriterProcessesLegacyUnattributedInWindow`,
-   `documentsLegacyPersonalNullAuthority`,
-   `codexCredentialsUnattributedConnector`,
-   `workspaceMemberSubjectsWithoutMembershipAnchor`,
-   `sessionsAttributableButUnattributed`, and
-   `connectionUseLegacyResolutionsInWindow`. The bounded writer/use lanes prove
-   the legacy path is no longer exercised; the attributable-session lane is the
-   actually repairable subset of ownerless sessions. Total `sessions.ownerless`
-   and the all-time `workspaceWriters.*.legacyUnattributed` inventory counts are
-   deliberately not blockers: service/API-key sessions can remain ownerless,
-   and pre-0277 direct/process writer rows are immutable historical evidence.
-   A single non-zero required parity lane or invariant violation is a blocker.
-   Variable Sets, Sandbox Environments, and Connected Machines contribute no drain-to-zero
-   counter here, and one must not be invented: nothing in their schema separates
-   an unmigrated legacy row from a deliberately organization- or
-   workspace-scoped one, so no truthful unmigrated-population count exists for
-   them (see [D. Backfill](#d-backfill)). Reconcile those three families through
-   their `byScope` breakdown against the reviewed classification instead -
-   `byScope` reports every authority distinction the schema can truthfully make,
-   and any non-user-scoped total is derivable from it.
-   Migration 0340 additionally requires the newest receipt in each executable
-   phase-D family to be settled: `organization_memberships`, `sessions`,
-   `variable_sets`, `rigs`, `machines`, and `connections`. Produce them with one
-   complete membership walk, one resource-classification run, a converged
-   connection-authority run, and a final full session `--classify`, each with a
-   fresh `--run-key`. The four resource/connection receipts must have zero
-   unresolved rows and every resource/session/connection receipt must cover its
-   current full-family total. Membership and session unresolved rows are not
-   blindly treated as corruption: the inventory/parity gates above decide
-   whether their current residual populations are legitimate. The newest
-   receipt wins, so a later open/failed or partial run cannot hide behind an
-   older successful one.
-2. **Parity evidence.** The phase-E read-only shadow comparison shows the
-   proposed effective scope equals the legacy effective scope for every compared
-   read. No mismatch may be resolved by falling back to user authority.
-3. **Cross-organization and RLS evidence.** Exact organization+subject+workspace
-   policies deny every cross-organization read and write, and missing or
-   mismatched transaction-local identity fails closed rather than widening.
-4. **Immediate-revocation tests.** Suspension, offboarding, and single-workspace
-   membership removal take effect before the next read on the activated surface,
-   including buffered/replayed SSE frames, and revoked or suspended grants fence
-   new mutations before any generation is consumed.
-5. **Zero incompatible writers.** `pg_stat_activity` shows no `opengeni_app`
-   session other than the migration connection. The in-migration guard is the
-   durable fence, not a courtesy check.
-
-### The pre-activation opt-out switch
-
-`OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED`
-(`organizationTenancyCanonicalActivationEnabled` in `@opengeni/config`) is the
-named deployment-level switch for declining or deferring canonical activation.
-It defaults to `false` - the reversible pre-activation posture - and is parsed
-with the config library's `EnvBoolean`, so an operator writing `false` out
-explicitly stays declined rather than being coerced into activation.
-
-- `false` (default): this deployment declines/defers activation. No phase-F
-  slice may switch a subsystem's access decision to authority ids.
-- `true`: the operator states that the preconditions above were proven for this
-  deployment and that the one-way boundary is accepted.
-
-What the switch is not:
-
-- **not a kill switch and not a rollback.** After an activation migration has
-  committed, setting it back to `false` does not restore legacy authority. The
-  switch only governs whether the boundary may be crossed, never whether it can
-  be uncrossed;
-- **not an authorization decision.** It grants and revokes nothing by itself;
-  every membership, grant, epoch, and RLS fence keeps its own authority;
-- **not a data migration toggle.** Rolling tenancy migrations are applied
-  independently of it.
-
-Migration 0303 is the first slice to enforce this switch. Its ordinary rolling
-migration remains inert with the default `false`; the drained activation
-command refuses to write a per-organization receipt unless the switch is true.
-Once any receipt exists, API/worker startup and readiness also require true.
-That startup interlock is forward-only posture, not a rollback mechanism.
-Migration 0340 preserves the activation command and database function
-signatures while adding the settled-backfill proof above. New activation rows
-bind the six exact receipt ids. Older activation rows retain their existing
-zero-receipt evidence and remain replayable only for their identical stored
-inventory/parity digests; the migration never invents historical evidence. The
-database recomputes inventory, parity, and receipt evidence while holding the
-complete source-table fence and rejects a stale or fabricated supplied digest
-with SQLSTATE `40001`.
-
-Migration 0340 additionally makes that receipt writable. Migration 0303 created
-`session_tenancy_activations` with FORCE ROW LEVEL SECURITY and a
-`FOR SELECT`-only policy and no INSERT policy at all, so under the documented
-non-superuser-owner posture the activation was denied `42501` on its own append
-after every gate had already passed - the cutover could not commit at all. The
-new `session_tenancy_activation_receipt_insert` policy re-opens exactly that one
-command for exactly the migration owner, gated on a
-`session_tenancy_activation` marker the function sets only around the append and
-restores on every exit, and fenced to the transaction's own organization. INSERT
-is the complete write set: the table is append-only, no `UPDATE` or `DELETE`
-writer exists anywhere in the tree, and activation is one-way. The runtime role
-keeps `SELECT` and nothing else.
-
-Migration 0340 also freezes the deployment-wide advisory boundary
-`session-tenancy-canonical-boundary:v1` behind the owner-only
-`lock_session_tenancy_activation_boundary()` seam. Operator activation keeps
-the organization advisory prefix, acquires every source-table
-`ACCESS EXCLUSIVE` lock, and only then takes this boundary immediately before
-its final evidence recompute and receipt write. A future greenfield provisioning
-transaction must do the inverse work order: write its complete organization
-graph first, take this same boundary last, and then inspect the already-committed
-version-1 witness. This ordering means a setup transaction either commits
-unactivated before the first boundary or waits and observes it afterward; taking
-the global boundary before the operator's source locks would introduce a
-RowExclusive/global-lock deadlock and is forbidden. Migration 0340 does not
-itself auto-activate new organizations.
-
-Migration 0349 consumes that frozen boundary only inside
-`complete_self_service_organization_setup`. The setup transaction first writes
-and validates exactly one newly inserted `better-auth:user` organization, one
-active owner membership, its canonical Personal workspace and control row, no
-`workspace_memberships`, and its immutable setup receipt. The explicit 0348
-orphan-account adoption branch is excluded even when the adopted account was
-otherwise empty. Only after that proof does the owner-only helper take the
-canonical boundary and inspect a committed activation witness. With no witness,
-the setup commits unactivated and remains on the operator procedure above; with
-a witness, the same transaction appends the existing version-1 activation
-receipt shape, an enabled version-1 private-session setting and immutable
-setting event, plus `session_tenancy_greenfield_activation_evidence` binding the
-exact setup operation, Personal-only graph digest, witness, parity digest, and
-setting event. A failure rolls back the account graph, setup receipt, activation,
-setting/event, and evidence together, so retry is deterministic and no
-unreceipted private authority can escape. Setup replay returns its existing
-receipt and never re-runs activation; a changed operation remains a conflict.
-
-The greenfield helper and evidence table have no runtime-role or PUBLIC access,
-use FORCE RLS under the real non-superuser/non-BYPASSRLS owner posture, and are
-not an alternate activation API for existing organizations. Migration 0349 also
-opens and restores a subject-and-organization-fenced owner policy window around
-the two Personal private-create membership readers; without that repair those
-readers were blind under FORCE RLS and an otherwise activated fresh owner could
-not create the immediate private session promised by the signup contract.
+The 0349 (self-service setup) and 0399 (additional organization) helpers still
+append an evidence receipt plus an explicit enabled Only-me setting for a fresh
+organization when any receipt witness exists; without a witness they do
+nothing and the organization relies on the enabled default. Either way a new
+self-service owner has Only me on with no operator action. Their owner-only
+helpers and evidence tables keep the FORCE-RLS and no-runtime-access posture
+described in their migrations.
 
 ### What an operator must not do
 
 - Do not restart a pre-activation image after an activation migration has
   committed, and do not attempt a mixed-version rolling rollback across one.
-  This already applies to `0264`, `0275`, and an organization activated through
-  `0303`.
+  This already applies to `0264`, `0275`, and pre-0303 images; rolling `0611`
+  keeps post-0303 images restartable.
 - Do not run an activation migration with a live application. The
   `opengeni_app` session guard aborts with SQLSTATE `55000` and rolls its
   transaction back cleanly; treat that as the contract, not as a race to retry.
@@ -2815,9 +2744,6 @@ not create the immediate private session promised by the signup contract.
   `organization_user_resource_grants`, or session tenancy columns to "undo" an
   activation. Those tables have zero direct application-role DML by design, and
   lifecycle evidence is immutable.
-- Do not treat flipping
-  `OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED` back to `false`
-  as a rollback, or as a way to re-open a crossed boundary.
 - Do not infer user authority for an unresolved backfill row in order to clear a
   precondition counter. Ownership is never guessed from `created_by`, connection
   attribution, a default workspace, resource name, or current access.

@@ -1,4 +1,5 @@
 import { EphemeralChromiumContextPool } from "./chromium-context-pool";
+import { UnsettledCleanupError } from "./cleanup-error";
 import { restoredTabUrl } from "./restored-tab-url";
 import { selectManagedChromiumExecutable, type VerifiedHeadlessShell } from "./headless-shell";
 import type { HeadlessSessionCookies } from "./headless-session-cookies";
@@ -202,6 +203,7 @@ export type BrowserSupervisorDriver = BrowserInteractionDriver & {
   start(url?: string): Promise<BrowserObservation>;
   listTargets(): Promise<BrowserTarget[]>;
   openTarget(url?: string): Promise<BrowserObservation>;
+  openTargetWithInventory?(url?: string): Promise<BrowserTarget[]>;
   selectTarget(targetId: string): Promise<BrowserObservation>;
   closeTarget(targetId: string): Promise<BrowserTarget[]>;
   targetState(targetId: string): Promise<BrowserTargetState>;
@@ -352,6 +354,8 @@ export class BrowserSupervisor {
   private readonly ending = new Map<string, Promise<void>>();
   private readonly stateTransferTails = new Map<string, Promise<void>>();
   private closed = false;
+  private closePromise: Promise<void> | null = null;
+  private cleanupUncertain = false;
 
   private constructor(options: BrowserSupervisorOptions) {
     this.rootDirectory = resolve(options.rootDirectory);
@@ -411,6 +415,9 @@ export class BrowserSupervisor {
       .digest("hex");
     let pool = this.contextPools.get(key);
     if (!pool || pool.isTerminal()) {
+      // A failed terminal pool still owns the only cleanup proof. Do not
+      // replace it until its retained shutdown has positively completed.
+      if (pool) await pool.close();
       const poolDirectory = join(this.rootDirectory, "sessions", randomUUID());
       const poolSocketDirectory = join(this.socketRootDirectory, shortDigest(poolDirectory));
       pool = new EphemeralChromiumContextPool({
@@ -548,7 +555,12 @@ export class BrowserSupervisor {
     try {
       const runtime = await creation;
       if (this.closed) {
-        await this.disposeRuntime(runtime, false);
+        try {
+          await this.disposeRuntime(runtime, false);
+        } catch (error) {
+          this.cleanupUncertain = true;
+          throw error;
+        }
         throw new InteractionControllerError(
           "resource_unavailable",
           "browser supervisor is closed",
@@ -571,6 +583,7 @@ export class BrowserSupervisor {
   /** Update safety includes work hidden from the public active-session list. */
   isIdle(): boolean {
     return (
+      !this.cleanupUncertain &&
       this.creationRequests.size === 0 &&
       this.sessions.size === 0 &&
       this.creating.size === 0 &&
@@ -605,6 +618,25 @@ export class BrowserSupervisor {
     });
     this.rememberObservation(runtime, observation);
     return observation;
+  }
+
+  async openTargetWithInventory(
+    reference: BrowserSessionReference,
+    url?: string,
+  ): Promise<BrowserTarget[]> {
+    const runtime = this.requireActive(reference);
+    const open = runtime.driver.openTargetWithInventory;
+    if (!open) {
+      throw new InteractionControllerError(
+        "unsupported",
+        "browser driver does not support metadata-only tab opening",
+      );
+    }
+    const targets = await this.mutateWithRecovery(runtime, async () => {
+      return await open.call(runtime.driver, url);
+    });
+    this.rememberTargets(runtime, targets);
+    return targets;
   }
 
   async selectTarget(
@@ -852,6 +884,14 @@ export class BrowserSupervisor {
     reference: BrowserSessionReference,
     options: { removeState?: boolean } = {},
   ): Promise<void> {
+    return await this.finishSession(reference, options, false);
+  }
+
+  private async finishSession(
+    reference: BrowserSessionReference,
+    options: { removeState?: boolean },
+    suspendForShutdown: boolean,
+  ): Promise<void> {
     if (!isUuid(reference.browserSessionId)) throw new Error("browserSessionId must be a UUID");
     const pending = this.creating.get(reference.browserSessionId);
     if (pending) await pending;
@@ -877,14 +917,34 @@ export class BrowserSupervisor {
     const runtime = this.requireBound(reference);
     if (runtime.externalAuthTail) await runtime.externalAuthTail;
     const existing = this.ending.get(reference.browserSessionId);
-    if (existing) return await existing;
+    if (existing) {
+      await existing;
+      // An explicit end must never acknowledge a recoverable shutdown as retirement.
+      if (!suspendForShutdown && runtime.workingReceipt?.intent === "suspend")
+        throw workingRuntimeUnavailable();
+      return;
+    }
     if (runtime.recovery) await runtime.recovery.catch(() => undefined);
     const raced = this.ending.get(reference.browserSessionId);
-    if (raced) return await raced;
+    if (raced) {
+      await raced;
+      if (!suspendForShutdown && runtime.workingReceipt?.intent === "suspend")
+        throw workingRuntimeUnavailable();
+      return;
+    }
     const driverAlreadyClosed = runtime.lifecycle === "captured";
+    const preserveWorkingRuntime =
+      suspendForShutdown &&
+      runtime.lifecycle === "active" &&
+      !runtime.driver.isTerminal?.() &&
+      runtime.workingJournal !== null &&
+      runtime.workingReceipt?.intent === "launch" &&
+      runtime.workingReceipt.state === "completed" &&
+      runtime.workingReceipt.process !== null &&
+      runtime.workingReceipt.directoryLaunchAllowed;
     runtime.lifecycle = "ending";
     const ending = (async () => {
-      if (runtime.driver.isTerminal?.()) {
+      if (runtime.driver.isTerminal?.() || preserveWorkingRuntime) {
         // Settle already-dispatched commands before their durable journals close.
         // lifecycle=ending fences queued/new dispatches without replaying input.
         await Promise.all([
@@ -892,7 +952,12 @@ export class BrowserSupervisor {
           runtime.protectedAuthController.waitForIdle(),
         ]);
       }
-      await this.disposeRuntime(runtime, options.removeState ?? false, driverAlreadyClosed);
+      await this.disposeRuntime(
+        runtime,
+        options.removeState ?? false,
+        driverAlreadyClosed,
+        preserveWorkingRuntime,
+      );
     })();
     this.ending.set(reference.browserSessionId, ending);
     try {
@@ -914,16 +979,32 @@ export class BrowserSupervisor {
   }
 
   async close(): Promise<void> {
-    if (this.closed) return;
+    if (this.closePromise) return await this.closePromise;
     this.closed = true;
+    this.closePromise = this.performClose();
+    return await this.closePromise;
+  }
+
+  private async performClose(): Promise<void> {
     await Promise.allSettled([...this.creationRequests]);
     await Promise.allSettled([...this.creating.values()]);
     const active = [...this.sessions.values()];
-    await Promise.allSettled(
-      active.map(async (runtime) => await this.endSession(binding(runtime))),
+    const results = await Promise.allSettled(
+      active.map(async (runtime) => await this.finishSession(binding(runtime), {}, true)),
     );
-    await Promise.all([...this.contextPools.values()].map((pool) => pool.close()));
+    const poolResults = await Promise.allSettled(
+      [...this.contextPools.values()].map((pool) => pool.close()),
+    );
     this.contextPools.clear();
+    const failures = [...results, ...poolResults].flatMap((result) =>
+      result.status === "rejected" ? [result.reason] : [],
+    );
+    if (this.cleanupUncertain)
+      failures.push(new Error("previous browser cleanup remains unsettled"));
+    if (failures.length > 0) {
+      this.cleanupUncertain = true;
+      throw new AggregateError(failures, "browser supervisor shutdown failed");
+    }
   }
 
   private async buildRuntime(options: ValidatedBrowserSupervisorSessionOptions): Promise<Runtime> {
@@ -1236,6 +1317,7 @@ export class BrowserSupervisor {
       }
       return runtime;
     } catch (error) {
+      if (error instanceof UnsettledCleanupError) this.cleanupUncertain = true;
       const failures: unknown[] = [error];
       let driverClosed = driver === null;
       try {
@@ -1278,6 +1360,7 @@ export class BrowserSupervisor {
         failures.push(cleanupError);
       }
       if (failures.length > 1) {
+        this.cleanupUncertain = true;
         throw aggregateFailure(failures, "browser session creation did not clean up safely", error);
       }
       throw error;
@@ -1458,7 +1541,15 @@ export class BrowserSupervisor {
         );
       }
     } catch (error) {
-      await driver.close().catch(() => undefined);
+      try {
+        await driver.close();
+      } catch (cleanupError) {
+        this.cleanupUncertain = true;
+        throw new UnsettledCleanupError(
+          [error, cleanupError],
+          "replacement browser cleanup failed",
+        );
+      }
       throw error;
     }
   }
@@ -1828,6 +1919,7 @@ export class BrowserSupervisor {
     runtime: Runtime,
     removeState: boolean,
     driverAlreadyClosed = false,
+    suspendForShutdown = false,
   ): Promise<void> {
     const failures: unknown[] = [];
     let driverClosed = driverAlreadyClosed;
@@ -1839,10 +1931,21 @@ export class BrowserSupervisor {
     let protectedAuthJournalClosed = false;
     let stateJournalClosed = false;
     let downloadStoreClosed = runtime.downloadStore === null;
-    // Retirement becomes durable before controller/process cleanup. A crash
-    // cannot turn an explicitly closed or captured runtime into a launch.
-    // Failed retirement acceptance preserves the live driver and all journals.
-    this.retireWorkingRuntime(runtime);
+    // Shutdown intent becomes durable before process cleanup; only confirmed
+    // suspension permits recovery. Explicit end/capture still retires the runtime.
+    // Failed acceptance preserves the live driver and all journals.
+    if (
+      suspendForShutdown &&
+      runtime.workingJournal &&
+      runtime.workingReceipt?.intent === "launch" &&
+      runtime.workingReceipt.state === "completed" &&
+      runtime.workingReceipt.process &&
+      runtime.workingReceipt.directoryLaunchAllowed
+    ) {
+      runtime.workingReceipt = runtime.workingJournal.suspend(runtime.workingReceipt);
+    } else {
+      this.retireWorkingRuntime(runtime);
+    }
     if (!driverAlreadyClosed) {
       try {
         await runtime.downloadStore?.interruptInProgress("browser_ended");
@@ -1859,11 +1962,15 @@ export class BrowserSupervisor {
     if (
       driverClosed &&
       runtime.workingJournal &&
-      runtime.workingReceipt?.intent === "retire" &&
+      (runtime.workingReceipt?.intent === "retire" ||
+        runtime.workingReceipt?.intent === "suspend") &&
       runtime.workingReceipt.state !== "completed"
     ) {
       try {
-        runtime.workingReceipt = runtime.workingJournal.complete(runtime.workingReceipt, null);
+        runtime.workingReceipt = runtime.workingJournal.complete(
+          runtime.workingReceipt,
+          runtime.workingReceipt.intent === "suspend" ? runtime.workingReceipt.process : null,
+        );
         workingReceiptSettled = true;
       } catch (error) {
         failures.push(error);
@@ -1904,7 +2011,9 @@ export class BrowserSupervisor {
     } catch (error) {
       failures.push(error);
     }
-    if (driverClosed) {
+    // Recovery inspects the exact daemon namespace for live owners. Preserve
+    // that evidence for suspension; missing namespace state is not exit proof.
+    if (driverClosed && runtime.workingReceipt?.intent !== "suspend") {
       try {
         await rm(join(this.socketRootDirectory, shortDigest(runtime.options.browserSessionId)), {
           recursive: true,

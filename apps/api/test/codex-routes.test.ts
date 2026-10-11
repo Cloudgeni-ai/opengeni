@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import * as codex from "@opengeni/codex";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
 import * as opengeniDb from "@opengeni/db";
@@ -53,6 +53,12 @@ async function bearer(workspaceId: string, permissions: Permission[]): Promise<s
 }
 
 const realFetch = globalThis.fetch;
+// These organizations have no Codex cutover row: the legacy routes run.
+// (The core-disposition routes are covered in codex-core-routes.test.ts.)
+beforeEach(() => {
+  const cutover = spyOn(opengeniDb, "readCodexCutoverDisposition").mockResolvedValue("core");
+  restores.push(() => cutover.mockRestore());
+});
 const restores: Array<() => void> = [];
 afterEach(() => {
   globalThis.fetch = realFetch;
@@ -87,7 +93,10 @@ describe("Codex status readiness semantics", () => {
     const slack = spyOn(opengeniDb, "getSlackInteractionSessionAccessForSession").mockResolvedValue(
       null,
     );
-    const projection = spyOn(opengeniDb, "getSessionCodexAccounts").mockResolvedValue({
+    const projection = spyOn(
+      opengeniDb,
+      "getSubscriptionCoreSessionCodexAccounts",
+    ).mockResolvedValue({
       accounts: [account],
       currentAccount: account,
       currentSelection: { credentialId: account.id, waiting: true },
@@ -112,7 +121,12 @@ describe("Codex status readiness semantics", () => {
       },
     );
     expect(response.status).toBe(200);
-    expect(projection).toHaveBeenCalledWith(expect.anything(), WS_A, sessionId);
+    expect(projection).toHaveBeenCalledWith(expect.anything(), {
+      accountId: ACCOUNT,
+      workspaceId: WS_A,
+      sessionId,
+      viewerSubjectId: "tester",
+    });
     const body = await response.json();
     expect(body).toMatchObject({
       accounts: [{ id: account.id, canEnableApps: false, appsDesignated: false }],
@@ -182,7 +196,7 @@ describe("Codex status readiness semantics", () => {
     ).toEqual({ poolReady: false, workerRoutable: false });
   });
 
-  test("status response keeps active-account probe fields distinct from pool readiness", async () => {
+  test("status response keeps core readiness fields without probing credentials", async () => {
     const active = {
       id: "active",
       source: "workspace" as const,
@@ -210,39 +224,22 @@ describe("Codex status readiness semantics", () => {
       exhaustedUntil: null,
       exhaustedKind: null,
     } satisfies opengeniDb.CodexAccountStatus;
-    const status = spyOn(opengeniDb, "getCodexCredentialStatus").mockResolvedValue({
-      connected: true,
-      credentialId: active.id,
-      chatgptAccountId: active.chatgptAccountId,
-      scopes: null,
-      planType: active.planType,
-      status: active.status,
-      expiresAt: null,
-      lastRefreshAt: null,
-      lastError: null,
-    });
-    const accounts = spyOn(opengeniDb, "listCodexAccountStatuses").mockResolvedValue([active]);
-    const source = spyOn(opengeniDb, "getWorkspaceCodexSubscriptionSource").mockResolvedValue({
-      accountId: ACCOUNT,
-      workspaceId: WS_A,
-      workspaceKind: "shared",
-      mode: "workspace",
-      effectiveSource: "workspace",
-      workspaceAvailable: true,
-      organizationAvailable: false,
-    });
-    const rotation = spyOn(opengeniDb, "getCodexRotationSettings").mockResolvedValue({
-      activeCredentialId: active.id,
-      rotationEnabled: true,
-      rotationStrategy: "sharded",
-    });
-    const load = spyOn(opengeniDb, "loadCodexCredentialForRun").mockResolvedValue(null);
+    const projection = spyOn(
+      opengeniDb,
+      "getSubscriptionCoreCodexWorkspaceProjection",
+    ).mockResolvedValue({
+      accounts: [active],
+      source: { effectiveSource: "workspace" },
+      rotation: {
+        activeCredentialId: active.id,
+        rotationEnabled: true,
+        rotationStrategy: "sharded",
+      },
+    } as never);
+    const probe = spyOn(codex, "fetchCodexModels");
     restores.push(
-      () => status.mockRestore(),
-      () => accounts.mockRestore(),
-      () => source.mockRestore(),
-      () => rotation.mockRestore(),
-      () => load.mockRestore(),
+      () => projection.mockRestore(),
+      () => probe.mockRestore(),
     );
 
     const res = await app().request(`/v1/workspaces/${WS_A}/codex/status`, {
@@ -251,8 +248,8 @@ describe("Codex status readiness semantics", () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({
       connected: true,
-      valid: false,
-      activeAccountValid: false,
+      valid: true,
+      activeAccountValid: true,
       poolReady: true,
       workerRoutable: true,
       activeAccount: {
@@ -261,39 +258,10 @@ describe("Codex status readiness semantics", () => {
         chatgptAccountId: active.chatgptAccountId,
       },
       accountCount: 1,
-      models: [],
+      models: expect.arrayContaining([expect.objectContaining({ id: "codex/gpt-6-sol" })]),
     });
 
-    // A healthy probe uses the refreshing resolver and returns exact live membership.
-    load.mockResolvedValue({ id: active.id } as opengeniDb.CodexCredentialForRun);
-    const token = {
-      accessToken: "refreshed",
-      chatgptAccountId: active.chatgptAccountId,
-      isFedramp: false,
-      credentialVersion: 2,
-      planType: "pro",
-    };
-    const resolver = spyOn(opengeniDb, "buildCodexTokenResolver").mockReturnValue({
-      getToken: async () => token,
-      refresh: async () => token,
-    });
-    const probe = spyOn(codex, "fetchCodexModels").mockResolvedValue({
-      ok: true,
-      status: 200,
-      slugs: ["gpt-6-sol", "unconfigured"],
-    });
-    restores.push(
-      () => resolver.mockRestore(),
-      () => probe.mockRestore(),
-    );
-    const healthyResponse = await app().request(`/v1/workspaces/${WS_A}/codex/status`, {
-      headers: { authorization: await bearer(WS_A, ["workspace:read"]) },
-    });
-    expect(await healthyResponse.json()).toMatchObject({
-      valid: true,
-      models: [expect.objectContaining({ id: "codex/gpt-6-sol", label: "GPT-6 Sol" })],
-    });
-    expect(probe.mock.calls[0]![0].accessToken).toBe("refreshed");
+    expect(probe).not.toHaveBeenCalled();
   });
 });
 
@@ -370,7 +338,7 @@ describe("codex connect routes", () => {
     expect(await res.json()).toEqual({ status: "pending" });
   });
 
-  test("connect/poll maps an active source cutover fence to 409", async () => {
+  test("connect/poll maps the core identity-verification refusal to 409", async () => {
     mockDevice({
       usercode: () => json({ device_auth_id: "dev_1", user_code: "ABCD-1234", interval: "5" }),
     });
@@ -390,9 +358,10 @@ describe("codex connect routes", () => {
           refresh_token: "refresh-token",
         }),
     });
-    const mutation = spyOn(opengeniDb, "withSessionCodexCapacityMutation").mockRejectedValue(
-      new Error("Codex subscription source cannot change while active turns are using it"),
-    );
+    const mutation = spyOn(opengeniDb, "connectSubscriptionCoreCodexConnection").mockResolvedValue({
+      kind: "refused",
+      reason: "identity_unverified",
+    });
     restores.push(() => mutation.mockRestore());
 
     const res = await app().request(`/v1/workspaces/${WS_A}/codex/connect/poll`, {
@@ -408,7 +377,8 @@ describe("codex connect routes", () => {
     expect(await res.json()).toMatchObject({
       error: {
         code: "conflict",
-        message: "Codex subscription source cannot change while active turns are using it",
+        message:
+          "this migrated Codex login has no verified person identity; an organization administrator must disconnect it before connecting again",
         status: 409,
       },
     });
@@ -443,28 +413,24 @@ describe("codex connect routes", () => {
         workspaceAvailable: false,
         organizationAvailable: true,
       };
-      const mocks = [
-        spyOn(opengeniDb, "getWorkspaceCodexSubscriptionSource").mockResolvedValue(source),
-        spyOn(opengeniDb, "upsertCodexSubscriptionCredential").mockResolvedValue({
-          kind: "upserted",
-          id: "local-account",
-          isNew: true,
-        }),
-        spyOn(opengeniDb, "ensureCodexRotationSettings").mockResolvedValue(undefined),
-        spyOn(opengeniDb, "setInitialActiveCodexCredential").mockResolvedValue(true),
-        spyOn(opengeniDb, "getCodexRotationSettings").mockResolvedValue(null),
-      ];
-      const setMode = spyOn(
-        opengeniDb,
-        "setWorkspaceCodexSubscriptionModeInTransaction",
-      ).mockResolvedValue(source);
-      const mutation = spyOn(opengeniDb, "withSessionCodexCapacityMutation").mockImplementation(
-        async (_db, _input, mutate) => {
-          const result = await mutate(poisonDb as never);
-          return { result: result.result, wakeTargets: [] };
-        },
+      const connect = spyOn(opengeniDb, "connectSubscriptionCoreCodexConnection").mockResolvedValue(
+        { kind: "connected", id: "local-account", wake: null } as never,
       );
-      restores.push(...[...mocks, setMode, mutation].map((mock) => () => mock.mockRestore()));
+      const projection = spyOn(
+        opengeniDb,
+        "getSubscriptionCoreCodexWorkspaceProjection",
+      ).mockResolvedValue({
+        accounts: [],
+        source,
+        rotation: { activeCredentialId: "local-account", rotationEnabled: true },
+      } as never);
+      const wake = spyOn(opengeniDb, "deliverSubscriptionCoreCodexWake").mockResolvedValue(
+        undefined,
+      );
+      const setMode = spyOn(opengeniDb, "setSubscriptionCoreWorkspaceCodexSource");
+      restores.push(
+        ...[connect, projection, wake, setMode].map((mock) => () => mock.mockRestore()),
+      );
       const res = await app().request(`/v1/workspaces/${WS_A}/codex/connect/poll`, {
         method: "POST",
         headers: {
@@ -475,10 +441,8 @@ describe("codex connect routes", () => {
       });
       expect(res.status).toBe(200);
       expect(await res.json()).toMatchObject({ status: "connected", accountId: "local-account" });
-      expect(setMode.mock.calls[0]?.[1]).toMatchObject({
-        mode,
-        effectiveSourceBeforeMutation: source.effectiveSource,
-      });
+      expect(setMode).not.toHaveBeenCalled();
+      expect(connect.mock.calls[0]?.[1]).toMatchObject({ accountId: ACCOUNT, workspaceId: WS_A });
     });
   }
 

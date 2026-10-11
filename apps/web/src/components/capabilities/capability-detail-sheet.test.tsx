@@ -77,7 +77,7 @@ function socialConnection(overrides: Partial<SocialConnection> = {}): SocialConn
     ownership: "workspace",
     provider: "x",
     accountHandle: "opengeni",
-    accountName: "OpenGeni",
+    accountName: "Opengeni",
     externalAccountId: "x-account-1",
     status: "connected",
     scopes: ["tweet.read"],
@@ -611,7 +611,7 @@ describe("social provider integration UI", () => {
     const needsReauth = socialConnection({
       id: "55555555-5555-4555-8555-555555555555",
       accountHandle: "opengeni_support",
-      accountName: "OpenGeni Support",
+      accountName: "Opengeni Support",
       externalAccountId: "x-account-2",
       status: "needs_reauth",
       updatedAt: "2026-08-02T00:00:00.000Z",
@@ -629,8 +629,8 @@ describe("social provider integration UI", () => {
       />,
     );
     try {
-      expect(rendered.container.textContent).toContain("OpenGeni");
-      expect(rendered.container.textContent).toContain("OpenGeni Support");
+      expect(rendered.container.textContent).toContain("Opengeni");
+      expect(rendered.container.textContent).toContain("Opengeni Support");
       expect(rendered.container.textContent).toContain("Needs reconnection");
       expect(rendered.container.textContent).toContain(
         "Workspace agents and automations can act through your account.",

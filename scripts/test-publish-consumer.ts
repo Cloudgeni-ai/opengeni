@@ -401,6 +401,7 @@ try {
       "packages/codex",
       "packages/config",
       "packages/contracts",
+      "packages/interaction",
       "packages/network",
       "packages/observability",
       "packages/tool-gateway",
@@ -465,6 +466,8 @@ try {
     "package/dist/github-repository-contracts.d.ts",
     "package/dist/session-titles.js",
     "package/dist/session-titles.d.ts",
+    "package/dist/connection-account-label.js",
+    "package/dist/connection-account-label.d.ts",
   ]) {
     if (!contractsTarballContents.split("\n").includes(artifact)) {
       throw new Error(`contracts tarball is missing ${artifact}`);
@@ -488,7 +491,11 @@ try {
   ) {
     throw new Error("contracts tarball has an invalid ./session-titles export");
   }
-  for (const subpath of ["github-repository", "github-repository-contracts"] as const) {
+  for (const subpath of [
+    "github-repository",
+    "github-repository-contracts",
+    "connection-account-label",
+  ] as const) {
     const entry = contracts.manifest.exports?.[`./${subpath}`];
     if (
       !entry ||
@@ -686,7 +693,7 @@ try {
     ),
     writeFile(
       join(consumerRoot, "index.html"),
-      '<!doctype html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>OpenGeni consumer proof</title></head><body><div id="root"></div><script type="module" src="/browser.tsx"></script></body></html>\n',
+      '<!doctype html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Opengeni consumer proof</title></head><body><div id="root"></div><script type="module" src="/browser.tsx"></script></body></html>\n',
     ),
     writeFile(
       join(consumerRoot, "browser.tsx"),
@@ -922,6 +929,19 @@ try {
     writeFile(
       join(consumerRoot, "sdk-types.ts"),
       'import type { CreateSessionRequest, Session } from "@opengeni/sdk";\ntype Assert<T extends true> = T;\nexport type CreateSessionRequestExposesFirstPartyMcpTools = Assert<"firstPartyMcpTools" extends keyof CreateSessionRequest ? true : false>;\nexport type SessionExposesFirstPartyMcpTools = Assert<"firstPartyMcpTools" extends keyof Session ? true : false>;\n',
+    ),
+    writeFile(
+      join(consumerRoot, "connection-account-label-proof.ts"),
+      [
+        'import { connectionAccountIdentityLabel } from "@opengeni/contracts/connection-account-label";',
+        'const metadata = { providerEmail: "person@example.invalid", slackTeamName: "Host workspace" };',
+        "const before = JSON.stringify(metadata);",
+        'if (connectionAccountIdentityLabel(metadata, "Fallback") !== "person@example.invalid · Host workspace") throw new Error("packed contracts lost the account identity label");',
+        'if (connectionAccountIdentityLabel({ email: 42, teamName: {} }, "Fallback") !== "Fallback") throw new Error("packed contracts accepted invalid identity metadata");',
+        'if (JSON.stringify(metadata) !== before) throw new Error("packed account label mutated metadata");',
+        'console.log("CONNECTION_ACCOUNT_LABEL_PACKAGE_OK");',
+        "",
+      ].join("\n"),
     ),
     writeFile(
       join(consumerRoot, "session-title-proof.ts"),
@@ -1251,6 +1271,7 @@ try {
   }
   await run(["bun", "run", "typecheck"], consumerRoot);
   await run(["bun", "run", "typecheck:nodenext"], consumerRoot);
+  await run(["bun", "connection-account-label-proof.ts"], consumerRoot);
   await run(["bun", "run", "build"], consumerRoot);
   await run(["bun", "run", "build:session"], consumerRoot);
   await run(["bun", "run", "build:worker-entry"], consumerRoot);
@@ -1336,7 +1357,7 @@ try {
   for (const forbidden of [
     "function OpenGeniProvider",
     "streamWorkspaceControlEvents",
-    "OpenGeni updated",
+    "Opengeni updated",
     "data-opengeni-api-contract-mismatch",
     "react/jsx-runtime",
     "@uiw/react-codemirror",
@@ -1400,7 +1421,7 @@ try {
     !compiledCss.includes("--og-color-bg") ||
     !compiledCss.includes(":where(.og-root).bg-og-surface-1")
   ) {
-    throw new Error("Vite output is missing OpenGeni tokens or scoped compiled utilities");
+    throw new Error("Vite output is missing Opengeni tokens or scoped compiled utilities");
   }
   for (const forbidden of ["@tailwind", "@theme", "@source", "@utility"]) {
     if (compiledCss.includes(forbidden)) {

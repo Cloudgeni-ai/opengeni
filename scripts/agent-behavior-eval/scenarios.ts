@@ -131,7 +131,7 @@ async function conversation(
   return { session, sandboxRoot };
 }
 
-/** The session's frozen first-party MCP selection, when the OpenGeni server is attached. */
+/** The session's frozen first-party MCP selection, when the Opengeni server is attached. */
 function firstPartySelection(created: Record<string, unknown>): string[] {
   const tools = Array.isArray(created.tools) ? (created.tools as Array<{ id?: unknown }>) : [];
   if (!tools.some((tool) => tool.id === "opengeni")) return [];
@@ -617,7 +617,7 @@ export const SCENARIOS: Scenario[] = [
     run: (ctx) =>
       singleSession(ctx, {
         messages: [
-          "Create a one-page status report for Project Falcon as a shareable document I can open in OpenGeni: status is on track, the two risks are a vendor delivery delay and a hiring gap, and the next milestone is the beta on October 15.",
+          "Create a one-page status report for Project Falcon as a shareable document I can open in Opengeni: status is on track, the two risks are a vendor delivery delay and a hiring gap, and the next milestone is the beta on October 15.",
         ],
         drive: { maxTurns: 4 },
       }),
@@ -735,7 +735,7 @@ export const SCENARIOS: Scenario[] = [
         ),
         check(
           "no-opengeni",
-          "does not introduce itself as OpenGeni (informational)",
+          "does not introduce itself as Opengeni (informational)",
           !/opengeni/iu.test(answer),
           undefined,
           true,

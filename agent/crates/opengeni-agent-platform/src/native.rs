@@ -243,6 +243,7 @@ struct ExecProcessGroup {
     child: tokio::process::Child,
     pgid: i32,
     running: bool,
+    reservation: Option<crate::WorkReservation>,
     /// Whether [`wait`](Self::wait)'s post-exit group kill already ran. The
     /// wait future may be dropped mid-sequence and re-created (the op-engine
     /// pump polls it inside a select that drops arm futures every iteration);
@@ -302,13 +303,17 @@ impl ExecProcessGroup {
         }
         let mut anchor = anchor_command.spawn()?;
         let Some(runner_lease) = anchor.stdin.take() else {
+            mark_unsettled_work();
             let _ = anchor.start_kill();
             return Err(std::io::Error::other(
                 "exec anchor did not expose its runner-death lease",
             ));
         };
-        let pgid = i32::try_from(anchor.id().expect("new anchor must have a pid"))
-            .map_err(|_| std::io::Error::other("exec anchor PID exceeds i32"))?;
+        let pgid =
+            i32::try_from(anchor.id().expect("new anchor must have a pid")).map_err(|_| {
+                mark_unsettled_work();
+                std::io::Error::other("exec anchor PID exceeds i32")
+            })?;
 
         command.process_group(pgid);
         #[cfg(target_os = "linux")]
@@ -317,6 +322,7 @@ impl ExecProcessGroup {
         if let (Some(cgroups), Some(prepared)) = (cgroups, prepared_op.as_ref()) {
             if let Err(error) = cgroups.configure_process_cgroup_before_exec(prepared, &mut command)
             {
+                mark_unsettled_work();
                 let _ = terminate_unix_process_group(pgid);
                 let _ = anchor.start_kill();
                 return Err(error);
@@ -325,6 +331,7 @@ impl ExecProcessGroup {
         let child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
+                mark_unsettled_work();
                 let _ = terminate_unix_process_group(pgid);
                 let _ = anchor.start_kill();
                 return Err(error);
@@ -351,6 +358,7 @@ impl ExecProcessGroup {
             match cg.place_process_group(pgid, &pids, prepared) {
                 Ok(handle) => Some(handle),
                 Err(error) => {
+                    mark_unsettled_work();
                     let _ = terminate_unix_process_group(pgid);
                     let _ = anchor.start_kill();
                     return Err(error);
@@ -373,6 +381,7 @@ impl ExecProcessGroup {
             child,
             pgid,
             running: true,
+            reservation: crate::current_work_reservation(),
             wait_killed_group: false,
             op_cgroup,
         })
@@ -439,6 +448,12 @@ impl ExecProcessGroup {
 #[cfg(unix)]
 impl Drop for ExecProcessGroup {
     fn drop(&mut self) {
+        if self.running {
+            if let Some(reservation) = &self.reservation {
+                // Drop signals cleanup but cannot await its exit receipt.
+                reservation.mark_unsettled();
+            }
+        }
         if self.running && self.anchor.id().is_some() {
             if let Err(error) = self.terminate() {
                 if error.kind() != std::io::ErrorKind::NotFound {
@@ -477,6 +492,10 @@ fn terminate_unix_process_group(pgid: i32) -> std::io::Result<()> {
         // all it can either way; failing the op over it turned a SUCCESSFUL
         // git commit into a typed error.
         Err(Errno::EPERM) => {
+            // A successful command result does not establish that every member
+            // exited. Keep ordinary exec behavior, but refuse an update whose
+            // process-tree cleanup could not be proved.
+            mark_unsettled_work();
             tracing::debug!(
                 group_id = pgid,
                 "group kill reported EPERM (unsignalable member); owned members were signaled"
@@ -494,6 +513,7 @@ fn terminate_unix_process_group(pgid: i32) -> std::io::Result<()> {
 struct ExecProcessGroup {
     child: AsyncGroupChild,
     running: bool,
+    reservation: Option<crate::WorkReservation>,
 }
 
 #[cfg(windows)]
@@ -501,10 +521,20 @@ impl ExecProcessGroup {
     fn spawn(mut command: tokio::process::Command) -> std::io::Result<Self> {
         // `command_group` wraps the spawn in a Job Object; kill-on-drop terminates
         // the whole job (the direct child + every descendant) on cancel.
-        let child = command.group().kill_on_drop(true).spawn()?;
+        let child = command
+            .group()
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|error| {
+                // The opaque dependency can fail after creating/assigning a child.
+                // It exposes no same-job settlement handle for that partial spawn.
+                mark_unsettled_work();
+                error
+            })?;
         Ok(Self {
             child,
             running: true,
+            reservation: crate::current_work_reservation(),
         })
     }
 
@@ -533,6 +563,13 @@ impl ExecProcessGroup {
 
     async fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
         let status = self.child.wait().await?;
+        // command-group 5.0.1 treats any job completion notification as exit;
+        // it exposes neither that notification nor the job's active count.
+        // Preserve normal command results, but never use this ambiguous receipt
+        // to authorize replacing a runner that may still own descendants.
+        if let Some(reservation) = &self.reservation {
+            reservation.mark_unsettled();
+        }
         self.running = false;
         Ok(status)
     }
@@ -544,6 +581,9 @@ impl Drop for ExecProcessGroup {
         if !self.running {
             return;
         }
+        if let Some(reservation) = &self.reservation {
+            reservation.mark_unsettled();
+        }
         let group_id = self.child.id();
         if let Err(error) = self.child.start_kill() {
             if !matches!(
@@ -553,6 +593,13 @@ impl Drop for ExecProcessGroup {
                 tracing::warn!(?group_id, %error, "failed to terminate cancelled exec process group");
             }
         }
+    }
+}
+
+#[cfg(any(unix, windows))]
+fn mark_unsettled_work() {
+    if let Some(reservation) = crate::current_work_reservation() {
+        reservation.mark_unsettled();
     }
 }
 
@@ -854,7 +901,7 @@ impl Platform for NativePlatform {
         let path = self.resolve_path(&req.path)?;
         let offset = req.offset;
         let length = req.length;
-        let (content, total_size) = tokio::task::spawn_blocking(move || {
+        let (content, total_size) = crate::spawn_blocking_reserved(move || {
             use std::io::{copy, sink, Read};
 
             let read = || -> std::io::Result<(Vec<u8>, u64)> {
@@ -2236,7 +2283,7 @@ mod tests {
         for args in [
             vec!["init", "-q"],
             vec!["config", "user.email", "agent@opengeni.test"],
-            vec!["config", "user.name", "OpenGeni Agent"],
+            vec!["config", "user.name", "Opengeni Agent"],
         ] {
             // git is gated as known-present by the callers' `which_git()` check, so
             // a spawn `NotFound` here is the transient NixOS fork/exec ENOENT — retry

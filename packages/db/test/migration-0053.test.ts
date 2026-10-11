@@ -6,8 +6,9 @@ import { fileURLToPath } from "node:url";
 import postgres from "postgres";
 import { sql } from "drizzle-orm";
 
-import { selectCodexCredentialLeaseForTurn } from "../../../apps/worker/src/activities/codex-rotation";
-import { acquireCodexCredentialLease, createDb, withSessionActivityRlsContext } from "../src/index";
+import { selectCodexCredentialLeaseForTurn } from "../../../apps/worker/test/fixtures/legacy-codex/rotation";
+import { createDb, withSessionActivityRlsContext } from "../src/index";
+import { acquireCodexCredentialLease } from "./fixtures/legacy-codex";
 import { migrate } from "../src/migrate";
 
 const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
@@ -132,6 +133,19 @@ describe("migration 0053 (Codex credential leases)", () => {
         allocator_enabled: true,
       });
 
+      // This exercises the legacy Codex lease protocol, which the drained
+      // 0689 cutover moves onto the shared core (M3 PR 4 deletes the legacy
+      // path). Hold that one migration back so the fixture stays legacy,
+      // with 0712 and 0713, which build on it.
+      await admin`
+        insert into schema_migrations (name)
+        values ('0689_subscription_core_codex_cutover.sql'),
+          -- 0712 requires the committed 0689 cutover; hold it back too.
+          ('0712_subscription_core_generic_precursor.sql'),
+          -- 0713 alters objects 0689 creates; hold it back too.
+          ('0713_subscription_core_provider_keyed_reach.sql'),
+          -- 0714 redefines 0713's reach setters; hold it back too.
+          ('0714_subscription_workspace_managed_organization_accounts.sql') on conflict do nothing`;
       await migrate(databaseUrl);
       client = createDb(databaseUrl, { max: 2 });
 

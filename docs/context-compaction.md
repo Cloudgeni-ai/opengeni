@@ -1,12 +1,12 @@
 # Conversation context compaction
 
-OpenGeni freezes a per-session compaction mode at create time
+Opengeni freezes a per-session compaction mode at create time
 (`sessions.codex_compaction_mode`):
 
 | Mode | When | Mechanism |
 | --- | --- | --- |
 | `portable` | All non-Codex sessions; existing sessions (backfill); new Codex sessions when the workspace sets `codexCompactionDefault: "portable"` | Durable plaintext checkpoint (Codex CLI local path). Free mid-session provider switching. |
-| `remote_v2` | New Codex sessions by default (`codexCompactionDefault` absent or `"remote_v2"`) | Codex remote compaction v2 (wire `compaction_trigger` → opaque `{ type: "compaction", encrypted_content }`). On a valid compaction item, install and recompute usage — same as Codex CLI (no local “must shrink / must differ” gate). The compact request **must** reuse the ordinary turn prompt-cache prefix: model-visible tool schemas + the exact agent `instructions` + active history + `compaction_trigger` (CLI `base_instructions` / `model_visible_specs` parity). Empty instructions are rejected. Operator `/compact` goes through normal sandbox and lazy-tool request preparation, stopping before ordinary inference. Retained cleartext keeps recent user/system/developer messages **including images** within the 64k budget. The Agents SDK rejects a bare trigger item, so OpenGeni emits `{ type: "unknown", providerData: { type: "compaction_trigger" } }` through `CompactionResponsesModel` and the Codex fetch normalizer restores the wire shape. Session is **Codex-only** for its lifetime (HTTP + worker admission). |
+| `remote_v2` | New Codex sessions by default (`codexCompactionDefault` absent or `"remote_v2"`) | Codex remote compaction v2 (wire `compaction_trigger` → opaque `{ type: "compaction", encrypted_content }`). On a valid compaction item, install and recompute usage — same as Codex CLI (no local “must shrink / must differ” gate). The compact request **must** reuse the ordinary turn prompt-cache prefix: model-visible tool schemas + the exact agent `instructions` + active history + `compaction_trigger` (CLI `base_instructions` / `model_visible_specs` parity). Empty instructions are rejected. Operator `/compact` goes through normal sandbox and lazy-tool request preparation, stopping before ordinary inference. Retained cleartext keeps recent user/system/developer messages **including images** within the 64k budget. The Agents SDK rejects a bare trigger item, so Opengeni emits `{ type: "unknown", providerData: { type: "compaction_trigger" } }` through `CompactionResponsesModel` and the Codex fetch normalizer restores the wire shape. Session is **Codex-only** for its lifetime (HTTP + worker admission). |
 
 There is no off switch, compatibility ladder, ordinary-turn history trim, or
 deterministic non-model fallback. A `remote_v2` session never silently falls
@@ -25,7 +25,7 @@ The implementation lives in:
 
 - `packages/runtime/src/context-compaction.ts`: thresholds, portable rebuild,
   remote v2 retain/rebuild helpers, and the typed compaction signal.
-- `packages/runtime/src/prepared-compaction-request.ts`: retains the actual prepared request prefix at the model dispatch boundary. Responses pre-turn/operator and mid-turn compaction stop there before ordinary inference; no prefix is rebuilt from the original Agent. A missing prepared request fails closed. Remote v2 preserves all prepared model settings; portable Responses preserves the prepared tools and instructions while applying its summary-specific output limit and provider safety settings.
+- `packages/runtime/src/prepared-compaction-request.ts`: retains the actual prepared request prefix at the model dispatch boundary. Responses and Claude pre-turn/operator and mid-turn compaction stop there before ordinary inference; no prefix is rebuilt from the original Agent. A missing prepared request fails closed. Remote v2 preserves all prepared model settings; portable Responses preserves the prepared tools and instructions while applying its summary-specific output limit and provider safety settings; Claude preserves every cache-relevant field (see below).
 - `apps/worker/src/activities/run-input.ts`: operator compaction loads canonical history through ordinary input preparation without a synthetic message or required update batch.
 - `packages/runtime/src/index.ts`: portable summarizer + `requestRemoteCompactionV2`.
 - `apps/worker/src/activities/context-compaction.ts`: mode branch, summarizer
@@ -44,10 +44,52 @@ Each resolved model can declare three distinct values:
 | effective input window | provider-safe input ceiling |
 | automatic compaction limit | proactive checkpoint trigger |
 
-If a model has no explicit automatic limit, OpenGeni uses
+If a model has no explicit automatic limit, Opengeni uses
 `floor(rawWindow * contextCompactionThresholdRatio)`. The ratio defaults to
 0.9 and is clamped to 0.3–0.9. An explicit limit is capped at 90% of the raw
 window, matching Codex core.
+
+### Organization and workspace preferences
+
+Organization owners and admins set limits once for every workspace under
+**Organization settings → Models → Defaults for every workspace → Context &
+compaction**. An empty field there follows the model's default. Each workspace
+follows the organization's limit for a model until its own admins set one under
+**Organization settings → Models → your workspace → Context & compaction**
+(including your Personal workspace). On a workspace's page an empty field shows
+what it follows (the organization's limit, labeled with the organization's name,
+or the model's default) as its placeholder; a number is the workspace's own limit
+(`300k` and `300,000` both work), with what it replaces and a way back to it
+under it. The Models row says "Model defaults", the organization's limits, or how
+many models have a custom limit. A saved limit above the model's current maximum
+says which value is used. Only the respective administrators can save; readers can
+inspect. Setting a limit does not change any session's model or reasoning effort.
+
+Preferences apply when a subsequent turn attempt prepares its model, including
+existing sessions. An in-flight model call is unchanged. They never change the
+session's frozen portable/remote-v2 mode. The worker resolves the preference once
+for all model-facing paths in that attempt, including same-turn continuation.
+Provider usage anchors are still cleared after a checkpoint; a lowered threshold
+does not restore stale usage or cause an immediate compaction loop.
+
+The setting is `modelCompactionThresholds`, keyed by the exact product model ID
+(so API and subscription routes can differ). PATCH `/v1/workspaces/:workspaceId/settings`
+merges a workspace's model keys atomically, and PATCH
+`/v1/organizations/:organizationId/model-defaults` merges the organization's.
+The workspace's value wins, then the organization's, then the model default. Omission preserves a model; `null` removes only its
+override. Writes require whole numbers of at least 16,000 tokens. The effective
+value is bounded by both 90% of the raw window and the provider-safe input window.
+If a model's limits change, the saved preference remains visible but is clamped
+at execution. Malformed read values are ignored per model, not by resetting the
+whole workspace settings bag. The model catalog exposes `compactionPolicy` with
+default/override/organization/effective/minimum/maximum tokens, separately from immutable model
+execution metadata.
+
+Haiku 5.5 defaults to 95,000 tokens and Opus 5.5 (native Claude and Opper) to
+300,000, unless overridden (for example, to 250,000). These are proactive thresholds, not
+hard spending caps: checks run between steps and include provider-accounted
+context, so newly appended content or a large response may cross a price boundary.
+The independent request-byte guard described below always remains active.
 
 The Codex subscription catalog verified with Codex CLI 0.146.0 on 2026-07-29
 has the following limits, and billed GPT-5.6 Sol/Terra/Luna pin the same
@@ -60,7 +102,7 @@ triple instead of the 1.05M deployment fallback:
 | automatic compaction limit (90%) | 244,800 |
 
 Automatic compaction is provider-accounted. Before a provider response exists,
-no local whole-request estimate may force compaction: OpenGeni sends the request,
+no local whole-request estimate may force compaction: Opengeni sends the request,
 then either records the provider's usage or handles the provider's typed context
 overflow through the same compaction recovery. After a response, the per-call
 guard anchors to that exact response's provider-reported **total** tokens and
@@ -97,10 +139,62 @@ conservative bounded fallback. Inline image bytes or data-URL base64 therefore
 do not grow the text estimate linearly. A data URL inside ordinary textual
 content is still text and receives ordinary text accounting.
 
+## Claude request bytes and image-heavy recovery
+
+Request bytes are independent of model context tokens. Claude's Messages API
+accepts a 32 MB body; Opengeni checks the **final UTF-8 JSON**, after subscription
+identity additions, against a conservative 24,000,000-byte transport budget.
+This is not a local token estimate or an automatic-compaction preference.
+Each inline raster is independently bounded to 2,000 pixels per side and
+512 KiB of base64. Compression and, when necessary, further resizing depend
+only on that image, never the number of later images. Originals stay retained;
+coordinate-mapping notes describe the request-local rendition. A per-image
+limit alone cannot bound an accumulating conversation.
+
+On models with prefix-bound thinking, a checkpoint or resized-image projection
+opts into the documented `thinking-binding-controls-2026-08-01` beta with
+`prefix_mismatch_behavior: "drop_block"`. The provider, not the client, may omit
+only reasoning invalidated by the changed prefix. Signed blocks remain verbatim
+in durable history and in requests. The retained checkpoint/image makes that
+choice stable after restart; ordinary unchanged prefixes keep strict behavior.
+Responses expose only counts of dropped blocks by closed reason, not signatures
+or prompt data. This reset can lose old reasoning and cost new reasoning tokens;
+it is not a claim that a client-generated checkpoint preserves prefix binding.
+See Anthropic's [preserved thinking](https://platform.claude.com/docs/en/build-with-claude/preserved-thinking).
+
+Both the preflight refusal and a real HTTP 413 before a response stream use the
+same worker-owned recovery. The worker checkpoints the largest complete earlier
+prefix that fits both the summary's token budget and at most half the rejected
+body's bytes (also capped at 24 MB). Fitting uses the same serializer and image
+projection as dispatch, without making inference calls. The complete remaining
+suffix stays verbatim, including unread images and paired tool calls/results;
+cuts never separate signed reasoning from its assistant/tool batch. The durable
+replacement appends that suffix after the checkpoint. Historical tool actions
+are not executed again, and neither a queue entry nor a new turn is created.
+
+The exact turn-attempt fence claims one size-recovery allowance in logical-turn
+metadata before requesting the summary. It survives worker restart, attempt
+replacement, and successful checkpointing. A second size refusal is terminal,
+not another automatic summary or replay. An irreducible prefix, empty/failed
+summary, non-shrinking replacement, cancellation, or stale attempt cannot replace
+active history. Explicit subsequent input or compaction can create a new attempt
+at the task; no automatic retry promises that irreducibly large new input fits.
+Portable Claude compaction also uses exact-byte prefix fitting when its normal
+checkpoint would otherwise be too large. Other provider protocols are unchanged.
+
+Diagnostics retain only total UTF-8 bytes, image count/base64 bytes, system/tool
+schema bytes, the budget, and an available provider request ID; they do not retain
+prompt/image contents or depend on full request capture. A stream error after HTTP
+200 and an unrelated file-upload 413 do not enter this pre-dispatch recovery.
+
+See `packages/runtime/src/anthropic-request-size.ts`,
+`packages/runtime/src/anthropic-compaction.ts`, and Anthropic's
+[request-size limits](https://platform.claude.com/docs/en/api/errors#request-size-limits).
+
 ## Model-facing tool output
 
 Every resolved model carries a textual tool-output policy. The Codex catalog's
-10,000-token policy is the default; OpenGeni applies Codex's exact 1.2x JSON
+10,000-token policy is the default; Opengeni applies Codex's exact 1.2x JSON
 serialization allowance, UTF-8-safe head/tail truncation, and explicit
 `…N tokens truncated…` marker. Structured textual parts share one sequential
 budget while images, files, and encrypted content remain structured.
@@ -135,6 +229,15 @@ The compaction model receives:
 3. for Responses providers, the exact prepared system instructions and
    model-visible tool schemas from the ordinary agent request; portable
    compaction sets `tool_choice:none` and cannot execute returned tool calls.
+   Claude caches `tools` → `system` → `messages`, and its thinking mode,
+   `output_config.effort` and `tool_choice` are part of the cache key, so a
+   Claude checkpoint keeps the prepared tools, instructions, thinking, effort
+   and tool choice unchanged, changes only `max_tokens`, and appends a
+   text-only instruction after the checkpoint prompt in the same user turn.
+   Its history is the same projected prefix, so the call reads the warm cache.
+   If the model still calls a tool, one retry sets `tool_choice:none` (tools
+   and instructions stay cached); a reply with a tool call never becomes the
+   checkpoint.
    Chat providers still use a tool-less transcript request and composed
    instructions because their protocol differs;
 4. no provider-side context-management policy.
@@ -179,17 +282,17 @@ assistant content survive; no system moves across an assistant, and canonical
 history is never rewritten. Already-compacted sessions use this projection on
 their next ordinary turn without clearing context or rerunning completed tools.
 
-Before the provider call, OpenGeni estimates the history and checkpoint prompt. It
+Before the provider call, Opengeni estimates the history and checkpoint prompt. It
 replaces aggregate oversized tool results oldest-first only in the temporary
 copy, preserving recent detail. If that remains too large, it removes whole
 oldest user-delimited work units and re-sanitizes the suffix so no tool result,
 call, or reasoning fragment is orphaned. The temporary history copy is kept
 beneath the effective input ceiling and raw window minus requested summary.
-For a prepared Responses call, OpenGeni reserves the estimated instruction and
+For a prepared Responses call, Opengeni reserves the estimated instruction and
 tool-schema tokens before fitting history. If the provider still reports context
 overflow, it refits history to 40% of the remaining target and sends one final
 request. The provider may still count differently; on another overflow, active
-history stays intact. If only the checkpoint instruction fits, OpenGeni stops
+history stays intact. If only the checkpoint instruction fits, Opengeni stops
 without asking the model to summarize unseen history. It never issues one
 failing call per history item.
 
@@ -211,7 +314,7 @@ terminal SSE `response.failed` and `response.error` events that arrive on HTTP
 type/code/message/parameter and response identity; arbitrary nested diagnostics
 are omitted and truncation is explicit. They are never misclassified as an
 empty summary. A genuinely successful but empty response is a distinct typed
-compaction failure with bounded, content-free response diagnostics. OpenGeni
+compaction failure with bounded, content-free response diagnostics. Opengeni
 never installs a manufactured placeholder as conversation truth.
 
 ## Durable replacement
@@ -303,7 +406,7 @@ The successful summarizer response reports usage through the same durable,
 idempotency-keyed `agent.model.usage` and billing-ledger path as an ordinary
 model call, owned by the current execution attempt. Codex subscription
 allowance headers use the same per-account request context and remain separate
-from OpenGeni token billing.
+from Opengeni token billing.
 
 Both paths compact inside the same activity, turn, attempt, and sandbox.
 Compaction never creates a prompt-queue row, a recovery message, a new logical
@@ -316,7 +419,7 @@ landmark is durable, the ordinary turn settles `superseded` before another
 model request and the Steer runs next. Pause and Cancel are not deferred.
 
 If summarization produces an authoritative terminal failure, the turn ends
-with an honest `context_compaction_failed` result. OpenGeni does not continue
+with an honest `context_compaction_failed` result. Opengeni does not continue
 with silently trimmed input and does not install a mechanical fallback summary.
 Retryable provider failures instead recover the same accepted turn through the
 ordinary provider/capacity path; they do not create another goal continuation,
@@ -345,13 +448,27 @@ bounded status/code/request identifiers, never the provider message or model
 input.
 
 When the latest finished inference has `code="context_compaction_failed"`, an
-active goal remains active and ordinary pending system/child/schedule updates
-remain durable, but neither may start another inference against the unchanged
-history. A queued human/API prompt or Agent Steer instruction remains runnable
-and receives the pending updates at its normal boundary. Explicit `/compact`
-also remains runnable; it does not consume those updates, but a successful
-checkpoint supplies newer finished-turn truth so the existing pending batch can
-run next. This gate neither creates queue work nor consumes a goal
+active goal remains active and the machine inputs that were already pending at
+that failure remain durable, but neither may start another inference against
+the unchanged history. The hold is bounded by the exact `turn.failed` event
+sequence (`compactionFailureHoldSequenceTx` in
+`packages/db/src/compaction-failure-hold.ts`): an input whose own
+`system.update.pending` event is newer than that sequence is genuinely new
+truth. Under the ordinary wake-class rules it makes one new attempt, and the
+held backlog rides along in canonical order (a batch that cannot coalesce
+claims first and the newer input follows). A queued human/API prompt or Agent
+Steer instruction, of any age, remains runnable and receives the pending
+updates at its normal boundary. Explicit `/compact` also remains runnable; it
+does not consume those updates, but a successful checkpoint supplies newer
+finished-turn truth so the existing pending batch can run next. Every reader
+of runnable work applies the same hold: work peek, claim, pre-claim failure,
+goal materialization, final idle settlement, the workflow-wake delivery ACK and
+the child-result wake repair. Held-only input therefore neither keeps a wake
+revision open (the dispatcher would otherwise re-signal a closed workflow
+forever) nor wakes a session, while a sender's new message after the failure
+always wakes it. A further compaction failure starts a new hold at its own
+sequence, so every retry needs another external input and there is no
+self-sustaining loop. This gate neither creates queue work nor consumes a goal
 continuation counter.
 
 Manual `/compact` sets one durable idempotent request. During active inference,

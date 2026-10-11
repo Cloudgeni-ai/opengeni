@@ -95,7 +95,7 @@ pub struct RelayHub {
     ptys: Arc<Mutex<HashMap<String, PtyControlTx>>>,
     /// Idempotent terminal scopes → their live PTY/channel. The value is removed
     /// when the PTY pump exits. A scope is supplied by the control plane's durable
-    /// OpenGeni session identity; explicit unscoped `pty_open` remains create-new.
+    /// Opengeni session identity; explicit unscoped `pty_open` remains create-new.
     pty_scopes: Arc<Mutex<HashMap<String, PtyOpenResponse>>>,
     /// Per-scope singleflight locks. Weak values make the lock table self-pruning:
     /// it does not retain one allocation for every historical session forever.
@@ -330,7 +330,7 @@ impl StreamRegistry for RelayHub {
         };
         let (ready_tx, ready_rx) = oneshot::channel();
         let browser_ports = self.browser_ports.clone();
-        tokio::spawn(async move {
+        opengeni_agent_platform::spawn_reserved(async move {
             match browser_pump::run(socket, &mut channel, Some(ready_tx)).await {
                 Ok(()) => {
                     channel
@@ -386,7 +386,7 @@ impl StreamRegistry for RelayHub {
         };
         let (ready_tx, ready_rx) = oneshot::channel();
         let browser_ports = self.browser_ports.clone();
-        tokio::spawn(async move {
+        opengeni_agent_platform::spawn_reserved(async move {
             match browser_pump::run(socket, &mut channel, Some(ready_tx)).await {
                 Ok(()) => {
                     channel
@@ -466,7 +466,7 @@ fn spawn_pty_pump(
     pty_scopes: Arc<Mutex<HashMap<String, PtyOpenResponse>>>,
     ready: oneshot::Sender<()>,
 ) {
-    tokio::spawn(async move {
+    opengeni_agent_platform::spawn_reserved(async move {
         // The PTY pump owns reconnects because its reader/writer handles are
         // once-only and must remain alive across every relay transport generation.
         match pty_pump::run(&mut process, &mut channel, &mut commands, Some(ready)).await {
@@ -499,7 +499,7 @@ fn spawn_desktop_pump(
     policy: InputPolicy,
     ready: oneshot::Sender<()>,
 ) {
-    tokio::spawn(async move {
+    opengeni_agent_platform::spawn_reserved(async move {
         // The readiness signal is fired by the pump on its FIRST run only (after the
         // first frame is captured + forwarded); a reconnect re-enters with `None`.
         let mut ready = Some(ready);

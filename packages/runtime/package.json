@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/runtime",
-  "version": "1.0.0",
+  "version": "1.4.4",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -33,6 +33,10 @@
       "types": "./src/mcp-network.ts",
       "default": "./src/mcp-network.ts"
     },
+    "./model-call": {
+      "types": "./src/model-call.ts",
+      "default": "./src/model-call.ts"
+    },
     "./gmail-rest-mcp": {
       "types": "./src/gmail-rest-mcp.ts",
       "default": "./src/gmail-rest-mcp.ts"
@@ -44,6 +48,10 @@
     "./github-rest-mcp": {
       "types": "./src/github-rest-mcp.ts",
       "default": "./src/github-rest-mcp.ts"
+    },
+    "./web-search": {
+      "types": "./src/web-search/index.ts",
+      "default": "./src/web-search/index.ts"
     },
     "./workspace-tool-gateway": {
       "types": "./src/workspace-tool-gateway.ts",
@@ -73,6 +81,7 @@
     "@opengeni/codex": "workspace:*",
     "@opengeni/config": "workspace:*",
     "@opengeni/contracts": "workspace:*",
+    "@opengeni/interaction": "workspace:*",
     "@opengeni/network": "workspace:*",
     "@opengeni/observability": "workspace:*",
     "@opengeni/sdk": "workspace:*",
@@ -88,7 +97,9 @@
     "zod": "4.4.3"
   },
   "devDependencies": {
+    "@daytonaio/sdk": "0.162.0",
     "@opengeni/ogtool": "workspace:*",
+    "@runloop/api-client": "1.16.2",
     "tsup": "^8.5.0",
     "typescript": "7.0.2"
   }

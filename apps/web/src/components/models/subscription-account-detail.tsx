@@ -282,11 +282,7 @@ function SubscriptionAccountDetail<Account extends AccountSummary>({
               {pool.accounts.length > 1 ? (
                 <SettingRow
                   label="Primary account"
-                  description={
-                    account.id === pool.activeAccountId
-                      ? "With Primary only, this is the only account used for new work."
-                      : "Choose the account used when allocation is set to Primary only."
-                  }
+                  description="Used for new work when sharing is set to Primary only."
                   control={
                     account.id === pool.activeAccountId ? (
                       <span className="inline-flex h-8 items-center gap-1.5 text-sm font-medium text-fg-muted">

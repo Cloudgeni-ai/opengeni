@@ -664,7 +664,7 @@ const SCENARIO_WORKER_FLEET: StreamScenario = {
     },
     {
       kind: "message",
-      text: "Inbound cards landed: one **Worker completed**, one **Worker paused**, one **Worker failed**. Expand any for the full report; **View session** deep-links into the child.\n",
+      text: "Inbound cards landed: one **Worker completed**, one **Worker paused**, one **Worker failed**. Expand any for the full report; the arrow on each row opens the child.\n",
       stream: true,
       pacing: "fast",
     },
@@ -1006,7 +1006,7 @@ export const STREAM_SCENARIOS: StreamScenario[] = [
         tools: (ctx) => [
           ...marathonTools(ctx, 6),
           applyPatch(ctx.id("z-patch"), "src/routes/login.tsx", 9),
-          webSearch(ctx.id("z-search"), "OpenGeni session chrome"),
+          webSearch(ctx.id("z-search"), "Opengeni session chrome"),
           computerScreenshot(ctx.id("z-shot")),
           mcpIssue(ctx.id("z-issue"), "Polish stream settle fold"),
         ],

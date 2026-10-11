@@ -179,6 +179,13 @@ pub trait DesktopBackend: Send + Sync {
     /// reason — it is a value, not an error.
     fn probe(&self) -> Option<v1::Display>;
 
+    /// Whether enrollment can offer screen-control consent. This reports display
+    /// presence, not permission to capture it. Capture/input remain independently
+    /// gated after the user approves the connection.
+    fn can_offer_display(&self) -> bool {
+        self.probe().is_some()
+    }
+
     /// Captures the current desktop framebuffer as a PNG-encoded [`CapturedFrame`].
     ///
     /// # Errors

@@ -681,7 +681,7 @@ describe("caller seam", () => {
         mcpServers: [
           {
             id: "opengeni",
-            name: "OpenGeni",
+            name: "Opengeni",
             url: "https://mcp.example.test/og",
             cacheToolsList: false,
           },

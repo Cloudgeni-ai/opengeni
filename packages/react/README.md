@@ -1,6 +1,6 @@
 # @opengeni/react
 
-React hooks and styled components for OpenGeni, built on
+React hooks and styled components for Opengeni, built on
 [`@opengeni/sdk`](../sdk): live session streaming, a chat composer, a message
 timeline that renders streaming deltas / tool calls / spawned-worker status,
 session status badges, and fleet tiles for workspace overviews. Two opt-in
@@ -28,6 +28,17 @@ animation. Override the tokens to rebrand everything.
 
 ## Embedded connections and Sites
 
+For a child chat's capability selection, `prepareSessionCapabilityAccess` reads
+an ancestor-to-child access plan without writing. Show the parent chats whose
+`request` is non-null and obtain an explicit confirmation before calling
+`applySessionCapabilityAccess`. The plan preserves existing choices, applies
+version-fenced updates root first, and grants no authority: each ordinary API
+request still authorizes its caller. Invalidate the review on actor/workspace
+changes. A partial failure may leave approved parent changes saved; prepare a
+new plan for retry instead of rolling them back. Existing
+`attachSessionCapability` remains a single-chat operation and never changes
+parents implicitly.
+
 Optional `@opengeni/react/connect` exports `useConnect`, `ConnectChooser`,
 `ConnectSetup`, `ConnectAccounts`, and the composed `ConnectPanel`. Inject one
 `@opengeni/connect` controller per authenticated actor/workspace and dispose it
@@ -48,7 +59,7 @@ provider warnings are not hidden during migration.
 `PluginDiscovery` accepts `defaultProvider="openai"` or `"anthropic"` to choose
 the initial registry. Omitting it starts with All. Users can still switch among
 All, OpenAI, and Anthropic; changing the search preserves their selection. The
-OpenGeni Plugins page starts with OpenAI.
+Opengeni Plugins page starts with OpenAI.
 
 ```tsx
 import { ConnectPanel } from "@opengeni/react/connect";
@@ -65,7 +76,7 @@ The host owns synchronous popup/full-redirect navigation and pending-attempt
 recovery. Backend state, not a popup message or URL query, proves completion.
 Operation installation uses explicit selection; OAuth success alone is not
 installation. Account disconnect requires an observed version and confirmation,
-revokes local OpenGeni access only, and never silently retries an unknown outcome.
+revokes local Opengeni access only, and never silently retries an unknown outcome.
 Provider readiness is deployment-dependent; use the server catalog rather than
 assuming every OAuth application or operator-managed provider is configured.
 
@@ -85,17 +96,34 @@ runnable loopback host reference. Native route reuse and full visual acceptance
 are not implied by these optional package surfaces.
 ## Conversation UI
 
-`SessionConversation` is the default product integration for an existing
-session. Back it with `createSessionProxyHandler` from `@opengeni/sdk`, mounted
-on your server, and point an unmodified browser
-`new OpenGeniClient({ baseUrl: "/api/opengeni" })` at it:
+`OpenGeniChat` and `SessionConversation` are the default product integration.
+Back them with `createSessionProxyHandler` from `@opengeni/sdk`, mounted on your
+server, and pass its mount as `baseUrl`. No provider, client, or workspace id
+is needed: the component creates the browser client and uses the workspace the
+proxy resolved for the signed-in user (from the proxy's client config).
 
 ```tsx
 import "@opengeni/react/compiled.css";
 
-<OpenGeniProvider client={client} workspaceId={workspaceId}>
+<OpenGeniChat baseUrl="/api/opengeni" />;
+// or one conversation: <SessionConversation baseUrl="/api/opengeni" sessionId={sessionId} />
+```
+
+Bearer-token apps pass `headers` (a function runs per request) or a custom
+`fetch`; a `client` passed with `baseUrl` replaces the one the component
+creates:
+
+```tsx
+<OpenGeniChat baseUrl="/api/opengeni" headers={() => ({ Authorization: `Bearer ${getToken()}` })} />
+```
+
+The provider form keeps working, for example for several components sharing one
+client or the headless hooks:
+
+```tsx
+<OpenGeniProvider client={new OpenGeniClient({ baseUrl: "/api/opengeni" })} workspaceId={workspaceId}>
   <SessionConversation sessionId={sessionId} />
-</OpenGeniProvider>;
+</OpenGeniProvider>
 ```
 
 Compose `MessageTimeline` and `ChatComposer` with the session hooks only when
@@ -110,6 +138,22 @@ composed from `SessionList` and `SessionConversation`, which you can also mount
 separately. Pass `conversationProps` for message rendering and tool renderers,
 `createSession` to create chats through your own endpoint, or `sessionId` /
 `onSessionChange` to control the selection (for example from the URL).
+
+Live voice is opt-in, because a call spends your credits and asks the browser
+for the microphone. Turn it on with `realtimeVoice={true}` (via `OpenGeniChat`'s
+`conversationProps` too) or `createSessionProxyHandler({ realtimeVoice: true })`.
+The composer then shows a voice button when the workspace offers an available
+voice model (for example hosted GPT Live with credits): the user talks, the
+voice model answers and hands work to the agent in the same chat, and the
+transcript lands in the timeline. It stays hidden when no model is available,
+when the proxy sets `realtimeVoice: false`, or when you pass
+`realtimeVoice={false}`. The voice code loads lazily on first display.
+
+The working indicator before the first reply says "Thinking…". Pass
+`genieLoading` (`phrases`, `messages`, `orb`, or a whole `render`) to use your
+own copy or visual. File attachments follow the proxy: it reports them off when
+`files: false`, and for anonymous visitors (`visitor: true` from `resolve`)
+unless it sets `visitorUploads: true`.
 
 `SessionConversation` and `OpenGeniChat` are built to look native inside
 someone else's product with zero styling:
@@ -132,7 +176,13 @@ someone else's product with zero styling:
   also fixes the policy server-side.
 
 Attachments appear when the deployment enables uploads (`attachments={false}`
-opts out), pending tool approvals render Approve/Reject, a yes/no question
+opts out), the microphone appears when it reports voice input available
+(`voiceInput={false}` opts out), generated images, video, published files and
+screenshots display through the conversation's session scope, actions a
+session proxy reports unavailable (`sessionCreation`, `archive`, `artifacts`)
+are hidden, the session goal shows with Pause/Resume/Clear, sub-agent cards
+open the child through `onOpenSession` (`OpenGeniChat` opens it in place),
+pending tool approvals render Approve/Reject, a yes/no question
 renders as two buttons, a failed load offers Try again, and `toolRegistry`
 customizes tool rendering.
 
@@ -154,8 +204,8 @@ enablePierreDiffs();
 
 Without it, diffs and file views render as plain text.
 
-`OpenGeniProvider` never blocks or reloads the host page when OpenGeni deploys
-a new API contract revision. The stock OpenGeni console opts into that
+`OpenGeniProvider` never blocks or reloads the host page when Opengeni deploys
+a new API contract revision. The stock Opengeni console opts into that
 stale-tab protection with `reloadOnApiContractChange`; embedded products
 should leave it off.
 
@@ -290,6 +340,29 @@ import { EditablePresentationArtifactSurface } from "@opengeni/react/artifacts/p
 <EditablePresentationArtifactSurface session={presentationSession} title="Launch deck" />;
 ```
 
+The spreadsheet surface supports typing, formulas, rectangular paste, clear,
+and durable row/column resizing. Drag a header boundary for immediate visual
+feedback and one command on release. Focus a boundary and use arrows to resize
+(Shift for 1 px), Home to reset, or Escape to cancel. Pending saves do not block
+typing; the sync indicator remains pending until server acknowledgement. Failed
+independent edits stay visible, and retry cannot overwrite newer overlapping
+edits. The same component is used in the dock and full-page artifact view;
+dimensions and values remain authoritative in the SDK Worker.
+The console supplies an XLSX Download action in both dock and full-page views.
+Custom hosts can supply `download(signal): Promise<Blob>` on the spreadsheet
+surface, or `downloadSpreadsheet(opened, signal): Promise<Blob>` on
+`EditableArtifactView`. Use the authenticated artifact SDK to pin the saved native
+head, materialize XLSX, poll its job, and download its bytes; never return the
+original imported file. Forward the abort signal through every request. The
+control waits for live sync without pending edits, shows progress and retryable
+errors, and cancels on teardown or revoked access. Omit the callback when the host
+does not support export; other modalities do not gain an unsupported download.
+Double-click a sheet tab or focus it and press F2 to rename it. Enter/Save submits
+the canonical `sheet.rename` command; Escape/Cancel discards an unsent name.
+Validation and failed submissions keep the name editor open. Pending cell edits
+show submitted input until the Worker projection catches up; pending formulas
+show their source, not an invented result.
+
 The durable document surface composes bounded summary, body, section, and
 review queries at one native revision. Text edits become UTF-16-correct minimal
 `paragraph.edit` commands; formatting becomes `paragraph.format`. Empty
@@ -311,7 +384,7 @@ or permissive fallback.
 
 `DocumentProjectionEditor`, `PresentationProjectionEditor`, and
 `SpreadsheetProjectionGrid` expose the same host-owned projection/async-command
-boundary without requiring the OpenGeni sync session. Pending, failure, retry,
+boundary without requiring the Opengeni sync session. Pending, failure, retry,
 read-only, focus, and reconciliation behavior stays inside the components.
 
 Projection editors use browser-safe structural views and do not load
@@ -383,7 +456,7 @@ derived defaults use scoped effective values so changing a base accent, radius,
 motion, or surface token updates its dependents at runtime.
 
 The original Tailwind v4 bridge remains available for hosts that intentionally
-want OpenGeni utilities compiled into their own Tailwind entry:
+want Opengeni utilities compiled into their own Tailwind entry:
 
 ```css
 @import "tailwindcss";
@@ -524,7 +597,7 @@ export function App() {
 
 ## Realtime composer controls (`@opengeni/react/realtime`)
 
-The realtime subpath is the exact OpenGeni composer experience: model catalog
+The realtime subpath is the exact Opengeni composer experience: model catalog
 and selection, split-button motion, start/stop/retry states, microphone and
 audio mute controls, diagnostics, recovery, and the same copy, ARIA, classes,
 and styling used by the web console. It is deliberately separate from the root
@@ -590,7 +663,7 @@ The reference consumer is `demo/realtime.html`. Run `bun run demo` from
 `packages/react`, then open `http://localhost:3100/realtime.html?mode=mock` for
 deterministic selection/start/mute/stop/reconnect/error testing. Use
 `?mode=live&workspaceId=…&sessionId=…` against the web server's same-origin
-`/demo-api` proxy for a real local OpenGeni environment. Configure
+`/demo-api` proxy for a real local Opengeni environment. Configure
 `OPENGENI_DEMO_API_URL` and, only on the server, optional demo API/access
 credentials; the browser receives neither credential. Prefer the deployment's
 normal browser authentication. If the proxy needs a server credential, create a
@@ -615,7 +688,7 @@ through published package APIs only.
 ## Browser and computer surfaces (`@opengeni/react/interaction`)
 
 The interaction subpath renders the same browser-native and semantic computer
-surfaces used by the OpenGeni web app. It consumes only the public SDK client:
+surfaces used by the Opengeni web app. It consumes only the public SDK client:
 workspace discovery, peer switching, tabs/windows, live frames, human input,
 identity versions, interventions, diagnostics, reconnect, and lifecycle state do
 not require app-private controller glue.
@@ -938,10 +1011,16 @@ intentional changes should regenerate those snapshots and review the diff.
 - `MessageTimeline` — the session timeline with stick-to-bottom scrolling, a
   "jump to latest" affordance, streaming caret, collapsible activity clusters,
   and worker cards (wire `onOpenSession` to drill into a worker). Pass
-  `renderMessageText` to plug a markdown renderer. Pass
+  `renderMessageText` to plug a markdown renderer. The default renderer shows a
+  single newline in a message as a line break, like other chat apps; a custom
+  renderer gets the same result with `<Markdown softLineBreaks>{text}</Markdown>`
+  (off by default for non-chat Markdown). Pass
   `loadRetainedArtifact` to render permanent generated-image receipts; a loader
   may return verified bytes or a short-lived signed URL. The stock web app uses
   the URL path to avoid copying multi-megabyte images into JavaScript memory.
+  `createWorkspaceRetainedArtifactLoader`, `createSessionRetainedScreenshotLoader`,
+  and `createWorkspaceRetainedVideoLoader` bind the SDK reads to a workspace
+  (and session); `SessionConversation` uses them by default.
 - `UserMessageBody` — the shared lossless rendered-height disclosure for
   already-sent user text. Use it inside a custom `renderMessageText` user branch
   so attachments and voice identity remain outside the clipped Markdown region.
@@ -958,7 +1037,7 @@ intentional changes should regenerate those snapshots and review the diff.
 - `FleetTile` — one session in a fleet grid: title, status, model, recency.
 - `ModelPicker` — a compact model dropdown for a composer slot, grouping the
   host-exposed models by provider.
-- `ModelPolicyPicker` — the full model policy control used by the OpenGeni web
+- `ModelPolicyPicker` — the full model policy control used by the Opengeni web
   app: provider/billing rails, model availability, reasoning effort, and
   runnable latency modes such as Fast. It accepts either `ClientModel[]` or
   catalog-backed `PickerModelRow[]`, and supports host-supplied labels.
@@ -1227,6 +1306,22 @@ The conversation's "usage limit reached" row is customized on
 replaced with `renderAllowanceExhausted`. See
 [usage allowances](../../docs/usage-allowances.md#react-components-and-the-console).
 
+## Terminal startup input
+
+`SandboxTerminal` captures bounded early typing while attaching. Supported stock
+sandbox images negotiate explicit Bash Readline readiness; banners and first
+output do not release queued commands. Silent prompts work too. If a startup
+profile asks for input or disables line editing, **Use manual input** clears
+buffered typing before enabling unguaranteed input. Old images/running ttyd
+daemons retain labelled **legacy input** behavior; wait for their shell startup
+before typing. Relay PTYs retain their existing OPEN_ACK behavior.
+
+Custom consumers of `useTerminalStream` can inspect `inputReadiness` and expose
+`useLegacyInput()` for `waiting` states. That action discards queued typing; it
+is not an acknowledgement of shell readiness. A new React package alone cannot
+upgrade an old sandbox image. See the [native readiness contract](../../agent/native/terminal-ready/README.md)
+for compatibility, startup limits and coordinated release requirements.
+
 ## Optional peer dependencies
 
 The chat/timeline surface needs only the required React/React DOM peers. All
@@ -1374,3 +1469,26 @@ Copy and the timestamp for user messages and completed assistant messages.
 The host owns feedback, fork authorization, and mutations; streaming assistant
 messages omit this slot. Use the `group/copy` hover/focus state and preserve
 visible touch targets when styling actions.
+
+### Portable action reviews
+
+`ApprovalSurface` accepts `loadReview(approval)` and `onViewDetails(review, path)`;
+load the versioned facts with `client.getToolActionReview`. It shows one selected
+action, counts and bounded fields instead of raw argument JSON. Keep
+`selectedApprovalId` and `onSelectedApprovalChange` in the host if a full-page
+detail route unmounts the surface, so returning cannot silently select a different
+action. The native `onApprove` / `onReject` identity is unchanged and duplicate
+submission is fenced until authoritative events remove the request.
+
+Render `ToolActionReviewDetails` on the host's normal page with
+`client.getToolReviewDetails`, passing the review's `actionDigest`, path and offset.
+Details are immutable, authenticated, paginated, and redact protected values.
+Restore focus to the original `data-review-path` button on return. No web-app
+imports, iframe, second confirmation, or nested scrolling pane is required.
+The standalone fallback retains bounded details for older SDK approvals.
+
+Wrap `MessageTimeline` in `ToolReviewHistoryProvider` with its visible events,
+authenticated `load(approvalId)` callback and `onViewDetails` to keep recorded
+reviews readable inside the corresponding tool activity. Historical receipts
+never render decision buttons. The same semantic tokens support light/dark
+embeds; `demo/approval-review.html` is the synthetic state gallery.

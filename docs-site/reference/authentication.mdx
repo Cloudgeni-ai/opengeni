@@ -1,20 +1,20 @@
 ---
 title: "Authentication"
-description: "How callers identify themselves to the OpenGeni API."
+description: "How callers identify themselves to the Opengeni API."
 icon: "key"
 ---
 
-Session operations are workspace-scoped; organization routes manage shared workspaces, keys, and session inventory across them. Every request resolves to an access grant before route code touches protected data. Which credential you use depends on who is calling.
+Sessions belong to workspaces; organization routes manage shared workspaces, keys, and sessions across them. Which credential you use depends on who is calling.
 
 ## Choosing a credential
 
 | You are                                              | Use                                                                         |
 | ---------------------------------------------------- | --------------------------------------------------------------------------- |
-| A product backend integrating OpenGeni               | An **organization API key**                                                 |
+| A product backend integrating Opengeni               | An **organization API key**                                                 |
 | A backend or automation constrained to one workspace | A **workspace API key**                                                     |
 | A host acting on behalf of its own signed-in users   | A **delegated access token** signed with the deployment's delegation secret |
 | A person in the web console                          | A managed web session (email/password or an enabled Google/GitHub provider) |
-| A machine you enrolled                               | The enrollment credential the installer obtained; you never handle it       |
+| A machine you enrolled                               | The enrollment credential, which the installer manages                      |
 
 ## Credentials
 
@@ -28,34 +28,23 @@ Session operations are workspace-scoped; organization routes manage shared works
 
 ## Personal sign-in methods
 
-In managed mode, Google, GitHub, and email/password can be sign-in methods for
-the same OpenGeni user. When an enabled social provider presents the same email
-as an existing user, OpenGeni automatically links the method only if both the
-existing email and the provider's email are verified. A verified email/password
-user can therefore also sign in with a matching verified social identity without
-creating another user.
+In managed mode, Google, GitHub, and email/password can all sign in the same
+user. When a social provider presents an email that matches an existing user,
+Opengeni links it automatically if both emails are verified. Linking keeps the
+user's workspaces, history, memberships, and billing. Unverified or different
+emails are not linked.
 
-Linking keeps the same workspaces, history, memberships, and billing ownership.
-It does not merge separate users. Different emails, unverified emails, and
-provider identities already owned by another user are not automatically linked.
+Manage sign-in methods in Personal settings → Security. Sensitive changes
+require a recent sign-in, and you must keep at least one method. After you
+disconnect a provider, reconnect it from the same page.
 
-Personal settings → Security lets you inspect your methods, connect or disconnect
-Google and GitHub, and manage your password. Sensitive changes require recent
-authentication. You must keep at least one usable sign-in method. If you
-explicitly disconnect a provider, a later same-email sign-in does not silently
-reconnect it; use the explicit connect flow instead.
-
-When asked to sign in again, complete a new OpenGeni sign-in flow for the same
-user. Google or GitHub may reuse an active provider session; OpenGeni does not
-guarantee that the provider will prompt for a password or multi-factor challenge.
-
-These are login methods, not integration permissions. Google sign-in does not
-grant access to Gmail or Drive, and GitHub sign-in does not grant repository
-access. Manage those connections separately.
+Sign-in methods are not integration permissions. Google sign-in does not grant
+Gmail or Drive access, and GitHub sign-in does not grant repository access.
+Connect those separately.
 
 ## Organization key access
 
-An explicit organization-key policy selects both permissions and workspace scope:
+An organization key's policy sets both its permissions and its workspace scope:
 
 ```ts
 const { apiKey, token } = await adminClient.createOrganizationApiKey(organizationId, {
@@ -69,25 +58,22 @@ const { apiKey, token } = await adminClient.createOrganizationApiKey(organizatio
 // Store token on the server; it is returned only at creation.
 ```
 
-| Policy preset | Permissions                                                                                                  |
-| ------------- | ------------------------------------------------------------------------------------------------------------ |
-| `read_only`   | Every canonical read/list/view/search permission except secret values (`secrets:read`, `variable-sets:read`) |
-| `full`        | Every canonical, non-deprecated permission                                                                   |
-| `custom`      | Exactly your chosen permissions; no implicit grants or workspace scope                                       |
+| Policy preset | Permissions                                                                                        |
+| ------------- | -------------------------------------------------------------------------------------------------- |
+| `read_only`   | Every read/list/view/search permission except secret values (`secrets:read`, `variable-sets:read`) |
+| `full`        | Every non-deprecated permission                                                                    |
+| `custom`      | Only the permissions you choose                                                                    |
 
-The preset label never adds permissions. The server canonicalizes the supplied
-list and recomputes the label; even `preset: "full"` grants only the permissions
-you send. Under an explicit policy, every permission—including `workspace:admin`—is
-chosen individually; admin is not a wildcard. `read_only` leaves out plaintext
-secret values; add `secrets:read` or `variable-sets:read` to a custom list when a
-backend needs them.
+The preset is a label. The server grants only the permissions you send and
+recomputes the label from them. Each permission, including `workspace:admin`,
+is granted individually. To give a backend plaintext secret values, add
+`secrets:read` or `variable-sets:read` to a custom list.
 
-Scope `{ kind: "all" }` includes all current and future shared workspaces in the
-organization. `{ kind: "selected", workspaceIds }` accepts up to 500 unique existing
-shared-workspace IDs from that same organization. Missing, cross-organization,
-and Personal IDs are rejected. An empty selection reaches no workspace. Neither scope includes Personal workspaces.
+Scope `{ kind: "all" }` covers every current and future shared workspace in the
+organization. `{ kind: "selected", workspaceIds }` takes up to 500 shared
+workspace IDs from the same organization. Personal workspaces are never in scope.
 
-For existing integrations, the legacy creation selectors remain supported:
+Older integrations can keep using the legacy `access` selector:
 
 | `access`            | Use                                                                                                                                      |
 | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
@@ -95,102 +81,65 @@ For existing integrations, the legacy creation selectors remain supported:
 | `"read"`            | Inventory shared workspaces and read their sessions, events, and files for reporting or audit                                            |
 | `"developer_setup"` | A restricted tier: workspaces, members, sessions, and usage allowances, but no key management. Setup flows use a full-access key instead |
 
-Omitting policy and legacy selectors keeps full legacy semantics. The top-level
-`preset: "developer_setup"` alias also remains available. Do not combine an
-explicit policy with legacy selectors. The legacy `access: "read"` tier reads
-sessions and files, unlike the broader explicit `read_only` preset.
+Omitting both `policy` and `access` creates a full legacy key. Don't combine
+`policy` with legacy selectors.
 
-Use all-shared-workspace scope and full permissions for integrations that
-provision tenant workspaces, onboard members, and create sessions as users.
+Integrations that provision tenant workspaces, onboard members, and create
+sessions as users need all-workspace scope and full permissions.
 
-Keys with session-read authority can use `listOrganizationSessions` or
-`iterateOrganizationSessions` across their authorized shared workspaces. Personal
-workspaces and Only me sessions are excluded. Agent access scopes and end-user
-labels do not replace the key's live policy or workspace scope.
+Keys with `sessions:read` can call `listOrganizationSessions` or
+`iterateOrganizationSessions` across their shared workspaces. Personal
+workspaces and Only me sessions are excluded.
 
 ### Inspect and edit a key
 
-`getOrganizationApiKey(organizationId, apiKeyId)` returns its metadata and policy.
-`updateOrganizationApiKey(organizationId, apiKeyId, { name?, description?, policy? })`
-accepts at least one change; `description: null` clears the description. Both
-return the raw `ApiKey`, without a wrapper or secret token. Only creation returns
-`{ apiKey, token }`.
+`getOrganizationApiKey(organizationId, apiKeyId)` returns the key's metadata and
+policy. `updateOrganizationApiKey(organizationId, apiKeyId, { name?, description?, policy? })`
+changes at least one field; `description: null` clears the description. Both
+return an `ApiKey` without the token. Only creation returns `{ apiKey, token }`.
 
-A policy edit replaces the complete policy and applies permission or scope
-narrowing on the next request, without rotating the token. Name/description-only
-edits preserve legacy stored permissions and the historical admin wildcard.
-Supplying a policy changes a legacy key to explicit semantics; every permission
-must be selected individually. Inspect optional `apiKey.permissionMode`
-(`legacy` or `explicit`), `apiKey.policy`, and `apiKey.workspaceScope`.
+A policy edit replaces the whole policy and takes effect on the next request,
+without rotating the token. Supplying a policy moves a legacy key to explicit
+permissions. Check `apiKey.permissionMode` (`legacy` or `explicit`),
+`apiKey.policy`, and `apiKey.workspaceScope`.
 
-### Inspect direct API-key authority
+### Inspect what a key can do
 
-`getAccessContext()` / `GET /v1/access/me` reports optional `credential` metadata
-for direct organization and workspace API-key requests. Existing `accountGrants`
-and `workspaceGrants` are unchanged; an organization key's `workspaceGrants` may
-be empty even when it can access shared workspaces. Use `listWorkspaces()` for
-the inventory allowed by the key's live scope.
+`getAccessContext()` / `GET /v1/access/me` returns a `credential` object for
+requests made directly with an organization or workspace API key. It contains:
 
-The credential contains `kind` (`organization_api_key` or `workspace_api_key`),
-organization-only `access` (`full`, `read`, or `developer_setup`), `accountId`, `workspaceId`,
-`effectiveWorkspacePermissions`, and a plain-language `note`. Organization keys
-also expose optional `policy` and `workspaceScope`. Their null `workspaceId`
-identifies an organization key, not an all-workspaces grant: consult the scope.
-Personal workspaces are always excluded; a workspace key names its one workspace.
-`credential.effectiveWorkspacePermissions` expands `workspace:admin` only for
-legacy keys, preserves exact explicit-policy grants, excludes account-only permissions, and includes
-`secrets:read` only when explicitly granted. Full organization keys include
-`sessions:create` and `members:manage`: they can provision workspaces, external
-members, and `asUser` sessions. User requests additionally require live membership
-and intersect it with the key's permissions. This metadata bypasses
-neither session visibility nor literal secrets authority.
+- `kind`: `organization_api_key` or `workspace_api_key`
+- `access`: `full`, `read`, or `developer_setup` (organization keys only)
+- `accountId` and `workspaceId` (null for organization keys)
+- `effectiveWorkspacePermissions`
+- `policy` and `workspaceScope` (organization keys)
 
-`credential` is omitted for `asUser`/external-actor requests, humans, delegated
-tokens, and other caller contexts. Older servers may also omit it; an absent
-field does not prove the key lacks authority.
+An organization key's `workspaceGrants` may be empty even when it can reach
+shared workspaces. Use `listWorkspaces()` to list the workspaces it can reach.
+
+`credential` is absent for `asUser` requests, signed-in users, and delegated
+tokens.
 
 ## Authenticate users of your chat
 
-`createSessionProxyHandler` and the fallback `createChatHandler` call your product's `resolve(request)` hook on every request. Verify the product's session cookie or bearer, then return the user's allowed tenant and user ID. The organization key authenticates your backend to OpenGeni; it does not authenticate a product user to your backend.
+`createSessionProxyHandler` and `createChatHandler` call your `resolve(request)` hook on every request. Verify your product's session cookie or bearer there, and return the user's tenant and user ID. The organization key authenticates your backend to Opengeni; your backend authenticates your users.
 
-Conversation identity is independent of the acting user; different user IDs do not isolate a shared conversation ID. The host must authorize which conversations a user may open. An opaque end-user label does not grant workspace membership. If you omit the user label, the host must resolve an authorized conversation itself.
+A conversation ID is not scoped to a user. Your backend decides which conversations a user may open. An end-user label does not grant workspace membership.
 
-On sign-out or user/tenant changes, abort old requests and clear transcripts and pending requests from your frontend. Reset or remount session components when their authenticated identity changes. Client cleanup does not replace server-side authorization. See [Users, tenants & privacy](/integrate/users-and-tenants).
+On sign-out or a user or tenant change, abort pending requests, clear transcripts in your frontend, and remount session components. See [Users, tenants & privacy](/integrate/users-and-tenants).
 
-## External-user onboarding
+## External users
 
-Passing `user` through the chat facade, or using `asUser` on the full SDK, can
-establish an external identity. It does not grant access to a shared workspace.
-After your backend has approved a user's tenant membership, provision the
-corresponding workspace membership with the full SDK:
+When the organization key acts as one of your users (through the session proxy, the chat facade, or `asUser`), Opengeni adds that user to the workspace on their first request. They get conversation permissions: workspace read, session create/read/control, file upload/read, and `mcp_servers:attach`. The key must hold `members:manage` and those permissions; a full-access key does. Existing memberships are never changed.
 
-```ts
-await serviceClient.addExternalWorkspaceMember(authorizedWorkspaceId, {
-  identity: { externalId: authenticatedUser.id, source: "my-product" },
-  permissions: approvedProductPermissions,
-  operationId: persistedOnboardingOperationId,
-});
-```
-
-Use the same stable `source` as the chat facade. Derive the user and workspace
-from authenticated host records. `approvedProductPermissions` is the explicit
-permission list for the product's supported features; it must include the session
-operations the product needs. The service requires `members:manage` and cannot
-grant permissions above its own ceiling. User requests intersect this membership
-with the initiating key's permissions.
-
-Run this as a deliberate onboarding operation, not on every browser request.
-Persist the operation UUID before calling and reuse it with the exact same
-request after an uncertain result. Replaying it does not restore a subsequently
-removed membership; changed permissions conflict. Keep service administration
-separate from ordinary user chat requests.
+To choose permissions yourself, call `addExternalWorkspaceMember` before the user's first request, and `updateExternalWorkspaceMember` to change them later.
 
 ## Rules that hold everywhere
 
-- Organization keys stay on the product server. List, inspect, create, edit, and revoke them through the organization control plane; never embed one in a client.
-- A delegated token cannot grant more than the host was configured to delegate, and it never receives a managed human's personal-workspace authority.
-- Every request is constrained by normal route authorization after authentication. A valid credential for one workspace does not reach another.
-- Secrets an agent uses at runtime (provider tokens, MCP headers, variable sets) are encrypted at rest, are read only by explicit permissioned operations, and never appear in audit rows.
+- Keep organization keys on your server. Never embed one in a client.
+- A delegated token cannot grant more than the host is configured to delegate, and it never reaches a user's Personal workspace.
+- A credential for one workspace does not reach another.
+- Secrets agents use at runtime (provider tokens, MCP headers, variable sets) are encrypted at rest, readable only with explicit permissions, and never written to audit rows.
 
 ## Deployment access modes
 
@@ -200,4 +149,4 @@ separate from ordinary user chat requests.
 | `configured`                   | Delegated bearer tokens from your product, or the deployment shared key |
 | `managed`                      | Managed sign-up, organizations, API keys, prepaid credits, and limits   |
 
-The full credential taxonomy, including stream tokens, enrollment tokens, sandbox bearers, and signed storage URLs, is in the repository's [credentials document](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/credentials.md).
+Every other credential, including stream tokens, enrollment tokens, sandbox bearers, and signed storage URLs, is listed in the repository's [credentials document](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/credentials.md).

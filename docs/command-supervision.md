@@ -56,9 +56,16 @@ including malformed metadata, and the containment inventory skips any lease that
 holds one. Idle containment records no supervised cancellation intent: the
 intent reasons stay `provider_deadline` and `explicit_stop`, and an idle
 supervised command keeps its box until one of those paths settles it with proof. Enrollment, capture claims/replacement, publication
-and already-published teardown retries recheck this boundary. The database lease
-guard also fences older control writers; readiness requires that guard before
-new launches. Only normal authenticated terminal settlement or exact typed
+and already-published teardown retries recheck this boundary. The one capture a
+running supervised command allows is a warm point-in-time checkpoint that runs
+around it on its own box (turn heartbeat or idle checkpoint sweep): the claim is
+marked concurrent, only the warm fold publishes it one generation behind the
+workspace, and the box and command keep running. It never terminates the box or
+settles the command, and the receipt stays in the supervisor's memory, not in
+the snapshot. The database lease guard (`supervised_command_capture_guard`,
+narrowed by migration 0685) admits exactly that claim and fold and still fences
+every drain claim, enrollment, publication stamp and other archive change by
+older control writers; readiness requires that guard before new launches. Only normal authenticated terminal settlement or exact typed
 provider loss releases supervised blockers, never observation-error counts.
 
 Exact provider disappearance is a separate typed `lost` transition, not successful
@@ -107,6 +114,17 @@ Reaper metrics use `opengeni_command_supervision_total` with bounded `outcome`
 labels: cancellation intent, retained/missing proof, provider failure, and blocked
 checkpoint. Invocation IDs, socket paths, credentials, and command text are not
 metric labels.
+
+## Exit observation for router commands
+
+A native router page reads stdout, stderr and the provider exit poll together.
+The poll is a point-in-time status, so it can answer "running" just before the
+command exits while both stream reads then reach EOF. When both streams are at
+EOF and the exit is still unknown, the same page polls again within its existing
+read budget. EOF alone is never exit proof: an exhausted budget or a failed
+re-poll keeps the bytes and leaves the exit unknown for the next page.
+Internal callers that read once (file writes, Skill checkout) therefore see a
+finished command's exit in that read instead of a stale running answer.
 
 ## Validation boundary
 

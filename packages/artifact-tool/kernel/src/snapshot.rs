@@ -4,8 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::id::IdGenerator;
 use crate::sheet::Tile;
 use crate::{
-    Cell, CellValue, DateValue, FormulaError, Number, Sheet, StableId, TileCoord, ValueError,
-    Workbook, WorkbookError,
+    Cell, CellValue, DateValue, DimensionAxis, FormulaError, Number, Sheet, StableId, TileCoord,
+    ValueError, Workbook, WorkbookError,
 };
 
 const MAGIC: [u8; 8] = *b"OGARTK02";
@@ -20,6 +20,7 @@ const MAX_CELLS_PER_TILE: usize = 65_536;
 const MIN_SHEET_BYTES: usize = 16 + 4 + 4;
 const MIN_TILE_BYTES: usize = 4 + 4 + 4;
 const MIN_CELL_BYTES: usize = 2 + 1 + 1;
+const DIMENSIONS_FLAG: u16 = 1;
 
 /// Canonically encodes a workbook. No hash maps, pointer identities, locale,
 /// clock, or platform byte order can affect the result.
@@ -53,6 +54,31 @@ pub fn encode_snapshot(workbook: &Workbook) -> Result<Vec<u8>, SnapshotError> {
         }
     }
 
+    let dimension_sheets = workbook.sheet_order.iter().filter(|id| {
+        let sheet = &workbook.sheets[id];
+        !sheet.row_heights.is_empty() || !sheet.column_widths.is_empty()
+    });
+    let dimension_sheet_count = dimension_sheets.clone().count();
+    let flags = if dimension_sheet_count == 0 {
+        0
+    } else {
+        DIMENSIONS_FLAG
+    };
+    if flags != 0 {
+        payload.count(dimension_sheet_count)?;
+        for id in dimension_sheets {
+            payload.id(*id);
+            for axis in [DimensionAxis::Row, DimensionAxis::Column] {
+                let entries = workbook.sheets[id].dimensions(axis);
+                payload.count(entries.len())?;
+                for (index, pixels) in entries {
+                    payload.u32(*index);
+                    payload.u32(*pixels);
+                }
+            }
+        }
+    }
+
     if payload.bytes.len() > MAX_SNAPSHOT_BYTES {
         return Err(SnapshotError::SizeLimit);
     }
@@ -65,7 +91,7 @@ pub fn encode_snapshot(workbook: &Workbook) -> Result<Vec<u8>, SnapshotError> {
     let mut output = Vec::with_capacity(capacity);
     output.extend_from_slice(&MAGIC);
     output.extend_from_slice(&SNAPSHOT_VERSION.to_le_bytes());
-    output.extend_from_slice(&0u16.to_le_bytes());
+    output.extend_from_slice(&flags.to_le_bytes());
     output.extend_from_slice(&payload_len.to_le_bytes());
     output.extend_from_slice(&payload.bytes);
     output.extend_from_slice(&checksum.to_le_bytes());
@@ -87,7 +113,8 @@ pub fn decode_snapshot(bytes: &[u8]) -> Result<Workbook, SnapshotError> {
     if version != SNAPSHOT_VERSION {
         return Err(SnapshotError::UnsupportedVersion(version));
     }
-    if u16::from_le_bytes([bytes[10], bytes[11]]) != 0 {
+    let flags = u16::from_le_bytes([bytes[10], bytes[11]]);
+    if flags & !DIMENSIONS_FLAG != 0 {
         return Err(SnapshotError::NonCanonical("reserved header bits are set"));
     }
     let payload_len = u64::from_le_bytes(
@@ -207,8 +234,60 @@ pub fn decode_snapshot(bytes: &[u8]) -> Result<Workbook, SnapshotError> {
             tiles.insert(tile_coord, Tile::from_cells(cells));
         }
         sheet_order.push(id);
-        if sheets.insert(id, Sheet { id, name, tiles }).is_some() {
+        if sheets
+            .insert(
+                id,
+                Sheet {
+                    id,
+                    name,
+                    tiles,
+                    row_heights: BTreeMap::new(),
+                    column_widths: BTreeMap::new(),
+                },
+            )
+            .is_some()
+        {
             return Err(SnapshotError::InvalidModel("duplicate sheet id"));
+        }
+    }
+    if flags & DIMENSIONS_FLAG != 0 {
+        let count = decoder.count(sheet_count)?;
+        if count == 0 {
+            return Err(SnapshotError::NonCanonical("empty dimension section"));
+        }
+        let mut ordered_sheets = sheet_order.iter();
+        for _ in 0..count {
+            let id = decoder.id()?;
+            if !ordered_sheets.any(|sheet_id| *sheet_id == id) {
+                return Err(SnapshotError::NonCanonical(
+                    "dimension sheets are missing or not ordered",
+                ));
+            }
+            let sheet = sheets
+                .get_mut(&id)
+                .ok_or(SnapshotError::InvalidModel("dimension sheet missing"))?;
+            for axis in [DimensionAxis::Row, DimensionAxis::Column] {
+                let entries = decoder.count(MAX_SNAPSHOT_BYTES / 8)?;
+                if entries > decoder.remaining() / 8 {
+                    return Err(SnapshotError::Truncated);
+                }
+                let mut previous = None;
+                for _ in 0..entries {
+                    let index = decoder.u32()?;
+                    let pixels = decoder.u32()?;
+                    if previous.is_some_and(|previous| index <= previous)
+                        || !axis.valid_pixels(Some(pixels))
+                        || pixels == axis.default_pixels()
+                    {
+                        return Err(SnapshotError::NonCanonical("invalid sparse dimensions"));
+                    }
+                    previous = Some(index);
+                    sheet.set_dimension(axis, index, Some(pixels));
+                }
+            }
+            if sheet.row_heights.is_empty() && sheet.column_widths.is_empty() {
+                return Err(SnapshotError::NonCanonical("empty dimension sheet"));
+            }
         }
     }
     if !decoder.is_empty() {
@@ -516,7 +595,7 @@ fn checksum(bytes: &[u8]) -> u64 {
 mod tests {
     use crate::{
         decode_snapshot, encode_snapshot, AtomicBatch, Cell, CellBlock, CellCoord, CellValue,
-        Command, DateValue, FormulaError, Number, StableId, Workbook,
+        Command, DateValue, DimensionAxis, FormulaError, Number, StableId, Workbook,
     };
 
     fn populated_workbook() -> Workbook {
@@ -589,6 +668,55 @@ mod tests {
         let decoded = decode_snapshot(&first).expect("decode");
         assert_eq!(decoded, workbook);
         assert_eq!(encode_snapshot(&decoded).expect("re-encode"), first);
+    }
+
+    #[test]
+    fn sparse_dimension_sections_follow_sheet_order_and_reject_noncanonical_values() {
+        let mut workbook = Workbook::new(55).unwrap();
+        let ids = [
+            StableId::from_parts(55, 100),
+            StableId::from_parts(55, 101),
+            StableId::from_parts(55, 102),
+        ];
+        for (index, id) in ids.into_iter().enumerate() {
+            workbook
+                .apply_batch(&AtomicBatch::from_commands(vec![Command::CreateSheet {
+                    id,
+                    name: format!("Sheet {index}"),
+                }]))
+                .unwrap();
+        }
+        for sheet_id in [ids[0], ids[2]] {
+            workbook
+                .apply_batch(&AtomicBatch::from_commands(vec![Command::SetDimension {
+                    sheet_id,
+                    axis: DimensionAxis::Row,
+                    index: 3,
+                    pixels: Some(48),
+                }]))
+                .unwrap();
+        }
+        let bytes = encode_snapshot(&workbook).unwrap();
+        assert_eq!(decode_snapshot(&bytes).unwrap(), workbook);
+        // A section count and two 32-byte sheets: id, row count/pair, column count.
+        let section = bytes.len() - super::CHECKSUM_BYTES - 68;
+        let checksum_offset = bytes.len() - super::CHECKSUM_BYTES;
+        for (offset, replacement) in [
+            (section + 4, ids[2].to_le_bytes().to_vec()),
+            (section + 36, ids[0].to_le_bytes().to_vec()),
+            (section + 28, 24u32.to_le_bytes().to_vec()),
+            (section + 28, 0u32.to_le_bytes().to_vec()),
+            (section + 28, 4097u32.to_le_bytes().to_vec()),
+        ] {
+            let mut corrupt = bytes.clone();
+            corrupt[offset..offset + replacement.len()].copy_from_slice(&replacement);
+            let checksum = super::checksum(&corrupt[super::HEADER_BYTES..checksum_offset]);
+            corrupt[checksum_offset..].copy_from_slice(&checksum.to_le_bytes());
+            assert!(matches!(
+                decode_snapshot(&corrupt),
+                Err(super::SnapshotError::NonCanonical(_))
+            ));
+        }
     }
 
     #[test]

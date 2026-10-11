@@ -476,3 +476,68 @@ test("selected workspace grants resolve external asUser with empty inventory and
     (await app.request(`/v1/workspaces/${workspace.id}/access/grant`, { headers })).status,
   ).toBe(403);
 });
+
+test("retained associations prove generated images and published files by exact source session", async () => {
+  const f = await fixture();
+  const image = crypto.randomUUID();
+  const published = crypto.randomUUID();
+  const elsewhere = crypto.randomUUID();
+  await shared.admin.begin(async (tx) => {
+    await tx`SET LOCAL session_replication_role = replica`;
+    for (const [id, name] of [
+      [image, "teal.png"],
+      [published, "report.pdf"],
+      [elsewhere, "report.pdf"],
+    ] as const) {
+      await tx`insert into files (id, account_id, workspace_id, status, filename, safe_filename,
+        content_type, size_bytes, sha256, bucket, object_key)
+        values (${id}::uuid, ${f.scope.accountId}::uuid, ${f.scope.workspaceId}::uuid, 'ready',
+          ${name}, ${name}, ${name.endsWith(".png") ? "image/png" : "application/pdf"}, 4,
+          ${"a".repeat(64)}, 'fixture', ${`fixture/${id}`})`;
+    }
+    await tx`insert into generated_image_artifacts (artifact_id, account_id, workspace_id, session_id,
+      settlement_key, tool_call_id, source_strategy, provider_id, provider_binding_hash, status,
+      media_type, size_bytes, sha256, width, height, sandbox_path, ready_at)
+      values (${image}::uuid, ${f.scope.accountId}::uuid, ${f.scope.workspaceId}::uuid,
+        ${f.session.id}::uuid, ${"b".repeat(64)}, 'call-1', 'provider_adapter', 'fixture',
+        ${"c".repeat(64)}, 'ready', 'image/png', 4, ${"a".repeat(64)}, 1, 1,
+        ${`/workspace/generated-images/generated-image-${image}.png`}, now())`;
+    await tx`insert into opengeni_private.sandbox_file_publications
+      (account_id, workspace_id, file_id, source_session_id)
+      values (${f.scope.accountId}::uuid, ${f.scope.workspaceId}::uuid, ${published}::uuid,
+        ${f.session.id}::uuid),
+        (${f.scope.accountId}::uuid, ${f.scope.workspaceId}::uuid, ${elsewhere}::uuid,
+        ${f.otherSession.id}::uuid)`;
+  });
+  const token = await signDelegatedAccessToken(secret, {
+    ...f.scope,
+    subjectId: f.grant.subjectId,
+    principalKind: "human_session",
+    permissions: ["sessions:read", "files:read"],
+    exp: Math.floor(Date.now() / 1000) + 3600,
+  });
+  const request = (artifactId: string, sourceId: string, kind = "retained") =>
+    f.app.request(
+      `/v1/workspaces/${f.scope.workspaceId}/sessions/${sourceId}/artifact-associations/${artifactId}?kind=${kind}`,
+      { headers: { authorization: `Bearer ${token}` } },
+    );
+  for (const id of [image, published]) {
+    const linked = await request(id, f.session.id);
+    expect(linked.status, await linked.clone().text()).toBe(200);
+    expect(await linked.json()).toEqual({
+      sessionId: f.session.id,
+      artifactId: id,
+      kind: "retained",
+    });
+    expect((await request(id, f.otherSession.id)).status).toBe(404);
+  }
+  // Same file name, other source session: the exact id decides.
+  expect((await request(elsewhere, f.session.id)).status).toBe(404);
+  expect((await request(elsewhere, f.otherSession.id)).status).toBe(200);
+  // Unknown ids and the Site default never become retained proofs.
+  expect((await request(crypto.randomUUID(), f.session.id)).status).toBe(404);
+  expect((await f.request(image, f.session.id, "site")).status).toBe(404);
+  expect((await f.request(image, f.session.id)).status).toBe(404);
+  f.revoke();
+  expect((await request(image, f.session.id)).status).toBe(404);
+}, 180_000);

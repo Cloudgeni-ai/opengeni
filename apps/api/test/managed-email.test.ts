@@ -11,7 +11,7 @@ import { testSettings } from "@opengeni/testing";
 
 const message = {
   kind: "organization_user_setup" as const,
-  from: "OpenGeni <invites@example.test>",
+  from: "Opengeni <invites@example.test>",
   to: "invited@example.test",
   subject: "Invitation",
   text: "Set up with bearer-only-link",
@@ -23,14 +23,14 @@ describe("managed email transport", () => {
   test("rejects malformed embedded-provider metadata before durable delivery", () => {
     expect(() =>
       assertManagedEmailTransportMetadata({
-        sender: "OpenGeni <invites@example.test>",
+        sender: "Opengeni <invites@example.test>",
         idempotency: { scope: "Other Provider", retentionSeconds: 3_600 },
         send: async () => ({ status: "sent", providerMessageId: null }),
       }),
     ).toThrow("idempotency contract");
     expect(() =>
       assertManagedEmailTransportMetadata({
-        sender: " OpenGeni <invites@example.test>",
+        sender: " Opengeni <invites@example.test>",
         idempotency: { scope: "test-provider-v1:account", retentionSeconds: 3_600.5 },
         send: async () => ({ status: "sent", providerMessageId: null }),
       }),
@@ -63,7 +63,7 @@ describe("managed email transport", () => {
 
   test("renders an escaped, frozen safe snapshot with a stable payload digest", async () => {
     const rendered = renderOrganizationUserSetupEmail({
-      senderEmail: "OpenGeni <invites@example.test>",
+      senderEmail: "Opengeni <invites@example.test>",
       recipientEmail: "invited@example.test",
       recipientName: "Ada <Admin>",
       organizationName: "R&D <Labs>",
@@ -77,13 +77,14 @@ describe("managed email transport", () => {
       ],
       setupUrl: "https://opengeni.test/setup-account?token=secret-bearer",
     });
-    expect(rendered.subject).toBe("You're invited to join R&D <Labs> on OpenGeni");
+    // Keep invitation semantics stable without freezing product-name capitalization.
+    expect(rendered.subject).toMatch(/^You're invited to join R&D <Labs> on \S+$/);
     expect(rendered.text).toContain("Ada <Admin>");
     expect(rendered.text).toContain("Launch <Ops>: Viewer");
     expect(rendered.text).toContain("never shares anyone's Personal workspace");
     expect(rendered.text).toContain("Accept invitation to R&D <Labs>:");
     expect(rendered.text).toContain("You'll sign in or create an account before joining.");
-    expect(rendered.text).toContain("OpenGeni will show the invitation immediately");
+    expect(rendered.text).toContain("will show the invitation immediately");
     expect(rendered.html).toContain("Ada &lt;Admin&gt;");
     expect(rendered.html).toContain("R&amp;D &lt;Labs&gt;");
     expect(rendered.html).toContain("Launch &lt;Ops&gt;");
@@ -101,7 +102,7 @@ describe("managed email transport", () => {
     expect(
       await organizationUserSetupPayloadDigest({
         ...digestInput,
-        from: "OpenGeni <changed@example.test>",
+        from: "Opengeni <changed@example.test>",
       }),
     ).not.toBe(first);
     expect(
@@ -122,7 +123,7 @@ describe("managed email transport", () => {
     const identity = {
       invitationId: "00000000-0000-4000-8000-000000000001",
       deliveryId: "00000000-0000-4000-8000-000000000002",
-      senderEmail: "OpenGeni <invites@example.test>",
+      senderEmail: "Opengeni <invites@example.test>",
       recipientEmail: "invited@example.test",
       recipientName: "Invited User",
       organizationName: "Frozen Organization",

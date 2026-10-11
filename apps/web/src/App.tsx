@@ -10,6 +10,8 @@
 //   /workspaces/:id/variable-sets            → variable sets (?view=new)
 //   /workspaces/:id/variable-sets/:setId     → one variable set (?view=add|paste|edit)
 //   /workspaces/:id/rigs                     → rigs list + create
+//   /workspaces/:id/read-only-chats          → chats moved to long-term storage (read-only)
+//   /workspaces/:id/inbox                    → things that need you, from agents (temporary inbox)
 //   /workspaces/:id/rigs/:rigId              → rig detail (overview/setup/versions/changes)
 
 //   /workspaces/:id/capabilities             → legacy redirect to /plugins
@@ -18,6 +20,7 @@
 //   /workspaces/:id/schedules/new            → new schedule (?template, ?from, ?sourceSessionId)
 //   /workspaces/:id/schedules/:scheduleId    → one schedule (overview + runs)
 //   /workspaces/:id/schedules/:scheduleId/edit → edit schedule
+//   /workspaces/:id/playground               → playground: Opengeni inside a sample product, with a guided tour
 //   /workspaces/:id/state                    → Knowledge (?view, ?entry, ?page)
 //   /workspaces/:id/documents, /memory       → old links, redirect to Knowledge
 //   /workspaces/:id/insights                 → workspace insights (admin usage rollup)
@@ -56,8 +59,13 @@ import {
   workspaceModelsRedirect,
   type ModelsView,
 } from "@/lib/models-route";
-import { parseKnowledgeSearch, type KnowledgeSearch } from "@/lib/knowledge-route";
+import {
+  documentsRedirectSearch,
+  parseKnowledgeSearch,
+  type KnowledgeSearch,
+} from "@/lib/knowledge-route";
 import { parseApiKeyParam } from "@/lib/api-keys-route";
+import type { NativeSignInSearch } from "@/lib/native-sign-in-context";
 import {
   parseAgentParam,
   parseServiceAccountParam,
@@ -134,11 +142,20 @@ const LazyPersonalSecurityRoute = lazyRouteComponent(
   () => import("@/routes/personal-security"),
   "PersonalSecurityRoute",
 );
+const LazyNativeSignInRoute = lazyRouteComponent(
+  () => import("@/routes/native-sign-in"),
+  "NativeSignInRoute",
+);
 const LazyOnboardingPreviewRoute = lazyRouteComponent(
   () => import("@/routes/onboarding-preview"),
   "OnboardingPreviewRoute",
 );
 const LazyRigsRoute = lazyRouteComponent(() => import("@/routes/rigs"), "RigsRoute");
+const LazyReadOnlyChatsRoute = lazyRouteComponent(
+  () => import("@/routes/read-only-chats"),
+  "ReadOnlyChatsRoute",
+);
+const LazyInboxRoute = lazyRouteComponent(() => import("@/routes/inbox"), "InboxRoute");
 const LazyRigDetailRoute = lazyRouteComponent(
   () => import("@/routes/rig-detail"),
   "RigDetailRoute",
@@ -153,6 +170,10 @@ const LazyScheduleFormRoute = lazyRouteComponent(
   "ScheduleFormRoute",
 );
 const LazySessionRoute = lazyRouteComponent(() => import("@/routes/session"), "SessionRoute");
+const LazyPlaygroundRoute = lazyRouteComponent(
+  () => import("@/routes/playground"),
+  "PlaygroundRoute",
+);
 const LazySessionDeepLinkRoute = lazyRouteComponent(
   () => import("@/routes/session-deep-link"),
   "SessionDeepLinkRoute",
@@ -189,6 +210,10 @@ const LazyWorkspaceShellRoute = lazyRouteComponent(
 const LazyComposerChromeGalleryRoute = lazyRouteComponent(
   () => import("@/routes/composer-chrome"),
   "ComposerChromeGalleryRoute",
+);
+const LazyDevSessionTimelineRoute = lazyRouteComponent(
+  () => import("@/routes/dev-session-timeline"),
+  "DevSessionTimelineRoute",
 );
 
 const rootRoute = createRootRoute({
@@ -293,6 +318,26 @@ const personalSecurityRoute = createRoute({
   path: "settings/security",
   component: LazyPersonalSecurityRoute,
 });
+// Where the Opengeni phone app's sign-in opens in the system auth browser:
+// sign in with any web method, then allow the device (code + PKCE).
+const nativeSignInRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "native-sign-in",
+  validateSearch: (search: Record<string, unknown>): NativeSignInSearch => {
+    const text = (key: string) =>
+      typeof search[key] === "string" && search[key] ? { [key]: search[key] } : {};
+    return {
+      ...text("redirect_uri"),
+      ...text("code_challenge"),
+      ...text("state"),
+      ...text("device_name"),
+      ...(search.platform === "ios" || search.platform === "android"
+        ? { platform: search.platform }
+        : {}),
+    };
+  },
+  component: NativeSignIn,
+});
 // DEV-only visual harness for the Session composer chrome stack (queue / goal /
 // agents / composer). Public so it needs no live auth or session; omitted from
 // production route trees.
@@ -305,6 +350,12 @@ const onboardingPreviewRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "dev/onboarding",
   component: LazyOnboardingPreviewRoute,
+});
+// DEV-only: production MessageTimeline replaying deterministic scenarios (native parity reference).
+const devSessionTimelineRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "dev/session-timeline",
+  component: LazyDevSessionTimelineRoute,
 });
 // DEV-only component studio. Created only in development so the kit chunk is
 // never emitted into a production build.
@@ -391,6 +442,16 @@ const workspaceRigsRoute = createRoute({
   validateSearch: (search: Record<string, unknown>): { view?: "new" } =>
     search.view === "new" ? { view: "new" } : {},
   component: Rigs,
+});
+const workspaceReadOnlyChatsRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "read-only-chats",
+  component: ReadOnlyChats,
+});
+const workspaceInboxRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "inbox",
+  component: Inbox,
 });
 const workspaceRigDetailRoute = createRoute({
   getParentRoute: () => workspaceRoute,
@@ -510,6 +571,11 @@ const workspaceScheduleEditRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "schedules/$scheduleId/edit",
   component: ScheduleEdit,
+});
+const workspacePlaygroundRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "playground",
+  component: Playground,
 });
 const workspaceDocumentsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
@@ -708,7 +774,10 @@ const routeTree = rootRoute.addChildren([
   setupAccountRoute,
   accountAuthRoute,
   personalSecurityRoute,
-  ...(import.meta.env.DEV ? [composerChromeGalleryRoute, onboardingPreviewRoute] : []),
+  nativeSignInRoute,
+  ...(import.meta.env.DEV
+    ? [composerChromeGalleryRoute, onboardingPreviewRoute, devSessionTimelineRoute]
+    : []),
   ...(import.meta.env.DEV && uiKitRoute ? [uiKitRoute] : []),
   workspaceRoute.addChildren([
     workspaceIndexRoute,
@@ -724,6 +793,8 @@ const routeTree = rootRoute.addChildren([
     workspaceEnvironmentsRoute,
     workspaceRigsRoute,
     workspaceRigDetailRoute,
+    workspaceReadOnlyChatsRoute,
+    workspaceInboxRoute,
     workspaceMachinesRoute,
     workspaceInsightsRoute,
     workspaceCapabilitiesRoute,
@@ -732,6 +803,7 @@ const routeTree = rootRoute.addChildren([
     workspaceScheduleNewRoute,
     workspaceScheduleDetailRoute,
     workspaceScheduleEditRoute,
+    workspacePlaygroundRoute,
     workspaceDocumentsRoute,
     workspaceMemoryRoute,
     workspaceStateRoute,
@@ -858,6 +930,16 @@ function Rigs() {
   return <LazyRigsRoute workspaceId={workspaceId} view={view} />;
 }
 
+function ReadOnlyChats() {
+  const { workspaceId } = workspaceReadOnlyChatsRoute.useParams();
+  return <LazyReadOnlyChatsRoute workspaceId={workspaceId} />;
+}
+
+function Inbox() {
+  const { workspaceId } = workspaceInboxRoute.useParams();
+  return <LazyInboxRoute workspaceId={workspaceId} />;
+}
+
 function RigDetail() {
   const { workspaceId, rigId } = workspaceRigDetailRoute.useParams();
   const { view } = workspaceRigDetailRoute.useSearch();
@@ -931,6 +1013,11 @@ function ScheduleNew() {
   );
 }
 
+function Playground() {
+  const { workspaceId } = workspacePlaygroundRoute.useParams();
+  return <LazyPlaygroundRoute key={workspaceId} workspaceId={workspaceId} />;
+}
+
 function ScheduleDetail() {
   const { workspaceId, scheduleId } = workspaceScheduleDetailRoute.useParams();
   return <LazyScheduleDetailRoute workspaceId={workspaceId} scheduleId={scheduleId} />;
@@ -943,12 +1030,12 @@ function ScheduleEdit() {
 
 function Documents() {
   const { workspaceId } = workspaceDocumentsRoute.useParams();
-  const { memory } = workspaceDocumentsRoute.useSearch();
+  const { memory, authority } = workspaceDocumentsRoute.useSearch();
   return (
     <Navigate
       to="/workspaces/$workspaceId/state"
       params={{ workspaceId }}
-      search={memory ? parseKnowledgeSearch({ entry: memory }) : { view: "files" }}
+      search={documentsRedirectSearch({ memory, authority })}
       replace
     />
   );
@@ -985,17 +1072,6 @@ function WorkspaceSettings() {
           account,
           view: view as ModelsView | undefined,
         })}
-        replace
-      />
-    );
-  }
-  // Agent learning is the Learning page of Knowledge now.
-  if (section === "learning") {
-    return (
-      <Navigate
-        to="/workspaces/$workspaceId/state"
-        params={{ workspaceId }}
-        search={{ page: "learning" }}
         replace
       />
     );
@@ -1141,6 +1217,11 @@ function ConnectAgent() {
 function Device() {
   const { user_code } = deviceRoute.useSearch();
   return <LazyDeviceRoute userCode={user_code} />;
+}
+
+function NativeSignIn() {
+  const search = nativeSignInRoute.useSearch();
+  return <LazyNativeSignInRoute search={search} />;
 }
 
 function ResetPassword() {

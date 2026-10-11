@@ -1,6 +1,6 @@
 [package]
 name = "opengeni-agent-platform"
-description = "Per-OS platform abstraction (exec/fs/git/terminal/desktop/metrics + service manager) for the OpenGeni agent."
+description = "Per-OS platform abstraction (exec/fs/git/terminal/desktop/metrics + service manager) for the Opengeni agent."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -20,6 +20,7 @@ workspace = true
 macos-desktop = ["dep:opengeni-agent-macos-ffi"]
 
 [dependencies]
+opengeni-agent-engine = { path = "../opengeni-agent-engine" }
 opengeni-agent-proto = { path = "../opengeni-agent-proto" }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
@@ -50,7 +51,7 @@ x11rb = { workspace = true }
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 xattr = { workspace = true }
-rustix = { version = "1.1.4", features = ["fs"] }
+rustix = { version = "1.1.4", features = ["fs", "net"] }
 
 # macOS desktop backend: the leaf FFI crate that owns all Apple `unsafe` behind a
 # safe API. Optional + macOS-gated so non-macOS builds (and the default macOS
@@ -60,7 +61,7 @@ opengeni-agent-macos-ffi = { path = "../opengeni-agent-macos-ffi", optional = tr
 opengeni-agent-files-ffi = { path = "../opengeni-agent-files-ffi" }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs", "process", "io-util", "time", "net"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs", "process", "io-util", "time", "net", "sync"] }
 tempfile = { workspace = true }
 # The wire types the cgroup-placement integration test builds an ExecRequest with.
 opengeni-agent-proto = { path = "../opengeni-agent-proto" }

@@ -32,6 +32,19 @@ export function resolveBundledSkillSelection(
   return selected === undefined ? undefined : BundledSkillSelection.parse(selected);
 }
 
+/**
+ * Freeze the defaults a session's agent configuration implies. An agent that
+ * starts from `capabilities: "none"` carries no bundled Opengeni guides unless
+ * the request lists them; an explicit list (including `[]`) is kept exactly,
+ * and `"all"` or legacy (null) configurations keep the bundled defaults.
+ */
+export function bundledSkillSelectionForAgentConfig(
+  selection: BundledSkillId[] | undefined,
+  agentConfig: { from: "all" | "none" } | null | undefined,
+): BundledSkillId[] | undefined {
+  return selection === undefined && agentConfig?.from === "none" ? [] : selection;
+}
+
 // Immutable session configuration, following the existing create-identity
 // metadata convention. Callers cannot set this through arbitrary metadata.
 const BUNDLED_SKILL_SELECTION_KEY = "_opengeni_bundled_skill_ids_v1";

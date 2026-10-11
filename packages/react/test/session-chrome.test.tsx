@@ -966,14 +966,74 @@ describe("SessionChrome", () => {
     const links = [...panel.querySelectorAll("button")].filter(
       (button) => button.textContent === "View session",
     );
-    expect(links).toHaveLength(2);
+    // Typed child receipts and the agent message (sent by that session) link;
+    // an untyped source never does.
+    expect(links).toHaveLength(3);
     await act(async () => {
-      links[0]?.click();
-      links[1]?.click();
+      for (const link of links) link.click();
     });
-    expect(opened).toEqual([childId, childId]);
+    expect(opened).toEqual([childId, childId, childId]);
     expect(panel.textContent).toContain(inputs[1]!.summary);
     expect(panel.querySelectorAll("li")).toHaveLength(4);
+  });
+
+  test("background command results arrive as one incoming row", async () => {
+    const dismissed: string[] = [];
+    const lost = (index: number) => ({
+      ...pendingInput(),
+      id: `lost-${index}`,
+      kind: "background_command_result" as const,
+      classification: "failure" as const,
+      summary: `\`job-${index}\` is no longer running because its sandbox was shut down or lost; whether it finished is unknown. Check its effects before running it again.`,
+    });
+    const inputs = [pendingInput(), ...Array.from({ length: 35 }, (_, index) => lost(index))];
+    mounted = await renderComponent(
+      <SessionChrome
+        defaultActive="incoming"
+        queue={queue({ queue: [], pendingInputs: inputs })}
+        onDismissIncoming={(id) => {
+          dismissed.push(id);
+        }}
+      />,
+    );
+    const panel = mounted.container.querySelector('[data-og-session-chrome-panel="incoming"]')!;
+    expect(panel.querySelectorAll("li")).toHaveLength(2);
+    expect(panel.textContent).toContain(
+      "35 background commands are no longer running because their sandbox was shut down or lost.",
+    );
+    expect(panel.textContent).not.toContain("job-3");
+    const dismissAll = panel.querySelector<HTMLButtonElement>(
+      '[aria-label="Dismiss incoming command results"]',
+    );
+    await act(async () => {
+      dismissAll?.click();
+    });
+    expect(dismissed).toHaveLength(35);
+  });
+
+  test("ordinary command results keep their own rows", async () => {
+    const result = (index: number, summary: string) => ({
+      ...pendingInput(),
+      id: `result-${index}`,
+      kind: "background_command_result" as const,
+      classification: "failure" as const,
+      summary,
+    });
+    mounted = await renderComponent(
+      <SessionChrome
+        defaultActive="incoming"
+        queue={queue({
+          queue: [],
+          pendingInputs: [
+            result(1, "bun test: exited with code 1."),
+            result(2, "bun build: completed successfully."),
+          ],
+        })}
+      />,
+    );
+    const panel = mounted.container.querySelector('[data-og-session-chrome-panel="incoming"]')!;
+    expect(panel.querySelectorAll("li")).toHaveLength(2);
+    expect(panel.textContent).toContain("bun test: exited with code 1.");
   });
 
   test("inbox dismiss action appears when onDismissIncoming is provided", async () => {
@@ -1170,7 +1230,18 @@ describe("SessionChrome goal pill reasons", () => {
     expect(sessionChromeGoalPillLabel("paused", paused("max_auto_continuations").goal)).toBe(
       "Paused · cap",
     );
-    expect(sessionChromeGoalPillLabel("paused", paused("limits").goal)).toBe("Paused · budget");
+    expect(sessionChromeGoalPillLabel("paused", paused("limits").goal)).toBe("Paused · limits");
+    for (const [reason, label] of [
+      ["model_unavailable", "model"],
+      ["model_policy", "policy"],
+      ["credits", "credits"],
+      ["budget", "budget"],
+      ["usage_limit", "usage limit"],
+      ["usage_policy", "limits"],
+      ["allowance", "allowance"],
+    ]) {
+      expect(sessionChromeGoalPillLabel("paused", paused(reason!).goal)).toBe(`Paused · ${label}`);
+    }
     expect(sessionChromeGoalPillLabel("paused", paused("user_pause").goal)).toBe(
       "Paused · manually",
     );
@@ -1184,7 +1255,9 @@ describe("SessionChrome goal pill reasons", () => {
     expect(
       sessionChromeGoalPillExplanation("paused", paused("max_auto_continuations").goal),
     ).toContain("continuation cap");
-    expect(sessionChromeGoalPillExplanation("paused", paused("limits").goal)).toContain("limits");
+    expect(sessionChromeGoalPillExplanation("paused", paused("limits").goal)).toContain(
+      "admission limit",
+    );
     expect(sessionChromeGoalPillExplanation("paused", paused("agent").goal)).toContain(
       "human decision",
     );
@@ -1252,6 +1325,33 @@ describe("SessionChrome goal pill reasons", () => {
     expect(
       panel?.querySelector("[data-og-session-chrome-goal-explanation]")?.textContent,
     ).toContain("New input");
+  });
+
+  test("shows the actual pause rationale in the existing tooltip and goal panel", async () => {
+    const rationale =
+      "The selected model is unavailable. Choose an available model before resuming.";
+    const value = goal({ status: "paused", pausedReason: "model_unavailable", rationale });
+    mounted = await renderComponent(
+      <SessionChrome queue={queue({ queue: [] })} composer={composer()} goal={value} />,
+    );
+    const chip = mounted.container.querySelector<HTMLButtonElement>(
+      '[data-og-session-chrome-signal="goal"]',
+    );
+    expect(chip?.textContent).toContain("Paused · model");
+    expect(chip?.getAttribute("title")).toBe(rationale);
+    await act(async () => chip?.click());
+    expect(
+      mounted.container.querySelector("[data-og-session-chrome-goal-explanation]")?.textContent,
+    ).toBe(rationale);
+    expect(mounted.container.textContent).not.toContain("budget");
+    // Older servers used the limits bucket for model failures. Preserve their explanation.
+    expect(
+      sessionChromeGoalPillExplanation("paused", {
+        status: "paused",
+        pausedReason: "limits",
+        rationale,
+      }),
+    ).toBe(rationale);
   });
 });
 
@@ -1468,7 +1568,7 @@ describe("SessionChrome compact actions", () => {
     expectChromeCollapsed(mounted.container);
   });
 
-  test("steers the first queued message without opening the panel", async () => {
+  test("steers the latest queued message without opening the panel", async () => {
     const ids: string[] = [];
     mounted = await renderComponent(
       <SessionChrome
@@ -1488,13 +1588,42 @@ describe("SessionChrome compact actions", () => {
     await act(async () => queueChip?.click());
     expect(mounted.container.querySelector('[data-og-session-chrome-open="false"]')).not.toBeNull();
     const action = mounted.container.querySelector<HTMLButtonElement>(
-      '[aria-label="Steer first queued message"]',
+      '[aria-label="Steer latest queued message"]',
     )!;
     expect(action.closest("button")).toBe(action);
     expect(action.getAttribute("data-analytics-action")).toBe("steer");
     await act(async () => action.click());
-    expect(ids).toEqual(["11111111-1111-4111-8111-111111111111"]);
+    expect(ids).toEqual(["22222222-2222-4222-8222-222222222222"]);
     expect(mounted.container.querySelector('[data-og-session-chrome-open="false"]')).not.toBeNull();
+  });
+
+  test("the collapsed queue chip previews the latest queued message", async () => {
+    mounted = await renderComponent(<SessionChrome composer={composer()} queue={queue()} />);
+    const queueChip = mounted.container.querySelector<HTMLButtonElement>(
+      '[data-og-session-chrome-signal="queue"]',
+    );
+    // Opened by default: the list carries the text, so the chip does not repeat it.
+    expect(mounted.container.querySelector('[data-testid="session-chrome-queue-peek"]')).toBeNull();
+    expect(
+      mounted.container.querySelector('[aria-label="Steer latest queued message"]'),
+    ).toBeNull();
+    await act(async () => queueChip?.click());
+    expect(
+      mounted.container.querySelector('[data-testid="session-chrome-queue-peek"]')?.textContent,
+    ).toBe("second queued prompt");
+    expect(queueChip?.textContent).toContain("2 queued");
+  });
+
+  test("open queue rows keep Steer visible outside the hover-revealed actions", async () => {
+    mounted = await renderComponent(<SessionChrome composer={composer()} queue={queue()} />);
+    const steer = mounted.container.querySelector<HTMLButtonElement>(
+      '[aria-label="Steer queued prompt 1"]',
+    )!;
+    const edit = mounted.container.querySelector<HTMLButtonElement>(
+      '[aria-label="Edit queued prompt 1"]',
+    )!;
+    expect(steer.closest(".opacity-0")).toBeNull();
+    expect(edit.closest(".opacity-0")).not.toBeNull();
   });
 
   test("goal pause/resume and clear do not open the panel", async () => {
@@ -1949,7 +2078,7 @@ describe("SessionChrome compact queue annotations", () => {
               state: "failed",
               retryable: false,
               outcomeUnknown: false,
-              error: "Insufficient OpenGeni credits. Add credits before sending again.",
+              error: "Insufficient Opengeni credits. Add credits before sending again.",
             },
           ],
           retryOptimisticMessage: () => {
@@ -1961,7 +2090,7 @@ describe("SessionChrome compact queue annotations", () => {
       />,
     );
     const row = mounted.container.querySelector("[data-optimistic-queue-message]")!;
-    expect(row.textContent).toContain("Insufficient OpenGeni credits. Add credits");
+    expect(row.textContent).toContain("Insufficient Opengeni credits. Add credits");
     expect(row.textContent).not.toContain("Not confirmed");
     expect(
       Array.from(row.querySelectorAll("button")).some((button) => button.textContent === "Retry"),

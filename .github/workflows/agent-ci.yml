@@ -1,17 +1,9 @@
 name: Agent CI
 
-# PR gate for the Rust agent workspace (agent/**), purely additive to the bun CI.
-# The FULL OS matrix here IS the cross-platform proof: a macOS/Windows compile or
-# test break is caught per-PR, not at tag time — and since these legs cannot run on
-# the Linux dev box, the green run on hosted macos-26 + windows-latest runners is
-# the only evidence the agent builds + tests on those OSes.
-#
-# The Cloudgeni-ai org is on the Team plan, so hosted ubuntu/macos-26/windows-latest
-# runners are available; the path-filter keeps docs-only PRs off the (10×-billed)
-# macOS leg.
+# Cross-platform Rust agent checks run after pushes to main and production.
 
 on:
-  # Launch window (until 2026-10-04 22:00 Oslo): no pull-request runs; restore after the launch window.
+  # Pull-request checks are disabled; retained triggers run below.
   push:
     branches:
       - main
@@ -21,8 +13,11 @@ on:
       - ".github/workflows/agent-ci.yml"
       - "packages/browserd/src/cua/**"
       - "packages/browserd/scripts/stage-cua-runtime.ts"
+      - "packages/browserd/scripts/build-cua-worker.ts"
       - "packages/browserd/test/cua-runtime-packaging.e2e.test.ts"
-      - "packages/browserd/test/fixtures/cua/PackagedProbe.ts"
+      - "packages/browserd/test/cua-linux*.e2e.test.ts"
+      - "packages/browserd/test/fixtures/cua/**"
+      - "packages/contracts/src/cua-desktop-tools*"
       - "packages/browserd/package.json"
 
 concurrency:
@@ -37,7 +32,46 @@ defaults:
     working-directory: agent
 
 jobs:
+  cua-linux:
+    name: Linux CUA (${{ matrix.runner }})
+    if: ${{ !(github.event_name == 'pull_request' && github.head_ref == 'main' && github.base_ref == 'production') }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install desktop and native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            xvfb xauth dbus-x11 at-spi2-core xfwm4 xterm x11vnc python3-gi gir1.2-gtk-3.0 gir1.2-gtk-4.0 \
+            clang pkg-config libdbus-1-dev libpipewire-0.3-dev libspa-0.2-dev libei-dev \
+            libwayland-dev libxkbcommon-dev libx11-dev libxi-dev libxtst-dev libxext-dev \
+            libxdo-dev libssl-dev
+          bun install --frozen-lockfile
+      - name: Stage the native Linux worker and transport
+        run: bun packages/browserd/scripts/stage-cua-runtime.ts
+      - name: Verify isolated desktops and compiled packaging
+        env:
+          OPENGENI_CUA_E2E: "1"
+          OPENGENI_CUA_PACKAGING_E2E: "1"
+        run: |
+          bun test --timeout 120000 packages/browserd/test/cua-linux*.e2e.test.ts
+          bun test --timeout 120000 packages/browserd/test/cua-runtime-packaging.e2e.test.ts
+
   native-command-supervisor:
+    # Skip the main -> production promotion PR: its head already ran as a main push.
+    if: ${{ !(github.event_name == 'pull_request' && github.head_ref == 'main' && github.base_ref == 'production') }}
     name: Linux native command supervisor
     runs-on: ubuntu-latest
     timeout-minutes: 6
@@ -52,9 +86,13 @@ jobs:
   # lock and compile every target/feature on that exact toolchain so a transitive
   # edition/MSRV bump cannot hide behind the stable-toolchain matrix.
   msrv:
+    # Skip the main -> production promotion PR: its head already ran as a main push.
+    if: ${{ !(github.event_name == 'pull_request' && github.head_ref == 'main' && github.base_ref == 'production') }}
     name: Rust 1.82 compatibility
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      RUSTUP_TOOLCHAIN: 1.82.0
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -73,6 +111,8 @@ jobs:
   # fmt + clippy run once on ubuntu (they are platform-independent); -D warnings
   # makes every lint a hard failure, as required for idiomatic Rust.
   lint:
+    # Skip the main -> production promotion PR: its head already ran as a main push.
+    if: ${{ !(github.event_name == 'pull_request' && github.head_ref == 'main' && github.base_ref == 'production') }}
     name: fmt + clippy
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -104,12 +144,13 @@ jobs:
   # hosted-runner set, never schedules, and macOS is covered by macos-26 here +
   # the macos-26 install-smoke leg below.)
   test:
+    # Skip the main -> production promotion PR: its head already ran as a main push.
+    if: ${{ !(github.event_name == 'pull_request' && github.head_ref == 'main' && github.base_ref == 'production') }}
     name: test + build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    # The green matrix here finishes in ~2 min; cap execution so a wedged test
-    # (e.g. a PTY master that never delivers EOF) fails fast instead of holding a
-    # runner for the 6-hour default and leaving the check perpetually in-progress.
-    timeout-minutes: 25
+    # Allow a cold build of both macOS CUA architectures, workspace tests, and
+    # release binaries while keeping a finite bound on wedged native processes.
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -124,16 +165,6 @@ jobs:
         with:
           bun-version-file: .bun-version
 
-      - name: Verify both macOS CUA packages and the isolated compiled loader
-        if: runner.os == 'macOS'
-        working-directory: .
-        env:
-          OPENGENI_CUA_PACKAGING_E2E: "1"
-        run: |
-          bun install --frozen-lockfile --os=darwin --cpu='*'
-          bun packages/browserd/scripts/stage-cua-runtime.ts x64
-          bun test --timeout 120000 packages/browserd/test/cua-runtime-packaging.e2e.test.ts
-
       - name: Install the Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -142,8 +173,23 @@ jobs:
         with:
           workspaces: agent
 
+      - name: Verify both macOS CUA packages and the isolated compiled loader
+        if: runner.os == 'macOS'
+        working-directory: .
+        env:
+          OPENGENI_CUA_PACKAGING_E2E: "1"
+        run: |
+          bun install --frozen-lockfile --os=darwin --cpu='*'
+          rustup target add x86_64-apple-darwin aarch64-apple-darwin
+          bun packages/browserd/scripts/stage-cua-runtime.ts x64
+          bun packages/browserd/scripts/stage-cua-runtime.ts arm64
+          bun test --timeout 120000 packages/browserd/test/cua-runtime-packaging.e2e.test.ts
+
       - name: cargo test --workspace
         run: cargo test --workspace --all-features
+
+      - name: Verify publication receipts across blocked writes and reconnects
+        run: cargo test --manifest-path vendor/async-nats/Cargo.toml --locked --lib --no-default-features --features ring,websockets flush_custody
 
       - name: Prove embedded helper selection with synthetic payloads
         if: runner.os == 'Linux'
@@ -179,6 +225,8 @@ jobs:
   # a throwaway minisign key, signs the freshly-built binary, and runs the REAL
   # script with OPENGENI_INSTALL_BASE_URL pointed at the mock dir.
   install-smoke:
+    # Skip the main -> production promotion PR: its head already ran as a main push.
+    if: ${{ !(github.event_name == 'pull_request' && github.head_ref == 'main' && github.base_ref == 'production') }}
     name: install-smoke (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 25

@@ -84,7 +84,7 @@ function Fixture() {
     <main className="mx-auto max-w-5xl space-y-8 p-6 sm:p-12">
       <header>
         <h1 className="text-2xl font-semibold">Capabilities</h1>
-        <p className="mt-2 text-sm text-fg-muted">Bring your tools and workflows into OpenGeni.</p>
+        <p className="mt-2 text-sm text-fg-muted">Bring your tools and workflows into Opengeni.</p>
       </header>
       <section aria-label="Connections">
         <h2 className="mb-3 text-sm font-semibold">Connections</h2>

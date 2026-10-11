@@ -30,6 +30,7 @@ export type ConnectionAccessKind =
   | "supergrok"
   | "vercel_gateway"
   | "openrouter"
+  | "opper"
   | "anthropic"
   | "claude_subscription";
 
@@ -132,34 +133,24 @@ function saveFailure(caught: unknown): ReactNode {
   );
 }
 
-export function modelsSummary(policy: ModelConnectionAccessPolicy): string {
-  if (policy.allowedModels === null) return "All models, including new ones";
-  const count = policy.allowedModels.length;
-  return count === 0 ? "No models" : count === 1 ? "1 model" : `${count} models`;
-}
-
-export function workspacesSummary(
+/** The short value for the "Available in" row: "All workspaces + Personal", "No workspaces". */
+export function workspacesShort(
   policy: ModelConnectionAccessPolicy,
   personalSupported: boolean,
 ): string {
+  const personal = personalSupported && policy.allowPersonalWorkspaces;
+  const count = policy.allowedWorkspaces?.length ?? null;
+  if (count === 0) return personal ? "Personal workspaces only" : "No workspaces";
   const shared =
-    policy.allowedWorkspaces === null
-      ? "All shared workspaces"
-      : policy.allowedWorkspaces.length === 1
-        ? "1 shared workspace"
-        : `${policy.allowedWorkspaces.length} shared workspaces`;
-  return personalSupported && policy.allowPersonalWorkspaces ? `${shared} + Personal` : shared;
+    count === null ? "All workspaces" : count === 1 ? "1 workspace" : `${count} workspaces`;
+  return personal ? `${shared} + Personal` : shared;
 }
 
-/** The short value for the "Available in" row: "All workspaces + Personal". */
-function workspacesShort(policy: ModelConnectionAccessPolicy, personalSupported: boolean): string {
-  const shared =
-    policy.allowedWorkspaces === null
-      ? "All workspaces"
-      : policy.allowedWorkspaces.length === 1
-        ? "1 workspace"
-        : `${policy.allowedWorkspaces.length} workspaces`;
-  return personalSupported && policy.allowPersonalWorkspaces ? `${shared} + Personal` : shared;
+/** The short value for the "Models it can serve" row. */
+export function modelsShort(policy: ModelConnectionAccessPolicy): string {
+  if (policy.allowedModels === null) return "All models";
+  const count = policy.allowedModels.length;
+  return count === 0 ? "No models" : count === 1 ? "1 model" : `${count} models`;
 }
 
 /**
@@ -196,12 +187,6 @@ export function ConnectionAccessRows({
   }
   const policy = access.data?.policy;
   if (!policy) return null;
-  const models =
-    policy.allowedModels === null
-      ? "All models"
-      : policy.allowedModels.length === 1
-        ? "1 model"
-        : `${policy.allowedModels.length} models`;
   return (
     <>
       {organization ? (
@@ -219,7 +204,7 @@ export function ConnectionAccessRows({
             ? "New models are included until you limit them."
             : "The workspace's Allowed models still apply."
         }
-        value={models}
+        value={modelsShort(policy)}
         // At organization scope both rows open the same page.
         disabled={!canManage}
         onOpen={onEdit}
@@ -230,6 +215,15 @@ export function ConnectionAccessRows({
 
 function toggle(values: string[], value: string, checked: boolean): string[] {
   return checked ? [...new Set([...values, value])] : values.filter((item) => item !== value);
+}
+
+/** A quiet line under a choice that, as drafted, leaves the account serving nothing. */
+function EmptyChoiceHint({ children }: { children: ReactNode }) {
+  return (
+    <p role="status" className="m-0 text-sm leading-5 text-fg-muted">
+      {children}
+    </p>
+  );
 }
 
 /** The form page: which workspaces (organization) and which models this account serves. */
@@ -255,6 +249,14 @@ export function ConnectionAccessFormPage({
   }, [data, draft]);
   const dirty = Boolean(draft && data && JSON.stringify(draft) !== JSON.stringify(data.policy));
   const disabled = !canManage;
+  const reachesNoWorkspace = Boolean(
+    organization &&
+    draft &&
+    data &&
+    draft.allowedWorkspaces !== null &&
+    draft.allowedWorkspaces.length === 0 &&
+    !(data.personalWorkspacesSupported && draft.allowPersonalWorkspaces),
+  );
 
   const body =
     access.error && !data ? (
@@ -299,7 +301,7 @@ export function ConnectionAccessFormPage({
               />
               <ChoiceCard
                 value="only"
-                title="Only the workspaces I choose"
+                title="Only selected workspaces"
                 description="Other workspaces can't use it for new work."
               />
             </ChoiceCards>
@@ -322,25 +324,39 @@ export function ConnectionAccessFormPage({
                     }
                   />
                 ))}
+                {data.workspaces.length === 0 ? (
+                  <p className="m-0 text-sm text-fg-muted">
+                    This organization has no shared workspaces yet.
+                  </p>
+                ) : null}
               </fieldset>
             ) : null}
-            {data.personalWorkspacesSupported ? (
-              <CheckboxField
-                label="Personal workspaces"
-                disabled={disabled}
-                checked={draft.allowPersonalWorkspaces}
-                onCheckedChange={(checked) =>
-                  setDraft({ ...draft, allowPersonalWorkspaces: checked })
-                }
-              />
-            ) : (
-              <CheckboxField
-                label="Personal workspaces"
-                description="Organization API keys can't be used in Personal workspaces."
-                disabled
-                checked={false}
-              />
-            )}
+            {/* Personal workspaces are their own choice, not one of the shared workspaces above. */}
+            <div className="mt-2 border-t border-border pt-4">
+              {data.personalWorkspacesSupported ? (
+                <CheckboxField
+                  label="Personal workspaces"
+                  description="Each member's own private workspace."
+                  disabled={disabled}
+                  checked={draft.allowPersonalWorkspaces}
+                  onCheckedChange={(checked) =>
+                    setDraft({ ...draft, allowPersonalWorkspaces: checked })
+                  }
+                />
+              ) : (
+                <CheckboxField
+                  label="Personal workspaces"
+                  description="Organization API keys can't be used in Personal workspaces."
+                  disabled
+                  checked={false}
+                />
+              )}
+            </div>
+            {reachesNoWorkspace ? (
+              <EmptyChoiceHint>
+                No workspace can use it. It stays connected, ready to share later.
+              </EmptyChoiceHint>
+            ) : null}
           </div>
         ) : null}
         <div className="flex min-w-0 flex-col gap-3">
@@ -398,6 +414,8 @@ export function ConnectionAccessFormPage({
                 <p className="text-sm text-fg-muted">
                   No models yet. Add a custom model to this connection first.
                 </p>
+              ) : draft.allowedModels.length === 0 ? (
+                <EmptyChoiceHint>It can't serve any model until you choose one.</EmptyChoiceHint>
               ) : null}
             </fieldset>
           ) : null}
@@ -410,7 +428,7 @@ export function ConnectionAccessFormPage({
       title={organization ? `Where ${name} can be used` : `Models ${name} can serve`}
       description={
         organization
-          ? "Only these workspaces can use it for new work, and only for these models. Work already running keeps going. The organization's owners and admins can see and change it wherever it's used."
+          ? "Changes apply to new chats and schedules. Work already running keeps going."
           : "New work, including chats pinned to this account, can only use these models. Work already running keeps going."
       }
       backLabel={name}

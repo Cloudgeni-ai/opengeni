@@ -656,6 +656,28 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
   );
 
   app.post(
+    "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/targets/open-with-inventory",
+    async (context) => {
+      const { workspaceId, grant, browserSessionId } = await browserRoutePreamble(
+        context,
+        "sessions:control",
+      );
+      const request = await parseJsonBody(context, BrowserOpenTargetRequest);
+      const result = await withActiveBrowserController(
+        context,
+        grant,
+        workspaceId,
+        browserSessionId,
+        "session.control",
+        "browser.control",
+        async ({ sessionClient }) =>
+          BrowserTargetListResponse.parse(await sessionClient.openTargetWithInventory(request.url)),
+      );
+      return context.json(result, 201);
+    },
+  );
+
+  app.post(
     "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/targets/:targetId/select",
     async (context) => {
       const { workspaceId, grant, browserSessionId } = await browserRoutePreamble(
@@ -930,6 +952,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
             workspaceId,
             session: sourceSession,
             subjectId: grant.subjectId,
+            grant,
             waitSignal: context.req.raw.signal,
             operation: "browser.download.save",
           },
@@ -939,6 +962,9 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
               destinationPath: save.destinationPath,
               overwrite: save.overwrite,
               mayReplaceExisting: save.overwrite && dispatched.dispatchedNow,
+              // Missing folders on the relative destination are created; the
+              // import still confines every existing ancestor to the workspace.
+              createParents: true,
               sizeBytes: save.download.receivedBytes,
               sha256: save.download.sha256!,
               source: {
@@ -2825,6 +2851,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         deviceId: expectedPlacement.deviceId,
       });
       if (device.state !== "connected") {
+        recordAttachedBrowserUnavailable(deps.observability, "disconnected");
         throw new BrowserSessionStateError("Attached browser is disconnected");
       }
       const enrollment = await getLiveEnrollmentConnection(
@@ -2833,9 +2860,11 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         device.enrollmentId,
       );
       if (!enrollment || enrollment.status !== "active" || !enrollment.connectionInstanceId) {
+        recordAttachedBrowserUnavailable(deps.observability, "machine_unavailable");
         throw new BrowserSessionStateError("Attached browser machine is unavailable");
       }
       if (!enrollment.workspaceRoot) {
+        recordAttachedBrowserUnavailable(deps.observability, "no_workspace_root");
         throw new BrowserSessionStateError(
           "Attached browser machine has not reported an absolute workspace root",
         );
@@ -2905,6 +2934,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         workspaceId: sourceSession.workspaceId,
         session: sourceSession,
         subjectId: grant.subjectId,
+        grant,
         waitSignal,
         operation,
         retryControllerTransport: operation === "browser.read" || operation === "browser.action",
@@ -4077,7 +4107,9 @@ async function ensureInteractionHolder(
   if (!placement.lease?.instanceId) {
     throw new BrowserSessionStateError("BrowserSession lease placement is unavailable");
   }
-  const sandboxRuntime = await resolveSessionSandboxRuntime(deps.db, deps.settings, sourceSession);
+  const sandboxRuntime = await resolveSessionSandboxRuntime(deps.db, deps.settings, sourceSession, {
+    grant,
+  });
   const acquired = await acquireLease(deps.db, {
     accountId: grant.accountId,
     workspaceId: sourceSession.workspaceId,
@@ -5114,6 +5146,22 @@ async function recordBrowserDownloadFileUsage(
     sourceResourceId: file.id,
     idempotencyKey: `file.uploaded:${workspaceId}:${file.id}`,
   });
+}
+
+/** A user's own attached browser could not be reached for an operation. */
+function recordAttachedBrowserUnavailable(
+  observability: ApiRouteDeps["observability"],
+  reason: "disconnected" | "machine_unavailable" | "no_workspace_root",
+): void {
+  try {
+    observability?.incrementCounter({
+      name: "opengeni_attached_browser_unavailable_total",
+      help: "Browser operations refused because the user's attached browser (or its machine) was unreachable, by closed reason.",
+      labels: { reason },
+    });
+  } catch {
+    // Telemetry never changes the refusal.
+  }
 }
 
 function browserRouteError(error: unknown): HTTPException {

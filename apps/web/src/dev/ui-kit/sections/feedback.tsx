@@ -212,7 +212,7 @@ function HelpDemo() {
           <div className="flex items-center gap-1.5">
             <span className="text-sm font-medium text-fg">Usage</span>
             <HelpTip label="Where usage comes from">
-              Codex reports usage for each account. OpenGeni checks it when you open this sheet.
+              Codex reports usage for each account. Opengeni checks it when you open this sheet.
             </HelpTip>
           </div>
           <p className="text-xs leading-4.5 text-fg-muted">{ops.checkedLabel}</p>
@@ -254,12 +254,12 @@ function RetryButton({ label = "Try again" }: { label?: string }) {
 function CopyRewrite() {
   const rows = [
     {
-      before: "OpenGeni API 404: Connected MCP connector not found Reference: 4b1d7e2a-93c5-…",
+      before: "Opengeni API 404: Connected MCP connector not found Reference: 4b1d7e2a-93c5-…",
       after: "Couldn't load this connection's tools. Try again.",
     },
     {
       before: "Could not start setup. Retry setup",
-      after: "Slack isn't set up on this OpenGeni server. Ask an admin.",
+      after: "Slack isn't set up on this Opengeni server. Ask an admin.",
     },
     {
       before: "Request failed with status code 409",
@@ -609,7 +609,7 @@ export default function FeedbackSection() {
             action={<HelpLink onClick={() => undefined}>Try again</HelpLink>}
           >
             Linear didn't accept the sign-in. If your organization restricts third-party apps, ask a
-            Linear admin to approve OpenGeni.
+            Linear admin to approve Opengeni.
           </ErrorMessage>
         </StateCell>
         <StateCell

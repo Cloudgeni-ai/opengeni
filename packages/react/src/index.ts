@@ -16,6 +16,9 @@ export {
 export {
   attachSessionCapability,
   completeSessionCapabilityOAuth,
+  prepareSessionCapabilityAccess,
+  applySessionCapabilityAccess,
+  type SessionCapabilityAccessPlan,
 } from "./session-capability-policy";
 export { retainedImageId } from "./components/markdown";
 // oxlint-disable-next-line typescript/triple-slash-reference -- package consumers must load the ambient type for this optional untyped peer without emitting a runtime import.
@@ -89,6 +92,7 @@ export {
 export type {
   ComposerControllerState,
   ComposerPolicy,
+  InitialComposerDraft,
   ComposerSendExtras,
   ComposerState,
   UseComposerOptions,
@@ -328,6 +332,8 @@ export type {
 export { approvalsFromRequiresAction, projectPendingApprovals } from "./approvals";
 export type { PendingApproval } from "./approvals";
 export { ApprovalSurface, defaultApprovalSurfaceMessages } from "./components/approval-surface";
+export { ToolActionReviewCard, ToolActionReviewDetails } from "./components/tool-action-review";
+export type { ToolReviewDetailsLoader } from "./components/tool-action-review";
 export type { ApprovalSurfaceMessages, ApprovalSurfaceProps } from "./components/approval-surface";
 
 // Structured human input: event projection, authoritative hook, and styled form.
@@ -386,14 +392,21 @@ export type {
 // Tool-renderer registry + the per-tool renderers (the timeline's extension API)
 export {
   createDefaultToolRegistry,
+  createSessionRetainedScreenshotLoader,
   createToolRegistry,
+  createWorkspaceRetainedArtifactLoader,
+  createWorkspaceRetainedVideoLoader,
   defaultToolRegistry,
   rawTypeOf,
 } from "./timeline";
 export type {
   CreateToolRegistryOptions,
   RetainedArtifactLoader,
+  RetainedArtifactLoadOptions,
+  RetainedArtifactLoaderClient,
   RetainedScreenshotLoader,
+  RetainedScreenshotLoaderClient,
+  RetainedVideoLoaderClient,
   VideoArtifactPlaybackLoader,
   ToolRegistry,
   ToolRegistryEntry,
@@ -487,14 +500,37 @@ export type { CommandPaletteProps } from "./components/command-palette";
 // Components
 export { ChatComposer } from "./components/chat-composer";
 export { conversationTimeline } from "./conversation-timeline";
-export { SessionConversation } from "./components/session-conversation";
+export { SessionConversation, SessionConversationView } from "./components/session-conversation";
+export { useSessionConversation } from "./hooks/use-session-conversation";
+export { useNewConversation } from "./hooks/use-new-conversation";
+export type {
+  NewConversationController,
+  UseNewConversationOptions,
+  NewConversationCreateOptions,
+  CreatedConversation,
+} from "./hooks/use-new-conversation";
+export { NewConversation, NewConversationView } from "./components/new-conversation";
+export type {
+  NewConversationProps,
+  NewConversationViewProps,
+  NewConversationLabels,
+} from "./components/new-conversation";
+export type {
+  SessionConversationController,
+  UseSessionConversationOptions,
+} from "./hooks/use-session-conversation";
 export { SessionList } from "./components/session-list";
 export type { SessionListLabels, SessionListProps } from "./components/session-list";
 export { OpenGeniChat } from "./components/open-geni-chat";
-export type { OpenGeniChatLabels, OpenGeniChatProps } from "./components/open-geni-chat";
+export type {
+  OpenGeniChatCreateOptions,
+  OpenGeniChatLabels,
+  OpenGeniChatProps,
+} from "./components/open-geni-chat";
 export type {
   SessionConversationLabels,
   SessionConversationProps,
+  SessionConversationViewProps,
 } from "./components/session-conversation";
 export type { ChatComposerProps } from "./components/chat-composer";
 export { ComposerTranscriptionControl } from "./components/composer-transcription-control";
@@ -558,6 +594,9 @@ export { MessageTimeline, TimelineRow } from "./components/message-timeline";
 export { GeneratedVideoPlayer } from "./components/generated-video-player";
 export type { GeneratedVideoPlayerProps } from "./components/generated-video-player";
 export type { MessageTimelineProps } from "./components/message-timeline";
+export { MessageSenderLabel } from "./timeline/message-sender";
+export type { RenderMessageSender } from "./timeline/message-sender";
+export type { MessageSender } from "./timeline";
 export type { RenderAllowanceExhausted } from "./timeline/allowance-exhausted-row";
 export type { AllowanceLabels, AllowanceScope } from "./usage/allowance-copy";
 export type { TimelineSearchTarget } from "./components/timeline-search";
@@ -598,6 +637,8 @@ export {
 export { CopyButton, CopyHoverFrame } from "./components/copy-button";
 export { copyTextToClipboard, tableElementToTsv } from "./lib/clipboard";
 export { SessionStatus, StatusDot, SESSION_STATUS_META } from "./components/session-status";
+export { sessionAdmissionBlocked, sessionDisplayStatus } from "./session-status-model";
+export type { SessionDisplayStatus } from "./session-status-model";
 export type {
   SessionStatusProps,
   StatusDotProps,
@@ -701,6 +742,20 @@ export {
   truncate,
   tryParseJson,
 } from "./lib/format";
+export {
+  currentProviderRecovery,
+  parseProviderRecovery,
+  providerRecoveryExhaustedText,
+  providerRecoveryRetryingText,
+  providerRecoverySubject,
+  type ProviderRecoveryCondition,
+  type ProviderRecoveryFacts,
+} from "./lib/provider-recovery";
+export {
+  ProviderRecoveryNotice,
+  PROVIDER_RECOVERY_NOTICE_DETAIL,
+  type ProviderRecoveryNoticeProps,
+} from "./components/provider-recovery-notice";
 export { SessionCommandsPanel } from "./components/session-commands-panel";
 export { SessionCommands } from "./components/session-commands";
 
@@ -713,4 +768,7 @@ export { setStartupDetails, useStartupDetails } from "./timeline/startup-prefere
 export { ClaudeMark } from "./components/claude-mark";
 export { AnthropicMark } from "./components/anthropic-mark";
 export { OpenRouterMark } from "./components/openrouter-mark";
+export { OpperMark } from "./components/opper-mark";
 export { GrokMark } from "./components/grok-mark";
+
+export { ToolReviewHistoryProvider } from "./components/tool-review-history";

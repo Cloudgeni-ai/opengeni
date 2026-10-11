@@ -204,7 +204,7 @@ export interface ErrorParts {
 }
 
 /**
- * Splits "OpenGeni API 409: ... Reference: abc." into its parts. `message` is
+ * Splits "Opengeni API 409: ... Reference: abc." into its parts. `message` is
  * the server's own sentence, for Technical details; show `userFacingError`'s
  * text to people.
  */
@@ -218,7 +218,7 @@ export function errorParts(error: unknown): ErrorParts {
 
 /**
  * A user-facing error for a form or dialog, keeping the original as its cause.
- * An API error becomes what to do next, never its raw "OpenGeni API ..." text.
+ * An API error becomes what to do next, never its raw "Opengeni API ..." text.
  */
 export function userFacingError(error: unknown, message = userErrorText(error)): Error {
   return new Error(message, { cause: error });

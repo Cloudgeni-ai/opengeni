@@ -12,6 +12,9 @@ export const TranscriptionRecordingErrorCode = z.enum([
   "too_large",
   "invalid_audio",
   "unknown",
+  "insufficient_credits",
+  "allowance_exhausted",
+  "monthly_model_cost_limit",
 ]);
 export type TranscriptionRecordingErrorCode = z.infer<typeof TranscriptionRecordingErrorCode>;
 

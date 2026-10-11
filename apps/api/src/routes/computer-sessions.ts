@@ -8,6 +8,8 @@ import {
   BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX,
   BROWSER_CONTROL_PORT,
   COMPUTER_CONTROL_WEBSOCKET_PROTOCOL,
+  ComputerNativeCommand,
+  ComputerNativeCallRequest,
   ComputerActionCommand,
   ComputerActionRequest,
   ComputerSessionAttachment,
@@ -574,6 +576,51 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
   );
 
   app.post(
+    "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/native-calls",
+    async (context) => {
+      const { workspaceId, grant, computerSessionId } = await routePreamble(
+        context,
+        "sessions:control",
+      );
+      if (grant.principalKind === "agent_attempt") {
+        const selected = grant.metadata?.firstPartyMcpTools;
+        if (!Array.isArray(selected) || !selected.includes("computer_act"))
+          throw new HTTPException(403, {
+            message: "Computer control is not selected for this attempt",
+          });
+      }
+      const request = await parseJsonBody(context, ComputerNativeCallRequest);
+      const result = await withActiveComputerController(
+        context,
+        grant,
+        workspaceId,
+        computerSessionId,
+        "session.control",
+        "computer.action",
+        async ({ sessionClient, binding, record }) => {
+          if (
+            record.session.placement.kind === "sandbox_group" &&
+            deps.settings.sandboxDesktopInteractive === false &&
+            grant.principalKind !== "agent_attempt"
+          )
+            throw new HTTPException(403, { message: "Human desktop input is disabled" });
+          return await sessionClient.nativeCall(
+            ComputerNativeCommand.parse({
+              ...request,
+              protocolVersion: INTERACTION_PROTOCOL_VERSION,
+              computerSessionId,
+              controllerGeneration: binding.controllerGeneration,
+              targetId: null,
+              actor: interactionActorForGrant(grant),
+            }),
+          );
+        },
+      );
+      return context.json(result);
+    },
+  );
+
+  app.post(
     "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/actions",
     async (context) => {
       const { workspaceId, grant, computerSessionId } = await routePreamble(
@@ -1112,6 +1159,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
         workspaceId: sourceSession.workspaceId,
         session: sourceSession,
         subjectId: grant.subjectId,
+        grant,
         waitSignal,
         operation,
         retryControllerTransport: operation === "computer.read" || operation === "computer.action",
@@ -1522,6 +1570,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
       deps.db,
       deps.settings,
       sourceSession,
+      { grant },
     );
     const acquired = await acquireLease(deps.db, {
       accountId: grant.accountId,

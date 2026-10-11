@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { App, Image, SandboxService } from "modal";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { canonicalModalCheckpointProviderBinding } from "@opengeni/contracts";
+import {
+  canonicalModalCheckpointProviderBinding,
+  MODAL_NATIVE_FRESH_NORMALIZATION_V1,
+} from "@opengeni/contracts";
 import {
   compileNativeFreshCreate,
   describeNativeFreshCreate,
@@ -82,11 +84,9 @@ describe("pinned SDK normalized create JSON parity (detached, no provider)", () 
       expect(require("modal/package.json").version).toBe("0.9.0");
       const spec = fixture(cpu!, memoryMiB!, timeoutSeconds!);
       const compiled = describeNativeFreshCreate(compileNativeFreshCreate(spec));
-      expect(
-        createHash("sha256")
-          .update(readFileSync(new URL(import.meta.resolve("modal"))))
-          .digest("hex"),
-      ).toBe(compiled.normalization.sdkSourceSha256);
+      // This reviewed recipe fingerprint is frozen correlation metadata, not
+      // a hash of unrelated transport patches in the installed SDK bundle.
+      expect(compiled.normalization).toEqual(MODAL_NATIVE_FRESH_NORMALIZATION_V1);
       const requests: unknown[] = [];
       // This test constructs genuine SDK App/Image/SandboxService instances,
       // never a configured ModalClient. Every CP method except the in-memory

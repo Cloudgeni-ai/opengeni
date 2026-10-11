@@ -1,4 +1,4 @@
-//! Native accessibility and capture adapter for OpenGeni ComputerSessions.
+//! Native accessibility and capture adapter for Opengeni ComputerSessions.
 //!
 //! The placement-local Bun controller owns public session authority, durable
 //! operation receipts, and media grants. This crate owns only the genuinely
@@ -11,9 +11,13 @@ mod adapter;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod captured_frames;
 mod clipboard;
+#[cfg(any(target_os = "linux", test))]
+mod linux_pointer;
 mod model;
 mod rpc;
 mod tree;
+#[cfg(any(target_os = "linux", test))]
+mod window_input_fences;
 
 #[cfg(target_os = "linux")]
 mod linux;

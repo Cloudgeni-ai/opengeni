@@ -4,6 +4,9 @@ import type { AuthNeededItem } from "@opengeni/react";
 import { SessionCapabilityCard } from "../../../src/components/capabilities/session-capability-card";
 import "../../../src/styles.css";
 
+const params = new URLSearchParams(window.location.search);
+document.documentElement.dataset.ogTheme = params.get("theme") === "dark" ? "dark" : "light";
+const prepared = params.get("prepared") === "true";
 const item = {
   id: "sample-custom-mcp",
   kind: "auth-needed",
@@ -16,6 +19,14 @@ const item = {
     name: "Records MCP",
     endpointUrl: "https://mcp.records.example/mcp",
     rationale: "Connect your records server to find the documents you asked about.",
+    ...(prepared ? {
+      ownership: params.get("scope") === "workspace" ? "workspace" : "personal",
+      mcpSetup: {
+        name: "Records MCP", endpointUrl: "https://mcp.records.example/mcp",
+        headers: [{ name: "Authorization", secret: "key", prefix: "Bearer " }],
+        secretFields: [{ id: "key", label: "API key" }],
+      },
+    } : {}),
   },
 } as AuthNeededItem;
 

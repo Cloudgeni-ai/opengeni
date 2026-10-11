@@ -7,7 +7,7 @@ import { EDITABLE_ARTIFACT_KERNEL_VERSION_MAX_BYTES } from "@opengeni/contracts/
 /**
  * Domain vocabulary for collaborative, editable Office-like artifacts.
  *
- * This is intentionally unrelated to OpenGeni's published HTML artifacts and
+ * This is intentionally unrelated to Opengeni's published HTML artifacts and
  * document-ingestion records. An editable artifact is mutable canonical model
  * state plus a causally ordered operation history.
  */

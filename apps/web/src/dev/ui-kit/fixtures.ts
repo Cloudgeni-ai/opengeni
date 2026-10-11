@@ -341,7 +341,7 @@ export const designPreviewAccessRequests: AccessRequest[] = [
     personId: "person-jonas",
     source: "Slack",
     requestedLabel: "2 hours ago",
-    message: "Asked from #design-reviews to use OpenGeni in Design preview.",
+    message: "Asked from #design-reviews to use Opengeni in Design preview.",
   },
 ];
 
@@ -624,7 +624,7 @@ export const envPastePreview: { targetSetId: string; rows: EnvPasteRow[] } = {
       kind: "secret",
       status: "reserved",
       message:
-        "OpenGeni sets GITHUB_TOKEN for repository access. Use another name, like GITHUB_BOT_TOKEN.",
+        "Opengeni sets GITHUB_TOKEN for repository access. Use another name, like GITHUB_BOT_TOKEN.",
     },
     { name: "RENOVATE_PLATFORM", kind: "plain", value: "github", status: "new" },
     { name: "RENOVATE_AUTODISCOVER", kind: "plain", value: "false", status: "new" },
@@ -634,7 +634,7 @@ export const envPastePreview: { targetSetId: string; rows: EnvPasteRow[] } = {
 /** Name validation copy for Add variable. */
 export const variableNameRules = {
   hint: "Letters, numbers and underscores. Saved in uppercase.",
-  reserved: "GITHUB_TOKEN is reserved. OpenGeni sets it for repository access.",
+  reserved: "GITHUB_TOKEN is reserved. Opengeni sets it for repository access.",
   duplicate: "AWS_REGION is already in this set.",
   replaceHint: "Takes effect from the next turn. Turns already running keep the current value.",
 };
@@ -684,7 +684,7 @@ export const repositories = [
    Models and model accounts
    -------------------------------------------------------------------------- */
 
-export type Payer = "Codex plan" | "OpenGeni credits" | "AI Gateway" | "OpenRouter";
+export type Payer = "Codex plan" | "Opengeni credits" | "AI Gateway" | "OpenRouter";
 
 export interface ModelOption {
   id: string;
@@ -725,8 +725,8 @@ export const modelCatalog: ModelOption[] = [
   {
     id: "credits:gpt-6-astra",
     label: "GPT-6 Astra",
-    payer: "OpenGeni credits",
-    displayLabel: "GPT-6 Astra · OpenGeni credits",
+    payer: "Opengeni credits",
+    displayLabel: "GPT-6 Astra · Opengeni credits",
     description: "Billed to your organization's credit balance.",
     available: false,
     unavailableReason: "No credit balance. An owner can add credits in Billing.",
@@ -912,7 +912,7 @@ export const exhaustedUsageWindow: UsageWindow = {
 };
 
 export interface GatewayProvider {
-  id: "vercel" | "openrouter";
+  id: "vercel" | "openrouter" | "opper";
   name: string;
   description: string;
   connected: boolean;
@@ -935,6 +935,13 @@ export const gatewayProviders: GatewayProvider[] = [
     connected: true,
     keyHint: "•••• 4f2a",
     customModels: ["anthropic/claude-sonnet-4.5", "meta-llama/llama-4-maverick"],
+  },
+  {
+    id: "opper",
+    name: "Opper",
+    description: "Use EU-hosted models through Opper, billed to your Opper key.",
+    connected: false,
+    customModels: ["gemini-3.8-flash", "aws/claude-sonnet-4-6-eu"],
   },
 ];
 
@@ -1745,14 +1752,14 @@ export const popularCapabilities: Capability[] = [
     byLine: "By GitHub",
     status: "unavailable",
     statusDetail:
-      "GitHub isn't available on this OpenGeni server yet. An admin needs to add the GitHub App.",
+      "GitHub isn't available on this Opengeni server yet. An admin needs to add the GitHub App.",
     logoKey: "github",
     monogram: "G",
   },
   {
     id: "cap-slack",
     name: "Slack",
-    description: "Chat with OpenGeni in Slack, or let it read and send messages as you.",
+    description: "Chat with Opengeni in Slack, or let it read and send messages as you.",
     kind: "connection",
     byLine: "By Slack",
     status: "available",

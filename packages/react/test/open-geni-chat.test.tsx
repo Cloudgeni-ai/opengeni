@@ -118,6 +118,70 @@ describe("SessionList", () => {
 });
 
 describe("OpenGeniChat", () => {
+  test("default new chat preserves newer text through uncertain retry and native draft hydration", async () => {
+    const { client } = listClient();
+    const calls: unknown[][] = [];
+    let finish!: (id: string) => void;
+    const view = await renderComponent(
+      <OpenGeniChat
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        createSession={async (...args) => {
+          calls.push(args);
+          if (calls.length === 1) throw new TypeError("Response lost");
+          return new Promise((resolve) => {
+            finish = resolve;
+          });
+        }}
+      />,
+    );
+    const edit = async (text: string) => {
+      const input = view.container.querySelector<HTMLTextAreaElement>(
+        "[data-og-new-chat-composer] textarea",
+      )!;
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(
+        input,
+        text,
+      );
+      const key = Object.keys(input).find((name) => name.startsWith("__reactProps$"))!;
+      await actRun(() =>
+        (input as unknown as Record<string, { onChange: (event: unknown) => void }>)[key]!.onChange(
+          { target: input },
+        ),
+      );
+      return input;
+    };
+    try {
+      await flush(40);
+      const input = await edit("First question");
+      await actRun(() => input.form!.requestSubmit());
+      expect(view.container.textContent).toContain("Creation is not confirmed");
+      await edit("Keep this newer thought");
+      const retry = [...view.container.querySelectorAll<HTMLButtonElement>("button")].find(
+        (button) => button.textContent === "Retry",
+      )!;
+      await actRun(() => retry.click());
+      expect(calls).toHaveLength(2);
+      expect(calls[1]).toEqual(calls[0]);
+      await actRun(() => finish("bbbbbbbb-0000-4000-8000-000000000002"));
+      await flush(50);
+      expect(view.container.querySelector("[data-og-new-chat-composer]")).toBeNull();
+      expect(
+        view.container.querySelector<HTMLTextAreaElement>(
+          "[data-og-conversation-composer] textarea",
+        )?.value,
+      ).toBe("Keep this newer thought");
+      await flush(650);
+      expect(
+        view.container.querySelector<HTMLTextAreaElement>(
+          "[data-og-conversation-composer] textarea",
+        )?.value,
+      ).toBe("Keep this newer thought");
+    } finally {
+      await view.unmount();
+    }
+  });
+
   test("conversation appearance reaches the stock model picker without replacing the conversation", async () => {
     const { client, sessions } = listClient();
     const view = await renderComponent(

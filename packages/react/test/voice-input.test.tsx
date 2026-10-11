@@ -945,6 +945,86 @@ describe("useVoiceInput", () => {
     await hook.unmount();
   });
 
+  test("Cancel and Escape keep a real dictation; only an accidental start is discarded", async () => {
+    let clock = Date.parse("2026-10-05T00:00:00.000Z");
+    const transcribeCalls: unknown[] = [];
+    const renderRecorder = async (store: MemoryVoiceRecordingStore, recordingId: string) =>
+      await renderHook(
+        () =>
+          useVoiceInput({
+            client: {
+              transcribeAudio: async (input: unknown) => {
+                transcribeCalls.push(input);
+                return { text: "unexpected", languages: [] };
+              },
+            },
+            workspaceId: "ws-1",
+            capability,
+            enabled: true,
+            value: "draft",
+            setValue: () => undefined,
+            focusInput: () => undefined,
+            now: () => new Date(clock),
+            createRecordingStore: () => store,
+            createRecordingId: () => recordingId,
+            createOwnerId: () => `owner-${recordingId}`,
+          }),
+        undefined,
+      );
+
+    for (const via of ["cancel", "escape"] as const) {
+      installMediaMocks();
+      const store = new MemoryVoiceRecordingStore();
+      const hook = await renderRecorder(store, `recording-keep-${via}`);
+      await act(async () => {
+        await hook.result.current.start();
+      });
+      expect(hook.result.current.status).toBe("recording");
+      clock += 45_000;
+      await act(async () => {
+        if (via === "cancel") hook.result.current.cancel();
+        else document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+        await settle();
+      });
+      expect(hook.result.current.status).toBe("recovered");
+      expect(hook.result.current.hasRecoverableRecording).toBe(true);
+      expect(store.manifests.get(`recording-keep-${via}`)?.captureState).toBe("stopped");
+      expect(transcribeCalls).toHaveLength(0);
+      await hook.unmount();
+    }
+
+    // An Escape already handled by a dialog or menu does not touch dictation.
+    installMediaMocks();
+    const handledStore = new MemoryVoiceRecordingStore();
+    const handled = await renderRecorder(handledStore, "recording-escape-handled");
+    await act(async () => {
+      await handled.result.current.start();
+    });
+    await act(async () => {
+      const event = new KeyboardEvent("keydown", { key: "Escape", cancelable: true });
+      event.preventDefault();
+      document.dispatchEvent(event);
+      await settle();
+    });
+    expect(handled.result.current.status).toBe("recording");
+    await handled.unmount();
+
+    installMediaMocks();
+    const accidentalStore = new MemoryVoiceRecordingStore();
+    const accidental = await renderRecorder(accidentalStore, "recording-accidental");
+    await act(async () => {
+      await accidental.result.current.start();
+    });
+    clock += 1_000;
+    await act(async () => {
+      accidental.result.current.cancel();
+      await settle();
+    });
+    expect(accidental.result.current.status).toBe("idle");
+    expect(accidentalStore.manifests.has("recording-accidental")).toBe(false);
+    await accidental.unmount();
+  });
+
   test("composer mic stop auto-transcribes and never auto-sends", async () => {
     installMediaMocks();
     const store = new MemoryVoiceRecordingStore();
@@ -983,7 +1063,9 @@ describe("useVoiceInput", () => {
     });
     expect(mounted.container.querySelector("[data-voice-waveform]")).toBeTruthy();
     expect(
-      mounted.container.querySelector<HTMLButtonElement>("[aria-label='Cancel recording']"),
+      mounted.container.querySelector<HTMLButtonElement>(
+        "[aria-label='Stop without transcribing']",
+      ),
     ).toBeTruthy();
     const stop = mounted.container.querySelector<HTMLButtonElement>(
       "[aria-label='Stop and transcribe']",
@@ -1126,13 +1208,76 @@ describe("useVoiceInput", () => {
     });
     await act(async () => {
       mounted?.container
-        .querySelector<HTMLButtonElement>("[aria-label='Cancel recording']")
+        .querySelector<HTMLButtonElement>("[aria-label='Stop without transcribing']")
         ?.click();
       await settle();
     });
     expect(draft).toBe("keep me");
     expect(calls).toBe(0);
     expect(sends).toHaveLength(0);
+    expect(mounted.container.querySelector("[aria-label='Start voice input']")).toBeTruthy();
+  });
+
+  test("a start error is dismissible and cleared when live voice takes the mic", async () => {
+    installMediaMocks({ deny: true });
+    const store = new MemoryVoiceRecordingStore();
+    let suppress: (value: boolean) => void = () => undefined;
+    const starts: string[] = [];
+
+    function Harness() {
+      const [value, setValue] = useState("");
+      const [suppressed, setSuppressed] = useState(false);
+      suppress = setSuppressed;
+      return (
+        <ChatComposer
+          composer={composerState(value, setValue, [])}
+          transcriptionSuppressed={suppressed}
+          transcription={{
+            client: { transcribeAudio: async () => ({ text: "", languages: [] }) } as never,
+            workspaceId: "ws-1",
+            capability,
+            workspaceEnabled: true,
+            createRecordingStore: () => store,
+            createOwnerId: () => "composer-error-owner",
+          }}
+        />
+      );
+    }
+
+    mounted = await renderComponent(<Harness />);
+    mounted.container
+      .querySelector(".og-composer")
+      ?.addEventListener("opengeni:composer-voice-input-start", () => starts.push("start"));
+    const blocked =
+      "[aria-label='Dismiss: Microphone access is blocked. Allow it in site settings, then try again.']";
+    const startOnce = async () =>
+      await act(async () => {
+        mounted?.container.querySelector<HTMLButtonElement>("[data-og-composer-dictate]")?.click();
+        await settle();
+      });
+
+    await startOnce();
+    expect(starts).toEqual(["start"]);
+    expect(mounted.container.querySelector(blocked)).toBeTruthy();
+    await act(async () => {
+      mounted?.container.querySelector<HTMLButtonElement>(blocked)?.click();
+      await settle();
+    });
+    expect(mounted.container.querySelector(blocked)).toBeNull();
+    expect(mounted.container.querySelector("[aria-label='Start voice input']")).toBeTruthy();
+
+    await startOnce();
+    expect(mounted.container.querySelector(blocked)).toBeTruthy();
+    // Live voice owning the mic retires the stale error instead of duplicating it.
+    await act(async () => {
+      suppress(true);
+      await settle();
+    });
+    await act(async () => {
+      suppress(false);
+      await settle();
+    });
+    expect(mounted.container.querySelector(blocked)).toBeNull();
     expect(mounted.container.querySelector("[aria-label='Start voice input']")).toBeTruthy();
   });
 
@@ -1836,7 +1981,7 @@ describe("useVoiceInput", () => {
     });
 
     expect(hook.result.current.status).toBe("transcript-ready");
-    expect(hook.result.current.error).toBe("handoff_uncertain");
+    expect(hook.result.current.error).toBeNull();
     expect(hook.result.current.recordingId).toBe("recording-retry");
     expect((await store.listChunks("recording-retry")).map((chunk) => chunk.chunkNumber)).toEqual([
       0, 1, 2,
@@ -2021,6 +2166,62 @@ describe("useVoiceInput", () => {
     expect(store.manifests.has("recording-conflict")).toBe(true);
     await hook.unmount();
   });
+
+  test.each(["insufficient_credits", "allowance_exhausted", "monthly_model_cost_limit"])(
+    "keeps billing refusal %s for manual retry",
+    async (code) => {
+      installMediaMocks();
+      const store = new MemoryVoiceRecordingStore();
+      let transcriptionCalls = 0;
+      const hook = await renderHook(
+        () =>
+          useVoiceInput({
+            client: {
+              transcribeAudio: async () => {
+                transcriptionCalls += 1;
+                throw new OpenGeniApiError(
+                  code === "monthly_model_cost_limit" ? 429 : 402,
+                  JSON.stringify({
+                    error: {
+                      status: code === "monthly_model_cost_limit" ? 429 : 402,
+                      code,
+                      message: "Credits required.",
+                      retryable: true,
+                    },
+                  }),
+                );
+              },
+            },
+            workspaceId: "ws-1",
+            capability,
+            enabled: true,
+            value: "",
+            setValue: () => undefined,
+            focusInput: () => undefined,
+            createRecordingStore: () => store,
+            createRecordingId: () => "recording-conflict",
+            automaticRetryDelayMilliseconds: 0,
+          }),
+        undefined,
+      );
+
+      await act(async () => {
+        await hook.result.current.start();
+        hook.result.current.stop();
+        await settle(30);
+      });
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        await settle(20);
+      });
+
+      expect(transcriptionCalls).toBe(1);
+      expect(hook.result.current.status).toBe("error");
+      expect(hook.result.current.error).toBe(code);
+      expect(store.manifests.has("recording-conflict")).toBe(true);
+      await hook.unmount();
+    },
+  );
 
   test("waits for a deferred final chunk before exposing same-recording retry", async () => {
     const { getUserMedia } = installMediaMocks();
@@ -2306,6 +2507,74 @@ describe("useVoiceInput", () => {
     expect(recovered.result.current.status).toBe("retrying");
     expect(recovered.result.current.recordingId).toBe("recording-live-tab");
     await recovered.unmount();
+  });
+
+  test("recovers a recording from a closed tab at once, but never from a live one", async () => {
+    installMediaMocks();
+    const held = new Set<string>();
+    const originalLocks = Object.getOwnPropertyDescriptor(navigator, "locks");
+    Object.defineProperty(navigator, "locks", {
+      configurable: true,
+      value: {
+        request: (name: string, _options: unknown, callback: () => Promise<void>) => {
+          held.add(name);
+          return callback().finally(() => held.delete(name));
+        },
+        query: async () => ({
+          held: [...held].map((name) => ({ name, mode: "exclusive" })),
+          pending: [],
+        }),
+      },
+    });
+    try {
+      const store = new MemoryVoiceRecordingStore();
+      await seedStoppedRecording(store, "recording-closed-tab", "2026-08-03T20:00:00.000Z");
+      // The tab that owned it heartbeated a moment ago and then closed.
+      await store.updateManifest(
+        "recording-closed-tab",
+        { ownerId: "closed-tab", ownerHeartbeatAt: new Date().toISOString() },
+        new Date().toISOString(),
+      );
+      await seedStoppedRecording(store, "recording-live-tab", "2026-08-03T20:01:00.000Z");
+      await store.updateManifest(
+        "recording-live-tab",
+        { ownerId: "live-tab", ownerHeartbeatAt: new Date().toISOString() },
+        new Date().toISOString(),
+      );
+      held.add("opengeni.voice-recording-owner:live-tab");
+
+      const hook = await renderHook(
+        () =>
+          useVoiceInput({
+            client: { transcribeAudio: async () => ({ text: "unused", languages: [] }) },
+            workspaceId: "ws-1",
+            capability,
+            enabled: true,
+            value: "",
+            setValue: () => undefined,
+            focusInput: () => undefined,
+            createRecordingStore: () => store,
+          }),
+        undefined,
+      );
+      await act(async () => {
+        await settle(40);
+      });
+      expect(hook.result.current.recordingId).toBe("recording-closed-tab");
+      expect(hook.result.current.status).toBe("recovered");
+
+      await act(async () => {
+        await hook.result.current.discard();
+        await settle(40);
+      });
+      // The other tab is still open: its recording stays private to it.
+      expect(hook.result.current.recordingId).toBeNull();
+      expect(store.manifests.get("recording-live-tab")?.ownerId).toBe("live-tab");
+      await hook.unmount();
+    } finally {
+      if (originalLocks) Object.defineProperty(navigator, "locks", originalLocks);
+      else delete (navigator as { locks?: unknown }).locks;
+    }
   });
 
   test("advances through every retained recording after the current one is discarded", async () => {

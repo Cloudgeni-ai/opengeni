@@ -54,7 +54,7 @@ const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 type ScriptedOutcome = Exclude<ManagedEmailDeliveryResult, { status: "sent" }>;
 
 class ScriptableManagedEmailTransport implements ManagedEmailTransport {
-  readonly sender = "OpenGeni Acceptance <acceptance@example.test>";
+  readonly sender = "Opengeni Acceptance <acceptance@example.test>";
   readonly idempotency = {
     scope: "opengeni-onboarding-acceptance-v1",
     retentionSeconds: 86_400,
@@ -219,6 +219,9 @@ function isExpectedNavigationReadCancellation(problem: string): boolean {
     pathname === "/v1/auth/get-session" ||
     /^\/v1\/workspaces\/[0-9a-f-]+\/(?:realtime-)?model-catalog$/u.test(pathname) ||
     /^\/v1\/workspaces\/[0-9a-f-]+\/(?:sessions|machines|new-session-draft)$/u.test(pathname) ||
+    // Sending from the new-chat page routes to the new session, which can
+    // cancel that session's first composer-draft read.
+    /^\/v1\/workspaces\/[0-9a-f-]+\/sessions\/[0-9a-f-]+\/composer-draft$/u.test(pathname) ||
     /^\/v1\/workspaces\/[0-9a-f-]+\/live-events\/stream$/u.test(pathname)
   );
 }
@@ -1472,7 +1475,19 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
     expect(prompt).toContain(`Opengeni API: ${publicOrigin}`);
     await expectNoAxeViolations(page, "body");
 
+    // The setup chat opens ready in its workspace's composer, and starts on Send.
     await page.getByRole("button", { name: "Let Opengeni implement it" }).click();
+    await page.waitForURL(/\/workspaces\/[0-9a-f-]{36}\/sessions$/u, { timeout: 30_000 });
+    const composer = page.getByRole("textbox", { name: "Message the agent" });
+    await composer.waitFor({ timeout: 30_000 });
+    const composerDeadline = Date.now() + 30_000;
+    while (
+      (await composer.inputValue()) !== "I want to add AI agents to my product. Help me set it up."
+    ) {
+      if (Date.now() > composerDeadline) throw new Error("The setup chat was not ready to send");
+      await page.waitForTimeout(200);
+    }
+    await page.getByRole("button", { name: "Send message", exact: true }).click();
     await page.waitForURL(/\/workspaces\/[0-9a-f-]{36}\/sessions\/[0-9a-f-]{36}$/u, {
       timeout: 30_000,
     });

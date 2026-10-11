@@ -25,8 +25,71 @@ import {
   type BrowserWorkingRuntimeReceipt,
 } from "../src/working-runtime-journal";
 import type { SqliteInteractionOperationJournal } from "../src/operation-journal";
+import { UnsettledCleanupError } from "../src/cleanup-error";
 
 describe("BrowserSupervisor", () => {
+  test("propagates failed process cleanup during controller shutdown", async () => {
+    await withSupervisor(
+      async ({ supervisor }) => {
+        await supervisor.createSession({ ...reference(1), headed: false });
+        await expect(supervisor.close()).rejects.toThrow("browser supervisor shutdown failed");
+        expect(supervisor.isIdle()).toBe(false);
+      },
+      {
+        expectShutdownFailure: true,
+        driverHooks: {
+          close: () => {
+            throw new Error("owned process cleanup failed");
+          },
+        },
+      },
+    );
+  });
+
+  test.each([false, true])(
+    "retains failed creation cleanup only when unconfirmed (%s)",
+    async (failed) => {
+      await withSupervisor(
+        async ({ supervisor }) => {
+          await expect(
+            supervisor.createSession({ ...reference(3), headed: false }),
+          ).rejects.toThrow();
+          expect(supervisor.listSessions()).toEqual([]);
+          expect(supervisor.isIdle()).toBe(!failed);
+        },
+        {
+          expectShutdownFailure: failed,
+          driverHooks: {
+            start: () => {
+              throw new Error("fixture launch failed");
+            },
+            close: () => {
+              if (failed) throw new Error("fixture process stop failed");
+            },
+          },
+        },
+      );
+    },
+  );
+
+  test("retains cleanup failure from a factory which never returned a driver", async () => {
+    await withSupervisor(
+      async ({ supervisor }) => {
+        await expect(supervisor.createSession({ ...reference(4), headed: false })).rejects.toThrow(
+          "fixture factory cleanup failed",
+        );
+        expect(supervisor.listSessions()).toEqual([]);
+        expect(supervisor.isIdle()).toBe(false);
+      },
+      {
+        expectShutdownFailure: true,
+        onFactory: () => {
+          throw new UnsettledCleanupError([], "fixture factory cleanup failed");
+        },
+      },
+    );
+  });
+
   test("protects creation and pending shutdown even when active inventory is empty", async () => {
     const directory = await mkdtemp("/tmp/ogb-update-idle-");
     const started = deferred(),
@@ -1101,6 +1164,7 @@ async function withSupervisor(
     contexts: Map<string, BrowserSupervisorDriverContext>;
   }) => Promise<void>,
   options: {
+    expectShutdownFailure?: boolean;
     maxSessions?: number;
     ephemeralContextPoolEnabled?: boolean;
     onFactory?: () => void;
@@ -1141,7 +1205,9 @@ async function withSupervisor(
   try {
     await callback({ supervisor, contexts });
   } finally {
-    await supervisor.close();
+    if (options.expectShutdownFailure)
+      await expect(supervisor.close()).rejects.toThrow("browser supervisor shutdown failed");
+    else await supervisor.close();
     await rm(directory, { recursive: true, force: true });
   }
 }
@@ -1483,6 +1549,163 @@ const workingAuthority = {
 };
 
 describe("same-working-directory controller restart", () => {
+  test.each(["failed-close", "suspend-write", "completion-write"] as const)(
+    "%s during shutdown cannot admit recovery",
+    async (failure) => {
+      await withWorkingCrashFixture(async ({ options, rootDirectory, socketRootDirectory }) => {
+        const first = await BrowserSupervisor.open({
+          rootDirectory,
+          socketRootDirectory,
+          inspectOwnedProcess: async () => "live",
+          createDriver: async (context) => ({
+            ...fakeDriver(context),
+            ownedProcessIdentity: async () => syntheticOwnedProcess(context),
+            close: async () => {
+              if (failure === "failed-close") throw new Error("synthetic close failure");
+            },
+          }),
+        });
+        await first.createSession({ ...options, recoverExistingWorkingDirectory: true });
+        const journal = (
+          first as unknown as {
+            sessions: Map<
+              string,
+              {
+                workingJournal: SqliteBrowserWorkingRuntimeJournal;
+              }
+            >;
+          }
+        ).sessions.get(options.browserSessionId)!.workingJournal;
+        const spy =
+          failure === "suspend-write"
+            ? spyOn(journal, "suspend").mockImplementation((receipt) => {
+                // Persist uncertainty, then fail before process shutdown.
+                journal.begin({ ...receipt, intent: "suspend" });
+                throw new Error("synthetic suspend persistence failure");
+              })
+            : failure === "completion-write"
+              ? spyOn(journal, "complete").mockImplementation(() => {
+                  throw new Error("synthetic completion failure");
+                })
+              : null;
+        await expect(first.close()).rejects.toThrow("shutdown failed");
+        spy?.mockRestore();
+        let launches = 0;
+        const second = await BrowserSupervisor.open({
+          rootDirectory,
+          socketRootDirectory,
+          inspectOwnedProcess: async () => "exited",
+          createDriver: async (context) => {
+            launches++;
+            return fakeDriver(context);
+          },
+        });
+        try {
+          await expect(
+            second.createSession({ ...options, recoverExistingWorkingDirectory: true }),
+          ).rejects.toThrow("preserved");
+          expect(launches).toBe(0);
+        } finally {
+          await second.close();
+          // Explicit cleanup is still allowed for the retained synthetic holder.
+          if (failure === "failed-close") {
+            const runtime = (
+              first as unknown as { sessions: Map<string, { driver: BrowserSupervisorDriver }> }
+            ).sessions.get(options.browserSessionId)!;
+            runtime.driver.close = async () => {};
+          }
+          await first.endSession(options);
+        }
+      });
+    },
+  );
+
+  test("explicit end racing shutdown never acknowledges recoverable suspension as retirement", async () => {
+    await withWorkingCrashFixture(async ({ options, rootDirectory, socketRootDirectory }) => {
+      let beginClose!: () => void, finishClose!: () => void;
+      const closing = new Promise<void>((resolve) => {
+        beginClose = resolve;
+      });
+      const closed = new Promise<void>((resolve) => {
+        finishClose = resolve;
+      });
+      const supervisor = await BrowserSupervisor.open({
+        rootDirectory,
+        socketRootDirectory,
+        inspectOwnedProcess: async () => "live",
+        createDriver: async (context) => ({
+          ...fakeDriver(context),
+          ownedProcessIdentity: async () => syntheticOwnedProcess(context),
+          close: async () => {
+            beginClose();
+            await closed;
+          },
+        }),
+      });
+      await supervisor.createSession({ ...options, recoverExistingWorkingDirectory: true });
+      const shutdown = supervisor.close();
+      await closing;
+      const end = supervisor.endSession(options).then(
+        () => null,
+        (error: unknown) => error,
+      );
+      finishClose();
+      await shutdown;
+      expect(await end).toMatchObject({ code: "resource_unavailable" });
+    });
+  });
+
+  test("graceful shutdown preserves exact profile recovery without replaying uncertain input", async () => {
+    await withWorkingCrashFixture(
+      async ({ options, action, rootDirectory, socketRootDirectory }) => {
+        let dispatches = 0;
+        const contexts: BrowserSupervisorDriverContext[] = [];
+        const open = () =>
+          BrowserSupervisor.open({
+            rootDirectory,
+            socketRootDirectory,
+            inspectOwnedProcess: async () => "exited",
+            createDriver: async (context) => {
+              contexts.push(context);
+              return {
+                ...fakeDriver(context, {
+                  dispatch: () => {
+                    dispatches++;
+                  },
+                }),
+                ownedProcessIdentity: async () => syntheticOwnedProcess(context),
+              };
+            },
+          });
+        const first = await open();
+        await first.createSession({ ...options, recoverExistingWorkingDirectory: true });
+        const profile = contexts[0]!.profileDirectory;
+        const socketDirectory = contexts[0]!.socketDirectory;
+        const identity = await stat(profile);
+        const socketIdentity = await stat(socketDirectory);
+        await writeFile(join(profile, "synthetic-profile-state"), "retained");
+        await first.close();
+        expect((await stat(socketDirectory)).ino).toBe(socketIdentity.ino);
+        const second = await open();
+        try {
+          const result = await second.createSession({
+            ...options,
+            recoverExistingWorkingDirectory: true,
+          });
+          expect(result.browserSessionId).toBe(options.browserSessionId);
+          expect(result.controllerGeneration).toBe(options.controllerGeneration);
+          expect(contexts[1]!.profileDirectory).toBe(profile);
+          expect((await stat(profile)).ino).toBe(identity.ino);
+          expect(await readFile(join(profile, "synthetic-profile-state"), "utf8")).toBe("retained");
+          expect((await second.action(action)).state).toBe("outcome_unknown");
+          expect(dispatches).toBe(0);
+        } finally {
+          await second.close();
+        }
+      },
+    );
+  });
+
   test.each(["live", "exited"] as const)(
     "completed %s receipt preserves exact directory and never replays an accepted action",
     async (processState) => {

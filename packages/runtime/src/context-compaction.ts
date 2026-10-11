@@ -27,6 +27,7 @@ import {
 } from "@opengeni/contracts";
 import { createHash } from "node:crypto";
 import { isProxy } from "node:util/types";
+import { projectHostedSearchEvidence } from "./hosted-search-evidence";
 
 import {
   latestReasoningConfiguration,
@@ -84,7 +85,7 @@ export const USER_MESSAGE_TRUNCATION_MARKER =
   "\n[... middle truncated for context compaction ...]\n";
 
 export const REMOTE_COMPACTION_TOOL_RESULT_OMISSION =
-  "[OpenGeni omitted tool result body for context compaction retry]";
+  "[Opengeni omitted tool result body for context compaction retry]";
 
 const RESULT_TYPE_BY_CALL_TYPE = TOOL_CALL_RESULT_TYPE_BY_CALL_TYPE;
 const RESULT_TYPES = new Set(Object.values(RESULT_TYPE_BY_CALL_TYPE));
@@ -1502,7 +1503,7 @@ function remoteCompactionShellOutputIsMinimal(output: unknown): boolean {
  * Fit the explicit checkpoint request without mutating canonical history.
  *
  * Codex first replaces oversized tool outputs in its temporary remote-
- * compaction input. OpenGeni does the same oldest-first, preserving the most
+ * compaction input. Opengeni does the same oldest-first, preserving the most
  * recent tool detail for the plaintext summary. If that is still insufficient,
  * whole oldest user-delimited work units are removed and the remaining suffix
  * is protocol-sanitized so no call/result/reasoning fragment is orphaned.
@@ -1551,7 +1552,9 @@ export function prepareCompactionPromptInput(
   maxInputTokens: number,
 ): PreparedCompactionPromptInput {
   const budget = Math.max(0, Math.floor(maxInputTokens));
-  let history = omitOpaqueArtifactsFromPortableCompactionHistory(items).slice();
+  let history = omitOpaqueArtifactsFromPortableCompactionHistory(items).map((item) =>
+    projectHostedSearchEvidence(item),
+  );
   let estimatedInputTokens = estimateTokens(buildCompactionPromptInput(history));
   let rewrittenToolOutputs = 0;
 
@@ -1768,7 +1771,7 @@ function buildAttachmentCatalogItem(
   return {
     type: "message",
     role: "user",
-    content: "[OpenGeni retained attachment references]",
+    content: "[Opengeni retained attachment references]",
     [MODEL_ATTACHMENT_REFS_FIELD]: omittedRefs,
     [MODEL_ATTACHMENT_CATALOG_MARKER]: true,
   };
@@ -2002,7 +2005,10 @@ function messageText(item: CompactionItem): string {
 }
 
 export function renderCompactionPromptInputForChat(input: readonly CompactionItem[]): string {
-  return input.map(renderItem).join("\n");
+  return input
+    .map((item) => projectHostedSearchEvidence(item))
+    .map(renderItem)
+    .join("\n");
 }
 
 function renderItem(item: CompactionItem): string {

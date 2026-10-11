@@ -1,0 +1,113 @@
+{
+  "name": "@opengeni/react-native",
+  "version": "1.4.4",
+  "description": "React Native and Expo kit for Opengeni agents: the native session timeline, composer adapters, voice dictation, and realtime voice calls (CallKit) on the same SDK controllers as the web.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Cloudgeni-ai/opengeni.git",
+    "directory": "packages/react-native"
+  },
+  "files": [
+    "dist",
+    "src",
+    "ios",
+    "expo-module.config.json",
+    "README.md",
+    "app.plugin.js",
+    "plugin"
+  ],
+  "type": "module",
+  "main": "./src/index.ts",
+  "module": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./adapters": {
+      "types": "./src/adapters.ts",
+      "default": "./src/adapters.ts"
+    },
+    "./expo": {
+      "types": "./src/expo.ts",
+      "default": "./src/expo.ts"
+    },
+    "./ui": {
+      "types": "./src/ui/index.ts",
+      "default": "./src/ui/index.ts"
+    },
+    "./timeline": {
+      "types": "./src/timeline/index.ts",
+      "default": "./src/timeline/index.ts"
+    },
+    "./timeline/markdown": {
+      "types": "./src/timeline/markdown.tsx",
+      "default": "./src/timeline/markdown.tsx"
+    },
+    "./timeline/previews": {
+      "types": "./src/timeline/previews.tsx",
+      "default": "./src/timeline/previews.tsx"
+    },
+    "./webrtc": {
+      "types": "./src/webrtc.ts",
+      "default": "./src/webrtc.ts"
+    }
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "build": "bun ../../scripts/build-typescript-package.ts",
+    "prepublishOnly": "bash ../../scripts/prepublish-guard"
+  },
+  "dependencies": {
+    "@opengeni/contracts": "workspace:*",
+    "@opengeni/react": "workspace:*",
+    "@opengeni/sdk": "workspace:*",
+    "thinking-orbs": "^0.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.14",
+    "expo-audio": "~57.0.5",
+    "expo-modules-core": "57.0.20",
+    "react-native-markdown-display": "^7.0.2",
+    "react-native-safe-area-context": "~5.7.0",
+    "react-native-webrtc": "124.0.8",
+    "react-native-webview": "13.16.1",
+    "tsup": "^8.5.0"
+  },
+  "peerDependencies": {
+    "expo": ">=57",
+    "expo-audio": "*",
+    "expo-crypto": "*",
+    "expo-document-picker": "*",
+    "expo-file-system": "*",
+    "expo-glass-effect": "*",
+    "expo-image-picker": "*",
+    "expo-modules-core": "*",
+    "react": ">=19",
+    "react-native": ">=0.80",
+    "react-native-markdown-display": ">=7",
+    "react-native-reanimated": ">=4",
+    "react-native-safe-area-context": ">=5",
+    "react-native-svg": ">=15",
+    "react-native-webrtc": ">=124",
+    "react-native-webview": ">=13"
+  },
+  "peerDependenciesMeta": {
+    "react-native-markdown-display": {
+      "optional": true
+    },
+    "react-native-webrtc": {
+      "optional": true
+    },
+    "react-native-webview": {
+      "optional": true
+    }
+  }
+}

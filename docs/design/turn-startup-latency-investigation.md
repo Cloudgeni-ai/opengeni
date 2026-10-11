@@ -220,5 +220,5 @@ servers, long history, NATS expiry boundaries, and concurrent workers.
 - Events remain durable before live publication.
 - File writes remain hash-verified, atomic, and read-only.
 - Connected Machines retain ambient user filesystem and credential authority;
-OpenGeni does not clone a replacement repository or inject platform GitHub
+Opengeni does not clone a replacement repository or inject platform GitHub
 credentials.

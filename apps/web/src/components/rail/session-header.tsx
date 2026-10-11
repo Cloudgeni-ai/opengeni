@@ -12,6 +12,8 @@ import {
   SessionStatus as SessionStatusBadge,
   SESSION_STATUS_META,
   StatusDot,
+  sessionDisplayStatus,
+  type SessionDisplayStatus,
 } from "@opengeni/react";
 import { ModelMark, modelDisplayName, type SessionEventsConnectionState } from "@opengeni/react";
 import type { SessionSummary } from "@opengeni/sdk";
@@ -19,6 +21,8 @@ import { SiteOriginLink } from "@/components/session/site-origin-link";
 import {
   ArchiveIcon,
   ArchiveRestoreIcon,
+  BellIcon,
+  BellOffIcon,
   CalendarClockIcon,
   LockIcon,
   MoreHorizontalIcon,
@@ -28,11 +32,18 @@ import {
   PencilIcon,
   PinIcon,
   SearchIcon,
+  ShieldCheckIcon,
+  ShieldOffIcon,
 } from "lucide-react";
 import { useCallback, useRef, useState, type ReactNode } from "react";
 
 import { BillingClassMark, type BillingClass } from "@/components/billing-class-mark";
 import { ConnectionPill } from "@/components/common";
+import {
+  GrantSessionAdminAccessDialog,
+  SessionAdminAccessIndicator,
+  type SessionAdminAccessControl,
+} from "@/components/session/session-admin-access";
 import { SessionAncestryBreadcrumb } from "@/components/session/subagents";
 import { Button } from "@/components/ui/button";
 import {
@@ -45,7 +56,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
 import { requestConversationFind } from "@/lib/conversation-find-event";
-import { sessionInputWait } from "@/lib/session-rail";
+import { sessionControlPaused, sessionInputWait } from "@/lib/session-rail";
 import { useSessionStartup } from "@/lib/session-startup";
 import { isCodexProductModel } from "@/lib/session-model";
 import {
@@ -55,6 +66,7 @@ import {
   type InlineRename,
 } from "@/lib/session-rename";
 import { pinLiveAnnouncement } from "@/lib/pin-live-announcement";
+import type { SessionRepliesMute } from "@/lib/inbox";
 import { labelEffort, type IntelligenceEffort } from "@/lib/session-tools";
 import type { LatencyMode, Session } from "@/types";
 
@@ -73,6 +85,8 @@ export function SessionHeader({
   onRename,
   onPin,
   onArchive,
+  repliesMute,
+  adminAccess,
   sandboxSlot,
   codexSlot,
   accessSlot,
@@ -82,6 +96,7 @@ export function SessionHeader({
   lastStartedLatencyMode,
   billingClass,
   modelLabel,
+  modelLogoUrl,
   policyLoading,
 }: {
   session: Session;
@@ -104,6 +119,16 @@ export function SessionHeader({
   onPin: (session: Session, pinned: boolean) => Promise<Session | null>;
   /** Archives or restores this root session. Absent hides the action. */
   onArchive?: (session: Session, archived: boolean) => Promise<void>;
+  /**
+   * The signed-in person's mute on this session's replies. Absent hides the
+   * action (sub-agents, people without an inbox, servers without it).
+   */
+  repliesMute?: SessionRepliesMute | null;
+  /**
+   * This session's admin access, when the viewer can see it on or give it.
+   * Absent hides the shield and the menu action.
+   */
+  adminAccess?: SessionAdminAccessControl | null;
   /** The "Run on <machine>" control — a live component in production. */
   sandboxSlot?: ReactNode;
   /**
@@ -127,6 +152,7 @@ export function SessionHeader({
   billingClass?: BillingClass;
   /** Product model label (e.g. GPT-5.6 Luna). */
   modelLabel?: string;
+  modelLogoUrl?: string | undefined;
   /**
    * True while last-started policy and/or model catalog are still resolving.
    * Avoids flashing session defaults (wrong provider) before admitted truth.
@@ -134,6 +160,11 @@ export function SessionHeader({
   policyLoading?: boolean;
 }) {
   const waiting = sessionInputWait({ ...session, status });
+  // A session the runtime could not start reads as stuck, not "Waiting on you".
+  const displayStatus = sessionDisplayStatus({
+    status,
+    admissionBlock: session.admissionBlock,
+  });
   const startup = useSessionStartup({ ...session, status });
   const startupLabel =
     startup === "starting"
@@ -148,7 +179,7 @@ export function SessionHeader({
   const displayEffort: IntelligenceEffort = lastStartedReasoningEffort ?? session.reasoningEffort;
   const displayLatency: LatencyMode = lastStartedLatencyMode ?? session.latencyMode;
   // Codex → clickable account chip. Other rails → static provider icon only
-  // (never invent a text "OpenGeni"/"BYOK" word). Don't key off `codexSlot != null`.
+  // (never invent a text "Opengeni"/"BYOK" word). Don't key off `codexSlot != null`.
   const isCodexRail = resolvedBilling === "codex_subscription";
   const policyBits = [
     resolvedModel,
@@ -158,6 +189,7 @@ export function SessionHeader({
   const rename = useInlineRename(session, onRename);
   const pin = useSessionPinToggle(session, onPin);
   const canArchive = Boolean(onArchive) && session.parentSessionId === null;
+  const [grantAdminOpen, setGrantAdminOpen] = useState(false);
   // Menu actions that move focus (rename input, find field) run after the menu
   // has closed, so its focus restoration cannot steal focus back to the trigger.
   const afterMenuClose = useRef<(() => void) | null>(null);
@@ -172,7 +204,7 @@ export function SessionHeader({
   ) : (
     // The model maker's logo; the payment rail only when the maker has none.
     <ModelMark
-      model={modelId}
+      model={{ id: modelId, logoUrl: modelLogoUrl }}
       className="size-3.5 text-fg-muted"
       fallback={<BillingClassMark billingClass={resolvedBilling} className="size-3.5 shrink-0" />}
     />
@@ -214,12 +246,13 @@ export function SessionHeader({
           {/* Below lg the lifecycle is a dot beside the title; the full badge
               and connection pill take over from lg. */}
           <CompactSessionStatus
-            paused={session.effectiveControl.state !== "active"}
+            paused={sessionControlPaused(session)}
             waiting={Boolean(waiting)}
-            status={status}
+            status={displayStatus}
             label={startupLabel}
           />
           {accessSlot}
+          {adminAccess ? <SessionAdminAccessIndicator control={adminAccess} /> : null}
         </div>
       </div>
       <div className="ml-auto flex shrink-0 items-center justify-end gap-0.5 lg:min-w-0 lg:max-w-full lg:shrink lg:flex-wrap lg:gap-2">
@@ -284,7 +317,7 @@ export function SessionHeader({
               control is Active (Running + Active) is redundant noise. When
               paused, admission is the headline — hide lifecycle so we don't
               imply the session is still "Running"/"Idle" under a pause gate. */}
-          {session.effectiveControl.state === "active" ? (
+          {!sessionControlPaused(session) ? (
             waiting ? (
               <span
                 className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-border bg-surface px-2 py-0.5 text-control font-medium text-fg-muted"
@@ -294,7 +327,7 @@ export function SessionHeader({
                 Waiting
               </span>
             ) : (
-              <SessionStatusBadge status={status} label={startupLabel} />
+              <SessionStatusBadge status={displayStatus} label={startupLabel} />
             )
           ) : (
             <WorkstreamControlIndicator session={session} />
@@ -382,6 +415,28 @@ export function SessionHeader({
                 {sandboxSlot}
               </div>
             ) : null}
+            {repliesMute ? (
+              <DropdownMenuItem disabled={repliesMute.busy} onSelect={() => repliesMute.toggle()}>
+                {repliesMute.muted ? <BellIcon /> : <BellOffIcon />}
+                {repliesMute.muted ? "Unmute replies" : "Mute replies"}
+              </DropdownMenuItem>
+            ) : null}
+            {adminAccess?.state.active && adminAccess.state.canRevoke ? (
+              <DropdownMenuItem disabled={adminAccess.busy} onSelect={() => adminAccess.revoke()}>
+                <ShieldOffIcon />
+                Turn off admin access
+              </DropdownMenuItem>
+            ) : adminAccess && !adminAccess.state.active && adminAccess.state.canGrant ? (
+              <DropdownMenuItem
+                disabled={adminAccess.busy}
+                onSelect={() => {
+                  afterMenuClose.current = () => setGrantAdminOpen(true);
+                }}
+              >
+                <ShieldCheckIcon />
+                Give admin access…
+              </DropdownMenuItem>
+            ) : null}
             {canArchive ? (
               <>
                 <DropdownMenuSeparator />
@@ -394,6 +449,13 @@ export function SessionHeader({
             ) : null}
           </DropdownMenuContent>
         </DropdownMenu>
+        {adminAccess ? (
+          <GrantSessionAdminAccessDialog
+            control={adminAccess}
+            open={grantAdminOpen}
+            onOpenChange={setGrantAdminOpen}
+          />
+        ) : null}
       </div>
     </header>
   );
@@ -408,7 +470,7 @@ function CompactSessionStatus({
 }: {
   paused: boolean;
   waiting: boolean;
-  status: Session["status"];
+  status: SessionDisplayStatus;
   label?: string;
 }) {
   if (paused) {
@@ -435,8 +497,7 @@ function CompactSessionStatus({
       </span>
     );
   }
-  const name =
-    status === "waiting_capacity" ? "Waiting" : (label ?? SESSION_STATUS_META[status].label);
+  const name = label ?? SESSION_STATUS_META[status].label;
   return (
     <span
       data-compact-session-status={status}
@@ -453,7 +514,7 @@ function CompactSessionStatus({
 /** Pause-only header chip (Active is not shown — lifecycle status covers “go”). */
 function WorkstreamControlIndicator({ session }: { session: Session }) {
   const control = session.effectiveControl;
-  if (control.state !== "paused") {
+  if (control.state !== "paused" || session.status === "cancelled") {
     return null;
   }
   const blocker = control.primaryBlocker;

@@ -22,6 +22,7 @@ function server(input: {
   fetchImpl: typeof fetch;
   resolveCredential?: GmailRestMcpServerOptions["resolveCredential"];
   onAuthNeeded?: GmailRestMcpServerOptions["onAuthNeeded"];
+  watchTopicName?: string;
 }) {
   return new GmailRestMcpServer({
     workspaceId: "ws_1",
@@ -36,11 +37,26 @@ function server(input: {
         connectionId: "conn_1",
       })),
     ...(input.onAuthNeeded ? { onAuthNeeded: input.onAuthNeeded } : {}),
+    ...(input.watchTopicName ? { watchTopicName: input.watchTopicName } : {}),
     fetchImpl: input.fetchImpl,
   });
 }
 
 describe("Gmail REST MCP adapter", () => {
+  test("offers watch_mailbox only when the deployment configures a Pub/Sub topic", async () => {
+    const fetchImpl = async () => Response.json({});
+    const without = (await server({ fetchImpl }).listTools()).map((tool) => tool.name);
+    expect(without).not.toContain("watch_mailbox");
+    expect(without).toContain("stop_watch");
+    expect(without).toHaveLength(GMAIL_REST_MCP_TOOLS.length - 1);
+    const withTopic = await server({
+      fetchImpl,
+      watchTopicName: "projects/example-project/topics/gmail-events",
+    }).listTools();
+    expect(withTopic.map((tool) => tool.name)).toContain("watch_mailbox");
+    expect(withTopic).toHaveLength(GMAIL_REST_MCP_TOOLS.length);
+  });
+
   test("registers through the reusable local bridge contract", () => {
     expect(
       GMAIL_REST_MCP_BRIDGE_ADAPTER.matches({
@@ -351,7 +367,7 @@ describe("Gmail REST MCP adapter", () => {
     expect(providerAuthorizations).toBe(1);
   });
 
-  test("rejects sensitive label additions before any provider request", async () => {
+  test("recoverable Trash uses the ordinary governed label operation", async () => {
     let requests = 0;
     const gmail = server({
       fetchImpl: async () => {
@@ -363,9 +379,8 @@ describe("Gmail REST MCP adapter", () => {
       threadId: "t1",
       labelIds: ["TRASH"],
     })) as { isError?: boolean; content: Array<{ text: string }> };
-    expect(result.isError).toBe(true);
-    expect(result.content[0]!.text).toContain("TRASH and SPAM");
-    expect(requests).toBe(0);
+    expect(result.isError).not.toBe(true);
+    expect(requests).toBe(1);
   });
 
   test("creates a draft as base64url MIME but never sends it", async () => {

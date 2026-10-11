@@ -5,7 +5,7 @@
 //! * [`Command::Run`] — the DEFAULT, FOREGROUND run model: enroll-if-needed, then
 //!   dial the control plane and serve until stopped. The machine is online while
 //!   this runs and offline when it stops.
-//! * [`Command::Connect`] — add this machine to another OpenGeni workspace or
+//! * [`Command::Connect`] — add this machine to another Opengeni workspace or
 //!   deployment without replacing any existing connection.
 //! * [`Command::Start`] — idempotently install, enable, and start the ordinary
 //!   always-on background service. `run` remains the explicit foreground mode.
@@ -18,7 +18,7 @@
 
 use clap::{Parser, Subcommand};
 
-/// The OpenGeni self-hosted agent: run your own machine as a first-class OpenGeni
+/// The Opengeni self-hosted agent: run your own machine as a first-class Opengeni
 /// sandbox.
 #[derive(Debug, Parser)]
 #[command(name = "opengeni-agent", version, about, long_about = None)]
@@ -27,9 +27,9 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
 
-    /// The control-plane API base URL used for enrollment (for managed OpenGeni,
+    /// The control-plane API base URL used for enrollment (for managed Opengeni,
     /// `https://app.opengeni.ai`). Falls back to `$OPENGENI_API_URL`, then the
-    /// managed OpenGeni origin.
+    /// managed Opengeni origin.
     #[arg(long, global = true, env = "OPENGENI_API_URL")]
     pub api_url: Option<String>,
 }
@@ -40,7 +40,7 @@ pub enum Command {
     /// Enroll if needed, then dial the control plane and serve in the foreground
     /// (the default). The machine is online while this process runs.
     Run(RunArgs),
-    /// Connect this machine to an OpenGeni workspace. Repeat for as many
+    /// Connect this machine to an Opengeni workspace. Repeat for as many
     /// workspaces or deployments as you need; existing connections are retained.
     Connect(EnrollArgs),
     /// Backward-compatible spelling of `connect`.
@@ -364,6 +364,11 @@ pub struct CodemodeCallArgs {
     /// Tool arguments as one JSON object. Defaults to `{}`.
     #[arg(default_value = "{}")]
     pub arguments: String,
+
+    /// Print the exact result. By default a text block that only repeats
+    /// `structuredContent` as JSON is omitted.
+    #[arg(long)]
+    pub full: bool,
 }
 
 /// Arguments for the `uninstall` subcommand.
@@ -728,6 +733,7 @@ mod tests {
             })) => {
                 assert_eq!(args.tool, "interaction.browser.observe");
                 assert!(args.arguments.contains("browserSessionId"));
+                assert!(!args.full);
             }
             other => panic!("expected codemode call, got {other:?}"),
         }

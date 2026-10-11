@@ -140,6 +140,12 @@ const CAPTURE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_milli
 #[cfg(feature = "macos-desktop")]
 #[async_trait]
 impl DesktopBackend for MacosDesktop {
+    fn can_offer_display(&self) -> bool {
+        // CoreGraphics display metadata does not require Screen Recording. A
+        // pending TCC grant must not hide enrollment's explicit control consent.
+        macffi::list_displays().is_ok_and(|displays| !displays.is_empty())
+    }
+
     fn probe(&self) -> Option<v1::Display> {
         let info = macffi::probe_display()?;
         Some(v1::Display {
@@ -155,7 +161,7 @@ impl DesktopBackend for MacosDesktop {
     async fn capture(&self) -> PlatformResult<CapturedFrame> {
         // The leaf capture blocks on a ScreenCaptureKit completion handler; keep
         // it (and the PNG encode) off the async runtime like the Linux path does.
-        tokio::task::spawn_blocking(|| {
+        crate::spawn_blocking_reserved(|| {
             // A ScreenCaptureKit stream can hand back a null image / time out on the
             // FIRST frame right after the display wakes or the stream warms up — a
             // transient miss, not a real failure. Retry a bounded few times with a
@@ -175,6 +181,13 @@ impl DesktopBackend for MacosDesktop {
                         });
                     }
                     Err(err) => {
+                        if matches!(err, macffi::MacFfiError::TimedOut(_)) {
+                            // SCK retains its completion callback after our
+                            // bounded wait. Timeout is not native completion.
+                            if let Some(reservation) = crate::current_work_reservation() {
+                                reservation.mark_unsettled();
+                            }
+                        }
                         let terminal = !macffi::screen_capture_granted();
                         last_err = Some(map_ffi_err(err));
                         if terminal || attempt + 1 >= CAPTURE_MAX_ATTEMPTS {
@@ -202,7 +215,7 @@ impl DesktopBackend for MacosDesktop {
             ));
         }
         let event = map_input(input)?;
-        tokio::task::spawn_blocking(move || macffi::inject(&event).map_err(map_ffi_err))
+        crate::spawn_blocking_reserved(move || macffi::inject(&event).map_err(map_ffi_err))
             .await
             .map_err(|e| PlatformError::os(format!("macOS inject task join: {e}")))?
     }
@@ -215,7 +228,7 @@ impl DesktopBackend for MacosDesktop {
         // cannot perform.
         if !macffi::screen_capture_granted() {
             return Some(
-                "Screen Recording permission not granted — enable it for OpenGeni in \
+                "Screen Recording permission not granted — enable it for Opengeni in \
                  System Settings → Privacy & Security → Screen & System Audio Recording, \
                  availability refreshes automatically after permission is granted."
                     .to_string(),

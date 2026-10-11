@@ -30,7 +30,7 @@ import { apiErrorTechnicalFacts, userErrorTextWithoutReference } from "@/lib/api
 export interface FailedLoad {
   /** What happened: "Couldn't load the history". */
   message: string;
-  /** What to do next. A raw "OpenGeni API 404: ..." string is replaced with advice. */
+  /** What to do next. A raw "Opengeni API 404: ..." string is replaced with advice. */
   detail?: ReactNode;
   /** The error itself: its advice stands in for a missing detail, its facts go behind Technical details. */
   cause?: unknown;

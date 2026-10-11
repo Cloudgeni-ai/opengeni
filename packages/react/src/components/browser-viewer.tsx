@@ -82,13 +82,29 @@ import { InteractionInterventionBanner } from "./interaction-intervention-banner
 import { BrowserSelectControl } from "./browser-select-control";
 import { useViewerMenuDismiss } from "./use-viewer-menu-dismiss";
 
+/** Auto-ending a lost attached-device browser: bounded retries for transient failures only. */
+const STALE_BROWSER_END_MAX_ATTEMPTS = 3;
+const STALE_BROWSER_END_RETRY_BASE_MS = 5_000;
+
+/**
+ * Delay before retrying an automatic end of a lost attached-device browser, or null to stop.
+ * A refusal (4xx, e.g. 409 when the server will not end it) is never retried: re-sending it on
+ * every registry refresh looped about one request per second on prod.
+ */
+export function staleBrowserEndRetryDelayMs(cause: unknown, failedAttempts: number): number | null {
+  const status = (cause as { status?: unknown } | null)?.status;
+  if (typeof status === "number" && status >= 400 && status < 500) return null;
+  if (failedAttempts >= STALE_BROWSER_END_MAX_ATTEMPTS) return null;
+  return STALE_BROWSER_END_RETRY_BASE_MS * 2 ** (failedAttempts - 1);
+}
+
 export type BrowserViewerNotification = {
   kind: "error" | "info";
   message: string;
 };
 
 export type BrowserViewerProps = EmbeddedBrowserInteractionClientOverride & {
-  /** The selected OpenGeni agent/session. Peer BrowserSessions stay discoverable. */
+  /** The selected Opengeni agent/session. Peer BrowserSessions stay discoverable. */
   sessionId: string;
   enabled?: boolean | undefined;
   /** Whether the Browser tab is selected. Keeps the mounted media stream warm
@@ -190,6 +206,7 @@ export function BrowserViewer({
     [registry.sessions],
   );
   const endedGenerationLossRef = useRef(new Set<string>());
+  const endStaleBrowserAttemptsRef = useRef(new Map<string, number>());
   const endStaleBrowser = registry.end;
   useEffect(() => {
     if (!enabled) return;
@@ -203,8 +220,12 @@ export function BrowserViewer({
       }
       if (endedGenerationLossRef.current.has(session.id)) continue;
       endedGenerationLossRef.current.add(session.id);
-      void endStaleBrowser(session.id).catch(() => {
-        endedGenerationLossRef.current.delete(session.id);
+      void endStaleBrowser(session.id).catch((cause: unknown) => {
+        const attempts = (endStaleBrowserAttemptsRef.current.get(session.id) ?? 0) + 1;
+        endStaleBrowserAttemptsRef.current.set(session.id, attempts);
+        const delay = staleBrowserEndRetryDelayMs(cause, attempts);
+        if (delay === null) return;
+        setTimeout(() => endedGenerationLossRef.current.delete(session.id), delay);
       });
     }
   }, [enabled, endStaleBrowser, registry.sessions]);
@@ -1287,9 +1308,11 @@ function BrowserUnavailableNotice({ session }: { session: BrowserSession }) {
       ? "The computer running it reached its time limit."
       : session.failureCode === "source_placement_changed"
         ? "This chat moved to another computer."
-        : session.lifecycle === "failed"
-          ? "It stopped unexpectedly."
-          : "The connection to it was lost.";
+        : session.failureCode === "idle_released"
+          ? "It stopped after it went unused."
+          : session.lifecycle === "failed"
+            ? "It stopped unexpectedly."
+            : "The connection to it was lost.";
   return (
     <div role="status">
       <p className="mt-3 text-og-menu font-medium text-og-fg">Browser unavailable</p>

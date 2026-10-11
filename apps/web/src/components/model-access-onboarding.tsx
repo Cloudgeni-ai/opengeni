@@ -1,7 +1,6 @@
 import { modelDisplayName } from "@opengeni/sdk/model-display";
 import { DirectModelProviderForm } from "@/components/direct-model-provider-connection";
 import { pollDeviceAuthorization } from "@opengeni/connect";
-import { labelReasoningEffort } from "@opengeni/react";
 import type { BillingCheckoutStatus, CodexConnectPoll, CodexConnectStart } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { ArrowUpRightIcon, Loader2Icon } from "lucide-react";
@@ -20,7 +19,6 @@ import { CelebrationBurst } from "@/components/onboarding/celebration-burst";
 import { CreditsPrize } from "@/components/onboarding/credits-prize";
 import { SubscriptionDeviceCodePanel } from "@/components/subscription-device-code-panel";
 import { Button } from "@/components/ui/button";
-import { Disclosure } from "@/components/ui/disclosure";
 import { ListRow } from "@/components/ui/list-row";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -43,7 +41,7 @@ import {
   pollSuperGrokDeviceLogin,
 } from "@/components/supergrok-device-poll";
 
-type ProviderKey = "vercel" | "openrouter";
+type ProviderKey = "vercel" | "openrouter" | "opper";
 
 const PROVIDER_KEYS: Record<
   ProviderKey,
@@ -54,7 +52,7 @@ const PROVIDER_KEYS: Record<
     placeholder: string;
     help: string;
     family: ConnectedModelFamily;
-    analytics: "connect_ai_gateway" | "connect_openrouter";
+    analytics: "connect_ai_gateway" | "connect_openrouter" | "connect_opper";
   }
 > = {
   vercel: {
@@ -75,6 +73,15 @@ const PROVIDER_KEYS: Record<
     family: "openrouter",
     analytics: "connect_openrouter",
   },
+  opper: {
+    domain: "api.opper.ai",
+    role: "opper",
+    label: "Opper",
+    placeholder: "Opper API key",
+    help: "Create one at platform.opper.ai under API keys.",
+    family: "opper",
+    analytics: "connect_opper",
+  },
 };
 
 /** Names the service in the selection toast; model labels repeat across services. */
@@ -83,6 +90,7 @@ const FAMILY_LABELS: Record<ConnectedModelFamily, string> = {
   supergrok: "SuperGrok",
   vercel_gateway: "Vercel AI Gateway",
   openrouter: "OpenRouter",
+  opper: "Opper",
   credits: "Opengeni credits",
   openai: "OpenAI",
   azure_openai: "Azure OpenAI",
@@ -107,20 +115,12 @@ export type IncludedOnboardingModel = {
   free: boolean;
 };
 
-/** "GPT-6 Luna with extra high reasoning", or just the label when there is no effort to name. */
-function describeCreditsModel(model: StartingCreditsOnboarding["model"]): string {
-  const name = modelDisplayName(model);
-  if (model.reasoningEffort === "none") return name;
-  return `${name} with ${labelReasoningEffort(model.reasoningEffort).toLowerCase()} reasoning`;
-}
-
 /**
  * First-sign-in product step after the durable organization-name lifecycle.
  * When the organization already holds Opengeni credits (for example the
  * verified-signup trial grant) and new chats default to a credits model,
  * starting to chat on those credits is the primary path: the step shows the
- * balance and the resolved default, and names the free model as what applies
- * once the credits run out. Otherwise, when the deployment includes a default
+ * balance without promising a particular model. Otherwise, when the deployment includes a default
  * model, starting to chat with it is the primary path. Every connection or
  * purchase is an optional upgrade. Connecting a model updates the
  * actor-private new-chat draft so the next chat preselects that model. Leaving
@@ -169,7 +169,8 @@ export function ModelAccessOnboardingPanel({
   const [open, setOpen] = useState<ModelProviderId | "credits" | null>(
     !startingCredits && !includedModel && billingMode === "stripe" ? "credits" : null,
   );
-  const keyProvider: ProviderKey | null = open === "vercel" || open === "openrouter" ? open : null;
+  const keyProvider: ProviderKey | null =
+    open === "vercel" || open === "openrouter" || open === "opper" ? open : null;
   const connectedModelId = useRef<string | undefined>(undefined);
   const [apiKey, setApiKey] = useState("");
   const [topupAmount, setTopupAmount] = useState("25.00");
@@ -219,7 +220,7 @@ export function ModelAccessOnboardingPanel({
 
   function leaveOnboarding(): void {
     // Leaving mid-save would complete twice or drop the connected selection.
-    if (finishing.current) return;
+    if (finishing.current || selectionRetry === "credits") return;
     stopDeviceLogin();
     onboardingJourney().completed(
       "model_access",
@@ -231,6 +232,7 @@ export function ModelAccessOnboardingPanel({
   async function finishWithConnectedModel(
     family: ConnectedModelFamily,
     preferredModelId?: string,
+    complete = true,
   ): Promise<boolean> {
     connectedModelId.current = preferredModelId;
     if (client) {
@@ -242,26 +244,39 @@ export function ModelAccessOnboardingPanel({
           family,
           preferredModelId,
         );
+        if (cancelled.current) return false;
         if (model) {
           setSelectionRetry(null);
-          toast.success(
-            `${modelDisplayName(model)} (${FAMILY_LABELS[family]}) is selected for your next chat`,
-          );
+          if (complete)
+            toast.success(
+              `${modelDisplayName(model)} (${FAMILY_LABELS[family]}) is selected for your next chat`,
+            );
         } else {
           setSelectionRetry(family);
-          toast.error("The connection is ready, but its model is not selectable yet");
+          toast.error(
+            family === "credits"
+              ? "Credits added. A covered model isn't available yet."
+              : "The connection is ready, but its model is not selectable yet",
+          );
           return false;
         }
       } catch (error) {
+        if (cancelled.current) return false;
         setSelectionRetry(family);
-        toast.error("Model connected, but your new-chat selection could not be saved", {
-          description: userErrorText(error),
-        });
+        toast.error(
+          family === "credits"
+            ? "Credits added. Couldn't prepare your next chat."
+            : "Model connected, but your new-chat selection could not be saved",
+          {
+            description: userErrorText(error),
+          },
+        );
         return false;
       } finally {
         finishing.current = false;
       }
     }
+    if (!complete) return true;
     onboardingJourney().completed("model_access", "connected_model");
     onComplete();
     return true;
@@ -453,18 +468,18 @@ export function ModelAccessOnboardingPanel({
     setOpen((current) => (current === row ? null : row));
   }
 
-  function celebrateCheckout(status: BillingCheckoutStatus): void {
+  async function celebrateCheckout(status: BillingCheckoutStatus): Promise<void> {
+    setBusy(true);
     setWon((previous) => ({
       amountMicros: status.credit.amountMicros,
       balanceMicros: status.balance?.balanceMicros ?? null,
       free: status.credit.free,
       celebration: (previous?.celebration ?? 0) + 1,
     }));
-    // Without a credits default yet, make the next chat use the credits just added.
-    if (!startingCredits && client) {
-      void applyConnectedModelToNewSessionDraft(client, workspaceId, "credits").catch(
-        () => undefined,
-      );
+    try {
+      await finishWithConnectedModel("credits", undefined, false);
+    } finally {
+      if (!cancelled.current) setBusy(false);
     }
   }
 
@@ -507,6 +522,7 @@ export function ModelAccessOnboardingPanel({
         ["openai", "OpenAI"],
         ["azure_openai", "Azure OpenAI"],
         ["openrouter", "OpenRouter"],
+        ["opper", "Opper"],
         ["vercel", "Vercel AI Gateway"],
       ] as const
     ).map(([id, title]) => ({
@@ -629,7 +645,9 @@ export function ModelAccessOnboardingPanel({
         />
       );
     }
-    return choice.id === "vercel" || choice.id === "openrouter" ? keyPanel(choice.id) : null;
+    return choice.id === "vercel" || choice.id === "openrouter" || choice.id === "opper"
+      ? keyPanel(choice.id)
+      : null;
   }
 
   const creditsPanel =
@@ -683,9 +701,13 @@ export function ModelAccessOnboardingPanel({
   const selectionRetryNotice = selectionRetry ? (
     <div className="mt-6 grid gap-3 rounded-lg border border-border bg-bg p-4" role="alert">
       <div>
-        <p className="text-sm font-medium">Your service is connected</p>
+        <p className="text-sm font-medium">
+          {selectionRetry === "credits" ? "Your credits are ready" : "Your service is connected"}
+        </p>
         <p className="mt-1 text-xs leading-relaxed text-fg-muted">
-          Its model is not selectable yet. Try again to use it for your next chat.
+          {selectionRetry === "credits"
+            ? "Try again to select a covered model for your next chat."
+            : "Its model is not selectable yet. Try again to use it for your next chat."}
         </p>
       </div>
       <Button
@@ -701,7 +723,6 @@ export function ModelAccessOnboardingPanel({
   ) : null;
 
   if (startingCredits || won) {
-    const freeAfterCredits = includedModel?.free ? includedModel : null;
     const currency = startingCredits?.balance?.currency ?? "usd";
     const trialAmount = startingCredits?.balance
       ? formatCreditAmount(startingCredits.balance.balanceMicros, currency)
@@ -738,34 +759,21 @@ export function ModelAccessOnboardingPanel({
             {heading}
           </h1>
           <p className="mt-2 text-sm leading-relaxed text-fg-muted">
-            {startingCredits
-              ? `You can start right now. New chats use ${describeCreditsModel(startingCredits.model)}. No card or API key needed.`
-              : "You can start right now. New chats use your Opengeni credits."}
+            Start chatting. No card or API key needed.
           </p>
-          {freeAfterCredits ? (
-            <p className="mt-2 text-xs leading-relaxed text-fg-muted">
-              When your credits run out, new chats use {freeAfterCredits.label}, which is free.
-            </p>
-          ) : null}
           <Button
             type="button"
             size="lg"
             className="mt-6 w-full"
-            disabled={busy}
+            disabled={busy || selectionRetry === "credits"}
             onClick={leaveOnboarding}
           >
             {continueToNextStep ? "Continue" : "Start chatting"}
           </Button>
           {coupon ? <div className="mt-3 text-center">{coupon}</div> : null}
-
-          <Disclosure
-            className="mt-6 border-t border-border pt-3"
-            title="Other ways to pay"
-            summary={`Optional. Connect a subscription or API key${billingMode === "stripe" ? ", or buy more credits" : ""}. You can also do this later.`}
-          >
-            <div className="pt-2">{connectOptions}</div>
-            {selectionRetryNotice}
-          </Disclosure>
+          {/* With credits there's no model to connect here; Models in
+              Organization settings connects one later. */}
+          {selectionRetryNotice}
         </div>
       </section>
     );

@@ -104,6 +104,33 @@ describe("core usage allowance admission", () => {
     });
   });
 
+  test("accepted Codex funding passes the exact turn and needs no deployment credit balance", async () => {
+    codex.mockResolvedValue(true);
+    const acceptedTurn = { sessionId: crypto.randomUUID(), turnId: crypto.randomUUID() };
+    const spendable = spyOn(opengeniDb, "getSpendableCreditBalance").mockResolvedValue({
+      balanceMicros: 0,
+    } as never);
+    try {
+      expect(
+        await checkLimit(
+          {
+            ...deps,
+            settings: testSettings({
+              billingMode: "stripe",
+              usageLimitsMode: "managed",
+              codexSubscriptionEnabled: true,
+            }),
+          },
+          { ...input, model: "codex/gpt-5.5", acceptedTurn },
+        ),
+      ).toEqual({ allowed: true });
+      expect(codex.mock.calls.at(-1)?.[0].acceptedTurn).toEqual(acceptedTurn);
+      expect(spendable).not.toHaveBeenCalled();
+    } finally {
+      spendable.mockRestore();
+    }
+  });
+
   test.each([HUMAN, null])(
     "retry uses the original frozen human %s rather than the retrying administrator",
     async (originalHuman) => {
@@ -203,15 +230,21 @@ describe("core usage allowance admission", () => {
       overrides: { modelCostPolicyJson: '{"scripted-model":"free"}' },
     },
   ])(
-    "exempts externally funded $model from allowance checks",
+    "admits externally funded $model unless the allowance counts unbilled usage",
     async ({ model, codexBilled, overrides }) => {
       codex.mockResolvedValue(codexBilled);
-      allowance.mockResolvedValue({
-        code: "allowance_exhausted",
-        scope: "workspace",
-        resetsAt: null,
-        message: "Exhausted",
-      });
+      // The real check admits credit-free work unless the allowance opts into
+      // counting unbilled usage.
+      allowance.mockImplementation(async (_db, check) =>
+        check.fundedWithoutCredits
+          ? null
+          : {
+              code: "allowance_exhausted",
+              scope: "workspace",
+              resetsAt: null,
+              message: "Exhausted",
+            },
+      );
       await requireLimit(
         {
           ...deps,
@@ -223,7 +256,12 @@ describe("core usage allowance admission", () => {
         },
         { ...input, model },
       );
-      expect(allowance).not.toHaveBeenCalled();
+      expect(allowance).toHaveBeenCalledWith(deps.db, {
+        accountId: ACCOUNT,
+        workspaceId: WORKSPACE,
+        subjectId: HUMAN,
+        fundedWithoutCredits: true,
+      });
       expect(balance).not.toHaveBeenCalled();
     },
   );

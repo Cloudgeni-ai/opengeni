@@ -6,6 +6,8 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 
 import {
+  DatabaseTransactionError,
+  isDatabasePersistenceFailure,
   runIdempotentPersistenceTransaction,
   type IdempotentPersistenceTransactionOptions,
 } from "./persistence-errors";
@@ -20,7 +22,7 @@ import { startDatabaseTiming } from "./database-timing";
 // `PostgresJsDatabase<typeof schema>` to `PgDatabase<any, typeof schema>` is a
 // pure TYPE change — no runtime behavior changes — that lets an embedded host
 // inject ANY drizzle pg driver handle (node-postgres, neon-http, etc.) bound to
-// OpenGeni's schema, not just the postgres-js handle `createDb` builds. The
+// Opengeni's schema, not just the postgres-js handle `createDb` builds. The
 // `any` for the query-result HKT is deliberate: it keeps `db.execute(sql\`…\`)`
 // callable across drivers whose raw-result shapes differ (postgres-js returns a
 // row array; node-postgres returns `{ rows }`). The three raw `db.execute(…)`
@@ -68,6 +70,15 @@ export function currentSessionAttachmentReadAccess(): SessionAttachmentReadAcces
 }
 
 /**
+ * The ambient session RLS actor established by the caller, if any. Read-only:
+ * helpers use it to decide whether the caller already owns session access and
+ * must never mutate it.
+ */
+export function currentSessionRlsActorContext(): Readonly<SessionRlsActorContext> | undefined {
+  return sessionRlsActorContext.getStore();
+}
+
+/**
  * Stable identity of the ambient session RLS actor: every field that
  * `setRlsContext` turns into database-visible GUCs or that scoped reads
  * consult. Two callers with equal keys see exactly the same rows, so the key
@@ -83,6 +94,17 @@ export function currentSessionRlsActorIdentityKey(): string | null {
     actor.privateFileOwnerSubjectId ?? null,
     actor.sessionAttachmentReadAccess ?? null,
   ]);
+}
+
+/**
+ * The ambient session RLS actor's frozen initiating human: `undefined` when
+ * there is no actor, `null` when the actor has no human. Reads that must act
+ * for the turn's human take it from here, never from a caller argument.
+ */
+export function currentSessionRlsActorInitiatingHumanSubjectId(): string | null | undefined {
+  const actor = sessionRlsActorContext.getStore();
+  if (!actor) return undefined;
+  return actor.initiatingHumanSubjectId ?? null;
 }
 
 export async function withSessionRlsActorContext<T>(
@@ -124,16 +146,16 @@ type RlsContextSettings = {
 };
 
 /**
- * RLS posture for the connection OpenGeni's query layer runs over (Step I, §7.7).
+ * RLS posture for the connection Opengeni's query layer runs over (Step I, §7.7).
  *
- * - `"force"` (DEFAULT — today's standalone behavior, byte-for-byte): OpenGeni
+ * - `"force"` (DEFAULT — today's standalone behavior, byte-for-byte): Opengeni
  *   connects as a NON-OWNER role (`opengeni_app`) and every table carries
  *   `FORCE ROW LEVEL SECURITY`, so the workspace/account GUCs set by
  *   `setRlsContext` are the ONLY thing that admits rows — even the table owner
  *   is subject to RLS. This is the Fork-A isolation guarantee.
- * - `"scoped"` (embedded Fork-B opt-in): the host runs OpenGeni's queries over a
+ * - `"scoped"` (embedded Fork-B opt-in): the host runs Opengeni's queries over a
  *   role that OWNS the dedicated schema (RLS need not be forced for that role),
- *   relying on the host's own tenant boundary. OpenGeni STILL emits the
+ *   relying on the host's own tenant boundary. Opengeni STILL emits the
  *   `set_config('opengeni.account_id'/'workspace_id', …)` GUCs defensively on
  *   every scoped query, so the application query path is byte-identical between
  *   the two strategies and the app code is RLS-mode-agnostic. The strategy is a
@@ -151,7 +173,7 @@ export type RlsStrategy = "force" | "scoped";
  * against Better Auth's `auth_users` table (see `getManagedUserByEmail`), which
  * relies on the postgres-js array-shaped `db.execute` result. An embedded host
  * whose identity lives elsewhere (a different IdP table, a different driver, or
- * a non-`auth_users` user store) injects this closure so OpenGeni never touches
+ * a non-`auth_users` user store) injects this closure so Opengeni never touches
  * `auth_users` directly. Returns the user id, or null when no such user exists.
  */
 export type UserLookup = (db: Database, email: string) => Promise<string | null>;
@@ -225,7 +247,7 @@ export function rlsStrategyFor(db: Database): RlsStrategy {
  * deliberately sets the query-result HKT to `any` so `db.execute(…)` is callable
  * across drivers whose raw-result shapes differ (postgres-js → row array;
  * node-postgres → `{ rows }`). A side effect is that `db.execute<T>(…)` now
- * resolves to `any`, erasing the per-row element type at the call site. OpenGeni's
+ * resolves to `any`, erasing the per-row element type at the call site. Opengeni's
  * OWN internal raw queries usually run over the postgres-js handle `createDb`
  * builds (array result), while an embedded host may inject a node-postgres style
  * driver (`{ rows }`). Normalize those two standard shapes in one place; reject
@@ -343,6 +365,11 @@ export async function withSandboxProviderReadLock<T>(
   });
 }
 
+/** Jittered reconnect delay in seconds after `retries` consecutive connection failures. */
+export function databaseReconnectBackoffSeconds(retries: number): number {
+  return (0.5 + Math.random() / 2) * Math.min(3 ** retries / 100, 2);
+}
+
 export function createDb(databaseUrl: string, options: CreateDbOptions = {}): DbClient {
   // `prepare: false` is REQUIRED for Azure Database for PostgreSQL Flexible
   // Server's transaction-pooling PgBouncer: postgres-js's default named prepared
@@ -358,6 +385,12 @@ export function createDb(databaseUrl: string, options: CreateDbOptions = {}): Db
     prepare: false,
     idle_timeout: 30,
     max_lifetime: 1800,
+    // postgres.js grows one pool-wide reconnect delay after every refused or
+    // reset connection (3^n / 100 s, up to 20 s) and queues queries behind it.
+    // After a restart or failover that left the server refusing connections
+    // for a while, requests then hung for up to 20 s after it was back. Keep
+    // the same jittered growth but cap it at 2 s.
+    backoff: databaseReconnectBackoffSeconds,
     // `connection` carries per-session Postgres STARTUP parameters. The exact
     // `application_name` is also the PgBouncer-compatible current-image receipt
     // for migration 0352's restrictive sessions policy; arbitrary custom startup
@@ -418,14 +451,21 @@ export async function setRlsContext(db: Database, context: RlsContext): Promise<
   // Transaction-local writer identity covers supported injected/embedded
   // database handles whose connection-level application_name is host-owned.
   // Standalone createDb connections also carry version receipts in their exact
-  // application_name, while old OpenGeni binaries set neither current receipt.
+  // application_name, while old Opengeni binaries set neither current receipt.
+  //
+  // JIT is off for these short request transactions: row-level security
+  // functions inflate planner cost estimates past jit_above_cost, so PostgreSQL
+  // spent seconds compiling queries that execute in milliseconds (the session
+  // list's tree-stats query: 0.4 s of work behind 3.8 s of JIT). Transaction-local,
+  // so it is safe behind transaction poolers and never leaks to other work.
   await db.execute(sql`select
     set_config('opengeni.account_id', ${context.accountId}, true),
     set_config('opengeni.workspace_id', ${context.workspaceId ?? ""}, true),
     set_config('opengeni.lossless_content_writer', '1', true),
     set_config('opengeni.sandbox_recovery_protocol_v2', '1', true),
     set_config('opengeni.pending_tool_event_output_v1', '1', true),
-    set_config('opengeni.session_variable_set_attachments_v1', '1', true)`);
+    set_config('opengeni.session_variable_set_attachments_v1', '1', true),
+    set_config('jit', 'off', true)`);
   const sessionActor = sessionRlsActorContext.getStore();
   if (sessionActor) {
     await setSubjectRlsContext(db, sessionActor.subjectId);
@@ -521,6 +561,39 @@ async function restoreRlsContextSettings(
   }
 }
 
+/** Attribute only failures outside the application callback to our transaction
+ * driver. BEGIN/COMMIT/ROLLBACK can throw raw postgres.js errors, unlike ORM
+ * queries. This supplies provenance, never transaction retry permission. */
+async function withDatabaseTransactionProvenance<T>(
+  db: Database,
+  fn: (db: Database) => Promise<T>,
+  transactionConfig?: PgTransactionConfig,
+): Promise<T> {
+  let entered = false;
+  let callbackFailure: { error: unknown } | undefined;
+  try {
+    return await db.transaction(async (tx) => {
+      entered = true;
+      try {
+        return await fn(tx as unknown as Database);
+      } catch (error) {
+        callbackFailure = { error };
+        throw error;
+      }
+    }, transactionConfig);
+  } catch (error) {
+    // A provider/tool rejection propagated by a successful rollback is still
+    // the provider/tool's error, even if it has a connection-looking code.
+    if (callbackFailure && callbackFailure.error === error) throw error;
+    if (!isDatabasePersistenceFailure(error)) throw error;
+    throw new DatabaseTransactionError(
+      entered ? "settlement" : "admission",
+      error,
+      callbackFailure?.error,
+    );
+  }
+}
+
 export async function withRlsContext<T>(
   db: Database,
   context: RlsContext,
@@ -535,49 +608,53 @@ export async function withRlsContext<T>(
     restoreParentScope ? "savepoint_admission" : "transaction_admission",
   );
   try {
-    return await db.transaction(async (tx) => {
-      admission("completed");
-      const setup = startDatabaseTiming("rls_setup");
-      const scoped = tx as unknown as Database;
-      let parentScope: RlsContextSettings | null;
-      try {
-        parentScope = restoreParentScope ? await readRlsContextSettings(scoped) : null;
-        await setRlsContext(scoped, context);
-        if (context.workspaceId && sessionTenancyFence === "shared") {
-          await scoped.execute(
-            sql`select pg_advisory_xact_lock_shared(hashtextextended(${`session-tenancy:${context.workspaceId}`}, 0))`,
-          );
+    return await withDatabaseTransactionProvenance(
+      db,
+      async (tx) => {
+        admission("completed");
+        const setup = startDatabaseTiming("rls_setup");
+        const scoped = tx as unknown as Database;
+        let parentScope: RlsContextSettings | null;
+        try {
+          parentScope = restoreParentScope ? await readRlsContextSettings(scoped) : null;
+          await setRlsContext(scoped, context);
+          if (context.workspaceId && sessionTenancyFence === "shared") {
+            await scoped.execute(
+              sql`select pg_advisory_xact_lock_shared(hashtextextended(${`session-tenancy:${context.workspaceId}`}, 0))`,
+            );
+          }
+          // Defense-in-depth: read the LOCAL GUC back on THIS backend BEFORE running
+          // the scoped query. The set_config and this read share one db.transaction,
+          // which a transaction pooler pins to a single backend — so a mismatch here
+          // means the context was genuinely lost (a torn transaction / pooler backend
+          // swap), not normal operation. Without this guard such an event runs the
+          // scoped read with an empty account_id and returns zero RLS-visible rows,
+          // manufacturing a phantom "no active subscription" from a credential that is
+          // in fact active. Convert that silent false into a loud, root-cause-bearing
+          // error so the caller can retry rather than permanently mis-decide.
+          await assertRlsContextApplied(scoped, context);
+          setup("completed");
+        } catch (error) {
+          setup("failed");
+          throw error;
         }
-        // Defense-in-depth: read the LOCAL GUC back on THIS backend BEFORE running
-        // the scoped query. The set_config and this read share one db.transaction,
-        // which a transaction pooler pins to a single backend — so a mismatch here
-        // means the context was genuinely lost (a torn transaction / pooler backend
-        // swap), not normal operation. Without this guard such an event runs the
-        // scoped read with an empty account_id and returns zero RLS-visible rows,
-        // manufacturing a phantom "no active subscription" from a credential that is
-        // in fact active. Convert that silent false into a loud, root-cause-bearing
-        // error so the caller can retry rather than permanently mis-decide.
-        await assertRlsContextApplied(scoped, context);
-        setup("completed");
-      } catch (error) {
-        setup("failed");
-        throw error;
-      }
-      const callback = startDatabaseTiming("scoped_callback");
-      let value: T;
-      try {
-        value = await fn(scoped);
-        callback("completed");
-      } catch (error) {
-        callback("failed");
-        throw error;
-      }
-      // A nested transaction is a savepoint, and SET LOCAL survives successful
-      // savepoint release. Restore the parent tenant and actor proof together;
-      // writer/protocol capabilities intentionally remain transaction-wide.
-      if (parentScope) await restoreRlsContextSettings(scoped, parentScope);
-      return value;
-    }, transactionConfig);
+        const callback = startDatabaseTiming("scoped_callback");
+        let value: T;
+        try {
+          value = await fn(scoped);
+          callback("completed");
+        } catch (error) {
+          callback("failed");
+          throw error;
+        }
+        // A nested transaction is a savepoint, and SET LOCAL survives successful
+        // savepoint release. Restore the parent tenant and actor proof together;
+        // writer/protocol capabilities intentionally remain transaction-wide.
+        if (parentScope) await restoreRlsContextSettings(scoped, parentScope);
+        return value;
+      },
+      transactionConfig,
+    );
   } catch (error) {
     // No-op after callback entry; only admission failures are counted here.
     admission("failed");
@@ -644,7 +721,8 @@ type SessionActivityGate = {
   owner: boolean;
 };
 
-function isTransactionHandle(db: Database): boolean {
+/** True for an open transaction (or savepoint) handle rather than a pool handle. */
+export function isTransactionHandle(db: Database): boolean {
   return typeof (db as Database & { rollback?: unknown }).rollback === "function";
 }
 
@@ -822,9 +900,11 @@ export async function withSessionActivityRlsContext<T>(
     context,
     async (scopedDb) => {
       if (organizationMembershipFence) {
-        // Claim can inherit membership-fenced authority after locking sessions.
-        // Acquire membership before even a shared tenancy fence: an exclusive
-        // tenancy/control waiter can otherwise complete the same lock cycle.
+        // Only callers that reauthorize or mutate under the membership
+        // lifecycle lock take it, always exclusively. Acquire membership
+        // before even a shared tenancy fence: an exclusive tenancy/control
+        // waiter can otherwise complete the same lock cycle. The turn claim
+        // deliberately takes no membership fence at all.
         await scopedDb.execute(sql`select pg_advisory_xact_lock(
           hashtextextended(${`organization-membership:${context.accountId}`}, 0))`);
         if (fenceMode === "shared") {
@@ -848,17 +928,26 @@ export async function withSessionActivityRlsContext<T>(
   );
 }
 
+/**
+ * `organizationMembershipFence` is required when the callback takes the
+ * organization-membership lifecycle lock (for example external-actor
+ * reauthorization): that lock precedes the session-tenancy fence and the
+ * canonical control/workspace/session prefix, never follows it.
+ */
 export async function withWorkspaceSessionActivityRls<T>(
   db: Database,
   workspaceId: string,
   fn: (db: SessionActivityDatabase) => Promise<T>,
   transactionConfig?: PgTransactionConfig,
+  organizationMembershipFence = false,
 ): Promise<T> {
   return await withSessionActivityRlsContext(
     db,
     { ...(await rlsContextForWorkspace(db, workspaceId)), workspaceId },
     fn,
     transactionConfig,
+    "shared",
+    organizationMembershipFence,
   );
 }
 
@@ -918,19 +1007,10 @@ export async function withSessionActivitySavepoint<T>(
 export async function retrySessionActivityRls<T>(
   db: Database,
   workspaceId: string,
-  options: IdempotentPersistenceTransactionOptions & {
-    /** Claim can inherit membership-fenced causal authority after locking the
-     * session. Acquire that fence before tenancy/control/session instead. An
-     * enclosing transaction must preserve this same lock prefix. */
-    organizationMembershipFence?: boolean;
-  },
+  options: IdempotentPersistenceTransactionOptions,
   fn: (db: SessionActivityDatabase) => Promise<T>,
 ): Promise<T> {
   return await runIdempotentPersistenceTransaction(options, async () => {
-    if (options.organizationMembershipFence) {
-      const context = { ...(await rlsContextForWorkspace(db, workspaceId)), workspaceId };
-      return await withSessionActivityRlsContext(db, context, fn, undefined, "shared", true);
-    }
     return await withWorkspaceSessionActivityRls(db, workspaceId, fn);
   });
 }

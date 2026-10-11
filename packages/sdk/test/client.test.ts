@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { OpenGeniClient, type OpenGeniClientOptions } from "../src/client";
 import { OpenGeniDocumentAuthorityClient } from "../src/document-authority-client";
+import type { BrowserObservation, BrowserTargetListResponse } from "../src/interaction";
 import {
   OpenGeniApiContractMismatchError,
   OpenGeniApiError,
@@ -69,6 +70,79 @@ function makeClient(
   });
   return { client, requests };
 }
+
+test("metadata-only tab opening opts into inventory while default opening still returns observation", async () => {
+  const browserSessionId = "11111111-1111-4111-8111-111111111111";
+  const target: BrowserObservation["target"] = {
+    id: "synthetic-target",
+    browserSessionId,
+    controllerGeneration: "controller-1",
+    targetGeneration: "target-1-generation",
+    documentGeneration: "document-1",
+    kind: "page",
+    title: "Synthetic page",
+    url: "https://new.example.test/",
+    selected: true,
+    attached: true,
+    createdAt: "2026-01-01T00:00:00.000Z",
+  };
+  const inventory: BrowserTargetListResponse = {
+    browserSessionId,
+    controllerGeneration: "controller-1",
+    targets: [target],
+  };
+  const observation: BrowserObservation = {
+    protocolVersion: 1,
+    observationId: "synthetic-observation",
+    browserSessionId,
+    target,
+    frameId: "frame-1",
+    semantic: { kind: "snapshot", roots: [], nodeCount: 0 },
+    screenshot: null,
+    focusedRef: null,
+    changedRegions: [],
+    diagnostics: {
+      consoleErrorCount: 0,
+      failedRequestCount: 0,
+      downloadCount: 0,
+      pageErrorCount: 0,
+    },
+    dialog: null,
+    observedAt: "2026-01-01T00:00:00.000Z",
+  };
+  const { client, requests } = makeClient((request) =>
+    jsonResponse(request.url.endsWith("/open-with-inventory") ? inventory : observation, 201),
+  );
+  expect(
+    await client.openBrowserTargetWithInventory(WORKSPACE_ID, browserSessionId, {
+      url: "https://new.example.test/",
+    }),
+  ).toEqual(inventory);
+  expect(
+    await client.openBrowserTarget(WORKSPACE_ID, browserSessionId, {
+      url: "https://new.example.test/",
+    }),
+  ).toEqual(observation);
+  expect(requests.map((request) => new URL(request.url).pathname)).toEqual([
+    `/v1/workspaces/${WORKSPACE_ID}/browser-sessions/${browserSessionId}/targets/open-with-inventory`,
+    `/v1/workspaces/${WORKSPACE_ID}/browser-sessions/${browserSessionId}/targets`,
+  ]);
+  expect(
+    requests.every(
+      (request) =>
+        request.method === "POST" &&
+        request.body === JSON.stringify({ url: "https://new.example.test/" }),
+    ),
+  ).toBe(true);
+});
+
+test("account settings opt into inactive inventory without changing the execution picker default", async () => {
+  const { client, requests } = makeClient(() => jsonResponse({ connections: [] }));
+  await client.listOwnConnectionAccounts(WORKSPACE_ID);
+  await client.listOwnConnectionAccounts(WORKSPACE_ID, { includeInactive: true });
+  expect(new URL(requests[0]!.url).search).toBe("");
+  expect(new URL(requests[1]!.url).searchParams.get("includeInactive")).toBe("true");
+});
 
 const STRICT = { apiContract: "strict" } as const;
 
@@ -1837,7 +1911,7 @@ describe("OpenGeniClient", () => {
       body: "",
     });
     expect((error as Error).message).toMatch(
-      /^OpenGeni could not confirm the request — reconcile before retrying\. Reference: [0-9a-f-]{36}\.$/,
+      /^Opengeni could not confirm the request — reconcile before retrying\. Reference: [0-9a-f-]{36}\.$/,
     );
     expect((error as Error).message).not.toContain("PRIVATE");
     expect((error as Error).message).not.toContain("bearer");
@@ -1907,7 +1981,7 @@ describe("OpenGeniClient", () => {
     expect((error as OpenGeniApiError).body).toBe("");
     expect((error as OpenGeniApiError).code).toBeUndefined();
     expect((error as OpenGeniApiError).message).toMatch(
-      /^OpenGeni API 404: Request failed\. Reference: [0-9a-f-]{36}\.$/,
+      /^Opengeni API 404: Request failed\. Reference: [0-9a-f-]{36}\.$/,
     );
   });
 
@@ -1931,7 +2005,7 @@ describe("OpenGeniClient", () => {
       body,
     });
     expect((error as Error).message).toMatch(
-      /^OpenGeni API 422: Invalid session create request: initialMessage failed schema validation Reference: [0-9a-f-]{36}\.$/,
+      /^Opengeni API 422: Invalid session create request: initialMessage failed schema validation Reference: [0-9a-f-]{36}\.$/,
     );
   });
 
@@ -1940,7 +2014,7 @@ describe("OpenGeniClient", () => {
       error: {
         status: 503,
         code: "upstream_unavailable",
-        message: "OpenGeni is temporarily unavailable — retry.",
+        message: "Opengeni is temporarily unavailable — retry.",
         retryable: true,
         requestId: "api-safe-503",
       },
@@ -1957,7 +2031,7 @@ describe("OpenGeniClient", () => {
       correlationId: "api-safe-503",
       outcomeUnknown: false,
       body,
-      message: "OpenGeni is temporarily unavailable — retry. Reference: api-safe-503.",
+      message: "Opengeni is temporarily unavailable — retry. Reference: api-safe-503.",
     });
   });
 
@@ -1966,7 +2040,7 @@ describe("OpenGeniClient", () => {
       error: {
         status: 503,
         code: "upstream_unavailable",
-        message: "OpenGeni could not confirm the controller mutation.",
+        message: "Opengeni could not confirm the controller mutation.",
         retryable: true,
         outcomeUnknown: true,
         requestId: "controller-mutation-503",
@@ -2098,7 +2172,7 @@ describe("OpenGeniClient", () => {
           body: "",
         });
         expect((error as Error).message).toBe(
-          `OpenGeni is temporarily unavailable — retry. Reference: ${correlationId}.`,
+          `Opengeni is temporarily unavailable — retry. Reference: ${correlationId}.`,
         );
         expect((error as Error).message).not.toContain("PRIVATE-UPSTREAM-BODY");
         expect(requests[0]!.headers[OPENGENI_CORRELATION_HEADER]).toMatch(/^[0-9a-f-]{36}$/);
@@ -2632,8 +2706,8 @@ describe("OpenGeniClient", () => {
       fundingOptions: [
         {
           source: "opengeni_credits" as const,
-          label: "OpenGeni",
-          description: "Uses OpenGeni credits.",
+          label: "Opengeni",
+          description: "Uses Opengeni credits.",
           available: true,
           unavailableReason: null,
         },

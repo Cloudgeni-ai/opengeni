@@ -12,6 +12,15 @@ import {
 } from "../mcp-oauth";
 
 const githubConnectPathPattern = /^\/v1\/workspaces\/[^/]+\/github\/connect$/;
+// The Connected Machine agent's own protocol. A machine never holds the
+// deployment key; each route authenticates its own enroll token, device code,
+// or signed install-key proof, and is rate limited by its route.
+const connectedMachineProtocolPaths = new Set([
+  "/v1/enrollments/token/exchange",
+  "/v1/enrollments/device/start",
+  "/v1/enrollments/device/poll",
+  "/v1/enrollments/renew",
+]);
 const githubInstallationLinkPathPattern = /^\/v1\/workspaces\/[^/]+\/github\/installations$/;
 const prReviewGithubBrowserPathPattern =
   /^\/v1\/workspaces\/[^/]+\/pr-review\/github\/(?:connect|installations\/select|installations\/[^/]+\/configure)$/;
@@ -21,7 +30,7 @@ export function requireAccessKey(settings: Settings): MiddlewareHandler {
     // §7.2 P1: requireAccessKey is the coarse NETWORK perimeter, not the
     // per-tenant identity gate (that is resolveAccessContext). When
     // `authRequired:false` it is a NO-OP — the embedded (Path 2) case where the
-    // host's own auth is the sole human gate and OpenGeni is mounted behind it.
+    // host's own auth is the sole human gate and Opengeni is mounted behind it.
     // Standalone/separate deployments set `authRequired:true` to keep this ON as
     // the shared-deployment-key perimeter.
     if (!settings.authRequired || isAuthExempt(c, settings)) {
@@ -140,6 +149,11 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
   if (installExactPaths.has(path) || isInstallRedirectPath(path)) {
     return true;
   }
+  // Without this a key-protected deployment could never enroll or renew a
+  // machine. Human approval and lookup stay behind the key.
+  if (c.req.method === "POST" && connectedMachineProtocolPaths.has(path)) {
+    return true;
+  }
   if (
     settings.authAllowHealth &&
     (path === "/healthz" || path === "/readyz" || path === "/traffic-readyz")
@@ -178,6 +192,28 @@ async function isAuthorized(c: Context, settings: Settings): Promise<boolean> {
     bearer &&
     delegationSecret &&
     (await verifyDelegatedAccessToken(delegationSecret, bearer)),
+  );
+}
+
+/**
+ * A request to a key-only (configured) deployment that presents the deployment
+ * key itself, from the operator rather than an agent acting for someone. The
+ * key travels in a request header that a page on another site can't add, so
+ * browser same-origin checks have nothing to protect on such a request.
+ */
+export function isConfiguredDeploymentKeyRequest(c: Context, settings: Settings): boolean {
+  const expected = settings.accessKey;
+  if (settings.productAccessMode !== "configured" || !settings.authRequired || !expected) {
+    return false;
+  }
+  if (verifiedDelegatedHumanAuthorizationForRequest(c.req.raw) !== null) return false;
+  const authorization = c.req.header("authorization");
+  const bearer = authorization?.startsWith("Bearer ")
+    ? authorization.slice("Bearer ".length)
+    : undefined;
+  return (
+    constantTimeEqual(c.req.header("x-opengeni-access-key"), expected) ||
+    constantTimeEqual(bearer, expected)
   );
 }
 

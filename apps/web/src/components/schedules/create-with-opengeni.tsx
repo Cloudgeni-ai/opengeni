@@ -1,8 +1,8 @@
 /**
- * "Create with OpenGeni": say what should happen and how often, and a chat
+ * "Create with Opengeni": say what should happen and how often, and a chat
  * researches the rest (repositories, variable sets, integrations) and creates
  * the schedule with its scheduling tools. Starts the chat the same way
- * Knowledge's "Ask OpenGeni" does: context.startSession on the workspace's
+ * Knowledge's "Ask Opengeni" does: context.startSession on the workspace's
  * model, then navigate to the new chat.
  */
 import { useNavigate } from "@tanstack/react-router";

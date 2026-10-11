@@ -10,6 +10,7 @@ export {
   DEFAULT_OPENGENI_BASE_URL,
   IMPORTED_HISTORY_MAX_CHARS,
   OpenGeni,
+  Opengeni,
   formatImportedHistory,
 } from "./opengeni";
 export {
@@ -28,6 +29,7 @@ export {
   type ChatSessionListOptions,
   type ChatSnapshot,
   type ChatTarget,
+  type WorkspaceTarget,
   type ChatToolStatus,
   type OpenGeniOptions,
 } from "./types";

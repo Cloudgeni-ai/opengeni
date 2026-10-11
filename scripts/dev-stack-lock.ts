@@ -52,7 +52,7 @@ export function acquireDevelopmentStackLock(
     db.close();
     if ((error as { code?: string }).code === "SQLITE_BUSY") {
       throw new Error(
-        `OpenGeni stack ${project} already has a launcher.${recordedOwnerHint(ownerPath)} Use its printed web URL or stop it before restarting.`,
+        `Opengeni stack ${project} already has a launcher.${recordedOwnerHint(ownerPath)} Use its printed web URL or stop it before restarting.`,
         { cause: error },
       );
     }
@@ -69,7 +69,7 @@ export function acquireDevelopmentStackLock(
     // Preserve that owner's services rather than rotating their credentials.
     if (previous && ownerIsRunning(previous)) {
       throw new Error(
-        `OpenGeni stack ${project} is still running from ${previous.repositoryRoot}.${recordedOwnerHint(ownerPath)} Stop that launcher before restarting.`,
+        `Opengeni stack ${project} is still running from ${previous.repositoryRoot}.${recordedOwnerHint(ownerPath)} Stop that launcher before restarting.`,
       );
     }
     // Publish the token before spawning, so even supervisor death during spawn

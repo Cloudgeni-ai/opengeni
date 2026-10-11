@@ -79,7 +79,7 @@ jobs:
             asset: opengeni-agent-x86_64-unknown-linux-musl
             kind: linux
           - target: aarch64-unknown-linux-musl
-            runner: ubuntu-latest
+            runner: ubuntu-24.04-arm
             asset: opengeni-agent-aarch64-unknown-linux-musl
             kind: linux
           - target: universal-apple-darwin
@@ -155,6 +155,12 @@ jobs:
             aarch64-*) bun_target=bun-linux-arm64; browser_arch=arm64 ;;
             *) echo "unsupported Linux interaction target" >&2; exit 1 ;;
           esac
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang pkg-config libdbus-1-dev libpipewire-0.3-dev libspa-0.2-dev libei-dev \
+            libwayland-dev libxkbcommon-dev libx11-dev libxi-dev libxtst-dev libxext-dev \
+            libxdo-dev libssl-dev
+          bun packages/browserd/scripts/stage-cua-runtime.ts "$browser_arch"
           bun build --compile --target="$bun_target" packages/browserd/src/main.ts \
             --define "process.env.OPENGENI_RUNTIME_BUILD_ID=\"${GITHUB_SHA}\"" \
             --outfile "opengeni-browserd-${{ matrix.target }}"
@@ -186,6 +192,7 @@ jobs:
             OPENGENI_EMBEDDED_BROWSERD="$GITHUB_WORKSPACE/opengeni-browserd-${{ matrix.target }}" \
             OPENGENI_EMBEDDED_AGENT_BROWSER="$GITHUB_WORKSPACE/opengeni-agent-browser-${{ matrix.target }}" \
             OPENGENI_EMBEDDED_COMPUTER_NATIVE="$GITHUB_WORKSPACE/opengeni-computer-native-${{ matrix.target }}" \
+            OPENGENI_EMBEDDED_CUA_RUNTIME="$GITHUB_WORKSPACE/packages/browserd/dist/cua/$browser_arch/embedded.rs" \
               cargo zigbuild --release --target "${{ matrix.target }}" -p opengeni-agent
           )
           cp "agent/target/${{ matrix.target }}/release/opengeni-agent" "${{ matrix.asset }}"
@@ -425,8 +432,8 @@ jobs:
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
           <dict>
-              <key>CFBundleName</key><string>OpenGeni Agent</string>
-              <key>CFBundleDisplayName</key><string>OpenGeni Agent</string>
+              <key>CFBundleName</key><string>Opengeni Agent</string>
+              <key>CFBundleDisplayName</key><string>Opengeni Agent</string>
               <key>CFBundleIdentifier</key><string>ai.opengeni.agent</string>
               <key>CFBundleExecutable</key><string>opengeni-agent</string>
               <key>CFBundleIconFile</key><string>OpenGeni-Agent.icns</string>

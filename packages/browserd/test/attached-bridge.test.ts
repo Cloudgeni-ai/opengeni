@@ -125,6 +125,42 @@ describe("AttachedBrowserBridgeClient", () => {
       await fixture.close();
     }
   });
+
+  test("preserves exact debugger absence before its detach event is polled", async () => {
+    const fixture = await bridgeFixture((socket, messages) => {
+      const request = messages.find((message) => message.type === "request");
+      if (!request) return;
+      writeFrame(socket, {
+        type: "response",
+        protocolVersion: 1,
+        requestId: request.requestId,
+        deviceId: request.deviceId,
+        connectionGeneration: GENERATION,
+        ok: false,
+        error: {
+          code: "debugger_unavailable",
+          message: "synthetic debugger absence",
+          retryable: false,
+        },
+      });
+    });
+    try {
+      const client = await AttachedBrowserBridgeClient.connect({
+        deviceId: DEVICE_ID,
+        connectionGeneration: GENERATION,
+        authorityFile: fixture.authorityFile,
+      });
+      try {
+        await expect(
+          client.request({ type: "debugger.command", tabId: "7", method: "Page.getFrameTree" }),
+        ).rejects.toMatchObject({ code: "debugger_unavailable", retryable: false });
+      } finally {
+        client.close();
+      }
+    } finally {
+      await fixture.close();
+    }
+  });
 });
 
 type JsonRecord = Record<string, unknown>;

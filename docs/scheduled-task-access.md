@@ -7,16 +7,16 @@ create a chat, it also stores the chat's initial tool selection:
 - the connector accounts it uses (`agentConfig.connectionAccounts`, frozen with
   `connectionAccountsFrozen`), resolved against its immutable owner at each
   fresh occurrence;
-- for a task an agent created, the creating session's OpenGeni tools,
+- for a task an agent created, the creating session's Opengeni tools,
   permissions and access policy (the creator policy, migration 0428).
 
 Later workspace defaults do not widen those saved selections. Existing chats,
 including a reusable schedule's chat after its first run, supply their own
 model, tools and machine. Their scheduled runs still use the schedule's
 captured account authority. A task can therefore fall behind: a
-connector the workspace now gives every new schedule is missing, newer OpenGeni
+connector the workspace now gives every new schedule is missing, newer Opengeni
 tools are absent, or the account it chose was disconnected. This page describes
-how OpenGeni shows that, how the owner refreshes it, and how the owner learns
+how Opengeni shows that, how the owner refreshes it, and how the owner learns
 that a run could not use a connector.
 
 ## Scheduling a message in a chat
@@ -150,7 +150,7 @@ The plan, for an agent-turn task (connector-source tasks are excluded):
   `attachableAccounts`. The Google Drive publication and personal GitHub
   surfaces keep their own account contract and pass through unchanged; a
   blocked occurrence caused by one of them is not reported yet.
-- **OpenGeni tools** (agent-created tasks only). A human- or API-created task
+- **Opengeni tools** (agent-created tasks only). A human- or API-created task
   has no creator policy and already follows the deployment default at each run.
   For a frozen creator policy, the default tools it lacks are reported
   (`missingOpenGeniTools`) and added. Permissions stay least-privilege: a
@@ -206,17 +206,17 @@ create. Auto-following workspace defaults at each run was considered and
 rejected: it would conflict with the creator-policy freeze.
 
 The optional `leaveOut` (`{ connectors?, openGeniTools? }`) names workspace
-default connectors and OpenGeni tools the person wants kept off this schedule.
-The plan then neither adds them nor, for an OpenGeni tool, the permissions it
+default connectors and Opengeni tools the person wants kept off this schedule.
+The plan then neither adds them nor, for an Opengeni tool, the permissions it
 would need. It only narrows what the refresh adds; it never removes anything
 the task already has, and an unknown tool name is refused (400).
 
 ## Keeping defaults off
 
-A person may deliberately leave a default connector or OpenGeni tool off a
+A person may deliberately leave a default connector or Opengeni tool off a
 schedule, and drift would otherwise name it forever. The schedule's page offers
 "Keep without these" next to missing defaults. It records, in that browser, the
-missing connectors and OpenGeni tools for the task head the person looked at
+missing connectors and Opengeni tools for the task head the person looked at
 (its `executionDigest`); the page then hides them, and "Refresh access" sends
 them as `leaveOut`, carrying the choice to the refreshed head. A new default
 that appears later is shown again, and editing the task any other way (a new
@@ -224,13 +224,13 @@ head) is a fresh look. A chosen account that can no longer be used, a connector
 the workspace removed, and a connector without an account are never hidden.
 
 The choice is a display preference: the server keeps reporting the drift and
-nothing about what a run may use changes. It is per browser because OpenGeni has
+nothing about what a run may use changes. It is per browser because Opengeni has
 no per-person preference store for it; a durable per-person choice would need
 its own column and is left for later.
 
 ## Failed-access notice
 
-OpenGeni has no general notification channel for this. Product email is
+Opengeni has no general notification channel for this. Product email is
 reserved for sign-in, recovery and invitation lifecycles, and the Slack bot can
 only message people who linked their Slack identity. So the owner's signal is
 in-app:

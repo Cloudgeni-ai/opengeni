@@ -55,11 +55,11 @@ const response = (content: unknown[], stop = "end_turn") => ({
 test.each(["low", "medium", "high", "xhigh", "max"] as const)(
   "native effort %s reaches the wire unchanged for both 5.5 models",
   (effort) => {
-    for (const model of ["claude-opus-5-5", "claude-sonnet-5-5"]) {
+    for (const model of ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]) {
       const req = request();
       req.modelSettings = { reasoning: { effort } };
       const body = buildAnthropicRequest(req, model, provider, false);
-      expect(body.thinking).toEqual({ type: "adaptive" });
+      expect(body.thinking).toEqual({ type: "adaptive", display: "summarized" });
       expect(body.output_config.effort).toBe(effort);
       expect(body.max_tokens).toBe(128_000);
     }

@@ -49,7 +49,7 @@ use crate::job::{run_job, JobCommand, JobConfig, JobEnd, JobExit, JobHooks, JobP
 pub const LEGACY_ORIGIN: &str = "legacy";
 
 /// Builds the process-internal operation identity. The wire id remains unchanged;
-/// the local connection scope prevents unrelated OpenGeni deployments from
+/// the local connection scope prevents unrelated Opengeni deployments from
 /// colliding in the shared registry/admission/router.
 #[must_use]
 pub fn scoped_op_id(scope: &str, wire_op_id: &str) -> OpId {
@@ -606,7 +606,7 @@ impl Engine {
             engine: self.clone(),
             op_id: op_id.clone(),
         };
-        tokio::spawn(async move {
+        opengeni_agent_platform::spawn_reserved(async move {
             // Owned here so a PANIC in the pump still removes the route. The
             // RetentionLog drop separately releases actual spool bytes.
             let cleanup = cleanup;

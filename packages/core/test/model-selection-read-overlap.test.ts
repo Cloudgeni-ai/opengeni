@@ -18,16 +18,11 @@ const dependencies = [
   "connectionRestrictionsAndXaiReadiness",
   "loadWorkspaceClaudeSubscriptionReadiness",
   "getWorkspaceModelPolicy",
-  "workspaceCodexSubscriptionActive",
-  "loadWorkspaceCodexModelAvailability",
-  "workspaceVercelAiGatewayConnectionActive",
-  "listWorkspaceGatewayCustomModels",
-  "workspaceOpenRouterConnectionActive",
-  "listWorkspaceOpenRouterCustomModels",
-  "organizationModelProviderConnectionActiveForWorkspace",
-  "listOrganizationModelProviderCustomModelsForWorkspace",
-  "getWorkspaceProviderApiKeyConnectionMetadata",
-  "listWorkspaceProviderCustomModels",
+  "loadWorkspaceCodexCatalogReadiness",
+  "listConnectionsMetadata",
+  "listWorkspaceProviderCustomModelsByKind",
+  "getOrganizationModelProviderCatalogForWorkspace",
+  "workspaceProviderApiKeyConnectionMetadataFromConnections",
 ];
 // Execute the complete current production declaration, not a copied parallel
 // recipe. The real helpers are replaced only at their existing read boundaries.
@@ -75,22 +70,26 @@ function fixture(
     restrictions: { restrictions: { "supergrok/": ["allowed"] }, xaiSubscriptionActive: true },
     claude: { workspace: true, organization: false },
     policy: { allowedProviders: ["anthropic"], allowedModels: null },
-    codex: true,
-    observations: { marker: "availability" },
-    gateway: true,
-    gatewayModels: ["gateway-model"],
-    openrouter: false,
-    openrouterModels: ["openrouter-model"],
-    "org-active:vercel_gateway": true,
-    "org-active:openrouter": false,
-    "org-models:vercel_gateway": ["org-gateway"],
-    "org-models:openrouter": ["org-openrouter"],
-    "org-active:anthropic": true,
-    "org-models:anthropic": ["org-anthropic"],
-    "org-models:claude_subscription": ["org-subscription"],
-    "metadata:anthropic": { connectionId: "metadata-only", version: 4 },
-    "workspace-models:anthropic": ["workspace-anthropic"],
-    "workspace-models:claude_subscription": ["workspace-subscription"],
+    // Codex readiness and live availability come from one cutover-aware read.
+    codex: { active: true, observations: {} },
+    // Workspace API-key readiness is derived from one metadata read; the
+    // fixture keys it by provider so the derivation port stays trivial.
+    connections: {
+      vercel_gateway: { connectionId: "gateway", version: 1 },
+      anthropic: { connectionId: "metadata-only", version: 4 },
+    },
+    "workspace-models": {
+      vercel_gateway: ["gateway-model"],
+      openrouter: ["openrouter-model"],
+      anthropic: ["workspace-anthropic"],
+      claude_subscription: ["workspace-subscription"],
+    },
+    "org-catalog": {
+      vercel_gateway: { active: true, models: ["org-gateway"] },
+      openrouter: { active: false, models: ["org-openrouter"] },
+      anthropic: { active: true, models: ["org-anthropic"] },
+      claude_subscription: { active: false, models: ["org-subscription"] },
+    },
   };
   const holds = Object.fromEntries(Object.keys(values).map((name) => [name, deferred()]));
   const calls: { name: string; args: unknown[] }[] = [];
@@ -105,23 +104,15 @@ function fixture(
     connectionRestrictionsAndXaiReadiness: (...args: unknown[]) => read("restrictions", args),
     loadWorkspaceClaudeSubscriptionReadiness: (...args: unknown[]) => read("claude", args),
     getWorkspaceModelPolicy: (...args: unknown[]) => read("policy", args),
-    workspaceCodexSubscriptionActive: (...args: unknown[]) => read("codex", args),
-    loadWorkspaceCodexModelAvailability: (...args: unknown[]) => read("observations", args),
-    workspaceVercelAiGatewayConnectionActive: (...args: unknown[]) => read("gateway", args),
-    listWorkspaceGatewayCustomModels: (...args: unknown[]) => read("gatewayModels", args),
-    workspaceOpenRouterConnectionActive: (...args: unknown[]) => read("openrouter", args),
-    listWorkspaceOpenRouterCustomModels: (...args: unknown[]) => read("openrouterModels", args),
-    organizationModelProviderConnectionActiveForWorkspace: (database: unknown, scope: any) =>
-      read(`org-active:${scope.providerKind}`, [database, scope]),
-    listOrganizationModelProviderCustomModelsForWorkspace: (database: unknown, scope: any) =>
-      read(`org-models:${scope.providerKind}`, [database, scope]),
-    getWorkspaceProviderApiKeyConnectionMetadata: (
-      database: unknown,
-      workspaceId: string,
+    loadWorkspaceCodexCatalogReadiness: (...args: unknown[]) => read("codex", args),
+    listConnectionsMetadata: (...args: unknown[]) => read("connections", args),
+    listWorkspaceProviderCustomModelsByKind: (...args: unknown[]) => read("workspace-models", args),
+    getOrganizationModelProviderCatalogForWorkspace: (...args: unknown[]) =>
+      read("org-catalog", args),
+    workspaceProviderApiKeyConnectionMetadataFromConnections: (
+      connections: Record<string, unknown>,
       kind: string,
-    ) => read(`metadata:${kind}`, [database, workspaceId, kind]),
-    listWorkspaceProviderCustomModels: (database: unknown, scope: any) =>
-      read(`workspace-models:${scope.providerKind}`, [database, scope]),
+    ) => connections[kind] ?? null,
   };
   const running = productionLoader(ports)(
     db,
@@ -160,14 +151,7 @@ function fixture(
   };
 }
 
-const catalogReads = [
-  "org-active:anthropic",
-  "org-models:anthropic",
-  "metadata:anthropic",
-  "workspace-models:anthropic",
-  "org-models:claude_subscription",
-  "workspace-models:claude_subscription",
-];
+const catalogReads = ["connections", "workspace-models", "org-catalog"];
 
 test("all independent catalog reads start while the policy/readiness batch is held", async () => {
   const f = fixture();
@@ -203,13 +187,17 @@ for (const first of ["inputs", "catalog"] as const) {
         codexSubscriptionActive: true,
         observations: {},
         workspaceGatewayConnectionActive: true,
-        workspaceGatewayCustomModels: f.values.gatewayModels,
+        workspaceGatewayCustomModels: ["gateway-model"],
         workspaceOpenRouterConnectionActive: false,
-        workspaceOpenRouterCustomModels: f.values.openrouterModels,
+        workspaceOpenRouterCustomModels: ["openrouter-model"],
         organizationGatewayConnectionActive: true,
         organizationOpenRouterConnectionActive: false,
-        organizationGatewayCustomModels: f.values["org-models:vercel_gateway"],
-        organizationOpenRouterCustomModels: f.values["org-models:openrouter"],
+        organizationGatewayCustomModels: ["org-gateway"],
+        organizationOpenRouterCustomModels: ["org-openrouter"],
+        workspaceOpperConnectionActive: false,
+        workspaceOpperCustomModels: [],
+        organizationOpperConnectionActive: false,
+        organizationOpperCustomModels: [],
         claudeConnections: {
           anthropic: { active: true, models: ["org-anthropic"] },
           claude_subscription: { active: false, models: ["org-subscription"] },
@@ -243,53 +231,80 @@ test("subscription activation waits for the same exact fresh/frozen-subject read
   }
 });
 
-test("disabled subscription skips only its catalog; every existing read keeps its exact scope and call count", async () => {
-  const f = fixture({ subscription: false });
-  try {
-    await flush();
-    expect(f.names()).not.toContain("org-models:claude_subscription");
-    expect(f.names()).not.toContain("workspace-models:claude_subscription");
-    expect(f.names()).not.toContain("org-active:claude_subscription");
-    expect(f.names()).not.toContain("metadata:claude_subscription");
-    expect(new Set(f.names()).size).toBe(f.names().length);
-    for (const { name, args } of f.calls) {
-      expect(args[0]).toBe(f.db);
-      if (name.startsWith("org-") || name.startsWith("workspace-models:"))
-        expect(args[1]).toEqual({
-          accountId: f.context.accountId,
-          workspaceId: f.context.workspaceId,
-          providerKind: name.split(":")[1],
-        });
-      else if (name === "metadata:anthropic")
-        expect(args.slice(1)).toEqual([f.context.workspaceId, "anthropic"]);
-      else if (name === "restrictions" || name === "claude")
-        expect(args.slice(1)).toEqual([f.settings, f.context]);
-      else if (name === "codex") expect(args.slice(1)).toEqual([f.settings, f.context.workspaceId]);
-      else if (name.endsWith("Models"))
-        expect(args[1]).toEqual({
-          accountId: f.context.accountId,
-          workspaceId: f.context.workspaceId,
-        });
-      else expect(args.slice(1)).toEqual([f.context.workspaceId]);
+test("disabled subscription skips only its catalog; every read keeps its exact scope and call count", async () => {
+  for (const subscription of [true, false]) {
+    const f = fixture({ subscription });
+    try {
+      await flush();
+      const providerKinds = [
+        "vercel_gateway",
+        "openrouter",
+        "opper",
+        "anthropic",
+        ...(subscription ? ["claude_subscription"] : []),
+      ];
+      expect(new Set(f.names()).size).toBe(f.names().length);
+      for (const { name, args } of f.calls) {
+        expect(args[0]).toBe(f.db);
+        if (name === "workspace-models" || name === "org-catalog")
+          expect(args[1]).toEqual({
+            accountId: f.context.accountId,
+            workspaceId: f.context.workspaceId,
+            providerKinds,
+          });
+        else if (name === "connections")
+          expect(args.slice(1)).toEqual([f.context.workspaceId, null]);
+        else if (name === "restrictions" || name === "claude")
+          expect(args.slice(1)).toEqual([f.settings, f.context]);
+        else if (name === "codex")
+          expect(args.slice(1)).toEqual([
+            f.settings,
+            {
+              accountId: f.context.accountId,
+              workspaceId: f.context.workspaceId,
+              subjectId: f.context.subjectId,
+            },
+            { observeAvailability: false },
+          ]);
+        else expect(args.slice(1)).toEqual([f.context.workspaceId]);
+      }
+      f.release(Object.keys(f.values));
+      const result = await f.running;
+      if (subscription) {
+        expect(result.claudeConnections).toHaveProperty("claude_subscription");
+      } else {
+        expect(result.claudeConnections).not.toHaveProperty("claude_subscription");
+        expect(result.workspaceClaudeConnections).not.toHaveProperty("claude_subscription");
+      }
+    } finally {
+      await f.cleanup();
     }
-    f.release(Object.keys(f.values));
-    const result = await f.running;
-    expect(result.claudeConnections).not.toHaveProperty("claude_subscription");
-    expect(result.workspaceClaudeConnections).not.toHaveProperty("claude_subscription");
-  } finally {
-    await f.cleanup();
   }
 });
 
-test("opt-in live availability is still invoked exactly once, never added to stable create admission", async () => {
+test("opt-in live availability is still requested exactly once, never for stable create admission", async () => {
   const f = fixture({ observe: true });
   try {
     await flush();
-    expect(f.calls.filter((call) => call.name === "observations")).toEqual([
-      { name: "observations", args: [f.db, f.settings, f.context.workspaceId] },
+    expect(f.calls.filter((call) => call.name === "codex")).toEqual([
+      {
+        name: "codex",
+        args: [
+          f.db,
+          f.settings,
+          {
+            accountId: f.context.accountId,
+            workspaceId: f.context.workspaceId,
+            subjectId: f.context.subjectId,
+          },
+          { observeAvailability: true },
+        ],
+      },
     ]);
-    f.release(Object.keys(f.values));
-    expect((await f.running).observations).toBe(f.values.observations);
+    const observations = { marker: "availability" };
+    f.holds.codex!.resolve({ active: true, observations });
+    f.release(Object.keys(f.values).filter((name) => name !== "codex"));
+    expect((await f.running).observations).toBe(observations);
   } finally {
     await f.cleanup();
   }
@@ -299,9 +314,13 @@ test("the loader's existing omitted-options default still observes live availabi
   const f = fixture({ observe: "default" });
   try {
     await flush();
-    expect(f.names().filter((name) => name === "observations")).toHaveLength(1);
-    f.release(Object.keys(f.values));
-    expect((await f.running).observations).toBe(f.values.observations);
+    const codexCalls = f.calls.filter((call) => call.name === "codex");
+    expect(codexCalls).toHaveLength(1);
+    expect(codexCalls[0]!.args[3]).toEqual({ observeAvailability: true });
+    const observations = { marker: "availability" };
+    f.holds.codex!.resolve({ active: true, observations });
+    f.release(Object.keys(f.values).filter((name) => name !== "codex"));
+    expect((await f.running).observations).toBe(observations);
   } finally {
     await f.cleanup();
   }
@@ -335,7 +354,7 @@ test("a refused transaction input batch never starts catalog reads", async () =>
   }
 });
 
-for (const failure of ["policy", "org-models:anthropic"] as const) {
+for (const failure of ["policy", "org-catalog"] as const) {
   test(`${failure} failure waits for the other read wave and prevents downstream admission`, async () => {
     const f = fixture();
     const error = new Error(failure);
@@ -360,16 +379,16 @@ for (const failure of ["policy", "org-models:anthropic"] as const) {
   });
 }
 
-for (const first of ["policy", "org-models:anthropic"] as const) {
+for (const first of ["policy", "org-catalog"] as const) {
   test(`dual failure retains original input-wave priority when ${first} rejects first`, async () => {
     const f = fixture();
-    const errors = { policy: new Error("policy"), "org-models:anthropic": new Error("catalog") };
+    const errors = { policy: new Error("policy"), "org-catalog": new Error("catalog") };
     try {
       await flush();
       f.holds[first]!.reject(errors[first]);
       await flush();
       expect(f.settled()).toBe(false);
-      const second = first === "policy" ? "org-models:anthropic" : "policy";
+      const second = first === "policy" ? "org-catalog" : "policy";
       f.holds[second]!.reject(errors[second]);
       await expect(f.running).rejects.toBe(errors.policy);
     } finally {
@@ -378,7 +397,7 @@ for (const first of ["policy", "org-models:anthropic"] as const) {
   });
 }
 
-for (const failure of ["policy", "org-models:anthropic"] as const) {
+for (const failure of ["policy", "org-catalog"] as const) {
   test(`synchronous ${failure} refusal cannot escape the other wave join`, async () => {
     const f = fixture({ syncFailure: failure });
     try {

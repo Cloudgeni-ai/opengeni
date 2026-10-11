@@ -62,14 +62,20 @@ import type { SelfhostedOpObservation, SelfhostedOpObserver } from "./op-observe
 import { selfhostedFaultClass } from "./fault-rendering";
 import {
   nextDurableOpId,
+  notifyRemoteOperationTransportSelected,
   notifyDurableOpOwnershipTransferStarted,
+  notifyDurableOpOwnershipTransferFailed,
   notifyDurableOpOwnershipTransferred,
+  notifyRemoteOperationNotDispatched,
+  type RemoteOperationControl,
+  type RemoteOperationObservation,
 } from "../op-correlation";
 import {
   OpStreamExecClient,
   runnerFailureToControlError,
   type OpStreamJournal,
   type OpStreamOutputFrame,
+  type OpStreamOutputReceipt,
 } from "./op-stream";
 import { OpStreamUnavailableError, type OpStreamTransport } from "./op-transport";
 import { connectedMachineWorkspaceRootsEqual, resolveConnectedMachinePath } from "./workspace-path";
@@ -362,6 +368,7 @@ export interface SelfhostedSessionDeps {
     exitCode: number | null;
     reason: string;
     failure?: import("@opengeni/contracts").SessionCommandFailure;
+    outputReceipt?: OpStreamOutputReceipt;
   }) => void | Promise<void>;
   /** The clock the bounded control-op retry loop drives (sleep + jitter). Injected
    *  so tests are deterministic; defaults to a real timer + `Math.random()`. */
@@ -469,6 +476,10 @@ export class SelfhostedSession {
    * durability hook; never retarget an already-admitted operation on reconnect. */
   private readonly opStreamClients = new Map<string, OpStreamExecClient>();
   private readonly inFlightOpStreamClients = new Map<string, OpStreamExecClient>();
+  private readonly inFlightOpStreamOutput = new Map<
+    string,
+    { stdout: string[]; stderr: string[]; completed?: RemoteOperationObservation }
+  >();
   private readonly ownedCommandReaders = new Map<string, () => Promise<void>>();
   private readonly commandRefreshes = new Map<string, Promise<void>>();
 
@@ -939,40 +950,63 @@ export class SelfhostedSession {
     return await this.execInternal(args, false);
   }
 
+  /** Internal controller transport: stream private request bytes over the
+   * existing command channel, never through argv, environment or host files. */
+  async execWithInput(
+    args: SelfhostedExecArgs & { stdin: Uint8Array },
+  ): Promise<SelfhostedExecResult> {
+    if (args.stdin.byteLength > SELFHOSTED_PLACEMENT_PRIVATE_MAX_BYTES) {
+      throw new RangeError("controller command input is too large");
+    }
+    return await this.execInternal(args, false, args.stdin.slice());
+  }
+
   private async execInternal(
     args: SelfhostedExecArgs,
     allowBackground: boolean,
+    stdin: Uint8Array = new Uint8Array(0),
   ): Promise<SelfhostedExecResult> {
-    // Admission is the only mutable-policy read. Everything below retains this
-    // exact connection/capability/policy-revision snapshot through completion.
-    const admission = await this.admitCommand();
+    // Mint once before local preflight so a proven refusal can settle exactly
+    // this command's turn registration, including SDK-rendered error paths.
+    const opId = nextDurableOpId() ?? `anon_${crypto.randomUUID()}`;
+    let admission: Awaited<ReturnType<SelfhostedSession["admitCommand"]>>;
+    let execReq: ExecRequest;
+    let opStreamClient: OpStreamExecClient | undefined;
     // 0 deliberately means no process deadline. That contract is safe only over
     // op-stream: its liveness probes, replay, and cancellation do not depend on a
     // request/reply timer or a monolithic response.
     const executionTimeoutMs = this.effectiveExecDeadlineMs;
-    const requestedShell = args.shell?.trim();
-    const execReq: ExecRequest = {
-      // An explicit shell is encoded as direct argv so every agent version honors
-      // it. With no explicit shell, preserve the existing machine-owned default
-      // shell behavior byte-for-byte.
-      command: requestedShell
-        ? explicitShellArgv(requestedShell, args.cmd, args.login === true)
-        : [args.cmd],
-      shell: !requestedShell,
-      // Relative paths resolve from the exact host root, while absolute paths
-      // retain their literal machine meaning. In particular, "/workspace" is
-      // sent as the real absolute path "/workspace".
-      cwd: resolveConnectedMachinePath(this.workspaceRoot, args.workdir),
-      // The machine owns its ambient shell environment and ordinary credentials.
-      // Only attempt-local values explicitly supplied by the worker cross here;
-      // snapshot now so a later renewal cannot mutate an in-flight request.
-      env: { ...(this.transientExecEnvironment?.() ?? {}) },
-      stdin: new Uint8Array(0),
-      timeoutMs: executionTimeoutMs,
-    };
-    const opStreamClient = this.opStreamClientFor(admission);
-    if (!opStreamClient) {
-      throw execRequiresOpStream();
+    try {
+      // Admission is the only mutable-policy read. Everything below retains
+      // its exact connection/capability/policy snapshot through completion.
+      admission = await this.admitCommand();
+      const requestedShell = args.shell?.trim();
+      execReq = {
+        // An explicit shell is encoded as direct argv so every agent version honors
+        // it. With no explicit shell, preserve the existing machine-owned default
+        // shell behavior byte-for-byte.
+        command: requestedShell
+          ? explicitShellArgv(requestedShell, args.cmd, args.login === true)
+          : [args.cmd],
+        shell: !requestedShell,
+        // Relative paths resolve from the exact host root, while absolute paths
+        // retain their literal machine meaning. In particular, "/workspace" is
+        // sent as the real absolute path "/workspace".
+        cwd: resolveConnectedMachinePath(this.workspaceRoot, args.workdir),
+        // The machine owns its ambient shell environment and ordinary credentials.
+        // Only attempt-local values explicitly supplied by the worker cross here;
+        // snapshot now so a later renewal cannot mutate an in-flight request.
+        env: { ...(this.transientExecEnvironment?.() ?? {}) },
+        stdin,
+        timeoutMs: executionTimeoutMs,
+      };
+      opStreamClient = this.opStreamClientFor(admission);
+      if (!opStreamClient) throw execRequiresOpStream();
+    } catch (error) {
+      // This region has issued no command RPC and registered no live consumer.
+      // This local fact, not the error's code/shape, proves non-dispatch.
+      notifyRemoteOperationNotDispatched(opId);
+      throw error;
     }
     try {
       return await this.execViaOpStream(
@@ -987,6 +1021,7 @@ export class SelfhostedSession {
             )
           : 0,
         args.cmd,
+        opId,
       );
     } catch (error) {
       if (error instanceof OpStreamUnavailableError) {
@@ -1012,11 +1047,36 @@ export class SelfhostedSession {
     executionTimeoutMs: number,
     backgroundYieldMs: number,
     command: string,
+    opId: string,
   ): Promise<SelfhostedExecResult> {
     const startedAt = Date.now();
-    const opId = nextDurableOpId() ?? `anon_${crypto.randomUUID()}`;
     let adoptedCommandId: string | null = null;
+    let ownershipTransferPending = false;
+    let terminalProof = false;
+    const retainedOutput: {
+      stdout: string[];
+      stderr: string[];
+      completed?: RemoteOperationObservation;
+    } = {
+      stdout: [],
+      stderr: [],
+    };
     this.inFlightOpStreamClients.set(opId, client);
+    this.inFlightOpStreamOutput.set(opId, retainedOutput);
+    const remoteControl: RemoteOperationControl = {
+      cancelExecCommand: async (requestedOpId) => {
+        if (requestedOpId !== opId) return false;
+        await client.cancel(opId);
+        return true;
+      },
+      observeExecCommand: async (requestedOpId) => {
+        if (requestedOpId !== opId) {
+          throw new Error("Remote operation observer received a different operation id");
+        }
+        return await this.observeExecCommandWithClient(opId, client, retainedOutput);
+      },
+    };
+    notifyRemoteOperationTransportSelected(remoteControl);
     try {
       const wallMs =
         executionTimeoutMs > 0 ? executionTimeoutMs + SELFHOSTED_EXEC_REPLY_GRACE_MS : 0;
@@ -1029,6 +1089,7 @@ export class SelfhostedSession {
                   await this.captureBackgroundCommandOutput?.(adoptedCommandId, frames);
               },
               onYield: async () => {
+                ownershipTransferPending = true;
                 notifyDurableOpOwnershipTransferStarted(opId);
                 const adopted = await this.adoptBackgroundCommand!({
                   controlWorkspaceId: admission.controlWorkspaceId,
@@ -1043,6 +1104,9 @@ export class SelfhostedSession {
                     await this.captureBackgroundCommandOutput?.(adopted.commandId, frames);
                   });
                   const terminal = replay.status === "completed" ? replay : replay.terminal;
+                  const outputReceipt =
+                    replay.outputReceipt ??
+                    (replay.status === "running" ? replay.terminal?.outputReceipt : undefined);
                   if (terminal) {
                     await this.settleBackgroundCommand?.({
                       commandId: adopted.commandId,
@@ -1051,6 +1115,9 @@ export class SelfhostedSession {
                       connectionInstanceId: admission.connectionInstanceId,
                       opId,
                       outcome: "exited",
+                      ...(this.captureBackgroundCommandOutput && outputReceipt
+                        ? { outputReceipt }
+                        : {}),
                       exitCode: terminal.outcome.response.exitCode,
                       reason: terminal.outcome.failure
                         ? `op_failure_${terminal.outcome.failure.failureCode.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 128)}`
@@ -1072,6 +1139,7 @@ export class SelfhostedSession {
                       throw runnerFailureToControlError(terminal.outcome.failure);
                   }
                 });
+                ownershipTransferPending = false;
                 notifyDurableOpOwnershipTransferred(opId);
               },
             })
@@ -1080,6 +1148,7 @@ export class SelfhostedSession {
               outcome: await client.exec(opId, execReq, executionTimeoutMs, wallMs),
             };
       if (result.status === "running") {
+        terminalProof = result.terminal !== undefined;
         if (result.terminal && adoptedCommandId) {
           await Promise.resolve(
             this.settleBackgroundCommand?.({
@@ -1089,6 +1158,9 @@ export class SelfhostedSession {
               connectionInstanceId: admission.connectionInstanceId,
               opId,
               outcome: "exited",
+              ...(this.captureBackgroundCommandOutput && result.terminal.outputReceipt
+                ? { outputReceipt: result.terminal.outputReceipt }
+                : {}),
               exitCode: result.terminal.outcome.response.exitCode,
               reason: result.terminal.outcome.failure
                 ? `op_failure_${result.terminal.outcome.failure.failureCode.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 128)}`
@@ -1130,6 +1202,7 @@ export class SelfhostedSession {
           backgroundOpId: result.opId,
         };
       }
+      terminalProof = true;
       const outcome = result.outcome;
       if (adoptedCommandId) {
         await Promise.resolve(
@@ -1169,8 +1242,16 @@ export class SelfhostedSession {
         // start retries without heals were admission backpressure (draining).
         ...(retries > 0 ? { faultClass: outcome.heals > 0 ? "reconnecting" : "draining" } : {}),
       });
-      return execResultToChannelA(outcome.response, executionTimeoutMs);
+      const nativeResult = execResultToChannelA(outcome.response, executionTimeoutMs);
+      retainedOutput.completed = { status: "completed", result: nativeResult };
+      return nativeResult;
     } catch (error) {
+      if (ownershipTransferPending && !adoptedCommandId) {
+        // The live consumer's failed-adoption cleanup has also rejected. Its
+        // exact client remains retained below, so turn cleanup must rejoin it.
+        ownershipTransferPending = false;
+        notifyDurableOpOwnershipTransferFailed(opId);
+      }
       if (error instanceof OpStreamUnavailableError) throw error;
       const controlError =
         error instanceof SelfhostedControlError
@@ -1195,20 +1276,28 @@ export class SelfhostedSession {
       });
       throw controlError;
     } finally {
-      this.inFlightOpStreamClients.delete(opId);
+      // An observer failure does not prove that the exact provider operation
+      // stopped. Keep its launch client available for cancellation and
+      // readExisting recovery; only terminal proof or durable adoption releases
+      // this process-local custody entry.
+      if (terminalProof || adoptedCommandId) {
+        this.inFlightOpStreamClients.delete(opId);
+        this.inFlightOpStreamOutput.delete(opId);
+      }
     }
   }
 
   /**
-   * The turn-end op-stream durability hook: persists each settled op's frontier
+   * The result/turn-end durability hook: persists each settled op's frontier
    * to the journal, then final-acks it on the wire (licensing the runner to GC
-   * its retained frames). The WORKER calls this after the turn's results are
-   * durably recorded — never mid-turn (the durable-before-wire-ack ordering).
+   * its retained frames). A tool-scoped call releases only that tool's output
+   * after its result is durably recorded. Omit scope only once every settled
+   * result has been accepted at the complete turn or one-off API boundary.
    * A no-op for sessions without the op-stream transport.
    */
-  async finalizeOpStreamOps(): Promise<void> {
+  async finalizeOpStreamOps(toolCallIds?: readonly string[]): Promise<void> {
     for (const client of this.opStreamClients.values()) {
-      await client.finalizeSettledOps();
+      await client.finalizeSettledOps(toolCallIds);
     }
   }
 
@@ -1259,6 +1348,56 @@ export class SelfhostedSession {
     if (!client) return false;
     await client.cancel(opId);
     return true;
+  }
+
+  /** Reconcile the exact retained foreground exec without OpStart or final ACK.
+   * Running/unobservable results keep the pinned client for another attempt. */
+  async observeExecCommand(opId: string): Promise<RemoteOperationObservation> {
+    const client = this.inFlightOpStreamClients.get(opId);
+    if (!client) throw new Error("No retained observer is available for this operation");
+    const output = this.inFlightOpStreamOutput.get(opId);
+    if (!output) throw new Error("No retained output custody is available for this operation");
+    return await this.observeExecCommandWithClient(opId, client, output);
+  }
+
+  private async observeExecCommandWithClient(
+    opId: string,
+    client: OpStreamExecClient,
+    output: { stdout: string[]; stderr: string[]; completed?: RemoteOperationObservation },
+  ): Promise<RemoteOperationObservation> {
+    if (output.completed?.status === "completed") return output.completed;
+    const observed = await client.readExisting(opId, 250, async (frames) => {
+      for (const frame of frames) output[frame.stream].push(frame.chunk);
+    });
+    if (observed.status === "running") {
+      return {
+        status: "running",
+        result: {
+          stdout: output.stdout.join(""),
+          stderr: output.stderr.join(""),
+          exitCode: null,
+        },
+      };
+    }
+    const result = execResultToChannelA(observed.outcome.response, this.effectiveExecDeadlineMs);
+    const completed: RemoteOperationObservation = {
+      status: "completed",
+      result: {
+        ...result,
+        stdout: output.stdout.join(""),
+        stderr: output.stderr.join(""),
+        output: output.stdout.join(""),
+      },
+      ...(observed.outcome.failure
+        ? { failure: runnerFailureToControlError(observed.outcome.failure) }
+        : {}),
+    };
+    output.completed = completed;
+    if (this.inFlightOpStreamClients.get(opId) === client) {
+      this.inFlightOpStreamClients.delete(opId);
+      this.inFlightOpStreamOutput.delete(opId);
+    }
+    return completed;
   }
 
   /** SDK shell capability never calls this (gated on `supportsPty()` which is
@@ -1671,7 +1810,7 @@ export class SelfhostedSession {
     return Number(result.fsWrite.bytesWritten);
   }
 
-  /** Idempotently remove only an OpenGeni placement-private authority file.
+  /** Idempotently remove only an Opengeni placement-private authority file.
    * This uses the filesystem control op rather than exec, so cleanup still
    * runs when the consuming command fails before a child process starts. */
   async deletePlacementPrivate(path: string, _runAs?: string): Promise<void> {
@@ -1953,7 +2092,7 @@ export class SelfhostedSandboxClient {
     /** Exact live daemon process. Optional only for the inert registry client;
      *  any live create()/resume() fails closed until one is bound. */
     connectionInstanceId?: string;
-    /** Stable terminal identity (normally the durable OpenGeni session id). */
+    /** Stable terminal identity (normally the durable Opengeni session id). */
     terminalScopeId?: string;
     epoch?: number;
     /** The control-op timeout threaded into every bound session. */
@@ -2136,7 +2275,7 @@ export interface SelfhostedSessionBuild {
   connectionInstanceId: string;
   /** The relay-URL shape for stream endpoints. */
   relay: SelfhostedRelayConfig;
-  /** Stable terminal identity; normally the durable OpenGeni session id. */
+  /** Stable terminal identity; normally the durable Opengeni session id. */
   terminalScopeId?: string;
   /** Lazily build the live ControlRpc (the request-scoped NATS connection). */
   controlRpcFactory: () => ControlRpc;
@@ -2303,8 +2442,8 @@ function execRequiresOpStream(cause?: OpStreamUnavailableError): SelfhostedContr
   const runnerUpgrade = cause?.unavailableKind === "runner" || cause === undefined;
   return new SelfhostedControlError({
     message: runnerUpgrade
-      ? "This Connected Machine does not advertise the streaming command protocol required for exec. Update and reconnect the OpenGeni agent. The command was not started."
-      : "The Connected Machine streaming channel is temporarily unavailable. OpenGeni did not downgrade to an ambiguous request/reply command; the command was not started. Retry after the machine reconnects.",
+      ? "This Connected Machine does not advertise the streaming command protocol required for exec. Update and reconnect the Opengeni agent. The command was not started."
+      : "The Connected Machine streaming channel is temporarily unavailable. Opengeni did not downgrade to an ambiguous request/reply command; the command was not started. Retry after the machine reconnects.",
     code: runnerUpgrade ? ErrorCode.ERROR_CODE_UNSUPPORTED : ErrorCode.ERROR_CODE_STREAM,
     reason: runnerUpgrade ? null : "agent_reconnecting",
     retryable: !runnerUpgrade,

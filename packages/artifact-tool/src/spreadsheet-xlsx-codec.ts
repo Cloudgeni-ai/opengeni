@@ -520,9 +520,17 @@ function importWorkbook(
         if (view.xSplit) worksheet.freezePanes.freezeColumns(view.xSplit);
       }
 
+      // ExcelJS exposes sparse rows at runtime; its WorksheetModel declaration
+      // omits the field even though RowModel is public.
+      const rowModels = sourceSheet.model as ExcelJS.WorksheetModel & {
+        rows?: readonly ExcelJS.RowModel[];
+      };
+      for (const row of rowModels.rows ?? []) {
+        if (row.height && row.height > 0) {
+          worksheet.setRowHeight(row.number - 1, pointsToPixels(row.height));
+        }
+      }
       sourceSheet.eachRow({ includeEmpty: false }, (row, rowNumber) => {
-        if (row.height && row.height > 0)
-          worksheet.setRowHeight(rowNumber - 1, pointsToPixels(row.height));
         row.eachCell({ includeEmpty: false }, (cell, columnNumber) => {
           const value = importCellValue(cell.value);
           const formula = formulaOf(cell.value);
@@ -540,10 +548,9 @@ function importWorkbook(
         });
       });
 
-      for (let columnNumber = 1; columnNumber <= sourceSheet.columnCount; columnNumber += 1) {
-        const width = sourceSheet.getColumn(columnNumber).width;
-        if (width && width > 0)
-          worksheet.setColumnWidth(columnNumber - 1, excelWidthToPixels(width));
+      for (const [column, definition] of (sourceSheet.columns ?? []).entries()) {
+        const width = definition?.width;
+        if (width && width > 0) worksheet.setColumnWidth(column, excelWidthToPixels(width));
       }
       for (const merge of sourceSheet.model.merges ?? []) worksheet.mergeCells(merge);
       importTables(worksheet, sourceSheet);
@@ -560,8 +567,8 @@ function importWorkbook(
 
 async function exportWorkbook(workbook: Workbook): Promise<ExcelJS.Workbook> {
   const output = await createExcelWorkbook();
-  output.creator = "OpenGeni";
-  output.lastModifiedBy = "OpenGeni";
+  output.creator = "Opengeni";
+  output.lastModifiedBy = "Opengeni";
   output.created = new Date(0);
   output.modified = new Date(0);
   output.calcProperties.fullCalcOnLoad = true;
@@ -607,12 +614,24 @@ async function exportWorkbook(workbook: Workbook): Promise<ExcelJS.Workbook> {
         sheet.getRow(row + 1).height = pixelsToPoints(worksheet.rowHeight(row));
       }
     }
+    // Sparse geometry can exist beyond the cell rectangle or on an empty sheet.
+    for (const [col, width] of worksheet.columnWidthEntries()) {
+      sheet.getColumn(col + 1).width = pixelsToExcelWidth(width);
+    }
+    for (const [row, height] of worksheet.rowHeightEntries()) {
+      sheet.getRow(row + 1).height = pixelsToPoints(height);
+    }
     for (const merge of worksheet.mergeRegions()) sheet.mergeCells(formatRangeAddress(merge));
     exportDataValidations(worksheet, sheet);
     exportConditionalFormattings(worksheet, sheet);
     exportTables(worksheet, sheet);
     exportImages(output, worksheet, sheet);
     exportComments(workbook, worksheet, sheet);
+  }
+  // OOXML requires at least one <sheet>, and Excel rejects a sheetless
+  // package as corrupt, so an empty workbook exports as one blank sheet.
+  if (workbook.worksheets.items.length === 0) {
+    output.addWorksheet("Sheet1", { views: [{ state: "normal" }] });
   }
   return output;
 }
@@ -1243,6 +1262,9 @@ function excelWidthToPixels(width: number): number {
 }
 
 function pixelsToExcelWidth(pixels: number): number {
+  if (pixels < 6) {
+    throw new RangeError("XLSX column widths below 6 pixels cannot round-trip through this codec");
+  }
   return Math.max(0.1, Number(((pixels - 5) / 7).toFixed(2)));
 }
 
@@ -2360,7 +2382,10 @@ function inspectXml(
       const value = activeMetadata.text.trim();
       if (
         value.length > 0 &&
-        !(["creator", "lastModifiedBy"].includes(activeMetadata.name) && value === "OpenGeni")
+        !(
+          ["creator", "lastModifiedBy"].includes(activeMetadata.name) &&
+          (value === "Opengeni" || value === "OpenGeni")
+        )
       ) {
         features.add("workbook-properties");
       }

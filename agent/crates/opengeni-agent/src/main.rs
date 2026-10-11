@@ -1,7 +1,7 @@
-//! The OpenGeni self-hosted agent binary.
+//! The Opengeni self-hosted agent binary.
 //!
-//! Run your own machine as a first-class OpenGeni sandbox. After a one-time
-//! device-flow enrollment the agent dials the OpenGeni control plane over NATS,
+//! Run your own machine as a first-class Opengeni sandbox. After a one-time
+//! device-flow enrollment the agent dials the Opengeni control plane over NATS,
 //! claims one process generation and subscribes to its exact authority subject
 //! (`agent.<ws>.<id>.connection.<instance>.rpc`), then answers control RPCs
 //! (exec / filesystem / git today; terminal + desktop
@@ -219,10 +219,10 @@ fn string_err(message: String) -> anyhow_lite::BoxError {
 fn list_connections(api_url: &str) -> anyhow_lite::Result {
     let connections = config::load_connections(api_url).map_err(to_boxed)?;
     if connections.is_empty() {
-        println!("No OpenGeni connections configured. Run `opengeni-agent connect`.");
+        println!("No Opengeni connections configured. Run `opengeni-agent connect`.");
         return Ok(());
     }
-    println!("Configured OpenGeni connections ({}):", connections.len());
+    println!("Configured Opengeni connections ({}):", connections.len());
     for connection in connections {
         let origin_note = if connection.legacy_origin {
             " (legacy origin unverified; reconnect once to confirm)"
@@ -342,7 +342,7 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
         let connections = existing_connections;
         info!(
             count = connections.len(),
-            "loaded configured OpenGeni connections"
+            "loaded configured Opengeni connections"
         );
         connections
     };
@@ -379,15 +379,16 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
         platform = platform.with_oom_isolation(cgroups);
     }
     let config_dir = config::config_dir().ok();
+    let update_drain = Arc::new(uploads::update_drain::UpdateDrain::default());
     let (next_platform, browser_sidecars) =
-        attach_browser_controller(platform, config_dir.as_deref());
+        attach_browser_controller(platform, config_dir.as_deref(), update_drain.clone());
     platform = next_platform;
     // Clone connection platforms only after browser control is attached. Existing
     // links and links added by the watcher must expose the identical controller.
     let connection_instance_id = uuid::Uuid::new_v4().to_string();
     let links = supervisor_links(&connections, &platform, &connection_instance_id);
     let (updates_tx, updates_rx) = tokio::sync::watch::channel(links.clone());
-    let browser_bridge = start_browser_bridge(config_dir.as_deref()).await;
+    let browser_bridge = start_browser_bridge(config_dir.as_deref(), update_drain.clone()).await;
 
     // The engine's disk spool lives under the config dir — a real filesystem
     // (a tmpfs temp dir would spool "to disk" in RAM and defeat the budgets).
@@ -396,6 +397,7 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
             .with_spool_root(dir.join("spool")),
         None => Supervisor::new_links(&links, env!("CARGO_PKG_VERSION")),
     };
+    supervisor = supervisor.with_update_drain(update_drain);
     if let Some(bridge) = &browser_bridge {
         supervisor = supervisor.with_browser_bridge(bridge.inventory());
     }
@@ -426,12 +428,12 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
                     if updates_tx.send(next_links).is_err() {
                         return;
                     }
-                    info!(count = next.len(), "reconciled local OpenGeni connections");
+                    info!(count = next.len(), "reconciled local Opengeni connections");
                     current = next;
                 }
                 Ok(_) => {}
                 Err(error) => {
-                    error!(%error, "could not reload OpenGeni connections; keeping active links");
+                    error!(%error, "could not reload Opengeni connections; keeping active links");
                 }
             }
         }
@@ -488,13 +490,14 @@ fn restart_after_verified_update() -> anyhow_lite::Result {
 fn attach_browser_controller(
     platform: NativePlatform,
     config_dir: Option<&Path>,
+    update_drain: Arc<uploads::update_drain::UpdateDrain>,
 ) -> (NativePlatform, Option<Arc<BrowserSidecarManager>>) {
     let Some(directory) = config_dir else {
         return (platform, None);
     };
     match BrowserSidecarManager::discover(directory) {
         Ok(manager) => {
-            let manager = Arc::new(manager);
+            let manager = Arc::new(manager.with_update_drain(update_drain));
             (
                 platform.with_browser_control(manager.clone()),
                 Some(manager),
@@ -507,9 +510,12 @@ fn attach_browser_controller(
     }
 }
 
-async fn start_browser_bridge(config_dir: Option<&Path>) -> Option<BrowserBridgeServer> {
+async fn start_browser_bridge(
+    config_dir: Option<&Path>,
+    update_drain: Arc<uploads::update_drain::UpdateDrain>,
+) -> Option<BrowserBridgeServer> {
     let directory = config_dir?;
-    match BrowserBridgeServer::start(directory).await {
+    match BrowserBridgeServer::start_with_update_drain(directory, update_drain).await {
         Ok(bridge) => Some(bridge),
         Err(error) => {
             warn!(%error, "attached browser bridge unavailable; continuing without it");
@@ -589,18 +595,18 @@ fn parse_geometry(geometry: &str) -> (u32, u32) {
     (w, h)
 }
 
-/// Probes whether this host currently has a usable display surface (a real X11
-/// screen or an Xvfb virtual framebuffer), the value advertised as the offer's
-/// `offers_display` at enroll. Mirrors how [`Supervisor::capabilities`] derives the
-/// `desktop` capability: `probe()` does a synchronous x11rb connect, so run it on
-/// the blocking pool — a wedged X server must not stall this async enroll task.
+/// Probe the display offer independently of capture permission. A Mac awaiting
+/// Screen Recording must still offer the user explicit screen-control consent.
 async fn probe_offers_display() -> bool {
-    // On macOS, make sure the desktop grants have been requested before we probe,
-    // so a freshly-granted Mac reports its display in the enroll offer. No-op on
-    // every non-macOS / feature-off build.
     ensure_macos_desktop_grants();
-    let desktop = opengeni_agent_platform::resolve_desktop();
-    tokio::task::spawn_blocking(move || desktop.probe().is_some())
+    probe_offers_display_with_backend(opengeni_agent_platform::resolve_desktop()).await
+}
+
+async fn probe_offers_display_with_backend(
+    desktop: Box<dyn opengeni_agent_platform::DesktopBackend>,
+) -> bool {
+    // X11 discovery can block; keep all platform probes off the async loop.
+    tokio::task::spawn_blocking(move || desktop.can_offer_display())
         .await
         .unwrap_or(false)
 }
@@ -632,7 +638,7 @@ fn ensure_macos_desktop_grants() {
             screen_recording = grants.screen_recording,
             accessibility = grants.accessibility,
             input_monitoring = grants.input_monitoring,
-            "this Mac needs OS permission to expose its display to OpenGeni — requesting \
+            "this Mac needs OS permission to expose its display to Opengeni — requesting \
              Screen Recording + Accessibility + Input Monitoring. Approve the system prompt(s), \
              or open System Settings > Privacy & Security and enable all three for \
              opengeni-agent, then let it reconnect. Capture and input capabilities appear as \
@@ -716,8 +722,7 @@ async fn enroll_command(
         .clone()
         .unwrap_or_else(supervisor::hostname_or_default);
 
-    // Probe the live display surface so a display-capable host enrolls as such
-    // (rather than the old M6 hardcode that recorded every machine headless).
+    // Offer consent based on display presence, including Macs awaiting OS grants.
     let offers_display = probe_offers_display().await;
 
     let request = EnrollmentRequest {
@@ -727,9 +732,8 @@ async fn enroll_command(
         offer: EnrollmentOffer {
             os: identity.os,
             arch: identity.arch,
-            // Whether this host currently has a probeable display (a real screen or
-            // an Xvfb virtual framebuffer) — mirrors the supervisor's `desktop`
-            // capability so the consent page only promises screen-control we can serve.
+            // Display presence allows consent during enrollment; runtime capture
+            // and input still require the OS grants and the user's approval.
             offers_display,
             // The agent does not request screen control by default (the user's
             // approve-time allow_screen_control is the authoritative consent anyway).
@@ -768,7 +772,7 @@ async fn enroll_command(
         "connection complete; credentials persisted"
     );
     println!(
-        "Connected to {} (connection {}). Existing OpenGeni connections were kept.",
+        "Connected to {} (connection {}). Existing Opengeni connections were kept.",
         stored.api_url, stored.connection_id
     );
     println!("A running agent notices this connection automatically within a few seconds.");
@@ -794,8 +798,7 @@ async fn enroll_with_token(
         .clone()
         .unwrap_or_else(supervisor::hostname_or_default);
 
-    // Probe the live display surface so a display-capable host enrolls as such
-    // (rather than the old M6 hardcode that recorded every machine headless).
+    // Offer consent based on display presence, including Macs awaiting OS grants.
     let offers_display = probe_offers_display().await;
 
     // The exchange carries the same identity fields as the device flow; the
@@ -808,9 +811,8 @@ async fn enroll_with_token(
         offer: EnrollmentOffer {
             os: identity.os,
             arch: identity.arch,
-            // Whether this host currently has a probeable display (a real screen or
-            // an Xvfb virtual framebuffer) — mirrors the supervisor's `desktop`
-            // capability so the control plane only records screen-control we can serve.
+            // Presence is independent of capture permission; the token remains
+            // authoritative for whether the user allowed screen control.
             offers_display,
             // The agent does not request screen control; the token's
             // allow_screen_control (set at mint time) is the authoritative consent.
@@ -835,7 +837,7 @@ async fn enroll_with_token(
         "connection complete; credentials persisted"
     );
     println!(
-        "Connected to {} (connection {}). Existing OpenGeni connections were kept.",
+        "Connected to {} (connection {}). Existing Opengeni connections were kept.",
         stored.api_url, stored.connection_id
     );
     println!("A running agent notices this connection automatically within a few seconds.");
@@ -890,4 +892,44 @@ mod anyhow_lite {
     pub type Result = std::result::Result<(), BoxError>;
     /// A handler result returning a value.
     pub type ResultOf<T> = std::result::Result<T, BoxError>;
+}
+
+#[cfg(test)]
+mod display_offer_tests {
+    use super::probe_offers_display_with_backend;
+    use opengeni_agent_platform::{CapturedFrame, DesktopBackend, NoDesktop, PlatformResult};
+    use opengeni_agent_proto::v1;
+
+    struct DisplayAwaitingPermission;
+
+    #[async_trait::async_trait]
+    impl DesktopBackend for DisplayAwaitingPermission {
+        fn probe(&self) -> Option<v1::Display> {
+            None
+        }
+
+        fn can_offer_display(&self) -> bool {
+            true
+        }
+
+        async fn capture(&self) -> PlatformResult<CapturedFrame> {
+            panic!("enrollment must not capture the screen")
+        }
+
+        async fn inject(&self, _: &v1::DesktopInput) -> PlatformResult<()> {
+            panic!("enrollment must not inject input")
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_capture_permission_does_not_hide_control_consent() {
+        let desktop = Box::new(DisplayAwaitingPermission);
+        assert!(desktop.probe().is_none());
+        assert!(probe_offers_display_with_backend(desktop).await);
+    }
+
+    #[tokio::test]
+    async fn headless_enrollment_still_does_not_offer_screen_control() {
+        assert!(!probe_offers_display_with_backend(Box::new(NoDesktop)).await);
+    }
 }

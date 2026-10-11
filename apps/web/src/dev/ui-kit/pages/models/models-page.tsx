@@ -74,7 +74,7 @@ const COLUMNS: RowListColumn[] = [
   { id: "usage", label: "Usage", width: 200, hideLabel: true, align: "end" },
 ];
 
-const GATEWAY_ORDER: readonly GatewayId[] = ["openrouter", "vercel"];
+const GATEWAY_ORDER: readonly GatewayId[] = ["openrouter", "opper", "vercel"];
 
 const PICK_HELP =
   "Spread work sends each new chat to the account with the most usage left. Primary only uses the primary account and waits when it runs out.";

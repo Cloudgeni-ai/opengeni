@@ -235,7 +235,7 @@ case "$*" in image\\ inspect\\ --format\\ {{.Id}}\\ opengeni-sandbox:*) printf '
       false,
     );
     expect(exitCode).toBe(0);
-    expect(stdout).toContain("Recreating the OpenGeni sandbox builder");
+    expect(stdout).toContain("Recreating the Opengeni sandbox builder");
     const removal = calls.indexOf("buildx rm --force opengeni-development-sandbox");
     const create = calls.indexOf(
       `buildx create --name opengeni-development-sandbox --node ${node}`,

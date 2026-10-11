@@ -829,7 +829,7 @@ describe("API component integration", () => {
         mcpServers: [
           {
             id: "opengeni",
-            name: "OpenGeni",
+            name: "Opengeni",
             url: "http://127.0.0.1:65530/v1/workspaces/{workspaceId}/mcp",
             cacheToolsList: true,
           },
@@ -891,6 +891,48 @@ describe("API component integration", () => {
     expect(((await paused.json()) as { status: string }).status).toBe("paused");
 
     const wakeupsBeforeResume = workflow.wakeups.length;
+    const pausedGoal = await getSessionGoal(dbClient.db, workspaceId, session.id);
+    const pausedEvents = await listSessionEvents(dbClient.db, workspaceId, session.id);
+    await withWorkspaceSessionActivityRls(dbClient.db, workspaceId, (tx) =>
+      tx.execute(sql`
+      update sessions set model = 'removed/fixture-model' where id = ${session.id}`),
+    );
+    const blockedResume = await app.request(
+      workspacePath(workspaceId, `/sessions/${session.id}/goal`),
+      {
+        method: "PATCH",
+        body: JSON.stringify({ status: "active" }),
+        headers: { "content-type": "application/json" },
+      },
+    );
+    expect(blockedResume.status).toBe(422);
+    expect(await blockedResume.text()).toContain("Choose an available model");
+    expect(await getSessionGoal(dbClient.db, workspaceId, session.id)).toEqual(pausedGoal);
+    expect(await listSessionEvents(dbClient.db, workspaceId, session.id)).toEqual(pausedEvents);
+    expect(workflow.wakeups.length).toBe(wakeupsBeforeResume);
+    await withWorkspaceSessionActivityRls(dbClient.db, workspaceId, (tx) =>
+      tx.execute(sql`
+      update sessions set model = 'scripted-model' where id = ${session.id}`),
+    );
+    await withWorkspaceSessionActivityRls(dbClient.db, workspaceId, (tx) =>
+      tx.execute(sql`update sessions set latency_mode = 'fast' where id = ${session.id}`),
+    );
+    const blockedLatencyResume = await app.request(
+      workspacePath(workspaceId, `/sessions/${session.id}/goal`),
+      {
+        method: "PATCH",
+        body: JSON.stringify({ status: "active" }),
+        headers: { "content-type": "application/json" },
+      },
+    );
+    expect(blockedLatencyResume.status).toBe(422);
+    expect(await blockedLatencyResume.text()).toContain("latency mode");
+    expect(await getSessionGoal(dbClient.db, workspaceId, session.id)).toEqual(pausedGoal);
+    expect(await listSessionEvents(dbClient.db, workspaceId, session.id)).toEqual(pausedEvents);
+    expect(workflow.wakeups.length).toBe(wakeupsBeforeResume);
+    await withWorkspaceSessionActivityRls(dbClient.db, workspaceId, (tx) =>
+      tx.execute(sql`update sessions set latency_mode = 'standard' where id = ${session.id}`),
+    );
     const resumed = await app.request(workspacePath(workspaceId, `/sessions/${session.id}/goal`), {
       method: "PATCH",
       body: JSON.stringify({ status: "active" }),
@@ -1263,6 +1305,27 @@ describe("API component integration", () => {
       outcome: "applied",
     });
 
+    const pausedBeforeResume = await getSessionGoal(dbClient.db, baseGrant.workspaceId, session.id);
+    const eventsBeforeResume = await listSessionEvents(
+      dbClient.db,
+      baseGrant.workspaceId,
+      session.id,
+    );
+    await withWorkspaceSessionActivityRls(dbClient.db, baseGrant.workspaceId, (tx) =>
+      tx.execute(sql`
+      update sessions set model = 'removed/fixture-model' where id = ${session.id}`),
+    );
+    await expect(callMcpTool(mcp, "goal_resume", {})).rejects.toThrow("Choose an available model");
+    expect(await getSessionGoal(dbClient.db, baseGrant.workspaceId, session.id)).toEqual(
+      pausedBeforeResume,
+    );
+    expect(await listSessionEvents(dbClient.db, baseGrant.workspaceId, session.id)).toEqual(
+      eventsBeforeResume,
+    );
+    await withWorkspaceSessionActivityRls(dbClient.db, baseGrant.workspaceId, (tx) =>
+      tx.execute(sql`
+      update sessions set model = 'scripted-model' where id = ${session.id}`),
+    );
     const resumedGoal = await callMcpTool<McpMutationReceiptType>(mcp, "goal_resume", {});
     expect(resumedGoal).toMatchObject({ changed: true, resource: { state: "active" } });
     const alreadyActive = await callMcpTool<McpMutationReceiptType>(mcp, "goal_resume", {});
@@ -1687,7 +1750,7 @@ describe("API component integration", () => {
           mcpServers: [
             {
               id: "opengeni",
-              name: "OpenGeni",
+              name: "Opengeni",
               url: `http://127.0.0.1:${server.port}/v1/workspaces/{workspaceId}/mcp`,
               timeoutMs: undefined,
               cacheToolsList: false,
@@ -1975,7 +2038,9 @@ describe("API component integration", () => {
       }),
     });
     expect(rejectedTurn.status).toBe(402);
-    expect(await rejectedTurn.text()).toContain("insufficient OpenGeni credits");
+    expect(await rejectedTurn.json()).toMatchObject({
+      error: { status: 402, code: "payment_required", retryable: false },
+    });
     const preserved = await app.request(
       workspacePath(ownerWorkspaceId, `/files/${upload.fileId}`),
       {
@@ -2155,7 +2220,9 @@ describe("API component integration", () => {
       },
     );
     expect(triggered.status).toBe(402);
-    expect(await triggered.text()).toContain("insufficient OpenGeni credits");
+    expect(await triggered.json()).toMatchObject({
+      error: { status: 402, code: "payment_required", retryable: false },
+    });
   });
 
   test("static usage limits enforce operator caps without Better Auth or Stripe", async () => {
@@ -2787,8 +2854,8 @@ describe("API component integration", () => {
     ).toEqual({ received: true });
     expect(await balance()).toBe(0);
 
-    // A paid OpenGeni checkout for an account this deployment does not hold,
-    // such as another OpenGeni deployment sharing the Stripe account: retrying
+    // A paid Opengeni checkout for an account this deployment does not hold,
+    // such as another Opengeni deployment sharing the Stripe account: retrying
     // cannot succeed, so it is acknowledged rather than failed for days.
     const absentAccountId = crypto.randomUUID();
     expect(
@@ -5843,7 +5910,7 @@ describe("API component integration", () => {
 
     const authorityCheckedAt = new Date();
     const authorityExpiresAt = new Date(authorityCheckedAt.getTime() + 10 * 60_000);
-    // One GitHub installation can be deliberately delegated into two OpenGeni
+    // One GitHub installation can be deliberately delegated into two Opengeni
     // workspaces, but each workspace owns an independent exact allowlist and
     // an independent consumed owner-authority proof.
     await Promise.all([
@@ -6028,7 +6095,7 @@ describe("API component integration", () => {
     );
   });
 
-  test("configured-token browser handoff preserves OpenGeni grant but still requires GitHub owner proof", async () => {
+  test("configured-token browser handoff preserves Opengeni grant but still requires GitHub owner proof", async () => {
     const stateSecret = "github-owner-authority-state";
     const delegationSecret = "test-delegation-secret";
     const installationId = 438826628;
@@ -7585,7 +7652,7 @@ describe("API component integration", () => {
 
     // A worker-signed parent claim makes this a child create. Omitting the
     // override must inherit the manager's effective grant instead of widening
-    // the child to OpenGeni's full standalone worker defaults.
+    // the child to Opengeni's full standalone worker defaults.
     const childMcp = buildOpenGeniMcpServer(mcpDeps, {
       ...managerGrant,
       // Delegated permission arrays are semantically sets. Inheritance stores
@@ -7636,7 +7703,7 @@ describe("API component integration", () => {
         mcpServers: [
           {
             id: "opengeni",
-            name: "OpenGeni",
+            name: "Opengeni",
             url: `http://127.0.0.1:${server.port}/v1/workspaces/{workspaceId}/mcp`,
             timeoutMs: undefined,
             cacheToolsList: false,

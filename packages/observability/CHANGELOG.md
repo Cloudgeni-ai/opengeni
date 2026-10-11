@@ -1,5 +1,81 @@
 # @opengeni/observability
 
+## 1.4.4
+
+### Patch Changes
+
+- 2edfa4c: Spans are batched on a short timer (up to 256 per OTLP request) instead of per microtask, so busy workers no longer overflow the bounded export queue and drop spans.
+- Updated dependencies [6384dbd]
+  - @opengeni/contracts@1.4.4
+
+## 1.4.3
+
+### Patch Changes
+
+- @opengeni/contracts@1.4.3
+
+## 1.4.2
+
+### Patch Changes
+
+- @opengeni/contracts@1.4.2
+
+## 1.4.1
+
+### Patch Changes
+
+- Updated dependencies [9145bad]
+- Updated dependencies [f290348]
+  - @opengeni/contracts@1.4.1
+
+## 1.4.0
+
+### Patch Changes
+
+- Updated dependencies [bd9521c]
+- Updated dependencies [08ce841]
+- Updated dependencies [673bb53]
+  - @opengeni/contracts@1.4.0
+
+## 1.3.0
+
+### Patch Changes
+
+- 178b5ae: Unify connector Allow, Ask first and Block decisions across tool transports and settings. Add durable programmatic approval handles, exact stored-operation continuation, and shared review facts with portable React presentation and paginated protected details.
+
+  Add lightweight Gmail message selection and bounded pagination/chunk helpers. Preserve exact access checks, uncertain outcomes and existing client compatibility. Deploy matching API, worker and native runtime artifacts through the documented maintenance migration.
+
+- Updated dependencies [178b5ae]
+- Updated dependencies [414d416]
+  - @opengeni/contracts@1.3.0
+
+## 1.2.0
+
+### Patch Changes
+
+- Updated dependencies [21c8904]
+- Updated dependencies [d870f32]
+  - @opengeni/contracts@1.2.0
+
+## 1.1.0
+
+### Patch Changes
+
+- Updated dependencies [5fd6c55]
+- Updated dependencies [c600e3a]
+- Updated dependencies [411b3b5]
+- Updated dependencies [208dec1]
+  - @opengeni/contracts@1.1.0
+
+## 1.0.2
+
+### Patch Changes
+
+- f9e33b5: Retain bounded HTTP method, route, cause-kind and diagnostic correlation in error logs without exposing request contents or exception text. Record protected cause diagnostics for unexpected API failures.
+- Updated dependencies [4476ca7]
+- Updated dependencies [e16aa17]
+  - @opengeni/contracts@1.0.1
+
 ## 1.0.0
 
 ### Major Changes

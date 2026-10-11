@@ -52,6 +52,8 @@ import { PrivateSessionIndicator } from "@/components/session/private-session-in
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import { isCodexProductModel } from "@/lib/session-model";
 import { isIntelligenceEffort } from "@/lib/session-tools";
+import { useSessionRepliesMute } from "@/lib/inbox";
+import { useSessionAdminAccess } from "@/components/session/session-admin-access";
 import { applySessionArchiveProjection } from "@/lib/session-pagination";
 import { notifySessionListChanged } from "@/lib/session-list-invalidation";
 import type { Session } from "@/types";
@@ -238,7 +240,7 @@ export function RailShell({ children }: { children: ReactNode }) {
   // Focus returns here when the mobile drawer closes (D9.1): the drawer is a
   // controlled Sheet with no in-tree trigger, so radix can't restore focus on
   // its own — we point it back at the hamburger that opened it.
-  const hamburgerRef = useRef<HTMLButtonElement>(null);
+  const hamburgerRef = rail.drawerTriggerRef;
 
   // Live width while the reader drags the resize handle. Held locally (not in
   // context) so we don't write localStorage on every pointer move — the chosen
@@ -341,7 +343,7 @@ export function RailShell({ children }: { children: ReactNode }) {
               className="w-screen max-w-none gap-0 p-0 sm:w-[380px] sm:max-w-[90vw]"
               onCloseAutoFocus={(event) => {
                 event.preventDefault();
-                hamburgerRef.current?.focus();
+                rail.restoreDrawerFocus();
               }}
             >
               <SheetTitle className="sr-only">Session navigation</SheetTitle>
@@ -491,6 +493,8 @@ function SessionRouteHeader({
   const catalog = useWorkspaceModelCatalog(session.workspaceId);
   const selectedRow = findPickerRow(catalog.rows, displayModelId);
   const policyLoading = lastStarted.loading || catalog.loading;
+  const repliesMute = useSessionRepliesMute(session);
+  const adminAccess = useSessionAdminAccess(session);
   const archiveInFlight = useRef(false);
   const onArchive = useCallback(
     async (target: Session, archived: boolean) => {
@@ -557,12 +561,15 @@ function SessionRouteHeader({
         context.updateSessionPin(target.workspaceId, target.id, pinned, target.pinVersion ?? 0)
       }
       onArchive={onArchive}
+      repliesMute={repliesMute}
+      adminAccess={adminAccess}
       leading={hamburger}
       lastStartedModel={lastStartedModel}
       lastStartedReasoningEffort={lastStartedReasoningEffort}
       lastStartedLatencyMode={lastStartedLatencyMode}
       billingClass={selectedRow?.billingClass}
       modelLabel={selectedRow?.label}
+      modelLogoUrl={selectedRow?.catalog.logoUrl}
       policyLoading={policyLoading}
       accessSlot={
         session.tenancy ? (
