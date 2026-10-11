@@ -11,7 +11,9 @@
 // response shapes over core connections and settings, with legacy ids
 // resolved through the cutover's aliases. Authority is the core's own
 // (row-level security and the neutral writers); the route keeps the legacy
-// browser and scope checks in front of it.
+// browser and scope checks in front of it, except that a private (`user`)
+// connection is managed only from its owner's own Personal workspace, where
+// the core keeps it.
 import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import * as z from "zod/v4";
@@ -21,6 +23,7 @@ import {
   disconnectSubscriptionCoreConnection,
   readSubscriptionCoreProviderRouteForRequest,
   renameSubscriptionCoreConnection,
+  resolveNamedManagedPersonalWorkspaceGrant,
   setSubscriptionCoreAllocator,
   setSubscriptionCorePrimary,
   setSubscriptionCoreRotation,
@@ -192,6 +195,7 @@ async function workspaceTarget(c: Context, ctx: PoolContext, workspaceId: string
     workspaceId,
     account.scope,
     displayName,
+    "personal_workspace",
   );
   return {
     admin: { accountId: authority.accountId, workspaceId, subjectId: authority.subjectId },
@@ -209,7 +213,13 @@ export async function coreWorkspaceAccounts(c: Context, ctx: PoolContext, worksp
     viewerSubjectId: grant.subjectId,
   });
   if (projection.source === "user") {
-    const human = await requirePrivateSubscriptionHuman(c, deps, workspaceId, displayName);
+    const human = await requirePrivateSubscriptionHuman(
+      c,
+      deps,
+      workspaceId,
+      displayName,
+      "personal_workspace",
+    );
     if (human.subjectId !== grant.subjectId)
       throw new HTTPException(403, { message: "managed browser identity mismatch" });
   }
@@ -258,12 +268,27 @@ export async function coreWorkspaceSettings(
     workspaceId,
     viewerSubjectId: grant.subjectId,
   });
+  // Authorized by the workspace, not by the listing's display source: while an
+  // organization pool serves the workspace it is managed there (409, as
+  // legacy); the caller's own Personal workspace is the owner's to change;
+  // any other workspace needs its administrator.
+  const scope =
+    projection.source === "organization"
+      ? "organization"
+      : (await resolveNamedManagedPersonalWorkspaceGrant(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            subjectId: grant.subjectId,
+          }))
+        ? "user"
+        : "workspace";
   const authority = await requireSubscriptionScopeMutation(
     c,
     deps,
     workspaceId,
-    projection.source,
+    scope,
     displayName,
+    "personal_workspace",
   );
   const written = await setSubscriptionCoreRotation(deps.db, core.binding, {
     accountId: authority.accountId,

@@ -37,7 +37,7 @@ mock.module(Bun.resolveSync("../src/subscription-core-providers", import.meta.di
 }));
 const db = await import("../src");
 const { encryptEnvironmentValue } = await import("../src/environment-crypto");
-const { rawRows } = await import("../src/database");
+const { rawRows, setSubjectRlsContext, withRlsContext } = await import("../src/database");
 const { connectSubscriptionCoreConnection } = await import("../src/subscription-core/connections");
 
 let shared: SharedTestDatabase | null = null;
@@ -290,10 +290,11 @@ describe.skipIf(!realDb)("SuperGrok on the shared core's writers (M4 X2b)", () =
     const workspaceWide = await connectXai(org!, { workspaceId: org!.sharedWorkspaceId });
     if (workspaceWide.kind !== "connected") throw new Error("workspace connect refused");
     expect((await connection(workspaceWide.id))!.credential_format).toBe("xai_oauth_v1");
-    // The 0719 writer refuses a format that is not an adapter's format name.
-    const malformed = await connectSubscriptionCoreConnection(client!.db, SUBSCRIPTION_CORE_XAI, {
+    // A format that is not an adapter's format name is a caller defect on
+    // every path: refused before any write, never reported as a maintenance
+    // pause or an ordinary refusal.
+    const malformedInput = {
       accountId: org!.accountId,
-      workspaceId: org!.personalWorkspaceId,
       subjectId: org!.subjectId,
       credentialEncrypted: "v1:fixture",
       credentialFormat: "Not A Format",
@@ -306,8 +307,51 @@ describe.skipIf(!realDb)("SuperGrok on the shared core's writers (M4 X2b)", () =
       accountEmail: null,
       label: null,
       connectedBySubjectId: org!.subjectId,
+    };
+    for (const workspaceId of [org!.personalWorkspaceId, org!.sharedWorkspaceId, null]) {
+      await expect(
+        connectSubscriptionCoreConnection(client!.db, SUBSCRIPTION_CORE_XAI, {
+          ...malformedInput,
+          workspaceId,
+        }),
+      ).rejects.toThrow("subscription core credential format is malformed");
+    }
+    // The 0719 writer keeps its own check for a direct call.
+    const direct = await db.withSessionRlsActorContext({ subjectId: org!.subjectId }, () =>
+      withRlsContext(
+        client!.db,
+        { accountId: org!.accountId, workspaceId: org!.personalWorkspaceId },
+        async (tx) => {
+          await setSubjectRlsContext(tx, org!.subjectId);
+          return await rawRows<{ outcome: string; connection_id: string | null }>(
+            tx,
+            sql`select outcome, connection_id::text as connection_id
+              from opengeni_private.connect_subscription_core_personal('xai',
+                ${org!.accountId}::uuid, ${org!.personalWorkspaceId}::uuid, ${org!.subjectId},
+                'v1:fixture', ${malformedInput.providerAccountId}, 'xai-person', null,
+                '{}'::jsonb, null, now(), null, null, ${org!.subjectId}, 'Not A Format')`,
+          );
+        },
+      ),
+    );
+    expect(direct).toHaveLength(1);
+    expect(direct[0]!.outcome).not.toBe("connected");
+    expect(direct[0]!.connection_id).toBeNull();
+  });
+
+  test("an access change wakes from the provider's binding, with the earlier texts", () => {
+    const accountId = crypto.randomUUID();
+    expect(db.subscriptionCoreAccessChangeWake("codex", accountId)).toEqual({
+      provider: "codex",
+      displayName: "Codex",
+      wake: { accountId, reason: "core_codex_access_changed" },
     });
-    expect(malformed).toEqual({ kind: "refused", reason: "unavailable" });
+    expect(db.subscriptionCoreAccessChangeWake("supergrok", accountId)).toEqual({
+      provider: "xai",
+      displayName: "SuperGrok",
+      wake: { accountId, reason: "core_xai_access_changed" },
+    });
+    expect(db.subscriptionCoreAccessChangeWake("openrouter", accountId)).toBeNull();
   });
 
   test("Codex personal connections still store `v1` through the 0707 writer", async () => {

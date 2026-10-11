@@ -137,11 +137,23 @@ async function isOrganizationAdministrator(tx: Database, accountId: string): Pro
  * Connect (or reconnect) one account of this provider from a completed
  * sign-in. The caller delivers `wake` after commit.
  */
+/** A stored `credential_format` name, as 0719's personal writer checks it. */
+const SUBSCRIPTION_CORE_CREDENTIAL_FORMAT = /^[a-z][a-z0-9_]{0,63}$/u;
+
 export async function connectSubscriptionCoreConnection(
   db: Database,
   provider: SubscriptionCoreProvider,
   input: SubscriptionCoreConnectScope & SubscriptionCoreCredentialInput,
 ): Promise<SubscriptionCoreConnectResult> {
+  // The format is the adapter's stored-format name (`credential.format`),
+  // never free text. A malformed one is a caller defect, reported as such on
+  // every path rather than as a refusal or a maintenance pause.
+  if (
+    input.credentialFormat !== undefined &&
+    !SUBSCRIPTION_CORE_CREDENTIAL_FORMAT.test(input.credentialFormat)
+  ) {
+    throw new Error("subscription core credential format is malformed");
+  }
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },

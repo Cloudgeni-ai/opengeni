@@ -482,6 +482,47 @@ describe("provider-neutral subscription-core routines (migration 0707)", () => {
   );
 
   test.skipIf(!realDb)(
+    "the format-aware personal connect writer is the live writer plus exactly 0719's changes",
+    async () => {
+      // 0719 builds its overload from the live 14-argument writer. A later fix
+      // to one overload must reach the other: this compares the two live
+      // bodies after 0719's four substitutions, so any drift fails here.
+      const [row] = await database!.admin<{ base: string; formatted: string }[]>`
+        select
+          pg_get_functiondef('opengeni_private.connect_subscription_core_personal(text,uuid,uuid,text,text,text,text,text,jsonb,timestamptz,timestamptz,text,text,text)'::regprocedure) as base,
+          pg_get_functiondef('opengeni_private.connect_subscription_core_personal(text,uuid,uuid,text,text,text,text,text,jsonb,timestamptz,timestamptz,text,text,text,text)'::regprocedure) as formatted`;
+      const substitutions: Array<[string, string]> = [
+        [
+          "p_connected_by_subject_id text)",
+          "p_connected_by_subject_id text, p_credential_format text)",
+        ],
+        [
+          "credential_encrypted = p_credential_encrypted, credential_format = 'v1',",
+          "credential_encrypted = p_credential_encrypted, credential_format = p_credential_format,",
+        ],
+        [
+          "p_credential_encrypted, 'v1', p_expires_at",
+          "p_credential_encrypted, p_credential_format, p_expires_at",
+        ],
+        [
+          "OR p_credential_encrypted IS NULL OR length(p_credential_encrypted) = 0\n",
+          "OR p_credential_encrypted IS NULL OR length(p_credential_encrypted) = 0\n        OR p_credential_format IS NULL OR p_credential_format !~ '^[a-z][a-z0-9_]{0,63}$'\n",
+        ],
+      ];
+      let expected = row!.base;
+      for (const [from, to] of substitutions) {
+        expect({ from, occurrences: expected.split(from).length - 1 }).toEqual({
+          from,
+          occurrences: 1,
+        });
+        expected = expected.replace(from, () => to);
+      }
+      expect(row!.formatted).toBe(expected);
+    },
+    180_000,
+  );
+
+  test.skipIf(!realDb)(
     "personal writers: provider-named and neutral routines produce the same outcomes and rows",
     async () => {
       const [codex, core] = [await writerScenario("codex"), await writerScenario("core")];

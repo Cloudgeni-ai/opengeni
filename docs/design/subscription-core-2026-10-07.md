@@ -4404,14 +4404,23 @@ disabled) answers the typed 503 `subscription_core_cutover_disabled`.
   rotation maps to `spread` / `primary_first`; rename, allocator and
   disconnect use the neutral writers, behind the legacy browser and scope
   checks. Connect start fails closed in maintenance.
-- **Workspace settings over an inherited pool.** On the core, rotation and
-  activate on a workspace route write that workspace's own setting, as
-  Codex on the core does; the organization's settings change only on the
-  organization routes. Legacy SuperGrok changed the organization's
-  rotation from a workspace that used the organization pool, and its
-  activate there wrote nothing. Whether a workspace may hold such an
-  override is the organization's settings lock, enforced by the neutral
-  settings writers these routes call.
+- **Workspace settings over an inherited pool.** As legacy, while an
+  available organization pool serves the workspace, rotation and activate
+  on a workspace route are refused (409, "manage this subscription in
+  organization settings") before anything is written; the organization's
+  settings change only on the organization routes. Otherwise they write
+  that workspace's own setting, and whether a workspace may hold it is the
+  organization's settings lock, enforced by the neutral settings writers.
+- **Private accounts live in the Personal workspace.** On the core, every
+  route that manages a private (`user`) account (connect start and poll,
+  listing personal rows, rename, allocator, activate, disconnect, rotation)
+  requires the caller's own current Personal workspace with a live
+  organization membership, where the core keeps personal connections; the
+  legacy rule (an ordinary workspace membership) still applies before the
+  receipt. `scope: "user"` outside the Personal workspace is refused at
+  connect start, before the xAI sign-in. Rotation is authorized by the
+  workspace (organization pool, own Personal workspace, else the workspace
+  administrator), not by the listing's display `source`.
 - **Organization activate** refuses, as legacy did (409), an account that
   is not active or that the allocator may not use; an unknown id is 404.
 - **Connect admission.** Whether a workspace administrator may save the
@@ -4426,7 +4435,12 @@ disabled) answers the typed 503 `subscription_core_cutover_disabled`.
   into a shared one (the strictest reading of "personal connections only in
   the owner's private session or Personal workspace"). Migration 0719 adds
   the personal writer overload that takes the format; Codex keeps the 0707
-  writer and `v1`. A shared workspace's connect is step W's shape
+  writer and `v1`. The format is the adapter codec's
+  (`credential.format`); a malformed one is a caller defect, thrown by the
+  neutral writer before any write on every path (never a refusal or the
+  maintenance 503). A test compares the two live overloads after 0719's
+  four substitutions, so a later fix to one that misses the other fails.
+  A shared workspace's connect is step W's shape
   ([§5.4](#54-workspace-managed-connections-as-organization-accounts)): an
   organization account that workspace manages, which the organization
   access editor shares. As for Codex on the core, a first connect leaves

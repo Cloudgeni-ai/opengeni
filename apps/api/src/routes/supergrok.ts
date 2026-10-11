@@ -114,12 +114,36 @@ function requireEnabled(deps: ApiRouteDeps): void {
 
 const requirePrivateHuman = (c: Context, deps: ApiRouteDeps, workspaceId: string) =>
   requirePrivateSubscriptionHuman(c, deps, workspaceId, "SuperGrok");
+/**
+ * The legacy scope check; on the shared core a private (`user`) account is
+ * managed only from its owner's Personal workspace.
+ */
 export const requireScopeMutation = (
   c: Context,
   deps: ApiRouteDeps,
   workspaceId: string,
   scope: "workspace" | "user" | "organization",
-) => requireSubscriptionScopeMutation(c, deps, workspaceId, scope, "SuperGrok");
+  runtime: "legacy" | "core" = "legacy",
+) =>
+  requireSubscriptionScopeMutation(
+    c,
+    deps,
+    workspaceId,
+    scope,
+    "SuperGrok",
+    runtime === "core" ? "personal_workspace" : "ordinary_workspace",
+  );
+
+/**
+ * The runtime serving a workspace route. With the receipt the switch row is
+ * read for the caller's organization, which a workspace grant names first,
+ * so an unauthenticated caller learns nothing about it.
+ */
+const workspaceRuntime = (c: Context, deps: ApiRouteDeps, workspaceId: string) =>
+  supergrokRoute(
+    deps,
+    async () => (await requireAccessGrant(c, deps, workspaceId, "workspace:read")).accountId,
+  );
 
 async function resolveReadAuthority(
   c: Context,
@@ -463,8 +487,10 @@ export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const parsed = connectStartBody.safeParse(await c.req.json().catch(() => ({})));
     if (!parsed.success) throw new HTTPException(400, { message: "invalid SuperGrok scope" });
-    const authority = await requireScopeMutation(c, deps, workspaceId, parsed.data.scope);
-    await supergrokRoute(deps, async () => authority.accountId);
+    // On the core a private account is connected only from the person's own
+    // Personal workspace: refused here, before the xAI sign-in, elsewhere.
+    const runtime = await workspaceRuntime(c, deps, workspaceId);
+    const authority = await requireScopeMutation(c, deps, workspaceId, parsed.data.scope, runtime);
     const authorization = await requireAccessGrantAuthorization(
       c,
       deps,
@@ -531,8 +557,8 @@ export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "SuperGrok connect state is invalid or expired",
       });
     }
-    const authority = await requireScopeMutation(c, deps, workspaceId, state.scope);
-    const runtime = await supergrokRoute(deps, async () => authority.accountId);
+    const runtime = await workspaceRuntime(c, deps, workspaceId);
+    const authority = await requireScopeMutation(c, deps, workspaceId, state.scope, runtime);
     if (authority.subjectId !== state.subjectId) {
       throw new HTTPException(403, {
         message: "SuperGrok connect identity changed",
@@ -579,7 +605,7 @@ export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {
       const identity = xaiIdentityFromDeviceTokens(poll.tokens);
       phase = "credential_persist";
       await requireOrigin();
-      const liveAuthority = await requireScopeMutation(c, deps, workspaceId, state.scope);
+      const liveAuthority = await requireScopeMutation(c, deps, workspaceId, state.scope, runtime);
       if (
         liveAuthority.accountId !== authority.accountId ||
         liveAuthority.subjectId !== authority.subjectId

@@ -2,6 +2,11 @@ import { sql, type SQL, type SQLWrapper } from "drizzle-orm";
 import { rawRows, type Database } from "./database";
 import { SUBSCRIPTION_CORE_CODEX_PROVIDER } from "./subscription-core-codex-provider";
 import { SUBSCRIPTION_CORE_XAI_PROVIDER } from "./subscription-core-xai-adapter";
+import { subscriptionCoreProvider } from "./subscription-core-providers";
+import {
+  subscriptionCoreWakeReason,
+  type SubscriptionCoreWake,
+} from "./subscription-core/administration";
 import {
   getSubscriptionCoreModelConnectionAccess,
   ModelConnectionWorkspaceNotInOrganizationError,
@@ -117,6 +122,26 @@ function subscriptionCoreProviderOfKind(kind: ModelConnectionKind): string | nul
   if (kind === "codex") return SUBSCRIPTION_CORE_CODEX_PROVIDER;
   if (kind === "supergrok") return SUBSCRIPTION_CORE_XAI_PROVIDER;
   return null;
+}
+
+/**
+ * The core wake of an access change to a connection of this kind (a wider
+ * scope or model list can make waiting work placeable), with the provider
+ * and the display name the wake reports, all from the provider's binding;
+ * null for a kind whose provider is not on the core.
+ */
+export function subscriptionCoreAccessChangeWake(
+  kind: ModelConnectionKind,
+  accountId: string,
+): { provider: string; displayName: string; wake: SubscriptionCoreWake } | null {
+  const providerId = subscriptionCoreProviderOfKind(kind);
+  if (!providerId) return null;
+  const binding = subscriptionCoreProvider(providerId);
+  return {
+    provider: binding.adapter.provider,
+    displayName: binding.adapter.displayName,
+    wake: { accountId, reason: subscriptionCoreWakeReason(binding, "access_changed") },
+  };
 }
 
 /**

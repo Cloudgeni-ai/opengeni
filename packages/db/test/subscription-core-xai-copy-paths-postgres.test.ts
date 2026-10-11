@@ -26,6 +26,7 @@ import {
   initializeSessionStartAtomically,
   materializeGoalContinuation,
   sendAgentMessageInTransaction,
+  settleConnectedMachineSessionBackgroundCommand,
   settleSessionIdleWithParentOutbox,
   steerAgentSessionInTransaction,
   submitHumanPromptInTransaction,
@@ -685,6 +686,48 @@ describe.skipIf(!realDb)("SuperGrok compatibility copies on every path (M4 X2b)"
       });
       if (update.reason !== "added") throw new Error(`not added: ${update.reason}`);
       expect(await records("session_system_update", update.update.id)).toEqual(only(expected()));
+    });
+
+    test(`${name}: a background command's result copies the turn that launched it`, async () => {
+      const { grant, caller } = current();
+      const commandId = crypto.randomUUID();
+      const enrollmentId = crypto.randomUUID();
+      const opId = `${crypto.randomUUID()}:0`;
+      await shared!.admin`insert into session_background_commands ${shared!.admin({
+        id: commandId,
+        account_id: grant.accountId,
+        workspace_id: grant.workspaceId,
+        session_id: caller.sessionId,
+        provider: "connected_machine",
+        state: "running",
+        control_workspace_id: grant.workspaceId,
+        enrollment_id: enrollmentId,
+        connection_instance_id: "launch",
+        op_id: opId,
+        launch_turn_id: caller.turnId,
+        launch_attempt_id: caller.actor.attemptId,
+        launch_execution_generation: caller.actor.executionGeneration,
+      })}`;
+      const settled = await settleConnectedMachineSessionBackgroundCommand(client!.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: caller.sessionId,
+        commandId,
+        controlWorkspaceId: grant.workspaceId,
+        enrollmentId,
+        connectionInstanceId: "launch",
+        opId,
+        outcome: "exited",
+        exitCode: 0,
+        reason: "exited",
+      });
+      expect(settled?.command.state).toBe("exited");
+      const [result] = await shared!.admin<{ id: string; lineage: Record<string, unknown> }[]>`
+        select id::text as id, lineage from session_system_updates
+        where session_id = ${caller.sessionId}::uuid and source_id = ${commandId}
+          and kind = 'background_command_result'`;
+      expect(result!.lineage).toMatchObject({ commandId });
+      expect(await records("session_system_update", result!.id)).toEqual(only(expected()));
     });
 
     test(`${name}: an agent-created task and its revision copy the creating turn`, async () => {

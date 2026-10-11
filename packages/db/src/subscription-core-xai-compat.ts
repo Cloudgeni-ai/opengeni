@@ -26,9 +26,7 @@ import {
   type SubscriptionCoreConnectScope,
 } from "./subscription-core/connections";
 import {
-  encodeSubscriptionCoreXaiCredential,
   SUBSCRIPTION_CORE_XAI,
-  SUBSCRIPTION_CORE_XAI_CREDENTIAL_FORMAT,
   type SubscriptionCoreXaiTokens,
 } from "./subscription-core-xai-adapter";
 import type { XaiSubscriptionAccountMetadata } from "./xai-subscription";
@@ -173,9 +171,10 @@ export async function connectSubscriptionCoreXaiConnection(
     ...(input.personal ? { personal: true } : {}),
     credentialEncrypted: encryptEnvironmentValue(
       input.encryptionKey,
-      encodeSubscriptionCoreXaiCredential(input.tokens),
+      SUBSCRIPTION_CORE_XAI.adapter.credential.encode(input.tokens),
     ),
-    credentialFormat: SUBSCRIPTION_CORE_XAI_CREDENTIAL_FORMAT,
+    // The adapter's codec names the stored format of the credential it encodes.
+    credentialFormat: SUBSCRIPTION_CORE_XAI.adapter.credential.format(input.tokens),
     providerAccountId: input.identitySubject,
     providerSubjectId: input.identitySubject,
     planType: null,

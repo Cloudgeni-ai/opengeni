@@ -19,6 +19,7 @@ import {
   listOrganizationAdministrationMembers,
   nestedPostgresSqlState,
   readSubscriptionCoreProviderModelConnectionAccess,
+  subscriptionCoreAccessChangeWake,
   ModelConnectionAccessForbiddenError,
   SubscriptionCoreAccessInvalidError,
   SubscriptionCoreAccessPeopleUnlistableError,
@@ -86,12 +87,6 @@ async function coreAccessDisposition(
     return await subscriptionCoreRoute(deps, "xai", "SuperGrok", async () => accountId);
   return "legacy";
 }
-
-/** The core wake reason of an access change, by connection kind. */
-const CORE_ACCESS_WAKE: Partial<Record<ModelConnectionTarget["kind"], [string, string, string]>> = {
-  codex: ["codex", "core_codex_access_changed", "Codex"],
-  supergrok: ["xai", "core_xai_access_changed", "SuperGrok"],
-};
 
 export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDeps) {
   for (const scope of ["organizations", "workspaces"] as const) {
@@ -336,16 +331,17 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
         throw new HTTPException(409, {
           message: "Connection access changed. Reload before saving.",
         });
-      const wake = core ? CORE_ACCESS_WAKE[connection.kind] : undefined;
-      if (wake) {
+      if (core) {
         // A wider scope or model list can make waiting work placeable.
         try {
-          await deliverSubscriptionCoreWake(
-            deps.db,
-            wake[0],
-            { accountId: connection.accountId, reason: wake[1] },
-            wake[2],
-          );
+          const change = subscriptionCoreAccessChangeWake(connection.kind, connection.accountId);
+          if (change)
+            await deliverSubscriptionCoreWake(
+              deps.db,
+              change.provider,
+              change.wake,
+              change.displayName,
+            );
         } catch {
           // Every core waiter has its own bounded recheck; a lost wake only delays.
         }

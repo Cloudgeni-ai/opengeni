@@ -74,6 +74,9 @@ let app: HonoApp | null = null;
 /** The organization routes: an organization administrator's managed browser session. */
 let organizationApp: HonoApp | null = null;
 let organizationId = "";
+/** The organization administrator's own Personal workspace, and a shared one they belong to. */
+let personalWorkspaceId = "";
+let managedSharedWorkspaceId = "";
 let accountId = "";
 let workspaceId = "";
 let subjectId = "";
@@ -190,6 +193,22 @@ beforeAll(async () => {
     name: "Organization Owner",
   });
   organizationId = managedAccess.defaultAccountId!;
+  const [personal] = await shared.admin<{ id: string }[]>`
+    select personal_workspace_id::text as id from organization_memberships
+    where account_id = ${organizationId}::uuid and subject_id = ${`user:${managedUserId}`}`;
+  personalWorkspaceId = personal!.id;
+  const [managedShared] = await shared.admin<{ id: string }[]>`
+    insert into workspaces (account_id, name)
+    values (${organizationId}::uuid, 'SuperGrok core managed shared') returning id::text as id`;
+  managedSharedWorkspaceId = managedShared!.id;
+  await shared.admin`
+    insert into workspace_memberships (account_id, workspace_id, subject_id, role, permissions)
+    values (${organizationId}::uuid, ${managedSharedWorkspaceId}::uuid, ${`user:${managedUserId}`},
+      'member', '["workspace:read", "connections:write"]'::jsonb)`;
+  await shared.admin`
+    insert into workspace_inference_controls (workspace_id, account_id)
+    values (${managedSharedWorkspaceId}::uuid, ${organizationId}::uuid)
+    on conflict do nothing`;
   organizationApp = new Hono();
   const managedDeps = {
     db: client.db,
@@ -289,6 +308,28 @@ async function connectOrganizationAccount(subject: string): Promise<string> {
     body: { status: "connected", scope: "organization", isActive: false },
   });
   return connected.accountId;
+}
+
+/** A workspace route as the organization administrator's managed browser session. */
+async function browserWorkspaceRequest(
+  workspace: string,
+  path: string,
+  method = "GET",
+  body?: unknown,
+) {
+  return await organizationApp!.request(
+    `${PUBLIC_ORIGIN}/v1/workspaces/${workspace}/supergrok${path}`,
+    {
+      method,
+      headers: {
+        "content-type": "application/json",
+        origin: PUBLIC_ORIGIN,
+        "sec-fetch-site": "same-origin",
+        cookie: "better-auth.session_token=organization-owner",
+      },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    },
+  );
 }
 
 /** The account list with its volatile fields (timestamps) removed. */
@@ -612,5 +653,138 @@ describe.skipIf(!realDb)("SuperGrok routes on the shared core (M4 X2b)", () => {
     const remaining = await (await organizationRequest("/accounts")).json();
     expect(remaining.accounts.map((account: { id: string }) => account.id)).toEqual([first]);
     expect(remaining.accounts[0]).toMatchObject({ label: "Organization Grok", active: true });
+  });
+
+  test("private accounts: only from the owner's Personal workspace, managed there", async () => {
+    // This organization's switch row is enabled (above). A private connect
+    // from a shared workspace the person belongs to is refused at start,
+    // before any xAI sign-in.
+    const before = deviceSequence;
+    const elsewhere = await browserWorkspaceRequest(
+      managedSharedWorkspaceId,
+      "/connect/start",
+      "POST",
+      { scope: "user" },
+    );
+    expect({ status: elsewhere.status, body: await elsewhere.json() }).toMatchObject({
+      status: 409,
+      body: {
+        message:
+          "Private SuperGrok accounts are connected and managed from your Personal workspace",
+      },
+    });
+    expect(deviceSequence).toBe(before);
+
+    // In the Personal workspace the person connects a personal connection.
+    providerSubject = "xai-core-personal";
+    const start = await browserWorkspaceRequest(personalWorkspaceId, "/connect/start", "POST", {
+      scope: "user",
+    });
+    const started = await start.json();
+    expect({ status: start.status, body: started }).toMatchObject({
+      status: 200,
+      body: { scope: "user" },
+    });
+    const poll = await browserWorkspaceRequest(personalWorkspaceId, "/connect/poll", "POST", {
+      state: started.state,
+    });
+    const connected = await poll.json();
+    expect({ status: poll.status, body: connected }).toMatchObject({
+      status: 200,
+      body: { status: "connected", scope: "user", email: "owner@example.com" },
+    });
+    const personalId: string = connected.accountId;
+    const [stored] = await shared!.admin<
+      { ownership: string; credential_format: string; owner_subject_id: string | null }[]
+    >`
+      select ownership, credential_format, owner_subject_id
+      from subscription_connections where id = ${personalId}::uuid`;
+    expect(stored).toMatchObject({ ownership: "personal", credential_format: "xai_oauth_v1" });
+
+    // Listed to its owner in the Personal workspace, as a private account.
+    const listing = await (await browserWorkspaceRequest(personalWorkspaceId, "/accounts")).json();
+    expect(listing.source).toBe("user");
+    // The organization pool serves the Personal workspace too; the personal
+    // connection is listed beside it as the owner's private account.
+    const own = listing.accounts.find((account: { id: string }) => account.id === personalId);
+    expect(own).toMatchObject({ scope: "user", status: "active", label: "Owner" });
+    // The shared workspace never lists or reaches it.
+    const sharedListing = await (
+      await browserWorkspaceRequest(managedSharedWorkspaceId, "/accounts")
+    ).json();
+    expect(JSON.stringify(sharedListing)).not.toContain(personalId);
+    const sharedRename = await browserWorkspaceRequest(
+      managedSharedWorkspaceId,
+      `/accounts/${personalId}`,
+      "PATCH",
+      { label: "nope" },
+    );
+    expect(sharedRename.status).toBe(404);
+
+    const renamed = await browserWorkspaceRequest(
+      personalWorkspaceId,
+      `/accounts/${personalId}`,
+      "PATCH",
+      { label: "My Grok" },
+    );
+    expect({ status: renamed.status, body: await renamed.json() }).toMatchObject({
+      status: 200,
+      body: { id: personalId, label: "My Grok", scope: "user" },
+    });
+    const version = Number(own.allocatorVersion);
+    const disabled = await browserWorkspaceRequest(
+      personalWorkspaceId,
+      `/accounts/${personalId}/allocator`,
+      "PATCH",
+      { enabled: false, expectedVersion: version },
+    );
+    expect({ status: disabled.status, body: await disabled.json() }).toMatchObject({
+      status: 200,
+      body: { allocatorEnabled: false, changed: true },
+    });
+    const enabled = await browserWorkspaceRequest(
+      personalWorkspaceId,
+      `/accounts/${personalId}/allocator`,
+      "PATCH",
+      { enabled: true, expectedVersion: version + 1 },
+    );
+    expect(enabled.status).toBe(200);
+    const activated = await browserWorkspaceRequest(
+      personalWorkspaceId,
+      `/accounts/${personalId}/activate`,
+      "POST",
+      {},
+    );
+    expect({ status: activated.status, body: await activated.json() }).toEqual({
+      status: 200,
+      body: { activated: true, accountId: personalId },
+    });
+    // Rotation in the Personal workspace is the owner's (by workspace, not by
+    // the listing's display source).
+    const rotation = await browserWorkspaceRequest(personalWorkspaceId, "/settings", "PATCH", {
+      rotationEnabled: false,
+    });
+    expect({ status: rotation.status, body: await rotation.json() }).toMatchObject({
+      status: 200,
+      body: { rotationEnabled: false },
+    });
+
+    // Reconnecting the same login updates the same personal connection.
+    const restart = await browserWorkspaceRequest(personalWorkspaceId, "/connect/start", "POST", {
+      scope: "user",
+    });
+    const repoll = await browserWorkspaceRequest(personalWorkspaceId, "/connect/poll", "POST", {
+      state: (await restart.json()).state,
+    });
+    expect(await repoll.json()).toMatchObject({ status: "connected", accountId: personalId });
+
+    const disconnected = await browserWorkspaceRequest(
+      personalWorkspaceId,
+      `/accounts/${personalId}`,
+      "DELETE",
+    );
+    expect(disconnected.status).toBe(200);
+    const after = await (await browserWorkspaceRequest(personalWorkspaceId, "/accounts")).json();
+    expect(JSON.stringify(after.accounts)).not.toContain(personalId);
   });
 });
