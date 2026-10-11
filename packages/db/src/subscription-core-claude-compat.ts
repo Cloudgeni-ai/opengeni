@@ -39,26 +39,38 @@ export type SubscriptionCoreClaudeAccount = ClaudeSubscriptionAccountMetadata & 
   usage: ClaudeSubscriptionUsage;
 };
 
-/** The legacy usage reading of a core connection (C2a's projection of its quota row). */
-const claudeUsage = (row: SubscriptionCoreConnectionRow): ClaudeSubscriptionUsage =>
-  projectSubscriptionCoreClaudeUsage(row);
-
 function date(value: Date | string | null | undefined): Date | null {
   return value === null || value === undefined ? null : new Date(value);
 }
 
 /**
+ * A listed connection's row version: a positive integer, or the listing
+ * fails (never a made-up version a reconnect could be fenced on).
+ */
+function rowVersion(row: SubscriptionCoreConnectionRow): number {
+  const version = Number(row.version ?? Number.NaN);
+  if (!Number.isSafeInteger(version) || version < 1)
+    throw new Error("core Claude connection has no row version");
+  return version;
+}
+
+/**
  * One core connection in the legacy Claude account shape. `version` is the
- * connection's row version: it moves on reconnect (as the legacy credential
- * version does) and on other connection changes, never on a refresh, and
- * fences a reconnect. The legacy quota columns and selection counters have
- * no core counterpart and no Claude route projects them.
+ * connection's row version, the one legacy credential version on the core:
+ * the listing's `version` and `usage.credentialVersion` alike (the web
+ * client treats a difference as a credential change). It moves on connect,
+ * reconnect, rename and every status transition (needs_relogin, quarantine,
+ * recovery), never on a successful refresh (that moves
+ * `refresh_generation` only), and fences a reconnect. The legacy quota
+ * columns and selection counters have no core counterpart and no Claude
+ * route projects them.
  */
 export function projectSubscriptionCoreClaudeAccount(
   row: SubscriptionCoreConnectionRow,
   scope: SubscriptionCoreClaudeScope,
   allocatorEnabled = row.allocator_enabled,
 ): SubscriptionCoreClaudeAccount {
+  const version = rowVersion(row);
   return {
     id: row.id,
     scope,
@@ -69,7 +81,7 @@ export function projectSubscriptionCoreClaudeAccount(
     planType: row.plan_type,
     status: row.status as ClaudeSubscriptionAccountMetadata["status"],
     allocatorEnabled,
-    version: Number(row.version ?? 0),
+    version,
     allocatorVersion: Number(row.allocator_version),
     allocatorUpdatedAt: date(row.updated_at),
     expiresAt: date(row.expires_at),
@@ -82,7 +94,8 @@ export function projectSubscriptionCoreClaudeAccount(
     selectionCount: 0,
     lastSelectedAt: null,
     connectedBySubjectId: row.connected_by_subject_id,
-    usage: claudeUsage(row),
+    // C2a's projection of the quota row, at the listed credential version.
+    usage: { ...projectSubscriptionCoreClaudeUsage(row), credentialVersion: version },
   };
 }
 
@@ -133,12 +146,14 @@ export async function getSubscriptionCoreClaudeWorkspaceProjection(
               entry.row.allocator_enabled && entry.poolAllocatorEnabled,
             ),
           ),
-          ...view.personal.map((row) =>
-            projectSubscriptionCoreClaudeAccount(
-              { ...row, version: versions.get(row.id) ?? 0 },
+          ...view.personal.map((row) => {
+            // No version from the owner reader fails the listing (rowVersion).
+            const version = versions.get(row.id);
+            return projectSubscriptionCoreClaudeAccount(
+              version === undefined ? row : { ...row, version },
               "user",
-            ),
-          ),
+            );
+          }),
         ],
         activeCredentialId: view.primaryConnectionId,
         rotationEnabled: view.pool.rotationMode === "spread",
@@ -194,8 +209,30 @@ export function subscriptionCoreClaudeReconnectIdentity(
 
 export type SubscriptionCoreClaudeConnectResult =
   | SubscriptionCoreConnectResult
-  /** A reconnect whose sign-in is not the target's Claude account. */
-  | { kind: "refused"; reason: "different_account" };
+  /**
+   * A reconnect whose credential may not replace the target:
+   * `setup_token_over_sign_in` (a setup token for an account a sign-in
+   * proved), `sign_in_over_setup_token` (a proven sign-in for an account
+   * added with a setup token), else `different_account`.
+   */
+  | {
+      kind: "refused";
+      reason: "different_account" | "setup_token_over_sign_in" | "sign_in_over_setup_token";
+    };
+
+function reconnectRefusal(
+  targetProviderAccountId: string | null,
+  signedIn: { providerAccountId: string; setupToken: boolean },
+): Extract<SubscriptionCoreClaudeConnectResult, { kind: "refused" }>["reason"] {
+  const targetProven = !isSubscriptionCoreClaudeUnverifiedAccountId(targetProviderAccountId);
+  if (signedIn.setupToken && targetProven) return "setup_token_over_sign_in";
+  if (
+    !isSubscriptionCoreClaudeUnverifiedAccountId(signedIn.providerAccountId) &&
+    targetProviderAccountId?.startsWith("setup:")
+  )
+    return "sign_in_over_setup_token";
+  return "different_account";
+}
 
 /**
  * Connect (or reconnect) one Claude account from an OAuth sign-in or a
@@ -236,7 +273,14 @@ export async function connectSubscriptionCoreClaudeConnection(
         verified: !isSubscriptionCoreClaudeUnverifiedAccountId(input.providerAccountId),
       })
     : input.providerAccountId;
-  if (providerAccountId === null) return { kind: "refused", reason: "different_account" };
+  if (providerAccountId === null)
+    return {
+      kind: "refused",
+      reason: reconnectRefusal(target!.providerAccountId, {
+        providerAccountId: input.providerAccountId,
+        setupToken: input.credential.oauth === undefined,
+      }),
+    };
   return await connectSubscriptionCoreConnection(db, SUBSCRIPTION_CORE_CLAUDE, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,

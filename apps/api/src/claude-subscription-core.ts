@@ -18,6 +18,7 @@ import {
 import {
   canonicalConnectionId,
   coreConnectRefused,
+  deliverPoolCoreWake,
   subscriptionCoreRoute,
   type SubscriptionPoolCore,
 } from "./routes/subscription-pool-core";
@@ -26,7 +27,17 @@ import {
 export const claudeCoreRoute = (deps: ApiRouteDeps, accountId: () => Promise<string>) =>
   subscriptionCoreRoute(deps, "claude", "Claude", accountId);
 
-/** Claude on the shared core for the neutral pool routes. */
+/** Deliver a core Claude wake after commit (best effort, as every pool wake). */
+export const deliverClaudeCoreWake = (
+  deps: ApiRouteDeps,
+  wake: Parameters<typeof deliverPoolCoreWake>[2],
+) => deliverPoolCoreWake(deps, { binding: SUBSCRIPTION_CORE_CLAUDE }, wake);
+
+/**
+ * Claude on the shared core for the neutral pool routes. The listings add
+ * the legacy usage reading beside the account (`listedAccountJson`); every
+ * other route answers the plain legacy `accountJson`.
+ */
 export function claudePoolCore(
   accountJson: (account: SubscriptionCoreClaudeAccount, activeId: string | null) => object,
 ): SubscriptionPoolCore {
@@ -34,7 +45,7 @@ export function claudePoolCore(
     binding: SUBSCRIPTION_CORE_CLAUDE,
     workspaceProjection: getSubscriptionCoreClaudeWorkspaceProjection,
     organizationProjection: getSubscriptionCoreClaudeOrganizationProjection,
-    accountJson: (account, activeId) => {
+    listedAccountJson: (account, activeId) => {
       const claude = account as SubscriptionCoreClaudeAccount;
       // The legacy listing's usage fields, from the core quota reading.
       return {
@@ -52,8 +63,10 @@ type ClaudeCoreScope = { accountId: string; workspaceId: string | null; subjectI
 
 /**
  * The account a reconnect names, as this caller's listing shows it: a legacy
- * id resolves through the cutover aliases; personal accounts only to their
- * owner in their Personal workspace. Null when the caller cannot see it.
+ * id resolves through the cutover aliases as the caller may see them
+ * (`canonicalConnectionId`, which resolves a personal account's legacy id
+ * only for its owner in their Personal workspace). Null when the caller's
+ * listing does not show it.
  */
 export async function claudeCoreAccount(
   deps: ApiRouteDeps,
@@ -94,17 +107,31 @@ export async function requireClaudeCorePersonalWorkspace(
     });
 }
 
+/** What a person who cannot reconnect this way is told to do instead. */
+const RECONNECT_REFUSED: Record<
+  "different_account" | "setup_token_over_sign_in" | "sign_in_over_setup_token",
+  string
+> = {
+  different_account:
+    "Sign in to the same Claude account to reconnect. Use Add account for a different subscription.",
+  setup_token_over_sign_in:
+    "A setup token can't replace a signed-in Claude account. Add it as a new account.",
+  sign_in_over_setup_token:
+    "This account was added with a setup token. Add it again with Sign in, then remove the old one.",
+};
+
 /** The legacy response for a refused core Claude connect. */
 export function claudeCoreConnectRefused(
   result: Extract<SubscriptionCoreClaudeConnectResult, { kind: "refused" }>,
   personal: boolean,
   changedMessage: string,
 ): HTTPException | ReturnType<typeof coreConnectRefused> {
-  if (result.reason === "different_account")
-    return new HTTPException(409, {
-      message:
-        "Sign in to the same Claude account to reconnect. Use Add account for a different subscription.",
-    });
+  if (
+    result.reason === "different_account" ||
+    result.reason === "setup_token_over_sign_in" ||
+    result.reason === "sign_in_over_setup_token"
+  )
+    return new HTTPException(409, { message: RECONNECT_REFUSED[result.reason] });
   if (result.reason === "changed") return new HTTPException(409, { message: changedMessage });
   if (result.reason === "forbidden" && personal)
     return new HTTPException(403, {

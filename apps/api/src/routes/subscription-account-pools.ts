@@ -116,7 +116,8 @@ export function registerSubscriptionAccountPoolRoutes(
         deps,
         core,
         displayName: options.displayName,
-        accountJson: core.accountJson ?? options.accountJson,
+        accountJson: options.accountJson,
+        listedAccountJson: core.listedAccountJson ?? options.accountJson,
       }
     : null;
   /** The pool's runtime for this organization; `legacy` without a core binding. */

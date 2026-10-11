@@ -12,6 +12,7 @@ import { isConfiguredDeploymentKeyRequest } from "../http/auth";
 import {
   startClaudeSubscriptionOAuth,
   completeClaudeSubscriptionOAuth,
+  type ClaudeOAuthCore,
   type ClaudeOAuthScope,
 } from "../claude-subscription-oauth";
 import {
@@ -101,6 +102,9 @@ export function registerClaudeSubscriptionOAuthRoutes(
     if ((await claudeCoreRoute(deps, async () => inputScope.accountId)) !== "core") return null;
     return { connectedBySubjectId: (await managedCookieHuman(c, deps))?.subjectId ?? null };
   }
+  /** Where a private account is authorized: on the core, the owner's Personal workspace. */
+  const privatePlace = (core: ClaudeOAuthCore | null) =>
+    core ? "personal_workspace" : "ordinary_workspace";
   for (const organization of [false, true]) {
     const path = organization
       ? "/v1/organizations/:organizationId/model-providers/claude_subscription/oauth"
@@ -112,14 +116,9 @@ export function registerClaudeSubscriptionOAuthRoutes(
       );
       if (!payload.success || (organization && payload.data.scope !== "workspace"))
         throw new HTTPException(422, { message: "Choose where to connect this Claude account." });
-      if (!organization)
-        await requireSubscriptionScopeMutation(
-          c,
-          deps,
-          inputScope.workspaceId!,
-          payload.data.scope,
-          "Claude",
-        );
+      // The runtime first: on the core a private account is authorized in
+      // the owner's Personal workspace and refused (403) anywhere else,
+      // before any Claude sign-in.
       const core = await oauthCore(c, inputScope);
       if (core && payload.data.scope === "user")
         await requireClaudeCorePersonalWorkspace(deps, {
@@ -127,6 +126,15 @@ export function registerClaudeSubscriptionOAuthRoutes(
           workspaceId: inputScope.workspaceId,
           subjectId: inputScope.actorSubjectId,
         });
+      if (!organization)
+        await requireSubscriptionScopeMutation(
+          c,
+          deps,
+          inputScope.workspaceId!,
+          payload.data.scope,
+          "Claude",
+          privatePlace(core),
+        );
       return c.json(await startClaudeSubscriptionOAuth(deps, inputScope, payload.data, core));
     });
     app.post(`${path}/complete`, async (c) => {
@@ -152,6 +160,7 @@ export function registerClaudeSubscriptionOAuthRoutes(
                 inputScope.workspaceId!,
                 poolScope ?? "workspace",
                 "Claude",
+                privatePlace(core),
               );
             const fresh = await scope(c, organization, true);
             if (

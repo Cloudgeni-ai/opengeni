@@ -39,8 +39,11 @@ import {
   fetchClaudeSubscriptionProfile,
   parseClaudeSubscriptionProfile,
 } from "./claude-subscription-profile";
-import { claudeCoreAccount, claudePoolCore, connectClaudeCore } from "./claude-subscription-core";
-import { deliverPoolCoreWake } from "./routes/subscription-pool-core";
+import {
+  claudeCoreAccount,
+  connectClaudeCore,
+  deliverClaudeCoreWake,
+} from "./claude-subscription-core";
 
 export type ClaudeOAuthScope = {
   accountId: string;
@@ -59,6 +62,12 @@ const AttemptScope = z
     credentialId: z.string().uuid().nullable(),
     credentialVersion: z.number().int().nonnegative(),
     authoritySnapshot: ClaudeProviderAccountAuthoritySnapshotV1.nullable(),
+    /**
+     * Started on the shared core (C2b). An attempt completes only on the
+     * runtime it started on; an older pod's strict schema rejects the key
+     * (410, start again), which fails closed too.
+     */
+    runtime: z.literal("core").optional(),
   })
   .strict();
 const Attempt = z.discriminatedUnion("stage", [
@@ -82,9 +91,11 @@ const changed = () =>
   new HTTPException(409, { message: "Claude account changed during sign-in. Start again." });
 /**
  * Claude on the shared core for this attempt (the route read the `claude`
- * provider route). A core attempt names the canonical connection and its row
- * version and carries no v1 authority snapshot, so an attempt started on the
- * legacy path never reconnects a core connection (it must start again).
+ * provider route). A core attempt records `runtime: "core"`, names the
+ * canonical connection and its row version, and carries no v1 authority
+ * snapshot; an attempt completes only on the runtime it started on, so one
+ * started on the legacy path (adding or reconnecting) never writes a core
+ * connection, nor a core one a legacy row (409, start again).
  */
 export type ClaudeOAuthCore = { connectedBySubjectId: string | null };
 
@@ -141,6 +152,7 @@ export async function startClaudeSubscriptionOAuth(
     credentialId: current?.account.id ?? null,
     credentialVersion: current?.account.version ?? 0,
     authoritySnapshot: current?.authoritySnapshot ?? null,
+    ...(core ? { runtime: "core" } : {}),
   });
   await storeIntegrationOAuthPendingState(deps.db, {
     ...scope,
@@ -193,6 +205,7 @@ export async function completeClaudeSubscriptionOAuth(
     throw new HTTPException(403, {
       message: "Complete Claude sign-in in the browser where you started it.",
     });
+  if ((attempt.runtime === "core") !== (core !== null)) throw changed();
   await reauthorize(attempt.poolScope);
   const current = attempt.credentialId
     ? await (core ? coreTarget : target)(deps, scope, attempt.credentialId)
@@ -341,16 +354,13 @@ export async function completeClaudeSubscriptionOAuth(
             credentialId: connected.id,
             credentialVersion: connected.version,
             authoritySnapshot: null,
+            runtime: "core",
           }),
         ),
       });
       return connected;
     });
-    await deliverPoolCoreWake(
-      deps,
-      claudePoolCore(() => ({})),
-      saved.wake,
-    );
+    await deliverClaudeCoreWake(deps, saved.wake);
     await offerClaudeDefaultModels(deps, {
       ...(scope.workspaceId
         ? { accountId: scope.accountId, workspaceId: scope.workspaceId }

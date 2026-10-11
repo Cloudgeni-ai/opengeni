@@ -254,18 +254,39 @@ export function registerClaudeSubscriptionAccountRoutes(app: Hono, deps: ApiRout
           }
         : null;
       const workspaceId = organization ? null : c.req.param("workspaceId")!;
+      // The runtime first (one receipt read, behind a read grant), so a
+      // private account on the core is authorized in the owner's Personal
+      // workspace, where the core keeps it, and refused (403) anywhere else.
+      const readGrant = workspaceId
+        ? await requireAccessGrant(c, deps, workspaceId, "workspace:read")
+        : null;
+      const runtime = await claudeCoreRoute(
+        deps,
+        async () => actor?.organizationId ?? readGrant!.accountId,
+      );
+      if (runtime === "core" && workspaceId && parsed.data.scope === "user")
+        await requireClaudeCorePersonalWorkspace(deps, {
+          accountId: readGrant!.accountId,
+          workspaceId,
+          subjectId: readGrant!.subjectId,
+        });
       const authority = workspaceId
-        ? await requireSubscriptionScopeMutation(c, deps, workspaceId, parsed.data.scope, "Claude")
+        ? await requireSubscriptionScopeMutation(
+            c,
+            deps,
+            workspaceId,
+            parsed.data.scope,
+            "Claude",
+            runtime === "core" ? "personal_workspace" : "ordinary_workspace",
+          )
         : null;
       const accountId = actor?.organizationId ?? authority!.accountId;
       const subjectId = actor?.subjectId ?? authority!.subjectId;
       const encryptionKey = requireEnvironmentEncryption(deps.settings);
       const reconnectId = parsed.data.reconnectAccountId;
-      if ((await claudeCoreRoute(deps, async () => accountId)) === "core") {
+      if (runtime === "core") {
         const scope = workspaceId ? parsed.data.scope : "organization";
         const personal = scope === "user";
-        if (personal)
-          await requireClaudeCorePersonalWorkspace(deps, { accountId, workspaceId, subjectId });
         const target = reconnectId
           ? await claudeCoreAccount(deps, { accountId, workspaceId, subjectId }, reconnectId)
           : null;
