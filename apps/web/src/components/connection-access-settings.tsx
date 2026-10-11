@@ -1,6 +1,6 @@
 import type { ModelConnectionAccessPolicy, ModelConnectionAccessResponse } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import { ModelsFormPage } from "@/components/models/models-ui";
@@ -294,6 +294,7 @@ export function ConnectionAccessFormPage({
   const { data } = access;
   const [draft, setDraft] = useState<ModelConnectionAccessPolicy | null>(data?.policy ?? null);
   const [error, setError] = useState<ReactNode>(null);
+  const keptNoteId = useId();
   useEffect(() => {
     if (data && !draft) setDraft(data.policy);
   }, [data, draft]);
@@ -319,6 +320,7 @@ export function ConnectionAccessFormPage({
     !(data.personalWorkspacesSupported && draft.allowPersonalWorkspaces),
   );
   const reachesNoOne = scope === "people" && draft!.allowedPeople!.length === 0;
+  const keptNote = scope === "people" && !reachesNoOne && local.length > 0;
   /** A workspace choice; `allowedPeople` is cleared only when people were saved. */
   const withoutPeople = (policy: ModelConnectionAccessPolicy): ModelConnectionAccessPolicy => {
     const { allowedPeople: _dropped, ...rest } = policy;
@@ -443,12 +445,6 @@ export function ConnectionAccessFormPage({
                 ) : null}
               </fieldset>
             ) : null}
-            {scope === "people" && local.length > 0 ? (
-              // A workspace that keeps it as its own follows the people choice too.
-              <p className="m-0 text-sm text-fg-muted">
-                {`In ${localNames(local, data.workspaces)} too, only these people can use it.`}
-              </p>
-            ) : null}
             {scope === "people" && !peopleListed ? (
               <p className="m-0 text-sm text-fg-muted">
                 {draft.allowedPeople!.length > 0
@@ -458,7 +454,10 @@ export function ConnectionAccessFormPage({
               </p>
             ) : null}
             {scope === "people" && peopleListed ? (
-              <fieldset className="m-0 flex min-w-0 flex-col gap-3 border-0 p-0">
+              <fieldset
+                className="m-0 flex min-w-0 flex-col gap-3 border-0 p-0"
+                aria-describedby={keptNote ? keptNoteId : undefined}
+              >
                 <legend className="mb-2 text-xs leading-4.5 font-medium text-fg">People</legend>
                 {[
                   ...(data.people ?? []),
@@ -482,6 +481,12 @@ export function ConnectionAccessFormPage({
                   />
                 ))}
               </fieldset>
+            ) : null}
+            {keptNote ? (
+              // A workspace that keeps it as its own follows the people choice too.
+              <p id={keptNoteId} className="m-0 text-sm text-fg-muted">
+                {`In ${localNames(local, data.workspaces)} too, only these people can use it.`}
+              </p>
             ) : null}
             {reachesNoOne ? (
               <EmptyChoiceHint>

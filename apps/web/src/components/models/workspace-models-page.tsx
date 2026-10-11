@@ -647,7 +647,7 @@ export function WorkspaceModelsPageBody({
       <ConnectPickerPage
         target="organization"
         title="Connect account"
-        subtitle={`Connect it once for ${organizationName}, then choose which workspaces can use it.`}
+        subtitle={`Connect it once for ${organizationName}, then choose who can use it.`}
         codexAvailable
         grok={orgGrok.unavailable ? "not_enabled" : "available"}
         claude={claudeEnabled ? "available" : "hidden"}

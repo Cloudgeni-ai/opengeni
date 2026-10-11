@@ -174,6 +174,16 @@ try {
     );
     await noOverflow();
     await shot("10-workspace-page-shared-everywhere");
+
+    // An organization account a workspace also keeps as its own (an older merge):
+    // choosing people says that workspace follows the choice too.
+    await open(`kept=research&account=${ACME_PRO}`);
+    await page.getByText("Available in").click();
+    await page.getByText("Only selected people").click();
+    await page.getByText("Alex Morgan").click();
+    await page.getByText("In Research too, only these people can use it.").waitFor();
+    await noOverflow();
+    await shot("11-editor-people-kept");
     assert(errors.length === 0, errors.join("\n"));
     await page.close();
   }

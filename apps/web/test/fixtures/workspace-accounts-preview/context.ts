@@ -23,6 +23,8 @@ const params = new URLSearchParams(window.location.search);
 const initialReach = params.get("reach");
 /** `designSource=organization`: Design is set to use the organization's accounts. */
 const designSource = params.get("designSource") === "organization" ? "organization" : "automatic";
+/** `kept=research`: Research also keeps Acme Pro as its own (a copy an older migration merged). */
+const keptByResearch = params.get("kept") === "research";
 
 const weekly = (remaining: number) => ({
   used: 100 - remaining,
@@ -97,6 +99,7 @@ const policies: Record<string, Policy> = {
   },
 };
 const local: Record<string, string[]> = {
+  ...(keptByResearch ? { [ACME_PRO]: [WORKSPACES.research.id] } : {}),
   [DESIGN_PLAN]: [WORKSPACES.design.id],
   [RESEARCH_PLAN]: [WORKSPACES.research.id],
 };

@@ -535,6 +535,14 @@ async function cleanup({ container, root }: { container: HTMLElement; root: Root
   container.remove();
 }
 
+/** The description under the section titled `title`, or undefined. */
+function sectionDescription(container: HTMLElement, title: string): string | undefined {
+  const section = [...container.querySelectorAll<HTMLElement>("[data-slot=section]")].find(
+    (candidate) => candidate.querySelector("h2, h3")?.textContent === title,
+  );
+  return section?.querySelector("[data-slot=section-description]")?.textContent ?? undefined;
+}
+
 function button(container: HTMLElement, text: string | RegExp): HTMLButtonElement | undefined {
   return [...container.querySelectorAll<HTMLButtonElement>("button")].find((candidate) =>
     typeof text === "string"
@@ -1517,7 +1525,7 @@ describe("One Models page for the organization and the workspace", () => {
       await flush();
       expect(view.container.querySelector("h1")?.textContent).toBe("Connect account");
       expect(view.container.textContent).toContain(
-        "Connect it once for Acme, then choose which workspaces can use it.",
+        "Connect it once for Acme, then choose who can use it.",
       );
       // No peer "this workspace only" choice on the picker any more.
       expect(view.container.textContent).not.toContain("Connect for Design preview only");
@@ -1854,7 +1862,7 @@ describe("One Models page for the organization and the workspace", () => {
       await flush();
       expect(view.container.querySelector("h1")?.textContent).toBe("Connect account");
       expect(view.container.textContent).toContain(
-        "Connect it once for Acme, then choose which workspaces can use it.",
+        "Connect it once for Acme, then choose who can use it.",
       );
       // Reached in context (Codex Apps, resets), the workspace's own Connect
       // Codex says what the account will be.
@@ -1979,6 +1987,41 @@ describe("One Models page for the organization and the workspace", () => {
     }
   });
 
+  test("an organization without accounts says to connect one, then choose who can use it", async () => {
+    organizationAdmin = true;
+    organizationList = true;
+    accounts = { ...accounts, accounts: [], activeAccountId: null };
+    client.requestJson.mockImplementation(async (method: string, path: string) => {
+      if (method === "GET" && path === "/v1/organizations/organization-a/codex/accounts") {
+        return { ...orgAccounts, accounts: [], activeAccountId: null };
+      }
+      if (method === "GET") throw new Error(`unexpected read ${path}`);
+      return {};
+    });
+    organizationWorkspaces = [
+      {
+        id: "workspace-a",
+        name: "Design preview",
+        personal: false,
+        canManage: true,
+        savedDefaultModel: null,
+      },
+    ];
+    const view = await render();
+    try {
+      const empty = [
+        ...view.container.querySelectorAll<HTMLElement>("[data-slot=empty-state]"),
+      ].find((node) => node.textContent?.includes("No accounts connected"));
+      expect(empty).toBeDefined();
+      expect(empty!.textContent).toContain(
+        "Connect a subscription or an API key, then choose who can use it.",
+      );
+      expect(button(view.container, /Connect account/)).toBeDefined();
+    } finally {
+      await cleanup(view);
+    }
+  });
+
   // Design 5.4: an account a shared workspace connected is also an organization account.
   describe("a workspace's own account is an organization account", () => {
     const workspaceOwn = {
@@ -2029,8 +2072,8 @@ describe("One Models page for the organization and the workspace", () => {
       try {
         // Accounts reach workspaces or people, and their tags say which: the
         // section doesn't promise only workspaces.
-        expect(view.container.textContent).toContain(
-          "Connect accountSubscriptions, API keys and credits that pay for models.Company plan",
+        expect(sectionDescription(view.container, "Accounts")).toBe(
+          "Subscriptions, API keys and credits that pay for models.",
         );
         expect(rowsNamed(view.container, "Team plan")).toHaveLength(1);
         expect(rowsNamed(view.container, "Team plan")[0]!.textContent).toContain(
@@ -2131,7 +2174,7 @@ describe("One Models page for the organization and the workspace", () => {
       }
     });
 
-    test("limited to chosen people, its workspace no longer lists it as its own, so it shows as the organization's", async () => {
+    test("limited to chosen people, its workspace no longer lists it as its own, so it shows as the organization's, in use for those people where placement serves them", async () => {
       organizationAdmin = true;
       accounts = {
         ...accounts,
@@ -2171,22 +2214,68 @@ describe("One Models page for the organization and the workspace", () => {
       } finally {
         await cleanup(view);
       }
-      // Set to use only its own accounts: nobody's sessions here use it.
-      accounts = {
+      // Set to use only its own accounts: this workspace keeps it as its own
+      // (0689 merged its copy), so chosen people's sessions here still use it.
+      const workspaceSource = {
         ...accounts,
         accounts: [codexAccount({ id: "acct-2", label: "Other plan", source: "workspace" })],
         activeAccountId: "acct-2",
-        source: { ...source, mode: "workspace", effectiveSource: "workspace" },
+        source: { ...source, mode: "workspace" as const, effectiveSource: "workspace" as const },
       };
+      accounts = workspaceSource;
       const workspaceOnly = await render();
       try {
         await flush();
         const row = rowsNamed(workspaceOnly.container, "Team plan")[0]!;
+        expect(row.textContent).not.toContain("Set aside");
+        expect(row.textContent).not.toContain("Not in use");
+      } finally {
+        await cleanup(workspaceOnly);
+      }
+      // Set to use only the organization's accounts: its own copy isn't used,
+      // and the organization's isn't given to this workspace: nobody uses it here.
+      accounts = {
+        ...accounts,
+        accounts: [codexAccount({ id: "org-1", label: "Company plan", source: "organization" })],
+        activeAccountId: "org-1",
+        source: {
+          ...source,
+          mode: "organization" as const,
+          effectiveSource: "organization" as const,
+        },
+      };
+      const organizationOnly = await render();
+      try {
+        await flush();
+        const row = rowsNamed(organizationOnly.container, "Team plan")[0]!;
+        expect(row.textContent).toContain("Set aside");
+        expect(row.textContent).toContain("Not in use");
+      } finally {
+        await cleanup(organizationOnly);
+      }
+      // Kept by no workspace: set to use only its own accounts, nobody's
+      // sessions here use it.
+      client.getModelConnectionAccess.mockImplementation(async (...args: unknown[]) => {
+        const access = managedAccess((args[0] as { connectionId: string }).connectionId);
+        return (args[0] as { connectionId: string }).connectionId === "acct-1"
+          ? {
+              ...access,
+              policy: { ...access.policy, allowedPeople: ["person-a"] },
+              localWorkspaceIds: [],
+              managedByWorkspaceId: null,
+            }
+          : access;
+      });
+      accounts = workspaceSource;
+      const notKept = await render();
+      try {
+        await flush();
+        const row = rowsNamed(notKept.container, "Team plan")[0]!;
         expect(row.textContent).toContain("Set aside");
         expect(row.textContent).toContain("Not in use");
         expect(row.querySelector('[aria-label^="More actions"]')).not.toBeNull();
       } finally {
-        await cleanup(workspaceOnly);
+        await cleanup(notKept);
       }
     });
 

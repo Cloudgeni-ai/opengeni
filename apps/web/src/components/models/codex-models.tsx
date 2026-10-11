@@ -359,6 +359,7 @@ export function CodexAccountRows({
               places={places}
               ownInUse={pool.organizationSetAside}
               workspaceOnly={codex.source?.mode === "workspace"}
+              organizationOnly={codex.source?.mode === "organization"}
               menu={pool.organizationSetAside ? alwaysOrganization : null}
             />
           );
@@ -471,6 +472,7 @@ function SharedCodexSetAsideRow({
   places,
   ownInUse,
   workspaceOnly,
+  organizationOnly,
   menu,
 }: {
   account: CodexAccount;
@@ -480,6 +482,8 @@ function SharedCodexSetAsideRow({
   ownInUse: boolean;
   /** This workspace uses only its own accounts: chosen people's sessions here don't use it either. */
   workspaceOnly: boolean;
+  /** This workspace uses only the organization's accounts. */
+  organizationOnly: boolean;
   menu: ReactNode;
 }) {
   const access = useConnectionAccess({
@@ -488,9 +492,12 @@ function SharedCodexSetAsideRow({
     kind: "codex",
     connectionId: account.id,
   });
-  // Chosen people's sessions use it here unless the workspace uses only its own.
+  // Chosen people's sessions use it here unless the workspace uses only its
+  // own. In a workspace that keeps it as its own (a copy 0689 merged), they
+  // use it through that copy: unless the workspace uses only the organization's.
   const chosenPeople = (access.data?.policy.allowedPeople?.length ?? 0) > 0;
-  const forPeople = chosenPeople && !workspaceOnly;
+  const keptHere = (access.data?.localWorkspaceIds ?? []).includes(organization.workspace.id);
+  const forPeople = chosenPeople && (keptHere ? !organizationOnly : !workspaceOnly);
   // Another workspace's own account, or one shared elsewhere, may not reach
   // this workspace at all: then this workspace's own accounts set nothing aside.
   const reaches = reachesWorkspace(access.data, organization.workspace);

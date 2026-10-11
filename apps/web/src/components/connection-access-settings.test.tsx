@@ -628,9 +628,22 @@ test("a workspace's own copy no workspace manages is an organization account: it
     await flush();
     await choose("Only selected people");
     expect(container.textContent).not.toContain("Personal workspaces");
-    // The workspace that keeps it as its own follows the people choice too.
-    expect(container.textContent).toContain("In Engineering too, only these people can use it.");
+    const keptNote = "In Engineering too, only these people can use it.";
+    // With nobody chosen, the one statement is that no one can use it.
     expect(container.textContent).toContain("No one can use it.");
+    expect(container.textContent).not.toContain(keptNote);
+    await choose("Alex Morgan");
+    // The workspace that keeps it as its own follows the people choice too,
+    // and the People group announces it.
+    const note = [...container.querySelectorAll("p")].find((p) => p.textContent === keptNote)!;
+    expect(note).toBeDefined();
+    const group = [...container.querySelectorAll("fieldset")].find((fieldset) =>
+      fieldset.textContent?.startsWith("People"),
+    )!;
+    expect(group.getAttribute("aria-describedby")).toBe(note.id);
+    await choose("Only selected workspaces");
+    expect(container.textContent).not.toContain(keptNote);
+    await choose("Only selected people");
     await choose("Alex Morgan");
     await choose("sam@example.com");
     await save();
