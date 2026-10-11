@@ -2026,6 +2026,8 @@ describe("One Models page for the organization and the workspace", () => {
       ];
       const view = await render();
       try {
+        // Accounts reach workspaces or people: the section doesn't promise only workspaces.
+        expect(view.container.textContent).toContain("Choose who can use each one.");
         expect(rowsNamed(view.container, "Team plan")).toHaveLength(1);
         expect(rowsNamed(view.container, "Team plan")[0]!.textContent).toContain(
           "Design preview only",
@@ -2344,6 +2346,50 @@ describe("One Models page for the organization and the workspace", () => {
         expect(rowsNamed(view.container, "Team plan")[0]!.textContent).toContain(
           "Personal workspace only",
         );
+      } finally {
+        await cleanup(view);
+      }
+    });
+
+    test("on the organization's accounts with none reaching it, the notice doesn't call another workspace's account its own", async () => {
+      organizationAdmin = true;
+      const research = {
+        ...codexAccount({ id: "acct-r", label: "Research plan", source: "organization" }),
+        ownInWorkspaceIds: ["workspace-b"],
+      };
+      accounts = {
+        ...accounts,
+        accounts: [],
+        activeAccountId: null,
+        source: {
+          ...source,
+          mode: "organization",
+          effectiveSource: "organization",
+          organizationAvailable: false,
+          organizationCount: 0,
+          workspaceSetAside: false,
+        },
+      };
+      client.requestJson.mockImplementation(async (method: string, path: string) => {
+        if (method === "GET" && path === "/v1/organizations/organization-a/codex/accounts") {
+          return { ...orgAccounts, accounts: [research] };
+        }
+        if (method === "GET") throw new Error(`unexpected read ${path}`);
+        return {};
+      });
+      client.getModelConnectionAccess.mockImplementation(async () => ({
+        ...managedAccess("acct-r"),
+        policy: { ...openPolicy, allowedWorkspaces: [], allowPersonalWorkspaces: false },
+        localWorkspaceIds: ["workspace-b"],
+        managedByWorkspaceId: "workspace-b",
+      }));
+      const view = await render();
+      try {
+        await flush();
+        expect(rowsNamed(view.container, "Research plan")[0]!.textContent).toContain(
+          "Not available here",
+        );
+        expect(view.container.textContent).not.toContain("which here");
       } finally {
         await cleanup(view);
       }

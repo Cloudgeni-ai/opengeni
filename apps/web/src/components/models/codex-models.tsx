@@ -557,8 +557,11 @@ export function CodexPoolNotice({
     organizationCount:
       source.effectiveSource === "organization" ? codex.accounts.length : organizationAccountCount,
     // The organization's accounts here are only this workspace's own, shared,
-    // and none of its own is set aside (with none at all, no notice shows).
-    onlyOwnShared: source.organizationCount === 0 && source.workspaceSetAside === false,
+    // and none of its own is set aside.
+    onlyOwnShared:
+      source.organizationCount === 0 &&
+      source.workspaceSetAside === false &&
+      codex.accounts.length > 0,
     canConnect: codex.canManage,
   });
   return (
