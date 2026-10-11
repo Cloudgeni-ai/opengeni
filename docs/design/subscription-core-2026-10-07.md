@@ -3559,6 +3559,11 @@ rows. Choices:
   returns: personal rows still need the turn's owner, the active owner
   membership and the frozen entry naming the row's membership and
   generation; shared rows still need the ordinary visibility rule.
+  Follow-up, not changed here: the waiter's deadline lookup
+  (`earliestHealthRetryAt`) reads as the application role and cannot see a
+  quarantined personal row, so a waiter on a personal-only quarantine falls
+  back to its 1 to 15 minute backoff instead of waking at the retry time.
+  Recovery is delayed by at most one backoff interval, never skipped.
 - **Personal connections allowed.** The writers do not read the
   organization's `personalConnectionsAllowed`; placement applies it. The
   runbook's inventory therefore lists owners whose new acceptances will
