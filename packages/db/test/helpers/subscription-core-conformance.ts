@@ -4938,7 +4938,7 @@ export function describeSubscriptionCoreConformance<Credential>(
         );
       };
       const expected = (allowedProviders: readonly string[]) => ({
-        status: "completed",
+        status: "completed" as const,
         value: [m0, m1, m2]
           .filter((model) => policyIds(model).every((id) => allowedProviders.includes(id)))
           .map((model) => model.productModelId),
@@ -4950,6 +4950,10 @@ export function describeSubscriptionCoreConformance<Credential>(
         expect(expected(first).value).not.toContain(m2.productModelId);
         expect(await place(turn, { now: new Date() })).not.toMatchObject({ kind: "run" });
       }
+      // The provider's declared identity alone admits exactly the models
+      // that carry no other identity.
+      const declared = [provider.adapter.modelPolicyProviderId];
+      expect(await allowedUnder(declared)).toEqual(expected(declared));
       // Every identity allowed: the model is placed.
       expect(await allowedUnder(policyIds(m2))).toEqual(expected(policyIds(m2)));
       expect(await placeChecked(turn)).toMatchObject({ kind: "run" });

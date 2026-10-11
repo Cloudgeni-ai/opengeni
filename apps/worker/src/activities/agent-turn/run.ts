@@ -127,6 +127,7 @@ import {
 } from "./sandbox-establish";
 import {
   buildClaudeCoreRequestAuthorization,
+  CLAUDE_CORE_SETTINGS_PLACEHOLDER_TOKEN,
   claudeCoreModelScope,
   claudeCoreRequestPreparer,
   claudeSubscriptionProviderIds,
@@ -671,10 +672,17 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               },
             });
             const token = await claudeCoreAuthorization.getToken();
+            // The settings carry the account identity but never the live
+            // bearer: every core request gets it from its custody, so a
+            // request outside a custody wrapper fails closed upstream.
             selectedCapabilitySettings = withClaudeConnectionCredential(
               capabilitySettings,
               "claude_subscription",
-              JSON.stringify(token.credential),
+              JSON.stringify({
+                version: token.credential.version,
+                token: CLAUDE_CORE_SETTINGS_PLACEHOLDER_TOKEN,
+                identity: token.credential.identity,
+              }),
               claudeCoreModelScope(turnExecutionPolicy.productModelId),
               { connectionId: claudeCore.connectionId, credentialVersion: token.credentialVersion },
             );

@@ -43,6 +43,15 @@ export type CoreSubscriptionRequestsDeps = {
   /** The provider's unresolved-outcome error (the durable fence raises the same). */
   outcomeUnknown: () => Error;
   isOutcomeUnknown: (error: unknown) => boolean;
+  /**
+   * The provider's model call may send a continuation request after a
+   * complete response, before the history checkpoint (a paused server-side
+   * tool). The lane then admits a further reservation while every pending
+   * request has received its response; each is still reserved before its
+   * I/O and settled once at the checkpoint. Off: any pending request
+   * refuses a new one.
+   */
+  continuesAfterResponse?: boolean;
 };
 
 /** One attempt's bounded request custody; no tokens or response bodies live here. */
@@ -62,7 +71,11 @@ export function createCoreSubscriptionRequests(deps: CoreSubscriptionRequestsDep
     JSON.stringify([request.requestId, request.transportAttempt]);
   return {
     async reserve(request: SubscriptionCoreRequestIdentity): Promise<void> {
-      if (uncertain || requests.size > 0 || reserving) {
+      const pendingWithoutResponse =
+        requests.size > 0 &&
+        (!deps.continuesAfterResponse ||
+          [...requests.values()].some((pending) => !pending.responseReceived));
+      if (uncertain || pendingWithoutResponse || reserving) {
         throw deps.outcomeUnknown();
       }
       // The DB also rejects duplicate reservations, including ones already

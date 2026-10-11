@@ -4,6 +4,8 @@ import * as events from "@opengeni/events";
 import { testSettings } from "@opengeni/testing";
 import { withClaudeUsageObserver } from "../../../packages/runtime/src/claude-subscription-usage";
 import { instrumentedModelFetch } from "../../../packages/runtime/src/model-provider-client";
+import { AnthropicMessagesModel } from "../../../packages/runtime/src/anthropic-messages";
+import type { ResolvedModelProvider } from "@opengeni/config";
 import type { CapacityPhaseDeps } from "../src/activities/agent-turn/codex-capacity";
 import {
   createTurnCredentialLeases,
@@ -760,4 +762,206 @@ test("a core-placed Claude turn is the turn's placement for attribution, checkpo
     claudeAuthoritySnapshot: null,
   } as never);
   expect(legacyCheck).not.toHaveBeenCalled();
+});
+
+describe("Claude custody edge paths on the core", () => {
+  const claudeProvider: ResolvedModelProvider = {
+    id: PROVIDER_ID,
+    label: "Claude",
+    kind: "api-key",
+    api: "anthropic-messages",
+    wireProfile: "openai",
+    builtin: false,
+    baseUrl: "https://api.anthropic.com/v1",
+    apiKey: "sk-ant-oat01-opengeni-core-custody-only",
+    credentialSource: { kind: "deployment", mechanism: "api_key" },
+    billing: { upstreamPayer: "deployment", metering: "external" },
+  };
+  const message = (id: string, text: string, stop: string) => ({
+    id,
+    type: "message",
+    role: "assistant",
+    content: [{ type: "text", text }],
+    stop_reason: stop,
+    usage: { input_tokens: 10, output_tokens: 5 },
+  });
+  const streamed = (id: string, text: string, stop: string) =>
+    sse(
+      [
+        "message_start",
+        {
+          type: "message_start",
+          message: { ...message(id, "", ""), content: [], stop_reason: null },
+        },
+      ],
+      [
+        "content_block_start",
+        { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+      ],
+      [
+        "content_block_delta",
+        { type: "content_block_delta", index: 0, delta: { type: "text_delta", text } },
+      ],
+      ["content_block_stop", { type: "content_block_stop", index: 0 }],
+      [
+        "message_delta",
+        { type: "message_delta", delta: { stop_reason: stop }, usage: { output_tokens: 5 } },
+      ],
+      ["message_stop", { type: "message_stop" }],
+    );
+  const modelRequest = {
+    input: "Search",
+    systemInstructions: "Instructions",
+    modelSettings: {},
+    tools: [],
+    handoffs: [],
+    outputType: "text",
+    tracing: false,
+  } as never;
+  function model(placed: ReturnType<typeof placedCore>, responses: Array<() => Response>) {
+    let call = 0;
+    let sequence = 0;
+    const fetcher = instrumentedModelFetch(PROVIDER_ID, (async () => {
+      const next = responses[call++];
+      if (!next) throw new Error("unexpected provider call");
+      return next();
+    }) as typeof fetch);
+    const claude = new AnthropicMessagesModel(claudeProvider, "claude-sonnet-5", fetcher);
+    const custody = <T>(fn: () => Promise<T>) =>
+      withClaudeUsageObserver(
+        () => undefined,
+        fn,
+        claudeCoreRequestPreparer({
+          authorization: placed.authorization,
+          lane: placed.core.requests!,
+          mainLane: true,
+          nextRequestId: () => `attempt-1:1:1:claude:${++sequence}`,
+          providerIds: new Set([PROVIDER_ID]),
+        }),
+      );
+    return { claude, custody, calls: () => call };
+  }
+
+  test("a paused search continues as its own reservation; both settle once at the checkpoint", async () => {
+    const placed = placedCore();
+    const { claude, custody, calls } = model(placed, [
+      () => Response.json(message("msg_1", "Searching.", "pause_turn")),
+      () => Response.json(message("msg_2", "Done.", "end_turn")),
+    ]);
+    await custody(() => claude.getResponse(modelRequest));
+    expect(calls()).toBe(2);
+    expect(placed.order).toEqual([
+      "fence",
+      "reserve:attempt-1:1:1:claude:1:1",
+      "fence",
+      "reserve:attempt-1:1:1:claude:2:1",
+    ]);
+    expect(placed.core.requests!.canRecover()).toBe(false);
+    await placed.core.requests!.checkpoint();
+    expect(placed.order.slice(4)).toEqual([
+      "settle:operation-1:response_received",
+      "settle:operation-2:response_received",
+    ]);
+    expect(placed.core.requests!.canRecover()).toBe(true);
+    expect(placed.core.requests!.hasUnknownOutcome()).toBe(false);
+  });
+
+  test("a streamed paused search continues the same way", async () => {
+    const placed = placedCore();
+    const { claude, custody, calls } = model(placed, [
+      () => streamed("msg_1", "Searching.", "pause_turn"),
+      () => streamed("msg_2", "Done.", "end_turn"),
+    ]);
+    await custody(async () => {
+      for await (const _event of claude.getStreamedResponse(modelRequest));
+    });
+    expect(calls()).toBe(2);
+    await placed.core.requests!.checkpoint();
+    expect(placed.order.filter((step) => step.startsWith("settle:"))).toEqual([
+      "settle:operation-1:response_received",
+      "settle:operation-2:response_received",
+    ]);
+    expect(placed.core.requests!.canRecover()).toBe(true);
+  });
+
+  test("no further request is admitted after a response without its final event", async () => {
+    const placed = placedCore();
+    const first = send(placed, [
+      () =>
+        sse(
+          ["message_start", { type: "message_start" }],
+          ["content_block_start", { type: "content_block_start", index: 0 }],
+        ),
+    ]);
+    await (await first.response).text();
+    expect(placed.core.requests!.hasUnknownOutcome()).toBe(true);
+    const second = send(placed, [answered], { prefix: "attempt-1:1:1:claude:next" });
+    await expect(second.response).rejects.toMatchObject({
+      code: "subscription_core_request_outcome_unknown",
+    });
+    expect(second.calls()).toBe(0);
+  });
+
+  test("a body cancelled before its final event, or a read error, settles unknown", async () => {
+    const cancelled = placedCore();
+    const sent = send(cancelled, [
+      () =>
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode("event: message_start\ndata: {}\n\n"));
+            },
+          }),
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+    ]);
+    const body = (await sent.response).body!.getReader();
+    await body.read();
+    await body.cancel();
+    expect(cancelled.order.at(-1)).toBe("settle:operation-1:unknown");
+    expect(cancelled.core.requests!.hasUnknownOutcome()).toBe(true);
+
+    const broken = placedCore();
+    const failing = send(broken, [
+      () =>
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode("event: message_start\ndata: {}\n\n"));
+              controller.error(new Error("socket reset"));
+            },
+          }),
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+    ]);
+    await expect((await failing.response).text()).rejects.toThrow("socket reset");
+    expect(broken.order.at(-1)).toBe("settle:operation-1:unknown");
+  });
+
+  test("a renewal that fails cancels the refused body, surfaces the error and reserves nothing more", async () => {
+    const placed = placedCore();
+    spyOn(placed.authorization, "renewAfterUnauthorized").mockRejectedValue(
+      new Error("refresh failed"),
+    );
+    let cancelled = false;
+    const sent = send(placed, [
+      () =>
+        new Response(
+          new ReadableStream({
+            cancel() {
+              cancelled = true;
+            },
+          }),
+          { status: 401 },
+        ),
+    ]);
+    await expect(sent.response).rejects.toThrow("refresh failed");
+    expect(cancelled).toBe(true);
+    expect(sent.calls()).toBe(1);
+    expect(placed.order).toEqual([
+      "fence",
+      "reserve:attempt-1:1:1:claude:1:1",
+      "settle:operation-1:refused",
+    ]);
+  });
 });

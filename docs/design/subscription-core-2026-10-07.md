@@ -4977,9 +4977,20 @@ unregistered until then.
   stream error such as a timeout or conflict and anything else unknown); a
   failed fetch is unknown, and a response the custody cannot settle is
   cancelled. An unknown outcome is never replayed: later requests of the
-  attempt are refused locally. The 401 renewal resends the same body only
-  when it can be sent again. A 529 is a refusal on the same connection
-  (never a refresh or a rotation). Session titles use their own lane under
+  attempt are refused locally. A paused web search (`pause_turn`) continues
+  the same model call with a new physical request before the history
+  checkpoint: Claude's lanes declare `continuesAfterResponse`, so a further
+  reservation is admitted while every pending request of the lane has
+  received its response (each still reserved before its I/O and settled
+  once at the checkpoint); any request without a response still refuses
+  the next one, and lanes that do not declare it keep refusing any pending
+  request (review finding on #4132). The 401 renewal resends the same body
+  only when it can be sent again; a forced refresh that fails stays failed
+  for the attempt. A 529 settles refused on its connection and is never
+  refreshed or retried in place; that it never rotates accounts is C1b's
+  settlement. The capability settings carry the account identity with a
+  placeholder bearer, so a request outside custody fails closed upstream.
+  Session titles use their own lane under
   the same fence; only an admitted main-lane request moves the generation
   the refusal settlement fences on (`core.credentialVersion`), so a title
   request renewed after a 401 never does. The legacy usage observer, its receipts and its usage

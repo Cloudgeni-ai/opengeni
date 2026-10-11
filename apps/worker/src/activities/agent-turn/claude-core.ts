@@ -130,6 +130,9 @@ export function createCoreClaudeRequests(
     displayName: DISPLAY_NAME,
     outcomeUnknown: () => CLAUDE.errors.requestOutcomeUnknown(),
     isOutcomeUnknown: (error) => hasCoreCode(error, "subscription_core_request_outcome_unknown"),
+    // A paused web search continues the same model call with a new request
+    // after a complete response (`pause_turn`).
+    continuesAfterResponse: true,
   });
 }
 
@@ -198,6 +201,14 @@ export function buildClaudeCoreRequestAuthorization(input: {
     },
   };
 }
+
+/**
+ * The bearer a core-placed Claude turn's capability settings carry instead of
+ * the live one: each core request's custody sets the real bearer, so a
+ * request that bypasses custody is refused upstream rather than spending the
+ * account unreserved.
+ */
+export const CLAUDE_CORE_SETTINGS_PLACEHOLDER_TOKEN = "sk-ant-oat01-opengeni-core-custody-only";
 
 /** The scope a Claude product model id names (its prefix). */
 export function claudeCoreModelScope(productModelId: string): "organization" | "workspace" {
