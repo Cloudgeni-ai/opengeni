@@ -4426,7 +4426,7 @@ disabled) answers the typed 503 `subscription_core_cutover_disabled`.
   Personal workspace's own override; the override takes the organization's
   current primary as its inherited primary, so the organization accounts
   serving that workspace follow the owner's order there and no longer
-  later organization primary changes. Nobody else's work runs in that
+  follow later organization primary changes. Nobody else's work runs in that
   workspace, and the owner cannot make an organization account its
   primary. Without a private account the organization pool's 409 applies,
   as legacy; the 409 for activate applies to shared accounts.
