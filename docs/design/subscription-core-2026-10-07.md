@@ -3654,7 +3654,11 @@ as "not an organization account":
    organization's route and the managing workspace's: another workspace's
    route would switch the connection alone, which the manager's next "on"
    would undo for every other workspace, so it is refused as not found (that
-   workspace's page opens the organization's page for it). Until a workspace-managed account is first shared it has
+   workspace's page opens the organization's page for it). Older API pods
+   still switch the connection alone there, so the runbook forbids sharing a
+   workspace-managed account until every pod runs the release, and asks for
+   such accounts to be narrowed back before an older image runs again.
+   Until a workspace-managed account is first shared it has
    no organization copies, so the organization's switch is the connection's,
    which its managing workspace also flips; the organization's choice is
    recorded on its copies from the first share on (new copies take the
@@ -3780,9 +3784,13 @@ organization's copies, so the switch is the connection's again until the next
 share; keeping it needs a place only organization administrators write;
 decision 5); and whether an organization save that keeps the model list should
 leave the managing workspace's narrowed list alone (today it writes the saved
-list to that workspace's copy; keeping the manager's list needs the workspace
-route to report its own copy's list instead of the connection's, so the reach
-setter never copies the manager's list into the reach; decision 5).
+list to the connection and to that workspace's copy; keeping the manager's
+list means leaving it on that copy only, while the organization save still
+writes its list onto the connection, which the reach setter copies; the
+workspace route would then report the list placement reads for its source, as
+its switch does, and where that workspace also has an organization-pool row,
+its automatic and organization sources would still serve the organization's
+list; decision 5).
 
 ## 6. Specific behaviours
 

@@ -4476,7 +4476,11 @@ END $$;
 workspaces until every API pod runs this release: an older pod still lets
 another workspace's route switch only the connection, and the managing
 workspace's next "on" would then undo the organization's "off" for every other
-workspace. Do not limit any account to chosen people (`allowedPeople`)
+workspace. The same applies to a rollback: before running an older API image
+again, narrow every shared workspace-managed account back to its workspace
+(`allowedWorkspaces: []`), since older organization routes refuse
+workspace-managed accounts and can't narrow them afterwards. People choices
+likewise read as "no workspaces" on an older image. Do not limit any account to chosen people (`allowedPeople`)
 until every API pod runs this release. An older pod reads a people-scoped
 account as "no workspaces", and a save there would switch it back to
 workspace scope. Workspace-managed accounts can't be limited to people at all
@@ -4487,7 +4491,8 @@ refuses them, so the editor reads `peopleSupported: false`. An account that
 already has people there can still have them kept or removed and its models
 edited; adding someone is refused with 422.
 
-**Validation.** Use an operator-owned test organization (never a customer
+**Validation.** Once every API pod runs this release, use an operator-owned
+test organization (never a customer
 account: the `PUT` below widens a real account). As its administrator, call
 `GET /v1/organizations/<organization id>/model-connections/codex/<connection id>/access`
 for a workspace-managed account: it returns its workspace's own copy in
