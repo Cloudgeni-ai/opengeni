@@ -161,22 +161,16 @@ export interface SubscriptionCoreAdapter<Credential = unknown> {
   readonly capabilities: ProviderCapabilities;
   /**
    * Capabilities of one credential format, as `credential.format` derives it
-   * from a decoded secret. The stored `credential_format` column is not that
-   * format (the shared writers record the encryption envelope version there),
-   * so callers derive it from the secret. The core never calls `refresh` for
-   * a format whose `autoRenews` is false.
+   * from a decoded secret. Pass that derived value, never the stored
+   * `credential_format` column: the column is informational and may hold the
+   * shared writers' envelope version (`v1`). The core never calls `refresh`
+   * for a format whose `autoRenews` is false.
    */
   capabilitiesFor(credentialFormat: string): ProviderCapabilities;
   readonly credentialKind: CredentialKind;
   readonly quotaKind: QuotaKind;
   /** Provider identity used by workspace model policy for this provider's models. */
   readonly modelPolicyProviderId: string;
-  /**
-   * The workspace model policy's provider identity of one model, for a
-   * provider whose models carry more than one (absent or null:
-   * `modelPolicyProviderId`). Read through `subscriptionCoreModelPolicyProviderId`.
-   */
-  readonly modelPolicyProviderIdFor?: (modelId: ModelId) => string | null;
   /** Cache behaviour used by placement (exact TTL or a measured idle cut-off). */
   readonly cacheFacts: CacheFacts;
   /** Health policy applied to this provider's connections. */
@@ -248,14 +242,6 @@ export function subscriptionCoreCredentialRefresher<Credential>(
   return adapter.capabilitiesFor(adapter.credential.format(credential)).autoRenews
     ? adapter.refresh
     : null;
-}
-
-/** The workspace model policy's provider identity for one of the adapter's models. */
-export function subscriptionCoreModelPolicyProviderId(
-  adapter: Pick<SubscriptionCoreAdapter, "modelPolicyProviderId" | "modelPolicyProviderIdFor">,
-  modelId: ModelId,
-): string {
-  return adapter.modelPolicyProviderIdFor?.(modelId) ?? adapter.modelPolicyProviderId;
 }
 
 /**

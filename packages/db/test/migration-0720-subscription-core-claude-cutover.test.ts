@@ -34,6 +34,8 @@ import {
 import { decodeSubscriptionCoreClaudeCredential } from "../src/subscription-core-claude-adapter";
 import { SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES } from "../src/runtime-posture";
 import { deleteSubscriptionCoreWaitersForTurns } from "../src/subscription-core/waiters";
+import { subscriptionCoreOperations } from "../src/subscription-core/operations";
+import { subscriptionCoreProvider } from "../src/subscription-core-providers";
 
 const MIGRATION = "0720_subscription_core_claude_cutover.sql";
 const key = Buffer.alloc(32, 79);
@@ -91,6 +93,7 @@ const a = {
   t5: randomUUID(),
   t6: randomUUID(), // withdrawn for edit; a composer draft still edits it
   t12: randomUUID(), // W1 shared, queued with a malformed auth recovery value
+  t13: randomUUID(), // W1 shared, queued with an auth recovery of an older c1 version
   s12: randomUUID(),
   waiter: randomUUID(),
   goal: randomUUID(),
@@ -580,6 +583,9 @@ async function seed() {
       position: 2,
       human: a.owner,
       v1: workspaceV1,
+      // A renewal of the duplicate login c2 (version 2), now an alias of c1:
+      // never a receipt on c1, whose own credential was not renewed.
+      authRecovery: { credentialId: a.c2, credentialVersion: 2 },
     });
     await session({
       id: a.s2,
@@ -682,6 +688,19 @@ async function seed() {
       human: a.owner,
       v1: workspaceV1,
       authRecovery: { credentialId: a.c1, credentialVersion: "4" },
+    });
+    // A renewal of c1 at version 3, before its current version 4: not about
+    // the current credential.
+    await turn({
+      id: a.t13,
+      account: a.account,
+      workspace: a.w1,
+      session: a.s12,
+      status: "queued",
+      position: 1,
+      human: a.owner,
+      v1: workspaceV1,
+      authRecovery: { credentialId: a.c1, credentialVersion: 3 },
     });
     await admin`INSERT INTO claude_session_account_pins (account_id, workspace_id, session_id, authority_scope, owner_organization_membership_id, pinned_credential_id, pin_source, last_credential_id)
       VALUES (${a.account}, ${a.w2}, ${a.s1}, 'workspace', NULL, ${a.c2}, 'manual', ${a.c2}),
@@ -966,6 +985,21 @@ describe.skipIf(!realDb)(
         await expect(migrateCutover({ key })).rejects.toMatchObject({ code: "55000" });
       } finally {
         await app.end();
+      }
+      await noPartialCutover();
+    }, 180_000);
+
+    test("an isolation level other than READ COMMITTED is refused before any write", async () => {
+      const ownerName = new URL(owned.ownerUrl).username;
+      await owned.admin.unsafe(
+        `ALTER ROLE "${ownerName}" SET default_transaction_isolation = 'repeatable read'`,
+      );
+      try {
+        const error = await migrateCutover({ key }).catch((caught: Error) => caught);
+        expect(error).toMatchObject({ code: "55000" });
+        expect(errorChain(error)).toContain("0720 requires READ COMMITTED");
+      } finally {
+        await owned.admin.unsafe(`ALTER ROLE "${ownerName}" RESET default_transaction_isolation`);
       }
       await noPartialCutover();
     }, 180_000);
@@ -1415,7 +1449,7 @@ describe.skipIf(!realDb)(
             turn: a.t2,
             connection: a.c6,
             failure_kind: "unauthorized",
-            recovery_evidence: { refreshGeneration: 4 },
+            recovery_evidence: { refreshGeneration: 4, refusals: 0 },
           },
         ]);
         const after = await snapshotUntouched();
@@ -1461,7 +1495,7 @@ describe.skipIf(!realDb)(
         expect(metric("aliases")).toMatchObject({ legacy: 2 });
         expect(metric("live_leases")).toMatchObject({ legacy: 1 });
         expect(metric("waiting_waiters")).toMatchObject({ legacy: 2 });
-        expect(metric("auth_recovery_live_turns")).toMatchObject({ legacy: 3 });
+        expect(metric("auth_recovery_live_turns")).toMatchObject({ legacy: 5 });
         // c1's and c5's current readings and c11's unreadable current row
         // (unknown, listed).
         expect(metric("usage_generations")).toMatchObject({ legacy: 3 });
@@ -1472,6 +1506,7 @@ describe.skipIf(!realDb)(
         });
         expect(metric("disposition:auth_recovery_unmapped")).toMatchObject({ legacy: 1 });
         expect(metric("disposition:auth_recovery_malformed")).toMatchObject({ legacy: 1 });
+        expect(metric("disposition:auth_recovery_not_current")).toMatchObject({ legacy: 2 });
         expect(metric("disposition:usage_rows_stale")).toMatchObject({ legacy: 1 });
         expect(metric("disposition:usage_snapshot_unreadable")).toMatchObject({ legacy: 1 });
         expect(metric("disposition:usage_reconnect_pending")).toMatchObject({ legacy: 1 });
@@ -1562,12 +1597,29 @@ describe.skipIf(!realDb)(
           await asOwner(
             `UPDATE claude_subscription_credentials SET label = 'Renamed' WHERE id = '${a.c1}'`,
           ),
-        ).toContain("claude_subscription_credentials_closed");
+        ).toContain("claude_subscription_credentials_closed_update");
         expect(
           await asOwner(
             `UPDATE claude_subscription_account_usage SET model_cooldowns = '{}' WHERE credential_id = '${a.c1}'`,
           ),
-        ).toContain("claude_subscription_account_usage_closed");
+        ).toContain("claude_subscription_account_usage_closed_update");
+        // Row security is checked before constraints, so re-inserting an
+        // existing row reaches the restrictive insert policy first.
+        expect(
+          await asOwner(
+            `INSERT INTO claude_subscription_credentials
+             SELECT * FROM claude_subscription_credentials WHERE id = '${a.c1}'`,
+          ),
+        ).toContain("claude_subscription_credentials_closed_insert");
+        // Write-only restrictive policies: a restrictive policy covering SELECT
+        // would be a restrictive read policy, which the lifecycle-facts
+        // backfill (0565) refuses for its source tables.
+        const closedPolicies = await owned.admin<{ policyname: string; cmd: string }[]>`
+          SELECT policyname, cmd FROM pg_policies
+          WHERE tablename LIKE 'claude\_%' AND policyname LIKE '%\_closed%'
+          ORDER BY policyname`;
+        expect(closedPolicies.length).toBe(12);
+        expect(closedPolicies.every(({ cmd }) => cmd === "INSERT" || cmd === "UPDATE")).toBe(true);
         // No role adds a legacy Claude personal authority after the receipt.
         const [closed] = await owned.admin`SELECT permissive, cmd, with_check
           FROM pg_policies WHERE tablename = 'organization_user_resource_authorities'
@@ -1642,6 +1694,97 @@ describe.skipIf(!realDb)(
           return await tx`DELETE FROM claude_subscription_credentials WHERE id = ${a.c10} RETURNING id`;
         });
         expect(deleted).toHaveLength(1);
+      }, 60_000);
+
+      // A partial Claude reading must not end a block before its reset. The
+      // migrated connection c1 (generation 4) is read through the registered
+      // Claude binding as the runtime reads it after the receipt.
+      const claudeQuotaScope = () => ({
+        kind: "workspace" as const,
+        accountId: a.account,
+        workspaceId: a.w1,
+        subjectId: a.owner,
+      });
+      const claudeReading = (
+        source: "response_headers" | "usage_endpoint",
+        at: number,
+        windows: {
+          id: string;
+          usedPercent: number;
+          resetsAt: number;
+          status: "ok" | "exhausted";
+        }[],
+      ) => ({
+        windows,
+        modelCooldowns: {},
+        exhaustedUntil: null,
+        exhaustedKind: null,
+        revision: 0,
+        observedAt: at,
+        observedRefreshGeneration: 4,
+        source,
+      });
+      const recordClaudeReading = (reading: ReturnType<typeof claudeReading>) =>
+        subscriptionCoreOperations(
+          subscriptionCoreProvider("claude"),
+        ).recordSubscriptionCoreUsageObservation(client.db, claudeQuotaScope(), a.c1, reading);
+      const weeklyObservedAt = Date.now();
+      const weeklyReset = weeklyObservedAt + 2 * HOUR;
+      const migratedC1Windows = async () => {
+        const [row] = await owned.admin`SELECT quota FROM subscription_connection_quota
+          WHERE connection_id = ${a.c1}`;
+        return row!.quota.windows as { id: string; status: string; resetsAt: number }[];
+      };
+
+      test("a newer Claude response-header reading that omits a still-exhausted window keeps it until its reset", async () => {
+        expect(
+          await recordClaudeReading(
+            claudeReading("response_headers", weeklyObservedAt, [
+              { id: "five_hour", usedPercent: 40, resetsAt: weeklyObservedAt + HOUR, status: "ok" },
+              { id: "seven_day", usedPercent: 100, resetsAt: weeklyReset, status: "exhausted" },
+            ]),
+          ),
+        ).toMatchObject({ applied: true });
+        expect(
+          await recordClaudeReading(
+            claudeReading("response_headers", weeklyObservedAt + 1_000, [
+              { id: "five_hour", usedPercent: 41, resetsAt: weeklyObservedAt + HOUR, status: "ok" },
+            ]),
+          ),
+        ).toMatchObject({ applied: true });
+        expect(await migratedC1Windows()).toContainEqual(
+          expect.objectContaining({ id: "seven_day", status: "exhausted", resetsAt: weeklyReset }),
+        );
+      }, 60_000);
+
+      // Registering Claude also relies on its adapter declaring its usage
+      // readings incomplete: a Claude usage reading can omit a window that is
+      // still exhausted. That declaration is C2a's (#4130,
+      // `usageReadingsComplete: false`); this case stays red until C2a is in
+      // the base, so C3 cannot pass its validation, or merge, ahead of it.
+      test("a newer Claude usage reading that omits a still-exhausted window keeps it until its reset", async () => {
+        // Self-contained: record the exhausted weekly window here rather than
+        // relying on the response-header case above.
+        expect(
+          await recordClaudeReading(
+            claudeReading("response_headers", weeklyObservedAt + 1_500, [
+              { id: "five_hour", usedPercent: 41, resetsAt: weeklyObservedAt + HOUR, status: "ok" },
+              { id: "seven_day", usedPercent: 100, resetsAt: weeklyReset, status: "exhausted" },
+            ]),
+          ),
+        ).toMatchObject({ applied: true });
+        await recordClaudeReading(
+          claudeReading("usage_endpoint", weeklyObservedAt + 2_000, [
+            { id: "five_hour", usedPercent: 42, resetsAt: weeklyObservedAt + HOUR, status: "ok" },
+          ]),
+        );
+        expect(await migratedC1Windows()).toContainEqual(
+          expect.objectContaining({
+            id: "seven_day",
+            status: "exhausted",
+            resetsAt: weeklyReset,
+          }),
+        );
       }, 60_000);
     });
   },

@@ -5239,7 +5239,20 @@ shared settings rows gain only their `claude` keys and the Claude primary,
 the Personal-workspace fallback override and the owner's per-person fallback
 opt-in). 0720 reads and writes no SuperGrok data.
 
-**1. Inventory (before the window).** As the schema owner:
+**1. Inventory (before the window).** Run every query in this step as a
+superuser or another `BYPASSRLS` role: the schema owner is subject to row
+security and sees no legacy Claude rows, so its counts all read 0. Start the
+session with this guard, which stops otherwise:
+
+```sql
+\set ON_ERROR_STOP on
+DO $$ BEGIN
+  IF NOT (SELECT rolsuper OR rolbypassrls FROM pg_roles
+      WHERE rolname = current_user) THEN
+    RAISE EXCEPTION 'run the 0720 inventory as a superuser or BYPASSRLS role';
+  END IF;
+END $$;
+```
 
 ```sql
 SELECT account_id, authority_scope, count(*) FROM claude_subscription_credentials GROUP BY 1, 2;
@@ -5271,7 +5284,7 @@ SELECT account_id, id FROM organization_model_provider_connections
     AND (status <> 'revoked' OR credential_encrypted <> '');
 ```
 
-As a role that bypasses row security, confirm the core holds no Claude state
+Still as that role, confirm the core holds no Claude state
 yet. Each query must return no rows:
 
 ```sql
@@ -5290,8 +5303,35 @@ SELECT account_id, workspace_id FROM subscription_settings
 ```
 
 List the workspaces whose Claude setting will follow a locked organization
-value (the 0719 query with `claude_subscription_credentials` in place of
-`xai_subscription_credentials`); nothing aborts either way.
+value; nothing aborts either way:
+
+```sql
+SELECT workspace.account_id, workspace.id AS workspace_id,
+  'providers' = ANY(org.locked_settings) AS freeze_follows_organization,
+  'rotation' = ANY(org.locked_settings) AS rotation_follows_organization
+FROM workspaces workspace
+JOIN subscription_settings org
+  ON org.account_id = workspace.account_id AND org.workspace_id IS NULL
+WHERE org.locked_settings && ARRAY['providers', 'rotation']
+  AND EXISTS (SELECT 1 FROM claude_subscription_credentials credential
+    WHERE credential.account_id = workspace.account_id
+      AND credential.workspace_id = workspace.id
+      AND credential.authority_scope = 'workspace')
+  AND NOT EXISTS (SELECT 1 FROM organization_memberships owner
+    WHERE owner.account_id = workspace.account_id
+      AND owner.personal_workspace_id = workspace.id);
+```
+
+The migration holds one shared settings lock per organization with moved
+workspace accounts until it commits (the settings lock protocol). Count
+them; if the count approaches `max_locks_per_transaction` times
+`max_connections` (about 6,400 on default settings), raise
+`max_locks_per_transaction` before the window (a server restart):
+
+```sql
+SELECT count(DISTINCT account_id) FROM claude_subscription_credentials
+  WHERE authority_scope = 'workspace';
+```
 
 **2. Stop and drain. 3. Back up.** As for 0719. Do not cancel turns.
 
@@ -5330,6 +5370,8 @@ an older binary must never be restarted after it.
   `compat:dependent_sources_without_record` is zero. Claude adds these
   `disposition:*` rows to 0719's: `auth_recovery_unmapped` (a live
   `claudeAuthRecovery` value naming no moved credential; nothing to bound),
+  `auth_recovery_not_current` (a live value naming a duplicate login, now an
+  alias, or an older credential version; no receipt),
   `auth_recovery_malformed` (a value without a credential id and a positive
   version; ignored), `usage_rows_stale` (a usage row of an older credential
   version; only the legacy `exhausted_until` moved), `usage_snapshot_unreadable`
@@ -5345,8 +5387,11 @@ an older binary must never be restarted after it.
   enabled = true)`.
 - Waiting Claude turns keep their waiter (same id, generation and wake
   revisions) and resume through the core; no workflow reset is needed. A
-  live turn that had already spent its one forced token refresh has an
-  `unauthorized` row in `subscription_turn_failures` for that connection.
+  live turn that had already spent its one forced token refresh of a
+  connection's current credential has an `unauthorized` row in
+  `subscription_turn_failures` for that connection with `refusals: 0` (it
+  does not use the turn's failover bound); one that renewed a duplicate
+  login or an older version is listed as `auth_recovery_not_current`.
 
 **Release notes (behaviour users can see).**
 
@@ -5367,6 +5412,10 @@ an older binary must never be restarted after it.
   reading carry over; a stale or unreadable reading does not (only a running
   account exhaustion does), so such an account shows unknown usage until its
   next reading.
+- An account whose last usage check asked for a reconnect was held out of
+  selection; after the cutover it is selectable again (and chosen first when
+  it is the primary or a session's explicit choice) until a request or the
+  next refresh shows it still needs signing in, which then marks it.
 
 **Containment and fix forward.** As for 0719, with the Claude cutover row.
 

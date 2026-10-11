@@ -94,8 +94,9 @@ export interface ConcurrentIndexMigration {
 
 export type MigrationRuntimeOptions = {
   /**
-   * Existing operator key; used only by the closed Claude (0598) and Codex
-   * (0680) maintenance conversions.
+   * Existing operator key; used only by the closed maintenance conversions:
+   * Claude (0598), Codex (0680) and the provider cutover codec stages
+   * (0689, 0719, 0720).
    */
   environmentsEncryptionKey?: Uint8Array;
   maxNestedAgentDepth?: number;
