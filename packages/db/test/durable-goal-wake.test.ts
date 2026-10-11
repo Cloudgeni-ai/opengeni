@@ -1916,6 +1916,65 @@ describe("durable active-goal wake", () => {
     });
   });
 
+  test("a message queued while paused runs before any goal continuation on Resume", async () => {
+    const ctx = await runningGoalFixture();
+    await settleIdle(ctx);
+    const control = async (action: "pause" | "resume") =>
+      await withWorkspaceRls(client.db, ctx.grant.workspaceId!, (db) =>
+        db.transaction((tx) =>
+          mutateSessionControlInTransaction(tx as unknown as typeof db, {
+            accountId: ctx.grant.accountId,
+            workspaceId: ctx.grant.workspaceId!,
+            sessionId: ctx.session.id,
+            actor: { type: "human", subjectId: ctx.grant.subjectId },
+            operationKey: crypto.randomUUID(),
+            action,
+          }),
+        ),
+      );
+
+    await control("pause");
+    const submitted = await withWorkspaceSubjectRls(
+      client.db,
+      ctx.grant.workspaceId!,
+      ctx.grant.subjectId,
+      (db) =>
+        db.transaction((tx) =>
+          submitHumanPromptInTransaction(tx as unknown as typeof db, {
+            accountId: ctx.grant.accountId,
+            workspaceId: ctx.grant.workspaceId!,
+            sessionId: ctx.session.id,
+            subjectId: ctx.grant.subjectId,
+            actor: { type: "human", subjectId: ctx.grant.subjectId },
+            operationKey: crypto.randomUUID(),
+            delivery: "send",
+            text: "sent while paused",
+            resources: [],
+            reasoningEffortFallback: "low",
+            source: "user",
+          }),
+        ),
+    );
+    expect((await materialize(ctx)).action).toBe("none");
+    await control("resume");
+
+    // The resumed workflow evaluates the goal first; the waiting message wins.
+    expect((await materialize(ctx)).action).toBe("queue");
+    expect(await counts(ctx)).toMatchObject({ autoContinuations: 0, updates: 0 });
+    const next = await claimSessionWorkForAttempt(client.db, ctx.grant.workspaceId!, {
+      sessionId: ctx.session.id,
+      workflowId: `session-${ctx.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: `dispatch-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    expect(next.action).toBe("claimed");
+    if (next.action !== "claimed") return;
+    expect(next.turn.id).toBe(submitted.turn.id);
+    expect(next.turn.source).toBe("user");
+  });
+
   test("a frozen legacy waiter never supplies the runtime retry deadline", async () => {
     const ctx = await runningGoalFixture();
     await ensureCodexRotationSettings(client.db, ctx.grant.accountId, ctx.grant.workspaceId!);
