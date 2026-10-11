@@ -3415,6 +3415,18 @@ provision-roles revokes them from the runtime role). Choices:
   admissible), and then also for a `user` xAI snapshot, because the
   dispatcher derives one causal human; other scopes carry no Claude subject
   (`42501`).
+  Admission adds no v2 comparison of its own, although row 0 lists one:
+  admission already pins the run's `task_authority_revision` to the task's
+  current revision and the execution digest; 0688's trigger derives the
+  revision's v2 value from the task's, which
+  `scheduled_tasks_subscription_authority_immutable_trg` keeps immutable;
+  runtime roles hold no privilege on `scheduled_task_revision_authorities`,
+  whose only inserters (0275, 0478) never supply the column; and the
+  occurrence fence compares the v2 value the firing copies. A comparison at
+  admission would re-check a value nothing can make differ, and re-deriving
+  0688's rule there could refuse admissible runs if the two copies of the
+  rule drifted. A later migration that lets a writer supply the revision's
+  v2 value must add the comparison.
 - **Generated session.** `fence_scheduled_task_run_connection_session_identity`
   compares the generated session's `initial_claude_provider_account_authority_snapshot`
   with the accepted one.
@@ -3469,6 +3481,28 @@ provision-roles revokes them from the runtime role). Choices:
   tables (an owner bound by the credential tables' policies would see no
   credential and revoke every live authority), asserting convergence inside
   the window. Retained authorities of offboarded members are not touched.
+  The repair's predicate (an active authority with no credential at its
+  resource id) also matches authorities whose credential went with a deleted
+  workspace: the credentials' workspace foreign keys cascade, while the
+  authority's origin-workspace key only sets NULL and no delete trigger
+  revokes it. Revoking those is also correct (without a credential there is
+  no access), but 0717 fixes only the disconnect path, so such authorities
+  reappear after every workspace deletion until a later migration revokes
+  them on credential deletion; the inventory reports both kinds together.
+- **Lock order.** Sections 5 and 6 lock `organization_memberships`, both
+  personal credential tables and `organization_user_resource_authorities`,
+  and the trigger swap locks `session_turns`. Runtime work reads memberships
+  before turns (private-session visibility) and turns before memberships
+  (the turn enqueue, then the v2 writer), so no order of the five is
+  cycle-free; a reviewer reproduced `40P01` against the first draft, which
+  held the membership lock while it waited for `session_turns`. 0717 takes
+  the whole set first with 0716's bounded, retried lock acquisition (100 ms
+  per wait inside a savepoint, released and retried on timeout, `55P03`
+  after 30 s), so it never holds one of these locks long while it waits.
+  Splitting the trigger swap into its own migration was the alternative; the
+  bounded acquisition keeps one migration and covers every order, including
+  the credential and authority tables. The race test
+  `migration-0717-authority-fences-lock-order.test.ts` covers both orders.
 - **Inventory.** `docs/deployment.md`, "Subscription authority fences
   (0717)", holds one read-only query listing every existing row the new
   comparisons refuse or the repair revokes (finding, account, workspace,
