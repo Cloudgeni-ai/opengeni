@@ -4858,8 +4858,9 @@ is replaced by a reference to the canonical connection). Legacy rows stay
 for forensics. The five legacy SuperGrok tables become read-only: the
 runtime role keeps only `SELECT`, and restrictive policies that apply once
 the receipt exists refuse every insert or update of them, also by the legacy
-connect and rotation routines that run as the schema owner; no role can add
-a legacy SuperGrok personal authority.
+connect and rotation routines that run as the schema owner; the legacy
+disconnect refuses (accounts are disconnected on the core); and no role can
+add a legacy SuperGrok personal authority.
 
 Other providers' rows are not changed, with these SuperGrok-owned
 exceptions. A session whose current model is SuperGrok gets its SuperGrok

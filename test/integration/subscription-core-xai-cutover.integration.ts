@@ -295,8 +295,16 @@ describe.skipIf(!realDb)(
         observed_wake_revision: armed.waiter!.observedWakeRevision,
         blocked_turn_generation: 1,
         wait_reason: "no_eligible_capacity",
-        reset_kind: "quota",
+        reset_kind: "authoritative",
       });
+      // The timer the workflow sleeps on and the known reset are the legacy row's.
+      const [timers] = await owned.admin<{ next_check: boolean; earliest_reset: boolean }[]>`
+        select core.next_check_at = legacy.next_check_at as next_check,
+          core.earliest_reset_at = legacy.earliest_reset_at as earliest_reset
+        from subscription_capacity_waiters core
+        join xai_capacity_waiters legacy on legacy.id = core.waiter_id
+        where core.provider = 'xai' and core.waiter_id = ${recorded!.waiterId}::uuid`;
+      expect(timers).toEqual({ next_check: true, earliest_reset: true });
       const wakes = await owned.admin<{ generation: number; wake_revision: number }[]>`
         select generation::int, wake_revision::int from subscription_capacity_wake_outbox
         where workspace_id = ${workspaceId}::uuid and waiter_id = ${recorded!.waiterId}::uuid`;
@@ -314,14 +322,19 @@ describe.skipIf(!realDb)(
       expect(connection).toEqual({ provider: "xai", ownership: "shared" });
     }, 180_000);
 
-    // The recorded `provider: "xai"` reference reconciles on the migrated core
-    // waiter (keeps waiting while exhausted, resumes after a core wake) only
-    // through X1b's provider-neutral core reconcile path; the legacy getter
-    // that the current activity uses for `xai` sees the superseded waiter. X3
-    // merges after X1b (merge gate) and this case is completed on that rebase.
-    test.todo(
-      "the recorded SuperGrok reference reconciles and resumes on the migrated core waiter (X1b)",
-    );
+    // Merge gate (X3 merges after X1b). At this head nothing reaches the
+    // migrated waiter: the recorded `provider: "xai"` reference reconciles
+    // `stale` through the legacy getter, the peek returns null and
+    // `peekSessionWork` reports the session runnable. On the rebase onto X1b
+    // these become passing cases against the migrated waiter, with no re-arm:
+    // (a) the recorded reference keeps waiting on the same waiter id while the
+    // account is exhausted and observes the pending outbox wake; (b) after a
+    // core capacity change it resumes the same turn at the same execution
+    // generation; (c) the peek and `peekSessionWork` return a capacity-wait
+    // reference that reconciles to the same waiter.
+    test.todo("(a) the recorded SuperGrok reference keeps waiting on the migrated waiter (X1b)");
+    test.todo("(b) the recorded SuperGrok reference resumes the same turn after a core wake (X1b)");
+    test.todo("(c) the peek and peekSessionWork resolve to the migrated waiter (X1b)");
 
     test("the pinned capacity-wait history, recorded as a SuperGrok wait, replays against the current workflow registry", async () => {
       const history = await supergrokCapacityWaitHistory();

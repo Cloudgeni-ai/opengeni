@@ -89,6 +89,7 @@ const a = {
   t5: randomUUID(),
   t6: randomUUID(), // withdrawn for edit; a composer draft still edits it
   waiter: randomUUID(),
+  goal: randomUUID(), // the goal fence of the moved waiter
   collapsed: randomUUID(),
   draft: randomUUID(),
   update: randomUUID(),
@@ -140,6 +141,7 @@ const SEEDED_TABLES = [
   "sessions",
   "session_turns",
   "composer_drafts",
+  "session_goals",
   "xai_subscription_credentials",
   "xai_rotation_settings",
   "xai_credential_leases",
@@ -562,18 +564,20 @@ async function seed() {
     await admin`INSERT INTO xai_credential_leases (account_id, workspace_id, authority_scope, owner_organization_membership_id, credential_id, turn_id, holder_id, generation, leased_until)
       VALUES (${a.account}, ${a.w1}, 'user', ${a.om}, ${a.x6}, ${a.t2}, 'attempt-t2', 2, now() + interval '10 minutes'),
              (${a.account}, ${a.w2}, 'workspace', NULL, ${a.x2}, ${a.t5}, 'attempt-expired', 1, now() - interval '1 minute')`;
+    await admin`INSERT INTO session_goals (id, account_id, workspace_id, session_id, text, version)
+      VALUES (${a.goal}, ${a.account}, ${a.w2}, ${a.s1}, 'Finish the retained work', 3)`;
     await admin`INSERT INTO xai_capacity_waiters (
         id, account_id, workspace_id, session_id, blocked_turn_id, blocked_turn_generation,
         workflow_id, authority_scope, owner_organization_membership_id, status, generation,
         earliest_reset_at, next_check_at, wake_revision, observed_wake_revision, last_wake_reason,
-        updated_at
+        updated_at, goal_id, goal_version
       ) VALUES
         (${a.waiter}, ${a.account}, ${a.w2}, ${a.s1}, ${a.t1}, 2, ${`session-${a.s1}`}, 'workspace',
          NULL, 'waiting', 3, now() + interval '20 minutes', now() + interval '1 minute', 5, 4,
-         'usage_refreshed', now() - interval '1 minute'),
+         'usage_refreshed', now() - interval '1 minute', ${a.goal}, 3),
         (${a.collapsed}, ${a.account}, ${a.w2}, ${a.s1}, ${a.t1}, 2, ${`session-${a.s1}`},
          'organization', NULL, 'waiting', 1, NULL, now() + interval '1 minute', 1, 1,
-         'capacity_wait_armed', now())`;
+         'capacity_wait_armed', now(), NULL, NULL)`;
     await admin`INSERT INTO composer_drafts (id, account_id, workspace_id, session_id, subject_id, text, model, reasoning_effort, source_turn_id, source_turn_version)
       VALUES (${a.draft}, ${a.account}, ${a.w2}, ${a.s1}, ${a.owner}, 'Edited prompt', ${MODEL}, 'high', ${a.t6}, 1)`;
     await admin`INSERT INTO session_system_updates (id, account_id, workspace_id, session_id, kind, source_id, dedupe_key, summary, state)
@@ -832,6 +836,35 @@ describe.skipIf(!realDb)(
         await expect(migrateCutover({ key })).rejects.toMatchObject({ code: "55000" });
       } finally {
         await app.end();
+      }
+      await noPartialCutover();
+    }, 180_000);
+
+    test("the drain check refuses a connected writer the role list does not name", async () => {
+      const role = `x3_unlisted_${randomUUID().replaceAll("-", "").slice(0, 12)}`;
+      const password = randomUUID();
+      const database = new URL(owned.ownerUrl).pathname.slice(1);
+      await owned.admin.unsafe(
+        `CREATE ROLE ${role} LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD '${password}'`,
+      );
+      await owned.admin.unsafe(`GRANT CONNECT ON DATABASE "${database}" TO ${role}`);
+      await owned.admin.unsafe(`GRANT USAGE ON SCHEMA public TO ${role}`);
+      await owned.admin.unsafe(`GRANT INSERT, UPDATE, DELETE ON sessions TO ${role}`);
+      const url = new URL(owned.ownerUrl);
+      url.username = role;
+      url.password = password;
+      const writer = postgres(url.toString(), { max: 1 });
+      try {
+        await writer`SELECT 1`;
+        const error = await migrateCutover({ key }).catch((caught: Error) => caught);
+        expect(error).toMatchObject({ code: "55000" });
+        expect((error as Error).message).toContain("requires drained application sessions");
+      } finally {
+        await writer.end();
+        await owned.admin.unsafe(`REVOKE ALL ON sessions FROM ${role}`);
+        await owned.admin.unsafe(`REVOKE ALL ON SCHEMA public FROM ${role}`);
+        await owned.admin.unsafe(`REVOKE ALL ON DATABASE "${database}" FROM ${role}`);
+        await owned.admin.unsafe(`DROP ROLE ${role}`);
       }
       await noPartialCutover();
     }, 180_000);
@@ -1289,7 +1322,7 @@ describe.skipIf(!realDb)(
             wake_revision: 5,
             observed_wake_revision: 4,
             blocked_turn_generation: 2,
-            reset_kind: "quota",
+            reset_kind: "authoritative",
             wait_reason: "pinned_account_unavailable",
             last_wake_reason: "usage_refreshed",
           },
@@ -1300,6 +1333,20 @@ describe.skipIf(!realDb)(
         expect([...wakes]).toEqual([{ id: a.waiter, generation: 3, wake_revision: 5 }]);
         const legacyWaiters = await owned.admin`SELECT status FROM xai_capacity_waiters`;
         expect(legacyWaiters.every((row) => row.status === "superseded")).toBe(true);
+        // The timer and the goal fence the workflow depends on are the legacy row's.
+        const [fences] = await owned.admin`SELECT
+            core.next_check_at = legacy.next_check_at AS next_check,
+            core.earliest_reset_at = legacy.earliest_reset_at AS earliest_reset,
+            core.goal_id::text AS goal_id, core.goal_version::int AS goal_version
+          FROM subscription_capacity_waiters core
+          JOIN xai_capacity_waiters legacy ON legacy.id = core.waiter_id
+          WHERE core.provider = 'xai' AND core.waiter_id = ${a.waiter}`;
+        expect(fences).toEqual({
+          next_check: true,
+          earliest_reset: true,
+          goal_id: a.goal,
+          goal_version: 3,
+        });
       });
 
       test("accepted authority: one record per carrier with exact personal entries; v1 bytes untouched", async () => {
@@ -1550,6 +1597,30 @@ describe.skipIf(!realDb)(
         ).toContain("xai_subscription_credentials_closed");
       }, 60_000);
 
+      test("the legacy disconnect refuses after the receipt and changes nothing", async () => {
+        const disconnect = await withRlsContext(
+          client.db,
+          { accountId: a.account, workspaceId: a.w1, subjectId: a.owner },
+          (tx) =>
+            rawRows(
+              tx,
+              sql`select disconnect_xai_subscription_credential(${a.account}::uuid, ${a.w1}::uuid,
+                ${a.owner}, ${a.x1}::uuid, '{"version":1,"scope":"workspace"}'::jsonb) as disconnected`,
+            ),
+        ).then(
+          () => "disconnected",
+          (error: unknown) => errorChain(error),
+        );
+        expect(disconnect).toContain(
+          "SuperGrok accounts are disconnected on the shared subscription core after the cutover",
+        );
+        const [state] = await owned.admin`SELECT
+            (SELECT count(*)::int FROM xai_subscription_credentials WHERE id = ${a.x1}) AS legacy,
+            (SELECT count(*)::int FROM xai_session_account_pins WHERE last_credential_id = ${a.x1}) AS pins,
+            (SELECT status FROM subscription_connections WHERE id = ${a.x1}) AS core`;
+        expect(state).toEqual({ legacy: 1, pins: 2, core: "active" });
+      }, 60_000);
+
       test("new work accepted after the cutover carries the owner's current SuperGrok generation", async () => {
         const [generation] =
           await owned.admin`SELECT authority_generation FROM subscription_connections WHERE id = ${a.x6}`;
@@ -1641,6 +1712,56 @@ describe.skipIf(!realDb)(
             (SELECT count(*)::int FROM subscription_capacity_waiters WHERE provider = 'xai') AS waiters,
             (SELECT count(*)::int FROM subscription_capacity_wake_outbox WHERE account_id = ${a.account}) AS wakes`;
         expect(left).toEqual({ waiters: 0, wakes: 0 });
+      }, 60_000);
+
+      test("organization retention deletion of an offboarded member still runs after the receipt", async () => {
+        await withSeedTriggersOff(() =>
+          owned.admin`UPDATE organization_memberships SET status = 'revoked', revoked_at = now(),
+              personal_retention_until = now() - interval '1 day'
+            WHERE id = ${a.bm}`.then(() => undefined),
+        );
+        const operation = randomUUID();
+        await owned.admin`INSERT INTO organization_user_retention_deletions (
+            account_id, membership_id, retention_until, state, claim_operation_id, claim_expires_at
+          ) SELECT account_id, id, personal_retention_until, 'claimed', ${operation}::uuid,
+            now() + interval '15 minutes'
+          FROM organization_memberships WHERE id = ${a.bm}`;
+        const [finalized] = await withSessionRlsActorContext({ subjectId: a.owner }, () =>
+          withRlsContext(client.db, { accountId: a.account }, (tx) =>
+            rawRows<{ result: { deletedResources: Record<string, number> } }>(
+              tx,
+              sql`select finalize_organization_retention_deletion(${a.account}::uuid, ${a.bm}::uuid,
+                ${operation}::uuid, 'xai-cutover-test-bucket') as result`,
+            ),
+          ),
+        );
+        // The member's migrated personal connection is deleted with their
+        // Personal workspace. The legacy row stays: the retention delete has no
+        // workspace context and the legacy `user` row is not visible to it, the
+        // same as before the receipt (its ciphertext is blank since 0718).
+        expect(finalized!.result.deletedResources).toMatchObject({
+          subscriptionConnections: 1,
+          personalWorkspaces: 1,
+          xaiSubscriptions: 0,
+        });
+        const [left] = await owned.admin`SELECT
+            (SELECT count(*)::int FROM subscription_connections WHERE id = ${a.x8}) AS core,
+            (SELECT credential_encrypted FROM xai_subscription_credentials WHERE id = ${a.x8}) AS legacy`;
+        expect(left).toEqual({ core: 0, legacy: "" });
+      }, 60_000);
+
+      test("the owner can still delete a legacy SuperGrok row after the receipt", async () => {
+        // Deletes stay open on the legacy tables (USING (true) on the `_closed`
+        // policies); referential actions null what pointed at the row.
+        const deleted = await owner.begin(async (tx) => {
+          await tx`SELECT set_config('opengeni.account_id', ${a.account}, true),
+            set_config('opengeni.workspace_id', ${a.w3}, true)`;
+          return await tx`DELETE FROM xai_subscription_credentials WHERE id = ${a.x9} RETURNING id`;
+        });
+        expect(deleted).toHaveLength(1);
+        const [left] =
+          await owned.admin`SELECT count(*)::int AS total FROM xai_subscription_credentials WHERE id = ${a.x9}`;
+        expect(left!.total).toBe(0);
       }, 60_000);
     });
   },

@@ -93,7 +93,8 @@ BEGIN
     SELECT 1 FROM pg_stat_activity activity
     JOIN pg_roles login ON login.oid = activity.usesysid
     WHERE activity.datname = current_database() AND activity.pid <> pg_backend_pid()
-      AND activity.backend_type = 'client backend'
+      -- A non-superuser owner sees NULL for another role's backend_type.
+      AND coalesce(activity.backend_type, 'client backend') = 'client backend'
       AND login.rolname <> current_user AND NOT login.rolsuper
       AND EXISTS (SELECT 1 FROM xai_cutover_relations relation
         WHERE has_table_privilege(activity.usesysid, relation.oid, 'INSERT')
@@ -579,7 +580,10 @@ SELECT waiter.account_id, waiter.workspace_id, waiter.session_id, waiter.blocked
       WHERE binding.workspace_id = waiter.workspace_id AND binding.session_id = waiter.session_id
         AND binding.provider = 'xai' AND binding.choice = 'explicit')
     THEN 'pinned_account_unavailable' ELSE 'no_eligible_capacity' END,
-  NULL, CASE WHEN waiter.earliest_reset_at IS NOT NULL THEN 'quota' END, 0, NULL,
+  -- The core's reset kinds: a known future reset is authoritative, else the
+  -- waiter waits for a capacity mutation (subscriptionCoreCodexNextCheckAt).
+  NULL, CASE WHEN waiter.earliest_reset_at > now() THEN 'authoritative' ELSE 'mutation_only' END,
+  0, NULL,
   waiter.earliest_reset_at, waiter.generation, waiter.wake_revision, waiter.observed_wake_revision,
   waiter.next_check_at, waiter.blocked_turn_generation, waiter.goal_id, waiter.goal_version,
   left(waiter.last_wake_reason, 128), waiter.updated_at
@@ -1479,13 +1483,15 @@ END $xai_cutover_restore$;
 -- lifecycle keeps revoking, retaining and restoring them with every other
 -- authority of a member; after the receipt no role adds one. The five legacy
 -- tables admit no insert or update after the receipt either: the legacy
--- create, disconnect and lease routines run as the owner, which FORCE row
--- security binds, so a restrictive policy refuses them whatever runtime
--- grants a login still holds (before provision-roles runs again, or a login
--- it does not provision). Deletes stay open: membership lifecycle deletes
--- an offboarded member's `user` credentials. provision-roles also withdraws
--- runtime write grants on these tables, and the runtime posture contract
--- asserts it.
+-- create and lease routines run as the owner, which FORCE row security
+-- binds, so a restrictive policy refuses them whatever runtime grants a login
+-- still holds (before provision-roles runs again, or a login it does not
+-- provision). Deletes stay open for organization retention deletion, which
+-- deletes an offboarded member's `user` credentials; the legacy disconnect
+-- routine refuses after the receipt instead (below), so it can never report
+-- a revocation while the moved connection keeps serving. provision-roles
+-- also withdraws runtime write grants on these tables, and the runtime
+-- posture contract asserts it.
 DO $xai_cutover_read_only$
 DECLARE data_schema text := current_schema(); legacy text;
 BEGIN
@@ -1511,3 +1517,84 @@ BEGIN
       OR NOT opengeni_private.subscription_provider_cutover_committed('xai'))
   $ddl$, data_schema);
 END $xai_cutover_read_only$;
+
+-- The legacy disconnect (0432's definition) refuses once the receipt exists:
+-- the account lives on the shared core and is disconnected there.
+DO $xai_cutover_legacy_disconnect$
+DECLARE data_schema text := current_schema();
+BEGIN
+  EXECUTE format($ddl$
+    CREATE OR REPLACE FUNCTION %1$I.disconnect_xai_subscription_credential(
+      p_account_id uuid,
+      p_workspace_id uuid,
+      p_subject_id text,
+      p_credential_id uuid,
+      p_snapshot jsonb
+    ) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path = %1$I, pg_catalog
+    AS $body$
+    DECLARE
+      credential_row record;
+    BEGIN
+      IF opengeni_private.subscription_provider_cutover_committed('xai') THEN
+        RAISE EXCEPTION 'SuperGrok accounts are disconnected on the shared subscription core after the cutover'
+          USING ERRCODE = '55000';
+      END IF;
+      IF p_account_id IS DISTINCT FROM NULLIF(current_setting('opengeni.account_id', true), '')::uuid
+        OR p_workspace_id IS DISTINCT FROM NULLIF(current_setting('opengeni.workspace_id', true), '')::uuid
+        OR p_subject_id IS DISTINCT FROM NULLIF(current_setting('opengeni.subject_id', true), '')
+      THEN
+        RAISE EXCEPTION 'xAI credential lifecycle authority denied' USING ERRCODE = '42501';
+      END IF;
+
+      SELECT credential.* INTO credential_row
+      FROM revalidate_xai_subscription_authority(
+        p_workspace_id, p_subject_id, p_credential_id, p_snapshot
+      ) authorized
+      INNER JOIN xai_subscription_credentials credential ON credential.id = authorized.id
+      FOR UPDATE OF credential;
+      IF credential_row.id IS NULL THEN RETURN false; END IF;
+
+      INSERT INTO opengeni_private.xai_subscription_runtime_capabilities (
+        backend_pid, transaction_id, capability_kind
+      ) VALUES (pg_catalog.pg_backend_pid(), pg_catalog.pg_current_xact_id(), 'lifecycle')
+      ON CONFLICT DO NOTHING;
+
+      -- Clear the coupled pin fields before the foreign key nulls its id.
+      -- Keep the row/version so stale session pin edits still fail their CAS.
+      UPDATE xai_session_account_pins
+      SET pinned_credential_id = NULL, pin_source = NULL,
+          version = version + 1, updated_at = now()
+      WHERE account_id = credential_row.account_id
+        AND workspace_id = credential_row.workspace_id
+        AND pinned_credential_id = credential_row.id;
+
+      DELETE FROM xai_subscription_credentials WHERE id = credential_row.id;
+      IF credential_row.authority_scope = 'user' THEN
+        UPDATE organization_user_resource_authorities
+        SET status = 'revoked', revoked_at = now(), updated_at = now()
+        WHERE id = credential_row.organization_user_resource_authority_id
+          AND account_id = credential_row.account_id
+          AND organization_membership_id = credential_row.owner_organization_membership_id
+          AND resource_kind = 'xai_subscription'
+          AND resource_id = credential_row.id
+          AND generation = credential_row.organization_user_resource_authority_generation;
+      END IF;
+
+      DELETE FROM opengeni_private.xai_subscription_runtime_capabilities
+      WHERE backend_pid = pg_catalog.pg_backend_pid()
+        AND transaction_id = pg_catalog.pg_current_xact_id_if_assigned()
+        AND capability_kind = 'lifecycle';
+      RETURN true;
+    EXCEPTION WHEN OTHERS THEN
+      DELETE FROM opengeni_private.xai_subscription_runtime_capabilities
+      WHERE backend_pid = pg_catalog.pg_backend_pid()
+        AND transaction_id = pg_catalog.pg_current_xact_id_if_assigned()
+        AND capability_kind = 'lifecycle';
+      RAISE;
+    END
+    $body$;
+  $ddl$, data_schema);
+END $xai_cutover_legacy_disconnect$;
+-- CREATE OR REPLACE retains the existing owner and PUBLIC-revoked ACL.
