@@ -271,6 +271,8 @@ export function subscriptionCoreXaiAdapter(
     decodeQuota: decodeSubscriptionCoreXaiQuota,
     // Billing below the limit ends a stored exhaustion (the legacy refresh rule).
     usageReadEndsQuotaExhaustion: true,
+    // The billing read reports the whole spend window (today's merge replaces it).
+    usageReadingsComplete: true,
     liveModels: async (read) =>
       (await fetchXaiSubscriptionModels(xaiReadContext(read))).map((model) => model.slug),
   };

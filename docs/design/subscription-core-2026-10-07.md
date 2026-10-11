@@ -102,19 +102,18 @@ quarantine a renewed credential (this replaces `version` fencing, which does
 not change on Claude refresh).
 
 Merging (`applyQuotaObservation`) depends on `source`. A usage-endpoint
-reading replaces the stored windows, so it can show an early reset. That is
-an adapter obligation: an adapter tags a reading `usage_endpoint` only when
-it reports every window the provider tracks, because the store treats such a
-reading as complete whether or not it is (a reading that omits an exhausted
-window ends that window's block). Whether a provider's usage endpoint meets
-this is checked before the provider is registered; for Claude it is a C3
-precondition, tracked separately. Response-header readings and refusals
-report only some windows: a stored exhausted window with a known future
-reset that such an observation does not report stays until that reset (one
-that reports the window again replaces it). Whatever the source, a running
-`exhaustedUntil` deadline or model cooldown is never shortened, and an older
-or undated reading never replaces a newer dated one. So a writer's own
-refusal is tagged `refusal`, never `usage_endpoint`.
+reading of an adapter that declares its usage readings complete
+(`usageReadingsComplete`) replaces the stored windows outright, so it can
+show an early reset (a reading that omits an exhausted window ends that
+window's block); an adapter declares it only when its usage endpoint reports
+every window the provider tracks. Response-header readings, refusals and
+every other adapter's usage readings (fail closed: absent means partial,
+Claude's are partial) report only some windows: a stored exhausted window
+with a known future reset that such an observation does not report stays
+until that reset (one that reports the window again replaces it). Whatever
+the source, a running `exhaustedUntil` deadline or model cooldown is never
+shortened, and an older or undated reading never replaces a newer dated one.
+So a writer's own refusal is tagged `refusal`, never `usage_endpoint`.
 
 ## 3. Data model
 
@@ -4750,13 +4749,27 @@ Facts the adapter declares, each read from today's Claude path:
     shared `applyQuotaObservation` keep a stored exhausted window with a
     known future reset that a newer response-header reading or refusal
     omits, until that window's reset (provider-neutral, toward waiting, with
-    the Codex and SuperGrok suites run against it). A usage-endpoint reading
-    is complete and still replaces the stored windows, so it can show an
+    the Codex and SuperGrok suites run against it). Whether a usage-endpoint
+    reading is complete is the adapter's declaration
+    (`usageReadingsComplete`, C2a): only a usage reading of an adapter that
+    declares it replaces the stored windows outright, so it can show an
     early reset, including of a refusal's `exhausted_without_reset` fallback
-    window. A two-observation shared test covers all three sources, and the
-    adapter's former `test.failing` case is an ordinary test, which C3
-    (which registers Claude) requires. C3's combined cutover ledger test
-    covers the case on real data.
+    window; any other usage reading keeps an omitted exhausted window like a
+    header reading (absent means partial: fail closed). Codex, SuperGrok
+    and the conformance API-key connector declare complete readings, which
+    keeps their behaviour. Claude declares partial readings: `/api/oauth/usage`
+    can omit an account window that is still exhausted, and #4120's rule
+    treated every
+    usage reading as complete, which would end such a block early where
+    today's merged reading keeps it (a defect in merged work, fixed in C2a).
+    A Claude refusal's fallback window therefore rests its full minute even
+    when a usage reading shows capacity (toward waiting); the shared
+    conformance case asserts the declared behaviour for each subject. A
+    two-observation shared test covers all three sources and both
+    declarations, and the adapter's tests cover a header and a usage
+    reading that omit an exhausted window; C3 (which registers Claude)
+    requires both. C3's combined cutover ledger test covers the case on real
+    data.
   - C3 re-keys the legacy cooldowns and restrictions: the legacy reading is
     keyed by Anthropic's upstream model id, the core by product model id, so
     the cutover maps each through `subscriptionCoreClaudeProductModelIds`
@@ -4882,9 +4895,14 @@ core read before C3 fails closed in the registry.
   shared pool is `organization`; a task without one (`v2` or `none`) takes
   the same source rule; anything else (`missing`, `v1`, not visible, or a
   database without the reader) admits nothing.
+- Usage-reading completeness. The adapter declares `usageReadingsComplete`;
+  the shared quota merge drops an omitted exhausted window only for a
+  usage-endpoint reading of an adapter that declares it (see the usage
+  bullets above and 2.2). Claude declares `false`.
 - Generalizations (provider-neutral): an optional `modelIds` on the probe
-  deps and the `decodeQuota` input, and `pools` on
-  `SubscriptionCoreServingConnection`.
+  deps and the `decodeQuota` input, `pools` on
+  `SubscriptionCoreServingConnection`, and the adapter's
+  `usageReadingsComplete` with the matching `applyQuotaObservation` option.
 
 ### 5.4 Workspace-managed connections as organization accounts
 

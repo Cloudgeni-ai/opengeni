@@ -90,22 +90,30 @@ export function quotaObservationApplies(
  * the current credential generation, never replaces a newer or dated reading
  * with an older or undated one, and never shortens a running exhaustion
  * deadline or model cooldown: a later usage reading without them does not
- * clear them. A usage-endpoint reading is complete and replaces the stored
- * windows, so it can show an early reset (also of a refusal's fallback
- * window). Response headers and refusals report only some windows: a stored
- * exhausted window with a known reset that such an observation does not
- * report at all stays until that reset (one that reports the window again
- * replaces it). So a window that only refusals report (a policy hold the
- * caller records itself, for example) ends at its reset or with a usage
- * reading, never with a header reading. A caller's own refusal must be
- * tagged `refusal`, not `usage_endpoint`, or it would erase the stored
- * windows.
+ * clear them. A stored exhausted window with a known reset that an
+ * observation does not report at all stays until that reset (one that
+ * reports the window again replaces it), unless the observation is a
+ * usage-endpoint reading of an adapter that declares its usage readings
+ * complete (`options.usageReadingsComplete`, from the adapter's
+ * `usageReadingsComplete`): such a reading replaces the stored windows, so
+ * it can show an early reset (also of a refusal's fallback window).
+ * Response headers and refusals, and the usage readings of every other
+ * adapter, report only some windows (fail closed: absent means partial).
+ * So a window that only refusals report (a policy hold the caller records
+ * itself, for example) ends at its reset or with a complete usage reading,
+ * never with a header reading. A caller's own refusal must be tagged
+ * `refusal`, not `usage_endpoint`, or a complete adapter's reading would
+ * erase the stored windows.
  * Clearing a cooldown early is an explicit, revision-fenced store operation,
  * not an observation. Revision numbers are assigned by the store.
  */
 export function applyQuotaObservation(
   connection: Pick<SubscriptionConnection, "refreshGeneration" | "quota">,
   observation: SubscriptionQuota,
+  options: {
+    /** The observing adapter declares its usage-endpoint readings complete. */
+    usageReadingsComplete?: boolean;
+  } = {},
 ): SubscriptionQuota | null {
   if (!quotaObservationApplies(connection, observation)) return connection.quota;
   const current = connection.quota;
@@ -134,7 +142,7 @@ export function applyQuotaObservation(
     (observation.exhaustedUntil === null || observation.exhaustedUntil < current.exhaustedUntil);
   const reported = new Set(observation.windows.map((window) => window.id));
   const omittedExhausted =
-    observation.source === "usage_endpoint"
+    observation.source === "usage_endpoint" && options.usageReadingsComplete === true
       ? []
       : current.windows.filter(
           (window) =>

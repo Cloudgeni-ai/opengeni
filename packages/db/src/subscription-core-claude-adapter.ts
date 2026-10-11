@@ -181,6 +181,8 @@ export function subscriptionCoreClaudeAdapter(
     // Usage reads and their decoding live in `subscription-core-claude-usage.ts` (C2a).
     fetchUsage: (read) => fetchSubscriptionCoreClaudeUsage(read),
     decodeQuota: (input) => decodeSubscriptionCoreClaudeUsage(input),
+    // A usage reading may omit a window that still runs: keep it (design 5.3).
+    usageReadingsComplete: false,
   };
 }
 

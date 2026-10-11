@@ -260,6 +260,15 @@ export interface SubscriptionCoreAdapter<Credential = unknown> {
    */
   usageReadEndsQuotaExhaustion?: boolean;
   /**
+   * The provider's usage-endpoint readings are complete: each reports every
+   * window that limits the connection, so a stored exhausted window that a
+   * newer reading omits has ended and is dropped. Absent or false: a
+   * reading may omit a window that still runs, and the shared quota merge
+   * keeps an omitted exhausted window until its own reset (fail closed,
+   * design 2.2). Response headers and refusals are always partial.
+   */
+  usageReadingsComplete?: boolean;
+  /**
    * Optional live model catalog of one connection (provider model ids),
    * read with its bearer through `input.fetch`. Throws when the provider
    * refuses the credential.

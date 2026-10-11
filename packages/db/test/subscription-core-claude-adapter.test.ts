@@ -898,6 +898,59 @@ describe("Claude usage in the shared quota model", () => {
     });
   });
 
+  // A Claude usage-endpoint reading is partial too: the adapter declares its
+  // usage readings incomplete, so a reading that omits a window that is
+  // still exhausted keeps the block until its reset, as today's merged
+  // reading does (design 5.3, Claude track, C2a).
+  test("a usage reading that omits an exhausted window keeps its block", () => {
+    const adapter = subscriptionCoreClaudeProvider().adapter;
+    expect(adapter.usageReadingsComplete).toBe(false);
+    const weeklyReset = at(3 * 86_400) * 1000;
+    const first = decode(
+      parseClaudeUsageResponse(
+        {
+          five_hour: { utilization: 20, resets_at: null },
+          seven_day: { utilization: 100, resets_at: new Date(weeklyReset).toISOString() },
+        },
+        now,
+      )!,
+    );
+    const later = new Date(now.getTime() + 600_000);
+    const second = decode(
+      parseClaudeUsageResponse({ five_hour: { utilization: 25, resets_at: null } }, later)!,
+    );
+    expect(second.source).toBe("usage_endpoint");
+    expect(second.windows.map((window) => window.id)).toEqual(["five_hour"]);
+    const stored = applyQuotaObservation(
+      { refreshGeneration: 4, quota: quota(first) },
+      quota(second),
+      { usageReadingsComplete: adapter.usageReadingsComplete === true },
+    );
+    expect(quotaCapacity(stored, later.getTime() + 1_000)).toEqual({
+      kind: "exhausted",
+      resetsAt: weeklyReset,
+    });
+    expect(quotaCapacity(stored, weeklyReset + 1_000)).not.toMatchObject({ kind: "exhausted" });
+    // A reading that reports the window again shows its early reset.
+    const third = decode(
+      parseClaudeUsageResponse(
+        {
+          five_hour: { utilization: 25, resets_at: null },
+          seven_day: { utilization: 10, resets_at: new Date(weeklyReset).toISOString() },
+        },
+        new Date(later.getTime() + 1_000),
+      )!,
+    );
+    const reset = applyQuotaObservation(
+      { refreshGeneration: 4, quota: { ...stored!, revision: 2 } },
+      quota(third),
+      { usageReadingsComplete: adapter.usageReadingsComplete === true },
+    );
+    expect(quotaCapacity(reset, later.getTime() + 2_000)).not.toMatchObject({
+      kind: "exhausted",
+    });
+  });
+
   test("a rejection for an unknown model limits the whole connection; unknown resets recheck in a minute", () => {
     const decoded = decode(
       parseClaudeUsageHeaders(

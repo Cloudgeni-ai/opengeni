@@ -3927,6 +3927,18 @@ export function describeSubscriptionCoreConformance<Credential>(
         connectionId,
         observation,
       );
+      if (provider.adapter.usageReadingsComplete !== true) {
+        // A partial usage reading (the adapter declares no complete
+        // readings) cannot tell that the refused limit ended: it never
+        // reports the fallback window, which stays until its own reset.
+        expect(recorded).toEqual({ applied: true, recovered: false });
+        expect(await placeChecked(turn, new Date(now + 2_000))).toMatchObject({ kind: "wait" });
+        expect(await evaluateChecked(turn, new Date(fallback + 1_000))).toMatchObject({
+          kind: "run",
+          connectionId,
+        });
+        return;
+      }
       expect(recorded).toEqual({ applied: true, recovered: true });
       expect(await placeChecked(turn, new Date(now + 2_000))).toMatchObject({
         kind: "run",
