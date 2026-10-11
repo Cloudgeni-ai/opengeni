@@ -1109,4 +1109,126 @@ describe.skipIf(!realDb)("subscription settings with lockable workspace override
     });
     expect(refused?.code).toBe("42501");
   });
+
+  // A provider cutover migration (the SuperGrok one, and later Claude) runs as
+  // the migration owner, outside any trigger-disabled window, and freezes
+  // workspaces with local accounts on their own rotation and source. It must
+  // skip every key the organization row locks; the guard refuses it otherwise.
+  test("a cutover-shaped workspace upsert succeeds only when it skips locked keys", async () => {
+    const f = await fixture();
+    await updateWorkspaceSubscriptionSettings(client!.db, {
+      ...workspace(f, f.alphaId, f.workspaceAdminSubjectId),
+      patch: { crossProviderFailover: true },
+    });
+    await updateOrganizationSubscriptionSettings(client!.db, {
+      ...organization(f),
+      patch: { locked: ["rotation", "providers"] },
+    });
+    const [connection] = await shared!.admin<{ id: string }[]>`
+      insert into subscription_connections (
+        account_id, provider, provider_account_id, credential_encrypted, scope_kind
+      ) values (
+        ${f.accountId}, 'xai', ${`provider-account-${crypto.randomUUID()}`}, 'v1:test', 'organization'
+      ) returning id::text as id`;
+
+    // The cutover's statement: shared workspaces get the local rotation, the
+    // primary and the workspace source; the Personal workspace gets personal
+    // fallback. `skipLocked` mirrors its rotation/providers/fallback lock checks.
+    const cutover = (skipLocked: boolean) =>
+      shared!.admin.begin(
+        (tx) => tx`
+        with organization as (
+          select coalesce(locked_settings, '{}') as locked from subscription_settings
+          where account_id = ${f.accountId}::uuid and workspace_id is null
+        ), ws as (
+          select candidate.workspace_id, candidate.personal,
+            ${skipLocked} and 'rotation' = any(organization.locked) as rotation_locked,
+            ${skipLocked} and 'providers' = any(organization.locked) as providers_locked,
+            ${skipLocked} and 'personalFallbackAllowed' = any(organization.locked) as fallback_locked
+          from organization, (values
+            (${f.alphaId}::uuid, false), (${f.betaId}::uuid, false), (${f.personalId}::uuid, true)
+          ) candidate(workspace_id, personal)
+        )
+        insert into subscription_settings (
+          account_id, workspace_id, xai_primary_connection_id, rotation, providers,
+          personal_fallback_allowed, updated_by_subject_id, updated_at
+        )
+        select ${f.accountId}::uuid, ws.workspace_id,
+          case when not ws.personal and not ws.rotation_locked then ${connection!.id}::uuid end,
+          case when not ws.personal and not ws.rotation_locked
+            then '{"xai":{"mode":"primary_first"}}'::jsonb end,
+          case when not ws.personal and not ws.providers_locked
+            then '{"xai":{"inferenceSource":"workspace","useOrganizationAccounts":false}}'::jsonb end,
+          case when ws.personal and not ws.fallback_locked then true end,
+          'service:subscription-core-cutover', now()
+        from ws
+        where (not ws.personal and not (ws.rotation_locked and ws.providers_locked))
+          or (ws.personal and not ws.fallback_locked)
+        on conflict (account_id, workspace_id) do update set
+          xai_primary_connection_id = case when excluded.rotation is null
+            then subscription_settings.xai_primary_connection_id
+            else excluded.xai_primary_connection_id end,
+          rotation = case when excluded.rotation is null then subscription_settings.rotation
+            else coalesce(subscription_settings.rotation, '{}'::jsonb) || excluded.rotation end,
+          providers = case when excluded.providers is null then subscription_settings.providers
+            else coalesce(subscription_settings.providers, '{}'::jsonb) || excluded.providers end,
+          personal_fallback_allowed = coalesce(excluded.personal_fallback_allowed,
+            subscription_settings.personal_fallback_allowed),
+          version = subscription_settings.version + 1,
+          updated_by_subject_id = excluded.updated_by_subject_id,
+          updated_at = excluded.updated_at`,
+      );
+
+    // Not skipping: the guard refuses the whole statement, as the owner too.
+    const refused = (await rejected(cutover(false))) as { code?: string; detail?: string };
+    expect(refused.code).toBe("42501");
+    expect(refused.detail).toMatch(/^subscription_setting_locked:(rotation|providers)$/);
+    expect(await workspaceRow(f, f.betaId)).toBeNull();
+    expect(await workspaceRow(f, f.personalId)).toBeNull();
+
+    // Skipping: it succeeds, writes only the unlocked key, and keeps the rest.
+    await cutover(true);
+    expect(await workspaceRow(f, f.alphaId)).toMatchObject({
+      rotation: null,
+      cross_provider_failover: true,
+    });
+    expect(await workspaceRow(f, f.betaId)).toBeNull();
+    expect(await workspaceRow(f, f.personalId)).toMatchObject({
+      personal_fallback_allowed: true,
+      rotation: null,
+    });
+    const [alphaRaw] = await shared!.admin<
+      { providers: unknown; xai_primary_connection_id: string | null }[]
+    >`select providers, xai_primary_connection_id::text from subscription_settings
+      where account_id = ${f.accountId}::uuid and workspace_id = ${f.alphaId}::uuid`;
+    expect(alphaRaw).toEqual({ providers: null, xai_primary_connection_id: null });
+    const alpha = await readWorkspaceSubscriptionSettings(
+      client!.db,
+      workspace(f, f.alphaId, f.workspaceAdminSubjectId),
+    );
+    expect(alpha.sources.rotation).toBe("locked");
+    expect(alpha.sources.providers).toBe("locked");
+
+    // With only providers locked, the rotation freeze is written and the
+    // providers freeze is still refused when not skipped.
+    await updateOrganizationSubscriptionSettings(client!.db, {
+      ...organization(f),
+      patch: { locked: ["providers"] },
+    });
+    const providersOnly = (await rejected(cutover(false))) as { code?: string; detail?: string };
+    expect(providersOnly).toMatchObject({
+      code: "42501",
+      detail: "subscription_setting_locked:providers",
+    });
+    await cutover(true);
+    const [beta] = await shared!.admin<
+      { rotation: unknown; providers: unknown; xai_primary_connection_id: string | null }[]
+    >`select rotation, providers, xai_primary_connection_id::text from subscription_settings
+      where account_id = ${f.accountId}::uuid and workspace_id = ${f.betaId}::uuid`;
+    expect(beta).toEqual({
+      rotation: { xai: { mode: "primary_first" } },
+      providers: null,
+      xai_primary_connection_id: connection!.id,
+    });
+  });
 });
