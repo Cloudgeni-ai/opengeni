@@ -4528,7 +4528,7 @@ disabled) answers the typed 503 `subscription_core_cutover_disabled`.
 
 - **Routes (EP-S09, EP-S10, EP-S14, EP-S16).** The pool routes take an
   optional core hook (`apps/api/src/routes/subscription-pool-core.ts`,
-  provider-neutral; Claude passes none yet and is unchanged). Paths, verbs,
+  provider-neutral; Claude's hook is C2b's). Paths, verbs,
   bodies and response shapes stay; accounts are core connections projected
   into the legacy SuperGrok account shape (`subscription-core-xai-compat.ts`;
   the one quota window is the legacy percentage and reset), so the legacy
@@ -5317,6 +5317,114 @@ like C1a.
   never emits that code), and a core Claude turn's generic completed model
   request event carries `meaningfulOutput` (completed assistant text or a
   complete function call) so real progress resets the breaker.
+
+##### C2b: routes and writers
+
+Dormant until the Claude cutover receipt, like X2b: each Claude account
+route, the setup-token and OAuth writers and the Claude access policy first
+read the organization's `claude` provider route (one read). `legacy` (no
+receipt, every organization today) runs today's handlers unchanged;
+`maintenance` answers the typed 503 `subscription_core_cutover_disabled`,
+including OAuth start and complete; `core` uses the neutral writers with
+the `SUBSCRIPTION_CORE_CLAUDE` binding, which production does not register
+until C3 (a test asserts it). Claude-specific code: the compat module
+(`packages/db/src/subscription-core-claude-compat.ts`) and the API glue
+(`apps/api/src/claude-subscription-core.ts`), under 400 lines together
+including comments.
+
+- **Pool routes.** Claude passes a core hook to the X2b pool routes (list,
+  rename, allocator, activate, rotation, disconnect) with an `accountJson`
+  override that adds the usage reading and the `needs_relogin` status the
+  legacy listing derives from it. Core rows project into the legacy
+  `ClaudeSubscriptionAccountMetadata` shape (every field `accountJson`
+  emits); the legacy quota columns and selection counters have no core
+  counterpart and no Claude route renders them. The usage reading is C2a's
+  `projectSubscriptionCoreClaudeUsage`, behind a one-line seam
+  (`claudeUsage`) until C2a lands; until then a core account lists no
+  `usage`, as a legacy account without a reading does. The usage routes
+  themselves are C2a's.
+- **Version.** A Claude account's `version` (the setup-token
+  `expectedCredentialVersion`, the OAuth attempt's `credentialVersion`, the
+  responses' `credentialVersion`) is the core connection's row version: a
+  positive integer that moves on every reconnect and on other connection
+  changes (a rename), never on a token refresh (the refresh writers move
+  `refresh_generation` only). A replace names the version the caller listed;
+  a rename in between is a conflict, as a concurrent credential change is
+  in legacy (stricter, never weaker). Personal rows are read through the
+  owner reader, which does not return the version, so migration 0720 adds
+  `opengeni_private.subscription_core_personal_connection_versions`,
+  derived from the live 0707 owner reader by drift-checked replacement
+  (the 0719 pattern) and returning only `(id, version)`.
+- **Reconnect.** The neutral connect writer takes an optional
+  `reconnect {connectionId, expectedVersion}`: the sign-in must land on
+  exactly that connection at that version, or nothing is written and the
+  route answers the legacy 409. A reconnect never creates a connection. For
+  a shared row the writer checks under its row lock; for a personal row the
+  0719 writer serializes and moves the version by exactly one, so the
+  writer reads the version back and rolls the whole write back unless it is
+  the target at `expectedVersion + 1`.
+- **Identity.** A core connection's Claude identity never changes. The
+  provider account id is the legacy one (the account uuid, else the
+  `oauth:`/`setup:` HMAC id), and it is also the provider subject id (the
+  Claude account is the person's own login). A credential that proves an
+  account (an OAuth sign-in with an account uuid) reconnects only that
+  account. One that proves none (a setup token, or OAuth without a uuid)
+  keeps the target's unverified id, so replacing a setup token whose HMAC
+  changes keeps the account, its pins and policy; it never replaces a
+  target whose account was proven. A proven sign-in over an unproven target
+  is refused too (`different_account`, the legacy "Sign in to the same
+  Claude account" 409), where legacy upgraded the row in place: re-keying a
+  core connection could merge it with another connection of that account,
+  so the person adds the signed-in account and disconnects the setup-token
+  one. Legacy also let a setup token replace a proven account; the core
+  refuses it.
+- **Connect.** Shared and personal connects store the legacy secret object
+  through the adapter codec, with the adapter's format
+  (`claude_oauth_v1` with `oauth`, else `claude_setup_token_v1`) and the
+  adapter-owned provider state `{oauthScopes}` (`[]` for a setup token),
+  the expiry the adapter reads from the credential. As for SuperGrok, an
+  organization or workspace connect creates a shared connection (a shared
+  workspace's is an organization account that workspace manages), a new
+  shared account needs an organization administrator, and a first connect
+  leaves the primary unset. `offerClaudeDefaultModels` runs after every
+  core connect, as legacy; waiters wake through `deliverPoolCoreWake`.
+- **Personal.** `scope: "user"` connects only in the person's own Personal
+  workspace: the routes refuse elsewhere with 403 before any sign-in
+  starts (`requireClaudeCorePersonalWorkspace`), and the 0719 writer checks
+  the exact owner membership and authority generation in its transaction.
+  A personal sign-in completed elsewhere is refused 403, never turned into a
+  shared connection.
+- **OAuth attempts.** A core attempt names the canonical connection and its
+  row version and carries no v1 authority snapshot; an attempt started on
+  the legacy path and completed after the cutover fails the fence (409,
+  start again), as does any change to the target in between.
+- **Access policy.** `claude_subscription` reads and writes the core
+  connection's policy (`subscriptionCoreProviderOfKind`), the legacy
+  snapshot check is skipped on the core as for SuperGrok (the core editor
+  authorizes; only legacy pools have private rows), a workspace change
+  keeps the legacy same-origin browser check, and a change wakes waiters
+  with `core_claude_access_changed`.
+- **Aliases.** Route account ids, reconnect targets (setup token and
+  OAuth) and access-policy ids resolve through the cutover aliases
+  (`canonicalConnectionId`, which now also serves the organization routes;
+  aliases are visible to organization administrators only).
+- **Acceptance (EP-S18..S24) and copies.** Nothing Claude-specific was
+  needed: once Claude is registered the merged `coreSubscriptionAuthorityV2*`
+  writers add the `claude` entry for the exact owner only, the generic v1
+  resolvers return the column default after the `claude` receipt, and the
+  compatibility copy writes Claude records on every carrier path (both
+  covered by real-PostgreSQL tests).
+- **SDK and events.** No change: request and response shapes, status
+  reasons and SDK types are the legacy ones; core wakes carry the neutral
+  reasons. Session-event vocabulary on the core is C1b's.
+
+Generalizations (provider-neutral): the connect writer's `reconnect` fence,
+`returnVersion` and the connected result's `version`; the `changed`
+refusal; `SubscriptionCoreConnectionRow.version` and
+`readSubscriptionCorePersonalConnectionVersionsInTransaction` (0720);
+`resolveSubscriptionCoreConnectionId` for the organization context and an
+authenticated subject; `SubscriptionPoolCore.accountJson`; exported
+`canonicalConnectionId`.
 
 ### 5.4 Workspace-managed connections as organization accounts
 
