@@ -15,7 +15,15 @@ import {
   type SessionStatusTone,
 } from "@opengeni/react/session-list-model";
 import { useEffect, useMemo } from "react";
-import { Platform, Pressable, Text, useWindowDimensions, View } from "react-native";
+import {
+  ActionSheetIOS,
+  Alert,
+  Platform,
+  Pressable,
+  Text,
+  useWindowDimensions,
+  View,
+} from "react-native";
 import Animated, {
   cancelAnimation,
   Easing,
@@ -27,6 +35,7 @@ import Animated, {
 } from "react-native-reanimated";
 import Svg, { Path } from "react-native-svg";
 import { Icon } from "./icon";
+import { useNativeTimelineMessages } from "./messages";
 import { withAlpha } from "./primitives";
 import { fontStyle, useNativeTimelineTheme, type WebColorToken } from "./theme";
 
@@ -115,12 +124,18 @@ export interface SessionRowProps {
   /** The deployment's client model catalog, for catalog labels. */
   models: readonly ClientModel[];
   onPress: () => void;
+  /**
+   * Pin or unpin this chat for the person (the same personal pin as the web).
+   * When set, a long press offers Pin or Unpin, and so does an accessibility action.
+   */
+  onTogglePin?: (() => void) | undefined;
   now?: Date | undefined;
 }
 
 /** One recent-session row, as the web home canvas renders it. */
-export function SessionRow({ session, models, onPress, now }: SessionRowProps) {
+export function SessionRow({ session, models, onPress, onTogglePin, now }: SessionRowProps) {
   const theme = useNativeTimelineTheme();
+  const m = useNativeTimelineMessages();
   const c = theme.colors;
   const rows = useMemo(() => projectClientModelRows([...models]), [models]);
   const title = sessionDisplayTitle(session);
@@ -128,11 +143,34 @@ export function SessionRow({ session, models, onPress, now }: SessionRowProps) {
   const model = recentSessionModelPresentation(session.model, rows);
   const repo = sessionRepoLabel(session);
   const meta = [model.label, repo].filter(Boolean).join(" · ");
+  const pinned = Boolean(session.pinned);
+  const pinLabel = pinned ? m.unpin : m.pin;
+  const offerPin = () => {
+    if (!onTogglePin) return;
+    if (Platform.OS === "ios") {
+      ActionSheetIOS.showActionSheetWithOptions(
+        { title, options: [pinLabel, "Cancel"], cancelButtonIndex: 1 },
+        (index) => {
+          if (index === 0) onTogglePin();
+        },
+      );
+      return;
+    }
+    Alert.alert(title, undefined, [
+      { text: pinLabel, onPress: onTogglePin },
+      { text: "Cancel", style: "cancel" },
+    ]);
+  };
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={title}
+      accessibilityLabel={pinned ? `${title}, ${m.pinned}` : title}
+      accessibilityActions={onTogglePin ? [{ name: "pin", label: pinLabel }] : undefined}
+      onAccessibilityAction={(event) => {
+        if (event.nativeEvent.actionName === "pin") onTogglePin?.();
+      }}
       onPress={onPress}
+      onLongPress={onTogglePin ? offerPin : undefined}
       style={({ pressed }) => ({
         flexDirection: "row",
         alignItems: "center",
@@ -169,17 +207,20 @@ export function SessionRow({ session, models, onPress, now }: SessionRowProps) {
           </View>
         ) : null}
       </View>
-      <Text
-        style={{
-          ...fontStyle(theme, 400),
-          fontSize: 11,
-          lineHeight: 16,
-          color: c["fg-subtle"],
-          fontVariant: ["tabular-nums"],
-        }}
-      >
-        {relativeTimeLabel(session.updatedAt, now)}
-      </Text>
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
+        {pinned ? <Icon name="pin" size={11} color={c["fg-subtle"]} /> : null}
+        <Text
+          style={{
+            ...fontStyle(theme, 400),
+            fontSize: 11,
+            lineHeight: 16,
+            color: c["fg-subtle"],
+            fontVariant: ["tabular-nums"],
+          }}
+        >
+          {relativeTimeLabel(session.updatedAt, now)}
+        </Text>
+      </View>
     </Pressable>
   );
 }
@@ -211,6 +252,8 @@ export function SessionRowList(props: {
   sessions: readonly Session[];
   models: readonly ClientModel[];
   onOpen: (sessionId: string) => void;
+  /** Pin or unpin a chat from its row (long press); omitted, rows offer no pin. */
+  onTogglePin?: ((session: Session) => void) | undefined;
 }) {
   const theme = useNativeTimelineTheme();
   return (
@@ -232,6 +275,7 @@ export function SessionRowList(props: {
             session={session}
             models={props.models}
             onPress={() => props.onOpen(session.id)}
+            onTogglePin={props.onTogglePin ? () => props.onTogglePin?.(session) : undefined}
           />
         </View>
       ))}

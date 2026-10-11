@@ -1,6 +1,6 @@
 import { compactModelPill } from "@opengeni/react/model-policy";
-import { partitionPinnedSessions, recentSessionsForHome } from "@opengeni/react/session-list-model";
-import type { LatencyMode, ReasoningEffort, Session } from "@opengeni/sdk";
+import { recentSessionsForHome } from "@opengeni/react/session-list-model";
+import type { LatencyMode, ReasoningEffort } from "@opengeni/sdk";
 import { useNativeFileAttachments } from "@opengeni/react-native";
 import {
   AttachmentChips,
@@ -33,6 +33,7 @@ import * as Haptics from "expo-haptics";
 import { useAccount } from "@/account";
 import { useAgentCall } from "@/call";
 import { cachedLists, rememberLists } from "@/session-list-cache";
+import { EMPTY_SESSION_LISTS, useSessionPinToggle, type SessionLists } from "@/session-pins";
 import { serverLabel } from "@/account-store";
 import { BrandMark } from "@/brand-mark";
 import { useWorkspaceModelCatalog } from "@/model-catalog";
@@ -108,7 +109,9 @@ function Home() {
     error,
     reload,
   } = useAccount();
-  const [sessions, setSessions] = useState<Session[]>(() => cachedLists(workspaceId).home ?? []);
+  const [lists, setLists] = useState<SessionLists>(
+    () => cachedLists(workspaceId).home ?? EMPTY_SESSION_LISTS,
+  );
   // Only a pull shows the refresh spinner; focus refreshes are quiet so the
   // composer never jumps when you come back to this screen.
   const [pulling, setPulling] = useState(false);
@@ -125,9 +128,11 @@ function Home() {
     try {
       // Top-level conversations only, as web's home: sub-agents are reached from
       // their parent and would otherwise crowd the list.
-      const list = await client.listSessions(workspaceId, { limit: 12, parentSessionId: null });
-      rememberLists(workspaceId, { home: list });
-      setSessions(list);
+      // The page also carries every pin, which leads the list as on web.
+      const page = await client.listSessionPage(workspaceId, { limit: 12, parentSessionId: null });
+      const next = { pinned: page.pinned, sessions: page.sessions };
+      rememberLists(workspaceId, { home: next });
+      setLists(next);
       setListError(null);
     } catch (caught) {
       setListError(caught instanceof Error ? caught.message : String(caught));
@@ -136,7 +141,7 @@ function Home() {
 
   // A workspace switch shows that workspace's last list at once.
   useEffect(() => {
-    setSessions(cachedLists(workspaceId).home ?? []);
+    setLists(cachedLists(workspaceId).home ?? EMPTY_SESSION_LISTS);
   }, [workspaceId]);
 
   useFocusEffect(
@@ -180,10 +185,13 @@ function Home() {
       ...patch,
     }));
   const pill = model ? compactModelPill(models, model, effort) : null;
-  const recent = useMemo(() => {
-    const { pinned } = partitionPinnedSessions(sessions);
-    return recentSessionsForHome(sessions, pinned, 6);
-  }, [sessions]);
+  const recent = useMemo(() => recentSessionsForHome(lists.sessions, lists.pinned, 6), [lists]);
+  const togglePin = useSessionPinToggle({ client, workspaceId, setLists });
+  useEffect(() => {
+    if (workspaceId && (lists.pinned.length > 0 || lists.sessions.length > 0)) {
+      rememberLists(workspaceId, { home: lists });
+    }
+  }, [lists, workspaceId]);
 
   // The new chat's photos and files upload to the workspace as they are picked.
   const attachments = useNativeFileAttachments({
@@ -496,6 +504,7 @@ function Home() {
               sessions={recent}
               models={models}
               onOpen={(sessionId) => router.push(`/session/${sessionId}`)}
+              onTogglePin={(session) => void togglePin(session)}
             />
           </View>
         ) : null}
