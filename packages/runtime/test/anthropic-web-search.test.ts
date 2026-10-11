@@ -126,9 +126,9 @@ function unmarked(value: unknown): unknown {
   return value;
 }
 
-function stream(frames: unknown[], requestId = "req_test") {
+function stream(events: unknown[], requestId = "req_test") {
   const bytes = new TextEncoder().encode(
-    frames.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(""),
+    events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(""),
   );
   return new Response(
     new ReadableStream({
