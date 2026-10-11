@@ -4176,6 +4176,11 @@ reviewers:
   and primary were not applied), and the parity metric
   `locked_workspace_keys_untouched` proves every such key kept its value.
   An administrator who later unlocks the key re-applies the setting by hand.
+  The settings trigger also admits a widening workspace write only at READ
+  COMMITTED. The cutover's triggers are disabled during the owner window, so
+  it is never reached, but the preflight still refuses any other isolation
+  up front (`55000`), so a database or role default cannot change the
+  outcome. The runbook says not to set one.
 - **Steer and Cancel.** The legacy SuperGrok supersede in the Steer path is
   gone (no legacy waiter can be live after the receipt the binary
   requires). Steer and Cancel call
@@ -4190,9 +4195,13 @@ reviewers:
   tolerates full DML on a provider's legacy tables while its receipt is
   missing and then reports only the missing receipt, so a rolling binary
   before the window sees one violation, not five. Once the receipt exists,
-  a restrictive `<table>_closed` policy on each of the five tables refuses
-  every insert and update (`WITH CHECK (NOT
-  subscription_provider_cutover_committed('xai'))`), and new legacy
+  restrictive `<table>_closed_insert` and `<table>_closed_update` policies
+  on each of the five tables refuse every insert and update (`WITH CHECK
+  (NOT subscription_provider_cutover_committed('xai'))`). They are per
+  command, never `FOR ALL`: a restrictive read policy without the
+  `lifecycle_backfill_read_active` branch makes the product lifecycle
+  backfill refuse the table as a source (found by its real-PostgreSQL
+  suite), and reads need no change. New legacy
   `xai_subscription` authorities are refused by a restrictive `INSERT`
   policy on `organization_user_resource_authorities`. The legacy connect,
   rotation and pin routines run as the owner, which FORCE row security
