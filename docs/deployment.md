@@ -4496,9 +4496,21 @@ be narrowed after the rollback. Before rolling back, run this read-only check
 as a superuser or `BYPASSRLS` role (like the parity check). Row security hides
 these tables from any other role, including the migration owner, where an
 empty result proves nothing, so under one the block stops with an error; run
-it again as a superuser or `BYPASSRLS` role. Both queries must return no rows:
+it again as a superuser or `BYPASSRLS` role. Run it in `psql` from a file or
+standard input (`psql -X -f check.sql`, or `psql -X -f - < check.sql`), or
+paste it; never with `psql -c`, which runs only the first `\set` and checks
+nothing. The two `\set` lines make the guard's error abort the transaction,
+so both queries fail even when `~/.psqlrc` sets `ON_ERROR_ROLLBACK`, which
+would otherwise undo the error and print the passing empty results. Keep the
+`\\` that ends the second line: it ends the `\set` when a terminal pastes the
+block as one line. From a file or standard input, psql stops at the guard and
+exits with status 3. Pasted, or read with `\i`, the queries fail or are
+skipped and the session is left in an aborted transaction: send `ROLLBACK`
+before anything else. Both queries must return no rows:
 
 ```sql
+\set ON_ERROR_ROLLBACK off
+\set ON_ERROR_STOP on \\
 BEGIN TRANSACTION READ ONLY;
 DO $$ BEGIN
   IF NOT (SELECT rolsuper OR rolbypassrls FROM pg_roles
@@ -4533,29 +4545,48 @@ WHERE connection.ownership = 'shared' AND connection.disconnected_at IS NULL
 COMMIT;
 ```
 
-For each row of the first, that organization's administrator narrows the
-account back to its workspace with both `allowedWorkspaces: []` and
-`allowPersonalWorkspaces: false` (an account given to the whole organization
-otherwise stays in every Personal workspace), and with `allowedModels` set to
-the row's `allowed_models` exactly as printed (`null` keeps every model; never
-send `[]`, which admits none). That is the managing workspace's current list;
-the editor shows the organization's list, and saving it would widen a list the
-workspace narrowed. Otherwise fix forward instead of rolling back. The second
-query lists workspace-managed accounts the organization switched on after their
-workspace switched them off: an older image's workspace route reads only the
-connection's switch, so its "on" there answers "unchanged" and the workspace
-stays off. For each such row, before rolling back, either that workspace
-switches the account on on its page, or the organization's administrator
-switches it off on the organization route; either way the older image can
-switch it again. Run the check again once every pod runs the older image: an
-account shared while pods were still being replaced can't be narrowed then, so
-any row of the first means rolling forward again; for a row of the second, the
-workspace's administrator sends "off" and then "on" through the API. Likewise,
-shared accounts limited to people (`ownership = 'shared' AND scope_kind =
-'people'`) are read as "no workspaces" by an older image, and a save there
-replaces the people: move them back to workspaces first, or accept that. Run
-right after the rollout, the first query also shows whether anything was shared
-while older pods still served; for each such row, confirm with that
+Clear the rows in this order:
+
+1. For each row of the first query, that organization's administrator narrows
+   the account back to its workspace with both `allowedWorkspaces: []` and
+   `allowPersonalWorkspaces: false` (an account given to the whole organization
+   otherwise stays in every Personal workspace), and with `allowedModels` set
+   to the row's `allowed_models`: `null` when it prints `null` (every model),
+   otherwise the printed list, including `[]` when the managing workspace chose
+   no models. Never turn a `null` into `[]`, which admits none, or a printed
+   `[]` into `null`, which admits every model. That is the managing workspace's
+   current list; the editor shows the organization's list, and saving it would
+   widen a list the workspace narrowed.
+2. Run the check again. The second query lists workspace-managed accounts the
+   organization switched on after their workspace switched them off (for a
+   shared account, do this after narrowing: before it, the managing workspace
+   can be served through the organization's copy, and then its page reads the
+   organization's "on"): an older image's workspace route reads only the
+   connection's switch, so its "on" there answers "unchanged" and the
+   workspace stays off. For each such row, either that workspace switches the
+   account on on its page, or the organization's administrator switches it off
+   on the organization route; either way the older image can switch it again
+   once that workspace's page lists it. A workspace whose page doesn't list the
+   account after narrowing (one set to use only the organization's accounts,
+   or with Codex switched off) answers `not_found`: use the organization's
+   "off" for it.
+3. Run the check again until both queries return no rows; otherwise fix
+   forward instead of rolling back.
+4. Run it once more when every pod runs the older image: an account shared
+   while pods were still being replaced can't be narrowed then, so any row of
+   the first query means rolling forward again; for a row of the second, the
+   workspace's administrator sends "off" and then "on" through the API. If
+   that workspace's page doesn't list the account (it uses only the
+   organization's accounts, or Codex is off there), both routes answer
+   `not_found` on the older image, and the account is served nowhere until
+   that workspace uses its own accounts again; its administrator then sends
+   "off" and then "on" (or roll forward and use the organization's "off").
+
+Before rolling back, shared accounts limited to people (`ownership = 'shared'
+AND scope_kind = 'people'`) are read as "no workspaces" by an older image, and
+a save there replaces the people: move them back to workspaces first, or accept
+that. Run right after the rollout, the first query also shows whether anything
+was shared while older pods still served; for each such row, confirm with that
 organization's administrator that the account's workspaces and rotation switch
 are what they meant, since an "off" sent from another workspace's page on an
 older pod switched only the connection, which the managing workspace's next

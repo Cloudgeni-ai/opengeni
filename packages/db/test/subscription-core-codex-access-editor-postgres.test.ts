@@ -933,8 +933,9 @@ describe.skipIf(!realDb)("Codex access editor on the shared core", () => {
     await shared!.admin`update subscription_connection_assignment_policies
       set allocator_enabled = false
       where connection_id = ${id}::uuid and inference_pool = 'organization'`;
-    // Every shared workspace, including ones created later: they take the
-    // connection's switch, as before this change.
+    // Every shared workspace, including ones created later. The workspaces this
+    // save adds, and ones created later, take the connection's switch, as before
+    // this change; Shared B keeps its paused copy.
     await updateSubscriptionCoreCodexModelConnectionAccess(client!.db, target, {
       allowedModels: null,
       allowedWorkspaces: null,
@@ -950,6 +951,14 @@ describe.skipIf(!realDb)("Codex access editor on the shared core", () => {
     // new organization copy.
     await source(org, org.sharedWorkspaceId, "organization");
     expect(await servedIn(org, org.sharedWorkspaceId)).toEqual([id]);
+    // Shared B, which had a copy before the save, keeps it paused: unserved.
+    await source(org, org.otherWorkspaceId, "organization");
+    expect(await servedIn(org, org.otherWorkspaceId)).toEqual([]);
+    const [kept] = await shared!.admin<{ allocator_enabled: boolean }[]>`
+      select allocator_enabled from subscription_connection_assignment_policies
+      where connection_id = ${id}::uuid and workspace_id = ${org.otherWorkspaceId}::uuid
+        and inference_pool = 'organization'`;
+    expect(kept?.allocator_enabled).toBe(false);
     const later = await workspace(org.accountId, org.ownerSubjectId, "Added later");
     expect(await servedIn(org, later)).toEqual([id]);
   });
