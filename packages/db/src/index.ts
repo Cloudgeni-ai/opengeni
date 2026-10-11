@@ -557,6 +557,7 @@ import type {
   ModelContextContributionSummary,
   Permission,
   PersonalResourceAttachmentIntent,
+  PrivateScheduledTaskSummary,
   ResourceRef,
   SandboxBackend,
   SandboxOs,
@@ -810,6 +811,7 @@ import {
   toPostgresLosslessText,
   withLosslessContentWriteVersion,
 } from "./lossless-json";
+import { withBoundSessionEventPayloads } from "./session-event-write-bounds";
 export { LOSSLESS_TEXT_PREFIX } from "./lossless-json";
 import {
   projectSessionMcpProgressText,
@@ -6498,6 +6500,8 @@ export type CreateScheduledTaskInput = {
   // The rig each run binds to (M3); active version resolved per fire at dispatch.
   rigId?: string | null;
   metadata: Record<string, unknown>;
+  /** Who can see it; `user_private` requires a human owner. Default shared. */
+  visibility?: "user_private" | "workspace_shared";
   /** Trusted database-only admission seam. Throwing rolls the task creation back. */
   beforeCreateCommit?: (tx: Database) => Promise<void>;
 
@@ -6507,6 +6511,7 @@ export type CreateScheduledTaskInput = {
 export type UpdateScheduledTaskInput = Partial<{
   name: string;
   status: ScheduledTaskStatus;
+  visibility: "user_private" | "workspace_shared";
   schedule: ScheduledTaskScheduleSpec;
   runMode: ScheduledTaskRunMode;
   overlapPolicy: ScheduledTaskOverlapPolicy;
@@ -18131,6 +18136,7 @@ export async function createScheduledTask(
                   : null))
               : null,
           status: input.status,
+          visibility: input.visibility ?? "workspace_shared",
           schedule: input.schedule,
           temporalScheduleId: input.temporalScheduleId,
           runMode: input.runMode,
@@ -18206,6 +18212,131 @@ export async function scheduledTaskMutationOwnerMatches(
   });
 }
 
+/**
+ * The person a request reads schedules as: the human caller, or the human an
+ * exact agent attempt acts for. Null for keys and services, which own no
+ * Only me schedules.
+ */
+export async function scheduledTaskViewerSubject(
+  db: Database,
+  input: {
+    workspaceId: string;
+    createdBy?: TurnInitiator;
+    createdByContext?: TurnInitiatorContext;
+    createdByActor?: AgentSessionCreationActor | null;
+  },
+): Promise<string | null> {
+  return withWorkspaceRls(db, input.workspaceId, async (tx) => {
+    const actor = await frozenSessionCreatorForInsert(tx, input);
+    const subject =
+      actor.initiatingHumanSubjectId ??
+      (actor.initiator.kind === "subject" ? actor.initiator.subjectId : null);
+    return subject && !subject.startsWith("api_key:") ? subject : null;
+  });
+}
+
+/**
+ * Admin view of other people's Only me schedules: owner, cadence, status, last
+ * run and the last 30 days of usage. Never the name, prompt, settings or runs.
+ */
+export async function listPrivateScheduledTaskSummaries(
+  db: Database,
+  input: {
+    workspaceId: string;
+    /** Leave out this person's own schedules; they see those in full. */
+    excludeOwnerSubjectId: string | null;
+    /** Read just this schedule. */
+    taskId?: string;
+    now?: Date;
+    limit?: number;
+  },
+): Promise<PrivateScheduledTaskSummary[]> {
+  const since = new Date((input.now ?? new Date()).getTime() - 30 * 24 * 60 * 60 * 1000);
+  const limit = Math.min(Math.max(input.limit ?? 200, 1), 500);
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const rows = await rawRows<{
+      id: string;
+      owner_subject_id: string;
+      owner_name: string | null;
+      status: string;
+      schedule: unknown;
+      created_at: Date | string;
+      last_run_at: Date | string | null;
+      runs: number | string;
+      credit_micros: number | string;
+      provider_micros: number | string;
+    }>(
+      scopedDb,
+      // Their runs and usage are usually hidden by chat visibility; this
+      // definer function returns only these aggregates.
+      sql`select * from opengeni_private.private_scheduled_task_summaries(
+        nullif(current_setting('opengeni.account_id', true), '')::uuid,
+        ${input.workspaceId}::uuid,
+        ${input.excludeOwnerSubjectId}::text,
+        ${input.taskId ?? null}::uuid,
+        ${since.toISOString()}::timestamptz,
+        ${limit}::integer
+      )`,
+    );
+    const iso = (value: Date | string | null) =>
+      value === null ? null : new Date(value).toISOString();
+    return rows.map((row) => ({
+      id: row.id,
+      ownerSubjectId: row.owner_subject_id,
+      ownerName: row.owner_name,
+      status: row.status as ScheduledTaskStatus,
+      schedule: row.schedule as ScheduledTaskScheduleSpec,
+      lastRunAt: iso(row.last_run_at),
+      last30Days: {
+        runs: Number(row.runs),
+        creditUsd: Number(row.credit_micros) / 1_000_000,
+        estimatedProviderUsd: Number(row.provider_micros) / 1_000_000,
+      },
+      createdAt: iso(row.created_at)!,
+    }));
+  });
+}
+
+/**
+ * Pause someone else's Only me schedule as a workspace admin, even when it
+ * posts into a chat the admin cannot see. Returns false when no such schedule
+ * exists. Runs check the stored status, so the paused schedule stops firing.
+ */
+export async function pausePrivateScheduledTask(
+  db: Database,
+  input: { workspaceId: string; taskId: string; excludeOwnerSubjectId: string | null },
+): Promise<boolean> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const [row] = await rawRows<{ paused: boolean }>(
+      scopedDb,
+      sql`select opengeni_private.pause_private_scheduled_task(
+        nullif(current_setting('opengeni.account_id', true), '')::uuid,
+        ${input.workspaceId}::uuid,
+        ${input.excludeOwnerSubjectId}::text,
+        ${input.taskId}::uuid
+      ) as paused`,
+    );
+    return row?.paused === true;
+  });
+}
+
+/** The stored audience of a chat this request can already see, or null. */
+export async function getVisibleSessionTenancyVisibility(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<"user_private" | "workspace_shared" | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({ visibility: schema.sessions.visibility })
+      .from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+      .limit(1);
+    if (!row) return null;
+    return row.visibility === "user_private" ? "user_private" : "workspace_shared";
+  });
+}
+
 export async function updateScheduledTask(
   db: Database,
   workspaceId: string,
@@ -18262,6 +18393,7 @@ export async function updateScheduledTask(
       .set({
         ...(input.name !== undefined ? { name: input.name } : {}),
         ...(input.status !== undefined ? { status: input.status } : {}),
+        ...(input.visibility !== undefined ? { visibility: input.visibility } : {}),
         ...(input.schedule !== undefined ? { schedule: input.schedule } : {}),
         ...(input.runMode !== undefined ? { runMode: input.runMode } : {}),
         ...(input.overlapPolicy !== undefined ? { overlapPolicy: input.overlapPolicy } : {}),
@@ -18637,6 +18769,12 @@ export async function listScheduledTasks(
   limit = 100,
   offset = 0,
   sessionId?: string,
+  /**
+   * The person reading. Omitted (trusted internal callers only): every
+   * schedule. Given: shared schedules plus this person's own Only me ones;
+   * null reads shared schedules only.
+   */
+  viewerSubjectId?: string | null,
 ): Promise<ScheduledTask[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const rows = await scopedDb
@@ -18646,6 +18784,16 @@ export async function listScheduledTasks(
         and(
           eq(schema.scheduledTasks.workspaceId, workspaceId),
           isNull(schema.scheduledTasks.deletedAt),
+          ...(viewerSubjectId === undefined
+            ? []
+            : [
+                viewerSubjectId === null
+                  ? eq(schema.scheduledTasks.visibility, "workspace_shared")
+                  : or(
+                      eq(schema.scheduledTasks.visibility, "workspace_shared"),
+                      eq(schema.scheduledTasks.ownerSubjectId, viewerSubjectId),
+                    ),
+              ]),
           ...(sessionId
             ? [
                 eq(schema.scheduledTasks.reusableSessionId, sessionId),
@@ -25805,7 +25953,13 @@ async function supersedeSubscriptionCoreCodexCapacityWaitInTransaction(
   }
   const inserted = await tx
     .insert(schema.sessionEvents)
-    .values(withLosslessContentWriteVersion(eventValues, "payload", "payloadCodecVersion"))
+    .values(
+      withLosslessContentWriteVersion(
+        withBoundSessionEventPayloads(eventValues),
+        "payload",
+        "payloadCodecVersion",
+      ),
+    )
     .returning();
   const [updatedSession] = await tx
     .update(schema.sessions)
@@ -26773,7 +26927,13 @@ function createScopedSubscriptionCapacityWaiters(options: {
     }
     const inserted = await tx
       .insert(schema.sessionEvents)
-      .values(withLosslessContentWriteVersion(values, "payload", "payloadCodecVersion"))
+      .values(
+        withLosslessContentWriteVersion(
+          withBoundSessionEventPayloads(values),
+          "payload",
+          "payloadCodecVersion",
+        ),
+      )
       .returning();
     const [updatedSession] = await tx
       .update(schema.sessions)
@@ -31486,24 +31646,48 @@ async function createSessionInTransaction(
           runId: input.scheduledSourceRunId,
         });
         const source = accepted?.task.agentConfig.knowledgeSource;
-        if (
-          !accepted ||
-          !source ||
-          accepted.task.accountId !== input.accountId ||
-          accepted.task.runMode !== "new_session_per_run" ||
-          source.destination.kind !== "personal" ||
-          source.destination.subjectId !== source.initiatingSubjectId ||
-          source.connection.ownerSubjectId !== source.initiatingSubjectId ||
-          accepted.causalHumanSubjectId !== source.initiatingSubjectId ||
-          accepted.causalHumanAuthority?.subjectId !== source.initiatingSubjectId ||
-          accepted.generatedSessionBinding?.createIdempotencyKey !== input.createIdempotencyKey ||
-          frozenCreator.initiator.kind !== "service" ||
-          frozenCreator.initiator.subjectId !== "scheduler" ||
-          input.sandboxGroupId
-        ) {
+        // The run must be this exact accepted scheduler occurrence, creating
+        // the chat its generated-session binding names.
+        const acceptedRun =
+          accepted &&
+          accepted.task.accountId === input.accountId &&
+          accepted.generatedSessionBinding?.createIdempotencyKey === input.createIdempotencyKey &&
+          frozenCreator.initiator.kind === "service" &&
+          frozenCreator.initiator.subjectId === "scheduler" &&
+          !input.sandboxGroupId
+            ? accepted
+            : null;
+        let scheduledOwner: string | null = null;
+        if (acceptedRun && source) {
+          // A personal-knowledge source run belongs to its connection owner.
+          if (
+            acceptedRun.task.runMode === "new_session_per_run" &&
+            source.destination.kind === "personal" &&
+            source.destination.subjectId === source.initiatingSubjectId &&
+            source.connection.ownerSubjectId === source.initiatingSubjectId &&
+            acceptedRun.causalHumanSubjectId === source.initiatingSubjectId &&
+            acceptedRun.causalHumanAuthority?.subjectId === source.initiatingSubjectId
+          )
+            scheduledOwner = source.initiatingSubjectId;
+        } else if (acceptedRun) {
+          // An Only me schedule's chats belong to its owner, the human its
+          // accepted run was admitted for. The capability below re-proves that
+          // person may still create Only me chats here.
+          const taskOwner = acceptedRun.task.ownerSubjectId;
+          if (
+            acceptedRun.task.visibility === "private" &&
+            taskOwner &&
+            (acceptedRun.task.runMode === "new_session_per_run" ||
+              acceptedRun.task.runMode === "reusable_session") &&
+            acceptedRun.causalHumanSubjectId === taskOwner &&
+            acceptedRun.causalHumanAuthority?.subjectId === taskOwner
+          )
+            scheduledOwner = taskOwner;
+        }
+        if (!scheduledOwner) {
           throw new Error("Private source session requires its accepted owning-human run");
         }
-        owner = source.initiatingSubjectId;
+        owner = scheduledOwner;
         await setSubjectRlsContext(tx, owner);
       } else if (frozenCreator.initiator.kind !== "subject" || !owner || input.sandboxGroupId) {
         throw new Error("Private session creation requires a top-level managed-human singleton");
@@ -37718,6 +37902,12 @@ export type SessionEventPage = {
 
 const POSTGRES_INT_MAX = 2_147_483_647;
 export const SESSION_EVENT_DB_PAGE_MAX_BYTES = 1024 * 1024;
+/**
+ * Largest canonical event payload a full-mode history read returns verbatim.
+ * Larger legacy rows are projected in SQL to an explicit preview.
+ */
+export const SESSION_EVENT_FULL_READ_MAX_PAYLOAD_BYTES = 4 * 1024 * 1024;
+const SESSION_EVENT_FULL_READ_PREVIEW_CHARS = 32 * 1024;
 const SESSION_EVENT_DB_BATCH_SIZE = 256;
 const SESSION_EVENT_INTERACTIVE_PAGE_MAX = 255;
 
@@ -37737,6 +37927,8 @@ type SessionEventProjectionRow = {
   turnAssociation: string | null;
   duplicateOfEventId: string | null;
   duplicateReason: string | null;
+  /** Full mode replaced an oversized canonical payload with a read preview. */
+  payloadReadBounded?: boolean;
 };
 
 type SessionEventProjectionMetadataRow = {
@@ -37832,7 +38024,7 @@ export async function listSessionEventPage(
     let bytes = 2; // []
     let cursor = direction === "before" ? before : after;
     let hasMore = false;
-    const fullPayloadsExact = payloadMode === "full";
+    let fullPayloadsExact = payloadMode === "full";
     let truncatedBy: SessionEventPage["truncatedBy"] = null;
 
     for (;;) {
@@ -38032,6 +38224,7 @@ export async function listSessionEventPage(
           break;
         }
         const event = mapProjectedEvent(row);
+        if (row.payloadReadBounded === true) fullPayloadsExact = false;
         const eventBytes = utf8JsonBytes(event);
         const separatorBytes = events.length === 0 ? 0 : 1;
         if (bytes + separatorBytes + eventBytes > maxBytes) {
@@ -38163,9 +38356,57 @@ function sessionEventProjectionSelect(
     else opengeni_private.project_session_event_payload(${source.payload})
   end`;
   const projectedPayloadBytes = sql<number>`octet_length((${projectedPayload})::text)`;
+  // Full reads stay exact for every ordinary row. A row whose canonical JSON
+  // exceeds the read ceiling (only possible for rows written before tool output
+  // was bounded at write time) is replaced in SQL by an explicit head preview,
+  // so the API never materializes it. The cheap stored-size test comes first:
+  // a row stored compressed in at most 16 KiB cannot expand past the ceiling.
+  const fullPayloadOversized = sql`(
+    pg_column_size(${source.payload}) > 16384
+    and octet_length((${source.payload})::text) > ${SESSION_EVENT_FULL_READ_MAX_PAYLOAD_BYTES}
+  )`;
+  const fullPayloadPreview = sql`left(
+    coalesce(
+      case when jsonb_typeof(${source.payload} -> 'output') = 'string'
+        then ${source.payload} ->> 'output' end,
+      ${source.payload} #>> '{output,content,0,text}',
+      (${source.payload} -> 'output')::text,
+      (${source.payload})::text
+    ),
+    ${SESSION_EVENT_FULL_READ_PREVIEW_CHARS}
+  )`;
+  const fullPayload = sql<unknown>`case
+    when ${fullPayloadOversized} then jsonb_strip_nulls(jsonb_build_object(
+      'id', left(${source.payload} ->> 'id', 256),
+      'name', left(coalesce(${source.payload} ->> 'name', ${source.payload} ->> 'toolName'), 256),
+      'status', left(${source.payload} ->> 'status', 128),
+      'error', case when jsonb_typeof(${source.payload} -> 'error') = 'boolean'
+        then ${source.payload} -> 'error' end,
+      'isError', case when jsonb_typeof(${source.payload} #> '{output,isError}') = 'boolean'
+        then ${source.payload} #> '{output,isError}' end,
+      'preview', ${fullPayloadPreview} || '…[rest of this oversized event omitted at the history read boundary]',
+      'truncation', jsonb_build_object(
+        'truncated', true,
+        'surface', 'database_read_projection',
+        'reason', 'payload_bytes_exceeded',
+        'originalBytes', octet_length((${source.payload})::text),
+        'deliveredBytes', octet_length(${fullPayloadPreview}),
+        'omittedBytes', octet_length((${source.payload})::text) - octet_length(${fullPayloadPreview}),
+        'estimatedOriginalTokens', ceil(octet_length((${source.payload})::text) / 4.0)::integer,
+        'estimatedDeliveredTokens', ceil(octet_length(${fullPayloadPreview}) / 4.0)::integer,
+        'fullEvidence', jsonb_build_object('available', false, 'reason', 'oversized'),
+        'details', jsonb_build_array(jsonb_build_object(
+          'path', '$',
+          'kind', 'object',
+          'originalBytes', octet_length((${source.payload})::text)
+        ))
+      )
+    ))
+    else ${source.payload}
+  end`;
   const selectedPayload =
     payloadMode === "full"
-      ? sql<unknown>`${source.payload}`
+      ? fullPayload
       : payloadMode === "none"
         ? sql<unknown>`jsonb_build_object(
           '_monitoring', jsonb_build_object(
@@ -38197,7 +38438,8 @@ function sessionEventProjectionSelect(
     payload: selectedPayload.as("payload"),
     payloadCodecVersion:
       payloadMode === "full"
-        ? sql<number | null>`${source.payloadCodecVersion}`.as("payload_codec_version")
+        ? sql<number | null>`case when ${fullPayloadOversized} then null
+            else ${source.payloadCodecVersion} end`.as("payload_codec_version")
         : sql<number | null>`null`.as("payload_codec_version"),
     occurredAt: sql<Date>`${source.occurredAt}`.as("occurred_at"),
     clientEventId:
@@ -38218,6 +38460,10 @@ function sessionEventProjectionSelect(
       payloadMode === "full"
         ? sql<string | null>`${source.duplicateReason}`.as("duplicate_reason")
         : projectedDuplicateReason.as("duplicate_reason"),
+    payloadReadBounded:
+      payloadMode === "full"
+        ? sql<boolean>`coalesce(${fullPayloadOversized}, false)`.as("payload_read_bounded")
+        : sql<boolean>`false`.as("payload_read_bounded"),
   };
 }
 
@@ -74469,7 +74715,13 @@ export async function settleSessionAttemptInterruptions(
             ];
       const eventRows = await tx
         .insert(schema.sessionEvents)
-        .values(withLosslessContentWriteVersion(eventValues, "payload", "payloadCodecVersion"))
+        .values(
+          withLosslessContentWriteVersion(
+            withBoundSessionEventPayloads(eventValues),
+            "payload",
+            "payloadCodecVersion",
+          ),
+        )
         .returning();
       await tx
         .update(schema.sessionTurns)
@@ -76253,7 +76505,13 @@ export async function failSessionWorkBeforeAttemptClaim(
         ];
         const inserted = await tx
           .insert(schema.sessionEvents)
-          .values(withLosslessContentWriteVersion(values, "payload", "payloadCodecVersion"))
+          .values(
+            withLosslessContentWriteVersion(
+              withBoundSessionEventPayloads(values),
+              "payload",
+              "payloadCodecVersion",
+            ),
+          )
           .returning();
         const cancelledHumanInputById = new Map(
           cancelledHumanInputs.map((request) => [request.id, request]),
@@ -78948,7 +79206,13 @@ export async function applySessionTurnSettlement(
         values.length > 0
           ? await tx
               .insert(schema.sessionEvents)
-              .values(withLosslessContentWriteVersion(values, "payload", "payloadCodecVersion"))
+              .values(
+                withLosslessContentWriteVersion(
+                  withBoundSessionEventPayloads(values),
+                  "payload",
+                  "payloadCodecVersion",
+                ),
+              )
               .returning()
           : [];
       const canonicalStartupMilestones = await canonicalTurnStartupMilestonesForInsertedEvents(
@@ -83552,7 +83816,13 @@ export async function appendSessionEvents(
         }));
         const inserted = await tx
           .insert(schema.sessionEvents)
-          .values(withLosslessContentWriteVersion(values, "payload", "payloadCodecVersion"))
+          .values(
+            withLosslessContentWriteVersion(
+              withBoundSessionEventPayloads(values),
+              "payload",
+              "payloadCodecVersion",
+            ),
+          )
           .returning();
         await tx
           .update(schema.sessions)
@@ -84525,7 +84795,11 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
                   await tx
                     .insert(schema.sessionEvents)
                     .values(
-                      withLosslessContentWriteVersion(values, "payload", "payloadCodecVersion"),
+                      withLosslessContentWriteVersion(
+                        withBoundSessionEventPayloads(values),
+                        "payload",
+                        "payloadCodecVersion",
+                      ),
                     )
                     .returning(),
               );
@@ -84859,7 +85133,13 @@ export async function appendSessionEventToSandboxGroup(
         }));
         const inserted = await tx
           .insert(schema.sessionEvents)
-          .values(withLosslessContentWriteVersion(values, "payload", "payloadCodecVersion"))
+          .values(
+            withLosslessContentWriteVersion(
+              withBoundSessionEventPayloads(values),
+              "payload",
+              "payloadCodecVersion",
+            ),
+          )
           .returning();
         const lockedSessionIds = rows.map((row) => row.id);
         const updated = await tx
@@ -84941,7 +85221,13 @@ export async function appendSessionEventsAndUpdateSession(
         }));
         const inserted = await tx
           .insert(schema.sessionEvents)
-          .values(withLosslessContentWriteVersion(values, "payload", "payloadCodecVersion"))
+          .values(
+            withLosslessContentWriteVersion(
+              withBoundSessionEventPayloads(values),
+              "payload",
+              "payloadCodecVersion",
+            ),
+          )
           .returning();
         const advancesActivity =
           sessionMutationAdvancesActivity(update) || sessionEventTypesAdvanceActivity(values);
@@ -85145,7 +85431,13 @@ export async function appendSessionEventsWithLockedSessionUpdate(
         }));
         const inserted = await tx
           .insert(schema.sessionEvents)
-          .values(withLosslessContentWriteVersion(values, "payload", "payloadCodecVersion"))
+          .values(
+            withLosslessContentWriteVersion(
+              withBoundSessionEventPayloads(values),
+              "payload",
+              "payloadCodecVersion",
+            ),
+          )
           .returning();
         const updated = await tx
           .update(schema.sessions)
@@ -85622,6 +85914,7 @@ function mapScheduledTask(row: typeof schema.scheduledTasks.$inferSelect): Sched
     workspaceId: row.workspaceId,
     name: row.name,
     ownerSubjectId: row.ownerSubjectId,
+    visibility: row.visibility === "user_private" ? "private" : "workspace",
     status: row.status as ScheduledTaskStatus,
     schedule: row.schedule as ScheduledTaskScheduleSpec,
     temporalScheduleId: row.temporalScheduleId,

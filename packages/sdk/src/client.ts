@@ -280,6 +280,7 @@ import type {
   OrganizationAgentAdminAccess,
   UpdateOrganizationAgentAdminAccessRequest,
   SessionAdminAccess,
+  GrantSessionAdminAccessRequest,
   WorkspaceModelCatalogResponse,
   WorkspaceGatewayCustomModel,
   WorkspaceGatewayCustomModelsResponse,
@@ -474,6 +475,7 @@ import type {
   VideoGenerationPolicy,
   WorkspaceVideoGenerationSettings,
   PreviewSkillImportRequest,
+  PrivateScheduledTaskSummary,
   ScheduledTask,
   ScheduledTaskAccessAttention,
   ScheduledTaskRun,
@@ -6759,6 +6761,27 @@ export class OpenGeniClient {
     );
   }
 
+  /** Admins: other people's Only me schedules, as summaries without names or prompts. */
+  async listPrivateScheduledTaskSummaries(
+    workspaceId: string,
+  ): Promise<{ schedules: PrivateScheduledTaskSummary[] }> {
+    return await this.requestJson<{ schedules: PrivateScheduledTaskSummary[] }>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/scheduled-tasks/private-summaries`,
+    );
+  }
+
+  /** Admins: pause someone else's Only me schedule. Only its owner can resume it. */
+  async pausePrivateScheduledTask(
+    workspaceId: string,
+    taskId: string,
+  ): Promise<PrivateScheduledTaskSummary> {
+    return await this.requestJson<PrivateScheduledTaskSummary>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/scheduled-tasks/private-summaries/${taskId}/pause`,
+    );
+  }
+
   async resumeScheduledTask(workspaceId: string, taskId: string): Promise<ScheduledTask> {
     return await this.requestJson<ScheduledTask>(
       "POST",
@@ -9251,16 +9274,19 @@ export class OpenGeniClient {
   /**
    * Give your own session admin access: its agent can then do what you can
    * manage across the organization. An owner or admin, in the app, when the
-   * organization allows it.
+   * organization allows it. It lasts one hour unless `durationHours` says
+   * otherwise (1 to 720), or null for no time limit; giving it again while it
+   * is on sets a new time limit from now.
    */
   async grantSessionAdminAccess(
     workspaceId: string,
     sessionId: string,
+    input: GrantSessionAdminAccessRequest = {},
   ): Promise<SessionAdminAccess> {
     return await this.requestJson<SessionAdminAccess>(
       "PUT",
       `${sessionPath(workspaceId, sessionId)}/admin-access`,
-      {},
+      input,
     );
   }
 

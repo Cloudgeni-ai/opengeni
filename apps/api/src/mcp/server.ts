@@ -137,7 +137,7 @@ import {
   readVariableSetSecretAtomically,
   recordSyncedSocialPosts,
   listVariableSets,
-  requireScheduledTask,
+  getScheduledTaskIncludingDeleted,
   requireSession,
   type MemoryAgentScope,
   serializeEffectiveSessionControl,
@@ -262,6 +262,12 @@ import {
   manualScheduledTaskTriggerUsageKey,
   manualScheduledTaskTriggerWorkflowId,
   scheduledTaskForGrant,
+  pauseScheduledTaskAsAdmin,
+  pausePrivateScheduledTaskAsAdmin,
+  requirePausableScheduledTask,
+  requireVisibleScheduledTask,
+  scheduledTaskAccess,
+  scheduledTaskViewerForGrant,
   scheduledTaskRunForGrant,
   scheduledTaskToolsProvided,
   scheduledTaskTriggerToken,
@@ -1723,6 +1729,16 @@ export function buildOpenGeniMcpServer(
   }
 
   if (can("scheduled_tasks:manage") || can("scheduled_tasks:run")) {
+    // Someone else's Only me schedule is indistinguishable from a missing one.
+    const requireVisibleTask = async (id: string) => {
+      try {
+        return await requireVisibleScheduledTask(deps.db, grant, id);
+      } catch (error) {
+        if (error instanceof HTTPException && error.status === 404)
+          throw new Error(`Scheduled task not found: ${id}`, { cause: error });
+        throw error;
+      }
+    };
     server.registerTool(
       "scheduled_tasks_list",
       {
@@ -1736,7 +1752,15 @@ export function buildOpenGeniMcpServer(
       async ({ limit: requestedLimit, offset: requestedOffset }) => {
         const limit = requestedLimit ?? 25;
         const offset = requestedOffset ?? 0;
-        const rows = await listScheduledTasks(deps.db, grant.workspaceId, limit + 1, offset);
+        const viewer = await scheduledTaskViewerForGrant(deps.db, grant);
+        const rows = await listScheduledTasks(
+          deps.db,
+          grant.workspaceId,
+          limit + 1,
+          offset,
+          undefined,
+          viewer.subjectId,
+        );
         return json(
           boundScheduledTaskMcpPage({
             tasks: rows.slice(0, limit).map((task) => scheduledTaskForGrant(task, grant)),
@@ -1761,10 +1785,7 @@ export function buildOpenGeniMcpServer(
         },
       },
       async ({ id, includeEntity, promptOffset, expectedExecutionDigest }) => {
-        const task = scheduledTaskForGrant(
-          await requireScheduledTask(deps.db, grant.workspaceId, id),
-          grant,
-        );
+        const task = scheduledTaskForGrant(await requireVisibleTask(id), grant);
         if (promptOffset !== undefined)
           return json(scheduledTaskPromptPage(task, promptOffset, expectedExecutionDigest));
         return json(
@@ -1833,7 +1854,7 @@ export function buildOpenGeniMcpServer(
         inputSchema: scheduledTaskUpdateToolInput(),
       },
       async ({ id, ...raw }) => {
-        const existing = await requireScheduledTask(deps.db, grant.workspaceId, id);
+        const existing = await requireVisibleTask(id);
         const previous = await captureScheduledTaskRestoreState(deps.db, existing);
         const payload = UpdateScheduledTaskRequest.parse(raw);
         const patchWarnings = (task: ScheduledTask) =>
@@ -1902,14 +1923,32 @@ export function buildOpenGeniMcpServer(
         inputSchema: { id: z4.string().uuid() },
       },
       async ({ id }) => {
-        const existing = await requireScheduledTask(deps.db, grant.workspaceId, id);
+        // Admins can pause any schedule, including someone else's Only me one,
+        // which they only ever see as a summary.
+        const viewer = await scheduledTaskViewerForGrant(deps.db, grant);
+        let pausable: Awaited<ReturnType<typeof requirePausableScheduledTask>>;
+        try {
+          pausable = await requirePausableScheduledTask(deps.db, grant, id, viewer);
+        } catch (error) {
+          if (error instanceof HTTPException && error.status === 404)
+            throw new Error(`Scheduled task not found: ${id}`, { cause: error });
+          throw error;
+        }
+        if (pausable.access === "summary") {
+          const changed = pausable.summary.status !== "paused";
+          if (changed) await pausePrivateScheduledTaskAsAdmin(deps.db, grant, id, viewer);
+          return json({ operation: "scheduled_tasks_pause", id, status: "paused", changed });
+        }
+        const existing = pausable.task;
         if (existing.status === "paused") {
           return json(scheduledTaskReceipt("scheduled_tasks_pause", existing, "unchanged", false));
         }
         const previous = await captureScheduledTaskRestoreState(deps.db, existing);
-        const task = await updateScheduledTaskForApi(deps.db, grant, id, {
-          status: "paused",
-        });
+        const task =
+          viewer.admin &&
+          (viewer.subjectId === null || existing.ownerSubjectId !== viewer.subjectId)
+            ? await pauseScheduledTaskAsAdmin(deps.db, grant.workspaceId, id)
+            : await updateScheduledTaskForApi(deps.db, grant, id, { status: "paused" });
         await syncUpdatedScheduledTask({
           db: deps.db,
           workflowClient: deps.workflowClient,
@@ -1927,7 +1966,7 @@ export function buildOpenGeniMcpServer(
         inputSchema: { id: z4.string().uuid() },
       },
       async ({ id }) => {
-        const existing = await requireScheduledTask(deps.db, grant.workspaceId, id);
+        const existing = await requireVisibleTask(id);
         if (existing.status === "active") {
           return json(scheduledTaskReceipt("scheduled_tasks_resume", existing, "unchanged", false));
         }
@@ -1964,7 +2003,7 @@ export function buildOpenGeniMcpServer(
         },
       },
       async ({ id, triggerId }) => {
-        const task = await requireScheduledTask(deps.db, grant.workspaceId, id);
+        const task = await requireVisibleTask(id);
         if (task.action.kind === "agent_turn") {
           const targetSession = await validateScheduledTaskTarget({
             db: deps.db,
@@ -2073,6 +2112,12 @@ export function buildOpenGeniMcpServer(
         inputSchema: { id: z4.string().uuid() },
       },
       async ({ id }) => {
+        const target = await getScheduledTaskIncludingDeleted(deps.db, grant.workspaceId, id);
+        if (
+          target &&
+          scheduledTaskAccess(await scheduledTaskViewerForGrant(deps.db, grant), target) !== "full"
+        )
+          throw new Error(`Scheduled task not found: ${id}`);
         const { task, changed } = await deleteScheduledTaskWithDurableCleanup(deps, {
           grant,
           taskId: id,
@@ -2099,12 +2144,14 @@ export function buildOpenGeniMcpServer(
           limit: z4.number().int().positive().optional(),
         },
       },
-      async ({ taskId, limit }) =>
-        json({
+      async ({ taskId, limit }) => {
+        await requireVisibleTask(taskId);
+        return json({
           runs: (await listScheduledTaskRuns(deps.db, grant.workspaceId, taskId, limit ?? 100)).map(
             (run) => scheduledTaskRunForGrant(run, grant),
           ),
-        }),
+        });
+      },
     );
   }
 

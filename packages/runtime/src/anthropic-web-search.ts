@@ -12,7 +12,16 @@
  * and analytics paths that already understand hosted search keep working. The
  * Claude transport replays `providerData.anthropic.blocks` verbatim; every
  * other provider receives the portable evidence projection instead.
+ *
+ * The encrypted payloads only decrypt for the Anthropic account that ran the
+ * search: any other account rejects the whole request with "Invalid
+ * `encrypted_content`". A conversation can move between accounts (a pool
+ * re-shards when an account is exhausted, a key is replaced), so each item
+ * records an opaque account scope and is replayed natively only to that same
+ * scope; anywhere else it becomes readable facts.
  */
+
+import { createHash } from "node:crypto";
 
 type Json = Record<string, any>;
 
@@ -39,6 +48,32 @@ export function isAnthropicWebSearchBlock(block: Json): boolean {
     (block.type === "server_tool_use" && block.name === ANTHROPIC_WEB_SEARCH_TOOL_NAME) ||
     block.type === "web_search_tool_result"
   );
+}
+
+/**
+ * Opaque identity of the Anthropic account a request runs on, or null when
+ * the request carries no credential. A Claude subscription is identified by
+ * its account UUID; otherwise by a one-way digest of the credential, which
+ * never reveals it. A rotated credential only costs a readable replay.
+ */
+export function anthropicSearchAccountScope(provider: {
+  apiKey?: string | null | undefined;
+  anthropic?: { auth?: string; identity?: { accountUuid?: string } | undefined } | undefined;
+}): string | null {
+  const accountUuid = provider.anthropic?.identity?.accountUuid;
+  if (provider.anthropic?.auth === "oauth" && accountUuid) return `claude-account:${accountUuid}`;
+  if (!provider.apiKey) return null;
+  const digest = createHash("sha256")
+    .update(`opengeni-anthropic-search-scope\0${provider.apiKey}`)
+    .digest("base64url")
+    .slice(0, 22);
+  return `credential:${digest}`;
+}
+
+/** The account scope a stored search was produced under (null for unscoped or older items). */
+export function anthropicWebSearchAccountScope(item: Record<string, unknown>): string | null {
+  const scope = (item.providerData as Json | undefined)?.anthropic?.accountScope;
+  return typeof scope === "string" && scope ? scope : null;
 }
 
 /** A Claude search item retained in canonical history. */
@@ -111,6 +146,7 @@ export function anthropicWebSearchItem(input: {
   id: string;
   blocks: Json[];
   queriesByCallId?: ReadonlyMap<string, string>;
+  accountScope?: string | null;
 }): Record<string, unknown> {
   const call = input.blocks.find((block) => block.type === "server_tool_use");
   const result = input.blocks.find((block) => block.type === "web_search_tool_result");
@@ -143,7 +179,10 @@ export function anthropicWebSearchItem(input: {
           : {}),
       },
       ...(facts.errorCode ? { error: { code: facts.errorCode } } : {}),
-      anthropic: { blocks: input.blocks.map((block) => structuredClone(block)) },
+      anthropic: {
+        blocks: input.blocks.map((block) => structuredClone(block)),
+        ...(input.accountScope ? { accountScope: input.accountScope } : {}),
+      },
     },
   };
 }

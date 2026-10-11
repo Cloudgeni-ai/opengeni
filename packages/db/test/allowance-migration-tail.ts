@@ -11,4 +11,9 @@ export const allowanceMigrationTail = [
   "0623_voice_transcription_attribution.sql",
   // Counts unbilled model calls into counters introduced by withheld 0552.
   "0638_allowance_unbilled_usage_metering.sql",
+  // Patches the scheduled private-session proof whose personal-knowledge
+  // branch is restored with this tail; replay after it.
+  "0720_scheduled_task_audience.sql",
+  // Requires 0720's audience column; it follows 0720.
+  "0721_private_scheduled_task_summaries.sql",
 ] as const;

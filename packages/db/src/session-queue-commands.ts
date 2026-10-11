@@ -56,6 +56,7 @@ import {
   fromPostgresLosslessText,
   withLosslessContentWriteVersion,
 } from "./lossless-json";
+import { withBoundSessionEventPayloads } from "./session-event-write-bounds";
 import { closePendingSessionToolCallsInTransaction } from "./session-tool-call-settlement";
 import { deleteSubscriptionCoreCodexWaitersForTurns } from "./subscription-core-codex-waiter-cleanup";
 import { cancelTurnInteractionInterventionsInTransaction } from "./browser-auth";
@@ -1703,7 +1704,13 @@ export async function steerQueuedTurnInTransaction(
   });
   const eventRows = await db
     .insert(schema.sessionEvents)
-    .values(withLosslessContentWriteVersion(eventValues, "payload", "payloadCodecVersion"))
+    .values(
+      withLosslessContentWriteVersion(
+        withBoundSessionEventPayloads(eventValues),
+        "payload",
+        "payloadCodecVersion",
+      ),
+    )
     .returning({
       id: schema.sessionEvents.id,
     });
@@ -2539,7 +2546,13 @@ export async function submitHumanPromptInTransaction(
   }
   const eventRows = await db
     .insert(schema.sessionEvents)
-    .values(withLosslessContentWriteVersion(eventValues, "payload", "payloadCodecVersion"))
+    .values(
+      withLosslessContentWriteVersion(
+        withBoundSessionEventPayloads(eventValues),
+        "payload",
+        "payloadCodecVersion",
+      ),
+    )
     .returning();
   // Shared acceptance boundary covers ordinary Send/Steer and realtime. Only the
   // verified human command can share original uploads; inherited agent identity
@@ -2937,7 +2950,13 @@ export async function sendAgentMessageInTransaction(
   ];
   const insertedEvents = await db
     .insert(schema.sessionEvents)
-    .values(withLosslessContentWriteVersion(eventValues, "payload", "payloadCodecVersion"))
+    .values(
+      withLosslessContentWriteVersion(
+        withBoundSessionEventPayloads(eventValues),
+        "payload",
+        "payloadCodecVersion",
+      ),
+    )
     .returning({ id: schema.sessionEvents.id });
   if (insertedEvents.length !== eventValues.length) {
     throw new SessionControlInvariantError("Agent message event was not inserted");
@@ -3304,7 +3323,13 @@ export async function steerAgentSessionInTransaction(
   }
   const insertedEvents = await db
     .insert(schema.sessionEvents)
-    .values(withLosslessContentWriteVersion(events, "payload", "payloadCodecVersion"))
+    .values(
+      withLosslessContentWriteVersion(
+        withBoundSessionEventPayloads(events),
+        "payload",
+        "payloadCodecVersion",
+      ),
+    )
     .returning({
       id: schema.sessionEvents.id,
     });

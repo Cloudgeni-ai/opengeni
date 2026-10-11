@@ -109,6 +109,10 @@ import {
 } from "../session-authorization";
 import type { SessionWorkflowClient } from "../dependencies";
 import type { ObjectStorageDependency } from "../dependencies";
+import {
+  resolveScheduledTaskVisibility,
+  scheduledTaskViewerForGrant,
+} from "./scheduled-task-audience";
 import { lockActiveCustomModelForAdmission, workspaceCustomModelReference } from "../model-catalog";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
 import {
@@ -571,6 +575,18 @@ export async function createValidatedScheduledTask(input: {
           claudeAuthoritySnapshot: claudeProviderAccountAuthoritySnapshot,
         })
       : undefined;
+  const visibility = await resolveScheduledTaskVisibility({
+    db: input.db,
+    grant: input.grant,
+    requested: "visibility" in input.payload ? input.payload.visibility : undefined,
+    current: null,
+    targetSessionId: target?.id ?? null,
+    personalKnowledge: agentConfig.knowledgeSource?.destination.kind === "personal",
+    ownerSubjectId:
+      action.kind === "agent_turn"
+        ? (await scheduledTaskViewerForGrant(input.db, input.grant)).subjectId
+        : null,
+  });
   return await withScheduledTaskAuthorityWriteErrors(() =>
     input.db.transaction(async (transaction) => {
       const task = await createScheduledTask(transaction, {
@@ -579,6 +595,7 @@ export async function createValidatedScheduledTask(input: {
         workspaceId: input.grant.workspaceId,
         name: trimmedScheduledTaskName(input.payload.name),
         status: input.payload.status,
+        visibility,
         schedule: input.payload.schedule,
         temporalScheduleId: scheduledTaskTemporalScheduleId(id),
         runMode: input.payload.runMode,
@@ -881,6 +898,20 @@ export async function assertScheduledTaskMutationOwner(
     throw new HTTPException(403, {
       message: "Only the schedule owner can change or run it. Copy it to create your own schedule.",
     });
+}
+
+/**
+ * An admin's pause of a schedule they do not own. Pausing is reversible and
+ * changes nothing else; only the owner can change, run or resume it again.
+ */
+export async function pauseScheduledTaskAsAdmin(
+  db: Database,
+  workspaceId: string,
+  taskId: string,
+): Promise<ScheduledTask> {
+  return await withScheduledTaskAuthorityWriteErrors(() =>
+    updateScheduledTask(db, workspaceId, taskId, { status: "paused" }),
+  );
 }
 
 export async function triggerScheduledTaskForGrant(
@@ -1249,7 +1280,37 @@ async function requireScheduledTaskRig(
   return rig;
 }
 
-export async function validatedScheduledTaskUpdate(input: {
+/**
+ * The validated update for a schedule edit, including its audience: a schedule
+ * that ends up posting into an Only me chat is Only me, and only its owner can
+ * change who sees it (the update itself is owner-only).
+ */
+export async function validatedScheduledTaskUpdate(
+  input: Parameters<typeof validatedScheduledTaskUpdateWithoutAudience>[0],
+): Promise<UpdateScheduledTaskInput> {
+  const update = await validatedScheduledTaskUpdateWithoutAudience(input);
+  const runMode = update.runMode ?? input.existing.runMode;
+  const targetSessionId =
+    runMode === "existing_session"
+      ? (update.targetSessionId ?? input.existing.targetSessionId)
+      : runMode === "reusable_session" && input.existing.runMode === "reusable_session"
+        ? input.existing.reusableSessionId
+        : null;
+  const agentConfig = update.agentConfig ?? input.existing.agentConfig;
+  const visibility = await resolveScheduledTaskVisibility({
+    db: input.db,
+    grant: input.grant,
+    requested: input.payload.visibility,
+    current: input.existing,
+    targetSessionId,
+    personalKnowledge: agentConfig.knowledgeSource?.destination.kind === "personal",
+    ownerSubjectId: input.existing.ownerSubjectId,
+  });
+  const current = input.existing.visibility === "private" ? "user_private" : "workspace_shared";
+  return visibility === current ? update : { ...update, visibility };
+}
+
+async function validatedScheduledTaskUpdateWithoutAudience(input: {
   settings: Settings;
   db: Database;
   objectStorage: ObjectStorageDependency;

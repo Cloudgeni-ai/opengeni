@@ -295,6 +295,15 @@ type ManagedCookieHuman = {
   browserSessionHash: string;
 };
 
+/**
+ * The stand-in browser session for an agent acting as a person: stable per
+ * person, so the agent can confirm a usage limit reset it prepared, and never
+ * equal to a real browser session's hash.
+ */
+async function agentSessionHash(subjectId: string): Promise<string> {
+  return await hashCodexBrowserSession(`agent:${subjectId}`);
+}
+
 export async function managedCookieHuman(
   c: Context,
   deps: ApiRouteDeps,
@@ -335,7 +344,7 @@ export async function managedHumanOrAgent(
   return agent
     ? {
         subjectId: agent.subjectId,
-        browserSessionHash: await hashCodexBrowserSession(`agent:${crypto.randomUUID()}`),
+        browserSessionHash: await agentSessionHash(agent.subjectId),
       }
     : null;
 }
@@ -359,7 +368,7 @@ export async function requireOrganizationCodexHuman(
     if (agent) {
       human = {
         subjectId: agent.subjectId,
-        browserSessionHash: await hashCodexBrowserSession(`agent:${crypto.randomUUID()}`),
+        browserSessionHash: await agentSessionHash(agent.subjectId),
       };
     }
   }
@@ -530,7 +539,7 @@ async function requireRedemptionHuman(
   const human: ManagedCookieHuman | null = agent
     ? {
         subjectId: agent.subjectId,
-        browserSessionHash: await hashCodexBrowserSession(`agent:${agent.subjectId}`),
+        browserSessionHash: await agentSessionHash(agent.subjectId),
       }
     : await managedCookieHuman(c, deps);
   if (!human) {
@@ -887,7 +896,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   // Redeem an organization account's usage limit reset from the organization's
   // Models page: the same HMAC confirmation, single-use ledger fences and
   // ambiguous-outcome recovery as a workspace page, for an organization
-  // administrator in their own browser only.
+  // administrator in their own browser or an agent acting as them.
   app.post(
     "/v1/organizations/:organizationId/codex/accounts/:accountId/reset-credits/prepare",
     async (c) => {
@@ -1572,8 +1581,8 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
 // ambiguous-outcome recovery as the historical handlers; authority is the
 // design 6.3 rule enforced by `subscription_codex_reset_authority` (an
 // organization administrator or an administrator of the managing workspace,
-// from a same-origin managed browser only), and the credential is read and
-// refreshed through the core connection seam.
+// from a same-origin managed browser or an agent acting as them), and the
+// credential is read and refreshed through the core connection seam.
 
 type CoreRedemptionInput = {
   human: ManagedCookieHuman;
@@ -1691,8 +1700,10 @@ function organizationManagedRedemption(): never {
 
 /**
  * An organization administrator redeeming from the organization's Models
- * page: the person in their own managed browser (never an agent, an API key
- * or a delegated bearer), and the workspace whose ledger files the attempt.
+ * page: the person in their own managed browser, or an agent acting as them
+ * (never an API key or a delegated bearer), and the workspace whose ledger
+ * files the attempt. An agent's confirmation binds to its stable per-person
+ * stand-in session, which never equals a browser session.
  */
 async function requireOrganizationRedemptionHuman(
   c: Context,
@@ -1702,39 +1713,39 @@ async function requireOrganizationRedemptionHuman(
   if (deps.settings.productAccessMode !== "managed") {
     throw new HTTPException(403, { message: "reset redemption requires managed product mode" });
   }
-  requireNotAgent(c, "Redeeming a usage limit reset");
-  if (c.req.header("authorization")) {
+  const agent = isAgentActingAsPerson(c);
+  if (!agent && c.req.header("authorization")) {
     throw new HTTPException(403, {
       message: "authorization bearer is not allowed for redemption",
     });
   }
   requireSameOriginBrowserMutation(c, deps);
-  const browser = await managedCookieHuman(c, deps);
-  if (!browser) {
+  const browser = agent ? null : await managedCookieHuman(c, deps);
+  if (!agent && !browser) {
     throw new HTTPException(401, { message: "managed browser session required" });
   }
   const human = await requireOrganizationCodexHuman(c, deps, organizationId);
-  if (human.subjectId !== browser.subjectId) {
+  if (browser && human.subjectId !== browser.subjectId) {
     throw new HTTPException(403, { message: "managed browser identity mismatch" });
   }
   const workspaceId = await resolveOrganizationCodexRedemptionWorkspace(deps.db, {
     organizationId,
-    actorSubjectId: browser.subjectId,
+    actorSubjectId: human.subjectId,
   });
   if (!workspaceId) {
     throw new HTTPException(409, {
       message: "create a workspace first: usage limit reset redemptions are recorded in one",
     });
   }
-  return { human: browser, workspaceId };
+  return { human, workspaceId };
 }
 
 /**
  * One organization-managed account's usage and usage limit resets on the
  * organization's Models page, whether or not any workspace uses it. Anyone
  * who may manage the organization's Codex accounts can read it (an agent
- * acting as an administrator included); only an organization administrator
- * in their own browser gets redemption flags and their recoverable attempts.
+ * acting as an administrator included); an organization administrator, or an
+ * agent acting as them, gets redemption flags and their recoverable attempts.
  */
 async function coreOrganizationCodexOverview(
   c: Context,
@@ -1757,7 +1768,7 @@ async function coreOrganizationCodexOverview(
   });
   const row = accounts.find((account) => account.id === credentialId);
   if (!row) throw new HTTPException(404, { message: "codex account not found" });
-  const browser = isAgentActingAsPerson(c) ? null : await managedCookieHuman(c, deps);
+  const browser = isAgentActingAsPerson(c) ? human : await managedCookieHuman(c, deps);
   const browserHuman =
     deps.settings.productAccessMode === "managed" && browser?.subjectId === human.subjectId
       ? browser
@@ -1849,15 +1860,6 @@ async function coreOrganizationCodexOverview(
   );
 }
 
-/** An agent acting as a person may not redeem on the core (design 6.3). */
-function requireBrowserRedemption(c: Context): void {
-  if (isAgentActingAsPerson(c)) {
-    throw new HTTPException(403, {
-      message: "reset redemption requires a managed browser session",
-    });
-  }
-}
-
 function coreCodexConnectionScope(
   input: { accountId: string; workspaceId: string },
   subjectId: string,
@@ -1876,7 +1878,6 @@ async function coreCodexResetPrepare(
   input: CoreRedemptionInput,
   resolveTarget: () => Promise<RedemptionTarget> = () => workspaceRedemptionTarget(deps, input),
 ) {
-  requireBrowserRedemption(c);
   c.header("cache-control", "no-store");
   const parsed = redemptionPrepareBody.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) {
@@ -2006,7 +2007,6 @@ async function coreCodexResetRedeem(
   input: CoreRedemptionInput,
   resolveTarget: () => Promise<RedemptionTarget> = () => workspaceRedemptionTarget(deps, input),
 ) {
-  requireBrowserRedemption(c);
   c.header("cache-control", "no-store");
   const parsed = redemptionBody.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) {
@@ -2167,7 +2167,7 @@ async function coreCodexResetRedeem(
  * The overview on the core: per-account usage and reset details settle
  * independently through the connection seam, with at most four provider
  * calls at a time and the legacy route deadline. Redemption flags follow the
- * 6.3 authority for a same-origin browser human only.
+ * 6.3 authority for the person in their browser or an agent acting as them.
  */
 async function coreCodexOverview(
   c: Context,
@@ -2179,7 +2179,6 @@ async function coreCodexOverview(
   const browserHuman =
     human &&
     human.subjectId === grant.subjectId &&
-    !isAgentActingAsPerson(c) &&
     hasPermission(grant.permissions, "connections:write")
       ? human
       : null;

@@ -12,7 +12,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "AcceptOrganizationInvitationResponse"
     ],
-    "browserOnly": "it acts on the person's own account across organizations (creating an organization, listing their memberships or invitations, accepting an invitation), and a connection is limited to one organization"
+    "browserOnly": "it acts on the person's own account across organizations (creating an organization, listing their memberships or invitations, accepting an invitation), and an agent works in one organization"
   },
   {
     "id": "acceptOrganizationRecoveryCustody",
@@ -24,7 +24,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "OrganizationRecoveryMutationResponse"
     ],
-    "browserOnly": "organization recovery is a ceremony in the person's own browser session"
+    "browserOnly": "organization recovery is for when someone can't sign in, so each step is proven by that person's own browser sign-in"
   },
   {
     "id": "acknowledgeStream",
@@ -214,6 +214,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "answerMcpConnectionRequest",
+    "method": "POST",
+    "path": "/v1/mcp-connections/requests/:request",
+    "request": [
+      "McpConnectionDecision"
+    ],
+    "response": []
+  },
+  {
     "id": "appendArchivedSessionEvents",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/session-imports/:importId/events",
@@ -267,7 +276,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "OrganizationRecoveryMutationResponse"
     ],
-    "browserOnly": "organization recovery is a ceremony in the person's own browser session"
+    "browserOnly": "organization recovery is for when someone can't sign in, so each step is proven by that person's own browser sign-in"
   },
   {
     "id": "approveSlackUserLinkAccessRequest",
@@ -437,7 +446,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "OrganizationRecoveryMutationResponse"
     ],
-    "browserOnly": "organization recovery is a ceremony in the person's own browser session"
+    "browserOnly": "organization recovery is for when someone can't sign in, so each step is proven by that person's own browser sign-in"
   },
   {
     "id": "cancelSessionBackgroundCommand",
@@ -631,7 +640,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "OrganizationRecoveryMutationResponse"
     ],
-    "browserOnly": "organization recovery is a ceremony in the person's own browser session"
+    "browserOnly": "organization recovery is for when someone can't sign in, so each step is proven by that person's own browser sign-in"
   },
   {
     "id": "confirmIdentityLink",
@@ -672,7 +681,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "controlSession",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/control",
-    "request": [],
+    "request": [
+      "SessionControlRequest"
+    ],
     "response": [
       "SessionControlResponse"
     ]
@@ -698,7 +709,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "CreateAdditionalOrganizationResponse"
     ],
-    "browserOnly": "it acts on the person's own account across organizations (creating an organization, listing their memberships or invitations, accepting an invitation), and a connection is limited to one organization"
+    "browserOnly": "it acts on the person's own account across organizations (creating an organization, listing their memberships or invitations, accepting an invitation), and an agent works in one organization"
   },
   {
     "id": "createApiKey",
@@ -924,7 +935,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "CreateOrganizationResponse"
     ],
-    "browserOnly": "it acts on the person's own account across organizations (creating an organization, listing their memberships or invitations, accepting an invitation), and a connection is limited to one organization"
+    "browserOnly": "it acts on the person's own account across organizations (creating an organization, listing their memberships or invitations, accepting an invitation), and an agent works in one organization"
   },
   {
     "id": "createOrganizationApiKey",
@@ -1320,6 +1331,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "deleteOrganizationMcpConnection",
+    "method": "DELETE",
+    "path": "/v1/organizations/:organizationId/mcp-connections/:connectionId",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "deleteOrganizationProviderCustomModel",
     "method": "DELETE",
     "path": "/v1/organizations/:organizationId/model-providers/:providerKind/custom-models/:customModelId",
@@ -1535,7 +1553,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "OrganizationRecoveryMutationResponse"
     ],
-    "browserOnly": "organization recovery is a ceremony in the person's own browser session"
+    "browserOnly": "organization recovery is for when someone can't sign in, so each step is proven by that person's own browser sign-in"
   },
   {
     "id": "disableSource",
@@ -1712,7 +1730,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "OrganizationRecoveryMutationResponse"
     ],
-    "browserOnly": "organization recovery is a ceremony in the person's own browser session"
+    "browserOnly": "organization recovery is for when someone can't sign in, so each step is proven by that person's own browser sign-in"
   },
   {
     "id": "exportCompanyBrainOkf",
@@ -2449,8 +2467,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "InboxSettings"
-    ],
-    "browserOnly": "the person's inbox requires their own signed-in browser session"
+    ]
   },
   {
     "id": "getInstalledPluginDetails",
@@ -2485,6 +2502,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "PrReviewManagedGitHubSetup"
     ]
+  },
+  {
+    "id": "getMcpConnectionRequest",
+    "method": "GET",
+    "path": "/v1/mcp-connections/requests/:request",
+    "request": [],
+    "response": []
   },
   {
     "id": "getMemberNotifications",
@@ -2685,7 +2709,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "OrganizationRecoveryOverview"
     ],
-    "browserOnly": "organization recovery is a ceremony in the person's own browser session"
+    "browserOnly": "organization recovery is for when someone can't sign in, so each step is proven by that person's own browser sign-in"
   },
   {
     "id": "getOrganizationRetentionPolicy",
@@ -2820,6 +2844,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/:workspaceId/scheduled-tasks/:taskId",
     "request": [],
     "response": [
+      "PrivateScheduledTaskSummary",
       "ScheduledTask",
       "ScheduledTaskAccessAttention"
     ]
@@ -2849,8 +2874,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "SessionInboxMute"
-    ],
-    "browserOnly": "the person's session mute requires their own signed-in browser session"
+    ]
   },
   {
     "id": "getSessionLineage",
@@ -3261,11 +3285,12 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "grantSessionAdminAccess",
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/admin-access",
-    "request": [],
+    "request": [
+      "GrantSessionAdminAccessRequest"
+    ],
     "response": [
       "SessionAdminAccess"
-    ],
-    "browserOnly": "giving an agent admin access, or allowing it for the organization, is done by an owner or admin in person in the Opengeni app"
+    ]
   },
   {
     "id": "grantWorkspaceCredits",
@@ -3793,8 +3818,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "ListInboxResponse"
-    ],
-    "browserOnly": "the person's inbox requires their own signed-in browser session"
+    ]
   },
   {
     "id": "listInstalledPlugins",
@@ -3970,7 +3994,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "ListOrganizationInvitationsPageResponse"
     ],
-    "browserOnly": "it acts on the person's own account across organizations (creating an organization, listing their memberships or invitations, accepting an invitation), and a connection is limited to one organization"
+    "browserOnly": "it acts on the person's own account across organizations (creating an organization, listing their memberships or invitations, accepting an invitation), and an agent works in one organization"
   },
   {
     "id": "listOrganizationInvitationsForOrganization",
@@ -3982,6 +4006,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "listOrganizationMcpConnections",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/mcp-connections",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "listOrganizationMemberships",
     "method": "GET",
     "path": "/v1/organization-memberships",
@@ -3989,7 +4020,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "ListManagedOrganizationMembershipsResponse"
     ],
-    "browserOnly": "it acts on the person's own account across organizations (creating an organization, listing their memberships or invitations, accepting an invitation), and a connection is limited to one organization"
+    "browserOnly": "it acts on the person's own account across organizations (creating an organization, listing their memberships or invitations, accepting an invitation), and an agent works in one organization"
   },
   {
     "id": "listOrganizationProviderCustomModels",
@@ -4088,6 +4119,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "PreferenceRegistryListResponse"
+    ]
+  },
+  {
+    "id": "listPrivateScheduledTaskSummaries",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/scheduled-tasks/private-summaries",
+    "request": [],
+    "response": [
+      "PrivateScheduledTaskSummary"
     ]
   },
   {
@@ -4693,6 +4733,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/:workspaceId/environments/:variableSetId",
     "request": [],
     "response": []
+  },
+  {
+    "id": "pausePrivateScheduledTask",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/scheduled-tasks/private-summaries/:taskId/pause",
+    "request": [],
+    "response": [
+      "PrivateScheduledTaskSummary"
+    ]
   },
   {
     "id": "pauseScheduledTask",
@@ -6086,8 +6135,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "SessionInboxMute"
-    ],
-    "browserOnly": "the person's session mute requires their own signed-in browser session"
+    ]
   },
   {
     "id": "setSuperGrokAccountAllocator",
@@ -6243,7 +6291,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "OrganizationRecoveryMutationResponse"
     ],
-    "browserOnly": "organization recovery is a ceremony in the person's own browser session"
+    "browserOnly": "organization recovery is for when someone can't sign in, so each step is proven by that person's own browser sign-in"
   },
   {
     "id": "startPersonalGitHubOAuth",
@@ -6680,8 +6728,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "InboxItem"
     ],
-    "response": [],
-    "browserOnly": "the person's inbox requires their own signed-in browser session"
+    "response": []
   },
   {
     "id": "updateInboxSettings",
@@ -6692,8 +6739,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "InboxSettings"
-    ],
-    "browserOnly": "the person's inbox requires their own signed-in browser session"
+    ]
   },
   {
     "id": "updateMachineAgent",
@@ -6766,8 +6812,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "OrganizationAgentAdminAccess"
-    ],
-    "browserOnly": "giving an agent admin access, or allowing it for the organization, is done by an owner or admin in person in the Opengeni app"
+    ]
   },
   {
     "id": "updateOrganizationApiKey",
@@ -6790,6 +6835,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "OrganizationIntegrationPolicy"
     ]
+  },
+  {
+    "id": "updateOrganizationMcpConnection",
+    "method": "PATCH",
+    "path": "/v1/organizations/:organizationId/mcp-connections/:connectionId",
+    "request": [
+      "UpdateOrganizationMcpConnectionRequest"
+    ],
+    "response": []
   },
   {
     "id": "updateOrganizationMember",

@@ -7,6 +7,7 @@ import {
   ANTHROPIC_COMPACTION_TEXT_ONLY_INSTRUCTION,
   ANTHROPIC_COMPACTION_THINKING_HEADROOM_TOKENS,
 } from "../src/anthropic-compaction";
+import { anthropicSearchAccountScope } from "../src/anthropic-web-search";
 import { buildCompactionPromptInput, EmptyCompactionSummaryError } from "../src/context-compaction";
 import { summarizeForCompaction } from "../src/index";
 
@@ -234,7 +235,8 @@ test("with Claude web search, the checkpoint keeps the search tool and stored se
         type: "web_search_call",
         call_id: "srvtoolu_1",
         action: { type: "search", query: "q" },
-        anthropic: { blocks: search },
+        // Searched on this conversation's own Claude account.
+        anthropic: { blocks: search, accountScope: anthropicSearchAccountScope(provider) },
       },
     },
     history.at(-1)!,

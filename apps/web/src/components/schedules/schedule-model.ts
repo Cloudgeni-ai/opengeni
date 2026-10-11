@@ -224,6 +224,8 @@ export interface ScheduleDraft extends ScheduledTaskFormState {
   cadence: CadenceValue | null;
   variableSetId: string | null;
   rigId: string | null;
+  /** Who can see the schedule and the chats it creates. */
+  visibility: "private" | "workspace";
 }
 
 export interface DraftDefaults {
@@ -251,6 +253,7 @@ export function newScheduleDraft(defaults: DraftDefaults, timeZone?: string): Sc
     cadence: defaultCadence(timeZone),
     variableSetId: null,
     rigId: null,
+    visibility: "workspace",
   };
 }
 
@@ -432,6 +435,7 @@ export function createRequestFromDraft(
       schedule,
       prompt: draft.prompt.trim(),
       targetSessionId: draft.targetSessionId,
+      ...(draft.visibility === "private" ? { visibility: "private" as const } : {}),
       overlapPolicy: overlapPolicyForCreate(draft),
       metadata: taskMetadataFromFormState(draft),
       connectionAccounts: draft.connectionAccounts ?? [],
@@ -442,6 +446,7 @@ export function createRequestFromDraft(
       : {}),
     name: scheduleName(draft),
     schedule,
+    ...(draft.visibility === "private" ? { visibility: "private" as const } : {}),
     runMode: draft.runMode,
     overlapPolicy: overlapPolicyForCreate(draft),
     metadata: taskMetadataFromFormState(draft),
@@ -524,6 +529,7 @@ export function updateRequestFromDraft(
     ...(initial.overlapPolicy === draft.overlapPolicy
       ? {}
       : { overlapPolicy: draft.overlapPolicy }),
+    ...(initial.visibility === draft.visibility ? {} : { visibility: draft.visibility }),
     ...(same(oldMetadata, nextMetadata) ? {} : { metadata: nextMetadata }),
     ...(same(initial.connectionAccounts ?? [], draft.connectionAccounts ?? [])
       ? {}

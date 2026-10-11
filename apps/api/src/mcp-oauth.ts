@@ -9,6 +9,7 @@ import {
   McpOAuthClientRegistrationRequest,
   McpOAuthClientRegistrationResponse,
   McpOAuthProtectedResourceMetadata,
+  McpConnectionDecision,
   McpOAuthTokenResponse,
   OrganizationAccessPolicy,
   organizationAccessPresetPermissions,
@@ -45,9 +46,8 @@ import {
 } from "@opengeni/core";
 import { Hono, type Context } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { z } from "zod";
 import { trustedRequestSourceRateLimitKey, type RequestSourceTrust } from "./http/request-source";
-import { requireNotAgent } from "./http/acting-person";
+import { isAgentActingAsPerson, requireFullAccessIfAgent } from "./http/acting-person";
 import { requireSameOriginBrowserMutation } from "./routes/codex";
 import {
   prepareWorkspaceToolGateway,
@@ -404,7 +404,7 @@ export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
     requireSameOriginBrowserMutation(c, deps);
     const person = await requireBrowserPerson(c, deps);
     const request = await requirePendingOrganizationRequest(deps, c.req.param("request"), person);
-    const parsed = OrganizationConsentDecision.safeParse(await c.req.json().catch(() => null));
+    const parsed = McpConnectionDecision.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) throw new HTTPException(400, { message: "invalid sign-in decision" });
     const decision = parsed.data;
     if (decision.decision === "deny") {
@@ -1012,23 +1012,23 @@ function DEFAULT_ORGANIZATION_ACCESS(): OrganizationAccessPolicy {
   };
 }
 
-const OrganizationConsentDecision = z.discriminatedUnion("decision", [
-  z.object({ decision: z.literal("deny") }).strict(),
-  z
-    .object({
-      decision: z.literal("approve"),
-      organizationId: z.string().uuid(),
-      access: OrganizationAccessPolicy,
-    })
-    .strict(),
-]);
-
-/** A person signed in to Opengeni in this browser: never a key, bearer or service. */
+/**
+ * A person signed in to Opengeni in this browser, or an agent with their full
+ * access answering a sign-in that person started: never a key, bearer or
+ * service. A limited agent can't approve sign-ins, so it can't widen access.
+ */
 async function requireBrowserPerson(
   c: Context,
   deps: ApiRouteDeps,
 ): Promise<{ context: AccessContext }> {
-  requireNotAgent(c, "Approving a connection");
+  if (isAgentActingAsPerson(c)) {
+    requireFullAccessIfAgent(c, "Approving an agent sign-in");
+    const context = await requireAccessContext(c, deps);
+    if (context.mode !== "managed" || !context.subjectId.startsWith("user:")) {
+      throw new HTTPException(403, { message: "Approving an agent sign-in needs a person" });
+    }
+    return { context };
+  }
   if (
     deps.settings.productAccessMode !== "managed" ||
     !c.req.header("cookie") ||

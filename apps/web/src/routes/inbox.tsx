@@ -735,7 +735,12 @@ function InboxSettingsSections({
       })
       .catch(() => {
         if (current)
-          setSettings({ tidyPolicy: "own_sessions", pausedGoals: false, replies: false });
+          setSettings({
+            tidyPolicy: "own_sessions",
+            pausedGoals: false,
+            replies: false,
+            timeSensitiveNeedsYou: false,
+          });
       });
     return () => {
       current = false;
@@ -802,6 +807,30 @@ function InboxSettingsSections({
                 }
               />
             ) : null}
+          </SettingRowGroup>
+        )}
+      </Section>
+      <Section
+        title="Phone alerts"
+        description="For the Opengeni app on your phone. Choose which alerts it sends in the app's settings."
+      >
+        {settings === null ? (
+          <div className="grid gap-3 pt-1" aria-busy="true">
+            <Skeleton className="h-5 w-1/2" />
+          </div>
+        ) : (
+          <SettingRowGroup>
+            <SettingRow
+              label="Questions and approvals are time-sensitive"
+              description="They break through Focus on iPhone, since the agent waits until you answer."
+              control={
+                <Switch
+                  checked={settings.timeSensitiveNeedsYou ?? false}
+                  pending={saving}
+                  onCheckedChange={(checked) => void change({ timeSensitiveNeedsYou: checked })}
+                />
+              }
+            />
           </SettingRowGroup>
         )}
       </Section>

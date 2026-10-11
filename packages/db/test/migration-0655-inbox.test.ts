@@ -239,6 +239,7 @@ describe("0655 inbox", () => {
       tidyPolicy: "own_sessions",
       pausedGoals: false,
       replies: false,
+      timeSensitiveNeedsYou: false,
     });
     await appendSessionEvents(db(), person.scope.workspaceId, person.session.id, [
       {
@@ -253,12 +254,14 @@ describe("0655 inbox", () => {
       tidyPolicy: "any_agent",
       pausedGoals: true,
       replies: false,
+      timeSensitiveNeedsYou: false,
     });
     // Full agent access (0693) is a third policy; anything else is refused.
     expect(await setInboxSettings(db(), { ...owner, tidyPolicy: "full_access" })).toEqual({
       tidyPolicy: "full_access",
       pausedGoals: true,
       replies: false,
+      timeSensitiveNeedsYou: false,
     });
     expect(await getInboxTidyPolicy(db(), owner)).toBe("full_access");
     await expect(

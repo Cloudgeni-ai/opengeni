@@ -95,7 +95,7 @@ afterAll(async () => {
   await shared?.release();
 });
 
-async function workspaceFixture() {
+async function workspaceFixture(subjectId = `subject-${crypto.randomUUID()}`) {
   const [account] = await admin<{ id: string }[]>`
     insert into managed_accounts (name) values ('scheduled personal authority') returning id`;
   const [workspace] = await admin<{ id: string }[]>`
@@ -107,7 +107,7 @@ async function workspaceFixture() {
   const fixture = {
     accountId: account!.id,
     workspaceId: workspace!.id,
-    subjectId: `subject-${crypto.randomUUID()}`,
+    subjectId,
   };
   await admin`
     insert into organization_memberships (
@@ -773,6 +773,40 @@ describe("scheduled task personal MCP authority", () => {
         from scheduled_task_personal_resource_authorities
         where task_id = ${task.id}`;
       expect(authority?.count, scope).toBe(0);
+    }
+  });
+
+  test("an Only me schedule's runs create Only me chats owned by its owner", async () => {
+    if (!available) return;
+    const workspace = await workspaceFixture(`user:${crypto.randomUUID()}`);
+    await admin`insert into session_tenancy_activations (account_id, activation_version, inventory_digest, parity_digest, activated_by)
+      values (${workspace.accountId}, 1, ${"1".repeat(64)}, ${"2".repeat(64)}, 'scheduled-private-run-test')`;
+    for (const runMode of ["new_session_per_run", "reusable_session"] as const) {
+      const task = await createScheduledTask(client.db, {
+        ...workspace,
+        name: `Only me ${runMode}`,
+        status: "active",
+        visibility: "user_private",
+        schedule: { type: "interval", everySeconds: 3_600 },
+        temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+        runMode,
+        overlapPolicy: "allow_concurrent",
+        agentConfig: { prompt: "Review my notes", resources: [], tools: [], metadata: {} },
+        createdBy: { kind: "subject", subjectId: workspace.subjectId },
+        metadata: {},
+      });
+      expect(task.visibility, runMode).toBe("private");
+      const dispatched = await activities().dispatchScheduledTaskRun({
+        workspaceId: workspace.workspaceId,
+        taskId: task.id,
+        triggerType: "scheduled",
+        producerKey: `private-schedule-${runMode}-${crypto.randomUUID()}`,
+      });
+      expect(dispatched).toMatchObject({ action: "start" });
+      if (dispatched.action !== "start") throw new Error(`Unexpected: ${dispatched.action}`);
+      const [session] = await admin<Array<{ visibility: string; owner: string | null }>>`
+        select visibility, owner_subject_id as owner from sessions where id = ${dispatched.sessionId}`;
+      expect(session, runMode).toEqual({ visibility: "user_private", owner: workspace.subjectId });
     }
   });
 

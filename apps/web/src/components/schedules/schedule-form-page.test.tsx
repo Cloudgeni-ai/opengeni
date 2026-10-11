@@ -15,6 +15,7 @@ let task: ScheduledTask;
 let chats: Session[];
 let pendingAccountBaseline: Promise<Session> | null = null;
 let sourceReads = 0;
+let privateAllowed = false;
 const updateScheduledTask = mock(
   async (_workspace: string, _id: string, _request: unknown) => task,
 );
@@ -27,6 +28,11 @@ const client = {
     return chats.find((chat) => chat.id === id)!;
   },
   listSessions: async () => chats,
+  getSessionTenancyCreateCapabilities: async () => ({
+    activated: true,
+    canCreatePrivate: privateAllowed,
+    reason: privateAllowed ? "available" : "not_activated",
+  }),
   getAgentLearningSettings: async () => ({
     settings: {},
     version: 1,
@@ -155,11 +161,13 @@ beforeEach(() => {
   updateScheduledTask.mockClear();
   pendingAccountBaseline = null;
   sourceReads = 0;
+  privateAllowed = false;
   task = {
     id: "task-example",
     workspaceId,
     name: "Example schedule",
     ownerSubjectId: "viewer",
+    visibility: "workspace",
     runMode: "new_session_per_run",
     reusableSessionId: null,
     targetSessionId: null,
@@ -388,5 +396,53 @@ test("choosing an account while the original chat loads does not freeze another 
     { serverId: "retained", connectionId: "later-account" },
     { serverId: "added", connectionId: "new-account" },
   ]);
+  await act(async () => root.unmount());
+});
+
+function audienceOption(container: HTMLElement, label: string) {
+  return [...container.querySelectorAll<HTMLElement>('[role="radio"]')].find(
+    (option) => option.textContent === label,
+  );
+}
+
+test("who can see a schedule is only asked when the organization allows Only me", async () => {
+  const hidden = await render();
+  expect(hidden.container.textContent).not.toContain("Who can see it");
+  await act(async () => hidden.root.unmount());
+
+  privateAllowed = true;
+  const { container, root } = await render();
+  expect(container.textContent).toContain("Who can see it");
+  expect(audienceOption(container, "Workspace")!.getAttribute("aria-checked")).toBe("true");
+  expect(container.textContent).toContain(
+    "Everyone in this workspace can see this schedule and its chats.",
+  );
+  await act(async () => {
+    audienceOption(container, "Only me")!.click();
+    await flush();
+  });
+  expect(container.textContent).toContain("Only you can see this schedule and its chats.");
+  const request = (await save(container)) as { visibility?: string };
+  expect(request.visibility).toBe("private");
+  await act(async () => root.unmount());
+});
+
+test("a schedule that posts into an Only me chat stays Only me", async () => {
+  privateAllowed = true;
+  task = {
+    ...task,
+    visibility: "private",
+    runMode: "existing_session",
+    targetSessionId: "source-chat",
+  } as ScheduledTask;
+  chats = chats.map((chat) =>
+    chat.id === "source-chat"
+      ? ({ ...chat, tenancy: { visibility: "private" } } as unknown as Session)
+      : chat,
+  );
+  const { container, root } = await render();
+  expect(audienceOption(container, "Only me")!.getAttribute("aria-checked")).toBe("true");
+  expect(audienceOption(container, "Workspace")!.getAttribute("aria-disabled")).toBe("true");
+  expect(container.textContent).toContain("It posts into an Only me chat.");
   await act(async () => root.unmount());
 });

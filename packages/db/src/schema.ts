@@ -4545,6 +4545,8 @@ export const sessionAdminAccess = pgTable(
       .references(() => workspaces.id, { onDelete: "cascade" }),
     grantedBySubjectId: text("granted_by_subject_id").notNull(),
     grantedAt: timestamp("granted_at", { withTimezone: true }).notNull().defaultNow(),
+    // When admin access ends by itself (0719); null means no time limit.
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
   },
   (table) => [index("session_admin_access_account_idx").on(table.accountId)],
 );
@@ -11776,6 +11778,9 @@ export const scheduledTasks = pgTable(
       .references(() => workspaces.id, { onDelete: "cascade" }),
     name: text("name").notNull(),
     ownerSubjectId: text("owner_subject_id"),
+    // Who can read the schedule (migration 0720): everyone in the workspace, or
+    // only its owner. Not execution configuration; excluded from the digest.
+    visibility: text("visibility").notNull().default("workspace_shared"),
     status: text("status").notNull().default("active"),
     schedule: jsonb("schedule").$type<unknown>().notNull(),
     temporalScheduleId: text("temporal_schedule_id").notNull(),
