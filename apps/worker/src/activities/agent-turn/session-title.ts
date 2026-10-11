@@ -258,6 +258,9 @@ export function startParallelSessionTitleGeneration(input: {
   return {
     finish,
     cancel: async () => {
+      // Let an already-resolved generation deliver its queued result before
+      // aborting. A request still pending at this boundary remains cancelled.
+      await Promise.resolve();
       cancellationController.abort();
       await finish();
     },
