@@ -4407,7 +4407,8 @@ its own side's copies; a request is unchanged only when every copy it writes
 already has the value. 0714 also makes the reach reader
 (`opengeni_private.subscription_core_reach`) report the reach row's switch and
 model list, additive keys older binaries ignore.
-It needs no drain or window: older binaries never call the helper for a
+It needs no drain or window (but see the Rollout rule and Rollback below for
+sharing and people choices): older binaries never call the helper for a
 managed connection and read the same rows with the same meaning. This
 release's API calls the new routine on every organization rotation switch and
 access save, so apply 0714 before rolling out the API (the normal order). It can ship
@@ -4476,20 +4477,49 @@ END $$;
 workspaces until every API pod runs this release: an older pod still lets
 another workspace's route switch only the connection, and the managing
 workspace's next "on" would then undo the organization's "off" for every other
-workspace. The same applies to a rollback: before running an older API image
-again, narrow every shared workspace-managed account back to its workspace
-(`allowedWorkspaces: []`), since older organization routes refuse
-workspace-managed accounts and can't narrow them afterwards. People choices
-likewise read as "no workspaces" on an older image. Do not limit any account to chosen people (`allowedPeople`)
+workspace. Do not limit any account to chosen people (`allowedPeople`)
 until every API pod runs this release. An older pod reads a people-scoped
 account as "no workspaces", and a save there would switch it back to
-workspace scope. Workspace-managed accounts can't be limited to people at all
-(`peopleSupported: false`, refused with 422) so their workspace's
-administrators keep managing them. Organizations with more than 1000
-memberships (revoked ones count) are not offered people: the member list
-refuses them, so the editor reads `peopleSupported: false`. An account that
-already has people there can still have them kept or removed and its models
-edited; adding someone is refused with 422.
+workspace scope (leaving its people rows behind). Workspace-managed accounts
+can't be limited to people at all (`peopleSupported: false`, refused with 422)
+so their workspace's administrators keep managing them. Organizations with
+more than 1000 memberships (revoked ones count) are not offered people: the
+member list refuses them, so the editor reads `peopleSupported: false`. An
+account that already has people there can still have them kept or removed and
+its models edited; adding someone is refused with 422.
+
+**Rollback.** The same rules hold before an older API image runs again. Older
+organization routes refuse workspace-managed accounts, so a shared one can't
+be narrowed after the rollback. Before rolling back, run this read-only check
+as a superuser or `BYPASSRLS` role (like the parity check); it must return no
+rows:
+
+```sql
+SELECT connection.account_id, connection.provider, connection.id,
+  connection.managed_by_workspace_id
+FROM subscription_connections connection
+WHERE connection.ownership = 'shared' AND connection.disconnected_at IS NULL
+  AND connection.managed_by_workspace_id IS NOT NULL
+  AND (EXISTS (SELECT 1 FROM subscription_connection_assignment_policies policy
+      WHERE policy.connection_id = connection.id
+        AND policy.inference_pool = 'organization')
+    OR EXISTS (SELECT 1 FROM subscription_connection_workspaces assignment
+      WHERE assignment.connection_id = connection.id
+        AND assignment.workspace_id <> connection.managed_by_workspace_id)
+    OR EXISTS (SELECT 1 FROM opengeni_private.subscription_core_auto_assignments auto
+      WHERE auto.connection_id = connection.id))
+ORDER BY connection.account_id, connection.provider, connection.id;
+```
+
+For each row, that organization's administrator narrows the account back to
+its workspace with both `allowedWorkspaces: []` and
+`allowPersonalWorkspaces: false` (an account given to the whole organization
+otherwise stays in every Personal workspace); otherwise fix forward instead of
+rolling back. Likewise, shared accounts limited to people
+(`ownership = 'shared' AND scope_kind = 'people'`) are read as "no workspaces"
+by an older image, and a save there replaces the people: move them back to
+workspaces first, or accept that. Run right after the rollout, the same check
+also shows whether anything was shared while older pods still served.
 
 **Validation.** Once every API pod runs this release, use an operator-owned
 test organization (never a customer
@@ -4531,8 +4561,9 @@ found" surfaces as a server error while this release's API is deployed) and
 write nothing; rotation switches keep working on both routes; nothing else
 changes. That includes narrowing: an account already given to more
 workspaces stays that way. Narrow such accounts back to their workspace
-(`allowedWorkspaces: []`) before restoring the setters, or restore only if
-a defect requires it.
+(`allowedWorkspaces: []` and `allowPersonalWorkspaces: false`; the Rollback
+check lists them) before restoring the setters, or restore only if a defect
+requires it.
 
 ### Slack API pilot activation (0597)
 
