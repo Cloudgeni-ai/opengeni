@@ -485,7 +485,7 @@ export async function readSubscriptionCoreOrganizationPool(
 }
 
 /**
- * A row-level security refusal (42501). The settings lock guard (0717) also
+ * A row-level security refusal (42501). The settings lock guard (0718) also
  * raises 42501; it is not a refusal to see the row, so it is excluded here and
  * surfaces as `SubscriptionSettingsLockedError`.
  */
@@ -566,12 +566,12 @@ async function withAdministration<T>(
         }
         return await fn(tx);
       },
-      // These routines write settings rows: 0717 admits a widening write
+      // These routines write settings rows: 0718 admits a widening write
       // only at READ COMMITTED, whatever the connection default.
       SUBSCRIPTION_SETTINGS_TRANSACTION,
     );
   } catch (error) {
-    // A write the organization's settings lock refused (0717), for example a
+    // A write the organization's settings lock refused (0718), for example a
     // workspace rotation, primary or source change: nothing was written.
     throwIfSubscriptionSettingLocked(error);
     throw error;

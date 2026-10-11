@@ -171,7 +171,7 @@ One row per connection with the shared quota model and placement statistics
   enforcement source; the TypeScript `effectiveSettings` has a parity test.
   An organization overview reads the same function for every workspace
   (SUB-SET-05).
-- Locks are enforced at write time by migration 0717 and exposed through the
+- Locks are enforced at write time by migration 0718 and exposed through the
   model-account settings API; see §5.5.
 
 ### 3.4 `subscription_session_bindings`
@@ -4637,7 +4637,7 @@ this one stores and resolves its switch and fallback order.
 override all date from 0642/0644. Nothing wrote a lock, and nothing stopped a
 workspace row from storing an override of a locked setting.
 
-**Migration 0717 (rolling).** It changes no column, routine or value, so
+**Migration 0718 (rolling).** It changes no column, routine or value, so
 every effective setting is the same before and after (asserted on staged
 data with workspace overrides). It adds:
 

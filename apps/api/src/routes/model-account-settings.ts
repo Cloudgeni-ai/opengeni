@@ -39,7 +39,7 @@ function parseId(value: string | undefined, what: "organization" | "workspace"):
 
 /**
  * 409 `setting_locked` for any write the organization's settings lock refused:
- * these routes and every older route whose write meets the 0717 guard (for
+ * these routes and every older route whose write meets the 0718 guard (for
  * example a Codex rotation, primary or source change). Mapped centrally in
  * the app error handler.
  */
