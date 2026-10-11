@@ -327,13 +327,18 @@ describe.skipIf(!realDb)(
     // `stale` through the legacy getter, the peek returns null and
     // `peekSessionWork` reports the session runnable. On the rebase onto X1b
     // these become passing cases against the migrated waiter, with no re-arm:
-    // (a) the recorded reference keeps waiting on the same waiter id while the
-    // account is exhausted and observes the pending outbox wake; (b) after a
-    // core capacity change it resumes the same turn at the same execution
-    // generation; (c) the peek and `peekSessionWork` return a capacity-wait
-    // reference that reconciles to the same waiter.
-    test.todo("(a) the recorded SuperGrok reference keeps waiting on the migrated waiter (X1b)");
-    test.todo("(b) the recorded SuperGrok reference resumes the same turn after a core wake (X1b)");
+    // (a) the recorded reference keeps waiting while the account is exhausted:
+    // the session still has exactly one core waiter, with the migrated id and
+    // generation, and that waiter observes the pending outbox wake; (b) after
+    // a core capacity change the resumed turn has the parked turn's id and
+    // execution generation; (c) the peek and `peekSessionWork` return a
+    // capacity-wait reference that reconciles to the same waiter.
+    test.todo(
+      "(a) the recorded SuperGrok reference keeps waiting on exactly the migrated waiter, no re-arm (X1b)",
+    );
+    test.todo(
+      "(b) the recorded SuperGrok reference resumes the parked turn id and generation after a core wake (X1b)",
+    );
     test.todo("(c) the peek and peekSessionWork resolve to the migrated waiter (X1b)");
 
     test("the pinned capacity-wait history, recorded as a SuperGrok wait, replays against the current workflow registry", async () => {

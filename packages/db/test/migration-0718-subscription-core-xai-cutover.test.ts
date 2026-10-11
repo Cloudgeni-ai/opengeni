@@ -858,7 +858,9 @@ describe.skipIf(!realDb)(
         await writer`SELECT 1`;
         const error = await migrateCutover({ key }).catch((caught: Error) => caught);
         expect(error).toMatchObject({ code: "55000" });
-        expect((error as Error).message).toContain("requires drained application sessions");
+        expect((error as Error).message).toContain(
+          "a connected role outside the listed application roles can write moved relations",
+        );
       } finally {
         await writer.end();
         await owned.admin.unsafe(`REVOKE ALL ON sessions FROM ${role}`);

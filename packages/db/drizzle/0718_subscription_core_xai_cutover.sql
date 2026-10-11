@@ -1486,10 +1486,13 @@ END $xai_cutover_restore$;
 -- create and lease routines run as the owner, which FORCE row security
 -- binds, so a restrictive policy refuses them whatever runtime grants a login
 -- still holds (before provision-roles runs again, or a login it does not
--- provision). Deletes stay open for organization retention deletion, which
--- deletes an offboarded member's `user` credentials; the legacy disconnect
--- routine refuses after the receipt instead (below), so it can never report
--- a revocation while the moved connection keeps serving. provision-roles
+-- provision). The policies leave deletes open (an owner delete still
+-- works). Organization retention deletion removes an offboarded member's
+-- migrated connection with their Personal workspace; it does not reach their
+-- legacy `user` rows, which row security hides from it without a workspace
+-- context exactly as before the receipt, and whose ciphertext this migration
+-- blanked. The legacy disconnect routine refuses (below), so it can never
+-- report a revocation while the moved connection keeps serving. provision-roles
 -- also withdraws runtime write grants on these tables, and the runtime
 -- posture contract asserts it.
 DO $xai_cutover_read_only$
@@ -1518,8 +1521,9 @@ BEGIN
   $ddl$, data_schema);
 END $xai_cutover_read_only$;
 
--- The legacy disconnect (0432's definition) refuses once the receipt exists:
--- the account lives on the shared core and is disconnected there.
+-- The legacy disconnect refuses: this transaction writes the receipt, so
+-- 0432's body could never run again. The account lives on the shared core and
+-- is disconnected there. The signature, owner, SECURITY DEFINER and ACL stay.
 DO $xai_cutover_legacy_disconnect$
 DECLARE data_schema text := current_schema();
 BEGIN
@@ -1532,67 +1536,11 @@ BEGIN
       p_snapshot jsonb
     ) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path = %1$I, pg_catalog
+    SET search_path = %1$I, pg_catalog, pg_temp
     AS $body$
-    DECLARE
-      credential_row record;
     BEGIN
-      IF opengeni_private.subscription_provider_cutover_committed('xai') THEN
-        RAISE EXCEPTION 'SuperGrok accounts are disconnected on the shared subscription core after the cutover'
-          USING ERRCODE = '55000';
-      END IF;
-      IF p_account_id IS DISTINCT FROM NULLIF(current_setting('opengeni.account_id', true), '')::uuid
-        OR p_workspace_id IS DISTINCT FROM NULLIF(current_setting('opengeni.workspace_id', true), '')::uuid
-        OR p_subject_id IS DISTINCT FROM NULLIF(current_setting('opengeni.subject_id', true), '')
-      THEN
-        RAISE EXCEPTION 'xAI credential lifecycle authority denied' USING ERRCODE = '42501';
-      END IF;
-
-      SELECT credential.* INTO credential_row
-      FROM revalidate_xai_subscription_authority(
-        p_workspace_id, p_subject_id, p_credential_id, p_snapshot
-      ) authorized
-      INNER JOIN xai_subscription_credentials credential ON credential.id = authorized.id
-      FOR UPDATE OF credential;
-      IF credential_row.id IS NULL THEN RETURN false; END IF;
-
-      INSERT INTO opengeni_private.xai_subscription_runtime_capabilities (
-        backend_pid, transaction_id, capability_kind
-      ) VALUES (pg_catalog.pg_backend_pid(), pg_catalog.pg_current_xact_id(), 'lifecycle')
-      ON CONFLICT DO NOTHING;
-
-      -- Clear the coupled pin fields before the foreign key nulls its id.
-      -- Keep the row/version so stale session pin edits still fail their CAS.
-      UPDATE xai_session_account_pins
-      SET pinned_credential_id = NULL, pin_source = NULL,
-          version = version + 1, updated_at = now()
-      WHERE account_id = credential_row.account_id
-        AND workspace_id = credential_row.workspace_id
-        AND pinned_credential_id = credential_row.id;
-
-      DELETE FROM xai_subscription_credentials WHERE id = credential_row.id;
-      IF credential_row.authority_scope = 'user' THEN
-        UPDATE organization_user_resource_authorities
-        SET status = 'revoked', revoked_at = now(), updated_at = now()
-        WHERE id = credential_row.organization_user_resource_authority_id
-          AND account_id = credential_row.account_id
-          AND organization_membership_id = credential_row.owner_organization_membership_id
-          AND resource_kind = 'xai_subscription'
-          AND resource_id = credential_row.id
-          AND generation = credential_row.organization_user_resource_authority_generation;
-      END IF;
-
-      DELETE FROM opengeni_private.xai_subscription_runtime_capabilities
-      WHERE backend_pid = pg_catalog.pg_backend_pid()
-        AND transaction_id = pg_catalog.pg_current_xact_id_if_assigned()
-        AND capability_kind = 'lifecycle';
-      RETURN true;
-    EXCEPTION WHEN OTHERS THEN
-      DELETE FROM opengeni_private.xai_subscription_runtime_capabilities
-      WHERE backend_pid = pg_catalog.pg_backend_pid()
-        AND transaction_id = pg_catalog.pg_current_xact_id_if_assigned()
-        AND capability_kind = 'lifecycle';
-      RAISE;
+      RAISE EXCEPTION 'SuperGrok accounts are disconnected on the shared subscription core after the cutover'
+        USING ERRCODE = '55000';
     END
     $body$;
   $ddl$, data_schema);

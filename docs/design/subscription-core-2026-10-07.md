@@ -3701,11 +3701,13 @@ reviewers:
   `xai_subscription` authorities are refused by a restrictive `INSERT`
   policy on `organization_user_resource_authorities`. The legacy connect,
   rotation and pin routines run as the owner, which FORCE row security
-  binds, so they cannot write either. Deletes stay open for organization
-  retention deletion; the legacy disconnect routine instead refuses with
-  `55000` once the receipt exists (0718 redefines 0432's body behind that
-  check), so it can never report a revocation while the moved connection
-  keeps serving. Membership lifecycle still revokes, retains and restores the
+  binds, so they cannot write either. The policies leave deletes open.
+  Organization retention deletion removes an offboarded member's migrated
+  connection with their Personal workspace; row security hides their legacy
+  `user` rows from it, as before the cutover, and 0718 has blanked those rows'
+  ciphertext. 0718 reduces the legacy disconnect routine to a refusal with
+  `55000` (its old body could never run after the receipt), so it can never
+  report a revocation while the moved connection keeps serving. Membership lifecycle still revokes, retains and restores the
   existing authorities. The migration asserts FORCE on the five tables.
 - **Drain check.** Besides the listed runtime logins, the drain check
   refuses any other client session whose non-superuser role, other than the
