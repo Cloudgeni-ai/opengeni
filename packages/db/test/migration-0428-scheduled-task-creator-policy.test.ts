@@ -144,7 +144,7 @@ describe("0428 creator policy (real PostgreSQL)", () => {
           to_jsonb(task) - array[
             'name', 'status', 'updated_at', 'authority_revision', 'execution_digest', 'owner_subject_id',
             'creator_first_party_mcp_tools', 'creator_first_party_mcp_permissions',
-            'creator_session_policy', 'subscription_authority'
+            'creator_session_policy', 'subscription_authority', 'authority_inserted_at'
           ]::text[]
         )::text, 'UTF8')), 'hex') as legacy,
         scheduled_task_execution_digest(task) as recomputed
@@ -179,12 +179,13 @@ describe("0428 creator policy (real PostgreSQL)", () => {
           to_jsonb(task) - array[
             'name', 'status', 'updated_at', 'authority_revision', 'execution_digest', 'owner_subject_id',
             'creator_first_party_mcp_tools', 'creator_first_party_mcp_permissions',
-            'creator_session_policy', 'subscription_authority'
+            'creator_session_policy', 'subscription_authority', 'authority_inserted_at'
           ]::text[]
         )::text, 'UTF8')), 'hex') as stripped,
         encode(sha256(convert_to((
           to_jsonb(task) - array[
-            'name', 'status', 'updated_at', 'authority_revision', 'execution_digest', 'owner_subject_id', 'subscription_authority'
+            'name', 'status', 'updated_at', 'authority_revision', 'execution_digest', 'owner_subject_id', 'subscription_authority',
+            'authority_inserted_at'
           ]::text[]
         )::text, 'UTF8')), 'hex') as full
       from scheduled_tasks task
