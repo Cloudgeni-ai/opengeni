@@ -550,11 +550,14 @@ export async function loadWorkspaceModelSelectionInput(
     ),
   ];
   const inputRead = (async () => {
-    // Claude's provider route and core projection, once for both readers.
-    const claudeCore = await loadCoreRoutedClaudeCatalogReadiness(db, settings, context);
+    // Claude's provider route and core projection, read once for both
+    // readers that need it; the other reads do not wait for it.
+    const claudeCore = loadCoreRoutedClaudeCatalogReadiness(db, settings, context);
     return await Promise.all([
-      connectionRestrictionsAndXaiReadiness(db, settings, context, claudeCore),
-      loadWorkspaceClaudeSubscriptionReadiness(db, settings, context, claudeCore),
+      claudeCore.then((core) => connectionRestrictionsAndXaiReadiness(db, settings, context, core)),
+      claudeCore.then((core) =>
+        loadWorkspaceClaudeSubscriptionReadiness(db, settings, context, core),
+      ),
       getWorkspaceModelPolicy(db, workspaceId),
       // Codex readiness and live availability by the organization's Codex
       // cutover row: legacy without one, the shared core when enabled, not
