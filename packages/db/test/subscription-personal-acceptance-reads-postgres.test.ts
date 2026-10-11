@@ -1,12 +1,12 @@
-// Migration 0717: the v2 accepted-authority writers see the owner's personal
+// Migration 0718: the v2 accepted-authority writers see the owner's personal
 // connections under FORCE row security (design
 // docs/design/subscription-core-2026-10-07.md, "Findings in earlier merged
 // work"). The database is migrated by the NOSUPERUSER, NOBYPASSRLS owner, as
 // the documented posture is; runtime calls run as the restricted application
-// role. Before 0717 every acceptance froze the empty value for an owner with a
+// role. Before 0718 every acceptance froze the empty value for an owner with a
 // serviceable personal Codex account; after it the owner's personal entry is
 // frozen, through the same writers and the same rules. The runbook's inventory
-// queries (docs/deployment.md) run against the fixtures staged before 0717.
+// queries (docs/deployment.md) run against the fixtures staged before 0718.
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import {
@@ -35,7 +35,7 @@ import { provisionRoles } from "../src/provision-roles";
 setDefaultTimeout(180_000);
 
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
-const MIGRATION = "0717_subscription_personal_acceptance_reads.sql";
+const MIGRATION = "0718_subscription_personal_acceptance_reads.sql";
 const EMPTY = { version: 2, personal: [] };
 const key = Buffer.alloc(32, 61);
 const ROUTINES = [
@@ -44,7 +44,7 @@ const ROUTINES = [
   "opengeni_private.subscription_core_acceptance_authority_v2(text,uuid,uuid,uuid,text)",
   "opengeni_private.subscription_core_task_authority_v2(text,uuid,uuid,uuid,text)",
 ];
-/** The exact text 0717 inserts into each writer. */
+/** The exact text 0718 inserts into each writer. */
 const INSERTED = [
   "      prior_lifecycle text := current_setting('opengeni.organization_tenancy_lifecycle', true);\n",
   "        PERFORM pg_catalog.set_config('opengeni.organization_tenancy_lifecycle',\n" +
@@ -75,7 +75,7 @@ type Inventory = {
 
 let database: OwnerMigratedTestDatabase | null = null;
 let client: DbClient | null = null;
-/** State staged before 0717, on the same database. */
+/** State staged before 0718, on the same database. */
 let before: {
   owner: Owner;
   sessionId: string;
@@ -85,16 +85,16 @@ let before: {
   codex: unknown;
   core: unknown;
   routines: Routine[];
-  /** The runbook's queries as an operator runs them before deploying 0717. */
+  /** The runbook's queries as an operator runs them before deploying 0718. */
   inventory: Inventory;
 } | null = null;
 let posture: { unprovisioned: string[]; provisioned: string[] } | null = null;
 
-/** The 0717 runbook queries in docs/deployment.md: the owner posture, then the owners served. */
+/** The 0718 runbook queries in docs/deployment.md: the owner posture, then the owners served. */
 async function inventory(): Promise<Inventory> {
   const runbook = await readFile(new URL("../../../docs/deployment.md", import.meta.url), "utf8");
   const section = runbook.slice(
-    runbook.indexOf("### Personal Codex acceptance under row security (0717)"),
+    runbook.indexOf("### Personal Codex acceptance under row security (0718)"),
   );
   const start = section.indexOf("```sql\n") + "```sql\n".length;
   const queries = section
@@ -313,7 +313,7 @@ beforeAll(async () => {
   if (!realDb) return;
   database = await acquireOwnerMigratedTestDatabase("subscription-personal-acceptance-reads");
   if (!database) throw new Error("Real PostgreSQL is required");
-  // Stage a provisioned database without 0717, as a deployment is before it.
+  // Stage a provisioned database without 0718, as a deployment is before it.
   const staging = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
     await staging`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
@@ -342,7 +342,7 @@ beforeAll(async () => {
     inventory: await inventory(),
   };
   // A rolling migration keeps the previous binary's runtime posture until
-  // roles are provisioned again: apply 0717 alone, evaluate as the runtime
+  // roles are provisioned again: apply 0718 alone, evaluate as the runtime
   // role, then provision and evaluate again.
   const applying = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
@@ -350,7 +350,7 @@ beforeAll(async () => {
     await migrate(database.ownerUrl);
     const [applied] = await applying<{ count: number }[]>`
       select count(*)::int as count from schema_migrations where name = ${MIGRATION}`;
-    if (applied?.count !== 1) throw new Error("0717 was not applied by the second migrate");
+    if (applied?.count !== 1) throw new Error("0718 was not applied by the second migrate");
   } finally {
     await applying.end();
   }
@@ -375,7 +375,7 @@ afterAll(async () => {
   await database?.release();
 }, 180_000);
 
-describe.skipIf(!realDb)("0717 personal acceptance reads", () => {
+describe.skipIf(!realDb)("0718 personal acceptance reads", () => {
   test("the owner and the application role are bound by row security; the rolling posture holds", async () => {
     const roles = await database!.admin<{ superuser: boolean; bypass: boolean }[]>`
       select rolsuper as superuser, rolbypassrls as bypass
@@ -392,13 +392,13 @@ describe.skipIf(!realDb)("0717 personal acceptance reads", () => {
     expect(posture).toEqual({ unprovisioned: [], provisioned: [] });
   });
 
-  test("before 0717 every writer froze the empty value for a serviceable personal account", () => {
+  test("before 0718 every writer froze the empty value for a serviceable personal account", () => {
     expect(before!.sessionTurn).toEqual(EMPTY);
     expect(before!.task).toEqual(EMPTY);
     expect({ codex: before!.codex, core: before!.core }).toEqual({ codex: EMPTY, core: EMPTY });
   });
 
-  test("pre-merge inventory: the runbook finds the bound owner and the owner 0717 starts to serve", () => {
+  test("pre-merge inventory: the runbook finds the bound owner and the owner 0718 starts to serve", () => {
     expect(before!.inventory).toEqual({
       posture: [{ rolname: database!.ownerRole, rolsuper: false, rolbypassrls: false }],
       owners: [
@@ -420,7 +420,7 @@ describe.skipIf(!realDb)("0717 personal acceptance reads", () => {
       codex: personal(fresh),
       core: personal(fresh),
     });
-    // The owner staged before 0717 is served by new acceptances; frozen values stay.
+    // The owner staged before 0718 is served by new acceptances; frozen values stay.
     const staged = await ownerSession(before!.owner);
     expect(staged.turn).toEqual(personal(before!.owner));
     expect(await turnAuthority(before!.turnId)).toEqual(EMPTY);

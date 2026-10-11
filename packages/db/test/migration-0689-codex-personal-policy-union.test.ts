@@ -21,10 +21,10 @@ const precursor = "0712_subscription_core_generic_precursor.sql";
 const providerKeyedReach = "0713_subscription_core_provider_keyed_reach.sql";
 // 0714 redefines 0713's reach setters: held back and replayed with it.
 const workspaceManagedAccounts = "0714_subscription_workspace_managed_organization_accounts.sql";
-// 0715 builds on 0712's receipts and patches its helpers; it follows 0712.
-const compat = "0715_subscription_authority_compat.sql";
-// 0716 requires 0715's routines; it follows 0715.
-const fences = "0716_subscription_authority_fences.sql";
+// 0716 builds on 0712's receipts and patches its helpers; it follows 0712.
+const compat = "0716_subscription_authority_compat.sql";
+// 0717 requires 0716's routines; it follows 0716.
+const fences = "0717_subscription_authority_fences.sql";
 const key = Buffer.alloc(32, 87);
 const cases: Array<{
   name: string;

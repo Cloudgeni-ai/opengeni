@@ -54,11 +54,11 @@ const subscriptionCoreMigrations = [
   // Redefines the reach setters withheld 0713 creates.
   "0714_subscription_workspace_managed_organization_accounts.sql",
   // Builds on withheld 0712's receipts and patches the helpers it patched.
-  "0715_subscription_authority_compat.sql",
-  // Requires 0715's routines; it follows 0715.
-  "0716_subscription_authority_fences.sql",
+  "0716_subscription_authority_compat.sql",
+  // Requires 0716's routines; it follows 0716.
+  "0717_subscription_authority_fences.sql",
   // Patches the acceptance writers withheld 0669, 0688 and 0707 define.
-  "0717_subscription_personal_acceptance_reads.sql",
+  "0718_subscription_personal_acceptance_reads.sql",
 ] as const;
 const key = Buffer.alloc(32, 67);
 const ids = {

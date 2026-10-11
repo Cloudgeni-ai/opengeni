@@ -4525,9 +4525,9 @@ workspaces stays that way. Narrow such accounts back to their workspace
 (`allowedWorkspaces: []`) before restoring the setters, or restore only if
 a defect requires it.
 
-### Accepted authority compatibility (0715)
+### Accepted authority compatibility (0716)
 
-Migration `0715_subscription_authority_compat.sql` is **rolling** and inert on
+Migration `0716_subscription_authority_compat.sql` is **rolling** and inert on
 deploy. Design record:
 [subscription core, PR 0b](design/subscription-core-2026-10-07.md#pr-0b-authority-compatibility-and-fences).
 It requires 0712 and, like 0712, grants to the configured application roles
@@ -4547,12 +4547,12 @@ It requires 0712 and, like 0712, grants to the configured application roles
 - The scheduled-task execution digest ignores the new column, so existing run
   receipts stay valid.
 
-### Subscription authority fences (0716)
+### Subscription authority fences (0717)
 
-Migration `0716_subscription_authority_fences.sql` is **rolling**, requires
-0715 and grants nothing. Design record:
+Migration `0717_subscription_authority_fences.sql` is **rolling**, requires
+0716 and grants nothing. Design record:
 [subscription core, PR 0b](design/subscription-core-2026-10-07.md#pr-0b-authority-compatibility-and-fences).
-Unlike 0715, part of it acts on deploy:
+Unlike 0716, part of it acts on deploy:
 
 - Codex (already cut over): an internal turn delivered into a receiving
   context must carry the v2 accepted authority it copies (the context's, or
@@ -4568,7 +4568,7 @@ Unlike 0715, part of it acts on deploy:
 - Personal (`user`) SuperGrok and Claude accounts: under a migration owner
   without `BYPASSRLS` (the documented posture), disconnecting one deleted the
   credential but left its authority active, and connecting a personal Claude
-  account failed with `42501`. 0716 adds the missing owner policies and
+  account failed with `42501`. 0717 adds the missing owner policies and
   revokes the authorities earlier disconnects left active. A live run
   accepted for such a disconnected account then fails with
   `scheduled_xai_authority_changed` or `scheduled_claude_authority_changed`;
@@ -4584,11 +4584,11 @@ Unlike 0715, part of it acts on deploy:
 
 **Before deploying**, run this read-only inventory as a role that bypasses
 row security. Each row is one finding. Resolve the scheduled findings first
-(pause or edit the task, or let the run finish): after 0716, their tasks
+(pause or edit the task, or let the run finish): after 0717, their tasks
 cannot be admitted, their occurrences or reusable sessions are refused, or
 the run fails at claim. Record the counts of the two `inbox_` findings
 (history the fences never check again) and of
-`disconnected_personal_authority` (the authorities 0716 revokes).
+`disconnected_personal_authority` (the authorities 0717 revokes).
 
 ```sql
 WITH live_run AS (
@@ -4764,7 +4764,7 @@ WHERE turn.execution_context_turn_id IS NOT NULL
 ORDER BY 1, 2, 3, 4;
 ```
 
-| Finding | After 0716 |
+| Finding | After 0717 |
 | --- | --- |
 | `scheduled_task_claude_subject` | Every firing is refused (the dispatcher already refuses it). |
 | `scheduled_run_claude_accepted` | Admission would not accept this run's Claude values. |
@@ -4775,12 +4775,12 @@ ORDER BY 1, 2, 3, 4;
 | `disconnected_personal_authority` | Revoked: its credential was disconnected. |
 | `inbox_turn_v2`, `inbox_update_v2` | Such a delivery is refused; existing rows are not checked again. |
 
-Staging and production were not queried when 0716 was written; run the
+Staging and production were not queried when 0717 was written; run the
 inventory there before deploying it.
 
-### Personal Codex acceptance under row security (0717)
+### Personal Codex acceptance under row security (0718)
 
-Migration `0717_subscription_personal_acceptance_reads.sql` is **rolling**
+Migration `0718_subscription_personal_acceptance_reads.sql` is **rolling**
 and grants nothing. Design record:
 [subscription core, PR 0b](design/subscription-core-2026-10-07.md#pr-0b-authority-compatibility-and-fences).
 It acts on deploy for Codex, on databases whose migration owner is neither a
@@ -4797,10 +4797,10 @@ superuser nor `BYPASSRLS` (the documented posture):
   unchanged; only the read is fixed.
 - Values frozen earlier are not rewritten: the next turn accepted in a
   private session uses the personal account, but a scheduled task keeps the
-  value frozen when it was created, so tasks created before 0717 keep using
+  value frozen when it was created, so tasks created before 0718 keep using
   shared capacity until they are recreated.
 
-To see whether a database is affected, and which owners 0717 starts to serve,
+To see whether a database is affected, and which owners 0718 starts to serve,
 run as a role that bypasses row security:
 
 ```sql

@@ -654,7 +654,7 @@ test("owner inventory works without private conversation activation and isolates
           version: 1 as const,
           scope: "workspace" as const,
         },
-        // The firing's v2 value, as the dispatcher copies it (0716 compares).
+        // The firing's v2 value, as the dispatcher copies it (0717 compares).
         subscriptionAuthority: await getScheduledTaskSubscriptionAuthority(client.db, {
           workspaceId: scope.workspaceId,
           taskId: scheduled.id,

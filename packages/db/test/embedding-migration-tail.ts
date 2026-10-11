@@ -193,9 +193,9 @@ export const embeddingMigrationTail = [
   // Builds on 0712's receipts, adds a marker to the session and scheduled
   // carrier tables and patches the personal helpers 0712 patched; replay
   // after it.
-  "0715_subscription_authority_compat.sql",
-  // Requires 0715's routines and patches fences earlier migrations define.
-  "0716_subscription_authority_fences.sql",
+  "0716_subscription_authority_compat.sql",
+  // Requires 0716's routines and patches fences earlier migrations define.
+  "0717_subscription_authority_fences.sql",
   // Patches the acceptance writers withheld 0669, 0688 and 0707 define.
-  "0717_subscription_personal_acceptance_reads.sql",
+  "0718_subscription_personal_acceptance_reads.sql",
 ];

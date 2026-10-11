@@ -152,14 +152,14 @@ export async function subscriptionAuthorityV2ForScheduledTaskInTransaction(
   return SubscriptionPersonalAuthorityV2.parse(row.authority);
 }
 
-/** A carrier of delivered inbox input (0715 carrier kinds). */
+/** A carrier of delivered inbox input (0716 carrier kinds). */
 export type InboxAuthorityCarrier = {
   kind: "session_turn" | "session_system_update";
   id: string;
 };
 
 /**
- * The effective accepted authority of each inbox carrier (0715's reader), per
+ * The effective accepted authority of each inbox carrier (0716's reader), per
  * provider whose own drained cutover holds compatibility records (design 5.3,
  * inbox batching): keyed `kind:id`, one value per provider. Empty while no
  * provider has a receipt with a real commit time, and on historical ledgers

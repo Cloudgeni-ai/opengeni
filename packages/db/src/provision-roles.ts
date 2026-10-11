@@ -2190,7 +2190,7 @@ BEGIN
       'drop_subscription_core_owner_capabilities(text,uuid)',
       'subscription_core_connection_target(text,uuid,uuid,uuid,uuid,uuid,text,bigint)',
       'apply_subscription_core_auto_assignments(text,uuid,uuid,boolean)',
-      -- Migration 0715: the authority marker and compatibility guards,
+      -- Migration 0716: the authority marker and compatibility guards,
       -- resolvers and commit-time check are owner-only.
       'stamp_subscription_authority_inserted_at()',
       'keep_subscription_authority_inserted_at()',
@@ -2211,7 +2211,7 @@ BEGIN
       'subscription_compat_leave_scope(text[])',
       'subscription_compat_effective(text,text,uuid,uuid,bigint)',
       'enforce_subscription_authority_compat()',
-      -- Migration 0716: the fences' helpers are owner-only.
+      -- Migration 0717: the fences' helpers are owner-only.
       'subscription_v2_copy_matches(jsonb,jsonb)',
       'subscription_scheduled_firing_v2(uuid,uuid,uuid,bigint)',
       'subscription_personal_entry_serviceable(uuid,jsonb)',

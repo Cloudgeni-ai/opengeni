@@ -5,7 +5,7 @@
 -- "Findings in earlier merged work", rows 2 and 3).
 --
 -- 1. The 0608 inbox fence compares the delivering turn's v2 value with its
---    delivery source (0715's delivery resolver: a pure goal continuation reads
+--    delivery source (0716's delivery resolver: a pure goal continuation reads
 --    the goal's causal turn, any other delivery the receiving context), and
 --    each delivered causal update's v2 value with the turn's. After a
 --    provider's receipt it also compares the provider's effective authority.
@@ -45,7 +45,7 @@ BEGIN
     OR to_regprocedure(
       'opengeni_subscription_internal.subscription_compat_expected(text,timestamptz,uuid,text,uuid,bigint,text)') IS NULL
   THEN
-    RAISE EXCEPTION '0716 requires the 0715 accepted authority compatibility routines'
+    RAISE EXCEPTION '0717 requires the 0716 accepted authority compatibility routines'
       USING ERRCODE = '55000';
   END IF;
 END
@@ -68,7 +68,7 @@ $body$;
 -- revision's frozen value, narrowed to the empty value when it holds a
 -- personal entry and the revision's authorizer is not the task owner. NULL
 -- without the revision row or for a deleted task (the writer then freezes
--- none). 0715's scheduled resolver applies the same rule to records.
+-- none). 0716's scheduled resolver applies the same rule to records.
 CREATE FUNCTION opengeni_subscription_internal.subscription_scheduled_firing_v2(
   p_account_id uuid, p_workspace_id uuid, p_task_id uuid, p_task_authority_revision bigint)
 RETURNS jsonb
@@ -139,7 +139,7 @@ $body$;
 -- The personal entries a scheduled run carries, one per provider whose own
 -- drained cutover holds records: the firing's v2 entry, else the personal
 -- entry of the revision's compatibility record as the occurrence copies it
--- (0715's scheduled resolver and copy rule). Empty while no provider has a
+-- (0716's scheduled resolver and copy rule). Empty while no provider has a
 -- receipt with a real commit time.
 CREATE FUNCTION opengeni_subscription_internal.subscription_scheduled_run_personal_entries(
   p_account_id uuid, p_workspace_id uuid, p_run_id uuid)
@@ -660,7 +660,7 @@ BEGIN
           SELECT 1 FROM claude_subscription_credentials credential
           WHERE credential.id = authority.resource_id)))
   ) THEN
-    RAISE EXCEPTION '0716 left a disconnected personal subscription authority active'
+    RAISE EXCEPTION '0717 left a disconnected personal subscription authority active'
       USING ERRCODE = '55000';
   END IF;
 END
