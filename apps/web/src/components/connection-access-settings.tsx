@@ -245,6 +245,24 @@ export function ConnectionAccessRows({
   );
 }
 
+/** The workspaces that keep an account as their own, by name where listed. */
+function localNames(
+  local: readonly string[],
+  workspaces: readonly { id: string; name: string }[],
+): string {
+  const names = local.flatMap(
+    (id) => workspaces.find((workspace) => workspace.id === id)?.name ?? [],
+  );
+  if (names.length !== local.length) {
+    return local.length === 1
+      ? "the workspace that keeps it as its own"
+      : "the workspaces that keep it as their own";
+  }
+  return names.length <= 2
+    ? names.join(" and ")
+    : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
+}
+
 function toggle(values: string[], value: string, checked: boolean): string[] {
   return checked ? [...new Set([...values, value])] : values.filter((item) => item !== value);
 }
@@ -424,6 +442,12 @@ export function ConnectionAccessFormPage({
                   </p>
                 ) : null}
               </fieldset>
+            ) : null}
+            {scope === "people" && local.length > 0 ? (
+              // A workspace that keeps it as its own follows the people choice too.
+              <p className="m-0 text-sm text-fg-muted">
+                {`In ${localNames(local, data.workspaces)} too, only these people can use it.`}
+              </p>
             ) : null}
             {scope === "people" && !peopleListed ? (
               <p className="m-0 text-sm text-fg-muted">

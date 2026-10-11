@@ -628,6 +628,8 @@ test("a workspace's own copy no workspace manages is an organization account: it
     await flush();
     await choose("Only selected people");
     expect(container.textContent).not.toContain("Personal workspaces");
+    // The workspace that keeps it as its own follows the people choice too.
+    expect(container.textContent).toContain("In Engineering too, only these people can use it.");
     expect(container.textContent).toContain("No one can use it.");
     await choose("Alex Morgan");
     await choose("sam@example.com");

@@ -484,7 +484,7 @@ export function OrganizationModelsList({
         title="Accounts"
         description={
           administrator
-            ? "Subscriptions, API keys and credits that pay for models. Choose who can use each one."
+            ? "Subscriptions, API keys and credits that pay for models."
             : workspaces.some((workspace) => !workspace.personal)
               ? "Subscriptions, API keys and credits that pay for models in your workspaces."
               : "Subscriptions, API keys and credits that pay for models in your Personal workspace."
@@ -498,7 +498,7 @@ export function OrganizationModelsList({
             title="No accounts connected"
             description={
               administrator
-                ? "Connect a subscription or an API key, then choose which workspaces use it."
+                ? "Connect a subscription or an API key, then choose who can use it."
                 : "Nothing pays for models in your workspaces yet."
             }
             action={administrator ? connect : null}

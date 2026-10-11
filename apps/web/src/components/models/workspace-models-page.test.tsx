@@ -1385,6 +1385,7 @@ describe("One Models page for the organization and the workspace", () => {
       // No "<workspace> only" tag while its reach loads: it may be shared wider.
       expect(ownRow().textContent).not.toContain("Design preview only");
       expect(ownRow().textContent).not.toContain("Everyone in Acme");
+      expect(ownRow().textContent).not.toContain("Shared by");
       await act(async () =>
         resolveAccess({
           policy: openPolicy,
@@ -2026,8 +2027,11 @@ describe("One Models page for the organization and the workspace", () => {
       ];
       const view = await render();
       try {
-        // Accounts reach workspaces or people: the section doesn't promise only workspaces.
-        expect(view.container.textContent).toContain("Choose who can use each one.");
+        // Accounts reach workspaces or people, and their tags say which: the
+        // section doesn't promise only workspaces.
+        expect(view.container.textContent).toContain(
+          "Connect accountSubscriptions, API keys and credits that pay for models.Company plan",
+        );
         expect(rowsNamed(view.container, "Team plan")).toHaveLength(1);
         expect(rowsNamed(view.container, "Team plan")[0]!.textContent).toContain(
           "Design preview only",
@@ -2388,6 +2392,9 @@ describe("One Models page for the organization and the workspace", () => {
         await flush();
         expect(rowsNamed(view.container, "Research plan")[0]!.textContent).toContain(
           "Not available here",
+        );
+        expect(view.container.textContent).toContain(
+          "New work uses the organization's Codex accounts, even when accounts are connected here.",
         );
         expect(view.container.textContent).not.toContain("which here");
       } finally {
