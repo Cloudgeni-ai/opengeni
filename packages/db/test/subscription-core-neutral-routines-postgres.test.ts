@@ -34,6 +34,11 @@ let client: DbClient | null = null;
 let appConnectionUrl = "";
 /** Runtime posture violations right after applying 0707 to a provisioned database, before provisioning again. */
 let unprovisionedPostureViolations: string[] | null = null;
+// A deployment's own application role (not named opengeni_app), configured
+// for the migration, and the 0715 routines it could execute before roles were
+// provisioned again (an older binary's posture requires EXECUTE on them).
+const customApplicationRole = `og_m4f_custom_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
+let customRoleKindRoutinesBeforeProvision: Record<string, boolean> | null = null;
 
 beforeAll(async () => {
   if (!realDb) return;
@@ -43,15 +48,20 @@ beforeAll(async () => {
   // until roles are provisioned again. Stage a provisioned database without
   // 0707 (as a deployment is before it), apply 0707 alone, and evaluate the
   // full runtime posture as the runtime role before provisioning again. 0712
-  // patches routines 0707 creates and 0713 builds on 0707's registry, so both
-  // are withheld and applied with it.
+  // patches routines 0707 creates, 0713 builds on 0707's registry, 0714
+  // redefines 0713's reach setters and 0715 rewrites routines 0707, 0713 and
+  // 0714 create, so all four are withheld and applied with it.
   const neutral = "0707_subscription_core_neutral_routines.sql";
+  // Later migrations that rewrite 0707's routines are withheld with it and
+  // replayed after it (their own rolling posture is checked the same way).
   const withheld = [
     neutral,
     "0712_subscription_core_generic_precursor.sql",
     "0713_subscription_core_provider_keyed_reach.sql",
     // Redefines 0713's reach setters.
     "0714_subscription_workspace_managed_organization_accounts.sql",
+    // Rewrites routines 0707, 0713 and 0714 create.
+    "0715_subscription_core_api_key_connections.sql",
   ];
   const owner = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
@@ -60,11 +70,30 @@ beforeAll(async () => {
     await migrate(database.ownerUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
     await owner`delete from schema_migrations where name in ${owner(withheld)}`;
-    await migrate(database.ownerUrl);
+    await database.admin.unsafe(
+      `CREATE ROLE "${customApplicationRole}" NOLOGIN NOSUPERUSER NOBYPASSRLS`,
+    );
+    await migrate(database.ownerUrl, undefined, {
+      applicationDatabaseRoles: ["opengeni_app", customApplicationRole],
+    });
+    const kindRoutines = [
+      "opengeni_private.subscription_core_connection_kind(text)",
+      "opengeni_private.guard_subscription_provider_connection_kind()",
+    ];
+    customRoleKindRoutinesBeforeProvision = Object.fromEntries(
+      await Promise.all(
+        kindRoutines.map(async (signature) => {
+          const [row] = await database!.admin<{ allowed: boolean }[]>`
+            select has_function_privilege(${customApplicationRole}, ${signature}, 'EXECUTE') as allowed`;
+          return [signature, row?.allowed ?? false] as const;
+        }),
+      ),
+    );
     const [applied] = await owner<{ count: number }[]>`
       select count(*)::int as count from schema_migrations where name in ${owner(withheld)}`;
-    if (applied?.count !== withheld.length)
-      throw new Error("0707, 0712, 0713 and 0714 were not applied by the second migrate");
+    if (applied?.count !== withheld.length) {
+      throw new Error("0707 and its dependents were not applied by the second migrate");
+    }
   } finally {
     await owner.end();
   }
@@ -95,6 +124,12 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await client?.close();
+  if (database) {
+    await database.admin.unsafe(`DROP OWNED BY "${customApplicationRole}"`).catch(() => undefined);
+    await database.admin
+      .unsafe(`DROP ROLE IF EXISTS "${customApplicationRole}"`)
+      .catch(() => undefined);
+  }
   await database?.release();
 }, 180_000);
 
@@ -373,7 +408,7 @@ describe("provider-neutral subscription-core routines (migration 0707)", () => {
   );
 
   test.skipIf(!realDb)(
-    "neutral routine sources name no provider and branch on no provider",
+    "neutral routine sources name no provider or connection kind and branch on neither",
     async () => {
       const rows = await database!.admin<{ name: string; definition: string }[]>`
         select proc.proname as name, pg_get_functiondef(proc.oid) as definition
@@ -382,18 +417,59 @@ describe("provider-neutral subscription-core routines (migration 0707)", () => {
           and proc.proname like '%subscription_core%'`;
       expect(rows.length).toBe(
         SUBSCRIPTION_CORE_NEUTRAL_PRIVATE_ROUTINES.length +
-          SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES.length,
+          SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES.length +
+          // 0715: the registered connection-kind lookup the routines call.
+          1,
       );
+      expect(rows.some((row) => row.name === "subscription_core_connection_kind")).toBe(true);
       for (const row of rows) {
         expect({
           name: row.name,
           provider:
             /codex|openai|chatgpt|claude|anthropic|\bxai\b|grok/i.exec(row.definition)?.[0] ?? null,
+          // A neutral routine reads a provider's connection kind from the
+          // registry (`subscription_core_connection_kind`), never a literal
+          // (in a comparison, an insert or anywhere else), so API-key and
+          // subscription providers share every routine.
+          connectionKind: /'(?:subscription|api_key)'/i.exec(row.definition)?.[0] ?? null,
         }).toEqual({
           name: row.name,
           provider: null,
+          connectionKind: null,
         });
       }
+      // Each routine 0715 rewrote still reads the registered kind exactly
+      // where its earlier definition compared (or inserted) a literal kind, plus
+      // the two personal reads 0715 gave a kind filter (personal management's
+      // target lookup and the personal connect's authority generation): a
+      // dropped kind filter fails here even where no seeded row reaches it.
+      const kindReads: Record<string, number> = {
+        subscription_core_connection_target: 1,
+        begin_subscription_core_refresh: 1,
+        persist_subscription_core_refresh: 1,
+        persist_subscription_core_refresh_with_plan: 1,
+        fail_subscription_core_refresh: 1,
+        quarantine_subscription_core_connection: 1,
+        recover_subscription_core_connection_health: 1,
+        subscription_core_acceptance_authority_v2: 1,
+        subscription_core_task_authority_v2: 1,
+        persist_subscription_core_connection_refresh: 1,
+        fail_subscription_core_connection_refresh: 1,
+        connect_subscription_core_personal: 4,
+        manage_subscription_core_personal: 1,
+        disconnect_subscription_core_connection: 1,
+        subscription_core_personal_connections: 1,
+        set_subscription_core_reach: 1,
+        set_subscription_core_reach_allocator: 1,
+      };
+      const lookup = "opengeni_private.subscription_core_connection_kind(p_provider)";
+      expect(
+        Object.fromEntries(
+          rows
+            .filter((row) => row.name in kindReads)
+            .map((row) => [row.name, row.definition.split(lookup).length - 1]),
+        ),
+      ).toEqual(kindReads);
     },
     180_000,
   );
@@ -847,6 +923,12 @@ describe("provider-neutral subscription-core routines (migration 0707)", () => {
     "applied to a provisioned database, 0707 keeps the runtime posture clean before provisioning again",
     () => {
       expect(unprovisionedPostureViolations).toEqual([]);
+      // 0715 grants its two routines to every configured application role,
+      // not only the default name, before provision-roles.
+      expect(customRoleKindRoutinesBeforeProvision).toEqual({
+        "opengeni_private.subscription_core_connection_kind(text)": true,
+        "opengeni_private.guard_subscription_provider_connection_kind()": true,
+      });
     },
   );
 

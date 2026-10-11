@@ -26,8 +26,9 @@ export type ProviderCapabilities = {
  * Shared error outcomes every adapter classifies into (SUB-PROV-01). A
  * refusal that limits one model only carries its `modelId`, so the core can
  * record it as that model's cooldown on the connection
- * (`modelCooldownFromOutcome`). No settlement path records it yet; the first
- * adapter that classifies per-model refusals wires it (X1b, C1b).
+ * (`modelCooldownFromOutcome`). The shared settlement step
+ * (`planSubscriptionCoreRefusal`) records it; the live worker does once it
+ * adopts that step.
  */
 export type ProviderErrorOutcome =
   | { kind: "exhausted"; resetAt: number | null; modelId?: ModelId }
@@ -176,6 +177,14 @@ export interface SubscriptionCoreAdapter<Credential = unknown> {
     readonly forbiddenQuarantineMs: number;
     /** How long a model the plan is not entitled to stays cooled down. */
     readonly entitlementCooldownMs: number;
+    /** How long a rate-limited connection rests when the provider gave no retry time. */
+    readonly rateLimitFallbackMs: number;
+    /**
+     * How long an exhausted connection (usage limit or spend budget) rests
+     * when the provider gave no reset. Placement retries it then, so a
+     * connector without a usage reading still recovers on its own.
+     */
+    readonly exhaustedFallbackMs: number;
   };
   /** Plaintext codec for the encrypted credential column. */
   readonly credential: {
