@@ -973,6 +973,11 @@ describe.skipIf(!realDb)("0716 compatibility paths after a provider's own receip
           { kind: "agent_message", lineage: callerLineage(caller) },
           true,
         );
+        // The delivering turn copies the context's Codex v2 value too, as
+        // the planner writes it (0717's inbox fence compares it).
+        const [contextRow] = await database!.admin<{ v2: unknown }[]>`
+          select subscription_authority as v2 from session_turns
+          where id = ${context.turnId}::uuid`;
         return await writeTurn(
           session,
           {
@@ -980,6 +985,7 @@ describe.skipIf(!realDb)("0716 compatibility paths after a provider's own receip
             status: "running",
             human: contextHuman,
             executionContextTurnId: context.turnId,
+            subscriptionAuthority: contextRow!.v2 ?? undefined,
           },
           copyRecord,
           { deliver: [message] },

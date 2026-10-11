@@ -4675,6 +4675,260 @@ It requires 0712 and, like 0712, grants to the configured application roles
 - The scheduled-task execution digest ignores the new column, so existing run
   receipts stay valid.
 
+### Subscription authority fences (0717)
+
+Migration `0717_subscription_authority_fences.sql` is **rolling**, requires
+0716 and grants nothing. Design record:
+[subscription core, PR 0b](design/subscription-core-2026-10-07.md#pr-0b-authority-compatibility-and-fences).
+Unlike 0716, part of it acts on deploy:
+
+- Codex (already cut over): an internal turn delivered into a receiving
+  context must carry the v2 accepted authority it copies (the context's, or
+  for a pure goal continuation the goal's causal turn's), a delivered causal
+  update frozen with another value is refused, and a scheduled occurrence
+  must carry its firing's value. Writers already copy these values, so only
+  drifted rows are refused; nothing else changes for Codex.
+- Claude: admission, occurrences, the generated session and the scheduled
+  turn compare the accepted Claude snapshot and causal subject as they do
+  for SuperGrok. A live run whose accepted `user` Claude authority was
+  revoked fails with `scheduled_claude_authority_changed` at claim, and the
+  host MCP, external link and MCP operation guards refuse it.
+- Personal (`user`) SuperGrok and Claude accounts: under a migration owner
+  without `BYPASSRLS` (the documented posture), disconnecting one deleted the
+  credential but left its authority active, and connecting a personal Claude
+  account failed with `42501`. 0717 adds the missing owner policies and
+  revokes every active personal SuperGrok or Claude authority whose
+  credential is gone: those earlier disconnects left active, and those whose
+  credential went with a deleted workspace (the credential's workspace
+  foreign key cascades, the authority's only loses its origin workspace). A
+  live run accepted for such an account then fails with
+  `scheduled_xai_authority_changed` or `scheduled_claude_authority_changed`;
+  connected accounts are unaffected. 0717 fixes the disconnect path only, so
+  after it an authority whose credential went with a deleted workspace stays
+  active (and without a credential grants nothing) until a later fix; the
+  inventory below lists both kinds.
+- The receipt switch and the effective-authority comparisons stay inert
+  until SuperGrok's or Claude's own cutover records its receipt.
+- It recreates the `scheduled_turn_execution_immutable` trigger on
+  `session_turns`, adds policies on `organization_memberships` and
+  `organization_user_resource_authorities`, and briefly relaxes FORCE row
+  security for the owner on that table and both personal credential tables
+  for the repair.
+- Locks: it first takes ACCESS EXCLUSIVE on `organization_memberships`, both
+  personal credential tables, `organization_user_resource_authorities` and
+  `session_turns` together, waiting at most 100 ms per lock and releasing
+  everything and retrying after a short pause when it cannot take them all,
+  so no cycle between it and one live transaction can form (with
+  `deadlock_timeout` at its default of one second or more). A cycle through
+  a third transaction can still abort a live one with a deadlock error (one
+  that had already waited about a second behind other live work); this is
+  rare and reported as retryable, and the migration is never the victim.
+  While it retries, reads of these tables stall up to 100 ms at a time.
+  While it holds them, for well under a second, private-session reads, turn
+  writes and personal connects and disconnects wait for it. If it cannot
+  take the whole set within 30 seconds the Job fails with `55P03`, the
+  migration rolls back entirely, and it is safe to retry. Before retrying,
+  look for what held one of these tables: a running vacuum
+  (`pg_stat_progress_vacuum`; the short waits never cancel autovacuum) or a
+  long-open transaction (`pg_stat_activity`).
+
+**Before deploying**, run this read-only inventory as a role that bypasses
+row security. Each row is one finding. Resolve the scheduled findings first
+(pause or edit the task, or let the run finish): after 0717, their tasks
+cannot be admitted, their occurrences or reusable sessions are refused, or
+the run fails at claim. Record the counts of the two `inbox_` findings
+(history the fences never check again) and of
+`disconnected_personal_authority` (the authorities 0717 revokes: credentials
+removed by a disconnect or with a deleted workspace).
+
+```sql
+WITH live_run AS (
+  SELECT run.id, run.account_id, run.workspace_id, run.task_id, run.session_id,
+    run.task_authority_revision, run.accepted_execution_snapshot AS accepted,
+    coalesce(run.accepted_execution_snapshot -> 'claudeProviderAccountAuthoritySnapshot',
+      '{"version":1,"scope":"workspace"}'::jsonb) AS accepted_claude,
+    task.owner_subject_id AS task_owner, task.deleted_at AS task_deleted_at,
+    task.authority_revision AS task_revision,
+    task.claude_provider_account_authority_snapshot AS task_claude,
+    task.reusable_session_id
+  FROM scheduled_task_runs run
+  JOIN scheduled_tasks task ON task.id = run.task_id
+    AND task.account_id = run.account_id AND task.workspace_id = run.workspace_id
+  WHERE run.action_kind = 'agent_turn' AND run.status IN ('queued', 'dispatched')
+    AND run.accepted_execution_snapshot IS NOT NULL
+), occurrence AS (
+  SELECT update_row.id, update_row.account_id, update_row.workspace_id,
+    update_row.lineage, update_row.subscription_authority,
+    update_row.claude_provider_account_authority_snapshot AS claude,
+    run.accepted, run.accepted_claude, run.task_owner, run.task_deleted_at,
+    run.task_id, run.task_authority_revision
+  FROM session_system_updates update_row
+  JOIN live_run run ON run.id = update_row.scheduled_task_run_id
+    AND run.account_id = update_row.account_id AND run.workspace_id = update_row.workspace_id
+)
+SELECT 'scheduled_task_claude_subject' AS finding, task.account_id, task.workspace_id,
+  task.id AS row_id
+FROM scheduled_tasks task
+WHERE task.status = 'active' AND task.deleted_at IS NULL
+  AND task.action ->> 'kind' = 'agent_turn'
+  AND task.claude_provider_account_authority_snapshot ->> 'scope' = 'user'
+  AND (task.owner_subject_id IS NULL
+    OR (task.xai_provider_account_authority_snapshot ->> 'scope' = 'user'
+      AND task.created_by_subject_id IS DISTINCT FROM task.owner_subject_id))
+UNION ALL
+SELECT 'scheduled_run_claude_accepted', run.account_id, run.workspace_id, run.id
+FROM live_run run
+WHERE (run.task_revision = run.task_authority_revision
+    AND run.accepted_claude IS DISTINCT FROM run.task_claude)
+  OR CASE WHEN run.accepted_claude ->> 'scope' = 'user'
+    THEN run.task_owner IS NULL
+      OR run.accepted ->> 'claudeAuthoritySubjectId' IS DISTINCT FROM run.task_owner
+      OR (run.accepted -> 'xaiProviderAccountAuthoritySnapshot' ->> 'scope' = 'user'
+        AND run.accepted ->> 'xaiAuthoritySubjectId' IS DISTINCT FROM run.task_owner)
+    ELSE run.accepted ->> 'claudeAuthoritySubjectId' IS NOT NULL END
+UNION ALL
+SELECT 'scheduled_occurrence_claude', occurrence.account_id, occurrence.workspace_id,
+  occurrence.id
+FROM occurrence
+WHERE occurrence.claude IS DISTINCT FROM occurrence.accepted_claude
+  OR occurrence.lineage ->> 'claudeAuthoritySubjectId'
+    IS DISTINCT FROM occurrence.accepted ->> 'claudeAuthoritySubjectId'
+UNION ALL
+SELECT 'scheduled_occurrence_v2', occurrence.account_id, occurrence.workspace_id,
+  occurrence.id
+FROM occurrence
+WHERE NOT EXISTS (
+  SELECT 1
+  FROM (VALUES ((occurrence.accepted -> 'task' ->> 'authorityRevision')::bigint),
+    (occurrence.task_authority_revision)) candidate(revision_number)
+  LEFT JOIN LATERAL (
+    SELECT CASE
+      WHEN revision.subscription_authority IS NULL THEN NULL
+      WHEN jsonb_typeof(revision.subscription_authority -> 'personal') = 'array'
+        AND jsonb_array_length(revision.subscription_authority -> 'personal') > 0
+        AND revision.subject_id IS DISTINCT FROM occurrence.task_owner
+      THEN '{"version":2,"personal":[]}'::jsonb
+      ELSE revision.subscription_authority END AS v2
+    FROM scheduled_task_revision_authorities revision
+    WHERE revision.account_id = occurrence.account_id
+      AND revision.workspace_id = occurrence.workspace_id
+      AND revision.task_id = occurrence.task_id
+      AND revision.task_authority_revision = candidate.revision_number
+      AND occurrence.task_deleted_at IS NULL
+  ) firing ON true
+  WHERE CASE WHEN firing.v2 IS NULL
+    THEN occurrence.subscription_authority IS NULL
+      OR occurrence.subscription_authority = '{"version":2,"personal":[]}'::jsonb
+    ELSE occurrence.subscription_authority = firing.v2 END)
+UNION ALL
+SELECT 'scheduled_session_claude', run.account_id, run.workspace_id, run.id
+FROM live_run run
+JOIN sessions session_row ON session_row.account_id = run.account_id
+  AND session_row.workspace_id = run.workspace_id
+  AND session_row.id = coalesce(run.session_id, CASE
+    WHEN run.accepted -> 'task' ->> 'runMode' = 'reusable_session'
+    THEN run.reusable_session_id END)
+WHERE coalesce(run.accepted -> 'targetSessionExecution', 'null'::jsonb) = 'null'::jsonb
+  AND session_row.initial_claude_provider_account_authority_snapshot
+    IS DISTINCT FROM run.accepted_claude
+UNION ALL
+SELECT 'scheduled_run_claude_authority', run.account_id, run.workspace_id, run.id
+FROM live_run run
+WHERE run.accepted_claude ->> 'scope' = 'user'
+  AND NOT EXISTS (
+    SELECT 1 FROM organization_user_resource_authorities authority
+    WHERE authority.account_id = run.account_id
+      AND authority.organization_membership_id::text
+        = run.accepted -> 'causalHumanAuthority' ->> 'organizationMembershipId'
+      AND authority.resource_kind = 'claude_subscription'
+      AND authority.generation::text = run.accepted_claude ->> 'authorityGeneration'
+      AND authority.status = 'active' AND authority.revoked_at IS NULL
+      AND EXISTS (SELECT 1 FROM claude_subscription_credentials credential
+        WHERE credential.id = authority.resource_id))
+UNION ALL
+SELECT 'scheduled_run_xai_authority', run.account_id, run.workspace_id, run.id
+FROM live_run run
+WHERE run.accepted -> 'xaiProviderAccountAuthoritySnapshot' ->> 'scope' = 'user'
+  AND NOT EXISTS (
+    SELECT 1 FROM organization_user_resource_authorities authority
+    WHERE authority.account_id = run.account_id
+      AND authority.organization_membership_id::text
+        = run.accepted -> 'causalHumanAuthority' ->> 'organizationMembershipId'
+      AND authority.resource_kind = 'xai_subscription'
+      AND authority.generation::text
+        = run.accepted -> 'xaiProviderAccountAuthoritySnapshot' ->> 'authorityGeneration'
+      AND authority.status = 'active' AND authority.revoked_at IS NULL
+      AND EXISTS (SELECT 1 FROM xai_subscription_credentials credential
+        WHERE credential.id = authority.resource_id))
+UNION ALL
+SELECT 'disconnected_personal_authority', authority.account_id,
+  authority.origin_workspace_id, authority.id
+FROM organization_user_resource_authorities authority
+WHERE authority.status = 'active'
+  AND ((authority.resource_kind = 'xai_subscription' AND NOT EXISTS (
+      SELECT 1 FROM xai_subscription_credentials credential
+      WHERE credential.id = authority.resource_id))
+    OR (authority.resource_kind = 'claude_subscription' AND NOT EXISTS (
+      SELECT 1 FROM claude_subscription_credentials credential
+      WHERE credential.id = authority.resource_id)))
+UNION ALL
+SELECT 'inbox_turn_v2', turn.account_id, turn.workspace_id, turn.id
+FROM session_turns turn
+JOIN session_turns context ON context.account_id = turn.account_id
+  AND context.workspace_id = turn.workspace_id AND context.session_id = turn.session_id
+  AND context.id = turn.execution_context_turn_id
+CROSS JOIN LATERAL (
+  SELECT count(*) > 0 AND bool_and(delivered.kind = 'goal_continuation') AS pure_goal,
+    (array_agg(lower(delivered.lineage ->> 'causalTurnId')
+      ORDER BY delivered.created_at, delivered.id))[1] AS goal_turn_id
+  FROM session_system_updates delivered
+  WHERE delivered.account_id = turn.account_id AND delivered.workspace_id = turn.workspace_id
+    AND delivered.session_id = turn.session_id AND delivered.delivered_turn_id = turn.id
+    AND delivered.state = 'delivered'
+) delivery
+LEFT JOIN session_turns goal ON delivery.pure_goal
+  AND goal.workspace_id = turn.workspace_id AND goal.session_id = turn.session_id
+  AND goal.id::text = delivery.goal_turn_id
+  AND goal.initiating_human_subject_id = turn.initiating_human_subject_id
+CROSS JOIN LATERAL (SELECT CASE WHEN delivery.pure_goal THEN goal.subscription_authority
+  ELSE context.subscription_authority END AS v2) expected
+WHERE turn.execution_context_turn_id IS NOT NULL
+  AND NOT CASE WHEN expected.v2 IS NULL
+    THEN turn.subscription_authority IS NULL
+      OR turn.subscription_authority = '{"version":2,"personal":[]}'::jsonb
+    ELSE turn.subscription_authority = expected.v2 END
+UNION ALL
+SELECT 'inbox_update_v2', update_row.account_id, update_row.workspace_id, update_row.id
+FROM session_turns turn
+JOIN session_system_updates update_row ON update_row.account_id = turn.account_id
+  AND update_row.workspace_id = turn.workspace_id AND update_row.session_id = turn.session_id
+  AND update_row.delivered_turn_id = turn.id AND update_row.state = 'delivered'
+WHERE turn.execution_context_turn_id IS NOT NULL
+  AND update_row.kind <> 'agent_message' AND update_row.kind NOT LIKE 'child\_%'
+  AND update_row.subscription_authority IS NOT NULL
+  AND update_row.subscription_authority IS DISTINCT FROM turn.subscription_authority
+  AND EXISTS (
+    SELECT 1 FROM session_system_updates other
+    WHERE other.account_id = turn.account_id AND other.workspace_id = turn.workspace_id
+      AND other.session_id = turn.session_id AND other.delivered_turn_id = turn.id
+      AND other.state = 'delivered' AND other.kind <> 'goal_continuation')
+ORDER BY 1, 2, 3, 4;
+```
+
+| Finding | After 0717 |
+| --- | --- |
+| `scheduled_task_claude_subject` | Every firing is refused (the dispatcher already refuses it). |
+| `scheduled_run_claude_accepted` | Admission would not accept this run's Claude values. |
+| `scheduled_occurrence_claude`, `scheduled_occurrence_v2` | The occurrence would be refused at insert. |
+| `scheduled_session_claude` | Binding the run to its session is refused. |
+| `scheduled_run_claude_authority` | The run fails with `scheduled_claude_authority_changed`. |
+| `scheduled_run_xai_authority` | The run fails with `scheduled_xai_authority_changed`. |
+| `disconnected_personal_authority` | Revoked: its credential was disconnected. |
+| `inbox_turn_v2`, `inbox_update_v2` | Such a delivery is refused; existing rows are not checked again. |
+
+Staging and production were not queried when 0717 was written; run the
+inventory there before deploying it.
+
 ### Organization settings locks (0717)
 
 Migration `0717_subscription_settings_locks.sql` is **rolling**. It changes no

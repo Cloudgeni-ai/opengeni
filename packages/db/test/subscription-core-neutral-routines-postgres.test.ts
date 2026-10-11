@@ -50,8 +50,8 @@ beforeAll(async () => {
   // full runtime posture as the runtime role before provisioning again. 0712
   // patches routines 0707 creates, 0713 builds on 0707's registry, 0714
   // redefines 0713's reach setters and 0715 rewrites routines 0707, 0713 and
-  // 0714 create, and 0716 builds on 0712's receipts and patches its helpers,
-  // so all five are withheld and applied with it.
+  // 0714 create, 0716 builds on 0712's receipts and patches its helpers, and
+  // 0717 requires 0716's routines, so all six are withheld and applied with it.
   const neutral = "0707_subscription_core_neutral_routines.sql";
   // Later migrations that rewrite 0707's routines are withheld with it and
   // replayed after it (their own rolling posture is checked the same way).
@@ -64,6 +64,7 @@ beforeAll(async () => {
     // Rewrites routines 0707, 0713 and 0714 create.
     "0715_subscription_core_api_key_connections.sql",
     "0716_subscription_authority_compat.sql",
+    "0717_subscription_authority_fences.sql",
   ];
   const owner = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {

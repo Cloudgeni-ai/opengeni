@@ -53,6 +53,8 @@ const WORKSPACE_MANAGED_ACCOUNTS = "0714_subscription_workspace_managed_organiza
 const API_KEY_CONNECTIONS = "0715_subscription_core_api_key_connections.sql";
 // 0716 builds on 0712's receipts and patches its helpers; it follows 0712.
 const COMPAT = "0716_subscription_authority_compat.sql";
+// 0717 requires 0716's routines; it follows 0716.
+const FENCES = "0717_subscription_authority_fences.sql";
 const key = Buffer.alloc(32, 72);
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
@@ -710,9 +712,9 @@ describe.skipIf(!realDb)(
       await owner`CREATE TABLE schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`;
       // 0712 records the provider cutover receipts and requires the committed
       // 0689, so it is withheld with it and applied by the same cutover run.
-      await owner`INSERT INTO schema_migrations(name) VALUES(${MIGRATION}), (${PRECURSOR}), (${PROVIDER_KEYED_REACH}), (${WORKSPACE_MANAGED_ACCOUNTS}), (${API_KEY_CONNECTIONS}), (${COMPAT})`;
+      await owner`INSERT INTO schema_migrations(name) VALUES(${MIGRATION}), (${PRECURSOR}), (${PROVIDER_KEYED_REACH}), (${WORKSPACE_MANAGED_ACCOUNTS}), (${API_KEY_CONNECTIONS}), (${COMPAT}), (${FENCES})`;
       await migrate(owned.ownerUrl, undefined, { applicationDatabaseRoles: ["opengeni_app"] });
-      await owner`DELETE FROM schema_migrations WHERE name IN (${MIGRATION}, ${PRECURSOR}, ${PROVIDER_KEYED_REACH}, ${WORKSPACE_MANAGED_ACCOUNTS}, ${API_KEY_CONNECTIONS}, ${COMPAT})`;
+      await owner`DELETE FROM schema_migrations WHERE name IN (${MIGRATION}, ${PRECURSOR}, ${PROVIDER_KEYED_REACH}, ${WORKSPACE_MANAGED_ACCOUNTS}, ${API_KEY_CONNECTIONS}, ${COMPAT}, ${FENCES})`;
       await seed();
     }, 180_000);
 

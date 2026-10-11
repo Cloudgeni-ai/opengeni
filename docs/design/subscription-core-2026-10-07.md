@@ -2999,7 +2999,7 @@ repository's complex-change review policy.
 
 | PR | Content | Mode |
 | --- | --- | --- |
-| 0. Generic precursor | Receipt table and provider-keyed readiness; switch-row and core-connection restrictions before a receipt; compatibility relation, reader and copy routines (inert); the server-owned `authority_inserted_at` marker on carrier tables; `authorize_subscription_personal_access` (0668's legacy-generation v1 branch replaced, not generalized) and the 0667 placement helper: a provider with an enabled cutover reads its v2 entry or compatibility record and requires the exact owner membership, the current generation, `personalConnectionsAllowed` and, for records, `connectionIds`; a disabled row grants nothing; until a provider's receipt both helpers return false for that provider (`xai`, `claude`), whose personal access is decided only by its v1 path. Fences 0608 and scheduled admission also compare v2, the Claude scheduled comparisons and `scheduled_claude_authority_changed` are added, the v1 liveness check switches at the receipt, and the compatibility deferred triggers are installed. PR 0 merges before any X1a or C1a call site, because 0667 and 0668 already accept any provider; provider-checked primaries; `video` operation kind; `model` and `credential_request` kinds and the unknown-outcome replay fence widened beyond Codex; wait reason `accepted_authority_unavailable`; provider-keyed `model.connected` lifecycle fact on core connection insert; provider-keyed cutover planner and auto-assignment if M4-A lacks them; adapter interface additions; provider-keyed report relation. | rolling |
+| 0. Generic precursor | Receipt table and provider-keyed readiness; switch-row and core-connection restrictions before a receipt; compatibility relation, reader and copy routines (inert); the server-owned `authority_inserted_at` marker on carrier tables; `authorize_subscription_personal_access` (0668's legacy-generation v1 branch replaced, not generalized) and the 0667 placement helper: a provider with an enabled cutover reads its v2 entry or compatibility record and requires the exact owner membership, the current generation, `personalConnectionsAllowed` and, for records, `connectionIds`; a disabled row grants nothing; until a provider's receipt both helpers return false for that provider (`xai`, `claude`), whose personal access is decided only by its v1 path. Fence 0608 and the scheduled occurrence also compare v2 (scheduled admission relies on the v2 value its pinned revision carries; see part 2's Admission choice), the Claude scheduled comparisons and `scheduled_claude_authority_changed` are added, the v1 liveness check switches at the receipt, and the compatibility deferred triggers are installed. PR 0 merges before any X1a or C1a call site, because 0667 and 0668 already accept any provider; provider-checked primaries; `video` operation kind; `model` and `credential_request` kinds and the unknown-outcome replay fence widened beyond Codex; wait reason `accepted_authority_unavailable`; provider-keyed `model.connected` lifecycle fact on core connection insert; provider-keyed cutover planner and auto-assignment if M4-A lacks them; adapter interface additions; provider-keyed report relation. | rolling |
 | X1a. SuperGrok adapter and chat placement | The xAI adapter and its conformance suite; chat placement, materialization, refresh, request custody (`model` / `credential_request` rows, including hosted-search continuations), session-title requests, readiness, `list_models`, funding and attribution on the core with `provider = xai`. | rolling |
 | X1b. SuperGrok settlement and waits | Failure settlement through adapter `classifyError`, finalization, waits, wakes, Temporal reconciliation by waiter id, compaction. | rolling |
 | X2a. SuperGrok media and probes | Image, video (funding, selection, admission, reconciliation), transcription, realtime, status and quota probes. | rolling |
@@ -3158,8 +3158,9 @@ M4-A hand-over are:
   relation, reader and copy routines (inert); the server-owned
   `authority_inserted_at` marker on carrier tables; the compatibility-record
   branch of both personal helpers (`connectionIds`); the compatibility
-  deferred triggers; fences 0608 and scheduled admission comparing the v2
-  slot, the Claude scheduled comparisons and
+  deferred triggers; fence 0608 and the scheduled occurrence comparing the
+  v2 slot (scheduled admission relies on its pinned revision; see part 2's
+  Admission choice), the Claude scheduled comparisons and
   `scheduled_claude_authority_changed`; the v1 liveness check switching to
   the core check at the provider's receipt; and the pre-merge inventories
   the plan requires: the functions it patches, the existing rows the new
@@ -3372,6 +3373,159 @@ Choices made where the plan left room, for reviewers:
   `search_path = pg_catalog, <data schema>, opengeni_private, pg_temp`. The
   previous release's posture check passes against the migrated schema before
   and after role provisioning.
+
+Part 2 (migration 0717) patches the live definitions by anchored
+replacement (each anchor must occur exactly once, so a drifted definition
+aborts the migration) and adds four owner-only helpers in
+`opengeni_subscription_internal` (no grant; the runtime posture requires all
+four, owner-only with a safe search path, once any exists, and
+provision-roles revokes them from the runtime role). Choices:
+
+- **v2 copy rule.** A copied v2 value matches its source's when it is the
+  same value or, when the source froze none, when it is none or the empty
+  value `{"version":2,"personal":[]}` (the Codex writers store the empty
+  value once the Codex cutover is enabled; neither widens). One helper,
+  `subscription_v2_copy_matches`, serves every fence below.
+- **Inbox fence (0608).** The delivering turn's v2 value must match its
+  delivery source from 0716's delivery resolver: for a pure goal
+  continuation the first continuation's causal turn (none when its human is
+  not the turn's), otherwise the receiving context turn. A delivered causal
+  update (wait timeout, background command result, goal continuation in a
+  mixed batch) that froze a value must carry the turn's value; one that froze
+  none follows the context, as the planner batches it. Agent Messages and
+  child results stay checked by human only, as in 0608. After a provider's
+  receipt with a real commit time, each causal update's effective authority
+  for that provider (0716's `subscription_compat_effective`) must equal the
+  context turn's, unless the update froze no v2 value and is post-receipt
+  work without a record (the same exception as above).
+- **Inbox batching key.** `systemUpdateExecutionAuthorityKey` and the
+  receiver-context comparison in `planInboxBatch` add each carrier's
+  effective authority per provider holding records
+  (`subscriptionAuthorityCompatForCarriersInTransaction`, one reader call
+  for the context and the candidate updates), with the fence's exception, so
+  the planner never batches what the fence refuses. The map is empty while no
+  provider has a real-time receipt, so every key is unchanged until then.
+- **Scheduled occurrence.** `validate_scheduled_occurrence_accepted_execution`
+  compares the Claude snapshot with the run's accepted one and
+  `lineage.claudeAuthoritySubjectId` with the accepted causal subject, and
+  the v2 value with the value its firing copies: the revision's frozen
+  value, narrowed to the empty value when it holds a personal entry and the
+  revision's authorizer is not the task owner (the writer's rule,
+  `subscription_scheduled_firing_v2`). Either the accepted snapshot's
+  revision or the run's current revision is accepted, because a
+  reusable-connection materialization advances the run's revision after
+  acceptance. A run accepted without a Claude snapshot (before 0598) compares
+  as the column default `{"version":1,"scope":"workspace"}`, here and below.
+- **Immutability.** `fence_scheduled_occurrence_update` and
+  `fence_scheduled_turn_execution_update` keep the Claude snapshot and the v2
+  value for every role, as they do for xAI (the generic v2 immutability
+  triggers exempt the table owner). The `scheduled_turn_execution_immutable`
+  trigger listed only the xAI snapshot column, so a Claude or v2 update never
+  reached its fence; it is recreated with both columns.
+- **Admission.** `admit_scheduled_agent_run_execution` compares the accepted
+  Claude snapshot with the task's (`40001`, "accepted execution changed
+  during admission", as for xAI). The accepted causal subject must be the
+  task owner for a `user` Claude snapshot (an ownerless task is never
+  admissible), and then also for a `user` xAI snapshot, because the
+  dispatcher derives one causal human; other scopes carry no Claude subject
+  (`42501`).
+  Admission adds no v2 comparison of its own, although row 0 lists one:
+  admission already pins the run's `task_authority_revision` to the task's
+  current revision and the execution digest; 0688's trigger derives the
+  revision's v2 value from the task's, which
+  `scheduled_tasks_subscription_authority_immutable_trg` keeps immutable;
+  runtime roles hold no privilege on `scheduled_task_revision_authorities`,
+  whose only inserters (0275, 0478) never supply the column; and the
+  occurrence fence compares the v2 value the firing copies. A comparison at
+  admission would re-check a value nothing can make differ, and re-deriving
+  0688's rule there could refuse admissible runs if the two copies of the
+  rule drifted. A later migration that lets a writer supply the revision's
+  v2 value must add the comparison.
+- **Generated session.** `fence_scheduled_task_run_connection_session_identity`
+  compares the generated session's `initial_claude_provider_account_authority_snapshot`
+  with the accepted one.
+- **Live authority.** `validate_scheduled_agent_run_live_authority` returns
+  `scheduled_claude_authority_changed` when a `user` Claude snapshot's
+  causal membership no longer holds an active, unrevoked
+  `claude_subscription` authority at the accepted generation, mirroring
+  `scheduled_xai_authority_changed` and locked in the same statement. Its
+  callers inherit the refusal: the host MCP turn guard (0447), the external
+  link snapshot guard (0452), MCP operation scoping (0459), and the
+  scheduled claim in `packages/db/src/index.ts`, which fails the run and its
+  occurrence with the code and creates no attempt.
+- **Receipt switch.** After a provider's receipt with a real commit time,
+  its v1 check no longer runs. Instead every personal entry the run carries
+  for that provider (the firing's v2 entry, else the entry of the revision's
+  compatibility record as the occurrence copies it,
+  `subscription_scheduled_run_personal_entries`) must be serviceable: an
+  active personal connection of that provider owned by the entry's active
+  membership whose authority row is active at the entry's generation and,
+  for a record, one of its listed connections
+  (`subscription_personal_entry_serviceable`). The code is
+  `scheduled_<provider>_authority_changed`, the v1 code. Codex has no
+  real-time receipt, so nothing changes for it. The live check runs as the
+  owner, whom FORCE RLS binds, and a `lifecycle` capability does not expose
+  personal connections, so the helper reads connections, memberships and
+  authorities through the owner-only membership-lifecycle read
+  (`opengeni.organization_tenancy_lifecycle =
+  'organization_membership_lifecycle'`) and restores the caller's marker. A
+  marker rather than a capability row keeps the check write-free.
+- **Defects fixed on the way.** The three 0608 `SECURITY DEFINER` routines
+  (`fence_session_execution_context`, `advance_session_execution_context`,
+  `fence_inbox_execution_context`) ran with the migration's search path
+  (`"$user", public`), which searches `pg_temp` first for relations; they
+  now use the helpers' path with `pg_temp` last. 0598 copied the xAI
+  policies of `organization_memberships` by the name pattern
+  `xai_subscription_capability_%` and missed 0442's
+  `xai_subscription_membership_lock`, the UPDATE policy FORCE RLS needs for
+  the membership lock in `create_claude_subscription_credential`; under an
+  owner without `BYPASSRLS` connecting a personal Claude account failed with
+  `42501`. 0717 adds `claude_subscription_membership_lock` (lock only,
+  `WITH CHECK (false)`). The personal SuperGrok and Claude disconnects
+  delete the credential and then revoke its `xai_subscription` or
+  `claude_subscription` authority, but no policy lets the provider's
+  lifecycle capability update `organization_user_resource_authorities`;
+  under such an owner the revoke matched no row, so the authority stayed
+  active and runs accepted for the disconnected account kept passing the
+  `user` generation check. 0717 adds `xai_subscription_capability_revoke` and
+  `claude_subscription_capability_revoke` (UPDATE of the provider's own kind
+  to `revoked` only, as Codex's `subscription_codex_owner_authority_revoke`),
+  and revokes the active authorities whose credential no longer exists, in
+  an owner-only `NO FORCE` window over the authorities and both credential
+  tables (an owner bound by the credential tables' policies would see no
+  credential and revoke every live authority), asserting convergence inside
+  the window. Retained authorities of offboarded members are not touched.
+  The repair's predicate (an active authority with no credential at its
+  resource id) also matches authorities whose credential went with a deleted
+  workspace: the credentials' workspace foreign keys cascade, while the
+  authority's origin-workspace key only sets NULL and no delete trigger
+  revokes it. Revoking those is also correct (without a credential there is
+  no access), but 0717 fixes only the disconnect path, so such authorities
+  reappear after every workspace deletion until a later migration revokes
+  them on credential deletion; the inventory reports both kinds together.
+- **Lock order.** Sections 5 and 6 lock `organization_memberships`, both
+  personal credential tables and `organization_user_resource_authorities`,
+  and the trigger swap locks `session_turns`. Runtime work reads memberships
+  before turns (private-session visibility) and turns before memberships
+  (the turn enqueue, then the v2 writer), so no order of the five is
+  cycle-free; a reviewer reproduced `40P01` against the first draft, which
+  held the membership lock while it waited for `session_turns`. 0717 takes
+  the whole set first with 0716's bounded, retried lock acquisition (100 ms
+  per wait inside a savepoint, released and retried on timeout, `55P03`
+  after 30 s), so it never holds one of these locks long while it waits.
+  Splitting the trigger swap into its own migration was the alternative; the
+  bounded acquisition keeps one migration and covers every order, including
+  the credential and authority tables. The race test
+  `migration-0717-authority-fences-lock-order.test.ts` covers both orders.
+- **Inventory.** `docs/deployment.md`, "Subscription authority fences
+  (0717)", holds one read-only query listing every existing row the new
+  comparisons refuse or the repair revokes (finding, account, workspace,
+  row), including live scheduled tasks whose Claude snapshot has no
+  admissible subject, live runs whose accepted `user` SuperGrok or Claude
+  authority has no live credential, and the authorities the repair revokes.
+  The test stages each kind before 0717, runs the query there as an operator
+  would, and asserts it lists exactly them; after 0717 the same query lists
+  them less the repaired authorities.
 
 #### PR 0c: provider-keyed cutover planner and organization reach
 
@@ -4013,8 +4167,12 @@ step, not the worker's own settlement that live Codex turns use today.
 | Finding | Where | Fixed in |
 | --- | --- | --- |
 | Runtime roles acting as an organization administrator can insert or enable `subscription_provider_cutovers` rows for `xai` and `claude`, and insert their core connections, before any drained move. Inert in runtime code today (every reader passes `codex`), but the SQL placement helper (0667) and 0668's non-Codex branch already accept any provider and would act on such rows as soon as an X1a or C1a call site exists; 0668's branch also compares a legacy generation with a core one. Such rows would also abort the cutover preflight. | 0642 connection insert policy; 0689 cutover administrator policies; 0667; 0668 | PR 0, merged before any X1a or C1a call site; runbook inventory query |
-| §3.7 says the 0608 inbox fence compares Codex against v2, but no later migration redefines `fence_inbox_execution_context`, so receiver-context turns are not fenced on `subscription_authority` in SQL. Scheduled admission and occurrence functions do not compare v2 either; the 0688 revision trigger only fills a NULL revision value. Both need a v2 comparison. | 0608, 0275, 0478, 0688 | PR 0 |
-| §3.7 says Claude stays compared against its v1 columns, but scheduled admission (`admit_scheduled_agent_run_execution`, restated by 0478 with the 0416 and 0447 changes and patched in place by 0501; `validate_scheduled_occurrence_accepted_execution`; `validate_scheduled_agent_run_live_authority`; the occurrence and turn-execution fences) never compares Claude: not the run's accepted Claude snapshot, the occurrence update, nor the generated session's `initial_claude`, and there is no Claude equivalent of `scheduled_xai_authority_changed`. Claude scheduled pools are fenced only in TypeScript. | 0275, 0416, 0447, 0478, 0501 | PR 0 |
+| §3.7 says the 0608 inbox fence compares Codex against v2, but no later migration redefines `fence_inbox_execution_context`, so receiver-context turns are not fenced on `subscription_authority` in SQL. Scheduled admission and occurrence functions do not compare v2 either; the 0688 revision trigger only fills a NULL revision value. Both need a v2 comparison. | 0608, 0275, 0478, 0688 | PR 0b part 2 (0717): the inbox fence and the scheduled occurrence compare v2; scheduled admission adds no v2 comparison of its own, by choice (the revision it pins already carries the task's v2 value; see the Admission bullet in part 2's choices) |
+| §3.7 says Claude stays compared against its v1 columns, but scheduled admission (`admit_scheduled_agent_run_execution`, restated by 0478 with the 0416 and 0447 changes and patched in place by 0501; `validate_scheduled_occurrence_accepted_execution`; `validate_scheduled_agent_run_live_authority`; the occurrence and turn-execution fences) never compares Claude: not the run's accepted Claude snapshot, the occurrence update, nor the generated session's `initial_claude`, and there is no Claude equivalent of `scheduled_xai_authority_changed`. Claude scheduled pools are fenced only in TypeScript. | 0275, 0416, 0447, 0478, 0501 | PR 0b part 2 (0717) |
+| The three 0608 `SECURITY DEFINER` routines kept the migration's search path (`"$user", public`), which searches `pg_temp` first for relations. | 0608 | PR 0b part 2 (0717) |
+| The `scheduled_turn_execution_immutable` trigger fires `BEFORE UPDATE OF` a column list with only the xAI snapshot, so a Claude snapshot or v2 update of a scheduled turn never reaches its fence. | 0275 and its xAI successor | PR 0b part 2 (0717) |
+| 0598 copied the xAI policies of `organization_memberships` by the pattern `xai_subscription_capability_%` and missed `xai_subscription_membership_lock`: under a migration owner without `BYPASSRLS` (the documented posture) connecting a personal Claude account fails with `42501`. | 0598 (0442's xAI policy) | PR 0b part 2 (0717) |
+| No policy lets the SuperGrok or Claude lifecycle capability update `organization_user_resource_authorities`, so under such an owner a personal disconnect deletes the credential and leaves its authority active, and runs accepted for the disconnected account keep passing the `user` generation check. Existing tests ran as a superuser. | 0234, 0442, 0598 | PR 0b part 2 (0717): revoke policies, and a repair of the authorities left active |
 | The `{codex,claude,xai}_primary_connection_id` foreign keys omit `provider`, so a primary can reference another provider's connection. | 0642 `subscription_settings` | PR 0, or M4-A's settings shape |
 | The non-Codex branch of `authorize_subscription_personal_access` compares the owner subject but neither requires the connection's owner membership id to equal the session owner's membership nor checks `personalConnectionsAllowed`. | 0668 | PR 0 |
 | `autoRenews` is a static adapter flag but is documented as false for setup tokens. | `packages/subscriptions/src/adapter.ts` | PR 0 |

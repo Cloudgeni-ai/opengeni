@@ -197,4 +197,6 @@ export const embeddingMigrationTail = [
   // carrier tables and patches the personal helpers 0712 patched; replay
   // after it.
   "0716_subscription_authority_compat.sql",
+  // Requires 0716's routines and patches fences earlier migrations define.
+  "0717_subscription_authority_fences.sql",
 ];
