@@ -1748,6 +1748,16 @@ describe.skipIf(!realDb)(
       // `usageReadingsComplete: false`); this case stays red until C2a is in
       // the base, so C3 cannot pass its validation, or merge, ahead of it.
       test("a newer Claude usage reading that omits a still-exhausted window keeps it until its reset", async () => {
+        // Self-contained: record the exhausted weekly window here rather than
+        // relying on the response-header case above.
+        expect(
+          await recordClaudeReading(
+            claudeReading("response_headers", weeklyObservedAt + 1_500, [
+              { id: "five_hour", usedPercent: 41, resetsAt: weeklyObservedAt + HOUR, status: "ok" },
+              { id: "seven_day", usedPercent: 100, resetsAt: weeklyReset, status: "exhausted" },
+            ]),
+          ),
+        ).toMatchObject({ applied: true });
         await recordClaudeReading(
           claudeReading("usage_endpoint", weeklyObservedAt + 2_000, [
             { id: "five_hour", usedPercent: 42, resetsAt: weeklyObservedAt + HOUR, status: "ok" },

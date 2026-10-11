@@ -4609,7 +4609,10 @@ Choices made where the plan left room, for reviewers:
   credential behind.
 - **Organization locks, Steer and Cancel, read-only legacy.** As X3: no
   workspace override of a locked key is written and each such workspace is
-  listed; the Steer path no longer supersedes legacy Claude waiters (core
+  listed; before reading the organization locks the cutover takes each
+  organization's shared settings lock (`subscription-settings-locks:<account>`,
+  ascending, for every organization with moved workspace accounts) at READ
+  COMMITTED, the settings lock protocol; the Steer path no longer supersedes legacy Claude waiters (core
   cleanup only); Claude's six legacy tables, including
   `claude_subscription_account_usage`, join
   `SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES` with restrictive

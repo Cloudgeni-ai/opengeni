@@ -5309,6 +5309,17 @@ WHERE org.locked_settings && ARRAY['providers', 'rotation']
       AND owner.personal_workspace_id = workspace.id);
 ```
 
+The migration holds one shared settings lock per organization with moved
+workspace accounts until it commits (the settings lock protocol). Count
+them; if the count approaches `max_locks_per_transaction` times
+`max_connections` (about 6,400 on default settings), raise
+`max_locks_per_transaction` before the window (a server restart):
+
+```sql
+SELECT count(DISTINCT account_id) FROM claude_subscription_credentials
+  WHERE authority_scope = 'workspace';
+```
+
 **2. Stop and drain. 3. Back up.** As for 0719. Do not cancel turns.
 
 **4. Migrate.** Run the TypeScript migrator as the schema owner with
