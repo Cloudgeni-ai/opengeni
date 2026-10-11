@@ -104,10 +104,11 @@ import type {
 } from "./turn-context";
 import type { createCoreCodexRequests } from "./codex-core-requests";
 import {
-  settleCoreXaiRefusal,
+  XAI_CORE_REFUSAL,
   xaiCoreLanesRecoverAfterCheckpoint,
   xaiCoreRequestOutcomeUnknown,
 } from "./xai-core";
+import { settleCoreSubscriptionRefusal } from "./subscription-core-settlement";
 
 import { providerRecoveryCause, recordProviderRecoveryOutcome } from "./provider-recovery-metrics";
 
@@ -819,7 +820,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
   // bound, or fails with typed copy that idles the session (settled below).
   let coreXaiRefusal: SubscriptionCoreCodexTurnError | null = null;
   if (coreXai && !coreRequestOutcomeUnknown && !leases.xai.lost) {
-    const settled = await settleCoreXaiRefusal(deps, coreXai);
+    const settled = await settleCoreSubscriptionRefusal(deps, coreXai, XAI_CORE_REFUSAL);
     if (settled.result) return settled.result;
     coreXaiRefusal = settled.failure;
   }

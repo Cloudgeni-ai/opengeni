@@ -1,20 +1,33 @@
 /**
- * Refusal and finalization bookkeeping for a chat turn on the shared
- * subscription core, for any provider whose adapter classifies its errors
- * into shared outcomes (SuperGrok track X1b). Every write is scoped to the
- * exact accepted turn and its live lease, and is best effort: it can never
- * change how the turn itself settles. Codex keeps its own M3 step
- * (`codex-core-settlement.ts`), whose refusal kinds predate the shared
- * outcomes.
+ * Refusal settlement and finalization for a chat turn on the shared
+ * subscription core, for any provider whose errors classify into shared
+ * outcomes (SuperGrok track X1b; the Claude track binds the same steps).
+ * Every write is scoped to the exact accepted turn and its live lease, and
+ * the bookkeeping is best effort: it never changes how the turn settles by
+ * itself. Codex keeps its own M3 step (`codex-core-settlement.ts` and the
+ * Codex branch of `failure-settlement.ts`), whose refusal kinds predate the
+ * shared outcomes.
  */
 import {
+  SubscriptionCoreError,
   subscriptionCoreSettlement,
   subscriptionCoreTurns,
   type Database,
   type SubscriptionCoreProvider,
+  type SubscriptionCoreTurnIdentity,
 } from "@opengeni/db";
 import { planSubscriptionCoreRefusal, type ProviderErrorOutcome } from "@opengeni/subscriptions";
+import type { RunAgentTurnResult } from "../types";
+import {
+  subscriptionCoreAccountRefusedFailure,
+  type SubscriptionCoreCodexTurnError,
+} from "./codex-core-errors";
 import type { CoreSubscriptionTurnLease } from "./credential-leases";
+import type { TurnFailureDeps } from "./failure-settlement";
+import {
+  failOverCoreSubscriptionTurn,
+  type CoreFailoverBinding,
+} from "./subscription-core-failover";
 import type { SubscriptionCoreTurn } from "./turn-context";
 
 type LeaseFence = Pick<CoreSubscriptionTurnLease, "holderId" | "generation">;
@@ -87,4 +100,116 @@ export async function touchCoreSubscriptionBinding(input: {
   await subscriptionCoreTurns(input.provider)
     .touchSubscriptionCoreBinding(input.db, input.core.identity, ref, input.modelCallCompletedAt)
     .catch(() => false);
+}
+
+/** One provider's refusal settlement inputs. */
+export type CoreRefusalBinding = {
+  provider: SubscriptionCoreProvider;
+  displayName: string;
+  /** The provider's classification of a failed model request (null: not a refusal). */
+  classify: (error: unknown) => ProviderErrorOutcome | null;
+  lease: (deps: TurnFailureDeps) => CoreSubscriptionTurnLease;
+  isSourceDisconnected: (
+    db: Database,
+    identity: SubscriptionCoreTurnIdentity,
+    connectionId: string,
+  ) => Promise<boolean>;
+  failover: CoreFailoverBinding;
+};
+
+function causeHasCoreCode(error: unknown, code: string): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth < 8 && current instanceof Error; depth++) {
+    if (current instanceof SubscriptionCoreError && current.code === code) return true;
+    current = current.cause;
+  }
+  return false;
+}
+
+/**
+ * Failure settlement of a core turn's definitive refusal: the provider's
+ * classification becomes a shared outcome, the refusal is recorded against
+ * the leased connection, and the same turn re-places within the per-turn
+ * bound (another account, or a durable wait). A graceful source disconnect
+ * re-places without a refusal. Returns the settled result, or the typed
+ * terminal failure when automatic re-placement was not possible (null: not
+ * an account refusal, so the generic failure path settles the turn). The
+ * caller runs this only when no request outcome is unknown and the lease
+ * was not lost.
+ */
+export async function settleCoreSubscriptionRefusal(
+  deps: TurnFailureDeps,
+  core: SubscriptionCoreTurn,
+  binding: CoreRefusalBinding,
+): Promise<{ result: RunAgentTurnResult | null; failure: SubscriptionCoreCodexTurnError | null }> {
+  const { error, db, eventing, attempt } = deps;
+  const outcome = binding.classify(error);
+  // Only a pre-dispatch lifecycle fence or a definite refusal can enter
+  // graceful recovery; a concurrent disconnect never upgrades an ambiguous
+  // failure into replay proof.
+  const disconnected =
+    causeHasCoreCode(error, "subscription_core_source_disconnected") ||
+    (!!outcome &&
+      (await binding
+        .isSourceDisconnected(db, core.identity, core.connectionId)
+        .catch(() => false)));
+  if (disconnected) {
+    const settled = await failOverCoreSubscriptionTurn(
+      deps,
+      core,
+      "source_disconnected",
+      binding.failover,
+    );
+    if (settled) return { result: settled, failure: null };
+  } else if (outcome) {
+    const recorded = await recordCoreSubscriptionRefusal({
+      db,
+      provider: binding.provider,
+      core,
+      lease: binding.lease(deps),
+      outcome,
+    });
+    if (recorded.receipt && eventing.publish && attempt.turnId && eventing.turnStartedPublished) {
+      const settled = await failOverCoreSubscriptionTurn(
+        deps,
+        core,
+        { kind: outcome.kind, unbounded: false },
+        binding.failover,
+      );
+      if (settled) return { result: settled, failure: null };
+    }
+  }
+  const refusal =
+    disconnected || causeHasCoreCode(error, "subscription_core_access_lost")
+      ? "access_lost"
+      : outcome?.kind === "unauthorized"
+        ? "sign_in"
+        : outcome?.kind === "forbidden"
+          ? "forbidden"
+          : null;
+  return {
+    result: null,
+    failure: refusal ? subscriptionCoreAccountRefusedFailure(refusal, binding.displayName) : null,
+  };
+}
+
+/**
+ * Finalization of a core turn before its lease is released: a completed
+ * model call (the latest response of either request lane) moves the
+ * binding's cache clock. No per-turn quota call runs on the core path:
+ * quota is observed on refusal and by the out-of-turn probe.
+ */
+export async function finalizeCoreSubscriptionTurn(input: {
+  db: Database;
+  provider: SubscriptionCoreProvider;
+  core: SubscriptionCoreTurn;
+  lease: LeaseFence;
+}): Promise<void> {
+  const at = [input.core.requests, input.core.titleRequests]
+    .map((lane) => lane?.lastResponseReceivedAt() ?? null)
+    .reduce<Date | null>(
+      (latest, next) => (next && (!latest || next > latest) ? next : latest),
+      null,
+    );
+  await touchCoreSubscriptionBinding({ ...input, modelCallCompletedAt: at });
 }

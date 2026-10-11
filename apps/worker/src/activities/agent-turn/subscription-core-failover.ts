@@ -54,6 +54,24 @@ export type CoreFailoverRefusal = { kind: string; unbounded: boolean } | "source
  */
 export const SUBSCRIPTION_CORE_TURN_REFUSAL_LIMIT = 4;
 
+/**
+ * The shared failover metrics, labelled by provider (Codex keeps its M3
+ * `opengeni_codex_failover_*` metrics with `workspace_key`).
+ */
+export function subscriptionCoreFailoverMetrics(provider: string): CoreFailoverBinding["metrics"] {
+  return {
+    checkpoints: {
+      name: "opengeni_subscription_core_failover_checkpoints_total",
+      help: "Durable subscription-core failover checkpoint attempts by provider and outcome.",
+    },
+    settlements: {
+      name: "opengeni_subscription_core_failover_settlements_total",
+      help: "Atomic subscription-core failover settlements by provider and outcome.",
+    },
+    labels: () => ({ provider }),
+  };
+}
+
 /** Pure bound: fail over while under the limit, stop at it. */
 export function coreFailoverDisposition(
   refusals: number | null,

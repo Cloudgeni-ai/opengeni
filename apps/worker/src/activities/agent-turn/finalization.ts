@@ -42,7 +42,8 @@ import {
 } from "../../sandbox-resume";
 import { createTurnCredentialLeases } from "./credential-leases";
 import { coreCodexModelCallCompletedAt, finalizeCoreCodexUsage } from "./codex-core-settlement";
-import { finalizeCoreXaiTurn } from "./xai-core";
+import { finalizeCoreSubscriptionTurn } from "./subscription-core-settlement";
+import { XAI_CORE_REFUSAL } from "./xai-core";
 import { wakeSubscriptionCoreCodexWaitersAndDeliver } from "../subscription-core-codex-waits";
 import { drainPhysicalSandboxResumes } from "./sandbox-provision";
 import { safeErrorDiagnostic, safeErrorForTelemetry } from "./errors";
@@ -503,8 +504,9 @@ async function finalizeTurnAttemptSteps(
     // below needs the legacy subject, which a core lease never has).
     if (providerTurn.xaiSubscriptionCore && leases.xai.held && attempt.turnId) {
       await waitForTurnFinalizerStep(
-        finalizeCoreXaiTurn({
+        finalizeCoreSubscriptionTurn({
           db,
+          provider: XAI_CORE_REFUSAL.provider,
           core: providerTurn.xaiSubscriptionCore,
           lease: leases.xai,
         }).catch(() => undefined),
