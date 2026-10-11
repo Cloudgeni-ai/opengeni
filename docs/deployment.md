@@ -4501,8 +4501,9 @@ their workspace.
 
 In the same test organization, switch the account's rotation off on the
 organization route and on again on its workspace's route: the workspace's
-own copy serves again, other workspaces stay off, and the organization's
-switch still reads off until it is turned on there. Then the other order:
+own copy serves again (under the workspace's own source) and other workspaces
+and a workspace created afterwards stay off until the organization turns it on
+on its route. Then the other order:
 switch it off on the workspace's route, off on the organization route (it
 answers `changed: true`), and on again on the workspace's route: other
 workspaces and a workspace created afterwards stay off.

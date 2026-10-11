@@ -275,6 +275,22 @@ async function setReach(
   );
 }
 
+async function setReachAllocator(
+  org: Org,
+  provider: string | null,
+  connectionId: string,
+  enabled: boolean | null,
+  subjectId = org.ownerSubjectId,
+): Promise<Outcome> {
+  return await outcome(() =>
+    asOrganizationSubject(org.accountId, subjectId, async (tx) => {
+      await tx.execute(sql`select opengeni_private.set_subscription_core_reach_allocator(
+        ${provider}, ${org.accountId}::uuid, ${connectionId}::uuid, ${enabled}::boolean)`);
+      return "set";
+    }),
+  );
+}
+
 async function reachRows(accountId: string, table: string): Promise<ReachRow[]> {
   return [
     ...(await database!.admin<ReachRow[]>`
@@ -838,6 +854,45 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
         value: { sharedWorkspaces: true, personalWorkspaces: true },
       });
       expect(await reachOf(org, "codex", personalManaged)).toEqual({ value: null });
+
+      // 0714's reach switch: organization administrators only, a registered
+      // provider, a value, and an organization account; it sets only the switch.
+      const allocatorRefusals = {
+        notAdmin: await setReachAllocator(org, "codex", local, false, memberSubjectId),
+        unregistered: await setReachAllocator(org, "xai", local, false),
+        nullProvider: await setReachAllocator(org, null, local, false),
+        nullValue: await setReachAllocator(org, "codex", local, null),
+        missing: await setReachAllocator(org, "codex", missing, false),
+        personalManaged: await setReachAllocator(org, "codex", personalManaged, false),
+      };
+      expect(allocatorRefusals).toEqual({
+        notAdmin: {
+          code: "42501",
+          message: "only organization administrators may change subscription connection reach",
+        },
+        unregistered,
+        nullProvider: unregistered,
+        nullValue: {
+          code: "22023",
+          message: "subscription connection reach allocator is required",
+        },
+        missing: { code: "P0002", message: "organization subscription connection not found" },
+        personalManaged: {
+          code: "P0002",
+          message: "organization subscription connection not found",
+        },
+      });
+      const [before] = await reachRows(
+        org.accountId,
+        "opengeni_private.subscription_codex_auto_assignments",
+      ).then((rows) => rows.filter((row) => row.connection_id === local));
+      expect(before?.allocator_enabled).toBe(true);
+      expect(await setReachAllocator(org, "codex", local, false)).toEqual({ value: "set" });
+      const [after] = await reachRows(
+        org.accountId,
+        "opengeni_private.subscription_codex_auto_assignments",
+      ).then((rows) => rows.filter((row) => row.connection_id === local));
+      expect(after).toEqual({ ...before, allocator_enabled: false });
     },
     180_000,
   );
