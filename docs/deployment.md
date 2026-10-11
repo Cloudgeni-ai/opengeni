@@ -4929,9 +4929,9 @@ ORDER BY 1, 2, 3, 4;
 Staging and production were not queried when 0717 was written; run the
 inventory there before deploying it.
 
-### Personal Codex acceptance under row security (0722)
+### Personal Codex acceptance under row security (0723)
 
-Migration `0722_subscription_personal_acceptance_reads.sql` is **rolling**
+Migration `0723_subscription_personal_acceptance_reads.sql` is **rolling**
 and grants nothing. Design record:
 [subscription core, PR 0b](design/subscription-core-2026-10-07.md#pr-0b-authority-compatibility-and-fences).
 It acts on deploy for Codex, on databases whose migration owner is neither a
@@ -4948,17 +4948,17 @@ superuser nor `BYPASSRLS` (the documented posture):
   unchanged; only the read is fixed.
 - Values frozen earlier are not rewritten: the next turn accepted in a
   private session uses the personal account, but a scheduled task keeps the
-  value frozen when it was created, so tasks created before 0722 keep using
+  value frozen when it was created, so tasks created before 0723 keep using
   shared capacity until they are recreated.
 - Health recovery had the same blind spot: a personal Codex account
   quarantined after a refused request (a time-bound `error` status with a
-  retry time) was never returned to service. After 0722 the owner's own turn
+  retry time) was never returned to service. After 0723 the owner's own turn
   whose frozen entry names the account recovers it once the retry time
   passes, as shared accounts already were. Sign-in failures still need a new
   sign-in.
 
 To see whether a database is affected, and which owners' new acceptances
-0722 will freeze the personal entry for, run as a role that bypasses row
+0723 will freeze the personal entry for, run as a role that bypasses row
 security. Placement still applies the organization's
 `personalConnectionsAllowed` setting, so where it is off these owners' work
 keeps using shared capacity:

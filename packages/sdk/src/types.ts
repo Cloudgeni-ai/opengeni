@@ -5634,6 +5634,46 @@ export type UpdateOrganizationMcpConnectionRequest = {
   access: OrganizationAccessPolicy;
 };
 
+// --- Personal API keys ---------------------------------------------------------------------------
+
+/**
+ * A key that acts as the person who created it: their live access in this
+ * organization, capped by `access`. It stops working when they leave.
+ */
+export type PersonalApiKey = {
+  id: string;
+  organizationId: string;
+  name: string;
+  description: string | null;
+  /** The first characters of the key, to recognize it. */
+  prefix: string;
+  access: OrganizationAccessPolicy;
+  owner: { subjectId: string; name: string };
+  expiresAt: string | null;
+  lastUsedAt: string | null;
+  createdAt: string;
+};
+
+export type ListPersonalApiKeysResponse = {
+  apiKeys: PersonalApiKey[];
+  /** Owners and admins see everyone's keys and can revoke them. */
+  canManageAll: boolean;
+};
+
+export type CreatePersonalApiKeyRequest = {
+  name: string;
+  description?: string | undefined;
+  access: OrganizationAccessPolicy;
+  /** Omitted means the key never expires. */
+  expiresAt?: string | undefined;
+};
+
+export type CreatePersonalApiKeyResponse = {
+  apiKey: PersonalApiKey;
+  /** The full secret token, shown once at creation. */
+  token: string;
+};
+
 /** A pending agent sign-in, as the web app's sign-in page shows it. */
 export type McpConnectionRequest = {
   client: { name: string; host: string | null };

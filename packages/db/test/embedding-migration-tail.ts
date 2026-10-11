@@ -203,5 +203,5 @@ export const embeddingMigrationTail = [
   // settings 0663 and 0665 grow; replay after them.
   "0718_inbox_time_sensitive_needs_you.sql",
   // Patches the acceptance writers withheld 0669, 0688 and 0707 define.
-  "0722_subscription_personal_acceptance_reads.sql",
+  "0723_subscription_personal_acceptance_reads.sql",
 ];

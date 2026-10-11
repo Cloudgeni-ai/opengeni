@@ -320,6 +320,9 @@ import type {
   CreateApiKeyResponse,
   CreateOrganizationApiKeyRequest,
   OrganizationMcpConnection,
+  CreatePersonalApiKeyRequest,
+  CreatePersonalApiKeyResponse,
+  ListPersonalApiKeysResponse,
   OrganizationMcpConnectionList,
   OrganizationServiceAccount,
   ListOrganizationServiceAccountsResponse,
@@ -9047,6 +9050,40 @@ export class OpenGeniClient {
     await this.requestVoid(
       "DELETE",
       `/v1/organizations/${organizationId}/mcp-connections/${connectionId}`,
+    );
+  }
+
+  // --- Personal API keys -----------------------------------------------------------------------
+
+  /**
+   * Keys that act as the person who created them, with their live access in
+   * this organization capped by each key's access setting. Everyone sees their
+   * own; owners and admins see everyone's.
+   */
+  async listPersonalApiKeys(organizationId: string): Promise<ListPersonalApiKeysResponse> {
+    return await this.requestJson<ListPersonalApiKeysResponse>(
+      "GET",
+      `/v1/organizations/${organizationId}/personal-api-keys`,
+    );
+  }
+
+  /** Create a key that acts as you. The token is returned once. */
+  async createPersonalApiKey(
+    organizationId: string,
+    request: CreatePersonalApiKeyRequest,
+  ): Promise<CreatePersonalApiKeyResponse> {
+    return await this.requestJson<CreatePersonalApiKeyResponse>(
+      "POST",
+      `/v1/organizations/${organizationId}/personal-api-keys`,
+      request,
+    );
+  }
+
+  /** Revoke a personal key: its next request is refused. Its person, or an admin. */
+  async revokePersonalApiKey(organizationId: string, apiKeyId: string): Promise<void> {
+    await this.requestVoid(
+      "DELETE",
+      `/v1/organizations/${organizationId}/personal-api-keys/${apiKeyId}`,
     );
   }
 
