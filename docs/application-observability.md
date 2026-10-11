@@ -14,6 +14,21 @@ classes still collapse and unknown codes/messages are omitted. Caller-supplied
 `errorMessage`, provider bodies, SQL and customer content remain excluded;
 protected diagnostics below are the separate cause-investigation boundary.
 
+### Temporal SDK logs
+
+The worker process installs the Temporal Runtime with
+`createTemporalSdkLogger`, and forwards Rust core records to it, so SDK worker,
+activity and workflow records and `workflow.log` calls are written as ordinary
+structured lines (one JSON object per line). Records below INFO are dropped, the
+SDK default. Each record keeps only `sdkComponent`, the code-registered
+`activity` and `workflowType` names, `attempt` and `durationMs`. Task tokens,
+namespaces, task queues, workflow/run/activity identifiers, core fields and the
+raw error never cross the boundary. A record that carries an error becomes
+`TemporalSdkOperationError` / `temporal_sdk_failure_logged`. The message is kept
+only when it is one of the SDK's reviewed constant messages or comes from
+Opengeni workflow code. Anything else, including SDK messages that interpolate
+exception text and core messages, is published as `Temporal SDK log record`.
+
 ## Context and timing
 
 `withTraceContext` scopes identity through asynchronous calls. `startSpan`
