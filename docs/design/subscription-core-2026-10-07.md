@@ -2049,8 +2049,9 @@ required by claim/adopt/send helpers, not a legacy routing store. Core operation
 leases and accepted funding remain, as does connection-policy PUT 409 until M5.
 Personal-fallback catalog precision and the scope editor are not expanded.
 
-`check:no-legacy-codex-runtime` is also run by `check:subscription-contract`.
-It rejects executable legacy table/schema references and imports of historical
+`check:no-legacy-codex-runtime` (since X4 an alias of the provider-neutral
+`check:no-legacy-subscription-runtime`, below) is also run by
+`check:subscription-contract`. It rejects executable legacy table/schema references and imports of historical
 Codex fixtures. Exceptions are exact declarations: retained schema/FKs,
 declarative deployed-schema posture inventories, and the codec stage of 0689.
 Historical SQL is untouched. Test-only snapshots retain old schema regressions
@@ -4247,6 +4248,44 @@ reviewers:
   capacity-wait history rewritten with SuperGrok references. Resuming
   through that reference needs X1b's core reconcile path for `xai`; X3
   merges after X1b, and that case of the test is completed then.
+
+#### X4: SuperGrok legacy deletion and the provider-neutral guard
+
+- **Guard shape.** `check:no-legacy-subscription-runtime`
+  (`scripts/check-no-legacy-subscription-runtime.ts`, run by
+  `check:subscription-contract`; `check:no-legacy-codex-runtime` stays as an
+  alias) is the M3 PR4 Codex check generalized. The engine names no
+  provider. Each retired runtime is one entry in
+  `scripts/legacy-subscription-runtime/` (`codex.ts`, `xai.ts`), registered
+  in `index.ts`, with: `identifiers` (factory tables in both spellings and
+  retired routine names), `patterns` (retired call or literal shapes whose
+  identifiers stay shared, such as minting the synthetic
+  `worker:xai-workspace` pool subject; recognizing it stays), optional
+  `deletedModules` and `testFixtures`, and `exceptions` keyed by file with
+  exact top-level declarations and exact string literals. One entry's
+  exception never excuses another entry's identifiers. Claude C4 adds a
+  `claude.ts` entry; the retirement step adds the routines it drops. Neither
+  changes the engine.
+- **SuperGrok entry.** The five factory tables, the six legacy routines
+  (`create_`, `disconnect_`, `resolve_*_authority_pool`, `revalidate_*`,
+  `*_authority_live`, `*_pool_visible`) and the synthetic subject.
+  Exceptions: the schema declarations, the posture inventories
+  (`FORCE_RLS_TABLES`, `SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES` and the
+  routine-signature constants of the posture contract) and the 0719 codec
+  stage, which reads the legacy rows before its scrub; the legacy secret
+  decoder it calls stays for as long as 0719 ships.
+- **What X4 deletes.** The xAI selector arm (the legacy branch after the
+  provider's receipt check), the factory repository instance for `xai` and
+  every v1 SuperGrok reader and writer that used it (connect, disconnect,
+  rotation, pins, leases, waiters, quota), xAI use of
+  `ScopedSubscriptionTurnLease`, the legacy video token envelope code and
+  the M1 shadow for `xai`. Shared factory code stays for Claude until C4.
+  The v1 carrier columns are still written with their default and copied
+  verbatim on derived rows (the 0608 and scheduled fences compare them);
+  nothing reads them to decide. X4 merges only with
+  `packages/db/test/subscription-core-xai-copy-paths-postgres.test.ts` (the
+  `compat:dependent_sources_without_record` copy-path test) green at its
+  head.
 
 #### Verification plan
 
