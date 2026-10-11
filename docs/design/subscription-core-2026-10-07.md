@@ -991,7 +991,9 @@ always stays after them.
 - **Wakes.** `wakeSubscriptionCoreCodexCapacityWaiters` advances the wake
   revision of every waiting core Codex waiter of the account. It enumerates
   the organization's workspaces with the existing content-free
-  `list_organization_codex_workspace_ids` and writes in the trusted
+  `list_organization_codex_workspace_ids` (since §5.3 PR 0c, Codex's wrapper
+  of the provider-keyed `wakeSubscriptionCoreCapacityWaiters`, which uses
+  `list_organization_subscription_workspace_ids`) and writes in the trusted
   empty-subject worker scope the outbox policy requires, never through legacy
   active pointers. Each woken waiter gets a provider-neutral outbox row and a
   generic session workflow wake in the same commit; the generic wake is the
@@ -1303,7 +1305,9 @@ plus every Personal workspace when allowed, with matching organization-pool
 rows and the owner-only auto-assignment row from 0689 kept as the reach for
 workspaces created later (read and replaced only through
 `subscription_codex_reach` / `set_subscription_codex_reach`, organization
-administrators only). A workspace's own local copy keeps its assignment and
+administrators only; since §5.3 PR 0c these wrap the provider-keyed
+`subscription_core_reach` / `set_subscription_core_reach`). A workspace's
+own local copy keeps its assignment and
 workspace-pool row whatever the organization chooses. In a workspace, a
 workspace administrator changes only the models of the account that
 workspace manages (the scope guard admits exactly that change). The route
@@ -1814,6 +1818,8 @@ Steps, as implemented:
    every workspace the legacy rows admit today is enumerated as a `workspaces`
    scope, and the organization source's reach over workspaces created later
    is kept by `opengeni_private.subscription_codex_auto_assignments`
+   (keyed by provider since §5.3 PR 0c; its provider-free name comes at
+   retirement)
    (disposition `organization_reach_auto_assigned`): a NULL legacy allowlist
    assigns every new shared workspace, `allow_personal_workspaces` every new
    Personal workspace, each with the organization source's own allocator and
@@ -2230,6 +2236,12 @@ a provider name.
   `list_organization_codex_workspace_ids`, the scope visibility and wake
   routines, and 0691's operation-kind CHECK, which admits `model` and
   `credential_request` only for Codex.
+  §5.3 "PR 0c: provider-keyed cutover planner and organization reach"
+  (migration 0713) made the planner rules, the auto-assignment table, its
+  apply routine and triggers, plan-change history, organization reach, the
+  workspace inventory and the capacity wake provider-keyed, and removed the
+  allocator hook; the shared core's wake and organization paths use none of
+  the Codex scope-visibility helpers.
 - Deferred, with their provider branches recorded for the Claude and
   SuperGrok steps: `authorize_subscription_personal_access` (v1 branches per
   provider until each provider's drained cutover),
@@ -2262,10 +2274,12 @@ the provider as data. Shared modules live in `packages/db/src/subscription-core/
 `subscription-core-acceptance-authority.ts`). They take a
 `SubscriptionCoreProvider` binding (`subscription-core/provider.ts`): the
 provider's adapter, the SQL expression for its remote-compaction session lock
-(or null), the error classes its callers expect, the settings column that
-holds its primary connection and an optional hook run when an organization
-allocator switch changes (Codex keeps its organization reach for workspaces
-created later there). The primary column is the `primary_setting_column` of
+(or null), the error classes its callers expect and the settings column that
+holds its primary connection. (An optional hook run when an organization
+allocator switch changed, through which only Codex kept its organization
+reach in step, was removed by §5.3 PR 0c: the shared core refreshes any
+provider's reach through `set_subscription_core_reach`.) The primary column
+is the `primary_setting_column` of
 the provider's SQL registry row until settings are keyed by provider: always
 `<provider>_primary_connection_id` (checked when the binding is used, as the
 SQL CHECK does), or null for a provider without a primary setting, whose
@@ -2424,10 +2438,13 @@ source-refusal texts use the adapter's display name. Extra credits are
 writable only for a provider with the `extraCredits` capability.
 Codex Apps (`subscription-core-codex-apps.ts`) and reset credits stay Codex
 modules, and so does the operation candidate list in
-`subscription-core-codex-operations.ts` and Codex's organization reach
-(`set_subscription_codex_reach` over `subscription_codex_auto_assignments`,
-0702), which the binding's allocator hook calls; a second provider with
-organization reach needs a provider-keyed reach table and routine first.
+`subscription-core-codex-operations.ts`. Organization reach is
+provider-keyed since §5.3 PR 0c (`subscription_core_reach` /
+`set_subscription_core_reach` over the provider-keyed
+`subscription_codex_auto_assignments` rows,
+migration 0713), which the shared core and its access editor
+(`subscription-core/access-editor.ts`) call with the provider; Codex's 0702
+pair wraps it.
 Codex Apps request reservation uses the shared
 `reserveSubscriptionCoreDesignatedRequest` (source lock, then insert; holder
 `<operationKind>-request:<uuid>`), taken under the Codex Apps settings lock.
@@ -2517,7 +2534,12 @@ reconciled here with what it delivered:
   its apply routine and triggers; `record_subscription_codex_plan_change`;
   and 0702's access editor helpers `subscription_codex_reach` and
   `set_subscription_codex_reach`. The 0691 operation kinds below are also
-  still Codex-only.
+  still Codex-only. PR 0c ("PR 0c: provider-keyed cutover planner and
+  organization reach", below) makes all of these provider-keyed except the
+  operation kinds and the two Codex scope-visibility helpers
+  (`codex_organization_scope_visible` and `codex_organization_admin_visible`),
+  which the shared core does not call; they stay with the legacy policies
+  and guards that use them.
 - A guard test rejects provider names and provider conditionals in shared
   core modules. Every M4 change below keeps that guard green: provider facts
   live in adapters and capability flags only.
@@ -2816,7 +2838,7 @@ touches only that provider's rows.
 
 | Legacy | Core |
 | --- | --- |
-| Credentials, `authority_scope = workspace` (shared workspace) and `organization` | The M3 planner rules apply unchanged, keyed by provider (`codex-subscription-core-cutover.ts` made provider-keyed by M4-A or PR 0): after dedupe, a group gets `organization` scope only when it has a single organization source with a NULL `allowed_workspace_ids`, `allow_personal_workspaces = true`, and an allocator and model policy equal to the union; otherwise `workspaces` scope listing every reached workspace, with auto-assignment rows for organization sources with a NULL list so later workspaces still join, and Personal workspaces only where `allow_personal_workspaces` admitted them. One assignment policy per `(workspace, inference_pool)` source with its exact model allowlist, allocator state and manager. `managed_by_workspace_id` is set only when the group has a single workspace-scope source; otherwise NULL and per-workspace management comes from the assignment policies. Parity metric `organization_reach_auto_assigned`. |
+| Credentials, `authority_scope = workspace` (shared workspace) and `organization` | The M3 planner rules apply unchanged, keyed by provider (`subscription-core/cutover-plan.ts`, made provider-keyed by PR 0c; Codex passes its rules from `codex-subscription-core-cutover.ts`): after dedupe, a group gets `organization` scope only when it has a single organization source with a NULL `allowed_workspace_ids`, `allow_personal_workspaces = true`, and an allocator and model policy equal to the union; otherwise `workspaces` scope listing every reached workspace, with auto-assignment rows for organization sources with a NULL list so later workspaces still join, and Personal workspaces only where `allow_personal_workspaces` admitted them. One assignment policy per `(workspace, inference_pool)` source with its exact model allowlist, allocator state and manager. `managed_by_workspace_id` is set only when the group has a single workspace-scope source; otherwise NULL and per-workspace management comes from the assignment policies. Parity metric `organization_reach_auto_assigned`. |
 | Credential, `workspace`, Personal workspace | Personal connection of the workspace owner with a `subscription_connection` authority at the owner's cutover generation G ("Personal authority generations"); §5.2 fallback settings (opt-in plus the workspace `personal_fallback_allowed` override; an organization lock of `false` stays and is a disposition). |
 | Credential, `authority_scope = user` | Personal connection with the same `owner_organization_membership_id`, not workspace-bound. The canonical connection gets a `subscription_connection` authority at the owner's single cutover generation G ("Personal authority generations"); legacy generations are not carried, and the legacy authority row is retired as 0689 retired `codex_subscription`. The row's model allowlist becomes the personal ceiling. The origin workspace stays as authority provenance. |
 | Credential, `user`, organization with `personalConnectionsAllowed = false` | Still becomes the owner's personal connection (the data is preserved), but it is unusable while the organization forbids personal connections; counted as disposition `personal_connections_disallowed`. Compatibility records for its pre-cutover work get `personal: []` (decision 4: such work waits). |
@@ -3273,6 +3295,218 @@ for reviewers:
   `search_path = pg_catalog, <data schema>, opengeni_private, pg_temp`. The
   previous release's posture check passes against the migrated schema before
   and after role provisioning.
+
+#### PR 0c: provider-keyed cutover planner and organization reach
+
+PR 0c is the slice of PR 0 that makes the M3 cutover planner rules and the
+organization-reach machinery provider-keyed (everything "Not taken by M4-A"
+above except 0691's operation kinds and the Codex scope-visibility helpers,
+which the shared core does not call). Rolling migration 0713. Codex
+behaviour is unchanged, and every Codex-named routine keeps its name,
+signature, owner, grants and texts for the binaries that still call it, and
+its security mode and search path too except 0689's plan-change trigger
+function (below). Nothing is renamed, detached or dropped. A later SuperGrok
+or Claude cutover calls these with its provider as data and needs no
+routine of its own:
+
+| Need | Provider-keyed entry point | Codex entry point kept |
+| --- | --- | --- |
+| Cutover plan | `planSubscriptionCoreCutover(rules, input)` with `SubscriptionCutoverRules` (`packages/db/src/subscription-core/cutover-plan.ts`) | `planCodexCutover(input)`: the same call with `CODEX_CUTOVER_RULES` |
+| Reach rows for workspaces created later | owner-only view `opengeni_private.subscription_core_auto_assignments` over `subscription_codex_auto_assignments`, which gains `provider` keyed by the registry | the table keeps its name until retirement, when it takes the view's |
+| Applying reach to a new shared or Personal workspace | `opengeni_subscription_internal.apply_subscription_core_auto_assignments(provider, account, workspace, personal)`, run for every provider by 0689's two trigger functions | `opengeni_private.apply_subscription_codex_auto_assignments` delegates with `codex` |
+| Plan-change history | owner-only table `opengeni_private.subscription_core_plan_change_providers` (only `codex`) | 0689's `record_subscription_codex_plan_change()`, redefined in place to test it, still attached |
+| Reading and setting reach | `opengeni_private.subscription_core_reach(provider, account, connection)`, `opengeni_private.set_subscription_core_reach(provider, account, connection, shared, personal)` | the 0702 pair, its own checks first, then the neutral routine |
+| Organization workspace inventory | `list_organization_subscription_workspace_ids(account)` | `list_organization_codex_workspace_ids` unchanged |
+| Capacity wake | `wakeSubscriptionCoreCapacityWaiters(db, provider, input, enqueue)` (`subscription-core/waiters.ts`) | `wakeSubscriptionCoreCodexCapacityWaiters` wraps it |
+| Access editor | `getSubscriptionCoreModelConnectionAccess` / `updateSubscriptionCoreModelConnectionAccess(db, provider, ...)` (`subscription-core/access-editor.ts`) | the Codex pair wraps them |
+
+The TypeScript entry points are internal to `packages/db`, as §5.1.3
+requires: the package index exports only the Codex wrappers, and a later
+provider's binding imports the neutral functions from their modules.
+
+Decisions, each the strictest fail-closed reading of the plan and contract:
+
+- **Planner rules as data.** The neutral module holds dedupe and the
+  canonical choice (`compareSubscriptionCutoverSources`), the scope choice
+  (`organization` only for a single organization source with a NULL
+  allowlist, Personal admission and the union policy; otherwise `workspaces`
+  over every reached workspace plus an auto-assignment row), one policy per
+  (workspace, inference pool) source, the delegated manager and the policy
+  union (`unionSubscriptionCutoverPolicies`). A provider supplies
+  `SubscriptionCutoverRules`: `statusRank` (the legacy statuses it can
+  represent, by canonical preference), `source(row)` (the neutral facts of
+  one legacy row, passed through without defaulting) and an optional
+  `groupConflict(rows)` naming a merge it must refuse (Codex:
+  `fedramp_mismatch`). The rules never read a provider id; the provider's
+  own row travels through the plan untouched (`canonical`, `members`) for
+  its stage to write. `codex-subscription-core-cutover.ts` keeps only the
+  legacy Codex row decoding, the FedRAMP refusal and the quota and
+  provider-state mapping.
+- **Codex's plan is byte-for-byte unchanged.** 0689 still runs on fresh
+  installs and one-window upgrades. The existing plan tests run unchanged,
+  and an equivalence test compares the serialized plan with a frozen copy of
+  the 0689 planner (`packages/db/test/fixtures/codex-cutover-planner-frozen.ts`)
+  over 20,000 generated scenarios in which every conflict class and
+  disposition occurs at least 40 times. A synthetic second provider (its own
+  row shape, a fourth status and its own merge refusal) plans through the
+  same rules.
+- **Defect fixed in earlier merged work (0689 planner).** It tested a legacy
+  status with `in` against a plain object, so a status named like an
+  inherited object member (`toString`, `constructor`) passed and the stage
+  then hit the core's status CHECK, aborting 0689 on a constraint error. The
+  neutral rules read own keys only and report `unrepresentable_status`, which
+  aborts the cutover with a content-free conflict instead. Only the reason
+  for that abort changes; every other input plans exactly as before.
+- **Reach rows keyed by provider, in place.** The table keeps its name,
+  rows, owner-only grants, RLS mode and 0689's `(account_id, connection_id)`
+  key to the connection, and gains `provider` (NOT NULL, `DEFAULT 'codex'`),
+  keyed by the registry, so a row of an unregistered provider cannot exist.
+  Every existing row was written for a Codex connection (0689's cutover and
+  0702's Codex helper write no other), so the default fills the column with
+  `codex`. The default stays until the retirement migration: an older
+  binary's 0702 reach write (an access editor save or an allocator refresh)
+  that waits for 0713's lock is planned again after the commit, against the
+  new table, and names no provider, so without the default it would fail
+  with 23502 (lock-order test). It cannot mislabel a row: only owner
+  routines write the table, 0702's body writes only after checking the
+  connection is Codex, and every 0713 routine names the provider (the
+  second-provider test checks each stored row against its connection's
+  provider). The one writer from 0713 on,
+  `set_subscription_core_reach`, accepts only its provider's own
+  connection. A key from `(account_id, provider, connection_id)` to the
+  connection's `(account_id, provider, id)` would lock
+  `subscription_connections` (see "Lock set and order"), so it comes with
+  the provider-free name at retirement. No FORCE-RLS backfill runs, so there
+  is no NO FORCE window. The registry stays untruncatable: a plain TRUNCATE
+  is refused by the keys that reference it, and TRUNCATE ... CASCADE by its
+  append-only guard.
+- **A provider-free name without a rename.** The neutral routines reach the
+  rows through the owner-only view `subscription_core_auto_assignments`
+  (every column, no filter). Renaming the table would take no other lock,
+  but a statement that waits for 0713's lock looks its relation up by name
+  again once it has the lock: an older binary's workspace creation or reach
+  edit waiting on the table across 0713's commit would then fail with
+  42P01. Under its kept name it completes, with the reach it had before
+  (lock-order test). The retirement migration drops the view and gives the
+  table its name, so the neutral routines need no change then. 0713 changes
+  nothing else such a statement relies on: it renames, drops and tightens
+  no existing column, constraint or routine signature, its other objects
+  are new names, a call already running keeps the routine body it started
+  with, and the one new column carries the default above.
+- **One apply path.** 0689's apply body with the provider as data, in
+  `opengeni_subscription_internal` (owner-only routines stay out of
+  `opengeni_private`, whose unknown routines a previous binary's readiness
+  rejects). 0689's trigger functions `auto_assign_subscription_codex_workspace`
+  and `auto_assign_subscription_codex_personal_workspace` are redefined in
+  place (same owner, grants, security mode and search path) and stay
+  attached to 0689's triggers `workspaces_subscription_codex_auto_assign`
+  and `organization_memberships_subscription_codex_auto_assign`; they apply
+  the reach of every provider with rows in the organization, in provider
+  order. 0689's owner-only policies on both assignment tables already admit
+  these writes for the organization named by their setting
+  `opengeni.subscription_codex_auto_assign` (an organization, not a
+  provider), so there is no new trigger, policy or setting. The callers
+  (those two trigger functions and the Codex apply routine) set that
+  setting around each call and restore the caller's value after it, as
+  0689's apply routine did around its writes (a test reads it back in the
+  caller's transaction), so the neutral apply path names no provider (the
+  neutral-routine source check of 0707 covers it); without the setting its
+  writes are refused.
+- **Plan-change history by table.** The owner-only table
+  `subscription_core_plan_change_providers` (only `codex`, keyed by the
+  registry) replaces the provider test in 0689's trigger function, which is
+  redefined in place and stays attached to 0689's `BEFORE UPDATE OF
+  plan_type` trigger. It now reads owner data, so it runs as its owner
+  (`SECURITY DEFINER`, search path pinned with `pg_temp` last; 0689's was
+  invoker) and still only edits `NEW`. Codex records the same keys as before.
+  A registry column would have locked the registry ACCESS EXCLUSIVE, which
+  runtime transactions read after the workspace prefix.
+- **Lock set and order.** Runtime transactions take the workspace prefix
+  first and the subscription tables after it, and workspace or
+  Personal-workspace creation holds its new row while 0689's trigger reads
+  the reach table. 0713 therefore locks owner data only, first and in this
+  order: the reach table ACCESS EXCLUSIVE (touched only by 0689's triggers,
+  0702's helpers and the referential cascades from deleting a subscription
+  connection or an organization, which wait for 0713 briefly), then the
+  registry SHARE ROW EXCLUSIVE, which conflicts
+  with no runtime lock (runtime roles only read it or check keys against
+  it). It locks no workspace, membership, connection or assignment table:
+  every other statement acts on those two tables, creates a table or a
+  view, or creates or replaces a routine.
+  While it waits for its first lock it holds nothing, and afterwards it
+  waits for no lock a runtime transaction holds, so it cannot close a lock
+  cycle with runtime work (the 40P01 shape 0299 fixed). Replacing the
+  triggers or policies or adding the connection key would lock hot tables
+  and wait for runtime work, so those come with the maintenance retirement
+  migration. `migration-0713-provider-keyed-reach-lock-order.test.ts` races
+  0713 against those runtime shapes as the application role.
+- **Organization reach.** The neutral pair is 0702's helpers with the
+  provider as data: runtime-callable `SECURITY DEFINER` routines (search path
+  `pg_catalog`, data schema, `opengeni_private`, `pg_temp` last) granted to
+  the application roles only. Checks run in a fixed order: organization
+  administrator (42501), reach given as a pair (setter, 22023), a provider
+  registered on the shared core (22023, even where no row could exist), then
+  the provider's own organization-managed shared subscription connection
+  (P0002). Each provider sees only its own rows. The Codex-named pair keeps
+  its texts and checks, then calls the neutral routine on the same rows. The
+  shared core's organization allocator switch and the access editor call
+  the neutral pair with the binding's provider, so M4-A's optional
+  `organizationAllocatorChanged` binding hook, which existed only to reach
+  the Codex routine, is removed.
+- **Inventory and wake.** `list_organization_subscription_workspace_ids` is
+  0422's content-free inventory (shared and Personal workspaces, organization
+  context only) under a provider-free name, granted to the application roles
+  and listed with the runtime posture's organization lifecycle routines. The
+  shared capacity wake takes the provider and the session workflow wake
+  producer as arguments (the producer lives in the package index, which
+  shared modules do not import) and wakes only while that provider's cutover
+  is enabled. The shared core's wake and organization paths depend on no
+  Codex scope-visibility helper: `codex_organization_scope_visible` and
+  `codex_organization_admin_visible` are called only by legacy factory-table
+  policies, 0424's access guards on the API-key connection tables and 0492's
+  legacy Codex source check, all left as they are.
+- **Neutral entry points stay internal and guarded.** The
+  provider-parameterized TypeScript entry points (the planner, the capacity
+  wake and the access editor pair) live in shared modules under
+  `packages/db/src/subscription-core/`, which the neutrality guard scans,
+  and the package index exports none of them (§5.1.3). The access editor
+  module also owns what the legacy editor shares with it: the policy shape
+  `ModelConnectionAccess`, its two errors and the route scope
+  (`withModelConnectionAccessScope`). `model-connection-access.ts` keeps the
+  legacy connection kinds and the Codex pair, imports those, and re-exports
+  the shape and errors under their existing names, so the modules form no
+  import cycle and the package's exports are unchanged.
+- **Rolling posture.** On a provisioned database without 0713, the previous
+  release's evaluator, run as the runtime role, reports nothing missing
+  before 0713, after it and after provisioning again; the new evaluator
+  reports exactly the four new routines before 0713 and nothing after it.
+  The migration grants the three runtime routines to the application roles,
+  PUBLIC holds none of the four, and provisioning again leaves those grants
+  as the migration set them.
+- **Kept until retirement.** The Codex-named reach pair and apply routine
+  are dropped with the other Codex-named routines (§5.1.2, "Rolling
+  compatibility and retirement"). The same maintenance migration replaces
+  the reach view with the table under that name, gives 0689's two
+  auto-assignment triggers and their functions, the plan-change trigger and
+  its function, 0689's `*_codex_auto_assign` policies and their setting
+  provider-free names, adds the reach rows' connection-and-provider key and
+  drops their Codex default; none of that can run while a rolling migration
+  must stay off the workspace, membership and connection tables and keep
+  the names and defaults older binaries use.
+  `list_organization_codex_workspace_ids`
+  stays while the legacy SuperGrok and Claude organization wakes call it
+  (until X4 and C4). The Codex scope-visibility helpers stay as well. Most
+  of their callers are legacy (the credential-table policies of 0381 and
+  0423, 0492's legacy Codex source check) and are left as they are, but
+  0424's access-update guard on the API-key connection tables
+  (`organization_model_provider_connections` and `connections`) and its
+  `model_connection_workspace_access` read policy on
+  `organization_model_provider_connections` also call
+  `codex_organization_admin_visible`. Generalizing those uses belongs with
+  the API-key connectors.
+- **Migration tests.** Tests that withhold 0689 also withhold 0713, which
+  alters objects 0689 creates, and replay it after 0689; the neutral-routine
+  test replays 0707, 0712 and 0713 together.
 
 #### Verification plan
 

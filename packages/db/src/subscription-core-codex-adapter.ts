@@ -174,12 +174,6 @@ export function subscriptionCoreCodexProvider(
       organizationManaged: () => new SubscriptionCoreCodexOrganizationManagedError(),
     },
     settings: { primaryColumn: "codex_primary_connection_id" },
-    // An organization allocator switch also updates Codex's reach for
-    // workspaces created later (the Codex-named routine M3 shipped).
-    async organizationAllocatorChanged(tx, accountId, connectionId) {
-      await tx.execute(sql`select opengeni_private.set_subscription_codex_reach(
-        ${accountId}::uuid, ${connectionId}::uuid, null, null)`);
-    },
   };
 }
 

@@ -43,6 +43,10 @@ import {
 
 const MIGRATION = "0689_subscription_core_codex_cutover.sql";
 const PRECURSOR = "0712_subscription_core_generic_precursor.sql";
+// 0713 keys and redefines objects 0689 creates: held back with it and
+// replayed right after it, so these cases also cover the provider-keyed
+// reach, auto-assignment and plan-change paths on cutover data.
+const PROVIDER_KEYED_REACH = "0713_subscription_core_provider_keyed_reach.sql";
 // 0714 builds on 0712's receipts and patches its helpers; it follows 0712.
 const COMPAT = "0714_subscription_authority_compat.sql";
 const key = Buffer.alloc(32, 72);
@@ -702,9 +706,9 @@ describe.skipIf(!realDb)(
       await owner`CREATE TABLE schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`;
       // 0712 records the provider cutover receipts and requires the committed
       // 0689, so it is withheld with it and applied by the same cutover run.
-      await owner`INSERT INTO schema_migrations(name) VALUES(${MIGRATION}), (${PRECURSOR}), (${COMPAT})`;
+      await owner`INSERT INTO schema_migrations(name) VALUES(${MIGRATION}), (${PRECURSOR}), (${PROVIDER_KEYED_REACH}), (${COMPAT})`;
       await migrate(owned.ownerUrl, undefined, { applicationDatabaseRoles: ["opengeni_app"] });
-      await owner`DELETE FROM schema_migrations WHERE name IN (${MIGRATION}, ${PRECURSOR}, ${COMPAT})`;
+      await owner`DELETE FROM schema_migrations WHERE name IN (${MIGRATION}, ${PRECURSOR}, ${PROVIDER_KEYED_REACH}, ${COMPAT})`;
       await seed();
     }, 180_000);
 
@@ -1468,8 +1472,9 @@ describe.skipIf(!realDb)(
       });
 
       test("scope: organization reach covers workspaces created after the cutover, Personal or not as legacy did", async () => {
-        const reach = await owned.admin`SELECT connection_id::text AS connection, shared_workspaces,
-            personal_workspaces, allocator_enabled
+        // 0713 keeps the rows the cutover wrote, each keyed by its provider.
+        const reach = await owned.admin`SELECT connection_id::text AS connection, provider,
+            shared_workspaces, personal_workspaces, allocator_enabled
           FROM opengeni_private.subscription_codex_auto_assignments
           WHERE account_id = ${d.account} ORDER BY connection_id`;
         expect(new Map(reach.map((row) => [row.connection, row]))).toEqual(
@@ -1478,6 +1483,7 @@ describe.skipIf(!realDb)(
               d.allow,
               {
                 connection: d.allow,
+                provider: "codex",
                 shared_workspaces: false,
                 personal_workspaces: true,
                 allocator_enabled: true,
@@ -1487,6 +1493,7 @@ describe.skipIf(!realDb)(
               d.shared,
               {
                 connection: d.shared,
+                provider: "codex",
                 shared_workspaces: true,
                 personal_workspaces: false,
                 allocator_enabled: false,

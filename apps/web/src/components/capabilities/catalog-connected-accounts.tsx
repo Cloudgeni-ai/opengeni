@@ -1,7 +1,10 @@
 import { connectionAccountIdentityLabel } from "@opengeni/contracts/connection-account-label";
 import type { ConnectionMetadata } from "@opengeni/sdk";
+import { PlusIcon, RefreshCwIcon, TrashIcon } from "lucide-react";
+import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { DetailSection } from "@/components/ui/detail-sheet";
 import { MetaChip } from "@/components/ui/meta-chip";
 import { Notice } from "@/components/ui/notice";
@@ -16,22 +19,66 @@ const ACCOUNT_STATUS = {
   revoked: "not_connected",
 } as const satisfies Record<ConnectionMetadata["status"], ProductStatus>;
 
+/** Per-account management. The API re-checks every action; these rules only
+ * keep the page from offering what the server would refuse. */
+export type CatalogConnectedAccountsManagement = {
+  /** The viewer's subject: only their own personal accounts are theirs to manage. */
+  viewerSubjectId: string | null;
+  /** The viewer holds connections:write in this workspace. */
+  canWrite: boolean;
+  busy?: boolean;
+  /** Re-run sign-in for exactly this account (OAuth accounts only). */
+  onReconnect?: (account: ConnectionMetadata) => void;
+  /** Disconnect exactly this account. Resolve false to keep the dialog open. */
+  onRemove: (account: ConnectionMetadata) => Promise<boolean | void>;
+  /** Sign in a further account; omit when the connector holds a single account. */
+  onAdd?: () => void;
+};
+
 export type CatalogConnectedAccountsProps = {
   item: CapabilityCatalogItem;
   connections: readonly ConnectionMetadata[] | null;
   loadFailed?: boolean;
   accessDenied?: boolean;
   onRetry?: () => void;
+  management?: CatalogConnectedAccountsManagement;
 };
 
-/** Displays accounts without choosing or changing any credential authority. */
+/** Whether the viewer may disconnect this account: their own personal account,
+ * or a shared workspace account when they can manage workspace connections.
+ * Another person's personal account is never theirs to remove. */
+export function canRemoveConnectedAccount(
+  account: Pick<ConnectionMetadata, "subjectId">,
+  management: Pick<CatalogConnectedAccountsManagement, "viewerSubjectId" | "canWrite"> | undefined,
+): boolean {
+  if (!management?.canWrite) return false;
+  return (
+    account.subjectId === null ||
+    (management.viewerSubjectId !== null && account.subjectId === management.viewerSubjectId)
+  );
+}
+
+/** Sign-in never produced a usable account identity. */
+export function connectedAccountSignInUnfinished(
+  account: Pick<ConnectionMetadata, "status" | "metadata">,
+): boolean {
+  return account.status !== "active" && connectionAccountIdentityLabel(account.metadata, "") === "";
+}
+
+/** Displays accounts and, when management is supplied, per-account actions.
+ * It never chooses which account a session uses. */
 export function CatalogConnectedAccounts({
   item,
   connections,
   loadFailed = false,
   accessDenied = false,
   onRetry,
+  management,
 }: CatalogConnectedAccountsProps) {
+  const [removeTarget, setRemoveTarget] = useState<{
+    account: ConnectionMetadata;
+    label: string;
+  } | null>(null);
   if (
     item.kind !== "mcp" ||
     item.surfaceType === "codex_apps" ||
@@ -52,17 +99,28 @@ export function CatalogConnectedAccounts({
             : {}),
         }
       : null);
+  // A removed (revoked) account is gone; it is not listed as a dead row.
   const accounts = matchingConnectionAccounts(
     ref,
     connections ?? [],
     item.mcpUrl ?? item.endpointUrl,
-  );
-  const labels = accounts.map((account) =>
-    connectionAccountIdentityLabel(
-      account.metadata,
-      `${item.name} account ${account.id.slice(0, 8)}`,
-    ),
-  );
+  ).filter((account) => account.status !== "revoked");
+  const labels = accounts.map((account) => connectionSignInLabel(account, item.name));
+  const busy = management?.busy === true;
+  const addAction =
+    management?.onAdd && management.canWrite && !accessDenied && !loadFailed && connections ? (
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        className="min-h-9"
+        disabled={busy}
+        onClick={management.onAdd}
+      >
+        <PlusIcon aria-hidden="true" />
+        Add account
+      </Button>
+    ) : null;
 
   return (
     <DetailSection
@@ -72,6 +130,7 @@ export function CatalogConnectedAccounts({
           ? "This connector is off. Your saved accounts remain connected."
           : undefined
       }
+      action={addAction ?? undefined}
     >
       {accessDenied ? (
         <Notice tone="muted" live="polite">
@@ -108,6 +167,15 @@ export function CatalogConnectedAccounts({
           {accounts.map((account, index) => {
             const label = labels[index]!;
             const duplicate = labels.filter((other) => other === label).length > 1;
+            const unfinished = connectedAccountSignInUnfinished(account);
+            const reconnect =
+              management?.onReconnect &&
+              account.kind === "oauth2" &&
+              account.status !== "active" &&
+              canRemoveConnectedAccount(account, management)
+                ? management.onReconnect
+                : null;
+            const removable = canRemoveConnectedAccount(account, management);
             return (
               <li
                 key={account.id}
@@ -117,19 +185,84 @@ export function CatalogConnectedAccounts({
                   <p className="m-0 break-words text-sm leading-5 font-medium text-fg">{label}</p>
                   <div className="mt-1 flex flex-wrap items-center gap-2">
                     <MetaChip>{account.subjectId === null ? "This workspace" : "Only me"}</MetaChip>
-                    {duplicate ? (
+                    {duplicate || unfinished ? (
                       <span className="text-xs text-fg-muted">
                         Account {account.id.slice(0, 8)}
                       </span>
                     ) : null}
                   </div>
                 </div>
-                <StatusBadge status={ACCOUNT_STATUS[account.status]} variant="dot" />
+                {unfinished ? (
+                  <StatusBadge status="needs_reconnect" variant="dot">
+                    Sign-in not finished
+                  </StatusBadge>
+                ) : (
+                  <StatusBadge status={ACCOUNT_STATUS[account.status]} variant="dot" />
+                )}
+                {reconnect || removable ? (
+                  <div className="flex shrink-0 items-center gap-2">
+                    {reconnect ? (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="min-h-9"
+                        disabled={busy}
+                        aria-label={`Reconnect ${label}`}
+                        onClick={() => reconnect(account)}
+                      >
+                        <RefreshCwIcon aria-hidden="true" />
+                        Reconnect
+                      </Button>
+                    ) : null}
+                    {removable ? (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        className="min-h-9 text-fg-muted hover:text-status-failed"
+                        disabled={busy}
+                        aria-label={`Remove ${label}`}
+                        onClick={() => setRemoveTarget({ account, label })}
+                      >
+                        <TrashIcon aria-hidden="true" />
+                        Remove
+                      </Button>
+                    ) : null}
+                  </div>
+                ) : null}
               </li>
             );
           })}
         </ul>
       )}
+      {management ? (
+        <ConfirmDialog
+          open={removeTarget !== null}
+          onOpenChange={(open) => {
+            if (!open) setRemoveTarget(null);
+          }}
+          title={removeTarget ? `Remove ${removeTarget.label}?` : "Remove account?"}
+          description={
+            removeTarget?.account.subjectId === null
+              ? `${item.name} stops using this account for everyone in this workspace. You can add it again later.`
+              : `${item.name} stops using this account. You can add it again later.`
+          }
+          confirmLabel="Remove account"
+          pendingLabel="Removing…"
+          onConfirm={async () =>
+            removeTarget ? await management.onRemove(removeTarget.account) : undefined
+          }
+        />
+      ) : null}
     </DetailSection>
+  );
+}
+
+function connectionSignInLabel(account: ConnectionMetadata, itemName: string): string {
+  if (connectedAccountSignInUnfinished(account)) return `${itemName} account`;
+  return connectionAccountIdentityLabel(
+    account.metadata,
+    `${itemName} account ${account.id.slice(0, 8)}`,
   );
 }

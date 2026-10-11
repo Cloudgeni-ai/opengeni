@@ -361,6 +361,7 @@ export async function processModelResponseTerminalEvent(input: {
           model: input.model,
           externallyBilled: input.externallyBilled,
           billing,
+          webSearchRequests: responseUsage?.webSearchRequests,
         });
       }
       const observedInput = normalizedUsage.telemetry.inputTokens;
@@ -370,12 +371,15 @@ export async function processModelResponseTerminalEvent(input: {
     },
     recordAttemptSignals: async () => {
       if (!authoritative) return;
-      const observedTotal = normalizedUsage.totalTokens;
+      // Context is what the last request sent, not the sum of a response that
+      // took several requests (each re-sends the whole prefix).
+      const finalRequest = normalizedUsage.requestUsageEntries?.at(-1);
+      const observedTotal = finalRequest?.totalTokens ?? normalizedUsage.totalTokens;
       input.state.contextSignal =
         observedTotal !== null && observedTotal > 0
           ? { revision: responseOrdinal, totalTokens: observedTotal }
           : null;
-      const observedInput = normalizedUsage.telemetry.inputTokens;
+      const observedInput = finalRequest?.inputTokens ?? normalizedUsage.telemetry.inputTokens;
       await input.setLastInputTokens(
         observedInput !== null && observedInput > 0 ? observedInput : null,
       );
@@ -787,6 +791,8 @@ export function recordAuthoritativeModelUsageMetrics(input: {
   model: string;
   externallyBilled: boolean;
   billing: ModelUsageBillingRecord;
+  /** Provider-run web searches this response billed, when the provider reports them. */
+  webSearchRequests?: number | undefined;
 }): void {
   try {
     const telemetry = input.billing.normalizedUsage.telemetry;
@@ -797,6 +803,7 @@ export function recordAuthoritativeModelUsageMetrics(input: {
       tokens: telemetry,
       estimatedProviderCostMicros: input.billing.estimatedProviderCostMicros,
       pricingSource: input.billing.pricingSource,
+      ...(input.webSearchRequests ? { webSearchRequests: input.webSearchRequests } : {}),
     });
   } catch {
     // Durable event + billing already committed; metrics are best-effort only.

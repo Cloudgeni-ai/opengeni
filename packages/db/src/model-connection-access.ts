@@ -1,12 +1,21 @@
 import { sql, type SQL, type SQLWrapper } from "drizzle-orm";
+import { rawRows, type Database } from "./database";
+import { SUBSCRIPTION_CORE_CODEX_PROVIDER } from "./subscription-core-codex-provider";
 import {
-  withRlsContext,
-  withWorkspaceSubjectRls,
-  setSubjectRlsContext,
-  rawRows,
-  type Database,
-} from "./database";
-import { resolveSubscriptionConnectionId } from "./subscription-core-repository";
+  getSubscriptionCoreModelConnectionAccess,
+  ModelConnectionWorkspaceNotInOrganizationError,
+  updateSubscriptionCoreModelConnectionAccess,
+  withModelConnectionAccessScope,
+  type ModelConnectionAccess,
+} from "./subscription-core/access-editor";
+
+// The policy shape, its errors and the route scope are shared with the
+// provider-neutral core editor; the public names stay exported from here.
+export {
+  ModelConnectionAccessForbiddenError,
+  ModelConnectionWorkspaceNotInOrganizationError,
+  type ModelConnectionAccess,
+} from "./subscription-core/access-editor";
 
 export type ModelConnectionKind =
   | "codex"
@@ -16,12 +25,6 @@ export type ModelConnectionKind =
   | "anthropic"
   | "claude_subscription"
   | "opper";
-export type ModelConnectionAccess = {
-  allowedModels: string[] | null;
-  allowedWorkspaces: string[] | null;
-  allowPersonalWorkspaces: boolean;
-  version: number;
-};
 export type ModelConnectionTarget = {
   accountId: string;
   workspaceId: string | null;
@@ -29,22 +32,6 @@ export type ModelConnectionTarget = {
   kind: ModelConnectionKind;
   connectionId: string;
 };
-
-/** A requested access policy names a workspace outside the organization's shared workspaces. */
-export class ModelConnectionWorkspaceNotInOrganizationError extends Error {
-  constructor() {
-    super("A selected workspace is not in this organization");
-    this.name = "ModelConnectionWorkspaceNotInOrganizationError";
-  }
-}
-
-/** The viewer can read a connection's access but may not change it. */
-export class ModelConnectionAccessForbiddenError extends Error {
-  constructor() {
-    super("You can't change what this account serves");
-    this.name = "ModelConnectionAccessForbiddenError";
-  }
-}
 
 export function connectionModelAllowed(
   allowedModels: readonly string[] | null | undefined,
@@ -99,33 +86,13 @@ function relation(target: ModelConnectionTarget): { table: SQLWrapper; condition
   };
 }
 
-async function scoped<T>(
-  db: Database,
-  target: ModelConnectionTarget,
-  use: (db: Database) => Promise<T>,
-) {
-  if (target.workspaceId !== null)
-    return await withWorkspaceSubjectRls(db, target.workspaceId, target.subjectId, use);
-  return await withRlsContext(
-    db,
-    { accountId: target.accountId, workspaceId: null },
-    async (tx) => {
-      await setSubjectRlsContext(tx, target.subjectId);
-      await tx.execute(
-        sql`select get_organization_administration_overview(${target.accountId}::uuid, ${target.subjectId})`,
-      );
-      return await use(tx);
-    },
-  );
-}
-
 export async function getModelConnectionAccess(
   db: Database,
   target: ModelConnectionTarget,
 ): Promise<ModelConnectionAccess | null> {
   if (target.kind === "codex")
     return await getSubscriptionCoreCodexModelConnectionAccess(db, target);
-  return await scoped(db, target, async (tx) => {
+  return await withModelConnectionAccessScope(db, target, async (tx) => {
     const { table, condition } = relation(target);
     const [row] = await rawRows<ModelConnectionAccess>(
       tx,
@@ -138,276 +105,32 @@ export async function getModelConnectionAccess(
   });
 }
 
-type CoreCodexAccessRow = {
-  id: string;
-  allowed_model_ids: string[] | null;
-  scope_kind: "organization" | "workspaces" | "people";
-  allow_personal_workspaces: boolean;
-  allocator_enabled: boolean;
-  access_version: number | string;
-};
-
-/** The shared Codex connection the route may edit: organization-managed or this workspace's. */
-async function coreCodexAccessConnection(
-  tx: Database,
-  target: ModelConnectionTarget,
-  lock: boolean,
-): Promise<CoreCodexAccessRow | null> {
-  const connectionId = await resolveSubscriptionConnectionId(tx, {
-    accountId: target.accountId,
-    provider: "codex",
-    connectionId: target.connectionId,
-  });
-  if (!connectionId) return null;
-  const [row] = await rawRows<CoreCodexAccessRow>(
-    tx,
-    sql`select connection.id::text as id, connection.allowed_model_ids, connection.scope_kind,
-        connection.allow_personal_workspaces, connection.allocator_enabled, connection.access_version
-      from subscription_connections connection
-      where connection.account_id = ${target.accountId}::uuid
-        and connection.id = ${connectionId}::uuid
-        and connection.provider = 'codex' and connection.kind = 'subscription'
-        and connection.ownership = 'shared' and connection.disconnected_at is null
-        and ${
-          target.workspaceId === null
-            ? sql`connection.managed_by_workspace_id is null`
-            : sql`connection.managed_by_workspace_id = ${target.workspaceId}::uuid`
-        }
-      ${lock ? sql`for update` : sql``}`,
-  );
-  return row ?? null;
-}
-
-async function organizationSharedWorkspaceIds(tx: Database, accountId: string) {
-  const rows = await rawRows<{ workspace_id: string }>(
-    tx,
-    sql`select workspace_id::text as workspace_id
-      from list_organization_workspace_ids(${accountId}::uuid)`,
-  );
-  return new Set(rows.map((row) => row.workspace_id));
-}
-
-async function coreCodexAccessPolicy(
-  tx: Database,
-  target: ModelConnectionTarget,
-  connection: CoreCodexAccessRow,
-): Promise<ModelConnectionAccess> {
-  const version = Number(connection.access_version);
-  // A workspace's own account is never offered to other workspaces.
-  if (target.workspaceId !== null)
-    return {
-      allowedModels: connection.allowed_model_ids,
-      allowedWorkspaces: null,
-      allowPersonalWorkspaces: false,
-      version,
-    };
-  if (connection.scope_kind === "organization")
-    return {
-      allowedModels: connection.allowed_model_ids,
-      allowedWorkspaces: null,
-      allowPersonalWorkspaces: true,
-      version,
-    };
-  const [reach] = await rawRows<{
-    reach: { sharedWorkspaces: boolean; personalWorkspaces: boolean } | null;
-  }>(
-    tx,
-    sql`select opengeni_private.subscription_codex_reach(
-      ${target.accountId}::uuid, ${connection.id}::uuid) as reach`,
-  );
-  let allowedWorkspaces: string[] | null = null;
-  if (!reach?.reach?.sharedWorkspaces) {
-    // Personal workspaces are listed too (their assignment is what admits
-    // them); the policy shape names only shared workspaces.
-    const shared = await organizationSharedWorkspaceIds(tx, target.accountId);
-    // A workspace assigned only for its own local copy is not an
-    // organization-pool choice: without a policy row the organization pool
-    // serves it, otherwise only an organization-pool row does.
-    const listed = await rawRows<{ workspace_id: string }>(
-      tx,
-      sql`select assignment.workspace_id::text as workspace_id
-        from subscription_connection_workspaces assignment
-        where assignment.account_id = ${target.accountId}::uuid
-          and assignment.connection_id = ${connection.id}::uuid
-          and (exists (select 1 from subscription_connection_assignment_policies policy
-              where policy.account_id = assignment.account_id
-                and policy.connection_id = assignment.connection_id
-                and policy.workspace_id = assignment.workspace_id
-                and policy.inference_pool = 'organization')
-            or not exists (select 1 from subscription_connection_assignment_policies policy
-              where policy.account_id = assignment.account_id
-                and policy.connection_id = assignment.connection_id
-                and policy.workspace_id = assignment.workspace_id))
-        order by assignment.workspace_id`,
-    );
-    allowedWorkspaces = listed.map((row) => row.workspace_id).filter((id) => shared.has(id));
-  }
-  return {
-    allowedModels: connection.allowed_model_ids,
-    allowedWorkspaces,
-    allowPersonalWorkspaces: connection.allow_personal_workspaces,
-    version,
-  };
-}
-
-/**
- * A shared Codex connection's access policy on the shared subscription core,
- * in the legacy shape. The organization route reads an organization-managed
- * connection, the workspace route one that workspace manages.
- * `allowedWorkspaces` is null when every shared workspace, including ones
- * created later, may use it.
- */
+/** A shared Codex connection's access policy on the shared subscription core. */
 export async function getSubscriptionCoreCodexModelConnectionAccess(
   db: Database,
   target: ModelConnectionTarget,
 ): Promise<ModelConnectionAccess | null> {
   if (target.kind !== "codex") throw new Error("Only Codex connections are read from the core");
-  return await scoped(db, target, async (tx) => {
-    const connection = await coreCodexAccessConnection(tx, target, false);
-    return connection ? await coreCodexAccessPolicy(tx, target, connection) : null;
-  });
+  return await getSubscriptionCoreModelConnectionAccess(
+    db,
+    SUBSCRIPTION_CORE_CODEX_PROVIDER,
+    target,
+  );
 }
 
-function textArray(values: readonly string[] | null) {
-  return values === null
-    ? sql`null::text[]`
-    : sql`array(select jsonb_array_elements_text(${JSON.stringify(values)}::jsonb))`;
-}
-
-function uuidArray(values: Iterable<string>) {
-  return sql`array(select jsonb_array_elements_text(${JSON.stringify([...values])}::jsonb)::uuid)`;
-}
-
-/**
- * Save what a shared Codex connection serves on the core. Null when the
- * connection is gone or its access changed since `policy.version` was read.
- *
- * At organization scope the connection's scope, its workspace assignments,
- * the organization-pool policy rows and the reach for workspaces created later
- * change together, in one transaction:
- * - every shared and Personal workspace: `organization` scope;
- * - otherwise `workspaces` scope over the chosen shared workspaces (all of
- *   today's when the choice is "all, including new ones") plus every Personal
- *   workspace when they are allowed, with the reach kept for later ones.
- * A workspace's own local copy (its workspace-pool row) is never removed. In
- * a workspace, only the models of the account that workspace manages change.
- */
+/** Save what a shared Codex connection serves on the core. */
 export async function updateSubscriptionCoreCodexModelConnectionAccess(
   db: Database,
   target: ModelConnectionTarget,
   policy: ModelConnectionAccess,
 ): Promise<ModelConnectionAccess | null> {
   if (target.kind !== "codex") throw new Error("Only Codex connections are written to the core");
-  if (target.workspaceId !== null && policy.allowedWorkspaces !== null)
-    throw new Error("Workspace connections cannot assign other workspaces");
-  return await scoped(db, target, async (tx) => {
-    const current = await coreCodexAccessConnection(tx, target, true);
-    if (!current) {
-      // Locking needs the write policy: a readable row it hides is a refusal.
-      if (await coreCodexAccessConnection(tx, target, false))
-        throw new ModelConnectionAccessForbiddenError();
-      return null;
-    }
-    if (Number(current.access_version) !== policy.version) return null;
-    const id = current.id;
-    const models = textArray(policy.allowedModels);
-    if (target.workspaceId !== null) {
-      const [updated] = await rawRows<CoreCodexAccessRow>(
-        tx,
-        sql`update subscription_connections set allowed_model_ids = ${models},
-            access_version = access_version + 1, updated_at = clock_timestamp()
-          where account_id = ${target.accountId}::uuid and id = ${id}::uuid
-          returning id::text as id, allowed_model_ids, scope_kind, allow_personal_workspaces,
-            allocator_enabled, access_version`,
-      );
-      if (!updated) return null;
-      await tx.execute(sql`update subscription_connection_assignment_policies
-        set allowed_model_ids = ${models}, updated_at = clock_timestamp()
-        where account_id = ${target.accountId}::uuid and connection_id = ${id}::uuid
-          and workspace_id = ${target.workspaceId}::uuid and inference_pool = 'workspace'`);
-      return await coreCodexAccessPolicy(tx, target, updated);
-    }
-
-    const shared = await organizationSharedWorkspaceIds(tx, target.accountId);
-    if (policy.allowedWorkspaces?.some((workspaceId) => !shared.has(workspaceId)))
-      throw new ModelConnectionWorkspaceNotInOrganizationError();
-    const accountWorkspaces = await rawRows<{ id: string }>(
-      tx,
-      sql`select id::text as id from workspaces where account_id = ${target.accountId}::uuid`,
-    );
-    const personal = accountWorkspaces
-      .map((row) => row.id)
-      .filter((workspaceId) => !shared.has(workspaceId));
-    const organizationScope = policy.allowedWorkspaces === null && policy.allowPersonalWorkspaces;
-    // A workspace with its own local copy stays assigned whatever the
-    // organization chooses, so that copy keeps working.
-    const local = (
-      await rawRows<{ workspace_id: string }>(
-        tx,
-        sql`select workspace_id::text as workspace_id
-          from subscription_connection_assignment_policies
-          where account_id = ${target.accountId}::uuid and connection_id = ${id}::uuid
-            and inference_pool = 'workspace'`,
-      )
-    ).map((row) => row.workspace_id);
-    // Organization scope admits every workspace; only a workspace that also
-    // has its own local copy needs explicit rows for both pools.
-    const desired = new Set(
-      organizationScope
-        ? local
-        : [
-            ...(policy.allowedWorkspaces ?? shared),
-            ...(policy.allowPersonalWorkspaces ? personal : []),
-          ],
-    );
-    const [updated] = await rawRows<CoreCodexAccessRow>(
-      tx,
-      sql`update subscription_connections set allowed_model_ids = ${models},
-          scope_kind = ${organizationScope ? "organization" : "workspaces"},
-          allow_personal_workspaces = ${policy.allowPersonalWorkspaces},
-          access_version = access_version + 1, updated_at = clock_timestamp()
-        where account_id = ${target.accountId}::uuid and id = ${id}::uuid
-        returning id::text as id, allowed_model_ids, scope_kind, allow_personal_workspaces,
-          allocator_enabled, access_version`,
-    );
-    if (!updated) return null;
-    const keep = uuidArray(desired);
-    const assigned = uuidArray(new Set([...desired, ...local]));
-    await tx.execute(sql`delete from subscription_connection_assignment_policies
-      where account_id = ${target.accountId}::uuid and connection_id = ${id}::uuid
-        and inference_pool = 'organization' and managed_by_workspace_id is null
-        and workspace_id <> all(${keep})`);
-    await tx.execute(sql`delete from subscription_connection_workspaces assignment
-      where assignment.account_id = ${target.accountId}::uuid
-        and assignment.connection_id = ${id}::uuid
-        and assignment.workspace_id <> all(${assigned})
-        and not exists (select 1 from subscription_connection_assignment_policies policy
-          where policy.account_id = assignment.account_id
-            and policy.connection_id = assignment.connection_id
-            and policy.workspace_id = assignment.workspace_id)`);
-    await tx.execute(sql`insert into subscription_connection_workspaces
-        (account_id, connection_id, workspace_id)
-      select ${target.accountId}::uuid, ${id}::uuid, workspace_id
-      from unnest(${assigned}) as workspace_id
-      on conflict do nothing`);
-    await tx.execute(sql`insert into subscription_connection_assignment_policies (
-        account_id, connection_id, workspace_id, inference_pool, allocator_enabled,
-        allowed_model_ids, excluded_models, managed_by_workspace_id
-      )
-      select ${target.accountId}::uuid, ${id}::uuid, workspace_id, 'organization',
-        ${updated.allocator_enabled}, ${models}, '{}'::text[], null
-      from unnest(${keep}) as workspace_id
-      on conflict do nothing`);
-    await tx.execute(sql`update subscription_connection_assignment_policies
-      set allowed_model_ids = ${models}, updated_at = clock_timestamp()
-      where account_id = ${target.accountId}::uuid and connection_id = ${id}::uuid
-        and inference_pool = 'organization'`);
-    await tx.execute(sql`select opengeni_private.set_subscription_codex_reach(
-      ${target.accountId}::uuid, ${id}::uuid,
-      ${!organizationScope && policy.allowedWorkspaces === null}::boolean,
-      ${!organizationScope && policy.allowPersonalWorkspaces}::boolean)`);
-    return await coreCodexAccessPolicy(tx, target, updated);
-  });
+  return await updateSubscriptionCoreModelConnectionAccess(
+    db,
+    SUBSCRIPTION_CORE_CODEX_PROVIDER,
+    target,
+    policy,
+  );
 }
 
 export async function updateModelConnectionAccess(
@@ -416,7 +139,7 @@ export async function updateModelConnectionAccess(
   policy: ModelConnectionAccess,
 ): Promise<ModelConnectionAccess | null> {
   if (target.kind === "codex") return null;
-  return await scoped(db, target, async (tx) => {
+  return await withModelConnectionAccessScope(db, target, async (tx) => {
     const { table, condition } = relation(target);
     if (target.workspaceId !== null && policy.allowedWorkspaces !== null)
       throw new Error("Workspace connections cannot assign other workspaces");
