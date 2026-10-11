@@ -77,6 +77,8 @@ const withheldMigrations = [
   "0715_subscription_authority_compat.sql",
   // Requires 0715's routines; it follows 0715.
   "0716_subscription_authority_fences.sql",
+  // Patches the acceptance writers withheld 0688 and 0707 define.
+  "0717_subscription_personal_acceptance_reads.sql",
 ];
 let database: OwnerMigratedTestDatabase | null = null;
 

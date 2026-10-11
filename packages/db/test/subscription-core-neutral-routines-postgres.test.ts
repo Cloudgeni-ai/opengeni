@@ -45,8 +45,9 @@ beforeAll(async () => {
   // full runtime posture as the runtime role before provisioning again. 0712
   // patches routines 0707 creates, 0713 builds on 0707's registry, 0714
   // redefines 0713's reach setters, 0715 builds on 0712's receipts and
-  // patches its helpers, and 0716 requires 0715's routines, so all five are
-  // withheld and applied with it.
+  // patches its helpers, 0716 requires 0715's routines and 0717 patches the
+  // acceptance writers 0707 defines, so all six are withheld and applied with
+  // it.
   const neutral = "0707_subscription_core_neutral_routines.sql";
   const withheld = [
     neutral,
@@ -56,6 +57,7 @@ beforeAll(async () => {
     "0714_subscription_workspace_managed_organization_accounts.sql",
     "0715_subscription_authority_compat.sql",
     "0716_subscription_authority_fences.sql",
+    "0717_subscription_personal_acceptance_reads.sql",
   ];
   const owner = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
@@ -68,9 +70,7 @@ beforeAll(async () => {
     const [applied] = await owner<{ count: number }[]>`
       select count(*)::int as count from schema_migrations where name in ${owner(withheld)}`;
     if (applied?.count !== withheld.length)
-      throw new Error(
-        "0707, 0712, 0713, 0714, 0715 and 0716 were not applied by the second migrate",
-      );
+      throw new Error("0707 and 0712 to 0717 were not applied by the second migrate");
   } finally {
     await owner.end();
   }

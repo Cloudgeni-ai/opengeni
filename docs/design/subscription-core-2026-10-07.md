@@ -3152,13 +3152,14 @@ No X1a or C1a call site merges before all three.
 
 #### PR 0b: authority compatibility and fences
 
-PR 0b ships as two rolling PRs. Part 1 (migration 0715) is inert: the
+PR 0b ships as three rolling PRs. Part 1 (migration 0715) is inert: the
 marker, the compatibility relation, the per-path resolvers, the copy routine
 and reader, the commit-time check and the helpers' record branch act only
 for a provider whose own drained cutover wrote a receipt with a real commit
 time, which no provider has yet. Part 2 (stacked on part 1) adds the fences
-and comparisons, which act on deploy. Choices made where the plan left room,
-for reviewers:
+and comparisons, which act on deploy. Part 3 (stacked on part 2, below)
+fixes a defect in the Codex v2 writers found while testing part 2. Choices
+made where the plan left room, for reviewers:
 
 - **Relation.** `opengeni_private.subscription_authority_compat` belongs to
   the migration owner; runtime roles hold no privilege on it. Besides the
@@ -3415,6 +3416,27 @@ provision-roles revokes them from the runtime role). Choices:
   The test stages each kind before 0716, runs the query there as an operator
   would, and asserts it lists exactly them; after 0716 the same query lists
   them less the repaired authorities.
+
+Part 3 (migration 0717) fixes a defect found while testing part 2 under the
+documented owner posture (finding below). The v2 writers
+(`subscription_core_acceptance_authority_v2`,
+`subscription_core_task_authority_v2` and their Codex forms) count the
+owner's personal connection generations holding only an account `lifecycle`
+capability, which no `subscription_connections` policy honours for personal
+rows. Choices:
+
+- **The read, not the rule.** Each writer sets the owner-only
+  membership-lifecycle marker immediately before its count and restores the
+  caller's value right after it, as `subscription_personal_entry_serviceable`
+  does (0716). The marker exposes rows only to the owner, the count is still
+  restricted to the accepting owner's own personal connections at their
+  active authority, and every other check is unchanged.
+- **No new policy.** A `lifecycle`-capability read policy on
+  `subscription_connections` would also widen what every other owner routine
+  holding that capability sees; the marker is confined to these four counts.
+- **No backfill.** Values frozen empty stay empty: a backfill would widen
+  accepted work after the fact. New turns in a private session pick up the
+  personal entry; scheduled tasks keep the value frozen at creation.
 
 #### PR 0c: provider-keyed cutover planner and organization reach
 
@@ -3753,6 +3775,7 @@ Decisions, each the strictest fail-closed reading of the plan and contract:
 | The `scheduled_turn_execution_immutable` trigger fires `BEFORE UPDATE OF` a column list with only the xAI snapshot, so a Claude snapshot or v2 update of a scheduled turn never reaches its fence. | 0275 and its xAI successor | PR 0b part 2 (0716) |
 | 0598 copied the xAI policies of `organization_memberships` by the pattern `xai_subscription_capability_%` and missed `xai_subscription_membership_lock`: under a migration owner without `BYPASSRLS` (the documented posture) connecting a personal Claude account fails with `42501`. | 0598 (0442's xAI policy) | PR 0b part 2 (0716) |
 | No policy lets the SuperGrok or Claude lifecycle capability update `organization_user_resource_authorities`, so under such an owner a personal disconnect deletes the credential and leaves its authority active, and runs accepted for the disconnected account keep passing the `user` generation check. Existing tests ran as a superuser. | 0234, 0442, 0598 | PR 0b part 2 (0716): revoke policies, and a repair of the authorities left active |
+| Under such an owner the v2 writers see no personal connection: they count the owner's personal generations holding only an account `lifecycle` capability, which no `subscription_connections` policy honours for personal rows, so every acceptance freezes the empty value and a personal Codex account is never used after the cutover, even in the owner's private session. Existing tests ran the writers on superuser-owned databases. | 0669, 0688, 0707 | PR 0b part 3 (0717): the writers count through the owner-only membership-lifecycle read |
 | The `{codex,claude,xai}_primary_connection_id` foreign keys omit `provider`, so a primary can reference another provider's connection. | 0642 `subscription_settings` | PR 0, or M4-A's settings shape |
 | The non-Codex branch of `authorize_subscription_personal_access` compares the owner subject but neither requires the connection's owner membership id to equal the session owner's membership nor checks `personalConnectionsAllowed`. | 0668 | PR 0 |
 | `autoRenews` is a static adapter flag but is documented as false for setup tokens. | `packages/subscriptions/src/adapter.ts` | PR 0 |
