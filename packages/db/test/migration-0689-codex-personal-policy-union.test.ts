@@ -19,8 +19,8 @@ const precursor = "0712_subscription_core_generic_precursor.sql";
 // 0713 keys and redefines objects 0689 creates: held back and replayed right
 // after it.
 const providerKeyedReach = "0713_subscription_core_provider_keyed_reach.sql";
-// 0714 builds on 0712's receipts and patches its helpers; it follows 0712.
-const compat = "0714_subscription_authority_compat.sql";
+// 0715 builds on 0712's receipts and patches its helpers; it follows 0712.
+const compat = "0715_subscription_authority_compat.sql";
 const key = Buffer.alloc(32, 87);
 const cases: Array<{
   name: string;

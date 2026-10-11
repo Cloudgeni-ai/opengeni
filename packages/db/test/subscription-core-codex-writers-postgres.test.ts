@@ -1719,7 +1719,7 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
       // Exactly the four Codex writer internals, the neutral ones (0707, with
       // 0713's provider-keyed auto-assignment apply path), the cutover-receipt
       // and cutover-identity triggers (0712) and the authority compatibility
-      // internals (0714).
+      // internals (0715).
       expect(posture.subscriptionOwnerRoutines!.map((routine) => routine.name).sort()).toEqual(
         [
           "subscription_codex_writer_context(uuid, uuid, text)",

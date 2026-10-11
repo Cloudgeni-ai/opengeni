@@ -43,8 +43,8 @@ const PRECURSOR = "0712_subscription_core_generic_precursor.sql";
 // 0713 keys and redefines objects 0689 creates: held back with it and
 // replayed right after it.
 const PROVIDER_KEYED_REACH = "0713_subscription_core_provider_keyed_reach.sql";
-// 0714 builds on 0712's receipts and patches its helpers; it follows 0712.
-const COMPAT = "0714_subscription_authority_compat.sql";
+// 0715 builds on 0712's receipts and patches its helpers; it follows 0712.
+const COMPAT = "0715_subscription_authority_compat.sql";
 const MODEL = "codex/gpt-5.5";
 const key = Buffer.alloc(32, 77);
 const settings = { environmentsEncryptionKey: key.toString("base64") } as never;

@@ -3151,7 +3151,7 @@ No X1a or C1a call site merges before all three.
 
 #### PR 0b: authority compatibility and fences
 
-PR 0b ships as two rolling PRs. Part 1 (migration 0714) is inert: the
+PR 0b ships as two rolling PRs. Part 1 (migration 0715) is inert: the
 marker, the compatibility relation, the per-path resolvers, the copy routine
 and reader, the commit-time check and the helpers' record branch act only
 for a provider whose own drained cutover wrote a receipt with a real commit

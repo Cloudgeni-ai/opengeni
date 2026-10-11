@@ -191,5 +191,5 @@ export const embeddingMigrationTail = [
   // Builds on 0712's receipts, adds a marker to the session and scheduled
   // carrier tables and patches the personal helpers 0712 patched; replay
   // after it.
-  "0714_subscription_authority_compat.sql",
+  "0715_subscription_authority_compat.sql",
 ];

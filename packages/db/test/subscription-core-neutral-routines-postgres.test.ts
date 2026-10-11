@@ -43,7 +43,7 @@ beforeAll(async () => {
   // until roles are provisioned again. Stage a provisioned database without
   // 0707 (as a deployment is before it), apply 0707 alone, and evaluate the
   // full runtime posture as the runtime role before provisioning again. 0712
-  // patches routines 0707 creates, 0713 builds on 0707's registry and 0714
+  // patches routines 0707 creates, 0713 builds on 0707's registry and 0715
   // builds on 0712's receipts and patches its helpers, so all three are
   // withheld and applied with it.
   const neutral = "0707_subscription_core_neutral_routines.sql";
@@ -51,7 +51,7 @@ beforeAll(async () => {
     neutral,
     "0712_subscription_core_generic_precursor.sql",
     "0713_subscription_core_provider_keyed_reach.sql",
-    "0714_subscription_authority_compat.sql",
+    "0715_subscription_authority_compat.sql",
   ];
   const owner = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
@@ -64,7 +64,7 @@ beforeAll(async () => {
     const [applied] = await owner<{ count: number }[]>`
       select count(*)::int as count from schema_migrations where name in ${owner(withheld)}`;
     if (applied?.count !== withheld.length)
-      throw new Error("0707, 0712, 0713 and 0714 were not applied by the second migrate");
+      throw new Error("0707, 0712, 0713 and 0715 were not applied by the second migrate");
   } finally {
     await owner.end();
   }
