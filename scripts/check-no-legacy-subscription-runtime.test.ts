@@ -194,7 +194,49 @@ describe("M4 X4 SuperGrok entry", () => {
       xai("packages/db/src/index.ts", "const pool = isSubscriptionPoolWorkerSubject(subjectId);"),
     ).toEqual([]);
   });
-  test("schema, posture and the 0719 codec stage are exact exceptions", () => {
+  test("rejects the deleted v1 repository, waiters, quota and video envelope anywhere", () => {
+    for (const [file, code] of [
+      [
+        "packages/db/src/index.ts",
+        "export const x = xaiSubscriptionRepository.selectCredentialForUse;",
+      ],
+      ["packages/db/src/index.ts", "export const waiters = xaiCapacityRepository;"],
+      ["apps/worker/src/activities/agent-turn/admission.ts", "await armXaiCapacityWait(input);"],
+      ["apps/worker/src/activities/agent-turn/run.ts", "await acquireXaiCredentialLease(db, id);"],
+      ["apps/worker/src/activities/xai-quota.ts", "export const q = refreshExhaustedXaiQuota;"],
+      ["apps/api/src/routes/supergrok.ts", "await listOrganizationXaiSubscriptions(db, org);"],
+      ["apps/api/src/model-catalog.ts", "if (await workspaceXaiSubscriptionActive(db, ws)) {}"],
+      ["apps/worker/src/activities/video.ts", "encryptVideoGenerationXaiCredential(lease);"],
+      ["packages/core/src/x.ts", "type T = XaiCredentialForRun;"],
+    ] as const) {
+      expect(xai(file, code)).toHaveLength(1);
+    }
+  });
+  test("blocks imports of deleted SuperGrok producers and the legacy-xai fixture only", () => {
+    for (const specifier of [
+      "./xai-subscription",
+      "./xai-subscription.ts",
+      "./organization-xai-subscriptions",
+      "../agent-turn/xai-capacity",
+      "./xai-quota",
+      "../xai-subscription-auth",
+      "../test/fixtures/legacy-xai",
+    ]) {
+      expect(xai("apps/worker/src/run.ts", `import { x } from "${specifier}";`)).toHaveLength(1);
+    }
+    for (const specifier of [
+      "@opengeni/xai-subscription",
+      "./providers/xai-subscription",
+      "../xai-subscription-core",
+      "./xai-subscription-core-cutover",
+      "./subscription-core-xai-compat",
+      "./agent-turn/scoped-subscription-capacity",
+    ]) {
+      expect(xai("apps/worker/src/run.ts", `import { x } from "${specifier}";`)).toEqual([]);
+    }
+    expect(xai("packages/config/src/index.ts", 'const kind = "xai-subscription";')).toEqual([]);
+  });
+  test("schema, posture and the 0721 codec stage are exact exceptions", () => {
     expect(
       xai(
         "packages/db/src/schema.ts",
@@ -231,7 +273,7 @@ describe("M4 X4 SuperGrok entry", () => {
       xai(
         "packages/db/src/index.ts",
         `
-      // xai_capacity_waiters rows are read-only after the 0719 receipt.
+      // xai_capacity_waiters rows are read-only after the 0721 receipt.
       const provider = "xai";
       const waiters = schema.subscriptionCapacityWaiters;
       const route = "supergrok-subscription";

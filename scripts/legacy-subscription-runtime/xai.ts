@@ -2,11 +2,17 @@ import type { LegacySubscriptionRetirement } from "./types";
 
 /**
  * SuperGrok (`xai`) decision state retired by M4 X4, after the drained X3
- * cutover (0719) moved it onto the shared subscription core. The five legacy
+ * cutover (0721) moved it onto the shared subscription core. The five legacy
  * tables stay for forensics (read-only once the receipt exists), their
  * routines stay until the retirement step drops them, and the codec stage
- * with the legacy secret decoder it calls stays for as long as 0719 ships:
+ * with the legacy secret decoder it calls stays for as long as 0721 ships:
  * a fresh install and a one-window upgrade still run it.
+ *
+ * X4 deleted the v1 SuperGrok repository instance and every reader and
+ * writer built on it (connect, disconnect, rotation, pins, leases, waiters,
+ * quota, the legacy video token envelope, the M1 shadow). Their names are
+ * listed below so a runtime cannot quietly reintroduce them; the shared
+ * factory stays provider-parameterized for Claude until its own retirement.
  */
 export const LEGACY_XAI_RUNTIME: LegacySubscriptionRetirement = {
   id: "xai",
@@ -30,6 +36,79 @@ export const LEGACY_XAI_RUNTIME: LegacySubscriptionRetirement = {
     "disconnect_xai_subscription_credential",
     "xai_subscription_authority_live",
     "xai_subscription_pool_visible",
+    // The deleted v1 repository instance and its readers and writers.
+    "xaiSubscriptionRepository",
+    "xaiCapacityRepository",
+    "xaiCredentialMetadataColumns",
+    "xaiCredentialShardIndex",
+    "xaiCredentialWorkspacePredicate",
+    "xaiRotationWorkspacePredicate",
+    "createXaiSubscriptionCredential",
+    "upsertXaiSubscriptionCredential",
+    "disconnectXaiSubscriptionCredential",
+    "disconnectXaiSubscriptionCredentialAndRepick",
+    "renameXaiSubscriptionAccount",
+    "updateXaiSubscriptionAccountSettings",
+    "updateXaiAllocatorEligibility",
+    "updateXaiQuotaMetadata",
+    "refreshXaiSubscriptionCredentialSerialized",
+    "listXaiSubscriptionAccountsMetadata",
+    "getXaiSubscriptionAccountMetadata",
+    "getXaiSubscriptionAccountAuthoritySnapshot",
+    "ensureXaiRotationSettings",
+    "getXaiRotationSettings",
+    "updateXaiRotationSettings",
+    "setActiveXaiCredential",
+    "setInitialActiveXaiCredential",
+    "getXaiSessionAccountPin",
+    "setXaiSessionAccountPin",
+    "recordXaiSessionLastAccount",
+    "selectXaiCredentialForUse",
+    "selectXaiTurnCapacity",
+    "materializeXaiCredentialForRun",
+    "acquireXaiCredentialLease",
+    "releaseXaiCredentialLease",
+    "heartbeatXaiCredentialLeaseUntil",
+    "resolveXaiPoolMembershipInTransaction",
+    "resolveXaiProviderAccountAuthoritySnapshotForAcceptance",
+    "resolveXaiProviderAccountAuthoritySnapshotForAcceptanceInTransaction",
+    "resolveXaiSharedPoolAuthoritySnapshotInTransaction",
+    "XaiAccountAuthorityScope",
+    "XaiAllocatorUpdateResult",
+    "XaiAuthorityPoolInactiveError",
+    "XaiCredentialForRun",
+    "XaiCredentialLeaseQuarantine",
+    "XaiCredentialLeaseResult",
+    "XaiCredentialSecretV1",
+    "XaiCredentialStatus",
+    "XaiSerializedCredentialRefreshResult",
+    // The organization surface and the legacy waiters.
+    "listOrganizationXaiSubscriptions",
+    "upsertOrganizationXaiSubscription",
+    "updateOrganizationXaiSubscription",
+    "updateOrganizationXaiRotation",
+    "withOrganizationXaiCapacityMutation",
+    "armXaiCapacityWait",
+    "reconcileXaiCapacityWait",
+    "getXaiCapacityWaitForSession",
+    "getXaiCapacityWaitForSessionInTransaction",
+    "supersedeXaiCapacityWaitInTransaction",
+    "wakeXaiCapacityWaiters",
+    "mapXaiCapacityWaiter",
+    "resolveXaiWaiterSubject",
+    "ArmXaiCapacityWaitResult",
+    "ReconcileXaiCapacityWaitResult",
+    "XaiCapacityWait",
+    // The legacy readiness, quota, authorization and video envelope.
+    "workspaceXaiSubscriptionActive",
+    "workspaceXaiSubscriptionActiveForAuthority",
+    "xaiCatalogReadinessAuthority",
+    "refreshExhaustedXaiQuota",
+    "classifyXaiCredentialFailure",
+    "buildXaiSubscriptionAuthorization",
+    "buildXaiTurnRequestAuthorization",
+    "encryptVideoGenerationXaiCredential",
+    "xaiVideoGenerationCredentialLease",
   ],
   patterns: [
     {
@@ -40,6 +119,16 @@ export const LEGACY_XAI_RUNTIME: LegacySubscriptionRetirement = {
       message: "Retired SuperGrok synthetic pool subject",
     },
   ],
+  // Deleted producers: the v1 repository module, the organization surface,
+  // the legacy waiter, quota and API authorization modules. Relative
+  // specifiers only, so the live `@opengeni/xai-subscription` package, the
+  // transcription provider and the core modules (`xai-subscription-core*`,
+  // `subscription-core-xai*`) stay importable.
+  deletedModules: [
+    /^\.\/xai-subscription(?:\.[cm]?[jt]s)?$/,
+    /^\.{1,2}\/(?:.*\/)?(?:organization-xai-subscriptions|xai-capacity|xai-quota|xai-subscription-auth)(?:\.[cm]?[jt]s)?$/,
+  ],
+  testFixtures: /legacy-xai/,
   exceptions: {
     "packages/db/src/schema.ts": {
       declarations: [
@@ -75,7 +164,7 @@ export const LEGACY_XAI_RUNTIME: LegacySubscriptionRetirement = {
         "moveXaiCredentialRows",
       ],
       reason:
-        "0719 codec stage: decodes the legacy rows before the atomic scrub and receipt; never a request fallback.",
+        "0721 codec stage: decodes the legacy rows before the atomic scrub and receipt; never a request fallback.",
     },
   },
 };
