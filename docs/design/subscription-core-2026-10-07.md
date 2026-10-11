@@ -4371,9 +4371,11 @@ SuperGrok on the core:
   Codex) and never parks; a test asserts it arms no waiter.
 - Follow-ups recorded, not in X1b: (1) Codex has the same shared-slot shape
   for its refusal fence (its title lane shares the tracked token functions).
-  The imprecision only fails closed (a 403 quarantines, or a 429 limits, the
-  same connection under a newer generation); it is left for a Codex-owned
-  change so this PR keeps Codex byte-for-byte. (2) Moving the waiter
+  The imprecision is bounded and goes both ways: a newer generation can be
+  quarantined or limited, or a rare race can fence the refusal on an older
+  generation so its health record is dropped. The turn still fails over and
+  authority is never widened. It is left for a Codex-owned change that gives
+  Codex the SuperGrok shape, so this PR keeps Codex byte-for-byte. (2) Moving the waiter
   vocabulary into the provider registry and the wait steps out of the
   Codex-named module is a rename left until the Claude track has landed on
   these files.

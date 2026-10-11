@@ -177,6 +177,23 @@ export function sessionTitleCodexRequestContext(
   };
 }
 
+/**
+ * The durable `agent.model.request` payload of a SuperGrok request event. It
+ * carries every transport field, including `meaningfulOutput` on `completed`,
+ * which the shared false-resumption breaker resets on.
+ */
+export function xaiModelRequestEventPayload<Event extends object>(
+  event: Event,
+  ids: {
+    turnId: string;
+    attemptId: string;
+    dispatchId: string | undefined;
+    executionGeneration: number | null | undefined;
+  },
+): Event & { provider: "supergrok-subscription" } & typeof ids {
+  return { ...event, provider: "supergrok-subscription", ...ids };
+}
+
 export function sessionTitleXaiRequestContext(
   context: XaiSubscriptionRequestContext,
   nextRequestId: () => string,
@@ -1097,14 +1114,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                       : []),
                     {
                       type: "agent.model.request",
-                      payload: {
-                        ...event,
-                        provider: "supergrok-subscription",
+                      payload: xaiModelRequestEventPayload(event, {
                         turnId: attempt.turnId,
                         attemptId: input.attemptId,
                         dispatchId,
                         executionGeneration: attempt.executionGeneration,
-                      },
+                      }),
                     },
                   ]);
                   // SuperGrok places bytes on the wire immediately after this

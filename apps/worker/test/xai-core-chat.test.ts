@@ -22,7 +22,10 @@ import {
   XAI_CORE_TURN_PROVIDER,
 } from "../src/activities/agent-turn/xai-core";
 import { isCoreSourceDisconnectedError } from "../src/activities/agent-turn/subscription-core-capacity";
-import { sessionTitleXaiRequestContext } from "../src/activities/agent-turn/run";
+import {
+  sessionTitleXaiRequestContext,
+  xaiModelRequestEventPayload,
+} from "../src/activities/agent-turn/run";
 import type { SubscriptionCoreTurn } from "../src/activities/agent-turn/turn-context";
 import { testSettings } from "@opengeni/testing";
 
@@ -743,4 +746,58 @@ test("a core-placed SuperGrok turn never reaches the legacy image or video crede
     expect(source.split(legacy).length).toBe(2);
     expect(source.indexOf(legacy)).toBeGreaterThan(source.indexOf(videoGate));
   }
+});
+
+test("a productive SuperGrok request reaches its durable event with the breaker's progress flag", async () => {
+  const requestEvents: Array<Record<string, unknown>> = [];
+  const fetch = xaiSubscriptionFetch(async () =>
+    sse({
+      type: "response.completed",
+      response: {
+        id: "r1",
+        output: [
+          {
+            type: "message",
+            role: "assistant",
+            status: "completed",
+            content: [{ type: "output_text", text: "done" }],
+          },
+        ],
+      },
+    }),
+  );
+  const context: XaiSubscriptionRequestContext = {
+    clientVersion: "1.0.1",
+    sessionId: "session-1",
+    turnId: "turn-1",
+    getToken: async () => ({ accessToken: "access", userId: "subject-1" }),
+    refresh: async () => ({ accessToken: "fresh", userId: "subject-1" }),
+    resolveModel: (slug) => slug,
+    nextRequestId: () => "attempt-1:1:1:xai:1",
+    onModelRequestEvent: (event) => {
+      requestEvents.push(
+        xaiModelRequestEventPayload(event, {
+          turnId: "turn-1",
+          attemptId: "attempt-1",
+          dispatchId: "dispatch-1",
+          executionGeneration: 3,
+        }),
+      );
+    },
+  };
+  const response = await xaiSubscriptionRequestStorage.run(context, () =>
+    fetch("https://cli-chat-proxy.grok.com/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({ model: "supergrok/grok-4.7", input: "hello" }),
+    }),
+  );
+  await response.text();
+  expect(requestEvents.find((event) => event.phase === "completed")).toMatchObject({
+    phase: "completed",
+    meaningfulOutput: true,
+    provider: "supergrok-subscription",
+    turnId: "turn-1",
+    attemptId: "attempt-1",
+    executionGeneration: 3,
+  });
 });

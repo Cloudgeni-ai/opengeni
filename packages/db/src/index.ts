@@ -25106,8 +25106,12 @@ export function codexCapacityRefreshBackoffMs(attempt: number): number {
 // entry points are Codex's bindings and are unchanged.
 // ---------------------------------------------------------------------------
 
-/** A provider whose chat turns park on the shared core waiter. */
-export type SubscriptionCoreWaiterProvider = "codex" | "xai";
+/**
+ * A provider whose chat turns park on the shared core waiter. Derived from
+ * the exhausted-code table, so a waiter provider cannot exist (nor get a wait
+ * vocabulary) without the terminal code that human Retry replenishes.
+ */
+export type SubscriptionCoreWaiterProvider = keyof typeof SUBSCRIPTION_CORE_WAIT_EXHAUSTED_CODES;
 
 /**
  * The session-event vocabulary of one provider's core waiter. Codex keeps
@@ -25125,7 +25129,7 @@ type SubscriptionCoreWaitVocabulary = {
   /** Why pending tool calls close when the turn parks. */
   closeToolsReason: string;
   /** The false-resumption limit's terminal code (also the status reason). */
-  exhaustedCode: string;
+  exhaustedCode: (typeof SUBSCRIPTION_CORE_WAIT_EXHAUSTED_CODES)[SubscriptionCoreWaiterProvider];
   resumedEvent: (waiter: SubscriptionCoreCodexCapacityWait) => {
     type: "codex.capacity.resumed" | "turn.recovery.requested";
     payload: Record<string, unknown>;
