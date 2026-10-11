@@ -23,6 +23,11 @@ import {
   settleVideoGenerationReady,
   type XaiCredentialForRun,
   type VideoGenerationOperationWithReferences,
+  cancelVideoGenerationBeforeSubmit,
+  SUBSCRIPTION_CORE_XAI,
+  SUBSCRIPTION_CORE_XAI_PROVIDER,
+  subscriptionCoreXaiFetch,
+  subscriptionCoreXaiRequestAuth,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import type { ObjectStorage } from "@opengeni/storage";
@@ -46,8 +51,10 @@ import {
   refreshXaiToken,
   XaiSubscriptionError,
   xaiAccessTokenExpiry,
+  type XaiFetch,
   type XaiSubscriptionRequestContext,
 } from "@opengeni/xai-subscription";
+import { withSubscriptionCoreVideoConnection } from "./video-generation-subscription-core";
 import {
   buildXaiVideoStartBody,
   getXaiVideoGenerationStatus,
@@ -94,14 +101,111 @@ export async function reconcileVideoGenerationOperation(
   }
   const providerCredential = decryptVideoGenerationCredential(key, operation.credentialEncrypted);
   const usesSuperGrok = operation.fundingSource === "supergrok_subscription";
-  if (usesSuperGrok !== (providerCredential.kind === "xai-subscription")) {
+  if (usesSuperGrok !== (providerCredential.kind !== "api-key")) {
     throw new Error("Video provider credential does not match its funding source");
   }
-  const apiKey = providerCredential.kind === "api-key" ? providerCredential.apiKey : null;
-  const xaiAuth =
-    providerCredential.kind === "xai-subscription"
-      ? await durableXaiVideoAuth(service, operation, key, providerCredential)
-      : null;
+  if (providerCredential.kind === "subscription-connection") {
+    // After the SuperGrok cutover: the canonical connection under a `video`
+    // operation lease, refreshed only under the core lock (EP-N13/EP-N14).
+    if (providerCredential.provider !== SUBSCRIPTION_CORE_XAI_PROVIDER) {
+      throw new Error("Video provider credential does not match its funding source");
+    }
+    const ran = await withSubscriptionCoreVideoConnection(
+      service.db,
+      service.settings,
+      SUBSCRIPTION_CORE_XAI,
+      operation,
+      providerCredential.connectionId,
+      async ({ resolver, fetch }) =>
+        await reconcileWithProviderCredential(service, input, storage, key, operation, {
+          apiKey: null,
+          xai: {
+            auth: subscriptionCoreXaiRequestAuth(resolver),
+            fetch: subscriptionCoreXaiFetch(fetch) as XaiFetch,
+          },
+        }),
+    );
+    if (ran.kind === "ran") return ran.value;
+    return await subscriptionConnectionUnavailable(service, input, operation);
+  }
+  return await reconcileWithProviderCredential(service, input, storage, key, operation, {
+    apiKey: providerCredential.kind === "api-key" ? providerCredential.apiKey : null,
+    xai:
+      providerCredential.kind === "xai-subscription"
+        ? { auth: await durableXaiVideoAuth(service, operation, key, providerCredential) }
+        : null,
+  });
+}
+
+type XaiVideoAuth = {
+  auth: Pick<XaiSubscriptionRequestContext, "getToken" | "refresh">;
+  fetch?: XaiFetch;
+};
+
+/**
+ * The operation's subscription connection cannot serve it now (the session
+ * or its owner context is gone, the lease was refused, the connection needs
+ * a new sign-in or left the pool): wait until the recovery deadline, then
+ * end it (decision 6). Nothing reached the provider in this run.
+ */
+async function subscriptionConnectionUnavailable(
+  service: TurnActivityServices,
+  input: { accountId: string; workspaceId: string; operationId: string },
+  start: VideoGenerationOperationWithReferences,
+): Promise<VideoGenerationReconcileResult> {
+  let operation = start;
+  const mutation = {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    operationId: operation.id,
+    requestDigest: operation.requestDigest,
+  };
+  const reason = "The connected subscription funding this video is not available";
+  if (Date.now() < operation.recoveryDeadlineAt.getTime()) {
+    await rescheduleVideoGenerationOperation(service.db, {
+      ...mutation,
+      nextReconcileAt: nextPoll(service),
+      error: reason,
+    });
+    return waitResult(service);
+  }
+  operation = retainReferences(
+    operation,
+    operation.status === "retaining"
+      ? await settleVideoGenerationFailure(service.db, {
+          ...mutation,
+          status: "retention_failed",
+          publicReason: "The generated video could not be retained.",
+          privateError: reason,
+        })
+      : operation.status === "submission_uncertain" || operation.status === "provider_started"
+        ? await settleVideoGenerationFailure(service.db, {
+            ...mutation,
+            status: "outcome_unknown",
+            publicReason:
+              "The connected subscription that started this video is no longer available.",
+            privateError: reason,
+          })
+        : await cancelVideoGenerationBeforeSubmit(service.db, {
+            ...mutation,
+            reason: "The connected subscription funding this video is no longer available.",
+          }),
+  );
+  await deliverTerminalResult(service, operation);
+  return { action: "terminal", status: terminalStatus(operation.status) };
+}
+
+async function reconcileWithProviderCredential(
+  service: TurnActivityServices,
+  input: { accountId: string; workspaceId: string; operationId: string },
+  storage: ObjectStorage,
+  key: Uint8Array,
+  start: VideoGenerationOperationWithReferences,
+  credential: { apiKey: string | null; xai: XaiVideoAuth | null },
+): Promise<VideoGenerationReconcileResult> {
+  let operation = start;
+  const usesSuperGrok = operation.fundingSource === "supergrok_subscription";
+  const { apiKey, xai: xaiAuth } = credential;
   let preparedSubmissionThisRun = false;
 
   if (operation.status === "accepted") {
@@ -187,7 +291,7 @@ export async function reconcileVideoGenerationOperation(
         ? await startXaiVideoGeneration({
             body,
             sessionId: operation.sessionId,
-            auth: requireXaiAuth(xaiAuth),
+            ...requireXaiAuth(xaiAuth),
           })
         : await startGatewayVideoGenerationWithBody({
             apiKey: requireApiKey(apiKey),
@@ -246,7 +350,7 @@ export async function reconcileVideoGenerationOperation(
       ? await getXaiVideoGenerationStatus({
           providerJobId: operation.providerJobId,
           sessionId: operation.sessionId,
-          auth: requireXaiAuth(xaiAuth),
+          ...requireXaiAuth(xaiAuth),
         })
       : await getGatewayVideoGenerationStatus({
           apiKey: requireApiKey(apiKey),
@@ -614,9 +718,7 @@ function requireApiKey(value: string | null): string {
   return value;
 }
 
-function requireXaiAuth(
-  value: Pick<XaiSubscriptionRequestContext, "getToken" | "refresh"> | null,
-): Pick<XaiSubscriptionRequestContext, "getToken" | "refresh"> {
+function requireXaiAuth(value: XaiVideoAuth | null): XaiVideoAuth {
   if (!value) throw new Error("SuperGrok video authorization is unavailable");
   return value;
 }
