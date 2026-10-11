@@ -14,10 +14,11 @@
  */
 import { sql } from "drizzle-orm";
 import type { Settings } from "@opengeni/config";
-import type {
-  SubscriptionCoreConnectionBearer,
-  SubscriptionCoreConnectionRead,
-  SubscriptionQuota,
+import {
+  quotaCapacity,
+  type SubscriptionCoreConnectionBearer,
+  type SubscriptionCoreConnectionRead,
+  type SubscriptionQuota,
 } from "@opengeni/subscriptions";
 import { rawRows, type Database } from "../database";
 import { readSubscriptionCoreWorkspacePool } from "./administration";
@@ -42,6 +43,7 @@ import {
   type SubscriptionCoreProvider,
 } from "./provider";
 import {
+  decodeSubscriptionQuota,
   readSubscriptionProviderCutoverState,
   readSubscriptionSessionBinding,
   type SubscriptionOperationKind,
@@ -503,6 +505,65 @@ export const subscriptionCoreOperationConnections = memoByProvider(
       }
     }
 
+    /**
+     * Re-read live usage before a stored exhaustion is treated as current
+     * (design 5.3, EP-N22): each shared connection of the workspace's pool
+     * whose stored quota is exhausted now and was not observed within
+     * `minIntervalMs` is probed on its own, in the caller's explicit
+     * workspace context. Probe failures keep the stored exhaustion. Returns
+     * the connections whose exhaustion ended (the caller wakes waiters).
+     */
+    async function refreshExhaustedSubscriptionCoreQuota(
+      db: Database,
+      settings: Settings,
+      scope: Extract<SubscriptionCoreOperationScope, { kind: "workspace" }>,
+      deps: SubscriptionCoreConnectionProbeDeps & { minIntervalMs?: number; now?: number } = {},
+    ): Promise<string[]> {
+      if (!provider.adapter.fetchUsage || !provider.adapter.decodeQuota) return [];
+      const now = deps.now ?? Date.now();
+      const minIntervalMs = deps.minIntervalMs ?? 30_000;
+      const pool = await readSubscriptionCoreWorkspaceConnections(db, scope);
+      const ids = pool.connections
+        .filter((connection) => connection.status === "active")
+        .map((connection) => connection.connectionId);
+      if (ids.length === 0) return [];
+      const access = await operations().withOperationScope(db, scope, async (tx) =>
+        rawRows<{
+          connection_id: string;
+          quota: unknown;
+          quota_revision: number | string | null;
+          quota_observed_refresh_generation: number | string | null;
+          quota_updated_at: Date | string | null;
+        }>(
+          tx,
+          sql`select connection_id::text as connection_id, quota, revision as quota_revision,
+            observed_refresh_generation as quota_observed_refresh_generation,
+            updated_at as quota_updated_at
+          from subscription_connection_quota
+          where account_id = ${scope.accountId}::uuid
+            and connection_id = any(${`{${ids.join(",")}}`}::uuid[])`,
+        ),
+      );
+      const stale = (access?.value ?? []).filter((row) => {
+        const quota = decodeSubscriptionQuota(row);
+        if (!quota || quotaCapacity(quota, now).kind !== "exhausted") return false;
+        const updatedAt = row.quota_updated_at ? new Date(row.quota_updated_at).getTime() : 0;
+        return now - updatedAt >= minIntervalMs;
+      });
+      const recovered: string[] = [];
+      for (const row of stale) {
+        const probe = await probeSubscriptionCoreConnectionUsage(
+          db,
+          settings,
+          scope,
+          row.connection_id,
+          deps,
+        );
+        if (probe.kind === "read" && probe.recovered) recovered.push(row.connection_id);
+      }
+      return recovered;
+    }
+
     return {
       listSubscriptionCoreOperationCandidates,
       readSubscriptionCoreWorkspaceConnections,
@@ -510,6 +571,7 @@ export const subscriptionCoreOperationConnections = memoByProvider(
       runSubscriptionCoreOperation,
       probeSubscriptionCoreConnectionUsage,
       probeSubscriptionCoreConnectionLiveModels,
+      refreshExhaustedSubscriptionCoreQuota,
     };
   },
 );

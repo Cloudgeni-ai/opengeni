@@ -11,7 +11,11 @@ import {
   ensureSessionReasoningConfiguration,
   ensureSessionSkillCatalog,
   sessionHasToolRouterHistory,
+  readSubscriptionCoreProviderRouteForWorkspace,
+  SUBSCRIPTION_CORE_XAI,
+  SUBSCRIPTION_CORE_XAI_PROVIDER,
 } from "@opengeni/db";
+import { subscriptionCoreVideoGenerationCredentialLease } from "../video-generation-subscription-core";
 import { recoveryAwareSessionInstructions } from "./recovery-warning";
 import {
   formatSkillCatalog,
@@ -488,9 +492,28 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         };
       }
     } else if (videoGenerationPolicy.fundingSource === "supergrok_subscription") {
+      const route = await readSubscriptionCoreProviderRouteForWorkspace(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        provider: SUBSCRIPTION_CORE_XAI_PROVIDER,
+      });
+      if (route === "core") {
+        // After the receipt: a shared connection for the session's owner,
+        // referenced (never copied) by the operation (EP-T17/EP-N12).
+        videoGenerationCredential = await subscriptionCoreVideoGenerationCredentialLease(
+          db,
+          eventing.modelRunSettings,
+          SUBSCRIPTION_CORE_XAI,
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+          },
+        );
+      }
       const encryptionKey = environmentsEncryptionKeyBytes(eventing.modelRunSettings);
       const subjectId = leases.xai.subjectId ?? turn.initiatingHumanSubjectId;
-      if (encryptionKey && subjectId) {
+      if (route === "legacy" && encryptionKey && subjectId) {
         const authoritySnapshot =
           providerTurn.xaiAuthoritySnapshot ??
           (await resolveXaiProviderAccountAuthoritySnapshotForAcceptance(db, {

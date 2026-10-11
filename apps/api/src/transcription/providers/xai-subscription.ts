@@ -6,7 +6,7 @@ import {
 } from "@opengeni/core";
 import {
   getWorkspace,
-  readSubscriptionCoreProviderRouteInScope,
+  readSubscriptionCoreProviderRouteForWorkspace,
   SUBSCRIPTION_CORE_XAI,
   SUBSCRIPTION_CORE_XAI_PROVIDER,
   subscriptionCoreXaiBearer,
@@ -67,7 +67,7 @@ export function createXaiSubscriptionTranscriptionProvider(input: {
           requestId,
           signal,
         });
-      const route = await readSubscriptionCoreProviderRouteInScope(input.db, {
+      const route = await readSubscriptionCoreProviderRouteForWorkspace(input.db, {
         accountId,
         workspaceId,
         provider: SUBSCRIPTION_CORE_XAI_PROVIDER,

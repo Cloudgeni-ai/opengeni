@@ -1,6 +1,6 @@
 import type { Settings } from "@opengeni/config";
 import {
-  readSubscriptionCoreProviderRouteInScope,
+  readSubscriptionCoreProviderRouteForWorkspace,
   SUBSCRIPTION_CORE_XAI,
   SUBSCRIPTION_CORE_XAI_PROVIDER,
   subscriptionCoreOperationConnections,
@@ -22,7 +22,7 @@ export async function workspaceXaiOperationAvailable(
   settings: Settings,
   input: { accountId: string; workspaceId: string; subjectId: string },
 ): Promise<boolean> {
-  const route = await readSubscriptionCoreProviderRouteInScope(db, {
+  const route = await readSubscriptionCoreProviderRouteForWorkspace(db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
     provider: SUBSCRIPTION_CORE_XAI_PROVIDER,
@@ -74,7 +74,7 @@ export async function readXaiCoreStatus<Model>(
     workspaceId: input.workspaceId,
     subjectId: input.subjectId,
   };
-  const route = await readSubscriptionCoreProviderRouteInScope(deps.db, {
+  const route = await readSubscriptionCoreProviderRouteForWorkspace(deps.db, {
     ...scope,
     provider: SUBSCRIPTION_CORE_XAI_PROVIDER,
   });

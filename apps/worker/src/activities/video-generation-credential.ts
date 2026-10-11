@@ -11,7 +11,16 @@ export type VideoGenerationProviderCredential =
       credentialId: string;
       subjectId: string;
       authoritySnapshot: XaiProviderAccountAuthoritySnapshotV1;
-    }>;
+    }>
+  /**
+   * A subscription-core funded operation (after the provider's cutover
+   * receipt): a reference to the canonical connection, no token material.
+   * The credential is read through the core connection seam under the
+   * operation's `video` lease at each use (design 5.3, EP-N13/EP-N14).
+   */
+  | Readonly<{ kind: "subscription-connection"; provider: string; connectionId: string }>;
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** One frozen, provider-neutral credential envelope for every video funding route. */
 export function encryptVideoGenerationApiKey(key: Uint8Array, apiKey: string): string {
@@ -36,6 +45,23 @@ export function encryptVideoGenerationXaiCredential(
     throw new Error("SuperGrok video credential is incomplete");
   }
   return encryptEnvironmentValue(key, JSON.stringify({ kind: "xai-subscription", ...credential }));
+}
+
+export function encryptVideoGenerationConnectionReference(
+  key: Uint8Array,
+  reference: { provider: string; connectionId: string },
+): string {
+  if (!reference.provider.trim() || !UUID.test(reference.connectionId)) {
+    throw new Error("Video subscription connection reference is incomplete");
+  }
+  return encryptEnvironmentValue(
+    key,
+    JSON.stringify({
+      kind: "subscription-connection",
+      provider: reference.provider,
+      connectionId: reference.connectionId,
+    }),
+  );
 }
 
 /**
@@ -67,6 +93,21 @@ export function decryptVideoGenerationCredential(
       throw new Error("Video provider credential lease is malformed");
     }
     return Object.freeze({ kind: "api-key", apiKey: row.apiKey });
+  }
+  if (row?.kind === "subscription-connection") {
+    if (
+      typeof row.provider !== "string" ||
+      !row.provider.trim() ||
+      typeof row.connectionId !== "string" ||
+      !UUID.test(row.connectionId)
+    ) {
+      throw new Error("Video provider credential lease is malformed");
+    }
+    return Object.freeze({
+      kind: "subscription-connection",
+      provider: row.provider,
+      connectionId: row.connectionId,
+    });
   }
   const authority =
     row?.authoritySnapshot &&

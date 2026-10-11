@@ -4,7 +4,7 @@ import {
   getActiveSessionHistoryItems,
   getSessionRealtimeContinuityEntries,
   getXaiSessionAccountPin,
-  readSubscriptionCoreProviderRouteInScope,
+  readSubscriptionCoreProviderRouteForWorkspace,
   readSubscriptionCoreSessionOwner,
   resolveXaiProviderAccountAuthoritySnapshotForAcceptance,
   setXaiSessionAccountPin,
@@ -69,7 +69,7 @@ export async function createXaiRealtimeConnectionSecret(input: {
       "The selected model is not a connected SuperGrok realtime model",
     );
   }
-  const route = await readSubscriptionCoreProviderRouteInScope(input.db, {
+  const route = await readSubscriptionCoreProviderRouteForWorkspace(input.db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
     provider: SUBSCRIPTION_CORE_XAI_PROVIDER,

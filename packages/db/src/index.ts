@@ -315,9 +315,9 @@ export * from "./subscription-core-codex-connections";
 export * from "./subscription-core-codex-catalog";
 export {
   readSubscriptionCoreProviderRoute,
+  readSubscriptionCoreProviderRouteForWorkspace,
   type SubscriptionCoreProviderRoute,
 } from "./subscription-core/provider-route";
-export { readSubscriptionCoreProviderRouteInScope } from "./subscription-core/provider-route";
 // Provider-neutral operations outside chat (media, transcription, realtime,
 // usage and catalog probes), bound per provider by the caller.
 export {
@@ -28942,6 +28942,34 @@ export async function deliverSubscriptionCoreCodexWake(
         (error as { code?: unknown } | null)?.code ??
         (error as { cause?: { code?: unknown } } | null)?.cause?.code ??
         null,
+    });
+  }
+}
+
+/**
+ * Deliver a committed capacity change to one provider's core waiters (the
+ * provider-neutral form of `deliverSubscriptionCoreCodexWake`, for the
+ * providers that have no own wake binding). Never fails the committed
+ * change: every core waiter has its own bounded recheck.
+ */
+export async function deliverSubscriptionCoreProviderWake(
+  db: Database,
+  provider: import("@opengeni/subscriptions").ProviderId,
+  wake: { accountId: string; reason: string; workspaceIds?: readonly string[] },
+): Promise<void> {
+  try {
+    await wakeSubscriptionCoreCapacityWaiters(
+      db,
+      provider,
+      wake,
+      enqueueSessionWorkflowWakeInTransaction,
+    );
+  } catch (error) {
+    console.warn("core subscription wake delivery failed; waiters recheck on their own timer", {
+      provider,
+      accountId: wake.accountId,
+      reason: wake.reason,
+      error: error instanceof Error ? error.name : typeof error,
     });
   }
 }

@@ -34,18 +34,14 @@ export async function readSubscriptionCoreProviderRoute(
   return row.enabled === true ? "core" : "maintenance";
 }
 
-/**
- * The route read inside the caller's account (and workspace) scope: the
- * switch row is visible only in its account's RLS context, so a caller
- * without one would read a missing row and fail closed into `maintenance`.
- */
-export async function readSubscriptionCoreProviderRouteInScope(
+/** The route read under the organization's (and the caller's workspace's) row scope. */
+export async function readSubscriptionCoreProviderRouteForWorkspace(
   db: Database,
   input: { accountId: string; workspaceId: string | null; provider: string },
 ): Promise<SubscriptionCoreProviderRoute> {
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (tx) => await readSubscriptionCoreProviderRoute(tx, input),
+    (scoped) => readSubscriptionCoreProviderRoute(scoped, input),
   );
 }
