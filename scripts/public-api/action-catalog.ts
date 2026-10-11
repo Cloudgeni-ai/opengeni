@@ -27,11 +27,6 @@ export const ACTION_CATALOG_EXEMPTIONS: ReadonlyArray<{ pattern: RegExp; reason:
     reason: "signing the native app in and out, and its push device: the app's own credential",
   },
   { pattern: /^\/v1\/identity(\/|$)/, reason: "sign-in methods and account recovery" },
-  { pattern: /^\/v1\/mcp-connections\//, reason: "approving an agent sign-in" },
-  {
-    pattern: /^\/v1\/organizations\/:organizationId\/mcp-connections/,
-    reason: "managing connected agents: an agent can't widen its own access",
-  },
   {
     pattern: /\/callback$|^\/v1\/(pr-review\/)?github\/setup$|\/client-metadata\.json$/,
     reason: "a provider's browser redirect back to Opengeni",
@@ -51,42 +46,31 @@ export function isActionCatalogExempt(path: string): boolean {
 }
 
 /**
- * Registered actions no MCP caller can ever complete: they need the person's
- * own Opengeni browser session, which neither a connected agent (MCP OAuth)
- * nor an organization API key has. They stay in the catalog, so every route is
- * accounted for, but the MCP server hides them from search and describe and a
- * direct call answers with this reason instead of a bare 401. Matched against
- * "METHOD /path".
+ * Registered actions no MCP caller can ever complete: they act on the
+ * person's own account across organizations, or are an identity ceremony in
+ * their own signed-in browser, which neither a connected agent (MCP OAuth),
+ * an agent with session admin access nor an organization API key has. They
+ * stay in the catalog, so every route is accounted for, but the MCP server
+ * hides them from search and describe and a direct call answers with this
+ * reason instead of a bare 401. Everything else an agent with the person's
+ * full access can do as them. Matched against "METHOD /path".
  */
 export const ACTION_CATALOG_BROWSER_ONLY: ReadonlyArray<{ pattern: RegExp; reason: string }> = [
-  {
-    pattern: /^\w+ \/v1\/inbox(\/|$)/,
-    reason: "the person's inbox requires their own signed-in browser session",
-  },
-  {
-    pattern: /^(GET|PUT) \/v1\/workspaces\/:workspaceId\/sessions\/:sessionId\/inbox-mute$/,
-    reason: "the person's session mute requires their own signed-in browser session",
-  },
   {
     pattern:
       /^(POST \/v1\/organizations(\/additional)?|GET \/v1\/organization-(memberships|invitations)|POST \/v1\/organization-invitations\/:invitationId\/accept)$/,
     reason:
-      "it acts on the person's own account across organizations (creating an organization, listing their memberships or invitations, accepting an invitation), and a connection is limited to one organization",
+      "it acts on the person's own account across organizations (creating an organization, listing their memberships or invitations, accepting an invitation), and an agent works in one organization",
   },
   {
     pattern: /^\w+ \/v1\/organizations\/:organizationId\/recovery(\/|$)/,
-    reason: "organization recovery is a ceremony in the person's own browser session",
+    reason:
+      "organization recovery is for when someone can't sign in, so each step is proven by that person's own browser sign-in",
   },
   {
     pattern: /^\w+ \/v1\/workspaces\/:workspaceId\/identity-links(\/|$)/,
     reason:
       "linking a product user to an Opengeni account is confirmed by that person signed in to Opengeni, or started by the embedding product as its user",
-  },
-  {
-    pattern:
-      /^(PATCH \/v1\/organizations\/:organizationId\/agent-admin-access|PUT \/v1\/workspaces\/:workspaceId\/sessions\/:sessionId\/admin-access)$/,
-    reason:
-      "giving an agent admin access, or allowing it for the organization, is done by an owner or admin in person in the Opengeni app",
   },
 ];
 
@@ -145,6 +129,10 @@ export const ACTION_REQUEST_SCHEMAS: ReadonlyArray<{ pattern: RegExp; request: s
   {
     pattern: /^PUT \/v1\/workspaces\/:workspaceId\/model-policy$/,
     request: "UpdateWorkspaceModelPolicyRequest",
+  },
+  {
+    pattern: /^POST \/v1\/workspaces\/:workspaceId\/sessions\/:sessionId\/control$/,
+    request: "SessionControlRequest",
   },
 ];
 

@@ -1973,7 +1973,7 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
     60_000,
   );
 
-  test("an agent the owner signed in (organization MCP) cannot bypass the core browser-human reset fence", async () => {
+  test("an agent acting as the owner redeems as them, bound to its own confirmation", async () => {
     if (!available) return;
     const api = app();
     const access = await api.request("/v1/access/me", { headers: { cookie: OWNER_COOKIE } });
@@ -2026,18 +2026,32 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
     };
 
     const consumedBefore = provider.consumeBodies.length;
+    // A confirmation issued to the person's browser doesn't work for the agent.
+    const inBrowser = await prepare(api, workspaceId, connected.id, "credit-reset");
+    expect(inBrowser.response.status).toBe(200);
+    const borrowed = await agentRequest("redeem", {
+      attemptId: inBrowser.attemptId,
+      creditId: "credit-reset",
+      confirmationToken: inBrowser.body.confirmationToken,
+      confirmation: "REDEEM_USAGE_LIMIT_RESET",
+    });
+    expect(borrowed.status).toBe(403);
+    expect(provider.consumeBodies.length).toBe(consumedBefore);
+
+    // Its own: prepared and redeemed as the owner, exactly once.
     const attemptId = crypto.randomUUID();
     const prepared = await agentRequest("prepare", { attemptId, creditId: "credit-reset" });
-    expect(prepared.status).toBe(403);
-    expect(provider.consumeBodies.length).toBe(consumedBefore);
+    expect(prepared.status).toBe(200);
+    const { confirmationToken } = (await prepared.json()) as { confirmationToken: string };
     const redeemed = await agentRequest("redeem", {
       attemptId,
       creditId: "credit-reset",
-      confirmationToken: "not-issued-to-agent",
+      confirmationToken,
       confirmation: "REDEEM_USAGE_LIMIT_RESET",
     });
-    expect(redeemed.status).toBe(403);
-    expect(provider.consumeBodies.length).toBe(consumedBefore);
+    expect(redeemed.status).toBe(200);
+    expect(await redeemed.json()).toMatchObject({ status: "completed", outcome: "reset" });
+    expect(provider.consumeBodies.length).toBe(consumedBefore + 1);
 
     // The connection's access still bounds it: no connections:write, no redemption.
     const refused = await agentRequest(
@@ -2056,12 +2070,12 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
       },
     );
     expect(bearer.status).toBe(403);
-    expect(provider.consumeBodies.length).toBe(consumedBefore);
+    expect(provider.consumeBodies.length).toBe(consumedBefore + 1);
   }, 60_000);
 });
 
 describe("Codex reset credits and overview on the shared core (M3 PR 2c)", () => {
-  test("a browser organization administrator redeems a workspace-managed core connection through its alias; agents, bearers and strangers are refused", async () => {
+  test("a browser organization administrator redeems a workspace-managed core connection through its alias; bearers and strangers are refused", async () => {
     if (!available) return;
     const api = app();
     const access = await api.request("/v1/access/me", { headers: { cookie: OWNER_COOKIE } });
@@ -2151,8 +2165,8 @@ describe("Codex reset credits and overview on the shared core (M3 PR 2c)", () =>
         (await prepare(api, workspaceId, connectionId, "credit-ambiguous")).response.status,
       ).toBe(200);
 
-      // A bearer, another organization's administrator and an agent acting as
-      // the person are refused before any provider call.
+      // A bearer and another organization's administrator are refused before
+      // any provider call.
       const bearer = await api.request(
         `/v1/workspaces/${workspaceId}/codex/accounts/${alias}/reset-credits/prepare`,
         {
@@ -2193,13 +2207,10 @@ describe("Codex reset credits and overview on the shared core (M3 PR 2c)", () =>
         permissions: ["connections:write", "workspace:read"] as never,
         workspaceScope: { kind: "all" },
       });
-      // The same stamped request is accepted by the legacy route (see the
-      // organization MCP test above); on the core it is refused (design 6.3).
+      // An agent acting as the person prepares as them on the core too.
       const agentResponse = await api.fetch(agentRequest);
-      expect(agentResponse.status).toBe(403);
-      expect(((await agentResponse.json()) as any).error?.message ?? "").toContain(
-        "managed browser session",
-      );
+      expect(agentResponse.status).toBe(200);
+      expect(((await agentResponse.json()) as any).confirmationToken).toEqual(expect.any(String));
       expect(provider.consumeBodies.length).toBe(consumedBefore + 1);
 
       // The overview serves the core pool with redemption authority for the browser human.
@@ -2235,7 +2246,7 @@ describe("Codex reset credits and overview on the shared core (M3 PR 2c)", () =>
     }
   });
 
-  test("an organization administrator redeems an organization account that serves no workspace from the organization page; agents, bearers and strangers are refused", async () => {
+  test("an organization administrator redeems an organization account that serves no workspace from the organization page, as can an agent acting as them; bearers and strangers are refused", async () => {
     if (!available) return;
     const api = app();
     const access = await api.request("/v1/access/me", { headers: { cookie: OWNER_COOKIE } });
@@ -2371,16 +2382,14 @@ describe("Codex reset credits and overview on the shared core (M3 PR 2c)", () =>
         });
         return api.fetch(request);
       };
+      // An agent acting as the administrator prepares and reads as them.
       const agentPrepare = await agent("/reset-credits/prepare", "POST");
-      expect(agentPrepare.status).toBe(403);
-      expect(((await agentPrepare.json()) as any).error?.message ?? "").toContain(
-        "has to be done by the person",
-      );
+      expect(agentPrepare.status).toBe(200);
+      expect(((await agentPrepare.json()) as any).confirmationToken).toEqual(expect.any(String));
       const agentRead = await agent("/overview", "GET");
       expect(agentRead.status).toBe(200);
       expect((await agentRead.json()) as any).toMatchObject({
-        canRedeem: false,
-        redemptionAccess: { ownership: "managed_human_unavailable" },
+        redemptionAccess: { ownership: "current_human" },
         resetCredits: { availableCount: 2 },
       });
       expect(provider.consumeBodies.length).toBe(consumedBefore + 1);

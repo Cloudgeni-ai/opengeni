@@ -1,4 +1,4 @@
-import { OrganizationAccessPolicy, type AccessContext } from "@opengeni/contracts";
+import { UpdateOrganizationMcpConnectionRequest, type AccessContext } from "@opengeni/contracts";
 import {
   getManagedUserProfilesByIds,
   getWorkspace,
@@ -10,7 +10,7 @@ import {
 import { hasPermission, requireAccessContext, type ApiRouteDeps } from "@opengeni/core";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { requireNotAgent } from "../http/acting-person";
+import { isAgentActingAsPerson, requireFullAccessIfAgent } from "../http/acting-person";
 import { z } from "zod";
 
 import { requireSameOriginBrowserMutation } from "./codex";
@@ -19,11 +19,10 @@ import { requireSameOriginBrowserMutation } from "./codex";
    Connected agents: outside MCP clients people signed in to the organization
    server with. Everyone sees and manages their own; owners and admins see and
    can disconnect everyone's. Only the person who connected an agent changes
-   what it can do, and only from the browser: an agent can never widen its own
-   access through these routes.
+   what it can do. An agent with the person's full access can do this as them;
+   an agent with less can't use these routes, so it can never widen its own
+   access.
    -------------------------------------------------------------------------- */
-
-const UpdateBody = z.object({ access: OrganizationAccessPolicy }).strict();
 
 export function registerOrganizationMcpConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/organizations/:organizationId/mcp-connections", async (c) => {
@@ -48,7 +47,9 @@ export function registerOrganizationMcpConnectionRoutes(app: Hono, deps: ApiRout
         message: "Only the person who connected this agent can change what it can do.",
       });
     }
-    const parsed = UpdateBody.safeParse(await c.req.json().catch(() => null));
+    const parsed = UpdateOrganizationMcpConnectionRequest.safeParse(
+      await c.req.json().catch(() => null),
+    );
     if (!parsed.success) throw new HTTPException(400, { message: "invalid access setting" });
     const access = parsed.data.access;
     if (access.workspaceScope.kind === "selected") {
@@ -94,13 +95,17 @@ export function registerOrganizationMcpConnectionRoutes(app: Hono, deps: ApiRout
   });
 }
 
-/** A member of the organization, signed in in this browser. Keys and agents are refused. */
+/**
+ * A member of the organization, signed in in this browser, or an agent with
+ * their full access. Keys and limited agents are refused.
+ */
 async function requireOrganizationPerson(
   c: Context,
   deps: ApiRouteDeps,
 ): Promise<{ context: AccessContext; organizationId: string; admin: boolean }> {
-  requireNotAgent(c, "Managing connected agents");
-  if (
+  const agent = isAgentActingAsPerson(c);
+  if (agent) requireFullAccessIfAgent(c, "Managing connected agents");
+  else if (
     deps.settings.productAccessMode !== "managed" ||
     !c.req.header("cookie") ||
     c.req.header("authorization")

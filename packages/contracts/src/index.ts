@@ -8554,7 +8554,11 @@ const WorkspaceControlReason = z
   );
 
 export const SessionControlRequest = z.object({
-  action: z.enum(["pause", "resume", "cancel"]),
+  action: z
+    .enum(["pause", "resume", "cancel"])
+    .describe(
+      "pause stops the session and its sub-sessions until resume. cancel ends them for good and can't be undone; use pause to stop work you may want back.",
+    ),
   reason: WorkspaceControlReason.optional(),
   clientEventId: SessionOperationKey,
   expectedControlEtag: z.string().min(1).optional(),

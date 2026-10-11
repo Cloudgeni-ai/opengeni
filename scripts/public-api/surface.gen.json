@@ -295,7 +295,9 @@
       "sdk": [
         "OpenGeniClient.answerMcpConnectionRequest"
       ],
-      "request": [],
+      "request": [
+        "McpConnectionDecision"
+      ],
       "response": []
     },
     {
@@ -797,7 +799,9 @@
       "sdk": [
         "OpenGeniClient.updateOrganizationMcpConnection"
       ],
-      "request": [],
+      "request": [
+        "UpdateOrganizationMcpConnectionRequest"
+      ],
       "response": []
     },
     {
@@ -17771,6 +17775,20 @@
         "$.serverId": "string!"
       }
     },
+    "McpConnectionDecision": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "union=[\"decision=approve\",\"decision=deny\"]",
+        "$|decision=deny": "object",
+        "$|decision=deny.decision": "const!=[\"\\\"deny\\\"\"]",
+        "$|decision=approve": "object",
+        "$|decision=approve.access": "ref(OrganizationAccessPolicy)!",
+        "$|decision=approve.decision": "const!=[\"\\\"approve\\\"\"]",
+        "$|decision=approve.organizationId": "string!"
+      }
+    },
     "McpConnectionResourceScope": {
       "io": [
         "input"
@@ -24872,6 +24890,15 @@
         "$.expectedRevision": "integer!",
         "$.mode": "enum!=[\"\\\"restricted\\\"\",\"\\\"unrestricted\\\"\"]",
         "$.operationId": "string!"
+      }
+    },
+    "UpdateOrganizationMcpConnectionRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.access": "ref(OrganizationAccessPolicy)!"
       }
     },
     "UpdateOrganizationMemberRequest": {
