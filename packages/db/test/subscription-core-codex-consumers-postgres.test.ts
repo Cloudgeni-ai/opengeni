@@ -1217,8 +1217,8 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
       }),
     ).toMatchObject({ rotation: { activeCredentialId: orgAccount, rotationEnabled: false } });
 
-    // Organization routes manage organization accounts only (legacy parity):
-    // a workspace-managed connection is refused before anything is written.
+    // The organization primary stays within the organization pool: a
+    // workspace-managed connection is refused before anything is written.
     expect(
       (
         await setSubscriptionCoreCodexPrimary(client!.db, {
@@ -1227,14 +1227,17 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
         })
       ).activated,
     ).toBeNull();
+    expect((await orgRow())!.primary_id).toBe(orgAccount);
+    // Otherwise a connection a shared workspace manages is an organization
+    // account (design 5.4): the organization route may rename it.
     expect(
       await renameSubscriptionCoreCodexConnection(client!.db, {
         ...admin,
         connectionId: workspaceManaged,
         label: "renamed by the organization route",
       }),
-    ).toBeNull();
-    expect((await connectionRow(workspaceManaged)).label).toBe("org-write-managed");
+    ).toBe(workspaceManaged);
+    expect((await connectionRow(workspaceManaged)).label).toBe("renamed by the organization route");
     expect((await orgRow())!.primary_id).toBe(orgAccount);
     expect(
       await renameSubscriptionCoreCodexConnection(client!.db, {

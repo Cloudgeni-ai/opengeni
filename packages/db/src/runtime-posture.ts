@@ -735,6 +735,8 @@ export const SUBSCRIPTION_CORE_NEUTRAL_PRIVATE_ROUTINES = [
   // created later, read and replaced by organization administrators.
   "subscription_core_reach(text, uuid, uuid)",
   "set_subscription_core_reach(text, uuid, uuid, boolean, boolean)",
+  // Migration 0714: the organization's rotation switch on the reach row alone.
+  "set_subscription_core_reach_allocator(text, uuid, uuid, boolean)",
 ] as const;
 
 /** Migration 0707: the neutral writers' owner-only internals. */

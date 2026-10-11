@@ -188,4 +188,6 @@ export const embeddingMigrationTail = [
   // Keys the auto-assignment table by provider and redefines the trigger and
   // reach routines withheld 0689 and 0702 create; replay after them.
   "0713_subscription_core_provider_keyed_reach.sql",
+  // Redefines the reach setters withheld 0713 creates; replay after it.
+  "0714_subscription_workspace_managed_organization_accounts.sql",
 ];
