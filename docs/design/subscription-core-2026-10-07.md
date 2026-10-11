@@ -1012,10 +1012,11 @@ always stays after them.
   authority checks and concurrent wakes). It then locks those sessions
   `FOR NO KEY UPDATE` in ascending session order (the generic wake's archive
   guard's own mode, so Steer, Cancel and a resume, which lock the session
-  before its waiter, cannot interleave), skipping any deleted, archived or
-  imported since the read, so one such session no longer fails the whole
-  wake. Only for the sessions it locked does it record the generic wake, bump
-  the waiters and record their typed wakes. Typed delivery
+  before its waiter, cannot interleave), skipping any that no longer exist or
+  are archived or imported (whose generic wake the guard would refuse), so
+  one such session no longer fails the whole wake. Only for the sessions it
+  locked and found executable does it record the generic wake, bump the
+  waiters and record their typed wakes. Typed delivery
   claims due rows (claim-generation fenced), signals `codexCapacityChanged`
   with the waiter's wake revision through `signalWithStart`, then marks the
   row delivered; a failed signal retries after 1 second doubling to 5

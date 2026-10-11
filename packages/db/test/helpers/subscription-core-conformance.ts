@@ -2272,6 +2272,27 @@ export function describeSubscriptionCoreConformance<Credential>(
       }
     }
 
+    /** Whether another transaction could lock the session row in this mode right now. */
+    async function sessionLockableAs(
+      sessionId: string,
+      mode: "for key share" | "for share",
+    ): Promise<boolean> {
+      const probe = await admin().reserve();
+      try {
+        await probe`begin`;
+        if (mode === "for key share")
+          await probe`select id from sessions where id = ${sessionId}::uuid for key share nowait`;
+        else await probe`select id from sessions where id = ${sessionId}::uuid for share nowait`;
+        return true;
+      } catch (error) {
+        if ((error as { code?: string }).code === "55P03") return false;
+        throw error;
+      } finally {
+        await probe`rollback`.catch(() => undefined);
+        probe.release();
+      }
+    }
+
     test("a capacity wake locks the workspace before its sessions, like a runnable wake or a context clear", async () => {
       const org = await organization();
       const turn = await runningTurn(org);
@@ -2423,6 +2444,13 @@ export function describeSubscriptionCoreConformance<Credential>(
           second: await sessionLockable(second),
           fourth: await sessionLockable(fourth),
         }).toEqual({ first: false, second: false, fourth: true });
+        // The sessions it holds are locked FOR NO KEY UPDATE, the generic
+        // wake's archive guard's mode: key shares (foreign keys) still pass,
+        // shares do not.
+        expect({
+          keyShare: await sessionLockableAs(first, "for key share"),
+          share: await sessionLockableAs(first, "for share"),
+        }).toEqual({ keyShare: true, share: false });
         await holder`commit`;
       } catch (error) {
         failed = true;
@@ -2692,7 +2720,12 @@ export function describeSubscriptionCoreConformance<Credential>(
         await holder`select id from sessions where id = ${lower}::uuid for update`;
         wake = wakePool(org, "fixture_deleted_session");
         await waitUntilBlockedBy(holder, wake);
-        await admin()`delete from sessions where id = ${higher}::uuid`;
+        // Bounded: a wake that locked the higher session out of order would
+        // block this delete on a wait PostgreSQL cannot see as a deadlock.
+        await admin().begin(async (tx) => {
+          await tx`set local lock_timeout = '5s'`;
+          await tx`delete from sessions where id = ${higher}::uuid`;
+        });
         await holder`commit`;
       } catch (error) {
         failed = true;
@@ -2722,7 +2755,8 @@ export function describeSubscriptionCoreConformance<Credential>(
       // The generic wake's archive guard refuses an archiving session's wake;
       // the capacity wake must leave it out instead of failing for everyone.
       await admin()`update sessions
-        set content_archive_state = 'archiving', content_archive_started_at = now()
+        set content_archive_state = 'archiving', content_archive_started_at = now(),
+          content_archive = '{"format":"fixture","version":1,"objectKeys":[]}'::jsonb
         where id = ${archivedTurn.identity.sessionId}::uuid`;
       expect(await wakePool(org, "fixture_archived_session")).toEqual([
         { accountId: org.accountId, workspaceId: org.sharedWorkspaceId },
@@ -2733,6 +2767,41 @@ export function describeSubscriptionCoreConformance<Credential>(
         select count(*)::int as count from session_workflow_wake_outbox
         where session_id = ${archivedTurn.identity.sessionId}::uuid`;
       expect(generic!.count).toBe(0);
+      await expectForeignUntouched(org);
+    });
+
+    test("a capacity wake skips a workspace whose only waiting session is archived", async () => {
+      const org = await organization();
+      const [lower, higher] = [org.sharedWorkspaceId, org.otherWorkspaceId].sort() as [
+        string,
+        string,
+      ];
+      const archivedTurn = await runningTurn(org, { workspaceId: lower });
+      const liveTurn = await runningTurn(org, { workspaceId: higher });
+      const archivedWaiter = await armedWaiter(org, archivedTurn, { workspaceId: lower });
+      const liveWaiter = await armedWaiter(org, liveTurn, { workspaceId: higher });
+      // Archiving keeps turns, so a stale waiter can outlive its session's
+      // archive. Nothing in the lower workspace is left to wake; the wake
+      // must move on to the higher one rather than fail.
+      await admin()`update sessions
+        set content_archive_state = 'archived', content_archive_started_at = now(),
+          content_archived_at = now(),
+          content_archive = '{"format":"fixture","version":1,"objectKeys":[],"sha256":"fixture"}'::jsonb
+        where id = ${archivedTurn.identity.sessionId}::uuid`;
+      expect(
+        await wakeSubscriptionCoreCapacityWaiters(
+          db(),
+          providerId,
+          {
+            accountId: org.accountId,
+            reason: "fixture_archived_workspace",
+            workspaceIds: [higher, lower],
+          },
+          enqueueSessionWorkflowWakeInTransaction,
+        ),
+      ).toEqual([{ accountId: org.accountId, workspaceId: higher }]);
+      expect(await waiterRevision(archivedWaiter)).toBe(1);
+      expect(await waiterRevision(liveWaiter)).toBe(2);
       await expectForeignUntouched(org);
     });
 
