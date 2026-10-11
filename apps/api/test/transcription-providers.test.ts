@@ -419,6 +419,14 @@ describe("transcription providers", () => {
 
   test("uses the connected SuperGrok account for xAI speech-to-text", async () => {
     const active = spyOn(dbModule, "workspaceXaiSubscriptionActive").mockResolvedValue(true);
+    const workspace = spyOn(dbModule, "getWorkspace").mockResolvedValue({
+      accountId: "account",
+    } as never);
+    // No SuperGrok cutover receipt: the legacy path.
+    const route = spyOn(
+      dbModule,
+      "readSubscriptionCoreProviderRouteForWorkspace",
+    ).mockResolvedValue("legacy");
     const authority = spyOn(
       dbModule,
       "resolveXaiProviderAccountAuthoritySnapshotForAcceptance",
@@ -497,6 +505,8 @@ describe("transcription providers", () => {
       );
     } finally {
       active.mockRestore();
+      route.mockRestore();
+      workspace.mockRestore();
       authority.mockRestore();
       selected.mockRestore();
       materialized.mockRestore();
@@ -616,6 +626,13 @@ describe("transcription preference and fallback", () => {
 
 test("refreshes an expired SuperGrok token before sending audio", async () => {
   const active = spyOn(dbModule, "workspaceXaiSubscriptionActive").mockResolvedValue(true);
+  const workspace = spyOn(dbModule, "getWorkspace").mockResolvedValue({
+    accountId: "account",
+  } as never);
+  // No SuperGrok cutover receipt: the legacy path.
+  const route = spyOn(dbModule, "readSubscriptionCoreProviderRouteForWorkspace").mockResolvedValue(
+    "legacy",
+  );
   const authority = spyOn(
     dbModule,
     "resolveXaiProviderAccountAuthoritySnapshotForAcceptance",
@@ -712,6 +729,8 @@ test("refreshes an expired SuperGrok token before sending audio", async () => {
   } finally {
     refresh.mockRestore();
     active.mockRestore();
+    route.mockRestore();
+    workspace.mockRestore();
     authority.mockRestore();
     selected.mockRestore();
     materialized.mockRestore();
@@ -720,6 +739,13 @@ test("refreshes an expired SuperGrok token before sending audio", async () => {
 
 test("refreshes once for xAI 403 bad-credentials", async () => {
   const active = spyOn(dbModule, "workspaceXaiSubscriptionActive").mockResolvedValue(true);
+  const workspace = spyOn(dbModule, "getWorkspace").mockResolvedValue({
+    accountId: "account",
+  } as never);
+  // No SuperGrok cutover receipt: the legacy path.
+  const route = spyOn(dbModule, "readSubscriptionCoreProviderRouteForWorkspace").mockResolvedValue(
+    "legacy",
+  );
   const authority = spyOn(
     dbModule,
     "resolveXaiProviderAccountAuthoritySnapshotForAcceptance",
@@ -823,6 +849,8 @@ test("refreshes once for xAI 403 bad-credentials", async () => {
   } finally {
     refresh.mockRestore();
     active.mockRestore();
+    route.mockRestore();
+    workspace.mockRestore();
     authority.mockRestore();
     selected.mockRestore();
     materialized.mockRestore();
