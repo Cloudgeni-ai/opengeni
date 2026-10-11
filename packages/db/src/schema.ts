@@ -1335,7 +1335,7 @@ export const organizationServiceAccounts = pgTable(
   }),
 );
 
-export type ApiKeyCredentialKind = "workspace" | "organization" | "legacy_account";
+export type ApiKeyCredentialKind = "workspace" | "organization" | "legacy_account" | "personal";
 
 export const apiKeys = pgTable(
   "api_keys",
@@ -1360,6 +1360,10 @@ export const apiKeys = pgTable(
     permissions: jsonb("permissions").$type<string[]>().notNull().default([]),
     /** Organization keys: the service account that holds the key. */
     serviceAccountId: uuid("service_account_id"),
+    /** Personal keys: the person the key acts as, with their live access. */
+    ownerSubjectId: text("owner_subject_id"),
+    /** Personal keys: the most the key may do; `permissions` stays empty. */
+    ownerPermissions: jsonb("owner_permissions").$type<string[]>(),
     expiresAt: timestamp("expires_at", { withTimezone: true }),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
     lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
@@ -1388,9 +1392,25 @@ export const apiKeys = pgTable(
       "api_keys_access_policy_check",
       sql`${table.workspaceScope} in ('all', 'selected')
         and ${table.permissionMode} in ('legacy', 'explicit')
-        and (${table.workspaceScope} = 'all' or (${table.credentialKind} = 'organization' and ${table.permissionMode} = 'explicit'))
-        and (${table.permissionMode} = 'legacy' or ${table.credentialKind} = 'organization')`,
+        and (${table.workspaceScope} = 'all' or (${table.credentialKind} in ('organization', 'personal') and ${table.permissionMode} = 'explicit'))
+        and (${table.permissionMode} = 'legacy' or ${table.credentialKind} in ('organization', 'personal'))`,
     ),
+    personalOwner: check(
+      "api_keys_personal_owner_check",
+      sql`(${table.credentialKind} = 'personal') = (${table.ownerSubjectId} is not null)
+        and (${table.credentialKind} = 'personal') = (${table.ownerPermissions} is not null)
+        and (${table.credentialKind} <> 'personal' or (
+          ${table.ownerSubjectId} ~ '^user:[^[:space:][:cntrl:]]+$'
+          and length(${table.ownerSubjectId}) <= 1024
+          and jsonb_typeof(${table.ownerPermissions}) = 'array'
+          and ${table.permissions} = '[]'::jsonb
+          and ${table.permissionMode} = 'explicit'
+          and ${table.serviceAccountId} is null
+        ))`,
+    ),
+    personalOwnerIndex: index("api_keys_personal_owner_idx")
+      .on(table.accountId, table.ownerSubjectId, table.createdAt.desc())
+      .where(sql`${table.credentialKind} = 'personal'`),
     descriptionValid: check(
       "api_keys_description_check",
       sql`${table.description} is null or length(${table.description}) between 1 and 500`,
@@ -1407,6 +1427,9 @@ export const apiKeys = pgTable(
         ${table.workspaceId} is null
         and ${table.credentialKind} = 'legacy_account'
         and ${table.revokedAt} is not null
+      ) or (
+        ${table.workspaceId} is null
+        and ${table.credentialKind} = 'personal'
       )`,
     ),
   }),

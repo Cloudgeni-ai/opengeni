@@ -102,7 +102,9 @@ export async function readOrganizationApiKeyWorkspaceScopes(
   rows: (typeof schema.apiKeys.$inferSelect)[],
 ): Promise<Map<string, string[]>> {
   const selected = rows.filter(
-    (row) => row.credentialKind === "organization" && row.workspaceScope === "selected",
+    (row) =>
+      (row.credentialKind === "organization" || row.credentialKind === "personal") &&
+      row.workspaceScope === "selected",
   );
   const result = new Map<string, string[]>();
   // Every call site is account scoped, including the exact hash authentication
