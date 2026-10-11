@@ -40,10 +40,9 @@ const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const MIGRATION = "0689_subscription_core_codex_cutover.sql";
 // 0712 requires the committed 0689 cutover, so it is held back with it.
 const PRECURSOR = "0712_subscription_core_generic_precursor.sql";
-// 0713 keys and redefines objects 0689 creates: held back with it and
-// replayed right after it.
+// 0713 locks and alters tables 0689 creates, and 0714 redefines 0713's reach
+// setters: both are held back and replayed after the cutover.
 const PROVIDER_KEYED_REACH = "0713_subscription_core_provider_keyed_reach.sql";
-// 0714 redefines 0713's reach setters: held back and replayed with it.
 const WORKSPACE_MANAGED_ACCOUNTS = "0714_subscription_workspace_managed_organization_accounts.sql";
 // 0715 builds on 0712's receipts and patches its helpers; it follows 0712.
 const COMPAT = "0715_subscription_authority_compat.sql";
