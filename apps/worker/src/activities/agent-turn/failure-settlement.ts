@@ -1559,6 +1559,25 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
   );
   const coreLaneRecoverable = (lane: ReturnType<typeof createCoreCodexRequests> | undefined) =>
     !lane || lane.canRecover() || (!!coreUnknownRecoveryFailure && lane.unknownIsOwnAndSettled());
+  // A paused Claude response (`pause_turn`) still awaits its history
+  // checkpoint when its continuation fails (for example a 529): commit the
+  // history durably and checkpoint first, as the lease-lost and failover
+  // paths do, so a retryable failure can recover. Nothing is replayed: a
+  // lane without every response stays unrecoverable.
+  if (
+    coreClaude &&
+    attempt.turnId &&
+    !coreRequestOutcomeUnknown &&
+    failure.retryable &&
+    eventing.publish &&
+    eventing.turnStartedPublished &&
+    !(coreLaneRecoverable(coreClaude.requests) && coreLaneRecoverable(coreClaude.titleRequests))
+  ) {
+    await coreLanesRecoverAfterCheckpoint(coreClaude, async () => {
+      await flushRuntimeBatcher();
+      await historySink.reconcileConversationTruth({ requireDurable: true });
+    });
+  }
   if (
     attempt.turnId &&
     !coreRequestOutcomeUnknown &&

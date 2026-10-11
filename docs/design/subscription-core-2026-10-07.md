@@ -5248,6 +5248,11 @@ like C1a.
   `overloaded` and `fatal` record nothing: a 529 continues in the generic
   provider-overload recovery (the same turn retries, the binding keeps its
   connection) and a 403 fails the turn without a rotation or quarantine.
+  When a retryable failure (such as a 529) hits a paused search's
+  continuation, the answered first request still awaits its checkpoint:
+  settlement commits the history durably and checkpoints the lanes first
+  (as the lease-lost and failover paths do), so the turn recovers; a lane
+  with a request still without its response stays terminal.
   An unknown request outcome or a lost lease skips the step. The legacy
   Claude receipts, refresh recovery, rotation and wait never run for a core
   turn, and the core never reads the v1 `claudeAuthRecovery` marker (the

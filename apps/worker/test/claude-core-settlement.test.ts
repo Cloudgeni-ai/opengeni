@@ -352,6 +352,56 @@ describe("Claude refusal settlement on the core", () => {
     for (const legacy of runtime.legacy) expect(legacy).not.toHaveBeenCalled();
   });
 
+  test("a 529 on a paused search's continuation checkpoints the answered request, then recovers", async () => {
+    coreRuntime({ refusals: 1 });
+    const order: string[] = [];
+    const recovery = recoveringRecovery();
+    spy(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(undefined as never);
+    let checkpointed = false;
+    const paused = {
+      checkpoint: async () => {
+        order.push("checkpoint");
+        checkpointed = true;
+      },
+      canRecover: () => checkpointed,
+      hasUnknownOutcome: () => false,
+      unknownIsOwnAndSettled: () => false,
+    } as unknown as SubscriptionCoreTurn["requests"];
+    const { deps } = failureDeps(
+      anthropic(529, "overloaded_error"),
+      core({ requests: paused, titleRequests: undefined }),
+    );
+    deps.historySink.reconcileConversationTruth = async () => {
+      order.push("history");
+    };
+    expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "recovering" });
+    expect(order.slice(0, 2)).toEqual(["history", "checkpoint"]);
+    expect(order.filter((step) => step === "checkpoint")).toHaveLength(1);
+    expect(recovery.mock.calls[0]![2]).toMatchObject({ reason: "provider_overloaded" });
+  });
+
+  test("a lane still without a response stays terminal after the checkpoint", async () => {
+    coreRuntime({ refusals: 1 });
+    const recovery = recoveringRecovery();
+    spy(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(undefined as never);
+    const pending = {
+      checkpoint: async () => undefined,
+      canRecover: () => false,
+      hasUnknownOutcome: () => false,
+      unknownIsOwnAndSettled: () => false,
+    } as unknown as SubscriptionCoreTurn["requests"];
+    const { deps } = failureDeps(
+      anthropic(529, "overloaded_error"),
+      core({ requests: pending, titleRequests: undefined }),
+    );
+    await settleTurnFailure(deps as never).catch(() => undefined);
+    expect(recovery).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.objectContaining({ reason: "provider_overloaded" }),
+    );
+  });
+
   test("a 403 is fatal: nothing recorded, no rotation, no quarantine", async () => {
     const runtime = coreRuntime({ refusals: 1 });
     const recovery = recoveringRecovery();
