@@ -79,6 +79,9 @@ validation active while restoring wide-session locking and compatibility writes.
 
 Task-tree [locking invariants](run-lifecycle.md).
 
+The macOS Connected Machine LaunchAgent starts in the installing user's home;
+explicit session folders remain authoritative. Service rendering is owned by
+`agent/crates/opengeni-agent-platform/src/service.rs`.
 Heartbeats refresh desktop availability without reconnecting or granting consent;
 see `docs/connected-machines.md`.
 
@@ -889,8 +892,10 @@ This distinction enables worker-death recovery without duplicate external effect
 Semantic naming is attempt-owned auxiliary work: pending titles and exact-session
 policy authorize one bounded, tool-less request, parallel to the main stream and
 separately metered. Normal completion joins it before atomic settlement;
-exceptional/cancelled exits abort and join. Generic title writes lose to human
-renames. Runtimes without this seam serialize `set_session_title`.
+exceptional/cancelled exits abort and join, persisting completed title results
+and checkpointing their separate Codex request custody before failure recovery
+is evaluated. Pending/unknown requests retain their replay fence. Generic title
+writes lose to human renames. Runtimes without this seam serialize `set_session_title`.
 
 `packages/db/src/session-execution-policy.ts` projects defaults;
 `packages/db/src/session-model-settings.ts` records boundaries, preserving accepted
@@ -1595,6 +1600,11 @@ but admits no new connection, source configuration, credential delegation, or
 source-fetch execution. Scheduled admission and attempt-bound source fetching
 both enforce that retirement, including existing schedules and accepted work.
 Google Drive keeps its separate native API connection and source features.
+Publishing setup first verifies a folder through a file-only OAuth Picker, then
+uses a separate incremental OAuth step to retain recursive source reads. Both
+steps bind the same subject, account and unchanged connection; only final
+completion replaces the encrypted credential and enables the verified output
+folder. See [`google-drive.md`](google-drive.md#launch-oauth-scope-decision).
 See [`integrations-design.md`](integrations-design.md).
 
 The attempt-frozen Allow/Ask/Block policy and `connector_action_requests` apply

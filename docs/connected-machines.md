@@ -731,6 +731,28 @@ Windows retains its running-image replacement mechanism. This forward fix does
 not repair an older agent already executing its previous update handoff; those
 installations may require their service manager to start the verified canonical
 executable path after the old process exits.
+
+On macOS, the generated LaunchAgent sets `WorkingDirectory` to the installing
+user's home directory. This makes the reported default workspace root writable
+for attachment delivery instead of inheriting launchd's `/`. Foreground `run`
+continues to use the directory it was launched from, and an explicit session
+`workingDir` still takes precedence.
+
+After installing a release with this fix, regenerate an older service definition
+with `opengeni-agent service install --restart` when no machine work is running.
+The installer checks launchd's loaded binary and working directory as well as the
+plist on disk. If an earlier install wrote the plist but failed before reloading,
+a retry still reloads the stale job without requiring `--restart`. Dry-run
+rendering and installation share the `HOME`, then `USERPROFILE`, resolver;
+unsupported control characters and XML-invalid home paths are rejected before a
+plist is written. Existing sessions retain their saved absolute folder; restarting the service does not
+change an already-saved `/`. The existing-session Runs on menu changes the machine,
+not the folder. For a session with `/` saved, start a new session on that machine
+with a writable custom path in the new-session **Runs on** settings (or pass an
+explicit `workingDir` to `createSession`). Historical attachments are not restaged
+automatically; retrieve them explicitly through Files or attach them to a new
+message when needed.
+
 `opengeni-agent run` is the explicit foreground alternative.
 
 Self-update requires settled accepted work across every connection. Relay pumps,
