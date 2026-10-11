@@ -21,6 +21,7 @@ import { skillsModule } from "./modules/skills";
 import { subagentsModule } from "./modules/subagents";
 import type {
   AgentPromptContext,
+  AgentPromptExperiments,
   AgentPromptModule,
   AgentPromptResources,
   AgentPromptToolAvailability,
@@ -68,6 +69,7 @@ export type ComposeModularAgentInstructionsInput = {
    * Omitted keeps every tool-specific clause, byte for byte.
    */
   toolAvailability?: AgentPromptToolAvailability | undefined;
+  experiments?: AgentPromptExperiments | undefined;
   /** Per-attempt runtime directives, each already gated by its caller. */
   codemode?: string | undefined;
   codeSearch?: string | undefined;
@@ -129,6 +131,7 @@ export function composeModularAgentInstructions(input: ComposeModularAgentInstru
     renderer: input.renderer,
     resources: input.resources,
     ...(input.toolAvailability ? { toolAvailability: input.toolAvailability } : {}),
+    ...(input.experiments ? { experiments: input.experiments } : {}),
   });
   const layers: ModularInstructionLayer[] = [
     { id: "identity", title: "Identity", content: input.identity.trim(), joinBefore: "" },

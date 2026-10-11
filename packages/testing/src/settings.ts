@@ -256,6 +256,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     jevRequestTimeoutMs: 10_000,
     codeSearchMode: "off",
     agentInstructionsTemplate: DEFAULT_AGENT_INSTRUCTIONS,
+    experimentKnowledgeRetrievalGuidance: false,
     azureOpenaiBaseUrl: undefined,
     azureOpenaiEndpoint: undefined,
     azureOpenaiDeployment: undefined,
