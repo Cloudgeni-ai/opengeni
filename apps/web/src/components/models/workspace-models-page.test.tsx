@@ -1263,6 +1263,74 @@ describe("One Models page for the organization and the workspace", () => {
     }
   });
 
+  test("an administrator's own organization account: the notice counts the others, its tag waits for its reach, and an access save re-reads both lists", async () => {
+    organizationAdmin = true;
+    const ownAccount = codexAccount({ id: "own-1", label: "Team plan", source: "workspace" });
+    client.requestJson.mockImplementation(async (method: string, path: string) =>
+      method === "GET" && path === "/v1/organizations/organization-a/codex/accounts"
+        ? {
+            ...orgAccounts,
+            accounts: [
+              { ...orgAccounts.accounts[0], ownInWorkspaceIds: [] },
+              { ...ownAccount, source: "organization", ownInWorkspaceIds: ["workspace-a"] },
+            ],
+          }
+        : {},
+    );
+    accounts = {
+      ...accounts,
+      accounts: [ownAccount],
+      source: { ...source, mode: "automatic", effectiveSource: "workspace" },
+    };
+    let resolveAccess: (value: unknown) => void = () => undefined;
+    client.getModelConnectionAccess.mockImplementation(
+      () => new Promise((resolve) => (resolveAccess = resolve)),
+    );
+    const view = await render();
+    try {
+      const text = () => view.container.textContent ?? "";
+      // One organization account besides its own: "account is", "it's".
+      expect(text()).toContain(
+        "New work uses this workspace's Codex account. The organization's account is set aside while it's connected.",
+      );
+      const ownRow = () =>
+        [...view.container.querySelectorAll<HTMLElement>("[data-slot=list-row]")].find((row) =>
+          row.textContent?.includes("Team plan"),
+        )!;
+      // No "<workspace> only" tag while its reach loads: it may be shared wider.
+      expect(ownRow().textContent).not.toContain("Design preview only");
+      expect(ownRow().textContent).not.toContain("Everyone in Acme");
+      await act(async () =>
+        resolveAccess({
+          policy: openPolicy,
+          workspaces: [{ id: "workspace-a", name: "Design preview" }],
+          models: [],
+          personalWorkspacesSupported: true,
+          localWorkspaceIds: ["workspace-a"],
+        }),
+      );
+      await flush();
+      expect(ownRow().textContent).toContain("Everyone in Acme");
+
+      // An access save elsewhere re-reads this workspace's and the organization's lists.
+      const workspaceReads = client.listCodexAccounts.mock.calls.length;
+      const organizationReads = () =>
+        client.requestJson.mock.calls.filter(
+          ([method, path]) =>
+            method === "GET" && path === "/v1/organizations/organization-a/codex/accounts",
+        ).length;
+      const before = organizationReads();
+      await act(async () => {
+        window.dispatchEvent(new Event("model-connections-changed"));
+      });
+      await flush();
+      expect(client.listCodexAccounts.mock.calls.length).toBeGreaterThan(workspaceReads);
+      expect(organizationReads()).toBeGreaterThan(before);
+    } finally {
+      await cleanup(view);
+    }
+  });
+
   test("an organization account's page lists its usage limit resets and redeems them in the browser", async () => {
     organizationAdmin = true;
     const resetAccount = codexAccount({
@@ -1913,6 +1981,8 @@ describe("One Models page for the organization and the workspace", () => {
           mode: "organization",
           effectiveSource: "organization",
           workspaceAvailable: true,
+          // Its only own account is in use through the organization's pool.
+          workspaceSetAside: false,
         },
       };
       routeBoth();

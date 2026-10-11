@@ -346,13 +346,13 @@ export function ConnectionAccessFormPage({
                   return;
                 }
                 // Chosen workspaces start from the saved ones: none when people
-                // were saved, every shared workspace only when all were saved.
+                // were saved, every shared workspace when all were saved
+                // (including one that also keeps it as its own, so narrowing
+                // never drops that workspace's organization grant unseen).
                 const savedWorkspaces = data.policy.allowedPeople
                   ? []
                   : (data.policy.allowedWorkspaces ??
-                    data.workspaces
-                      .map((workspace) => workspace.id)
-                      .filter((id) => !local.includes(id)));
+                    data.workspaces.map((workspace) => workspace.id));
                 // Leaving people restores the saved Personal choice too.
                 const allowPersonalWorkspaces =
                   draft.allowedPeople && !data.policy.allowedPeople
@@ -427,8 +427,10 @@ export function ConnectionAccessFormPage({
             ) : null}
             {scope === "people" && !peopleListed ? (
               <p className="m-0 text-sm text-fg-muted">
-                {peopleCount(draft.allowedPeople!.length)} chosen. This organization has too many
-                members to list here.
+                {draft.allowedPeople!.length > 0
+                  ? `${peopleCount(draft.allowedPeople!.length)} chosen. `
+                  : ""}
+                This organization has too many members to list here.
               </p>
             ) : null}
             {scope === "people" && peopleListed ? (

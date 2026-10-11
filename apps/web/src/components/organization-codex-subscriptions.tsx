@@ -70,6 +70,13 @@ export function useOrganizationCodexSubscriptions({
     };
   }, [refresh, enabled]);
 
+  // An access save changes which workspaces list an account as their own.
+  useEffect(() => {
+    const changed = () => void refresh();
+    window.addEventListener("model-connections-changed", changed);
+    return () => window.removeEventListener("model-connections-changed", changed);
+  }, [refresh]);
+
   const connect = useCallback(
     async (options?: { onConnected?: (accountId: string | null) => void }) => {
       const recordOutcome = beginModelConnectJourney("codex", "device_code");

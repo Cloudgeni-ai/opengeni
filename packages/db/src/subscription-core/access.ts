@@ -438,10 +438,10 @@ export async function organizationAllocator(
 }
 
 /** The organization's model list: its organization-pool rows' list, or the connection's. */
-async function organizationModels(
+export async function organizationModels(
   tx: Database,
   accountId: string,
-  connection: AccessRow,
+  connection: Pick<AccessRow, "id" | "managed_by_workspace_id" | "allowed_model_ids">,
 ): Promise<string[] | null> {
   if (connection.managed_by_workspace_id === null) return connection.allowed_model_ids;
   const [row] = await rawRows<{ allowed_model_ids: string[] | null }>(

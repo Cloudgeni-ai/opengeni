@@ -5,6 +5,7 @@ import {
   createDb,
   ensureManagedAccessForUser,
   getSubscriptionCoreCodexModelConnectionAccess,
+  getSubscriptionCoreOrganizationCodexProjection,
   listOrganizationAdministrationMembers,
   listSubscriptionCoreCodexServingConnections,
   ModelConnectionWorkspaceNotInOrganizationError,
@@ -620,6 +621,19 @@ describe.skipIf(!realDb)("Codex access editor on the shared core", () => {
       reach: false,
     });
     expect(await served()).toEqual({ own: [id], other: [] });
+    // The organization's account list shows the organization's switch and
+    // list, not the manager's.
+    const listedForOrganization = async () =>
+      (
+        await getSubscriptionCoreOrganizationCodexProjection(client!.db, {
+          organizationId: org.accountId,
+          subjectId: org.ownerSubjectId,
+        })
+      ).accounts.find((account) => account.id === id);
+    expect(await listedForOrganization()).toMatchObject({
+      allocatorEnabled: false,
+      allowedModelIds: [MODEL],
+    });
     // The organization's switch still reads off, so turning it on is a change.
     expect((await flip("organization", false, 3)).result).toMatchObject({
       kind: "unchanged",

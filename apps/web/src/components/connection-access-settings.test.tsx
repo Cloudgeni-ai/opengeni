@@ -678,7 +678,8 @@ test("a workspace's own copy no workspace manages is an organization account: it
       version: 4,
     });
 
-    // From all, chosen workspaces start from every shared one except its own.
+    // From all, chosen workspaces start from every shared one, its own
+    // included: narrowing never drops that workspace's organization grant.
     await act(async () => root.unmount());
     root = createRoot(container);
     await act(async () => root.render(<Page />));
@@ -689,7 +690,7 @@ test("a workspace's own copy no workspace manages is an organization account: it
     await save();
     expect(writes.at(-1)).toEqual({
       allowedModels: null,
-      allowedWorkspaces: ["workspace-b"],
+      allowedWorkspaces: ["workspace-a", "workspace-b"],
       allowPersonalWorkspaces: true,
       version: 5,
     });
@@ -724,6 +725,15 @@ test("a workspace's own copy no workspace manages is an organization account: it
     await choose("Only selected workspaces");
     await choose("Only selected people");
     expect(saveButton().disabled).toBe(true);
+    // An empty saved choice says "No one" once, without a "0 people" count.
+    policy = { ...policy, allowedPeople: [] };
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await act(async () => root.render(<Page />));
+    await flush();
+    expect(container.textContent).toContain("No one can use it.");
+    expect(container.textContent).toContain("too many members to list here");
+    expect(container.textContent).not.toContain("0 people");
 
     // A workspace manages it: no people choice (the server refuses one).
     policy = { ...policy, allowedPeople: null };

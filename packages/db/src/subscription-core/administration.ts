@@ -26,7 +26,11 @@ import {
   readSubscriptionProviderCutoverState,
   resolveSubscriptionConnectionId,
 } from "../subscription-core-repository";
-import { organizationAdministeredConnection, organizationAllocator } from "./access";
+import {
+  organizationAdministeredConnection,
+  organizationAllocator,
+  organizationModels,
+} from "./access";
 import { SubscriptionCoreError } from "./errors";
 import { subscriptionCoreProviderId, type SubscriptionCoreProvider } from "./provider";
 
@@ -443,6 +447,16 @@ export async function readSubscriptionCoreOrganizationPool(
       order by connection.created_at, connection.id`,
       );
       if (!rows.some((row) => row.id === primaryConnectionId)) primaryConnectionId = null;
+      // A workspace-managed account's delegated manager writes the
+      // connection's own switch and list; the organization's are its
+      // organization-pool rows' (what the organization route shows and flips).
+      for (const row of rows) {
+        if (row.managed_by_workspace_id === null) continue;
+        row.allocator_enabled =
+          row.allocator_enabled &&
+          (await organizationAllocator(tx, input.organizationId, row.id, true));
+        row.allowed_model_ids = await organizationModels(tx, input.organizationId, row);
+      }
       // A workspace-pool row makes it the workspace's own; a world without
       // policy rows for that pair classifies by management.
       const own = await rawRows<{ connection_id: string; workspace_id: string }>(
