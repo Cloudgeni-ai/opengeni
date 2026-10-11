@@ -141,7 +141,7 @@ const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   // receipts and the provider-neutral cutover-row identity.
   "guard_subscription_provider_cutover_receipts()",
   "keep_subscription_cutover_identity()",
-  // Migration 0715: the authority marker and compatibility guards, the
+  // Migration 0716: the authority marker and compatibility guards, the
   // per-path source resolvers and the commit-time compatibility check. The
   // triggers fire without the writing role holding EXECUTE.
   "stamp_subscription_authority_inserted_at()",
@@ -163,7 +163,7 @@ const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   "subscription_compat_leave_scope(text[])",
   "subscription_compat_effective(text, text, uuid, uuid, bigint)",
   "enforce_subscription_authority_compat()",
-  // Migration 0716: the fences' helpers (the v2 copy rule, a scheduled
+  // Migration 0717: the fences' helpers (the v2 copy rule, a scheduled
   // firing's v2 value and the personal-entry liveness check), called only by
   // owner-run fences and functions.
   "subscription_v2_copy_matches(jsonb, jsonb)",
@@ -805,7 +805,7 @@ export const SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS: Readonly<Record<string, s
 };
 
 /**
- * Migration 0715 (M4 PR 0b): accepted authority across a provider's cutover.
+ * Migration 0716 (M4 PR 0b): accepted authority across a provider's cutover.
  * The runtime role may call the copy routine (inert until a provider's
  * writers call it), the reader, and the list of providers whose records can
  * exist; it holds no privilege on the compatibility relation itself.
@@ -817,7 +817,7 @@ export const SUBSCRIPTION_AUTHORITY_COMPAT_PRIVATE_ROUTINES = [
 ] as const;
 
 /**
- * Migration 0715: owner-only marker and guard triggers, the per-path source
+ * Migration 0716: owner-only marker and guard triggers, the per-path source
  * resolvers and the commit-time compatibility check, in
  * opengeni_subscription_internal.
  */
@@ -844,7 +844,7 @@ export const SUBSCRIPTION_AUTHORITY_COMPAT_OWNER_ROUTINES = [
 ] as const;
 
 /**
- * Migration 0716: the fences' owner-only helpers in
+ * Migration 0717: the fences' owner-only helpers in
  * opengeni_subscription_internal (the v2 copy rule, a scheduled firing's v2
  * value and the personal-entry liveness check). Only owner-run fences and
  * functions call them.
@@ -2840,7 +2840,7 @@ export function evaluateRuntimeDatabasePosture(
       )
         ? SUBSCRIPTION_AUTHORITY_COMPAT_OWNER_ROUTINES
         : []),
-      // 0716 adds no runtime routine: once any of its helpers exists, all of
+      // 0717 adds no runtime routine: once any of its helpers exists, all of
       // them must, owner-only and with a safe search path.
       ...(posture.subscriptionOwnerRoutines.some((routine) =>
         (SUBSCRIPTION_AUTHORITY_FENCE_OWNER_ROUTINES as readonly string[]).includes(routine.name),

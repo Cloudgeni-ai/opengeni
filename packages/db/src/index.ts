@@ -69390,7 +69390,7 @@ function systemUpdateExecutionAuthorityKey(
   });
 }
 
-/** 0715's effective authority for post-receipt work without a v2 entry or record. */
+/** 0716's effective authority for post-receipt work without a v2 entry or record. */
 function isPostReceiptWithoutAuthority(value: unknown): boolean {
   return stableJson(value ?? null) === stableJson({ authority: "none" });
 }

@@ -690,7 +690,7 @@ describe("runtime database posture evaluator", () => {
     }
   });
 
-  test("once a fence helper (0716) exists, every one must, owner-only with a safe search path", () => {
+  test("once a fence helper (0717) exists, every one must, owner-only with a safe search path", () => {
     const ownerRoutine = (name: string) => ({
       name,
       owner: "opengeni_migrator",
@@ -713,7 +713,7 @@ describe("runtime database posture evaluator", () => {
       ].map(ownerRoutine);
       return posture;
     };
-    // Before 0716 none is required; after it all four are, safely.
+    // Before 0717 none is required; after it all four are, safely.
     expect(evaluateRuntimeDatabasePosture(withOwnerRoutines([]), options)).toEqual([]);
     expect(
       evaluateRuntimeDatabasePosture(

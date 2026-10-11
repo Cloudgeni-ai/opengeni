@@ -49,10 +49,10 @@ const PRECURSOR = "0712_subscription_core_generic_precursor.sql";
 const PROVIDER_KEYED_REACH = "0713_subscription_core_provider_keyed_reach.sql";
 // 0714 redefines 0713's reach setters: held back and replayed with it.
 const WORKSPACE_MANAGED_ACCOUNTS = "0714_subscription_workspace_managed_organization_accounts.sql";
-// 0715 builds on 0712's receipts and patches its helpers; it follows 0712.
-const COMPAT = "0715_subscription_authority_compat.sql";
-// 0716 requires 0715's routines; it follows 0715.
-const FENCES = "0716_subscription_authority_fences.sql";
+// 0716 builds on 0712's receipts and patches its helpers; it follows 0712.
+const COMPAT = "0716_subscription_authority_compat.sql";
+// 0717 requires 0716's routines; it follows 0716.
+const FENCES = "0717_subscription_authority_fences.sql";
 const key = Buffer.alloc(32, 72);
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
