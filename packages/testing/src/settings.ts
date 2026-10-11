@@ -214,6 +214,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     resolvedOpperModelsJson: undefined,
     modelProvidersJson: "[]",
     codexSubscriptionEnabled: false,
+    experimentSystemPromptCacheSplit: false,
     supergrokSubscriptionEnabled: false,
     claudeSubscriptionEnabled: false,
     supergrokResponseStreamIdleTimeoutMs: 300_000,
