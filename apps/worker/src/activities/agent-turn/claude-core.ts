@@ -120,6 +120,7 @@ export function createCoreClaudeRequests(
   core: SubscriptionCoreTurn,
   ref: { connectionId: string; holderId: string; generation: number },
   execution: { attemptId: string; executionGeneration: number },
+  lane: "main" | "title",
 ) {
   const requests = subscriptionCoreRequests(CLAUDE);
   return createCoreSubscriptionRequests({
@@ -131,8 +132,9 @@ export function createCoreClaudeRequests(
     outcomeUnknown: () => CLAUDE.errors.requestOutcomeUnknown(),
     isOutcomeUnknown: (error) => hasCoreCode(error, "subscription_core_request_outcome_unknown"),
     // A paused web search continues the same model call with a new request
-    // after a complete response (`pause_turn`).
-    continuesAfterResponse: true,
+    // after a complete response (`pause_turn`); a title call has no server
+    // tools and never continues.
+    continuesAfterResponse: lane === "main",
   });
 }
 
@@ -174,8 +176,8 @@ export function buildClaudeCoreRequestAuthorization(input: {
 }): ClaudeCoreRequestAuthorization {
   const { db, core, lease } = input;
   const ref = coreLeaseRef(lease, core, DISPLAY_NAME);
-  core.requests = createCoreClaudeRequests(db, core, ref, input.execution);
-  core.titleRequests = createCoreClaudeRequests(db, core, ref, input.execution);
+  core.requests = createCoreClaudeRequests(db, core, ref, input.execution, "main");
+  core.titleRequests = createCoreClaudeRequests(db, core, ref, input.execution, "title");
   const resolver = guardCoreTokenResolver(
     db,
     CLAUDE_CORE_TURN_PROVIDER,

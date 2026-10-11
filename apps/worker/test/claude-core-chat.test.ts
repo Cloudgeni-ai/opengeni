@@ -951,24 +951,46 @@ describe("Claude custody edge paths on the core", () => {
   // The continuation rule only admits a further reservation once every
   // pending request has its response: Claude's main lane stays sequential.
   test("a request still waiting for its response blocks the next reservation", async () => {
-    const lane = placedCore().core.requests!;
+    const placed = placedCore();
+    const lane = placed.core.requests!;
     await lane.reserve({ requestId: "attempt-1:1:1:claude:1", transportAttempt: 1 });
     await expect(
       lane.reserve({ requestId: "attempt-1:1:1:claude:2", transportAttempt: 1 }),
     ).rejects.toMatchObject({ code: "subscription_core_request_outcome_unknown" });
+    expect(placed.order).toEqual(["reserve:attempt-1:1:1:claude:1:1"]);
   });
 
-  test("after a response, a second request in flight blocks a third", async () => {
+  test("after a response, a second request in flight blocks a third; the checkpoint settles both once", async () => {
     const placed = placedCore();
     const lane = placed.core.requests!;
     const first = { requestId: "attempt-1:1:1:claude:1", transportAttempt: 1 };
+    const second = { requestId: "attempt-1:1:1:claude:2", transportAttempt: 1 };
     await lane.reserve(first);
     await lane.observe({ ...first, outcome: "response_received" });
-    await lane.reserve({ requestId: "attempt-1:1:1:claude:2", transportAttempt: 1 });
+    await lane.reserve(second);
     await expect(
       lane.reserve({ requestId: "attempt-1:1:1:claude:3", transportAttempt: 1 }),
     ).rejects.toMatchObject({ code: "subscription_core_request_outcome_unknown" });
     expect(placed.order.filter((step) => step.startsWith("reserve:"))).toHaveLength(2);
+    await lane.observe({ ...second, outcome: "response_received" });
+    await lane.checkpoint();
+    await lane.checkpoint();
+    expect(placed.order.filter((step) => step.startsWith("settle:"))).toEqual([
+      "settle:operation-1:response_received",
+      "settle:operation-2:response_received",
+    ]);
+    expect(lane.canRecover()).toBe(true);
+  });
+
+  test("the session-title lane never continues after a response", async () => {
+    const placed = placedCore();
+    const lane = placed.core.titleRequests!;
+    const first = { requestId: "attempt-1:1:1:claude:title:1", transportAttempt: 1 };
+    await lane.reserve(first);
+    await lane.observe({ ...first, outcome: "response_received" });
+    await expect(
+      lane.reserve({ requestId: "attempt-1:1:1:claude:title:2", transportAttempt: 1 }),
+    ).rejects.toMatchObject({ code: "subscription_core_request_outcome_unknown" });
   });
 
   test("a refused request whose settle write failed blocks the next reservation", async () => {

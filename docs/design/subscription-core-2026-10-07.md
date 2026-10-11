@@ -4259,8 +4259,8 @@ Fail-closed choices:
   title requests.
 - Core-routed admission funding is opt-in per provider and only while the
   provider is enabled on the deployment (SuperGrok here, matching its
-  catalog readiness); Claude's admission funding moves in its own track
-  step, so no Claude admission reads a provider route before then.
+  catalog readiness); Claude's entry is added by C1a (its call-site step),
+  so no Claude admission reads a provider route before then.
 - A source disconnect is recognised by its shared code
   (`subscription_core_source_disconnected`) for every provider, so a core
   SuperGrok disconnect joins the admitted title stream and propagates out of
@@ -4979,7 +4979,8 @@ unregistered until then.
   cancelled. An unknown outcome is never replayed: later requests of the
   attempt are refused locally. A paused web search (`pause_turn`) continues
   the same model call with a new physical request before the history
-  checkpoint: Claude's lanes declare `continuesAfterResponse`, so a further
+  checkpoint: Claude's main lane declares `continuesAfterResponse` (the
+  title lane does not; a title call never continues), so a further
   reservation is admitted while every pending request of the lane has
   received its response (each still reserved before its I/O and settled
   once at the checkpoint); any request without a response still refuses
@@ -5007,10 +5008,12 @@ unregistered until then.
   (authority, accounts, rotation) unless it is `legacy`, so a retired
   legacy pool can never fail the catalog. The legacy route costs one
   receipt read in the catalog loader and one in the restriction loader.
-- Funding and attribution were already provider-neutral (credential source
-  `claude`); usage facts attribute the core connection through the placed
-  core turn, and the legacy model-connection check is skipped for a core
-  turn.
+- Funding and attribution: admission funding on the core is opt-in per
+  provider (`CORE_ROUTED_FUNDING`, from X1b); C1a adds the `claude` entry, so
+  a Claude admission reads its provider route only while Claude
+  subscriptions are enabled on the deployment (credential source `claude`).
+  Usage facts attribute the core connection through the placed core turn,
+  and the legacy model-connection check is skipped for a core turn.
 
 Conformance. The shared suite runs against the production binding twice,
 with OAuth credentials and with setup tokens; the suite decides whether a
