@@ -21,6 +21,7 @@ import {
   fetchSubscriptionCoreCodexUsage,
   getSubscriptionCoreCodexAppsSettings,
   getSubscriptionCoreCodexWorkspaceProjection,
+  getSubscriptionCoreOrganizationCodexAccount,
   getSubscriptionCoreOrganizationCodexProjection,
   readCodexCutoverDisposition,
   renameSubscriptionCoreCodexConnection,
@@ -506,15 +507,17 @@ export async function coreCodexRename(
     label,
   });
   if (!renamed) throw new HTTPException(404, { message: "codex account not found" });
-  const accounts = admin.workspaceId
-    ? (await projection(deps, admin.accountId, admin.workspaceId, admin.subjectId)).accounts
-    : (
-        await getSubscriptionCoreOrganizationCodexProjection(deps.db, {
-          organizationId: admin.accountId,
-          subjectId: admin.subjectId,
-        })
-      ).accounts;
-  const row = accounts.find((account) => account.id === renamed);
+  // The organization route also renames accounts a shared workspace manages,
+  // which its list does not show: read the renamed one itself.
+  const row = admin.workspaceId
+    ? (await projection(deps, admin.accountId, admin.workspaceId, admin.subjectId)).accounts.find(
+        (account) => account.id === renamed,
+      )
+    : await getSubscriptionCoreOrganizationCodexAccount(deps.db, {
+        organizationId: admin.accountId,
+        subjectId: admin.subjectId,
+        connectionId: renamed,
+      });
   if (!row) throw new HTTPException(404, { message: "codex account not found" });
   return c.json(codexAccountJson(row));
 }

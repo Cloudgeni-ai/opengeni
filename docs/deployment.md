@@ -4400,7 +4400,10 @@ live on its organization-pool rows and that reach row, so a managing
 workspace can narrow other workspaces' use but never widen it; giving such an
 account to every workspace stores every workspace's row plus the reach
 instead of organization scope. Each route's rotation switch shows and flips
-its own side's copies.
+its own side's copies; a request is unchanged only when every copy it writes
+already has the value. 0714 also makes the reach reader
+(`opengeni_private.subscription_core_reach`) report the reach row's switch and
+model list, additive keys older binaries ignore.
 It needs no drain or window: older binaries never call the helper for a
 managed connection and read the same rows with the same meaning. This
 release's API calls the new routine on every organization rotation switch and
@@ -4496,7 +4499,10 @@ their workspace.
 In the same test organization, switch the account's rotation off on the
 organization route and on again on its workspace's route: the workspace's
 own copy serves again, other workspaces stay off, and the organization's
-switch still reads off until it is turned on there.
+switch still reads off until it is turned on there. Then the other order:
+switch it off on the workspace's route, off on the organization route (it
+answers `changed: true`), and on again on the workspace's route: other
+workspaces and a workspace created afterwards stay off.
 
 **Accounts page change (separate release, after owner approval).** The
 organization Accounts page then lists a workspace-connected account once, as

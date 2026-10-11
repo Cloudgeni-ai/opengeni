@@ -22,6 +22,11 @@
 -- setter would also copy the connection's model list, which a delegated
 -- manager writes). Organization-administrator only, with the setter's checks;
 -- it changes nothing else.
+--
+-- The reach reader (0713) also reports the reach row's switch and model list
+-- (`allocatorEnabled`, `allowedModelIds`), additive keys older binaries
+-- ignore: the organization's own switch and list for a workspace-managed
+-- account live on its copies, the reach row included.
 SET LOCAL lock_timeout = '5s';
 
 DO $install$
@@ -129,6 +134,43 @@ BEGIN
 END
 $install$;
 
+DO $install_reach_reader$
+DECLARE data_schema text := current_schema();
+BEGIN
+  -- 0713's reader, also reporting the reach row's switch and model list.
+  EXECUTE format($ddl$
+    CREATE OR REPLACE FUNCTION opengeni_private.subscription_core_reach(
+      p_provider text, p_account_id uuid, p_connection_id uuid
+    ) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path = pg_catalog, %1$I, opengeni_private, pg_temp
+    AS $body$
+    DECLARE reach jsonb;
+    BEGIN
+      IF NOT opengeni_private.subscription_organization_admin(p_account_id) THEN
+        RAISE EXCEPTION 'only organization administrators may read subscription connection reach'
+          USING ERRCODE = '42501';
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM opengeni_private.subscription_core_providers registry
+          WHERE registry.provider = p_provider) THEN
+        RAISE EXCEPTION 'subscription provider is not registered on the shared core'
+          USING ERRCODE = '22023';
+      END IF;
+      SELECT pg_catalog.jsonb_build_object(
+          'sharedWorkspaces', auto.shared_workspaces,
+          'personalWorkspaces', auto.personal_workspaces,
+          'allocatorEnabled', auto.allocator_enabled,
+          'allowedModelIds', pg_catalog.to_jsonb(auto.allowed_model_ids))
+        INTO reach
+      FROM opengeni_private.subscription_core_auto_assignments auto
+      WHERE auto.account_id = p_account_id AND auto.provider = p_provider
+        AND auto.connection_id = p_connection_id;
+      RETURN reach;
+    END
+    $body$
+  $ddl$, data_schema);
+END
+$install_reach_reader$;
+
 DO $install_reach_allocator$
 DECLARE data_schema text := current_schema();
 BEGIN
@@ -149,6 +191,11 @@ BEGIN
       IF NOT opengeni_private.subscription_organization_admin(p_account_id) THEN
         RAISE EXCEPTION 'only organization administrators may change subscription connection reach'
           USING ERRCODE = '42501';
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM opengeni_private.subscription_core_providers registry
+          WHERE registry.provider = p_provider) THEN
+        RAISE EXCEPTION 'subscription provider is not registered on the shared core'
+          USING ERRCODE = '22023';
       END IF;
       IF p_enabled IS NULL THEN
         RAISE EXCEPTION 'subscription connection reach allocator is required' USING ERRCODE = '22023';

@@ -299,6 +299,29 @@ export async function getSubscriptionCoreOrganizationCodexProjection(
   };
 }
 
+/**
+ * One organization Codex account as the organization route shows it, any
+ * organization account (also one a shared workspace manages), for a route
+ * that just changed it. Null when it is not one or the subject is not an
+ * organization administrator.
+ */
+export async function getSubscriptionCoreOrganizationCodexAccount(
+  db: Database,
+  input: { organizationId: string; subjectId: string; connectionId: string },
+): Promise<CodexAccountStatus | null> {
+  const pool = await readSubscriptionCoreOrganizationPool(db, SUBSCRIPTION_CORE_CODEX, input);
+  const row = pool?.rows[0];
+  if (!pool || !row) return null;
+  return {
+    ...projectAccount(row, {
+      source: "organization",
+      primaryConnectionId: pool.primaryConnectionId,
+      poolAllocatorEnabled: true,
+    }),
+    ownInWorkspaceIds: pool.ownInWorkspaceIds.get(row.id) ?? [],
+  };
+}
+
 type Administration = SubscriptionCoreAdministration;
 
 export type SubscriptionCoreCodexAllocatorResult = SubscriptionCoreAllocatorResult;
