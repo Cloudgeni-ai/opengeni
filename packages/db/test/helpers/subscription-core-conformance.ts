@@ -2362,12 +2362,13 @@ export function describeSubscriptionCoreConformance<Credential>(
           where workspace_id = ${org.sharedWorkspaceId}::uuid and session_id = ${sessionId}::uuid
           for update nowait`;
         expect(locked.map((row) => row.waiter_id)).toEqual([waiterId]);
-        // The wake holds the workspace only as a key share: a session-first
-        // writer key-shares it through a foreign key (an outbox insert), so
-        // a stronger workspace lock would deadlock with it.
+        // The wake holds the workspace only as a key share, the weakest lock
+        // that excludes its FOR UPDATE lockers: anything stronger (FOR SHARE,
+        // FOR NO KEY UPDATE, FOR UPDATE) conflicts with this probe and would
+        // hold off workspace updates, authority checks and other wakes.
         const workspace = await holder<{ id: string }[]>`
           select id::text as id from workspaces where id = ${org.sharedWorkspaceId}::uuid
-          for key share nowait`;
+          for no key update nowait`;
         expect(workspace.map((row) => row.id)).toEqual([org.sharedWorkspaceId]);
         await holder`commit`;
       } catch (error) {
@@ -2667,6 +2668,149 @@ export function describeSubscriptionCoreConformance<Credential>(
           where waiter_id = ${waiterId}::uuid`;
         expect(typed!.count).toBe(rounds * perRound);
       }
+      await expectForeignUntouched(org);
+    });
+
+    test("a session deleted while a capacity wake waits drops out; the wake still wakes the rest", async () => {
+      const org = await organization();
+      const turns = [await runningTurn(org), await runningTurn(org)];
+      const waiterBySession = new Map<string, string>();
+      for (const turn of turns)
+        waiterBySession.set(turn.identity.sessionId, await armedWaiter(org, turn));
+      const [lower, higher] = turns.map((turn) => turn.identity.sessionId).sort() as [
+        string,
+        string,
+      ];
+      // The wake reads both waiters, then waits on the lower session. Cancel
+      // then a quiescent delete removes the higher session meanwhile; the wake
+      // must skip it rather than fail (and roll back) the whole wake.
+      const holder = await admin().reserve();
+      let wake: ReturnType<typeof wakePool> | null = null;
+      let failed = false;
+      try {
+        await holder`begin`;
+        await holder`select id from sessions where id = ${lower}::uuid for update`;
+        wake = wakePool(org, "fixture_deleted_session");
+        await waitUntilBlockedBy(holder, wake);
+        await admin()`delete from sessions where id = ${higher}::uuid`;
+        await holder`commit`;
+      } catch (error) {
+        failed = true;
+        await holder`rollback`.catch(() => undefined);
+        throw error;
+      } finally {
+        holder.release();
+        if (failed) await wake?.catch(() => undefined);
+      }
+      expect(await wake).toEqual([
+        { accountId: org.accountId, workspaceId: org.sharedWorkspaceId },
+      ]);
+      expect(await waiterRevision(waiterBySession.get(lower)!)).toBe(2);
+      const [generic] = await admin()<{ count: number }[]>`
+        select count(*)::int as count from session_workflow_wake_outbox
+        where session_id = ${higher}::uuid`;
+      expect(generic!.count).toBe(0);
+      await expectForeignUntouched(org);
+    });
+
+    test("a capacity wake skips an archived session and still wakes the rest", async () => {
+      const org = await organization();
+      const archivedTurn = await runningTurn(org);
+      const liveTurn = await runningTurn(org);
+      const archivedWaiter = await armedWaiter(org, archivedTurn);
+      const liveWaiter = await armedWaiter(org, liveTurn);
+      // The generic wake's archive guard refuses an archiving session's wake;
+      // the capacity wake must leave it out instead of failing for everyone.
+      await admin()`update sessions
+        set content_archive_state = 'archiving', content_archive_started_at = now()
+        where id = ${archivedTurn.identity.sessionId}::uuid`;
+      expect(await wakePool(org, "fixture_archived_session")).toEqual([
+        { accountId: org.accountId, workspaceId: org.sharedWorkspaceId },
+      ]);
+      expect(await waiterRevision(liveWaiter)).toBe(2);
+      expect(await waiterRevision(archivedWaiter)).toBe(1);
+      const [generic] = await admin()<{ count: number }[]>`
+        select count(*)::int as count from session_workflow_wake_outbox
+        where session_id = ${archivedTurn.identity.sessionId}::uuid`;
+      expect(generic!.count).toBe(0);
+      await expectForeignUntouched(org);
+    });
+
+    test("a workspace deleted while a capacity wake waits on it is skipped", async () => {
+      const org = await organization();
+      const doomed = await sharedWorkspace(
+        org.accountId,
+        org.ownerSubjectId,
+        "Doomed",
+        crypto.randomUUID(),
+      );
+      const turn = await runningTurn(org, { workspaceId: doomed });
+      await armedWaiter(org, turn, { workspaceId: doomed });
+      // The wake reads the waiter, then waits on the workspace row that an
+      // uncommitted delete holds; once the delete commits it has nothing to
+      // wake there.
+      const holder = await admin().reserve();
+      let wake: Promise<unknown> | null = null;
+      let failed = false;
+      try {
+        await holder`begin`;
+        await holder`delete from workspaces where id = ${doomed}::uuid`;
+        wake = wakeSubscriptionCoreCapacityWaiters(
+          db(),
+          providerId,
+          { accountId: org.accountId, reason: "fixture_deleted_workspace", workspaceIds: [doomed] },
+          enqueueSessionWorkflowWakeInTransaction,
+        );
+        await waitUntilBlockedBy(holder, wake);
+        await holder`commit`;
+      } catch (error) {
+        failed = true;
+        await holder`rollback`.catch(() => undefined);
+        throw error;
+      } finally {
+        holder.release();
+        if (failed) await wake?.catch(() => undefined);
+      }
+      expect(await wake).toEqual([]);
+      await expectForeignUntouched(org);
+    });
+
+    test("a capacity wake given an uppercase workspace id uses its canonical form", async () => {
+      const org = await organization();
+      const turn = await runningTurn(org);
+      const waiterId = await armedWaiter(org, turn);
+      // Workspace scope and the tenancy fence key are the lowercase uuid text.
+      // An uppercase id alone must still take the canonical fence and wake.
+      const holder = await admin().reserve();
+      let wake: Promise<unknown> | null = null;
+      let failed = false;
+      try {
+        await holder`begin`;
+        await holder`select pg_advisory_xact_lock(hashtextextended(${`session-tenancy:${org.sharedWorkspaceId}`}, 0))`;
+        wake = wakeSubscriptionCoreCapacityWaiters(
+          db(),
+          providerId,
+          {
+            accountId: org.accountId,
+            reason: "fixture_uppercase_workspace",
+            workspaceIds: [org.sharedWorkspaceId.toUpperCase()],
+          },
+          enqueueSessionWorkflowWakeInTransaction,
+        );
+        await waitUntilBlockedBy(holder, wake);
+        await holder`commit`;
+      } catch (error) {
+        failed = true;
+        await holder`rollback`.catch(() => undefined);
+        throw error;
+      } finally {
+        holder.release();
+        if (failed) await wake?.catch(() => undefined);
+      }
+      expect(await wake).toEqual([
+        { accountId: org.accountId, workspaceId: org.sharedWorkspaceId },
+      ]);
+      expect(await waiterRevision(waiterId)).toBe(2);
       await expectForeignUntouched(org);
     });
 

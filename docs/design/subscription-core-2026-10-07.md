@@ -1007,12 +1007,15 @@ always stays after them.
   reads the waiters' sessions without locking and, only if there are any,
   key-share-locks the workspace row (as `lockSessionEventWriteRows` does, and
   before a runnable wake or a context clear's `FOR UPDATE` could interleave;
-  only a key share, because session-first writers key-share it through
-  foreign keys). It then records each session's generic wake in ascending
-  session order (whose archive guard locks the session, so Steer, Cancel and
-  a resume, which lock the session before its waiter, cannot interleave), and
-  only then bumps
-  those sessions' waiters and records their typed wakes. Typed delivery
+  only a key share, the weakest lock that excludes those `FOR UPDATE`
+  lockers: a stronger one would also hold off workspace updates, `FOR SHARE`
+  authority checks and concurrent wakes). It then locks those sessions
+  `FOR NO KEY UPDATE` in ascending session order (the generic wake's archive
+  guard's own mode, so Steer, Cancel and a resume, which lock the session
+  before its waiter, cannot interleave), skipping any deleted, archived or
+  imported since the read, so one such session no longer fails the whole
+  wake. Only for the sessions it locked does it record the generic wake, bump
+  the waiters and record their typed wakes. Typed delivery
   claims due rows (claim-generation fenced), signals `codexCapacityChanged`
   with the waiter's wake revision through `signalWithStart`, then marks the
   row delivered; a failed signal retries after 1 second doubling to 5
