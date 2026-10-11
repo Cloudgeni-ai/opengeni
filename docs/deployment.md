@@ -4496,15 +4496,17 @@ be narrowed after the rollback. Before rolling back, run this read-only check
 as a superuser or `BYPASSRLS` role (like the parity check). Row security hides
 these tables from any other role, including the migration owner, where an
 empty result proves nothing, so under one the block stops with an error; run
-it again as a superuser or `BYPASSRLS` role. Run it in `psql`: the two `\set`
-lines stop at the guard's error even when `~/.psqlrc` sets `ON_ERROR_ROLLBACK`
-(which would otherwise undo the error and print the passing empty results),
-and from a file (`psql -X -f`) the refusal exits non-zero. Both queries must
-return no rows:
+it again as a superuser or `BYPASSRLS` role. Run it in `psql`. The two `\set`
+lines make the guard's error abort the transaction, so both queries fail even
+when `~/.psqlrc` sets `ON_ERROR_ROLLBACK`, which would otherwise undo the error
+and print the passing empty results. Keep the `\\` that ends the second line:
+it ends the `\set` when a terminal pastes the block as one line. From a file
+or standard input (`psql -X -f`), psql stops at the guard and exits with
+status 3. Both queries must return no rows:
 
 ```sql
 \set ON_ERROR_ROLLBACK off
-\set ON_ERROR_STOP on
+\set ON_ERROR_STOP on \\
 BEGIN TRANSACTION READ ONLY;
 DO $$ BEGIN
   IF NOT (SELECT rolsuper OR rolbypassrls FROM pg_roles
@@ -4552,13 +4554,16 @@ Clear the rows in this order:
    current list; the editor shows the organization's list, and saving it would
    widen a list the workspace narrowed.
 2. Run the check again. The second query lists workspace-managed accounts the
-   organization switched on after their workspace switched them off (narrowing
-   can add one: before it, a shared account's page reads the organization's
-   "on"): an older image's workspace route reads only the connection's switch,
+   organization switched on after their workspace switched them off (for a
+   shared account, do this after narrowing: before it, the managing workspace
+   is served through the organization's copy and its page reads the
+   organization's "on"): an older image's workspace route reads only the connection's switch,
    so its "on" there answers "unchanged" and the workspace stays off. For each
    such row, either that workspace switches the account on on its page, or the
    organization's administrator switches it off on the organization route;
-   either way the older image can switch it again.
+   either way the older image can switch it again. A workspace set to use only
+   the organization's accounts doesn't list the account after narrowing, and
+   its "on" answers `not_found`: use the organization's "off" for it.
 3. Run the check again until both queries return no rows; otherwise fix
    forward instead of rolling back.
 4. Run it once more when every pod runs the older image: an account shared

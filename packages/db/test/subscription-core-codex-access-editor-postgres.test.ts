@@ -954,6 +954,11 @@ describe.skipIf(!realDb)("Codex access editor on the shared core", () => {
     // Shared B, which had a copy before the save, keeps it paused: unserved.
     await source(org, org.otherWorkspaceId, "organization");
     expect(await servedIn(org, org.otherWorkspaceId)).toEqual([]);
+    const [kept] = await shared!.admin<{ allocator_enabled: boolean }[]>`
+      select allocator_enabled from subscription_connection_assignment_policies
+      where connection_id = ${id}::uuid and workspace_id = ${org.otherWorkspaceId}::uuid
+        and inference_pool = 'organization'`;
+    expect(kept?.allocator_enabled).toBe(false);
     const later = await workspace(org.accountId, org.ownerSubjectId, "Added later");
     expect(await servedIn(org, later)).toEqual([id]);
   });
