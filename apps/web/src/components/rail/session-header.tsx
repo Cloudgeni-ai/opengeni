@@ -252,7 +252,12 @@ export function SessionHeader({
             label={startupLabel}
           />
           {accessSlot}
-          {adminAccess ? <SessionAdminAccessIndicator control={adminAccess} /> : null}
+          {adminAccess ? (
+            <SessionAdminAccessIndicator
+              control={adminAccess}
+              onChangeTimeLimit={() => setGrantAdminOpen(true)}
+            />
+          ) : null}
         </div>
       </div>
       <div className="ml-auto flex shrink-0 items-center justify-end gap-0.5 lg:min-w-0 lg:max-w-full lg:shrink lg:flex-wrap lg:gap-2">

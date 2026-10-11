@@ -275,6 +275,7 @@ import type {
   OrganizationAgentAdminAccess,
   UpdateOrganizationAgentAdminAccessRequest,
   SessionAdminAccess,
+  GrantSessionAdminAccessRequest,
   WorkspaceModelCatalogResponse,
   WorkspaceGatewayCustomModel,
   WorkspaceGatewayCustomModelsResponse,
@@ -9188,16 +9189,19 @@ export class OpenGeniClient {
   /**
    * Give your own session admin access: its agent can then do what you can
    * manage across the organization. An owner or admin, in the app, when the
-   * organization allows it.
+   * organization allows it. It lasts one hour unless `durationHours` says
+   * otherwise (1 to 720), or null for no time limit; giving it again while it
+   * is on sets a new time limit from now.
    */
   async grantSessionAdminAccess(
     workspaceId: string,
     sessionId: string,
+    input: GrantSessionAdminAccessRequest = {},
   ): Promise<SessionAdminAccess> {
     return await this.requestJson<SessionAdminAccess>(
       "PUT",
       `${sessionPath(workspaceId, sessionId)}/admin-access`,
-      {},
+      input,
     );
   }
 

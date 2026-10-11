@@ -4545,6 +4545,8 @@ export const sessionAdminAccess = pgTable(
       .references(() => workspaces.id, { onDelete: "cascade" }),
     grantedBySubjectId: text("granted_by_subject_id").notNull(),
     grantedAt: timestamp("granted_at", { withTimezone: true }).notNull().defaultNow(),
+    // When admin access ends by itself (0719); null means no time limit.
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
   },
   (table) => [index("session_admin_access_account_idx").on(table.accountId)],
 );

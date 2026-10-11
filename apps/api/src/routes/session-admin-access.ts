@@ -1,4 +1,5 @@
 import {
+  GrantSessionAdminAccessRequest,
   OrganizationAgentAdminAccess,
   SessionAdminAccess,
   UpdateOrganizationAgentAdminAccessRequest,
@@ -34,11 +35,13 @@ import { requireOrganizationCodexHuman, requireSameOriginBrowserMutation } from 
    Admin access for agent sessions.
 
    An organization allows it (off by default). An owner or admin then gives
-   one of their own sessions admin access, in person in the app: the agent
-   there gets the organization's actions and runs them as that person, with
-   what they can manage right now. Turning the organization setting off ends
-   every session's admin access. Giving access and allowing it are browser
-   steps; an agent can read the state and can end access, never start it.
+   one of their own sessions admin access, in person in the app, for an hour
+   by default, a number of hours they choose, or with no time limit: the
+   agent there gets the organization's actions and runs them as that person,
+   with what they can manage right now. It ends by itself when the time is up.
+   Turning the organization setting off ends every session's admin access.
+   Giving access and allowing it are browser steps; an agent can read the
+   state and can end access, never start it.
    -------------------------------------------------------------------------- */
 
 const OrganizationId = z.string().uuid();
@@ -165,13 +168,10 @@ export function registerSessionAdminAccessRoutes(app: Hono, deps: ApiRouteDeps):
       active: state.active,
       grantedBy: state.active ? grantedBy : null,
       grantedAt: state.active ? (state.grant?.grantedAt ?? null) : null,
+      expiresAt: state.active ? (state.grant?.expiresAt ?? null) : null,
       allowed: state.allowed,
       canGrant:
-        state.allowed &&
-        !state.active &&
-        inPerson &&
-        state.viewerIsAdministrator &&
-        state.viewerStartedSession,
+        state.allowed && inPerson && state.viewerIsAdministrator && state.viewerStartedSession,
       canRevoke:
         state.grant !== null &&
         (state.grant.grantedBySubjectId === target.grant.subjectId || state.viewerIsAdministrator),
@@ -192,12 +192,28 @@ export function registerSessionAdminAccessRoutes(app: Hono, deps: ApiRouteDeps):
     if (human.subjectId !== target.grant.subjectId) {
       throw new HTTPException(403, { message: "Give admin access as yourself, in the app" });
     }
+    // No body (older clients) means the default: one hour.
+    const raw = (await c.req.text().catch(() => "")).trim();
+    let input: unknown = null;
+    try {
+      input = raw ? JSON.parse(raw) : {};
+    } catch {
+      input = null;
+    }
+    const body = GrantSessionAdminAccessRequest.safeParse(input);
+    if (!body.success) {
+      throw new HTTPException(422, {
+        message:
+          "durationHours must be a whole number of hours from 1 to 720, or null for no time limit",
+      });
+    }
     const grant = () =>
       grantSessionAdminAccess(deps.db, {
         organizationId: target.grant.accountId,
         workspaceId: target.workspaceId,
         sessionId: target.sessionId,
         actorSubjectId: human.subjectId,
+        durationHours: body.data.durationHours,
       });
     try {
       if (target.authorization) await withResolvedSessionAuthorization(target.authorization, grant);

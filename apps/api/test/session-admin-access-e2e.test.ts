@@ -185,11 +185,32 @@ describe("session admin access end to end", () => {
       body: "{}",
     });
     expect(granted.status).toBe(200);
-    expect(await granted.json()).toMatchObject({
+    const grantedBody = (await granted.json()) as { grantedAt: string; expiresAt: string };
+    expect(grantedBody).toMatchObject({
       active: true,
       grantedBy: { subjectId, name: "Maja Berg" },
       canRevoke: true,
+      // The person can choose a new time limit while it is on.
+      canGrant: true,
     });
+    // No length given: one hour.
+    expect(
+      Math.abs(Date.parse(grantedBody.expiresAt) - Date.parse(grantedBody.grantedAt) - 3_600_000),
+    ).toBeLessThan(5_000);
+
+    // A chosen number of hours, or no time limit; anything else is refused.
+    const choose = async (body: string) =>
+      await app.request(sessionAccess(own), { method: "PUT", headers: browser(cookie), body });
+    const day = await choose(JSON.stringify({ durationHours: 24 }));
+    expect(day.status).toBe(200);
+    const dayBody = (await day.json()) as { expiresAt: string };
+    expect(Date.parse(dayBody.expiresAt) - Date.now()).toBeGreaterThan(23 * 3_600_000);
+    for (const bad of ['{"durationHours":0}', '{"durationHours":1.5}', '{"durationHours":"8"}']) {
+      expect((await choose(bad)).status).toBe(422);
+    }
+    expect((await choose("not json")).status).toBe(422);
+    const open = await choose(JSON.stringify({ durationHours: null }));
+    expect(await open.json()).toMatchObject({ active: true, expiresAt: null });
 
     // The admin actions run as the person who gave access.
     const listed = await callOrganizationAction(

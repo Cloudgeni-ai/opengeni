@@ -2560,14 +2560,42 @@ export const SessionAdminAccess = z.object({
   active: z.boolean(),
   grantedBy: z.object({ subjectId: z.string(), name: z.string().nullable() }).nullable(),
   grantedAt: z.string().nullable(),
+  /** While active: when it ends by itself, or null for no time limit. */
+  expiresAt: z.string().nullable().default(null),
   /** The organization allows admin access for sessions. */
   allowed: z.boolean(),
-  /** The viewer may turn it on: an owner or admin, in person, on their own session. */
+  /**
+   * The viewer may turn it on, or choose a new time limit while it is on: an
+   * owner or admin, in person, on their own session.
+   */
   canGrant: z.boolean(),
   /** The viewer may turn it off. */
   canRevoke: z.boolean(),
 });
 export type SessionAdminAccess = z.infer<typeof SessionAdminAccess>;
+
+/** The longest time limit for a session's admin access, in hours (30 days). */
+export const MAX_SESSION_ADMIN_ACCESS_HOURS = 720;
+
+/**
+ * How long a session's admin access lasts from now: whole hours, or null for
+ * no time limit. Omitted means one hour.
+ */
+export const GrantSessionAdminAccessRequest = z
+  .object({
+    durationHours: z
+      .number()
+      .int()
+      .min(1)
+      .max(MAX_SESSION_ADMIN_ACCESS_HOURS)
+      .nullable()
+      .default(1)
+      .describe(
+        "Hours until admin access ends by itself (1 to 720), or null for no time limit. Defaults to 1.",
+      ),
+  })
+  .strict();
+export type GrantSessionAdminAccessRequest = z.input<typeof GrantSessionAdminAccessRequest>;
 
 /** The organization's compaction preference for one exact model, or null. */
 export function organizationModelCompactionThreshold(

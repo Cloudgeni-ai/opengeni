@@ -3234,7 +3234,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "grantSessionAdminAccess",
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/admin-access",
-    "request": [],
+    "request": [
+      "GrantSessionAdminAccessRequest"
+    ],
     "response": [
       "SessionAdminAccess"
     ],
