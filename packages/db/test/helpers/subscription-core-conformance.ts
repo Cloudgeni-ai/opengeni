@@ -31,6 +31,7 @@ import {
   decidePlacement,
   type PlacementDecision,
   type PlacementInput,
+  subscriptionCoreCredentialRefresher,
   type ProviderErrorOutcome,
   type SubscriptionQuota,
 } from "@opengeni/subscriptions";
@@ -192,6 +193,11 @@ export type SubscriptionCoreConformanceSubject<Credential> = {
   foreignProvider: string;
   /** Expiry stored with a fresh credential (null for one that never expires). */
   expiresAt(): Date | null;
+  /**
+   * Whether this subject's credentials are expected to renew; the suite
+   * checks the adapter agrees (a subject without it takes the adapter's word).
+   */
+  renews?: boolean;
   /** Test-database setup run once as the owner (for example a test registration). */
   prepareDatabase?(shared: SharedTestDatabase): Promise<void>;
   /** The scripted upstream all traffic goes to (started by the suite). */
@@ -217,6 +223,17 @@ export function describeSubscriptionCoreConformance<Credential>(
   const TTL = 120_000;
   if (subject.models.length < 3)
     throw new Error("A conformance subject needs at least three models");
+  // Whether the subject's credentials renew: the adapter's refresher applies
+  // only to credential formats whose capabilities say so (a provider may
+  // offer renewable and non-renewable formats, such as OAuth and a setup
+  // token), so the format of the subject's credentials decides.
+  const renews =
+    subscriptionCoreCredentialRefresher(provider.adapter, subject.credential("renewal-probe")) !==
+    null;
+  if (subject.renews !== undefined && subject.renews !== renews)
+    throw new Error(
+      `The conformance subject expects credentials that ${subject.renews ? "renew" : "never renew"}`,
+    );
   const m0 = subject.models[0]!;
   const m1 = subject.models[1]!;
   const m2 = subject.models[2]!;
@@ -2291,7 +2308,7 @@ export function describeSubscriptionCoreConformance<Credential>(
       await expectForeignUntouched(org);
     });
 
-    test.skipIf(provider.adapter.refresh !== null)(
+    test.skipIf(renews)(
       "a refused static credential becomes needs-relogin instead of being refreshed",
       async () => {
         const org = await organization();
@@ -2314,7 +2331,7 @@ export function describeSubscriptionCoreConformance<Credential>(
       },
     );
 
-    test.skipIf(provider.adapter.refresh === null)(
+    test.skipIf(!renews)(
       "a refused renewable credential is refreshed once and retried on the same connection",
       async () => {
         const org = await organization();
