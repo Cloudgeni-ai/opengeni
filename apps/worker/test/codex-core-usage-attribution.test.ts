@@ -182,7 +182,7 @@ test("the streamed, aggregate, compaction and title paths pass the core connecti
     "utf8",
   );
   const wiring =
-    "subscriptionConnectionId: providerTurn.codexSubscriptionCore?.connectionId ?? null";
+    "subscriptionConnectionId: subscriptionCoreTurnOf(providerTurn)?.connectionId ?? null";
   // Title usage, the streamed terminal response and the aggregate fallback.
   expect(stream.split(wiring).length - 1).toBe(3);
   expect(compaction.split(wiring).length - 1).toBe(1);

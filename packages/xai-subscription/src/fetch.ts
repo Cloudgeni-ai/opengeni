@@ -16,6 +16,7 @@ import { normalizeXaiResponseEventJson, normalizeXaiSubscriptionRequestBody } fr
 import {
   type XaiFinalContextUsage,
   type XaiModelRequestEvent,
+  type XaiProviderRequestSettlement,
   type XaiSubscriptionRequestContext,
   xaiSubscriptionRequestStorage,
 } from "./request-context";
@@ -59,7 +60,24 @@ type RequestAudit = {
   lastProgressAt: number | null;
   terminal: boolean;
   terminalEventEmitted: boolean;
+  /** The custody fence admitted this physical request (it may be on the wire). */
+  admitted: boolean;
+  /** The one custody settlement of an admitted request. */
+  settlement: Promise<void> | null;
+  /** A definite refusal observed in the stream (a capacity terminal before output). */
+  refused: boolean;
+  /** The stream carried an event beyond the response lifecycle preamble. */
+  outputObserved: boolean;
 };
+
+/** SSE terminal codes that are a capacity refusal: the provider did no model work. */
+const CAPACITY_SSE_ERROR_CODES = new Set(["insufficient_quota", "usage_limit_reached"]);
+/** Lifecycle events that precede any model output. */
+const PREAMBLE_SSE_EVENT_TYPES = new Set([
+  "response.created",
+  "response.in_progress",
+  "response.queued",
+]);
 
 type SseProgress = {
   valid: boolean;
@@ -143,6 +161,10 @@ export function xaiSubscriptionFetch(base: XaiFetchLike): XaiFetchLike {
         lastProgressAt: null,
         terminal: false,
         terminalEventEmitted: false,
+        admitted: false,
+        settlement: null,
+        refused: false,
+        outputObserved: false,
       };
       let response: Response | undefined;
       try {
@@ -150,6 +172,10 @@ export function xaiSubscriptionFetch(base: XaiFetchLike): XaiFetchLike {
           phase: "started",
           responseObserved: false,
         });
+        // The one-shot custody admission is the last awaited step before the
+        // physical fetch; a refusal here sends nothing.
+        await context.beforeProviderDispatch?.({ requestId, transportAttempt });
+        audit.admitted = true;
         response = await base(url, {
           ...init,
           method: init?.method ?? (input instanceof Request ? input.method : "POST"),
@@ -353,6 +379,9 @@ async function normalizeResponse(
             audit.eventCount = Math.min(Number.MAX_SAFE_INTEGER, audit.eventCount + 1);
             audit.lastEventType = progress.eventType;
             audit.lastProgressAt = now;
+            if (!progress.eventType || !PREAMBLE_SSE_EVENT_TYPES.has(progress.eventType)) {
+              if (progress.terminal !== "failed") audit.outputObserved = true;
+            }
             silenceStartedAt = now;
             if (audit.eventCount === 1) {
               await emitRequestEvent(audit, {
@@ -374,13 +403,17 @@ async function normalizeResponse(
               audit.terminal = true;
               clearIdleTimer();
               await reader.cancel().catch(() => undefined);
+              const terminalError = xaiSseTerminalError(response, audit, progress);
+              audit.refused =
+                !audit.outputObserved &&
+                (terminalError.status === 429 || CAPACITY_SSE_ERROR_CODES.has(terminalError.code));
               await emitRequestEvent(audit, {
                 phase: "failed",
                 responseObserved: true,
                 status: response.status,
                 ...providerRequestIdFields(response.headers),
               });
-              errorStream(xaiSseTerminalError(response, audit, progress));
+              errorStream(terminalError);
               return;
             }
             controller.enqueue(
@@ -593,6 +626,38 @@ function xaiSseTerminalError(
   });
 }
 
+function settleProviderRequest(
+  audit: RequestAudit,
+  outcome: XaiProviderRequestSettlement["outcome"],
+): Promise<void> {
+  if (!audit.admitted) return Promise.resolve();
+  audit.settlement ??= (async () => {
+    await audit.ctx.onProviderRequestSettled?.({
+      requestId: audit.requestId,
+      transportAttempt: audit.transportAttempt,
+      outcome,
+    });
+  })();
+  return audit.settlement;
+}
+
+/**
+ * An HTTP error status the provider returned is a definite answer: no model
+ * response was produced. Timeouts (408, 504) and conflicts (409) stay
+ * ambiguous because the provider may still be processing the request; an
+ * absent response is ambiguous too. The same rule as the Codex transport.
+ */
+function definiteErrorStatus(status: number | undefined): boolean {
+  return (
+    status !== undefined &&
+    status >= 400 &&
+    status < 600 &&
+    status !== 408 &&
+    status !== 409 &&
+    status !== 504
+  );
+}
+
 function boundedStreamIdleTimeout(value: number | undefined): number {
   const resolved = value ?? XAI_RESPONSE_STREAM_IDLE_TIMEOUT_MS;
   if (!Number.isSafeInteger(resolved) || resolved < 1 || resolved > MAX_STREAM_IDLE_TIMEOUT_MS) {
@@ -662,6 +727,15 @@ async function emitRequestEvent(
   if (event.phase === "completed" || event.phase === "failed" || event.phase === "timed_out") {
     if (audit.terminalEventEmitted) return;
     audit.terminalEventEmitted = true;
+    // Custody settles before the audit sink, independently of its delivery.
+    await settleProviderRequest(
+      audit,
+      audit.refused || definiteErrorStatus(event.status)
+        ? "refused"
+        : event.phase === "completed"
+          ? "response_received"
+          : "unknown",
+    );
   }
   const observed = emitDiagnosticEvent(audit, event);
   await audit.ctx.onModelRequestEvent?.(observed);

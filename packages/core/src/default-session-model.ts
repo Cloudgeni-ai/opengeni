@@ -26,6 +26,7 @@ import {
   getOrganizationModelProviderCatalogForWorkspace,
   listConnectionsMetadata,
   listWorkspaceProviderCustomModelsByKind,
+  readSubscriptionCoreRouteReadiness,
   workspaceProviderApiKeyConnectionMetadataFromConnections,
   getBillingBalance,
   getOrganizationModelDefaults,
@@ -335,6 +336,33 @@ export type WorkspaceModelSelectionContext = {
 };
 
 /**
+ * SuperGrok readiness and its `supergrok/` model restriction on the shared
+ * core once its provider route is `core` (design 5.3, SuperGrok track X1a,
+ * EP-T18/EP-S25/EP-N26): the core eligibility projection for the subject
+ * (shared pools; their own personal connection only in their own Personal
+ * workspace), not ready under maintenance. Null on the legacy route (one
+ * receipt read) and when the deployment disables SuperGrok (no read), so
+ * the caller keeps its legacy answer.
+ */
+export async function loadCoreRoutedXaiCatalogReadiness(
+  db: Database,
+  settings: Pick<Settings, "supergrokSubscriptionEnabled">,
+  context: { accountId: string; workspaceId: string; subjectId: string | null },
+): Promise<{ ready: boolean; allowedModelIds: string[] | null } | null> {
+  if (!settings.supergrokSubscriptionEnabled) return null;
+  const answer = await readSubscriptionCoreRouteReadiness(db, { provider: "xai", ...context });
+  return answer.route === "core" ? answer.value : null;
+}
+
+/** The connection restrictions with SuperGrok's replaced by the core's answer. */
+export function withCoreRoutedXaiRestriction(
+  restrictions: ConnectionModelRestrictions,
+  core: { allowedModelIds: string[] | null },
+): ConnectionModelRestrictions {
+  return { ...restrictions, "supergrok/": core.allowedModelIds };
+}
+
+/**
  * Connection restrictions and SuperGrok readiness for the subject. With a
  * frozen authority (a scheduled task's snapshot), a user pool that no longer
  * resolves (disconnected, reconnected under a new authority generation, or its
@@ -350,6 +378,23 @@ async function connectionRestrictionsAndXaiReadiness(
   context: WorkspaceModelSelectionContext,
 ): Promise<{ restrictions: ConnectionModelRestrictions; xaiSubscriptionActive: boolean }> {
   const { workspaceId, subjectId, xaiAuthoritySnapshot } = context;
+  // On the core route a frozen legacy authority snapshot no longer selects
+  // the pool: the core projection (and, at execution, the accepted turn's
+  // core authority) does.
+  const core = await loadCoreRoutedXaiCatalogReadiness(db, settings, context);
+  if (core) {
+    const restrictions = await getWorkspaceConnectionModelRestrictions(
+      db,
+      workspaceId,
+      subjectId,
+      undefined,
+      context.claudeAuthoritySnapshot,
+    );
+    return {
+      restrictions: withCoreRoutedXaiRestriction(restrictions, core),
+      xaiSubscriptionActive: core.ready,
+    };
+  }
   if (!xaiAuthoritySnapshot) {
     const [restrictions, xaiSubscriptionActive] = await Promise.all([
       getWorkspaceConnectionModelRestrictions(
