@@ -1096,9 +1096,10 @@ export function WorkspaceModelsPageBody({
                 codex={codex}
                 places={codexPlaces}
                 organizationAccountCount={
-                  organizationAdmin
+                  codex.source?.organizationCount ??
+                  (organizationAdmin
                     ? organizationNoticeCodexCount(orgCodex.accounts, codex, here.id)
-                    : undefined
+                    : undefined)
                 }
               />
             }

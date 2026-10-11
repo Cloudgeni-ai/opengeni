@@ -208,6 +208,13 @@ export type SubscriptionCoreWorkspaceSource = {
    * organization also gives this workspace stays in the pool, so it is not.
    */
   workspaceSetAside: boolean;
+  /**
+   * How many shared connections other than the workspace's own the
+   * organization gives this workspace (in use under the organization's
+   * source, set aside under the workspace's own). Connections limited to
+   * chosen people are not counted: they reach people, not workspaces.
+   */
+  organizationCount: number;
 };
 
 /** One shared connection of a workspace's effective pool. */
@@ -368,6 +375,12 @@ export async function readSubscriptionCoreWorkspacePool(
       workspaceAvailable,
       organizationAvailable,
       workspaceSetAside: pools.some((entry) => entry.local && !inEffectiveSource(entry)),
+      organizationCount: pools.filter(
+        (entry) =>
+          !entry.local &&
+          (entry.entries.length === 0 ||
+            entry.entries.some((policy) => policy.pool === "organization")),
+      ).length,
     },
   };
 }

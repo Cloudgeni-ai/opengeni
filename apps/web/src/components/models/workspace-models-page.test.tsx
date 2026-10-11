@@ -1249,7 +1249,11 @@ describe("One Models page for the organization and the workspace", () => {
       const text = view.container.textContent ?? "";
       // This workspace's account is in use; the organization's is named and set aside.
       expect(text).toContain("Company plan");
-      expect(text).toContain("Set aside while this workspace has its own");
+      expect(
+        [...view.container.querySelectorAll<HTMLElement>("[data-slot=list-row]")].find((row) =>
+          row.textContent?.includes("Company plan"),
+        )?.textContent,
+      ).toContain("Set aside");
       expect(text).not.toContain("Shared Codex accounts");
       const orgRow = [...view.container.querySelectorAll<HTMLElement>("[data-slot=list-row]")]
         .find((row) => row.textContent?.includes("Company plan"))!
@@ -2053,7 +2057,7 @@ describe("One Models page for the organization and the workspace", () => {
       try {
         await flush();
         const row = rowsNamed(workspaceOnly.container, "Team plan")[0]!;
-        expect(row.textContent).toContain("Set aside while this workspace has its own");
+        expect(row.textContent).toContain("Set aside");
         expect(row.textContent).toContain("Not in use");
         expect(row.querySelector('[aria-label^="More actions"]')).not.toBeNull();
       } finally {
@@ -2256,12 +2260,12 @@ describe("One Models page for the organization and the workspace", () => {
       try {
         await flush();
         const row = rowsNamed(view.container, "Research plan")[0]!;
-        expect(row.textContent).toContain("Not available in Design preview");
+        expect(row.textContent).toContain("Not available here");
         expect(row.textContent).not.toContain("Set aside");
         expect(row.querySelector('[aria-label^="More actions"]')).toBeNull();
         // The organization's account that does reach here is still set aside, with its way back.
         const company = rowsNamed(view.container, "Company plan")[0]!;
-        expect(company.textContent).toContain("Set aside while this workspace has its own");
+        expect(company.textContent).toContain("Set aside");
         expect(company.querySelector('[aria-label^="More actions"]')).not.toBeNull();
         // The notice counts only the organization's account known to reach here.
         expect(view.container.textContent).toContain(
@@ -2269,6 +2273,147 @@ describe("One Models page for the organization and the workspace", () => {
         );
       } finally {
         await cleanup(view);
+      }
+    });
+
+    test("an account limited to no one isn't available here and keeps its Not in use cell", async () => {
+      organizationAdmin = true;
+      client.requestJson.mockImplementation(async (method: string, path: string) => {
+        if (method === "GET" && path === "/v1/organizations/organization-a/codex/accounts") {
+          return {
+            ...orgAccounts,
+            accounts: [{ ...orgAccounts.accounts[0], ownInWorkspaceIds: [] }],
+          };
+        }
+        if (method === "GET") throw new Error(`unexpected read ${path}`);
+        return {};
+      });
+      client.getModelConnectionAccess.mockImplementation(async () => ({
+        ...managedAccess("org-1"),
+        policy: { ...openPolicy, allowedPeople: [] },
+      }));
+      const view = await render();
+      try {
+        await flush();
+        const row = rowsNamed(view.container, "Company plan")[0]!;
+        expect(row.textContent).toContain("No one");
+        expect(row.textContent).toContain("Not available here");
+        expect(row.textContent).toContain("Not in use");
+        expect(row.querySelector('[aria-label^="More actions"]')).toBeNull();
+      } finally {
+        await cleanup(view);
+      }
+    });
+
+    test("no set-aside reason while an organization account's reach loads", async () => {
+      organizationAdmin = true;
+      client.requestJson.mockImplementation(async (method: string, path: string) => {
+        if (method === "GET" && path === "/v1/organizations/organization-a/codex/accounts") {
+          return {
+            ...orgAccounts,
+            accounts: [{ ...orgAccounts.accounts[0], ownInWorkspaceIds: [] }],
+          };
+        }
+        if (method === "GET") throw new Error(`unexpected read ${path}`);
+        return {};
+      });
+      let resolveAccess: (value: unknown) => void = () => undefined;
+      client.getModelConnectionAccess.mockImplementation(
+        () => new Promise((resolve) => (resolveAccess = resolve)),
+      );
+      const view = await render();
+      try {
+        await flush();
+        expect(rowsNamed(view.container, "Company plan")[0]!.textContent).not.toContain(
+          "Set aside",
+        );
+        await act(async () => resolveAccess(managedAccess("org-1")));
+        await flush();
+        expect(rowsNamed(view.container, "Company plan")[0]!.textContent).toContain("Set aside");
+      } finally {
+        await cleanup(view);
+      }
+    });
+
+    test("set to its own accounts with none connected, the organization's are set aside without claiming it has its own", async () => {
+      organizationAdmin = true;
+      accounts = {
+        ...accounts,
+        accounts: [],
+        activeAccountId: null,
+        source: {
+          ...source,
+          mode: "workspace",
+          effectiveSource: "workspace",
+          workspaceAvailable: false,
+        },
+      };
+      client.requestJson.mockImplementation(async (method: string, path: string) => {
+        if (method === "GET" && path === "/v1/organizations/organization-a/codex/accounts") {
+          return {
+            ...orgAccounts,
+            accounts: [{ ...orgAccounts.accounts[0], ownInWorkspaceIds: [] }],
+          };
+        }
+        if (method === "GET") throw new Error(`unexpected read ${path}`);
+        return {};
+      });
+      client.getModelConnectionAccess.mockImplementation(async () => managedAccess("org-1"));
+      const view = await render();
+      try {
+        await flush();
+        expect(view.container.textContent).toContain("none are connected");
+        const row = rowsNamed(view.container, "Company plan")[0]!;
+        expect(row.textContent).toContain("Set aside");
+        expect(row.textContent).not.toContain("while this workspace has its own");
+      } finally {
+        await cleanup(view);
+      }
+    });
+
+    test("the pool notice counts what the server reports, and an older server's count includes another workspace's account this workspace lists", async () => {
+      organizationAdmin = true;
+      const research = {
+        ...codexAccount({ id: "acct-r", label: "Research plan", source: "organization" }),
+        ownInWorkspaceIds: ["workspace-b"],
+      };
+      client.requestJson.mockImplementation(async (method: string, path: string) => {
+        if (method === "GET" && path === "/v1/organizations/organization-a/codex/accounts") {
+          return {
+            ...orgAccounts,
+            accounts: [{ ...orgAccounts.accounts[0], ownInWorkspaceIds: [] }, research],
+          };
+        }
+        if (method === "GET") throw new Error(`unexpected read ${path}`);
+        return {};
+      });
+      client.getModelConnectionAccess.mockImplementation(async (...args: unknown[]) =>
+        managedAccess((args[0] as { connectionId: string }).connectionId),
+      );
+      // Older server, automatic source: Research's account is in this workspace's pool.
+      accounts = {
+        ...accounts,
+        accounts: [...accounts.accounts, { ...research, ownInWorkspaceIds: undefined }],
+      };
+      const older = await render();
+      try {
+        await flush();
+        expect(older.container.textContent).toContain(
+          "The organization's accounts are set aside while it's connected.",
+        );
+      } finally {
+        await cleanup(older);
+      }
+      // The server's count wins: here it says one.
+      accounts = { ...accounts, source: { ...source, organizationCount: 1 } };
+      const current = await render();
+      try {
+        await flush();
+        expect(current.container.textContent).toContain(
+          "The organization's account is set aside while it's connected.",
+        );
+      } finally {
+        await cleanup(current);
       }
     });
   });

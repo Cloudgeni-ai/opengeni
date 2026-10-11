@@ -139,9 +139,9 @@ try {
     assert((await page.getByText("Design team plan").count()) === 1, "listed twice on Design");
     // Research's own account doesn't reach Design: not available, nothing set aside, no menu.
     const research = page.locator("[data-slot=list-row]", { hasText: "Research team plan" });
-    await research.getByText("Not available in Design").waitFor();
+    await research.getByText("Not available here").waitFor();
     assert(
-      (await research.getByText("Set aside while this workspace has its own").count()) === 0,
+      (await research.getByText("Set aside", { exact: true }).count()) === 0,
       "another workspace's account shown as set aside",
     );
     assert(

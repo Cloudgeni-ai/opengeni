@@ -176,9 +176,9 @@ function SharedRow<T extends Account>({
         access.error
           ? "Couldn't check availability"
           : reaches === false
-            ? `Not available in ${places.scopeName}`
+            ? "Not available here"
             : ownInUse
-              ? "Set aside while this workspace has its own"
+              ? "Set aside"
               : null,
       ]}
       cells={{ usage: NOT_IN_USE }}

@@ -824,6 +824,11 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
       (await getSubscriptionCoreCodexWorkspaceProjection(client!.db, scope)).source
         .workspaceSetAside;
     expect(await setAside()).toBe(true);
+    // The organization gives this workspace one account besides its own.
+    const organizationCount = async () =>
+      (await getSubscriptionCoreCodexWorkspaceProjection(client!.db, scope)).source
+        .organizationCount;
+    expect(await organizationCount()).toBe(1);
     await shared!.admin`
       insert into subscription_connection_assignment_policies (
         account_id, connection_id, workspace_id, inference_pool
@@ -831,11 +836,15 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
         'organization')`;
     expect(await listed()).toEqual([first, second].sort());
     expect(await setAside()).toBe(false);
+    // Its own account given through the organization's pool too is still its own.
+    expect(await organizationCount()).toBe(1);
     await shared!.admin`delete from subscription_connection_assignment_policies
       where connection_id = ${second}::uuid and inference_pool = 'organization'`;
     await setSubscriptionCoreWorkspaceCodexSource(client!.db, { ...admin, mode: "workspace" });
     expect(await listed()).toEqual([second]);
     expect(await setAside()).toBe(false);
+    // Set aside, not listed, still counted.
+    expect(await organizationCount()).toBe(1);
     expect(
       (await setSubscriptionCoreWorkspaceCodexSource(client!.db, { ...admin, mode: "disabled" }))
         .source,

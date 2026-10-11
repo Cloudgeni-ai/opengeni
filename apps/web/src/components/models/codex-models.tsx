@@ -160,9 +160,10 @@ export function organizationOnlyCodexAccounts(
 }
 
 /**
- * The organization's accounts the pool notice counts here: those other than
- * this workspace's own, leaving out another workspace's own account unless
- * this workspace's pool lists it (only then is it known to reach here).
+ * For servers that don't report `source.organizationCount`: the
+ * organization's accounts the pool notice counts here, those other than this
+ * workspace's own, leaving out another workspace's own account unless this
+ * workspace's pool lists it (only then is it known to reach here).
  */
 export function organizationNoticeCodexCount(
   organizationAccounts: readonly CodexAccount[],
@@ -374,7 +375,7 @@ export function CodexAccountRows({
           disabled
           leading={<ProviderTile provider="codex" size="lg" />}
           title="Shared Codex accounts"
-          meta={[places.scope.organization, "Set aside while this workspace has its own"]}
+          meta={[places.scope.organization, "Set aside"]}
           cells={{ usage: NOT_IN_USE }}
           menu={alwaysOrganization}
           menuLabel="More actions for the organization's Codex accounts"
@@ -483,11 +484,11 @@ function SharedCodexSetAsideRow({
   const reason = forPeople
     ? null
     : chosenPeople
-      ? "Set aside while this workspace has its own"
+      ? "Set aside"
       : reaches === false
-        ? `Not available in ${places.workspaceName}`
+        ? "Not available here"
         : reaches && ownInUse
-          ? "Set aside while this workspace has its own"
+          ? "Set aside"
           : null;
   return (
     <ListRow

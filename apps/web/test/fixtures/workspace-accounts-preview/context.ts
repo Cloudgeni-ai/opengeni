@@ -219,6 +219,7 @@ const methods: Record<string, (...args: never[]) => Promise<unknown>> = {
         workspaceAvailable,
         organizationAvailable: rows.some((row) => row.organization),
         workspaceSetAside: rows.some((row) => row.local && !listed(row)),
+        organizationCount: rows.filter((row) => !row.local && row.organization).length,
       },
       settings: {
         rotationEnabled: true,

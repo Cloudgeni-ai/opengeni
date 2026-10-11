@@ -4124,6 +4124,11 @@ export type WorkspaceCodexSubscriptionSource = {
   organizationAvailable: boolean;
   /** Some of the workspace's own accounts are not in use here. Absent from older servers. */
   workspaceSetAside?: boolean;
+  /**
+   * How many organization accounts other than the workspace's own reach this
+   * workspace (accounts limited to chosen people aside). Absent from older servers.
+   */
+  organizationCount?: number;
 };
 
 /**
