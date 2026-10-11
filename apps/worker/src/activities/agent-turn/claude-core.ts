@@ -10,6 +10,7 @@ import {
   buildSubscriptionCoreClaudeTokenResolver,
   CLAUDE_CREDENTIAL_LEASE_TTL_MS,
   CodexCredentialLeaseAttemptFencedError,
+  decodeSubscriptionCoreClaudeQuota,
   readSubscriptionCoreProviderRoute,
   SUBSCRIPTION_CORE_CLAUDE,
   SUBSCRIPTION_CORE_CLAUDE_MODEL_PREFIXES,
@@ -21,18 +22,24 @@ import {
   type SubscriptionCoreClaudeTokenSnapshot,
   type SubscriptionCoreProvider,
 } from "@opengeni/db";
-import { parseModelProvidersJson, type Settings } from "@opengeni/config";
+import { parseClaudeUsageHeaders, parseModelProvidersJson, type Settings } from "@opengeni/config";
 import type { PreparedUsageRequest } from "@opengeni/runtime";
 import type { CapacityPhaseDeps, CapacityPhaseOutcome } from "./codex-capacity";
 import { subscriptionCoreCutoverDisabledFailure } from "./codex-core-errors";
 import type { ClaudeTurnLease } from "./credential-leases";
+import { classifyClaudeProviderError } from "./errors";
 import {
   assertCoreSourceConnected,
   coreLeaseRef,
   guardCoreTokenResolver,
+  parkCoreSubscriptionTurn,
   selectCoreSubscriptionTurnCapacity,
   type CoreTurnPlacementProvider,
 } from "./subscription-core-capacity";
+import {
+  SUBSCRIPTION_CORE_TURN_REFUSAL_LIMIT,
+  subscriptionCoreFailoverMetrics,
+} from "./subscription-core-failover";
 import {
   coreRequestOutcomeUnknownFailure,
   createCoreSubscriptionRequests,
@@ -40,9 +47,19 @@ import {
   type CoreResponseInspector,
   type CoreSubscriptionRequests,
 } from "./subscription-core-requests";
+import {
+  finalizeCoreSubscriptionTurn,
+  type CoreRefusalBinding,
+} from "./subscription-core-settlement";
 import type { SubscriptionCoreTurn } from "./turn-context";
 import { subscriptionTurnLeaseHolderId } from "./subscription-lease";
 import { selectClaudeTurnCapacity } from "./xai-capacity";
+import {
+  recoverCoreHealthAndWake,
+  wakeSubscriptionCoreWaitersAndDeliver,
+  type CoreCodexWakeServices,
+} from "../subscription-core-codex-waits";
+import { CLAUDE_CORE_WAIT_BINDING } from "../subscription-core-claude-waits";
 
 const CLAUDE = SUBSCRIPTION_CORE_CLAUDE as SubscriptionCoreProvider;
 const DISPLAY_NAME = "Claude";
@@ -58,13 +75,17 @@ export const CLAUDE_CORE_TURN_PROVIDER: CoreTurnPlacementProvider = {
   leaseTtlMs: CLAUDE_CREDENTIAL_LEASE_TTL_MS,
   lease: (deps) => deps.leases.claude,
   place: (db, request) => subscriptionCoreTurns(CLAUDE).placeSubscriptionCoreTurn(db, request),
-  // Waiter wakes after a recovery arrive with the Claude waits (C1b).
-  recoverHealth: async ({ db }, identity) => {
-    await subscriptionCoreTurns(CLAUDE)
-      .recoverSubscriptionCoreConnectionHealth(db, identity)
-      .catch(() => 0);
+  // A recovery wakes the account's other Claude waiters too.
+  recoverHealth: async ({ db, signalCodexCapacityWorkflow }, identity) => {
+    await recoverCoreHealthAndWake(
+      { db, signalCodexCapacityWorkflow },
+      CLAUDE_CORE_WAIT_BINDING,
+      identity,
+    );
   },
   adopt: ({ providerTurn, turnExecutionPolicy }, core, placement) => {
+    // A Claude rate limit cools the accepted model of the connection.
+    core.productModelId = turnExecutionPolicy.productModelId;
     providerTurn.claudeSubscriptionCore = core;
     providerTurn.effectiveClaudeCredentialId = placement.connectionId;
     providerTurn.claudeUpstreamModelId = turnExecutionPolicy.upstreamModelId;
@@ -74,7 +95,9 @@ export const CLAUDE_CORE_TURN_PROVIDER: CoreTurnPlacementProvider = {
     providerTurn.claudeAuthoritySnapshot = null;
     providerTurn.effectiveClaudeCredentialVersion = null;
   },
-  // No `park` until C1b: a core wait is a terminal capacity failure.
+  // A wait parks the same turn on the durable core waiter (EP-T09).
+  park: (deps, wait) =>
+    parkCoreSubscriptionTurn(deps, wait, CLAUDE_CORE_WAIT_BINDING, DISPLAY_NAME),
   isSourceDisconnected: (db, identity, connectionId) =>
     subscriptionCoreRequests(CLAUDE).isSubscriptionCoreSourceDisconnected(
       db,
@@ -159,13 +182,21 @@ export type ClaudeCoreRequestAuthorization = {
    * session-title requests (their own lane) never move it.
    */
   mainLaneAdmitted: (generation: number) => void;
+  /**
+   * A response's usage headers, made with a bearer of `generation`, as a
+   * quota observation of the leased connection (`decodeQuota`), recorded in
+   * order and best effort; `core.quota` joins them.
+   */
+  observeResponse: (response: Response, generation: number, upstreamModelId?: string) => void;
 };
 
 /**
  * Materialization and refresh for a core-placed Claude turn: the bearer comes
  * from the shared core resolver under the exact accepted turn and this
  * attempt's live core lease, and both request lanes (the agent's and the
- * session title's) are created on the turn.
+ * session title's) are created on the turn. `upstreamModelIds` lists the
+ * deployment's Claude models, so a family limit in a response's usage
+ * headers cools each of them.
  */
 export function buildClaudeCoreRequestAuthorization(input: {
   db: Database;
@@ -173,6 +204,7 @@ export function buildClaudeCoreRequestAuthorization(input: {
   core: SubscriptionCoreTurn;
   lease: ClaudeTurnLease;
   execution: { attemptId: string; executionGeneration: number };
+  upstreamModelIds: readonly string[];
 }): ClaudeCoreRequestAuthorization {
   const { db, core, lease } = input;
   const ref = coreLeaseRef(lease, core, DISPLAY_NAME);
@@ -187,6 +219,8 @@ export function buildClaudeCoreRequestAuthorization(input: {
     (error) => hasCoreCode(error, "subscription_core_lease_lost"),
   );
   let forced: Promise<SubscriptionCoreClaudeTokenSnapshot> | null = null;
+  let observed: Promise<boolean> = Promise.resolve(false);
+  core.quota = { settled: () => observed };
   return {
     getToken: () => resolver.getToken(),
     // One forced refresh per attempt, shared by both lanes: a refresh that
@@ -202,6 +236,34 @@ export function buildClaudeCoreRequestAuthorization(input: {
     },
     mainLaneAdmitted: (generation) => {
       core.credentialVersion = generation;
+    },
+    observeResponse: (response, generation, upstreamModelId) => {
+      // Every link is total: a failure records nothing and keeps what an
+      // earlier observation recovered, so the join never rejects.
+      const observedAt = new Date();
+      observed = observed.then(async (recovered) => {
+        try {
+          const observation = parseClaudeUsageHeaders(response.headers, observedAt, upstreamModelId);
+          if (!observation) return recovered;
+          const quota = {
+            ...decodeSubscriptionCoreClaudeQuota({
+              observation,
+              refreshGeneration: generation,
+              upstreamModelIds: input.upstreamModelIds,
+            }),
+            revision: 0,
+          };
+          const applied = await subscriptionCoreTurns(CLAUDE).applySubscriptionCoreQuotaObservation(
+            db,
+            core.identity,
+            ref,
+            quota,
+          );
+          return recovered || applied.recovered;
+        } catch {
+          return recovered;
+        }
+      });
     },
   };
 }
@@ -250,6 +312,23 @@ export function claudeCoreModelScope(productModelId: string): "organization" | "
   return productModelId.startsWith(`${SUBSCRIPTION_CORE_CLAUDE_MODEL_PREFIXES[1]}/`)
     ? "workspace"
     : "organization";
+}
+
+/** The upstream model ids of the deployment's Claude subscription catalog. */
+export function claudeSubscriptionUpstreamModelIds(
+  settings: Pick<Settings, "modelProvidersJson">,
+): string[] {
+  return [
+    ...new Set(
+      parseModelProvidersJson(settings.modelProvidersJson)
+        .filter(
+          (provider) =>
+            provider.kind === "claude-subscription-workspace" ||
+            provider.kind === "claude-subscription-organization",
+        )
+        .flatMap((provider) => provider.models.map((model) => model.upstreamModelId ?? model.id)),
+    ),
+  ];
 }
 
 /** The Claude subscription provider ids of the deployment's catalog. */
@@ -336,7 +415,7 @@ function claudeStreamErrorType(data: string): string | null {
  * turn's one forced refresh and retries the same request on the same
  * connection as a new reservation, only when the generation advanced.
  * `observe` receives every response with the generation of the bearer that
- * made it (usage headers become quota observations in C1b).
+ * made it (its usage headers become quota observations of the connection).
  */
 export function claudeCoreRequestPreparer(input: {
   authorization: ClaudeCoreRequestAuthorization;
@@ -398,4 +477,58 @@ export function claudeCoreRequestOutcomeUnknown(
   core: Pick<SubscriptionCoreTurn, "requests">,
 ): (Error & { code: string }) | null {
   return coreRequestOutcomeUnknownFailure(error, core, () => CLAUDE.errors.requestOutcomeUnknown());
+}
+
+/**
+ * Claude's in-turn failover and refusal settlement on the core (C1b) for a
+ * turn of `productModelId`: a 401 after the turn's one forced refresh is a
+ * sign-in quarantine, a 429 cools that model of the connection, and both
+ * re-place the same turn within the shared bound; 529 (overload) and 403
+ * (fatal) record nothing and never move the turn to another account.
+ */
+export function claudeCoreRefusal(productModelId: string | undefined): CoreRefusalBinding {
+  return {
+    provider: CLAUDE,
+    displayName: DISPLAY_NAME,
+    classify: (error) => classifyClaudeProviderError(error, productModelId),
+    lease: (deps) => deps.leases.claude,
+    isSourceDisconnected: CLAUDE_CORE_TURN_PROVIDER.isSourceDisconnected,
+    failover: {
+      displayName: DISPLAY_NAME,
+      lease: (deps) => deps.leases.claude,
+      countRefusals: (db, identity) =>
+        subscriptionCoreTurns(CLAUDE).countSubscriptionCoreTurnRefusals(db, identity),
+      refusalLimit: SUBSCRIPTION_CORE_TURN_REFUSAL_LIMIT,
+      recoveryReason: "claude_credential_failover",
+      recoveryProvider: "claude-subscription",
+      metrics: subscriptionCoreFailoverMetrics("claude"),
+    },
+  };
+}
+
+/**
+ * Finalization of a core Claude turn before its lease is released: the
+ * turn's usage-header observations are joined first (one that ended a stored
+ * exhaustion is a capacity change for the account's Claude waiters), then
+ * the shared step moves the binding's cache clock. Best effort.
+ */
+export async function finalizeCoreClaudeTurn(
+  input: CoreCodexWakeServices & {
+    core: SubscriptionCoreTurn;
+    lease: ClaudeTurnLease;
+  },
+): Promise<void> {
+  const recovered = await (input.core.quota?.settled() ?? false);
+  if (recovered) {
+    await wakeSubscriptionCoreWaitersAndDeliver(input, CLAUDE_CORE_WAIT_BINDING, {
+      accountId: input.core.identity.accountId,
+      reason: "quota_observed_available",
+    });
+  }
+  await finalizeCoreSubscriptionTurn({
+    db: input.db,
+    provider: CLAUDE,
+    core: input.core,
+    lease: input.lease,
+  });
 }
