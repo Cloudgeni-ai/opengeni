@@ -72,6 +72,8 @@ beforeAll(async () => {
     "0716_subscription_authority_compat.sql",
     "0717_subscription_authority_fences.sql",
     "0718_subscription_personal_acceptance_reads.sql",
+    // replaces 0707's personal connect writer with the format-aware one.
+    "0719_subscription_core_personal_connect_format.sql",
   ];
   // The drained SuperGrok cutover is maintenance-only: a rolling deployment
   // of 0707 never applies it, so it stays recorded and unapplied here.

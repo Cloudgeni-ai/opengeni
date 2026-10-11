@@ -1,7 +1,7 @@
 import { ClaudeProviderAccountAuthoritySnapshotV1 } from "@opengeni/contracts";
 import { resolveClaudeProviderAccountAuthoritySnapshotForAcceptanceInTransaction } from "./claude-subscription-accounts";
 import {
-  receiverCodexSubscriptionAuthorityV2InTransaction,
+  receiverSubscriptionAuthorityV2InTransaction,
   receiverSubscriptionAuthorityInTransaction,
   sharedPoolSubscriptionAuthoritySnapshotsInTransaction,
 } from "./accepted-subscription-authority";
@@ -94,7 +94,10 @@ import {
   type FrozenTurnInitiator,
 } from "./turn-initiator";
 import { resolveXaiProviderAccountAuthoritySnapshotForAcceptanceInTransaction } from "./xai-subscription";
-import { codexSubscriptionAuthorityV2ForAcceptanceInTransaction } from "./subscription-core-codex-bindings";
+import {
+  copySubscriptionAuthorityCompatInTransaction,
+  coreSubscriptionAuthorityV2ForAcceptanceInTransaction,
+} from "./subscription-core-acceptance-authority";
 import { assertActiveManagedHumanOrganizationMembership } from "./organization-membership-lifecycle";
 import { acceptTurnPersonalResourceAttachmentInTransaction } from "./user-resource-authority";
 
@@ -2200,23 +2203,24 @@ export async function submitHumanPromptInTransaction(
       (await resolveClaudeProviderAccountAuthoritySnapshotForAcceptanceInTransaction(db, {
         workspaceId: input.workspaceId,
       })));
-  // Codex v2 accepted authority (M3 PR 2a, 3b): an edit keeps its source
-  // turn's frozen value; a human prompt, whether sent or steered, resolves
-  // that human's own owner-caused authority; agent-submitted work copies the
-  // receiving session's value exactly as its v1 pools do (EP-T14); every
-  // other actor (service, operator, API key) freezes none. NULL until the
-  // account's Codex cutover is enabled. Reads the cutover row on every
-  // non-edit prompt (one indexed lookup).
+  // v2 accepted authority for every provider on the shared core (M3 PR 2a,
+  // 3b; M4 X2b): an edit keeps its source turn's frozen value; a human
+  // prompt, whether sent or steered, resolves that human's own owner-caused
+  // authority; agent-submitted work copies the receiving session's value
+  // exactly as its v1 pools do (EP-T14); every other actor (service,
+  // operator, API key) freezes none. NULL until some provider's cutover is
+  // enabled for the account. Reads each registered provider's cutover row on
+  // every non-edit prompt (one indexed lookup each).
   const subscriptionAuthority = editedSourceTurn
     ? (editedSourceTurn.subscriptionAuthority ?? null)
     : input.actor.type === "agent_attempt"
-      ? await receiverCodexSubscriptionAuthorityV2InTransaction(db, {
+      ? await receiverSubscriptionAuthorityV2InTransaction(db, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
           sessionId: input.sessionId,
           causalHumanSubjectId: acceptedInitiatingHumanSubjectId,
         })
-      : await codexSubscriptionAuthorityV2ForAcceptanceInTransaction(db, {
+      : await coreSubscriptionAuthorityV2ForAcceptanceInTransaction(db, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
           sessionId: input.sessionId,
@@ -2332,6 +2336,9 @@ export async function submitHumanPromptInTransaction(
     )
     .returning();
   if (!turn) throw new SessionControlInvariantError("Prompt turn was not inserted");
+  await copySubscriptionAuthorityCompatInTransaction(db, [
+    { kind: "session_turn", workspaceId: input.workspaceId, id: turn.id },
+  ]);
   await input.captureTurnAuthority?.(db, turn.id);
   let committedTurn = turn;
   const personalResourceExpectedAuthorityEpoch =
@@ -2829,7 +2836,7 @@ export async function sendAgentMessageInTransaction(
     causalHumanSubjectId: subscriptionCausalHuman,
   });
   // Codex v2 (M3 PR 3b): the same receiving source, copied (EP-T14).
-  const receiverCodexAuthority = await receiverCodexSubscriptionAuthorityV2InTransaction(db, {
+  const receiverAuthorityV2 = await receiverSubscriptionAuthorityV2InTransaction(db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
     sessionId: input.targetSessionId,
@@ -2888,7 +2895,7 @@ export async function sendAgentMessageInTransaction(
             mcpAccountBindings: inheritedConnectionAuthority.mcpAccountBindings,
             xaiProviderAccountAuthoritySnapshot: receiverAuthority.xai.snapshot,
             claudeProviderAccountAuthoritySnapshot: receiverAuthority.claude.snapshot,
-            subscriptionAuthority: receiverCodexAuthority,
+            subscriptionAuthority: receiverAuthorityV2,
             state: "pending",
           },
           "summary",
@@ -2900,6 +2907,9 @@ export async function sendAgentMessageInTransaction(
     )
     .returning({ id: schema.sessionSystemUpdates.id });
   if (!update) throw new SessionControlInvariantError("Agent message was not inserted");
+  await copySubscriptionAuthorityCompatInTransaction(db, [
+    { kind: "session_system_update", workspaceId: input.workspaceId, id: update.id },
+  ]);
   // An Agent message is external input for the target's goal. A goal paused
   // only by its continuation ceiling (`max_auto_continuations`, pacing rather
   // than intent) resumes in this same commit; any other pause stays. Goal row
@@ -3128,7 +3138,7 @@ export async function steerAgentSessionInTransaction(
     causalHumanSubjectId: subscriptionCausalHuman,
   });
   // Codex v2 (M3 PR 3b): the same receiving source, copied (EP-T14).
-  const receiverCodexAuthority = await receiverCodexSubscriptionAuthorityV2InTransaction(db, {
+  const receiverAuthorityV2 = await receiverSubscriptionAuthorityV2InTransaction(db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
     sessionId: input.targetSessionId,
@@ -3215,7 +3225,7 @@ export async function steerAgentSessionInTransaction(
             mcpAccountBindings: inheritedConnectionAuthority.mcpAccountBindings,
             xaiProviderAccountAuthoritySnapshot: receiverAuthority.xai.snapshot,
             claudeProviderAccountAuthoritySnapshot: receiverAuthority.claude.snapshot,
-            subscriptionAuthority: receiverCodexAuthority,
+            subscriptionAuthority: receiverAuthorityV2,
             state: "pending",
           },
           "summary",
@@ -3227,6 +3237,9 @@ export async function steerAgentSessionInTransaction(
     )
     .returning({ id: schema.sessionSystemUpdates.id });
   if (!update) throw new SessionControlInvariantError("Agent Steer instruction was not inserted");
+  await copySubscriptionAuthorityCompatInTransaction(db, [
+    { kind: "session_system_update", workspaceId: input.workspaceId, id: update.id },
+  ]);
   let sequence = supersession.lastSequence;
   const events: SessionEventInsertWithPayload[] = [];
   if (supersession.replacedTurn && !supersession.liveCurrentTurnId) {

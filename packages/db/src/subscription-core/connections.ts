@@ -51,6 +51,11 @@ import {
 export type SubscriptionCoreCredentialInput = {
   /** v1 envelope of the adapter's encoded credential. */
   credentialEncrypted: string;
+  /**
+   * The stored format of that credential (`adapter.credential.format`);
+   * `v1`, the 0707 writers' format, when omitted.
+   */
+  credentialFormat?: string;
   providerAccountId: string | null;
   /**
    * The signed-in person within the upstream account. Two people's logins of
@@ -96,6 +101,12 @@ export type SubscriptionCoreConnectScope = {
   /** null: the organization route. */
   workspaceId: string | null;
   subjectId: string;
+  /**
+   * The caller asked for the person's own connection (a legacy `user`
+   * scope): only a personal connection in their Personal workspace, else
+   * refused (`forbidden`), never a shared one.
+   */
+  personal?: boolean;
 };
 
 function iso(value: Date | null): string | null {
@@ -138,10 +149,13 @@ export async function connectSubscriptionCoreConnection(
       await setSubjectRlsContext(tx, input.subjectId);
       if (
         input.workspaceId !== null &&
-        (await workspaceKind(tx, input.accountId, input.workspaceId)) === "personal"
+        (input.personal === true ||
+          (await workspaceKind(tx, input.accountId, input.workspaceId)) === "personal")
       ) {
+        // The personal writer refuses a workspace that is not the person's own.
         return await connectPersonal(tx, provider, { ...input, workspaceId: input.workspaceId });
       }
+      if (input.personal === true) return { kind: "refused", reason: "forbidden" };
       return await connectShared(tx, provider, input);
     },
   );
@@ -155,13 +169,24 @@ async function connectPersonal(
   if (!input.subjectId.startsWith("user:")) return { kind: "refused", reason: "forbidden" };
   const [row] = await rawRows<{ outcome: string; connection_id: string | null; is_new: boolean }>(
     tx,
-    sql`select outcome, connection_id::text as connection_id, is_new
+    // The `v1` format keeps the 0707 writer (the format it stores); any
+    // other format takes the 0719 overload.
+    input.credentialFormat === undefined || input.credentialFormat === "v1"
+      ? sql`select outcome, connection_id::text as connection_id, is_new
       from opengeni_private.connect_subscription_core_personal(${subscriptionCoreProviderId(provider)},
         ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.subjectId},
         ${input.credentialEncrypted}, ${input.providerAccountId}, ${input.providerSubjectId}, ${input.planType},
         ${JSON.stringify(input.providerState)}::jsonb, ${iso(input.expiresAt)}::timestamptz,
         ${iso(input.lastRefreshAt)}::timestamptz, ${input.accountEmail}, ${input.label},
         ${input.connectedBySubjectId ?? null}
+      )`
+      : sql`select outcome, connection_id::text as connection_id, is_new
+      from opengeni_private.connect_subscription_core_personal(${subscriptionCoreProviderId(provider)},
+        ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.subjectId},
+        ${input.credentialEncrypted}, ${input.providerAccountId}, ${input.providerSubjectId}, ${input.planType},
+        ${JSON.stringify(input.providerState)}::jsonb, ${iso(input.expiresAt)}::timestamptz,
+        ${iso(input.lastRefreshAt)}::timestamptz, ${input.accountEmail}, ${input.label},
+        ${input.connectedBySubjectId ?? null}, ${input.credentialFormat}
       )`,
   );
   if (row?.outcome === "connected" && row.connection_id) {
@@ -267,6 +292,7 @@ async function connectShared(
       ? { accountId: input.accountId, reason }
       : { accountId: input.accountId, reason, workspaceIds: [input.workspaceId] };
   const providerState = JSON.stringify(input.providerState);
+  const credentialFormat = input.credentialFormat ?? "v1";
   if (existing) {
     if (input.workspaceId !== null) {
       const pool = await readSubscriptionCoreWorkspacePool(tx, provider, {
@@ -294,7 +320,7 @@ async function connectShared(
         return await rawRows<{ id: string }>(
           savepoint as unknown as Database,
           sql`update subscription_connections set
-              credential_encrypted = ${input.credentialEncrypted}, credential_format = 'v1',
+              credential_encrypted = ${input.credentialEncrypted}, credential_format = ${credentialFormat},
               expires_at = ${iso(input.expiresAt)}::timestamptz, last_refresh_at = ${iso(input.lastRefreshAt)}::timestamptz,
               refresh_generation = refresh_generation + 1, version = version + 1,
               status = 'active', last_error = null,
@@ -328,7 +354,7 @@ async function connectShared(
       ) values (
         ${input.accountId}::uuid, ${providerId}, ${connectionKind}, ${input.providerAccountId},
         ${input.accountEmail}, ${input.label}, ${input.planType}, ${input.credentialEncrypted},
-        'v1', ${iso(input.expiresAt)}::timestamptz, ${iso(input.lastRefreshAt)}::timestamptz, 'active', 'shared', ${connectedBySubjectId},
+        ${credentialFormat}, ${iso(input.expiresAt)}::timestamptz, ${iso(input.lastRefreshAt)}::timestamptz, 'active', 'shared', ${connectedBySubjectId},
         ${workspaceScoped ? "workspaces" : "organization"}, ${!workspaceScoped},
         ${input.workspaceId}::uuid, ${providerState}::jsonb,
         ${input.providerSubjectId}

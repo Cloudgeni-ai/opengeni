@@ -6,11 +6,11 @@ import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import { resolveClaudeSharedPoolAuthoritySnapshotInTransaction } from "./claude-subscription-accounts";
 import { withWorkspaceRls, type Database } from "./database";
 import * as schema from "./schema";
-import { EMPTY_SUBSCRIPTION_AUTHORITY_V2 } from "./subscription-core-acceptance-authority";
 import {
-  codexSubscriptionAuthorityV2ActiveInTransaction,
-  codexSubscriptionAuthorityV2OrEmptyInTransaction,
-} from "./subscription-core-codex-bindings";
+  coreSubscriptionAuthorityV2ActiveInTransaction,
+  coreSubscriptionAuthorityV2OrEmptyInTransaction,
+  EMPTY_SUBSCRIPTION_AUTHORITY_V2,
+} from "./subscription-core-acceptance-authority";
 import { resolveXaiSharedPoolAuthoritySnapshotInTransaction } from "./xai-subscription";
 
 type SubscriptionProvider = "xai" | "claude";
@@ -102,17 +102,19 @@ export async function receiverSubscriptionAuthorityInTransaction(
 }
 
 /**
- * The Codex v2 accepted authority for agent-originated work delivered to
- * `sessionId` (Agent Message, Agent Steer; design 3.7, EP-T14): the same
+ * The v2 accepted authority for agent-originated work delivered to
+ * `sessionId` (Agent Message, Agent Steer; design 3.7, EP-T14), for every
+ * provider on the shared core (the frozen value holds each provider's
+ * entry, all with the same owner, so one rule narrows them all): the same
  * receiving source as the v1 pools above, copied and never recomputed. Its
  * personal entry is kept only when the receiving source's exact owner is the
  * human who caused this work; otherwise the empty value (shared capacity
  * only). A child session without turns uses its exact spawning parent turn's
  * value. A source accepted before the cutover (no v2 value) yields the empty
- * value. Returns `null` (write nothing; v1 authoritative) unless the Codex
- * cutover is active. Call under the receiving session's lock.
+ * value. Returns `null` (write nothing; v1 authoritative) unless some
+ * provider's cutover is active. Call under the receiving session's lock.
  */
-export async function receiverCodexSubscriptionAuthorityV2InTransaction(
+export async function receiverSubscriptionAuthorityV2InTransaction(
   db: Database,
   input: {
     accountId: string;
@@ -121,7 +123,7 @@ export async function receiverCodexSubscriptionAuthorityV2InTransaction(
     causalHumanSubjectId: string | null;
   },
 ): Promise<SubscriptionPersonalAuthorityV2 | null> {
-  if (!(await codexSubscriptionAuthorityV2ActiveInTransaction(db, input.accountId))) return null;
+  if (!(await coreSubscriptionAuthorityV2ActiveInTransaction(db, input.accountId))) return null;
   const source = await receiverAuthoritySourceInTransaction(db, input);
   const frozen =
     source.codexV2 === null || source.codexV2 === undefined
@@ -137,6 +139,10 @@ export async function receiverCodexSubscriptionAuthorityV2InTransaction(
   }
   return EMPTY_SUBSCRIPTION_AUTHORITY_V2;
 }
+
+/** The Codex name of the receiver's v2 value (kept for existing callers). */
+export const receiverCodexSubscriptionAuthorityV2InTransaction =
+  receiverSubscriptionAuthorityV2InTransaction;
 
 async function receiverAuthoritySourceInTransaction(
   db: Database,
@@ -357,7 +363,7 @@ export async function getScheduledTaskSubscriptionAuthority(
     ) {
       return EMPTY_SUBSCRIPTION_AUTHORITY_V2;
     }
-    return codexSubscriptionAuthorityV2OrEmptyInTransaction(tx, row.accountId, frozen);
+    return coreSubscriptionAuthorityV2OrEmptyInTransaction(tx, row.accountId, frozen);
   });
 }
 

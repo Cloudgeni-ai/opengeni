@@ -369,6 +369,27 @@ export {
   type SubscriptionCoreOperationCandidate,
   type SubscriptionCoreUsageProbe,
 } from "./subscription-core/operation-connections";
+// The provider-neutral administration a provider's routes run over on the
+// core (SuperGrok track X2b; the Claude track reuses it with its binding).
+export {
+  readSubscriptionCoreWorkspaceView,
+  renameSubscriptionCoreConnection,
+  setSubscriptionCoreAllocator,
+  setSubscriptionCorePrimary,
+  setSubscriptionCoreRotation,
+  type SubscriptionCoreConnectionRow,
+  type SubscriptionCoreWake,
+  type SubscriptionCoreWorkspaceView,
+} from "./subscription-core/administration";
+export {
+  disconnectSubscriptionCoreConnection,
+  type SubscriptionCoreConnectRefusal,
+  type SubscriptionCoreDisconnectOutcome,
+} from "./subscription-core/connections";
+export { subscriptionCoreOperations } from "./subscription-core/operations";
+export type { SubscriptionCoreProvider } from "./subscription-core/provider";
+export { SUBSCRIPTION_CORE_XAI } from "./subscription-core-xai-adapter";
+export * from "./subscription-core-xai-compat";
 import {
   listSubscriptionCoreCodexServingConnections,
   readCodexCutoverDispositionForWorkspace,
@@ -419,13 +440,26 @@ import {
   type SubscriptionCoreWakeScope,
 } from "./subscription-core/waiters";
 import { SUBSCRIPTION_CORE_CODEX_PROVIDER } from "./subscription-core-codex-provider";
+export {
+  EMPTY_SUBSCRIPTION_AUTHORITY_V2,
+  copySubscriptionAuthorityCompatInTransaction,
+  coreSubscriptionAuthorityV2ForAcceptanceInTransaction,
+  coreSubscriptionAuthorityV2ForScheduledTaskInTransaction,
+  coreSubscriptionAuthorityV2OrEmptyInTransaction,
+  type SubscriptionAuthorityCarrier,
+} from "./subscription-core-acceptance-authority";
 import {
-  codexSubscriptionAuthorityV2ForAcceptanceInTransaction,
-  codexSubscriptionAuthorityV2ForScheduledTaskInTransaction,
-  codexSubscriptionAuthorityV2OrEmptyInTransaction,
-} from "./subscription-core-codex-bindings";
-export { EMPTY_SUBSCRIPTION_AUTHORITY_V2 } from "./subscription-core-acceptance-authority";
-import { subscriptionAuthorityCompatForCarriersInTransaction } from "./subscription-core-acceptance-authority";
+  copySubscriptionAuthorityCompatInTransaction,
+  coreSubscriptionAuthorityV2ForAcceptanceInTransaction,
+  coreSubscriptionAuthorityV2ForScheduledTaskInTransaction,
+  coreSubscriptionAuthorityV2OrEmptyInTransaction,
+  subscriptionAuthorityCompatForCarriersInTransaction,
+  subscriptionProviderCutoverCommittedInTransaction,
+} from "./subscription-core-acceptance-authority";
+import {
+  readSubscriptionCoreProviderRoute,
+  type SubscriptionCoreProviderRoute,
+} from "./subscription-core/provider-route";
 export { SessionMessageSearchCursorError } from "./session-message-search";
 export * from "./artifact-catalog";
 export * from "./scheduled-slack-bot-messages";
@@ -18117,7 +18151,8 @@ export async function createScheduledTask(
         input.claudeProviderAccountAuthoritySnapshot === undefined
           ? await sharedPoolSubscriptionAuthoritySnapshotsInTransaction(scopedDb, input.workspaceId)
           : null;
-      // Codex v2 (M3 PR 3b, EP-T15): frozen once, at creation, for the exact
+      // v2 for every provider on the shared core (M3 PR 3b, EP-T15; M4
+      // X2b): frozen once, at creation, for the exact
       // accepting human under the acceptance rule; firings copy it and never
       // recompute it. Non-human creators freeze the empty value; nothing
       // before the cutover.
@@ -18160,12 +18195,12 @@ export async function createScheduledTask(
             )
           : [];
       const taskSubscriptionAuthority = input.createdByActor
-        ? await codexSubscriptionAuthorityV2OrEmptyInTransaction(
+        ? await coreSubscriptionAuthorityV2OrEmptyInTransaction(
             scopedDb,
             input.accountId,
             taskDestination?.eligible ? creatorTurn?.authority : null,
           )
-        : await codexSubscriptionAuthorityV2ForScheduledTaskInTransaction(scopedDb, {
+        : await coreSubscriptionAuthorityV2ForScheduledTaskInTransaction(scopedDb, {
             accountId: input.accountId,
             workspaceId: input.workspaceId,
             reusableSessionId: input.targetSessionId ?? null,
@@ -18222,6 +18257,15 @@ export async function createScheduledTask(
         ${row.id}::uuid,
         ${row.authorityRevision}::bigint
       )`);
+      await copySubscriptionAuthorityCompatInTransaction(scopedDb, [
+        { kind: "scheduled_task", workspaceId: row.workspaceId, id: row.id },
+        {
+          kind: "scheduled_task_revision",
+          workspaceId: row.workspaceId,
+          id: row.id,
+          taskAuthorityRevision: row.authorityRevision,
+        },
+      ]);
 
       await input.captureLinkAuthority?.(scopedDb, mapScheduledTask(row));
       return mapScheduledTask(row);
@@ -18385,6 +18429,19 @@ export async function updateScheduledTask(
         ${input.clonePersonalResourceAuthorityFromRevision}::bigint,
         ${row.authorityRevision}::bigint
       )`);
+    }
+    if (
+      input.refreshPersonalResourceAuthority ||
+      input.clonePersonalResourceAuthorityFromRevision !== undefined
+    ) {
+      await copySubscriptionAuthorityCompatInTransaction(scopedDb, [
+        {
+          kind: "scheduled_task_revision",
+          workspaceId: row.workspaceId,
+          id: row.id,
+          taskAuthorityRevision: row.authorityRevision,
+        },
+      ]);
     }
     const mapped = mapScheduledTask(row);
     if (input.captureLinkAuthority) await input.captureLinkAuthority(scopedDb, mapped);
@@ -19587,6 +19644,15 @@ export async function materializeScheduledTaskReusableSessionFromRun(
       if (!row) {
         throw new Error("scheduled reusable-session materialization returned no revision");
       }
+      // A new head revision cloned from the source one (skipped when none was inserted).
+      await copySubscriptionAuthorityCompatInTransaction(scopedDb, [
+        {
+          kind: "scheduled_task_revision",
+          workspaceId: input.workspaceId,
+          id: input.taskId,
+          taskAuthorityRevision: Number(row.authorityRevision),
+        },
+      ]);
       const materializedTask = await getScheduledTask(scopedDb, input.workspaceId, input.taskId);
       if (!materializedTask || materializedTask.authorityRevision !== Number(row.authorityRevision))
         throw new Error("scheduled materialization revision changed");
@@ -29158,26 +29224,68 @@ export async function pinSubscriptionCoreSessionCodexAccount(
 }
 
 /**
- * Deliver a core Codex wake after the mutation that caused it committed. A
- * failed wake never fails the committed change: every core waiter also has
- * its own bounded recheck, so the change is observed at the latest then. The
- * failure is logged (identifiers and error class only).
+ * Deliver a core Codex wake after the mutation that caused it committed.
+ * Codex's binding of the provider-neutral `deliverSubscriptionCoreWake`.
  */
 export async function deliverSubscriptionCoreCodexWake(
   db: Database,
   wake: SubscriptionCoreCodexWake | null,
 ): Promise<void> {
+  await deliverSubscriptionCoreWake(db, SUBSCRIPTION_CORE_CODEX_PROVIDER, wake, "Codex");
+}
+
+/**
+ * The runtime serving one provider for one organization, for a route
+ * handler (`readSubscriptionCoreProviderRoute`). While the provider has no
+ * cutover receipt this is `legacy` after that one read, without resolving the
+ * organization (`accountId` is not called), so legacy handlers keep their
+ * order of checks; afterwards the organization's switch row is read under
+ * its own row-level-security scope.
+ */
+export async function readSubscriptionCoreProviderRouteForRequest(
+  db: Database,
+  provider: string,
+  accountId: () => Promise<string>,
+): Promise<SubscriptionCoreProviderRoute> {
+  if (!(await subscriptionProviderCutoverCommittedInTransaction(db, provider))) return "legacy";
+  const organizationId = await accountId();
+  return await withRlsContext(
+    db,
+    { accountId: organizationId, workspaceId: null },
+    async (tx) =>
+      await readSubscriptionCoreProviderRoute(tx, { accountId: organizationId, provider }),
+  );
+}
+
+/**
+ * Deliver a core wake of one provider after the mutation that caused it
+ * committed. A failed wake never fails the committed change: every core
+ * waiter also has its own bounded recheck, so the change is observed at the
+ * latest then. The failure is logged (identifiers and error class only).
+ */
+export async function deliverSubscriptionCoreWake(
+  db: Database,
+  provider: string,
+  wake: SubscriptionCoreCodexWake | null,
+  /** The provider's display name in the log line. */
+  label: string = provider,
+): Promise<void> {
   if (!wake) return;
   try {
-    await wakeSubscriptionCoreCodexCapacityWaiters(db, {
-      accountId: wake.accountId,
-      reason: wake.reason,
-      ...(wake.workspaceIds ? { workspaceIds: wake.workspaceIds } : {}),
-      ...(wake.sessionIds ? { sessionIds: wake.sessionIds } : {}),
-    });
+    await wakeSubscriptionCoreCapacityWaiters(
+      db,
+      provider,
+      {
+        accountId: wake.accountId,
+        reason: wake.reason,
+        ...(wake.workspaceIds ? { workspaceIds: wake.workspaceIds } : {}),
+        ...(wake.sessionIds ? { sessionIds: wake.sessionIds } : {}),
+      },
+      enqueueSessionWorkflowWakeInTransaction,
+    );
   } catch (error) {
     // Bounded waiter recheck is the backstop (see above).
-    console.warn("core Codex wake delivery failed; waiters recheck on their own timer", {
+    console.warn(`core ${label} wake delivery failed; waiters recheck on their own timer`, {
       accountId: wake.accountId,
       reason: wake.reason,
       workspaceIds: wake.workspaceIds ?? null,
@@ -31922,6 +32030,11 @@ async function createSessionInTransaction(
     throw error;
   }
   const [inserted] = insertedRows;
+  if (inserted) {
+    await copySubscriptionAuthorityCompatInTransaction(tx, [
+      { kind: "session_initial", workspaceId: input.workspaceId, id: inserted.id },
+    ]);
+  }
   if (!inserted) {
     if (createIdempotencyKey) {
       const existing = await existingSessionForCreateKey(
@@ -68463,6 +68576,9 @@ export async function materializeGoalContinuation(
           )
           .returning();
         if (!update) throw new Error("Failed to create goal continuation update");
+        await copySubscriptionAuthorityCompatInTransaction(tx as unknown as Database, [
+          { kind: "session_system_update", workspaceId: input.workspaceId, id: update.id },
+        ]);
 
         await tx
           .insert(schema.usageEvents)
@@ -69146,8 +69262,9 @@ export async function initializeSessionStartAtomically(
           }
           queueTailPosition += 1;
           const acceptedAt = new Date();
-          // Codex v2 accepted authority (M3 PR 2a): only the owner's own
-          // initial message freezes personal authority. A scheduled firing
+          // v2 accepted authority for every provider on the shared core (M3
+          // PR 2a; M4 X2b): only the owner's own initial message freezes
+          // personal authority. A scheduled firing
           // copies its task's frozen value (M3 PR 3b). A child session's first
           // turn takes its exact causal parent turn's immutable value (M3 PR 3,
           // design 3.7 EP-T13), never a fresh computation: it gains nothing the
@@ -69156,7 +69273,7 @@ export async function initializeSessionStartAtomically(
           // yields the empty value once the cutover is enabled.
           const initialSubscriptionAuthority =
             input.initialSubscriptionAuthority !== undefined
-              ? await codexSubscriptionAuthorityV2OrEmptyInTransaction(
+              ? await coreSubscriptionAuthorityV2OrEmptyInTransaction(
                   tx as unknown as Database,
                   session.accountId,
                   input.initialSubscriptionAuthority,
@@ -69164,7 +69281,7 @@ export async function initializeSessionStartAtomically(
               : session.parentSessionId
                 ? causalParentSubscriptionAuthority !== null
                   ? causalParentSubscriptionAuthority
-                  : await codexSubscriptionAuthorityV2ForAcceptanceInTransaction(
+                  : await coreSubscriptionAuthorityV2ForAcceptanceInTransaction(
                       tx as unknown as Database,
                       {
                         accountId: session.accountId,
@@ -69173,7 +69290,7 @@ export async function initializeSessionStartAtomically(
                         acceptingSubjectId: null,
                       },
                     )
-                : await codexSubscriptionAuthorityV2ForAcceptanceInTransaction(
+                : await coreSubscriptionAuthorityV2ForAcceptanceInTransaction(
                     tx as unknown as Database,
                     {
                       accountId: session.accountId,
@@ -69232,6 +69349,9 @@ export async function initializeSessionStartAtomically(
             .returning();
           if (!turn) throw new Error("Failed to create initial session turn");
           insertedTurn = true;
+          await copySubscriptionAuthorityCompatInTransaction(tx as unknown as Database, [
+            { kind: "session_turn", workspaceId: input.workspaceId, id: turn.id },
+          ]);
         }
         await lockSessionEventWriteRows(tx as unknown as Database, {
           workspaceId: input.workspaceId,
@@ -69560,7 +69680,7 @@ export async function enqueueSessionTurn(
                 // This exported low-level enqueue is also an acceptance boundary.
                 // Freeze the named human (or empty service authority) exactly once,
                 // just like the canonical prompt path; never leave postcutover NULL.
-                subscriptionAuthority: await codexSubscriptionAuthorityV2ForAcceptanceInTransaction(
+                subscriptionAuthority: await coreSubscriptionAuthorityV2ForAcceptanceInTransaction(
                   tx as unknown as Database,
                   {
                     accountId: input.accountId,
@@ -69580,6 +69700,9 @@ export async function enqueueSessionTurn(
         if (!row) {
           throw new Error("Failed to enqueue session turn");
         }
+        await copySubscriptionAuthorityCompatInTransaction(tx as unknown as Database, [
+          { kind: "session_turn", workspaceId: input.workspaceId, id: row.id },
+        ]);
         await tx
           .update(schema.sessions)
           .set({
@@ -72788,6 +72911,9 @@ export async function claimSessionWorkForAttempt(
               )
               .returning();
             if (!compactionTurn) throw new Error("Failed to create context compaction execution");
+            await copySubscriptionAuthorityCompatInTransaction(tx as unknown as Database, [
+              { kind: "session_turn", workspaceId, id: compactionTurn.id },
+            ]);
             await registerAttempt(compactionTurn);
             const [requestedEvent] = await tx
               .insert(schema.sessionEvents)
@@ -73445,8 +73571,8 @@ export async function claimSessionWorkForAttempt(
                   continuationCodexPolicy.policy,
                 )
               : baseInternalTurnMetadata;
-          // Codex v2 accepted authority (M3 PR 2a, 3b): a pure goal
-          // continuation inherits the exact causal turn's frozen value when
+          // v2 accepted authority for every provider on the shared core (M3
+          // PR 2a, 3b; M4 X2b): a pure goal continuation inherits the exact causal turn's frozen value when
           // that turn's human is this turn's human. Every other delivery
           // copies, exactly as its v1 pools: the receiving context turn's
           // value for informational input, otherwise the value frozen on the
@@ -73485,7 +73611,7 @@ export async function claimSessionWorkForAttempt(
               internalSubscriptionAuthority = goalCausalTurn.subscriptionAuthority;
             }
           }
-          internalSubscriptionAuthority = await codexSubscriptionAuthorityV2OrEmptyInTransaction(
+          internalSubscriptionAuthority = await coreSubscriptionAuthorityV2OrEmptyInTransaction(
             tx as unknown as Database,
             session.accountId,
             internalSubscriptionAuthority,
@@ -73544,6 +73670,11 @@ export async function claimSessionWorkForAttempt(
             )
             .returning();
           if (!internalTurn) throw new Error("Failed to create internal update inference");
+          // Its delivered updates already name this turn, so the copy
+          // resolves the delivery path's sources.
+          await copySubscriptionAuthorityCompatInTransaction(tx as unknown as Database, [
+            { kind: "session_turn", workspaceId, id: internalTurn.id },
+          ]);
           const frozenGoalSnapshot = SessionGoalSnapshot.parse(internalTurn.goalSnapshot);
           let goalContinuationHistoryItem: Record<string, unknown> | undefined;
           if (routingGoalUpdate) {
@@ -81132,6 +81263,14 @@ async function enqueueChildLifecycleNoticeOutboxTx(
       ],
     })
     .returning({ id: schema.sessionSystemUpdateOutbox.id });
+  await copySubscriptionAuthorityCompatInTransaction(
+    tx,
+    inserted.map((row) => ({
+      kind: "session_system_update_outbox" as const,
+      workspaceId,
+      id: row.id,
+    })),
+  );
   return inserted.length > 0;
 }
 
@@ -82310,6 +82449,10 @@ export async function getOrCreateSessionSystemUpdateOutbox(
       })
       .returning();
     if (!row) throw new Error("Failed to persist system-update outbox row");
+    // Skipped when the upsert updated an existing row.
+    await copySubscriptionAuthorityCompatInTransaction(scopedDb as unknown as Database, [
+      { kind: "session_system_update_outbox", workspaceId: input.workspaceId, id: row.id },
+    ]);
     if (
       stableJson(parseAcceptedMcpAccountBindings(row.mcpAccountBindings)) !==
       stableJson(parseAcceptedMcpAccountBindings(input.mcpAccountBindings))
@@ -82730,6 +82873,9 @@ export async function addSessionSystemUpdateWithSourceMutation<
           if (!replayed) throw new Error("System-update dedupe row disappeared");
           return replayed;
         }
+        await copySubscriptionAuthorityCompatInTransaction(tx as unknown as Database, [
+          { kind: "session_system_update", workspaceId: input.workspaceId, id: inserted.id },
+        ]);
 
         const now = new Date();
         const eventPreview = internalUpdateEventMember(inserted);
@@ -83324,6 +83470,9 @@ function backgroundCommandTerminalMutation(input: {
           `Background command ${command.id} terminal input already exists before settlement`,
         );
       }
+      await copySubscriptionAuthorityCompatInTransaction(tx as unknown as Database, [
+        { kind: "session_system_update", workspaceId: input.workspaceId, id: insertedUpdate.id },
+      ]);
       const preview = internalUpdateEventMember(insertedUpdate);
       const [pendingEvent] = await tx
         .insert(schema.sessionEvents)
