@@ -544,9 +544,10 @@ export function buildAnthropicRequest(
   if (!messages.length) throw new AnthropicProtocolError("Claude requires at least one message");
   // A recorded session-independent prefix becomes its own block so it can
   // carry a cache breakpoint (OPENGENI_EXPERIMENT_SYSTEM_PROMPT_CACHE_SPLIT).
-  const split = request.systemInstructions
-    ? splitStableSystemPromptPrefix(request.systemInstructions)
-    : undefined;
+  const split =
+    request.systemInstructions && provider.anthropic?.cacheTtl !== "off"
+      ? splitStableSystemPromptPrefix(request.systemInstructions)
+      : undefined;
   const system = split
     ? ([
         { type: "text", text: split[0] },

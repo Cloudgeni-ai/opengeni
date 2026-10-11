@@ -7,6 +7,7 @@ import { buildAnthropicRequest } from "../src/anthropic-messages";
 import { applyClaudeCodeIdentity } from "../src/claude-code-identity";
 import {
   clearStableSystemPromptPrefixes,
+  recordStableSystemPromptPrefix,
   splitStableSystemPromptPrefix,
 } from "../src/system-prompt-cache-prefix";
 
@@ -187,5 +188,41 @@ describe("system prompt cache split experiment", () => {
     expect(request.system).toHaveLength(3);
     expect(request.system[0].cache_control).toBeUndefined();
     expect(breakpoints(request)).toHaveLength(4);
+  });
+
+  test("off: composing records nothing", () => {
+    const prompt = instructions(false, "Policy.");
+    expect(splitStableSystemPromptPrefix(prompt)).toBeUndefined();
+  });
+
+  test("on: caching off or a whitespace-only tail sends one block", () => {
+    const prompt = instructions(true, "Policy.");
+    const uncached = buildAnthropicRequest(
+      {
+        input: firstTurn,
+        systemInstructions: prompt,
+        modelSettings: {},
+        tools: [],
+        handoffs: [],
+        outputType: "text",
+        tracing: false,
+      } as ModelRequest,
+      "claude-sonnet-5-5",
+      { anthropic: { cacheTtl: "off" } } as never,
+      true,
+    ) as any;
+    expect(uncached.system).toEqual([{ type: "text", text: prompt }]);
+    const stable = splitStableSystemPromptPrefix(prompt)![0];
+    expect(splitStableSystemPromptPrefix(`${stable}\n\n  `)).toBeUndefined();
+  });
+
+  test("a used prefix is refreshed and survives later records", () => {
+    const prompt = instructions(true, "Policy.");
+    const stable = splitStableSystemPromptPrefix(prompt)![0];
+    for (let index = 0; index < 300; index += 1) {
+      if (index % 50 === 0) expect(splitStableSystemPromptPrefix(prompt)![0]).toBe(stable);
+      recordStableSystemPromptPrefix(`${"x".repeat(2_048)}${index}`);
+    }
+    expect(splitStableSystemPromptPrefix(prompt)![0]).toBe(stable);
   });
 });

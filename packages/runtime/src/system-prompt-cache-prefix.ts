@@ -13,7 +13,10 @@
  * cost at most a cache miss; it never changes what the model reads. Nothing is
  * recorded while the experiment is off.
  */
-const MAX_RECORDED_PREFIXES = 32;
+// Distinct prefixes vary only by agent configuration, identity and directive
+// presence. A used entry is refreshed, so an active session's prefix is not
+// evicted mid-turn (which would move its block boundary and miss the cache).
+const MAX_RECORDED_PREFIXES = 256;
 /** Shorter prefixes are not worth a breakpoint (Anthropic's minimum is 1,024+ tokens). */
 const MIN_PREFIX_CHARS = 2_048;
 
@@ -38,11 +41,17 @@ export function splitStableSystemPromptPrefix(
   instructions: string,
 ): [stable: string, tail: string] | undefined {
   let end = 0;
+  let matched: string | undefined;
   for (const prefix of recorded.keys()) {
     const at = instructions.indexOf(prefix);
-    if (at >= 0 && at + prefix.length > end) end = at + prefix.length;
+    if (at >= 0 && at + prefix.length > end) {
+      end = at + prefix.length;
+      matched = prefix;
+    }
   }
-  if (end === 0 || end >= instructions.length) return undefined;
+  if (!matched || !instructions.slice(end).trim()) return undefined;
+  recorded.delete(matched);
+  recorded.set(matched, true);
   return [instructions.slice(0, end), instructions.slice(end)];
 }
 
