@@ -10,6 +10,8 @@ import {
   BrowserInteractionController,
   BrowserProtectedAuthController,
   InteractionControllerError,
+  InteractionDefiniteDriverError,
+  InteractionOutcomeUnknownDriverError,
   type BrowserInteractionDriver,
 } from "../src";
 
@@ -696,5 +698,90 @@ describe("BrowserProtectedAuthController", () => {
         ],
       }),
     ).toThrow(InteractionControllerError);
+  });
+});
+
+describe("resolved action targets", () => {
+  const headerClose = {
+    actionIndex: 0,
+    ref: "e7",
+    role: "button",
+    name: "Close",
+    container: { role: "banner", name: null },
+  } as const;
+
+  function tracedController(
+    dispatch: BrowserInteractionDriver["dispatch"],
+    records: Array<{ receipt: BrowserActionReceipt }>,
+  ) {
+    return new BrowserInteractionController({
+      browserSessionId,
+      controllerGeneration,
+      onJournalRecord(record) {
+        records.push(structuredClone(record));
+      },
+      driver: driver(new Map([["target-1", target()]]), dispatch),
+    });
+  }
+
+  test("returns what each locator resolved to without journaling it", async () => {
+    const records: Array<{ receipt: BrowserActionReceipt }> = [];
+    const controller = tracedController(async (_command, trace) => {
+      trace?.record(headerClose);
+      trace?.record({ ...headerClose, actionIndex: 1, ref: null, role: "textbox", name: null });
+      return observation(target());
+    }, records);
+
+    const receipt = await controller.run(command(1));
+
+    expect(receipt.state).toBe("completed");
+    expect(receipt.targets).toEqual([
+      headerClose,
+      { ...headerClose, actionIndex: 1, ref: null, role: "textbox", name: null },
+    ]);
+    // An older controller reading this journal must parse every record.
+    expect(records.length).toBeGreaterThan(0);
+    for (const record of records) expect(record.receipt).not.toHaveProperty("targets");
+    expect(controller.receipt(operationId(1))).not.toHaveProperty("targets");
+  });
+
+  test("keeps targets when the action fails after input", async () => {
+    for (const failure of [
+      new InteractionDefiniteDriverError("invalid_action", "fixture refusal"),
+      new InteractionOutcomeUnknownDriverError("outcome_unknown", "fixture unknown"),
+      new Error("fixture transport loss"),
+    ]) {
+      const controller = tracedController(async (_command, trace) => {
+        trace?.record(headerClose);
+        throw failure;
+      }, []);
+      const receipt = await controller.run(command(1));
+      expect(receipt.state).not.toBe("completed");
+      expect(receipt.targets).toEqual([headerClose]);
+    }
+  });
+
+  test("never lets an invalid or absent trace change the outcome", async () => {
+    const invalid = tracedController(async (_command, trace) => {
+      trace?.record({ ...headerClose, role: "" });
+      return observation(target());
+    }, []);
+    const invalidReceipt = await invalid.run(command(1));
+    expect(invalidReceipt.state).toBe("completed");
+    expect(invalidReceipt).not.toHaveProperty("targets");
+
+    const untraced = tracedController(async () => observation(target()), []);
+    expect(await untraced.run(command(1))).not.toHaveProperty("targets");
+  });
+
+  test("bounds recorded targets", async () => {
+    const controller = tracedController(async (_command, trace) => {
+      for (let index = 0; index < 500; index += 1) {
+        trace?.record({ ...headerClose, actionIndex: index % 32 });
+      }
+      return observation(target());
+    }, []);
+    const receipt = await controller.run(command(1));
+    expect(receipt.targets).toHaveLength(64);
   });
 });

@@ -74,6 +74,22 @@ export type InteractionOperationJournalRecord<TReceipt> = {
   receipt: TReceipt;
 };
 
+/** Side channel a driver may use to describe what a dispatch acted on, such
+ * as the element a locator resolved to. Recording never affects dispatch. */
+export type InteractionDispatchTrace = {
+  record(item: unknown): void;
+};
+
+class BoundedDispatchTrace implements InteractionDispatchTrace {
+  readonly items: unknown[] = [];
+
+  constructor(private readonly limit: number) {}
+
+  record(item: unknown): void {
+    if (this.items.length < this.limit) this.items.push(item);
+  }
+}
+
 type InteractionDriver<
   TCommand extends InteractionCoreCommand,
   TTarget extends InteractionCoreTarget,
@@ -83,7 +99,7 @@ type InteractionDriver<
   observe(targetId: string): Promise<TObservation>;
   validate?(command: TCommand, target: TTarget): Promise<void> | void;
   validateSession?(command: TCommand): Promise<void> | void;
-  dispatch(command: TCommand): Promise<TObservation | null>;
+  dispatch(command: TCommand, trace?: InteractionDispatchTrace): Promise<TObservation | null>;
 };
 
 type InteractionCoreAdapter<
@@ -114,6 +130,11 @@ type InteractionCoreAdapter<
     error: InteractionError | null;
   }): TReceipt;
   recoverReceipt(receipt: TReceipt, settledAt: string): TReceipt;
+  /** Upper bound on recorded dispatch trace items; zero disables tracing. */
+  maxDispatchTraceItems?: number;
+  /** Decorates the returned receipt with recorded trace items. It may throw
+   * on invalid items; the undecorated receipt is then returned unchanged. */
+  attachDispatchTrace?(receipt: TReceipt, items: readonly unknown[]): TReceipt;
 };
 
 type InteractionCoreAuthority<TCommand> = {
@@ -350,8 +371,31 @@ export class InteractionControllerCore<
       );
     }
 
+    const trace = new BoundedDispatchTrace(this.adapter.maxDispatchTraceItems ?? 0);
+    const receipt = await this.dispatchAndSettle(entry, command, dispatchedAt, trace);
+    return this.attachDispatchTrace(receipt, trace.items);
+  }
+
+  /** Dispatch diagnostics decorate only the returned receipt. The journal keeps
+   * the undecorated receipt, so an older controller can always read it back. */
+  private attachDispatchTrace(receipt: TReceipt, items: readonly unknown[]): TReceipt {
+    if (items.length === 0 || !this.adapter.attachDispatchTrace) return receipt;
     try {
-      const dispatchedObservation = await this.driver.dispatch(command);
+      return this.adapter.attachDispatchTrace(receipt, items);
+    } catch {
+      // Diagnostics never change an operation's outcome.
+      return receipt;
+    }
+  }
+
+  private async dispatchAndSettle(
+    entry: JournalEntry<TReceipt>,
+    command: TCommand,
+    dispatchedAt: string,
+    trace: InteractionDispatchTrace,
+  ): Promise<TReceipt> {
+    try {
+      const dispatchedObservation = await this.driver.dispatch(command, trace);
       const observation =
         dispatchedObservation === null
           ? null

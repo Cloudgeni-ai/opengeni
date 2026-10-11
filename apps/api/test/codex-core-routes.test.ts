@@ -397,6 +397,46 @@ describe("Codex routes with an enabled cutover", () => {
     expect(wakes).toHaveLength(2);
   });
 
+  test("a sign-in started on one API replica polls on another", async () => {
+    cutover("core");
+    poisonLegacyWriters();
+    // Two independent processes configured like a real deployment: no
+    // explicit manifest state secret, only the shared deployment secrets.
+    const replica = () =>
+      createApp({
+        settings: {
+          ...settings,
+          githubAppManifestStateSecret: undefined,
+          integrationsStateSecret: "shared-integrations-state-secret",
+        },
+        db: poisonDb as never,
+        bus: { publish: async () => undefined } as never,
+        workflowClient: {} as never,
+        managedAuth: null,
+      } as never);
+    const headers = {
+      authorization: await bearer(["workspace:read", "connections:write"]),
+      "content-type": "application/json",
+    };
+    mockDevice({
+      usercode: () => json({ device_auth_id: "dev_1", user_code: "ABCD-1234", interval: "5" }),
+      token: () => json({}, 403),
+    });
+    const started = await replica().request(`/v1/workspaces/${WS}/codex/connect/start`, {
+      method: "POST",
+      headers,
+    });
+    expect(started.status).toBe(200);
+    const { state } = (await started.json()) as { state: string };
+    const polled = await replica().request(`/v1/workspaces/${WS}/codex/connect/poll`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ state }),
+    });
+    expect(polled.status).toBe(200);
+    expect(await polled.json()).toEqual({ status: "pending" });
+  });
+
   test("connect start and poll write through the core writer (M3 PR 3b)", async () => {
     cutover("core");
     poisonLegacyWriters();

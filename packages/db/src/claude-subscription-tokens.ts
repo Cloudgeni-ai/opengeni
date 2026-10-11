@@ -81,6 +81,33 @@ export async function requestClaudeTokenRefresh(
   }
 }
 
+/**
+ * The credential an OAuth refresh produced: the new access token, the rotated
+ * refresh token (or the current one when Claude kept it), the new expiry and
+ * the granted scopes. Every Claude refresh path builds it here.
+ */
+export function claudeRefreshedCredential(
+  credential: import("zod").z.infer<typeof ClaudeSubscriptionCredential>,
+  tokens: Awaited<ReturnType<typeof requestClaudeTokenRefresh>>,
+  nowMs: number,
+) {
+  if (!credential.oauth) throw new ClaudeSubscriptionReconnectRequired();
+  const expiresAt = new Date(nowMs + tokens.expires_in * 1000);
+  return {
+    credential: ClaudeSubscriptionCredential.parse({
+      ...credential,
+      token: tokens.access_token,
+      oauth: {
+        ...credential.oauth,
+        refreshToken: tokens.refresh_token ?? credential.oauth.refreshToken,
+        expiresAt: expiresAt.toISOString(),
+        scopes: tokens.scope.split(/\s+/).filter(Boolean),
+      },
+    }),
+    expiresAt,
+  };
+}
+
 /** The existing connection generation remains authority; token renewal is not replacement. */
 export async function resolveClaudeSubscriptionCredential(
   db: Database,
@@ -149,16 +176,7 @@ export async function resolveClaudeSubscriptionCredential(
       }
       throw new ClaudeSubscriptionRefreshUnavailable();
     }
-    const refreshed = ClaudeSubscriptionCredential.parse({
-      ...latest,
-      token: tokens.access_token,
-      oauth: {
-        ...latest.oauth,
-        refreshToken: tokens.refresh_token ?? latest.oauth.refreshToken,
-        expiresAt: new Date(now() + tokens.expires_in * 1000).toISOString(),
-        scopes: tokens.scope.split(/\s+/).filter(Boolean),
-      },
-    });
+    const refreshed = claudeRefreshedCredential(latest, tokens, now()).credential;
     const serialized = JSON.stringify(refreshed);
     const table = scope.scope === "workspace" ? connections : organizationModelProviderConnections;
     const encrypted = encryptEnvironmentValue(

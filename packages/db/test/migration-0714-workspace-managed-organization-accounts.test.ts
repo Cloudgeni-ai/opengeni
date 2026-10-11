@@ -22,6 +22,9 @@ import { provisionRoles } from "../src/provision-roles";
 
 setDefaultTimeout(180_000);
 const MIGRATION = "0714_subscription_workspace_managed_organization_accounts.sql";
+// 0715 rewrites routines 0714 creates, so a deployment before 0714 is also
+// before it: held back and replayed after 0714.
+const API_KEY_CONNECTIONS = "0715_subscription_core_api_key_connections.sql";
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const key = Buffer.alloc(32, 83);
 const MODEL = "codex/gpt-5.5";
@@ -87,7 +90,7 @@ beforeAll(async () => {
   const owner = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
-    await owner`insert into schema_migrations(name) values (${MIGRATION})`;
+    await owner`insert into schema_migrations(name) values (${MIGRATION}), (${API_KEY_CONNECTIONS})`;
     await migrate(database.ownerUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
   } finally {
@@ -189,7 +192,7 @@ beforeAll(async () => {
 
   const applying = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
-    await applying`delete from schema_migrations where name = ${MIGRATION}`;
+    await applying`delete from schema_migrations where name in (${MIGRATION}, ${API_KEY_CONNECTIONS})`;
     await migrate(database.ownerUrl);
     const [applied] = await applying<{ count: number }[]>`
       select count(*)::int as count from schema_migrations where name = ${MIGRATION}`;
