@@ -11,13 +11,11 @@ import {
   type ReasoningEffort,
   type ScheduledTask,
   type WorkspaceSessionDefaults,
-  type XaiProviderAccountAuthoritySnapshotV1,
   type ClaudeProviderAccountAuthoritySnapshotV1,
   type BillingBalance,
   type OrganizationModelDefaults,
 } from "@opengeni/contracts";
 import {
-  getScheduledTaskXaiProviderAccountAuthoritySnapshot,
   getScheduledTaskClaudeProviderAccountAuthoritySnapshot,
   getSession,
   getWorkspace,
@@ -31,9 +29,6 @@ import {
   getBillingBalance,
   getOrganizationModelDefaults,
   spendableCreditMicros,
-  workspaceXaiSubscriptionActive,
-  workspaceXaiSubscriptionActiveForAuthority,
-  XaiAuthorityPoolInactiveError,
   ClaudeAuthorityPoolInactiveError,
   resolveClaudeProviderAccountAuthoritySnapshotForAcceptance,
   workspaceClaudeSubscriptionActiveForAuthority,
@@ -325,12 +320,6 @@ export type WorkspaceModelSelectionContext = {
    * execution owner. Never another member.
    */
   subjectId: string;
-  /**
-   * An already-frozen SuperGrok authority (a scheduled task's snapshot).
-   * Omitted means the subject's current acceptance authority, exactly as a
-   * direct Send resolves it.
-   */
-  xaiAuthoritySnapshot?: XaiProviderAccountAuthoritySnapshotV1 | undefined;
   /** Already accepted Claude pool; never replace it with current selection. */
   claudeAuthoritySnapshot?: ClaudeProviderAccountAuthoritySnapshotV1 | undefined;
 };
@@ -340,9 +329,10 @@ export type WorkspaceModelSelectionContext = {
  * core once its provider route is `core` (design 5.3, SuperGrok track X1a,
  * EP-T18/EP-S25/EP-N26): the core eligibility projection for the subject
  * (shared pools; their own personal connection only in their own Personal
- * workspace), not ready under maintenance. Null on the legacy route (one
- * receipt read) and when the deployment disables SuperGrok (no read), so
- * the caller keeps its legacy answer.
+ * workspace). Null when the route is not `core` (maintenance, or no receipt,
+ * which this binary's readiness check refuses) and when the deployment
+ * disables SuperGrok (no read): the caller then treats SuperGrok as not ready
+ * with no selectable model.
  */
 export async function loadCoreRoutedXaiCatalogReadiness(
   db: Database,
@@ -363,84 +353,31 @@ export function withCoreRoutedXaiRestriction(
 }
 
 /**
- * Connection restrictions and SuperGrok readiness for the subject. With a
- * frozen authority (a scheduled task's snapshot), a user pool that no longer
- * resolves (disconnected, reconnected under a new authority generation, or its
- * owner left) means SuperGrok is not ready: no SuperGrok model is selectable,
- * and resolution falls through to credits or the deployment default instead of
- * failing the occurrence. The frozen authority is never swapped for the
- * subject's current one; the SuperGrok restriction is closed outright, while
- * the other providers' restrictions do not depend on SuperGrok authority.
+ * Connection restrictions and SuperGrok readiness for the subject. SuperGrok
+ * runs only on the shared core: its readiness and `supergrok/` restriction
+ * are the core projection, and any other route (or a disabled deployment)
+ * means not ready with no selectable SuperGrok model.
  */
 async function connectionRestrictionsAndXaiReadiness(
   db: Database,
   settings: Settings,
   context: WorkspaceModelSelectionContext,
 ): Promise<{ restrictions: ConnectionModelRestrictions; xaiSubscriptionActive: boolean }> {
-  const { workspaceId, subjectId, xaiAuthoritySnapshot } = context;
-  // On the core route a frozen legacy authority snapshot no longer selects
-  // the pool: the core projection (and, at execution, the accepted turn's
-  // core authority) does.
-  const core = await loadCoreRoutedXaiCatalogReadiness(db, settings, context);
-  if (core) {
-    const restrictions = await getWorkspaceConnectionModelRestrictions(
-      db,
-      workspaceId,
-      subjectId,
-      undefined,
-      context.claudeAuthoritySnapshot,
-    );
-    return {
-      restrictions: withCoreRoutedXaiRestriction(restrictions, core),
-      xaiSubscriptionActive: core.ready,
-    };
-  }
-  if (!xaiAuthoritySnapshot) {
-    const [restrictions, xaiSubscriptionActive] = await Promise.all([
-      getWorkspaceConnectionModelRestrictions(
-        db,
-        workspaceId,
-        subjectId,
-        undefined,
-        context.claudeAuthoritySnapshot,
-      ),
-      workspaceXaiSubscriptionActive(db, settings, workspaceId, subjectId),
-    ]);
-    return { restrictions, xaiSubscriptionActive };
-  }
-  const frozen = await Promise.allSettled([
+  const [restrictions, core] = await Promise.all([
     getWorkspaceConnectionModelRestrictions(
       db,
-      workspaceId,
-      subjectId,
-      xaiAuthoritySnapshot,
+      context.workspaceId,
+      context.subjectId,
       context.claudeAuthoritySnapshot,
     ),
-    workspaceXaiSubscriptionActiveForAuthority(db, settings, {
-      workspaceId,
-      subjectId,
-      authoritySnapshot: xaiAuthoritySnapshot,
-    }),
+    loadCoreRoutedXaiCatalogReadiness(db, settings, context),
   ]);
-  const [restrictions, readiness] = frozen;
-  if (restrictions.status === "fulfilled" && readiness.status === "fulfilled") {
-    return { restrictions: restrictions.value, xaiSubscriptionActive: readiness.value };
+  if (!core) {
+    return { restrictions: { ...restrictions, "supergrok/": [] }, xaiSubscriptionActive: false };
   }
-  for (const result of frozen) {
-    if (result.status === "rejected" && !(result.reason instanceof XaiAuthorityPoolInactiveError)) {
-      throw result.reason;
-    }
-  }
-  const current = await getWorkspaceConnectionModelRestrictions(
-    db,
-    workspaceId,
-    subjectId,
-    undefined,
-    context.claudeAuthoritySnapshot,
-  );
   return {
-    restrictions: { ...current, "supergrok/": [] },
-    xaiSubscriptionActive: false,
+    restrictions: withCoreRoutedXaiRestriction(restrictions, core),
+    xaiSubscriptionActive: core.ready,
   };
 }
 
@@ -646,7 +583,7 @@ export async function resolveDefaultSessionModel(
  * The default a scheduled occurrence uses when its task names no model and the
  * occurrence creates its own session: resolved under the task's immutable
  * execution owner (or its creator for a workspace/service task) and the task's
- * frozen SuperGrok authority, never another member's. The worker stamps the
+ * frozen Claude authority, never another member's. The worker stamps the
  * result onto the accepted execution, so retries and recovery replay it; the
  * API's manual-trigger limit check uses the same resolution so it gates the
  * model that will run.
@@ -661,11 +598,6 @@ export async function resolveScheduledTaskDefaultModel(
     workspaceId: task.workspaceId,
     subjectId: task.ownerSubjectId ?? task.createdBy.subjectId,
     claudeAuthoritySnapshot: await getScheduledTaskClaudeProviderAccountAuthoritySnapshot(
-      db,
-      task.workspaceId,
-      task.id,
-    ),
-    xaiAuthoritySnapshot: await getScheduledTaskXaiProviderAccountAuthoritySnapshot(
       db,
       task.workspaceId,
       task.id,

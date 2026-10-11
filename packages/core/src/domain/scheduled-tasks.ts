@@ -19,6 +19,7 @@ import {
   type FirstPartyMcpToolPolicySettings,
   type Settings,
 } from "@opengeni/config";
+import { WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1 } from "@opengeni/contracts";
 import {
   ATLASSIAN_NATIVE_RETIRED_MESSAGE,
   isRetiredNativeAtlassianSource,
@@ -66,7 +67,6 @@ import {
   getScheduledScopedRigVersionMetadata,
   getScheduledTask,
   getScheduledTaskIncludingDeletedForUpdate,
-  getScheduledTaskXaiProviderAccountAuthoritySnapshot,
   getSandbox,
   getSessionTurnXaiProviderAccountAuthoritySnapshot,
   getSession,
@@ -80,7 +80,6 @@ import {
   updateScheduledTask,
   ScheduledTaskHeadChangedError,
   withWorkspaceSubjectRls,
-  resolveXaiProviderAccountAuthoritySnapshotForAcceptance,
   type Database,
   type ScheduledTaskCreatorPolicy,
   type SessionCommandActor,
@@ -545,10 +544,10 @@ export async function createValidatedScheduledTask(input: {
           creationInitiator.actor.sessionId,
           creationInitiator.actor.turnId,
         )
-      : await resolveXaiProviderAccountAuthoritySnapshotForAcceptance(input.db, {
-          workspaceId: input.grant.workspaceId,
-          subjectId: input.grant.subjectId,
-        });
+      : // SuperGrok's v1 value is never computed from live state after its
+        // cutover: new work writes the column default (design 5.3, "v1
+        // columns after a provider's cutover").
+        WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1;
   const claudeProviderAccountAuthoritySnapshot: ClaudeProviderAccountAuthoritySnapshotV1 =
     creationInitiator.actor
       ? await getSessionTurnClaudeProviderAccountAuthoritySnapshot(
@@ -1751,21 +1750,6 @@ export async function validatedScheduledTaskUpdate(input: {
       ),
     });
     if (beforeUpdateCommit) update.beforeUpdateCommit = beforeUpdateCommit;
-  }
-  const existingXaiAuthority = await getScheduledTaskXaiProviderAccountAuthoritySnapshot(
-    input.db,
-    input.existing.workspaceId,
-    input.existing.id,
-  );
-  if (
-    existingXaiAuthority.scope === "user" &&
-    materialExecutionChange &&
-    (input.existing.createdBy.kind !== "subject" ||
-      input.existing.createdBy.subjectId !== input.grant.subjectId)
-  ) {
-    throw new HTTPException(409, {
-      message: "changing a user-scoped xAI scheduled task requires the same causal human",
-    });
   }
   if (materialExecutionChange) {
     await assertScheduledTaskMutationOwner(input.db, input.grant, input.existing.id);

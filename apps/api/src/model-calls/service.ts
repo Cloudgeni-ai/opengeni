@@ -60,18 +60,11 @@ import {
   SingleModelCallUnsupportedError,
   type SingleModelCallResult,
 } from "@opengeni/runtime/model-call";
-import {
-  XAI_CLIENT_VERSION,
-  XAI_SUBSCRIPTION_MODEL_ID_PREFIX,
-  XaiSubscriptionReloginRequired,
-  xaiSubscriptionRequestStorage,
-  type XaiFetch,
-} from "@opengeni/xai-subscription";
+import { XaiSubscriptionReloginRequired, type XaiFetch } from "@opengeni/xai-subscription";
 import {
   creditDebitAttributionForGrant,
   withAccessGrantSessionRlsContext,
 } from "../access-grant-rls";
-import { buildXaiSubscriptionAuthorization } from "../xai-subscription-auth";
 
 export type ModelCallServiceDeps = {
   db: Database;
@@ -204,7 +197,10 @@ export function createModelCallService(deps: ModelCallServiceDeps): ModelCallSer
           subscription === "codex"
             ? await withCodexOperation(deps, settings, input, model, execute)
             : subscription === "xai"
-              ? await withXaiSubscription(deps, input, execute)
+              ? // SuperGrok runs only on the shared core, which has no single
+                // model-call operation yet: fail closed (the legacy pool path
+                // was deleted after the SuperGrok cutover).
+                failXaiModelCall()
               : await execute();
       } catch (error) {
         const mapped = publicModelCallError(error);
@@ -328,45 +324,8 @@ async function withClaudeSubscriptionCredential(
   );
 }
 
-async function withXaiSubscription<T>(
-  deps: ModelCallServiceDeps,
-  input: ModelCallInput,
-  run: () => Promise<T>,
-): Promise<T> {
-  let authorization: Awaited<ReturnType<typeof buildXaiSubscriptionAuthorization>>;
-  try {
-    authorization = await buildXaiSubscriptionAuthorization({
-      db: deps.db,
-      settings: deps.settings,
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      subjectId: input.subjectId,
-      shardKey: input.requestId,
-      sessionId: input.requestId,
-      ...(deps.xaiFetch ? { fetch: deps.xaiFetch } : {}),
-    });
-  } catch (error) {
-    if (error instanceof XaiSubscriptionReloginRequired) {
-      throw subscriptionReconnectRequired("SuperGrok");
-    }
-    throw subscriptionCapacityUnavailable("SuperGrok");
-  }
-  let sequence = 0;
-  return await xaiSubscriptionRequestStorage.run(
-    {
-      clientVersion: XAI_CLIENT_VERSION,
-      sessionId: input.requestId,
-      turnId: input.requestId,
-      getToken: authorization.context.getToken,
-      refresh: authorization.context.refresh,
-      resolveModel: (model) =>
-        model.startsWith(XAI_SUBSCRIPTION_MODEL_ID_PREFIX)
-          ? model.slice(XAI_SUBSCRIPTION_MODEL_ID_PREFIX.length)
-          : model,
-      nextRequestId: () => `completion:${input.requestId}:${++sequence}`,
-    },
-    run,
-  );
+function failXaiModelCall(): never {
+  throw subscriptionCapacityUnavailable("SuperGrok");
 }
 
 /**

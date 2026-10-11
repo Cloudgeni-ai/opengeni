@@ -3,11 +3,8 @@ import type { GatewayRealtimeInitialItem } from "@opengeni/contracts";
 import {
   getActiveSessionHistoryItems,
   getSessionRealtimeContinuityEntries,
-  getXaiSessionAccountPin,
   readSubscriptionCoreProviderRouteForWorkspace,
   readSubscriptionCoreSessionOwner,
-  resolveXaiProviderAccountAuthoritySnapshotForAcceptance,
-  setXaiSessionAccountPin,
   SUBSCRIPTION_CORE_XAI,
   SUBSCRIPTION_CORE_XAI_PROVIDER,
   subscriptionCoreOperationConnections,
@@ -19,13 +16,11 @@ import {
   XAI_CLIENT_MODE,
   XAI_CLIENT_VERSION,
   XAI_PUBLIC_API_BASE_URL,
-  type XaiFetch,
   type XaiProxyAuthContext,
 } from "@opengeni/xai-subscription";
 
 import { openGeniRealtimeInstructions } from "./codex-realtime";
 import { projectSessionRealtimeInitialItems } from "./session-realtime-context";
-import { buildXaiSubscriptionAuthorization } from "./xai-subscription-auth";
 
 const UPSTREAM_MODEL_ID = "grok-voice-think-fast-2.0";
 
@@ -74,99 +69,15 @@ export async function createXaiRealtimeConnectionSecret(input: {
     workspaceId: input.workspaceId,
     provider: SUBSCRIPTION_CORE_XAI_PROVIDER,
   });
-  if (route === "maintenance") {
+  // SuperGrok realtime runs only on the shared core; any other route
+  // (maintenance, or no receipt) has no eligible account.
+  if (route !== "core") {
     throw new XaiRealtimeBrokerError(
       "credential_unavailable",
       "No eligible connected SuperGrok account is available",
     );
   }
-  if (route === "core") return await createCoreXaiRealtimeConnectionSecret(input);
-  const authoritySnapshot = await resolveXaiProviderAccountAuthoritySnapshotForAcceptance(
-    input.db,
-    { workspaceId: input.workspaceId, subjectId: input.subjectId },
-  );
-  let pin = await getXaiSessionAccountPin(input.db, {
-    workspaceId: input.workspaceId,
-    subjectId: input.subjectId,
-    sessionId: input.sessionId,
-    authoritySnapshot,
-  });
-  let auth: Awaited<ReturnType<typeof buildXaiSubscriptionAuthorization>>;
-  try {
-    auth = await buildXaiSubscriptionAuthorization({
-      db: input.db,
-      settings: input.settings,
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      subjectId: input.subjectId,
-      shardKey: input.sessionId,
-      pinnedCredentialId: pin?.pinnedCredentialId ?? null,
-      pinSource: pin?.pinSource === "manual" || pin?.pinSource === "policy" ? pin.pinSource : null,
-      authoritySnapshot,
-      sessionId: input.sessionId,
-      ...(input.fetchImpl ? { fetch: input.fetchImpl as XaiFetch } : {}),
-    });
-    if (
-      auth.rotationEnabled &&
-      pin?.pinSource !== "manual" &&
-      pin?.pinnedCredentialId !== auth.credentialId
-    ) {
-      try {
-        pin = await setXaiSessionAccountPin(input.db, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          subjectId: input.subjectId,
-          sessionId: input.sessionId,
-          authoritySnapshot,
-          credentialId: auth.credentialId,
-          pinSource: "policy",
-          expectedVersion: pin?.version ?? null,
-        });
-      } catch {
-        const current = await getXaiSessionAccountPin(input.db, {
-          workspaceId: input.workspaceId,
-          subjectId: input.subjectId,
-          sessionId: input.sessionId,
-          authoritySnapshot,
-        });
-        if (current?.pinSource === "manual" && current.pinnedCredentialId !== auth.credentialId) {
-          auth = await buildXaiSubscriptionAuthorization({
-            db: input.db,
-            settings: input.settings,
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            subjectId: input.subjectId,
-            shardKey: input.sessionId,
-            pinnedCredentialId: current.pinnedCredentialId,
-            pinSource: "manual",
-            authoritySnapshot,
-            sessionId: input.sessionId,
-            ...(input.fetchImpl ? { fetch: input.fetchImpl as XaiFetch } : {}),
-          });
-        }
-      }
-    }
-  } catch {
-    throw new XaiRealtimeBrokerError(
-      "credential_unavailable",
-      "No eligible connected SuperGrok account is available",
-    );
-  }
-
-  const [history, continuity, minted] = await Promise.all([
-    getActiveSessionHistoryItems(input.db, input.workspaceId, input.sessionId),
-    getSessionRealtimeContinuityEntries(input.db, input.workspaceId, input.sessionId),
-    mintXaiClientSecret({
-      context: auth.context,
-      fetchImpl: input.fetchImpl ?? fetch,
-    }),
-  ]);
-  return {
-    ...minted,
-    upstreamModelId: UPSTREAM_MODEL_ID,
-    initialItems: projectSessionRealtimeInitialItems(history, continuity),
-    instructions: openGeniRealtimeInstructions(),
-  };
+  return await createCoreXaiRealtimeConnectionSecret(input);
 }
 
 /**

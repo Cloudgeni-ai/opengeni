@@ -1,18 +1,18 @@
 import type {
-  listOrganizationXaiSubscriptions,
-  updateOrganizationXaiSubscription,
-  updateOrganizationXaiRotation,
-  listXaiSubscriptionAccountsMetadata,
-  getXaiRotationSettings,
-  ensureXaiRotationSettings,
-  getXaiSubscriptionAccountAuthoritySnapshot,
-  resolveXaiProviderAccountAuthoritySnapshotForAcceptance,
-  setActiveXaiCredential,
-  updateXaiRotationSettings,
-  updateXaiAllocatorEligibility,
-  renameXaiSubscriptionAccount,
-  disconnectXaiSubscriptionCredentialAndRepick,
-  wakeXaiCapacityWaiters,
+  listOrganizationClaudeSubscriptions,
+  updateOrganizationClaudeSubscription,
+  updateOrganizationClaudeRotation,
+  listClaudeSubscriptionAccountsMetadata,
+  getClaudeRotationSettings,
+  ensureClaudeRotationSettings,
+  getClaudeSubscriptionAccountAuthoritySnapshot,
+  resolveClaudeProviderAccountAuthoritySnapshotForAcceptance,
+  setActiveClaudeCredential,
+  updateClaudeRotationSettings,
+  updateClaudeAllocatorEligibility,
+  renameClaudeSubscriptionAccount,
+  disconnectClaudeSubscriptionAccountAndRepick,
+  wakeClaudeCapacityWaiters,
   XaiSubscriptionAccountMetadata,
 } from "@opengeni/db";
 import { requireAccessGrant, type ApiRouteDeps } from "@opengeni/core";
@@ -39,6 +39,7 @@ import {
   coreWorkspaceDisconnect,
   coreWorkspaceRename,
   coreWorkspaceSettings,
+  requireSubscriptionCoreRoute,
   subscriptionCoreRoute,
   type SubscriptionPoolCore,
 } from "./subscription-pool-core";
@@ -46,25 +47,54 @@ const allocatorBody = SubscriptionAccountToggleRequest;
 const settingsBody = SubscriptionRotationSettingsRequest;
 const renameBody = SubscriptionAccountRenameRequest;
 
+/** The legacy pool repository; only Claude still has one (until its own cutover). */
 type PoolRepository = {
-  listOrganizationSubscriptions: typeof listOrganizationXaiSubscriptions;
-  updateOrganizationSubscription: typeof updateOrganizationXaiSubscription;
-  updateOrganizationSubscriptionRotation: typeof updateOrganizationXaiRotation;
-  listSubscriptionAccountsMetadata: typeof listXaiSubscriptionAccountsMetadata;
-  getSubscriptionRotationSettings: typeof getXaiRotationSettings;
-  ensureSubscriptionRotationSettings: typeof ensureXaiRotationSettings;
-  getSubscriptionAccountAuthoritySnapshot: typeof getXaiSubscriptionAccountAuthoritySnapshot;
-  resolveSubscriptionProviderAccountAuthoritySnapshotForAcceptance: typeof resolveXaiProviderAccountAuthoritySnapshotForAcceptance;
-  setActiveSubscriptionCredential: typeof setActiveXaiCredential;
-  updateSubscriptionRotationSettings: typeof updateXaiRotationSettings;
-  updateSubscriptionAllocatorEligibility: typeof updateXaiAllocatorEligibility;
-  renameSubscriptionAccount: typeof renameXaiSubscriptionAccount;
-  disconnectSubscriptionCredentialAndRepick: typeof disconnectXaiSubscriptionCredentialAndRepick;
-  wakeSubscriptionCapacityWaiters: typeof wakeXaiCapacityWaiters;
+  listOrganizationSubscriptions: typeof listOrganizationClaudeSubscriptions;
+  updateOrganizationSubscription: typeof updateOrganizationClaudeSubscription;
+  updateOrganizationSubscriptionRotation: typeof updateOrganizationClaudeRotation;
+  listSubscriptionAccountsMetadata: typeof listClaudeSubscriptionAccountsMetadata;
+  getSubscriptionRotationSettings: typeof getClaudeRotationSettings;
+  ensureSubscriptionRotationSettings: typeof ensureClaudeRotationSettings;
+  getSubscriptionAccountAuthoritySnapshot: typeof getClaudeSubscriptionAccountAuthoritySnapshot;
+  resolveSubscriptionProviderAccountAuthoritySnapshotForAcceptance: typeof resolveClaudeProviderAccountAuthoritySnapshotForAcceptance;
+  setActiveSubscriptionCredential: typeof setActiveClaudeCredential;
+  updateSubscriptionRotationSettings: typeof updateClaudeRotationSettings;
+  updateSubscriptionAllocatorEligibility: typeof updateClaudeAllocatorEligibility;
+  renameSubscriptionAccount: typeof renameClaudeSubscriptionAccount;
+  disconnectSubscriptionCredentialAndRepick: typeof disconnectClaudeSubscriptionAccountAndRepick;
+  wakeSubscriptionCapacityWaiters: typeof wakeClaudeCapacityWaiters;
 };
 
 /** The legacy pool account shape SuperGrok and Claude share (SuperGrok's metadata defines it). */
 export type SubscriptionPoolAccount = XaiSubscriptionAccountMetadata;
+/**
+ * The repository of a provider whose legacy runtime was deleted after its
+ * cutover: its routes serve only the core (`requireSubscriptionCoreRoute`
+ * refuses any other route first), so no legacy handler can reach these.
+ */
+function deletedLegacyRepository(displayName: string): PoolRepository {
+  const deleted = async (): Promise<never> => {
+    throw new HTTPException(503, {
+      message: `${displayName} subscriptions are served only by the shared subscription core`,
+    });
+  };
+  return {
+    listOrganizationSubscriptions: deleted,
+    updateOrganizationSubscription: deleted,
+    updateOrganizationSubscriptionRotation: deleted,
+    listSubscriptionAccountsMetadata: deleted,
+    getSubscriptionRotationSettings: deleted,
+    ensureSubscriptionRotationSettings: deleted,
+    getSubscriptionAccountAuthoritySnapshot: deleted,
+    resolveSubscriptionProviderAccountAuthoritySnapshotForAcceptance: deleted,
+    setActiveSubscriptionCredential: deleted,
+    updateSubscriptionRotationSettings: deleted,
+    updateSubscriptionAllocatorEligibility: deleted,
+    renameSubscriptionAccount: deleted,
+    disconnectSubscriptionCredentialAndRepick: deleted,
+    wakeSubscriptionCapacityWaiters: deleted,
+  };
+}
 
 /** Account CRUD uses one authority, allocator and wake contract for every pool. */
 export function registerSubscriptionAccountPoolRoutes(
@@ -75,7 +105,11 @@ export function registerSubscriptionAccountPoolRoutes(
     route: "supergrok" | "claude";
     displayName: "SuperGrok" | "Claude";
     enabled: () => boolean;
-    repository: PoolRepository;
+    /**
+     * The legacy repository, until the provider's own cutover deletes it.
+     * Without one the routes are core-only and any other route fails closed.
+     */
+    repository?: PoolRepository;
     accountJson: (
       account: XaiSubscriptionAccountMetadata,
       activeId: string | null,
@@ -87,8 +121,9 @@ export function registerSubscriptionAccountPoolRoutes(
     ) => Promise<Record<string, unknown>[]>;
     /**
      * Serve these routes from the shared subscription core once the
-     * provider's cutover receipt exists (design 5.3). Without it every route
-     * runs the legacy handler unchanged after one receipt read.
+     * provider's cutover receipt exists (design 5.3). With a legacy
+     * repository and without the receipt every route runs the legacy handler
+     * unchanged after one receipt read.
      */
     core?: SubscriptionPoolCore;
   },
@@ -109,16 +144,26 @@ export function registerSubscriptionAccountPoolRoutes(
     renameSubscriptionAccount,
     disconnectSubscriptionCredentialAndRepick,
     wakeSubscriptionCapacityWaiters,
-  } = options.repository;
+  } = options.repository ?? deletedLegacyRepository(options.displayName);
   const core = options.core;
   const coreContext = core
     ? { deps, core, displayName: options.displayName, accountJson: options.accountJson }
     : null;
-  /** The pool's runtime for this organization; `legacy` without a core binding. */
+  /**
+   * The pool's runtime for this organization: `legacy` without a core
+   * binding; a core-only pool (no legacy repository) serves only `core`.
+   */
   const route = async (accountId: () => Promise<string>) =>
-    core
-      ? await subscriptionCoreRoute(deps, options.provider, options.displayName, accountId)
-      : "legacy";
+    !core
+      ? "legacy"
+      : options.repository
+        ? await subscriptionCoreRoute(deps, options.provider, options.displayName, accountId)
+        : await requireSubscriptionCoreRoute(
+            deps,
+            options.provider,
+            options.displayName,
+            accountId,
+          );
   const workspaceRoute = (c: Context, workspaceId: string) =>
     route(async () => (await requireAccessGrant(c, deps, workspaceId, "workspace:read")).accountId);
   const workspacePath = `/v1/workspaces/:workspaceId/${options.route}`;
