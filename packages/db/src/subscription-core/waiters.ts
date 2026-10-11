@@ -107,14 +107,18 @@ export async function wakeSubscriptionCoreCapacityWaiters(
         provider,
       });
       if (cutover !== "enabled") return [];
+      // Workspaces in ascending id order (lowercase text sorts as the uuid
+      // does), as the membership commands walk them, so wakes never cross.
       const workspaceIds =
-        (input.workspaceIds ? [...new Set(input.workspaceIds)].sort() : null) ??
+        (input.workspaceIds
+          ? [...new Set(input.workspaceIds.map((id) => id.toLowerCase()))].sort()
+          : null) ??
         (
           await rawRows<{ workspace_id: string }>(
             tx,
-            sql`select workspace_id::text as workspace_id
-              from list_organization_subscription_workspace_ids(${input.accountId}::uuid)
-              order by workspace_id`,
+            sql`select inventory.workspace_id::text as workspace_id
+              from list_organization_subscription_workspace_ids(${input.accountId}::uuid) as inventory
+              order by inventory.workspace_id`,
           )
         ).map((row) => row.workspace_id);
       const touched: SubscriptionCoreWakeScope[] = [];
@@ -126,19 +130,6 @@ export async function wakeSubscriptionCoreCapacityWaiters(
         await tx.execute(
           sql`select pg_advisory_xact_lock_shared(hashtextextended(${`session-tenancy:${workspaceId}`}, 0))`,
         );
-        // The canonical prefix locks the workspace row before any session
-        // (`lockSessionEventWriteRows`; a runnable wake and a context clear
-        // take it FOR UPDATE, then the session). The outbox inserts below
-        // key-share-lock it through their foreign keys, so take it first: a
-        // wake that held a session while waiting for its workspace would
-        // deadlock with them.
-        const [workspace] = await rawRows<{ id: string }>(
-          tx,
-          sql`select id::text as id from workspaces
-            where id = ${workspaceId}::uuid and account_id = ${input.accountId}::uuid
-            for key share`,
-        );
-        if (!workspace) continue;
         const sessionFilter =
           sessionIds === null
             ? sql``
@@ -162,9 +153,28 @@ export async function wakeSubscriptionCoreCapacityWaiters(
             where account_id = ${input.accountId}::uuid
               and workspace_id = ${workspaceId}::uuid and provider = ${provider}
               ${sessionFilter}
-            order by session_id`,
+            order by subscription_capacity_waiters.session_id`,
         );
         if (waiting.length === 0) continue;
+        // The canonical prefix locks the workspace row after the tenancy
+        // fence (a visibility change or a fork takes the fence exclusively,
+        // then the workspace FOR UPDATE) and before any session
+        // (`lockSessionEventWriteRows`; a runnable wake and a context clear
+        // take it FOR UPDATE, then the session). The outbox inserts below
+        // key-share-lock it through their foreign keys, so take it before
+        // the sessions: a wake that held a session while waiting for its
+        // workspace would deadlock with them. Only a key share: session-first
+        // writers key-share it through foreign keys too, so a stronger lock
+        // here would deadlock with them. Only where there is a waiter to wake
+        // (the read above takes no row lock), so a wake does not hold
+        // workspace FOR UPDATE lockers off in workspaces it leaves alone.
+        const [workspace] = await rawRows<{ id: string }>(
+          tx,
+          sql`select id::text as id from workspaces
+            where id = ${workspaceId}::uuid and account_id = ${input.accountId}::uuid
+            for key share`,
+        );
+        if (!workspace) continue;
         for (const row of waiting) {
           // The generic durable wake is the crash-safe backstop: the global
           // dispatcher delivers it even if the typed outbox row's signal is
