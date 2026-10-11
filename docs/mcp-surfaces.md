@@ -329,6 +329,28 @@ approvals, and invocation continue through the existing runtime. Listing
 joins deferred preparation but adds no preparation barrier to the first model
 request, no shell dependency, and no change to eager/search policy defaults.
 
+### What the model sees of a tool result
+
+MCP separates content meant for the model from protocol data meant for
+clients, and the runtime keeps that split
+(`mcpResultModelContent` in `packages/runtime/src/mcp-result-custom-data.ts`):
+
+- Text blocks reach the model as text, and image blocks (PNG, JPEG, GIF, WebP)
+  as image input, so a screenshot is seen as a picture rather than as base64
+  text. Models without image input get the usual omission marker instead.
+- An embedded text resource becomes text with its URI. Audio, other image
+  types and binary resources become a one-line description (type, size, URI);
+  their bytes are never sent as text. Resource links and unknown block types are
+  shown as compact JSON without block `_meta`.
+- `structuredContent` is added once as compact JSON, and a text block that only
+  repeats it is dropped.
+- An error result starts with "The tool reported an error."
+- `_meta` and non-standard envelope fields are not sent to the model.
+
+The exact result, including `_meta`, stays in the run item's custom data and in
+the durable `agent.toolCall.output` event (inline media there becomes a
+`media_preview`), so audit, approvals and nested prefixed servers are unchanged.
+
 ### Tool argument errors
 
 First-party structured inputs reuse the native contract schemas, including
