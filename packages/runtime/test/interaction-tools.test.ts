@@ -37,6 +37,21 @@ const computerSessionId = randomUUID();
 const now = "2026-08-10T12:00:00.000Z";
 
 describe("interaction attempt tools", () => {
+  test("browser_act tells the model where upload workspace File IDs come from", () => {
+    const definitions = createInteractionAttemptToolDefinitions({
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_act"],
+      permissions: ["sessions:control"],
+      transport: partialTransport({}),
+    });
+    const act = definitions.find(
+      (definition) => definition.modelName === "interaction__browser_act",
+    )!;
+    expect(act.description).toContain("An upload action takes workspace File IDs");
+    expect(act.description).toContain("artifact.artifactId returned by sandbox_file_publish");
+  });
+
   test("native platform alternatives admit Linux arguments and retain the session boundary", async () => {
     let calls = 0;
     const definitions = createInteractionAttemptToolDefinitions({
