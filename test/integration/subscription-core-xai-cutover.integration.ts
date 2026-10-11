@@ -28,7 +28,9 @@ import {
   createDb,
   createSession,
   createXaiSubscriptionCredential,
+  peekSessionWork,
   subscriptionPoolWorkerSubject,
+  wakeSubscriptionCoreProviderCapacityWaiters,
   wakeXaiCapacityWaiters,
   withSessionActivityRlsContext,
   type DbClient,
@@ -105,6 +107,17 @@ describe.skipIf(!realDb)(
   () => {
     let owned: OwnerMigratedTestDatabase;
     let client: DbClient | null = null;
+    /** The migrated seam, set by the first case and read by the merge-gate cases. */
+    let seam: {
+      accountId: string;
+      workspaceId: string;
+      sessionId: string;
+      turnId: string;
+      credentialId: string;
+      waiterId: string;
+      generation: number;
+      wakeRevision: number;
+    } | null = null;
     const appUrl = () => {
       const url = new URL(owned.ownerUrl);
       url.username = "opengeni_app";
@@ -208,8 +221,24 @@ describe.skipIf(!realDb)(
         createdBy: { kind: "subject", subjectId },
         createdByContext: {},
       });
+      // The accepted execution policy every SuperGrok turn carries.
       const metadata = {
-        turnExecutionPolicyV1: { providerId: "supergrok-subscription", productModelId: MODEL },
+        turnExecutionPolicyV1: {
+          schemaVersion: 1,
+          productModelId: MODEL,
+          requestedModelId: null,
+          modelSource: "session",
+          reasoningEffort: "high",
+          reasoningSource: "session",
+          latencyMode: "standard",
+          latencyModeSource: "deployment",
+          providerId: "supergrok-subscription",
+          upstreamModelId: "grok-4",
+          wireApi: "responses",
+          credentialSource: { kind: "connected_subscription", provider: "xai" },
+          billing: { upstreamPayer: "connected_subscription", metering: "external" },
+          definitionVersion: `sha256:${"0".repeat(64)}`,
+        },
       };
       await withSessionActivityRlsContext(client!.db, input, async (tx) => {
         await tx.execute(
@@ -320,26 +349,133 @@ describe.skipIf(!realDb)(
       const [connection] = await owned.admin<{ provider: string; ownership: string }[]>`
         select provider, ownership from subscription_connections where id = ${credentialId}::uuid`;
       expect(connection).toEqual({ provider: "xai", ownership: "shared" });
+      seam = {
+        accountId,
+        workspaceId,
+        sessionId,
+        turnId,
+        credentialId,
+        waiterId: recorded!.waiterId,
+        generation: recorded!.generation,
+        wakeRevision: recorded!.wakeRevision,
+      };
     }, 180_000);
 
-    // Merge gate (X3 merges after X1b). At this head nothing reaches the
-    // migrated waiter: the recorded `provider: "xai"` reference reconciles
-    // `stale` through the legacy getter, the peek returns null and
-    // `peekSessionWork` reports the session runnable. On the rebase onto X1b
-    // these become passing cases against the migrated waiter, with no re-arm:
-    // (a) the recorded reference keeps waiting while the account is exhausted:
-    // the session still has exactly one core waiter, with the migrated id and
-    // generation, and that waiter observes the pending outbox wake; (b) after
-    // a core capacity change the resumed turn has the parked turn's id and
-    // execution generation; (c) the peek and `peekSessionWork` return a
-    // capacity-wait reference that reconciles to the same waiter.
-    test.todo(
-      "(a) the recorded SuperGrok reference keeps waiting on exactly the migrated waiter, no re-arm (X1b)",
-    );
-    test.todo(
-      "(b) the recorded SuperGrok reference resumes the parked turn id and generation after a core wake (X1b)",
-    );
-    test.todo("(c) the peek and peekSessionWork resolve to the migrated waiter (X1b)");
+    // The recorded `provider: "xai"` reference reaches the migrated waiter
+    // through the runtime's peek and reconcile paths, with no re-arm. The
+    // cases run in order on the seam the first case migrated.
+    const coreWaiters = async () =>
+      await owned.admin<
+        {
+          waiter_id: string;
+          generation: number;
+          wake_revision: number;
+          observed_wake_revision: number;
+        }[]
+      >`select waiter_id::text, generation::int, wake_revision::int, observed_wake_revision::int
+        from subscription_capacity_waiters
+        where workspace_id = ${seam!.workspaceId}::uuid and session_id = ${seam!.sessionId}::uuid`;
+
+    test("(c) the peek and peekSessionWork resolve to the migrated waiter", async () => {
+      expect(seam).not.toBeNull();
+      const expected = {
+        provider: "xai",
+        waiterId: seam!.waiterId,
+        generation: seam!.generation,
+        wakeRevision: seam!.wakeRevision,
+        // The unobserved wake makes the next check immediate.
+        nextCheckAt: new Date(0).toISOString(),
+      };
+      const peeked = await activities().getCodexCapacityWait({
+        accountId: seam!.accountId,
+        workspaceId: seam!.workspaceId,
+        sessionId: seam!.sessionId,
+      } as never);
+      expect(peeked).toEqual(expected);
+      const work = await withSessionActivityRlsContext(
+        client!.db,
+        { accountId: seam!.accountId, workspaceId: seam!.workspaceId },
+        (tx) => peekSessionWork(tx, seam!.workspaceId, seam!.sessionId),
+      );
+      expect(work).toEqual({ kind: "capacity-wait", ref: expected });
+    }, 180_000);
+
+    test("(a) the recorded SuperGrok reference keeps waiting on exactly the migrated waiter, no re-arm", async () => {
+      expect(seam).not.toBeNull();
+      const [wake] = await owned.admin<{ wake_revision: number }[]>`
+        select max(wake_revision)::int as wake_revision from subscription_capacity_wake_outbox
+        where workspace_id = ${seam!.workspaceId}::uuid and waiter_id = ${seam!.waiterId}::uuid`;
+      expect(wake!.wake_revision).toBe(seam!.wakeRevision);
+      // The account is still exhausted (the legacy `exhausted_until` moved
+      // with it): reconciling the recorded reference keeps the turn waiting.
+      const result = await activities().reconcileCodexCapacityWait({
+        provider: "xai",
+        accountId: seam!.accountId,
+        workspaceId: seam!.workspaceId,
+        sessionId: seam!.sessionId,
+        waiterId: seam!.waiterId,
+        generation: seam!.generation,
+      } as never);
+      expect(result).toMatchObject({
+        action: "waiting",
+        provider: "xai",
+        waiterId: seam!.waiterId,
+        generation: seam!.generation,
+      });
+      // Exactly one core waiter for the session: the migrated one, same id and
+      // generation, and it has observed the pending outbox wake.
+      expect([...(await coreWaiters())]).toEqual([
+        {
+          waiter_id: seam!.waiterId,
+          generation: seam!.generation,
+          wake_revision: seam!.wakeRevision,
+          observed_wake_revision: wake!.wake_revision,
+        },
+      ]);
+      const [turn] = await owned.admin<{ status: string; execution_generation: number }[]>`
+        select status, execution_generation::int from session_turns where id = ${seam!.turnId}::uuid`;
+      expect(turn).toEqual({ status: "waiting_capacity", execution_generation: 1 });
+    }, 180_000);
+
+    test("(b) the recorded SuperGrok reference resumes the parked turn id and generation after a core wake", async () => {
+      expect(seam).not.toBeNull();
+      // Capacity returns on the migrated connection, and the core wakes its
+      // SuperGrok waiters.
+      await owned.admin`
+        update subscription_connection_quota
+        set quota = jsonb_set(jsonb_set(quota, '{exhaustedUntil}', 'null'::jsonb), '{exhaustedKind}', 'null'::jsonb),
+          revision = revision + 1
+        where connection_id = ${seam!.credentialId}::uuid`;
+      const scopes = await wakeSubscriptionCoreProviderCapacityWaiters(client!.db, "xai", {
+        accountId: seam!.accountId,
+        reason: "quota_observed_available",
+      });
+      expect(scopes).toHaveLength(1);
+      const [waiter] = await coreWaiters();
+      expect(waiter).toMatchObject({ waiter_id: seam!.waiterId, generation: seam!.generation });
+      const result = await activities().reconcileCodexCapacityWait({
+        provider: "xai",
+        accountId: seam!.accountId,
+        workspaceId: seam!.workspaceId,
+        sessionId: seam!.sessionId,
+        waiterId: seam!.waiterId,
+        generation: seam!.generation,
+      } as never);
+      expect(result).toEqual({ action: "resumed" });
+      // The resumed turn is the parked one, at its execution generation; the
+      // waiter is gone and nothing re-armed.
+      const [turn] = await owned.admin<
+        { id: string; status: string; execution_generation: number }[]
+      >`
+        select id::text, status, execution_generation::int from session_turns
+        where session_id = ${seam!.sessionId}::uuid`;
+      expect(turn).toEqual({ id: seam!.turnId, status: "recovering", execution_generation: 1 });
+      expect([...(await coreWaiters())]).toEqual([]);
+      const [legacy] = await owned.admin<{ count: number }[]>`
+        select count(*)::int from xai_capacity_waiters
+        where session_id = ${seam!.sessionId}::uuid and status = 'waiting'`;
+      expect(legacy!.count).toBe(0);
+    }, 180_000);
 
     test("the pinned capacity-wait history, recorded as a SuperGrok wait, replays against the current workflow registry", async () => {
       const history = await supergrokCapacityWaitHistory();
