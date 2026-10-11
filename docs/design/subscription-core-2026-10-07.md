@@ -3867,17 +3867,24 @@ Facts the adapter declares, each read from today's Claude path:
     to every model of the account (deliberate, recorded difference toward
     dispatch). It is bounded like the others: a model whose own limit the
     overage does not cover is refused once, and that response's headers
-    record its limit again. A
-    rejected request whose overage was refused with a known reset ends the
-    blocks that response reports for the models it concerns (its own model;
+    record its limit again. A rejected request whose overage was refused
+    with a known reset before the request's own plan reset ends the blocks
+    that response reports for the models it concerns (its own model;
     without one, the family its limit names, else every model) no later
-    than that reset, as today's `nextCheckAt` does for the models whose
-    capacity that request decides, and only while the request's own plan
-    limit still runs; the other models keep waiting for their own limits. An overage allowance whose reset has already passed
+    than the overage reset, as today's `nextCheckAt` does for the models
+    whose capacity that request decides, and only while the request's own
+    plan limit still runs; the other models keep waiting for their own
+    limits. An overage reset at or after the plan reset ends nothing, as
+    today's rule never rechecks then. After such a recheck, today's rule
+    blocks the model again once the plan reset passes if a longer limit
+    (a family window) still runs; one cooldown cannot express "free, then
+    blocked again", so the core keeps the model free: a recorded difference
+    toward dispatch, bounded by one refused request, whose headers record
+    the limit again. An overage allowance whose reset has already passed
     covers nothing. One whose reset falls before the plan limit's covers
     the limit until a newer response arrives, where today's rule blocks
     again after the overage reset: a recorded difference toward dispatch,
-    bounded by one refused request, whose headers record the limit again.
+    bounded the same way.
   - The five-hour and seven-day windows decide the connection's capacity
     (`rejected`, or full without a status, is `exhausted` until the reset, a
     minute when unknown). A model-family window (Opus, Sonnet) never decides
@@ -3915,13 +3922,16 @@ Facts the adapter declares, each read from today's Claude path:
     reading keeps it. Recording the window in `exhaustedUntil` instead
     would let no later usage reading show an early reset, which today's
     reading does. So C1a, before any Claude call site exists, makes the
-    shared `applyQuotaObservation` keep a stored exhausted window that a
-    newer observation omits until that window's reset (provider-neutral,
-    toward waiting, with the Codex and SuperGrok suites run against it),
-    with a two-observation test. The adapter's unit tests hold that test as
-    `test.failing` until the fix lands, and C3 (which registers Claude)
-    requires it to pass as an ordinary test. C3's combined cutover ledger
-    test covers the case on real data.
+    shared `applyQuotaObservation` keep a stored exhausted window with a
+    known future reset that a newer response-header reading or refusal
+    omits, until that window's reset (provider-neutral, toward waiting, with
+    the Codex and SuperGrok suites run against it). A usage-endpoint reading
+    is complete and still replaces the stored windows, so it can show an
+    early reset, including of a refusal's `exhausted_without_reset` fallback
+    window. A two-observation shared test covers all three sources, and the
+    adapter's former `test.failing` case is an ordinary test, which C3
+    (which registers Claude) requires. C3's combined cutover ledger test
+    covers the case on real data.
   - C3 re-keys the legacy cooldowns and restrictions: the legacy reading is
     keyed by Anthropic's upstream model id, the core by product model id, so
     the cutover maps each through `subscriptionCoreClaudeProductModelIds`
