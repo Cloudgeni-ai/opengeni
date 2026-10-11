@@ -72,6 +72,8 @@ const subscriptionCoreMigrations = [
   "0728_subscription_core_personal_connect_format.sql",
   // Adds owner policies on the person preferences table from withheld 0642.
   "0729_subscription_person_preferences_owner.sql",
+  // Built from the owner reader withheld 0715 rewrites; it follows 0715.
+  "0720_subscription_core_personal_connection_versions.sql",
 ] as const;
 const key = Buffer.alloc(32, 67);
 const ids = {
