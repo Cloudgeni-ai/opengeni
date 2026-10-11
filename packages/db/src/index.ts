@@ -22107,6 +22107,8 @@ export async function updateSessionVariableSets(
                   and goal_row.session_id = ${input.sessionId}
                   and goal_row.status = 'active')
               then 'active_goal'
+            -- A blocked turn's core waiter of any provider keeps the session
+            -- busy (fail closed), including providers without a wait vocabulary.
             when exists (select 1 from subscription_capacity_waiters core_waiter
                 where core_waiter.workspace_id = ${input.workspaceId}::uuid
                   and core_waiter.session_id = ${input.sessionId}::uuid)
