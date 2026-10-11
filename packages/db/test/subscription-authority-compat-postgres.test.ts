@@ -34,6 +34,13 @@ const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const COMPAT = "0715_subscription_authority_compat.sql";
 // 0716 requires 0715's routines: withheld with it and applied by the same run.
 const FENCES = "0716_subscription_authority_fences.sql";
+// The drained SuperGrok cutover requires 0717; held back (never applied) so
+// this database models the rolling state before it.
+const XAI_CUTOVER = "0718_subscription_core_xai_cutover.sql";
+/** This binary requires the SuperGrok receipt, which the rolling state lacks. */
+const BEFORE_XAI_CUTOVER = [
+  "database is missing the xai subscription-core cutover receipt (0718_subscription_core_xai_cutover.sql); apply the pending migrations first",
+];
 const CORE_SUBJECT = "service:subscription-core";
 let database: OwnerMigratedTestDatabase | null = null;
 let client: DbClient | null = null;
@@ -403,7 +410,7 @@ beforeAll(async () => {
   const owner = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
-    await owner`insert into schema_migrations(name) values (${COMPAT}), (${FENCES})`;
+    await owner`insert into schema_migrations(name) values (${COMPAT}), (${FENCES}), (${XAI_CUTOVER})`;
     await migrate(database.ownerUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
   } finally {
@@ -490,7 +497,10 @@ afterAll(async () => {
 
 describe.skipIf(!realDb)("0715 subscription authority compatibility", () => {
   test("applies over a provisioned database and keeps the runtime posture before and after provisioning", async () => {
-    expect(posture).toEqual({ unprovisioned: [], provisioned: [] });
+    expect(posture).toEqual({
+      unprovisioned: BEFORE_XAI_CUTOVER,
+      provisioned: BEFORE_XAI_CUTOVER,
+    });
     // Every configured application role can run the three runtime routines
     // before provisioning; the owner-only check is never granted.
     expect(customRoleGrantsBeforeProvision).toEqual({

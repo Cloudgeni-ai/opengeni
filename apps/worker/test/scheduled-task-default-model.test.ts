@@ -29,6 +29,14 @@ import {
 } from "@opengeni/testing";
 import { createScheduledTaskActivities } from "../src/activities/scheduled-tasks";
 import type { ActivityServices } from "../src/activities/types";
+import { SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS } from "@opengeni/db";
+
+// Characterizes the legacy SuperGrok runtime, which runs only before the
+// drained SuperGrok cutover: the database withholds that migration. Removed
+// with the legacy runtime.
+const LEGACY_XAI_WORLD = {
+  withheldMigrations: [SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.xai!],
+};
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -42,7 +50,7 @@ beforeAll(async () => {
     slugs: ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"],
   });
   restoreModelsProbe = () => modelsProbe.mockRestore();
-  shared = await acquireSharedTestDatabase("worker-scheduled-default-model");
+  shared = await acquireSharedTestDatabase("worker-scheduled-default-model", LEGACY_XAI_WORLD);
   if (!shared) {
     available = false;
     console.warn("[worker-scheduled-default-model] PostgreSQL unavailable, skipping");

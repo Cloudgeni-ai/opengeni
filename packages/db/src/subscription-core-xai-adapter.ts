@@ -170,9 +170,6 @@ export function subscriptionCoreXaiProvider(
     sessionCompactionLock: null,
     errors: subscriptionCoreDefaultErrors("SuperGrok"),
     settings: { primaryColumn: "xai_primary_connection_id" },
-    // No organization reach table for SuperGrok (design 5.1.3): an
-    // organization-scope connection already reaches later workspaces.
-    organizationAllocatorChanged: null,
   };
 }
 

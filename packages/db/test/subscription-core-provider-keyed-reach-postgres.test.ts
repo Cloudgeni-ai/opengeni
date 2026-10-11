@@ -44,6 +44,14 @@ import { wakeSubscriptionCoreCapacityWaiters } from "../src/subscription-core/wa
 const REACH_MIGRATION = "0713_subscription_core_provider_keyed_reach.sql";
 // 0714 redefines 0713's reach setters, so it is withheld and applied with it.
 const LATER_MIGRATIONS = ["0714_subscription_workspace_managed_organization_accounts.sql"];
+// The drained SuperGrok cutover is a maintenance step this rolling test never
+// runs: it stays recorded as applied throughout.
+const MAINTENANCE_MIGRATIONS = ["0718_subscription_core_xai_cutover.sql"];
+// A binary that knows 0718 reports only the missing SuperGrok receipt until
+// the maintenance step runs.
+const BEFORE_XAI_CUTOVER = [
+  "database is missing the xai subscription-core cutover receipt (0718_subscription_core_xai_cutover.sql); apply the pending migrations first",
+];
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const key = Buffer.alloc(32, 71);
 const MODEL = "codex/gpt-5.5";
@@ -412,7 +420,7 @@ beforeAll(async () => {
   try {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
     await owner`insert into schema_migrations(name) values (${REACH_MIGRATION})`;
-    for (const later of LATER_MIGRATIONS)
+    for (const later of [...LATER_MIGRATIONS, ...MAINTENANCE_MIGRATIONS])
       await owner`insert into schema_migrations(name) values (${later})`;
     await migrate(database.ownerUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
@@ -502,7 +510,7 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
         sql`select current_user as role`,
       );
       expect(current?.role).toBe("opengeni_app");
-      expect(staged!.unprovisionedPosture).toEqual([]);
+      expect(staged!.unprovisionedPosture).toEqual(BEFORE_XAI_CUTOVER);
       // Every runtime routine 0713 adds is executable before provisioning,
       // which a previous binary's readiness requires of any opengeni_private
       // routine it does not know; its owner-only routines live outside
@@ -537,7 +545,7 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
         },
       ]);
       const posture = await inspectRuntimeDatabasePosture(client!.db, POSTURE_OPTIONS);
-      expect(evaluateRuntimeDatabasePosture(posture, POSTURE_OPTIONS)).toEqual([]);
+      expect(evaluateRuntimeDatabasePosture(posture, POSTURE_OPTIONS)).toEqual(BEFORE_XAI_CUTOVER);
       // Provisioning again leaves those grants exactly as the migration set
       // them.
       const provisionedAcl = [
@@ -932,11 +940,12 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
         select provider, shared_workspaces as shared
         from opengeni_private.subscription_codex_auto_assignments where connection_id = ${id}::uuid`;
       expect(row).toEqual({ provider: "codex", shared: true });
-      // A provider the shared core has no binding for is refused before any read.
+      // A provider the shared core has no binding for (Claude until its
+      // cutover) is refused before any read.
       for (const work of [
-        () => getSubscriptionCoreModelConnectionAccess(client!.db, "xai", target),
+        () => getSubscriptionCoreModelConnectionAccess(client!.db, "claude", target),
         () =>
-          updateSubscriptionCoreModelConnectionAccess(client!.db, "xai", target, {
+          updateSubscriptionCoreModelConnectionAccess(client!.db, "claude", target, {
             ...saved!,
             version: 2,
           }),
@@ -1034,7 +1043,7 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
       await expect(
         wakeSubscriptionCoreCapacityWaiters(
           client!.db,
-          "xai",
+          "claude",
           { accountId: org.accountId, reason: "quota_observed_available" },
           enqueue,
         ),
@@ -1356,10 +1365,11 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
         ),
       ).toMatchObject({ code: "23503" });
 
-      // The TypeScript registry still has no binding for it, so the shared
-      // core's TypeScript entry points refuse it.
+      // The TypeScript registry has no binding for a provider before its
+      // cutover (Claude; SuperGrok has one since X3), so the shared core's
+      // TypeScript entry points refuse it.
       await expect(
-        getSubscriptionCoreModelConnectionAccess(client!.db, "xai", {
+        getSubscriptionCoreModelConnectionAccess(client!.db, "claude", {
           connectionId: xai,
           accountId: org.accountId,
           workspaceId: null,
