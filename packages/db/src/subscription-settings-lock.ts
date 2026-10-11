@@ -5,12 +5,12 @@ import { rawRows, type Database } from "./database";
 
 /**
  * Settings transactions run at READ COMMITTED whatever the connection
- * default: 0723's guard and lock writer refuse a widening write or a lock
+ * default: 0724's guard and lock writer refuse a widening write or a lock
  * change under an older snapshot, which could miss a concurrent lock.
  */
 export const SUBSCRIPTION_SETTINGS_TRANSACTION = { isolationLevel: "read committed" } as const;
 
-/** The detail prefix migration 0723's guard raises (SQLSTATE 42501) for a locked setting. */
+/** The detail prefix migration 0724's guard raises (SQLSTATE 42501) for a locked setting. */
 const LOCK_DETAIL = "subscription_setting_locked:";
 
 /** The write would override settings the organization locked. */
@@ -22,7 +22,7 @@ export class SubscriptionSettingsLockedError extends Error {
 }
 
 /**
- * The settings named by a lock refusal from the 0723 guard, found in the
+ * The settings named by a lock refusal from the 0724 guard, found in the
  * error or its causes; null when the error is not a lock refusal. Every
  * writer of `subscription_settings` meets the guard, so callers that treat
  * 42501 as "not visible" must check this first.
@@ -51,12 +51,12 @@ export function throwIfSubscriptionSettingLocked(error: unknown): void {
 }
 
 /**
- * Take the organization's settings lock: the transaction advisory lock 0723's
+ * Take the organization's settings lock: the transaction advisory lock 0724's
  * guard (shared) and lock writer (exclusive) use. The repository's workspace
  * writers take it shared before any row lock, and a lock change queues for it
  * exclusively before any row lock, so later widening writes queue behind the
  * change instead of starving it. Holding it exclusively, a lock change never
- * waits for a workspace row (0723 locks them NOWAIT): a writer outside the
+ * waits for a workspace row (0724 locks them NOWAIT): a writer outside the
  * repository (an older release during a rolling upgrade, a raw or migration
  * writer) may hold a row while it waits for this lock.
  */
@@ -74,7 +74,7 @@ export async function lockSubscriptionSettings(
   );
 }
 
-/** The detail 0723's lock writer raises (SQLSTATE 55P03) while a workspace write is in flight. */
+/** The detail 0724's lock writer raises (SQLSTATE 55P03) while a workspace write is in flight. */
 const BUSY_DETAIL = "subscription_settings_lock_busy";
 
 /**
@@ -88,7 +88,7 @@ export class SubscriptionSettingsBusyError extends Error {
   }
 }
 
-/** Whether the error, or one of its causes, is 0723's lock-writer yield. */
+/** Whether the error, or one of its causes, is 0724's lock-writer yield. */
 export function isSubscriptionSettingsLockBusy(error: unknown): boolean {
   const queue: unknown[] = [error];
   for (let index = 0; index < queue.length && index < 16; index += 1) {

@@ -2041,7 +2041,7 @@ async function personalCase(): Promise<void> {
 
   // The personal primary is an upsert: its guard holds the shared settings
   // lock while it waits for the Personal row a lock change has locked. The
-  // lock change yields and retries (0723), so neither side deadlocks.
+  // lock change yields and retries (0724), so neither side deadlocks.
   for (let round = 0; round < 12; round += 1) {
     await updateOrganizationSubscriptionSettings(client!.db, {
       organizationId: org.accountId,
@@ -2070,7 +2070,7 @@ async function personalCase(): Promise<void> {
     patch: { locked: [] },
   });
 
-  // A rotation lock (0723) binds the person's own primary too: it is refused
+  // A rotation lock (0724) binds the person's own primary too: it is refused
   // as a lock (not a 500), and nothing is written.
   await shared!.admin`update subscription_settings set locked_settings = '{rotation}'
     where account_id = ${org.accountId}::uuid and workspace_id is null`;

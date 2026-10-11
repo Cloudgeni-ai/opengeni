@@ -1,5 +1,5 @@
 // Organization settings with lockable workspace overrides (design 3.3,
-// contract SUB-SET-01..05, migration 0723) on real PostgreSQL. Every check of
+// contract SUB-SET-01..05, migration 0724) on real PostgreSQL. Every check of
 // authority runs as the restricted application role (NOSUPERUSER,
 // NOBYPASSRLS); the superuser handle only seeds rows and reads ground truth.
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
@@ -44,7 +44,7 @@ setDefaultTimeout(180_000);
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let shared: OwnerMigratedTestDatabase | null = null;
 let client: DbClient | null = null;
-const LOCKS_MIGRATION = "0723_subscription_settings_locks.sql";
+const LOCKS_MIGRATION = "0724_subscription_settings_locks.sql";
 /** Rolling-migration evidence gathered in beforeAll (asserted in its own test). */
 let rolling: {
   postureViolations: string[];
@@ -73,7 +73,7 @@ beforeAll(async () => {
   // FORCE ROW LEVEL SECURITY engages for the guard's own (owner) read.
   shared = await acquireOwnerMigratedTestDatabase("subscription-settings-locks");
   if (!shared) throw new Error("Real PostgreSQL is required");
-  // Stage the deployment before 0723: every other migration applied and roles
+  // Stage the deployment before 0724: every other migration applied and roles
   // provisioned, with existing workspace overrides in place.
   const owner = postgres(shared.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
@@ -98,7 +98,7 @@ beforeAll(async () => {
     await shared.admin`insert into subscription_settings (account_id, workspace_id, fallback_order)
       values (${f.accountId}::uuid, ${f.betaId}::uuid, '{"codex/b":[]}'::jsonb)`;
     const before = await effectiveSnapshot(staged.db, f);
-    // The rolling step: 0723 alone, while the older binary still runs.
+    // The rolling step: 0724 alone, while the older binary still runs.
     await migrate(shared.ownerUrl);
     const options = {
       rlsStrategy: "force" as const,
@@ -238,7 +238,7 @@ describe.skipIf(!realDb)("subscription settings with lockable workspace override
     expect(table).toEqual({ forced: true, owner: shared!.ownerRole });
   });
 
-  test("rolling: 0723 keeps every effective setting and the older binary's runtime posture", () => {
+  test("rolling: 0724 keeps every effective setting and the older binary's runtime posture", () => {
     expect(rolling).not.toBeNull();
     expect(rolling!.postureViolations).toEqual([]);
     expect(rolling!.after).toEqual(rolling!.before);
