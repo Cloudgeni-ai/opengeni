@@ -163,6 +163,13 @@ const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   "subscription_compat_leave_scope(text[])",
   "subscription_compat_effective(text, text, uuid, uuid, bigint)",
   "enforce_subscription_authority_compat()",
+  // Migration 0716: the fences' helpers (the v2 copy rule, a scheduled
+  // firing's v2 value and the personal-entry liveness check), called only by
+  // owner-run fences and functions.
+  "subscription_v2_copy_matches(jsonb, jsonb)",
+  "subscription_scheduled_firing_v2(uuid, uuid, uuid, bigint)",
+  "subscription_personal_entry_serviceable(uuid, jsonb)",
+  "subscription_scheduled_run_personal_entries(uuid, uuid, uuid)",
   // Migration 0689: the owner-only Codex cutover receipt and the trigger that
   // seeds organizations created later onto the shared core.
   "subscription_codex_cutover_v1_active()",
@@ -836,6 +843,19 @@ export const SUBSCRIPTION_AUTHORITY_COMPAT_OWNER_ROUTINES = [
   "enforce_subscription_authority_compat()",
 ] as const;
 
+/**
+ * Migration 0716: the fences' owner-only helpers in
+ * opengeni_subscription_internal (the v2 copy rule, a scheduled firing's v2
+ * value and the personal-entry liveness check). Only owner-run fences and
+ * functions call them.
+ */
+export const SUBSCRIPTION_AUTHORITY_FENCE_OWNER_ROUTINES = [
+  "subscription_v2_copy_matches(jsonb, jsonb)",
+  "subscription_scheduled_firing_v2(uuid, uuid, uuid, bigint)",
+  "subscription_personal_entry_serviceable(uuid, jsonb)",
+  "subscription_scheduled_run_personal_entries(uuid, uuid, uuid)",
+] as const;
+
 export const SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES = [
   "authorize_subscription_ownerless_session_access(uuid, uuid, uuid, uuid)",
   "authorize_subscription_personal_placement_access(uuid, uuid, uuid, uuid, text, uuid, bigint, text, text)",
@@ -906,6 +926,7 @@ export const SUBSCRIPTION_M3_OWNER_ONLY_PRIVATE_ROUTINES = [
   ...SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES,
   ...SUBSCRIPTION_CORE_PRECURSOR_OWNER_ROUTINES,
   ...SUBSCRIPTION_AUTHORITY_COMPAT_OWNER_ROUTINES,
+  ...SUBSCRIPTION_AUTHORITY_FENCE_OWNER_ROUTINES,
 ] as const;
 
 const UNIFIED_KNOWLEDGE_ROUTINES = [
@@ -2818,6 +2839,13 @@ export function evaluateRuntimeDatabasePosture(
         routine.name.startsWith("copy_subscription_authority_compat("),
       )
         ? SUBSCRIPTION_AUTHORITY_COMPAT_OWNER_ROUTINES
+        : []),
+      // 0716 adds no runtime routine: once any of its helpers exists, all of
+      // them must, owner-only and with a safe search path.
+      ...(posture.subscriptionOwnerRoutines.some((routine) =>
+        (SUBSCRIPTION_AUTHORITY_FENCE_OWNER_ROUTINES as readonly string[]).includes(routine.name),
+      )
+        ? SUBSCRIPTION_AUTHORITY_FENCE_OWNER_ROUTINES
         : []),
     ];
     for (const signature of required) {

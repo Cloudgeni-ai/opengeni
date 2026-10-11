@@ -2210,7 +2210,12 @@ BEGIN
       'subscription_compat_enter_scope(uuid,uuid)',
       'subscription_compat_leave_scope(text[])',
       'subscription_compat_effective(text,text,uuid,uuid,bigint)',
-      'enforce_subscription_authority_compat()'
+      'enforce_subscription_authority_compat()',
+      -- Migration 0716: the fences' helpers are owner-only.
+      'subscription_v2_copy_matches(jsonb,jsonb)',
+      'subscription_scheduled_firing_v2(uuid,uuid,uuid,bigint)',
+      'subscription_personal_entry_serviceable(uuid,jsonb)',
+      'subscription_scheduled_run_personal_entries(uuid,uuid,uuid)'
     ] LOOP
       IF to_regprocedure('opengeni_subscription_internal.' || routine_signature) IS NOT NULL THEN
         EXECUTE format(

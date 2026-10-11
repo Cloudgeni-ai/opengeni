@@ -57,6 +57,7 @@ import {
   evaluateRuntimeDatabasePosture,
   inspectRuntimeDatabasePosture,
   SUBSCRIPTION_AUTHORITY_COMPAT_OWNER_ROUTINES,
+  SUBSCRIPTION_AUTHORITY_FENCE_OWNER_ROUTINES,
   SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES,
   SUBSCRIPTION_CORE_PRECURSOR_OWNER_ROUTINES,
 } from "../src/runtime-posture";
@@ -1718,8 +1719,8 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
       expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
       // Exactly the four Codex writer internals, the neutral ones (0707, with
       // 0713's provider-keyed auto-assignment apply path), the cutover-receipt
-      // and cutover-identity triggers (0712) and the authority compatibility
-      // internals (0715).
+      // and cutover-identity triggers (0712), the authority compatibility
+      // internals (0715) and the fences' helpers (0716).
       expect(posture.subscriptionOwnerRoutines!.map((routine) => routine.name).sort()).toEqual(
         [
           "subscription_codex_writer_context(uuid, uuid, text)",
@@ -1729,6 +1730,7 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
           ...SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES,
           ...SUBSCRIPTION_CORE_PRECURSOR_OWNER_ROUTINES,
           ...SUBSCRIPTION_AUTHORITY_COMPAT_OWNER_ROUTINES,
+          ...SUBSCRIPTION_AUTHORITY_FENCE_OWNER_ROUTINES,
         ].sort(),
       );
       await disconnectDesignationCase();

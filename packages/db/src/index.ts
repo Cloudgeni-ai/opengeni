@@ -369,6 +369,7 @@ import {
   codexSubscriptionAuthorityV2OrEmptyInTransaction,
 } from "./subscription-core-codex-bindings";
 export { EMPTY_SUBSCRIPTION_AUTHORITY_V2 } from "./subscription-core-acceptance-authority";
+import { subscriptionAuthorityCompatForCarriersInTransaction } from "./subscription-core-acceptance-authority";
 export { SessionMessageSearchCursorError } from "./session-message-search";
 export * from "./artifact-catalog";
 export * from "./scheduled-slack-bot-messages";
@@ -69361,7 +69362,10 @@ const frozenClaudeExecutionAuthority = (
   update: Parameters<typeof frozenSubscriptionExecutionAuthority>[0],
 ) => frozenSubscriptionExecutionAuthority(update, "claude");
 
-function systemUpdateExecutionAuthorityKey(update: BoundedSystemUpdate): string {
+function systemUpdateExecutionAuthorityKey(
+  update: BoundedSystemUpdate,
+  compatAuthority?: Readonly<Record<string, unknown>>,
+): string {
   const personalConnectionDelegations = parsedPersonalConnectionDelegations(
     update.personalConnectionDelegations,
     `session_system_updates:${update.id}`,
@@ -69379,7 +69383,16 @@ function systemUpdateExecutionAuthorityKey(update: BoundedSystemUpdate): string 
     // Codex v2 (M3 PR 3b): updates frozen with different values never share
     // one internal turn.
     codexV2: update.subscriptionAuthority ?? null,
+    // After a provider's own drained cutover (M4 PR 0b): its effective
+    // accepted authority, because its post-cutover v1 default equals a real
+    // pre-cutover `workspace` value. Absent while no provider holds records.
+    ...(compatAuthority === undefined ? {} : { compatAuthority }),
   });
+}
+
+/** 0715's effective authority for post-receipt work without a v2 entry or record. */
+function isPostReceiptWithoutAuthority(value: unknown): boolean {
+  return stableJson(value ?? null) === stableJson({ authority: "none" });
 }
 
 function systemUpdateCausalHumanTurnId(
@@ -69474,11 +69487,13 @@ function systemUpdatesCanCoalesceForExecution<T extends BoundedSystemUpdate>(
   candidate: T,
   causalExecutionKeys: ReadonlyMap<string, string | null>,
   receivingSessionId: string,
+  compatAuthority: (update: T) => Readonly<Record<string, unknown>> | undefined,
 ): boolean {
   const first = selected[0];
   if (
     !first ||
-    systemUpdateExecutionAuthorityKey(first) !== systemUpdateExecutionAuthorityKey(candidate)
+    systemUpdateExecutionAuthorityKey(first, compatAuthority(first)) !==
+      systemUpdateExecutionAuthorityKey(candidate, compatAuthority(candidate))
   ) {
     return false;
   }
@@ -69648,6 +69663,18 @@ async function planInboxBatch(
     contextTurnId: receivingTurn?.id ?? session.executionContextTurnId,
     updates,
   });
+  // Effective accepted authority per provider holding compatibility records
+  // (empty, and so absent from every key, until a provider's own cutover).
+  const compat = await subscriptionAuthorityCompatForCarriersInTransaction(tx, {
+    workspaceId: session.workspaceId,
+    carriers: [
+      ...(loaded.context ? [{ kind: "session_turn" as const, id: loaded.context.id }] : []),
+      ...updates.map((update) => ({ kind: "session_system_update" as const, id: update.id })),
+    ],
+  });
+  const compatOf = (key: string) => (compat.size === 0 ? undefined : (compat.get(key) ?? {}));
+  const updateCompat = (update: typeof schema.sessionSystemUpdates.$inferSelect) =>
+    compatOf(`session_system_update:${update.id}`);
   const compatible = (update: typeof schema.sessionSystemUpdates.$inferSelect) => {
     if (loaded.eligibleIds.has(update.id)) return true;
     const context = loaded.context;
@@ -69675,6 +69702,8 @@ async function planInboxBatch(
     )
       return false;
     const human = turnHuman(context);
+    const ownCompat = updateCompat(update);
+    const contextCompat = compatOf(`session_turn:${context.id}`);
     const contextReceipt = {
       ...update,
       personalConnectionDelegations: context.personalConnectionDelegations,
@@ -69692,11 +69721,27 @@ async function planInboxBatch(
         claudeAuthoritySubjectId: human,
       },
     };
+    // The provider's effective authority must equal the context's, unless
+    // the update froze no v2 value and is post-receipt work without a record:
+    // like a Codex value it froze none of, it follows the context (the 0608
+    // fence applies the same rule).
+    const receiptCompat =
+      ownCompat === undefined
+        ? undefined
+        : Object.fromEntries(
+            Object.keys(ownCompat).map((provider) => [
+              provider,
+              update.subscriptionAuthority == null &&
+              isPostReceiptWithoutAuthority(ownCompat[provider])
+                ? ownCompat[provider]
+                : (contextCompat?.[provider] ?? null),
+            ]),
+          );
     const causalKey = systemUpdateCausalExecutionKey(update, loaded.causalKeys, session.id);
     const ownKey = loaded.causalKeys.get(`${session.id}:${context.id}`);
     return (
-      systemUpdateExecutionAuthorityKey(update) ===
-        systemUpdateExecutionAuthorityKey(contextReceipt) &&
+      systemUpdateExecutionAuthorityKey(update, ownCompat) ===
+        systemUpdateExecutionAuthorityKey(contextReceipt, receiptCompat) &&
       (causalKey === null || (ownKey !== null && causalKey === `target-human:${ownKey}`))
     );
   };
@@ -69714,7 +69759,13 @@ async function planInboxBatch(
     (prior, candidate) =>
       receiverOwned
         ? compatible(candidate)
-        : systemUpdatesCanCoalesceForExecution(prior, candidate, loaded.causalKeys, session.id),
+        : systemUpdatesCanCoalesceForExecution(
+            prior,
+            candidate,
+            loaded.causalKeys,
+            session.id,
+            updateCompat,
+          ),
     true,
   );
   const receiver = receiverOwned ? loaded.context : null;

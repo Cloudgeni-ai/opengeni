@@ -802,6 +802,7 @@ describe("embedded worker lifecycle contract", () => {
         ...opengeniDb.SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES,
         ...opengeniDb.SUBSCRIPTION_CORE_PRECURSOR_OWNER_ROUTINES,
         ...opengeniDb.SUBSCRIPTION_AUTHORITY_COMPAT_OWNER_ROUTINES,
+        ...opengeniDb.SUBSCRIPTION_AUTHORITY_FENCE_OWNER_ROUTINES,
       ].map((name) => ({
         name,
         owner: "opengeni_migrator",

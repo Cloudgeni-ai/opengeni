@@ -55,6 +55,8 @@ const subscriptionCoreMigrations = [
   "0714_subscription_workspace_managed_organization_accounts.sql",
   // Builds on withheld 0712's receipts and patches the helpers it patched.
   "0715_subscription_authority_compat.sql",
+  // Requires 0715's routines; it follows 0715.
+  "0716_subscription_authority_fences.sql",
 ] as const;
 const key = Buffer.alloc(32, 67);
 const ids = {
