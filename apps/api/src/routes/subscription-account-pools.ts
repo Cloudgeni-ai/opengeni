@@ -112,7 +112,12 @@ export function registerSubscriptionAccountPoolRoutes(
   } = options.repository;
   const core = options.core;
   const coreContext = core
-    ? { deps, core, displayName: options.displayName, accountJson: options.accountJson }
+    ? {
+        deps,
+        core,
+        displayName: options.displayName,
+        accountJson: core.accountJson ?? options.accountJson,
+      }
     : null;
   /** The pool's runtime for this organization; `legacy` without a core binding. */
   const route = async (accountId: () => Promise<string>) =>

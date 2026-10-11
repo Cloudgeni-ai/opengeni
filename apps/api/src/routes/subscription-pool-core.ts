@@ -62,6 +62,12 @@ export type SubscriptionPoolCore = {
     db: Database,
     input: { organizationId: string; subjectId: string },
   ): Promise<SubscriptionCorePoolProjection>;
+  /**
+   * The listed JSON of one core account, when it differs from the legacy
+   * `accountJson` (fields the legacy listing adds beside it, such as a
+   * usage reading). Defaults to the legacy `accountJson`.
+   */
+  accountJson?: (account: PoolAccount, activeId: string | null) => Record<string, unknown>;
 };
 
 type PoolContext = {
@@ -133,6 +139,10 @@ export function coreConnectRefused(
         SUBSCRIPTION_CORE_CUTOVER_DISABLED,
         `${displayName} subscriptions are paused for maintenance in this organization`,
       );
+    case "changed":
+      return new HTTPException(409, {
+        message: `${displayName} account changed. Reload it before reconnecting.`,
+      });
     default:
       return new HTTPException(personal ? 409 : 403, {
         message: personal

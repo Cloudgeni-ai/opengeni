@@ -47,6 +47,15 @@ import type { Hono } from "hono";
 import { offerClaudeDefaultModels } from "../claude-default-models";
 import { registerSubscriptionAccountPoolRoutes } from "./subscription-account-pools";
 import { claudeUsageRoute, coreClaudeUsage, type CoreClaudeUsageCaller } from "./claude-core-usage";
+import {
+  claudeCoreAccount,
+  claudeCoreRoute,
+  claudePoolCore,
+  connectClaudeCore,
+  requireClaudeCorePersonalWorkspace,
+} from "../claude-subscription-core";
+import { deliverPoolCoreWake } from "./subscription-pool-core";
+import { managedCookieHuman } from "./subscription-pool-access";
 
 function accountJson(account: ClaudeSubscriptionAccountMetadata, activeId: string | null) {
   return {
@@ -68,6 +77,9 @@ function accountJson(account: ClaudeSubscriptionAccountMetadata, activeId: strin
   };
 }
 
+const CLAUDE_CORE = claudePoolCore(accountJson);
+const SETUP_TOKEN_CHANGED = "Claude account changed. Reload it before replacing the token.";
+
 export function registerClaudeSubscriptionAccountRoutes(app: Hono, deps: ApiRouteDeps) {
   registerSubscriptionAccountPoolRoutes(app, deps, {
     provider: "claude",
@@ -75,6 +87,7 @@ export function registerClaudeSubscriptionAccountRoutes(app: Hono, deps: ApiRout
     displayName: "Claude",
     enabled: () => deps.settings.claudeSubscriptionEnabled,
     accountJson,
+    core: CLAUDE_CORE,
     projectAccounts: async (accounts, activeId, authority) => {
       const usage = await listClaudeAccountUsage(deps.db, authority, accounts);
       return accounts.map((account) => {
@@ -248,6 +261,70 @@ export function registerClaudeSubscriptionAccountRoutes(app: Hono, deps: ApiRout
       const subjectId = actor?.subjectId ?? authority!.subjectId;
       const encryptionKey = requireEnvironmentEncryption(deps.settings);
       const reconnectId = parsed.data.reconnectAccountId;
+      if ((await claudeCoreRoute(deps, async () => accountId)) === "core") {
+        const scope = workspaceId ? parsed.data.scope : "organization";
+        const personal = scope === "user";
+        if (personal)
+          await requireClaudeCorePersonalWorkspace(deps, { accountId, workspaceId, subjectId });
+        const target = reconnectId
+          ? await claudeCoreAccount(deps, { accountId, workspaceId, subjectId }, reconnectId)
+          : null;
+        if (
+          reconnectId &&
+          (!target ||
+            target.version !== parsed.data.expectedCredentialVersion ||
+            target.scope !== scope)
+        )
+          throw new HTTPException(409, { message: SETUP_TOKEN_CHANGED });
+        const connected = await connectClaudeCore(
+          deps.db,
+          {
+            accountId,
+            workspaceId,
+            subjectId,
+            ...(personal ? { personal: true } : {}),
+            encryptionKey,
+            credential: ClaudeSubscriptionCredential.parse(
+              JSON.parse(
+                prepareClaudeSubscriptionCredential(
+                  deps.settings,
+                  workspaceId ? "workspace:" + workspaceId : "organization:" + accountId,
+                  parsed.data.token,
+                ),
+              ),
+            ),
+            providerAccountId:
+              "setup:" +
+              createHmac("sha256", encryptionKey).update(parsed.data.token).digest("hex"),
+            accountEmail: null,
+            planType: null,
+            label: target?.label ?? parsed.data.label ?? "Claude subscription",
+            connectedBySubjectId: (await managedCookieHuman(c, deps))?.subjectId ?? null,
+            ...(target
+              ? {
+                  reconnectTarget: {
+                    connectionId: target.id,
+                    expectedVersion: target.version,
+                    providerAccountId: target.providerAccountId,
+                  },
+                }
+              : {}),
+          },
+          SETUP_TOKEN_CHANGED,
+        );
+        await deliverPoolCoreWake(deps, CLAUDE_CORE, connected.wake);
+        await offerClaudeDefaultModels(deps, {
+          ...(workspaceId ? { accountId, workspaceId } : { organizationId: accountId }),
+          actorSubjectId: subjectId,
+          providerKind: "claude_subscription",
+        });
+        return c.json({
+          connected: true,
+          accountId: connected.id,
+          credentialVersion: connected.version,
+          scope,
+        });
+      }
       const reconnectAccount = !reconnectId
         ? null
         : workspaceId

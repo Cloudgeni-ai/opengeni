@@ -19,6 +19,7 @@ import {
   requireOrganizationCodexHuman,
   requireSameOriginBrowserMutation,
 } from "./codex";
+import { claudeCoreRoute, requireClaudeCorePersonalWorkspace } from "../claude-subscription-core";
 
 export function registerClaudeSubscriptionOAuthRoutes(
   app: Hono,
@@ -91,6 +92,15 @@ export function registerClaudeSubscriptionOAuthRoutes(
       message: "Sign in to Opengeni to connect Claude.",
     });
   }
+  /**
+   * Claude on the shared core for this organization (null on legacy, every
+   * organization without the Claude cutover receipt); maintenance is a typed
+   * 503 at start and complete alike.
+   */
+  async function oauthCore(c: Context, inputScope: ClaudeOAuthScope) {
+    if ((await claudeCoreRoute(deps, async () => inputScope.accountId)) !== "core") return null;
+    return { connectedBySubjectId: (await managedCookieHuman(c, deps))?.subjectId ?? null };
+  }
   for (const organization of [false, true]) {
     const path = organization
       ? "/v1/organizations/:organizationId/model-providers/claude_subscription/oauth"
@@ -110,7 +120,14 @@ export function registerClaudeSubscriptionOAuthRoutes(
           payload.data.scope,
           "Claude",
         );
-      return c.json(await startClaudeSubscriptionOAuth(deps, inputScope, payload.data));
+      const core = await oauthCore(c, inputScope);
+      if (core && payload.data.scope === "user")
+        await requireClaudeCorePersonalWorkspace(deps, {
+          accountId: inputScope.accountId,
+          workspaceId: inputScope.workspaceId,
+          subjectId: inputScope.actorSubjectId,
+        });
+      return c.json(await startClaudeSubscriptionOAuth(deps, inputScope, payload.data, core));
     });
     app.post(`${path}/complete`, async (c) => {
       const inputScope = await scope(c, organization);
@@ -121,6 +138,7 @@ export function registerClaudeSubscriptionOAuthRoutes(
         throw new HTTPException(422, {
           message: "Enter the authorization code from Claude.",
         });
+      const core = await oauthCore(c, inputScope);
       return c.json(
         await completeClaudeSubscriptionOAuth(
           deps,
@@ -146,6 +164,7 @@ export function registerClaudeSubscriptionOAuthRoutes(
               });
           },
           fetchImpl,
+          core,
         ),
       );
     });
