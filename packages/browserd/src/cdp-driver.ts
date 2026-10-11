@@ -35,15 +35,19 @@ import {
   type BrowserProtectedAuthFillCommand as BrowserProtectedAuthFillCommandValue,
   type BrowserProtectedAuthObservation as BrowserProtectedAuthObservationValue,
   type BrowserTarget as BrowserTargetValue,
+  type BrowserActionResolvedTarget as BrowserActionResolvedTargetValue,
   type InteractionSemanticNodeValue,
+  INTERACTION_MAX_RESOLVED_TARGET_TEXT,
 } from "@opengeni/contracts";
 import {
   InteractionControllerError,
   InteractionDefiniteDriverError,
   InteractionOutcomeUnknownDriverError,
   type BrowserInteractionDriver,
+  type InteractionDispatchTrace,
 } from "@opengeni/interaction";
 import {
+  accessibilityContainer,
   namespaceCdpAccessibilityFrame,
   normalizeCdpAccessibilityTree,
   type CdpAccessibilityEntry,
@@ -241,6 +245,8 @@ type TargetState = {
   protectedAuthQuietUntil: number;
   tail: Promise<void>;
   unsubscribe: Array<() => void>;
+  /** Set only while dispatching one action of a traced command. */
+  actionTrace?: { actionIndex: number; trace: InteractionDispatchTrace } | undefined;
 };
 
 type ProtectedElementMetadata = {
@@ -1065,15 +1071,24 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
 
   async dispatch(
     commandInput: BrowserActionCommandValue & { observationMode: "none" },
+    trace?: InteractionDispatchTrace,
   ): Promise<null>;
   async dispatch(
     commandInput: BrowserActionCommandValue & { observationMode: "input" },
+    trace?: InteractionDispatchTrace,
   ): Promise<BrowserObservationValue | null>;
   async dispatch(
     commandInput: BrowserActionCommandValue & { observationMode?: "full" },
+    trace?: InteractionDispatchTrace,
   ): Promise<BrowserObservationValue>;
-  async dispatch(commandInput: BrowserActionCommandValue): Promise<BrowserObservationValue>;
-  async dispatch(commandInput: BrowserActionCommandValue): Promise<BrowserObservationValue | null> {
+  async dispatch(
+    commandInput: BrowserActionCommandValue,
+    trace?: InteractionDispatchTrace,
+  ): Promise<BrowserObservationValue>;
+  async dispatch(
+    commandInput: BrowserActionCommandValue,
+    trace?: InteractionDispatchTrace,
+  ): Promise<BrowserObservationValue | null> {
     const command = BrowserActionCommand.parse(commandInput);
     const observation = await this.withTarget(command.targetId, async (state, info) => {
       if (!state.dialog) await this.refreshFrame(state);
@@ -1087,7 +1102,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       }
       let completedActions = 0;
       const initialEffectCount = state.actionEffectCount;
-      for (const action of actions) {
+      for (const [actionIndex, action] of actions.entries()) {
+        state.actionTrace = trace ? { actionIndex, trace } : undefined;
         try {
           if (
             completedActions > 0 &&
@@ -1098,6 +1114,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             this.assertExpectedGenerations(command, state);
           }
           await this.dispatchAction(state, action, command.operationId);
+          state.actionTrace = undefined;
           completedActions += 1;
           if (state.dialog) {
             if (completedActions < actions.length) {
@@ -1106,6 +1123,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             break;
           }
         } catch (error) {
+          state.actionTrace = undefined;
           if (error instanceof DialogOpenedSignal) {
             completedActions += 1;
             if (completedActions < actions.length) {
@@ -2814,17 +2832,17 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         });
         return;
       case "click": {
-        const node = await this.resolveLocator(state, action.locator);
+        const node = await this.resolveActionLocator(state, action.locator);
         await this.clickNode(state, node.backendDOMNodeId, action.button ?? "left", 1);
         return;
       }
       case "double_click": {
-        const node = await this.resolveLocator(state, action.locator);
+        const node = await this.resolveActionLocator(state, action.locator);
         await this.clickNode(state, node.backendDOMNodeId, "left", 2);
         return;
       }
       case "hover": {
-        const node = await this.resolveLocator(state, action.locator);
+        const node = await this.resolveActionLocator(state, action.locator);
         const point = await this.actionPoint(state, node.backendDOMNodeId, true);
         await this.sendActionTarget(state, "Input.dispatchMouseEvent", {
           type: "mouseMoved",
@@ -2834,7 +2852,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         return;
       }
       case "fill": {
-        const node = await this.resolveLocator(state, action.locator);
+        const node = await this.resolveActionLocator(state, action.locator);
+        if (await this.fillNativeDateTimeInput(state, node.backendDOMNodeId, action.value)) return;
         await this.focusNode(state, node.backendDOMNodeId);
         await this.selectAllAndDelete(state, node.backendDOMNodeId);
         if (action.value || this.engine === "lightpanda")
@@ -2857,7 +2876,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       }
       case "type":
         if (action.locator) {
-          const node = await this.resolveLocator(state, action.locator);
+          const node = await this.resolveActionLocator(state, action.locator);
           await this.focusNode(state, node.backendDOMNodeId);
         }
         if (
@@ -2879,13 +2898,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         return;
       case "press":
         if (action.locator) {
-          const node = await this.resolveLocator(state, action.locator);
+          const node = await this.resolveActionLocator(state, action.locator);
           await this.focusNode(state, node.backendDOMNodeId);
         }
         await this.pressKey(state, action.key);
         return;
       case "select": {
-        const node = await this.resolveLocator(state, action.locator);
+        const node = await this.resolveActionLocator(state, action.locator);
         const result = await this.callOnNode(
           state,
           node.backendDOMNodeId,
@@ -2904,7 +2923,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         return;
       }
       case "check": {
-        const node = await this.resolveLocator(state, action.locator);
+        const node = await this.resolveActionLocator(state, action.locator);
         const current = await this.callOnNode(state, node.backendDOMNodeId, CHECKED_FUNCTION, []);
         if (typeof current !== "boolean") {
           throw new InteractionDefiniteDriverError(
@@ -2918,7 +2937,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       }
       case "scroll":
         if (action.locator) {
-          const node = await this.resolveLocator(state, action.locator);
+          const node = await this.resolveActionLocator(state, action.locator);
           await this.callOnNode(
             state,
             node.backendDOMNodeId,
@@ -2934,8 +2953,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         }
         return;
       case "drag": {
-        const from = await this.resolveLocator(state, action.from);
-        const to = await this.resolveLocator(state, action.to);
+        const from = await this.resolveActionLocator(state, action.from);
+        const to = await this.resolveActionLocator(state, action.to);
         await this.dragNodes(state, from.backendDOMNodeId, to.backendDOMNodeId);
         return;
       }
@@ -2995,7 +3014,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     locator: BrowserLocator,
     paths: readonly string[],
   ): Promise<void> {
-    const node = await this.resolveLocator(state, locator);
+    const node = await this.resolveActionLocator(state, locator);
     const frameId = node.frameId ?? state.frame.id;
     if (this.engine === "lightpanda") {
       // Lightpanda supports direct file inputs, not Chromium's native chooser.
@@ -3189,7 +3208,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const text = action.text ?? this.clipboardText;
     if (action.text !== undefined) this.setClipboard(text, "paste", state.targetId);
     if (action.locator) {
-      const node = await this.resolveLocator(state, action.locator);
+      const node = await this.resolveActionLocator(state, action.locator);
       await this.focusNode(state, node.backendDOMNodeId);
     }
     if (text) {
@@ -3237,7 +3256,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   ): Promise<string> {
     let value: unknown;
     if (locator) {
-      const node = await this.resolveLocator(state, locator);
+      const node = await this.resolveActionLocator(state, locator);
       value = await this.callOnNode(state, node.backendDOMNodeId, COPY_BROWSER_TEXT_FUNCTION, [
         { value: content },
       ]);
@@ -3301,6 +3320,89 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         "browser clipboard text exceeds its UTF-8 byte envelope",
       );
     }
+  }
+
+  /** Resolve a locator an action is about to act on and, when the command is
+   * traced, record which element it resolved to before any input is sent. */
+  private async resolveActionLocator(
+    state: TargetState,
+    locator: BrowserLocator,
+  ): Promise<CdpAccessibilityEntry> {
+    const entry = await this.resolveLocator(state, locator);
+    const current = state.actionTrace;
+    if (current) {
+      current.trace.record(await this.describeResolvedTarget(state, entry, current.actionIndex));
+    }
+    return entry;
+  }
+
+  private async describeResolvedTarget(
+    state: TargetState,
+    entry: CdpAccessibilityEntry,
+    actionIndex: number,
+  ): Promise<BrowserActionResolvedTargetValue> {
+    if (entry.nodeId !== "") {
+      // Accessibility-resolved locators already carry role, name and ancestry.
+      const snapshot = state.accessibility;
+      const container =
+        snapshot && snapshot.entriesByNodeId.has(entry.nodeId)
+          ? accessibilityContainer(snapshot, entry.nodeId)
+          : null;
+      return {
+        actionIndex,
+        ref: entry.ref || null,
+        role: boundedTargetRole(entry.role),
+        name: boundedTargetText(entry.name),
+        container: container
+          ? { role: boundedTargetRole(container.role), name: boundedTargetText(container.name) }
+          : null,
+      };
+    }
+    // CSS, test id and placeholder locators resolve through the DOM. Read that
+    // node and its ancestors from Chromium's accessibility tree. The read is
+    // optional: an engine or frame without it reports no role or container.
+    const unknown: BrowserActionResolvedTargetValue = {
+      actionIndex,
+      ref: null,
+      role: "generic",
+      name: null,
+      container: null,
+    };
+    if (entry.backendDOMNodeId === null) return unknown;
+    let response: { nodes?: unknown };
+    try {
+      response = await this.sendTarget(state, "Accessibility.getPartialAXTree", {
+        backendNodeId: entry.backendDOMNodeId,
+        fetchRelatives: true,
+      });
+    } catch {
+      return unknown;
+    }
+    if (!Array.isArray(response.nodes)) return unknown;
+    let snapshot: CdpAccessibilitySnapshot;
+    try {
+      snapshot = normalizeCdpAccessibilityTree({
+        nodes: response.nodes as CdpAxNode[],
+        controllerGeneration: this.controllerGeneration,
+        targetId: state.targetId,
+        documentGeneration: state.documentGeneration,
+      });
+    } catch {
+      return unknown;
+    }
+    const resolved = snapshot.entries.find(
+      (candidate) => candidate.backendDOMNodeId === entry.backendDOMNodeId,
+    );
+    if (!resolved) return unknown;
+    const container = accessibilityContainer(snapshot, resolved.nodeId);
+    return {
+      ...unknown,
+      role: boundedTargetRole(resolved.role),
+      name: boundedTargetText(resolved.name),
+      container: container
+        ? { role: boundedTargetRole(container.role), name: boundedTargetText(container.name) }
+        : null,
+    };
   }
 
   private async resolveLocator(
@@ -3573,6 +3675,57 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     await this.sendActionTarget(state, "DOM.focus", {
       backendNodeId: backendDOMNodeId,
     });
+  }
+
+  /**
+   * Native date, time, month, week and datetime-local inputs render their
+   * editable parts as spin buttons inside a user-agent shadow root, and they
+   * ignore text insertion. Select-all plus Backspace would only clear the
+   * focused part. Fill such a control, or any of its parts, by setting the
+   * host input's value in the input's own format, the way a date picker
+   * commits a choice. Returns false for every other element so the ordinary
+   * text path still applies.
+   */
+  private async fillNativeDateTimeInput(
+    state: TargetState,
+    backendDOMNodeId: number | null,
+    value: string,
+  ): Promise<boolean> {
+    const inspected = await this.callOnNode(
+      state,
+      backendDOMNodeId,
+      INSPECT_NATIVE_DATE_TIME_FILL_FUNCTION,
+      [{ value }],
+    );
+    if (!isRecord(inspected) || inspected.kind === "other") return false;
+    const type = typeof inspected.type === "string" ? inspected.type : "date";
+    if (inspected.kind === "not_editable") {
+      throw new InteractionDefiniteDriverError(
+        "invalid_action",
+        `browser ${type} input is disabled or read-only`,
+      );
+    }
+    if (inspected.kind === "invalid_value") {
+      const part = inspected.part === true ? "this field is one part of a native " : "a native ";
+      throw new InteractionDefiniteDriverError(
+        "invalid_action",
+        `${part}${type} input; fill the whole input with a value in its format (${NATIVE_DATE_TIME_FORMATS[type] ?? "its value format"}), or an empty string to clear it`,
+      );
+    }
+    const retained = await this.callOnNode(
+      state,
+      backendDOMNodeId,
+      SET_NATIVE_DATE_TIME_VALUE_FUNCTION,
+      [{ value }],
+      { potentialEffect: true },
+    );
+    if (retained !== true) {
+      throw new InteractionOutcomeUnknownDriverError(
+        "outcome_unknown",
+        `browser set the ${type} input's value but the page did not keep it; re-observe before continuing`,
+      );
+    }
+    return true;
   }
 
   private async selectAllAndDelete(
@@ -4445,6 +4598,20 @@ function uniqueEntries(entries: CdpAccessibilityEntry[]): CdpAccessibilityEntry 
   return byBackend.size === 1 ? [...byBackend.values()][0]! : null;
 }
 
+function boundedTargetText(value: string | null): string | null {
+  const text = value?.replace(/\s+/gu, " ").trim() ?? "";
+  if (!text) return null;
+  const codePoints = Array.from(text);
+  return codePoints.length <= INTERACTION_MAX_RESOLVED_TARGET_TEXT
+    ? text
+    : `${codePoints.slice(0, INTERACTION_MAX_RESOLVED_TARGET_TEXT - 1).join("")}\u2026`;
+}
+
+function boundedTargetRole(value: string): string {
+  const role = value.trim().slice(0, 64);
+  return role || "generic";
+}
+
 function syntheticEntry(backendDOMNodeId: number): CdpAccessibilityEntry {
   return {
     ref: "",
@@ -4783,6 +4950,58 @@ const CONFIRM_EDITABLE_VALUE_FUNCTION = `async function(expected) {
   if (tag === "input" || tag === "textarea") return String(this.value) === String(expected);
   if (this.isContentEditable === true) return String(this.textContent || "") === String(expected);
   return false;
+}`;
+
+const NATIVE_DATE_TIME_FORMATS: Readonly<Record<string, string>> = {
+  date: "YYYY-MM-DD",
+  time: "HH:MM in 24-hour time, optionally HH:MM:SS",
+  "datetime-local": "YYYY-MM-DDTHH:MM",
+  month: "YYYY-MM",
+  week: "YYYY-Www",
+};
+
+// Resolves a native date/time input from the input itself or from one of the
+// parts in its user-agent shadow root. Inputs cannot host author shadow roots,
+// so a shadow root whose host is an input is always the browser's own.
+const NATIVE_DATE_TIME_HOST_SOURCE = `
+  const nativeDateTimeHost = (node) => {
+    let element = node;
+    for (let depth = 0; depth < 4 && element; depth++) {
+      if (String(element.tagName || "").toLowerCase() === "input") break;
+      const root = typeof element.getRootNode === "function" ? element.getRootNode() : null;
+      element = root && root.host ? root.host : null;
+    }
+    if (!element || String(element.tagName || "").toLowerCase() !== "input") return null;
+    const type = String(element.type || "").toLowerCase();
+    return ${JSON.stringify(Object.keys(NATIVE_DATE_TIME_FORMATS))}.includes(type) ? element : null;
+  };`;
+
+const INSPECT_NATIVE_DATE_TIME_FILL_FUNCTION = `function(expected) {${NATIVE_DATE_TIME_HOST_SOURCE}
+  const input = nativeDateTimeHost(this);
+  if (!input) return { kind: "other" };
+  const type = String(input.type).toLowerCase();
+  const part = input !== this;
+  if (input.disabled || input.readOnly) return { kind: "not_editable", type, part };
+  const probe = input.ownerDocument.createElement("input");
+  probe.type = type;
+  probe.value = String(expected);
+  if (probe.value !== String(expected)) return { kind: "invalid_value", type, part };
+  return { kind: "native", type, part };
+}`;
+
+// The prototype setter bypasses per-instance value trackers that frameworks
+// install, so their input listeners see the change as user input.
+const SET_NATIVE_DATE_TIME_VALUE_FUNCTION = `async function(expected) {${NATIVE_DATE_TIME_HOST_SOURCE}
+  const input = nativeDateTimeHost(this);
+  if (!input || !input.isConnected) return false;
+  const view = input.ownerDocument.defaultView;
+  const setter = Object.getOwnPropertyDescriptor(view.HTMLInputElement.prototype, "value").set;
+  input.focus();
+  setter.call(input, String(expected));
+  input.dispatchEvent(new view.Event("input", { bubbles: true, composed: true }));
+  input.dispatchEvent(new view.Event("change", { bubbles: true }));
+  await Promise.resolve();
+  return input.isConnected && input.value === String(expected);
 }`;
 
 function cssString(value: string): string {

@@ -2267,6 +2267,7 @@ describe("release schema contract", () => {
       "0718_subscription_personal_acceptance_reads.sql",
       "0717_subscription_authority_fences.sql",
       "0716_subscription_authority_compat.sql",
+      "0715_subscription_core_api_key_connections.sql",
       "0714_subscription_workspace_managed_organization_accounts.sql",
       "0713_subscription_core_provider_keyed_reach.sql",
       "0712_subscription_core_generic_precursor.sql",

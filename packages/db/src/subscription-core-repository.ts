@@ -97,13 +97,22 @@ export async function listSubscriptionConnectionAssignmentPolicies(
 
 /**
  * Read the provider/workspace-visible connection world for the pure placement
- * policy. Account and workspace are mandatory; provider may narrow the result.
+ * policy. Account and workspace are mandatory; provider and connection kind
+ * may narrow the result (the shared core passes both: a row of another kind
+ * is never placed for a provider, rather than placed and refused at
+ * credential load).
  * Callers cannot accidentally turn this into a viewer-derived or cross-account pool read.
  * Credential ciphertext is deliberately never selected here.
  */
 export async function listSubscriptionConnectionsForPlacement(
   db: Database,
-  input: { accountId: string; workspaceId: string; provider?: ProviderId; now?: Date },
+  input: {
+    accountId: string;
+    workspaceId: string;
+    provider?: ProviderId;
+    kind?: ConnectionKind;
+    now?: Date;
+  },
 ): Promise<SubscriptionConnection[]> {
   const now = (input.now ?? new Date()).toISOString();
   const rows = await rawRows<{
@@ -148,6 +157,7 @@ export async function listSubscriptionConnectionsForPlacement(
       on quota.account_id = connection.account_id and quota.connection_id = connection.id
     where connection.account_id = ${input.accountId}::uuid
       and (${input.provider ?? null}::text is null or connection.provider = ${input.provider ?? null})
+      and (${input.kind ?? null}::text is null or connection.kind = ${input.kind ?? null})
     order by connection.provider, connection.id`,
   );
   if (rows.length === 0) return [];
