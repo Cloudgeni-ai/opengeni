@@ -21,6 +21,7 @@ import { withClaudeModelRequest } from "./claude-subscription-usage";
 import { createModelImageSizer } from "./model-image-sizing";
 import { projectHistoryForProvider } from "./provider-history-adapter";
 import { projectHostedSearchEvidence } from "./hosted-search-evidence";
+import { splitStableSystemPromptPrefix } from "./system-prompt-cache-prefix";
 import {
   ANTHROPIC_WEB_SEARCH_TOOL,
   ANTHROPIC_WEB_SEARCH_TOOL_NAME,
@@ -541,9 +542,20 @@ export function buildAnthropicRequest(
   const webSearch = request.tools.some(isHostedWebSearchTool);
   let messages = anthropicMessages(input, { webSearch });
   if (!messages.length) throw new AnthropicProtocolError("Claude requires at least one message");
-  const system = request.systemInstructions
-    ? ([{ type: "text", text: request.systemInstructions }] as Json[])
-    : [];
+  // A recorded session-independent prefix becomes its own block so it can
+  // carry a cache breakpoint (OPENGENI_EXPERIMENT_SYSTEM_PROMPT_CACHE_SPLIT).
+  const split = request.systemInstructions
+    ? splitStableSystemPromptPrefix(request.systemInstructions)
+    : undefined;
+  const system = split
+    ? ([
+        { type: "text", text: split[0] },
+        { type: "text", text: split[1] },
+      ] as Json[])
+    : request.systemInstructions
+      ? ([{ type: "text", text: request.systemInstructions }] as Json[])
+      : [];
+  const stableSystem = split ? system[0] : undefined;
   // Initial system/developer instructions belong in the top-level field. Later
   // systems keep their authority within the same assistant-delimited phase.
   while (messages[0]?.role === "system") system.push(...messages.shift()!.content);
@@ -568,10 +580,12 @@ export function buildAnthropicRequest(
       input_schema: structuredClone(handoff.inputJsonSchema),
     });
   // Up to four breakpoints: tools, instructions, previous request, current history.
+  // A split system adds one after its stable prefix; when all five would apply,
+  // the tools breakpoint yields because the stable prefix already covers tools.
   // No TTL mixing, no global scope, and no marker on signed thinking blocks.
   if (provider.anthropic?.cacheTtl !== "off") {
     const cache = { type: "ephemeral", ttl: provider.anthropic?.cacheTtl ?? "5m" };
-    if (tools.length) tools.at(-1)!.cache_control = { ...cache };
+    if (stableSystem) stableSystem.cache_control = { ...cache };
     if (system.length) system.at(-1)!.cache_control = { ...cache };
     // Anthropic searches only a bounded number of blocks before a breakpoint.
     // A large parallel tool batch can move the old request prefix outside that
@@ -593,6 +607,9 @@ export function buildAnthropicRequest(
       .reverse()
       .find((block) => !["thinking", "redacted_thinking"].includes(block.type));
     if (last) last.cache_control = { ...cache };
+    const marked =
+      (stableSystem ? 1 : 0) + (system.length ? 1 : 0) + (previous ? 1 : 0) + (last ? 1 : 0);
+    if (tools.length && marked < 4) tools.at(-1)!.cache_control = { ...cache };
   }
   const body: Json = {
     model,
