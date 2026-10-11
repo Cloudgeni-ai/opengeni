@@ -349,6 +349,7 @@ import { projectClientModel } from "./model-catalog";
 import { createTranscriptionService } from "./transcription/service";
 import { createFfmpegTranscriptionSegmenter } from "./transcription/segmenter";
 import { registerSlackInteractionRoutes } from "./integrations/slack-interactions";
+import { resolveSignedStateSecret } from "./signed-state-secret";
 
 export { allowedCorsOrigin } from "./http/cors";
 
@@ -408,6 +409,25 @@ export async function resolveWorkspaceMcpRouteDeps(
     },
   );
   return { ...routeDeps, catalogSourceSettings, settings: resolvedCatalog.settings };
+}
+
+/**
+ * Signed browser state must verify on every API replica; see
+ * {@link resolveSignedStateSecret}. A per-process key is announced once so a
+ * multi-replica operator knows why such round trips fail.
+ */
+function signedStateSecret(
+  settings: AppDependencies["settings"],
+  observability: Pick<ReturnType<typeof createObservability>, "warn">,
+): string {
+  const resolved = resolveSignedStateSecret(settings);
+  if (resolved.source === "process_random" && !["local", "test"].includes(settings.environment)) {
+    observability.warn(
+      "Signed browser state uses a per-process key; set OPENGENI_GITHUB_APP_MANIFEST_STATE_SECRET or OPENGENI_INTEGRATIONS_STATE_SECRET before running more than one API replica",
+      { source: resolved.source },
+    );
+  }
+  return resolved.secret;
 }
 
 export function createAppComposition(deps: AppDependencies): {
@@ -597,8 +617,7 @@ export function createAppComposition(deps: AppDependencies): {
     resolveCatalogSettings: () => resolveCatalogSettings(deps.db, deps.settings),
     observability,
     userPresence,
-    githubStateSecret:
-      deps.githubStateSecret ?? deps.settings.githubAppManifestStateSecret ?? crypto.randomUUID(),
+    githubStateSecret: deps.githubStateSecret ?? signedStateSecret(deps.settings, observability),
     managedAuth,
     managedAuthSessionAdapter,
     managedEmailTransport,
