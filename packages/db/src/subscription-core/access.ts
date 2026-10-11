@@ -614,13 +614,19 @@ export async function updateSubscriptionCoreConnectionAccess(
       people === null &&
       policy.allowedWorkspaces === null &&
       policy.allowPersonalWorkspaces;
-    const organizationSwitch = await organizationAllocator(
-      tx,
-      provider,
-      target.accountId,
-      id,
-      current.allocator_enabled,
-    );
+    // An account no workspace manages is the organization's alone: its switch
+    // is the connection's, as its page and route show (0689 may have left its
+    // organization copies paused while the connection is on).
+    const organizationSwitch =
+      current.managed_by_workspace_id === null
+        ? current.allocator_enabled
+        : await organizationAllocator(
+            tx,
+            provider,
+            target.accountId,
+            id,
+            current.allocator_enabled,
+          );
     const reach =
       people === null && !organizationScope
         ? {

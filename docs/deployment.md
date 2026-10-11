@@ -4501,11 +4501,17 @@ their workspace.
 
 In the same test organization, switch the account's rotation off on the
 organization route and on again on its workspace's route: the workspace's
-own copy serves again, other workspaces stay off, and the organization's
-switch still reads off until it is turned on there. Then the other order:
+own copy serves again (under the workspace's own source) and other workspaces
+and a workspace created afterwards stay off until the organization turns it on
+on its route. Then the other order:
 switch it off on the workspace's route, off on the organization route (it
 answers `changed: true`), and on again on the workspace's route: other
 workspaces and a workspace created afterwards stay off.
+Switching it on another workspace's route returns 404: a workspace-managed
+account switches only on the organization route and its managing workspace's.
+Narrowing it back to its workspace alone (`allowedWorkspaces: []`) removes the
+organization's copies, so an organization "off" is not kept: the account page
+then shows the connection's switch, which a later share copies.
 
 **Accounts page change (separate release, after owner approval).** The
 organization Accounts page then lists a workspace-connected account once, as

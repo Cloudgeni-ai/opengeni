@@ -929,6 +929,145 @@ describe.skipIf(!realDb)("Codex access editor on the shared core", () => {
     expect(await servedIn(org, org.otherWorkspaceId)).toEqual([id]);
   });
 
+  test("an account no workspace manages: the editor gives added and later workspaces the connection's switch", async () => {
+    const org = await organization();
+    const id = await connection(org, "merged-paused-editor", {
+      localWorkspaceId: org.sharedWorkspaceId,
+    });
+    const target = organizationTarget(org, id);
+    await updateSubscriptionCoreCodexModelConnectionAccess(client!.db, target, {
+      allowedModels: null,
+      allowedWorkspaces: [org.otherWorkspaceId],
+      allowPersonalWorkspaces: false,
+      version: 1,
+    });
+    // 0689's shape: organization copies paused, the connection on, which the
+    // organization page shows and its route switches.
+    await shared!.admin`update subscription_connection_assignment_policies
+      set allocator_enabled = false
+      where connection_id = ${id}::uuid and inference_pool = 'organization'`;
+    // Every shared workspace, including ones created later: they take the
+    // connection's switch, as before this change.
+    await updateSubscriptionCoreCodexModelConnectionAccess(client!.db, target, {
+      allowedModels: null,
+      allowedWorkspaces: null,
+      allowPersonalWorkspaces: false,
+      version: 2,
+    });
+    expect((await stored(org, id)).reach).toMatchObject({ shared_workspaces: true });
+    const [reach] = await shared!.admin<{ allocator_enabled: boolean }[]>`
+      select allocator_enabled from opengeni_private.subscription_core_auto_assignments
+      where connection_id = ${id}::uuid`;
+    expect(reach?.allocator_enabled).toBe(true);
+    const later = await workspace(org.accountId, org.ownerSubjectId, "Added later");
+    expect(await servedIn(org, later)).toEqual([id]);
+  });
+
+  test("a workspace-managed account doesn't switch on another workspace's route", async () => {
+    const org = await organization();
+    const id = await connection(org, "managed-other-route", {
+      managedByWorkspaceId: org.sharedWorkspaceId,
+    });
+    const manager = await member(org, "member", "admin");
+    await updateSubscriptionCoreCodexModelConnectionAccess(
+      client!.db,
+      organizationTarget(org, id),
+      {
+        allowedModels: null,
+        allowedWorkspaces: null,
+        allowPersonalWorkspaces: false,
+        version: 1,
+      },
+    );
+    await source(org, org.otherWorkspaceId, "organization");
+    expect(await servedIn(org, org.otherWorkspaceId)).toEqual([id]);
+    const flip = async (subjectId: string) =>
+      await setSubscriptionCoreCodexAllocator(client!.db, {
+        accountId: org.accountId,
+        workspaceId: org.otherWorkspaceId,
+        subjectId,
+        connectionId: id,
+        enabled: false,
+        expectedVersion: 1,
+      });
+    // Its "off" there would switch only the connection, which the manager's
+    // next "on" would undo for every other workspace: refused, even for an
+    // organization administrator, whose switch is on the organization's page.
+    expect((await flip(org.ownerSubjectId)).result).toEqual({ kind: "not_found" });
+    expect((await flip(manager.subjectId)).result).toEqual({ kind: "not_found" });
+    const [row] = await shared!.admin<{ allocator_enabled: boolean; allocator_version: number }[]>`
+      select allocator_enabled, allocator_version from subscription_connections
+      where id = ${id}::uuid`;
+    expect(row).toEqual({ allocator_enabled: true, allocator_version: 1 });
+    expect(await servedIn(org, org.otherWorkspaceId)).toEqual([id]);
+  });
+
+  test("each route reports the switch its page shows, on a change and on a stale version", async () => {
+    const org = await organization();
+    const managed = await connection(org, "managed-page-value", {
+      managedByWorkspaceId: org.sharedWorkspaceId,
+    });
+    const manager = await member(org, "member", "admin");
+    await updateSubscriptionCoreCodexModelConnectionAccess(
+      client!.db,
+      organizationTarget(org, managed),
+      { allowedModels: null, allowedWorkspaces: null, allowPersonalWorkspaces: false, version: 1 },
+    );
+    await source(org, org.sharedWorkspaceId, "organization");
+    const flip = async (
+      connectionId: string,
+      workspaceId: string | null,
+      subjectId: string,
+      enabled: boolean,
+      expectedVersion: number,
+    ) =>
+      (
+        await setSubscriptionCoreCodexAllocator(client!.db, {
+          accountId: org.accountId,
+          workspaceId,
+          subjectId,
+          connectionId,
+          enabled,
+          expectedVersion,
+        })
+      ).result;
+    expect(await flip(managed, null, org.ownerSubjectId, false, 1)).toMatchObject({
+      kind: "updated",
+      allocatorEnabled: false,
+    });
+    // The managing workspace uses the organization's pool, whose copy the
+    // organization paused: its "on" turns its own copy on, and its page (and
+    // the answer) still read off.
+    expect(await flip(managed, org.sharedWorkspaceId, manager.subjectId, true, 2)).toMatchObject({
+      kind: "updated",
+      allocatorEnabled: false,
+    });
+
+    // An account no workspace manages, 0689-merged with its organization
+    // copies paused: a stale version answers with the connection's switch,
+    // which its page shows.
+    const unmanaged = await connection(org, "unmanaged-page-value", {
+      localWorkspaceId: org.otherWorkspaceId,
+    });
+    await updateSubscriptionCoreCodexModelConnectionAccess(
+      client!.db,
+      organizationTarget(org, unmanaged),
+      {
+        allowedModels: null,
+        allowedWorkspaces: [org.sharedWorkspaceId],
+        allowPersonalWorkspaces: false,
+        version: 1,
+      },
+    );
+    await shared!.admin`update subscription_connection_assignment_policies
+      set allocator_enabled = false
+      where connection_id = ${unmanaged}::uuid and inference_pool = 'organization'`;
+    expect(await flip(unmanaged, null, org.ownerSubjectId, false, 99)).toMatchObject({
+      kind: "conflict",
+      allocatorEnabled: true,
+    });
+  });
+
   test("the organization route renames a workspace-managed account and reads it back", async () => {
     const org = await organization();
     const id = await connection(org, "managed-label", {

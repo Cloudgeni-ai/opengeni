@@ -754,7 +754,17 @@ export async function setSubscriptionCoreAllocator(
     // so a switch the other side already turned off still records this side's
     // "off". An account no workspace manages is the organization's alone: its
     // route shows the connection's switch, as the shipped page does, and
-    // writes every part.
+    // writes every part. A workspace-managed account switches only on the
+    // organization's route and its managing workspace's: another workspace's
+    // route would switch the connection alone, so the manager's next "on"
+    // would undo its "off" for every other workspace. It is refused (that
+    // workspace's page opens the organization's page for it).
+    if (
+      input.workspaceId !== null &&
+      current.managedByWorkspaceId !== null &&
+      current.managedByWorkspaceId !== input.workspaceId
+    )
+      return { result: { kind: "not_found" }, wake: null };
     const copies =
       input.workspaceId === null
         ? await organizationAllocatorCopies(tx, provider, input.accountId, current.id)
