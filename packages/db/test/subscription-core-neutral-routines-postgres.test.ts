@@ -998,9 +998,9 @@ describe("provider-neutral subscription-core routines (migration 0707)", () => {
           await attempt("truncate", () =>
             tx`truncate opengeni_private.subscription_core_providers`.then(() => "truncated"),
           );
-          // 0713's reach rows reference the registry, so a plain TRUNCATE is
-          // refused by that key first; with CASCADE the append-only guard
-          // still refuses it.
+          // 0713's reach rows and plan-change providers reference the
+          // registry, so a plain TRUNCATE is refused by those keys first;
+          // with CASCADE the append-only guard still refuses it.
           await attempt("truncateCascade", () =>
             tx`truncate opengeni_private.subscription_core_providers cascade`.then(
               () => "truncated",

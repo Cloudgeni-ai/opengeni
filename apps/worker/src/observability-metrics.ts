@@ -2107,6 +2107,7 @@ export function recordModelResponseUsage(
     };
     estimatedProviderCostMicros: number | null;
     pricingSource: "configured_list_price" | "gateway_reported" | null;
+    webSearchRequests?: number;
   },
 ): void {
   const model = boundedModelMetricLabel(observability, input.model);
@@ -2135,6 +2136,14 @@ export function recordModelResponseUsage(
       amount,
     });
   }
+  const searches = nonnegativeSafeInteger(input.webSearchRequests ?? 0);
+  if (searches > 0)
+    observability.incrementCounter({
+      name: "opengeni_model_web_search_requests_total",
+      help: "Provider-run web searches billed with authoritative model responses, by provider, catalog model and payer.",
+      labels: { ...base, payer: input.payer },
+      amount: searches,
+    });
   const cost = nonnegativeSafeInteger(input.estimatedProviderCostMicros);
   if (priced && input.pricingSource !== null && cost > 0) {
     observability.incrementCounter({

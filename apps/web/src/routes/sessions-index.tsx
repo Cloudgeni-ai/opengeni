@@ -442,9 +442,12 @@ function SessionsIndexRouteContent({
     : [];
   const personalResourceEligibilitySettled =
     personalWorkspace || personalOwnerScope === null || tenancyCapabilities !== null;
-  const selectableRigs = rigs.rigs.filter(
-    (rig) => rig.scope !== "user" || personalResourcesAvailable,
-  );
+  // Sandbox Environments configure the managed sandbox; a deployment without
+  // one has nothing for them to apply to.
+  const noManagedSandbox = defaultSandboxBackend === "none";
+  const selectableRigs = noManagedSandbox
+    ? []
+    : rigs.rigs.filter((rig) => rig.scope !== "user" || personalResourcesAvailable);
   const selectedRig = selectableRigs.find((candidate) => candidate.id === draft.rigId);
   const selectedRigDefaultVariableSetIds = selectedRig?.activeVersion?.defaultVariableSetIds ?? [];
   const selectedRigDefaultVariableSetIdsKey = selectedRigDefaultVariableSetIds.join("\u0000");
@@ -619,6 +622,7 @@ function SessionsIndexRouteContent({
     rigs: selectableRigs,
     workspaceDefaultRigId: workspace?.defaultRigId ?? null,
     selfhostedPrimary: defaultSandboxBackend === "selfhosted",
+    noManagedSandbox,
     // A 404 means Connected Machines are off here, not a failure.
     fleetLoadFailed:
       fleet.error != null &&

@@ -113,7 +113,12 @@ const ACCESS_COLUMNS = sql`connection.id::text as id, connection.allowed_model_i
   connection.scope_kind, connection.allow_personal_workspaces, connection.allocator_enabled,
   connection.access_version, connection.managed_by_workspace_id::text as managed_by_workspace_id`;
 
-async function scoped<T>(
+/**
+ * Runs an access route's reads and writes: under the subject's workspace RLS
+ * for a workspace's connection, otherwise in the organization scope once the
+ * subject's organization administration overview is readable.
+ */
+export async function withSubscriptionCoreAccessScope<T>(
   db: Database,
   target: SubscriptionCoreAccessTarget,
   use: (tx: Database) => Promise<T>,
@@ -349,7 +354,7 @@ export async function readSubscriptionCoreConnectionAccess(
   provider: SubscriptionCoreProvider,
   target: SubscriptionCoreAccessTarget,
 ): Promise<SubscriptionCoreAccess | null> {
-  return await scoped(db, target, async (tx) => {
+  return await withSubscriptionCoreAccessScope(db, target, async (tx) => {
     const connection = await accessConnection(tx, provider, target, false);
     return connection ? await projection(tx, provider, target, connection) : null;
   });
@@ -482,7 +487,7 @@ export async function updateSubscriptionCoreConnectionAccess(
     throw new SubscriptionCoreAccessInvalidError(
       "An account limited to people cannot also be given to workspaces",
     );
-  return await scoped(db, target, async (tx) => {
+  return await withSubscriptionCoreAccessScope(db, target, async (tx) => {
     const current = await accessConnection(tx, provider, target, true);
     if (!current) {
       // Locking needs the write policy: a readable row it hides is a refusal.

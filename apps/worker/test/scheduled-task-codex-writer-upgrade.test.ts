@@ -35,7 +35,7 @@ test("a pre-writer personal-resource task retains its execution proof across mig
   // 0712 records the provider cutover receipts and requires the 0689 cutover,
   // so both are deferred and replayed with the writer in ledger order.
   const precursor = "0712_subscription_core_generic_precursor.sql";
-  // 0713 renames objects 0689 creates, so it is deferred with it and replayed
+  // 0713 alters objects 0689 creates, so it is deferred with it and replayed
   // after it.
   const providerKeyedReach = "0713_subscription_core_provider_keyed_reach.sql";
   // 0714 redefines 0713's reach setters: deferred and replayed with it.

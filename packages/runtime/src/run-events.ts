@@ -271,6 +271,8 @@ function assistantMessageText(rawItem: unknown): string | undefined {
 export type ModelResponseUsage = {
   responseId?: string;
   serviceTier?: string;
+  /** Provider-run web searches billed for this response, when the provider reports them. */
+  webSearchRequests?: number;
   gatewayBilling?: {
     finalProvider: string;
     inferenceCostUsd: string;
@@ -687,12 +689,23 @@ export function modelResponseUsageFromResponse(response: unknown): ModelResponse
   const responseId = modelResponseIdFromResponse(response);
   const serviceTier = modelResponseServiceTierFromResponse(response);
   const gatewayBilling = gatewayBillingFromResponse(response);
+  const webSearchRequests = webSearchRequestsFromResponse(response);
   return {
     ...(responseId ? { responseId } : {}),
     ...(serviceTier ? { serviceTier } : {}),
     ...(gatewayBilling ? { gatewayBilling } : {}),
+    ...(webSearchRequests ? { webSearchRequests } : {}),
     usage,
   };
+}
+
+/** Claude reports its billed server-side searches; the transport keeps the count. */
+function webSearchRequestsFromResponse(response: unknown): number | undefined {
+  const value = (response as { providerData?: { anthropic?: { webSearchRequests?: unknown } } })
+    ?.providerData?.anthropic?.webSearchRequests;
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 && value <= 10_000
+    ? value
+    : undefined;
 }
 
 function modelResponseIdFromResponse(response: unknown): string | undefined {

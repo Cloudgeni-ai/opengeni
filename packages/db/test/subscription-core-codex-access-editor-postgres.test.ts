@@ -157,7 +157,7 @@ async function stored(org: Org, connectionId: string) {
       allowed_model_ids: string[] | null;
     }[]
   >`select shared_workspaces, personal_workspaces, allowed_model_ids
-    from opengeni_private.subscription_core_auto_assignments where connection_id = ${connectionId}::uuid`;
+    from opengeni_private.subscription_codex_auto_assignments where connection_id = ${connectionId}::uuid`;
   return {
     ...row!,
     workspaces: workspaces.map((entry) => entry.workspace_id),
@@ -463,7 +463,7 @@ describe.skipIf(!realDb)("Codex access editor on the shared core", () => {
     expect(off.result.kind).toBe("updated");
     const [copies] = await shared!.admin<{ enabled: boolean[]; reach: boolean }[]>`
       select array_agg(distinct policy.allocator_enabled) as enabled,
-        (select allocator_enabled from opengeni_private.subscription_core_auto_assignments
+        (select allocator_enabled from opengeni_private.subscription_codex_auto_assignments
           where connection_id = ${id}::uuid) as reach
       from subscription_connection_assignment_policies policy
       where policy.connection_id = ${id}::uuid and policy.inference_pool = 'organization'`;

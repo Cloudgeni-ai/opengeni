@@ -240,6 +240,8 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     openaiMaxRetries: 5,
     webSearchEnabled: true,
     webSearchProvider: undefined,
+    webSearchPrefer: undefined,
+    webSearchProviderCredentials: {},
     webSearchApiKey: undefined,
     webSearchBaseUrl: undefined,
     webFetchProvider: undefined,

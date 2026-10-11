@@ -1,5 +1,7 @@
 import {
   TAVILY_CREDIT_MICROS,
+  WEB_SEARCH_PROVIDER_CATALOG,
+  WEB_SEARCH_PROVIDER_IDS,
   type WebSearchProviderEndpoint,
   type WebSearchProviderId,
 } from "@opengeni/config";
@@ -25,17 +27,18 @@ import {
 export const WEB_SEARCH_SNIPPET_MAX_CHARS = 400;
 const TITLE_MAX_CHARS = 200;
 
+/** Default API base URLs, from the provider catalog. */
 export const DEFAULT_WEB_PROVIDER_BASE_URLS: Readonly<
   Record<WebSearchProviderId, { search: string | null; fetch: string | null }>
-> = {
-  tinyfish: { search: "https://api.search.tinyfish.ai", fetch: "https://api.fetch.tinyfish.ai" },
-  exa: { search: "https://api.exa.ai", fetch: "https://api.exa.ai" },
-  tavily: { search: "https://api.tavily.com", fetch: "https://api.tavily.com" },
-  firecrawl: { search: "https://api.firecrawl.dev", fetch: "https://api.firecrawl.dev" },
-  brave: { search: "https://api.search.brave.com", fetch: null },
-  jina: { search: "https://s.jina.ai", fetch: "https://r.jina.ai" },
-  searxng: { search: null, fetch: null },
-};
+> = Object.fromEntries(
+  WEB_SEARCH_PROVIDER_IDS.map((id) => [
+    id,
+    {
+      search: WEB_SEARCH_PROVIDER_CATALOG[id].search?.defaultBaseUrl ?? null,
+      fetch: WEB_SEARCH_PROVIDER_CATALOG[id].fetch?.defaultBaseUrl ?? null,
+    },
+  ]),
+) as Record<WebSearchProviderId, { search: string | null; fetch: string | null }>;
 
 type AdapterInput = {
   endpoint: WebSearchProviderEndpoint;
@@ -185,6 +188,128 @@ function tinyfishFetch(input: AdapterInput): WebFetchProvider {
         title: hit.title,
         finalUrl: hit.final_url,
       });
+    },
+  };
+}
+
+// ---------------------------------------------------------------- Parallel
+
+function parallelSearch(input: AdapterInput): WebSearchProvider {
+  return {
+    id: "parallel",
+    async search(request, options) {
+      const body = await providerJson<{ results?: unknown }>(
+        http(input),
+        `${baseUrl(input, "search")}/v1/search`,
+        {
+          method: "POST",
+          headers: { ...json, "x-api-key": requireKey(input) },
+          body: JSON.stringify({
+            objective: request.query,
+            search_queries: [request.query],
+            // `fast` is the agent-tool mode priced in the provider catalog.
+            mode: "fast",
+            advanced_settings: {
+              max_results: request.maxResults,
+              excerpt_settings: { max_chars_per_result: WEB_SEARCH_SNIPPET_MAX_CHARS },
+            },
+          }),
+        },
+        options?.signal,
+      );
+      return {
+        results: results(
+          body.results,
+          (item) => ({
+            title: item.title,
+            url: item.url,
+            snippet: Array.isArray(item.excerpts)
+              ? item.excerpts.filter((value) => typeof value === "string").join(" … ")
+              : undefined,
+            publishedAt: item.publish_date,
+          }),
+          request.maxResults,
+        ),
+      };
+    },
+  };
+}
+
+function parallelFetch(input: AdapterInput): WebFetchProvider {
+  return {
+    id: "parallel",
+    async fetch(request, options) {
+      const body = await providerJson<{
+        results?: Array<Record<string, unknown>>;
+        errors?: Array<Record<string, unknown>>;
+      }>(
+        http(input),
+        `${baseUrl(input, "fetch")}/v1/extract`,
+        {
+          method: "POST",
+          headers: { ...json, "x-api-key": requireKey(input) },
+          body: JSON.stringify({
+            urls: [request.url],
+            advanced_settings: { full_content: true },
+          }),
+        },
+        options?.signal,
+      );
+      const hit = body.results?.[0];
+      if (!hit) {
+        const error = body.errors?.[0];
+        const reason = optionalString(error?.error_type) ?? "fetch failed";
+        const status = typeof error?.http_status_code === "number" ? error.http_status_code : null;
+        throw new WebSearchProviderError(
+          "parallel",
+          `Could not fetch the page: ${reason}${status ? ` (HTTP ${status})` : ""}`,
+        );
+      }
+      const excerpts = Array.isArray(hit.excerpts)
+        ? hit.excerpts.filter((value) => typeof value === "string").join("\n\n")
+        : undefined;
+      return page("parallel", request.url, {
+        content: optionalString(hit.full_content) ?? excerpts,
+        title: hit.title,
+        finalUrl: hit.url,
+      });
+    },
+  };
+}
+
+// -------------------------------------------------------------- Perplexity
+
+function perplexitySearch(input: AdapterInput): WebSearchProvider {
+  return {
+    id: "perplexity",
+    async search(request, options) {
+      const body = await providerJson<{ results?: unknown }>(
+        http(input),
+        `${baseUrl(input, "search")}/search`,
+        {
+          method: "POST",
+          headers: { ...json, authorization: `Bearer ${requireKey(input)}` },
+          body: JSON.stringify({
+            query: request.query,
+            max_results: request.maxResults,
+            // Fast Search is the agent-tool mode priced in the provider catalog.
+            search_type: "fast",
+          }),
+        },
+        options?.signal,
+      );
+      return {
+        results: results(
+          body.results,
+          (item) => ({
+            title: item.title,
+            url: item.url,
+            snippet: item.snippet,
+            publishedAt: item.date ?? item.last_updated,
+          }),
+          request.maxResults,
+        ),
+      };
     },
   };
 }
@@ -536,6 +661,8 @@ const SEARCH_ADAPTERS: Readonly<
   Record<WebSearchProviderId, (input: AdapterInput) => WebSearchProvider>
 > = {
   tinyfish: tinyfishSearch,
+  parallel: parallelSearch,
+  perplexity: perplexitySearch,
   exa: exaSearch,
   tavily: tavilySearch,
   firecrawl: firecrawlSearch,
@@ -548,6 +675,7 @@ const FETCH_ADAPTERS: Readonly<
   Partial<Record<WebSearchProviderId, (input: AdapterInput) => WebFetchProvider>>
 > = {
   tinyfish: tinyfishFetch,
+  parallel: parallelFetch,
   exa: exaFetch,
   tavily: tavilyFetch,
   firecrawl: firecrawlFetch,

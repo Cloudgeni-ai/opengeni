@@ -19,14 +19,14 @@ import postgres from "postgres";
 import {
   createDb,
   createOrganizationWorkspace,
+  createSession,
+  enqueueSessionTurn,
   ensureManagedAccessForUser,
   evaluateRuntimeDatabasePosture,
   getSubscriptionCoreCodexModelConnectionAccess,
-  getSubscriptionCoreModelConnectionAccess,
   inspectRuntimeDatabasePosture,
-  updateSubscriptionCoreModelConnectionAccess,
-  wakeSubscriptionCoreCapacityWaiters,
   wakeSubscriptionCoreCodexCapacityWaiters,
+  withSessionRlsActorContext,
   type DbClient,
   type ModelConnectionTarget,
 } from "../src";
@@ -34,6 +34,12 @@ import { rawRows, setSubjectRlsContext, withRlsContext } from "../src/database";
 import { encryptEnvironmentValue } from "../src/environment-crypto";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
+// The provider-parameterized entry points are internal to the package.
+import {
+  getSubscriptionCoreModelConnectionAccess,
+  updateSubscriptionCoreModelConnectionAccess,
+} from "../src/subscription-core/access-editor";
+import { wakeSubscriptionCoreCapacityWaiters } from "../src/subscription-core/waiters";
 
 const REACH_MIGRATION = "0713_subscription_core_provider_keyed_reach.sql";
 // 0714 redefines 0713's reach setters, so it is withheld and applied with it.
@@ -506,22 +512,6 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
           execute: false,
           publicExecute: false,
         },
-        {
-          routine:
-            "opengeni_subscription_internal.auto_assign_subscription_core_personal_workspace()",
-          execute: false,
-          publicExecute: false,
-        },
-        {
-          routine: "opengeni_subscription_internal.auto_assign_subscription_core_workspace()",
-          execute: false,
-          publicExecute: false,
-        },
-        {
-          routine: "opengeni_subscription_internal.record_subscription_core_plan_change()",
-          execute: false,
-          publicExecute: false,
-        },
       ]);
       const posture = await inspectRuntimeDatabasePosture(client!.db, POSTURE_OPTIONS);
       expect(evaluateRuntimeDatabasePosture(posture, POSTURE_OPTIONS)).toEqual([]);
@@ -539,9 +529,12 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
           )}::text[])`),
       ].sort((left, right) => (left.routine < right.routine ? -1 : 1));
       expect(provisionedAcl).toEqual(staged!.unprovisionedAcl);
-      // The registry and the reach rows stay owner data.
+      // The registry, the plan-change providers and the reach rows (under
+      // either name) stay owner data.
       for (const table of [
         "opengeni_private.subscription_core_providers",
+        "opengeni_private.subscription_core_plan_change_providers",
+        "opengeni_private.subscription_codex_auto_assignments",
         "opengeni_private.subscription_core_auto_assignments",
       ]) {
         await expect(rawRows(client!.db, sql.raw(`select * from ${table}`))).rejects.toThrow();
@@ -551,7 +544,7 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
   );
 
   test.skipIf(!realDb)(
-    "changes only the objects it names; every Codex-named routine keeps its signature and security",
+    "adds and redefines routines only; no trigger, policy or relation is renamed or dropped",
     async () => {
       const before = staged!.catalogBefore;
       const after = staged!.catalogAfter;
@@ -561,23 +554,15 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
         .filter((entry) => before.has(entry) && before.get(entry) !== after.get(entry))
         .sort();
       expect(added).toEqual([
-        "policy subscription_connection_assignment_policies.subscription_connection_assignment_policies_core_auto_assign",
-        "policy subscription_connection_workspaces.subscription_connection_workspaces_core_auto_assign",
         "relation opengeni_private.subscription_core_auto_assignments",
-        "relation opengeni_private.subscription_core_auto_assignments_account_idx",
-        "relation opengeni_private.subscription_core_auto_assignments_pkey",
+        "relation opengeni_private.subscription_core_plan_change_providers",
+        "relation opengeni_private.subscription_core_plan_change_providers_pkey",
         "routine list_organization_subscription_workspace_ids(uuid)",
         "routine opengeni_private.set_subscription_core_reach(text,uuid,uuid,boolean,boolean)",
         // 0714 (applied with 0713 here): the organization's switch on the reach row alone.
         "routine opengeni_private.set_subscription_core_reach_allocator(text,uuid,uuid,boolean)",
         "routine opengeni_private.subscription_core_reach(text,uuid,uuid)",
         "routine opengeni_subscription_internal.apply_subscription_core_auto_assignments(text,uuid,uuid,boolean)",
-        "routine opengeni_subscription_internal.auto_assign_subscription_core_personal_workspace()",
-        "routine opengeni_subscription_internal.auto_assign_subscription_core_workspace()",
-        "routine opengeni_subscription_internal.record_subscription_core_plan_change()",
-        "trigger organization_memberships.organization_memberships_subscription_core_auto_assign",
-        "trigger subscription_connections.subscription_connections_core_plan_change_trg",
-        "trigger workspaces.workspaces_subscription_core_auto_assign",
       ]);
       // Every routine 0713 adds is SECURITY DEFINER with the data schema and
       // opengeni_private on its search path and pg_temp last.
@@ -589,44 +574,40 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
           config: '{"search_path=pg_catalog, public, opengeni_private, pg_temp"}',
         });
       }
-      expect(removed).toEqual([
-        "relation opengeni_private.subscription_codex_auto_assignments",
-        "relation opengeni_private.subscription_codex_auto_assignments_account_idx",
-        "relation opengeni_private.subscription_codex_auto_assignments_pkey",
-        "trigger organization_memberships.organization_memberships_subscription_codex_auto_assign",
-        "trigger subscription_connections.subscription_connections_codex_plan_change_trg",
-        "trigger workspaces.workspaces_subscription_codex_auto_assign",
-      ]);
-      // Only the bodies of the three Codex-named routines that read the
-      // reach rows change; their security mode, search path and grants stay.
+      // Nothing is renamed, detached or dropped, and no trigger, policy or
+      // relation changes: the triggers on workspaces, organization_memberships
+      // and subscription_connections, and the assignment tables' policies,
+      // are exactly 0689's.
+      expect(removed).toEqual([]);
       expect(changed).toEqual([
         "routine opengeni_private.apply_subscription_codex_auto_assignments(uuid,uuid,boolean)",
+        "routine opengeni_private.auto_assign_subscription_codex_personal_workspace()",
+        "routine opengeni_private.auto_assign_subscription_codex_workspace()",
+        "routine opengeni_private.record_subscription_codex_plan_change()",
         "routine opengeni_private.set_subscription_codex_reach(uuid,uuid,boolean,boolean)",
         "routine opengeni_private.subscription_codex_reach(uuid,uuid)",
       ]);
+      // The Codex-named routines that act on the reach rows keep their
+      // security mode, search path and grants; only their bodies change.
       const withoutBody = (value: string | undefined) => value?.split(" | ").slice(0, 3);
-      for (const entry of changed) {
+      const planChange = "routine opengeni_private.record_subscription_codex_plan_change()";
+      for (const entry of changed.filter((name) => name !== planChange)) {
         expect(withoutBody(after.get(entry))).toEqual(withoutBody(before.get(entry)));
       }
-      // The renamed table keeps its owner-only grants and its RLS mode.
-      expect(after.get("relation opengeni_private.subscription_core_auto_assignments")).toBe(
-        before.get("relation opengeni_private.subscription_codex_auto_assignments"),
-      );
-      // The provider-free triggers fire on the same events and sort into the
-      // same place among each table's triggers as the Codex triggers did.
-      const triggerOrder = (entries: Catalog, table: string) =>
-        [...entries.keys()]
-          .filter((entry) => entry.startsWith(`trigger ${table}.`))
-          .sort()
-          .map((entry) =>
-            entries
-              .get(entry)!
-              .replace(/^CREATE TRIGGER \S+ /, "CREATE TRIGGER ")
-              .replace(/EXECUTE FUNCTION \S+$/, "EXECUTE FUNCTION"),
-          );
-      for (const table of ["workspaces", "organization_memberships", "subscription_connections"]) {
-        expect(triggerOrder(after, table)).toEqual(triggerOrder(before, table));
-      }
+      // The plan-change trigger function now reads owner data, so it runs as
+      // its owner with a pinned search path (pg_temp last); its grants stay
+      // owner-only.
+      const planChangeBefore = withoutBody(before.get(planChange));
+      const planChangeAfter = withoutBody(after.get(planChange));
+      expect(planChangeBefore?.slice(0, 2)).toEqual(["false", "{search_path=pg_catalog}"]);
+      expect(planChangeAfter?.slice(0, 2)).toEqual([
+        "true",
+        '{"search_path=pg_catalog, public, opengeni_private, pg_temp"}',
+      ]);
+      const planChangeGrants = planChangeAfter?.[2] ?? "";
+      expect(planChangeGrants).toBe(planChangeBefore?.[2] ?? "");
+      expect(planChangeGrants).not.toContain("opengeni_app");
+      expect(planChangeGrants).not.toMatch(/(^|[{,])=/);
     },
     180_000,
   );
@@ -639,38 +620,37 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
       const kept = await database!.admin<(ReachRow & { provider: string })[]>`
         select account_id::text as account_id, connection_id::text as connection_id,
           shared_workspaces, personal_workspaces, allocator_enabled, allowed_model_ids, provider
-        from opengeni_private.subscription_core_auto_assignments
+        from opengeni_private.subscription_codex_auto_assignments
         where account_id = ${accountId}::uuid order by connection_id`;
       expect([...kept]).toEqual(staged!.legacyRows.map((row) => ({ ...row, provider: "codex" })));
-      const [gone] = await database!.admin<{ table: string | null }[]>`
-        select to_regclass('opengeni_private.subscription_codex_auto_assignments')::text as table`;
-      expect(gone?.table).toBeNull();
+      // The provider-free view the routines use shows exactly these rows.
+      const viewed = await database!.admin<(ReachRow & { provider: string })[]>`
+        select account_id::text as account_id, connection_id::text as connection_id,
+          shared_workspaces, personal_workspaces, allocator_enabled, allowed_model_ids, provider
+        from opengeni_private.subscription_core_auto_assignments
+        where account_id = ${accountId}::uuid order by connection_id`;
+      expect([...viewed]).toEqual([...kept]);
       const constraints = await database!.admin<{ name: string; definition: string }[]>`
         select conname as name, pg_get_constraintdef(oid) as definition from pg_constraint
-        where conrelid = 'opengeni_private.subscription_core_auto_assignments'::regclass
-        order by conname`;
-      expect([...constraints]).toEqual([
-        {
-          name: "subscription_core_auto_assignments_connection_fk",
-          definition: expect.stringContaining(
-            "FOREIGN KEY (account_id, provider, connection_id) REFERENCES subscription_connections(account_id, provider, id) ON DELETE CASCADE",
-          ),
-        },
-        {
-          name: "subscription_core_auto_assignments_pkey",
-          definition: "PRIMARY KEY (connection_id)",
-        },
-        {
-          name: "subscription_core_auto_assignments_provider_fk",
-          definition: expect.stringContaining(
-            "FOREIGN KEY (provider) REFERENCES opengeni_private.subscription_core_providers(provider)",
-          ),
-        },
-        {
-          name: "subscription_core_auto_assignments_reach_chk",
-          definition: "CHECK ((shared_workspaces OR personal_workspaces))",
-        },
+        where conrelid = 'opengeni_private.subscription_codex_auto_assignments'::regclass
+        order by contype, conname`;
+      // 0689's connection key, primary key and reach check stay; the
+      // provider is keyed by the registry.
+      expect([...constraints].map((row) => row.definition)).toEqual([
+        "CHECK ((shared_workspaces OR personal_workspaces))",
+        "FOREIGN KEY (account_id, connection_id) REFERENCES subscription_connections(account_id, id) ON DELETE CASCADE",
+        "FOREIGN KEY (provider) REFERENCES opengeni_private.subscription_core_providers(provider)",
+        "PRIMARY KEY (connection_id)",
       ]);
+      expect(
+        constraints.find((row) => row.definition.startsWith("FOREIGN KEY (provider)"))?.name,
+      ).toBe("subscription_codex_auto_assignments_provider_fkey");
+      const [column] = await database!.admin<{ notNull: boolean; hasDefault: boolean }[]>`
+        select attnotnull as "notNull", atthasdef as "hasDefault" from pg_attribute
+        where attrelid = 'opengeni_private.subscription_codex_auto_assignments'::regclass
+          and attname = 'provider'`;
+      // Every writer names the provider; none falls back to Codex.
+      expect(column).toEqual({ notNull: true, hasDefault: false });
       // The Codex-named readers an older binary calls and the neutral ones
       // see the same kept rows.
       const { org, connections } = staged!.legacyScenario;
@@ -733,7 +713,7 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
       );
       expect(await setReach(org, "codex", id, [null, null])).toEqual({ value: "set" });
       expect(
-        await reachRows(org.accountId, "opengeni_private.subscription_core_auto_assignments"),
+        await reachRows(org.accountId, "opengeni_private.subscription_codex_auto_assignments"),
       ).toEqual([
         {
           account_id: org.accountId,
@@ -878,7 +858,7 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
       );
       const [row] = await database!.admin<{ provider: string; shared: boolean }[]>`
         select provider, shared_workspaces as shared
-        from opengeni_private.subscription_core_auto_assignments where connection_id = ${id}::uuid`;
+        from opengeni_private.subscription_codex_auto_assignments where connection_id = ${id}::uuid`;
       expect(row).toEqual({ provider: "codex", shared: true });
       // A provider the shared core has no binding for is refused before any read.
       for (const work of [
@@ -975,7 +955,10 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
     "capacity wakes run through the provider-keyed wake with each entry point's own texts",
     async () => {
       const org = await organization();
-      const enqueue = async () => undefined;
+      const enqueued: string[] = [];
+      const enqueue = async (_tx: unknown, wake: { sessionId: string }) => {
+        enqueued.push(wake.sessionId);
+      };
       await expect(
         wakeSubscriptionCoreCapacityWaiters(
           client!.db,
@@ -1006,9 +989,73 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
           enqueue,
         ),
       ).rejects.toThrow("A session-scoped subscription-core wake names exactly one workspace");
+      // One waiting turn of each of two providers in the same workspace.
+      const waiter = async (provider: "codex" | "xai") => {
+        const actor = { subjectId: org.ownerSubjectId };
+        const session = await withSessionRlsActorContext(actor, () =>
+          createSession(client!.db, {
+            accountId: org.accountId,
+            workspaceId: org.sharedWorkspaceId,
+            initialMessage: "provider-keyed wake fixture",
+            resources: [],
+            metadata: {},
+            model: MODEL,
+            reasoningEffort: "medium",
+            latencyMode: "standard",
+            sandboxBackend: "none",
+            subjectId: org.ownerSubjectId,
+            createdBy: { kind: "subject" as const, subjectId: org.ownerSubjectId },
+            createdByContext: {},
+          }),
+        );
+        const turn = await withSessionRlsActorContext(actor, () =>
+          enqueueSessionTurn(client!.db, {
+            accountId: org.accountId,
+            workspaceId: org.sharedWorkspaceId,
+            sessionId: session.id,
+            triggerEventId: crypto.randomUUID(),
+            temporalWorkflowId: `session-${session.id}`,
+            source: "user",
+            prompt: "provider-keyed wake fixture",
+            resources: [],
+            tools: [],
+            model: MODEL,
+            reasoningEffort: "medium",
+            sandboxBackend: "none",
+            metadata: {},
+            initiator: { kind: "subject", subjectId: org.ownerSubjectId },
+          }),
+        );
+        const [row] = await database!.admin<{ waiter_id: string }[]>`
+          insert into subscription_capacity_waiters
+            (account_id, workspace_id, session_id, turn_id, provider, wait_reason)
+          values (${org.accountId}::uuid, ${org.sharedWorkspaceId}::uuid, ${session.id}::uuid,
+            ${turn.id}::uuid, ${provider}, 'capacity')
+          returning waiter_id::text as waiter_id`;
+        return { sessionId: session.id, waiterId: row!.waiter_id };
+      };
+      const codexWaiter = await waiter("codex");
+      const otherWaiter = await waiter("xai");
+      // A waiter's wake revision, last wake reason and typed wake deliveries.
+      const woken = async (waiterId: string) => {
+        const [row] = await database!.admin<
+          { wake_revision: string; last_wake_reason: string | null; deliveries: number }[]
+        >`select waiter.wake_revision::text as wake_revision, waiter.last_wake_reason,
+            (select count(*)::int from subscription_capacity_wake_outbox outbox
+              where outbox.account_id = waiter.account_id
+                and outbox.waiter_id = waiter.waiter_id) as deliveries
+          from subscription_capacity_waiters waiter where waiter.waiter_id = ${waiterId}::uuid`;
+        return {
+          revision: Number(row!.wake_revision),
+          reason: row!.last_wake_reason,
+          deliveries: row!.deliveries,
+        };
+      };
+      const unwoken = { revision: 1, reason: null, deliveries: 0 };
       // Without an enabled cutover nothing is woken; with one, the
       // organization's workspaces are listed through the provider-free
-      // inventory in the trusted wake scope (no waiter is waiting here).
+      // inventory in the trusted wake scope, and only the waking provider's
+      // waiters advance.
       const cutover = (enabled: boolean) => database!.admin`
         insert into subscription_provider_cutovers (account_id, provider, enabled)
         values (${org.accountId}::uuid, 'codex', ${enabled})
@@ -1022,14 +1069,29 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
         );
       await cutover(false);
       expect(await wake()).toEqual([]);
+      expect(await woken(codexWaiter.waiterId)).toEqual(unwoken);
       await cutover(true);
-      expect(await wake()).toEqual([]);
+      const touched = [{ accountId: org.accountId, workspaceId: org.sharedWorkspaceId }];
+      expect(await wake()).toEqual(touched);
+      expect(await woken(codexWaiter.waiterId)).toEqual({
+        revision: 2,
+        reason: "fixture_wake",
+        deliveries: 1,
+      });
+      expect(await woken(otherWaiter.waiterId)).toEqual(unwoken);
+      expect(enqueued).toEqual([codexWaiter.sessionId]);
       expect(
         await wakeSubscriptionCoreCodexCapacityWaiters(client!.db, {
           accountId: org.accountId,
           reason: "fixture_wake",
         }),
-      ).toEqual([]);
+      ).toEqual(touched);
+      expect(await woken(codexWaiter.waiterId)).toEqual({
+        revision: 3,
+        reason: "fixture_wake",
+        deliveries: 2,
+      });
+      expect(await woken(otherWaiter.waiterId)).toEqual(unwoken);
     },
     180_000,
   );
@@ -1043,8 +1105,11 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
       const org = await organization();
       const codex = await connection(org, "codex", "second-codex", { allowedModelIds: [MODEL] });
       const xai = await connection(org, "xai", "second-xai", { allocatorEnabled: false });
+      // Reaches Personal workspaces only, so only the Personal rule assigns it.
+      const xaiPersonal = await connection(org, "xai", "second-xai-personal");
       expect(await setReach(org, "codex", codex, [true, false])).toEqual({ value: "set" });
       expect(await setReach(org, "xai", xai, [true, true])).toEqual({ value: "set" });
+      expect(await setReach(org, "xai", xaiPersonal, [false, true])).toEqual({ value: "set" });
       expect(await reachOf(org, "xai", xai)).toEqual({
         value: { sharedWorkspaces: true, personalWorkspaces: true },
       });
@@ -1065,16 +1130,30 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
         code: "P0002",
         message: "organization subscription connection not found",
       });
-      // A row can only carry its own connection's provider. (A postgres.js
-      // query runs only once awaited, so it is awaited inside `outcome`.)
-      const retagged = await outcome(
-        async () =>
-          await database!.admin`update opengeni_private.subscription_core_auto_assignments
-            set provider = 'codex' where connection_id = ${xai}::uuid`,
+      // The writer stored each row under its own connection's provider, and
+      // a row of an unregistered provider cannot exist. (A postgres.js query
+      // runs only once awaited, so it is awaited inside `outcome`.)
+      const stored = await database!.admin<{ connection_id: string; provider: string }[]>`
+        select auto.connection_id::text as connection_id, auto.provider
+        from opengeni_private.subscription_codex_auto_assignments auto
+        join subscription_connections connection on connection.id = auto.connection_id
+        where auto.account_id = ${org.accountId}::uuid and connection.provider = auto.provider
+        order by auto.connection_id`;
+      expect(new Map(stored.map((row) => [row.connection_id, row.provider]))).toEqual(
+        new Map([
+          [codex, "codex"],
+          [xai, "xai"],
+          [xaiPersonal, "xai"],
+        ]),
       );
-      expect(retagged).toMatchObject({ code: "23503" });
-      expect("message" in retagged ? retagged.message : "").toContain(
-        "subscription_core_auto_assignments_connection_fk",
+      const unregisteredRow = await outcome(
+        async () =>
+          await database!.admin`update opengeni_private.subscription_codex_auto_assignments
+            set provider = 'claude' where connection_id = ${xai}::uuid`,
+      );
+      expect(unregisteredRow).toMatchObject({ code: "23503" });
+      expect("message" in unregisteredRow ? unregisteredRow.message : "").toContain(
+        "subscription_codex_auto_assignments_provider_fkey",
       );
 
       // One workspace creation applies every provider's reach.
@@ -1100,20 +1179,38 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
         select connection_id::text as connection_id from subscription_connection_workspaces
         where workspace_id = ${created.id}::uuid order by connection_id`;
       expect(assigned.map((row) => row.connection_id)).toEqual([codex, xai].sort());
-      // A Personal workspace follows each provider's Personal rule.
+      // A Personal workspace follows each provider's Personal rule: created
+      // as a shared workspace it gets the shared rules; claimed as someone's
+      // Personal workspace, the shared-only Codex connection leaves and the
+      // Personal-only connection of the second provider arrives.
+      const assignedTo = async (workspaceId: string) =>
+        (
+          await database!.admin<{ connection_id: string; inference_pool: string | null }[]>`
+            select assignment.connection_id::text as connection_id, policy.inference_pool
+            from subscription_connection_workspaces assignment
+            left join subscription_connection_assignment_policies policy
+              on policy.account_id = assignment.account_id
+              and policy.connection_id = assignment.connection_id
+              and policy.workspace_id = assignment.workspace_id
+            where assignment.workspace_id = ${workspaceId}::uuid`
+        )
+          .map((row) => `${row.connection_id} ${row.inference_pool}`)
+          .sort();
       const [personal] = await database!.admin<{ id: string }[]>`
         insert into workspaces (account_id, name) values (${org.accountId}::uuid, 'Personal for both')
         returning id::text as id`;
+      expect(await assignedTo(personal!.id)).toEqual(
+        [`${codex} organization`, `${xai} organization`].sort(),
+      );
       await database!.admin`insert into organization_memberships
         (account_id, subject_id, role, status, personal_workspace_id)
         values (${org.accountId}::uuid, ${`user:core-reach-second-${crypto.randomUUID()}`},
           'member', 'active', ${personal!.id}::uuid)`;
-      const personalAssigned = await database!.admin<{ connection_id: string }[]>`
-        select connection_id::text as connection_id from subscription_connection_workspaces
-        where workspace_id = ${personal!.id}::uuid order by connection_id`;
-      expect(personalAssigned.map((row) => row.connection_id)).toEqual([xai]);
+      expect(await assignedTo(personal!.id)).toEqual(
+        [`${xai} organization`, `${xaiPersonal} organization`].sort(),
+      );
 
-      // Plan-change history is the registry's flag, not a provider name.
+      // Plan-change history is registry data, not a provider name.
       const planState = async () => {
         const [row] = await database!.admin<{ state: Record<string, unknown> }[]>`
           select provider_state as state from subscription_connections where id = ${xai}::uuid`;
@@ -1122,17 +1219,25 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
       await database!.admin`update subscription_connections set plan_type = 'plus'
         where id = ${xai}::uuid`;
       expect(await planState()).toEqual({ isFedramp: false });
-      await database!.admin`update opengeni_private.subscription_core_providers
-        set records_plan_change = true where provider = 'xai'`;
+      await database!.admin`insert into opengeni_private.subscription_core_plan_change_providers
+        (provider) values ('xai')`;
       await database!.admin`update subscription_connections set plan_type = 'heavy'
         where id = ${xai}::uuid`;
       expect(await planState()).toMatchObject({ planPreviousType: "plus" });
+      // Only a registered provider can keep plan-change history.
+      expect(
+        await outcome(
+          async () =>
+            await database!
+              .admin`insert into opengeni_private.subscription_core_plan_change_providers
+              (provider) values ('claude')`,
+        ),
+      ).toMatchObject({ code: "23503" });
 
       // The TypeScript registry still has no binding for it, so the shared
       // core's TypeScript entry points refuse it.
       await expect(
         getSubscriptionCoreModelConnectionAccess(client!.db, "xai", {
-          kind: "codex",
           connectionId: xai,
           accountId: org.accountId,
           workspaceId: null,

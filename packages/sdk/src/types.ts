@@ -1386,6 +1386,9 @@ export type OAuthStartRequest = {
   /** Exact trusted-host destination; requires verified external-user mode. */
   returnUrl?: string | undefined;
   connectionId?: string | undefined;
+  /** Sign in a further account instead of refreshing your existing active one.
+   * Never combined with connectionId. */
+  newAccount?: true | undefined;
   ownership?: ConnectionOwnership | undefined;
   oauthClient?:
     | {

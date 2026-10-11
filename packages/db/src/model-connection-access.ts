@@ -1,21 +1,23 @@
 import { sql, type SQL, type SQLWrapper } from "drizzle-orm";
-import {
-  withRlsContext,
-  withWorkspaceSubjectRls,
-  setSubjectRlsContext,
-  rawRows,
-  type Database,
-} from "./database";
-import type { ProviderId } from "@opengeni/subscriptions";
+import { rawRows, type Database } from "./database";
 import { SUBSCRIPTION_CORE_CODEX_PROVIDER } from "./subscription-core-codex-provider";
-import { subscriptionCoreProvider } from "./subscription-core-providers";
 import {
-  readSubscriptionCoreConnectionAccess,
-  SubscriptionCoreAccessForbiddenError,
-  SubscriptionCoreAccessWorkspaceNotInOrganizationError,
-  updateSubscriptionCoreConnectionAccess,
-  type SubscriptionCoreAccess,
-} from "./subscription-core/access";
+  getSubscriptionCoreModelConnectionAccess,
+  ModelConnectionWorkspaceNotInOrganizationError,
+  readSubscriptionCoreModelConnectionAccess,
+  updateSubscriptionCoreModelConnectionAccess,
+  withModelConnectionAccessScope,
+  type ModelConnectionAccess,
+} from "./subscription-core/access-editor";
+import type { SubscriptionCoreAccess } from "./subscription-core/access";
+
+// The policy shape, its errors and the route scope are shared with the
+// provider-neutral core editor; the public names stay exported from here.
+export {
+  ModelConnectionAccessForbiddenError,
+  ModelConnectionWorkspaceNotInOrganizationError,
+  type ModelConnectionAccess,
+} from "./subscription-core/access-editor";
 
 export type ModelConnectionKind =
   | "codex"
@@ -25,14 +27,6 @@ export type ModelConnectionKind =
   | "anthropic"
   | "claude_subscription"
   | "opper";
-export type ModelConnectionAccess = {
-  allowedModels: string[] | null;
-  allowedWorkspaces: string[] | null;
-  allowPersonalWorkspaces: boolean;
-  /** Chosen people (organization membership ids); shared core connections only. */
-  allowedPeople?: string[] | null | undefined;
-  version: number;
-};
 export type ModelConnectionTarget = {
   accountId: string;
   workspaceId: string | null;
@@ -40,22 +34,6 @@ export type ModelConnectionTarget = {
   kind: ModelConnectionKind;
   connectionId: string;
 };
-
-/** A requested access policy names a workspace outside the organization's shared workspaces. */
-export class ModelConnectionWorkspaceNotInOrganizationError extends Error {
-  constructor() {
-    super("A selected workspace is not in this organization");
-    this.name = "ModelConnectionWorkspaceNotInOrganizationError";
-  }
-}
-
-/** The viewer can read a connection's access but may not change it. */
-export class ModelConnectionAccessForbiddenError extends Error {
-  constructor() {
-    super("You can't change what this account serves");
-    this.name = "ModelConnectionAccessForbiddenError";
-  }
-}
 
 export function connectionModelAllowed(
   allowedModels: readonly string[] | null | undefined,
@@ -110,33 +88,13 @@ function relation(target: ModelConnectionTarget): { table: SQLWrapper; condition
   };
 }
 
-async function scoped<T>(
-  db: Database,
-  target: ModelConnectionTarget,
-  use: (db: Database) => Promise<T>,
-) {
-  if (target.workspaceId !== null)
-    return await withWorkspaceSubjectRls(db, target.workspaceId, target.subjectId, use);
-  return await withRlsContext(
-    db,
-    { accountId: target.accountId, workspaceId: null },
-    async (tx) => {
-      await setSubjectRlsContext(tx, target.subjectId);
-      await tx.execute(
-        sql`select get_organization_administration_overview(${target.accountId}::uuid, ${target.subjectId})`,
-      );
-      return await use(tx);
-    },
-  );
-}
-
 export async function getModelConnectionAccess(
   db: Database,
   target: ModelConnectionTarget,
 ): Promise<ModelConnectionAccess | null> {
   if (target.kind === "codex")
     return await getSubscriptionCoreCodexModelConnectionAccess(db, target);
-  return await scoped(db, target, async (tx) => {
+  return await withModelConnectionAccessScope(db, target, async (tx) => {
     const { table, condition } = relation(target);
     const [row] = await rawRows<ModelConnectionAccess>(
       tx,
@@ -149,69 +107,20 @@ export async function getModelConnectionAccess(
   });
 }
 
-/** The legacy policy shape; `allowedPeople` appears only when people are chosen. */
-function legacyCorePolicy(access: SubscriptionCoreAccess): ModelConnectionAccess {
-  const { allowedPeople, ...policy } = access.policy;
-  return allowedPeople === null ? policy : { ...policy, allowedPeople };
-}
-
-function coreTarget(target: ModelConnectionTarget) {
-  return {
-    accountId: target.accountId,
-    workspaceId: target.workspaceId,
-    subjectId: target.subjectId,
-    connectionId: target.connectionId,
-  };
-}
-
-function codexTarget(target: ModelConnectionTarget) {
-  if (target.kind !== "codex") throw new Error("Only Codex connections are on the core here");
-  return target;
-}
-
 /**
- * A shared connection's access on the shared subscription core, for any
- * registered provider, with the workspaces that use it as their own and its
- * delegated manager (design 5.4). The organization route reads any
- * organization account, including one a shared workspace manages; the
- * workspace route only one that workspace manages.
+ * A shared Codex connection's access on the shared subscription core, with
+ * the workspaces that use it as their own and its delegated manager.
  */
-export async function readSubscriptionCoreModelConnectionAccess(
-  db: Database,
-  provider: ProviderId,
-  target: ModelConnectionTarget,
-): Promise<SubscriptionCoreAccess | null> {
-  return await readSubscriptionCoreConnectionAccess(
-    db,
-    subscriptionCoreProvider(provider),
-    coreTarget(target),
-  );
-}
-
-/** A shared Codex connection's access on the shared subscription core. */
 export async function readSubscriptionCoreCodexModelConnectionAccess(
   db: Database,
   target: ModelConnectionTarget,
 ): Promise<SubscriptionCoreAccess | null> {
+  if (target.kind !== "codex") throw new Error("Only Codex connections are read from the core");
   return await readSubscriptionCoreModelConnectionAccess(
     db,
     SUBSCRIPTION_CORE_CODEX_PROVIDER,
-    codexTarget(target),
+    target,
   );
-}
-
-/**
- * A shared connection's access policy on the shared subscription core, for
- * any registered provider, in the legacy shape. `allowedWorkspaces` is null
- * when every shared workspace, including ones created later, may use it.
- */
-export async function getSubscriptionCoreModelConnectionAccess(
-  db: Database,
-  provider: ProviderId,
-  target: ModelConnectionTarget,
-): Promise<ModelConnectionAccess | null> {
-  const access = await readSubscriptionCoreModelConnectionAccess(db, provider, target);
-  return access ? legacyCorePolicy(access) : null;
 }
 
 /** A shared Codex connection's access policy on the shared subscription core. */
@@ -219,40 +128,12 @@ export async function getSubscriptionCoreCodexModelConnectionAccess(
   db: Database,
   target: ModelConnectionTarget,
 ): Promise<ModelConnectionAccess | null> {
+  if (target.kind !== "codex") throw new Error("Only Codex connections are read from the core");
   return await getSubscriptionCoreModelConnectionAccess(
     db,
     SUBSCRIPTION_CORE_CODEX_PROVIDER,
-    codexTarget(target),
+    target,
   );
-}
-
-/**
- * Save what a shared connection of any registered provider serves on the
- * core (`updateSubscriptionCoreConnectionAccess`). Null when the connection
- * is gone or its access changed since `policy.version` was read.
- */
-export async function updateSubscriptionCoreModelConnectionAccess(
-  db: Database,
-  provider: ProviderId,
-  target: ModelConnectionTarget,
-  policy: ModelConnectionAccess,
-): Promise<ModelConnectionAccess | null> {
-  const binding = subscriptionCoreProvider(provider);
-  try {
-    const access = await updateSubscriptionCoreConnectionAccess(
-      db,
-      binding,
-      coreTarget(target),
-      policy,
-    );
-    return access ? legacyCorePolicy(access) : null;
-  } catch (error) {
-    if (error instanceof SubscriptionCoreAccessWorkspaceNotInOrganizationError)
-      throw new ModelConnectionWorkspaceNotInOrganizationError();
-    if (error instanceof SubscriptionCoreAccessForbiddenError)
-      throw new ModelConnectionAccessForbiddenError();
-    throw error;
-  }
 }
 
 /** Save what a shared Codex connection serves on the core. */
@@ -261,10 +142,11 @@ export async function updateSubscriptionCoreCodexModelConnectionAccess(
   target: ModelConnectionTarget,
   policy: ModelConnectionAccess,
 ): Promise<ModelConnectionAccess | null> {
+  if (target.kind !== "codex") throw new Error("Only Codex connections are written to the core");
   return await updateSubscriptionCoreModelConnectionAccess(
     db,
     SUBSCRIPTION_CORE_CODEX_PROVIDER,
-    codexTarget(target),
+    target,
     policy,
   );
 }
@@ -277,7 +159,7 @@ export async function updateModelConnectionAccess(
   if (target.kind === "codex") return null;
   if (policy.allowedPeople != null)
     throw new Error("Only accounts on the shared subscription core can be limited to people");
-  return await scoped(db, target, async (tx) => {
+  return await withModelConnectionAccessScope(db, target, async (tx) => {
     const { table, condition } = relation(target);
     if (target.workspaceId !== null && policy.allowedWorkspaces !== null)
       throw new Error("Workspace connections cannot assign other workspaces");

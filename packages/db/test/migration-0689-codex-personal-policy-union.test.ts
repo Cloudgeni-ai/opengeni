@@ -16,7 +16,8 @@ import { encryptEnvironmentValue } from "../src/environment-crypto";
 const migration = "0689_subscription_core_codex_cutover.sql";
 // 0712 requires the committed 0689 cutover, so it is held back with it.
 const precursor = "0712_subscription_core_generic_precursor.sql";
-// 0713 renames objects 0689 creates: held back and replayed right after it.
+// 0713 keys and redefines objects 0689 creates: held back and replayed right
+// after it.
 const providerKeyedReach = "0713_subscription_core_provider_keyed_reach.sql";
 // 0714 redefines 0713's reach setters: held back and replayed with it.
 const workspaceManagedAccounts = "0714_subscription_workspace_managed_organization_accounts.sql";

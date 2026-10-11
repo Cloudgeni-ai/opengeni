@@ -49,7 +49,7 @@ const subscriptionCoreMigrations = [
   "0711_subscription_codex_completion_operations.sql",
   // Records provider cutover receipts over withheld 0689 and restricts its tables.
   "0712_subscription_core_generic_precursor.sql",
-  // Renames and redefines the auto-assignment objects the withheld 0689 creates.
+  // Keys and redefines the auto-assignment objects the withheld 0689 creates.
   "0713_subscription_core_provider_keyed_reach.sql",
   // Redefines the reach setters withheld 0713 creates.
   "0714_subscription_workspace_managed_organization_accounts.sql",

@@ -7,6 +7,7 @@ import {
   webSearchProviderConfig,
   webSearchToolPlan,
   type WebSearchProviderConfig,
+  type WebSearchProviderEndpoint,
   type WebSearchProviderToolName,
   type WebSearchSettings,
 } from "@opengeni/config";
@@ -53,7 +54,7 @@ export function turnWebSearchPlan(
     // SuperGrok's native search is added by its transport, not as an agent
     // tool, so provider tools would only duplicate it.
     transportHostedSearch: resolvedModel?.provider.kind === "xai-subscription",
-    // A workspace with Opengeni credits off is not offered paid provider tools.
+    // A workspace with Opengeni credits off is offered only free providers.
     creditsDisabled: !workspaceCreditModelsAllowed,
   });
 }
@@ -66,10 +67,11 @@ function textResult(text: string, isError: boolean) {
 }
 
 type Pricing = ReturnType<typeof webSearchCallPricing>;
+type Operation = "search" | "fetch";
 
 function settledCost(
   operationId: string,
-  operation: "search" | "fetch",
+  operation: Operation,
   provider: string,
   pricing: Pricing,
   reportedCostMicros: number | undefined,
@@ -117,7 +119,7 @@ const WEB_SEARCH_DURATION_BUCKETS = [0.25, 0.5, 1, 2, 4, 8, 15, 30];
  */
 function recordWebSearchCall(
   observability: WebSearchObservability,
-  operation: "search" | "fetch",
+  operation: Operation,
   provider: string,
   outcome: WebSearchCallOutcome,
   startedAt: number,
@@ -140,6 +142,146 @@ function providerFailureOutcome(error: WebSearchProviderError): WebSearchCallOut
   return error.retryable ? "provider_retryable" : "provider_error";
 }
 
+/** A provider rejected the key or the account is out of quota. */
+const CREDENTIAL_COOLDOWN_MS = 10 * 60_000;
+/** A provider rate-limited, timed out, or failed on its side. */
+const TRANSIENT_COOLDOWN_MS = 60_000;
+
+/**
+ * Process-wide provider health for failover ordering. A provider that just
+ * failed in a way that will repeat (rate limit, outage, rejected key) moves
+ * behind the healthy providers of its slot until its cooldown passes. It is
+ * never skipped: when every provider is cooling down they are tried in their
+ * configured order.
+ */
+export class WebProviderHealth {
+  private readonly coolingUntil = new Map<string, number>();
+  constructor(private readonly now: () => number = Date.now) {}
+
+  order<T extends { endpoint: WebSearchProviderEndpoint }>(
+    operation: Operation,
+    candidates: readonly T[],
+  ): T[] {
+    const now = this.now();
+    const cooling = (candidate: T) =>
+      (this.coolingUntil.get(`${operation}:${candidate.endpoint.provider}`) ?? 0) > now;
+    return [
+      ...candidates.filter((candidate) => !cooling(candidate)),
+      ...candidates.filter(cooling),
+    ];
+  }
+
+  failed(operation: Operation, provider: string, error: WebSearchProviderError): void {
+    const status = error.status;
+    const cooldown =
+      status === 401 || status === 402 || status === 403
+        ? CREDENTIAL_COOLDOWN_MS
+        : error.retryable
+          ? TRANSIENT_COOLDOWN_MS
+          : 0;
+    if (cooldown > 0) this.coolingUntil.set(`${operation}:${provider}`, this.now() + cooldown);
+  }
+
+  succeeded(operation: Operation, provider: string): void {
+    this.coolingUntil.delete(`${operation}:${provider}`);
+  }
+}
+
+const sharedProviderHealth = new WebProviderHealth();
+
+type Candidate<Adapter> = {
+  endpoint: WebSearchProviderEndpoint;
+  adapter: Adapter;
+  pricing: Pricing;
+};
+
+type CallOutcome<T> = { ok: true; value: T } | { ok: false; message: string };
+
+/**
+ * Try a slot's providers in order until one answers. Each paid provider is
+ * admitted for its own price just before it is called, and only the provider
+ * that answered is settled. A provider failure (not a cancelled turn, not a
+ * bug) moves to the next provider; the model sees an error only when every
+ * provider failed or was refused.
+ */
+async function callWithFailover<Adapter, T>(input: {
+  operation: Operation;
+  candidates: readonly Candidate<Adapter>[];
+  health: WebProviderHealth;
+  scope: WebSearchCallScope;
+  billing: WebSearchBilling;
+  observability: WebSearchObservability;
+  operationId: string;
+  signal: AbortSignal | undefined;
+  call: (adapter: Adapter) => Promise<T>;
+  reportedCostMicros: (value: T) => number | undefined;
+  settle: (cost: WebSearchCallCost) => Promise<void>;
+}): Promise<CallOutcome<T>> {
+  const ordered = input.health.order(input.operation, input.candidates);
+  const label = input.operation === "search" ? "Web search" : "Web fetch";
+  let lastFailure: WebSearchProviderError | null = null;
+  let refusal: WebSearchBillingRefusedError | null = null;
+  for (const [index, candidate] of ordered.entries()) {
+    const provider = candidate.endpoint.provider;
+    try {
+      await input.billing.admit(input.scope, candidate.pricing.providerMicros);
+    } catch (error) {
+      if (!(error instanceof WebSearchBillingRefusedError)) throw error;
+      recordWebSearchCall(
+        input.observability,
+        input.operation,
+        provider,
+        "billing_refused",
+        performance.now(),
+      );
+      refusal ??= error;
+      continue;
+    }
+    const startedAt = performance.now();
+    try {
+      const value = await input.call(candidate.adapter);
+      recordWebSearchCall(input.observability, input.operation, provider, "ok", startedAt);
+      input.health.succeeded(input.operation, provider);
+      await input.settle(
+        settledCost(
+          input.operationId,
+          input.operation,
+          provider,
+          candidate.pricing,
+          input.reportedCostMicros(value),
+        ),
+      );
+      return { ok: true, value };
+    } catch (error) {
+      if (input.signal?.aborted) throw error;
+      if (!(error instanceof WebSearchProviderError)) {
+        recordWebSearchCall(input.observability, input.operation, provider, "error", startedAt);
+        throw error;
+      }
+      recordWebSearchCall(
+        input.observability,
+        input.operation,
+        provider,
+        providerFailureOutcome(error),
+        startedAt,
+      );
+      input.health.failed(input.operation, provider, error);
+      input.observability.warn("web search provider call failed", {
+        operation: input.operation,
+        provider,
+        status: error.status ?? undefined,
+        retryable: error.retryable,
+        failover: index < ordered.length - 1,
+        error: error.message,
+      });
+      lastFailure = error;
+    }
+  }
+  if (lastFailure)
+    return { ok: false, message: `${label} failed: ${providerFailure(lastFailure)}` };
+  return { ok: false, message: refusal?.message ?? `${label} is not available.` };
+}
+
 /**
  * The `web_search` and `web_fetch` attempt tools for one turn. The caller
  * decides which names the turn gets ({@link webSearchToolPlan}); this only
@@ -152,9 +294,11 @@ export function webSearchToolDefinitions(input: {
   billing: WebSearchBilling;
   observability: WebSearchObservability;
   fetch?: typeof fetch;
+  health?: WebProviderHealth;
 }): AttemptToolDefinition[] {
   const config: WebSearchProviderConfig | null = webSearchProviderConfig(input.settings);
   if (!config || input.tools.length === 0) return [];
+  const health = input.health ?? sharedProviderHealth;
   const adapterInput = {
     timeoutMs: config.timeoutMs,
     ...(input.fetch ? { fetch: input.fetch } : {}),
@@ -172,14 +316,21 @@ export function webSearchToolDefinitions(input: {
       });
     }
   };
+  const shared = {
+    health,
+    scope: input.scope,
+    billing: input.billing,
+    observability: input.observability,
+    settle,
+  };
   const definitions: AttemptToolDefinition[] = [];
 
-  if (input.tools.includes(WEB_SEARCH_TOOL_NAME)) {
-    const provider = createWebSearchProvider({
-      ...adapterInput,
-      endpoint: config.search,
-    });
-    const pricing = webSearchCallPricing(config, "search");
+  if (input.tools.includes(WEB_SEARCH_TOOL_NAME) && config.search.length > 0) {
+    const candidates = config.search.map((endpoint) => ({
+      endpoint,
+      adapter: createWebSearchProvider({ ...adapterInput, endpoint }),
+      pricing: webSearchCallPricing(config, endpoint, "search"),
+    }));
     definitions.push({
       identity: { serverId: "opengeni", toolName: WEB_SEARCH_TOOL_NAME },
       modelName: WEB_SEARCH_TOOL_NAME,
@@ -200,85 +351,32 @@ export function webSearchToolDefinitions(input: {
         let request: ReturnType<typeof parseWebSearchArguments>;
         try {
           request = parseWebSearchArguments(args);
-          await input.billing.admit(input.scope, pricing.providerMicros);
         } catch (error) {
-          if (error instanceof WebSearchBillingRefusedError) {
-            recordWebSearchCall(
-              input.observability,
-              "search",
-              config.search.provider,
-              "billing_refused",
-              performance.now(),
-            );
-          }
-          if (
-            error instanceof WebToolArgumentError ||
-            error instanceof WebSearchBillingRefusedError
-          )
-            return textResult(error.message, true);
+          if (error instanceof WebToolArgumentError) return textResult(error.message, true);
           throw error;
         }
-        const startedAt = performance.now();
-        try {
-          const response = await provider.search(request, {
-            signal: context.signal,
-          });
-          recordWebSearchCall(
-            input.observability,
-            "search",
-            config.search.provider,
-            "ok",
-            startedAt,
-          );
-          await settle(
-            settledCost(
-              context.operationId,
-              "search",
-              config.search.provider,
-              pricing,
-              response.reportedCostMicros,
-            ),
-          );
-          return textResult(renderWebSearchResults(request.query, response.results), false);
-        } catch (error) {
-          if (context.signal?.aborted) throw error;
-          if (error instanceof WebSearchProviderError) {
-            recordWebSearchCall(
-              input.observability,
-              "search",
-              config.search.provider,
-              providerFailureOutcome(error),
-              startedAt,
-            );
-            input.observability.warn("web search provider call failed", {
-              operation: "search",
-              provider: config.search.provider,
-              status: error.status ?? undefined,
-              retryable: error.retryable,
-              error: error.message,
-            });
-            return textResult(`Web search failed: ${providerFailure(error)}`, true);
-          }
-          recordWebSearchCall(
-            input.observability,
-            "search",
-            config.search.provider,
-            "error",
-            startedAt,
-          );
-          throw error;
-        }
+        const outcome = await callWithFailover({
+          ...shared,
+          operation: "search",
+          candidates,
+          operationId: context.operationId,
+          signal: context.signal,
+          call: (adapter) => adapter.search(request, { signal: context.signal }),
+          reportedCostMicros: (response) => response.reportedCostMicros,
+        });
+        return outcome.ok
+          ? textResult(renderWebSearchResults(request.query, outcome.value.results), false)
+          : textResult(outcome.message, true);
       },
     });
   }
 
-  if (input.tools.includes(WEB_FETCH_TOOL_NAME) && config.fetch) {
-    const fetchEndpoint = config.fetch;
-    const provider = createWebFetchProvider({
-      ...adapterInput,
-      endpoint: fetchEndpoint,
-    });
-    const pricing = webSearchCallPricing(config, "fetch");
+  if (input.tools.includes(WEB_FETCH_TOOL_NAME) && config.fetch.length > 0) {
+    const candidates = config.fetch.map((endpoint) => ({
+      endpoint,
+      adapter: createWebFetchProvider({ ...adapterInput, endpoint }),
+      pricing: webSearchCallPricing(config, endpoint, "fetch"),
+    }));
     const pages = new Map<string, WebPage>();
     definitions.push({
       identity: { serverId: "opengeni", toolName: WEB_FETCH_TOOL_NAME },
@@ -306,77 +404,26 @@ export function webSearchToolDefinitions(input: {
         }
         const cached = pages.get(request.url);
         if (cached) return textResult(renderWebPageWindow(cached, request), false);
-        try {
-          await input.billing.admit(input.scope, pricing.providerMicros);
-        } catch (error) {
-          if (error instanceof WebSearchBillingRefusedError) {
-            recordWebSearchCall(
-              input.observability,
-              "fetch",
-              fetchEndpoint.provider,
-              "billing_refused",
-              performance.now(),
-            );
-            return textResult(error.message, true);
-          }
-          throw error;
+        const outcome = await callWithFailover({
+          ...shared,
+          operation: "fetch",
+          candidates,
+          operationId: context.operationId,
+          signal: context.signal,
+          call: (adapter) => adapter.fetch({ url: request.url }, { signal: context.signal }),
+          reportedCostMicros: (page) => page.reportedCostMicros,
+        });
+        if (!outcome.ok) return textResult(outcome.message, true);
+        const page = outcome.value;
+        if (pages.size >= PAGE_CACHE_ENTRIES) {
+          pages.delete(pages.keys().next().value!);
         }
-        const startedAt = performance.now();
-        try {
-          const page = await provider.fetch({ url: request.url }, { signal: context.signal });
-          recordWebSearchCall(
-            input.observability,
-            "fetch",
-            fetchEndpoint.provider,
-            "ok",
-            startedAt,
-          );
-          await settle(
-            settledCost(
-              context.operationId,
-              "fetch",
-              fetchEndpoint.provider,
-              pricing,
-              page.reportedCostMicros,
-            ),
-          );
-          if (pages.size >= PAGE_CACHE_ENTRIES) {
-            pages.delete(pages.keys().next().value!);
-          }
-          // Bound per-attempt memory; one extra character keeps the cut visible.
-          pages.set(request.url, {
-            ...page,
-            content: page.content.slice(0, WEB_FETCH_RETAINED_MAX_CHARS + 1),
-          });
-          return textResult(renderWebPageWindow(page, request), false);
-        } catch (error) {
-          if (context.signal?.aborted) throw error;
-          if (error instanceof WebSearchProviderError) {
-            recordWebSearchCall(
-              input.observability,
-              "fetch",
-              fetchEndpoint.provider,
-              providerFailureOutcome(error),
-              startedAt,
-            );
-            input.observability.warn("web search provider call failed", {
-              operation: "fetch",
-              provider: fetchEndpoint.provider,
-              status: error.status ?? undefined,
-              retryable: error.retryable,
-              error: error.message,
-            });
-            return textResult(`Web fetch failed: ${providerFailure(error)}`, true);
-          }
-          recordWebSearchCall(
-            input.observability,
-            "fetch",
-            fetchEndpoint.provider,
-            "error",
-            startedAt,
-          );
-          throw error;
-        }
+        // Bound per-attempt memory; one extra character keeps the cut visible.
+        pages.set(request.url, {
+          ...page,
+          content: page.content.slice(0, WEB_FETCH_RETAINED_MAX_CHARS + 1),
+        });
+        return textResult(renderWebPageWindow(page, request), false);
       },
     });
   }

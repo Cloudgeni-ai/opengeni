@@ -357,13 +357,13 @@ describe.skipIf(!realDb)("subscription-core binding gates (PostgreSQL)", () => {
     // provider-keyed routine for whichever provider the binding names; no
     // binding supplies a hook of its own.
     await shared!.admin`
-      insert into opengeni_private.subscription_core_auto_assignments (
+      insert into opengeni_private.subscription_codex_auto_assignments (
         account_id, provider, connection_id, shared_workspaces, personal_workspaces,
         allocator_enabled, allowed_model_ids
       ) values (${org.accountId}::uuid, 'codex', ${connectionId}::uuid, true, false, true, null)`;
     const reachAllocator = async (id: string) => {
       const [row] = await shared!.admin<{ allocator_enabled: boolean }[]>`
-        select allocator_enabled from opengeni_private.subscription_core_auto_assignments
+        select allocator_enabled from opengeni_private.subscription_codex_auto_assignments
         where connection_id = ${id}::uuid`;
       return row?.allocator_enabled ?? null;
     };

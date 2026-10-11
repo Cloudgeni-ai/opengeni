@@ -2174,8 +2174,8 @@ BEGIN
     -- M3 PR 3b: the writers' caller check, capability internals and the
     -- revision-authority trigger function are owner-only. Migration 0680: the
     -- cutover receipt and its owner-run trigger functions are owner-only.
-    -- Migration 0713: the provider-keyed auto-assignment apply path and the
-    -- auto-assignment and plan-change trigger functions are owner-only.
+    -- Migration 0713: the provider-keyed auto-assignment apply path is
+    -- owner-only.
     -- Triggers fire without the caller holding EXECUTE.
     FOREACH routine_signature IN ARRAY ARRAY[
       'subscription_codex_writer_context(uuid,uuid,text)',
@@ -2186,10 +2186,7 @@ BEGIN
       'grant_subscription_core_owner_capability(text,text,uuid,uuid,text,uuid)',
       'drop_subscription_core_owner_capabilities(text,uuid)',
       'subscription_core_connection_target(text,uuid,uuid,uuid,uuid,uuid,text,bigint)',
-      'apply_subscription_core_auto_assignments(text,uuid,uuid,boolean)',
-      'auto_assign_subscription_core_workspace()',
-      'auto_assign_subscription_core_personal_workspace()',
-      'record_subscription_core_plan_change()'
+      'apply_subscription_core_auto_assignments(text,uuid,uuid,boolean)'
     ] LOOP
       IF to_regprocedure('opengeni_subscription_internal.' || routine_signature) IS NOT NULL THEN
         EXECUTE format(

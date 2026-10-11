@@ -112,6 +112,67 @@ describe("search adapters normalize each provider", () => {
     });
   });
 
+  test("Parallel uses fast mode and joins excerpts", async () => {
+    const { result, call } = await search("parallel", {
+      search_id: "s",
+      session_id: "x",
+      results: [
+        {
+          url: "https://bun.sh/blog",
+          title: "Bun",
+          publish_date: "2026-09-30",
+          excerpts: ["first", "second"],
+        },
+        { url: "https://bun.sh/docs", title: null, excerpts: [] },
+      ],
+    });
+    expect(call.url).toBe("https://api.parallel.ai/v1/search");
+    expect(call.headers["x-api-key"]).toBe("secret-key");
+    expect(call.body).toEqual({
+      objective: "bun release",
+      search_queries: ["bun release"],
+      mode: "fast",
+      advanced_settings: { max_results: 5, excerpt_settings: { max_chars_per_result: 400 } },
+    });
+    expect(result).toEqual({
+      results: [
+        {
+          title: "Bun",
+          url: "https://bun.sh/blog",
+          snippet: "first … second",
+          publishedAt: "2026-09-30",
+        },
+        { title: "https://bun.sh/docs", url: "https://bun.sh/docs", snippet: "" },
+      ],
+    });
+  });
+
+  test("Perplexity uses Fast Search", async () => {
+    const { result, call } = await search(
+      "perplexity",
+      {
+        results: [
+          {
+            title: "Bun",
+            url: "https://bun.sh",
+            snippet: "Bun is out",
+            date: "2026-09-01",
+            last_updated: "2026-09-02",
+          },
+        ],
+      },
+      { maxResults: 3 },
+    );
+    expect(call.url).toBe("https://api.perplexity.ai/search");
+    expect(call.headers.authorization).toBe("Bearer secret-key");
+    expect(call.body).toEqual({ query: "bun release", max_results: 3, search_type: "fast" });
+    expect(result).toEqual({
+      results: [
+        { title: "Bun", url: "https://bun.sh", snippet: "Bun is out", publishedAt: "2026-09-01" },
+      ],
+    });
+  });
+
   test("Tavily converts reported credits", async () => {
     const { result, call } = await search("tavily", {
       results: [{ title: "T", url: "https://t.example", content: "c", published_date: "d" }],
@@ -243,12 +304,32 @@ describe("fetch adapters", () => {
     expect(jina.call.url).toBe("https://r.jina.ai/https://a.example/x");
     expect(jina.call.headers.authorization).toBeUndefined();
     expect(jina.page.content).toBe("text");
+    const parallel = await fetchPage("parallel", {
+      extract_id: "e",
+      session_id: "s",
+      errors: [],
+      results: [
+        { url: "https://a.example/x", title: "P", excerpts: ["ex"], full_content: "# Full" },
+      ],
+    });
+    expect(parallel.call.url).toBe("https://api.parallel.ai/v1/extract");
+    expect(parallel.call.body).toEqual({
+      urls: ["https://a.example/x"],
+      advanced_settings: { full_content: true },
+    });
+    expect(parallel.page).toEqual({ url: "https://a.example/x", title: "P", content: "# Full" });
   });
 
   test("per-URL failures and empty pages are provider errors", async () => {
     await expect(
       fetchPage("tinyfish", { results: [], errors: [{ url: "x", error: "timeout" }] }),
     ).rejects.toThrow("Could not fetch the page: timeout");
+    await expect(
+      fetchPage("parallel", {
+        results: [],
+        errors: [{ url: "x", error_type: "fetch_failed", http_status_code: 403, content: null }],
+      }),
+    ).rejects.toThrow("Could not fetch the page: fetch_failed (HTTP 403)");
     await expect(
       fetchPage("exa", {
         results: [],
@@ -264,6 +345,9 @@ describe("fetch adapters", () => {
     expect(() => createWebFetchProvider({ endpoint: endpoint("brave"), timeoutMs: 1_000 })).toThrow(
       "brave cannot fetch pages",
     );
+    expect(() =>
+      createWebFetchProvider({ endpoint: endpoint("perplexity"), timeoutMs: 1_000 }),
+    ).toThrow("perplexity cannot fetch pages");
   });
 });
 
