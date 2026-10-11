@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import {
   BrowserActionCommand,
   BrowserActionReceipt,
+  INTERACTION_MAX_RESOLVED_ACTION_TARGETS,
   BrowserObservation,
   BrowserProtectedAuthFillCommand,
   BrowserProtectedAuthFillReceipt,
@@ -35,6 +36,7 @@ import {
   InteractionOutcomeUnknownDriverError,
   recoverInteractionReceipt,
   type InteractionControllerErrorCode,
+  type InteractionDispatchTrace,
   type InteractionOperationJournalRecord,
 } from "./controller-core";
 
@@ -43,13 +45,18 @@ export {
   InteractionDefiniteDriverError,
   InteractionOutcomeUnknownDriverError,
   type InteractionControllerErrorCode,
+  type InteractionDispatchTrace,
 };
 
 export type BrowserInteractionDriver = {
   target(targetId: string): Promise<BrowserTargetValue | null>;
   observe(targetId: string): Promise<BrowserObservationValue>;
   validate?(command: BrowserActionCommandValue, target: BrowserTargetValue): Promise<void> | void;
-  dispatch(command: BrowserActionCommandValue): Promise<BrowserObservationValue | null>;
+  /** Drivers that resolve locators record each resolved element on `trace`. */
+  dispatch(
+    command: BrowserActionCommandValue,
+    trace?: InteractionDispatchTrace,
+  ): Promise<BrowserObservationValue | null>;
 };
 
 export type BrowserInteractionAuthority = {
@@ -166,6 +173,10 @@ export class BrowserInteractionController {
             observation: input.observation,
             error: input.error,
           });
+        },
+        maxDispatchTraceItems: INTERACTION_MAX_RESOLVED_ACTION_TARGETS,
+        attachDispatchTrace(receipt, items) {
+          return BrowserActionReceipt.parse({ ...receipt, targets: items });
         },
         recoverReceipt(receipt, settledAt) {
           if (

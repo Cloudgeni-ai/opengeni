@@ -10162,7 +10162,9 @@
         "$.protocolVersion": "const!=[\"1\"]",
         "$.settledAt": "string! null",
         "$.state": "ref(InteractionOperationState)!",
-        "$.targetId": "string!"
+        "$.targetId": "string!",
+        "$.targets": "array?",
+        "$.targets[]": "ref(BrowserActionResolvedTarget)"
       }
     },
     "BrowserActionRequest": {
@@ -10180,6 +10182,21 @@
         "$.observationMode": "enum?=[\"\\\"full\\\"\",\"\\\"input\\\"\",\"\\\"none\\\"\"]",
         "$.operationId": "string!",
         "$.targetId": "string!"
+      }
+    },
+    "BrowserActionResolvedTarget": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.actionIndex": "integer!",
+        "$.container": "object! null",
+        "$.container.name": "string! null",
+        "$.container.role": "string!",
+        "$.name": "string! null",
+        "$.ref": "string! null",
+        "$.role": "string!"
       }
     },
     "BrowserClipboard": {
@@ -27430,6 +27447,7 @@
       "BrowserActionBatch": "type",
       "BrowserActionReceipt": "type",
       "BrowserActionRequest": "type",
+      "BrowserActionResolvedTarget": "type",
       "BrowserAuthRunCollection": "value",
       "BrowserClipboard": "type",
       "BrowserClipboardResource": "value",
@@ -29415,6 +29433,7 @@
       "BrowserActionBatch": "type",
       "BrowserActionReceipt": "type",
       "BrowserActionRequest": "type",
+      "BrowserActionResolvedTarget": "type",
       "BrowserAuthRunCollection": "value",
       "BrowserClipboard": "type",
       "BrowserClipboardResource": "value",

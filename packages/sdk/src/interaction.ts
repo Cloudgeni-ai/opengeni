@@ -1104,6 +1104,17 @@ export type BrowserActionReceipt = {
   settledAt: string | null;
   observation: BrowserObservation | null;
   error: InteractionError | null;
+  /** Elements the action's locators resolved to, in dispatch order. */
+  targets?: BrowserActionResolvedTarget[] | undefined;
+};
+
+export type BrowserActionResolvedTarget = {
+  actionIndex: number;
+  ref: string | null;
+  role: string;
+  name: string | null;
+  /** Nearest dialog, landmark, menu or toolbar around the element. */
+  container: { role: string; name: string | null } | null;
 };
 
 export type BrowserSessionHeartbeatResponse = {
