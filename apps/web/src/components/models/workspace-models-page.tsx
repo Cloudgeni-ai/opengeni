@@ -44,7 +44,7 @@ import {
   CodexPoolNotice,
   CodexSettingRows,
   codexListedCount,
-  organizationOnlyCodexAccounts,
+  organizationNoticeCodexCount,
   codexSectionVisible,
   type CodexPlaces,
   type OrganizationCodexPool,
@@ -1097,7 +1097,7 @@ export function WorkspaceModelsPageBody({
                 places={codexPlaces}
                 organizationAccountCount={
                   organizationAdmin
-                    ? organizationOnlyCodexAccounts(orgCodex.accounts, codex, here.id).length
+                    ? organizationNoticeCodexCount(orgCodex.accounts, codex, here.id)
                     : undefined
                 }
               />

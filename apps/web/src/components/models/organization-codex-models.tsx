@@ -55,7 +55,8 @@ import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
 /**
  * Whether an organization account reaches a workspace, from its "Available
  * in" policy and the workspaces that connected it. Null while unknown (still
- * loading, or the read failed) or when it is limited to chosen people.
+ * loading, or the read failed) or when it is limited to chosen people; false
+ * when that choice is empty (no one uses it).
  */
 export function reachesWorkspace(
   access: ModelConnectionAccessResponse | null,
@@ -64,7 +65,7 @@ export function reachesWorkspace(
   if (!access) return null;
   const { policy, personalWorkspacesSupported } = access;
   // Chosen people use it wherever they work: not a property of the workspace.
-  if (policy.allowedPeople) return null;
+  if (policy.allowedPeople) return policy.allowedPeople.length > 0 ? null : false;
   if (workspace.personal) return personalWorkspacesSupported && policy.allowPersonalWorkspaces;
   return (
     policy.allowedWorkspaces === null ||

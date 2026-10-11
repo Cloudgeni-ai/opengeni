@@ -1,7 +1,7 @@
 // SAMPLE DATA. Synthetic organization "Acme": no real accounts, credentials,
 // people or provider calls. "Design team plan" was connected in the Design
-// workspace (a former "Design only" account); "Acme Pro" is an account the
-// organization connected. Saves change only this page's memory.
+// workspace (a former "Design only" account), "Research team plan" in the
+// Research workspace; "Acme Pro" is an account the organization connected. Saves change only this page's memory.
 const ORG = "00000000-0000-4000-8000-00000000a000";
 export const WORKSPACES = {
   design: { id: "00000000-0000-4000-8000-0000000000d1", name: "Design" },
@@ -16,6 +16,7 @@ const PEOPLE = [
 ];
 const ACME_PRO = "00000000-0000-4000-8000-0000000000c1";
 const DESIGN_PLAN = "00000000-0000-4000-8000-0000000000c2";
+const RESEARCH_PLAN = "00000000-0000-4000-8000-0000000000c3";
 
 const params = new URLSearchParams(window.location.search);
 /** `reach=people`: Acme Pro limited to people; `reach=all`: the Design plan in every shared workspace. */
@@ -53,6 +54,7 @@ function account(id: string, label: string, email: string, remaining: number, ac
 const organizationAccounts = [
   account(ACME_PRO, "Acme Pro", "billing@example.com", 62, true),
   account(DESIGN_PLAN, "Design team plan", "design@example.com", 81, false),
+  account(RESEARCH_PLAN, "Research team plan", "research@example.com", 44, false),
 ];
 
 type Policy = {
@@ -86,11 +88,22 @@ const policies: Record<string, Policy> = {
     allowPersonalWorkspaces: false,
     version: 1,
   },
+  // Research's own account, used only there: never available in Design.
+  [RESEARCH_PLAN]: {
+    allowedModels: null,
+    allowedWorkspaces: [],
+    allowPersonalWorkspaces: false,
+    version: 1,
+  },
 };
-const local: Record<string, string[]> = { [DESIGN_PLAN]: [WORKSPACES.design.id] };
+const local: Record<string, string[]> = {
+  [DESIGN_PLAN]: [WORKSPACES.design.id],
+  [RESEARCH_PLAN]: [WORKSPACES.research.id],
+};
 const managedBy: Record<string, string | null> = {
   [ACME_PRO]: null,
   [DESIGN_PLAN]: WORKSPACES.design.id,
+  [RESEARCH_PLAN]: WORKSPACES.research.id,
 };
 
 export const receipts: unknown[] = [];
@@ -130,7 +143,7 @@ const methods: Record<string, (...args: never[]) => Promise<unknown>> = {
     }
     if (method === "GET" && path.endsWith("/overview")) {
       const id = path.split("/").at(-2)!;
-      const remaining = id === ACME_PRO ? 62 : 81;
+      const remaining = id === ACME_PRO ? 62 : id === RESEARCH_PLAN ? 44 : 81;
       return {
         accountId: id,
         usage: {

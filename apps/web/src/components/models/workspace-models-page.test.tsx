@@ -2133,6 +2133,127 @@ describe("One Models page for the organization and the workspace", () => {
         await cleanup(view);
       }
     });
+
+    test("while the organization's list loads, the organization's list tags it with no reach", async () => {
+      organizationAdmin = true;
+      organizationList = true;
+      client.requestJson.mockImplementation(async (method: string, path: string) => {
+        if (method === "GET" && path === "/v1/organizations/organization-a/codex/accounts") {
+          return new Promise(() => undefined);
+        }
+        if (method === "GET") throw new Error(`unexpected read ${path}`);
+        return {};
+      });
+      client.getModelConnectionAccess.mockImplementation(async (...args: unknown[]) =>
+        managedAccess((args[0] as { connectionId: string }).connectionId),
+      );
+      organizationWorkspaces = [
+        {
+          id: "workspace-a",
+          name: "Design preview",
+          personal: false,
+          canManage: true,
+          savedDefaultModel: null,
+        },
+      ];
+      const view = await render();
+      try {
+        await flush();
+        expect(rowsNamed(view.container, "Team plan")).toHaveLength(1);
+        expect(rowsNamed(view.container, "Team plan")[0]!.textContent).not.toContain(
+          "Design preview only",
+        );
+      } finally {
+        await cleanup(view);
+      }
+    });
+
+    test("a Personal workspace's own account keeps its tag on the organization's list while that list can't be read", async () => {
+      organizationAdmin = true;
+      organizationList = true;
+      failOrganizationRead();
+      organizationWorkspaces = [
+        {
+          id: "workspace-a",
+          name: "Personal",
+          personal: true,
+          canManage: true,
+          savedDefaultModel: null,
+        },
+      ];
+      const view = await render();
+      try {
+        await flush();
+        expect(rowsNamed(view.container, "Team plan")).toHaveLength(1);
+        expect(rowsNamed(view.container, "Team plan")[0]!.textContent).toContain(
+          "Personal workspace only",
+        );
+      } finally {
+        await cleanup(view);
+      }
+    });
+
+    test("a Personal workspace's own account keeps its tag on its page while the organization's list can't be read", async () => {
+      organizationAdmin = true;
+      personalWorkspace = true;
+      failOrganizationRead();
+      const view = await render();
+      try {
+        await flush();
+        expect(rowsNamed(view.container, "Team plan")).toHaveLength(1);
+        expect(rowsNamed(view.container, "Team plan")[0]!.textContent).toContain(
+          "Personal workspace only",
+        );
+      } finally {
+        await cleanup(view);
+      }
+    });
+
+    test("another workspace's own account isn't available here and sets nothing aside", async () => {
+      organizationAdmin = true;
+      const research = {
+        ...codexAccount({ id: "acct-r", label: "Research plan", source: "organization" }),
+        ownInWorkspaceIds: ["workspace-b"],
+      };
+      client.requestJson.mockImplementation(async (method: string, path: string) => {
+        if (method === "GET" && path === "/v1/organizations/organization-a/codex/accounts") {
+          return {
+            ...orgAccounts,
+            accounts: [{ ...orgAccounts.accounts[0], ownInWorkspaceIds: [] }, research],
+          };
+        }
+        if (method === "GET") throw new Error(`unexpected read ${path}`);
+        return {};
+      });
+      client.getModelConnectionAccess.mockImplementation(async (...args: unknown[]) =>
+        (args[0] as { connectionId: string }).connectionId === "acct-r"
+          ? {
+              ...managedAccess("acct-r"),
+              policy: { ...openPolicy, allowedWorkspaces: [], allowPersonalWorkspaces: false },
+              localWorkspaceIds: ["workspace-b"],
+              managedByWorkspaceId: "workspace-b",
+            }
+          : managedAccess((args[0] as { connectionId: string }).connectionId),
+      );
+      const view = await render();
+      try {
+        await flush();
+        const row = rowsNamed(view.container, "Research plan")[0]!;
+        expect(row.textContent).toContain("Not available in Design preview");
+        expect(row.textContent).not.toContain("Set aside");
+        expect(row.querySelector('[aria-label^="More actions"]')).toBeNull();
+        // The organization's account that does reach here is still set aside, with its way back.
+        const company = rowsNamed(view.container, "Company plan")[0]!;
+        expect(company.textContent).toContain("Set aside while this workspace has its own");
+        expect(company.querySelector('[aria-label^="More actions"]')).not.toBeNull();
+        // The notice counts only the organization's account known to reach here.
+        expect(view.container.textContent).toContain(
+          "The organization's account is set aside while it's connected.",
+        );
+      } finally {
+        await cleanup(view);
+      }
+    });
   });
 
   test("a workspace admin sees their workspaces and what they use, read-only", async () => {

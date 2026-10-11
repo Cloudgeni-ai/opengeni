@@ -52,6 +52,9 @@ try {
     await page.getByText("Design team plan").waitFor();
     assert((await page.getByText("Design team plan").count()) === 1, "listed twice");
     await page.getByText("Design only").waitFor();
+    // Research's own account too: once, tagged with its workspace.
+    assert((await page.getByText("Research team plan").count()) === 1, "Research listed twice");
+    await page.getByText("Research only").waitFor();
     await page.getByText("Your Personal workspace").waitFor();
     await page.getByText("Sharing work between accounts").waitFor();
     await noOverflow();
@@ -134,6 +137,17 @@ try {
     await page.getByText("Acme Pro").waitFor();
     await page.getByText("Design team plan").waitFor();
     assert((await page.getByText("Design team plan").count()) === 1, "listed twice on Design");
+    // Research's own account doesn't reach Design: not available, nothing set aside, no menu.
+    const research = page.locator("[data-slot=list-row]", { hasText: "Research team plan" });
+    await research.getByText("Not available in Design").waitFor();
+    assert(
+      (await research.getByText("Set aside while this workspace has its own").count()) === 0,
+      "another workspace's account shown as set aside",
+    );
+    assert(
+      (await research.locator('[aria-label^="More actions"]').count()) === 0,
+      "menu on an account that doesn't reach Design",
+    );
     await noOverflow();
     await shot("8-workspace-page");
 

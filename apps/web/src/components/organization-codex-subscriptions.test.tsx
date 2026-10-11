@@ -452,5 +452,9 @@ describe("organization Codex subscriptions", () => {
     expect(
       reachesWorkspace({ ...access, policy: { ...access.policy, allowedPeople: ["p"] } }, shared),
     ).toBeNull();
+    // An empty people choice reaches no one.
+    expect(
+      reachesWorkspace({ ...access, policy: { ...access.policy, allowedPeople: [] } }, shared),
+    ).toBe(false);
   });
 });

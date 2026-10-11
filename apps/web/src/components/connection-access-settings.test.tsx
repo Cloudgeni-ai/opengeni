@@ -704,6 +704,17 @@ test("a workspace's own copy no workspace manages is an organization account: it
     expect(saveButton().disabled).toBe(false);
     await choose("Only selected workspaces");
     expect(saveButton().disabled).toBe(true);
+    // Choosing people clears the saved Personal choice: people replace it.
+    await choose("Only selected people");
+    await choose("Alex Morgan");
+    await save();
+    expect(writes.at(-1)).toEqual({
+      allowedModels: null,
+      allowedWorkspaces: [],
+      allowPersonalWorkspaces: false,
+      allowedPeople: ["person-a"],
+      version: 6,
+    });
 
     // People saved earlier stay chosen when the member list can't be read.
     policy = {

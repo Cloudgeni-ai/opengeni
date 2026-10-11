@@ -159,6 +159,22 @@ export function organizationOnlyCodexAccounts(
   );
 }
 
+/**
+ * The organization's accounts the pool notice counts here: those other than
+ * this workspace's own, leaving out another workspace's own account unless
+ * this workspace's pool lists it (only then is it known to reach here).
+ */
+export function organizationNoticeCodexCount(
+  organizationAccounts: readonly CodexAccount[],
+  codex: CodexSubscriptions,
+  workspaceId: string,
+): number {
+  const listed = new Set(codex.accounts.map((account) => account.id));
+  return organizationOnlyCodexAccounts(organizationAccounts, codex, workspaceId).filter(
+    (account) => !account.ownInWorkspaceIds?.length || listed.has(account.id),
+  ).length;
+}
+
 /** How many rows Codex adds to the Accounts list once loaded. */
 export function codexListedCount(
   codex: CodexSubscriptions,
@@ -244,12 +260,11 @@ export function CodexAccountRows({
         codex={codex}
         account={account}
         places={places}
-        // Until the organization's list says whether it is shared wider, no
-        // "<workspace> only" tag; a Personal workspace's account never is.
+        // When the organization's list can't say whether it is shared wider, no
+        // "<workspace> only" tag (the list loads before these rows render); a
+        // Personal workspace's account never is.
         scopeLabel={
-          organization &&
-          !organization.workspace.personal &&
-          (organization.codex.loading || organization.codex.loadError)
+          organization && !organization.workspace.personal && organization.codex.loadError
             ? ""
             : undefined
         }
@@ -455,14 +470,16 @@ function SharedCodexSetAsideRow({
     connectionId: account.id,
   });
   // Chosen people's sessions use it here whichever pool the workspace uses.
-  const forPeople = Boolean(access.data?.policy.allowedPeople);
-  const reaches = ownInUse ? true : reachesWorkspace(access.data, organization.workspace);
+  const forPeople = (access.data?.policy.allowedPeople?.length ?? 0) > 0;
+  // Another workspace's own account, or one shared elsewhere, may not reach
+  // this workspace at all: then this workspace's own accounts set nothing aside.
+  const reaches = reachesWorkspace(access.data, organization.workspace);
   const reason = forPeople
     ? null
-    : ownInUse
-      ? "Set aside while this workspace has its own"
-      : reaches === false
-        ? `Not available in ${places.workspaceName}`
+    : reaches === false
+      ? `Not available in ${places.workspaceName}`
+      : reaches && ownInUse
+        ? "Set aside while this workspace has its own"
         : null;
   return (
     <ListRow
@@ -475,7 +492,7 @@ function SharedCodexSetAsideRow({
         reason,
       ]}
       cells={forPeople ? undefined : { usage: NOT_IN_USE }}
-      menu={forPeople ? null : menu}
+      menu={!forPeople && reaches ? menu : null}
       indicator={
         account.status !== "active" ? { kind: "attention", label: "Needs reconnect" } : "open"
       }
