@@ -58,6 +58,7 @@ const FENCES = "0717_subscription_authority_fences.sql";
 // The drained SuperGrok cutover requires 0717; held back (never applied) so
 // this database stays a Codex-only cutover fixture.
 const XAI_CUTOVER = "0719_subscription_core_xai_cutover.sql";
+const CLAUDE_CUTOVER = "0720_subscription_core_claude_cutover.sql";
 const key = Buffer.alloc(32, 72);
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
@@ -715,7 +716,7 @@ describe.skipIf(!realDb)(
       await owner`CREATE TABLE schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`;
       // 0712 records the provider cutover receipts and requires the committed
       // 0689, so it is withheld with it and applied by the same cutover run.
-      await owner`INSERT INTO schema_migrations(name) VALUES(${MIGRATION}), (${PRECURSOR}), (${PROVIDER_KEYED_REACH}), (${WORKSPACE_MANAGED_ACCOUNTS}), (${API_KEY_CONNECTIONS}), (${COMPAT}), (${FENCES}), (${XAI_CUTOVER})`;
+      await owner`INSERT INTO schema_migrations(name) VALUES(${MIGRATION}), (${PRECURSOR}), (${PROVIDER_KEYED_REACH}), (${WORKSPACE_MANAGED_ACCOUNTS}), (${API_KEY_CONNECTIONS}), (${COMPAT}), (${FENCES}), (${XAI_CUTOVER}), (${CLAUDE_CUTOVER})`;
       await migrate(owned.ownerUrl, undefined, { applicationDatabaseRoles: ["opengeni_app"] });
       await owner`DELETE FROM schema_migrations WHERE name IN (${MIGRATION}, ${PRECURSOR}, ${PROVIDER_KEYED_REACH}, ${WORKSPACE_MANAGED_ACCOUNTS}, ${API_KEY_CONNECTIONS}, ${COMPAT}, ${FENCES})`;
       await seed();

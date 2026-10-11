@@ -84,6 +84,7 @@ const withheldMigrations = [
   "0718_subscription_personal_acceptance_reads.sql",
   // The drained SuperGrok cutover requires 0712 through 0718; it runs last.
   "0719_subscription_core_xai_cutover.sql",
+  "0720_subscription_core_claude_cutover.sql",
 ];
 let database: OwnerMigratedTestDatabase | null = null;
 

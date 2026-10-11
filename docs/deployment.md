@@ -5183,8 +5183,8 @@ releases works:
   window, and run the Claude cutover's window with its later release.
 - In one window: deploy a release that carries both. Drain and back up once,
   take both inventories, and run the migrator once with the same roles and
-  key; it applies 0719 and then the Claude cutover in ledger order. If the
-  Claude cutover aborts, 0719 stays committed: fix the named Claude rows and
+  key; it applies 0719 and then the Claude cutover (0720) in ledger order. If
+  the Claude cutover aborts, 0719 stays committed: fix the named Claude rows and
   run the migrator again (it resumes at the Claude cutover). Start binaries
   only after both receipts exist; readiness refuses a database missing
   either. Validate each provider's report rows separately. While only 0719
@@ -5192,6 +5192,190 @@ releases works:
   the old release must not run after 0719. If the Claude rows cannot be
   fixed within the window, restore the step 3 backup and use the separate
   path, or deploy a release that carries 0719 but not the Claude cutover.
+  The Claude steps are in
+  [Claude on the shared subscription core (0720)](#claude-on-the-shared-subscription-core-0720).
+
+### Claude on the shared subscription core (0720)
+
+Migration `0720_subscription_core_claude_cutover.sql` is a one-way
+maintenance cutover, the Claude counterpart of 0689 and 0719, and shares
+0719's receipt, readiness, report, compatibility-record and stage machinery.
+It moves every organization's Claude (`claude`) subscription state onto the
+shared subscription core, records the `claude` receipt and registry row, and
+enables the Claude cutover row for every organization, in one transaction.
+Design record:
+[subscription core, C3](design/subscription-core-2026-10-07.md#c3-the-drained-claude-cutover).
+The release that carries it must also carry the dormant Claude core runtime
+(chat placement, settlement, waits, usage, routes and writers); after the
+receipt the runtime serves Claude only through the core.
+
+What it moves, per organization: credentials (OAuth logins and setup tokens,
+each copied unchanged as `claude_oauth_v1` or `claude_setup_token_v1`; shared
+workspace accounts become organization-owned connections assigned to their
+workspace; organization accounts keep their allowlist, workspace reach and
+Personal-workspace reach; a Personal workspace's accounts and every
+`user`-scoped account become their owner's personal connections), one
+secret copy each with its health, allocator counters and legacy
+`exhausted_until`, the current usage reading from
+`claude_subscription_account_usage` with its per-model cooldowns and request
+restrictions re-keyed from Anthropic's model ids to Opengeni's product model
+ids, rotation and primaries, the workspace inference source, session pins as
+bindings, live leases with their exact fences, waiting capacity waiters with
+their ids, generations, wake revisions and pending wakes, each live turn's
+`claudeAuthRecovery` value as a turn-failure receipt, an accepted-authority
+compatibility record for every live carrier, and one fresh personal
+authority generation per owner. Legacy rows stay for forensics. The six
+legacy Claude tables (`claude_subscription_credentials`,
+`claude_rotation_settings`, `claude_credential_leases`,
+`claude_session_account_pins`, `claude_capacity_waiters`,
+`claude_subscription_account_usage`) become read-only as 0719 does for
+SuperGrok: the runtime role keeps only `SELECT`, restrictive policies refuse
+every insert or update once the receipt exists, the legacy disconnect
+refuses, and no role can add a legacy Claude personal authority.
+
+Other providers' rows are not changed, with the same Claude-owned
+exceptions as 0719 (a session on a Claude model gets its Claude binding,
+shared settings rows gain only their `claude` keys and the Claude primary,
+the Personal-workspace fallback override and the owner's per-person fallback
+opt-in). 0720 reads and writes no SuperGrok data.
+
+**1. Inventory (before the window).** As the schema owner:
+
+```sql
+SELECT account_id, authority_scope, count(*) FROM claude_subscription_credentials GROUP BY 1, 2;
+SELECT account_id, authority_scope, count(*) FROM claude_rotation_settings GROUP BY 1, 2;
+SELECT account_id, count(*) FROM claude_credential_leases WHERE leased_until > now() GROUP BY 1;
+SELECT account_id, count(*) FROM claude_capacity_waiters WHERE status = 'waiting' GROUP BY 1;
+SELECT account_id, count(*) FROM claude_session_account_pins
+  WHERE pinned_credential_id IS NOT NULL OR last_credential_id IS NOT NULL GROUP BY 1;
+SELECT account_id, count(*) FROM claude_subscription_account_usage GROUP BY 1;
+SELECT account_id, count(*) FROM session_turns
+  WHERE status IN ('queued', 'running', 'requires_action', 'recovering', 'waiting_capacity')
+  GROUP BY 1;
+SELECT account_id, count(*) FROM session_turns
+  WHERE status IN ('queued', 'running', 'requires_action', 'recovering', 'waiting_capacity')
+    AND metadata ? 'claudeAuthRecovery'
+  GROUP BY 1;
+```
+
+0598 moved every legacy Claude model connection into the account pools and
+revoked it. Confirm none is left; the migration aborts with
+`legacy_connection_not_revoked` otherwise:
+
+```sql
+SELECT account_id, id FROM connections
+  WHERE metadata->>'credentialRole' = 'claude_subscription'
+    AND (status <> 'revoked' OR credential_encrypted <> '');
+SELECT account_id, id FROM organization_model_provider_connections
+  WHERE provider_kind = 'claude_subscription'
+    AND (status <> 'revoked' OR credential_encrypted <> '');
+```
+
+As a role that bypasses row security, confirm the core holds no Claude state
+yet. Each query must return no rows:
+
+```sql
+SELECT account_id, id, ownership FROM subscription_connections WHERE provider = 'claude';
+SELECT account_id, alias_connection_id FROM subscription_connection_aliases WHERE provider = 'claude';
+SELECT account_id, session_id FROM subscription_session_bindings WHERE provider = 'claude';
+SELECT account_id, turn_id FROM subscription_leases WHERE provider = 'claude';
+SELECT account_id, session_id FROM subscription_capacity_waiters WHERE provider = 'claude';
+SELECT account_id FROM subscription_operation_leases WHERE provider = 'claude';
+SELECT account_id, turn_id FROM subscription_turn_failures WHERE provider = 'claude';
+SELECT account_id, enabled FROM subscription_provider_cutovers WHERE provider = 'claude';
+SELECT account_id, carrier_kind FROM opengeni_private.subscription_authority_compat
+  WHERE provider = 'claude';
+SELECT account_id, workspace_id FROM subscription_settings
+  WHERE claude_primary_connection_id IS NOT NULL;
+```
+
+List the workspaces whose Claude setting will follow a locked organization
+value (the 0719 query with `claude_subscription_credentials` in place of
+`xai_subscription_credentials`); nothing aborts either way.
+
+**2. Stop and drain. 3. Back up.** As for 0719. Do not cancel turns.
+
+**4. Migrate.** Run the TypeScript migrator as the schema owner with
+`OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES` and
+`OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`, as for 0719. Plain `psql` is refused.
+Each credential is decrypted, checked, re-encrypted and read back before the
+legacy copy is blanked. An installation without legacy Claude credentials
+needs no key.
+
+The migration aborts and rolls back everything (`55000`) on: a drain-check
+failure; an undecodable credential (fixed message, no material); a legacy
+Claude model connection that is not revoked
+(`legacy_connection_not_revoked`); identity or ownership ambiguity, named by
+content-free classes such as `provider_identity_mismatch` (the stored
+account id is neither the token's Claude account nor its `oauth:` or
+`setup:` derived id), `personal_workspace_owner_ambiguous`,
+`personal_owner_missing`, `unrepresentable_status`, `unrepresentable_scope`,
+`session_owner_ambiguous`, `personal_generation_ambiguous` or
+`pin_pool_ambiguous`; `lease_conflict`, `waiter_conflict` or
+`waiter_workflow_mismatch`; pre-existing core Claude state; or a parity
+mismatch (`0720 parity mismatch (<metrics>)`). Database errors surface only
+as `could not write the shared core (SQLSTATE <code>, <constraint>)`. Fix the
+named legacy rows and run the migrator again; nothing was committed.
+
+**5. Provision roles and start.** Run `db:provision-roles` (the runtime role
+keeps only `SELECT` on the six legacy Claude tables), then start only
+binaries of this release. Readiness refuses a database without the `claude`
+receipt (`opengeni_private.subscription_provider_cutover_committed('claude')`);
+an older binary must never be restarted after it.
+
+**6. Validate after start.**
+
+- Runtime posture is ready on every API and worker.
+- The 0719 report query with `provider = 'claude'` returns no rows, and
+  `compat:dependent_sources_without_record` is zero. Claude adds these
+  `disposition:*` rows to 0719's: `auth_recovery_unmapped` (a live
+  `claudeAuthRecovery` value naming no moved credential; nothing to bound),
+  `auth_recovery_malformed` (a value without a credential id and a positive
+  version; ignored), `usage_rows_stale` (a usage row of an older credential
+  version; only the legacy `exhausted_until` moved), `usage_snapshot_unreadable`
+  (a current usage row that does not decode; the connection's usage is
+  unknown until its first reading) and `usage_reconnect_pending` (the last
+  usage refresh asked for a reconnect; it stays a quota fact and the
+  connection status is unchanged). The `local_pool_freeze_locked:<workspace>`
+  and `local_rotation_locked:<workspace>` rows list each workspace whose
+  Claude source, rotation or primary the organization's lock kept.
+  `readiness:owners_with_multiple_current_personal_generations` is zero for
+  `claude`.
+- Every organization has `subscription_provider_cutovers (provider = 'claude',
+  enabled = true)`.
+- Waiting Claude turns keep their waiter (same id, generation and wake
+  revisions) and resume through the core; no workflow reset is needed. A
+  live turn that had already spent its one forced token refresh has an
+  `unauthorized` row in `subscription_turn_failures` for that connection.
+
+**Release notes (behaviour users can see).**
+
+- An OAuth login and a setup token of the same Claude account stay two
+  accounts; neither is merged into the other.
+- An account a person connected for themselves (`user` scope) becomes their
+  personal connection, usable in their own private sessions in any
+  workspace that allows personal connections. Accounts connected in a
+  Personal workspace become the owner's personal connection, as for
+  SuperGrok.
+- A workspace that had its own Claude accounts keeps using only them, unless
+  the organization locks the provider settings or rotation (listed in the
+  report).
+- Work accepted before the cutover keeps exactly the accounts it was
+  accepted with; personal access is re-issued at one new generation per
+  owner.
+- Usage windows, per-model cooldowns and request restrictions of the current
+  reading carry over; a stale or unreadable reading does not (only a running
+  account exhaustion does), so such an account shows unknown usage until its
+  next reading.
+
+**Containment and fix forward.** As for 0719, with the Claude cutover row.
+
+**With the SuperGrok cutover.** 0719 and 0720 touch disjoint legacy tables
+and only their own provider's keys, each with its own parity report and
+readiness gate. Run them in separate windows (each release carries one) or
+together as described in "With the Claude cutover" above. A release that
+carries 0720 also carries 0719, so the SuperGrok window comes first or
+shares the Claude window.
 
 ### Slack API pilot activation (0597)
 

@@ -20,11 +20,22 @@ import {
   disconnectClaudeSubscriptionAccount,
   materializeClaudeSubscriptionAccountForRun,
 } from "../src/claude-subscription-accounts";
+import { SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS } from "../src/runtime-posture";
+
+// Characterizes the legacy Claude runtime, which runs only before the drained
+// Claude cutover: the database withholds that migration. Removed with the
+// legacy runtime.
+const LEGACY_CLAUDE_WORLD = {
+  withheldMigrations: [SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.claude!],
+};
 
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("workspace-provider-rotation-access");
+  shared = await acquireSharedTestDatabase(
+    "workspace-provider-rotation-access",
+    LEGACY_CLAUDE_WORLD,
+  );
   if (!shared) throw new Error("Real PostgreSQL required for credential access regression");
   client = createDb(shared.appUrl);
 }, 180_000);

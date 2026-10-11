@@ -42,15 +42,22 @@ import {
 import { wakeSubscriptionCoreCapacityWaiters } from "../src/subscription-core/waiters";
 
 const REACH_MIGRATION = "0713_subscription_core_provider_keyed_reach.sql";
+// Every known provider is registered since its cutover; the shared core must
+// still refuse an id it has no binding for.
+const UNREGISTERED_PROVIDER = "unregistered" as never;
 // 0714 redefines 0713's reach setters, so it is withheld and applied with it.
 const LATER_MIGRATIONS = ["0714_subscription_workspace_managed_organization_accounts.sql"];
-// The drained SuperGrok cutover is a maintenance step this rolling test never
-// runs: it stays recorded as applied throughout.
-const MAINTENANCE_MIGRATIONS = ["0719_subscription_core_xai_cutover.sql"];
-// A binary that knows 0719 reports only the missing SuperGrok receipt until
-// the maintenance step runs.
+// The drained SuperGrok and Claude cutovers are maintenance steps this
+// rolling test never runs: they stay recorded as applied throughout.
+const MAINTENANCE_MIGRATIONS = [
+  "0719_subscription_core_xai_cutover.sql",
+  "0720_subscription_core_claude_cutover.sql",
+];
+// A binary that knows 0719 and 0720 reports only the missing SuperGrok and
+// Claude receipts until the maintenance steps run.
 const BEFORE_XAI_CUTOVER = [
   "database is missing the xai subscription-core cutover receipt (0719_subscription_core_xai_cutover.sql); apply the pending migrations first",
+  "database is missing the claude subscription-core cutover receipt (0720_subscription_core_claude_cutover.sql); apply the pending migrations first",
 ];
 // 0715 rewrites routines 0713 and 0714 create, so a deployment before 0713
 // is also before it: held back while 0713 is applied, then applied.
@@ -950,12 +957,12 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
         select provider, shared_workspaces as shared
         from opengeni_private.subscription_codex_auto_assignments where connection_id = ${id}::uuid`;
       expect(row).toEqual({ provider: "codex", shared: true });
-      // A provider the shared core has no binding for (Claude until its
-      // cutover) is refused before any read.
+      // A provider the shared core has no binding for is refused before
+      // any read (every known provider is registered since its cutover).
       for (const work of [
-        () => getSubscriptionCoreModelConnectionAccess(client!.db, "claude", target),
+        () => getSubscriptionCoreModelConnectionAccess(client!.db, UNREGISTERED_PROVIDER, target),
         () =>
-          updateSubscriptionCoreModelConnectionAccess(client!.db, "claude", target, {
+          updateSubscriptionCoreModelConnectionAccess(client!.db, UNREGISTERED_PROVIDER, target, {
             ...saved!,
             version: 2,
           }),
@@ -1053,7 +1060,7 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
       await expect(
         wakeSubscriptionCoreCapacityWaiters(
           client!.db,
-          "claude",
+          UNREGISTERED_PROVIDER,
           { accountId: org.accountId, reason: "quota_observed_available" },
           enqueue,
         ),
@@ -1375,11 +1382,10 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
         ),
       ).toMatchObject({ code: "23503" });
 
-      // The TypeScript registry has no binding for a provider before its
-      // cutover (Claude; SuperGrok has one since X3), so the shared core's
-      // TypeScript entry points refuse it.
+      // The TypeScript registry has no binding for an unknown provider, so
+      // the shared core's TypeScript entry points refuse it.
       await expect(
-        getSubscriptionCoreModelConnectionAccess(client!.db, "claude", {
+        getSubscriptionCoreModelConnectionAccess(client!.db, UNREGISTERED_PROVIDER, {
           connectionId: xai,
           accountId: org.accountId,
           workspaceId: null,

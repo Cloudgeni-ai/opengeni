@@ -1572,7 +1572,7 @@ describe.skipIf(!realDb)(
         // Only this provider's rows.
         const [others] =
           await owned.admin`SELECT count(*)::int AS total FROM opengeni_private.subscription_cutover_report
-          WHERE provider NOT IN ('xai', 'codex')`;
+          WHERE provider NOT IN ('xai', 'codex', 'claude')`;
         expect(others!.total).toBe(0);
       });
 
@@ -1589,7 +1589,7 @@ describe.skipIf(!realDb)(
           primary_column: "xai_primary_connection_id",
         });
         expect(state!.enabled).toBe(state!.accounts);
-        expect(subscriptionCoreProviderIds()).toEqual(["codex", "xai"]);
+        expect(subscriptionCoreProviderIds()).toEqual(["claude", "codex", "xai"]);
         const relaxed = await owned.admin`SELECT relname FROM pg_class
           WHERE relnamespace = 'public'::regnamespace AND relkind = 'r' AND relrowsecurity
             AND NOT relforcerowsecurity
@@ -1647,7 +1647,7 @@ describe.skipIf(!realDb)(
           targetSchema: "public",
         };
         const posture = await inspectRuntimeDatabasePosture(client.db, options);
-        expect(posture.subscriptionProviderCutoverReceipts).toEqual(["codex", "xai"]);
+        expect(posture.subscriptionProviderCutoverReceipts).toEqual(["claude", "codex", "xai"]);
         expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
       }, 180_000);
 

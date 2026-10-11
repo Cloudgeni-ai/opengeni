@@ -34,6 +34,14 @@ import {
   recordClaudeAccountUsage,
   listClaudeAccountUsage,
 } from "../src/claude-subscription-account-usage";
+import { SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS } from "../src/runtime-posture";
+
+// Characterizes the legacy Claude runtime, which runs only before the drained
+// Claude cutover: the database withholds that migration. Removed with the
+// legacy runtime.
+const LEGACY_CLAUDE_WORLD = {
+  withheldMigrations: [SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.claude!],
+};
 
 let shared: SharedTestDatabase;
 let client: DbClient;
@@ -45,7 +53,10 @@ const tokenSettings = getSettings({
   OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: encryptionKey.toString("base64"),
 });
 beforeAll(async () => {
-  const databaseFixture = await acquireSharedTestDatabase("claude-account-pools");
+  const databaseFixture = await acquireSharedTestDatabase(
+    "claude-account-pools",
+    LEGACY_CLAUDE_WORLD,
+  );
   if (!databaseFixture) throw new Error("Real PostgreSQL required");
   shared = databaseFixture;
   client = createDb(shared.appUrl);

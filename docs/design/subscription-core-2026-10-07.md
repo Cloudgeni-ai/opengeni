@@ -4527,6 +4527,83 @@ subject's credentials renew from their format
 run. Claude's own refusal classification is the worker's (C1b); until then
 the suite's scripted classification is used.
 
+#### C3: the drained Claude cutover
+
+Migration 0720 (`-- deployment-mode: maintenance`) is the Claude counterpart
+of 0719 and follows "Data mapping", "Accepted authority across the
+cutover", "Personal authority generations" and "Cutover protocol" above.
+The runbook is `docs/deployment.md`, "Claude on the shared subscription core
+(0720)". It reuses X3's machinery rather than forking it: the receipt,
+registry row, readiness, `subscription_cutover_report`, compatibility
+records, the neutral planner and `subscription-core/cutover-stage.ts`. C3
+generalizes the pieces X3 had inline: the migrator runs every provider's
+codec stage from one `PROVIDER_CUTOVER_STAGES` list (`migrate.ts`), and the
+stage's error, plan-context and conflict helpers move into
+`cutover-stage.ts`; the SuperGrok stage uses them unchanged in behaviour.
+The Claude stage (`packages/db/src/claude-subscription-core-cutover.ts`)
+holds only the Claude row shape, identity rules, usage mapping and catalog.
+Choices made where the plan left room, for reviewers:
+
+- **Format.** The legacy plaintext is copied unchanged; the stage writes
+  `claude_oauth_v1` for a secret with `oauth` and `claude_setup_token_v1`
+  otherwise, the formats the adapter derives at runtime.
+- **Identity.** The person is the token's `identity.accountUuid`. A stored
+  `provider_account_id` of the form `oauth:<hmac>` or `setup:<hmac>` (the
+  connect writers' derived id when the token reports no account) is its own
+  person key; any other stored value must equal the token's account, else
+  `provider_identity_mismatch` aborts. OAuth and setup-token rows never
+  merge, even for the same Claude account: they renew differently, and one
+  must not inherit the other's needs-relogin state.
+- **Usage.** Only a usage row of the credential's current version is read.
+  Its windows, request restrictions and per-model cooldowns map through
+  `decodeSubscriptionCoreClaudeQuota`, cooldowns re-keyed from upstream ids
+  to product ids under both Claude prefixes; an alias's live cooldowns join
+  its canonical connection's, ended ones are dropped. The observed refresh
+  generation is the credential version. The legacy `exhausted_until` becomes
+  a `quota` exhaustion only when there is no current reading (the reading
+  decides otherwise). A stale row (`usage_rows_stale`) or an undecodable
+  current row (`usage_snapshot_unreadable`) leaves usage unknown, which the
+  `usage_generations` parity metric counts as matching. The quota keeps
+  Claude's `refreshStatus` and `refreshCheckedAt`; a pending `reconnect` is
+  the `usage_reconnect_pending` disposition and never changes the
+  connection status (the next refresh decides).
+- **Catalog.** Cooldown re-keying and family limits use each organization's
+  catalog at the cutover: the default Claude models plus the organization's
+  and its workspaces' `claude_subscription` custom models that are not
+  retired.
+- **`claudeAuthRecovery`.** A live turn's value (`{credentialId,
+  credentialVersion}`, the one forced refresh it already spent) becomes an
+  `unauthorized` row in `subscription_turn_failures` for the turn and the
+  credential's alias-resolved connection, with evidence
+  `{refreshGeneration: credentialVersion}`; C1b's core settlement reads it
+  in place of the metadata, so the turn never forces a second refresh of
+  that generation. Finished turns are ignored; a value naming no moved
+  credential is `auth_recovery_unmapped`, a malformed one
+  `auth_recovery_malformed`. The metadata stays as history.
+- **Legacy model connections.** 0598 revoked and blanked every legacy
+  Claude model connection (`connections` with `credentialRole =
+  claude_subscription`, `organization_model_provider_connections` with
+  `provider_kind = claude_subscription`). Revoked ones stay untouched; one
+  that is not revoked or still holds a secret aborts
+  (`legacy_connection_not_revoked`), because the cutover would leave that
+  credential behind.
+- **Organization locks, Steer and Cancel, read-only legacy.** As X3: no
+  workspace override of a locked key is written and each such workspace is
+  listed; the Steer path no longer supersedes legacy Claude waiters (core
+  cleanup only); Claude's six legacy tables, including
+  `claude_subscription_account_usage`, join
+  `SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES` with `_closed` policies, and the
+  legacy disconnect refuses after the receipt.
+- **Together with SuperGrok.** 0719 and 0720 share no legacy table or key,
+  so one migrator run applies both in ledger order, each in its own
+  transaction with its own report and readiness gate; a Claude abort leaves
+  0719 committed and a rerun resumes at 0720. The combined-window ledger
+  test (`subscription-core-combined-cutover-ledger.test.ts`) proves this
+  and that only rolling migrations lie between them.
+- **Merge-gate seam cases.** The Claude seam integration test's peek and
+  reconcile cases are `test.failing` until C1b's Claude core waits land;
+  C3 merges after C1b, which makes them ordinary tests.
+
 ### 5.4 Workspace-managed connections as organization accounts
 
 Owner request (M4 addition): an account connected in a workspace, which the

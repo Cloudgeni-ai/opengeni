@@ -36,9 +36,11 @@ const FENCES = "0717_subscription_authority_fences.sql";
 // The drained SuperGrok cutover requires 0717; held back (never applied) so
 // this database models the rolling state before it.
 const XAI_CUTOVER = "0719_subscription_core_xai_cutover.sql";
+const CLAUDE_CUTOVER = "0720_subscription_core_claude_cutover.sql";
 /** This binary requires the SuperGrok receipt, which the rolling state lacks. */
 const BEFORE_XAI_CUTOVER = [
   "database is missing the xai subscription-core cutover receipt (0719_subscription_core_xai_cutover.sql); apply the pending migrations first",
+  "database is missing the claude subscription-core cutover receipt (0720_subscription_core_claude_cutover.sql); apply the pending migrations first",
 ];
 let database: OwnerMigratedTestDatabase | null = null;
 let client: DbClient | null = null;
@@ -182,7 +184,7 @@ beforeAll(async () => {
   });
   try {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
-    await owner`insert into schema_migrations(name) values (${PRECURSOR}), (${COMPAT}), (${FENCES}), (${XAI_CUTOVER})`;
+    await owner`insert into schema_migrations(name) values (${PRECURSOR}), (${COMPAT}), (${FENCES}), (${XAI_CUTOVER}), (${CLAUDE_CUTOVER})`;
     await migrate(database.ownerUrl);
     await provisionRoles(database.adminUrl, {
       appPassword: database.appPassword,

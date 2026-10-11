@@ -56,6 +56,14 @@ import {
 } from "../src/app";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
 import { registerWorkspaceRoutes } from "../src/routes/workspaces";
+import { SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS } from "@opengeni/db";
+
+// Characterizes the legacy Claude runtime, which runs only before the drained
+// Claude cutover: the database withholds that migration. Removed with the
+// legacy runtime.
+const LEGACY_CLAUDE_WORLD = {
+  withheldMigrations: [SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.claude!],
+};
 
 const SECRET = "gateway-custom-models-test-secret-at-least-32-bytes";
 
@@ -137,7 +145,8 @@ async function createAutomationSourceFixture(name: string) {
 async function acquireDatabase(): Promise<SharedTestDatabase | null> {
   const adminUrl = process.env.OPENGENI_TEST_POSTGRES_ADMIN_URL;
   const appUrl = process.env.OPENGENI_TEST_POSTGRES_APP_URL;
-  if (!adminUrl && !appUrl) return await acquireSharedTestDatabase("gateway-custom-models");
+  if (!adminUrl && !appUrl)
+    return await acquireSharedTestDatabase("gateway-custom-models", LEGACY_CLAUDE_WORLD);
   if (!adminUrl || !appUrl) {
     throw new Error(
       "OPENGENI_TEST_POSTGRES_ADMIN_URL and OPENGENI_TEST_POSTGRES_APP_URL must be set together",

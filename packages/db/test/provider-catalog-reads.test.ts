@@ -27,6 +27,14 @@ import {
 } from "../src";
 import { withDatabaseTimingObserver } from "../src/database-timing";
 import * as schema from "../src/schema";
+import { SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS } from "../src/runtime-posture";
+
+// Characterizes the legacy Claude runtime, which runs only before the drained
+// Claude cutover: the database withholds that migration. Removed with the
+// legacy runtime.
+const LEGACY_CLAUDE_WORLD = {
+  withheldMigrations: [SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.claude!],
+};
 
 const providerKinds: WorkspaceCustomModelProviderKind[] = [
   "vercel_gateway",
@@ -51,7 +59,7 @@ const claudeSecret = () => ({
 });
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("provider-catalog-reads");
+  shared = await acquireSharedTestDatabase("provider-catalog-reads", LEGACY_CLAUDE_WORLD);
   if (!shared) throw new Error("provider catalog reads require PostgreSQL");
   client = createDb(shared.appUrl);
   const bootstrap = async (suffix: string) => {

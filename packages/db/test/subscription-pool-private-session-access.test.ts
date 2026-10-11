@@ -52,11 +52,14 @@ import {
 } from "../src/subscription-session-access";
 import { SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS } from "../src/runtime-posture";
 
-// Characterizes the legacy SuperGrok runtime, which runs only before the
-// drained SuperGrok cutover: the database withholds that migration. Removed
-// with the legacy runtime.
-const LEGACY_XAI_WORLD = {
-  withheldMigrations: [SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.xai!],
+// Characterizes the legacy SuperGrok and Claude runtimes, which run only before
+// their drained subscription-core cutovers: the database withholds those
+// migrations. Removed with the legacy runtimes.
+const LEGACY_SUBSCRIPTION_WORLD = {
+  withheldMigrations: [
+    SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.xai!,
+    SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.claude!,
+  ],
 };
 
 let shared: SharedTestDatabase;
@@ -72,7 +75,7 @@ type Visibility = "user_private" | "workspace_shared";
 beforeAll(async () => {
   const databaseFixture = await acquireSharedTestDatabase(
     "subscription-pool-private-access",
-    LEGACY_XAI_WORLD,
+    LEGACY_SUBSCRIPTION_WORLD,
   );
   if (!databaseFixture) throw new Error("Real PostgreSQL required");
   shared = databaseFixture;

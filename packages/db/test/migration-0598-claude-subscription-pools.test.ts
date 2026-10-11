@@ -65,6 +65,9 @@ const subscriptionCoreMigrations = [
   // The drained SuperGrok cutover requires 0712 through 0718; it runs last.
   "0719_subscription_core_xai_cutover.sql",
 ] as const;
+// The drained Claude cutover moves the very pools this test characterizes, so
+// it stays recorded as applied and never runs here.
+const claudeCutover = "0720_subscription_core_claude_cutover.sql";
 const key = Buffer.alloc(32, 67);
 const ids = {
   account: randomUUID(),
@@ -119,6 +122,7 @@ beforeAll(async () => {
   await owner`CREATE TABLE schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`;
   await owner`INSERT INTO schema_migrations(name) VALUES(${migration})`;
   await owner`INSERT INTO schema_migrations(name) SELECT unnest(${subscriptionCoreMigrations}::text[])`;
+  await owner`INSERT INTO schema_migrations(name) VALUES (${claudeCutover})`;
   await migrate(owned.ownerUrl, undefined, { applicationDatabaseRoles: ["opengeni_app"] });
   await owner`DELETE FROM schema_migrations WHERE name = ${migration} OR name = ANY(${subscriptionCoreMigrations}::text[])`;
   await owned.admin`INSERT INTO managed_accounts(id, name) VALUES(${ids.account}, 'Subscription migration fixture')`;
