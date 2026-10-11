@@ -989,6 +989,21 @@ describe.skipIf(!realDb)(
       await noPartialCutover();
     }, 180_000);
 
+    test("an isolation level other than READ COMMITTED is refused before any write", async () => {
+      const ownerName = new URL(owned.ownerUrl).username;
+      await owned.admin.unsafe(
+        `ALTER ROLE "${ownerName}" SET default_transaction_isolation = 'repeatable read'`,
+      );
+      try {
+        const error = await migrateCutover({ key }).catch((caught: Error) => caught);
+        expect(error).toMatchObject({ code: "55000" });
+        expect(errorChain(error)).toContain("0720 requires READ COMMITTED");
+      } finally {
+        await owned.admin.unsafe(`ALTER ROLE "${ownerName}" RESET default_transaction_isolation`);
+      }
+      await noPartialCutover();
+    }, 180_000);
+
     test("a missing or wrong key rolls everything back without leaking material", async () => {
       await expect(migrateCutover()).rejects.toThrow(
         "requires the existing environments encryption key",

@@ -32,6 +32,11 @@ BEGIN
   IF to_regclass('pg_temp.claude_cutover_stage') IS NULL THEN
     RAISE EXCEPTION '0720 requires the codec-aware TypeScript migration runner' USING ERRCODE = '55000';
   END IF;
+  -- The workspace settings writes follow the settings lock protocol, which
+  -- requires READ COMMITTED; refuse any other isolation level up front.
+  IF current_setting('transaction_isolation') <> 'read committed' THEN
+    RAISE EXCEPTION '0720 requires READ COMMITTED' USING ERRCODE = '55000';
+  END IF;
   IF roles IS NULL OR jsonb_typeof(roles) <> 'array' THEN
     RAISE EXCEPTION '0720 requires explicit application database roles' USING ERRCODE = '55000';
   END IF;

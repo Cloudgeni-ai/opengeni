@@ -5239,7 +5239,20 @@ shared settings rows gain only their `claude` keys and the Claude primary,
 the Personal-workspace fallback override and the owner's per-person fallback
 opt-in). 0720 reads and writes no SuperGrok data.
 
-**1. Inventory (before the window).** As the schema owner:
+**1. Inventory (before the window).** Run every query in this step as a
+superuser or another `BYPASSRLS` role: the schema owner is subject to row
+security and sees no legacy Claude rows, so its counts all read 0. Start the
+session with this guard, which stops otherwise:
+
+```sql
+\set ON_ERROR_STOP on
+DO $$ BEGIN
+  IF NOT (SELECT rolsuper OR rolbypassrls FROM pg_roles
+      WHERE rolname = current_user) THEN
+    RAISE EXCEPTION 'run the 0720 inventory as a superuser or BYPASSRLS role';
+  END IF;
+END $$;
+```
 
 ```sql
 SELECT account_id, authority_scope, count(*) FROM claude_subscription_credentials GROUP BY 1, 2;
@@ -5271,7 +5284,7 @@ SELECT account_id, id FROM organization_model_provider_connections
     AND (status <> 'revoked' OR credential_encrypted <> '');
 ```
 
-As a role that bypasses row security, confirm the core holds no Claude state
+Still as that role, confirm the core holds no Claude state
 yet. Each query must return no rows:
 
 ```sql
