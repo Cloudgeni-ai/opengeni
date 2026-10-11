@@ -275,7 +275,7 @@ async function turn(input: {
     )`;
 }
 
-const hex = (seed: string) => seed.repeat(64).slice(0, 64);
+const hex = (pattern: string) => pattern.repeat(64).slice(0, 64);
 
 async function video(id: string, envelope: Record<string, unknown>) {
   await owned.admin`INSERT INTO video_generation_operations (
