@@ -17,6 +17,10 @@ import {
   RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES,
   RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES,
   RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES,
+  SUBSCRIPTION_AUTHORITY_COMPAT_OWNER_ROUTINES,
+  SUBSCRIPTION_AUTHORITY_FENCE_OWNER_ROUTINES,
+  SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES,
+  SUBSCRIPTION_CORE_PRECURSOR_OWNER_ROUTINES,
   SUBSCRIPTION_M3_OWNER_ONLY_PRIVATE_ROUTINES,
   SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES,
   SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS,
@@ -681,6 +685,62 @@ describe("runtime database posture evaluator", () => {
         Object.assign(posture.privateRoutines.find((routine) => routine.name === name)!, unsafe);
         expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
           `subscription M3 precursor private routine ${name} is missing or unsafe`,
+        );
+      }
+    }
+  });
+
+  test("once a fence helper (0716) exists, every one must, owner-only with a safe search path", () => {
+    const ownerRoutine = (name: string) => ({
+      name,
+      owner: "opengeni_migrator",
+      execute: false,
+      publicExecute: false,
+      securityDefiner: false,
+      configuration: ["search_path=pg_catalog, public, opengeni_private, pg_temp"],
+    });
+    const withOwnerRoutines = (names: readonly string[]) => {
+      const posture = safePosture();
+      posture.subscriptionOwnerRoutines = [
+        "subscription_codex_writer_context(uuid, uuid, text)",
+        "grant_subscription_codex_owner_capability(text, uuid, uuid, text, uuid)",
+        "drop_subscription_codex_owner_capabilities(uuid)",
+        "derive_scheduled_revision_subscription_authority()",
+        ...SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES,
+        ...SUBSCRIPTION_CORE_PRECURSOR_OWNER_ROUTINES,
+        ...SUBSCRIPTION_AUTHORITY_COMPAT_OWNER_ROUTINES,
+        ...names,
+      ].map(ownerRoutine);
+      return posture;
+    };
+    // Before 0716 none is required; after it all four are, safely.
+    expect(evaluateRuntimeDatabasePosture(withOwnerRoutines([]), options)).toEqual([]);
+    expect(
+      evaluateRuntimeDatabasePosture(
+        withOwnerRoutines(SUBSCRIPTION_AUTHORITY_FENCE_OWNER_ROUTINES),
+        options,
+      ),
+    ).toEqual([]);
+    for (const name of SUBSCRIPTION_AUTHORITY_FENCE_OWNER_ROUTINES) {
+      const missing = withOwnerRoutines(
+        SUBSCRIPTION_AUTHORITY_FENCE_OWNER_ROUTINES.filter((candidate) => candidate !== name),
+      );
+      expect(evaluateRuntimeDatabasePosture(missing, options)).toContain(
+        `subscription owner implementation ${name} is missing or unsafe`,
+      );
+      for (const unsafe of [
+        { execute: true },
+        { publicExecute: true },
+        { owner: "opengeni_app" },
+        { configuration: ["search_path=public"] },
+      ]) {
+        const posture = withOwnerRoutines(SUBSCRIPTION_AUTHORITY_FENCE_OWNER_ROUTINES);
+        Object.assign(
+          posture.subscriptionOwnerRoutines!.find((routine) => routine.name === name)!,
+          unsafe,
+        );
+        expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+          `subscription owner implementation ${name} is missing or unsafe`,
         );
       }
     }

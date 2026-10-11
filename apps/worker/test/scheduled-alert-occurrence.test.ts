@@ -1553,6 +1553,8 @@ describe("scheduled alert canonical responder session (real PostgreSQL)", () => 
     expect(count?.count).toBe(2);
   });
 
+  // Twelve concurrent dispatches against real PostgreSQL take about 5 to 7 s
+  // in a whole-file run, over Bun's 5 s default.
   test("an atomic multi-dispatch race creates exactly one responder root", async () => {
     if (!shared || !client || !admin) return;
     const workspace = await workspaceFixture();
@@ -1580,5 +1582,5 @@ describe("scheduled alert canonical responder session (real PostgreSQL)", () => 
       where workspace_id = ${workspace.workspaceId}
         and create_idempotency_key like 'scheduled-alert-occurrence:v1:%'`;
     expect(count?.count).toBe(1);
-  });
+  }, 60_000);
 });
