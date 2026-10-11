@@ -50,6 +50,8 @@ beforeAll(async () => {
     neutral,
     "0712_subscription_core_generic_precursor.sql",
     "0713_subscription_core_provider_keyed_reach.sql",
+    "0713_subscription_authority_compat.sql",
+    "0714_subscription_authority_fences.sql",
   ];
   const owner = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {

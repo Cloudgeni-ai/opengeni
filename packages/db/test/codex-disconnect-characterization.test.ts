@@ -154,7 +154,8 @@ describeRealDatabase("legacy Codex disconnect: known pre-fix behavior", () => {
       // 0712 requires the committed 0689 cutover and 0713 alters objects it
       // creates, so both are held back with it.
       await owner`insert into schema_migrations(name) values ('0689_subscription_core_codex_cutover.sql'),
-        ('0712_subscription_core_generic_precursor.sql'), ('0713_subscription_core_provider_keyed_reach.sql')`;
+        ('0712_subscription_core_generic_precursor.sql'), ('0713_subscription_core_provider_keyed_reach.sql'),
+        ('0713_subscription_authority_compat.sql'), ('0714_subscription_authority_fences.sql')`;
       await migrate(owned.databaseUrl);
       await provisionRoles(owned.databaseUrl, { appPassword: owned.appPassword });
     } finally {

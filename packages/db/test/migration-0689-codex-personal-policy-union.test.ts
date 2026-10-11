@@ -19,6 +19,10 @@ const precursor = "0712_subscription_core_generic_precursor.sql";
 // 0713 keys and redefines objects 0689 creates: held back and replayed right
 // after it.
 const providerKeyedReach = "0713_subscription_core_provider_keyed_reach.sql";
+// 0713 builds on 0712's receipts and patches its helpers; it follows 0712.
+const compat = "0713_subscription_authority_compat.sql";
+// 0714 requires 0713's routines; it follows 0713.
+const fences = "0714_subscription_authority_fences.sql";
 const key = Buffer.alloc(32, 87);
 const cases: Array<{
   name: string;
@@ -76,9 +80,9 @@ for (const shape of ["workspace-workspace", "workspace-user"] as const) {
     }));
     try {
       await owner`CREATE TABLE schema_migrations(name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`;
-      await owner`INSERT INTO schema_migrations(name) VALUES (${migration}), (${precursor}), (${providerKeyedReach})`;
+      await owner`INSERT INTO schema_migrations(name) VALUES (${migration}), (${precursor}), (${providerKeyedReach}), (${compat}), (${fences})`;
       await migrate(owned.ownerUrl, undefined, { applicationDatabaseRoles: ["opengeni_app"] });
-      await owner`DELETE FROM schema_migrations WHERE name IN (${migration}, ${precursor}, ${providerKeyedReach})`;
+      await owner`DELETE FROM schema_migrations WHERE name IN (${migration}, ${precursor}, ${providerKeyedReach}, ${compat}, ${fences})`;
       const seedTables = [
         "managed_accounts",
         "workspaces",

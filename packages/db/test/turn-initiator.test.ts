@@ -627,6 +627,13 @@ describe("immutable session turn initiators", () => {
     expect(
       (await getSessionTurn(client.db, grant.workspaceId!, resubmitted.turnId))?.initiator,
     ).toEqual(original?.initiator);
+    // The edit names the exact withdrawn turn it copies (0713's edit source).
+    expect(
+      (await getSessionTurn(client.db, grant.workspaceId!, resubmitted.turnId))?.lineage,
+    ).toEqual({ actor: "human", editedFromTurnId: sent.turnId });
+    expect((await getSessionTurn(client.db, grant.workspaceId!, sent.turnId))?.lineage).toEqual({
+      actor: "human",
+    });
 
     const steerSource = await withWorkspaceSubjectRls(client.db, grant.workspaceId!, sender, (db) =>
       db.transaction((tx) =>
@@ -686,6 +693,10 @@ describe("immutable session turn initiators", () => {
     expect(
       (await getSessionTurn(client.db, grant.workspaceId!, steered.turnId))?.initiator,
     ).toEqual({ kind: "subject", subjectId: editor, label: "Editor" });
+    expect((await getSessionTurn(client.db, grant.workspaceId!, steered.turnId))?.lineage).toEqual({
+      actor: "human",
+      editedFromTurnId: steerSource.turnId,
+    });
   });
 
   test("freezes a trusted service command separately from its authorizing subject", async () => {
