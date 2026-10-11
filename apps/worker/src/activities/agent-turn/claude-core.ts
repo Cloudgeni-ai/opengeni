@@ -187,6 +187,8 @@ export function buildClaudeCoreRequestAuthorization(input: {
   let forced: Promise<SubscriptionCoreClaudeTokenSnapshot> | null = null;
   return {
     getToken: () => resolver.getToken(),
+    // One forced refresh per attempt, shared by both lanes: a refresh that
+    // failed stays failed for the rest of the attempt (no second refresh).
     renewAfterUnauthorized: async (generation) => {
       forced ??= resolver.refresh();
       const token = await forced;
@@ -209,6 +211,19 @@ export function buildClaudeCoreRequestAuthorization(input: {
  * account unreserved.
  */
 export const CLAUDE_CORE_SETTINGS_PLACEHOLDER_TOKEN = "sk-ant-oat01-opengeni-core-custody-only";
+
+/**
+ * The Claude credential a core-placed turn's capability settings carry: the
+ * account identity with the placeholder bearer, never the live token or any
+ * refresh material.
+ */
+export function claudeCoreSettingsCredential(token: SubscriptionCoreClaudeTokenSnapshot): string {
+  return JSON.stringify({
+    version: token.credential.version,
+    token: CLAUDE_CORE_SETTINGS_PLACEHOLDER_TOKEN,
+    identity: token.credential.identity,
+  });
+}
 
 /** The scope a Claude product model id names (its prefix). */
 export function claudeCoreModelScope(productModelId: string): "organization" | "workspace" {

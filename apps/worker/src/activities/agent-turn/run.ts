@@ -127,7 +127,7 @@ import {
 } from "./sandbox-establish";
 import {
   buildClaudeCoreRequestAuthorization,
-  CLAUDE_CORE_SETTINGS_PLACEHOLDER_TOKEN,
+  claudeCoreSettingsCredential,
   claudeCoreModelScope,
   claudeCoreRequestPreparer,
   claudeSubscriptionProviderIds,
@@ -678,11 +678,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             selectedCapabilitySettings = withClaudeConnectionCredential(
               capabilitySettings,
               "claude_subscription",
-              JSON.stringify({
-                version: token.credential.version,
-                token: CLAUDE_CORE_SETTINGS_PLACEHOLDER_TOKEN,
-                identity: token.credential.identity,
-              }),
+              claudeCoreSettingsCredential(token),
               claudeCoreModelScope(turnExecutionPolicy.productModelId),
               { connectionId: claudeCore.connectionId, credentialVersion: token.credentialVersion },
             );

@@ -64,10 +64,10 @@ function anthropic(status: number, type: string) {
   );
 }
 
-function lane(options: { unknown?: boolean } = {}) {
+function lane(options: { unknown?: boolean; unresolved?: boolean } = {}) {
   return {
     checkpoint: async () => undefined,
-    canRecover: () => !options.unknown,
+    canRecover: () => !options.unknown && !options.unresolved,
     hasUnknownOutcome: () => options.unknown === true,
   } as unknown as SubscriptionCoreTurn["requests"];
 }
@@ -167,6 +167,7 @@ function legacyClaudeSettlement() {
       spy(db, "armClaudeCapacityWait"),
       spy(db, "reconcileClaudeCapacityWait"),
       spy(db, "loadClaudeAccountCredential"),
+      spy(db, "recordClaudeAccountUsage"),
     ],
   };
 }
@@ -187,10 +188,19 @@ describe("Claude failure settlement on the core", () => {
       cause: db.SUBSCRIPTION_CORE_CLAUDE.errors.requestOutcomeUnknown(),
     });
     const { deps, order } = failureDeps(error, core({ requests: lane({ unknown: true }) }), true);
+    const settle = mock(async (_input: unknown) => true);
+    (deps as { eventing: { settle: unknown } }).eventing.settle = settle;
     const recover = recovery(order);
     const settled = await settleTurnFailure(deps as never).catch((caught: unknown) => caught);
     expect(recover).not.toHaveBeenCalled();
     expect(JSON.stringify(settled)).not.toContain("recovering");
+    const terminal = settle.mock.calls[0]![0] as {
+      events: Array<{ type: string; payload: Record<string, unknown> }>;
+    };
+    expect(terminal.events[0]).toMatchObject({
+      type: "turn.failed",
+      payload: { code: "subscription_core_request_outcome_unknown", retryable: false },
+    });
     expect(legacy.goal).not.toHaveBeenCalled();
     for (const other of legacy.others) expect(other).not.toHaveBeenCalled();
   });
@@ -228,6 +238,42 @@ describe("Claude failure settlement on the core", () => {
     );
     const recover = recovery(order);
     await settleTurnFailure(deps as never).catch(() => undefined);
+    expect(recover).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.objectContaining({ reason: "claude_lease_lost" }),
+    );
+  });
+
+  test("a lost core lease with a request still unresolved (not unknown) never recovers", async () => {
+    spy(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(undefined as never);
+    const { deps, order } = failureDeps(
+      new Error("lease lost"),
+      core({ requests: lane({ unresolved: true }), titleRequests: lane() }),
+      true,
+    );
+    const recover = recovery(order);
+    await settleTurnFailure(deps as never).catch(() => undefined);
+    expect(order).toContain("history");
+    expect(recover).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.objectContaining({ reason: "claude_lease_lost" }),
+    );
+  });
+
+  test("a lost core lease before the turn start was published neither checkpoints nor recovers", async () => {
+    spy(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(undefined as never);
+    const recoverAfter = spy(coreRequests, "coreLanesRecoverAfterCheckpoint");
+    const { deps, order } = failureDeps(
+      new Error("lease lost"),
+      core({ requests: lane(), titleRequests: lane() }),
+      true,
+    );
+    (deps as { eventing: { turnStartedPublished: boolean } }).eventing.turnStartedPublished = false;
+    const recover = recovery(order);
+    await settleTurnFailure(deps as never).catch(() => undefined);
+    expect(recoverAfter).not.toHaveBeenCalled();
     expect(recover).not.toHaveBeenCalledWith(
       expect.anything(),
       expect.anything(),

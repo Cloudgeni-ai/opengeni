@@ -5,7 +5,11 @@ import { testSettings } from "@opengeni/testing";
 import { withClaudeUsageObserver } from "../../../packages/runtime/src/claude-subscription-usage";
 import { instrumentedModelFetch } from "../../../packages/runtime/src/model-provider-client";
 import { AnthropicMessagesModel } from "../../../packages/runtime/src/anthropic-messages";
-import type { ResolvedModelProvider } from "@opengeni/config";
+import {
+  parseModelProvidersJson,
+  withClaudeConnectionCredential,
+  type ResolvedModelProvider,
+} from "@opengeni/config";
 import type { CapacityPhaseDeps } from "../src/activities/agent-turn/codex-capacity";
 import {
   createTurnCredentialLeases,
@@ -14,7 +18,9 @@ import {
 import * as legacyCapacity from "../src/activities/agent-turn/xai-capacity";
 import {
   buildClaudeCoreRequestAuthorization,
+  CLAUDE_CORE_SETTINGS_PLACEHOLDER_TOKEN,
   claudeCoreModelScope,
+  claudeCoreSettingsCredential,
   claudeCoreRequestOutcomeUnknown,
   claudeCoreRequestPreparer,
   claudeResponseInspector,
@@ -26,6 +32,7 @@ import {
   type SubscriptionCoreTurn,
 } from "../src/activities/agent-turn/turn-context";
 import { placedSubscriptionCore } from "../src/activities/agent-turn/subscription-core-placed";
+import { createCoreSubscriptionRequests } from "../src/activities/agent-turn/subscription-core-requests";
 import { assertTurnModelConnection } from "../src/activities/agent-turn/codex-core-capacity";
 
 // Claude chat on the shared core (design 5.3, Claude track C1a), dormant
@@ -765,6 +772,45 @@ test("a core-placed Claude turn is the turn's placement for attribution, checkpo
 });
 
 describe("Claude custody edge paths on the core", () => {
+  test("the settings credential keeps the account identity with the placeholder bearer only", () => {
+    const accountIdentity = {
+      accountUuid: "10000000-0000-4000-8000-000000000001",
+      deviceId: "a".repeat(64),
+    };
+    const live = {
+      credential: {
+        version: 1,
+        token: "sk-ant-oat01-live-secret",
+        identity: accountIdentity,
+        oauth: {
+          refreshToken: "refresh-secret",
+          expiresAt: "2026-10-12T00:00:00.000Z",
+          scopes: ["user:inference"],
+        },
+      } as unknown as db.SubscriptionCoreClaudeTokenSnapshot["credential"],
+      credentialVersion: 7,
+    } as db.SubscriptionCoreClaudeTokenSnapshot;
+    const serialized = claudeCoreSettingsCredential(live);
+    expect(JSON.parse(serialized)).toEqual({
+      version: 1,
+      token: CLAUDE_CORE_SETTINGS_PLACEHOLDER_TOKEN,
+      identity: accountIdentity,
+    });
+    expect(serialized).not.toContain("live-secret");
+    expect(serialized).not.toContain("refresh-secret");
+    const settings = withClaudeConnectionCredential(
+      testSettings({ claudeSubscriptionEnabled: true }),
+      "claude_subscription",
+      serialized,
+      "organization",
+      { connectionId: "20000000-0000-4000-8000-000000000002", credentialVersion: 7 },
+    );
+    // The settings accept it as a strict Claude subscription credential.
+    const providers = JSON.stringify(parseModelProvidersJson(settings.modelProvidersJson));
+    expect(providers).not.toContain("live-secret");
+    expect(providers).not.toContain("refresh-secret");
+  });
+
   const claudeProvider: ResolvedModelProvider = {
     id: PROVIDER_ID,
     label: "Claude",
@@ -900,6 +946,52 @@ describe("Claude custody edge paths on the core", () => {
       code: "subscription_core_request_outcome_unknown",
     });
     expect(second.calls()).toBe(0);
+  });
+
+  // The continuation rule only admits a further reservation once every
+  // pending request has its response: Claude's main lane stays sequential.
+  test("a request still waiting for its response blocks the next reservation", async () => {
+    const lane = placedCore().core.requests!;
+    await lane.reserve({ requestId: "attempt-1:1:1:claude:1", transportAttempt: 1 });
+    await expect(
+      lane.reserve({ requestId: "attempt-1:1:1:claude:2", transportAttempt: 1 }),
+    ).rejects.toMatchObject({ code: "subscription_core_request_outcome_unknown" });
+  });
+
+  test("after a response, a second request in flight blocks a third", async () => {
+    const placed = placedCore();
+    const lane = placed.core.requests!;
+    const first = { requestId: "attempt-1:1:1:claude:1", transportAttempt: 1 };
+    await lane.reserve(first);
+    await lane.observe({ ...first, outcome: "response_received" });
+    await lane.reserve({ requestId: "attempt-1:1:1:claude:2", transportAttempt: 1 });
+    await expect(
+      lane.reserve({ requestId: "attempt-1:1:1:claude:3", transportAttempt: 1 }),
+    ).rejects.toMatchObject({ code: "subscription_core_request_outcome_unknown" });
+    expect(placed.order.filter((step) => step.startsWith("reserve:"))).toHaveLength(2);
+  });
+
+  test("a refused request whose settle write failed blocks the next reservation", async () => {
+    const lane = createCoreSubscriptionRequests({
+      reserve: async () => ({ operationId: "operation-1" }),
+      settle: async () => {
+        throw new Error("settle write failed");
+      },
+      displayName: "Claude",
+      outcomeUnknown: () =>
+        Object.assign(new Error("unknown"), { code: "subscription_core_request_outcome_unknown" }),
+      isOutcomeUnknown: () => false,
+      continuesAfterResponse: true,
+    });
+    const refused = { requestId: "attempt-1:1:1:claude:1", transportAttempt: 1 };
+    await lane.reserve(refused);
+    await expect(lane.observe({ ...refused, outcome: "refused" })).rejects.toThrow(
+      "settle write failed",
+    );
+    await expect(
+      lane.reserve({ requestId: "attempt-1:1:1:claude:2", transportAttempt: 1 }),
+    ).rejects.toMatchObject({ code: "subscription_core_request_outcome_unknown" });
+    expect(lane.canRecover()).toBe(false);
   });
 
   test("a body cancelled before its final event, or a read error, settles unknown", async () => {
