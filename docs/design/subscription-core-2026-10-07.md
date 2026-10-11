@@ -2849,7 +2849,7 @@ touches only that provider's rows.
 | Source | Legacy acceptance used the workspace pool when the workspace had its own credentials, else the organization pool; it never admitted organization accounts while local accounts existed. A workspace with workspace-scope credentials of the provider gets `inference_source = workspace`; other workspaces get no override (`automatic`, which today admits only organization connections there). `enabled` stays true. This deliberately diverges from §5.2's Codex `automatic` row (no override, rotation to keep local first): legacy Codex `automatic` already mixed both pools, so leaving it automatic was exact, whereas freezing `workspace` is the exact preservation for SuperGrok and Claude and the strictest one. Release note: such workspaces stop using organization accounts only if an administrator later changes the source, as today. |
 | Session pins | One binding per session, for the session's current model provider. Among that provider's pool rows, the row of the pool in the session's latest accepted v1 snapshot wins. A manual pin is `explicit` (owner-only, non-dispatching seam; kept when unhealthy); a policy pin, else the last account, is `automatic`. A personal target is kept only when the session owner owns it and the session is private or in their Personal workspace; otherwise disposition `pin_owner_ineligible`. An existing binding for the current provider is kept and this provider's rows become dispositions; a binding for another provider is replaced only when the session's current model provider is this one. `last_model_call_at` comes from the latest model-call fact. |
 | Leases | Live leases move with turn, holder, generation, expiry and the alias-resolved connection; parity compares exact tuples. Expired leases are a disposition; a live core lease on the same turn aborts (`lease_conflict`). |
-| Waiters | Only `waiting` rows whose blocked turn and generation equal the session's parked turn move; others collapse with a disposition. When several of the provider's pool waiters match the parked turn, the one for the pool of the turn's v1 snapshot moves (the `user` pool for a `user` snapshot). Preserve the legacy `id` as `waiter_id`, `generation`, `wake_revision`, `observed_wake_revision`, `next_check_at`, `earliest_reset_at`, `blocked_turn_generation`, the goal fence and `last_wake_reason`. `wait_reason` takes a core value: `pinned_account_unavailable` or `pinned_account_ineligible` for a pinned wait, `model_not_allowed` for a model policy refusal, else `no_eligible_capacity`; `reset_kind` `quota` only when a reset is known. `workflow_id` must equal the session's workflow id, else abort. Any existing core waiter for the session aborts the cutover (`waiter_conflict`); the migration never modifies Codex or other-provider core rows. A pending wake (`wake_revision > observed_wake_revision`) gets a wake-outbox row. |
+| Waiters | Only `waiting` rows whose blocked turn and generation equal the session's parked turn move; others collapse with a disposition. When several of the provider's pool waiters match the parked turn, the one for the pool of the turn's v1 snapshot moves (the `user` pool for a `user` snapshot). Preserve the legacy `id` as `waiter_id`, `generation`, `wake_revision`, `observed_wake_revision`, `next_check_at`, `earliest_reset_at`, `blocked_turn_generation`, the goal fence and `last_wake_reason`. `wait_reason` takes a core value derivable from the legacy row, which records no reason: `pinned_account_unavailable` when the session's moved binding is explicit, else `no_eligible_capacity`; the core reconcile sets a more specific reason at its next check; `reset_kind` `quota` only when a reset is known. `workflow_id` must equal the session's workflow id, else abort. Any existing core waiter for the session aborts the cutover (`waiter_conflict`); the migration never modifies Codex or other-provider core rows. A pending wake (`wake_revision > observed_wake_revision`) gets a wake-outbox row. |
 | Accepted authority | Compatibility records on every carrier listed under "Accepted authority across the cutover" (live work plus each session's execution-context, latest accepted and child-parent turns, or `session_initial`). v1 columns and existing v2 values are not modified. |
 | Media and transcription ledgers | Non-terminal xAI video operations get the canonical connection and a `video` operation reference; their envelopes are blanked after parity. Non-terminal image operations keep their recorded identity and resolve the recorded credential through aliases; nothing is reissued after an uncertain write. Transcription holds no durable credential state. |
 | Read-only legacy | Factory tables, `claude_subscription_account_usage`, `opengeni_private.{xai,claude}_subscription_runtime_capabilities`, and the legacy `xai_subscription` / `claude_subscription` resource authorities stay read-only for forensics until M6; v1 columns on carriers follow "v1 columns after a provider's cutover" (still written, by default or verbatim copy, never read). Runtime roles lose write grants on them through role provisioning (`provision-roles` stops granting them once the provider's receipt exists) and the deployed runtime-posture contract, which X3/C3 extend and assert; a revocation inside the migration alone would be re-granted by the next `provision-roles`. Claude's revoked legacy model connections stay; any non-revoked one aborts the Claude cutover. |
@@ -3694,12 +3694,30 @@ reviewers:
   on them once the provider's receipt exists. The posture evaluator
   tolerates full DML on a provider's legacy tables while its receipt is
   missing and then reports only the missing receipt, so a rolling binary
-  before the window sees one violation, not five. New legacy
+  before the window sees one violation, not five. Once the receipt exists,
+  a restrictive `<table>_closed` policy on each of the five tables refuses
+  every insert and update (`WITH CHECK (NOT
+  subscription_provider_cutover_committed('xai'))`), and new legacy
   `xai_subscription` authorities are refused by a restrictive `INSERT`
-  policy on `organization_user_resource_authorities` once the receipt
-  exists (the legacy connect routines run as the owner, which FORCE row
-  security binds); membership lifecycle still revokes, retains and restores
-  the existing ones.
+  policy on `organization_user_resource_authorities`. The legacy connect,
+  rotation and pin routines run as the owner, which FORCE row security
+  binds, so they cannot write either; deletes stay open for disconnect and
+  membership cleanup, and membership lifecycle still revokes, retains and
+  restores the existing authorities. The migration asserts FORCE on the
+  five tables.
+- **Drain check.** Besides the listed runtime logins, the drain check
+  refuses any other client session whose non-superuser role, other than the
+  schema owner, can insert, update or delete any of the 37 relations the
+  cutover locks, so a runtime login missing from the passed list cannot
+  write during the window.
+- **Personal fallback opt-in.** The opt-in follows the "Workspace-scoped
+  credential in a Personal workspace" row only: owners of accounts connected
+  in their Personal workspace are opted in, owners of only `user`-scoped
+  accounts are not, because the preference is per person and would also
+  cover their other providers' personal connections.
+- **Quota window.** A SuperGrok connection's quota snapshot has one window,
+  id `billing` (`SUBSCRIPTION_CORE_XAI_QUOTA_WINDOW_ID`), the id the core
+  adapter writes for SuperGrok usage.
 - **Readiness.** `SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.xai` is 0718, so a
   binary with 0718 in its ledger refuses to start without the `xai` receipt
   (the provider-keyed readiness function
@@ -3712,8 +3730,14 @@ reviewers:
 - **Temporal seam.** 0718 keeps every live waiter's id (as `waiter_id`),
   generation, wake revisions and blocked-turn generation and moves its
   pending wake to the wake outbox, so a workflow parked on a legacy
-  SuperGrok wait resumes on the core waiter with the same id and fences. The
-  replay test of that seam belongs to X1b and needs no change for these rows.
+  SuperGrok wait reconciles the reference its history recorded (`provider:
+  "xai"`, waiter id, generation) against the core waiter with the same id
+  and fences. `test/integration/subscription-core-xai-cutover.integration.ts`
+  parks a turn through the legacy arm path, records the peek result,
+  migrates, asserts the moved waiter and outbox row, and replays the pinned
+  capacity-wait history rewritten with SuperGrok references. Resuming
+  through that reference needs X1b's core reconcile path for `xai`; X3
+  merges after X1b, and that case of the test is completed then.
 
 #### Verification plan
 
