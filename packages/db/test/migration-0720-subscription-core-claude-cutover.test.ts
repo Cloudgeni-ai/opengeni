@@ -34,6 +34,8 @@ import {
 import { decodeSubscriptionCoreClaudeCredential } from "../src/subscription-core-claude-adapter";
 import { SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES } from "../src/runtime-posture";
 import { deleteSubscriptionCoreWaitersForTurns } from "../src/subscription-core/waiters";
+import { subscriptionCoreOperations } from "../src/subscription-core/operations";
+import { subscriptionCoreProvider } from "../src/subscription-core-providers";
 
 const MIGRATION = "0720_subscription_core_claude_cutover.sql";
 const key = Buffer.alloc(32, 79);
@@ -1562,12 +1564,29 @@ describe.skipIf(!realDb)(
           await asOwner(
             `UPDATE claude_subscription_credentials SET label = 'Renamed' WHERE id = '${a.c1}'`,
           ),
-        ).toContain("claude_subscription_credentials_closed");
+        ).toContain("claude_subscription_credentials_closed_update");
         expect(
           await asOwner(
             `UPDATE claude_subscription_account_usage SET model_cooldowns = '{}' WHERE credential_id = '${a.c1}'`,
           ),
-        ).toContain("claude_subscription_account_usage_closed");
+        ).toContain("claude_subscription_account_usage_closed_update");
+        // Row security is checked before constraints, so re-inserting an
+        // existing row reaches the restrictive insert policy first.
+        expect(
+          await asOwner(
+            `INSERT INTO claude_subscription_credentials
+             SELECT * FROM claude_subscription_credentials WHERE id = '${a.c1}'`,
+          ),
+        ).toContain("claude_subscription_credentials_closed_insert");
+        // Write-only restrictive policies: a restrictive policy covering SELECT
+        // would be a restrictive read policy, which the lifecycle-facts
+        // backfill (0565) refuses for its source tables.
+        const closedPolicies = await owned.admin<{ policyname: string; cmd: string }[]>`
+          SELECT policyname, cmd FROM pg_policies
+          WHERE tablename LIKE 'claude\_%' AND policyname LIKE '%\_closed%'
+          ORDER BY policyname`;
+        expect(closedPolicies.length).toBe(12);
+        expect(closedPolicies.every(({ cmd }) => cmd === "INSERT" || cmd === "UPDATE")).toBe(true);
         // No role adds a legacy Claude personal authority after the receipt.
         const [closed] = await owned.admin`SELECT permissive, cmd, with_check
           FROM pg_policies WHERE tablename = 'organization_user_resource_authorities'
@@ -1643,6 +1662,73 @@ describe.skipIf(!realDb)(
         });
         expect(deleted).toHaveLength(1);
       }, 60_000);
+
+      // Registering Claude relies on its adapter declaring its usage readings
+      // incomplete: a Claude usage reading can omit a window that is still
+      // exhausted, and must not end that block before its reset. The fix is
+      // C2a's (#4130, `usageReadingsComplete: false`); C3 merges after C2a,
+      // which makes this an ordinary test.
+      test.failing(
+        "a Claude usage reading that omits a still-exhausted window keeps it until its reset",
+        async () => {
+          const operations = subscriptionCoreOperations(subscriptionCoreProvider("claude"));
+          const scope = {
+            kind: "workspace" as const,
+            accountId: a.account,
+            workspaceId: a.w1,
+            subjectId: a.owner,
+          };
+          const observedAt = Date.now();
+          const resetsAt = observedAt + 2 * HOUR;
+          const reading = (
+            source: "response_headers" | "usage_endpoint",
+            at: number,
+            windows: {
+              id: string;
+              usedPercent: number;
+              resetsAt: number;
+              status: "ok" | "exhausted";
+            }[],
+          ) => ({
+            windows,
+            modelCooldowns: {},
+            exhaustedUntil: null,
+            exhaustedKind: null,
+            revision: 0,
+            observedAt: at,
+            observedRefreshGeneration: 4,
+            source,
+          });
+          // The migrated connection c1 (generation 4) reports its weekly window
+          // exhausted in response headers ...
+          expect(
+            await operations.recordSubscriptionCoreUsageObservation(
+              client.db,
+              scope,
+              a.c1,
+              reading("response_headers", observedAt, [
+                { id: "five_hour", usedPercent: 40, resetsAt: observedAt + HOUR, status: "ok" },
+                { id: "seven_day", usedPercent: 100, resetsAt, status: "exhausted" },
+              ]),
+            ),
+          ).toMatchObject({ applied: true });
+          // ... then a usage reading reports only the five-hour window.
+          await operations.recordSubscriptionCoreUsageObservation(
+            client.db,
+            scope,
+            a.c1,
+            reading("usage_endpoint", observedAt + 1_000, [
+              { id: "five_hour", usedPercent: 41, resetsAt: observedAt + HOUR, status: "ok" },
+            ]),
+          );
+          const [row] = await owned.admin`SELECT quota FROM subscription_connection_quota
+          WHERE connection_id = ${a.c1}`;
+          expect(row!.quota.windows).toContainEqual(
+            expect.objectContaining({ id: "seven_day", status: "exhausted", resetsAt }),
+          );
+        },
+        60_000,
+      );
     });
   },
 );

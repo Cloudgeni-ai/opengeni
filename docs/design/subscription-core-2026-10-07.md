@@ -4594,8 +4594,11 @@ Choices made where the plan left room, for reviewers:
   listed; the Steer path no longer supersedes legacy Claude waiters (core
   cleanup only); Claude's six legacy tables, including
   `claude_subscription_account_usage`, join
-  `SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES` with `_closed` policies, and the
-  legacy disconnect refuses after the receipt.
+  `SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES` with restrictive
+  `<table>_closed_insert` and `<table>_closed_update` policies (write
+  commands only: a restrictive policy that also covered SELECT would make
+  the lifecycle-facts backfill of 0565 refuse the table), and the legacy
+  disconnect refuses after the receipt.
 - **Together with SuperGrok.** 0719 and 0720 share no legacy table or key,
   so one migrator run applies both in ledger order, each in its own
   transaction with its own report and readiness gate; a Claude abort leaves

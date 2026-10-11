@@ -1659,11 +1659,20 @@ BEGIN
   FOREACH legacy IN ARRAY ARRAY['claude_subscription_credentials', 'claude_rotation_settings',
     'claude_credential_leases', 'claude_session_account_pins', 'claude_capacity_waiters',
     'claude_subscription_account_usage'] LOOP
+    -- One restrictive policy per write command, never FOR ALL: a restrictive
+    -- policy that also covers SELECT is a restrictive read policy, which
+    -- opengeni_private.backfill_product_lifecycle_facts (0565) refuses for a
+    -- source table without its lifecycle_backfill_read_active branch. Reads
+    -- and deletes keep the existing policies.
     EXECUTE format($ddl$
-      CREATE POLICY %2$I ON %1$I.%3$I AS RESTRICTIVE FOR ALL
+      CREATE POLICY %2$I ON %1$I.%3$I AS RESTRICTIVE FOR INSERT
+      WITH CHECK (NOT opengeni_private.subscription_provider_cutover_committed('claude'))
+    $ddl$, data_schema, legacy || '_closed_insert', legacy);
+    EXECUTE format($ddl$
+      CREATE POLICY %2$I ON %1$I.%3$I AS RESTRICTIVE FOR UPDATE
       USING (true)
       WITH CHECK (NOT opengeni_private.subscription_provider_cutover_committed('claude'))
-    $ddl$, data_schema, legacy || '_closed', legacy);
+    $ddl$, data_schema, legacy || '_closed_update', legacy);
   END LOOP;
   EXECUTE format($ddl$
     CREATE POLICY claude_subscription_authority_closed
