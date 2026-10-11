@@ -25118,7 +25118,9 @@ export type SubscriptionCoreWaiterProvider = keyof typeof SUBSCRIPTION_CORE_WAIT
  * the names its core waiter shipped with (M3); SuperGrok keeps the names of
  * its legacy waiter, so a wait reads the same before and after its cutover.
  */
-type SubscriptionCoreWaitVocabulary = {
+type SubscriptionCoreWaitVocabulary<
+  P extends SubscriptionCoreWaiterProvider = SubscriptionCoreWaiterProvider,
+> = {
   /** Product name in internal error texts. */
   label: string;
   waitingEventType: "codex.capacity.waiting" | "turn.capacity_waiting";
@@ -25129,7 +25131,7 @@ type SubscriptionCoreWaitVocabulary = {
   /** Why pending tool calls close when the turn parks. */
   closeToolsReason: string;
   /** The false-resumption limit's terminal code (also the status reason). */
-  exhaustedCode: (typeof SUBSCRIPTION_CORE_WAIT_EXHAUSTED_CODES)[SubscriptionCoreWaiterProvider];
+  exhaustedCode: (typeof SUBSCRIPTION_CORE_WAIT_EXHAUSTED_CODES)[P];
   resumedEvent: (waiter: SubscriptionCoreCodexCapacityWait) => {
     type: "codex.capacity.resumed" | "turn.recovery.requested";
     payload: Record<string, unknown>;
@@ -25142,10 +25144,9 @@ type SubscriptionCoreWaitVocabulary = {
   cancelledBy: string;
 };
 
-const SUBSCRIPTION_CORE_WAIT_VOCABULARY: Record<
-  SubscriptionCoreWaiterProvider,
-  SubscriptionCoreWaitVocabulary
-> = {
+const SUBSCRIPTION_CORE_WAIT_VOCABULARY: {
+  [P in SubscriptionCoreWaiterProvider]: SubscriptionCoreWaitVocabulary<P>;
+} = {
   codex: {
     label: "Codex",
     waitingEventType: "codex.capacity.waiting",
