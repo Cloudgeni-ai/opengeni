@@ -889,8 +889,10 @@ This distinction enables worker-death recovery without duplicate external effect
 Semantic naming is attempt-owned auxiliary work: pending titles and exact-session
 policy authorize one bounded, tool-less request, parallel to the main stream and
 separately metered. Normal completion joins it before atomic settlement;
-exceptional/cancelled exits abort and join. Generic title writes lose to human
-renames. Runtimes without this seam serialize `set_session_title`.
+exceptional/cancelled exits abort and join, persisting completed title results
+and checkpointing their separate Codex request custody before failure recovery
+is evaluated. Pending/unknown requests retain their replay fence. Generic title
+writes lose to human renames. Runtimes without this seam serialize `set_session_title`.
 
 `packages/db/src/session-execution-policy.ts` projects defaults;
 `packages/db/src/session-model-settings.ts` records boundaries, preserving accepted

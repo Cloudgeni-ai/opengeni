@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, mock, test } from "bun:test";
 import {
   AUTOMATIC_SESSION_TITLE_FALLBACK,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
@@ -448,6 +448,33 @@ describe("startParallelSessionTitleGeneration", () => {
     await Promise.resolve();
     await task.cancel();
     expect(observedSignal?.aborted).toBe(true);
+  });
+
+  test("finish and cancellation join one awaited settlement of a completed result", async () => {
+    let releaseSettlement!: () => void;
+    const settlement = new Promise<void>((resolve) => {
+      releaseSettlement = resolve;
+    });
+    const onFinish = mock(async () => settlement);
+    const result = { title: "Completed title", usage: null };
+    const task = startParallelSessionTitleGeneration({
+      generate: async () => result,
+      onFinish,
+    });
+    const finished = task.finish();
+    await Promise.resolve();
+    const cancelled = task.cancel();
+    let returned = false;
+    void cancelled.then(() => {
+      returned = true;
+    });
+    await Promise.resolve();
+    expect(returned).toBe(false);
+    releaseSettlement();
+    expect(await finished).toEqual(result);
+    await cancelled;
+    expect(onFinish).toHaveBeenCalledTimes(1);
+    expect(onFinish).toHaveBeenCalledWith(result);
   });
 });
 

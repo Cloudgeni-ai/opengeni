@@ -68,6 +68,8 @@ Then open the smallest source files that answer the question:
   `apps/worker/src/activities/agent-turn/quiescence.ts`, background replay/release
   in `apps/worker/src/activities/sandbox-lease.ts`, and
   `packages/db/src/session-background-commands.ts` before diagnosing retention.
+- Parallel title cleanup settles completed results and their separate Codex
+  custody before failure recovery; pending/unknown requests remain fenced.
 - Startup telemetry: `apps/worker/src/observability-metrics.ts` separates blocking
   preparation from background MCP work. Phase durations can overlap; use durable
   milestones for elapsed startup latency. Runtime stream initialization is not
