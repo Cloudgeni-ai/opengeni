@@ -122,6 +122,12 @@ export type SubscriptionCoreConnectionProbeDeps = {
   /** A caller-built custody fetch (replaces the core's for this read). */
   requestFetch?: SubscriptionCoreFetch;
   resolver?: SubscriptionCoreConnectionResolverDeps;
+  /**
+   * The product models the connection can serve (the caller's catalog when
+   * the usage is read), passed to the adapter's `decodeQuota` so a limit of
+   * a model group reaches each listed model. Absent: no catalog.
+   */
+  modelIds?: readonly string[];
 };
 
 class ProbeUnavailable extends Error {}
@@ -477,6 +483,7 @@ export const subscriptionCoreOperationConnections = memoByProvider(
         response,
         observedAt: Date.now(),
         refreshGeneration: prepared.current().credentialVersion,
+        ...(deps.modelIds ? { modelIds: deps.modelIds } : {}),
       });
       if (!quota) return { kind: "read", response, quota: null, recovered: false };
       const applied = await operations()

@@ -238,11 +238,18 @@ export interface SubscriptionCoreAdapter<Credential = unknown> {
    * Decode a `fetchUsage` response into the shared quota model, fenced on
    * the refresh generation of the bearer that read it. Null when the
    * response carries no quota (an error payload or no windows).
+   *
+   * `modelIds`, when the caller passes it, lists the product models the
+   * connection can serve when the response is decoded (the caller's
+   * catalog), for providers whose usage reports limits of model groups
+   * that become per-model cooldowns. Absent: no catalog is known, and only
+   * models the response itself names can be cooled down.
    */
   decodeQuota?(input: {
     response: unknown;
     observedAt: number;
     refreshGeneration: number;
+    modelIds?: readonly ModelId[];
   }): SubscriptionQuota | null;
   /**
    * The provider's usage endpoint is authoritative for its quota: a

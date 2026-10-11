@@ -24,6 +24,12 @@ import { connectionModelAllowed } from "./model-connection-access";
 
 export type ConnectionModelRestrictions = Record<string, string[] | null>;
 
+/** Claude's two model restrictions, as its core route projects them. */
+export type ClaudeCoreModelRestrictions = {
+  "organization-claude-subscription/": string[] | null;
+  "workspace-claude-subscription/": string[] | null;
+};
+
 /** Metadata-only read under the caller's workspace and subject RLS scope. */
 async function listDirectModelConnections(db: Database, workspaceId: string, subjectId: string) {
   return await withWorkspaceSubjectRls(db, workspaceId, subjectId, async (tx) =>
@@ -62,6 +68,11 @@ export async function getWorkspaceConnectionModelRestrictions(
   }>,
   authoritySnapshot?: XaiProviderAccountAuthoritySnapshotV1,
   claudeAuthoritySnapshot?: ClaudeProviderAccountAuthoritySnapshotV1,
+  /**
+   * Claude's restrictions on its core route (design 5.3, C2a): when given,
+   * no legacy Claude pool or v1 snapshot is read and these are used.
+   */
+  claudeCoreRestrictions?: ClaudeCoreModelRestrictions,
 ): Promise<ConnectionModelRestrictions> {
   const [xai, xaiAuthority] = await Promise.all([
     listXaiSubscriptionAccountsMetadata(db, { workspaceId, subjectId }),
@@ -80,35 +91,42 @@ export async function getWorkspaceConnectionModelRestrictions(
     rows.some((row) => row.allowedModelIds == null)
       ? null
       : [...new Set(rows.flatMap((row) => row.allowedModelIds ?? []))];
-  const claudeAuthority =
-    claudeAuthoritySnapshot ??
-    (await resolveClaudeProviderAccountAuthoritySnapshotForAcceptance(db, {
-      workspaceId,
-      subjectId,
-    }));
-  let claudeModels: string[] | null = [];
-  try {
-    const [claude, claudeRotation] = await Promise.all([
-      listClaudeSubscriptionAccountsMetadataForAuthority(db, {
+  const claudeAuthority = claudeCoreRestrictions
+    ? null
+    : (claudeAuthoritySnapshot ??
+      (await resolveClaudeProviderAccountAuthoritySnapshotForAcceptance(db, {
         workspaceId,
         subjectId,
-        authoritySnapshot: claudeAuthority,
-      }),
-      getClaudeRotationSettings(db, { workspaceId, subjectId, authoritySnapshot: claudeAuthority }),
-    ]);
-    claudeModels = union(
-      claude.filter(
-        (row) =>
-          row.status === "active" &&
-          row.allocatorEnabled &&
-          (claudeRotation?.rotationEnabled || row.id === claudeRotation?.activeCredentialId),
-      ),
-    );
-  } catch (error) {
-    // An accepted private pool cannot be replaced by the caller's current pool.
-    // Catalog readiness closes this rail; execution still rejects stale authority.
-    if (!claudeAuthoritySnapshot || !(error instanceof ClaudeAuthorityPoolInactiveError))
-      throw error;
+      })));
+  let claudeModels: string[] | null = [];
+  if (claudeAuthority) {
+    try {
+      const [claude, claudeRotation] = await Promise.all([
+        listClaudeSubscriptionAccountsMetadataForAuthority(db, {
+          workspaceId,
+          subjectId,
+          authoritySnapshot: claudeAuthority,
+        }),
+        getClaudeRotationSettings(db, {
+          workspaceId,
+          subjectId,
+          authoritySnapshot: claudeAuthority,
+        }),
+      ]);
+      claudeModels = union(
+        claude.filter(
+          (row) =>
+            row.status === "active" &&
+            row.allocatorEnabled &&
+            (claudeRotation?.rotationEnabled || row.id === claudeRotation?.activeCredentialId),
+        ),
+      );
+    } catch (error) {
+      // An accepted private pool cannot be replaced by the caller's current pool.
+      // Catalog readiness closes this rail; execution still rejects stale authority.
+      if (!claudeAuthoritySnapshot || !(error instanceof ClaudeAuthorityPoolInactiveError))
+        throw error;
+    }
   }
   const restrictions: ConnectionModelRestrictions = {
     "codex/": union(codex.filter((row) => row.status === "active" && row.allocatorEnabled)),
@@ -125,13 +143,20 @@ export async function getWorkspaceConnectionModelRestrictions(
     "workspace-openrouter/": [],
     "workspace-opper/": [],
     "workspace-anthropic/": [],
-    "workspace-claude-subscription/": claudeAuthority.scope === "organization" ? [] : claudeModels,
+    "workspace-claude-subscription/": claudeCoreRestrictions
+      ? claudeCoreRestrictions["workspace-claude-subscription/"]
+      : claudeAuthority?.scope === "organization"
+        ? []
+        : claudeModels,
     "organization-gateway/": [],
     "organization-openrouter/": [],
     "organization-opper/": [],
     "organization-anthropic/": [],
-    "organization-claude-subscription/":
-      claudeAuthority.scope === "organization" ? claudeModels : [],
+    "organization-claude-subscription/": claudeCoreRestrictions
+      ? claudeCoreRestrictions["organization-claude-subscription/"]
+      : claudeAuthority?.scope === "organization"
+        ? claudeModels
+        : [],
   };
   await withWorkspaceSubjectRls(db, workspaceId, subjectId, async (tx) => {
     const rows = await rawRows<{

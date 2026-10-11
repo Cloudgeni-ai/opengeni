@@ -27,6 +27,10 @@ import {
   listConnectionsMetadata,
   listWorkspaceProviderCustomModelsByKind,
   readSubscriptionCoreRouteReadiness,
+  readSubscriptionCoreProviderRouteForWorkspace,
+  readSubscriptionCoreClaudeCatalogReadiness,
+  SUBSCRIPTION_CORE_CLAUDE_NOT_READY,
+  type SubscriptionCoreClaudeCatalogReadiness,
   workspaceProviderApiKeyConnectionMetadataFromConnections,
   getBillingBalance,
   getOrganizationModelDefaults,
@@ -363,6 +367,38 @@ export function withCoreRoutedXaiRestriction(
 }
 
 /**
+ * Claude readiness and its two model restrictions on the shared core once
+ * Claude's provider route is `core` (design 5.3, Claude track C2a,
+ * EP-T18/EP-S25/EP-N26): the core eligibility projection for the subject
+ * split by the legacy prefixes (`organization-claude-subscription/` from the
+ * organization inference pool; `workspace-claude-subscription/` from the
+ * workspace pool or the subject's own personal connection in their own
+ * Personal workspace). Not ready under maintenance. Null on the legacy route
+ * (one receipt read) and when the deployment disables Claude subscriptions
+ * (no read), so the caller keeps its legacy answer. Frozen v1 Claude
+ * snapshots are not read on the core route.
+ */
+export async function loadCoreRoutedClaudeCatalogReadiness(
+  db: Database,
+  settings: Pick<Settings, "claudeSubscriptionEnabled">,
+  context: { accountId: string; workspaceId: string; subjectId: string | null },
+): Promise<SubscriptionCoreClaudeCatalogReadiness | null> {
+  if (!settings.claudeSubscriptionEnabled) return null;
+  const route = await readSubscriptionCoreProviderRouteForWorkspace(db, {
+    accountId: context.accountId,
+    workspaceId: context.workspaceId,
+    provider: "claude",
+  });
+  if (route === "legacy") return null;
+  if (route === "maintenance") return SUBSCRIPTION_CORE_CLAUDE_NOT_READY;
+  return await readSubscriptionCoreClaudeCatalogReadiness(db, {
+    accountId: context.accountId,
+    workspaceId: context.workspaceId,
+    subjectId: context.subjectId,
+  });
+}
+
+/**
  * Connection restrictions and SuperGrok readiness for the subject. With a
  * frozen authority (a scheduled task's snapshot), a user pool that no longer
  * resolves (disconnected, reconnected under a new authority generation, or its
@@ -378,6 +414,10 @@ async function connectionRestrictionsAndXaiReadiness(
   context: WorkspaceModelSelectionContext,
 ): Promise<{ restrictions: ConnectionModelRestrictions; xaiSubscriptionActive: boolean }> {
   const { workspaceId, subjectId, xaiAuthoritySnapshot } = context;
+  // Claude's restrictions come from the core on its core route (no legacy
+  // Claude pool or v1 snapshot is read then).
+  const claudeCore = (await loadCoreRoutedClaudeCatalogReadiness(db, settings, context))
+    ?.restrictions;
   // On the core route a frozen legacy authority snapshot no longer selects
   // the pool: the core projection (and, at execution, the accepted turn's
   // core authority) does.
@@ -389,6 +429,7 @@ async function connectionRestrictionsAndXaiReadiness(
       subjectId,
       undefined,
       context.claudeAuthoritySnapshot,
+      claudeCore,
     );
     return {
       restrictions: withCoreRoutedXaiRestriction(restrictions, core),
@@ -403,6 +444,7 @@ async function connectionRestrictionsAndXaiReadiness(
         subjectId,
         undefined,
         context.claudeAuthoritySnapshot,
+        claudeCore,
       ),
       workspaceXaiSubscriptionActive(db, settings, workspaceId, subjectId),
     ]);
@@ -415,6 +457,7 @@ async function connectionRestrictionsAndXaiReadiness(
       subjectId,
       xaiAuthoritySnapshot,
       context.claudeAuthoritySnapshot,
+      claudeCore,
     ),
     workspaceXaiSubscriptionActiveForAuthority(db, settings, {
       workspaceId,
@@ -437,6 +480,7 @@ async function connectionRestrictionsAndXaiReadiness(
     subjectId,
     undefined,
     context.claudeAuthoritySnapshot,
+    claudeCore,
   );
   return {
     restrictions: { ...current, "supergrok/": [] },
@@ -455,6 +499,9 @@ export async function loadWorkspaceClaudeSubscriptionReadiness(
   context: WorkspaceModelSelectionContext,
 ): Promise<{ workspace: boolean; organization: boolean }> {
   if (!settings.claudeSubscriptionEnabled) return { workspace: false, organization: false };
+  // Claude's core route: the core projection, never a v1 snapshot.
+  const core = await loadCoreRoutedClaudeCatalogReadiness(db, settings, context);
+  if (core) return { workspace: core.workspace, organization: core.organization };
   const authoritySnapshot =
     context.claudeAuthoritySnapshot ??
     (await resolveClaudeProviderAccountAuthoritySnapshotForAcceptance(db, context));

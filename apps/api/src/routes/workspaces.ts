@@ -133,6 +133,7 @@ import {
   creditsDefaultSessionModel,
   loadCoreRoutedXaiCatalogReadiness,
   loadWorkspaceClaudeSubscriptionReadiness,
+  loadCoreRoutedClaudeCatalogReadiness,
   withCoreRoutedXaiRestriction,
   resolveDefaultSessionModelForSelections,
   resolveWorkspaceModelSelection,
@@ -592,6 +593,13 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
           kind !== "claude_subscription" || resolvedCatalog.settings.claudeSubscriptionEnabled,
       ),
     ];
+    // Claude by its provider route: the shared core's projection (readiness
+    // and both Claude model restrictions) once it has cut over, else legacy.
+    const claudeCore = loadCoreRoutedClaudeCatalogReadiness(deps.db, resolvedCatalog.settings, {
+      accountId: grant.accountId,
+      workspaceId,
+      subjectId: grant.subjectId,
+    });
     const [
       currentConnectionModelRestrictions,
       policy,
@@ -603,7 +611,16 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       organizationProviders,
       workspace,
     ] = await Promise.all([
-      getWorkspaceConnectionModelRestrictions(deps.db, workspaceId, grant.subjectId),
+      claudeCore.then((core) =>
+        getWorkspaceConnectionModelRestrictions(
+          deps.db,
+          workspaceId,
+          grant.subjectId,
+          undefined,
+          undefined,
+          core?.restrictions,
+        ),
+      ),
       getWorkspaceModelPolicy(deps.db, workspaceId),
       // By the organization's Codex cutover row: legacy without one, the
       // shared core for the caller when enabled, not ready while disabled.
@@ -630,11 +647,15 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
             grant.subjectId,
           )),
       })),
-      loadWorkspaceClaudeSubscriptionReadiness(deps.db, resolvedCatalog.settings, {
-        accountId: grant.accountId,
-        workspaceId,
-        subjectId: grant.subjectId,
-      }),
+      claudeCore.then(async (core) =>
+        core
+          ? { workspace: core.workspace, organization: core.organization }
+          : await loadWorkspaceClaudeSubscriptionReadiness(deps.db, resolvedCatalog.settings, {
+              accountId: grant.accountId,
+              workspaceId,
+              subjectId: grant.subjectId,
+            }),
+      ),
       listConnectionsMetadata(deps.db, workspaceId, null),
       listWorkspaceProviderCustomModelsByKind(deps.db, {
         accountId: grant.accountId,

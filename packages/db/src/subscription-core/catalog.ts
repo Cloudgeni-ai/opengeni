@@ -60,6 +60,14 @@ export type SubscriptionCoreServingConnection = {
    */
   assignments: Array<{ allowedModelIds: string[] | null; excludedModelIds: string[] }> | null;
   /**
+   * The inference pools of this workspace that the connection serves under
+   * the effective source: its applicable assignment policies' pools, or,
+   * without assignment rows, its management classification (`workspace`
+   * when this workspace manages it, else `organization`). Empty for a
+   * personal connection, which belongs to no shared pool.
+   */
+  pools: Array<"workspace" | "organization">;
+  /**
    * Product models with a live per-model cooldown on this connection (a
    * proven plan refusal). Read for personal connections, whose live model
    * list cannot be read outside an exact accepted turn.
@@ -251,6 +259,7 @@ export async function listSubscriptionCoreServingConnections(
             policy.allocatorEnabled &&
             (source === "automatic" || policy.inferencePool === source),
         );
+        const classified = policies.some((policy) => policy.connectionId === candidate.id);
         return {
           connectionId: candidate.id,
           ownership: "shared" as const,
@@ -260,12 +269,20 @@ export async function listSubscriptionCoreServingConnections(
           excludedModelIds: excludedById.get(candidate.id) ?? [],
           // Placement reads explicit rows; without one the connection keeps
           // its management classification and only its own allowlist applies.
-          assignments: policies.some((policy) => policy.connectionId === candidate.id)
+          assignments: classified
             ? applicable.map((policy) => ({
                 allowedModelIds: policy.allowedModelIds,
                 excludedModelIds: policy.excludedModels,
               }))
             : null,
+          pools: classified
+            ? [...new Set(applicable.map((policy) => policy.inferencePool))].sort()
+            : [
+                candidate.ownership.kind === "shared" &&
+                candidate.ownership.managedByWorkspaceId === input.workspaceId
+                  ? ("workspace" as const)
+                  : ("organization" as const),
+              ],
           cooledDownModelIds: [],
         };
       });
@@ -293,6 +310,7 @@ export async function listSubscriptionCoreServingConnections(
             allowedModelIds: row.allowed_model_ids ?? null,
             excludedModelIds: [],
             assignments: null,
+            pools: [],
             cooledDownModelIds: liveModelCooldowns(decodeSubscriptionQuota(row), now),
           })),
       ];
