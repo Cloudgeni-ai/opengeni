@@ -108,6 +108,11 @@ export interface TurnSummaryProps {
   foldKey?: string | undefined;
   contextCompactionCount?: number | undefined;
   status?: NativeTurnStatus | undefined;
+  /**
+   * Reports the disclosure's open state: once on mount when it starts open,
+   * then on every change, in the same update as the change itself.
+   */
+  onOpenStateChange?: ((open: boolean) => void) | undefined;
   children: ReactNode;
 }
 
@@ -123,6 +128,7 @@ export function TurnSummary({
   foldKey,
   contextCompactionCount,
   status,
+  onOpenStateChange,
   children,
 }: TurnSummaryProps) {
   const theme = useNativeTimelineTheme();
@@ -140,14 +146,29 @@ export function TurnSummary({
     remembered === "closed" ? false : remembered === "open" ? true : (defaultOpen ?? false),
   );
   const readerOwnsOpen = useRef(remembered !== undefined);
+  const reportOpen = useRef(onOpenStateChange);
+  reportOpen.current = onOpenStateChange;
+  const openRef = useRef(open);
+  const changeOpen = (next: boolean) => {
+    if (openRef.current === next) return;
+    openRef.current = next;
+    setOpen(next);
+    reportOpen.current?.(next);
+  };
+  // oxlint-disable-next-line react-hooks/exhaustive-deps -- report the starting state once
   useEffect(() => {
-    if (status && defaultOpen && remembered === undefined && !readerOwnsOpen.current) setOpen(true);
+    if (openRef.current) reportOpen.current?.(true);
+  }, []);
+  useEffect(() => {
+    if (status && defaultOpen && remembered === undefined && !readerOwnsOpen.current)
+      changeOpen(true);
+    // oxlint-disable-next-line react-hooks/exhaustive-deps -- changeOpen only touches refs and state
   }, [status, defaultOpen, remembered]);
   const toggle = (next: boolean) => {
     releaseFollow();
     readerOwnsOpen.current = true;
     if (foldKey !== undefined) foldMemory?.set(foldKey, next ? "open" : "closed");
-    setOpen(next);
+    changeOpen(next);
   };
   const context = useMemo(
     () =>
