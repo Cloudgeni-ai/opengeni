@@ -1,6 +1,11 @@
 import { sql } from "drizzle-orm";
 import { evaluateWorkspaceModelPolicy, SubscriptionPersonalAuthorityV2 } from "@opengeni/contracts";
-import type { ModelDescriptor, PlacementInput, ReselectionPoint } from "@opengeni/subscriptions";
+import {
+  declaredCacheLifetimeMs,
+  type ModelDescriptor,
+  type PlacementInput,
+  type ReselectionPoint,
+} from "@opengeni/subscriptions";
 import { rawRows, withRlsContext, withSessionRlsActorContext, type Database } from "./database";
 import {
   assertSubscriptionTurnLeaseCurrent,
@@ -89,6 +94,9 @@ export async function withSubscriptionCoreProviderPlacementWorld<T>(
   operation: (tx: Database, input: PlacementInput) => Promise<T>,
 ): Promise<SubscriptionCorePlacementWorldResult<T>> {
   const providerId = subscriptionCoreProviderId(provider);
+  // A declaration that is not a positive lifetime fails placement closed
+  // instead of reading as always cold or always warm (SUB-STICK-04).
+  declaredCacheLifetimeMs(provider.adapter.cacheFacts);
   const acceptedAuthority = SubscriptionPersonalAuthorityV2.parse(request.acceptedAuthorityV2);
   return await withSubscriptionCoreAcceptedTurn(db, request, async (tx) => {
     const [session] = await rawRows<SessionPlacementRow>(

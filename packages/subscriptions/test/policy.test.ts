@@ -842,6 +842,25 @@ describe("cache-aware stickiness: why a binding keeps or leaves its account", ()
         }),
         reason: "model_not_permitted",
       },
+      {
+        name: "a compaction mode tied to another provider",
+        world: sticky({ session: { compactionProviderLock: "claude" } }),
+        reason: "model_not_permitted",
+      },
+      {
+        name: "paid credits while another account has included allowance",
+        world: sticky({
+          bound: {
+            extraCreditsEnabled: true,
+            quota: quota({
+              windows: [
+                { id: "weekly", usedPercent: 100, resetsAt: NOW + 3_600_000, status: "exhausted" },
+              ],
+            }),
+          },
+        }),
+        reason: "extra_credits",
+      },
     ];
     for (const entry of cases) {
       const verdict = bindingStickiness(entry.world);
@@ -962,6 +981,45 @@ describe("cache-aware stickiness: why a binding keeps or leaves its account", ()
       ineligibility: ["personal_not_owners_work"],
     });
     expect(decidePlacement(shared)).toMatchObject({ connectionId: "codex-org", personal: false });
+  });
+
+  test("SUB-STICK-03, SUB-STICK-07: a warm personal account is left once its authority or owner is gone", () => {
+    const mine = personal("codex-mine", "codex");
+    const owned = input({
+      connections: [connection("codex-org", "codex"), mine],
+      personalFallbackOptIn: true,
+      session: {
+        visibility: "private",
+        personalAuthority: [{ provider: "codex", ownerMembershipId: "member-a" }],
+        binding: { ...warmBinding, connectionId: "codex-mine" },
+      },
+    });
+    // The owner's private session keeps its warm personal account.
+    expect(bindingStickiness(owned)).toMatchObject({ kind: "keep", connectionId: "codex-mine" });
+    const revoked = { ...owned, session: { ...owned.session, personalAuthority: [] } };
+    const left = {
+      ...owned,
+      people: owned.people.map((person) => ({ ...person, active: false })),
+    };
+    for (const [name, world, why] of [
+      ["no frozen authority", revoked, "personal_authority_missing"],
+      ["the owner left", left, "personal_owner_inactive"],
+    ] as const) {
+      const verdict = bindingStickiness(world);
+      expect({
+        name,
+        kind: verdict.kind,
+        reason: verdict.kind === "reselect" && verdict.reason,
+      }).toEqual({ name, kind: "reselect", reason: "account_ineligible" });
+      expect({
+        name,
+        why: verdict.kind === "reselect" && verdict.ineligibility.includes(why),
+      }).toEqual({ name, why: true });
+      expect({ name, decision: decidePlacement(world) }).toMatchObject({
+        name,
+        decision: { kind: "run", connectionId: "codex-org", personal: false },
+      });
+    }
   });
 });
 

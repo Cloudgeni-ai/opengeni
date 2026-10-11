@@ -1054,8 +1054,9 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
    * Commit the placement to the session binding under its row lock
    * (SUB-STICK-02). The world was read without locks, so the locked row must
    * still be the binding the decision was made from: its account, model and
-   * choice always, and its cache clock when the decision depended on it (a
-   * cold cache or a re-selection point). Otherwise another placement or a pin
+   * choice always, and its cache clock exactly when the decision depended on
+   * it (a cold cache or a re-selection point), else a clock no earlier than
+   * the one read (a pin change clears it). Otherwise another placement or a pin
    * committed first and this placement retries on the new binding, so
    * parallel turns of one session never split accounts. Placing a turn uses
    * the account: the clock moves to the placement time, so a parallel turn
@@ -1089,8 +1090,12 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
           seen.provider === decided.provider &&
           seen.modelId === decided.modelId &&
           seen.choice === decided.choice &&
-          (!next.clockDecided ||
-            (seen.lastModelCallAt?.getTime() ?? 0) === decided.lastModelCallAt);
+          // A decision that read the clock needs the same clock. Any other
+          // only tolerates a clock that moved forward (a request); a cleared
+          // or earlier clock means a pin changed in between.
+          (next.clockDecided
+            ? (seen.lastModelCallAt?.getTime() ?? 0) === decided.lastModelCallAt
+            : (seen.lastModelCallAt?.getTime() ?? 0) >= decided.lastModelCallAt);
     if (!unchanged) throw new SubscriptionBindingConflict();
     if (
       current &&
@@ -1535,6 +1540,11 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
    * placement measures cache warmth from it (design 3.4). Only the leased
    * connection's binding moves, and only forward; the clock is not part of
    * the binding version (`advanceSubscriptionBindingCacheClock`).
+   *
+   * An adapter that declares an exact lifetime (`exact_ttl`) refreshes its
+   * cache when a request starts, not when it ends (SUB-STICK-04): its clock
+   * is advanced only when the request is reserved, so a long call never
+   * stretches warmth past the lifetime the provider applies.
    */
   async function touchSubscriptionCoreBinding(
     db: Database,
@@ -1543,6 +1553,7 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
     lastModelCallAt: Date,
   ): Promise<boolean> {
     if (!identity.sessionOwnerSubjectId) return false;
+    if (provider.adapter.cacheFacts.kind === "exact_ttl") return false;
     const access = await withLeasedConnection(db, identity, lease, (tx) =>
       advanceSubscriptionBindingCacheClock(tx, {
         workspaceId: identity.workspaceId,

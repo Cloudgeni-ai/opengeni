@@ -181,14 +181,19 @@ Primary key `(workspace_id, session_id)`: `provider`, `connection_id`,
 - `last_model_call_at` is the session's cache clock (M5 cache-aware
   stickiness, D-30 and D-31 of the contract). It advances, forward only and
   only while the binding still names that connection, when a placement
-  commits on the bound account, when a model request on it is reserved (in
-  the reservation's transaction) and when a model call completes, so a long
-  turn is not mistaken for a cold cache. A clock-only advance does not bump
+  commits on the bound account and when a model request on it is reserved
+  (in the reservation's transaction), so a long turn is not mistaken for a
+  cold cache. For an adapter that declares an idle cut-off it also advances
+  when a model call completes; an exact lifetime is refreshed when a request
+  starts, so for it the end of a call is not recorded. A clock-only advance does not bump
   `version`. A switch of account or model writes the placement time as the new
   clock; the trigger `subscription_session_bindings_cache_clock` (migration
   `0716_subscription_binding_cache_clock.sql`) clears it for any writer that
   changes the connection, provider, model or choice without stating a clock,
   so a pin change or an older binary never carries warmth to another account.
+  Setting or removing a pin therefore makes the next turn re-run selection
+  (D-31); a compaction is a re-selection point only when it is later than
+  the clock.
 - Placement commits the binding under its row lock (`FOR UPDATE`, after the
   lease, in the existing binding-write position of the lock order): the
   locked row must still name the account, model and choice the decision read,
@@ -4651,8 +4656,13 @@ provider and has no provider default:
 | --- | --- | --- |
 | Claude | exact TTL, 5 minutes (the `cacheTtl` Opengeni sends) | Anthropic prompt caching: the default cache lifetime is 5 minutes, refreshed on each use (https://platform.claude.com/docs/en/build-with-claude/prompt-caching) |
 | Codex | idle cut-off, 60 minutes | OpenAI prompt caching: in-memory retention keeps prefixes for about 5 to 10 minutes of inactivity, up to one hour (https://developers.openai.com/api/docs/guides/prompt-caching) |
-| SuperGrok | idle cut-off, 60 minutes | xAI documents no lifetime and says cached prefixes can be evicted at any time (https://docs.x.ai/developers/advanced-api-usage/prompt-caching/best-practices) |
+| SuperGrok | will declare an idle cut-off of 60 minutes when its core adapter lands (M4) | xAI documents no lifetime and says cached prefixes can be evicted at any time (https://docs.x.ai/developers/advanced-api-usage/prompt-caching/best-practices) |
 | Test API-key connector | idle cut-off, 20 minutes | deliberately unlike the real adapters, so conformance reads the lifetime from the adapter |
+
+Core placement validates the declaration (`declaredCacheLifetimeMs`) when it
+builds the world and fails closed on anything but a positive whole number of
+milliseconds. The reference model's `DEFAULT_IDLE_CUTOFF_MS` applies only to
+legacy cache facts without a cut-off, never to a core adapter.
 
 Until per-provider cut-offs are measured from `model_call_facts` (which
 gains `connection_id`, also needed for SUB-ACCT-01), erring towards "warm"
@@ -4668,8 +4678,10 @@ unhealthy or quarantined, disconnected, switched off), its model may not be
 used (`model_not_permitted`), or it would spend paid credits while another
 account has included allowance (`extra_credits`). Then re-selection points
 (`reselection_point`: compaction, model change) and finally the clock
-(`cache_cold`: idle longer than the declared lifetime). Idle exactly the
-lifetime is still warm. A re-selection runs normal selection (rotation
+(`cache_cold`: idle longer than the declared lifetime, or no clock, which is
+how a pin change shows up). Idle exactly the
+lifetime is still warm. The reported reason is the first that applies and is
+diagnostic only. A re-selection runs normal selection (rotation
 applies) and may land on the same account. Core placement reports the reason
 as `reselection` on a run (null when the warm account was kept, for an
 explicit choice and for a reused lease). Explicit pins, personal-account

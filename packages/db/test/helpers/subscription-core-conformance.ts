@@ -48,6 +48,7 @@ import {
   enqueueSessionWorkflowWakeInTransaction,
   enqueueSessionTurn,
   ensureManagedAccessForUser,
+  transitionSessionVisibility,
   withRlsContext,
   withSessionRlsActorContext,
   type DbClient,
@@ -796,6 +797,9 @@ export function describeSubscriptionCoreConformance<Credential>(
     next: {
       initiator?: "owner" | "service";
       model?: { productModelId: string; upstreamModelId: string };
+      personalAuthority?: boolean;
+      /** Runs while the session is idle between the two turns. */
+      between?: () => Promise<void>;
     } = {},
   ): Promise<Turn> {
     const { workspaceId, sessionId, turnId } = previous.identity;
@@ -829,10 +833,14 @@ export function describeSubscriptionCoreConformance<Credential>(
       ],
     });
     expect(settled.action).toBe("settled");
+    await next.between?.();
     return runningTurn(org, {
       workspaceId,
       sessionId,
       initiator: next.initiator ?? "owner",
+      ...(next.personalAuthority !== undefined
+        ? { personalAuthority: next.personalAuthority }
+        : {}),
       model:
         next.model ??
         subject.models.find((model) => model.productModelId === previous.productModelId)!,
@@ -1687,6 +1695,121 @@ export function describeSubscriptionCoreConformance<Credential>(
         where workspace_id = ${second.identity.workspaceId}::uuid
           and session_id = ${second.identity.sessionId}::uuid`;
       expect(binding!.model_id).toBe(m1.productModelId);
+    });
+
+    test("SUB-STICK-05: a compaction after the session's latest request re-runs selection although the cache is warm", async () => {
+      const org = await organization();
+      await sharedConnection(org, `compact-a-${crypto.randomUUID()}`);
+      await sharedConnection(org, `compact-b-${crypto.randomUUID()}`);
+      const compacted = async (turn: Turn, at: number) => {
+        await admin()`
+          insert into session_events (
+            account_id, workspace_id, session_id, sequence, type, payload, occurred_at
+          ) select ${org.accountId}::uuid, ${turn.identity.workspaceId}::uuid,
+            ${turn.identity.sessionId}::uuid, coalesce(max(sequence), 0) + 1,
+            'session.context.compacted', '{}'::jsonb, ${new Date(at).toISOString()}::timestamptz
+          from session_events where session_id = ${turn.identity.sessionId}::uuid`;
+      };
+      const first = await runningTurn(org);
+      const bound = await placeChecked(first);
+      if (bound.kind !== "run") throw new Error("expected a run");
+      // A compaction the session has made requests since is no re-selection
+      // point: the cache was rebuilt on this account from the compacted context.
+      const clock = (await bindingOf(first))!.clock!;
+      await compacted(first, clock - 1_000);
+      const second = await nextTurn(org, first);
+      const keptAt = clock + 1_000;
+      expect(await placeChecked(second, new Date(keptAt))).toMatchObject({
+        kind: "run",
+        connectionId: bound.connectionId,
+        switch: "sticky",
+        reselection: null,
+      });
+      // A compaction after the latest request replaced the cached prefix.
+      await compacted(second, keptAt + 1_000);
+      const third = await nextTurn(org, second);
+      const placedAt = keptAt + 2_000;
+      expect(await placeChecked(third, new Date(placedAt))).toMatchObject({
+        kind: "run",
+        reselection: { reason: "reselection_point", points: ["compaction_completed"] },
+      });
+      expect((await bindingOf(third))!.clock).toBe(placedAt);
+    });
+
+    test("SUB-STICK-04: a completed call advances the cache clock only for a declared idle cut-off", async () => {
+      const org = await organization();
+      await sharedConnection(org, `completed-${crypto.randomUUID()}`);
+      const placedAt = Date.now() - 60_000;
+      const turn = await runningTurn(org);
+      const bound = await placeChecked(turn, new Date(placedAt));
+      if (bound.kind !== "run") throw new Error("expected a run");
+      const completedAt = new Date(placedAt + 30_000);
+      const touched = await runtime().touchSubscriptionCoreBinding(
+        db(),
+        turn.identity,
+        leaseOf(turn, bound.connectionId),
+        completedAt,
+      );
+      // An exact lifetime is refreshed when a request starts, so the end of a
+      // call never extends it; an idle cut-off is measured from the call's end.
+      const exact = provider.adapter.cacheFacts.kind === "exact_ttl";
+      expect(touched).toBe(!exact);
+      expect((await bindingOf(turn))!.clock).toBe(exact ? placedAt : completedAt.getTime());
+    });
+
+    test("SUB-STICK-07: a session shared while warm on its owner's personal account leaves it at once", async () => {
+      const org = await organization();
+      const personal = await personalConnection(org, `stick-personal-${crypto.randomUUID()}`);
+      const shared = await sharedConnection(org, `stick-shared-${crypto.randomUUID()}`);
+      // Only the owner's personal account can serve the private session at first.
+      await admin()`update subscription_connections set allocator_enabled = false
+        where id = ${shared}::uuid`;
+      const first = await runningTurn(org, { visibility: "user_private", personalAuthority: true });
+      expect(await placeChecked(first)).toMatchObject({
+        kind: "run",
+        connectionId: personal,
+        personal: true,
+      });
+      await admin()`update subscription_connections set allocator_enabled = true
+        where id = ${shared}::uuid`;
+      // Still private and warm: the session keeps the personal account.
+      const second = await nextTurn(org, first, { personalAuthority: true });
+      expect(await placeChecked(second)).toMatchObject({
+        kind: "run",
+        connectionId: personal,
+        switch: "sticky",
+        reselection: null,
+      });
+      // Shared while its cache is warm: the personal account is out of scope
+      // for the session now, whatever authority the turn carries.
+      const share = async () => {
+        const [session] = await admin()<{ authority_epoch: number }[]>`
+          select authority_epoch::int as authority_epoch from sessions
+          where id = ${second.identity.sessionId}::uuid`;
+        expect(
+          await transitionSessionVisibility(db(), {
+            workspaceId: second.identity.workspaceId,
+            sessionId: second.identity.sessionId,
+            actorSubjectId: org.ownerSubjectId,
+            targetVisibility: "workspace_shared",
+            expectedAuthorityEpoch: session!.authority_epoch,
+            operationKey: `stick-share-${crypto.randomUUID()}`,
+          }),
+        ).toMatchObject({ visibility: "workspace_shared", changed: true });
+      };
+      const third = await nextTurn(org, second, { personalAuthority: true, between: share });
+      const moved = await placeChecked(third);
+      expect(moved).toMatchObject({
+        kind: "run",
+        connectionId: shared,
+        personal: false,
+        previousConnectionId: personal,
+      });
+      if (moved.kind !== "run") return;
+      expect(["account_unavailable", "account_ineligible"]).toContain(
+        moved.reselection?.reason ?? "kept",
+      );
+      expect(await bindingOf(third)).toMatchObject({ connectionId: shared, choice: "automatic" });
     });
 
     test("SUB-STICK-06: a pin is kept whatever the cache; a pin change restarts the clock and unpinning re-runs selection", async () => {

@@ -113,11 +113,19 @@ export function rankConnections(
 export type ReselectionReason =
   /** The session has no account yet. */
   | "unbound"
-  /** The bound account is not in this session's world: removed, disconnected or unreachable. */
+  /**
+   * The bound account is not in this session's world: removed, or outside
+   * the session's scope (a disconnected account stays in the world and is
+   * `account_ineligible`).
+   */
   | "account_unavailable"
   /** The bound model may no longer be used here (workspace, provider switch, compaction lock). */
   | "model_not_permitted"
-  /** The bound account cannot serve now; `ineligibility` says why (exhausted, unhealthy, out of scope...). */
+  /**
+   * The bound account cannot serve now; `ineligibility` says why (exhausted
+   * or rate-limited, unhealthy or quarantined, disconnected, switched off,
+   * personal authority or owner gone).
+   */
   | "account_ineligible"
   /** The bound account would spend paid credits while another has included allowance (SUB-CREDITS-01). */
   | "extra_credits"

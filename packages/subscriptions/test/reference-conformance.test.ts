@@ -115,12 +115,14 @@ describe("reference conformance over generated worlds", () => {
         return decision.kind === "run" && decision.switch === "sticky" && onBinding
           ? null
           : { verdict, decision };
-      // A forced reason never lands back on the bound account and model; a
-      // cold cache, a re-selection point or avoidable credits may.
+      // A forced reason never lands back on the bound account and model
+      // (avoidable credits included: an account with included allowance
+      // ranks first); a cold cache or a re-selection point may.
       const forced =
         verdict.reason === "account_unavailable" ||
         verdict.reason === "account_ineligible" ||
-        verdict.reason === "model_not_permitted";
+        verdict.reason === "model_not_permitted" ||
+        verdict.reason === "extra_credits";
       return forced && onBinding ? { verdict, decision } : null;
     });
     expect(findings.slice(0, 5)).toEqual([]);
