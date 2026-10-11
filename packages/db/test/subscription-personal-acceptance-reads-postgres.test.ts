@@ -5,8 +5,11 @@
 // the documented posture is; runtime calls run as the restricted application
 // role. Before 0718 every acceptance froze the empty value for an owner with a
 // serviceable personal Codex account; after it the owner's personal entry is
-// frozen, through the same writers and the same rules. The runbook's inventory
-// queries (docs/deployment.md) run against the fixtures staged before 0718.
+// frozen, through the same writers and the same rules. Health recovery had the
+// same defect: before 0718 the owner's own turn never recovered their due
+// quarantined personal account, even with the entry frozen; after it the turn
+// does. The runbook's inventory queries (docs/deployment.md) run against the
+// fixtures staged before 0718.
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import {
@@ -16,6 +19,7 @@ import {
 import { sql } from "drizzle-orm";
 import postgres from "postgres";
 import {
+  claimSessionWorkForAttempt,
   connectSubscriptionCoreCodexConnection,
   createDb,
   createScheduledTask,
@@ -24,6 +28,8 @@ import {
   ensureManagedAccessForUser,
   evaluateRuntimeDatabasePosture,
   inspectRuntimeDatabasePosture,
+  readSubscriptionCoreTurnIdentity,
+  recoverSubscriptionCoreCodexConnectionHealth,
   withSessionRlsActorContext,
   type DbClient,
 } from "../src";
@@ -31,6 +37,7 @@ import { rawRows, withRlsContext } from "../src/database";
 import { encryptEnvironmentValue } from "../src/environment-crypto";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
+import { withSubscriptionCoreAcceptedTurn } from "../src/subscription-core-placement-world";
 
 setDefaultTimeout(180_000);
 
@@ -43,6 +50,10 @@ const ROUTINES = [
   "opengeni_private.subscription_codex_task_authority_v2(uuid,uuid,uuid,text)",
   "opengeni_private.subscription_core_acceptance_authority_v2(text,uuid,uuid,uuid,text)",
   "opengeni_private.subscription_core_task_authority_v2(text,uuid,uuid,uuid,text)",
+];
+const RECOVERY = [
+  "opengeni_private.recover_subscription_codex_connection_health(uuid,uuid,uuid,uuid)",
+  "opengeni_private.recover_subscription_core_connection_health(text,uuid,uuid,uuid,uuid)",
 ];
 /** The exact text 0718 inserts into each writer. */
 const INSERTED = [
@@ -85,6 +96,9 @@ let before: {
   codex: unknown;
   core: unknown;
   routines: Routine[];
+  recovery: Routine[];
+  /** Recovery by the owner's own turn before 0718, through the core and Codex routines. */
+  recovered: { core: number; codex: number };
   /** The runbook's queries as an operator runs them before deploying 0718. */
   inventory: Inventory;
 } | null = null;
@@ -115,12 +129,12 @@ async function inventory(): Promise<Inventory> {
   };
 }
 
-async function routines(): Promise<Routine[]> {
+async function routines(names: string[] = ROUTINES): Promise<Routine[]> {
   return database!.admin<Routine[]>`
     select listed.name as routine, proc.prosecdef as definer,
       coalesce(proc.proconfig, '{}') as config, coalesce(proc.proacl::text, '') as acl,
       pg_get_userbyid(proc.proowner)::text as owner, pg_get_functiondef(proc.oid) as definition
-    from unnest(${ROUTINES}::text[]) with ordinality listed(name, position)
+    from unnest(${names}::text[]) with ordinality listed(name, position)
     join pg_proc proc on proc.oid = listed.name::regprocedure
     order by listed.position`;
 }
@@ -309,6 +323,87 @@ async function accept(
   );
 }
 
+/**
+ * The owner's own claimed turn in their private session with the personal
+ * entry frozen. Before 0718 the writers froze the empty value, so the fixture
+ * writes the entry directly with triggers suspended (the frozen value is
+ * immutable), and the evidence does not depend on the writers.
+ */
+async function quarantinedOwnTurn(owner: Owner, sessionId: string, turnId: string) {
+  if (JSON.stringify(await turnAuthority(turnId)) !== JSON.stringify(personal(owner))) {
+    await database!.admin.begin(async (admin) => {
+      await admin`set local session_replication_role = replica`;
+      await admin`update session_turns
+        set subscription_authority = ${admin.json(personal(owner))}::jsonb
+        where id = ${turnId}::uuid`;
+    });
+  }
+  const claimed = await claimSessionWorkForAttempt(client!.db, owner.personalWorkspaceId, {
+    sessionId,
+    workflowId: `session-${sessionId}`,
+    workflowRunId: crypto.randomUUID(),
+    dispatchId: crypto.randomUUID(),
+    attemptId: crypto.randomUUID(),
+    trigger: { kind: "next" },
+  });
+  if (claimed.action !== "claimed") throw new Error(`claim failed: ${claimed.reason}`);
+  const identity = await readSubscriptionCoreTurnIdentity(client!.db, {
+    accountId: owner.accountId,
+    workspaceId: owner.personalWorkspaceId,
+    sessionId,
+    turnId,
+  });
+  if (!identity) throw new Error("accepted turn identity was not readable");
+  return identity;
+}
+
+async function quarantinePersonal(owner: Owner): Promise<void> {
+  const updated = await database!.admin`update subscription_connections
+    set status = 'error', last_error = 'model request was forbidden for this credential',
+      health_retry_at = now() - interval '1 second'
+    where account_id = ${owner.accountId}::uuid and ownership = 'personal'
+      and owner_organization_membership_id = ${owner.membershipId}::uuid`;
+  if (updated.count !== 1)
+    throw new Error(`expected one personal connection, found ${updated.count}`);
+}
+
+async function personalStatus(owner: Owner): Promise<string> {
+  const [row] = await database!.admin<{ status: string }[]>`
+    select status from subscription_connections
+    where account_id = ${owner.accountId}::uuid and ownership = 'personal'
+      and owner_organization_membership_id = ${owner.membershipId}::uuid`;
+  return row!.status;
+}
+
+/** Recovery through the Codex form, called directly inside the accepted turn. */
+async function recoverCodexDirect(
+  identity: NonNullable<Awaited<ReturnType<typeof readSubscriptionCoreTurnIdentity>>>,
+): Promise<number> {
+  const access = await withSubscriptionCoreAcceptedTurn(client!.db, identity, async (tx) => {
+    const [row] = await rawRows<{ recovered: number }>(
+      tx,
+      sql`select opengeni_private.recover_subscription_codex_connection_health(
+        ${identity.accountId}::uuid, ${identity.workspaceId}::uuid,
+        ${identity.sessionId}::uuid, ${identity.turnId}::uuid) as recovered`,
+    );
+    return Number(row?.recovered ?? 0);
+  });
+  if (access.status !== "completed") throw new Error(`turn access: ${access.status}`);
+  return access.value;
+}
+
+/** Recover the owner's quarantined personal account through both routines. */
+async function recoverBoth(
+  owner: Owner,
+  identity: NonNullable<Awaited<ReturnType<typeof readSubscriptionCoreTurnIdentity>>>,
+): Promise<{ core: number; codex: number; status: string }> {
+  await quarantinePersonal(owner);
+  const core = await recoverSubscriptionCoreCodexConnectionHealth(client!.db, identity);
+  await quarantinePersonal(owner);
+  const codex = await recoverCodexDirect(identity);
+  return { core, codex, status: await personalStatus(owner) };
+}
+
 beforeAll(async () => {
   if (!realDb) return;
   database = await acquireOwnerMigratedTestDatabase("subscription-personal-acceptance-reads");
@@ -330,6 +425,18 @@ beforeAll(async () => {
   const stagedOwner = await stageOwner();
   const stagedSession = await ownerSession(stagedOwner);
   const stagedAcceptance = await accept(stagedOwner, stagedSession.sessionId);
+  const recoverySession = await ownerSession(stagedOwner);
+  const recoveryIdentity = await quarantinedOwnTurn(
+    stagedOwner,
+    recoverySession.sessionId,
+    recoverySession.turnId,
+  );
+  const stagedRecovery = await recoverBoth(stagedOwner, recoveryIdentity);
+  if (stagedRecovery.status !== "error")
+    throw new Error("the quarantine was recovered before 0718");
+  await database.admin`update subscription_connections set status = 'active', last_error = null,
+      health_retry_at = null
+    where account_id = ${stagedOwner.accountId}::uuid and ownership = 'personal'`;
   before = {
     owner: stagedOwner,
     sessionId: stagedSession.sessionId,
@@ -339,6 +446,8 @@ beforeAll(async () => {
     codex: stagedAcceptance.codex,
     core: stagedAcceptance.core,
     routines: await routines(),
+    recovery: await routines(RECOVERY),
+    recovered: { core: stagedRecovery.core, codex: stagedRecovery.codex },
     inventory: await inventory(),
   };
   // A rolling migration keeps the previous binary's runtime posture until
@@ -434,6 +543,61 @@ describe.skipIf(!realDb)("0718 personal acceptance reads", () => {
     const own = await ownerSession(fresh);
     const other = await accept(fresh, own.sessionId, "user:someone-else");
     expect({ codex: other.codex, core: other.core }).toEqual({ codex: EMPTY, core: EMPTY });
+  });
+
+  test("the owner's own turn recovers their due quarantined personal account", async () => {
+    // Before 0718 neither routine saw the row, though the entry was frozen.
+    expect(before!.recovered).toEqual({ core: 0, codex: 0 });
+    const fresh = await stageOwner();
+    const session = await ownerSession(fresh);
+    expect(session.turn).toEqual(personal(fresh));
+    const identity = await quarantinedOwnTurn(fresh, session.sessionId, session.turnId);
+    expect(await recoverBoth(fresh, identity)).toEqual({ core: 1, codex: 1, status: "active" });
+    // The rules are unchanged: the owner's own turn in a shared session froze
+    // no personal entry and recovers nothing; the caller's marker is restored.
+    const shared = await ownerSession(fresh, fresh.sharedWorkspaceId, "workspace_shared");
+    const claimed = await claimSessionWorkForAttempt(client!.db, fresh.sharedWorkspaceId, {
+      sessionId: shared.sessionId,
+      workflowId: `session-${shared.sessionId}`,
+      workflowRunId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    expect(claimed.action).toBe("claimed");
+    const sharedIdentity = await readSubscriptionCoreTurnIdentity(client!.db, {
+      accountId: fresh.accountId,
+      workspaceId: fresh.sharedWorkspaceId,
+      sessionId: shared.sessionId,
+      turnId: shared.turnId,
+    });
+    await quarantinePersonal(fresh);
+    expect(await recoverSubscriptionCoreCodexConnectionHealth(client!.db, sharedIdentity!)).toBe(0);
+    expect(await recoverCodexDirect(sharedIdentity!)).toBe(0);
+    expect(await personalStatus(fresh)).toBe("error");
+    const marker = await withSubscriptionCoreAcceptedTurn(client!.db, identity, async (tx) => {
+      await rawRows(
+        tx,
+        sql`select set_config('opengeni.organization_tenancy_lifecycle', 'caller-value', true)`,
+      );
+      const [row] = await rawRows<{ recovered: number; marker: string }>(
+        tx,
+        sql`select opengeni_private.recover_subscription_core_connection_health('codex',
+            ${identity.accountId}::uuid, ${identity.workspaceId}::uuid,
+            ${identity.sessionId}::uuid, ${identity.turnId}::uuid) as recovered,
+          current_setting('opengeni.organization_tenancy_lifecycle', true) as marker`,
+      );
+      return row!;
+    });
+    expect(marker).toEqual({
+      status: "completed",
+      value: { recovered: 1, marker: "caller-value" },
+    });
+  });
+
+  test("the recovery routines keep their attributes", async () => {
+    const attributes = (rows: Routine[]) => rows.map(({ definition: _, ...rest }) => rest);
+    expect(attributes(await routines(RECOVERY))).toEqual(attributes(before!.recovery));
   });
 
   test("the membership-lifecycle marker is restored to the caller's value", async () => {

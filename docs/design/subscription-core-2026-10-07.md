@@ -3185,8 +3185,9 @@ of row 0 above lands in exactly one of them:
   callers of `validate_scheduled_agent_run_live_authority`); and the defects
   in earlier merged work listed there.
 - **Part 3 (migration 0718), acts on deploy:** a defect fix in earlier
-  merged work found while testing part 2: the v2 acceptance writers see the
-  owner's personal connections under an owner bound by row security.
+  merged work found while testing part 2: the v2 acceptance writers and the
+  two health-recovery routines see the owner's personal connections under an
+  owner bound by row security.
 
 Choices made where the plan left room, for reviewers:
 
@@ -3533,6 +3534,23 @@ rows. Choices:
 - **No backfill.** Values frozen empty stay empty: a backfill would widen
   accepted work after the fact. New turns in a private session pick up the
   personal entry; scheduled tasks keep the value frozen at creation.
+- **Health recovery too.** `recover_subscription_core_connection_health`
+  (0707, 0715) and `recover_subscription_codex_connection_health` (0669)
+  select the due quarantined rows the accepted turn could lease and had the
+  same blind spot: a quarantined personal account was never recovered, even
+  for the owner's own turn with the entry frozen (found in review of part 3).
+  Each now collects its candidates into an array under the marker, restores
+  the caller's value, then updates: the marker also enables the
+  membership-lifecycle delete policy, so it is never set while the routine
+  writes, and a lazily read cursor would have kept it set through the loop.
+  The candidate filter is unchanged, so the marker widens nothing the routine
+  returns: personal rows still need the turn's owner, the active owner
+  membership and the frozen entry naming the row's membership and
+  generation; shared rows still need the ordinary visibility rule.
+- **Personal connections allowed.** The writers do not read the
+  organization's `personalConnectionsAllowed`; placement applies it. The
+  runbook's inventory therefore lists owners whose new acceptances will
+  freeze the personal entry, not owners whose work will run on it.
 
 #### PR 0c: provider-keyed cutover planner and organization reach
 
@@ -4181,6 +4199,7 @@ step, not the worker's own settlement that live Codex turns use today.
 | 0598 copied the xAI policies of `organization_memberships` by the pattern `xai_subscription_capability_%` and missed `xai_subscription_membership_lock`: under a migration owner without `BYPASSRLS` (the documented posture) connecting a personal Claude account fails with `42501`. | 0598 (0442's xAI policy) | PR 0b part 2 (0717) |
 | No policy lets the SuperGrok or Claude lifecycle capability update `organization_user_resource_authorities`, so under such an owner a personal disconnect deletes the credential and leaves its authority active, and runs accepted for the disconnected account keep passing the `user` generation check. Existing tests ran as a superuser. | 0234, 0442, 0598 | PR 0b part 2 (0717): revoke policies, and a repair of the authorities left active |
 | Under such an owner the v2 writers see no personal connection: they count the owner's personal generations holding only an account `lifecycle` capability, which no `subscription_connections` policy honours for personal rows, so every acceptance freezes the empty value and a personal Codex account is never used after the cutover, even in the owner's private session. Existing tests ran the writers on superuser-owned databases. | 0669, 0688, 0707 | PR 0b part 3 (0718): the writers count through the owner-only membership-lifecycle read |
+| Under such an owner the health-recovery routines see no personal connection either, so a due 403 quarantine of a personal account is never lifted, even for the owner's own turn whose frozen entry names it. | 0669, 0707, 0715 | PR 0b part 3 (0718): both collect their candidates under the same marker, restored before they write |
 | The `{codex,claude,xai}_primary_connection_id` foreign keys omit `provider`, so a primary can reference another provider's connection. | 0642 `subscription_settings` | PR 0, or M4-A's settings shape |
 | The non-Codex branch of `authorize_subscription_personal_access` compares the owner subject but neither requires the connection's owner membership id to equal the session owner's membership nor checks `personalConnectionsAllowed`. | 0668 | PR 0 |
 | `autoRenews` is a static adapter flag but is documented as false for setup tokens. | `packages/subscriptions/src/adapter.ts` | PR 0 |

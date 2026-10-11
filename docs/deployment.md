@@ -4936,9 +4936,18 @@ superuser nor `BYPASSRLS` (the documented posture):
   private session uses the personal account, but a scheduled task keeps the
   value frozen when it was created, so tasks created before 0718 keep using
   shared capacity until they are recreated.
+- Health recovery had the same blind spot: a personal Codex account
+  quarantined after a refused request (a time-bound `error` status with a
+  retry time) was never returned to service. After 0718 the owner's own turn
+  whose frozen entry names the account recovers it once the retry time
+  passes, as shared accounts already were. Sign-in failures still need a new
+  sign-in.
 
-To see whether a database is affected, and which owners 0718 starts to serve,
-run as a role that bypasses row security:
+To see whether a database is affected, and which owners' new acceptances
+0718 will freeze the personal entry for, run as a role that bypasses row
+security. Placement still applies the organization's
+`personalConnectionsAllowed` setting, so where it is off these owners' work
+keeps using shared capacity:
 
 ```sql
 SELECT rolname, rolsuper, rolbypassrls
