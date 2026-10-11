@@ -53,6 +53,9 @@ const subscriptionCoreMigrations = [
   "0713_subscription_core_provider_keyed_reach.sql",
   // Redefines the reach setters withheld 0713 creates.
   "0714_subscription_workspace_managed_organization_accounts.sql",
+  // Rewrites routines 0707, 0713 and 0714 create from their live definitions;
+  // replay after them.
+  "0715_subscription_core_api_key_connections.sql",
 ] as const;
 const key = Buffer.alloc(32, 67);
 const ids = {

@@ -9,6 +9,7 @@ import {
   readSubscriptionSessionBinding,
 } from "./subscription-core-repository";
 import {
+  subscriptionCoreConnectionKind,
   subscriptionCoreProviderId,
   type SubscriptionCoreProvider,
 } from "./subscription-core/provider";
@@ -156,6 +157,7 @@ export async function withSubscriptionCoreProviderPlacementWorld<T>(
         accountId: request.accountId,
         workspaceId: request.workspaceId,
         provider: providerId,
+        kind: subscriptionCoreConnectionKind(provider),
         now: request.now,
       }),
     ]);

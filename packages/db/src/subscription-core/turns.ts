@@ -63,6 +63,7 @@ import {
 
 import {
   memoByProvider,
+  subscriptionCoreConnectionKind,
   subscriptionCoreProviderId,
   type SubscriptionCoreProvider,
 } from "./provider";
@@ -644,23 +645,27 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
     };
   }
 
-  /** Earliest retry when a quarantine or fresh catalog observation expires. */
+  /**
+   * Earliest retry when a quarantine or fresh catalog observation of this
+   * provider's connections of its registered kind expires.
+   */
   async function earliestHealthRetryAt(
     tx: Database,
     identity: SubscriptionCoreAcceptedTurnIdentity,
   ): Promise<Date | null> {
+    const kind = subscriptionCoreConnectionKind(provider);
     const [row] = await rawRows<{ retry_at: Date | string | null }>(
       tx,
       sql`select min(retry_at) as retry_at from (
       select health_retry_at as retry_at from subscription_connections
         where account_id = ${identity.accountId}::uuid and provider = ${providerId}
-          and status = 'error' and health_retry_at > clock_timestamp()
+          and kind = ${kind} and status = 'error' and health_retry_at > clock_timestamp()
       union all
       select quota.model_catalog_expires_at from subscription_connection_quota quota
         join subscription_connections connection on connection.id = quota.connection_id
           and connection.account_id = quota.account_id
         where connection.account_id = ${identity.accountId}::uuid and connection.provider = ${providerId}
-          and connection.status = 'active' and connection.allocator_enabled
+          and connection.kind = ${kind} and connection.status = 'active' and connection.allocator_enabled
           and quota.model_catalog_refresh_generation = connection.refresh_generation
           and quota.model_catalog_expires_at > clock_timestamp()
       ) deadlines`,
@@ -1178,7 +1183,8 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
     ) {
       return { kind: "not_visible" };
     }
-    if (row.kind !== "subscription") return { kind: "unavailable" };
+    // Only this provider's kind of connection (a subscription or an API key).
+    if (row.kind !== subscriptionCoreConnectionKind(provider)) return { kind: "unavailable" };
     if (row.status === "needs_relogin") return { kind: "needs_relogin" };
     if (row.status !== "active") return { kind: "unavailable" };
     return {

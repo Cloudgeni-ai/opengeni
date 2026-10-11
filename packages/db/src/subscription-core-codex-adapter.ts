@@ -51,6 +51,12 @@ export const SUBSCRIPTION_CORE_CODEX_FORBIDDEN_QUARANTINE_MS = 60 * 60 * 1000;
 export const SUBSCRIPTION_CORE_CODEX_ENTITLEMENT_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 /** The `credential_format` of a Codex connection: OAuth tokens, which renew. */
 export const SUBSCRIPTION_CORE_CODEX_CREDENTIAL_FORMAT = "v1";
+/**
+ * Rest of a rate-limited or exhausted Codex connection without a provider
+ * time: the worker's legacy backpressure delay and allowance fallback.
+ */
+export const SUBSCRIPTION_CORE_CODEX_RATE_LIMIT_FALLBACK_MS = 60 * 1000;
+export const SUBSCRIPTION_CORE_CODEX_EXHAUSTED_FALLBACK_MS = 5 * 60 * 60 * 1000;
 
 export type SubscriptionCoreCodexAdapterDeps = {
   /** The OAuth token refresh call (tests inject a scripted upstream). */
@@ -86,6 +92,8 @@ export function subscriptionCoreCodexAdapter(
     health: {
       forbiddenQuarantineMs: SUBSCRIPTION_CORE_CODEX_FORBIDDEN_QUARANTINE_MS,
       entitlementCooldownMs: SUBSCRIPTION_CORE_CODEX_ENTITLEMENT_COOLDOWN_MS,
+      rateLimitFallbackMs: SUBSCRIPTION_CORE_CODEX_RATE_LIMIT_FALLBACK_MS,
+      exhaustedFallbackMs: SUBSCRIPTION_CORE_CODEX_EXHAUSTED_FALLBACK_MS,
     },
     credential: {
       decode(plaintext) {

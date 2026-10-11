@@ -6,4 +6,5 @@ export * from "./eligibility";
 export * from "./reasoning";
 export * from "./spread";
 export * from "./placement";
+export * from "./settlement";
 export * from "./adapter";
