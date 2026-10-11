@@ -791,7 +791,23 @@ describe("core Codex usage, quota and refusal bookkeeping", () => {
         resetsAt: weeklyReset,
       });
       const observation = await creditPolicyObservation({ ...failure, origin }, now);
-      expect(observation.source).toBe("refusal");
+      // The write itself: a 60-second rate-limit hold with no windows when
+      // usage could not be verified; one exhausted `included_usage` window
+      // (and no deadline) when included usage is exhausted.
+      const hold = now.getTime() + 60_000;
+      expect(observation).toEqual({
+        windows:
+          origin === "included_usage_policy"
+            ? [{ id: "included_usage", usedPercent: 100, resetsAt: hold, status: "exhausted" }]
+            : [],
+        modelCooldowns: {},
+        exhaustedUntil: origin === "usage_verification_policy" ? hold : null,
+        exhaustedKind: origin === "usage_verification_policy" ? "rate_limit" : null,
+        revision: 0,
+        observedAt: now.getTime(),
+        observedRefreshGeneration: 5,
+        source: "refusal",
+      });
       const refused = applyQuotaObservation({ refreshGeneration: 5, quota: stored }, observation)!;
       expect(refused.windows).toContainEqual({
         id: "secondary",

@@ -1067,6 +1067,99 @@ describe.skipIf(!realDb)("Codex operations on the shared core (M3 PR 2c)", () =>
     expect(quota).toEqual({ used: 40 });
   });
 
+  test("a /wham/usage reading is recorded as a complete usage reading: it ends a refusal's window and reports recovery only once nothing is exhausted", async () => {
+    const org = await organization();
+    await setCutover(org.accountId, true);
+    const connectionId = await sharedConnection(org, "ops-usage-complete");
+    const [connection] = await shared!.admin<{ generation: number }[]>`
+      select refresh_generation::int as generation from subscription_connections
+      where id = ${connectionId}::uuid`;
+    const now = Date.now();
+    // A credit-policy refusal's hold, as the worker records it.
+    expect(
+      await recordSubscriptionCoreCodexUsageObservation(
+        client!.db,
+        workspaceScope(org),
+        connectionId,
+        {
+          windows: [
+            {
+              id: "included_usage",
+              usedPercent: 100,
+              resetsAt: now + 7_200_000,
+              status: "exhausted",
+            },
+          ],
+          modelCooldowns: {},
+          exhaustedUntil: null,
+          exhaustedKind: null,
+          revision: 0,
+          observedAt: now - 1_000,
+          observedRefreshGeneration: connection!.generation,
+          source: "refusal",
+        },
+      ),
+    ).toEqual({ applied: true, recovered: false });
+    const weeklyReset = Math.floor((now + 3 * 86_400_000) / 1000);
+    const usage = (weeklyPercent: number) =>
+      (async () =>
+        Response.json({
+          plan_type: "pro",
+          rate_limit: {
+            primary_window: {
+              used_percent: 10,
+              limit_window_seconds: 18_000,
+              reset_at: Math.floor((now + 3_600_000) / 1000),
+            },
+            secondary_window: {
+              used_percent: weeklyPercent,
+              limit_window_seconds: 604_800,
+              reset_at: weeklyReset,
+            },
+          },
+        })) as never;
+    const stored = async () => {
+      const [row] = await shared!.admin<{ quota: { source: string; windows: unknown[] } }[]>`
+        select quota from subscription_connection_quota where connection_id = ${connectionId}::uuid`;
+      return row!.quota;
+    };
+    // A reading that shows the weekly window exhausted replaces every window
+    // (the policy hold included), and nothing recovered.
+    const exhausted = await fetchSubscriptionCoreCodexUsage(
+      client!.db,
+      settings,
+      workspaceScope(org),
+      connectionId,
+      usage(100),
+    );
+    expect(exhausted.usage.status).not.toBe("error");
+    expect(exhausted.recovered).toBe(false);
+    expect(await stored()).toMatchObject({
+      source: "usage_endpoint",
+      windows: [
+        { id: "primary", usedPercent: 10, status: "ok" },
+        { id: "secondary", usedPercent: 100, resetsAt: weeklyReset * 1000, status: "exhausted" },
+      ],
+    });
+    expect((await stored()).windows).toHaveLength(2);
+    // A later reading without the block ends it and reports the recovery.
+    const recovered = await fetchSubscriptionCoreCodexUsage(
+      client!.db,
+      settings,
+      workspaceScope(org),
+      connectionId,
+      usage(20),
+    );
+    expect(recovered.recovered).toBe(true);
+    expect(await stored()).toMatchObject({
+      source: "usage_endpoint",
+      windows: [
+        { id: "primary", usedPercent: 10, status: "ok" },
+        { id: "secondary", usedPercent: 20, status: "ok" },
+      ],
+    });
+  });
+
   test("compaction turns copy the accepted v2 authority; core usage facts carry the connection", async () => {
     const org = await organization();
     await setCutover(org.accountId, true);
