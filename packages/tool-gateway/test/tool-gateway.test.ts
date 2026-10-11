@@ -545,6 +545,64 @@ describe("ToolGateway argument validation errors", () => {
     expect(executed).toEqual([]);
   });
 
+  test("accepts plain decimal strings where the schema needs an integer or number", async () => {
+    const { callModel, executed } = gatewayFor({
+      type: "object",
+      properties: {
+        top: { type: "integer", minimum: 1 },
+        ratio: { type: "number" },
+        offset: { type: ["integer", "null"] },
+        ids: { type: "array", items: { type: "integer" } },
+        window: { type: "object", properties: { days: { type: "integer" } } },
+        query: { type: "string" },
+      },
+      required: ["top"],
+      additionalProperties: false,
+    });
+    await expect(
+      callModel({
+        top: "25",
+        ratio: "-0.5e2",
+        offset: "0",
+        ids: ["1", 2, "30"],
+        window: { days: "7" },
+        query: "42",
+      }),
+    ).resolves.toMatchObject({ content: [{ type: "text", text: "ok" }] });
+    expect(executed).toEqual([
+      { top: 25, ratio: -50, offset: 0, ids: [1, 2, 30], window: { days: 7 }, query: "42" },
+    ]);
+  });
+
+  test("keeps rejecting strings that are not plain numbers and every other type mismatch", async () => {
+    const { callModel, executed } = gatewayFor({
+      type: "object",
+      properties: {
+        top: { type: "integer", minimum: 1 },
+        ratio: { type: "number" },
+        flag: { type: "boolean" },
+        name: { type: "string" },
+      },
+      additionalProperties: false,
+    });
+    for (const top of ["5 ", "05", "1e3", "2.5", "0x10", "", "Infinity", "9007199254740993"]) {
+      const error = await rejection(callModel({ top }));
+      expect(error.issues.map((issue) => issue.path)).toEqual(["top"]);
+    }
+    for (const ratio of ["1,5", "NaN", ".5", "+1"]) {
+      await rejection(callModel({ ratio }));
+    }
+    // Only strings become numbers: no boolean, null or number-to-string coercion.
+    await rejection(callModel({ flag: "true" }));
+    await rejection(callModel({ name: 5 }));
+    // A repaired string must still satisfy the rest of the schema.
+    await rejection(callModel({ top: "0" }));
+    // One fixable string does not rescue a call that is wrong elsewhere.
+    const error = await rejection(callModel({ top: "3", extra: true }));
+    expect(error.issues.map((issue) => issue.message)).toEqual(['property "extra" is not allowed']);
+    expect(executed).toEqual([]);
+  });
+
   test("names the object, not the key, when a property name is not allowed", async () => {
     const { callModel } = gatewayFor({
       type: "object",

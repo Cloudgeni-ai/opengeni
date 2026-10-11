@@ -774,6 +774,38 @@ export const SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES = [
 ] as const;
 
 /**
+ * The Codex-named twins of the migration 0707 neutral routines. Migration
+ * 0707 kept them for binaries that still called them; no runtime code calls
+ * them now, and no retained policy, trigger or routine depends on them, so
+ * the M4 retirement migration drops them. Until then they stay exactly as
+ * hardened as before: when one exists it must be the private-schema owner's
+ * SECURITY DEFINER routine with a fixed search path, executable by the
+ * runtime role and not by PUBLIC; its absence is not a violation, so the
+ * drop can apply while this release runs.
+ */
+export const SUBSCRIPTION_CODEX_TWIN_PRIVATE_ROUTINES = [
+  "begin_subscription_codex_refresh(uuid, uuid, uuid, uuid, text, text, uuid, text, bigint)",
+  "persist_subscription_codex_refresh(uuid, uuid, uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone)",
+  "fail_subscription_codex_refresh(uuid, uuid, uuid, uuid, uuid, bigint, text)",
+  "quarantine_subscription_codex_connection(uuid, uuid, uuid, uuid, uuid, text, bigint, bigint, text, text, timestamp with time zone)",
+  "recover_subscription_codex_connection_health(uuid, uuid, uuid, uuid)",
+  "persist_subscription_codex_refresh_with_plan(uuid, uuid, uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone, text)",
+  "subscription_codex_acceptance_authority_v2(uuid, uuid, uuid, text)",
+  "read_subscription_codex_connection_credential(uuid, uuid, uuid, uuid, uuid, text, bigint)",
+  "begin_subscription_codex_connection_refresh(uuid, uuid, uuid, uuid, uuid, text, bigint)",
+  "persist_subscription_codex_connection_refresh(uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone)",
+  "fail_subscription_codex_connection_refresh(uuid, uuid, uuid, bigint, text)",
+  "connect_subscription_codex_personal(uuid, uuid, text, text, text, text, text, jsonb, timestamp with time zone, timestamp with time zone, text, text, text)",
+  "disconnect_subscription_codex_connection(uuid, uuid, text, uuid)",
+  "subscription_codex_personal_connections(uuid, uuid, text)",
+  "subscription_codex_task_authority_v2(uuid, uuid, uuid, text)",
+  "subscription_codex_revision_authority_v2(uuid, uuid, uuid, bigint)",
+  "manage_subscription_codex_personal(uuid, uuid, text, uuid, text, text, boolean, integer)",
+  "subscription_codex_reach(uuid, uuid)",
+  "set_subscription_codex_reach(uuid, uuid, boolean, boolean)",
+] as const;
+
+/**
  * Migration 0712 (M4 generic precursor): the per-provider cutover receipt
  * reader. The runtime calls it for readiness and its RLS policies call it.
  */
@@ -839,40 +871,20 @@ export const SUBSCRIPTION_AUTHORITY_COMPAT_OWNER_ROUTINES = [
 export const SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES = [
   "authorize_subscription_ownerless_session_access(uuid, uuid, uuid, uuid)",
   "authorize_subscription_personal_placement_access(uuid, uuid, uuid, uuid, text, uuid, bigint, text, text)",
+  // The Codex refresh-write capability check stays: the Codex refresh
+  // policies on subscription_connections call it.
   "subscription_codex_refresh_write_allowed(uuid, uuid, uuid)",
-  "begin_subscription_codex_refresh(uuid, uuid, uuid, uuid, text, text, uuid, text, bigint)",
-  "persist_subscription_codex_refresh(uuid, uuid, uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone)",
-  "fail_subscription_codex_refresh(uuid, uuid, uuid, uuid, uuid, bigint, text)",
-  // M3 PR 2a: Codex chat waits, connection health and v2 acceptance.
-  "quarantine_subscription_codex_connection(uuid, uuid, uuid, uuid, uuid, text, bigint, bigint, text, text, timestamp with time zone)",
-  "recover_subscription_codex_connection_health(uuid, uuid, uuid, uuid)",
-  "persist_subscription_codex_refresh_with_plan(uuid, uuid, uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone, text)",
-  "subscription_codex_acceptance_authority_v2(uuid, uuid, uuid, text)",
   // M3 PR 2b: the Codex Apps designation on the core.
   "resolve_subscription_codex_apps_designation(uuid, uuid)",
   "read_subscription_codex_apps_credential(uuid, uuid, uuid)",
   "begin_subscription_codex_apps_refresh(uuid, uuid, uuid)",
   "persist_subscription_codex_apps_refresh(uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone)",
   "fail_subscription_codex_apps_refresh(uuid, uuid, uuid, bigint, text)",
-  // M3 PR 2c: the connection-level Codex credential seam for operations.
-  "read_subscription_codex_connection_credential(uuid, uuid, uuid, uuid, uuid, text, bigint)",
-  "begin_subscription_codex_connection_refresh(uuid, uuid, uuid, uuid, uuid, text, bigint)",
-  "persist_subscription_codex_connection_refresh(uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone)",
-  "fail_subscription_codex_connection_refresh(uuid, uuid, uuid, bigint, text)",
+  // M3 PR 2c: the Codex reset-credit authority.
   "subscription_codex_reset_authority(uuid, uuid, uuid, text)",
-  // M3 PR 3b: Codex writers, the owner's personal-connection reader, the
-  // cross-workspace reset-credit fence, the scheduled-task v2 writer and the
-  // owner-only policies' capability helpers.
-  "connect_subscription_codex_personal(uuid, uuid, text, text, text, text, text, jsonb, timestamp with time zone, timestamp with time zone, text, text, text)",
-  "disconnect_subscription_codex_connection(uuid, uuid, text, uuid)",
-  "subscription_codex_personal_connections(uuid, uuid, text)",
+  // M3 PR 3b: the cross-workspace reset-credit fence and the owner-only
+  // policies' capability helpers.
   "subscription_codex_reset_credit_fence(uuid, uuid, uuid, text, text, uuid)",
-  "subscription_codex_task_authority_v2(uuid, uuid, uuid, text)",
-  "subscription_codex_revision_authority_v2(uuid, uuid, uuid, bigint)",
-  "manage_subscription_codex_personal(uuid, uuid, text, uuid, text, text, boolean, integer)",
-  // Migration 0702: the organization connection reach behind the access editor.
-  "subscription_codex_reach(uuid, uuid)",
-  "set_subscription_codex_reach(uuid, uuid, boolean, boolean)",
   "subscription_codex_owner_capability_held(uuid, text[], text, uuid, boolean)",
   "subscription_codex_owner_membership_held(uuid, uuid)",
   // Migration 0707: the provider-neutral equivalents the runtime calls.
@@ -2765,24 +2777,30 @@ export function evaluateRuntimeDatabasePosture(
     `search_path=pg_catalog, ${quotedTargetSchema}, opengeni_private, pg_temp`,
     `search_path=pg_catalog, ${/^[a-z_][a-z0-9_]*$/.test(targetSchema) ? targetSchema : quotedTargetSchema}, opengeni_private, pg_temp`,
   ]);
+  const safeSearchPath = (routine: RuntimeRoutinePosture) =>
+    routine.name === "subscription_codex_refresh_write_allowed(uuid, uuid, uuid)" ||
+    routine.name === "subscription_core_refresh_write_allowed(text, uuid, uuid, uuid)"
+      ? routine.configuration?.includes("search_path=pg_catalog, opengeni_private, pg_temp")
+      : routine.configuration?.some((configuration) => precursorSearchPaths.has(configuration));
+  const hardenedPrivateRoutine = (matches: RuntimeRoutinePosture[]) =>
+    matches.length === 1 &&
+    matches[0]!.execute &&
+    !matches[0]!.publicExecute &&
+    matches[0]!.securityDefiner &&
+    !(privateSchemaOwner && matches[0]!.owner !== privateSchemaOwner) &&
+    safeSearchPath(matches[0]!) === true;
   for (const expectedRoutine of SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES) {
     const matches = posture.privateRoutines.filter((routine) => routine.name === expectedRoutine);
-    const safeSearchPath = (routine: RuntimeRoutinePosture) =>
-      routine.name === "subscription_codex_refresh_write_allowed(uuid, uuid, uuid)" ||
-      routine.name === "subscription_core_refresh_write_allowed(text, uuid, uuid, uuid)"
-        ? routine.configuration?.includes("search_path=pg_catalog, opengeni_private, pg_temp")
-        : routine.configuration?.some((configuration) => precursorSearchPaths.has(configuration));
-    if (
-      matches.length !== 1 ||
-      !matches[0]!.execute ||
-      matches[0]!.publicExecute ||
-      !matches[0]!.securityDefiner ||
-      (privateSchemaOwner && matches[0]!.owner !== privateSchemaOwner) ||
-      !safeSearchPath(matches[0]!)
-    ) {
+    if (!hardenedPrivateRoutine(matches)) {
       violations.push(
         `subscription M3 precursor private routine ${expectedRoutine} is missing or unsafe`,
       );
+    }
+  }
+  for (const twin of SUBSCRIPTION_CODEX_TWIN_PRIVATE_ROUTINES) {
+    const matches = posture.privateRoutines.filter((routine) => routine.name === twin);
+    if (matches.length > 0 && !hardenedPrivateRoutine(matches)) {
+      violations.push(`retiring Codex twin private routine ${twin} is unsafe`);
     }
   }
   for (const ownerOnly of SUBSCRIPTION_M3_OWNER_ONLY_PRIVATE_ROUTINES) {
@@ -2793,20 +2811,25 @@ export function evaluateRuntimeDatabasePosture(
       violations.push(`subscription M3 owner-only private routine ${ownerOnly} is executable`);
     }
   }
+  const privateRoutinePresent = (prefix: string) =>
+    posture.privateRoutines.some((routine) => routine.name.startsWith(prefix));
+  // Keyed on either personal-writer family, not on the Codex twins alone, so
+  // dropping the twins cannot switch off the owner checks below.
   if (
     posture.subscriptionOwnerRoutines !== undefined &&
-    posture.privateRoutines.some((routine) =>
-      routine.name.startsWith("connect_subscription_codex_personal("),
-    )
+    (privateRoutinePresent("connect_subscription_codex_personal(") ||
+      privateRoutinePresent("connect_subscription_core_personal("))
   ) {
     const required = [
-      "subscription_codex_writer_context(uuid, uuid, text)",
+      // Only the Codex twin writers call the Codex writer context.
+      ...(privateRoutinePresent("connect_subscription_codex_personal(")
+        ? ["subscription_codex_writer_context(uuid, uuid, text)"]
+        : []),
+      // The reset-credit fence, which stays, calls these two.
       "grant_subscription_codex_owner_capability(text, uuid, uuid, text, uuid)",
       "drop_subscription_codex_owner_capabilities(uuid)",
       "derive_scheduled_revision_subscription_authority()",
-      ...(posture.privateRoutines.some((routine) =>
-        routine.name.startsWith("connect_subscription_core_personal("),
-      )
+      ...(privateRoutinePresent("connect_subscription_core_personal(")
         ? SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES
         : []),
       ...(posture.privateRoutines.some((routine) =>
