@@ -26,7 +26,7 @@ import {
   readSubscriptionProviderCutoverState,
   resolveSubscriptionConnectionId,
 } from "../subscription-core-repository";
-import { organizationAdministeredConnection } from "./access";
+import { organizationAdministeredConnection, syncSubscriptionCoreCopies } from "./access";
 import { SubscriptionCoreError } from "./errors";
 import { subscriptionCoreProviderId, type SubscriptionCoreProvider } from "./provider";
 
@@ -627,6 +627,12 @@ export async function setSubscriptionCoreAllocator(
         where account_id = ${input.accountId}::uuid and id = ${current.id}::uuid`,
     );
     if (current.allocatorEnabled === input.enabled) {
+      // The switch already reads this value. Copies another administrator
+      // left disagreeing (before 0714's single switch) are repaired.
+      const repaired = await syncSubscriptionCoreCopies(tx, provider, input.accountId, current.id, {
+        models: false,
+        repair: true,
+      });
       return {
         result: projection(
           "unchanged",
@@ -634,7 +640,12 @@ export async function setSubscriptionCoreAllocator(
           current.allocatorVersion,
           stamp?.updated_at ?? null,
         ),
-        wake: null,
+        wake: repaired
+          ? {
+              accountId: input.accountId,
+              reason: subscriptionCoreWakeReason(provider, "allocator_changed"),
+            }
+          : null,
       };
     }
     if (current.allocatorVersion !== input.expectedVersion) {
@@ -665,27 +676,17 @@ export async function setSubscriptionCoreAllocator(
             returning allocator_version, updated_at`,
         );
         if (row) {
-          // The per-workspace pool rows carry their own allocator copy, which
-          // placement also requires: keep the copies in this route's scope (the
-          // organization pool, or this workspace's local copy) and the reach for
-          // workspaces created later in step with the switch the admin sees.
-          if (input.workspaceId === null) {
-            await savepoint.execute(sql`update subscription_connection_assignment_policies
-              set allocator_enabled = ${input.enabled}, updated_at = clock_timestamp()
-              where account_id = ${input.accountId}::uuid and connection_id = ${current.id}::uuid
-                and inference_pool = 'organization' and managed_by_workspace_id is null`);
-            // The reach row (if any) copies the policy for workspaces created
-            // later; a null reach refreshes it from the connection.
-            await savepoint.execute(sql`select opengeni_private.set_subscription_core_reach(
-              ${subscriptionCoreProviderId(provider)}, ${input.accountId}::uuid,
-              ${current.id}::uuid, null, null)`);
-          } else {
-            await savepoint.execute(sql`update subscription_connection_assignment_policies
-              set allocator_enabled = ${input.enabled}, updated_at = clock_timestamp()
-              where account_id = ${input.accountId}::uuid and connection_id = ${current.id}::uuid
-                and workspace_id = ${input.workspaceId}::uuid and inference_pool = 'workspace'
-                and managed_by_workspace_id = ${input.workspaceId}::uuid`);
-          }
+          // The pool rows and the reach for workspaces created later carry
+          // their own allocator copy, which placement also requires. The
+          // organization and the managing workspace flip one switch, so every
+          // copy either of them governs follows it, whichever route flipped it.
+          await syncSubscriptionCoreCopies(
+            savepoint as unknown as Database,
+            provider,
+            input.accountId,
+            current.id,
+            { models: false },
+          );
         }
         return row;
       });

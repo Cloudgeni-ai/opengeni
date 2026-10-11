@@ -2226,4 +2226,40 @@ describe.skipIf(!realDb)("a workspace-managed Codex account under organization r
       ).outcome,
     ).toBe("removed");
   });
+
+  test("the organization disconnects an account a shared workspace manages, never one a Personal workspace manages", async () => {
+    const org = await organization();
+    await enableCodexCutover(org.accountId);
+    const disconnect = async (connectionId: string) =>
+      (
+        await withSessionRlsActorContext({ subjectId: org.ownerSubjectId }, () =>
+          disconnectSubscriptionCoreCodexConnection(client!.db, {
+            accountId: org.accountId,
+            workspaceId: null,
+            subjectId: org.ownerSubjectId,
+            connectionId,
+          }),
+        )
+      ).outcome;
+    const personalManaged = await managedConnection(org, "personal-managed-disconnect");
+    // No writer produces this shape; the fixture bypasses the scope guard.
+    await shared!.admin.begin(async (tx) => {
+      await tx`set local session_replication_role = replica`;
+      await tx`update subscription_connections
+        set managed_by_workspace_id = ${org.personalWorkspaceId}::uuid
+        where id = ${personalManaged}::uuid`;
+    });
+    expect(await disconnect(personalManaged)).toBe("not_found");
+    const disconnected = async (connectionId: string) =>
+      (
+        await shared!.admin<{ disconnected: boolean }[]>`
+          select disconnected_at is not null as disconnected from subscription_connections
+          where id = ${connectionId}::uuid`
+      )[0]?.disconnected;
+    expect(await disconnected(personalManaged)).toBe(false);
+
+    const managed = await managedConnection(org, "managed-disconnect");
+    expect(await disconnect(managed)).toBe("removed");
+    expect(await disconnected(managed)).toBe(true);
+  });
 });

@@ -414,6 +414,7 @@ import {
 export * from "./model-connection-access";
 export {
   SubscriptionCoreAccessInvalidError,
+  SubscriptionCoreAccessPeopleUnlistableError,
   SubscriptionCoreAccessPersonNotInOrganizationError,
   type SubscriptionCoreAccess,
 } from "./subscription-core/access";

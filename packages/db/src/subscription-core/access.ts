@@ -23,6 +23,7 @@ import {
   withWorkspaceSubjectRls,
 } from "../database";
 import type { Database } from "../database";
+import { nestedPostgresSqlState } from "../persistence-errors";
 import { resolveSubscriptionConnectionId } from "../subscription-core-repository";
 import { subscriptionCoreProviderId, type SubscriptionCoreProvider } from "./provider";
 
@@ -71,6 +72,14 @@ export class SubscriptionCoreAccessPersonNotInOrganizationError extends Error {
   constructor() {
     super("A selected person is not an active member of this organization");
     this.name = "SubscriptionCoreAccessPersonNotInOrganizationError";
+  }
+}
+
+/** People can't be added: the organization has more members than can be listed. */
+export class SubscriptionCoreAccessPeopleUnlistableError extends Error {
+  constructor() {
+    super("This organization has too many members to choose people for an account");
+    this.name = "SubscriptionCoreAccessPeopleUnlistableError";
   }
 }
 
@@ -357,22 +366,33 @@ function uuidArray(values: Iterable<string>) {
 /**
  * Active people of the organization among `ids`: memberships of humans,
  * read through the organization administrators' member list (the runtime role
- * cannot read memberships directly).
+ * cannot read memberships directly). Null when the organization has more
+ * memberships than that list projects (SQLSTATE 54000); the read runs in a
+ * savepoint so the save's transaction survives the refusal.
  */
 async function activePeople(
   tx: Database,
   target: SubscriptionCoreAccessTarget,
   ids: readonly string[],
-) {
+): Promise<Set<string> | null> {
   const wanted = new Set(ids);
-  const rows = await rawRows<{ id: string }>(
-    tx,
-    sql`select member->>'id' as id
-      from jsonb_array_elements(coalesce(list_organization_administration_members(
-        ${target.accountId}::uuid, ${target.subjectId})::jsonb, '[]'::jsonb)) member
-      where member->>'status' = 'active' and member->>'revokedAt' is null
-        and member->>'subjectId' like 'user:%'`,
-  );
+  let rows: { id: string }[];
+  try {
+    rows = await tx.transaction(
+      async (savepoint) =>
+        await rawRows<{ id: string }>(
+          savepoint as unknown as Database,
+          sql`select member->>'id' as id
+            from jsonb_array_elements(coalesce(list_organization_administration_members(
+              ${target.accountId}::uuid, ${target.subjectId})::jsonb, '[]'::jsonb)) member
+            where member->>'status' = 'active' and member->>'revokedAt' is null
+              and member->>'subjectId' like 'user:%'`,
+        ),
+    );
+  } catch (error) {
+    if (nestedPostgresSqlState(error) === "54000") return null;
+    throw error;
+  }
   return new Set(rows.map((row) => row.id).filter((id) => wanted.has(id)));
 }
 
@@ -384,6 +404,46 @@ async function chosenPeople(tx: Database, accountId: string, connectionId: strin
       where account_id = ${accountId}::uuid and connection_id = ${connectionId}::uuid`,
   );
   return new Set(rows.map((row) => row.membership_id));
+}
+
+/**
+ * Copy a shared connection's rotation switch and model list onto the copies
+ * placement also reads: its organization-pool rows, the managing workspace's
+ * own row and the reach for workspaces created later. Both the organization
+ * and the managing workspace change these values, but only an organization
+ * administrator may write the organization's copies, so one routine keeps
+ * them a single value (0714). Returns whether a copy changed.
+ *
+ * `models`: also copy the model list (the access editors' saves); a rotation
+ * switch copies only itself.
+ * `repair`: a read-only caller (it changed nothing itself) that may not manage
+ * the account is a no-op instead of an error.
+ */
+export async function syncSubscriptionCoreCopies(
+  tx: Database,
+  provider: SubscriptionCoreProvider,
+  accountId: string,
+  connectionId: string,
+  options: { models: boolean; repair?: boolean },
+): Promise<boolean> {
+  const run = async (db: Database) => {
+    const [row] = await rawRows<{ changed: boolean }>(
+      db,
+      sql`select opengeni_private.sync_subscription_core_copies(
+        ${subscriptionCoreProviderId(provider)}, ${accountId}::uuid, ${connectionId}::uuid,
+        ${options.models}::boolean
+      ) as changed`,
+    );
+    return row?.changed === true;
+  };
+  if (!options.repair) return await run(tx);
+  try {
+    return await tx.transaction(async (savepoint) => await run(savepoint as unknown as Database));
+  } catch (error) {
+    const state = nestedPostgresSqlState(error);
+    if (state === "42501" || state === "P0002") return false;
+    throw error;
+  }
 }
 
 /**
@@ -450,6 +510,8 @@ export async function updateSubscriptionCoreConnectionAccess(
         set allowed_model_ids = ${models}, updated_at = clock_timestamp()
         where account_id = ${target.accountId}::uuid and connection_id = ${id}::uuid
           and workspace_id = ${target.workspaceId}::uuid and inference_pool = 'workspace'`);
+      // The organization's copies of this account follow the same list.
+      await syncSubscriptionCoreCopies(tx, provider, target.accountId, id, { models: true });
       return await projection(tx, provider, target, updated);
     }
 
@@ -466,10 +528,16 @@ export async function updateSubscriptionCoreConnectionAccess(
     if (people !== null) {
       // A person already chosen who has since left may stay listed (people
       // scope admits only active memberships); anyone added must be active.
-      const active = await activePeople(tx, target, people);
+      // Without a member list (too many members) people already chosen can be
+      // kept or removed, so models stay editable, but no one can be added.
       const chosen = await chosenPeople(tx, target.accountId, current.id);
-      if (people.some((membershipId) => !active.has(membershipId) && !chosen.has(membershipId)))
-        throw new SubscriptionCoreAccessPersonNotInOrganizationError();
+      const added = people.filter((membershipId) => !chosen.has(membershipId));
+      if (added.length > 0) {
+        const active = await activePeople(tx, target, added);
+        if (active === null) throw new SubscriptionCoreAccessPeopleUnlistableError();
+        if (added.some((membershipId) => !active.has(membershipId)))
+          throw new SubscriptionCoreAccessPersonNotInOrganizationError();
+      }
     }
     const accountWorkspaces = await rawRows<{ id: string }>(
       tx,
@@ -575,6 +643,8 @@ export async function updateSubscriptionCoreConnectionAccess(
     await tx.execute(sql`select opengeni_private.set_subscription_core_reach(
       ${subscriptionCoreProviderId(provider)}, ${target.accountId}::uuid, ${id}::uuid,
       ${reach.sharedWorkspaces}::boolean, ${reach.personalWorkspaces}::boolean)`);
+    // The managing workspace's own copy follows the same model list.
+    await syncSubscriptionCoreCopies(tx, provider, target.accountId, id, { models: true });
     return await projection(tx, provider, target, updated);
   });
 }

@@ -738,6 +738,9 @@ export const SUBSCRIPTION_CORE_NEUTRAL_PRIVATE_ROUTINES = [
   // created later, read and replaced by organization administrators.
   "subscription_core_reach(text, uuid, uuid)",
   "set_subscription_core_reach(text, uuid, uuid, boolean, boolean)",
+  // Migration 0714: an organization account's rotation switch and model list
+  // copied onto the copies placement reads, by either of its administrators.
+  "sync_subscription_core_copies(text, uuid, uuid, boolean)",
 ] as const;
 
 /** Migration 0707: the neutral writers' owner-only internals. */

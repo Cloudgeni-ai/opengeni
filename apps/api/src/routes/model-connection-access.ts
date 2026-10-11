@@ -17,9 +17,11 @@ import {
   deliverSubscriptionCoreCodexWake,
   getModelConnectionAccess,
   listOrganizationAdministrationMembers,
+  nestedPostgresSqlState,
   readSubscriptionCoreCodexModelConnectionAccess,
   ModelConnectionAccessForbiddenError,
   SubscriptionCoreAccessInvalidError,
+  SubscriptionCoreAccessPeopleUnlistableError,
   SubscriptionCoreAccessPersonNotInOrganizationError,
   ModelConnectionWorkspaceNotInOrganizationError,
   updateModelConnectionAccess,
@@ -234,7 +236,9 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
                   )
                   .map(({ id, name, email }) => ({ id, name, email })),
               (error: unknown) => {
-                if (error instanceof z.ZodError) return null;
+                // The member list refuses organizations above its bound
+                // (SQLSTATE 54000); people are then not offered.
+                if (nestedPostgresSqlState(error) === "54000") return null;
                 throw error;
               },
             )
@@ -292,6 +296,7 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
           throw new HTTPException(422, { message: error.message });
         if (
           error instanceof SubscriptionCoreAccessPersonNotInOrganizationError ||
+          error instanceof SubscriptionCoreAccessPeopleUnlistableError ||
           error instanceof SubscriptionCoreAccessInvalidError
         )
           throw new HTTPException(422, { message: error.message });

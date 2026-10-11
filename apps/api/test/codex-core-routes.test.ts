@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
-import { z } from "zod";
 import {
   codexAppsRequestAuthForDesignation,
   resolveCodexAppsCredentialIdForRun,
@@ -1206,21 +1205,34 @@ describe("the organization access editor for a workspace-managed Codex account",
       managedByWorkspaceId: null,
     });
 
-    // Beyond what the member list can show, people are not offered; the editor still works.
+    // Beyond what the member list can show, people are not offered; the editor
+    // still works. The database refuses with SQLSTATE 54000, wrapped by the
+    // query layer, before any response parsing.
     mock("listOrganizationAdministrationMembers", async () => {
-      throw new z.ZodError([]);
+      throw Object.assign(new Error("Failed query"), {
+        cause: Object.assign(
+          new Error("organization member inventory exceeds the bounded projection"),
+          { code: "54000" },
+        ),
+      });
     });
     const large = await app().fetch(organizationAdminRequest(path));
     expect(large.status).toBe(200);
     const largeBody = await large.json();
     expect(largeBody.peopleSupported).toBe(false);
     expect(largeBody.people).toBeUndefined();
+    // Any other failure is not hidden.
+    mock("listOrganizationAdministrationMembers", async () => {
+      throw Object.assign(new Error("Failed query"), { cause: { code: "42501" } });
+    });
+    expect((await app().fetch(organizationAdminRequest(path))).status).toBe(500);
   });
 
   test("a person outside the organization or a mixed choice is a 422, never a write", async () => {
     editor();
     for (const error of [
       new opengeniDb.SubscriptionCoreAccessPersonNotInOrganizationError(),
+      new opengeniDb.SubscriptionCoreAccessPeopleUnlistableError(),
       new opengeniDb.SubscriptionCoreAccessInvalidError("mixed"),
     ]) {
       mock("updateSubscriptionCoreCodexModelConnectionAccess", async () => {

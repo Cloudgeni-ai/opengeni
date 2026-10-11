@@ -3510,8 +3510,12 @@ as "not an organization account":
    That guard lives in the API, so older API pods during a rollout bypass it:
    the runbook forbids people choices until every pod runs the release.
    People are offered only when the organization's member list can be read
-   (at most 1000 members, its existing limit); otherwise the editor works
-   without the people choice.
+   (at most 1000 memberships, revoked ones included, its existing limit; the
+   database refuses larger organizations with SQLSTATE 54000, which the
+   editor's read treats as "people not offered"). Otherwise the editor works
+   without the people choice: an account that already has people there can
+   keep or drop them and have its models edited, but adding someone is
+   refused (422), since nobody added can be checked against the list.
 5. **Delegated management is unchanged.** The managing workspace's
    administrators keep exactly what they can do today: reconnect, rename,
    allocation, the models of the account from their workspace (0702), the
@@ -3525,12 +3529,22 @@ as "not an organization account":
    recorded for the owner: because these actions act on the one connection,
    a delegated manager's allocation, model and extra-credit choices and a
    reconnect also apply where the organization later shares the account.
-   Other workspaces stay bounded by their organization-pool rows (placement
-   requires both the connection's and the workspace assignment's allocator and
-   models), so a delegated manager can narrow another workspace's use but
-   never widen it; extra credits are the exception, since they are one
-   per-connection switch. Whether sharing beyond the managing workspace
-   should narrow the delegation is an open question below.
+   The rotation switch and the model list are one value each, the
+   connection's: placement also reads a copy on every organization-pool row,
+   on the managing workspace's own row and on the reach row, and two
+   independently written copies drifted (a switch reading "on" while other
+   workspaces were not served, and a switch-on returning "unchanged"). So
+   whichever administrator changes either value, 0714's
+   `sync_subscription_core_copies` copies it onto those copies (the
+   workspace's administrators cannot write the organization's rows
+   themselves), and flipping a switch to the value it already shows repairs
+   copies that disagree. A delegated manager's switch and model list therefore
+   apply wherever the organization shares the account, widening as well as
+   narrowing, as extra credits and a reconnect already do; which workspaces
+   and people the account reaches stays the organization's decision. A
+   workspace's own copy that no workspace manages (copies 0689 merged) keeps
+   its own values. Whether sharing beyond the managing workspace should
+   narrow the delegation is an open question below.
    People scope is therefore not offered (`peopleSupported: false`) and is
    refused (422) for a connection a workspace manages: the managing
    workspace's administrators see and manage the connection through its
@@ -3615,8 +3629,9 @@ personal connections, outside the organization editor.
 | A connection 0689 merged from two workspaces' copies of one upstream account gets `managed_by_workspace_id = NULL` with each copy's manager on its assignment policy, but no route or policy honours an assignment-level manager (the assignment-policy and designation policies require the connection-level manager), so those workspaces' administrators lost reconnect, allocation and model management of their copy. Restoring it grants management authority, which is an owner decision; this change does not alter it. The duplicated listing of such accounts on the Accounts page is fixed by the UI change. | 0642 policies, 0689 planner | open question |
 
 Open questions for the product owner: whether sharing an account beyond its
-managing workspace should end or narrow that workspace's delegated management
-(decision 5); whether a workspace-managed account may be limited to chosen
+managing workspace should end or narrow that workspace's delegated management,
+including its rotation switch and model list, which now apply wherever the
+account is shared (decision 5); whether a workspace-managed account may be limited to chosen
 people, and what then happens to the delegation (decision 5; refused until
 decided); whether to restore per-workspace management of merged copies
 (finding above); whether an organization administrator may designate a

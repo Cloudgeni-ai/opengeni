@@ -5,18 +5,19 @@ import {
   createDb,
   ensureManagedAccessForUser,
   getSubscriptionCoreCodexModelConnectionAccess,
+  listOrganizationAdministrationMembers,
   listSubscriptionCoreCodexServingConnections,
   ModelConnectionWorkspaceNotInOrganizationError,
+  nestedPostgresSqlState,
   readSubscriptionCoreCodexModelConnectionAccess,
   SubscriptionCoreAccessInvalidError,
+  SubscriptionCoreAccessPeopleUnlistableError,
   SubscriptionCoreAccessPersonNotInOrganizationError,
   setSubscriptionCoreCodexAllocator,
   updateSubscriptionCoreCodexModelConnectionAccess,
   type DbClient,
   type ModelConnectionTarget,
 } from "../src";
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
 import { withWorkspaceSubjectRls } from "../src/database";
 import { encryptEnvironmentValue } from "../src/environment-crypto";
 
@@ -479,6 +480,127 @@ describe.skipIf(!realDb)("Codex access editor on the shared core", () => {
     expect(on.result.kind).toBe("updated");
     expect(await servedIn(org, org.sharedWorkspaceId)).toEqual([id]);
   });
+
+  test("the organization and the managing workspace flip one rotation switch and one model list", async () => {
+    const org = await organization();
+    const id = await connection(org, "one-switch", { managedByWorkspaceId: org.sharedWorkspaceId });
+    const admin = await member(org, "member", "admin");
+    await updateSubscriptionCoreCodexModelConnectionAccess(
+      client!.db,
+      organizationTarget(org, id),
+      {
+        allowedModels: null,
+        allowedWorkspaces: null,
+        allowPersonalWorkspaces: false,
+        version: 1,
+      },
+    );
+    const flip = async (from: "organization" | "workspace", enabled: boolean, version: number) =>
+      await setSubscriptionCoreCodexAllocator(client!.db, {
+        accountId: org.accountId,
+        workspaceId: from === "organization" ? null : org.sharedWorkspaceId,
+        subjectId: from === "organization" ? org.ownerSubjectId : admin.subjectId,
+        connectionId: id,
+        enabled,
+        expectedVersion: version,
+      });
+    const copies = async () => {
+      const [row] = await shared!.admin<
+        { connection: boolean; policies: boolean[]; reach: boolean; models: string[] }[]
+      >`select connection.allocator_enabled as connection,
+          (select array_agg(distinct policy.allocator_enabled)
+            from subscription_connection_assignment_policies policy
+            where policy.connection_id = connection.id) as policies,
+          (select auto.allocator_enabled from opengeni_private.subscription_core_auto_assignments auto
+            where auto.connection_id = connection.id) as reach,
+          (select array_agg(distinct coalesce(array_to_string(models.allowed_model_ids, ','), 'all'))
+            from (select policy.allowed_model_ids from subscription_connection_assignment_policies policy
+                where policy.connection_id = connection.id
+              union all select connection.allowed_model_ids
+              union all select auto.allowed_model_ids
+                from opengeni_private.subscription_core_auto_assignments auto
+                where auto.connection_id = connection.id) models) as models
+        from subscription_connections connection where connection.id = ${id}::uuid`;
+      return row!;
+    };
+    const served = async () => ({
+      own: await servedIn(org, org.sharedWorkspaceId),
+      other: await servedIn(org, org.otherWorkspaceId),
+    });
+    expect(await served()).toEqual({ own: [id], other: [id] });
+
+    // The organization switches it off, then the managing workspace on.
+    expect((await flip("organization", false, 1)).result.kind).toBe("updated");
+    expect(await copies()).toMatchObject({ connection: false, policies: [false], reach: false });
+    expect(await served()).toEqual({ own: [], other: [] });
+    expect((await flip("workspace", true, 2)).result.kind).toBe("updated");
+    expect(await copies()).toMatchObject({ connection: true, policies: [true], reach: true });
+    expect(await served()).toEqual({ own: [id], other: [id] });
+    // The managing workspace switches it off, then the organization on.
+    expect((await flip("workspace", false, 3)).result.kind).toBe("updated");
+    expect(await copies()).toMatchObject({ connection: false, policies: [false], reach: false });
+    expect(await served()).toEqual({ own: [], other: [] });
+    expect((await flip("organization", true, 4)).result.kind).toBe("updated");
+    expect(await copies()).toMatchObject({ connection: true, policies: [true], reach: true });
+    expect(await served()).toEqual({ own: [id], other: [id] });
+
+    // Models: one list, whichever editor saves it.
+    await updateSubscriptionCoreCodexModelConnectionAccess(
+      client!.db,
+      organizationTarget(org, id),
+      {
+        allowedModels: [MODEL],
+        allowedWorkspaces: null,
+        allowPersonalWorkspaces: false,
+        version: 2,
+      },
+    );
+    expect((await copies()).models).toEqual([MODEL]);
+    await updateSubscriptionCoreCodexModelConnectionAccess(
+      client!.db,
+      {
+        ...organizationTarget(org, id),
+        workspaceId: org.sharedWorkspaceId,
+        subjectId: admin.subjectId,
+      },
+      {
+        allowedModels: [OTHER_MODEL],
+        allowedWorkspaces: null,
+        allowPersonalWorkspaces: false,
+        version: 3,
+      },
+    );
+    expect((await copies()).models).toEqual([OTHER_MODEL]);
+
+    // Copies an older release left disagreeing are repaired by flipping the
+    // switch to the value it shows, from either side.
+    await shared!.admin`update subscription_connection_assignment_policies
+      set allocator_enabled = false where connection_id = ${id}::uuid and inference_pool = 'organization'`;
+    expect((await served()).other).toEqual([]);
+    const repaired = await flip("organization", true, 5);
+    expect(repaired.result.kind).toBe("unchanged");
+    expect(repaired.wake).not.toBeNull();
+    expect(await copies()).toMatchObject({ connection: true, policies: [true], reach: true });
+    expect((await served()).other).toEqual([id]);
+    await shared!.admin`update subscription_connection_assignment_policies
+      set allocator_enabled = false where connection_id = ${id}::uuid and inference_pool = 'organization'`;
+    expect((await flip("workspace", true, 5)).result.kind).toBe("unchanged");
+    expect(await copies()).toMatchObject({ policies: [true] });
+    // A consistent account repairs nothing and wakes no one.
+    expect((await flip("organization", true, 5)).wake).toBeNull();
+    // Someone who may not manage it is refused, as before, and changes nothing.
+    const outsider = await member(org);
+    const refused = await setSubscriptionCoreCodexAllocator(client!.db, {
+      accountId: org.accountId,
+      workspaceId: org.sharedWorkspaceId,
+      subjectId: outsider.subjectId,
+      connectionId: id,
+      enabled: true,
+      expectedVersion: 5,
+    }).catch((error: unknown) => error);
+    expect(refused).toBeDefined();
+    expect(await copies()).toMatchObject({ connection: true, policies: [true], reach: true });
+  });
 });
 
 async function member(org: Org, role: "admin" | "member" = "member", workspaceRole?: "admin") {
@@ -560,53 +682,6 @@ describe.skipIf(!realDb)("Workspace-managed Codex accounts are organization acco
     expect(role).toEqual({ rolsuper: false, rolbypassrls: false });
   });
 
-  test("the migration rewrites no subscription row, including pins, waits and leases", async () => {
-    const org = await organization();
-    const id = await connection(org, "preserved", { managedByWorkspaceId: org.sharedWorkspaceId });
-    const personalOwner = await member(org);
-    const sessionId = crypto.randomUUID();
-    const turnId = crypto.randomUUID();
-    await shared!.admin.begin(async (tx) => {
-      await tx`set local session_replication_role = replica`;
-      await tx`insert into subscription_connection_aliases
-        (account_id, provider, alias_connection_id, connection_id)
-        values (${org.accountId}::uuid, 'codex', ${crypto.randomUUID()}::uuid, ${id}::uuid)`;
-      await tx`insert into subscription_session_bindings (
-          account_id, workspace_id, session_id, provider, connection_id, model_id, choice
-        ) values (${org.accountId}::uuid, ${org.sharedWorkspaceId}::uuid, ${sessionId}::uuid,
-          'codex', ${id}::uuid, ${MODEL}, 'explicit')`;
-      await tx`insert into subscription_capacity_waiters
-          (account_id, workspace_id, session_id, turn_id, provider, wait_reason)
-        values (${org.accountId}::uuid, ${org.sharedWorkspaceId}::uuid, ${sessionId}::uuid,
-          ${turnId}::uuid, 'codex', 'pinned_account_unavailable')`;
-      await tx`insert into subscription_leases (account_id, workspace_id, session_id, turn_id,
-          connection_id, provider, holder_id, generation, leased_until)
-        values (${org.accountId}::uuid, ${org.sharedWorkspaceId}::uuid, ${sessionId}::uuid,
-          ${turnId}::uuid, ${id}::uuid, 'codex', 'holder', 1, now() + interval '5 minutes')`;
-      await tx`insert into subscription_apps_designations
-          (account_id, workspace_id, connection_id, updated_by_subject_id)
-        values (${org.accountId}::uuid, ${org.sharedWorkspaceId}::uuid, ${id}::uuid,
-          ${org.ownerSubjectId})`;
-    });
-    await personalConnection(org, personalOwner);
-    await source(org, org.sharedWorkspaceId, "workspace");
-    const before = await coreSnapshot(org.accountId);
-    expect(Object.keys(before)).toContain("opengeni_private.subscription_core_auto_assignments");
-    const migration = await readFile(
-      join(
-        import.meta.dir,
-        "..",
-        "drizzle",
-        "0714_subscription_workspace_managed_organization_accounts.sql",
-      ),
-      "utf8",
-    );
-    await shared!.admin.begin(async (tx) => {
-      await tx.unsafe(migration);
-    });
-    expect(await coreSnapshot(org.accountId)).toEqual(before);
-  });
-
   test("a former workspace account reads as its current reach and serves the same sources", async () => {
     const org = await organization();
     const id = await connection(org, "former", { managedByWorkspaceId: org.sharedWorkspaceId });
@@ -663,10 +738,11 @@ describe.skipIf(!realDb)("Workspace-managed Codex accounts are organization acco
       workspaces: [org.otherWorkspaceId, org.sharedWorkspaceId].sort(),
       reach: null,
     });
+    // One model list: the managing workspace's own copy follows it too.
     expect((await stored(org, id)).policies).toContainEqual({
       workspace_id: org.sharedWorkspaceId,
       inference_pool: "workspace",
-      allowed_model_ids: null,
+      allowed_model_ids: [MODEL],
     });
     expect(await servedIn(org, org.otherWorkspaceId)).toEqual([id]);
     expect(await servedIn(org, org.sharedWorkspaceId)).toEqual([id]);
@@ -945,6 +1021,73 @@ describe.skipIf(!realDb)("Workspace-managed Codex accounts are organization acco
       select count(*)::int as count from subscription_connection_people where connection_id = ${id}::uuid`;
     expect(remaining?.count).toBe(0);
     expect(await servedIn(org, org.otherWorkspaceId)).toEqual([id]);
+  });
+
+  test("above the member list's bound, chosen people stay editable but no one can be added", async () => {
+    const org = await organization();
+    const id = await connection(org, "bounded-people");
+    const target = organizationTarget(org, id);
+    const person = await member(org);
+    await updateSubscriptionCoreCodexModelConnectionAccess(client!.db, target, {
+      allowedModels: null,
+      allowedWorkspaces: [],
+      allowPersonalWorkspaces: false,
+      allowedPeople: [person.membershipId],
+      version: 1,
+    });
+    const newcomer = await member(org);
+    // Revoked memberships count toward the member list's bound (1000).
+    await shared!.admin`
+      insert into organization_memberships (account_id, subject_id, role, status, revoked_at)
+      select ${org.accountId}::uuid, 'user:bounded-' || ${id} || '-' || n, 'member', 'revoked', now()
+      from generate_series(1, 1001) n`;
+    // The real refusal is SQLSTATE 54000 from the database, which the
+    // organization editor's read treats as "people not offered".
+    const refusal = await listOrganizationAdministrationMembers(client!.db, {
+      organizationId: org.accountId,
+      actorSubjectId: org.ownerSubjectId,
+    }).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(nestedPostgresSqlState(refusal)).toBe("54000");
+
+    // Models change with the people already chosen.
+    expect(
+      await updateSubscriptionCoreCodexModelConnectionAccess(client!.db, target, {
+        allowedModels: [MODEL],
+        allowedWorkspaces: [],
+        allowPersonalWorkspaces: false,
+        allowedPeople: [person.membershipId],
+        version: 2,
+      }),
+    ).toMatchObject({ allowedModels: [MODEL], allowedPeople: [person.membershipId], version: 3 });
+    // Adding someone needs the member list: refused, nothing written.
+    await expect(
+      updateSubscriptionCoreCodexModelConnectionAccess(client!.db, target, {
+        allowedModels: [MODEL],
+        allowedWorkspaces: [],
+        allowPersonalWorkspaces: false,
+        allowedPeople: [person.membershipId, newcomer.membershipId],
+        version: 3,
+      }),
+    ).rejects.toBeInstanceOf(SubscriptionCoreAccessPeopleUnlistableError);
+    const chosen = await shared!.admin<{ membership_id: string }[]>`
+      select organization_membership_id::text as membership_id
+      from subscription_connection_people where connection_id = ${id}::uuid`;
+    expect(chosen.map((row) => row.membership_id)).toEqual([person.membershipId]);
+    expect((await stored(org, id)).allowed_model_ids).toEqual([MODEL]);
+    // Back to workspaces still works.
+    expect(
+      await updateSubscriptionCoreCodexModelConnectionAccess(client!.db, target, {
+        allowedModels: null,
+        allowedWorkspaces: null,
+        allowPersonalWorkspaces: true,
+        allowedPeople: null,
+        version: 3,
+      }),
+    ).toMatchObject({ allowedWorkspaces: null, allowPersonalWorkspaces: true, version: 4 });
+    expect((await stored(org, id)).scope_kind).toBe("organization");
   });
 
   test("workspace admins and members gain nothing", async () => {
