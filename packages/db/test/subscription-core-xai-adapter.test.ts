@@ -55,8 +55,8 @@ const json = (status: number, body: unknown) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
 describe("SuperGrok adapter", () => {
-  test("is not registered on the core before its cutover", () => {
-    expect(subscriptionCoreProviderIds()).not.toContain("xai");
+  test("is registered on the core since its cutover", () => {
+    expect(subscriptionCoreProviderIds()).toContain("xai");
     expect(SUBSCRIPTION_CORE_XAI.adapter.provider).toBe("xai");
     expect(SUBSCRIPTION_CORE_XAI.settings.primaryColumn).toBe("xai_primary_connection_id");
     expect(SUBSCRIPTION_CORE_XAI.adapter.credential.format(null as never)).toBe(
