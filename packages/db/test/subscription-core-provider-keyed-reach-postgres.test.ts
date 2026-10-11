@@ -631,12 +631,21 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
       expect(
         constraints.find((row) => row.definition.startsWith("FOREIGN KEY (provider)"))?.name,
       ).toBe("subscription_codex_auto_assignments_provider_fkey");
-      const [column] = await database!.admin<{ notNull: boolean; hasDefault: boolean }[]>`
-        select attnotnull as "notNull", atthasdef as "hasDefault" from pg_attribute
-        where attrelid = 'opengeni_private.subscription_codex_auto_assignments'::regclass
-          and attname = 'provider'`;
-      // Every writer names the provider; none falls back to Codex.
-      expect(column).toEqual({ notNull: true, hasDefault: false });
+      const [column] = await database!.admin<
+        { notNull: boolean; hasDefault: boolean; defaultValue: string | null }[]
+      >`
+        select column_row.attnotnull as "notNull", column_row.atthasdef as "hasDefault",
+          pg_get_expr(column_default.adbin, column_default.adrelid) as "defaultValue"
+        from pg_attribute column_row
+        left join pg_attrdef column_default
+          on column_default.adrelid = column_row.attrelid
+          and column_default.adnum = column_row.attnum
+        where column_row.attrelid = 'opengeni_private.subscription_codex_auto_assignments'::regclass
+          and column_row.attname = 'provider'`;
+      // Every routine names the provider. The Codex default serves only an
+      // older binary's 0702 reach write (it names no provider) until the
+      // retirement migration drops it.
+      expect(column).toEqual({ notNull: true, hasDefault: true, defaultValue: "'codex'::text" });
       // The Codex-named readers an older binary calls and the neutral ones
       // see the same kept rows.
       const { org, connections } = staged!.legacyScenario;
@@ -1064,6 +1073,56 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
         deliveries: 2,
       });
       expect(await woken(otherWaiter.waiterId)).toEqual(unwoken);
+    },
+    180_000,
+  );
+
+  test.skipIf(!realDb)(
+    "the auto-assignment triggers and the Codex-named apply routine restore the caller's setting",
+    async () => {
+      const org = await organization();
+      const sharedOnly = await connection(org, "codex", "restore-shared");
+      const personalOnly = await connection(org, "codex", "restore-personal");
+      expect(await setReach(org, "codex", sharedOnly, [true, false])).toEqual({ value: "set" });
+      expect(await setReach(org, "codex", personalOnly, [false, true])).toEqual({ value: "set" });
+      // 0689's setting admits the owner-only assignment writes for the
+      // organization it names; a caller's own value of it, set earlier in the
+      // same transaction, must be the value once each path returns.
+      const setting = "opengeni.subscription_codex_auto_assign";
+      const prior = crypto.randomUUID();
+      const observed = await database!.admin.begin(async (tx) => {
+        const after = async (workspaceId: string) => {
+          const [row] = await tx<{ value: string | null }[]>`
+            select current_setting(${setting}, true) as value`;
+          const assignments = await tx<{ connection_id: string }[]>`
+            select connection_id::text as connection_id from subscription_connection_workspaces
+            where workspace_id = ${workspaceId}::uuid`;
+          return {
+            setting: row!.value,
+            assigned: assignments.map((assignment) => assignment.connection_id).sort(),
+          };
+        };
+        await tx`select pg_catalog.set_config(${setting}, ${prior}, true)`;
+        const [created] = await tx<{ id: string }[]>`
+          insert into workspaces (account_id, name) values (${org.accountId}::uuid, 'Restore')
+          returning id::text as id`;
+        const workspaceTrigger = await after(created!.id);
+        await tx`insert into organization_memberships
+          (account_id, subject_id, role, status, personal_workspace_id)
+          values (${org.accountId}::uuid, ${`user:core-reach-restore-${crypto.randomUUID()}`},
+            'member', 'active', ${created!.id}::uuid)`;
+        const personalTrigger = await after(created!.id);
+        await tx`select opengeni_private.apply_subscription_codex_auto_assignments(
+          ${org.accountId}::uuid, ${created!.id}::uuid, false)`;
+        const codexApply = await after(created!.id);
+        return { workspaceTrigger, personalTrigger, codexApply };
+      });
+      // Each path applied its rule, so it ran, and left the caller's value.
+      expect(observed).toEqual({
+        workspaceTrigger: { setting: prior, assigned: [sharedOnly] },
+        personalTrigger: { setting: prior, assigned: [personalOnly] },
+        codexApply: { setting: prior, assigned: [sharedOnly] },
+      });
     },
     180_000,
   );

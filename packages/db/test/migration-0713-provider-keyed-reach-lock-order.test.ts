@@ -14,7 +14,10 @@
 // against those runtime shapes as the restricted application role, and take
 // the evidence from each side's outcome and PostgreSQL's own deadlock
 // counter. Every case but the last rolls 0713 back, so each starts from the
-// database a deployment has before it; the last commits it.
+// database a deployment has before it; the last commits it, with an older
+// binary's reach writes queued behind it: they run 0702's body, which names
+// no provider, and are planned again against the table 0713 commits, so they
+// complete only because the reach rows keep their Codex default.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -545,7 +548,7 @@ describe("migration 0713 lock order", () => {
   );
 
   test.skipIf(!realDb)(
-    "workspace and Personal-workspace creation straddle 0713's commit with Codex reach applied",
+    "workspace creation, a Personal-workspace claim and older-binary reach writes straddle 0713's commit",
     async () => {
       const org = staged!;
       const before = await deadlockCount();
@@ -566,6 +569,8 @@ describe("migration 0713 lock order", () => {
       let created: Outcome | null = null;
       let createdId: string | null = null;
       let claimed: Outcome | null = null;
+      let saved: Outcome | null = null;
+      let refreshed: Outcome | null = null;
       try {
         const state = await parkedOrApplied(applying);
         expect(state).toBe("applied");
@@ -586,14 +591,34 @@ describe("migration 0713 lock order", () => {
               values (${org.accountId}::uuid, ${`user:reach-lock-order-member-${crypto.randomUUID()}`},
                 'member', 'active', ${personal!.id}::uuid)`)(),
         );
+        // An older binary's reach writes: 0713 is not committed, so they run
+        // 0702's body, which names no provider; each is planned again once it
+        // has the reach table, against the table 0713 commits. An access
+        // editor save that keeps the connection's reach, then an allocator
+        // refresh (the null pair).
+        const saving = settle(
+          asOrganizationAdministrator((tx) =>
+            tx.execute(sql`select opengeni_private.set_subscription_codex_reach(
+              ${org.accountId}::uuid, ${org.connections.sharedOnly}::uuid, true, false)`),
+          ),
+        );
+        const refreshing = settle(
+          asOrganizationAdministrator((tx) =>
+            tx.execute(sql`select opengeni_private.set_subscription_codex_reach(
+              ${org.accountId}::uuid, ${org.connections.both}::uuid, null, null)`),
+          ),
+        );
         // Both creations reach 0689's triggers and wait on the reach table
-        // 0713 holds, holding their new rows.
-        await waitForWaitersOn(REACH_TABLE, 2);
+        // 0713 holds, holding their new rows; both reach writes wait on it
+        // too.
+        await waitForWaitersOn(REACH_TABLE, 4);
         reader.release();
         expect(await reader.done).toEqual({ ok: true });
         await applying.finish("commit");
         created = await creating;
         claimed = await claiming;
+        saved = await saving;
+        refreshed = await refreshing;
       } finally {
         reader.release();
         await applying.finish("rollback");
@@ -602,6 +627,9 @@ describe("migration 0713 lock order", () => {
       expect(applying.failure()).toBeNull();
       expect(created).toEqual({ ok: true });
       expect(claimed).toEqual({ ok: true });
+      // Without the reach rows' Codex default both fail with 23502.
+      expect(saved).toEqual({ ok: true });
+      expect(refreshed).toEqual({ ok: true });
       // Reach applied exactly as before 0713: the shared rules to the new
       // workspace, the Personal rules to the claimed one.
       expect(await assigned(createdId!)).toEqual(
@@ -609,6 +637,45 @@ describe("migration 0713 lock order", () => {
       );
       expect(await assigned(personal!.id)).toEqual(
         [org.connections.personalOnly, org.connections.both].sort(),
+      );
+      // The reach rows kept their reach, as Codex's.
+      const reach = await database!.admin<
+        { connection_id: string; provider: string; shared: boolean; personal: boolean }[]
+      >`
+        select connection_id::text as connection_id, provider,
+          shared_workspaces as shared, personal_workspaces as personal
+        from opengeni_private.subscription_codex_auto_assignments
+        where account_id = ${org.accountId}::uuid`;
+      expect(new Map(reach.map((row) => [row.connection_id, row]))).toEqual(
+        new Map([
+          [
+            org.connections.sharedOnly,
+            {
+              connection_id: org.connections.sharedOnly,
+              provider: "codex",
+              shared: true,
+              personal: false,
+            },
+          ],
+          [
+            org.connections.personalOnly,
+            {
+              connection_id: org.connections.personalOnly,
+              provider: "codex",
+              shared: false,
+              personal: true,
+            },
+          ],
+          [
+            org.connections.both,
+            {
+              connection_id: org.connections.both,
+              provider: "codex",
+              shared: true,
+              personal: true,
+            },
+          ],
+        ]),
       );
       const [applied] = await database!.admin<{ recorded: number; provider: number }[]>`
         select (select count(*)::int from schema_migrations where name = ${REACH_MIGRATION})

@@ -12,21 +12,24 @@
 -- place to act on the provider-keyed data. Nothing is renamed, detached or
 -- dropped: the provider-free names of the reach table, the two
 -- auto-assignment triggers, their policies and setting, and the reach rows'
--- connection-and-provider key come with the maintenance retirement
--- migration, when no older binary can run.
+-- connection-and-provider key, and dropping the reach rows' Codex default,
+-- come with the maintenance retirement migration, when no older binary can
+-- run.
 --
 -- Locks: the two tables below, taken first and in this order, and no other
 -- table. ACCESS EXCLUSIVE on the owner-only reach table, which only 0689's
--- workspace and Personal-workspace triggers and 0702's reach helpers touch,
--- then SHARE ROW EXCLUSIVE on the owner-only provider registry, which runtime
--- transactions only read (no runtime lock conflicts with it). Nothing locks
--- workspaces, organization_memberships, subscription_connections or the
--- assignment tables: every other statement acts on those two tables, creates
--- a table or a view, or creates or replaces a routine. While it waits for its
--- first lock this migration holds nothing a runtime transaction waits for,
--- and afterwards it waits for no lock a runtime transaction holds, so it
--- cannot close a lock cycle with runtime work (which takes the workspace
--- prefix first and the subscription tables after it).
+-- workspace and Personal-workspace triggers, 0702's reach helpers and the
+-- referential cascades from deleting a subscription connection or an
+-- organization touch, then SHARE ROW EXCLUSIVE on the owner-only provider
+-- registry, which runtime transactions only read (no runtime lock conflicts
+-- with it). Nothing locks workspaces, organization_memberships,
+-- subscription_connections or the assignment tables: every other statement
+-- acts on those two tables, creates a table or a view, or creates or replaces
+-- a routine. While it waits for its first lock this migration holds nothing a
+-- runtime transaction waits for, and afterwards it waits for no lock a
+-- runtime transaction holds, so it cannot close a lock cycle with runtime
+-- work (which takes the workspace prefix first and the subscription tables
+-- after it).
 --
 -- 1. opengeni_private.subscription_core_plan_change_providers: the providers
 --    whose adapters keep plan-change history in provider state, keyed by the
@@ -39,6 +42,11 @@
 --    cutover and 0702's Codex reach helper write no other), so each is
 --    Codex's; from now on the one writer checks the connection's provider.
 --    The rows are otherwise kept exactly.
+--    The column keeps DEFAULT 'codex' until the retirement migration. An
+--    older binary's 0702 reach write that waits for this migration's lock is
+--    planned again after the commit, against the new table, and names no
+--    provider; without the default it would fail on NOT NULL. Every routine
+--    below names the provider.
 --    The routines below reach them through the owner-only view
 --    opengeni_private.subscription_core_auto_assignments, their provider-free
 --    name. The table keeps its 0689 name while older binaries run: a
@@ -90,11 +98,10 @@ COMMENT ON TABLE opengeni_private.subscription_core_plan_change_providers IS
 INSERT INTO opengeni_private.subscription_core_plan_change_providers (provider) VALUES ('codex');
 
 -- 2. Provider-keyed reach rows: the same rows, each now carrying its
--- connection's provider.
+-- connection's provider. The Codex default stays for an older binary's reach
+-- write that straddles the commit (see the header).
 ALTER TABLE opengeni_private.subscription_codex_auto_assignments
   ADD COLUMN provider text NOT NULL DEFAULT 'codex';
-ALTER TABLE opengeni_private.subscription_codex_auto_assignments
-  ALTER COLUMN provider DROP DEFAULT;
 ALTER TABLE opengeni_private.subscription_codex_auto_assignments
   ADD CONSTRAINT subscription_codex_auto_assignments_provider_fkey
     FOREIGN KEY (provider) REFERENCES opengeni_private.subscription_core_providers(provider);

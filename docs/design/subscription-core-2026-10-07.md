@@ -3212,11 +3212,19 @@ Decisions, each the strictest fail-closed reading of the plan and contract:
   for that abort changes; every other input plans exactly as before.
 - **Reach rows keyed by provider, in place.** The table keeps its name,
   rows, owner-only grants, RLS mode and 0689's `(account_id, connection_id)`
-  key to the connection, and gains `provider` (NOT NULL, no default),
+  key to the connection, and gains `provider` (NOT NULL, `DEFAULT 'codex'`),
   keyed by the registry, so a row of an unregistered provider cannot exist.
   Every existing row was written for a Codex connection (0689's cutover and
-  0702's Codex helper write no other), so the column is filled with `codex`
-  and its default dropped in the same transaction. The one writer,
+  0702's Codex helper write no other), so the default fills the column with
+  `codex`. The default stays until the retirement migration: an older
+  binary's 0702 reach write (an access editor save or an allocator refresh)
+  that waits for 0713's lock is planned again after the commit, against the
+  new table, and names no provider, so without the default it would fail
+  with 23502 (lock-order test). It cannot mislabel a row: only owner
+  routines write the table, 0702's body writes only after checking the
+  connection is Codex, and every 0713 routine names the provider (the
+  second-provider test checks each stored row against its connection's
+  provider). The one writer from 0713 on,
   `set_subscription_core_reach`, accepts only its provider's own
   connection. A key from `(account_id, provider, connection_id)` to the
   connection's `(account_id, provider, id)` would lock
@@ -3233,7 +3241,11 @@ Decisions, each the strictest fail-closed reading of the plan and contract:
   edit waiting on the table across 0713's commit would then fail with
   42P01. Under its kept name it completes, with the reach it had before
   (lock-order test). The retirement migration drops the view and gives the
-  table its name, so the neutral routines need no change then.
+  table its name, so the neutral routines need no change then. 0713 changes
+  nothing else such a statement relies on: it renames, drops and tightens
+  no existing column, constraint or routine signature, its other objects
+  are new names, a call already running keeps the routine body it started
+  with, and the one new column carries the default above.
 - **One apply path.** 0689's apply body with the provider as data, in
   `opengeni_subscription_internal` (owner-only routines stay out of
   `opengeni_private`, whose unknown routines a previous binary's readiness
@@ -3248,9 +3260,11 @@ Decisions, each the strictest fail-closed reading of the plan and contract:
   `opengeni.subscription_codex_auto_assign` (an organization, not a
   provider), so there is no new trigger, policy or setting. The callers
   (those two trigger functions and the Codex apply routine) set that
-  setting around each call, as 0689's apply routine did around its writes,
-  so the neutral apply path names no provider (the neutral-routine source
-  check of 0707 covers it); without the setting its writes are refused.
+  setting around each call and restore the caller's value after it, as
+  0689's apply routine did around its writes (a test reads it back in the
+  caller's transaction), so the neutral apply path names no provider (the
+  neutral-routine source check of 0707 covers it); without the setting its
+  writes are refused.
 - **Plan-change history by table.** The owner-only table
   `subscription_core_plan_change_providers` (only `codex`, keyed by the
   registry) replaces the provider test in 0689's trigger function, which is
@@ -3264,8 +3278,10 @@ Decisions, each the strictest fail-closed reading of the plan and contract:
   first and the subscription tables after it, and workspace or
   Personal-workspace creation holds its new row while 0689's trigger reads
   the reach table. 0713 therefore locks owner data only, first and in this
-  order: the reach table ACCESS EXCLUSIVE (read only by 0689's triggers and
-  0702's helpers), then the registry SHARE ROW EXCLUSIVE, which conflicts
+  order: the reach table ACCESS EXCLUSIVE (touched only by 0689's triggers,
+  0702's helpers and the referential cascades from deleting a subscription
+  connection or an organization, which wait for 0713 briefly), then the
+  registry SHARE ROW EXCLUSIVE, which conflicts
   with no runtime lock (runtime roles only read it or check keys against
   it). It locks no workspace, membership, connection or assignment table:
   every other statement acts on those two tables, creates a table or a
@@ -3326,10 +3342,10 @@ Decisions, each the strictest fail-closed reading of the plan and contract:
   the reach view with the table under that name, gives 0689's two
   auto-assignment triggers and their functions, the plan-change trigger and
   its function, 0689's `*_codex_auto_assign` policies and their setting
-  provider-free names, and adds the reach rows' connection-and-provider key;
-  none of that can run while a rolling migration must stay off the
-  workspace, membership and connection tables and keep the names older
-  binaries use.
+  provider-free names, adds the reach rows' connection-and-provider key and
+  drops their Codex default; none of that can run while a rolling migration
+  must stay off the workspace, membership and connection tables and keep
+  the names and defaults older binaries use.
   `list_organization_codex_workspace_ids`
   stays while the legacy SuperGrok and Claude organization wakes call it
   (until X4 and C4). The Codex scope-visibility helpers stay as well. Most
