@@ -16,6 +16,7 @@ let chats: Session[];
 let pendingAccountBaseline: Promise<Session> | null = null;
 let sourceReads = 0;
 let privateAllowed = false;
+let machines: unknown[] = [];
 const updateScheduledTask = mock(
   async (_workspace: string, _id: string, _request: unknown) => task,
 );
@@ -77,7 +78,7 @@ mock.module("./create-with-opengeni", () => ({
   useCreateWithOpenGeni: () => ({ dialog: null }),
 }));
 mock.module("@/lib/use-workspace-machines", () => ({
-  useWorkspaceMachines: () => ({ machines: [], loading: false }),
+  useWorkspaceMachines: () => ({ machines, loading: false }),
 }));
 mock.module("@/lib/use-workspace-model-catalog", () => ({
   useWorkspaceModelCatalog: () => ({ defaultSelection: null, rows: [], loading: false }),
@@ -162,6 +163,7 @@ beforeEach(() => {
   pendingAccountBaseline = null;
   sourceReads = 0;
   privateAllowed = false;
+  machines = [];
   task = {
     id: "task-example",
     workspaceId,
@@ -444,5 +446,32 @@ test("a schedule that posts into an Only me chat stays Only me", async () => {
   expect(audienceOption(container, "Only me")!.getAttribute("aria-checked")).toBe("true");
   expect(audienceOption(container, "Workspace")!.getAttribute("aria-disabled")).toBe("true");
   expect(container.textContent).toContain("It posts into an Only me chat.");
+  await act(async () => root.unmount());
+});
+
+test("a schedule on your own machine is Only me", async () => {
+  privateAllowed = true;
+  machines = [
+    {
+      kind: "selfhosted",
+      isSessionGroup: false,
+      scope: "user",
+      sandboxId: "my-laptop",
+      name: "My laptop",
+      state: "online",
+    },
+  ];
+  task = {
+    ...task,
+    visibility: "private",
+    agentConfig: { ...task.agentConfig, machineTarget: { targetSandboxId: "my-laptop" } },
+  } as ScheduledTask;
+  const { container, root } = await render();
+  expect(audienceOption(container, "Only me")!.getAttribute("aria-checked")).toBe("true");
+  expect(audienceOption(container, "Workspace")!.getAttribute("aria-disabled")).toBe("true");
+  expect(container.textContent).toContain(
+    "It runs on your own machine, so only you can see this schedule and its chats.",
+  );
+  expect(container.textContent).toContain("My laptop");
   await act(async () => root.unmount());
 });

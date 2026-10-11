@@ -67,6 +67,8 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import postgres from "postgres";
+import { ControlRequest, ControlResponse } from "@opengeni/agent-proto";
+import { MockAgentResponder, subjectFor } from "@opengeni/runtime";
 import { createScheduledTaskActivities } from "../src/activities/scheduled-tasks";
 import { loadWorkspaceEnvironmentForRunWithCredentials } from "../src/activities/environment";
 import type { ActivityServices } from "../src/activities/types";
@@ -809,6 +811,162 @@ describe("scheduled task personal MCP authority", () => {
       expect(session, runMode).toEqual({ visibility: "user_private", owner: workspace.subjectId });
     }
   });
+
+  test("an Only me schedule runs on its owner's own machine; nobody else's schedule can", async () => {
+    if (!available) return;
+    const workspace = await workspaceFixture(`user:${crypto.randomUUID()}`);
+    await admin`insert into session_tenancy_activations (account_id, activation_version, inventory_digest, parity_digest, activated_by)
+      values (${workspace.accountId}, 1, ${"3".repeat(64)}, ${"4".repeat(64)}, 'scheduled-personal-machine-test')`;
+    const colleague = `user:${crypto.randomUUID()}`;
+    const [colleagueHome] = await admin<Array<{ id: string }>>`
+      insert into workspaces (account_id, name)
+      values (${workspace.accountId}, 'colleague home') returning id`;
+    await admin`insert into organization_memberships (account_id, subject_id, status, personal_workspace_id)
+      values (${workspace.accountId}, ${colleague}, 'active', ${colleagueHome!.id})`;
+    await admin`insert into workspace_memberships (account_id, workspace_id, subject_id)
+      values (${workspace.accountId}, ${workspace.workspaceId}, ${colleague})`;
+    const machine = await admin.begin(async (tx) => {
+      await tx`select set_config('opengeni.account_id', ${workspace.accountId}, true)`;
+      await tx`select set_config('opengeni.workspace_id', ${workspace.workspaceId}, true)`;
+      await tx`select set_config('opengeni.subject_id', ${workspace.subjectId}, true)`;
+      const [row] = await tx<Array<{ enrollmentId: string; sandboxId: string }>>`
+        select enrollment_id as "enrollmentId", sandbox_id as "sandboxId"
+        from finalize_scoped_enrollment(
+          ${workspace.accountId}::uuid, ${workspace.workspaceId}::uuid, 'user',
+          ${`pubkey-${crypto.randomUUID()}`}, false, false, 'linux', 'x86_64',
+          'My laptop', false
+        )`;
+      return row!;
+    });
+    // An in-memory stand-in for the machine's agent answers the liveness ping.
+    const connectionInstanceId = crypto.randomUUID();
+    const machineBus = new MemoryEventBus();
+    const responder = new MockAgentResponder();
+    machineBus.subscribeRequests(
+      subjectFor(workspace.workspaceId, machine.enrollmentId, connectionInstanceId),
+      async (payload, subject) =>
+        ControlResponse.encode(
+          await responder.request(subject, ControlRequest.decode(payload), { timeoutMs: 0 }),
+        ).finish(),
+    );
+    await admin.begin(async (tx) => {
+      await tx`alter table enrollments no force row level security`;
+      await tx`update enrollments set connection_instance_id = ${connectionInstanceId},
+          connection_generation = 1,
+          connection_lease_expires_at = clock_timestamp() + interval '1 hour',
+          workspace_root = '/home/me/work'
+        where id = ${machine.enrollmentId}`;
+      await tx`alter table enrollments force row level security`;
+    });
+    const scheduleOnMachine = async (input: {
+      owner: string;
+      visibility: "user_private" | "workspace_shared";
+    }) =>
+      await createScheduledTask(client.db, {
+        ...workspace,
+        name: `On my machine ${crypto.randomUUID()}`,
+        status: "active",
+        visibility: input.visibility,
+        schedule: { type: "interval", everySeconds: 3_600 },
+        temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+        runMode: "new_session_per_run",
+        overlapPolicy: "allow_concurrent",
+        agentConfig: {
+          prompt: "Tidy my downloads folder",
+          resources: [],
+          tools: [],
+          metadata: {},
+          machineTarget: { targetSandboxId: machine.sandboxId },
+        },
+        createdBy: { kind: "subject", subjectId: input.owner },
+        metadata: {},
+      });
+    const dispatch = async (taskId: string) =>
+      await activities({}, machineBus).dispatchScheduledTaskRun({
+        workspaceId: workspace.workspaceId,
+        taskId,
+        triggerType: "scheduled",
+        producerKey: `personal-machine-${crypto.randomUUID()}`,
+      });
+
+    // A schedule everyone can see, or a colleague's own schedule, never runs on it.
+    for (const refused of [
+      await scheduleOnMachine({ owner: workspace.subjectId, visibility: "workspace_shared" }),
+      await scheduleOnMachine({ owner: colleague, visibility: "user_private" }),
+    ]) {
+      const result = await dispatch(refused.id);
+      expect(result.action, refused.visibility).not.toBe("start");
+      const [runs] = await admin<Array<{ count: number }>>`
+        select count(*)::int as count from sessions
+        where workspace_id = ${workspace.workspaceId}
+          and metadata->>'scheduledTaskId' = ${refused.id}`;
+      expect(runs!.count).toBe(0);
+    }
+
+    // The owner's Only me schedule runs there, in an Only me chat with a grant
+    // for that chat alone, and the database admits the attempt on the machine.
+    const task = await scheduleOnMachine({
+      owner: workspace.subjectId,
+      visibility: "user_private",
+    });
+    const dispatched = await dispatch(task.id);
+    expect(dispatched).toMatchObject({ action: "start" });
+    if (dispatched.action !== "start") throw new Error(`Unexpected: ${dispatched.action}`);
+    const [session] = await admin<
+      Array<{ visibility: string; owner: string | null; sandboxId: string | null }>
+    >`select visibility, owner_subject_id as owner, active_sandbox_id as "sandboxId"
+      from sessions where id = ${dispatched.sessionId}`;
+    expect(session).toEqual({
+      visibility: "user_private",
+      owner: workspace.subjectId,
+      sandboxId: machine.sandboxId,
+    });
+    const grants = await admin<Array<{ mode: string; context: string; sessionId: string | null }>>`
+      select mode, context, session_id as "sessionId" from organization_user_resource_grants
+      where account_id = ${workspace.accountId} and action = 'connected_machine.use'
+        and status = 'active'`;
+    expect(grants).toEqual([
+      { mode: "session", context: "user_private", sessionId: dispatched.sessionId },
+    ]);
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(client.db, workspace.workspaceId, {
+      sessionId: dispatched.sessionId,
+      workflowId: dispatched.workflowId,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (claimed.action !== "claimed") throw new Error(`claim ${JSON.stringify(claimed)}`);
+    const [authorization] = await admin<Array<{ enrollmentId: string; grantMode: string }>>`
+      select enrollment_id as "enrollmentId", grant_mode as "grantMode"
+      from session_attempt_connected_machine_authorizations where attempt_id = ${attemptId}`;
+    expect(authorization).toEqual({ enrollmentId: machine.enrollmentId, grantMode: "session" });
+
+    // Without that grant the database refuses the run's next attempt.
+    const second = await dispatch(task.id);
+    if (second.action !== "start") throw new Error(`Unexpected: ${second.action}`);
+    await admin`update organization_user_resource_grants set status = 'revoked',
+        revoked_at = clock_timestamp(), generation = generation + 1, updated_at = clock_timestamp()
+      where session_id = ${second.sessionId} and action = 'connected_machine.use'`;
+    const refused = await claimSessionWorkForAttempt(client.db, workspace.workspaceId, {
+      sessionId: second.sessionId,
+      workflowId: second.workflowId,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    }).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(nestedPostgresSqlState(refused)).toBe("42501");
+    const reasons: string[] = [];
+    for (let error = refused; error instanceof Error; error = error.cause) {
+      reasons.push(error.message);
+    }
+    expect(reasons.join("\n")).toContain("personal machine use requires explicit grant");
+  }, 120_000);
 
   test("freezes workspace-default MCP tools across fresh and recovery claims", async () => {
     if (!available) return;
