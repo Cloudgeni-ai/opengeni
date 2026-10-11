@@ -15580,7 +15580,8 @@
         "$": "object",
         "$.pausedGoals": "boolean?",
         "$.replies": "boolean?",
-        "$.tidyPolicy": "ref(InboxTidyPolicy)!"
+        "$.tidyPolicy": "ref(InboxTidyPolicy)!",
+        "$.timeSensitiveNeedsYou": "boolean?"
       }
     },
     "InboxTidyPolicy": {

@@ -80,6 +80,9 @@ const withheldMigrations = [
   "0716_subscription_authority_compat.sql",
   // Requires 0716's routines; it follows 0716.
   "0717_subscription_authority_fences.sql",
+  // Redefines a push routine from withheld 0664 and reads the inbox settings
+  // columns withheld 0663 and 0665 add.
+  "0718_inbox_time_sensitive_needs_you.sql",
 ];
 let database: OwnerMigratedTestDatabase | null = null;
 

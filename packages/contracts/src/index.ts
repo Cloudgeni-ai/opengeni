@@ -14853,6 +14853,12 @@ export const InboxSettings = z.object({
    * Off by default. Always present in responses; leave it out to keep it.
    */
   replies: z.boolean().optional(),
+  /**
+   * Alert the phone for the agent's questions and approvals as time-sensitive,
+   * so they break through Focus on iPhone. Off by default. Always present in
+   * responses; leave it out to keep it.
+   */
+  timeSensitiveNeedsYou: z.boolean().optional(),
 });
 export type InboxSettings = z.infer<typeof InboxSettings>;
 
