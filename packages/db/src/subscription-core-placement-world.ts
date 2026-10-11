@@ -1,6 +1,11 @@
 import { sql } from "drizzle-orm";
 import { evaluateWorkspaceModelPolicy, SubscriptionPersonalAuthorityV2 } from "@opengeni/contracts";
-import type { ModelDescriptor, PlacementInput, ReselectionPoint } from "@opengeni/subscriptions";
+import {
+  declaredCacheLifetimeMs,
+  type ModelDescriptor,
+  type PlacementInput,
+  type ReselectionPoint,
+} from "@opengeni/subscriptions";
 import { rawRows, withRlsContext, withSessionRlsActorContext, type Database } from "./database";
 import {
   assertSubscriptionTurnLeaseCurrent,
@@ -31,6 +36,14 @@ export type SubscriptionCorePlacementWorldRequest = {
   models: readonly ModelDescriptor[];
   reselectionPoints: readonly ReselectionPoint[];
   now: Date;
+  /**
+   * Read the session binding under its row lock (`FOR UPDATE`), held until
+   * the transaction ends: placement decides from, and commits to, the
+   * binding no pin or other placement can change meanwhile (SUB-STICK-02).
+   * Taken before any per-connection lock (lease, request), the order a pin
+   * also uses: binding row, then the connection.
+   */
+  lockBinding?: boolean;
 };
 
 export type SubscriptionCorePlacementWorldResult<T> =
@@ -89,6 +102,9 @@ export async function withSubscriptionCoreProviderPlacementWorld<T>(
   operation: (tx: Database, input: PlacementInput) => Promise<T>,
 ): Promise<SubscriptionCorePlacementWorldResult<T>> {
   const providerId = subscriptionCoreProviderId(provider);
+  // A declaration that is not a positive lifetime fails placement closed
+  // instead of reading as always cold or always warm (SUB-STICK-04).
+  declaredCacheLifetimeMs(provider.adapter.cacheFacts);
   const acceptedAuthority = SubscriptionPersonalAuthorityV2.parse(request.acceptedAuthorityV2);
   return await withSubscriptionCoreAcceptedTurn(db, request, async (tx) => {
     const [session] = await rawRows<SessionPlacementRow>(
@@ -148,6 +164,7 @@ export async function withSubscriptionCoreProviderPlacementWorld<T>(
       readSubscriptionSessionBinding(tx, {
         workspaceId: request.workspaceId,
         sessionId: request.sessionId,
+        forUpdate: request.lockBinding === true,
       }),
       {
         allowedProviders: session.allowed_providers,

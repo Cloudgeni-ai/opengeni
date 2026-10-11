@@ -2031,6 +2031,7 @@ export function buildOpenGeniMcpServer(
             grant,
             runMode: task.runMode,
             agentConfig: task.agentConfig,
+            audience: task.visibility === "private" ? "user_private" : "workspace_shared",
             requireOnline: true,
           });
           const taskAuthoritySubjectId = await getScheduledTaskRevisionAuthoritySubject(deps.db, {

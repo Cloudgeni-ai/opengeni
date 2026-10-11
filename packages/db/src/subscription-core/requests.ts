@@ -7,6 +7,10 @@ import { sql } from "drizzle-orm";
 import { rawRows, withRlsContext, withSessionRlsActorContext, type Database } from "../database";
 
 import { withSubscriptionCoreAcceptedTurn } from "../subscription-core-placement-world";
+import {
+  advanceSubscriptionBindingCacheClock,
+  readSubscriptionSessionBinding,
+} from "../subscription-core-repository";
 
 import type {
   SubscriptionCoreOperationLeaseRef,
@@ -207,6 +211,11 @@ export const subscriptionCoreRequests = memoByProvider((provider: SubscriptionCo
       );
       if (operationKind === "model" && prior?.unresolved)
         throw provider.errors.requestOutcomeUnknown();
+      // The cache clock below is written under the binding row lock, taken
+      // before the connection's lock: the order a pin and placement use, so a
+      // pin of this account never deadlocks with a request on it.
+      const advancesClock = operationKind === "model" && Boolean(identity.sessionOwnerSubjectId);
+      if (advancesClock) await readSubscriptionSessionBinding(tx, { ...identity, forUpdate: true });
       await lockRequestSource(tx, identity.accountId, ref.connectionId);
       const [lease] = await rawRows<{ current: boolean }>(
         tx,
@@ -228,12 +237,25 @@ export const subscriptionCoreRequests = memoByProvider((provider: SubscriptionCo
     ) as current`,
       );
       if (!lease?.current) throw provider.errors.leaseLost();
-      return insertRequestReservation(tx, scope, ref.connectionId, {
+      const reservation = await insertRequestReservation(tx, scope, ref.connectionId, {
         ...request,
         holderId: ref.holderId,
         generation: request.executionGeneration,
         operationKind,
       });
+      // A model request on the bound account is the latest use of its prompt
+      // cache (SUB-STICK-04), recorded in the same transaction as the
+      // reservation: placement after a lost or crashed attempt still sees it.
+      // Application time, as placement judges warmth by it.
+      if (advancesClock)
+        await advanceSubscriptionBindingCacheClock(tx, {
+          workspaceId: identity.workspaceId,
+          sessionId: identity.sessionId,
+          provider: providerId,
+          connectionId: ref.connectionId,
+          at: new Date(),
+        });
+      return reservation;
     });
   }
 

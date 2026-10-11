@@ -219,6 +219,7 @@ describe("Codex cutover gate dispositions", () => {
       leasedUntil: new Date(Date.now() + 60_000),
       eligibleCount: 2,
       connectedCount: 3,
+      reselection: { reason: "unbound", ineligibility: [], points: [] },
     });
     const selected = spy(
       db,

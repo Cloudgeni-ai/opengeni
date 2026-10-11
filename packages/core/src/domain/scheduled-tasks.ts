@@ -422,6 +422,10 @@ export async function createValidatedScheduledTask(input: {
       grant: input.grant,
       runMode: input.payload.runMode,
       agentConfig,
+      audience:
+        "visibility" in input.payload && input.payload.visibility === "private"
+          ? "user_private"
+          : "workspace_shared",
     });
   }
   if (input.payload.variableSetId) {
@@ -586,6 +590,12 @@ export async function createValidatedScheduledTask(input: {
       action.kind === "agent_turn"
         ? (await scheduledTaskViewerForGrant(input.db, input.grant)).subjectId
         : null,
+  });
+  await requirePersonalMachineAudience({
+    db: input.db,
+    grant: input.grant,
+    agentConfig,
+    audience: visibility,
   });
   return await withScheduledTaskAuthorityWriteErrors(() =>
     input.db.transaction(async (transaction) => {
@@ -1040,12 +1050,48 @@ export async function validateScheduledTaskTarget(input: {
   return session;
 }
 
+export const PERSONAL_MACHINE_SCHEDULE_AUDIENCE_MESSAGE =
+  "Your personal machine can only run schedules that only you can see. Set Who can see it to Only me, or pick a shared machine.";
+
+/**
+ * A schedule's audience is resolved after its machine is validated, and can be
+ * changed without touching the machine. Re-check the pairing on the final
+ * audience so a personal machine never ends up on a schedule others can see.
+ */
+async function requirePersonalMachineAudience(input: {
+  db: Database;
+  grant: AccessGrant;
+  agentConfig: ScheduledTaskAgentConfig;
+  audience: "user_private" | "workspace_shared";
+}): Promise<void> {
+  const target = input.agentConfig.machineTarget;
+  if (!target || input.audience === "user_private") return;
+  const sandbox = await getSandbox(
+    input.db,
+    {
+      accountId: input.grant.accountId,
+      workspaceId: input.grant.workspaceId,
+      subjectId: input.grant.subjectId,
+    },
+    target.targetSandboxId,
+  );
+  if (sandbox?.scope === "user") {
+    throw new HTTPException(422, { message: PERSONAL_MACHINE_SCHEDULE_AUDIENCE_MESSAGE });
+  }
+}
+
 export async function validateScheduledTaskMachineTarget(input: {
   settings: Settings;
   db: Database;
   grant: AccessGrant;
   runMode: ScheduledTask["runMode"];
   agentConfig: ScheduledTaskAgentConfig;
+  /**
+   * Who can see the schedule. A personal machine runs only an Only me schedule
+   * of its owner; the owner check is the scoped lookup itself, which returns a
+   * personal machine to nobody else.
+   */
+  audience: "user_private" | "workspace_shared";
   requireOnline?: boolean;
 }): Promise<{
   sandboxId: string;
@@ -1086,11 +1132,8 @@ export async function validateScheduledTaskMachineTarget(input: {
       message: "the selected Connected Machine is unavailable",
     });
   }
-  if (sandbox.scope === "user") {
-    throw new HTTPException(422, {
-      message:
-        "personal Connected Machines cannot run unattended schedules; select a workspace or organization machine",
-    });
+  if (sandbox.scope === "user" && input.audience !== "user_private") {
+    throw new HTTPException(422, { message: PERSONAL_MACHINE_SCHEDULE_AUDIENCE_MESSAGE });
   }
   const enrollment = input.requireOnline
     ? await getLiveEnrollmentConnection(input.db, access, sandbox.enrollmentId)
@@ -1305,6 +1348,12 @@ export async function validatedScheduledTaskUpdate(
     targetSessionId,
     personalKnowledge: agentConfig.knowledgeSource?.destination.kind === "personal",
     ownerSubjectId: input.existing.ownerSubjectId,
+  });
+  await requirePersonalMachineAudience({
+    db: input.db,
+    grant: input.grant,
+    agentConfig,
+    audience: visibility,
   });
   const current = input.existing.visibility === "private" ? "user_private" : "workspace_shared";
   return visibility === current ? update : { ...update, visibility };
@@ -2032,6 +2081,10 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
       grant: input.grant,
       runMode: nextRunMode,
       agentConfig: update.agentConfig ?? input.existing.agentConfig,
+      audience:
+        (input.payload.visibility ?? input.existing.visibility) === "private"
+          ? "user_private"
+          : "workspace_shared",
     });
   }
   if (

@@ -1,6 +1,27 @@
 import type { CacheFacts, ModelId, ProviderId, SubscriptionQuota } from "./types";
 
 /**
+ * The prompt-cache lifetime a provider adapter declares (SUB-PROV-01,
+ * SUB-STICK-04): either the exact lifetime Opengeni sends with each request,
+ * or an idle cut-off taken from the provider's public documentation. Every
+ * adapter states a positive number; the shared core never falls back to a
+ * default for a provider and never names one. Choose it conservatively:
+ * a session switches account only once idle longer than this, so a value
+ * that is too short pays for a cache miss the provider would have avoided.
+ */
+export type DeclaredCacheFacts =
+  | { kind: "exact_ttl"; ttlMs: number }
+  | { kind: "measured_idle_cutoff"; cutoffMs: number };
+
+/** The declared lifetime in milliseconds, or a thrown error for an unusable declaration. */
+export function declaredCacheLifetimeMs(facts: DeclaredCacheFacts): number {
+  const lifetime = facts.kind === "exact_ttl" ? facts.ttlMs : facts.cutoffMs;
+  if (!Number.isSafeInteger(lifetime) || lifetime <= 0)
+    throw new Error("A provider adapter must declare a positive whole-millisecond cache lifetime");
+  return lifetime;
+}
+
+/**
  * Provider differences are capability flags, never provider conditionals in
  * shared code (SUB-PROV-02).
  */
@@ -169,8 +190,11 @@ export interface SubscriptionCoreAdapter<Credential = unknown> {
   readonly quotaKind: QuotaKind;
   /** Provider identity used by workspace model policy for this provider's models. */
   readonly modelPolicyProviderId: string;
-  /** Cache behaviour used by placement (exact TTL or a measured idle cut-off). */
-  readonly cacheFacts: CacheFacts;
+  /**
+   * The prompt-cache lifetime placement keeps a session's account for
+   * (SUB-STICK-04): an exact TTL Opengeni sends, or a documented idle cut-off.
+   */
+  readonly cacheFacts: DeclaredCacheFacts;
   /** Health policy applied to this provider's connections. */
   readonly health: {
     /** How long a connection the provider refused (forbidden) stays quarantined. */

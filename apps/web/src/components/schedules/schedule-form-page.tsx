@@ -289,7 +289,9 @@ function AgentScheduleForm({
   const machineOnly = defaultSandboxBackend === "selfhosted";
   // Without a managed sandbox backend a run off a connected machine has no computer.
   const noManagedSandbox = defaultSandboxBackend === "none";
-  const scheduledMachines = useMemo(
+  // Shared machines run any schedule. Your own machines (only you see them) run
+  // only schedules set to Only me, so picking one makes the schedule Only me.
+  const sharedMachines = useMemo(
     () =>
       fleet.machines.filter(
         (machine) =>
@@ -297,8 +299,16 @@ function AgentScheduleForm({
       ),
     [fleet.machines],
   );
+  const personalMachines = useMemo(
+    () =>
+      fleet.machines.filter(
+        (machine) =>
+          machine.kind === "selfhosted" && !machine.isSessionGroup && machine.scope === "user",
+      ),
+    [fleet.machines],
+  );
   const defaultMachineSandboxId =
-    scheduledMachines.find((machine) => isMachineComputeSelectable(machine.state))?.sandboxId ?? "";
+    sharedMachines.find((machine) => isMachineComputeSelectable(machine.state))?.sandboxId ?? "";
   const personal = isPersonalWorkspace(
     context.workspaces.find((item) => item.id === workspaceId) ?? null,
     context.managedSelfContext,
@@ -436,13 +446,13 @@ function AgentScheduleForm({
     if (inheritsChatSettings || draft.executionTarget !== "machine" || draft.machineSandboxId) {
       return;
     }
-    const firstSelectable = scheduledMachines.find((machine) =>
+    const firstSelectable = sharedMachines.find((machine) =>
       isMachineComputeSelectable(machine.state),
     );
     if (firstSelectable) {
       setDraft((current) => ({ ...current, machineSandboxId: firstSelectable.sandboxId }));
     }
-  }, [draft.executionTarget, draft.machineSandboxId, inheritsChatSettings, scheduledMachines]);
+  }, [draft.executionTarget, draft.machineSandboxId, inheritsChatSettings, sharedMachines]);
 
   /* ----- destination chats */
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -516,12 +526,18 @@ function AgentScheduleForm({
       : undefined;
   // A schedule that posts into an Only me chat, or saves to personal
   // knowledge, is always Only me; the server enforces the same rule.
+  const personalMachineChosen =
+    !inheritsChatSettings &&
+    draft.executionTarget === "machine" &&
+    personalMachines.some((machine) => machine.sandboxId === draft.machineSandboxId);
   const privateReason =
     audienceTarget?.tenancy?.visibility === "private"
       ? "It posts into an Only me chat."
       : draft.knowledgeSource?.destination.kind === "personal"
         ? "It saves to your personal knowledge."
-        : null;
+        : personalMachineChosen
+          ? "It runs on your own machine."
+          : null;
   useEffect(() => {
     if (privateReason)
       setDraft((current) =>
@@ -672,6 +688,13 @@ function AgentScheduleForm({
   }, [baselineDestinationKey, client, learningRetry, taskId, workspaceId]);
 
   /* ----- where it runs */
+  // Your own machines are offered whenever the schedule can be Only me.
+  const offerPersonalMachines =
+    personalMachines.length > 0 &&
+    (personal || canCreatePrivate === true || draft.visibility === "private");
+  const scheduledMachines = offerPersonalMachines
+    ? [...sharedMachines, ...personalMachines]
+    : sharedMachines;
   const selectableMachines = scheduledMachines.filter((machine) =>
     isMachineComputeSelectable(machine.state),
   );
@@ -704,9 +727,13 @@ function AgentScheduleForm({
     ...scheduledMachines.map((machine) => ({
       value: machine.sandboxId,
       label: machine.name,
-      meta:
-        machine.state === "online" ? "Connected machine" : `Connected machine · ${machine.state}`,
-      description: "Runs on this computer, in its code folder.",
+      meta: `${machine.scope === "user" ? "Your machine" : "Connected machine"}${
+        machine.state === "online" ? "" : ` · ${machine.state}`
+      }`,
+      description:
+        machine.scope === "user"
+          ? "Runs on your own computer. Only you can see this schedule and its chats."
+          : "Runs on this computer, in its code folder.",
       leading: <LaptopIcon className="size-4 text-fg-subtle" />,
       disabled: !isMachineComputeSelectable(machine.state),
       disabledReason: "It's offline. Start Opengeni on it to pick it.",
@@ -1107,7 +1134,7 @@ function AgentScheduleForm({
               label="Who can see it"
               hint={
                 draft.visibility === "private"
-                  ? "Only you can see this schedule and its chats. Admins can see that it exists, what it costs, and pause it."
+                  ? `${privateReason ? `${privateReason.slice(0, -1)}, so only` : "Only"} you can see this schedule and its chats. Admins can see that it exists, what it costs, and pause it.`
                   : "Everyone in this workspace can see this schedule and its chats."
               }
             >

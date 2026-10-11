@@ -57,7 +57,12 @@ export const SUBSCRIPTION_CORE_CLAUDE_ENTITLEMENT_COOLDOWN_MS = 24 * 60 * 60 * 1
 export const SUBSCRIPTION_CORE_CLAUDE_RATE_LIMIT_FALLBACK_MS = 60 * 1000;
 /** A limit without a known reset is checked again after a minute, as the legacy capacity check does. */
 export const SUBSCRIPTION_CORE_CLAUDE_UNKNOWN_RESET_MS = 60 * 1000;
-/** The prompt-cache lifetime Opengeni sends on Claude requests (`cacheTtl: "5m"`). */
+/**
+ * The prompt-cache lifetime Opengeni sends on Claude requests (`cacheTtl:
+ * "5m"`), declared as an exact TTL (SUB-STICK-04). Anthropic documents the
+ * default cache lifetime as 5 minutes, refreshed each time the cached
+ * content is used (https://platform.claude.com/docs/en/build-with-claude/prompt-caching).
+ */
 export const SUBSCRIPTION_CORE_CLAUDE_CACHE_TTL_MS = 5 * 60 * 1000;
 /** The product model id prefixes of Claude subscription models (`claudeProviderId`). */
 export const SUBSCRIPTION_CORE_CLAUDE_MODEL_PREFIXES = [
