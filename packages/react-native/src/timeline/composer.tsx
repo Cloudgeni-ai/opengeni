@@ -15,7 +15,6 @@ import {
   type ViewStyle,
 } from "react-native";
 import Animated, { useAnimatedKeyboard, useAnimatedStyle } from "react-native-reanimated";
-import Svg, { Defs, LinearGradient, Rect, Stop } from "react-native-svg";
 import { Button } from "./controls";
 import { Icon, type NativeIconName } from "./icon";
 import { withAlpha } from "./primitives";
@@ -381,11 +380,17 @@ export function SessionComposer(props: SessionComposerProps) {
 
 /** How far the scroll-edge fade reaches above the floating composer. */
 const SCROLL_EDGE_PX = 24;
+/** Page-color opacity of each band in the fade, top to bottom. */
+const SCROLL_EDGE_STEPS = [0.1, 0.28, 0.48, 0.68, 0.84, 0.95] as const;
 
 /**
  * The scroll-edge effect under a floating glass composer: the conversation
  * fades into the page color just above the composer and is fully covered
  * behind and below it, down to the screen edge (or the keyboard).
+ *
+ * Plain views, not an SVG gradient: a percentage-sized SVG inside this
+ * absolutely positioned layer painted nothing on device, which left the
+ * conversation legible under and below the glass.
  */
 function ScrollEdgeFade({ color }: { color: string }) {
   return (
@@ -393,17 +398,12 @@ function ScrollEdgeFade({ color }: { color: string }) {
       pointerEvents="none"
       style={{ position: "absolute", top: -SCROLL_EDGE_PX, left: 0, right: 0, bottom: 0 }}
     >
-      <Svg width="100%" height="100%">
-        <Defs>
-          <LinearGradient id="composer-scroll-edge" x1="0" y1="0" x2="0" y2="1">
-            <Stop offset="0" stopColor={color} stopOpacity={0} />
-            <Stop offset="0.25" stopColor={color} stopOpacity={0.8} />
-            <Stop offset="0.4" stopColor={color} stopOpacity={1} />
-            <Stop offset="1" stopColor={color} stopOpacity={1} />
-          </LinearGradient>
-        </Defs>
-        <Rect x="0" y="0" width="100%" height="100%" fill="url(#composer-scroll-edge)" />
-      </Svg>
+      <View style={{ height: SCROLL_EDGE_PX }}>
+        {SCROLL_EDGE_STEPS.map((alpha) => (
+          <View key={alpha} style={{ flex: 1, backgroundColor: withAlpha(color, alpha) }} />
+        ))}
+      </View>
+      <View style={{ flex: 1, backgroundColor: color }} />
     </View>
   );
 }
