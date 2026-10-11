@@ -305,3 +305,12 @@ different operational contract per turn, which breaks prompt-prefix reuse
 across those turns. This is expected: the turn's executable first-party
 permissions differ in the same way. Turns with the same authority keep an
 identical contract.
+
+Opt-in experiment `OPENGENI_EXPERIMENT_KNOWLEDGE_RETRIEVAL_GUIDANCE` (default
+off, both compositions): Knowledge retrieval also precedes answers about the
+workspace's own projects, systems, people, hosts, ports or policies and any
+correction or forget request; corrections update and forget archives the
+existing entry (`knowledge_archive`); "from now on"/"always" response
+preferences are saved in the same turn with `skill_save` or
+`instruction_policy_save` without an approval question. Each clause renders
+only while its tool may be available. Off, every prompt is byte-identical.

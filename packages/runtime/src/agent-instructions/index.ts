@@ -21,6 +21,7 @@ export {
 } from "./tool-availability";
 export type {
   AgentPromptContext,
+  AgentPromptExperiments,
   AgentPromptModule,
   AgentPromptResources,
   AgentPromptToolAvailability,

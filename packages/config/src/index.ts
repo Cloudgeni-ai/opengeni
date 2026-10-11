@@ -996,6 +996,8 @@ const SettingsSchema = z.object({
   // instructions. Defaulting to DEFAULT_AGENT_INSTRUCTIONS keeps the composed
   // default pinned by runtime tests.
   agentInstructionsTemplate: z.string().default(DEFAULT_AGENT_INSTRUCTIONS),
+  // A/B prompt experiment: Knowledge retrieval, correction and standing-preference guidance.
+  experimentKnowledgeRetrievalGuidance: EnvBoolean.default(false), // OPENGENI_EXPERIMENT_KNOWLEDGE_RETRIEVAL_GUIDANCE
   azureOpenaiBaseUrl: z.string().optional(),
   azureOpenaiEndpoint: z.string().optional(),
   azureOpenaiDeployment: z.string().optional(),
@@ -4649,6 +4651,9 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     jevRequestTimeoutMs: optional("OPENGENI_JEV_REQUEST_TIMEOUT_MS"),
     codeSearchMode: optional("OPENGENI_CODE_SEARCH_MODE"),
     agentInstructionsTemplate: optional("OPENGENI_AGENT_INSTRUCTIONS_TEMPLATE"),
+    experimentKnowledgeRetrievalGuidance: optional(
+      "OPENGENI_EXPERIMENT_KNOWLEDGE_RETRIEVAL_GUIDANCE",
+    ),
     azureOpenaiBaseUrl: optional("OPENGENI_AZURE_OPENAI_BASE_URL"),
     azureOpenaiEndpoint: optional("OPENGENI_AZURE_OPENAI_ENDPOINT"),
     azureOpenaiDeployment: optional("OPENGENI_AZURE_OPENAI_DEPLOYMENT"),
