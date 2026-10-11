@@ -1226,12 +1226,16 @@ function isCanonicalManagedHumanSession(context: AccessContext, grant: AccessGra
  * install's human qualifies only when the in-process local bootstrap produced
  * this context (so a delegated bearer naming `dev` cannot borrow it), with the
  * human-session, non-delegated, non-service, keyless shape of
- * {@link accessContextHasInbox}.
+ * {@link accessContextHasInbox}. An agent acting as a person (verified
+ * in-process dispatch) reads that person's inbox within its organization and
+ * workspaces: the inbox routes check each item's workspace on this context.
  */
 export function inboxSubjectForContext(context: AccessContext): string | null {
   if (!accessContextHasInbox(context)) return null;
   if (context.subjectId.startsWith("user:")) {
-    return canonicalManagedCookieContexts.has(context) ? context.subjectId : null;
+    return canonicalManagedCookieContexts.has(context) || delegatedHumanContexts.has(context)
+      ? context.subjectId
+      : null;
   }
   return canonicalLocalHumanContexts.has(context) &&
     context.workspaceGrants.every((grant) => isCanonicalLocalHumanSession(context, grant))

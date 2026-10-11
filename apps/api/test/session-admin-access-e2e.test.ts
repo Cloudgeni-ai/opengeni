@@ -1,5 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { organizationAccessPresetPermissions } from "@opengeni/contracts";
+import {
+  organizationAccessPresetPermissions,
+  type OrganizationWorkspaceScope,
+  type Permission,
+} from "@opengeni/contracts";
 import { stampDelegatedHumanAuthorization } from "@opengeni/core";
 import {
   createDb,
@@ -19,9 +23,10 @@ import { createApp } from "../src/app";
 import { callOrganizationAction } from "../src/organization-mcp";
 
 /* End to end through the real app and PostgreSQL: an owner allows admin
-   access for agent sessions, gives it to their own session in the browser,
-   an agent acting as them can't give it, and the organization turning it off
-   ends it. */
+   access for agent sessions and gives it to their own session; an agent with
+   their full access does what they can (giving admin access, their inbox,
+   connected agents, API keys), one with less can't widen its access, and the
+   organization turning it off ends it. */
 
 const origin = "http://opengeni.test";
 let shared: SharedTestDatabase;
@@ -52,7 +57,7 @@ function browser(cookie: string): Record<string, string> {
 }
 
 describe("session admin access end to end", () => {
-  test("allow, give in person, refuse agents and other sessions, turn off", async () => {
+  test("allow, give, act fully as the person, refuse limited agents and other sessions, turn off", async () => {
     const app = createApp({
       settings: testSettings({
         databaseUrl: shared.adminUrl,
@@ -154,19 +159,38 @@ describe("session admin access end to end", () => {
       await (await app.request(sessionAccess(own), { headers: { cookie } })).json(),
     ).toMatchObject({ active: false, allowed: true, canGrant: true });
 
-    // An agent acting as the person can read it, never give it.
-    const asAgent = new Request(new URL(sessionAccess(own), origin), {
-      method: "PUT",
-      headers: { "content-type": "application/json", "content-length": "2" },
-      body: "{}",
+    // An agent acting as the person with their full access gives it as them;
+    // one with less can't, so it can never widen its own access.
+    const agentPut = (permissions: Permission[], workspaceScope: OrganizationWorkspaceScope) => {
+      const request = new Request(new URL(sessionAccess(own), origin), {
+        method: "PUT",
+        headers: { "content-type": "application/json", "content-length": "2" },
+        body: "{}",
+      });
+      stampDelegatedHumanAuthorization(request, {
+        organizationId,
+        subjectId,
+        permissions,
+        workspaceScope,
+      });
+      return app.fetch(request);
+    };
+    const limited = await agentPut(organizationAccessPresetPermissions("full"), {
+      kind: "selected",
+      workspaceIds: [workspaceId],
     });
-    stampDelegatedHumanAuthorization(asAgent, {
-      organizationId,
-      subjectId,
-      permissions: organizationAccessPresetPermissions("full"),
-      workspaceScope: { kind: "all" },
+    expect(limited.status).toBe(403);
+    expect(((await limited.json()) as { error: { message: string } }).error.message).toContain(
+      "this agent's access is limited",
+    );
+    expect((await agentPut(["workspace:read"], { kind: "all" })).status).toBe(403);
+    const byAgent = await agentPut(organizationAccessPresetPermissions("full"), { kind: "all" });
+    expect(byAgent.status).toBe(200);
+    expect(await byAgent.json()).toMatchObject({
+      active: true,
+      grantedBy: { subjectId },
+      canGrant: true,
     });
-    expect((await app.fetch(asAgent)).status).toBe(403);
 
     // Only your own session.
     expect(
@@ -239,6 +263,59 @@ describe("session admin access end to end", () => {
       status: 200,
       body: { active: true },
     });
+
+    // Everything the person can do in the organization, as them.
+    const asPerson = async (
+      id: string,
+      pathParameters: Record<string, string>,
+      body?: Record<string, unknown>,
+    ) => {
+      const result = await callOrganizationAction(
+        {
+          caller: {
+            kind: "person",
+            accountId: organizationId,
+            subjectId,
+            access: {
+              preset: "full",
+              permissions: organizationAccessPresetPermissions("full"),
+              workspaceScope: { kind: "all" },
+            },
+          },
+          origin,
+          dispatch: async (request) => await app.fetch(request),
+        },
+        { id, pathParameters, query: {}, ...(body ? { body } : {}) },
+      );
+      expect(result.isError).toBeUndefined();
+      return JSON.parse((result.content[0] as { text: string }).text) as {
+        status: number;
+        body: Record<string, unknown>;
+      };
+    };
+    const another = await session(subjectId);
+    expect(
+      await asPerson(
+        "grantSessionAdminAccess",
+        { workspaceId, sessionId: another },
+        { durationHours: 8 },
+      ),
+    ).toMatchObject({ status: 200, body: { active: true, grantedBy: { subjectId } } });
+    expect(await asPerson("listInbox", {})).toMatchObject({ status: 200 });
+    expect(await asPerson("getSessionInboxMute", { workspaceId, sessionId: own })).toMatchObject({
+      status: 200,
+      body: { repliesMuted: false },
+    });
+    expect(await asPerson("listOrganizationMcpConnections", { organizationId })).toMatchObject({
+      status: 200,
+      body: { connections: [], canManageAll: true },
+    });
+    const key = await asPerson(
+      "createOrganizationApiKey",
+      { organizationId },
+      { name: "Made by an agent", access: "read" },
+    );
+    expect(key).toMatchObject({ status: 201, body: { apiKey: { name: "Made by an agent" } } });
 
     // Turning the organization setting off ends it.
     expect(
