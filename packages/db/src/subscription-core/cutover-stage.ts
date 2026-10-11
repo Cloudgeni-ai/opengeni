@@ -142,7 +142,9 @@ export async function writeSubscriptionCutoverConnections<Row>(
       dispositions.set(key, (dispositions.get(key) ?? 0) + 1);
     }
     const personal = connection.ownership === "personal";
-    const generation = personal ? input.personalGenerations.get(connection.ownerMembershipId!) : null;
+    const generation = personal
+      ? input.personalGenerations.get(connection.ownerMembershipId!)
+      : null;
     if (personal && (generation === undefined || generation === null || generation < 1)) {
       throw new Error("personal cutover generation missing");
     }
@@ -188,7 +190,7 @@ export async function writeSubscriptionCutoverConnections<Row>(
         ${staged.extraCredits.updatedAt}
       )`;
     if (connection.autoAssignment) {
-      await tx`INSERT INTO opengeni_private.subscription_core_auto_assignments (
+      await tx`INSERT INTO opengeni_private.subscription_core_auto_assignments AS auto (
           account_id, provider, connection_id, shared_workspaces, personal_workspaces,
           allocator_enabled, allowed_model_ids
         ) VALUES (

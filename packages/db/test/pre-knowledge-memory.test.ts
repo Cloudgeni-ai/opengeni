@@ -54,6 +54,8 @@ describe("pre-knowledge Memory storage compatibility", () => {
         "0653_session_archive_tenancy_fence.sql",
         "0657_session_archive_purge_retained_evidence.sql",
         "0660_session_archive_preference_snapshot_export.sql",
+        // The drained SuperGrok cutover reads the withheld 0560 import column.
+        "0717_subscription_core_xai_cutover.sql",
       ])
         await owner`INSERT INTO schema_migrations(name) VALUES(${name})`;
       await migrate(owned.ownerUrl);

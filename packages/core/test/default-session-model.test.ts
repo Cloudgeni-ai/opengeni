@@ -49,6 +49,14 @@ import {
 } from "../src/default-session-model";
 import { createSessionForRequest } from "../src/domain/sessions";
 import { resolveWorkspaceModelSelection } from "../src/model-catalog";
+import { SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS } from "@opengeni/db";
+
+// Characterizes the legacy SuperGrok runtime, which runs only before the
+// drained SuperGrok cutover: the database withholds that migration. Removed
+// with the legacy runtime.
+const LEGACY_XAI_WORLD = {
+  withheldMigrations: [SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.xai!],
+};
 
 test("scoped grants choose a funded credit model without overriding saved choices", () => {
   const settings = hostedSettings();
@@ -397,7 +405,7 @@ beforeAll(async () => {
     slugs: ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"],
   });
   restoreModelsProbe = () => modelsProbe.mockRestore();
-  shared = await acquireSharedTestDatabase("core-default-session-model");
+  shared = await acquireSharedTestDatabase("core-default-session-model", LEGACY_XAI_WORLD);
   if (!shared) {
     if (process.env.OPENGENI_REQUIRE_REAL_DB === "1") {
       throw new Error("Default model integration tests require real PostgreSQL");

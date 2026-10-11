@@ -410,6 +410,9 @@ beforeAll(async () => {
   try {
     await owner`CREATE TABLE schema_migrations(name text PRIMARY KEY,applied_at timestamptz NOT NULL DEFAULT now())`;
     await owner`INSERT INTO schema_migrations(name) SELECT unnest(${[migration, ...forwardMigrations]}::text[])`;
+    // The drained SuperGrok cutover reads the withheld 0560 import column; this
+    // fixture never runs that maintenance step, so it stays recorded.
+    await owner`INSERT INTO schema_migrations(name) VALUES ('0717_subscription_core_xai_cutover.sql')`;
     await migrate(owned.ownerUrl);
     // Current session adapters select these nullable reader fields. Do not
     // activate the import lifecycle before its withheld 0499 prerequisite.

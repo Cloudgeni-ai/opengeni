@@ -57,7 +57,7 @@ import {
   withLosslessContentWriteVersion,
 } from "./lossless-json";
 import { closePendingSessionToolCallsInTransaction } from "./session-tool-call-settlement";
-import { deleteSubscriptionCoreWaitersOfEveryProviderForTurns } from "./subscription-core-codex-waiter-cleanup";
+import { deleteSubscriptionCoreWaitersOfEveryProviderForTurns } from "./subscription-core-waiter-cleanup";
 import { cancelTurnInteractionInterventionsInTransaction } from "./browser-auth";
 import {
   assertAgentCommandAuthorityInTransaction,

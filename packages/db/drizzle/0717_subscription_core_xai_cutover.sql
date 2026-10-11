@@ -23,7 +23,7 @@ SET LOCAL statement_timeout = '30min';
 DO $xai_cutover_drain$
 DECLARE roles jsonb := nullif(current_setting('opengeni.migration_application_roles', true), '')::jsonb;
 BEGIN
-  IF to_regclass('pg_temp.xai_cutover_stage_0716') IS NULL THEN
+  IF to_regclass('pg_temp.xai_cutover_stage') IS NULL THEN
     RAISE EXCEPTION '0717 requires the codec-aware TypeScript migration runner' USING ERRCODE = '55000';
   END IF;
   IF roles IS NULL OR jsonb_typeof(roles) <> 'array' THEN
@@ -96,14 +96,54 @@ BEGIN
   FOR item IN SELECT * FROM xai_cutover_triggers WHERE tgenabled <> 'D' LOOP
     EXECUTE format('ALTER TABLE %s DISABLE TRIGGER %I', item.tgrelid::regclass, item.tgname);
   END LOOP;
-  FOR item IN SELECT * FROM xai_cutover_relations WHERE relforcerowsecurity LOOP
-    EXECUTE format('ALTER TABLE %s NO FORCE ROW LEVEL SECURITY', item.oid::regclass);
-  END LOOP;
+END $xai_cutover_owner_window$;
+-- `NO FORCE` relaxes only the owner; the application role stays
+-- policy-bound. The restore below re-forces exactly the relations that were
+-- forced before (recorded in xai_cutover_relations).
+ALTER TABLE "xai_subscription_credentials" NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE "xai_rotation_settings" NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE "xai_credential_leases" NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE "xai_session_account_pins" NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE "xai_capacity_waiters" NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE "subscription_connections" NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE "subscription_connection_aliases" NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE "subscription_connection_workspaces" NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE "subscription_connection_assignment_policies" NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE "subscription_connection_people" NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE "subscription_connection_quota" NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE "subscription_settings" NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE "subscription_person_preferences" NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE "subscription_provider_cutovers" NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE "subscription_session_bindings" NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE "subscription_leases" NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE "subscription_capacity_waiters" NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE "subscription_capacity_wake_outbox" NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE "subscription_operation_leases" NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE "organization_user_resource_authorities" NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE "organization_memberships" NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE "workspaces" NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE "managed_accounts" NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE "sessions" NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE "session_turns" NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE "session_events" NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE "composer_drafts" NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE "scheduled_tasks" NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE "scheduled_task_revision_authorities" NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE "scheduled_task_runs" NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE "session_system_updates" NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE "session_system_update_outbox" NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE "model_call_facts" NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE "video_generation_operations" NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE "image_generation_operations" NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE opengeni_private."subscription_authority_compat" NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE opengeni_private."subscription_codex_auto_assignments" NO FORCE ROW LEVEL SECURITY;
+DO $xai_cutover_owner_window_open$
+BEGIN
   IF EXISTS (SELECT 1 FROM xai_cutover_relations r JOIN pg_class c ON c.oid = r.oid
     WHERE c.relforcerowsecurity) THEN
     RAISE EXCEPTION '0717 owner window did not open' USING ERRCODE = '55000';
   END IF;
-END $xai_cutover_owner_window$;
+END $xai_cutover_owner_window_open$;
 
 -- A zero count is only trusted after an RLS-immune emptiness proof: VALIDATE
 -- CONSTRAINT sees every row whatever the row-security posture.
@@ -216,7 +256,7 @@ INSERT INTO opengeni_private.subscription_provider_cutover_receipts (
 
 DO $xai_cutover_codec_receipt$
 BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_temp.xai_cutover_stage_0716 WHERE completed) THEN
+  IF NOT EXISTS (SELECT 1 FROM pg_temp.xai_cutover_stage WHERE completed) THEN
     RAISE EXCEPTION '0717 codec stage did not complete' USING ERRCODE = '55000';
   END IF;
 END $xai_cutover_codec_receipt$;

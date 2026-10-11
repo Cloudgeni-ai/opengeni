@@ -34,6 +34,14 @@ import {
   upsertOrganizationClaudeSubscription,
   workspaceClaudeSubscriptionActiveForAuthority,
 } from "../src/claude-subscription-accounts";
+import { SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS } from "../src/runtime-posture";
+
+// Characterizes the legacy SuperGrok runtime, which runs only before the
+// drained SuperGrok cutover: the database withholds that migration. Removed
+// with the legacy runtime.
+const LEGACY_XAI_WORLD = {
+  withheldMigrations: [SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.xai!],
+};
 
 // Contract: the subscription pool belongs to the receiving session's accepted
 // work, never to the sender, and acceptance without an exact human resolves the
@@ -52,7 +60,10 @@ const settings = getSettings({
 });
 
 beforeAll(async () => {
-  const acquired = await acquireSharedTestDatabase("subscription-pool-receiver-authority");
+  const acquired = await acquireSharedTestDatabase(
+    "subscription-pool-receiver-authority",
+    LEGACY_XAI_WORLD,
+  );
   if (!acquired) throw new Error("Receiver subscription authority tests require real PostgreSQL");
   shared = acquired;
   client = createDb(shared.appUrl);

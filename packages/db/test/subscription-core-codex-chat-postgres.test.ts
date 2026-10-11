@@ -1573,11 +1573,12 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
     expect(await authorize()).toBe(false);
     await enableCodexCutover(org.accountId, true);
     expect(await authorize()).toBe(true);
-    // The same grant for a provider without a cutover receipt (SuperGrok,
-    // Claude) is refused: an enabled switch row, a v2 entry, the exact owner
-    // and the current generation are not enough before that provider's
-    // receipt, so its personal access stays decided by its v1 path alone.
-    for (const provider of ["claude", "xai"]) {
+    // The same grant for a provider without a cutover receipt (Claude; SuperGrok
+    // has had one since 0717) is refused: an enabled switch row, a v2 entry,
+    // the exact owner and the current generation are not enough before that
+    // provider's receipt, so its personal access stays decided by its v1 path
+    // alone.
+    for (const provider of ["claude"]) {
       await shared!.admin.begin(async (owner) => {
         // Fixture only: move this connection and its v2 entry to the provider
         // and give it an enabled switch row, bypassing the guards that keep

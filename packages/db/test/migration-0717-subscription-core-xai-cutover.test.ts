@@ -29,6 +29,7 @@ import {
 import { decodeSubscriptionCoreXaiCredential } from "../src/subscription-core-xai-adapter";
 import { subscriptionCoreProviderIds } from "../src/subscription-core-providers";
 import { SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES } from "../src/runtime-posture";
+import { deleteSubscriptionCoreWaitersOfEveryProviderForTurns } from "../src/subscription-core-waiter-cleanup";
 
 const MIGRATION = "0717_subscription_core_xai_cutover.sql";
 const key = Buffer.alloc(32, 73);
@@ -39,7 +40,9 @@ const MODEL = "xai/grok-4";
 /** A fixture access token whose principal is `subject` (null: none). */
 function accessToken(subject: string | null): string {
   const payload = Buffer.from(
-    JSON.stringify(subject ? { principal_id: subject, exp: 4_102_444_800 } : { exp: 4_102_444_800 }),
+    JSON.stringify(
+      subject ? { principal_id: subject, exp: 4_102_444_800 } : { exp: 4_102_444_800 },
+    ),
   ).toString("base64url");
   return `header.${payload}.signature`;
 }
@@ -207,7 +210,11 @@ async function credential(input: {
     )`;
 }
 
-const userV1 = (generation: number) => ({ version: 1, scope: "user", authorityGeneration: generation });
+const userV1 = (generation: number) => ({
+  version: 1,
+  scope: "user",
+  authorityGeneration: generation,
+});
 const workspaceV1 = { version: 1, scope: "workspace" } as const;
 const organizationV1 = { version: 1, scope: "organization" } as const;
 
@@ -277,7 +284,7 @@ async function video(id: string, envelope: Record<string, unknown>) {
       credential_encrypted, provider_idempotency_key, expected_artifact_id, expected_file_id,
       reserved_bytes, status, recovery_deadline_at, funding_source
     ) VALUES (
-      ${id}, ${a.account}, ${a.w2}, ${a.s1}, ${a.t1}, ${`call-${id}`}, ${hex(id.slice(0, 1).replace(/[^0-9a-f]/, "a"))},
+      ${id}, ${a.account}, ${a.w2}, ${a.s1}, ${a.t1}, ${`call-${id}`}, ${id.replaceAll("-", "").repeat(2)},
       ${hex("b")}, ${hex("c")}, 'xai/grok-imagine-video', 'text', ${hex("d")}, 1,
       ${encryptEnvironmentValue(key, JSON.stringify(envelope))}, ${`idem-${id}`}, ${randomUUID()},
       ${randomUUID()}, 1024, 'accepted', now() + interval '1 hour', 'supergrok_subscription'
@@ -893,20 +900,37 @@ describe.skipIf(!realDb)(
           refresh_generation: "4",
           credential_format: "xai_oauth_v1",
         });
-        expect(byId.get(a.x3)).toMatchObject({ scope_kind: "organization", allow_personal_workspaces: true });
-        expect(byId.get(a.x4)).toMatchObject({ scope_kind: "workspaces", allowed_model_ids: [MODEL] });
+        expect(byId.get(a.x3)).toMatchObject({
+          scope_kind: "organization",
+          allow_personal_workspaces: true,
+        });
+        expect(byId.get(a.x4)).toMatchObject({
+          scope_kind: "workspaces",
+          allowed_model_ids: [MODEL],
+        });
         for (const id of [a.x5, a.x6]) {
-          expect(byId.get(id)).toMatchObject({ ownership: "personal", scope_kind: "people", owner: a.om });
+          expect(byId.get(id)).toMatchObject({
+            ownership: "personal",
+            scope_kind: "people",
+            owner: a.om,
+          });
         }
         expect(byId.get(a.x8)).toMatchObject({ ownership: "personal", owner: a.bm });
         expect(byId.get(b.y1)).toMatchObject({ ownership: "personal", owner: b.membership });
-        expect(byId.get(a.x9)).toMatchObject({ provider_account_id: null, scope_kind: "workspaces" });
+        expect(byId.get(a.x9)).toMatchObject({
+          provider_account_id: null,
+          scope_kind: "workspaces",
+        });
         // The canonical secret decrypts to the adapter format with the same tokens.
         const secret = decodeSubscriptionCoreXaiCredential(
           decryptEnvironmentValue(key, byId.get(a.x1)!.credential_encrypted),
         );
-        expect(secret).toMatchObject({ accessToken: accessToken("sub-dup"), refreshToken: `refresh-${a.x1}` });
-        const aliases = await owned.admin`SELECT alias_connection_id::text AS alias, connection_id::text AS target
+        expect(secret).toMatchObject({
+          accessToken: accessToken("sub-dup"),
+          refreshToken: `refresh-${a.x1}`,
+        });
+        const aliases =
+          await owned.admin`SELECT alias_connection_id::text AS alias, connection_id::text AS target
           FROM subscription_connection_aliases WHERE provider = 'xai' ORDER BY alias`;
         expect(new Map(aliases.map((row) => [row.alias, row.target]))).toEqual(
           new Map([
@@ -919,7 +943,8 @@ describe.skipIf(!realDb)(
           FROM xai_subscription_credentials`;
         expect(legacy).toEqual({ total: 10, blank: 10 });
         // Quota: one window; the rate-limited exhaustion keeps its kind.
-        const quotas = await owned.admin`SELECT connection_id::text AS id, quota, selection_count::int AS selection_count
+        const quotas =
+          await owned.admin`SELECT connection_id::text AS id, quota, selection_count::int AS selection_count
           FROM subscription_connection_quota WHERE connection_id IN (${a.x1}, ${a.x3}, ${a.x9})`;
         const quota = new Map(quotas.map((row) => [row.id, row]));
         expect(quota.get(a.x1)!.selection_count).toBe(8);
@@ -929,7 +954,8 @@ describe.skipIf(!realDb)(
       });
 
       test("generations: one owner with `user` credentials in two workspaces and a Personal one has one current generation", async () => {
-        const rows = await owned.admin`SELECT connection.owner_organization_membership_id::text AS owner,
+        const rows =
+          await owned.admin`SELECT connection.owner_organization_membership_id::text AS owner,
             array_agg(DISTINCT connection.authority_generation) AS generations,
             bool_and(authority.status = 'active' AND authority.generation = connection.authority_generation
               AND authority.resource_kind = 'subscription_connection') AS verified
@@ -949,18 +975,37 @@ describe.skipIf(!realDb)(
       });
 
       test("pools, rotation and source: organization rows, local pools frozen on the workspace source", async () => {
-        const policies = await owned.admin`SELECT connection_id::text AS id, workspace_id::text AS workspace,
+        const policies =
+          await owned.admin`SELECT connection_id::text AS id, workspace_id::text AS workspace,
             inference_pool, allocator_enabled, allowed_model_ids, managed_by_workspace_id::text AS manager
           FROM subscription_connection_assignment_policies policy
           WHERE account_id = ${a.account} AND connection_id IN (${a.x1}, ${a.x4}) ORDER BY id, workspace`;
         expect(policies).toEqual(
           expect.arrayContaining([
-            expect.objectContaining({ id: a.x1, workspace: a.w1, inference_pool: "workspace", manager: a.w1, allowed_model_ids: null }),
-            expect.objectContaining({ id: a.x1, workspace: a.w2, inference_pool: "workspace", manager: a.w2, allowed_model_ids: [MODEL] }),
-            expect.objectContaining({ id: a.x4, workspace: a.w2, inference_pool: "organization", manager: null }),
+            expect.objectContaining({
+              id: a.x1,
+              workspace: a.w1,
+              inference_pool: "workspace",
+              manager: a.w1,
+              allowed_model_ids: null,
+            }),
+            expect.objectContaining({
+              id: a.x1,
+              workspace: a.w2,
+              inference_pool: "workspace",
+              manager: a.w2,
+              allowed_model_ids: [MODEL],
+            }),
+            expect.objectContaining({
+              id: a.x4,
+              workspace: a.w2,
+              inference_pool: "organization",
+              manager: null,
+            }),
           ]),
         );
-        const settings = await owned.admin`SELECT workspace_id::text AS workspace, rotation, providers,
+        const settings =
+          await owned.admin`SELECT workspace_id::text AS workspace, rotation, providers,
             xai_primary_connection_id::text AS primary, personal_fallback_allowed
           FROM subscription_settings WHERE account_id = ${a.account}`;
         const byWorkspace = new Map(settings.map((row) => [row.workspace, row]));
@@ -979,24 +1024,38 @@ describe.skipIf(!realDb)(
           primary: null,
         });
         expect(byWorkspace.get(a.w3)!.providers.xai.inferenceSource).toBe("workspace");
-        expect(byWorkspace.get(a.pa)).toMatchObject({ personal_fallback_allowed: true, providers: null });
+        expect(byWorkspace.get(a.pa)).toMatchObject({
+          personal_fallback_allowed: true,
+          providers: null,
+        });
         expect(byWorkspace.has(a.pb)).toBe(false);
         const preferences = await owned.admin`SELECT organization_membership_id::text AS membership,
             personal_fallback_opt_in FROM subscription_person_preferences WHERE account_id = ${a.account}`;
-        expect(new Set(preferences.filter((row) => row.personal_fallback_opt_in).map((row) => row.membership))).toEqual(
-          new Set([a.om, a.bm]),
-        );
+        expect(
+          new Set(
+            preferences.filter((row) => row.personal_fallback_opt_in).map((row) => row.membership),
+          ),
+        ).toEqual(new Set([a.om, a.bm]));
         // Organization B kept its own settings; only the SuperGrok key changed.
-        const [orgB] = await owned.admin`SELECT personal_connections_allowed, rotation FROM subscription_settings
+        const [orgB] =
+          await owned.admin`SELECT personal_connections_allowed, rotation FROM subscription_settings
           WHERE account_id = ${b.account} AND workspace_id IS NULL`;
-        expect(orgB).toEqual({ personal_connections_allowed: false, rotation: { xai: { mode: "spread" } } });
+        expect(orgB).toEqual({
+          personal_connections_allowed: false,
+          rotation: { xai: { mode: "spread" } },
+        });
       });
 
       test("pins become bindings through aliases; an ineligible pin is a disposition", async () => {
-        const bindings = await owned.admin`SELECT session_id::text AS session, connection_id::text AS connection,
+        const bindings =
+          await owned.admin`SELECT session_id::text AS session, connection_id::text AS connection,
             choice, model_id FROM subscription_session_bindings WHERE provider = 'xai'`;
         const bySession = new Map(bindings.map((row) => [row.session, row]));
-        expect(bySession.get(a.s1)).toMatchObject({ connection: a.x1, choice: "explicit", model_id: MODEL });
+        expect(bySession.get(a.s1)).toMatchObject({
+          connection: a.x1,
+          choice: "explicit",
+          model_id: MODEL,
+        });
         expect(bySession.get(a.s2)).toMatchObject({ connection: a.x6, choice: "automatic" });
         expect(bySession.get(a.s3)).toMatchObject({ connection: a.x5, choice: "automatic" });
         expect(bySession.get(a.s4)).toMatchObject({ connection: a.x8, choice: "automatic" });
@@ -1004,12 +1063,17 @@ describe.skipIf(!realDb)(
       });
 
       test("live leases and waiters keep their fences, ids and pending wakes", async () => {
-        const leases = await owned.admin`SELECT turn_id::text AS turn, connection_id::text AS connection,
+        const leases =
+          await owned.admin`SELECT turn_id::text AS turn, connection_id::text AS connection,
             holder_id, generation::int AS generation FROM subscription_leases WHERE provider = 'xai'`;
-        expect([...leases]).toEqual([{ turn: a.t2, connection: a.x6, holder_id: "attempt-t2", generation: 2 }]);
-        const [legacyLeases] = await owned.admin`SELECT count(*)::int AS total FROM xai_credential_leases`;
+        expect([...leases]).toEqual([
+          { turn: a.t2, connection: a.x6, holder_id: "attempt-t2", generation: 2 },
+        ]);
+        const [legacyLeases] =
+          await owned.admin`SELECT count(*)::int AS total FROM xai_credential_leases`;
         expect(legacyLeases!.total).toBe(0);
-        const waiters = await owned.admin`SELECT waiter_id::text AS id, turn_id::text AS turn, generation::int AS generation,
+        const waiters =
+          await owned.admin`SELECT waiter_id::text AS id, turn_id::text AS turn, generation::int AS generation,
             wake_revision::int AS wake_revision,
             observed_wake_revision::int AS observed_wake_revision,
             blocked_turn_generation::int AS blocked_turn_generation, reset_kind, wait_reason,
@@ -1041,10 +1105,15 @@ describe.skipIf(!realDb)(
             personal, shared_pool, legacy_scope, owner_subject_id
           FROM opengeni_private.subscription_authority_compat WHERE provider = 'xai'`;
         const by = new Map(records.map((row) => [`${row.carrier_kind}:${row.carrier}`, row]));
-        const [generation] = await owned.admin`SELECT authority_generation FROM subscription_connections WHERE id = ${a.x6}`;
+        const [generation] =
+          await owned.admin`SELECT authority_generation FROM subscription_connections WHERE id = ${a.x6}`;
         const g = Number(generation!.authority_generation);
         // Live turns.
-        expect(by.get(`session_turn:${a.t1}`)).toMatchObject({ personal: [], shared_pool: "workspace", legacy_scope: "workspace" });
+        expect(by.get(`session_turn:${a.t1}`)).toMatchObject({
+          personal: [],
+          shared_pool: "workspace",
+          legacy_scope: "workspace",
+        });
         expect(by.get(`session_turn:${a.t2}`)).toMatchObject({
           personal: [{ ownerMembershipId: a.om, authorityGeneration: g, connectionIds: [a.x6] }],
           shared_pool: "none",
@@ -1060,7 +1129,10 @@ describe.skipIf(!realDb)(
         // Child parent turn, the withdrawn turn a draft edits, a session without turns.
         expect(by.has(`session_turn:${a.t5}`)).toBe(true);
         expect(by.has(`session_turn:${a.t6}`)).toBe(true);
-        expect(by.get(`session_initial:${a.s5}`)).toMatchObject({ shared_pool: "organization", legacy_scope: "organization" });
+        expect(by.get(`session_initial:${a.s5}`)).toMatchObject({
+          shared_pool: "organization",
+          legacy_scope: "organization",
+        });
         expect(by.has(`session_initial:${a.s7}`)).toBe(true);
         // Schedules: the `user` task follows its alias to the canonical connection.
         expect(by.get(`scheduled_task:${a.taskUser}`)).toMatchObject({
@@ -1072,7 +1144,11 @@ describe.skipIf(!realDb)(
         expect(by.has(`session_system_update:${a.update}`)).toBe(true);
         expect(by.has(`session_system_update_outbox:${a.outbox}`)).toBe(true);
         // Organization B forbids personal connections: the work waits.
-        expect(by.get(`session_turn:${b.turn}`)).toMatchObject({ personal: [], shared_pool: "none", legacy_scope: "user" });
+        expect(by.get(`session_turn:${b.turn}`)).toMatchObject({
+          personal: [],
+          shared_pool: "none",
+          legacy_scope: "user",
+        });
         // v1 snapshots and v2 values are unchanged.
         const after = await snapshotUntouched();
         expect(after.turns).toBe(before.turns);
@@ -1084,7 +1160,9 @@ describe.skipIf(!realDb)(
           FROM video_generation_operations WHERE id IN (${a.video}, ${a.videoUnmapped})`;
         const byId = new Map(videos.map((row) => [row.id, row]));
         for (const row of videos) expect(row.connection_id).toBeNull();
-        expect(JSON.parse(decryptEnvironmentValue(key, byId.get(a.video)!.credential_encrypted))).toEqual({
+        expect(
+          JSON.parse(decryptEnvironmentValue(key, byId.get(a.video)!.credential_encrypted)),
+        ).toEqual({
           kind: "subscription-connection",
           provider: "xai",
           connectionId: a.x1,
@@ -1092,12 +1170,14 @@ describe.skipIf(!realDb)(
         expect(
           JSON.parse(decryptEnvironmentValue(key, byId.get(a.videoUnmapped)!.credential_encrypted)),
         ).toEqual({ kind: "subscription-connection", provider: "xai", connectionId: NIL });
-        const [image] = await owned.admin`SELECT status FROM image_generation_operations WHERE id = ${a.image}`;
+        const [image] =
+          await owned.admin`SELECT status FROM image_generation_operations WHERE id = ${a.image}`;
         expect(image!.status).toBe("prepared");
       });
 
       test("the parity report has every metric equal, with dispositions and impact rows", async () => {
-        const report = await owned.admin`SELECT metric, account_id::text AS account, legacy_count::int AS legacy,
+        const report =
+          await owned.admin`SELECT metric, account_id::text AS account, legacy_count::int AS legacy,
             core_count::int AS core FROM opengeni_private.subscription_cutover_report WHERE provider = 'xai'`;
         const mismatched = report.filter((row) => row.legacy !== row.core);
         expect(mismatched).toEqual([]);
@@ -1109,7 +1189,10 @@ describe.skipIf(!realDb)(
         expect(metric("live_leases")).toMatchObject({ legacy: 1 });
         expect(metric("waiting_waiters")).toMatchObject({ legacy: 2 });
         expect(metric("pending_wakes")).toMatchObject({ legacy: 1 });
-        expect(metric("compat:dependent_sources_without_record")).toMatchObject({ legacy: 0, core: 0 });
+        expect(metric("compat:dependent_sources_without_record")).toMatchObject({
+          legacy: 0,
+          core: 0,
+        });
         expect(metric("video_operations_open")).toMatchObject({ legacy: 2 });
         expect(metric("image_operations_open")).toMatchObject({ legacy: 1 });
         expect(metric("personal_generations")).toMatchObject({ legacy: 2 });
@@ -1119,13 +1202,20 @@ describe.skipIf(!realDb)(
         expect(metric("disposition:user_rotation_dropped")).toMatchObject({ legacy: 1 });
         expect(metric("disposition:personal_rotation_dropped")).toMatchObject({ legacy: 1 });
         expect(metric("disposition:video_operation_unmapped")).toMatchObject({ legacy: 1 });
-        expect(metric("disposition:personal_connections_disallowed", b.account)).toMatchObject({ legacy: 1 });
-        expect(metric("disposition:compat_personal_connections_disallowed", b.account)).toMatchObject({ legacy: 1 });
+        expect(metric("disposition:personal_connections_disallowed", b.account)).toMatchObject({
+          legacy: 1,
+        });
+        expect(
+          metric("disposition:compat_personal_connections_disallowed", b.account),
+        ).toMatchObject({ legacy: 1 });
         expect(metric("compat:carriers_that_will_wait", b.account)).toMatchObject({ legacy: 1 });
-        expect(metric("readiness:owners_with_multiple_current_personal_generations", null as never)).toMatchObject({ core: 0 });
+        expect(
+          metric("readiness:owners_with_multiple_current_personal_generations", null as never),
+        ).toMatchObject({ core: 0 });
         expect(metric("xai_cutover_rows", null as never)).toBeDefined();
         // Only this provider's rows.
-        const [others] = await owned.admin`SELECT count(*)::int AS total FROM opengeni_private.subscription_cutover_report
+        const [others] =
+          await owned.admin`SELECT count(*)::int AS total FROM opengeni_private.subscription_cutover_report
           WHERE provider NOT IN ('xai', 'codex')`;
         expect(others!.total).toBe(0);
       });
@@ -1171,7 +1261,8 @@ describe.skipIf(!realDb)(
       }, 180_000);
 
       test("provisioning withdraws runtime writes on the legacy tables and the posture contract holds", async () => {
-        const privileges = await owned.admin`SELECT table_name, array_agg(privilege_type ORDER BY privilege_type) AS granted
+        const privileges =
+          await owned.admin`SELECT table_name, array_agg(privilege_type ORDER BY privilege_type) AS granted
           FROM information_schema.role_table_grants
           WHERE grantee = 'opengeni_app' AND table_name = ANY(${[...SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES.xai!]})
           GROUP BY table_name`;
@@ -1206,22 +1297,57 @@ describe.skipIf(!realDb)(
 
       test("pre-cutover schedules and inbox rows read their records as the application role", async () => {
         const read = (kind: string, workspace: string, id: string, revision: number | null) =>
-          withRlsContext(client.db, { accountId: a.account, workspaceId: workspace }, async (tx) => {
-            const [row] = await rawRows<{ authority: Record<string, unknown> | null }>(
-              tx,
-              sql`select opengeni_private.read_subscription_authority_compat('xai', ${kind},
+          withRlsContext(
+            client.db,
+            { accountId: a.account, workspaceId: workspace },
+            async (tx) => {
+              const [row] = await rawRows<{ authority: Record<string, unknown> | null }>(
+                tx,
+                sql`select opengeni_private.read_subscription_authority_compat('xai', ${kind},
                 ${workspace}::uuid, ${id}::uuid, ${revision}::bigint) as authority`,
-            );
-            return row!.authority;
-          });
-        const [task] = await owned.admin`SELECT authority_revision FROM scheduled_tasks WHERE id = ${a.taskUser}`;
-        const revision = await read("scheduled_task_revision", a.w2, a.taskUser, Number(task!.authority_revision));
-        expect(revision).toMatchObject({ authority: "record", legacyScope: "user", sharedPool: "none" });
+              );
+              return row!.authority;
+            },
+          );
+        const [task] =
+          await owned.admin`SELECT authority_revision FROM scheduled_tasks WHERE id = ${a.taskUser}`;
+        const revision = await read(
+          "scheduled_task_revision",
+          a.w2,
+          a.taskUser,
+          Number(task!.authority_revision),
+        );
+        expect(revision).toMatchObject({
+          authority: "record",
+          legacyScope: "user",
+          sharedPool: "none",
+        });
         expect((revision!.personal as unknown[]).length).toBe(1);
         expect(await read("session_system_update_outbox", a.w2, a.outbox, null)).toMatchObject({
           authority: "record",
         });
         expect(await read("session_turn", a.w1, a.t2, null)).toMatchObject({ authority: "record" });
+      }, 60_000);
+
+      test("a Steer or Cancel ends a migrated SuperGrok wait through the provider-neutral cleanup", async () => {
+        const [waiter] =
+          await owned.admin`SELECT workspace_id::text AS workspace FROM subscription_capacity_waiters
+          WHERE provider = 'xai' AND waiter_id = ${a.waiter}`;
+        expect(waiter).toBeDefined();
+        const deleted = await withRlsContext(
+          client.db,
+          { accountId: a.account, workspaceId: waiter!.workspace },
+          (tx) =>
+            deleteSubscriptionCoreWaitersOfEveryProviderForTurns(tx, {
+              workspaceId: waiter!.workspace,
+              turnIds: [a.t1],
+            }),
+        );
+        expect(deleted).toBe(1);
+        const [left] = await owned.admin`SELECT
+            (SELECT count(*)::int FROM subscription_capacity_waiters WHERE provider = 'xai') AS waiters,
+            (SELECT count(*)::int FROM subscription_capacity_wake_outbox WHERE account_id = ${a.account}) AS wakes`;
+        expect(left).toEqual({ waiters: 0, wakes: 0 });
       }, 60_000);
     });
   },

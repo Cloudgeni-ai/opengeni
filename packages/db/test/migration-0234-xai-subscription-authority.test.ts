@@ -18,8 +18,6 @@ import {
   getXaiRotationSettings,
   getXaiSessionAccountPin,
   listXaiSubscriptionAccountsMetadata,
-  lockSessionEventWriteRows,
-  lockWorkspaceInferenceControl,
   materializeXaiCredentialForRun,
   nestedPostgresSqlState,
   reconcileXaiCapacityWait,
@@ -27,17 +25,23 @@ import {
   refreshXaiSubscriptionCredentialSerialized,
   releaseXaiCredentialLease,
   setXaiSessionAccountPin,
-  supersedeSessionCurrentDirectionInTransaction,
   updateXaiQuotaMetadata,
   updateXaiRotationSettings,
   wakeXaiCapacityWaiters,
   xaiCredentialShardIndex,
   withSessionActivityRlsContext,
   withSessionRlsActorContext,
-  withWorkspaceSubjectSessionActivityRls,
   type DbClient,
 } from "../src";
 import { FORCE_RLS_TABLES, SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES } from "../src/runtime-posture";
+import { SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS } from "../src/runtime-posture";
+
+// Characterizes the legacy SuperGrok runtime, which runs only before the
+// drained SuperGrok cutover: the database withholds that migration. Removed
+// with the legacy runtime.
+const LEGACY_XAI_WORLD = {
+  withheldMigrations: [SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.xai!],
+};
 
 const migrationPath = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -225,7 +229,7 @@ beforeAll(async () => {
       release: async () => await admin.end(),
     };
   } else {
-    shared = await acquireSharedTestDatabase("migration-0234-xai-authority");
+    shared = await acquireSharedTestDatabase("migration-0234-xai-authority", LEGACY_XAI_WORLD);
   }
   if (!shared && requireRealDatabase) {
     throw new Error(
@@ -1012,81 +1016,9 @@ describe("migration 0234 xAI subscription authority", () => {
     ).toBe(true);
   }, 180_000);
 
-  test("steering a capacity-blocked turn supersedes its xAI waiter atomically", async () => {
-    if (!shared || !client) return;
-    const fixture = await seedWorkspace();
-    const [subjectId] = fixture.subjects;
-    const turn = await seedSessionTurn(fixture);
-    const armed = await armXaiCapacityWait(client.db, {
-      ...fixture,
-      subjectId: subjectId!,
-      sessionId: turn.sessionId,
-      turnId: turn.turnId,
-      attemptId: turn.attemptId,
-      workflowId: turn.workflowId,
-      authoritySnapshot: workspaceSnapshot,
-      earliestResetAt: null,
-      failurePayload: {
-        error: "all connected SuperGrok subscriptions are unavailable",
-        code: "xai_capacity_unavailable",
-      },
-    });
-    expect(armed.action).toBe("waiting");
-    if (armed.action !== "waiting") throw new Error("xAI capacity waiter did not arm");
-
-    await withWorkspaceSubjectSessionActivityRls(
-      client.db,
-      fixture.workspaceId,
-      subjectId!,
-      async (tx) => {
-        const control = await lockWorkspaceInferenceControl(tx, fixture.workspaceId, "update");
-        const locks = await lockSessionEventWriteRows(tx, {
-          workspaceId: fixture.workspaceId,
-          controlLock: "already_locked",
-          sessionIds: [turn.sessionId],
-        });
-        const session = locks.sessions[0];
-        if (!session) throw new Error("capacity-blocked session is missing");
-        const controlRevision = Number(control.revision);
-        if (!Number.isSafeInteger(controlRevision)) {
-          throw new Error("workspace control revision is outside the safe integer range");
-        }
-        expect(
-          await supersedeSessionCurrentDirectionInTransaction(tx, {
-            accountId: fixture.accountId,
-            workspaceId: fixture.workspaceId,
-            sessionId: turn.sessionId,
-            activeTurnId: session.activeTurnId,
-            actor: { type: "human", subjectId: subjectId! },
-            operationId: crypto.randomUUID(),
-            controlRevision,
-            lastSequence: session.lastSequence,
-          }),
-        ).toMatchObject({
-          interruptionCount: 0,
-          liveCurrentTurnId: null,
-          replacedTurn: { id: turn.turnId, status: "waiting_capacity" },
-        });
-      },
-    );
-
-    const [settled] = await shared.admin<
-      { waiter_status: string; last_wake_reason: string; turn_status: string }[]
-    >`
-      select waiter.status as waiter_status,
-        waiter.last_wake_reason,
-        turn.status as turn_status
-      from xai_capacity_waiters waiter
-      join session_turns turn
-        on turn.workspace_id = waiter.workspace_id
-       and turn.id = waiter.blocked_turn_id
-      where waiter.id = ${armed.waiter.id}`;
-    expect(settled).toEqual({
-      waiter_status: "superseded",
-      last_wake_reason: "steer",
-      turn_status: "superseded",
-    });
-  }, 180_000);
+  // Steering a capacity-blocked SuperGrok turn ends its core waiter since the
+  // drained cutover (0717); migration-0717-subscription-core-xai-cutover.test.ts
+  // covers it. This legacy world keeps no Steer path for xai_capacity_waiters.
 
   test("persists pool-scoped capacity waiters and immutable accepted-work snapshots", async () => {
     if (!shared || !client) return;

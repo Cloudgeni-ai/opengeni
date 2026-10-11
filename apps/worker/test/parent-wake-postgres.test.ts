@@ -27,6 +27,14 @@ import type { EventBus } from "@opengeni/events";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 
 import { notifyParentOfChildIdle, type NotifyServices } from "../src/activities/parent-wake";
+import { SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS } from "@opengeni/db";
+
+// Characterizes the legacy SuperGrok runtime, which runs only before the
+// drained SuperGrok cutover: the database withholds that migration. Removed
+// with the legacy runtime.
+const LEGACY_XAI_WORLD = {
+  withheldMigrations: [SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.xai!],
+};
 
 // The child-to-parent handoff with real PostgreSQL. Only the Temporal
 // transport is replaced: the recorder stands in for signalWithStart and then
@@ -41,7 +49,7 @@ let shared: SharedTestDatabase | null = null;
 let client: ReturnType<typeof createDb> | null = null;
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("worker-parent-wake");
+  shared = await acquireSharedTestDatabase("worker-parent-wake", LEGACY_XAI_WORLD);
   if (!shared) {
     if (requireRealDatabase) throw new Error("Parent wake PostgreSQL harness is unavailable");
     console.warn("[worker-parent-wake] PostgreSQL unavailable, skipping");

@@ -262,7 +262,7 @@ export async function executeMigrationFile(
     // Every failure leaves content-free, as for 0689.
     await sql
       .begin(async (transaction) => {
-        await transaction`CREATE TEMP TABLE xai_cutover_stage_0716(completed boolean NOT NULL) ON COMMIT DROP`;
+        await transaction`CREATE TEMP TABLE xai_cutover_stage(completed boolean NOT NULL) ON COMMIT DROP`;
         await transaction`SELECT
         pg_catalog.set_config('opengeni.sandbox_recovery_protocol_v2','1',true),
         pg_catalog.set_config('opengeni.session_variable_set_attachments_v1','1',true)`;
@@ -271,7 +271,7 @@ export async function executeMigrationFile(
           transaction,
           options?.environmentsEncryptionKey,
         );
-        await transaction`INSERT INTO pg_temp.xai_cutover_stage_0716 VALUES(true)`;
+        await transaction`INSERT INTO pg_temp.xai_cutover_stage VALUES(true)`;
         await transaction.unsafe(parts[1]!);
         await transaction`INSERT INTO schema_migrations(name) VALUES(${file}) ON CONFLICT DO NOTHING`;
       })

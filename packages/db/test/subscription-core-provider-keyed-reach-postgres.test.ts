@@ -44,6 +44,9 @@ import { wakeSubscriptionCoreCapacityWaiters } from "../src/subscription-core/wa
 const REACH_MIGRATION = "0713_subscription_core_provider_keyed_reach.sql";
 // 0714 redefines 0713's reach setters, so it is withheld and applied with it.
 const LATER_MIGRATIONS = ["0714_subscription_workspace_managed_organization_accounts.sql"];
+// The drained SuperGrok cutover is a maintenance step this rolling test never
+// runs: it stays recorded as applied throughout.
+const MAINTENANCE_MIGRATIONS = ["0717_subscription_core_xai_cutover.sql"];
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const key = Buffer.alloc(32, 71);
 const MODEL = "codex/gpt-5.5";
@@ -412,7 +415,7 @@ beforeAll(async () => {
   try {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
     await owner`insert into schema_migrations(name) values (${REACH_MIGRATION})`;
-    for (const later of LATER_MIGRATIONS)
+    for (const later of [...LATER_MIGRATIONS, ...MAINTENANCE_MIGRATIONS])
       await owner`insert into schema_migrations(name) values (${later})`;
     await migrate(database.ownerUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });

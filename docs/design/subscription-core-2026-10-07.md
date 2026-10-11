@@ -2418,7 +2418,7 @@ Module map (old Codex module, its new shared home, and what stays Codex):
 | `subscription-core-codex.ts` | `subscription-core/turns.ts`, `subscription-core/credential-resolver.ts` | credential mapping (ChatGPT account id, FedRAMP flag), the turn token resolver wrapper, every exported name |
 | `subscription-core-codex-operations.ts` | `subscription-core/operations.ts` | connection token resolver, candidate ordering, plan voice entitlement, usage endpoint fetch and decoding |
 | `subscription-core-codex-requests.ts` | `subscription-core/requests.ts` | Apps request reservation and settlement |
-| `subscription-core-codex-waiter-cleanup.ts` | `subscription-core/waiters.ts` | the Codex-named wrapper |
+| `subscription-core-codex-waiter-cleanup.ts` (now `subscription-core-waiter-cleanup.ts`, every provider; see X3) | `subscription-core/waiters.ts` | nothing since X3 |
 | `subscription-core-codex-compat.ts` | `subscription-core/administration.ts` (cutover disposition, workspace and organization pools, personal rows, allocator, extra credits, rename, primary, rotation, workspace source) | the legacy Codex account projection (ChatGPT account id, reset credits, plan history, plan-entitlement exclusions), rotation shape, every exported name |
 | `subscription-core-codex-connections.ts` | `subscription-core/connections.ts` (connect personal and shared, disconnect, disconnect all) | the FedRAMP flag as provider state, every exported name |
 | `subscription-core-codex-catalog.ts` | `subscription-core/catalog.ts` (serving connections, model admission, readiness) | every exported name |
@@ -3624,6 +3624,71 @@ aborts the migration) and adds four owner-only helpers in
   The test stages each kind before 0714, runs the query there as an operator
   would, and asserts it lists exactly them; after 0714 the same query lists
   them less the repaired authorities.
+
+#### X3: the drained SuperGrok cutover
+
+Migration 0717 (`-- deployment-mode: maintenance`) is the SuperGrok
+counterpart of 0689 and follows "Data mapping", "Accepted authority across
+the cutover", "Personal authority generations" and "Cutover protocol"
+above. The runbook is `docs/deployment.md`, "SuperGrok on the shared
+subscription core (0717)". Choices made where the plan left room, for
+reviewers:
+
+- **One writer for every provider's stage.** The credential stage is
+  `packages/db/src/xai-subscription-core-cutover.ts`; it holds only the
+  SuperGrok row shape, token identity, its four statuses and the quota
+  mapping. Staging tables, personal generation minting and the connection,
+  reach, alias, map and readability writes are the provider-neutral
+  `packages/db/src/subscription-core/cutover-stage.ts`, which the Claude
+  cutover calls with its own decoder and rules. 0689's Codex stage keeps its
+  own writer unchanged: it belongs to a shipped migration whose SQL reads
+  Codex-named staging tables and 0689-era relations, and a historical
+  migration is not rewritten. The planner is 0c's
+  `planSubscriptionCoreCutover` with SuperGrok's `SubscriptionCutoverRules`.
+- **Video.** A non-terminal SuperGrok video operation's token envelope is
+  replaced by the connection reference X2a's core video path reads
+  (`{kind: "subscription-connection", provider: "xai", connectionId}`),
+  read back before the replacement. An envelope whose credential cannot be
+  resolved gets the nil connection id and a
+  `disposition:video_operation_unmapped` row: the core path finds no
+  connection and the operation ends at its recovery deadline (decision 6).
+  An envelope funded by a `user` credential points at that owner's personal
+  connection, which X2a's video lease refuses (video is never funded by a
+  personal connection), so it ends the same way. Image operations keep
+  their recorded identity and resolve it through aliases.
+- **Steer and Cancel.** The legacy SuperGrok supersede in the Steer path is
+  gone (no legacy waiter can be live after the receipt the binary
+  requires). Steer and Cancel call
+  `deleteSubscriptionCoreWaitersOfEveryProviderForTurns`
+  (`packages/db/src/subscription-core-waiter-cleanup.ts`, formerly the
+  Codex-only `deleteSubscriptionCoreCodexWaitersForTurns`), which walks the
+  provider registry.
+- **Read-only legacy.** `SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES` in
+  `runtime-posture.ts` lists each provider's legacy tables (SuperGrok's five
+  now, Claude's in C3). Role provisioning grants the runtime `SELECT` only
+  on them once the provider's receipt exists. The posture evaluator
+  tolerates full DML on a provider's legacy tables while its receipt is
+  missing and then reports only the missing receipt, so a rolling binary
+  before the window sees one violation, not five. New legacy
+  `xai_subscription` authorities are refused by a restrictive `INSERT`
+  policy on `organization_user_resource_authorities` once the receipt
+  exists (the legacy connect routines run as the owner, which FORCE row
+  security binds); membership lifecycle still revokes, retains and restores
+  the existing ones.
+- **Readiness.** `SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.xai` is 0717, so a
+  binary with 0717 in its ledger refuses to start without the `xai` receipt
+  (the provider-keyed readiness function
+  `subscription_provider_cutover_committed('xai')`).
+- **Tests of the legacy runtime.** Characterization tests of the legacy
+  SuperGrok runtime run in a database that withholds 0717 (the shared test
+  harness's `withheldMigrations` option builds a separate template with
+  those ledger rows pre-recorded), the state a rolling deployment has
+  before the window. X4 deletes them with the legacy runtime.
+- **Temporal seam.** 0717 keeps every live waiter's id (as `waiter_id`),
+  generation, wake revisions and blocked-turn generation and moves its
+  pending wake to the wake outbox, so a workflow parked on a legacy
+  SuperGrok wait resumes on the core waiter with the same id and fences. The
+  replay test of that seam belongs to X1b and needs no change for these rows.
 
 #### Verification plan
 
