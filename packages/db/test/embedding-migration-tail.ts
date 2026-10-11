@@ -185,4 +185,7 @@ export const embeddingMigrationTail = [
   // shared core tables from withheld 0642 and patches the capture function
   // installed by withheld 0264/0275/0478; replay after them.
   "0712_subscription_core_generic_precursor.sql",
+  // Keys the auto-assignment table by provider and redefines the trigger and
+  // reach routines withheld 0689 and 0702 create; replay after them.
+  "0713_subscription_core_provider_keyed_reach.sql",
 ];

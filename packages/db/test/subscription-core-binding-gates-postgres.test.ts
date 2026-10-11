@@ -1,9 +1,10 @@
 // The shared subscription-core writers honour their provider binding: the
 // TypeScript registry agrees with the SQL registry, unregistered providers
-// and foreign primary columns are refused, and the extraCredits/apps
-// capabilities, a missing primary column and a missing allocator hook gate
-// exactly what they name. Variant bindings of the registered Codex provider
-// stand in for future providers, as the restricted application role.
+// and foreign primary columns are refused, the extraCredits/apps
+// capabilities and a missing primary column gate exactly what they name, and
+// an organization allocator switch refreshes the binding's provider-keyed
+// reach. Variant bindings of the registered Codex provider stand in for
+// future providers, as the restricted application role.
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
@@ -347,24 +348,28 @@ describe.skipIf(!realDb)("subscription-core binding gates (PostgreSQL)", () => {
     expect((await settingsRow(org, null))?.primary_id).toBe(connectionId);
   });
 
-  test("the organization allocator hook is optional and receives the organization switch", async () => {
+  test("an organization allocator switch refreshes the binding's provider-keyed reach", async () => {
     const org = await organization();
     const connectionId = await connectOrganizationConnection(org, "allocator-gate");
-    // Codex keeps a reach row for workspaces created later; its hook refreshes
-    // the row's allocator copy on an organization switch.
+    const plain = await connectOrganizationConnection(org, "allocator-gate-plain");
+    // A reach row keeps the connection's allocator copy for workspaces
+    // created later. The shared core refreshes it through the
+    // provider-keyed routine for whichever provider the binding names; no
+    // binding supplies a hook of its own.
     await shared!.admin`
       insert into opengeni_private.subscription_codex_auto_assignments (
-        account_id, connection_id, shared_workspaces, personal_workspaces,
+        account_id, provider, connection_id, shared_workspaces, personal_workspaces,
         allocator_enabled, allowed_model_ids
-      ) values (${org.accountId}::uuid, ${connectionId}::uuid, true, false, true, null)`;
-    const reachAllocator = async () => {
+      ) values (${org.accountId}::uuid, 'codex', ${connectionId}::uuid, true, false, true, null)`;
+    const reachAllocator = async (id: string) => {
       const [row] = await shared!.admin<{ allocator_enabled: boolean }[]>`
         select allocator_enabled from opengeni_private.subscription_codex_auto_assignments
-        where connection_id = ${connectionId}::uuid`;
+        where connection_id = ${id}::uuid`;
       return row?.allocator_enabled ?? null;
     };
     const switchWith = (
       binding: SubscriptionCoreProvider,
+      id: string,
       enabled: boolean,
       expectedVersion: number,
     ) =>
@@ -373,31 +378,27 @@ describe.skipIf(!realDb)("subscription-core binding gates (PostgreSQL)", () => {
           accountId: org.accountId,
           workspaceId: null,
           subjectId: org.ownerSubjectId,
-          connectionId,
+          connectionId: id,
           enabled,
           expectedVersion,
         }),
       );
 
-    const viaHook = await switchWith(registered(), false, 1);
-    expect(viaHook.result).toMatchObject({ kind: "updated", allocatorEnabled: false });
-    expect(await reachAllocator()).toBe(false);
+    const viaRegistered = await switchWith(registered(), connectionId, false, 1);
+    expect(viaRegistered.result).toMatchObject({ kind: "updated", allocatorEnabled: false });
+    expect(await reachAllocator(connectionId)).toBe(false);
 
-    // Without a hook the switch still applies, and nothing touches the reach.
-    const withoutHook = variant(() => ({ organizationAllocatorChanged: null }));
-    const again = await switchWith(withoutHook, true, 2);
+    // A variant binding of the same provider (as a future provider's binding
+    // differs) refreshes the same row the same way.
+    const variantBinding = variant((base) => ({ errors: { ...base.errors } }));
+    const again = await switchWith(variantBinding, connectionId, true, 2);
     expect(again.result).toMatchObject({ kind: "updated", allocatorEnabled: true });
-    expect(await reachAllocator()).toBe(false);
+    expect(await reachAllocator(connectionId)).toBe(true);
 
-    const calls: Array<[string, string]> = [];
-    const recording = variant(() => ({
-      organizationAllocatorChanged: async (_tx, accountId, changed) => {
-        calls.push([accountId, changed]);
-      },
-    }));
-    const recorded = await switchWith(recording, false, 3);
-    expect(recorded.result).toMatchObject({ kind: "updated", allocatorEnabled: false });
-    expect(calls).toEqual([[org.accountId, connectionId]]);
+    // A connection without a reach row is switched and gains none.
+    const withoutReach = await switchWith(registered(), plain, false, 1);
+    expect(withoutReach.result).toMatchObject({ kind: "updated", allocatorEnabled: false });
+    expect(await reachAllocator(plain)).toBeNull();
   });
 
   test("only a provider with the apps capability reports the Apps designations a disconnect clears", async () => {

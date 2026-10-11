@@ -5,7 +5,7 @@ import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/test
 import postgres from "postgres";
 import { migrationDeploymentMode, planMigrations } from "../src/migrate";
 
-const ROLLING = "0707_subscription_core_neutral_routines.sql";
+const ROLLING = "0713_subscription_core_provider_keyed_reach.sql";
 const MAINTENANCE = "0691_subscription_core_codex_disconnect.sql";
 
 let blank: BlankTestDatabase;

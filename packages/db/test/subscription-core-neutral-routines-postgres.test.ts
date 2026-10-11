@@ -42,21 +42,27 @@ beforeAll(async () => {
   // A rolling migration must leave an older binary's runtime posture intact
   // until roles are provisioned again. Stage a provisioned database without
   // 0707 (as a deployment is before it), apply 0707 alone, and evaluate the
-  // full runtime posture as the runtime role before provisioning again.
+  // full runtime posture as the runtime role before provisioning again. 0712
+  // patches routines 0707 creates and 0713 builds on 0707's registry, so both
+  // are withheld and applied with it.
   const neutral = "0707_subscription_core_neutral_routines.sql";
-  const precursor = "0712_subscription_core_generic_precursor.sql";
+  const withheld = [
+    neutral,
+    "0712_subscription_core_generic_precursor.sql",
+    "0713_subscription_core_provider_keyed_reach.sql",
+  ];
   const owner = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
-    // 0712 patches routines 0707 creates, so it is withheld and replayed with it.
-    await owner`insert into schema_migrations(name) values (${neutral}), (${precursor})`;
+    for (const name of withheld) await owner`insert into schema_migrations(name) values (${name})`;
     await migrate(database.ownerUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
-    await owner`delete from schema_migrations where name in (${neutral}, ${precursor})`;
+    await owner`delete from schema_migrations where name in ${owner(withheld)}`;
     await migrate(database.ownerUrl);
     const [applied] = await owner<{ count: number }[]>`
-      select count(*)::int as count from schema_migrations where name = ${neutral}`;
-    if (applied?.count !== 1) throw new Error("0707 was not applied by the second migrate");
+      select count(*)::int as count from schema_migrations where name in ${owner(withheld)}`;
+    if (applied?.count !== withheld.length)
+      throw new Error("0707, 0712 and 0713 were not applied by the second migrate");
   } finally {
     await owner.end();
   }
@@ -990,6 +996,14 @@ describe("provider-neutral subscription-core routines (migration 0707)", () => {
           await attempt("truncate", () =>
             tx`truncate opengeni_private.subscription_core_providers`.then(() => "truncated"),
           );
+          // 0713's reach rows and plan-change providers reference the
+          // registry, so a plain TRUNCATE is refused by those keys first;
+          // with CASCADE the append-only guard still refuses it.
+          await attempt("truncateCascade", () =>
+            tx`truncate opengeni_private.subscription_core_providers cascade`.then(
+              () => "truncated",
+            ),
+          );
           await attempt("missingColumn", () =>
             tx`insert into opengeni_private.subscription_core_providers
               (provider, primary_setting_column)
@@ -1038,7 +1052,8 @@ describe("provider-neutral subscription-core routines (migration 0707)", () => {
         },
         deleteProvider: { error: "subscription core providers are append-only" },
         renameProvider: { error: "subscription core providers are append-only" },
-        truncate: { error: "subscription core providers are append-only" },
+        truncate: { error: "cannot truncate a table referenced in a foreign key constraint" },
+        truncateCascade: { error: "subscription core providers are append-only" },
         missingColumn: { error: "subscription_settings primary column is missing" },
         foreignColumn: {
           error: expect.stringMatching(/subscription_core_providers_primary_column_chk/),

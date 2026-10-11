@@ -49,6 +49,8 @@ const subscriptionCoreMigrations = [
   "0711_subscription_codex_completion_operations.sql",
   // Records provider cutover receipts over withheld 0689 and restricts its tables.
   "0712_subscription_core_generic_precursor.sql",
+  // Keys and redefines the auto-assignment objects the withheld 0689 creates.
+  "0713_subscription_core_provider_keyed_reach.sql",
 ] as const;
 const key = Buffer.alloc(32, 67);
 const ids = {

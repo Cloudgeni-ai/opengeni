@@ -10,7 +10,6 @@
  */
 import type { SQL } from "drizzle-orm";
 import type { SubscriptionCoreAdapter } from "@opengeni/subscriptions";
-import type { Database } from "../database";
 import { subscriptionCoreProvider } from "../subscription-core-providers";
 import type { SubscriptionCoreErrors } from "./errors";
 
@@ -34,14 +33,6 @@ export type SubscriptionCoreProvider<Credential = unknown> = {
      */
     readonly primaryColumn: string | null;
   };
-  /**
-   * Runs inside an organization-route allocator change of a shared
-   * connection, after the organization pool's copy changed (for example the
-   * provider's organization reach for workspaces created later), or null.
-   */
-  readonly organizationAllocatorChanged:
-    | ((tx: Database, accountId: string, connectionId: string) => Promise<void>)
-    | null;
 };
 
 /**
