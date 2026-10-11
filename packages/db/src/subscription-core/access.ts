@@ -253,6 +253,8 @@ async function projection(
   const local = (await localWorkspaceIds(tx, target.accountId, connection)).filter((id) =>
     shared.has(id),
   );
+  // The organization's list, which its workspaces are held to.
+  const allowedModels = await organizationModels(tx, target.accountId, connection);
   const base = {
     localWorkspaceIds: local,
     managedByWorkspaceId: connection.managed_by_workspace_id,
@@ -262,7 +264,7 @@ async function projection(
     return {
       ...base,
       policy: {
-        allowedModels: connection.allowed_model_ids,
+        allowedModels,
         allowedWorkspaces: null,
         allowPersonalWorkspaces: true,
         allowedPeople: null,
@@ -280,7 +282,7 @@ async function projection(
     return {
       ...base,
       policy: {
-        allowedModels: connection.allowed_model_ids,
+        allowedModels,
         allowedWorkspaces: [],
         allowPersonalWorkspaces: false,
         allowedPeople: people.map((row) => row.membership_id),
@@ -329,7 +331,7 @@ async function projection(
   return {
     ...base,
     policy: {
-      allowedModels: connection.allowed_model_ids,
+      allowedModels,
       allowedWorkspaces,
       allowPersonalWorkspaces: connection.allow_personal_workspaces,
       allowedPeople: null,
@@ -407,43 +409,44 @@ async function chosenPeople(tx: Database, accountId: string, connectionId: strin
 }
 
 /**
- * Copy a shared connection's rotation switch and model list onto the copies
- * placement also reads: its organization-pool rows, the managing workspace's
- * own row and the reach for workspaces created later. Both the organization
- * and the managing workspace change these values, but only an organization
- * administrator may write the organization's copies, so one routine keeps
- * them a single value (0714). Returns whether a copy changed.
- *
- * `models`: also copy the model list (the access editors' saves); a rotation
- * switch copies only itself.
- * `repair`: a read-only caller (it changed nothing itself) that may not manage
- * the account is a no-op instead of an error.
+ * The organization's own rotation switch for the workspaces it shares a
+ * connection with: its organization-pool rows' switch (uniform; the
+ * organization route writes them together), or the connection's when it has
+ * none. A workspace-managed connection's delegated manager writes the
+ * connection's switch, never these rows, so new rows and the reach for
+ * workspaces created later take this value, not the connection's.
  */
-export async function syncSubscriptionCoreCopies(
+export async function organizationAllocator(
   tx: Database,
-  provider: SubscriptionCoreProvider,
   accountId: string,
   connectionId: string,
-  options: { models: boolean; repair?: boolean },
+  connectionAllocator: boolean,
 ): Promise<boolean> {
-  const run = async (db: Database) => {
-    const [row] = await rawRows<{ changed: boolean }>(
-      db,
-      sql`select opengeni_private.sync_subscription_core_copies(
-        ${subscriptionCoreProviderId(provider)}, ${accountId}::uuid, ${connectionId}::uuid,
-        ${options.models}::boolean
-      ) as changed`,
-    );
-    return row?.changed === true;
-  };
-  if (!options.repair) return await run(tx);
-  try {
-    return await tx.transaction(async (savepoint) => await run(savepoint as unknown as Database));
-  } catch (error) {
-    const state = nestedPostgresSqlState(error);
-    if (state === "42501" || state === "P0002") return false;
-    throw error;
-  }
+  const [row] = await rawRows<{ enabled: boolean | null }>(
+    tx,
+    sql`select bool_and(policy.allocator_enabled) as enabled
+      from subscription_connection_assignment_policies policy
+      where policy.account_id = ${accountId}::uuid and policy.connection_id = ${connectionId}::uuid
+        and policy.inference_pool = 'organization' and policy.managed_by_workspace_id is null`,
+  );
+  return row?.enabled ?? connectionAllocator;
+}
+
+/** The organization's model list: its organization-pool rows' list, or the connection's. */
+async function organizationModels(
+  tx: Database,
+  accountId: string,
+  connection: AccessRow,
+): Promise<string[] | null> {
+  if (connection.managed_by_workspace_id === null) return connection.allowed_model_ids;
+  const [row] = await rawRows<{ allowed_model_ids: string[] | null }>(
+    tx,
+    sql`select policy.allowed_model_ids from subscription_connection_assignment_policies policy
+      where policy.account_id = ${accountId}::uuid and policy.connection_id = ${connection.id}::uuid
+        and policy.inference_pool = 'organization' and policy.managed_by_workspace_id is null
+      order by policy.workspace_id limit 1`,
+  );
+  return row ? row.allowed_model_ids : connection.allowed_model_ids;
 }
 
 /**
@@ -510,8 +513,6 @@ export async function updateSubscriptionCoreConnectionAccess(
         set allowed_model_ids = ${models}, updated_at = clock_timestamp()
         where account_id = ${target.accountId}::uuid and connection_id = ${id}::uuid
           and workspace_id = ${target.workspaceId}::uuid and inference_pool = 'workspace'`);
-      // The organization's copies of this account follow the same list.
-      await syncSubscriptionCoreCopies(tx, provider, target.accountId, id, { models: true });
       return await projection(tx, provider, target, updated);
     }
 
@@ -546,8 +547,22 @@ export async function updateSubscriptionCoreConnectionAccess(
     const personal = accountWorkspaces
       .map((row) => row.id)
       .filter((workspaceId) => !shared.has(workspaceId));
+    // A workspace-managed connection is never stored with organization scope:
+    // its delegated manager writes the connection's own switch and model list,
+    // so "everyone" is every workspace's organization-pool row plus the reach
+    // for workspaces created later, which only organization administrators
+    // write, and the manager can narrow other workspaces but never widen them.
     const organizationScope =
-      people === null && policy.allowedWorkspaces === null && policy.allowPersonalWorkspaces;
+      current.managed_by_workspace_id === null &&
+      people === null &&
+      policy.allowedWorkspaces === null &&
+      policy.allowPersonalWorkspaces;
+    const organizationSwitch = await organizationAllocator(
+      tx,
+      target.accountId,
+      id,
+      current.allocator_enabled,
+    );
     const reach =
       people === null && !organizationScope
         ? {
@@ -622,7 +637,7 @@ export async function updateSubscriptionCoreConnectionAccess(
         allowed_model_ids, excluded_models, managed_by_workspace_id
       )
       select ${target.accountId}::uuid, ${id}::uuid, workspace_id, 'organization',
-        ${updated.allocator_enabled}, ${models}, '{}'::text[], null
+        ${organizationSwitch}, ${models}, '{}'::text[], null
       from unnest(${keep}) as workspace_id
       on conflict do nothing`);
     await tx.execute(sql`update subscription_connection_assignment_policies
@@ -643,8 +658,20 @@ export async function updateSubscriptionCoreConnectionAccess(
     await tx.execute(sql`select opengeni_private.set_subscription_core_reach(
       ${subscriptionCoreProviderId(provider)}, ${target.accountId}::uuid, ${id}::uuid,
       ${reach.sharedWorkspaces}::boolean, ${reach.personalWorkspaces}::boolean)`);
-    // The managing workspace's own copy follows the same model list.
-    await syncSubscriptionCoreCopies(tx, provider, target.accountId, id, { models: true });
+    // The setter copies the connection's switch; the reach keeps the
+    // organization's.
+    await tx.execute(sql`select opengeni_private.set_subscription_core_reach_allocator(
+      ${subscriptionCoreProviderId(provider)}, ${target.accountId}::uuid, ${id}::uuid,
+      ${organizationSwitch}::boolean)`);
+    // The organization's list also becomes the managing workspace's own
+    // copy's, which that workspace may change again afterwards.
+    if (current.managed_by_workspace_id !== null)
+      await tx.execute(sql`update subscription_connection_assignment_policies
+        set allowed_model_ids = ${models}, updated_at = clock_timestamp()
+        where account_id = ${target.accountId}::uuid and connection_id = ${id}::uuid
+          and workspace_id = ${current.managed_by_workspace_id}::uuid
+          and inference_pool = 'workspace'
+          and managed_by_workspace_id = ${current.managed_by_workspace_id}::uuid`);
     return await projection(tx, provider, target, updated);
   });
 }

@@ -17,15 +17,11 @@
 -- read any connection's row. Signatures, owners, grants, security mode and
 -- search paths are unchanged (CREATE OR REPLACE keeps the grants).
 --
--- Once both the organization and the managing workspace administer such an
--- account, its rotation switch and model list are one value each: the
--- connection's. One new routine, `sync_subscription_core_copies`, copies them
--- onto the copies placement also reads (the organization-pool rows, the
--- managing workspace's own row and the reach for workspaces created later),
--- which the workspace's administrators cannot write under row security.
--- It never changes scope, assignments or people, only copies the
--- connection's own two values, and is callable by an organization
--- administrator or the account's delegated manager.
+-- One routine is added, `set_subscription_core_reach_allocator`: the
+-- organization's rotation switch sets the reach row's switch alone (the
+-- setter would also copy the connection's model list, which a delegated
+-- manager writes). Organization-administrator only, with the setter's checks;
+-- it changes nothing else.
 SET LOCAL lock_timeout = '5s';
 
 DO $install$
@@ -133,79 +129,56 @@ BEGIN
 END
 $install$;
 
-DO $install_copies$
+DO $install_reach_allocator$
 DECLARE data_schema text := current_schema();
 BEGIN
-  -- The rotation switch and model list each administrator sees are the
-  -- connection's; placement also reads the copies on the organization-pool
-  -- rows, on the managing workspace's own row and on the reach row. A
-  -- workspace's own copy that no workspace manages (copies 0689 merged) keeps
-  -- its own values. The switch is always copied; the model list only when
-  -- `p_models` (the access editors' saves). Returns whether any copy changed.
+  -- The organization's rotation switch for the workspaces it shares an
+  -- account with lives on its organization-pool rows and on the reach row
+  -- for workspaces created later. The reach setter copies the connection's
+  -- own switch and model list, which a workspace-managed account's delegated
+  -- manager also writes, so the organization's switch sets the reach row's
+  -- switch alone, as an organization administrator, with the setter's checks.
   EXECUTE format($ddl$
-    CREATE FUNCTION opengeni_private.sync_subscription_core_copies(
-      p_provider text, p_account_id uuid, p_connection_id uuid, p_models boolean
-    ) RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER
+    CREATE FUNCTION opengeni_private.set_subscription_core_reach_allocator(
+      p_provider text, p_account_id uuid, p_connection_id uuid, p_enabled boolean
+    ) RETURNS void LANGUAGE plpgsql SECURITY DEFINER
     SET search_path = pg_catalog, %1$I, opengeni_private, pg_temp
     AS $body$
-    DECLARE
-      target record;
-      previous text := current_setting('opengeni.subscription_core_auto_assign', true);
-      policies integer;
-      reaches integer;
+    DECLARE target record;
     BEGIN
-      SELECT connection.allocator_enabled, connection.allowed_model_ids,
-          connection.managed_by_workspace_id INTO target
+      IF NOT opengeni_private.subscription_organization_admin(p_account_id) THEN
+        RAISE EXCEPTION 'only organization administrators may change subscription connection reach'
+          USING ERRCODE = '42501';
+      END IF;
+      IF p_enabled IS NULL THEN
+        RAISE EXCEPTION 'subscription connection reach allocator is required' USING ERRCODE = '22023';
+      END IF;
+      SELECT connection.managed_by_workspace_id INTO target
       FROM subscription_connections connection
       WHERE connection.account_id = p_account_id AND connection.id = p_connection_id
         AND connection.provider = p_provider AND connection.kind = 'subscription'
         AND connection.ownership = 'shared';
-      IF NOT FOUND THEN
+      IF NOT FOUND OR (target.managed_by_workspace_id IS NOT NULL AND NOT EXISTS (
+          SELECT 1 FROM %1$I.list_organization_workspace_ids(p_account_id) inventory
+          WHERE inventory.workspace_id = target.managed_by_workspace_id)) THEN
         RAISE EXCEPTION 'organization subscription connection not found' USING ERRCODE = 'P0002';
       END IF;
-      IF NOT (opengeni_private.subscription_organization_admin(p_account_id)
-          OR (target.managed_by_workspace_id IS NOT NULL
-            AND opengeni_private.subscription_apps_designation_manage_allowed(
-              p_account_id, target.managed_by_workspace_id, p_connection_id))) THEN
-        RAISE EXCEPTION 'only the account''s administrators may change its copies'
-          USING ERRCODE = '42501';
-      END IF;
-      PERFORM pg_catalog.set_config('opengeni.subscription_core_auto_assign', p_account_id::text, true);
-      UPDATE subscription_connection_assignment_policies policy
-      SET allocator_enabled = target.allocator_enabled,
-          allowed_model_ids = CASE WHEN p_models THEN target.allowed_model_ids
-            ELSE policy.allowed_model_ids END,
-          updated_at = pg_catalog.clock_timestamp()
-      WHERE policy.account_id = p_account_id AND policy.connection_id = p_connection_id
-        AND ((policy.inference_pool = 'organization' AND policy.managed_by_workspace_id IS NULL)
-          OR (policy.inference_pool = 'workspace'
-            AND policy.workspace_id = target.managed_by_workspace_id
-            AND policy.managed_by_workspace_id = target.managed_by_workspace_id))
-        AND (policy.allocator_enabled IS DISTINCT FROM target.allocator_enabled
-          OR (p_models AND policy.allowed_model_ids IS DISTINCT FROM target.allowed_model_ids));
-      GET DIAGNOSTICS policies = ROW_COUNT;
       UPDATE opengeni_private.subscription_core_auto_assignments auto
-      SET allocator_enabled = target.allocator_enabled,
-          allowed_model_ids = CASE WHEN p_models THEN target.allowed_model_ids
-            ELSE auto.allowed_model_ids END
+      SET allocator_enabled = p_enabled
       WHERE auto.account_id = p_account_id AND auto.provider = p_provider
-        AND auto.connection_id = p_connection_id
-        AND (auto.allocator_enabled IS DISTINCT FROM target.allocator_enabled
-          OR (p_models AND auto.allowed_model_ids IS DISTINCT FROM target.allowed_model_ids));
-      GET DIAGNOSTICS reaches = ROW_COUNT;
-      PERFORM pg_catalog.set_config('opengeni.subscription_core_auto_assign', coalesce(previous, ''), true);
-      RETURN policies + reaches > 0;
+        AND auto.connection_id = p_connection_id;
     END
     $body$
   $ddl$, data_schema);
 END
-$install_copies$;
+$install_reach_allocator$;
 
-REVOKE ALL ON FUNCTION opengeni_private.sync_subscription_core_copies(text, uuid, uuid, boolean) FROM PUBLIC;
+REVOKE ALL ON FUNCTION opengeni_private.set_subscription_core_reach_allocator(text, uuid, uuid, boolean)
+  FROM PUBLIC;
 
 -- Like the reach setters: the configured application roles (and the default
 -- one) and nobody else.
-DO $grant_copies$
+DO $grant_reach_allocator$
 DECLARE application_role text;
 BEGIN
   FOR application_role IN
@@ -223,8 +196,8 @@ BEGIN
     WHERE EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'opengeni_app')
   LOOP
     EXECUTE format(
-      'GRANT EXECUTE ON FUNCTION opengeni_private.sync_subscription_core_copies(text, uuid, uuid, boolean) TO %I',
+      'GRANT EXECUTE ON FUNCTION opengeni_private.set_subscription_core_reach_allocator(text, uuid, uuid, boolean) TO %I',
       application_role);
   END LOOP;
 END
-$grant_copies$;
+$grant_reach_allocator$;

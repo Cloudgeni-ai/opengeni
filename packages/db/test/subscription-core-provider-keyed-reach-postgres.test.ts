@@ -490,13 +490,13 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
           publicExecute: false,
         },
         {
-          routine: "opengeni_private.subscription_core_reach(text,uuid,uuid)",
+          // 0714, applied with 0713 here.
+          routine: "opengeni_private.set_subscription_core_reach_allocator(text,uuid,uuid,boolean)",
           execute: true,
           publicExecute: false,
         },
         {
-          // 0714, applied with 0713 here.
-          routine: "opengeni_private.sync_subscription_core_copies(text,uuid,uuid,boolean)",
+          routine: "opengeni_private.subscription_core_reach(text,uuid,uuid)",
           execute: true,
           publicExecute: false,
         },
@@ -568,9 +568,9 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
         "relation opengeni_private.subscription_core_auto_assignments_pkey",
         "routine list_organization_subscription_workspace_ids(uuid)",
         "routine opengeni_private.set_subscription_core_reach(text,uuid,uuid,boolean,boolean)",
+        // 0714 (applied with 0713 here): the organization's switch on the reach row alone.
+        "routine opengeni_private.set_subscription_core_reach_allocator(text,uuid,uuid,boolean)",
         "routine opengeni_private.subscription_core_reach(text,uuid,uuid)",
-        // 0714 (applied with 0713 here): the copies of the one rotation switch and model list.
-        "routine opengeni_private.sync_subscription_core_copies(text,uuid,uuid,boolean)",
         "routine opengeni_subscription_internal.apply_subscription_core_auto_assignments(text,uuid,uuid,boolean)",
         "routine opengeni_subscription_internal.auto_assign_subscription_core_personal_workspace()",
         "routine opengeni_subscription_internal.auto_assign_subscription_core_workspace()",

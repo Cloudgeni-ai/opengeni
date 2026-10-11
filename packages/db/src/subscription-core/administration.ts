@@ -26,7 +26,7 @@ import {
   readSubscriptionProviderCutoverState,
   resolveSubscriptionConnectionId,
 } from "../subscription-core-repository";
-import { organizationAdministeredConnection, syncSubscriptionCoreCopies } from "./access";
+import { organizationAdministeredConnection, organizationAllocator } from "./access";
 import { SubscriptionCoreError } from "./errors";
 import { subscriptionCoreProviderId, type SubscriptionCoreProvider } from "./provider";
 
@@ -520,6 +520,23 @@ async function withAdministration<T>(
  * organization pool itself (its primary).
  * Management authority itself is still the core tables' write policies.
  */
+/** The managing workspace's own copy's switch, or true when it has no own row. */
+async function workspaceOwnAllocator(
+  tx: Database,
+  accountId: string,
+  workspaceId: string,
+  connectionId: string,
+): Promise<boolean> {
+  const [row] = await rawRows<{ allocator_enabled: boolean }>(
+    tx,
+    sql`select allocator_enabled from subscription_connection_assignment_policies
+      where account_id = ${accountId}::uuid and connection_id = ${connectionId}::uuid
+        and workspace_id = ${workspaceId}::uuid and inference_pool = 'workspace'
+        and managed_by_workspace_id = ${workspaceId}::uuid`,
+  );
+  return row?.allocator_enabled ?? true;
+}
+
 async function visibleSharedConnection(
   tx: Database,
   provider: SubscriptionCoreProvider,
@@ -626,36 +643,26 @@ export async function setSubscriptionCoreAllocator(
       sql`select updated_at from subscription_connections
         where account_id = ${input.accountId}::uuid and id = ${current.id}::uuid`,
     );
-    if (current.allocatorEnabled === input.enabled) {
-      // The switch already reads this value. Copies another administrator
-      // left disagreeing (before 0714's single switch) are repaired.
-      const repaired = await syncSubscriptionCoreCopies(tx, provider, input.accountId, current.id, {
-        models: false,
-        repair: true,
-      });
+    // Each route shows and flips its own switch: the connection's switch with
+    // the organization's pool rows (organization route) or with the managing
+    // workspace's own row (workspace route). The connection's switch gates
+    // every copy, so either side can turn the account off everywhere, but
+    // turning it on reaches only that side's copies: a delegated manager never
+    // re-enables what the organization switched off for other workspaces.
+    const shown =
+      current.allocatorEnabled &&
+      (input.workspaceId === null
+        ? await organizationAllocator(tx, input.accountId, current.id, true)
+        : await workspaceOwnAllocator(tx, input.accountId, input.workspaceId, current.id));
+    if (shown === input.enabled) {
       return {
-        result: projection(
-          "unchanged",
-          current.allocatorEnabled,
-          current.allocatorVersion,
-          stamp?.updated_at ?? null,
-        ),
-        wake: repaired
-          ? {
-              accountId: input.accountId,
-              reason: subscriptionCoreWakeReason(provider, "allocator_changed"),
-            }
-          : null,
+        result: projection("unchanged", shown, current.allocatorVersion, stamp?.updated_at ?? null),
+        wake: null,
       };
     }
     if (current.allocatorVersion !== input.expectedVersion) {
       return {
-        result: projection(
-          "conflict",
-          current.allocatorEnabled,
-          current.allocatorVersion,
-          stamp?.updated_at ?? null,
-        ),
+        result: projection("conflict", shown, current.allocatorVersion, stamp?.updated_at ?? null),
         wake: null,
       };
     }
@@ -677,16 +684,24 @@ export async function setSubscriptionCoreAllocator(
         );
         if (row) {
           // The pool rows and the reach for workspaces created later carry
-          // their own allocator copy, which placement also requires. The
-          // organization and the managing workspace flip one switch, so every
-          // copy either of them governs follows it, whichever route flipped it.
-          await syncSubscriptionCoreCopies(
-            savepoint as unknown as Database,
-            provider,
-            input.accountId,
-            current.id,
-            { models: false },
-          );
+          // their own allocator copy, which placement also requires.
+          if (input.workspaceId === null) {
+            await savepoint.execute(sql`update subscription_connection_assignment_policies
+              set allocator_enabled = ${input.enabled}, updated_at = clock_timestamp()
+              where account_id = ${input.accountId}::uuid and connection_id = ${current.id}::uuid
+                and inference_pool = 'organization' and managed_by_workspace_id is null`);
+            // The reach row's switch alone: its model list stays the
+            // organization's.
+            await savepoint.execute(sql`select opengeni_private.set_subscription_core_reach_allocator(
+              ${subscriptionCoreProviderId(provider)}, ${input.accountId}::uuid,
+              ${current.id}::uuid, ${input.enabled}::boolean)`);
+          } else {
+            await savepoint.execute(sql`update subscription_connection_assignment_policies
+              set allocator_enabled = ${input.enabled}, updated_at = clock_timestamp()
+              where account_id = ${input.accountId}::uuid and connection_id = ${current.id}::uuid
+                and workspace_id = ${input.workspaceId}::uuid and inference_pool = 'workspace'
+                and managed_by_workspace_id = ${input.workspaceId}::uuid`);
+          }
         }
         return row;
       });

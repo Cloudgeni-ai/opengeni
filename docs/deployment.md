@@ -4355,19 +4355,20 @@ manager is a shared workspace of the organization, so an organization
 administrator can give it to the whole
 organization, chosen workspaces or chosen people without reconnecting. Design
 record: [workspace-managed connections as organization accounts](design/subscription-core-2026-10-07.md#54-workspace-managed-connections-as-organization-accounts).
-It also adds one routine, `opengeni_private.sync_subscription_core_copies`
-(granted to the application roles like the setters): once the organization
-and the managing workspace both administer an account, its rotation switch
-and model list are one value each, and the routine copies the connection's
-value onto the organization-pool rows, the managing workspace's own row and
-the reach row, which the workspace's administrators cannot write themselves.
-Either side's switch or model save changes it everywhere; flipping a switch to
-the value it already shows repairs copies that disagree. A workspace's own
-copy that no workspace manages (copies 0689 merged) keeps its own values.
+It also adds one routine, `opengeni_private.set_subscription_core_reach_allocator`
+(organization administrators only, granted to the application roles like the
+setters): the organization's rotation switch sets the reach row's switch
+without copying the connection's model list, which the managing workspace's
+administrators also write. The organization's choices for other workspaces
+live on its organization-pool rows and that reach row, so a managing
+workspace can narrow other workspaces' use but never widen it; giving such an
+account to every workspace stores every workspace's row plus the reach
+instead of organization scope. Each route's rotation switch shows and flips
+its own side's copies.
 It needs no drain or window: older binaries never call the helper for a
 managed connection and read the same rows with the same meaning. This
-release's API calls the new routine on every rotation switch and access save,
-so apply 0714 before rolling out the API (the normal order). It can ship
+release's API calls the new routine on every organization rotation switch and
+access save, so apply 0714 before rolling out the API (the normal order). It can ship
 alone or in the same release as the SuperGrok and Claude cutovers. It must
 run after 0713 (ordinal order guarantees it).
 
@@ -4457,17 +4458,18 @@ approves the Accounts page change, the page still lists these accounts under
 their workspace.
 
 In the same test organization, switch the account's rotation off on the
-organization route and on again on its workspace's route: every
-`subscription_connection_assignment_policies` row of the account and its
-reach row read the same `allocator_enabled` as the connection.
+organization route and on again on its workspace's route: the workspace's
+own copy serves again, other workspaces stay off, and the organization's
+switch still reads off until it is turned on there.
 
 **Fix forward.** The previous setter definitions are in 0713. If they
 misbehave, ship a forward migration restoring those definitions and keeping
-`sync_subscription_core_copies` (this release's API calls it on every
-rotation switch and access save; dropping it makes those fail). Organization
-access saves on managed accounts then fail (the setter's "not found" surfaces
-as a server error while this release's API is deployed) and write nothing;
-rotation switches keep working, on both routes; nothing else changes. That includes narrowing: an account already given to more
+`set_subscription_core_reach_allocator` (this release's API calls it on every
+organization rotation switch and access save; dropping it makes those fail).
+Organization access saves on managed accounts then fail (the setter's "not
+found" surfaces as a server error while this release's API is deployed) and
+write nothing; rotation switches keep working on both routes; nothing else
+changes. That includes narrowing: an account already given to more
 workspaces stays that way. Narrow such accounts back to their workspace
 (`allowedWorkspaces: []`) before restoring the setters, or restore only if
 a defect requires it.
