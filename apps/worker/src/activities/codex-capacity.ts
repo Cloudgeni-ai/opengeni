@@ -15,6 +15,7 @@ import {
   reconcileCoreCodexCapacityWait,
 } from "./subscription-core-codex-waits";
 import { XAI_CORE_WAIT_BINDING } from "./subscription-core-xai-waits";
+import { CLAUDE_CORE_WAIT_BINDING } from "./subscription-core-claude-waits";
 
 import type {
   ControlActivityServices,
@@ -28,8 +29,9 @@ export function createCodexCapacityActivities(services: () => Promise<ControlAct
     const { db } = await services();
     // A core waiter (shared subscription core) is the only waiter written
     // after its provider's cutover. A Codex one keeps the legacy Codex
-    // reference shape; a SuperGrok one carries `provider: "xai"`, so its
-    // reconcile also looks the core up first.
+    // reference shape; a SuperGrok one carries `provider: "xai"` and a
+    // Claude one `provider: "claude"`, so their reconcile also looks the core
+    // up first.
     const coreWaiter = await getSubscriptionCoreCapacityWaitForSession(
       db,
       input.workspaceId,
@@ -67,17 +69,22 @@ export function createCodexCapacityActivities(services: () => Promise<ControlAct
     input: ReconcileCodexCapacityWaitInput,
   ): Promise<ReconcileCodexCapacityWaitResult> {
     const resolved = await services();
-    if (input.provider === "xai") {
-      // The core waiter by its exact id and generation first: a SuperGrok
-      // waiter the cutover moved to the core keeps both, so a history that
-      // recorded the legacy reference reconciles against the core waiter.
-      const core = await reconcileCoreCapacityWait(resolved, XAI_CORE_WAIT_BINDING, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        waiterId: input.waiterId,
-        generation: input.generation,
-      });
+    if (input.provider === "xai" || input.provider === "claude") {
+      // The core waiter by its exact id and generation first: a SuperGrok or
+      // Claude waiter the cutover moved to the core keeps both, so a history
+      // that recorded the legacy reference reconciles against the core
+      // waiter.
+      const core = await reconcileCoreCapacityWait(
+        resolved,
+        input.provider === "xai" ? XAI_CORE_WAIT_BINDING : CLAUDE_CORE_WAIT_BINDING,
+        {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          waiterId: input.waiterId,
+          generation: input.generation,
+        },
+      );
       if (core) return core;
     }
     if (input.provider === "xai" || input.provider === "claude") {

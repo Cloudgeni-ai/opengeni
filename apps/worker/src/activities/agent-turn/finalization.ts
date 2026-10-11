@@ -45,6 +45,7 @@ import { coreCodexModelCallCompletedAt, finalizeCoreCodexUsage } from "./codex-c
 import { finalizeCoreSubscriptionTurn } from "./subscription-core-settlement";
 import { XAI_CORE_REFUSAL } from "./xai-core";
 import { wakeSubscriptionCoreCodexWaitersAndDeliver } from "../subscription-core-codex-waits";
+import { finalizeCoreClaudeTurn } from "./claude-core";
 import { drainPhysicalSandboxResumes } from "./sandbox-provision";
 import { safeErrorDiagnostic, safeErrorForTelemetry } from "./errors";
 import {
@@ -518,6 +519,25 @@ async function finalizeTurnAttemptSteps(
         finalizerSignal,
       );
       leases.xai.held = false;
+    }
+    // The same for a core-placed Claude turn (its legacy usage receipts and
+    // legacy release never run: they need the legacy authority and subject).
+    if (providerTurn.claudeSubscriptionCore && leases.claude.held && attempt.turnId) {
+      await waitForTurnFinalizerStep(
+        finalizeCoreClaudeTurn({
+          db,
+          signalCodexCapacityWorkflow,
+          core: providerTurn.claudeSubscriptionCore,
+          lease: leases.claude,
+        }).catch(() => undefined),
+        finalizerSignal,
+      );
+      leases.claude.stopHeartbeat();
+      await waitForTurnFinalizerStep(
+        leases.claude.releaseCurrent().catch(() => false),
+        finalizerSignal,
+      );
+      leases.claude.held = false;
     }
     // The per-turn SuperGrok quota call is legacy only: on the core, quota is
     // observed on refusal and by the out-of-turn probe.

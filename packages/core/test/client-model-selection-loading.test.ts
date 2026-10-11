@@ -97,6 +97,10 @@ describe("fresh model admission versus live discovery", () => {
         claude_subscription: { active: false, models: [] },
       }),
       spyOn(opengeniDb, "isCodexBilledTurn").mockImplementation(async () => active),
+      // Claude has no cutover receipt: its legacy readiness answers.
+      spyOn(opengeniDb, "readSubscriptionCoreRouteReadiness").mockResolvedValue({
+        route: "legacy",
+      }),
     ];
   });
 

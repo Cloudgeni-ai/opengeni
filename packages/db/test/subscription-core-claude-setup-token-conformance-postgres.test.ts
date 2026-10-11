@@ -89,4 +89,14 @@ describeSubscriptionCoreConformance<SubscriptionCoreClaudeCredential>({
   renews: false,
   upstream,
   denyNetwork: installNetworkDenialGuard,
+  // The core waiter speaks the legacy Claude wait's session events, so
+  // clients and the workflow see one vocabulary across the cutover.
+  sessionWaits: {
+    provider: "claude",
+    events: {
+      waiting: "turn.capacity_waiting",
+      resumed: "turn.recovery.requested",
+      superseded: "turn.superseded",
+    },
+  },
 });

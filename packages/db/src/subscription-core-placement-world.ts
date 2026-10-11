@@ -1,6 +1,11 @@
 import { sql } from "drizzle-orm";
 import { evaluateWorkspaceModelPolicy, SubscriptionPersonalAuthorityV2 } from "@opengeni/contracts";
-import type { ModelDescriptor, PlacementInput, ReselectionPoint } from "@opengeni/subscriptions";
+import {
+  subscriptionCoreModelPolicyProviderId,
+  type ModelDescriptor,
+  type PlacementInput,
+  type ReselectionPoint,
+} from "@opengeni/subscriptions";
 import { rawRows, withRlsContext, withSessionRlsActorContext, type Database } from "./database";
 import {
   assertSubscriptionTurnLeaseCurrent,
@@ -194,10 +199,12 @@ export async function withSubscriptionCoreProviderPlacementWorld<T>(
               (model) =>
                 evaluateWorkspaceModelPolicy(workspacePolicy, {
                   // Workspace model policy uses the resolved provider identity;
-                  // the subscription core's provider key is intentionally neutral.
+                  // the subscription core's provider key is intentionally
+                  // neutral, and a provider may name its models under more
+                  // than one identity.
                   providerId:
                     model.provider === providerId
-                      ? provider.adapter.modelPolicyProviderId
+                      ? subscriptionCoreModelPolicyProviderId(provider.adapter, model.id)
                       : model.provider,
                   modelId: model.id,
                   // Subscription placement: these models never spend Opengeni credits.
