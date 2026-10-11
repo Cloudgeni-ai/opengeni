@@ -67,6 +67,14 @@ const MODEL_FACT_CAPABILITY_ROUTINES = [
     "visible_workspace_insights_model_fact_rows(uuid, timestamp with time zone, timestamp with time zone, text, text, uuid, uuid)",
     "Insights scoped fact projection is missing or unsafe",
   ],
+  [
+    "private_scheduled_task_summaries(uuid, uuid, text, uuid, timestamp with time zone, integer)",
+    "private schedule summary capability is missing or unsafe",
+  ],
+  [
+    "pause_private_scheduled_task(uuid, uuid, text, uuid)",
+    "private schedule pause capability is missing or unsafe",
+  ],
 ] as const;
 
 const AUTOMATIC_SESSION_TITLE_FANOUT_MIGRATION_ROUTINE =

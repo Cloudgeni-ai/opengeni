@@ -10600,6 +10600,12 @@ export const ScheduledTask = /* @__PURE__ */ z.object({
   name: z.string(),
   /** Immutable execution owner; null for workspace/service tasks. */
   ownerSubjectId: z.string().min(1).nullable(),
+  /**
+   * Who can see this schedule. `workspace`: everyone in the workspace (only the
+   * owner can change or run it). `private`: only its owner; its runs create
+   * Only me chats owned by that person.
+   */
+  visibility: SessionVisibility.default("workspace"),
   status: ScheduledTaskStatus,
   schedule: ScheduledTaskScheduleSpec,
   temporalScheduleId: z.string(),
@@ -10630,6 +10636,40 @@ export const ScheduledTask = /* @__PURE__ */ z.object({
   policyDrift: ScheduledTaskPolicyDrift.nullable().optional(),
 });
 export type ScheduledTask = z.infer<typeof ScheduledTask>;
+
+/**
+ * What an admin sees of someone else's Only me schedule: that it exists, whose
+ * it is, how often it runs and what it costs. Never its name, prompt, settings
+ * or runs. An admin can pause it.
+ */
+export const PrivateScheduledTaskSummary = /* @__PURE__ */ z
+  .object({
+    id: z.string().uuid(),
+    ownerSubjectId: z.string().min(1),
+    /** The owner's display name or email, when known. */
+    ownerName: z.string().nullable(),
+    status: ScheduledTaskStatus,
+    schedule: ScheduledTaskScheduleSpec,
+    lastRunAt: z.string().nullable(),
+    /** Usage of this schedule's runs over the last 30 days. */
+    last30Days: z
+      .object({
+        runs: z.number().int().nonnegative(),
+        creditUsd: z.number().nonnegative(),
+        estimatedProviderUsd: z.number().nonnegative(),
+      })
+      .strict(),
+    createdAt: z.string(),
+  })
+  .strict();
+export type PrivateScheduledTaskSummary = z.infer<typeof PrivateScheduledTaskSummary>;
+
+export const ListPrivateScheduledTaskSummariesResponse = /* @__PURE__ */ z
+  .object({ schedules: z.array(PrivateScheduledTaskSummary) })
+  .strict();
+export type ListPrivateScheduledTaskSummariesResponse = z.infer<
+  typeof ListPrivateScheduledTaskSummariesResponse
+>;
 
 /**
  * Complete credential-free execution truth accepted for one scheduled agent
@@ -11088,6 +11128,8 @@ const CreateAgentScheduledTaskRequest = /* @__PURE__ */ withVariableSetIdAlias(
     runMode: ScheduledTaskRunMode.default("new_session_per_run"),
     overlapPolicy: ScheduledTaskOverlapPolicy.default("allow_concurrent"),
     targetSessionId: z.string().uuid().nullable().optional(),
+    /** Who can see it. Omitted: the organization's default for new schedules. */
+    visibility: SessionVisibility.optional(),
     connectionAuthorities: z.never().optional(),
     connectionAccounts: McpConnectionAccountSelections.default([]),
 
@@ -11163,6 +11205,8 @@ export const CreateSessionScheduledTaskRequest = /* @__PURE__ */ z
     schedule: ScheduledTaskScheduleSpec,
     prompt: ScheduledTaskAgentConfigInput.shape.prompt,
     targetSessionId: z.string().uuid(),
+    /** A schedule posting into an Only me chat is always Only me. */
+    visibility: SessionVisibility.optional(),
     connectionAccounts: McpConnectionAccountSelections.default([]),
     runMode: z.literal("existing_session").default("existing_session"),
     overlapPolicy: ScheduledTaskOverlapPolicy.default("buffer_one"),
@@ -11226,6 +11270,8 @@ export const UpdateScheduledTaskRequest =
       overlapPolicy: ScheduledTaskOverlapPolicy.optional(),
       action: ScheduledTaskAction.optional(),
       targetSessionId: z.string().uuid().nullable().optional(),
+      /** Change who can see it. Only the owner can, and a schedule posting into an Only me chat stays Only me. */
+      visibility: SessionVisibility.optional(),
       connectionAuthorities: z.never().optional(),
       connectionAccounts: McpConnectionAccountSelections.optional(),
 

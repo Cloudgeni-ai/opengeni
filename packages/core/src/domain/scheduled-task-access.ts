@@ -72,9 +72,9 @@ import {
   type PersonalConnectionDelegationSource,
 } from "./personal-connection-delegations";
 import { withWorkspaceDefaultMcpTools } from "./resources";
+import { requireVisibleScheduledTask } from "./scheduled-task-audience";
 import {
   assertScheduledTaskMutationOwner,
-  requireScheduledTaskForApi,
   scheduledConnectionTools,
   updateScheduledTaskForApi,
   validatedScheduledTaskUpdate,
@@ -688,7 +688,7 @@ export async function refreshScheduledTaskAccess(input: {
         "Only a signed-in person can refresh a schedule's access. API keys, services and agents cannot.",
     });
   }
-  const existing = await requireScheduledTaskForApi(input.db, grant.workspaceId, input.taskId);
+  const existing = await requireVisibleScheduledTask(input.db, grant, input.taskId);
   if (!hasAgentAccess(existing)) {
     throw new HTTPException(422, {
       message: "This schedule has no connectors or tools to refresh.",

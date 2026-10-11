@@ -1110,6 +1110,7 @@ export type {
   SandboxOs,
   ScheduledTask,
   ScheduledTaskAccessAttention,
+  PrivateScheduledTaskSummary,
   ScheduledTaskAccessConnector,
   ScheduledTaskAccessFailureReason,
   ScheduledTaskAgentConfig,

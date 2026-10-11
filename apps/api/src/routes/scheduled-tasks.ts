@@ -1,6 +1,8 @@
 import { z } from "zod";
 import {
   CreateScheduledTaskRequest,
+  ListPrivateScheduledTaskSummariesResponse,
+  PrivateScheduledTaskSummary,
   RefreshScheduledTaskAccessRequest,
   ScheduledTaskSlackChannelId,
   ScheduledTaskSlackChannelListResponse,
@@ -9,7 +11,9 @@ import {
   type AccessGrant,
 } from "@opengeni/contracts";
 import {
+  getScheduledTaskIncludingDeleted,
   getScheduledTaskRevisionAuthoritySubject,
+  listPrivateScheduledTaskSummaries,
   listScheduledTaskRuns,
   listScheduledTasks,
 } from "@opengeni/db";
@@ -40,7 +44,12 @@ import {
   scheduledTaskForGrant,
   scheduledTaskRunForGrant,
   scheduledTaskTriggerToken,
-  requireScheduledTaskForApi,
+  pauseScheduledTaskAsAdmin,
+  pausePrivateScheduledTaskAsAdmin,
+  requirePausableScheduledTask,
+  requireVisibleScheduledTask,
+  scheduledTaskAccess,
+  scheduledTaskViewerForGrant,
   syncCreatedScheduledTask,
   syncUpdatedScheduledTask,
   updateScheduledTaskForApi,
@@ -244,12 +253,14 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       }
       await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     }
+    const viewer = await scheduledTaskViewerForGrant(db, grant);
     const tasks = await listScheduledTasks(
       db,
       workspaceId,
       boundedLimit(c.req.query("limit")),
       offset,
       sessionId,
+      viewer.subjectId,
     );
     return c.json(
       (await withPolicyDrift(authorization, tasks)).map((task) =>
@@ -257,6 +268,39 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       ),
     );
   });
+
+  // Registered before `/:taskId`. Admins see that other people's Only me
+  // schedules exist: owner, how often, last run and cost. Never their name,
+  // prompt, settings or runs.
+  app.get("/v1/workspaces/:workspaceId/scheduled-tasks/private-summaries", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const viewer = await scheduledTaskViewerForGrant(db, grant);
+    const schedules = await listPrivateScheduledTaskSummaries(db, {
+      workspaceId,
+      excludeOwnerSubjectId: viewer.subjectId,
+    });
+    return c.json(ListPrivateScheduledTaskSummariesResponse.parse({ schedules }));
+  });
+
+  // An admin pauses someone else's Only me schedule from its summary. Only its
+  // owner can change, run or resume it.
+  app.post(
+    "/v1/workspaces/:workspaceId/scheduled-tasks/private-summaries/:taskId/pause",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+      const viewer = await scheduledTaskViewerForGrant(db, grant);
+      const pausable = await requirePausableScheduledTask(db, grant, c.req.param("taskId"), viewer);
+      if (pausable.access !== "summary")
+        throw new HTTPException(404, { message: "scheduled task not found" });
+      const summary =
+        pausable.summary.status === "paused"
+          ? pausable.summary
+          : await pausePrivateScheduledTaskAsAdmin(db, grant, pausable.summary.id, viewer);
+      return c.json(PrivateScheduledTaskSummary.parse(summary));
+    },
+  );
 
   app.get("/v1/workspaces/:workspaceId/scheduled-tasks/:taskId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
@@ -267,7 +311,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       "scheduled_tasks:run",
     );
     const grant = authorization.grant;
-    const task = await requireScheduledTaskForApi(db, workspaceId, c.req.param("taskId"));
+    const task = await requireVisibleScheduledTask(db, grant, c.req.param("taskId"));
     const [withDrift] = await withPolicyDrift(authorization, [task]);
     return c.json(scheduledTaskForGrant(withDrift ?? task, grant));
   });
@@ -321,7 +365,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     );
     const grant = authorization.grant;
     const taskId = c.req.param("taskId");
-    const existing = await requireScheduledTaskForApi(db, workspaceId, taskId);
+    const existing = await requireVisibleScheduledTask(db, grant, taskId);
     const previous = await captureScheduledTaskRestoreState(db, existing);
     const rawPayload = await readRequestJson(c);
     const parsedPayload = UpdateScheduledTaskRequest.safeParse(rawPayload);
@@ -366,11 +410,14 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
   app.post("/v1/workspaces/:workspaceId/scheduled-tasks/:taskId/pause", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:manage");
-    const existing = await requireScheduledTaskForApi(db, workspaceId, c.req.param("taskId"));
+    const viewer = await scheduledTaskViewerForGrant(db, grant);
+    const existing = await requireVisibleScheduledTask(db, grant, c.req.param("taskId"), viewer);
     const previous = await captureScheduledTaskRestoreState(db, existing);
-    const task = await updateScheduledTaskForApi(db, grant, existing.id, {
-      status: "paused",
-    });
+    const ownerPause = viewer.subjectId !== null && existing.ownerSubjectId === viewer.subjectId;
+    const task =
+      viewer.admin && !ownerPause
+        ? await pauseScheduledTaskAsAdmin(db, workspaceId, existing.id)
+        : await updateScheduledTaskForApi(db, grant, existing.id, { status: "paused" });
     await syncUpdatedScheduledTask({ db, workflowClient, previous, task });
     return c.json(scheduledTaskForGrant(task, grant));
   });
@@ -384,7 +431,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       "scheduled_tasks:manage",
     );
     const grant = authorization.grant;
-    const existing = await requireScheduledTaskForApi(db, workspaceId, c.req.param("taskId"));
+    const existing = await requireVisibleScheduledTask(db, grant, c.req.param("taskId"));
     const previous = await captureScheduledTaskRestoreState(db, existing);
     const catalogSettings = (
       await resolveWorkspaceCatalogSettings(db, deps.settings, {
@@ -413,7 +460,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     const grant = await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:run");
     // Load the task before the gate so a codex-model scheduled task can be
     // recognised as codex-billed and skip the credit/cost gates at the edge.
-    const task = await requireScheduledTaskForApi(db, workspaceId, c.req.param("taskId"));
+    const task = await requireVisibleScheduledTask(db, grant, c.req.param("taskId"));
     if (task.action.kind === "agent_turn") {
       const catalogSettings = (
         await resolveWorkspaceCatalogSettings(db, deps.settings, {
@@ -501,6 +548,14 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
   app.delete("/v1/workspaces/:workspaceId/scheduled-tasks/:taskId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:manage");
+    // Deleting stays idempotent, but someone else's Only me schedule is
+    // indistinguishable from a missing one.
+    const target = await getScheduledTaskIncludingDeleted(db, workspaceId, c.req.param("taskId"));
+    if (
+      target &&
+      scheduledTaskAccess(await scheduledTaskViewerForGrant(db, grant), target) !== "full"
+    )
+      throw new HTTPException(404, { message: "scheduled task not found" });
     await deleteScheduledTaskWithDurableCleanup(deps, {
       grant,
       taskId: c.req.param("taskId"),
@@ -511,7 +566,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
   app.get("/v1/workspaces/:workspaceId/scheduled-tasks/:taskId/runs", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:run");
-    const task = await requireScheduledTaskForApi(db, workspaceId, c.req.param("taskId"));
+    const task = await requireVisibleScheduledTask(db, grant, c.req.param("taskId"));
     const taskRuns = await listScheduledTaskRuns(
       db,
       workspaceId,

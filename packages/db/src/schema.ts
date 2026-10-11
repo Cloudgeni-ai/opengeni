@@ -11778,6 +11778,9 @@ export const scheduledTasks = pgTable(
       .references(() => workspaces.id, { onDelete: "cascade" }),
     name: text("name").notNull(),
     ownerSubjectId: text("owner_subject_id"),
+    // Who can read the schedule (migration 0720): everyone in the workspace, or
+    // only its owner. Not execution configuration; excluded from the digest.
+    visibility: text("visibility").notNull().default("workspace_shared"),
     status: text("status").notNull().default("active"),
     schedule: jsonb("schedule").$type<unknown>().notNull(),
     temporalScheduleId: text("temporal_schedule_id").notNull(),

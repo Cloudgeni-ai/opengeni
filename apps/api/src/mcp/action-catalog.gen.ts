@@ -2826,6 +2826,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/:workspaceId/scheduled-tasks/:taskId",
     "request": [],
     "response": [
+      "PrivateScheduledTaskSummary",
       "ScheduledTask",
       "ScheduledTaskAccessAttention"
     ]
@@ -4094,6 +4095,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "listPrivateScheduledTaskSummaries",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/scheduled-tasks/private-summaries",
+    "request": [],
+    "response": [
+      "PrivateScheduledTaskSummary"
+    ]
+  },
+  {
     "id": "listRigChanges",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/rigs/:rigId/changes",
@@ -4696,6 +4706,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/:workspaceId/environments/:variableSetId",
     "request": [],
     "response": []
+  },
+  {
+    "id": "pausePrivateScheduledTask",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/scheduled-tasks/private-summaries/:taskId/pause",
+    "request": [],
+    "response": [
+      "PrivateScheduledTaskSummary"
+    ]
   },
   {
     "id": "pauseScheduledTask",
