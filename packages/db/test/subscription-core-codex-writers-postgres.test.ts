@@ -56,6 +56,9 @@ import { provisionRoles } from "../src/provision-roles";
 import {
   evaluateRuntimeDatabasePosture,
   inspectRuntimeDatabasePosture,
+  SUBSCRIPTION_AUTHORITY_COMPAT_OWNER_ROUTINES,
+  SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES,
+  SUBSCRIPTION_CORE_PRECURSOR_OWNER_ROUTINES,
 } from "../src/runtime-posture";
 
 setDefaultTimeout(180_000);
@@ -1713,9 +1716,20 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
       };
       const posture = await inspectRuntimeDatabasePosture(ownerClient!.db, options);
       expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
-      // Four Codex writer internals, four neutral ones (0707) and the two
-      // cutover-receipt and cutover-identity triggers (0712).
-      expect(posture.subscriptionOwnerRoutines).toHaveLength(10);
+      // Exactly the four Codex writer internals, the four neutral ones (0707),
+      // the cutover-receipt and cutover-identity triggers (0712) and the
+      // authority compatibility internals (0713).
+      expect(posture.subscriptionOwnerRoutines!.map((routine) => routine.name).sort()).toEqual(
+        [
+          "subscription_codex_writer_context(uuid, uuid, text)",
+          "grant_subscription_codex_owner_capability(text, uuid, uuid, text, uuid)",
+          "drop_subscription_codex_owner_capabilities(uuid)",
+          "derive_scheduled_revision_subscription_authority()",
+          ...SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES,
+          ...SUBSCRIPTION_CORE_PRECURSOR_OWNER_ROUTINES,
+          ...SUBSCRIPTION_AUTHORITY_COMPAT_OWNER_ROUTINES,
+        ].sort(),
+      );
       await disconnectDesignationCase();
       for (const routine of posture.subscriptionOwnerRoutines!) {
         expect(posture.privateRoutines.some((entry) => entry.name === routine.name)).toBe(false);
