@@ -278,13 +278,13 @@ async function normalizeResponse(
   const contentType = response.headers.get("content-type") ?? "";
   if (!contentType.includes("text/event-stream")) {
     const { value, normalized } = await readBodySettled(audit, response, async () => {
-      const value: unknown = await response.json();
-      const normalized = normalizeXaiResponseEventJson({
+      const decoded: unknown = await response.json();
+      const decodedEvent = normalizeXaiResponseEventJson({
         type: "response.completed",
-        response: value,
+        response: decoded,
       });
-      emitContextUsage(normalized.value, normalized.finalContextTokens, onFinalContextUsage);
-      return { value, normalized };
+      emitContextUsage(decodedEvent.value, decodedEvent.finalContextTokens, onFinalContextUsage);
+      return { value: decoded, normalized: decodedEvent };
     });
     const responseValue =
       normalized.value && typeof normalized.value === "object" && !Array.isArray(normalized.value)
