@@ -33,6 +33,13 @@ const PRECURSOR = "0712_subscription_core_generic_precursor.sql";
 const COMPAT = "0714_subscription_authority_compat.sql";
 // 0715 requires 0714's routines; it follows 0714.
 const FENCES = "0715_subscription_authority_fences.sql";
+// The drained SuperGrok cutover requires 0715; held back (never applied) so
+// this database models the rolling state before it.
+const XAI_CUTOVER = "0716_subscription_core_xai_cutover.sql";
+/** This binary requires the SuperGrok receipt, which the rolling state lacks. */
+const BEFORE_XAI_CUTOVER = [
+  "database is missing the xai subscription-core cutover receipt (0716_subscription_core_xai_cutover.sql); apply the pending migrations first",
+];
 let database: OwnerMigratedTestDatabase | null = null;
 let client: DbClient | null = null;
 let appUrl = "";
@@ -175,7 +182,7 @@ beforeAll(async () => {
   });
   try {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
-    await owner`insert into schema_migrations(name) values (${PRECURSOR}), (${COMPAT}), (${FENCES})`;
+    await owner`insert into schema_migrations(name) values (${PRECURSOR}), (${COMPAT}), (${FENCES}), (${XAI_CUTOVER})`;
     await migrate(database.ownerUrl);
     await provisionRoles(database.adminUrl, {
       appPassword: database.appPassword,
@@ -284,7 +291,7 @@ describe.skipIf(!realDb)("subscription-core generic precursor (migration 0712)",
       app_super: false,
       app_bypass: false,
     });
-    expect(unprovisionedPostureViolations).toEqual([]);
+    expect(unprovisionedPostureViolations).toEqual(BEFORE_XAI_CUTOVER);
     // A configured application role with another name can run the reader the
     // restrictive policies call, before provision-roles.
     expect(customRoleReaderBeforeProvision).toBe(true);
@@ -294,7 +301,7 @@ describe.skipIf(!realDb)("subscription-core generic precursor (migration 0712)",
       targetSchema: "public",
     };
     const posture = await inspectRuntimeDatabasePosture(client!.db, options);
-    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual(BEFORE_XAI_CUTOVER);
     expect(posture.subscriptionProviderCutoverReceipts).toEqual(["codex"]);
     // Every new routine has a fixed search_path ending in pg_temp; only the
     // readiness function is executable by the runtime role.

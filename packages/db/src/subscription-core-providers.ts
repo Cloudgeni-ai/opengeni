@@ -12,9 +12,11 @@
 import type { SubscriptionCoreAdapter } from "@opengeni/subscriptions";
 import type { SubscriptionCoreProvider } from "./subscription-core/provider";
 import { SUBSCRIPTION_CORE_CODEX } from "./subscription-core-codex-adapter";
+import { SUBSCRIPTION_CORE_XAI } from "./subscription-core-xai-adapter";
 
 const REGISTERED: readonly SubscriptionCoreProvider[] = Object.freeze([
   SUBSCRIPTION_CORE_CODEX as SubscriptionCoreProvider,
+  SUBSCRIPTION_CORE_XAI as SubscriptionCoreProvider,
 ]);
 
 // Private: callers read through the functions below, so the registry cannot

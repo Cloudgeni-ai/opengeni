@@ -793,6 +793,7 @@ export const SUBSCRIPTION_CORE_PRECURSOR_OWNER_ROUTINES = [
  */
 export const SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS: Readonly<Record<string, string>> = {
   codex: "0689_subscription_core_codex_cutover.sql",
+  xai: "0716_subscription_core_xai_cutover.sql",
 };
 
 /**
@@ -1715,12 +1716,25 @@ export const RUNTIME_FULL_DML_TABLES = [
   "workspace_webhook_deliveries",
   "workspace_webhooks",
   "workspaces",
-  "xai_capacity_waiters",
-  "xai_credential_leases",
-  "xai_rotation_settings",
-  "xai_session_account_pins",
-  "xai_subscription_credentials",
 ] as const;
+
+/**
+ * A provider's legacy subscription tables once its drained cutover receipt
+ * exists: kept for forensics, read-only for the runtime role. Role
+ * provisioning grants them full DML only to a database without the receipt
+ * (an older binary's world); this binary requires the receipt, so its
+ * contract is SELECT only.
+ */
+export const SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES: Readonly<Record<string, readonly string[]>> =
+  Object.freeze({
+    xai: Object.freeze([
+      "xai_capacity_waiters",
+      "xai_credential_leases",
+      "xai_rotation_settings",
+      "xai_session_account_pins",
+      "xai_subscription_credentials",
+    ]),
+  });
 
 /** Configuration and lifecycle-owned audit rows are read-only at runtime. */
 export const RUNTIME_READ_ONLY_TABLES = [
@@ -1997,6 +2011,11 @@ const FULL_DML_PRIVILEGES = ["SELECT", "INSERT", "UPDATE", "DELETE"] as const;
 export const RUNTIME_TABLE_PRIVILEGES: RuntimeTablePrivilegeContract = Object.freeze({
   ...Object.fromEntries(RUNTIME_FULL_DML_TABLES.map((table) => [table, FULL_DML_PRIVILEGES])),
   ...Object.fromEntries(RUNTIME_READ_ONLY_TABLES.map((table) => [table, ["SELECT"] as const])),
+  ...Object.fromEntries(
+    Object.values(SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES)
+      .flat()
+      .map((table) => [table, ["SELECT"] as const]),
+  ),
   ...Object.fromEntries(
     RUNTIME_READ_UPDATE_TABLES.map((table) => [table, ["SELECT", "UPDATE"] as const]),
   ),
@@ -2702,6 +2721,11 @@ export function evaluateRuntimeDatabasePosture(
   const targetSchema = options.targetSchema?.trim() || "public";
   const protectedTables = new Set(options.protectedTables ?? FORCE_RLS_TABLES);
   const tablePrivileges = options.tablePrivileges ?? RUNTIME_TABLE_PRIVILEGES;
+  const legacyTablesBeforeReceipt = new Set(
+    Object.entries(SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES)
+      .filter(([provider]) => !posture.subscriptionProviderCutoverReceipts.includes(provider))
+      .flatMap(([, tables]) => tables),
+  );
   const directRuntimeTables = new Set(Object.keys(tablePrivileges));
   const protectedNoDirectDmlTables = new Set(
     options.protectedNoDirectDmlTables ??
@@ -2922,6 +2946,13 @@ export function evaluateRuntimeDatabasePosture(
       ["TRIGGER", table.trigger],
     ] as const;
     const expectedPrivileges = new Set<string>(tablePrivileges[table.name] ?? []);
+    // Before a provider's receipt, provisioning still grants its legacy
+    // tables full DML (an older binary's world): tolerated, since the missing
+    // receipt is reported and refuses readiness on its own.
+    const toleratedPrivileges = new Set<string>(expectedPrivileges);
+    if (legacyTablesBeforeReceipt.has(table.name)) {
+      for (const privilege of FULL_DML_PRIVILEGES) toleratedPrivileges.add(privilege);
+    }
     if (table.owner === expectedRole) {
       violations.push(`runtime role owns table ${table.name}`);
     }
@@ -2934,7 +2965,7 @@ export function evaluateRuntimeDatabasePosture(
       );
     }
     const excessPrivileges = privileges
-      .filter(([privilege, granted]) => !expectedPrivileges.has(privilege) && granted)
+      .filter(([privilege, granted]) => !toleratedPrivileges.has(privilege) && granted)
       .map(([privilege]) => privilege);
     if (excessPrivileges.length > 0) {
       violations.push(

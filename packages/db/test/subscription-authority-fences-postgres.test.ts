@@ -49,6 +49,9 @@ setDefaultTimeout(180_000);
 
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const FENCES = "0715_subscription_authority_fences.sql";
+// The drained SuperGrok cutover requires 0715; held back (never applied) so
+// this database models the rolling state before it.
+const XAI_CUTOVER = "0716_subscription_core_xai_cutover.sql";
 const EMPTY = { version: 2, personal: [] };
 const ORGANIZATION_CLAUDE = { version: 1, scope: "organization" };
 let database: OwnerMigratedTestDatabase | null = null;
@@ -57,6 +60,10 @@ let client: DbClient | null = null;
 let app: DbClient["db"] | null = null;
 let appUrl = "";
 /** Runtime posture right after applying 0715 to a provisioned database, then after provisioning. */
+/** This binary requires the SuperGrok receipt, which the rolling state lacks. */
+const BEFORE_XAI_CUTOVER = [
+  "database is missing the xai subscription-core cutover receipt (0716_subscription_core_xai_cutover.sql); apply the pending migrations first",
+];
 let posture: { unprovisioned: string[]; provisioned: string[] } | null = null;
 
 type Grant = { accountId: string; workspaceId: string; subjectId: string };
@@ -689,7 +696,7 @@ beforeAll(async () => {
   const owner = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
-    await owner`insert into schema_migrations(name) values (${FENCES})`;
+    await owner`insert into schema_migrations(name) values (${FENCES}), (${XAI_CUTOVER})`;
     await migrate(database.ownerUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
   } finally {
@@ -750,7 +757,10 @@ afterAll(async () => {
 
 describe.skipIf(!realDb)("0715 subscription authority fences", () => {
   test("applies over a provisioned database and keeps the runtime posture before and after provisioning", async () => {
-    expect(posture).toEqual({ unprovisioned: [], provisioned: [] });
+    expect(posture).toEqual({
+      unprovisioned: BEFORE_XAI_CUTOVER,
+      provisioned: BEFORE_XAI_CUTOVER,
+    });
     const [identity] = await rawRows<{ role: string; superuser: boolean; bypass: boolean }>(
       client!.db,
       sql`select current_user::text as role, rolsuper as superuser, rolbypassrls as bypass

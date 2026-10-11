@@ -21804,8 +21804,7 @@ export async function updateSessionVariableSets(
               then 'active_goal'
             when exists (select 1 from subscription_capacity_waiters core_waiter
                 where core_waiter.workspace_id = ${input.workspaceId}::uuid
-                  and core_waiter.session_id = ${input.sessionId}::uuid
-                  and core_waiter.provider = 'codex')
+                  and core_waiter.session_id = ${input.sessionId}::uuid)
               or exists (select 1 from ${schema.xaiCapacityWaiters} xai_waiter
                 where xai_waiter.workspace_id = ${input.workspaceId}
                   and xai_waiter.session_id = ${input.sessionId}

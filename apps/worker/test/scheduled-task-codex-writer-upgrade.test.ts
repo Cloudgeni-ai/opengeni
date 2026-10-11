@@ -42,6 +42,8 @@ test("a pre-writer personal-resource task retains its execution proof across mig
   const compat = "0714_subscription_authority_compat.sql";
   // 0715 requires 0714's routines; it follows 0714.
   const fences = "0715_subscription_authority_fences.sql";
+  // The drained SuperGrok cutover requires 0715; held back (never applied).
+  const xaiCutover = "0716_subscription_core_xai_cutover.sql";
   try {
     // Stage the actual pre-writer ledger, including on the stacked cutover
     // branch. This is a rolling/gate-off regression, not cutover activation.
@@ -51,7 +53,7 @@ test("a pre-writer personal-resource task retains its execution proof across mig
     // the genuine pre-writer fixture, then replay them in ledger order below.
     await database.admin`insert into schema_migrations(name) values (${writer}),
       (${cutover}), (${disconnect}), (${explicitRetry}), (${recovery}), (${neutral}), (${completion}), (${precursor}),
-      (${providerKeyedReach}), (${compat}), (${fences})`;
+      (${providerKeyedReach}), (${compat}), (${fences}), (${xaiCutover})`;
     await migrate(database.adminUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
     const appUrl = new URL(database.ownerUrl);

@@ -16,6 +16,12 @@ import {
   migrateCodexSubscriptionCoreCredentials,
 } from "./codex-subscription-core-cutover";
 import {
+  XAI_SUBSCRIPTION_CORE_CUTOVER_MARKER,
+  XAI_SUBSCRIPTION_CORE_CUTOVER_MIGRATION,
+  contentFreeXaiCutoverError,
+  migrateXaiSubscriptionCoreCredentials,
+} from "./xai-subscription-core-cutover";
+import {
   SKILL_METADATA_MIGRATION_MARKER,
   createSkillMetadataMigrationStage,
   stageSkillMetadataMigration,
@@ -245,6 +251,32 @@ export async function executeMigrationFile(
       })
       .catch((error: unknown) => {
         throw contentFreeCodexCutoverError(error);
+      });
+    return;
+  }
+  if (sqlText.includes(XAI_SUBSCRIPTION_CORE_CUTOVER_MARKER)) {
+    if (file !== XAI_SUBSCRIPTION_CORE_CUTOVER_MIGRATION)
+      throw new Error("SuperGrok subscription cutover is restricted to migration 0716");
+    const parts = sqlText.split(XAI_SUBSCRIPTION_CORE_CUTOVER_MARKER);
+    if (parts.length !== 2) throw new Error("0716 requires exactly one SuperGrok cutover stage");
+    // Every failure leaves content-free, as for 0689.
+    await sql
+      .begin(async (transaction) => {
+        await transaction`CREATE TEMP TABLE xai_cutover_stage_0716(completed boolean NOT NULL) ON COMMIT DROP`;
+        await transaction`SELECT
+        pg_catalog.set_config('opengeni.sandbox_recovery_protocol_v2','1',true),
+        pg_catalog.set_config('opengeni.session_variable_set_attachments_v1','1',true)`;
+        await transaction.unsafe(parts[0]!);
+        await migrateXaiSubscriptionCoreCredentials(
+          transaction,
+          options?.environmentsEncryptionKey,
+        );
+        await transaction`INSERT INTO pg_temp.xai_cutover_stage_0716 VALUES(true)`;
+        await transaction.unsafe(parts[1]!);
+        await transaction`INSERT INTO schema_migrations(name) VALUES(${file}) ON CONFLICT DO NOTHING`;
+      })
+      .catch((error: unknown) => {
+        throw contentFreeXaiCutoverError(error);
       });
     return;
   }

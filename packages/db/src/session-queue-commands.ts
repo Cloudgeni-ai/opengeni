@@ -57,7 +57,7 @@ import {
   withLosslessContentWriteVersion,
 } from "./lossless-json";
 import { closePendingSessionToolCallsInTransaction } from "./session-tool-call-settlement";
-import { deleteSubscriptionCoreCodexWaitersForTurns } from "./subscription-core-codex-waiter-cleanup";
+import { deleteSubscriptionCoreWaitersOfEveryProviderForTurns } from "./subscription-core-codex-waiter-cleanup";
 import { cancelTurnInteractionInterventionsInTransaction } from "./browser-auth";
 import {
   assertAgentCommandAuthorityInTransaction,
@@ -791,7 +791,10 @@ export async function supersedeSessionCurrentDirectionInTransaction(
     })
     .where(eq(schema.sessionTurns.id, current.id));
   if (current.status === "waiting_capacity") {
-    for (const waiters of [schema.xaiCapacityWaiters, schema.claudeCapacityWaiters]) {
+    // SuperGrok's legacy waiters are read-only after its cutover receipt,
+    // which this binary requires: none can be waiting (the cutover moved or
+    // superseded every one), and its core waiters go below.
+    for (const waiters of [schema.claudeCapacityWaiters]) {
       await db
         .update(waiters)
         .set({ status: "superseded", lastWakeReason: "steer", updatedAt: now })
@@ -804,10 +807,10 @@ export async function supersedeSessionCurrentDirectionInTransaction(
           ),
         );
     }
-    // The shared subscription core's Codex waiter exists only while its turn
-    // waits; the Steer ends that wait, so the row goes with it (its pending
-    // wake deliveries cascade).
-    await deleteSubscriptionCoreCodexWaitersForTurns(db, {
+    // A shared subscription core waiter exists only while its turn waits;
+    // the Steer ends that wait, so the row goes with it (its pending wake
+    // deliveries cascade).
+    await deleteSubscriptionCoreWaitersOfEveryProviderForTurns(db, {
       workspaceId: input.workspaceId,
       turnIds: [current.id],
     });

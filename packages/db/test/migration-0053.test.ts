@@ -145,7 +145,8 @@ describe("migration 0053 (Codex credential leases)", () => {
           -- 0714 alters objects 0689 creates; hold it back too.
           ('0713_subscription_core_provider_keyed_reach.sql'),
           ('0714_subscription_authority_compat.sql'),
-          ('0715_subscription_authority_fences.sql') on conflict do nothing`;
+          ('0715_subscription_authority_fences.sql'),
+          ('0716_subscription_core_xai_cutover.sql') on conflict do nothing`;
       await migrate(databaseUrl);
       client = createDb(databaseUrl, { max: 2 });
 

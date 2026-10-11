@@ -55,6 +55,8 @@ const subscriptionCoreMigrations = [
   "0714_subscription_authority_compat.sql",
   // Requires 0714's routines; it follows 0714.
   "0715_subscription_authority_fences.sql",
+  // The drained SuperGrok cutover requires 0712 through 0715; it runs last.
+  "0716_subscription_core_xai_cutover.sql",
 ] as const;
 const key = Buffer.alloc(32, 67);
 const ids = {

@@ -6,6 +6,7 @@ import {
   RUNTIME_READ_INSERT_UPDATE_TABLES,
   RUNTIME_READ_ONLY_TABLES,
   RUNTIME_READ_UPDATE_TABLES,
+  SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES,
   WORK_CLAIM_CAPABILITY_ROUTINES,
   SUBSCRIPTION_ACCOUNT_CAPABILITY_ROUTINES,
 } from "./runtime-posture";
@@ -523,6 +524,10 @@ async function grantAppRoleIfSchemaExists(
   const runtimeReadUpdateTables = `ARRAY[${RUNTIME_READ_UPDATE_TABLES.map(literal).join(", ")}]`;
   const runtimeReadInsertTables = `ARRAY[${RUNTIME_READ_INSERT_TABLES.map(literal).join(", ")}]`;
   const runtimeReadInsertUpdateTables = `ARRAY[${RUNTIME_READ_INSERT_UPDATE_TABLES.map(literal).join(", ")}]`;
+  // (provider, table) pairs: read-only once the provider's cutover receipt exists.
+  const cutoverReadOnlyTables = `ARRAY[${Object.entries(SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES)
+    .flatMap(([provider, tables]) => tables.map((table) => `ARRAY[${literal(provider)}, ${literal(table)}]`))
+    .join(", ")}]::text[][]`;
   const workClaimCapabilityRoutines = `ARRAY[${WORK_CLAIM_CAPABILITY_ROUTINES.map(literal).join(", ")}]`;
   const organizationMembershipLifecycleRoutines = `ARRAY[${[
     "maintain_usage_allowances(integer,integer)",
@@ -628,6 +633,8 @@ DO $$
 DECLARE
   owner_role text := current_user;
   runtime_table text;
+  cutover_pair text[];
+  cutover_committed boolean;
   routine_signature text;
 BEGIN
   EXECUTE format('REVOKE CREATE ON DATABASE %I FROM %I', current_database(), ${literal(role)});
@@ -688,6 +695,26 @@ BEGIN
           'GRANT SELECT, INSERT, UPDATE ON TABLE %I.%I TO %I',
           ${literal(schema)},
           runtime_table,
+          ${literal(role)}
+        );
+      END IF;
+    END LOOP;
+    -- A provider's legacy subscription tables: full DML for an older binary
+    -- until its drained cutover receipt exists, then read-only forensics.
+    FOREACH cutover_pair SLICE 1 IN ARRAY ${cutoverReadOnlyTables} LOOP
+      IF to_regclass(format('%I.%I', ${literal(schema)}, cutover_pair[2])) IS NOT NULL THEN
+        -- Dynamic, so a database before 0712 (no receipt reader) plans this block.
+        cutover_committed := false;
+        IF to_regprocedure('opengeni_private.subscription_provider_cutover_committed(text)') IS NOT NULL THEN
+          EXECUTE 'SELECT opengeni_private.subscription_provider_cutover_committed($1)'
+            INTO cutover_committed USING cutover_pair[1];
+        END IF;
+        EXECUTE format(
+          CASE WHEN coalesce(cutover_committed, false)
+            THEN 'GRANT SELECT ON TABLE %I.%I TO %I'
+            ELSE 'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %I.%I TO %I' END,
+          ${literal(schema)},
+          cutover_pair[2],
           ${literal(role)}
         );
       END IF;

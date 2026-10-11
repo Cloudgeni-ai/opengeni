@@ -412,7 +412,7 @@ function safePosture(): RuntimeDatabasePosture {
     sessionVariableSetAttachmentsCutoverPresent: true,
     claudeSubscriptionPoolActivationPresent: true,
     subscriptionCodexCutoverActivationPresent: true,
-    subscriptionProviderCutoverReceipts: ["codex"],
+    subscriptionProviderCutoverReceipts: ["codex", "xai"],
     tables: [
       {
         name: "tenant_rows",
@@ -708,10 +708,36 @@ describe("runtime database posture evaluator", () => {
     expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
       "database is missing the codex subscription-core cutover receipt (0689_subscription_core_codex_cutover.sql); apply the pending migrations first",
     );
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "database is missing the xai subscription-core cutover receipt (0716_subscription_core_xai_cutover.sql); apply the pending migrations first",
+    );
     // Each listed cutover migration is in this binary's ledger.
     for (const migration of Object.values(SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS)) {
       expect(existsSync(new URL(`../drizzle/${migration}`, import.meta.url))).toBe(true);
     }
+  });
+
+  test("a provider's legacy tables are read-only once its receipt exists", () => {
+    const posture = safePosture();
+    const existing = posture.tables.find((table) => table.name === "xai_subscription_credentials");
+    const legacy = existing ?? xaiAuthorityTables().find((table) => table.name === "xai_subscription_credentials")!;
+    if (!existing) posture.tables.push(legacy);
+    Object.assign(legacy, { select: true, insert: true, update: true, delete: true });
+    const legacyOptions = {
+      ...options,
+      tablePrivileges: { ...options.tablePrivileges, xai_subscription_credentials: ["SELECT"] as const },
+    };
+    expect(evaluateRuntimeDatabasePosture(posture, legacyOptions)).toContain(
+      "table xai_subscription_credentials grants excess runtime privileges: INSERT, UPDATE, DELETE",
+    );
+    // Before the receipt provisioning still grants full DML; only the missing
+    // receipt is reported.
+    posture.subscriptionProviderCutoverReceipts = ["codex"];
+    const before = evaluateRuntimeDatabasePosture(posture, legacyOptions);
+    expect(before.filter((violation) => violation.includes("xai_subscription_credentials"))).toEqual([]);
+    expect(before).toContain(
+      "database is missing the xai subscription-core cutover receipt (0716_subscription_core_xai_cutover.sql); apply the pending migrations first",
+    );
   });
 
   const modelFactCapabilities = [
@@ -1448,7 +1474,9 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_READ_INSERT_TABLES ||
           tables === RUNTIME_DML_TABLES
             ? 1
-            : 0) +
+            : 0) -
+          // 0716: the five legacy SuperGrok tables become read-only forensics.
+          (tables === RUNTIME_FULL_DML_TABLES ? 5 : 0) +
           embeddingTableCount +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
             ? length +

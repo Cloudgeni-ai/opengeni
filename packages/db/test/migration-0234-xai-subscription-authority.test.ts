@@ -37,7 +37,7 @@ import {
   withWorkspaceSubjectSessionActivityRls,
   type DbClient,
 } from "../src";
-import { FORCE_RLS_TABLES, RUNTIME_FULL_DML_TABLES } from "../src/runtime-posture";
+import { FORCE_RLS_TABLES, SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES } from "../src/runtime-posture";
 
 const migrationPath = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -247,7 +247,8 @@ describe("migration 0234 xAI subscription authority", () => {
       expect(migration).toContain(`CREATE TABLE "${table}"`);
       expect(migration).toContain(`ALTER TABLE "${table}" FORCE ROW LEVEL SECURITY`);
       expect(FORCE_RLS_TABLES).toContain(table);
-      expect(RUNTIME_FULL_DML_TABLES).toContain(table);
+      // Read-only forensics once the SuperGrok cutover receipt exists (0716).
+      expect(SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES.xai).toContain(table);
     }
     expect(migration).toContain("\"authority_scope\" IN ('workspace', 'user')");
     expect(migration).toContain("authority.resource_kind = 'xai_subscription'");
