@@ -2,7 +2,6 @@ import {
   generateXaiSubscriptionImage,
   XAI_IMAGE_MODEL,
   XAI_SUBSCRIPTION_PROVIDER_ID,
-  type XaiSubscriptionRequestContext,
 } from "@opengeni/xai-subscription";
 import type { Settings } from "@opengeni/config";
 import {
@@ -37,8 +36,15 @@ const xaiImageGenerationPorts: XaiImageGenerationPorts = {
   generate: generateXaiSubscriptionImage,
 };
 
-/** Execute xAI's standalone subscription image path under the durable paid-operation fence. */
-export async function executeXaiSubscriptionImageGeneration(
+/**
+ * SuperGrok image generation of a turn placed on the shared core (design
+ * 5.3, EP-N09/N10): the turn's placed connection under its own `image`
+ * operation lease, the bearer from the core seam and every request in the
+ * core's custody. A refused lease or fence before dispatch returns the
+ * ledger row to `prepared`. This is SuperGrok's only image path: the legacy
+ * credential-bound executor was deleted with its runtime (M4 X4).
+ */
+export async function executeCoreXaiImageGeneration(
   input: {
     db: Database;
     objectStorage: ObjectStorage | null;
@@ -50,67 +56,7 @@ export async function executeXaiSubscriptionImageGeneration(
     toolCallId: string;
     prompt: string;
     references?: readonly ResolvedImageGenerationReference[];
-    credentialId: string;
-    xaiContext: Pick<XaiSubscriptionRequestContext, "getToken" | "refresh">;
     abortSignal?: AbortSignal;
-  },
-  ports: XaiImageGenerationPorts = xaiImageGenerationPorts,
-): Promise<GeneratedImageReceipt> {
-  const providerBindingHash = imageProviderBindingHash(
-    XAI_SUBSCRIPTION_PROVIDER_ID,
-    input.credentialId,
-  );
-  return await ports.execute({
-    db: input.db,
-    objectStorage: input.objectStorage,
-    accountId: input.accountId,
-    workspaceId: input.workspaceId,
-    sessionId: input.sessionId,
-    turnId: input.turnId,
-    attemptId: input.attemptId,
-    toolCallId: input.toolCallId,
-    prompt: input.prompt,
-    providerId: XAI_SUBSCRIPTION_PROVIDER_ID,
-    providerBindingHash,
-    modelId: XAI_IMAGE_MODEL,
-    generate: async () => {
-      const generated = await ports.generate({
-        prompt: input.prompt,
-        sessionId: input.sessionId,
-        ...(input.references?.length
-          ? {
-              references: input.references.map((reference) => ({
-                mediaType: reference.mediaType,
-                bytes: reference.bytes,
-              })),
-            }
-          : {}),
-        getToken: input.xaiContext.getToken,
-        refresh: input.xaiContext.refresh,
-        ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),
-      });
-      return {
-        toolCallId: input.toolCallId,
-        providerItemId: null,
-        bytes: generated.bytes,
-        declaredMediaType: generated.declaredMediaType,
-      };
-    },
-  });
-}
-
-/**
- * SuperGrok image generation of a turn placed on the shared core (design
- * 5.3, EP-N09/N10): the turn's placed connection under its own `image`
- * operation lease, the bearer from the core seam and every request in the
- * core's custody. A refused lease or fence before dispatch returns the
- * ledger row to `prepared`.
- */
-export async function executeCoreXaiImageGeneration(
-  input: Omit<
-    Parameters<typeof executeXaiSubscriptionImageGeneration>[0],
-    "credentialId" | "xaiContext"
-  > & {
     settings: Settings;
     core: { identity: SubscriptionCoreTurnIdentity; connectionId: string };
     executionGeneration: number;
