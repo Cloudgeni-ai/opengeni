@@ -3867,17 +3867,24 @@ Facts the adapter declares, each read from today's Claude path:
     to every model of the account (deliberate, recorded difference toward
     dispatch). It is bounded like the others: a model whose own limit the
     overage does not cover is refused once, and that response's headers
-    record its limit again. A
-    rejected request whose overage was refused with a known reset ends the
-    blocks that response reports for the models it concerns (its own model;
+    record its limit again. A rejected request whose overage was refused
+    with a known reset before the request's own plan reset ends the blocks
+    that response reports for the models it concerns (its own model;
     without one, the family its limit names, else every model) no later
-    than that reset, as today's `nextCheckAt` does for the models whose
-    capacity that request decides, and only while the request's own plan
-    limit still runs; the other models keep waiting for their own limits. An overage allowance whose reset has already passed
+    than the overage reset, as today's `nextCheckAt` does for the models
+    whose capacity that request decides, and only while the request's own
+    plan limit still runs; the other models keep waiting for their own
+    limits. An overage reset at or after the plan reset ends nothing, as
+    today's rule never rechecks then. After such a recheck, today's rule
+    blocks the model again once the plan reset passes if a longer limit
+    (a family window) still runs; one cooldown cannot express "free, then
+    blocked again", so the core keeps the model free: a recorded difference
+    toward dispatch, bounded by one refused request, whose headers record
+    the limit again. An overage allowance whose reset has already passed
     covers nothing. One whose reset falls before the plan limit's covers
     the limit until a newer response arrives, where today's rule blocks
     again after the overage reset: a recorded difference toward dispatch,
-    bounded by one refused request, whose headers record the limit again.
+    bounded the same way.
   - The five-hour and seven-day windows decide the connection's capacity
     (`rejected`, or full without a status, is `exhausted` until the reset, a
     minute when unknown). A model-family window (Opus, Sonnet) never decides

@@ -194,11 +194,11 @@ const allowed = (status: string | null | undefined) =>
  *   a full account window is a `warning`, and no family or request limit
  *   blocks. Overage is the Claude account's own setting, so it covers every
  *   model of the account.
- * - A rejected request whose overage was refused with a known reset is
- *   checked again at that reset (while its own plan limit still runs): the
- *   blocks that response reports for the
- *   models it concerns (its own model; without one, the family its limit
- *   names, else every model) end no later than it.
+ * - A rejected request whose overage was refused with a known reset before
+ *   its own plan reset is checked again at the overage reset (while its plan
+ *   limit still runs): the blocks that response reports for the models it
+ *   concerns (its own model; without one, the family its limit names, else
+ *   every model) end no later than it.
  * - The account windows (five hours, seven days) decide the connection's
  *   capacity: `rejected`, or full without a status, is `exhausted` until its
  *   reset (a minute when the reset is unknown).
@@ -238,11 +238,15 @@ export function decodeSubscriptionCoreClaudeQuota(input: {
     rejected && allowed(request.overageStatus) && (overageReset ?? Infinity) > observedAt;
   const base = (reset: string | null, at: string) =>
     reset === null ? Date.parse(at) + SUBSCRIPTION_CORE_CLAUDE_UNKNOWN_RESET_MS : Date.parse(reset);
-  // Only while the request's own plan limit still runs.
+  // Only while the request's own plan limit still runs, and only when the
+  // overage resets first: a later overage reset never ends another limit.
+  const planReset = rejected ? base(request.resetsAt, request.observedAt) : -Infinity;
   const recheck =
     rejected &&
     request.overageStatus === "rejected" &&
-    base(request.resetsAt, request.observedAt) > observedAt
+    planReset > observedAt &&
+    overageReset !== null &&
+    overageReset < planReset
       ? overageReset
       : null;
   const recheckFamily =
