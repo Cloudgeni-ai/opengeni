@@ -29,6 +29,8 @@ import { ownerlessRefreshFixture, ownerlessRefreshKey } from "./fixtures/ownerle
 
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const PRECURSOR = "0712_subscription_core_generic_precursor.sql";
+// 0715 builds on 0712's receipts and patches its helpers; it follows 0712.
+const COMPAT = "0715_subscription_authority_compat.sql";
 let database: OwnerMigratedTestDatabase | null = null;
 let client: DbClient | null = null;
 let appUrl = "";
@@ -171,7 +173,7 @@ beforeAll(async () => {
   });
   try {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
-    await owner`insert into schema_migrations(name) values (${PRECURSOR})`;
+    await owner`insert into schema_migrations(name) values (${PRECURSOR}), (${COMPAT})`;
     await migrate(database.ownerUrl);
     await provisionRoles(database.adminUrl, {
       appPassword: database.appPassword,
@@ -213,7 +215,7 @@ beforeAll(async () => {
     onnotice: () => undefined,
   });
   try {
-    await ownerAgain`delete from schema_migrations where name = ${PRECURSOR}`;
+    await ownerAgain`delete from schema_migrations where name in (${PRECURSOR}, ${COMPAT})`;
     await database.admin.unsafe(
       `CREATE ROLE "${customApplicationRole}" NOLOGIN NOSUPERUSER NOBYPASSRLS`,
     );
