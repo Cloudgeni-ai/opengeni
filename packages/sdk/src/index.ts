@@ -802,6 +802,7 @@ export type {
   OrganizationAgentAdminAccess,
   UpdateOrganizationAgentAdminAccessRequest,
   SessionAdminAccess,
+  GrantSessionAdminAccessRequest,
   WorkspaceRealtimeModelCatalogItem,
   WorkspaceRealtimeModelCatalogResponse,
   CodexAccount,

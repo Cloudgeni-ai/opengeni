@@ -1,4 +1,5 @@
-import { and, eq, sql } from "drizzle-orm";
+import { MAX_SESSION_ADMIN_ACCESS_HOURS } from "@opengeni/contracts";
+import { and, eq, gt, isNull, or, sql } from "drizzle-orm";
 
 import { nestedPostgresSqlState } from "./persistence-errors";
 import { type Database, setSubjectRlsContext, withRlsContext } from "./database";
@@ -7,9 +8,10 @@ import * as schema from "./schema";
 /**
  * Admin access for agent sessions (migration 0691). An organization allows it
  * (off by default); an owner or admin then gives one of their sessions admin
- * access, and the agent there can do what that person can manage. Every use
- * goes through {@link resolveSessionAdminAuthority}, which re-checks the
- * allowance, the grant and the person's live role.
+ * access for a number of hours or with no time limit, and the agent there can
+ * do what that person can manage. Every use goes through
+ * {@link resolveSessionAdminAuthority}, which re-checks the allowance, the
+ * grant, its time limit and the person's live role.
  */
 export type OrganizationAgentAdminAccess = {
   sessionAdminAccessAllowed: boolean;
@@ -20,6 +22,8 @@ export type SessionAdminAccessGrant = {
   sessionId: string;
   grantedBySubjectId: string;
   grantedAt: string;
+  /** When it ends by itself; null means no time limit. */
+  expiresAt: string | null;
 };
 
 /** Raised when the organization does not allow admin access for sessions. */
@@ -72,8 +76,15 @@ function mapGrant(row: typeof schema.sessionAdminAccess.$inferSelect): SessionAd
     sessionId: row.sessionId,
     grantedBySubjectId: row.grantedBySubjectId,
     grantedAt: row.grantedAt.toISOString(),
+    expiresAt: row.expiresAt?.toISOString() ?? null,
   };
 }
+
+/** A grant still in effect: no time limit, or one not yet reached (database clock). */
+const grantNotExpired = or(
+  isNull(schema.sessionAdminAccess.expiresAt),
+  gt(schema.sessionAdminAccess.expiresAt, sql`now()`),
+);
 
 /** Whether owners and admins may give sessions admin access. Absent reads as off. */
 export async function getOrganizationAgentAdminAccess(
@@ -151,7 +162,9 @@ export async function getSessionAdminAccess(
 /**
  * Give a session admin access as `actorSubjectId`, who must be an active owner
  * or admin, in an organization that allows it, on a session they started
- * themselves. Giving it again keeps the original grant.
+ * themselves, for `durationHours` hours or, when null, with no time limit.
+ * Giving it again while it is on sets a new time limit from now; after it
+ * ended by itself, it counts as given anew.
  */
 export async function grantSessionAdminAccess(
   db: Database,
@@ -160,8 +173,19 @@ export async function grantSessionAdminAccess(
     workspaceId: string;
     sessionId: string;
     actorSubjectId: string;
+    durationHours: number | null;
   },
 ): Promise<SessionAdminAccessGrant> {
+  const hours = input.durationHours;
+  if (
+    hours !== null &&
+    (!Number.isInteger(hours) || hours < 1 || hours > MAX_SESSION_ADMIN_ACCESS_HOURS)
+  ) {
+    throw new RangeError(
+      `Admin access lasts 1 to ${MAX_SESSION_ADMIN_ACCESS_HOURS} hours, or has no time limit`,
+    );
+  }
+  const expiresAt = hours === null ? null : sql`now() + make_interval(hours => ${hours}::int)`;
   return await withRlsContext(
     db,
     { accountId: input.organizationId, workspaceId: input.workspaceId },
@@ -190,17 +214,24 @@ export async function grantSessionAdminAccess(
           accountId: input.organizationId,
           workspaceId: input.workspaceId,
           grantedBySubjectId: input.actorSubjectId,
+          expiresAt,
         })
-        .onConflictDoNothing({ target: schema.sessionAdminAccess.sessionId })
+        .onConflictDoUpdate({
+          target: schema.sessionAdminAccess.sessionId,
+          set: {
+            expiresAt,
+            grantedBySubjectId: input.actorSubjectId,
+            grantedAt: sql`case
+              when ${schema.sessionAdminAccess.expiresAt} is not null
+                and ${schema.sessionAdminAccess.expiresAt} <= now()
+              then now()
+              else ${schema.sessionAdminAccess.grantedAt}
+            end`,
+          },
+        })
         .returning();
-      if (row) return mapGrant(row);
-      const [existing] = await scopedDb
-        .select()
-        .from(schema.sessionAdminAccess)
-        .where(eq(schema.sessionAdminAccess.sessionId, input.sessionId))
-        .limit(1);
-      if (!existing) throw new Error("session admin access could not be recorded");
-      return mapGrant(existing);
+      if (!row) throw new Error("session admin access could not be recorded");
+      return mapGrant(row);
     },
   );
 }
@@ -230,13 +261,14 @@ export async function revokeSessionAdminAccess(
 
 /**
  * The person whose access this session uses right now, or null. Live on every
- * call: the organization must still allow it, the grant must still exist, and
- * the person who gave it must still be an active owner or admin.
+ * call: the organization must still allow it, the grant must still exist and
+ * be within its time limit, and the person who gave it must still be an
+ * active owner or admin.
  */
 export async function resolveSessionAdminAuthority(
   db: Database,
   input: { accountId: string; workspaceId: string; sessionId: string },
-): Promise<{ subjectId: string; grantedAt: string } | null> {
+): Promise<{ subjectId: string; grantedAt: string; expiresAt: string | null } | null> {
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: null },
@@ -250,6 +282,7 @@ export async function resolveSessionAdminAuthority(
           and(
             eq(schema.sessionAdminAccess.sessionId, input.sessionId),
             eq(schema.sessionAdminAccess.workspaceId, input.workspaceId),
+            grantNotExpired,
           ),
         )
         .limit(1);
@@ -262,16 +295,20 @@ export async function resolveSessionAdminAuthority(
         if (nestedPostgresSqlState(error) === "42501") return null;
         throw error;
       }
-      return { subjectId: row.grantedBySubjectId, grantedAt: row.grantedAt.toISOString() };
+      return {
+        subjectId: row.grantedBySubjectId,
+        grantedAt: row.grantedAt.toISOString(),
+        expiresAt: row.expiresAt?.toISOString() ?? null,
+      };
     },
   );
 }
 
 /**
  * What a viewer needs to show and change a session's admin access: whether
- * the organization allows it, the recorded grant, whether it is in effect
- * right now, and whether the viewer started this session and is an owner or
- * admin themselves.
+ * the organization allows it, the grant while it is within its time limit,
+ * whether it is in effect right now, and whether the viewer started this
+ * session and is an owner or admin themselves.
  */
 export async function getSessionAdminAccessView(
   db: Database,
@@ -297,6 +334,7 @@ export async function getSessionAdminAccessView(
             and(
               eq(schema.sessionAdminAccess.sessionId, input.sessionId),
               eq(schema.sessionAdminAccess.workspaceId, input.workspaceId),
+              grantNotExpired,
             ),
           )
           .limit(1);

@@ -4064,12 +4064,25 @@ export type SessionAdminAccess = {
   active: boolean;
   grantedBy: { subjectId: string; name: string | null } | null;
   grantedAt: string | null;
+  /** While active: when it ends by itself, or null for no time limit. */
+  expiresAt: string | null;
   /** The organization allows admin access for sessions. */
   allowed: boolean;
-  /** The viewer may turn it on: an owner or admin, in person, on their own session. */
+  /**
+   * The viewer may turn it on, or choose a new time limit while it is on: an
+   * owner or admin, in person, on their own session.
+   */
   canGrant: boolean;
   /** The viewer may turn it off. */
   canRevoke: boolean;
+};
+
+/**
+ * How long a session's admin access lasts from now: whole hours from 1 to
+ * 720, or null for no time limit. Omitted means one hour.
+ */
+export type GrantSessionAdminAccessRequest = {
+  durationHours?: number | null;
 };
 
 /** Full replacement body for `PUT /v1/workspaces/:id/model-policy`. */
