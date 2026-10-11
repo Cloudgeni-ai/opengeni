@@ -140,13 +140,12 @@ export async function wakeSubscriptionCoreCapacityWaiters(
         // Lock order: workspace, then session, then waiter. Steer, Cancel and
         // a resume lock the session before its waiter, and the generic wake's
         // archive guard locks the session too. So read the waiters without
-        // locking, take the session locks (by recording each session's generic
-        // wake) in session order, and only then bump those sessions' waiters
-        // and record their typed wakes (whose foreign key share-locks the
-        // waiter). Holding a waiter while waiting for its session deadlocks
-        // with Steer or Cancel, and concurrent multi-row bumps of one pool
-        // deadlock with each other. A session has at most one core waiter (its
-        // primary key), so it gets one generic wake as before.
+        // locking, lock their sessions in session order, and only then bump
+        // those sessions' waiters and record their typed wakes (whose foreign
+        // key share-locks the waiter). Holding a waiter while waiting for its
+        // session deadlocks with Steer or Cancel, and concurrent multi-row
+        // bumps of one pool deadlock with each other. A session has at most
+        // one core waiter (its primary key), so it gets one generic wake.
         const waiting = await rawRows<{ session_id: string }>(
           tx,
           sql`select session_id::text as session_id from subscription_capacity_waiters
@@ -168,20 +167,46 @@ export async function wakeSubscriptionCoreCapacityWaiters(
         // here would deadlock with them. Only where there is a waiter to wake
         // (the read above takes no row lock), so a wake does not hold
         // workspace FOR UPDATE lockers off in workspaces it leaves alone.
+        // The weakest lock that excludes those FOR UPDATE lockers: a stronger
+        // one would also hold off workspace updates, FOR SHARE authority
+        // checks and concurrent wakes of the workspace.
         const [workspace] = await rawRows<{ id: string }>(
           tx,
           sql`select id::text as id from workspaces
             where id = ${workspaceId}::uuid and account_id = ${input.accountId}::uuid
             for key share`,
         );
+        // Deleted since the read (its waiters went with it): nothing to wake.
         if (!workspace) continue;
-        for (const row of waiting) {
+        // Lock the sessions read, in ascending order, with the generic wake's
+        // archive guard's own mode (so recording the wake never upgrades a
+        // lock), and wake only those still present and executable. A session
+        // deleted since the read (Cancel, then a quiescent delete) or archived
+        // or imported (the guard would refuse its wake) drops out here instead
+        // of failing the whole wake. Rows are locked in the sorted order, and
+        // a row changed while this waits is rechecked against the filter.
+        const present = await rawRows<{ session_id: string }>(
+          tx,
+          sql`select sessions.id::text as session_id from sessions
+            where sessions.workspace_id = ${workspaceId}::uuid
+              and sessions.id in (${sql.join(
+                waiting.map((row) => sql`${row.session_id}::uuid`),
+                sql`, `,
+              )})
+              and sessions.imported_archive_import_id is null
+              and sessions.content_archive_state is null
+            order by sessions.id
+            for no key update of sessions`,
+        );
+        if (present.length === 0) continue;
+        for (const row of present) {
           // The generic durable wake is the crash-safe backstop: the global
           // dispatcher delivers it even if the typed outbox row's signal is
-          // never sent. A waiter that ended since the read leaves its session
-          // a spurious but harmless wake. A waiter armed since the read is not
-          // bumped by this wake: arming evaluates fresh capacity, and the
-          // bounded recheck covers it, as with a single-statement snapshot.
+          // never sent. A waiter that ended since the read leaves its (still
+          // locked, still present) session a spurious but harmless wake. A
+          // waiter armed since the read is not bumped by this wake: arming
+          // evaluates fresh capacity, and the bounded recheck covers it, as
+          // with a single-statement snapshot.
           await enqueueSessionWorkflowWake(tx, {
             accountId: input.accountId,
             workspaceId,
@@ -190,7 +215,7 @@ export async function wakeSubscriptionCoreCapacityWaiters(
             reason: "subscription_capacity",
           });
         }
-        // Every session read above is now held by this transaction, so no
+        // Every session woken above is held by this transaction, so no
         // concurrent wake, Steer, Cancel or resume holds any of their waiters.
         const woken = await rawRows<{
           session_id: string;
@@ -205,7 +230,7 @@ export async function wakeSubscriptionCoreCapacityWaiters(
             where account_id = ${input.accountId}::uuid
               and workspace_id = ${workspaceId}::uuid and provider = ${provider}
               and session_id in (${sql.join(
-                waiting.map((row) => sql`${row.session_id}::uuid`),
+                present.map((row) => sql`${row.session_id}::uuid`),
                 sql`, `,
               )})
             returning session_id::text as session_id, waiter_id::text as waiter_id,
