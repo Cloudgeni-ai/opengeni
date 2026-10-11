@@ -62,6 +62,10 @@ const subscriptionCoreMigrations = [
   "0717_subscription_authority_fences.sql",
   // Patches the acceptance writers withheld 0669, 0688 and 0707 define.
   "0718_subscription_personal_acceptance_reads.sql",
+  // Patches the operation-lease guard withheld 0671 and 0711 define.
+  "0719_subscription_core_ownerless_video_operations.sql",
+  // Built from the connect writer withheld 0715 rewrites; it follows 0715.
+  "0720_subscription_core_personal_connect_format.sql",
   // The drained SuperGrok cutover requires 0712 through 0718; it runs last.
   "0721_subscription_core_xai_cutover.sql",
 ] as const;

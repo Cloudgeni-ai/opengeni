@@ -49,6 +49,8 @@ test("a pre-writer personal-resource task retains its execution proof across mig
   // 0718 patches the acceptance writers 0688 and 0707 define; it follows them.
   const acceptanceReads = "0718_subscription_personal_acceptance_reads.sql";
   // The drained SuperGrok cutover requires 0718; held back (never applied).
+  // Built from the connect writer withheld 0715 rewrites; it follows 0715.
+  const personalConnectFormat = "0720_subscription_core_personal_connect_format.sql";
   const xaiCutover = "0721_subscription_core_xai_cutover.sql";
   try {
     // Stage the actual pre-writer ledger, including on the stacked cutover
@@ -59,7 +61,7 @@ test("a pre-writer personal-resource task retains its execution proof across mig
     // the genuine pre-writer fixture, then replay them in ledger order below.
     await database.admin`insert into schema_migrations(name) values (${writer}),
       (${cutover}), (${disconnect}), (${explicitRetry}), (${recovery}), (${neutral}), (${completion}), (${precursor}),
-      (${providerKeyedReach}), (${workspaceManagedAccounts}), (${apiKeyConnections}), (${compat}), (${fences}), (${acceptanceReads}), (${xaiCutover})`;
+      (${providerKeyedReach}), (${workspaceManagedAccounts}), (${apiKeyConnections}), (${personalConnectFormat}), (${compat}), (${fences}), (${acceptanceReads}), (${xaiCutover})`;
     await migrate(database.adminUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
     const appUrl = new URL(database.ownerUrl);
@@ -113,7 +115,7 @@ test("a pre-writer personal-resource task retains its execution proof across mig
       await database.admin`select execution_digest, authority_revision from scheduled_tasks where id = ${taskId}::uuid`;
     await client.close();
     client = undefined;
-    await database.admin`delete from schema_migrations where name in (${writer}, ${cutover}, ${disconnect}, ${explicitRetry}, ${recovery}, ${neutral}, ${completion}, ${precursor}, ${providerKeyedReach}, ${workspaceManagedAccounts}, ${apiKeyConnections}, ${compat}, ${fences}, ${acceptanceReads})`;
+    await database.admin`delete from schema_migrations where name in (${writer}, ${cutover}, ${disconnect}, ${explicitRetry}, ${recovery}, ${neutral}, ${completion}, ${precursor}, ${providerKeyedReach}, ${workspaceManagedAccounts}, ${apiKeyConnections}, ${personalConnectFormat}, ${compat}, ${fences}, ${acceptanceReads})`;
     await migrate(database.adminUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
     client = createDb(appUrl.toString());
