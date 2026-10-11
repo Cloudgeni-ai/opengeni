@@ -2138,6 +2138,9 @@ BEGIN
       'set_subscription_core_reach(text,uuid,uuid,boolean,boolean)',
       'set_subscription_core_reach_allocator(text,uuid,uuid,boolean)',
       'subscription_provider_cutover_committed(text)',
+      'copy_subscription_authority_compat(text,text,uuid,uuid,bigint)',
+      'read_subscription_authority_compat(text,text,uuid,uuid,bigint)',
+      'subscription_authority_compat_providers()',
       'subscription_organization_admin(uuid)',
       'subscription_people_assignment_visible(uuid,uuid,uuid,text,text)',
       'subscription_person_preference_visible(uuid,uuid,text,text)',
@@ -2186,7 +2189,28 @@ BEGIN
       'grant_subscription_core_owner_capability(text,text,uuid,uuid,text,uuid)',
       'drop_subscription_core_owner_capabilities(text,uuid)',
       'subscription_core_connection_target(text,uuid,uuid,uuid,uuid,uuid,text,bigint)',
-      'apply_subscription_core_auto_assignments(text,uuid,uuid,boolean)'
+      'apply_subscription_core_auto_assignments(text,uuid,uuid,boolean)',
+      -- Migration 0713: the authority marker and compatibility guards,
+      -- resolvers and commit-time check are owner-only.
+      'stamp_subscription_authority_inserted_at()',
+      'keep_subscription_authority_inserted_at()',
+      'subscription_authority_compat_entry_valid(jsonb)',
+      'guard_subscription_authority_compat()',
+      'subscription_compat_turn_human(uuid,uuid)',
+      'subscription_compat_v2_has_entry(jsonb,text)',
+      'subscription_compat_receiver_source(uuid,uuid)',
+      'subscription_compat_delivery_sources(uuid,uuid,uuid,uuid,text)',
+      'subscription_compat_compaction_source(uuid,uuid)',
+      'subscription_compat_scheduled_source(uuid,uuid)',
+      'subscription_compat_carrier_sources(text,uuid,uuid,bigint)',
+      'subscription_compat_carrier_state(text,uuid,uuid,bigint)',
+      'subscription_compat_record(text,text,uuid,uuid,bigint)',
+      'subscription_compat_expected(text,timestamptz,uuid,text,uuid,bigint,text)',
+      'subscription_compat_carrier_expected(text,timestamptz,text,uuid,uuid,bigint)',
+      'subscription_compat_enter_scope(uuid,uuid)',
+      'subscription_compat_leave_scope(text[])',
+      'subscription_compat_effective(text,text,uuid,uuid,bigint)',
+      'enforce_subscription_authority_compat()'
     ] LOOP
       IF to_regprocedure('opengeni_subscription_internal.' || routine_signature) IS NOT NULL THEN
         EXECUTE format(
