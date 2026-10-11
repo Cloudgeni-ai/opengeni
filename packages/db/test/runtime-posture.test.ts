@@ -25,11 +25,15 @@ import {
   SCHEDULED_SLACK_BOT_MESSAGE_RUNTIME_ROUTINES,
   ORGANIZATION_SIGNUP_USE_CASE_RUNTIME_ROUTINES,
   SLACK_FILE_UPLOAD_OPERATIONS_TABLE,
+  SUBSCRIPTION_CODEX_TWIN_PRIVATE_ROUTINES,
   type RuntimeDatabasePosture,
   type RuntimeDatabasePostureOptions,
   type RuntimePrivateTablePosture,
   type RuntimeTablePosture,
 } from "../src/runtime-posture";
+// Namespace access for the owner-routine lists, which other open PRs import
+// by name in the list above: a merge must not duplicate an imported binding.
+import * as runtimePosture from "../src/runtime-posture";
 
 /** Write-allowed probes pin a fixed search path without the target schema. */
 const FIXED_SEARCH_PATH_PRIVATE_ROUTINES: ReadonlySet<string> = new Set([
@@ -659,6 +663,111 @@ describe("runtime database posture evaluator", () => {
         );
       }
     }
+  });
+
+  test("tolerates an absent Codex twin routine but holds a present one to the precursor hardening", () => {
+    const hardenedTwin = (name: string) => ({
+      name,
+      owner: "opengeni_migrator",
+      execute: true,
+      publicExecute: false,
+      securityDefiner: true,
+      configuration: ["search_path=pg_catalog, public, opengeni_private, pg_temp"],
+    });
+    for (const name of SUBSCRIPTION_CODEX_TWIN_PRIVATE_ROUTINES) {
+      expect(SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES as readonly string[]).not.toContain(name);
+      // Absent (after the retirement migration) and present (before it).
+      expect(evaluateRuntimeDatabasePosture(safePosture(), options)).toEqual([]);
+      const present = safePosture();
+      present.privateRoutines.push(hardenedTwin(name));
+      expect(evaluateRuntimeDatabasePosture(present, options)).toEqual([]);
+      for (const unsafe of [
+        { execute: false },
+        { publicExecute: true },
+        { securityDefiner: false },
+        { owner: "opengeni_app" },
+        { configuration: ["search_path=public"] },
+      ]) {
+        const posture = safePosture();
+        posture.privateRoutines.push({ ...hardenedTwin(name), ...unsafe });
+        expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+          `retiring Codex twin private routine ${name} is unsafe`,
+        );
+      }
+      const duplicated = safePosture();
+      duplicated.privateRoutines.push(hardenedTwin(name), hardenedTwin(name));
+      expect(evaluateRuntimeDatabasePosture(duplicated, options)).toContain(
+        `retiring Codex twin private routine ${name} is unsafe`,
+      );
+    }
+  });
+
+  test("keeps the subscription owner implementation checks once the Codex twin writers are gone", () => {
+    const codexWriterContext = "subscription_codex_writer_context(uuid, uuid, text)";
+    const codexConnect = SUBSCRIPTION_CODEX_TWIN_PRIVATE_ROUTINES.find((name) =>
+      name.startsWith("connect_subscription_codex_personal("),
+    )!;
+    const ownerRoutine = (name: string) => ({
+      name,
+      owner: "opengeni_migrator",
+      execute: false,
+      publicExecute: false,
+      securityDefiner: true,
+      configuration: ["search_path=pg_catalog, public, opengeni_private, pg_temp"],
+    });
+    const ownerRoutines = [
+      "grant_subscription_codex_owner_capability(text, uuid, uuid, text, uuid)",
+      "drop_subscription_codex_owner_capabilities(uuid)",
+      "derive_scheduled_revision_subscription_authority()",
+      ...runtimePosture.SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES,
+      ...runtimePosture.SUBSCRIPTION_CORE_PRECURSOR_OWNER_ROUTINES,
+    ];
+    // The safe posture carries the neutral writers and no Codex twin writer.
+    // Every other owner-only routine is present and safe too, so owner
+    // requirements other PRs add to the same block stay satisfied; only the
+    // Codex writer context is left out, since it is asserted separately below.
+    const withoutTwins = () => {
+      const posture = safePosture();
+      posture.subscriptionOwnerRoutines = [
+        ...new Set([
+          ...ownerRoutines,
+          ...SUBSCRIPTION_M3_OWNER_ONLY_PRIVATE_ROUTINES.filter(
+            (name) => name !== codexWriterContext,
+          ),
+        ]),
+      ].map(ownerRoutine);
+      return posture;
+    };
+    expect(withoutTwins().privateRoutines.some((routine) => routine.name === codexConnect)).toBe(
+      false,
+    );
+    expect(evaluateRuntimeDatabasePosture(withoutTwins(), options)).toEqual([]);
+    for (const name of ownerRoutines) {
+      const missing = withoutTwins();
+      missing.subscriptionOwnerRoutines = missing.subscriptionOwnerRoutines!.filter(
+        (routine) => routine.name !== name,
+      );
+      expect(evaluateRuntimeDatabasePosture(missing, options)).toContain(
+        `subscription owner implementation ${name} is missing or unsafe`,
+      );
+      const executable = withoutTwins();
+      executable.subscriptionOwnerRoutines!.find((routine) => routine.name === name)!.execute =
+        true;
+      expect(evaluateRuntimeDatabasePosture(executable, options)).toContain(
+        `subscription owner implementation ${name} is missing or unsafe`,
+      );
+    }
+    // The Codex writer context is required exactly while a Codex twin writer exists.
+    const twinWriter = withoutTwins();
+    twinWriter.privateRoutines.push({
+      ...ownerRoutine(codexConnect),
+      execute: true,
+    });
+    expect(evaluateRuntimeDatabasePosture(twinWriter, options)).toContain(
+      `subscription owner implementation ${codexWriterContext} is missing or unsafe`,
+    );
+    twinWriter.subscriptionOwnerRoutines!.push(ownerRoutine(codexWriterContext));
+    expect(evaluateRuntimeDatabasePosture(twinWriter, options)).toEqual([]);
   });
 
   test("requires exact private M3 precursor capabilities and hardened ownership/ACL/search path", () => {
