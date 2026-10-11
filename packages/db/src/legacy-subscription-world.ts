@@ -410,7 +410,9 @@ export async function loadLegacySubscriptionPlacementWorld(
           const exhaustedUntil = epoch(row.exhausted_until);
           const observed = epoch(row.quota_checked_at) !== null;
           const quota: SubscriptionQuota = {
-            windows: [windowFor("quota", row.quota_used_percent, epoch(row.quota_reset_at), observed)],
+            windows: [
+              windowFor("quota", row.quota_used_percent, epoch(row.quota_reset_at), observed),
+            ],
             modelCooldowns: {},
             exhaustedUntil,
             exhaustedKind: null,

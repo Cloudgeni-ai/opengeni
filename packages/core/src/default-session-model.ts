@@ -389,23 +389,13 @@ async function connectionRestrictionsAndXaiReadiness(
   }
   if (!xaiAuthoritySnapshot) {
     const [restrictions, xaiSubscriptionActive] = await Promise.all([
-      getWorkspaceConnectionModelRestrictions(
-        db,
-        workspaceId,
-        subjectId,
-        undefined,
-      ),
+      getWorkspaceConnectionModelRestrictions(db, workspaceId, subjectId, undefined),
       workspaceXaiSubscriptionActive(db, settings, workspaceId, subjectId),
     ]);
     return { restrictions, xaiSubscriptionActive };
   }
   const frozen = await Promise.allSettled([
-    getWorkspaceConnectionModelRestrictions(
-      db,
-      workspaceId,
-      subjectId,
-      xaiAuthoritySnapshot,
-    ),
+    getWorkspaceConnectionModelRestrictions(db, workspaceId, subjectId, xaiAuthoritySnapshot),
     workspaceXaiSubscriptionActiveForAuthority(db, settings, {
       workspaceId,
       subjectId,

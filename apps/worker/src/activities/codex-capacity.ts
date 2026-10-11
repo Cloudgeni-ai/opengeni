@@ -82,11 +82,19 @@ export function createCodexCapacityActivities(services: () => Promise<ControlAct
     // exists after the cutover, so an unmatched one is stale.
     if (input.provider === "claude") return { action: "stale" };
     if (input.provider === "xai") {
-      const current = await getXaiCapacityWaitForSession(resolved.db, input.workspaceId, input.sessionId);
+      const current = await getXaiCapacityWaitForSession(
+        resolved.db,
+        input.workspaceId,
+        input.sessionId,
+      );
       if (!current || current.id !== input.waiterId || current.generation !== input.generation) {
         return { action: "stale" };
       }
-      const authority = await resolveXaiWaiterSubject(resolved.db, input.workspaceId, input.sessionId);
+      const authority = await resolveXaiWaiterSubject(
+        resolved.db,
+        input.workspaceId,
+        input.sessionId,
+      );
       if (authority)
         await refreshExhaustedXaiQuota({
           db: resolved.db,

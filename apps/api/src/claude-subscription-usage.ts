@@ -3,7 +3,6 @@ import type { ClaudeSubscriptionUsage } from "@opengeni/contracts";
 import { readResponseJsonBounded } from "@opengeni/network";
 
 /** The Claude profile usage request (no inference); the caller records its reading. */
-
 export async function requestClaudeUsage(
   token: string,
   fetchImpl: typeof fetch = globalThis.fetch,

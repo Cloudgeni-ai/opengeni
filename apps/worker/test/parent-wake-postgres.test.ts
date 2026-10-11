@@ -12,12 +12,10 @@ import {
   initializeSessionStartAtomically,
   listOutstandingSessionSystemUpdates,
   markSessionWorkflowWakeDelivered,
-  setInitialActiveClaudeCredential,
   setInitialActiveXaiCredential,
   settleConnectedMachineSessionBackgroundCommand,
   settleSessionInputWait,
   settleSessionIdleWithParentOutbox,
-  upsertOrganizationClaudeSubscription,
   upsertOrganizationXaiSubscription,
   waitForSessionInputWithEvent,
   type SessionWorkflowWakeDeliveryResult,
@@ -26,23 +24,17 @@ import type { EventBus } from "@opengeni/events";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 
 import { notifyParentOfChildIdle, type NotifyServices } from "../src/activities/parent-wake";
-import {
-  SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS,
-} from "@opengeni/db";
-// Legacy Claude account helpers stay only for the API until C2a/C2b (design 5.3, C4).
-import {
-  createClaudeSubscriptionAccount,
-} from "../../../packages/db/src/claude-subscription-accounts";
+import { SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS } from "@opengeni/db";
 
-// Characterizes the legacy SuperGrok and Claude runtimes, which run only before
-// their drained subscription-core cutovers: the database withholds those
-// migrations. Removed with the legacy runtimes.
+// Characterizes the legacy SuperGrok runtime, which runs only before its
+// drained subscription-core cutover: the database withholds that migration.
+// Removed with the legacy runtime. Claude is on the shared core (its legacy
+// runtime is deleted, design 5.3, C4): every accepted Claude snapshot is the
+// workspace default.
 const LEGACY_SUBSCRIPTION_WORLD = {
-  withheldMigrations: [
-    SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.xai!,
-    SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.claude!,
-  ],
+  withheldMigrations: [SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.xai!],
 };
+const CLAUDE_V1_DEFAULT = { version: 1, scope: "workspace" } as const;
 
 // The child-to-parent handoff with real PostgreSQL. Only the Temporal
 // transport is replaced: the recorder stands in for signalWithStart and then
@@ -72,7 +64,7 @@ afterAll(async () => {
 }, 60_000);
 
 test.each(["organization", "personal"] as const)(
-  "SUB-ACCESS-01: real child, background-command, and wait-timeout producers coalesce with accepted %s Claude and SuperGrok snapshots",
+  "SUB-ACCESS-01: real child, background-command, and wait-timeout producers coalesce with accepted %s SuperGrok snapshots",
   async (scope) => {
     if (!shared || !client) return;
     const admin = shared.admin;
@@ -103,31 +95,6 @@ test.each(["organization", "personal"] as const)(
       )`;
 
     if (scope === "personal") {
-      const claudeIdentity = crypto.randomUUID();
-      const claude = await createClaudeSubscriptionAccount(db, {
-        accountId,
-        workspaceId,
-        subjectId,
-        scope: "user",
-        encryptionKey,
-        secret: {
-          version: 1,
-          token: "sk-ant-oat01-parent-wake-personal",
-          identity: { accountUuid: claudeIdentity, deviceId: "d".repeat(64) },
-        },
-        providerAccountId: claudeIdentity,
-        label: null,
-        accountEmail: null,
-        planType: "claude_max",
-        expiresAt: null,
-      });
-      await setInitialActiveClaudeCredential(db, {
-        accountId,
-        workspaceId,
-        subjectId,
-        authoritySnapshot: claude.authoritySnapshot,
-        credentialId: claude.account.id,
-      });
       const xai = await createXaiSubscriptionCredential(db, {
         accountId,
         workspaceId,
@@ -145,21 +112,6 @@ test.each(["organization", "personal"] as const)(
         credentialId: xai.account.id,
       });
     } else {
-      const claudeIdentity = crypto.randomUUID();
-      await upsertOrganizationClaudeSubscription(db, {
-        organizationId: accountId,
-        actorSubjectId: subjectId,
-        encryptionKey,
-        secret: {
-          version: 1,
-          token: "sk-ant-oat01-parent-wake-org",
-          identity: { accountUuid: claudeIdentity, deviceId: "e".repeat(64) },
-        },
-        providerAccountId: claudeIdentity,
-        label: null,
-        accountEmail: null,
-        expiresAt: null,
-      });
       await upsertOrganizationXaiSubscription(db, {
         organizationId: accountId,
         actorSubjectId: subjectId,
@@ -263,8 +215,8 @@ test.each(["organization", "personal"] as const)(
       select claude_provider_account_authority_snapshot as claude,
         xai_provider_account_authority_snapshot as xai
       from session_turns where id = ${parent.turn.id}`;
-    expect(accepted?.claude.scope).toBe(scope === "personal" ? "user" : "organization");
-    expect(accepted?.xai).toEqual(accepted?.claude);
+    expect(accepted?.xai.scope).toBe(scope === "personal" ? "user" : "organization");
+    expect(accepted?.claude).toEqual(CLAUDE_V1_DEFAULT);
 
     const child = await start("complete delegated work", parent);
     const [childAuthority] = await admin<{ claude: PoolSnapshot; xai: PoolSnapshot }[]>`

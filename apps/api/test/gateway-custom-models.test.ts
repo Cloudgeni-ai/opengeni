@@ -54,9 +54,7 @@ import {
 } from "../src/app";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
 import { registerWorkspaceRoutes } from "../src/routes/workspaces";
-import {
-  SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS,
-} from "@opengeni/db";
+import { SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS } from "@opengeni/db";
 // Legacy Claude account helpers stay only for the API until C2a/C2b (design 5.3, C4).
 import {
   createClaudeSubscriptionAccount,
@@ -381,8 +379,11 @@ describe("workspace Gateway custom model API", () => {
           },
           publicApp,
         );
-        expect(session.status).toBe(202);
-        expect((await session.json()).model).toBe(productId);
+        // The legacy Claude pool no longer admits work (its runtime is deleted,
+        // design 5.3, C4); Claude admission comes from the shared core (C2a).
+        const admissible = providerKind === "anthropic";
+        expect(session.status).toBe(admissible ? 202 : 422);
+        if (admissible) expect((await session.json()).model).toBe(productId);
         const removal = { operationId: crypto.randomUUID(), expectedVersion: model.version };
         expect(
           (
@@ -419,7 +420,7 @@ describe("workspace Gateway custom model API", () => {
         // Assert the original pre-admission catalog snapshot as well. Keeping
         // this last lets the independent admission/retirement checks run when
         // a readiness regression is present; it does not change the invariant.
-        expect(initialSelectable).toBe(true);
+        expect(initialSelectable).toBe(admissible);
       } finally {
         // Pool precedence is intentional: clean up the workspace account before
         // the independent organization-inheritance test, even on assertion failure.
@@ -728,6 +729,19 @@ describe("workspace Gateway custom model API", () => {
         publicApp,
       );
       const body = await response.json();
+      if (providerKind === "claude_subscription") {
+        // The legacy organization Claude pool no longer admits work (its
+        // runtime is deleted, design 5.3, C4): fail closed until the shared
+        // core answers Claude admission (C2a).
+        expect({ status: response.status, body }).toEqual({
+          status: 422,
+          body: {
+            code: "SESSION_CREATE_REJECTED",
+            message: `model is not selectable: ${model}`,
+          },
+        });
+        return;
+      }
       expect({ status: response.status, ...(response.status === 202 ? {} : { body }) }).toEqual({
         status: 202,
       });

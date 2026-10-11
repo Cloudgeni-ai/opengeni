@@ -1177,8 +1177,7 @@ export function shouldRecoverCompactionProviderFailure(error: unknown): boolean 
   const claudeRefusal = isClaudeSubscriptionTransportError(error)
     ? classifyClaudeProviderError(error)
     : null;
-  if (claudeRefusal?.kind === "unauthorized" || claudeRefusal?.kind === "rate_limited")
-    return true;
+  if (claudeRefusal?.kind === "unauthorized" || claudeRefusal?.kind === "rate_limited") return true;
   // Codex may reject an opaque artifact it minted itself on the compaction
   // request exactly as it can on an ordinary request. Failure settlement
   // invalidates only the exact participating artifacts and recovers the same

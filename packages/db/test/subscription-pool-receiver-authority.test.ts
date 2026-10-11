@@ -26,24 +26,15 @@ import {
   workspaceXaiSubscriptionActiveForAuthority,
   type DbClient,
 } from "../src";
-import {
-  createClaudeSubscriptionAccount,
-  resolveClaudeProviderAccountAuthoritySnapshotForAcceptance,
-  selectClaudeCredentialForUse,
-  setInitialActiveClaudeCredential,
-  upsertOrganizationClaudeSubscription,
-  workspaceClaudeSubscriptionActiveForAuthority,
-} from "../src/claude-subscription-accounts";
 import { SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS } from "../src/runtime-posture";
 
-// Characterizes the legacy SuperGrok and Claude runtimes, which run only before
-// their drained subscription-core cutovers: the database withholds those
-// migrations. Removed with the legacy runtimes.
+// Characterizes the legacy SuperGrok runtime, which runs only before its
+// drained subscription-core cutover: the database withholds that migration.
+// Removed with the legacy runtime. Claude is on the shared core (its legacy
+// runtime is deleted, design 5.3, C4): every accepted Claude snapshot is the
+// workspace default, which turnAuthority and updateAuthority assert.
 const LEGACY_SUBSCRIPTION_WORLD = {
-  withheldMigrations: [
-    SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.xai!,
-    SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.claude!,
-  ],
+  withheldMigrations: [SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.xai!],
 };
 
 // Contract: the subscription pool belongs to the receiving session's accepted
@@ -105,23 +96,9 @@ async function fixture() {
   return { accountId, workspaceId, owner: humans[0], member: humans[1] };
 }
 
-/** Connect an organization pool for both Claude and SuperGrok. */
+/** Connect an organization SuperGrok pool. */
 async function connectOrganizationPools(input: Fixture) {
   const actor = { organizationId: input.accountId, actorSubjectId: input.owner };
-  const claudeIdentity = crypto.randomUUID();
-  const claude = await upsertOrganizationClaudeSubscription(client.db, {
-    ...actor,
-    encryptionKey,
-    secret: {
-      version: 1,
-      token: "sk-ant-oat01-receiver-fixture",
-      identity: { accountUuid: claudeIdentity, deviceId: "a".repeat(64) },
-    },
-    providerAccountId: claudeIdentity,
-    label: null,
-    accountEmail: null,
-    expiresAt: null,
-  });
   const xai = await upsertOrganizationXaiSubscription(client.db, {
     ...actor,
     providerAccountId: `receiver-${crypto.randomUUID()}`,
@@ -131,33 +108,12 @@ async function connectOrganizationPools(input: Fixture) {
     accountEmail: null,
     expiresAt: new Date(Date.now() + 3600_000),
   });
-  return { claude: claude.account.id, xai: xai.account.id };
+  return { xai: xai.account.id };
 }
 
-/** Connect and activate a personal (user-scoped) pool for both providers. */
+/** Connect and activate a personal (user-scoped) SuperGrok pool. */
 async function connectPersonalPools(input: Fixture, subjectId: string) {
   const scope = { accountId: input.accountId, workspaceId: input.workspaceId, subjectId };
-  const claudeIdentity = crypto.randomUUID();
-  const claude = await createClaudeSubscriptionAccount(client.db, {
-    ...scope,
-    scope: "user",
-    encryptionKey,
-    secret: {
-      version: 1,
-      token: "sk-ant-oat01-personal-fixture",
-      identity: { accountUuid: claudeIdentity, deviceId: "b".repeat(64) },
-    },
-    providerAccountId: claudeIdentity,
-    label: null,
-    accountEmail: null,
-    planType: "claude_max",
-    expiresAt: null,
-  });
-  await setInitialActiveClaudeCredential(client.db, {
-    ...scope,
-    authoritySnapshot: claude.authoritySnapshot,
-    credentialId: claude.account.id,
-  });
   const xai = await createXaiSubscriptionCredential(client.db, {
     ...scope,
     scope: "user",
@@ -172,12 +128,9 @@ async function connectPersonalPools(input: Fixture, subjectId: string) {
   });
   const accepted = { workspaceId: input.workspaceId, subjectId };
   expect(
-    await resolveClaudeProviderAccountAuthoritySnapshotForAcceptance(client.db, accepted),
-  ).toMatchObject({ scope: "user" });
-  expect(
     await resolveXaiProviderAccountAuthoritySnapshotForAcceptance(client.db, accepted),
   ).toMatchObject({ scope: "user" });
-  return { claude: claude.account.id, xai: xai.account.id };
+  return { xai: xai.account.id };
 }
 
 async function humanSession(input: Fixture, subjectId: string) {
@@ -245,7 +198,7 @@ async function turnAuthority(turnId: string) {
       initiating_human_subject_id as human
     from session_turns where id = ${turnId}`;
   if (!row) throw new Error(`Turn not found: ${turnId}`);
-  return row;
+  return { xai: row.xai, human: row.human };
 }
 
 async function updateAuthority(updateId: string) {
@@ -254,7 +207,7 @@ async function updateAuthority(updateId: string) {
       xai_provider_account_authority_snapshot as xai
     from session_system_updates where id = ${updateId}`;
   if (!row) throw new Error(`Update not found: ${updateId}`);
-  return row;
+  return { xai: row.xai };
 }
 
 function agentActor(sessionId: string, claimed: Awaited<ReturnType<typeof claim>>) {
@@ -314,8 +267,8 @@ async function complete(
 /** The accepted snapshot must reach the pool account the receiver can actually use. */
 async function expectSelects(
   input: Fixture,
-  authority: { claude: Snapshot; xai: Snapshot },
-  expected: { claude: string; xai: string },
+  authority: { xai: Snapshot },
+  expected: { xai: string },
 ) {
   const selection = {
     accountId: input.accountId,
@@ -323,23 +276,6 @@ async function expectSelects(
     subjectId: input.owner,
     shardKey: crypto.randomUUID(),
   };
-  expect(
-    await workspaceClaudeSubscriptionActiveForAuthority(client.db, settings, {
-      ...selection,
-      authoritySnapshot: authority.claude,
-      upstreamModelId,
-    }),
-  ).toBe(true);
-  expect(
-    (
-      await selectClaudeCredentialForUse(client.db, {
-        ...selection,
-        authoritySnapshot: authority.claude,
-        modelId: `organization-claude-subscription/${upstreamModelId}`,
-        upstreamModelId,
-      })
-    ).credentialId,
-  ).toBe(expected.claude);
   expect(
     await workspaceXaiSubscriptionActiveForAuthority(client.db, settings, {
       ...selection,
@@ -352,14 +288,13 @@ async function expectSelects(
   ).toBe(expected.xai);
 }
 
-test("SUB-ACCESS-01: an Agent message from a sender accepted before the organization pool freezes the receiver's organization pool (Claude and SuperGrok)", async () => {
+test("SUB-ACCESS-01: an Agent message from a sender accepted before the organization pool freezes the receiver's organization pool (SuperGrok)", async () => {
   const input = await fixture();
   // The sender was accepted while no pool existed, so its own work stays workspace.
   const sender = await humanSession(input, input.owner);
   await prompt(input, sender.id, { type: "human", subjectId: input.owner });
   const senderClaim = await claim(input, sender.id);
   expect(await turnAuthority(senderClaim.turn.id)).toMatchObject({
-    claude: workspace,
     xai: workspace,
   });
 
@@ -369,26 +304,24 @@ test("SUB-ACCESS-01: an Agent message from a sender accepted before the organiza
     select initial_claude_provider_account_authority_snapshot as claude,
       initial_xai_provider_account_authority_snapshot as xai
     from sessions where id = ${receiver.id}`;
-  expect(receiverRow).toEqual({ claude: organization, xai: organization });
+  expect(receiverRow).toEqual({ claude: workspace, xai: organization });
 
   const sent = await message(input, { sessionId: sender.id, claimed: senderClaim }, receiver.id);
   expect(await updateAuthority(sent.updateId)).toEqual({
-    claude: organization,
     xai: organization,
   });
   const received = await claim(input, receiver.id);
   const authority = await turnAuthority(received.turn.id);
-  expect(authority).toEqual({ claude: organization, xai: organization, human: input.owner });
+  expect(authority).toEqual({ xai: organization, human: input.owner });
   await expectSelects(input, authority, pools);
 
   // The sender's own accepted work keeps its frozen snapshot.
   expect(await turnAuthority(senderClaim.turn.id)).toMatchObject({
-    claude: workspace,
     xai: workspace,
   });
 }, 180_000);
 
-test("SUB-ACCESS-01: service-actor prompts and service-created sessions resolve the organization pool, and their Agent messages and Steers freeze the receiver's pool (Claude and SuperGrok)", async () => {
+test("SUB-ACCESS-01: service-actor prompts and service-created sessions resolve the organization pool, and their Agent messages and Steers freeze the receiver's pool (SuperGrok)", async () => {
   const input = await fixture();
   const pools = await connectOrganizationPools(input);
   const service = { type: "service" as const, subjectId: `service:bridge-${crypto.randomUUID()}` };
@@ -398,7 +331,7 @@ test("SUB-ACCESS-01: service-actor prompts and service-created sessions resolve 
   await prompt(input, sender.id, service);
   const senderClaim = await claim(input, sender.id);
   const senderAuthority = await turnAuthority(senderClaim.turn.id);
-  expect(senderAuthority).toMatchObject({ claude: organization, xai: organization });
+  expect(senderAuthority).toMatchObject({ xai: organization });
   await expectSelects(input, senderAuthority, pools);
 
   // A session created by a non-subject creator resolves the shared pool too.
@@ -419,19 +352,19 @@ test("SUB-ACCESS-01: service-actor prompts and service-created sessions resolve 
     select initial_claude_provider_account_authority_snapshot as claude,
       initial_xai_provider_account_authority_snapshot as xai
     from sessions where id = ${serviceCreated.id}`;
-  expect(serviceRow).toEqual({ claude: organization, xai: organization });
+  expect(serviceRow).toEqual({ claude: workspace, xai: organization });
 
   for (const delivery of ["message", "steer"] as const) {
     const receiver = await humanSession(input, input.owner);
     await message(input, { sessionId: sender.id, claimed: senderClaim }, receiver.id, delivery);
     const received = await claim(input, receiver.id);
     const authority = await turnAuthority(received.turn.id);
-    expect(authority).toMatchObject({ claude: organization, xai: organization });
+    expect(authority).toMatchObject({ xai: organization });
     await expectSelects(input, authority, pools);
   }
 }, 180_000);
 
-test("SUB-ACCESS-01: Agent messages never carry a personal pool into another human's session, in either direction (Claude and SuperGrok)", async () => {
+test("SUB-ACCESS-01: Agent messages never carry a personal pool into another human's session, in either direction (SuperGrok)", async () => {
   const input = await fixture();
   const pools = await connectOrganizationPools(input);
   const ownerPersonal = await connectPersonalPools(input, input.owner);
@@ -442,7 +375,6 @@ test("SUB-ACCESS-01: Agent messages never carry a personal pool into another hum
   await prompt(input, ownerSession.id, { type: "human", subjectId: input.owner });
   const ownerClaim = await claim(input, ownerSession.id);
   const ownerAuthority = await turnAuthority(ownerClaim.turn.id);
-  expect(ownerAuthority.claude.scope).toBe("user");
   expect(ownerAuthority.xai.scope).toBe("user");
 
   // Sender personal pool -> another human's session: the receiver keeps its
@@ -451,7 +383,7 @@ test("SUB-ACCESS-01: Agent messages never carry a personal pool into another hum
   await message(input, { sessionId: ownerSession.id, claimed: ownerClaim }, memberSession.id);
   const memberReceived = await claim(input, memberSession.id);
   const memberAuthority = await turnAuthority(memberReceived.turn.id);
-  expect(memberAuthority).toEqual({ claude: organization, xai: organization, human: input.owner });
+  expect(memberAuthority).toEqual({ xai: organization, human: input.owner });
   await expectSelects(input, memberAuthority, pools);
 
   // Receiver personal pool, different causal human: the member's message to
@@ -460,20 +392,7 @@ test("SUB-ACCESS-01: Agent messages never carry a personal pool into another hum
   await prompt(input, memberSender.id, { type: "human", subjectId: input.member });
   const memberClaim = await claim(input, memberSender.id);
   const memberSenderAuthority = await turnAuthority(memberClaim.turn.id);
-  expect(memberSenderAuthority.claude.scope).toBe("user");
   expect(memberSenderAuthority.xai.scope).toBe("user");
-  expect(
-    (
-      await selectClaudeCredentialForUse(client.db, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        subjectId: input.member,
-        shardKey: crypto.randomUUID(),
-        authoritySnapshot: memberSenderAuthority.claude,
-        upstreamModelId,
-      })
-    ).credentialId,
-  ).toBe(memberPersonal.claude);
   expect(
     (
       await selectXaiCredentialForUse(client.db, {
@@ -490,11 +409,9 @@ test("SUB-ACCESS-01: Agent messages never carry a personal pool into another hum
   const [ownerTargetTurn] = await shared.admin<{ id: string }[]>`
     select id from session_turns where session_id = ${ownerTarget.id}`;
   const ownerTargetAuthority = await turnAuthority(ownerTargetTurn!.id);
-  expect(ownerTargetAuthority.claude.scope).toBe("user");
   const ownerInitial = await claim(input, ownerTarget.id);
   const ownerInitialAuthority = await turnAuthority(ownerInitial.turn.id);
   expect(ownerInitialAuthority).toMatchObject({
-    claude: ownerTargetAuthority.claude,
     xai: ownerTargetAuthority.xai,
   });
   await expectSelects(input, ownerInitialAuthority, ownerPersonal);
@@ -505,12 +422,11 @@ test("SUB-ACCESS-01: Agent messages never carry a personal pool into another hum
     ownerTarget.id,
   );
   expect(await updateAuthority(cross.updateId)).toEqual({
-    claude: organization,
     xai: organization,
   });
   const crossReceived = await claim(input, ownerTarget.id);
   const crossAuthority = await turnAuthority(crossReceived.turn.id);
-  expect(crossAuthority).toMatchObject({ claude: organization, xai: organization });
+  expect(crossAuthority).toMatchObject({ xai: organization });
   await expectSelects(input, crossAuthority, pools);
 
   // The same human keeps their own receiver's personal pool: from the latest
@@ -522,13 +438,11 @@ test("SUB-ACCESS-01: Agent messages never carry a personal pool into another hum
     { sessionId: ownerSession.id, claimed: ownerClaim },
     ownerBusy.id,
   );
-  expect((await updateAuthority(sameLatest.updateId)).claude.scope).toBe("user");
   expect((await updateAuthority(sameLatest.updateId)).xai.scope).toBe("user");
   const ownerIdle = await humanSession(input, input.owner);
   await message(input, { sessionId: ownerSession.id, claimed: ownerClaim }, ownerIdle.id);
   const sameHuman = await claim(input, ownerIdle.id);
   const sameHumanAuthority = await turnAuthority(sameHuman.turn.id);
-  expect(sameHumanAuthority.claude.scope).toBe("user");
   expect(sameHumanAuthority.xai.scope).toBe("user");
   expect(sameHumanAuthority.human).toBe(input.owner);
   const ownerSelection = {
@@ -539,15 +453,6 @@ test("SUB-ACCESS-01: Agent messages never carry a personal pool into another hum
   };
   expect(
     (
-      await selectClaudeCredentialForUse(client.db, {
-        ...ownerSelection,
-        authoritySnapshot: sameHumanAuthority.claude,
-        upstreamModelId,
-      })
-    ).credentialId,
-  ).toBe(ownerPersonal.claude);
-  expect(
-    (
       await selectXaiCredentialForUse(client.db, {
         ...ownerSelection,
         authoritySnapshot: sameHumanAuthority.xai,
@@ -556,7 +461,7 @@ test("SUB-ACCESS-01: Agent messages never carry a personal pool into another hum
   ).toBe(ownerPersonal.xai);
 }, 180_000);
 
-test("SUB-ACCESS-01: the receiver's pool comes from its latest accepted work, not its queue position (Claude and SuperGrok)", async () => {
+test("SUB-ACCESS-01: the receiver's pool comes from its latest accepted work, not its queue position (SuperGrok)", async () => {
   const input = await fixture();
   const service = { type: "service" as const, subjectId: `service:bridge-${crypto.randomUUID()}` };
   const sender = await humanSession(input, input.owner);
@@ -571,7 +476,6 @@ test("SUB-ACCESS-01: the receiver's pool comes from its latest accepted work, no
   await message(input, { sessionId: sender.id, claimed: senderClaim }, receiver.id);
   const internal = await claim(input, receiver.id);
   expect(await turnAuthority(internal.turn.id)).toMatchObject({
-    claude: workspace,
     xai: workspace,
   });
   await complete(input, receiver.id, internal);
@@ -582,7 +486,6 @@ test("SUB-ACCESS-01: the receiver's pool comes from its latest accepted work, no
   await prompt(input, receiver.id, { type: "human", subjectId: input.owner });
   const newest = await claim(input, receiver.id);
   expect(await turnAuthority(newest.turn.id)).toMatchObject({
-    claude: organization,
     xai: organization,
   });
   const positions = await shared.admin<{ id: string; position: string }[]>`
@@ -595,11 +498,11 @@ test("SUB-ACCESS-01: the receiver's pool comes from its latest accepted work, no
   await message(input, { sessionId: sender.id, claimed: senderClaim }, receiver.id);
   const received = await claim(input, receiver.id);
   const authority = await turnAuthority(received.turn.id);
-  expect(authority).toMatchObject({ claude: organization, xai: organization });
+  expect(authority).toMatchObject({ xai: organization });
   await expectSelects(input, authority, pools);
 }, 180_000);
 
-test("SUB-ACCESS-01: internal updates without causal authority resolve the organization pool (Claude and SuperGrok)", async () => {
+test("SUB-ACCESS-01: internal updates without causal authority resolve the organization pool (SuperGrok)", async () => {
   const input = await fixture();
   const pools = await connectOrganizationPools(input);
   const receiver = await humanSession(input, input.owner);
@@ -619,14 +522,14 @@ test("SUB-ACCESS-01: internal updates without causal authority resolve the organ
     select claude_provider_account_authority_snapshot as claude,
       xai_provider_account_authority_snapshot as xai
     from session_system_updates where session_id = ${receiver.id} and dedupe_key = ${dedupeKey}`;
-  expect(update).toEqual({ claude: organization, xai: organization });
+  expect(update).toEqual({ claude: workspace, xai: organization });
   const received = await claim(input, receiver.id);
   const authority = await turnAuthority(received.turn.id);
-  expect(authority).toMatchObject({ claude: organization, xai: organization, human: null });
+  expect(authority).toMatchObject({ xai: organization, human: null });
   await expectSelects(input, authority, pools);
 }, 180_000);
 
-test("SUB-ACCESS-01: a child receiver before its first turn keeps a personal pool only for its spawning human (Claude and SuperGrok)", async () => {
+test("SUB-ACCESS-01: a child receiver before its first turn keeps a personal pool only for its spawning human (SuperGrok)", async () => {
   const input = await fixture();
   const pools = await connectOrganizationPools(input);
   await connectPersonalPools(input, input.owner);
@@ -634,14 +537,12 @@ test("SUB-ACCESS-01: a child receiver before its first turn keeps a personal poo
   await prompt(input, parent.id, { type: "human", subjectId: input.owner });
   const parentClaim = await claim(input, parent.id);
   const parentAuthority = await turnAuthority(parentClaim.turn.id);
-  expect(parentAuthority.claude.scope).toBe("user");
   const child = await createSession(client.db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
     initialMessage: "",
     parentSessionId: parent.id,
     createdByActor: agentActor(parent.id, parentClaim),
-    initialClaudeProviderAccountAuthoritySnapshot: parentAuthority.claude,
     initialXaiProviderAccountAuthoritySnapshot: parentAuthority.xai,
     resources: [],
     tools: [],
@@ -655,7 +556,6 @@ test("SUB-ACCESS-01: a child receiver before its first turn keeps a personal poo
   // The spawning human's own message keeps the child's inherited personal pool.
   const same = await message(input, { sessionId: parent.id, claimed: parentClaim }, child.id);
   expect(await updateAuthority(same.updateId)).toEqual({
-    claude: parentAuthority.claude,
     xai: parentAuthority.xai,
   });
 
@@ -665,12 +565,12 @@ test("SUB-ACCESS-01: a child receiver before its first turn keeps a personal poo
   const memberClaim = await claim(input, member.id);
   const cross = await message(input, { sessionId: member.id, claimed: memberClaim }, child.id);
   const crossAuthority = await updateAuthority(cross.updateId);
-  expect(crossAuthority).toEqual({ claude: organization, xai: organization });
+  expect(crossAuthority).toEqual({ xai: organization });
   await expectSelects(input, crossAuthority, pools);
 }, 180_000);
 
 test.each(["organization", "user"] as const)(
-  "SUB-ACCESS-01: Claude and SuperGrok %s accepted pool snapshots survive same-turn recovery",
+  "SUB-ACCESS-01: SuperGrok %s accepted pool snapshots survive same-turn recovery",
   async (scope) => {
     const input = await fixture();
     await connectOrganizationPools(input);
@@ -679,18 +579,11 @@ test.each(["organization", "user"] as const)(
     await prompt(input, session.id, { type: "human", subjectId: input.owner });
     const accepted = await claim(input, session.id);
     const frozen = await turnAuthority(accepted.turn.id);
-    expect(frozen.claude.scope).toBe(scope);
     expect(frozen.xai.scope).toBe(scope);
 
     if (scope === "organization") {
       // A changed live pool must not alter an already accepted organization turn.
       await connectPersonalPools(input, input.owner);
-      expect(
-        await resolveClaudeProviderAccountAuthoritySnapshotForAcceptance(client.db, {
-          workspaceId: input.workspaceId,
-          subjectId: input.owner,
-        }),
-      ).toMatchObject({ scope: "user" });
       expect(
         await resolveXaiProviderAccountAuthoritySnapshotForAcceptance(client.db, {
           workspaceId: input.workspaceId,
@@ -715,7 +608,7 @@ test.each(["organization", "user"] as const)(
 );
 
 test.each(["organization", "user"] as const)(
-  "SUB-ACCESS-01: Claude and SuperGrok %s accepted pool snapshots reach goal continuations and compaction turns",
+  "SUB-ACCESS-01: SuperGrok %s accepted pool snapshots reach goal continuations and compaction turns",
   async (scope) => {
     const input = await fixture();
     await connectOrganizationPools(input);
@@ -725,7 +618,6 @@ test.each(["organization", "user"] as const)(
     await prompt(input, compactSession.id, { type: "human", subjectId: input.owner });
     const started = await claim(input, compactSession.id);
     const compactAuthority = await turnAuthority(started.turn.id);
-    expect(compactAuthority.claude.scope).toBe(scope);
     expect(compactAuthority.xai.scope).toBe(scope);
     // Persist the canonical start marker that makes this the session's actual
     // latest started work for maintenance executions such as compaction.
@@ -743,7 +635,6 @@ test.each(["organization", "user"] as const)(
     const compacted = await claim(input, compactSession.id);
     expect(compacted.turn.source).toBe("compaction");
     const compactedAuthority = await turnAuthority(compacted.turn.id);
-    expect(compactedAuthority.claude).toEqual(compactAuthority.claude);
     expect(compactedAuthority.xai).toEqual(compactAuthority.xai);
 
     const goalSession = await humanSession(input, input.owner);
@@ -757,7 +648,6 @@ test.each(["organization", "user"] as const)(
     await prompt(input, goalSession.id, { type: "human", subjectId: input.owner });
     const goalStart = await claim(input, goalSession.id);
     const goalAuthority = await turnAuthority(goalStart.turn.id);
-    expect(goalAuthority.claude.scope).toBe(scope);
     expect(goalAuthority.xai.scope).toBe(scope);
     if (scope === "organization") await connectPersonalPools(input, input.owner);
     await complete(input, goalSession.id, goalStart);
@@ -782,12 +672,10 @@ test.each(["organization", "user"] as const)(
     if (continuation.action !== "continue")
       throw new Error("Goal continuation was not materialized");
     expect(await updateAuthority(continuation.update.id)).toEqual({
-      claude: goalAuthority.claude,
       xai: goalAuthority.xai,
     });
     const continued = await claim(input, goalSession.id);
     expect(await turnAuthority(continued.turn.id)).toMatchObject({
-      claude: goalAuthority.claude,
       xai: goalAuthority.xai,
       human: input.owner,
     });
@@ -796,7 +684,7 @@ test.each(["organization", "user"] as const)(
 );
 
 test.each(["organization", "user"] as const)(
-  "SUB-ACCESS-01: coalesced child, background-command, and wait-timeout updates deliver with the accepted Claude and SuperGrok %s pool",
+  "SUB-ACCESS-01: coalesced child, background-command, and wait-timeout updates deliver with the accepted SuperGrok %s pool",
   async (scope) => {
     const input = await fixture();
     await connectOrganizationPools(input);
@@ -807,7 +695,6 @@ test.each(["organization", "user"] as const)(
     await prompt(input, session.id, { type: "human", subjectId: input.owner });
     const accepted = await claim(input, session.id);
     const frozen = await turnAuthority(accepted.turn.id);
-    expect(frozen.claude.scope).toBe(scope);
     expect(frozen.xai.scope).toBe(scope);
 
     const commandId = crypto.randomUUID();
@@ -824,14 +711,11 @@ test.each(["organization", "user"] as const)(
         lineage: {
           parentTurnId: accepted.turn.id,
           parentSessionId: session.id,
-          ...(scope === "user"
-            ? { xaiAuthoritySubjectId: input.owner, claudeAuthoritySubjectId: input.owner }
-            : {}),
+          ...(scope === "user" ? { xaiAuthoritySubjectId: input.owner } : {}),
         },
         ...(scope === "user"
           ? {
               xaiProviderAccountAuthoritySnapshot: frozen.xai,
-              claudeProviderAccountAuthoritySnapshot: frozen.claude,
             }
           : {}),
         summary: "Child completed",
@@ -848,14 +732,11 @@ test.each(["organization", "user"] as const)(
         dedupeKey: `sub-access-command:${commandId}`,
         lineage: {
           causalTurnId: accepted.turn.id,
-          ...(scope === "user"
-            ? { xaiAuthoritySubjectId: input.owner, claudeAuthoritySubjectId: input.owner }
-            : {}),
+          ...(scope === "user" ? { xaiAuthoritySubjectId: input.owner } : {}),
         },
         ...(scope === "user"
           ? {
               xaiProviderAccountAuthoritySnapshot: frozen.xai,
-              claudeProviderAccountAuthoritySnapshot: frozen.claude,
             }
           : {}),
         summary: "Background command completed",
@@ -914,13 +795,11 @@ test.each(["organization", "user"] as const)(
     ]);
     for (const row of inserted) {
       const authority = await updateAuthority(row.id);
-      expect(authority.claude).toEqual(frozen.claude);
       expect(authority.xai).toEqual(frozen.xai);
     }
 
     const delivered = await claim(input, session.id);
     const deliveredAuthority = await turnAuthority(delivered.turn.id);
-    expect(deliveredAuthority.claude).toEqual(frozen.claude);
     expect(deliveredAuthority.xai).toEqual(frozen.xai);
     const rows = await shared.admin<
       { id: string; state: string; delivered_turn_id: string | null }[]

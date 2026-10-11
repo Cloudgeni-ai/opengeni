@@ -7,11 +7,7 @@ import {
   type CodexRequestContext,
   type CodexUsagePayload,
 } from "@opengeni/codex";
-import {
-  codexUpstreamModelSlugs,
-  type ConfiguredModel,
-  type Settings,
-} from "@opengeni/config";
+import { codexUpstreamModelSlugs, type ConfiguredModel, type Settings } from "@opengeni/config";
 import type { EntitlementsPort } from "@opengeni/contracts";
 import {
   admissibleWorkspaceModel,

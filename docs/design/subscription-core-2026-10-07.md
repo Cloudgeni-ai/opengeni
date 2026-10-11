@@ -3007,6 +3007,7 @@ repository's complex-change review policy.
 | X3. SuperGrok drained cutover | Codec stage, data move, compatibility records, parity report, receipt, switch rows enabled; role provisioning and the posture contract stop granting legacy writes; runbook section. | maintenance |
 | X4. SuperGrok legacy deletion | Removes the xAI selector arm, factory repository use, v1 xAI readers and writers, xAI use of `ScopedSubscriptionTurnLease`, the video envelope code and the shadow; extends the guard below to xAI. Merges only with the `compat:dependent_sources_without_record` copy-path test green. | rolling |
 | C1a, C1b, C2a, C2b, C3, C4. Claude | The same steps. C1b reads core turn-failure receipts in place of `claudeAuthRecovery`; C2a covers the usage routes; C2b covers the OAuth and setup-token writers; C3 converts live `claudeAuthRecovery` values and includes the combined-window ledger test; C4 deletes the Claude arm, `claude_subscription_account_usage` use and the dead connection-based usage code. | as X1a..X4 |
+| C4. Claude legacy deletion | Removes the Claude selector arm (any route but `core` fails closed), the `claudeAuthRecovery` reader, the legacy Claude settlement, refresh recovery, rotation and waiter arms, the legacy Claude model-call, readiness and custom-model admission paths, the connection-based usage code and the legacy readers in the db package; moves the pure OAuth helpers the core uses into a core-owned module; registers the `claude.ts` guard entry. The API account routes, OAuth and setup-token writers, access policy and usage refresh keep the legacy repository until C2a and C2b replace them; the guard reports those files until then. Merges only with the `compat:dependent_sources_without_record` copy-path tests green. | rolling |
 | F. Fake API-key adapter conformance | A test-only adapter (`kind = api_key`, static credential, no quota windows, no refresh) driven through the same core placement, lease, failover and wait paths as subscriptions and compared with the reference model; scripted local upstream and a network-denial guard. No production table, provider row or route; one migration (0715) makes the neutral routines read the connection kind from the provider registry. Lands after PR 0. See "API-key connectors on the shared core" below. | rolling (the connector is test only) |
 | W. Workspace-managed connections as organization accounts | [§5.4](#54-workspace-managed-connections-as-organization-accounts): 0714 lets the provider-keyed reach setters accept a connection managed by a shared workspace, makes the reach reader report the reach row's switch and list, and adds `set_subscription_core_reach_allocator` (organization administrators only); the organization access editor reads and saves its reach (people scope only for unmanaged accounts); the Accounts page change ships separately after owner approval. Applies to SuperGrok and Claude through X3 and C3, which map workspace credentials into the same shape. | rolling (no row changes) |
 | R. Retirement | A forward migration drops the retired SQL routines, triggers and policies listed below; `subscriptionPoolWorkerSubject` and its users are removed; posture inventories are updated. Historical migrations, legacy tables and columns, v1 CHECK validators and column-immutability triggers stay until M6. | maintenance (exact posture contract) |
@@ -4655,8 +4656,8 @@ like C1a.
   An unknown request outcome or a lost lease skips the step. The legacy
   Claude receipts, refresh recovery, rotation and wait never run for a core
   turn, and the core never reads the v1 `claudeAuthRecovery` marker (the
-  receipts replace it); the claim keeps reading it for legacy turns until
-  C3 converts live values.
+  receipts replace it). C3 converts live values into receipts and C4 deletes
+  the claim's read of the marker.
 - Header usage. Each response's usage headers are decoded with
   `decodeSubscriptionCoreClaudeQuota`, using the refresh generation of the
   bearer that made the request and every Claude model of the deployment's
@@ -4753,6 +4754,54 @@ Choices made where the plan left room, for reviewers:
 - **Merge-gate seam cases.** The Claude seam integration test's peek and
   reconcile cases are `test.failing` until C1b's Claude core waits land;
   C3 merges after C1b, which makes them ordinary tests.
+
+#### C4: Claude legacy deletion
+
+C4 deletes the legacy Claude decision runtime after the drained C3 cutover
+and registers Claude in the provider-neutral guard
+(`scripts/legacy-subscription-runtime/claude.ts`, see "X4: SuperGrok legacy
+deletion and the provider-neutral guard"). It adds no migration: 0720
+already makes the six legacy Claude tables read-only after the receipt and
+converts live `claudeAuthRecovery` values into `subscription_turn_failures`
+rows.
+
+- **Worker.** The claim no longer reads `claudeAuthRecovery` and the turn
+  context no longer carries it. The legacy Claude settlement, refresh
+  recovery, rotation and waiter arms are gone from failure settlement,
+  finalization, the run and credential leases; C1b's core settlement is the
+  only Claude refusal path. The Claude capacity phase places on the core
+  when the route is `core`; `legacy` or `maintenance` fails closed with
+  `subscription_core_cutover_disabled`. The workflow's capacity reconcile
+  still accepts a recorded reference with `provider: "claude"` and matches
+  it against the core waiter by exact waiter id and generation; with no
+  legacy Claude waiter left, an unmatched Claude reference is stale.
+- **Database package.** The connection-based usage module (over the
+  blanked `claude_usage_snapshot` columns), the legacy token module, the
+  `claudeCapacityRepository`, the Claude legacy-world readers, the legacy
+  `revalidate_claude_subscription_authority` admission in workspace model
+  access, the Claude arms of accepted authority and the session queue
+  commands, and `claudeAuthRecovery` in `requestSessionTurnRecovery` are
+  deleted. Accepted work freezes the workspace default Claude snapshot; the
+  v1 columns are still written and copied verbatim, and nothing reads them
+  to decide. The pure OAuth helpers the core adapter uses (secret shape,
+  token refresh request) move into `subscription-core-claude-oauth.ts`.
+- **Fail closed until C2a.** A single Claude model call (API model-calls)
+  has no core operation path yet and fails with capacity unavailable.
+  Claude readiness without a core answer is not ready, and organization or
+  workspace Claude custom-model admission no longer consults the legacy
+  pool. After 0720 the core answers readiness, so this only changes a
+  database that has not run the cutover.
+- **Kept.** The 0598 and 0720 codec stages and the legacy secret decoder
+  they call; schema declarations (no table or column drops); posture
+  inventories; the `claude-subscription-usage` modules of contracts, config
+  and runtime (the usage contract and request helpers). Until C2a and C2b
+  stack, the API account routes, OAuth and setup-token writers, access
+  policy and usage refresh keep the legacy repository
+  (`claude-subscription-accounts.ts`, `claude-subscription-account-usage.ts`,
+  `claude-subscription-account-tokens.ts`) and its explicit API-only exports;
+  0720's read-only policies already refuse their writes after the receipt.
+  The guard reports exactly these files until C2a and C2b replace their
+  consumers; no exception excuses them.
 
 ### 5.4 Workspace-managed connections as organization accounts
 

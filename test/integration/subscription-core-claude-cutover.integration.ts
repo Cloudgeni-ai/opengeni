@@ -399,105 +399,93 @@ describe.skipIf(!realDb)(
         from subscription_capacity_waiters
         where workspace_id = ${seam!.workspaceId}::uuid and session_id = ${seam!.sessionId}::uuid`;
 
-    test(
-      "(c) the peek and peekSessionWork resolve to the migrated waiter",
-      async () => {
-        expect(seam).not.toBeNull();
-        const expected = {
-          provider: "claude",
-          waiterId: seam!.waiterId,
-          generation: seam!.generation,
-          wakeRevision: seam!.wakeRevision,
-          // The unobserved wake makes the next check immediate.
-          nextCheckAt: new Date(0).toISOString(),
-        };
-        const peeked = await activities().getCodexCapacityWait({
-          accountId: seam!.accountId,
-          workspaceId: seam!.workspaceId,
-          sessionId: seam!.sessionId,
-        } as never);
-        expect(peeked).toEqual(expected);
-        const work = await withSessionActivityRlsContext(
-          client!.db,
-          { accountId: seam!.accountId, workspaceId: seam!.workspaceId },
-          (tx) => peekSessionWork(tx, seam!.workspaceId, seam!.sessionId),
-        );
-        expect(work).toEqual({ kind: "capacity-wait", ref: expected });
-      },
-      180_000,
-    );
+    test("(c) the peek and peekSessionWork resolve to the migrated waiter", async () => {
+      expect(seam).not.toBeNull();
+      const expected = {
+        provider: "claude",
+        waiterId: seam!.waiterId,
+        generation: seam!.generation,
+        wakeRevision: seam!.wakeRevision,
+        // The unobserved wake makes the next check immediate.
+        nextCheckAt: new Date(0).toISOString(),
+      };
+      const peeked = await activities().getCodexCapacityWait({
+        accountId: seam!.accountId,
+        workspaceId: seam!.workspaceId,
+        sessionId: seam!.sessionId,
+      } as never);
+      expect(peeked).toEqual(expected);
+      const work = await withSessionActivityRlsContext(
+        client!.db,
+        { accountId: seam!.accountId, workspaceId: seam!.workspaceId },
+        (tx) => peekSessionWork(tx, seam!.workspaceId, seam!.sessionId),
+      );
+      expect(work).toEqual({ kind: "capacity-wait", ref: expected });
+    }, 180_000);
 
-    test(
-      "(a) the recorded Claude reference keeps waiting on exactly the migrated waiter, no re-arm",
-      async () => {
-        expect(seam).not.toBeNull();
-        const [wake] = await owned.admin<{ wake_revision: number }[]>`
+    test("(a) the recorded Claude reference keeps waiting on exactly the migrated waiter, no re-arm", async () => {
+      expect(seam).not.toBeNull();
+      const [wake] = await owned.admin<{ wake_revision: number }[]>`
           select max(wake_revision)::int as wake_revision from subscription_capacity_wake_outbox
           where workspace_id = ${seam!.workspaceId}::uuid and waiter_id = ${seam!.waiterId}::uuid`;
-        expect(wake!.wake_revision).toBe(seam!.wakeRevision);
-        // The account is still exhausted (the legacy `exhausted_until` moved
-        // with it): reconciling the recorded reference keeps the turn waiting.
-        const result = await activities().reconcileCodexCapacityWait({
-          provider: "claude",
-          accountId: seam!.accountId,
-          workspaceId: seam!.workspaceId,
-          sessionId: seam!.sessionId,
-          waiterId: seam!.waiterId,
+      expect(wake!.wake_revision).toBe(seam!.wakeRevision);
+      // The account is still exhausted (the legacy `exhausted_until` moved
+      // with it): reconciling the recorded reference keeps the turn waiting.
+      const result = await activities().reconcileCodexCapacityWait({
+        provider: "claude",
+        accountId: seam!.accountId,
+        workspaceId: seam!.workspaceId,
+        sessionId: seam!.sessionId,
+        waiterId: seam!.waiterId,
+        generation: seam!.generation,
+      } as never);
+      expect(result).toMatchObject({
+        action: "waiting",
+        provider: "claude",
+        waiterId: seam!.waiterId,
+        generation: seam!.generation,
+      });
+      expect([...(await coreWaiters())]).toEqual([
+        {
+          waiter_id: seam!.waiterId,
           generation: seam!.generation,
-        } as never);
-        expect(result).toMatchObject({
-          action: "waiting",
-          provider: "claude",
-          waiterId: seam!.waiterId,
-          generation: seam!.generation,
-        });
-        expect([...(await coreWaiters())]).toEqual([
-          {
-            waiter_id: seam!.waiterId,
-            generation: seam!.generation,
-            wake_revision: seam!.wakeRevision,
-            observed_wake_revision: wake!.wake_revision,
-          },
-        ]);
-        const [turn] = await owned.admin<{ status: string; execution_generation: number }[]>`
+          wake_revision: seam!.wakeRevision,
+          observed_wake_revision: wake!.wake_revision,
+        },
+      ]);
+      const [turn] = await owned.admin<{ status: string; execution_generation: number }[]>`
           select status, execution_generation::int from session_turns where id = ${seam!.turnId}::uuid`;
-        expect(turn).toEqual({ status: "waiting_capacity", execution_generation: 1 });
-      },
-      180_000,
-    );
+      expect(turn).toEqual({ status: "waiting_capacity", execution_generation: 1 });
+    }, 180_000);
 
-    test(
-      "(b) the recorded Claude reference resumes the parked turn id and generation after a core wake",
-      async () => {
-        expect(seam).not.toBeNull();
-        await owned.admin`
+    test("(b) the recorded Claude reference resumes the parked turn id and generation after a core wake", async () => {
+      expect(seam).not.toBeNull();
+      await owned.admin`
           update subscription_connection_quota
           set quota = jsonb_set(jsonb_set(quota, '{exhaustedUntil}', 'null'::jsonb), '{exhaustedKind}', 'null'::jsonb),
             revision = revision + 1
           where connection_id = ${seam!.credentialId}::uuid`;
-        const scopes = await wakeSubscriptionCoreProviderCapacityWaiters(client!.db, "claude", {
-          accountId: seam!.accountId,
-          reason: "quota_observed_available",
-        });
-        expect(scopes).toHaveLength(1);
-        const result = await activities().reconcileCodexCapacityWait({
-          provider: "claude",
-          accountId: seam!.accountId,
-          workspaceId: seam!.workspaceId,
-          sessionId: seam!.sessionId,
-          waiterId: seam!.waiterId,
-          generation: seam!.generation,
-        } as never);
-        expect(result).toEqual({ action: "resumed" });
-        const [turn] = await owned.admin<
-          { id: string; status: string; execution_generation: number }[]
-        >`select id::text, status, execution_generation::int from session_turns
+      const scopes = await wakeSubscriptionCoreProviderCapacityWaiters(client!.db, "claude", {
+        accountId: seam!.accountId,
+        reason: "quota_observed_available",
+      });
+      expect(scopes).toHaveLength(1);
+      const result = await activities().reconcileCodexCapacityWait({
+        provider: "claude",
+        accountId: seam!.accountId,
+        workspaceId: seam!.workspaceId,
+        sessionId: seam!.sessionId,
+        waiterId: seam!.waiterId,
+        generation: seam!.generation,
+      } as never);
+      expect(result).toEqual({ action: "resumed" });
+      const [turn] = await owned.admin<
+        { id: string; status: string; execution_generation: number }[]
+      >`select id::text, status, execution_generation::int from session_turns
           where session_id = ${seam!.sessionId}::uuid`;
-        expect(turn).toEqual({ id: seam!.turnId, status: "recovering", execution_generation: 1 });
-        expect([...(await coreWaiters())]).toEqual([]);
-      },
-      180_000,
-    );
+      expect(turn).toEqual({ id: seam!.turnId, status: "recovering", execution_generation: 1 });
+      expect([...(await coreWaiters())]).toEqual([]);
+    }, 180_000);
 
     test("the pinned capacity-wait history, recorded as a Claude wait, replays against the current workflow registry", async () => {
       const history = await claudeCapacityWaitHistory();

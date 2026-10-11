@@ -69,15 +69,15 @@ async function selectScopedSubscriptionTurnCapacity(
       authoritySnapshot,
     });
     await refreshExhaustedXaiQuota({
-        db,
-        settings: deps.settings,
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        subjectId,
-        sessionId: input.sessionId,
-        turnId: turn.id,
-        authoritySnapshot,
-      });
+      db,
+      settings: deps.settings,
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      subjectId,
+      sessionId: input.sessionId,
+      turnId: turn.id,
+      authoritySnapshot,
+    });
     const leaseStartedAtMs = performance.now();
     const leased = await acquireLease(db, {
       upstreamModelId: deps.turnExecutionPolicy.upstreamModelId,

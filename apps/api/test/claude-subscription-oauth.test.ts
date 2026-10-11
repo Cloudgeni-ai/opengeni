@@ -49,13 +49,9 @@ import { settingsWithOrganizationProviderCredentials } from "../../worker/src/ac
 import { parseModelProvidersJson, withClaudeConnectionCredential } from "@opengeni/config";
 import { refreshClaudeAccountUsage } from "../src/claude-subscription-account-usage";
 import { httpStatusForError } from "../src/app";
-import {
-  SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS,
-} from "@opengeni/db";
+import { SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS } from "@opengeni/db";
 // Legacy Claude account helpers stay only for the API until C2a/C2b (design 5.3, C4).
-import {
-  loadClaudeAccountCredential,
-} from "../../../packages/db/src/claude-subscription-account-usage";
+import { loadClaudeAccountCredential } from "../../../packages/db/src/claude-subscription-account-usage";
 import {
   createClaudeSubscriptionAccount,
   refreshClaudeSubscriptionAccountSerialized,

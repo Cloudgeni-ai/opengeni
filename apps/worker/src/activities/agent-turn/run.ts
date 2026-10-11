@@ -11,7 +11,6 @@ import { routingEnabled } from "../../sandbox-routing";
 import { resolveAgentToolFamilies } from "@opengeni/contracts";
 import { createKnowledgeSourceSyncActivities } from "../knowledge-source-sync";
 import {
-  assertModelConnectionAllowsTurn,
   freezeAgentLearningPolicy,
   recoverLegacyKnowledgeConfirmations,
   withSessionRlsActorContext,

@@ -259,8 +259,7 @@ test("SUB-ACCESS-04: an ambient actor carrying a different human is never overri
   if (armed.action !== "waiting") throw new Error("Fixture failed to arm");
   const seen = await withSessionRlsActorContext(
     { subjectId: "service:agent-turn", initiatingHumanSubjectId: input.otherSubjectId },
-    async () =>
-      await getXaiCapacityWaitForSession(client.db, input.workspaceId, running.sessionId),
+    async () => await getXaiCapacityWaitForSession(client.db, input.workspaceId, running.sessionId),
   );
   expect(seen).toBeNull();
 }, 60_000);
