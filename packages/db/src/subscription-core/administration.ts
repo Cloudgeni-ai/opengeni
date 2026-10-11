@@ -504,7 +504,8 @@ export async function readSubscriptionCoreOrganizationPool(
         from subscription_connections connection
         cross join list_organization_workspace_ids(${input.organizationId}::uuid) workspace
         where connection.account_id = ${input.organizationId}::uuid
-          and connection.provider = ${providerId} and connection.kind = 'subscription'
+          and connection.provider = ${providerId}
+          and connection.kind = ${subscriptionCoreConnectionKind(provider)}
           and connection.disconnected_at is null and connection.ownership = 'shared'
           and (connection.scope_kind = 'organization'
             or (connection.scope_kind = 'workspaces' and exists (

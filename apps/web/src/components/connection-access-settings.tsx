@@ -415,7 +415,7 @@ export function ConnectionAccessFormPage({
                     <CheckboxField
                       key={workspace.id}
                       label={workspace.name}
-                      description="Connected in this workspace, which keeps it as its own."
+                      disabledReason="Connected in this workspace, so it's always included."
                       disabled
                       checked
                     />

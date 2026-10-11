@@ -283,6 +283,7 @@ export function Checkbox({
 export function CheckboxField({
   label,
   description,
+  disabledReason,
   checked,
   defaultChecked,
   onCheckedChange,
@@ -293,6 +294,8 @@ export function CheckboxField({
   label: ReactNode;
   /** One 12px line under the label. */
   description?: ReactNode;
+  /** Why a disabled choice can't change: shown in the description's place, and stays legible. */
+  disabledReason?: ReactNode;
   checked?: boolean;
   defaultChecked?: boolean;
   onCheckedChange?: (checked: boolean) => void;
@@ -302,7 +305,9 @@ export function CheckboxField({
 }) {
   const id = useId();
   const descriptionId = `${id}-description`;
-  // A disabled choice dims, but its description (often the reason) stays legible.
+  // A disabled choice dims, all but the reason it is disabled.
+  const reason = disabled ? disabledReason : undefined;
+  const note = reason ?? description;
   return (
     <div
       data-disabled={disabled || undefined}
@@ -314,7 +319,7 @@ export function CheckboxField({
         checked={checked}
         defaultChecked={defaultChecked}
         disabled={disabled}
-        aria-describedby={description ? descriptionId : undefined}
+        aria-describedby={note ? descriptionId : undefined}
         onCheckedChange={onCheckedChange}
         className={cn("mt-0.5", disabled && "opacity-60")}
       />
@@ -325,9 +330,15 @@ export function CheckboxField({
         >
           {label}
         </label>
-        {description ? (
-          <span id={descriptionId} className="mt-0.5 block text-xs leading-4.5 text-fg-muted">
-            {description}
+        {note ? (
+          <span
+            id={descriptionId}
+            className={cn(
+              "mt-0.5 block text-xs leading-4.5 text-fg-muted",
+              disabled && !reason && "opacity-60",
+            )}
+          >
+            {note}
           </span>
         ) : null}
       </span>

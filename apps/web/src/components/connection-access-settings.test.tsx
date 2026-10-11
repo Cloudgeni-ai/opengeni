@@ -597,7 +597,7 @@ test("a workspace's own copy no workspace manages is an organization account: it
     await flush();
     // Its workspace is shown included and can't be cleared.
     expect(container.textContent).toContain(
-      "Connected in this workspace, which keeps it as its own.",
+      "Connected in this workspace, so it's always included.",
     );
     expect(container.textContent).not.toContain("No workspace can use it");
     await choose("Finance");

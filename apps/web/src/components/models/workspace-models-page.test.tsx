@@ -1387,8 +1387,10 @@ describe("One Models page for the organization and the workspace", () => {
         [...view.container.querySelectorAll<HTMLElement>("[data-slot=list-row]")].find(
           (candidate) => candidate.textContent?.includes(name),
         )!.textContent ?? "";
-      // No reason while its reach loads.
+      // No reason, guessed tag or usage while its reach loads.
       expect(row("Company grok")).not.toContain("Set aside");
+      expect(row("Company grok")).not.toContain("Everyone in");
+      expect(row("Company grok")).not.toContain("Not in use");
       expect(row("People grok")).not.toContain("Set aside");
       await act(async () => {
         for (const settle of pending.splice(0)) settle();
@@ -1403,6 +1405,36 @@ describe("One Models page for the organization and the workspace", () => {
       expect(row("People grok")).toContain("·Selected people·Set aside·SuperGrok");
     } finally {
       await cleanup(view);
+    }
+    // A failed read says so in the tag's place, with no usage guess, and its
+    // named Try again reads it again.
+    const answered = client.getModelConnectionAccess.getMockImplementation()!;
+    client.getModelConnectionAccess.mockImplementation(async () => {
+      throw new Error("Connection request failed");
+    });
+    const failedView = await render();
+    try {
+      await flush();
+      const failedRow = [
+        ...failedView.container.querySelectorAll<HTMLElement>("[data-slot=list-row]"),
+      ].find((candidate) => candidate.textContent?.includes("Company grok"))!;
+      expect(failedRow.textContent).toContain("Couldn't check who can use it·SuperGrok");
+      expect(failedRow.textContent).not.toContain("Everyone in");
+      expect(failedRow.textContent).not.toContain("Not in use");
+      const retry = failedRow.querySelector<HTMLButtonElement>(
+        'button[aria-label="Try again for Company grok"]',
+      )!;
+      expect(retry).not.toBeNull();
+      client.getModelConnectionAccess.mockImplementation(answered);
+      await act(async () => retry.click());
+      await act(async () => {
+        for (const settle of pending.splice(0)) settle();
+      });
+      await flush();
+      expect(failedRow.textContent).toContain("·Everyone in Acme·Set aside·SuperGrok");
+    } finally {
+      client.getModelConnectionAccess.mockImplementation(answered);
+      await cleanup(failedView);
     }
   });
 
@@ -1432,7 +1464,7 @@ describe("One Models page for the organization and the workspace", () => {
     const view = await render();
     try {
       const text = () => view.container.textContent ?? "";
-      // One organization account besides its own: "account is", "it's".
+      // One organization account besides its own: "account is".
       expect(text()).toContain(
         "New work uses this workspace's Codex account. The organization's account is set aside while this workspace has its own.",
       );
