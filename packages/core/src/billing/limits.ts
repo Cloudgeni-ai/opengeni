@@ -100,7 +100,13 @@ export function modelFundingForAdmission(
  * of `isCodexBilledTurn`, with explicit workspace, causal human, accepted
  * work and model. Undefined on the provider's legacy route (one receipt
  * read) and for every other model (no read). Codex keeps `isCodexBilledTurn`.
+ * A provider opts in at its own chat placement step and only while it is
+ * enabled on the deployment, as its catalog readiness does.
  */
+const CORE_ROUTED_FUNDING: Partial<Record<string, (settings: Settings) => boolean>> = {
+  xai: (settings) => settings.supergrokSubscriptionEnabled,
+};
+
 export async function coreRoutedSubscriptionFunding(
   db: LimitDependencies["db"],
   settings: Settings,
@@ -114,7 +120,8 @@ export async function coreRoutedSubscriptionFunding(
 ): Promise<boolean | undefined> {
   if (!input.model) return undefined;
   const source = resolveModelProviderForTurn(settings, input.model)?.model.credentialSource;
-  if (source?.kind !== "connected_subscription" || source.provider === "codex") return undefined;
+  if (source?.kind !== "connected_subscription") return undefined;
+  if (!CORE_ROUTED_FUNDING[source.provider]?.(settings)) return undefined;
   const answer = await readSubscriptionCoreRouteFunding(db, {
     provider: source.provider,
     accountId: input.accountId,

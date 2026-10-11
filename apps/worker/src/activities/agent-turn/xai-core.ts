@@ -31,7 +31,10 @@ import {
   selectCoreSubscriptionTurnCapacity,
   type CoreTurnPlacementProvider,
 } from "./subscription-core-capacity";
-import { createCoreSubscriptionRequests } from "./subscription-core-requests";
+import {
+  createCoreSubscriptionRequests,
+  type CoreSubscriptionRequests,
+} from "./subscription-core-requests";
 import type { SubscriptionCoreTurn } from "./turn-context";
 import { subscriptionTurnLeaseHolderId } from "./subscription-lease";
 import { selectXaiTurnCapacity } from "./xai-capacity";
@@ -50,11 +53,10 @@ export const XAI_CORE_TURN_PROVIDER: CoreTurnPlacementProvider = {
   leaseTtlMs: XAI_CREDENTIAL_LEASE_TTL_MS,
   lease: (deps) => deps.leases.xai,
   place: (db, request) => subscriptionCoreTurns(XAI).placeSubscriptionCoreTurn(db, request),
-  // Waiter wakes after a recovery arrive with the SuperGrok waits (X1b).
+  // Waiter wakes after a recovery arrive with the SuperGrok waits (X1b). A
+  // failure propagates, as Codex's does.
   recoverHealth: async ({ db }, identity) => {
-    await subscriptionCoreTurns(XAI)
-      .recoverSubscriptionCoreConnectionHealth(db, identity)
-      .catch(() => 0);
+    await subscriptionCoreTurns(XAI).recoverSubscriptionCoreConnectionHealth(db, identity);
   },
   adopt: ({ providerTurn }, core, placement) => {
     providerTurn.xaiSubscriptionCore = core;
@@ -169,6 +171,21 @@ export function buildXaiCoreRequestAuthorization(input: {
     },
     onProviderRequestSettled: requests.observe,
   };
+}
+
+/**
+ * The session-title custody of a turn: none on the legacy route; on the core
+ * the turn's dispatch fence and its title lane, and a turn placed on the core
+ * without either fails closed instead of sending unreserved title requests.
+ */
+export function xaiCoreTitleCustody(
+  core: Pick<SubscriptionCoreTurn, "titleRequests"> | null,
+  authorization: Pick<XaiCoreRequestAuthorization, "assertDispatch"> | null,
+): { assertDispatch: () => Promise<void>; requests: CoreSubscriptionRequests } | undefined {
+  if (!core) return undefined;
+  if (!authorization || !core.titleRequests)
+    throw new Error("A SuperGrok turn on the shared core has no session-title request custody");
+  return { assertDispatch: authorization.assertDispatch, requests: core.titleRequests };
 }
 
 /**

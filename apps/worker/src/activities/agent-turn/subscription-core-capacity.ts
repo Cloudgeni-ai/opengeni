@@ -72,6 +72,21 @@ export type CoreTurnPlacementProvider = {
   isAttemptFenced: (error: unknown) => boolean;
 };
 
+/**
+ * Whether an error (or a cause up to eight deep) is a core source disconnect
+ * of any provider: every provider's `sourceDisconnectedError` carries the
+ * shared code `subscription_core_source_disconnected`.
+ */
+export function isCoreSourceDisconnectedError(error: unknown): boolean {
+  let current = error;
+  for (let depth = 0; depth < 8 && current instanceof Error; depth++) {
+    if ((current as { code?: unknown }).code === "subscription_core_source_disconnected")
+      return true;
+    current = current.cause;
+  }
+  return false;
+}
+
 /** Lifecycle disappearance is not an auth refusal or an ordinary account pause. */
 export async function assertCoreSourceConnected(
   db: Database,

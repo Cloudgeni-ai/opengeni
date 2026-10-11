@@ -4249,6 +4249,27 @@ Fail-closed choices:
   reads as no personal authority.
 - Image, video, transcription and realtime readiness stay on their legacy
   readers (X2a).
+- A core-placed SuperGrok turn offers no image or video tool until X2a
+  moves them onto core operation leases: the legacy media paths would read
+  the subject's current v1 authority, the legacy pin and the legacy
+  credential table with a core connection id, and image requests would
+  dispatch without the per-request fence and reservation.
+- Session-title custody on the core is required: a core turn without its
+  title lane or request authorization throws instead of sending unreserved
+  title requests.
+- Core-routed admission funding is opt-in per provider and only while the
+  provider is enabled on the deployment (SuperGrok here, matching its
+  catalog readiness); Claude's admission funding moves in its own track
+  step, so no Claude admission reads a provider route before then.
+- A source disconnect is recognised by its shared code
+  (`subscription_core_source_disconnected`) for every provider, so a core
+  SuperGrok disconnect joins the admitted title stream and propagates out of
+  compaction exactly as a Codex one does.
+- Follow-up (after the stacked SuperGrok and Claude worker PRs land, to
+  avoid churn under them): move `CapacityPhaseDeps`, the failure payload and
+  the neutral copy builders into provider-neutral worker modules and extend
+  `check:subscription-core-neutral` to `apps/worker/.../subscription-core-*.ts`
+  with `subscription-core-placed.ts` as the one allowed enumerator.
 - The route is read when the turn's capacity phase runs, not at claim time:
   a turn claimed before the cutover and placed after it places on the core.
 

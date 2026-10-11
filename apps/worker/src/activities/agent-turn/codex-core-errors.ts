@@ -44,10 +44,20 @@ export type SubscriptionCoreFailurePayload = SubscriptionCoreCodexFailurePayload
 /** A typed core turn failure (the class keeps its M3 name; it serves every provider). */
 export class SubscriptionCoreCodexTurnError extends Error {
   readonly code: SubscriptionCoreCodexFailurePayload["code"];
-  constructor(readonly payload: SubscriptionCoreCodexFailurePayload) {
+  /**
+   * The provider name its copy used. In-process only, never part of the
+   * payload, so a follow-up failure for the same turn (an exhausted lease-busy
+   * chain) names the same provider without the settlement naming providers.
+   */
+  readonly displayName: string;
+  constructor(
+    readonly payload: SubscriptionCoreCodexFailurePayload,
+    displayName: string = DEFAULT_DISPLAY_NAME,
+  ) {
     super(payload.error);
     this.name = "SubscriptionCoreCodexTurnError";
     this.code = payload.code;
+    this.displayName = displayName;
   }
 }
 
@@ -135,15 +145,18 @@ export function subscriptionCoreLeaseBusyFailure(
   cause?: "binding_conflict",
   displayName: string = DEFAULT_DISPLAY_NAME,
 ): SubscriptionCoreCodexTurnError {
-  return new SubscriptionCoreCodexTurnError({
-    error:
-      cause === "binding_conflict"
-        ? `The session's ${displayName} account changed while this turn was starting. The turn will retry.`
-        : `A previous attempt of this turn still holds its ${displayName} account. The turn will retry once that hold ends.`,
-    code: "subscription_lease_busy",
-    retryable: true,
-    ...(leasedUntil ? { resetsAt: leasedUntil.toISOString() } : {}),
-  });
+  return new SubscriptionCoreCodexTurnError(
+    {
+      error:
+        cause === "binding_conflict"
+          ? `The session's ${displayName} account changed while this turn was starting. The turn will retry.`
+          : `A previous attempt of this turn still holds its ${displayName} account. The turn will retry once that hold ends.`,
+      code: "subscription_lease_busy",
+      retryable: true,
+      ...(leasedUntil ? { resetsAt: leasedUntil.toISOString() } : {}),
+    },
+    displayName,
+  );
 }
 
 /** Most extra delay added after the older lease's expiry, so retries spread out. */
@@ -200,11 +213,14 @@ export function subscriptionCoreLeaseBusyChain(
 export function subscriptionCoreLeaseBusyExhaustedFailure(
   displayName: string = DEFAULT_DISPLAY_NAME,
 ): SubscriptionCoreCodexTurnError {
-  return new SubscriptionCoreCodexTurnError({
-    error: `A previous attempt of this turn kept holding its ${displayName} account, so the turn stopped. Send a new message to try again.`,
-    code: "subscription_lease_busy",
-    retryable: false,
-  });
+  return new SubscriptionCoreCodexTurnError(
+    {
+      error: `A previous attempt of this turn kept holding its ${displayName} account, so the turn stopped. Send a new message to try again.`,
+      code: "subscription_lease_busy",
+      retryable: false,
+    },
+    displayName,
+  );
 }
 
 export type SubscriptionCoreAccountRefusal =

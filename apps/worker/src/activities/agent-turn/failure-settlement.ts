@@ -1247,7 +1247,10 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
   // keeps the session usable for the next message.
   const coreTurnFailure =
     leaseBusyChain?.exhausted || leaseBusyNotRecoverable
-      ? subscriptionCoreLeaseBusyExhaustedFailure()
+      ? // The chain exists only for a lease-busy core error: keep its provider.
+        subscriptionCoreLeaseBusyExhaustedFailure(
+          error instanceof SubscriptionCoreCodexTurnError ? error.displayName : undefined,
+        )
       : error instanceof SubscriptionCoreCodexTurnError
         ? error
         : coreAccountRefusal;

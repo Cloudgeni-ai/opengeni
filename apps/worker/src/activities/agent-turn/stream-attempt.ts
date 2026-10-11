@@ -112,7 +112,7 @@ import {
 } from "@opengeni/contracts";
 import { createModelCheckpointMemoryCollector } from "../../model-checkpoint-memory-collector";
 import { createModelCallAdmission } from "./model-call-admission";
-import { isCoreCodexSourceDisconnectedError } from "./codex-core-capacity";
+import { isCoreSourceDisconnectedError } from "./subscription-core-capacity";
 import { revalidatePlacedSubscriptionCore } from "./subscription-core-placed";
 
 import {
@@ -2295,7 +2295,7 @@ export async function runTurnStreamAttempt(
           // empty summary and must not create a new goal continuation.
           if (
             shouldRecoverCompactionProviderFailure(compactError) ||
-            isCoreCodexSourceDisconnectedError(compactError)
+            isCoreSourceDisconnectedError(compactError)
           )
             throw compactError;
           if (compactError instanceof TurnAttemptFencedError) throw compactError;
@@ -2411,7 +2411,7 @@ export async function runTurnStreamAttempt(
   } catch (error) {
     // A lifecycle disconnect fences the next request, not the already admitted
     // title stream. Join and persist its bounded response before recovery.
-    if (isCoreCodexSourceDisconnectedError(error)) await finishParallelSessionTitle();
+    if (isCoreSourceDisconnectedError(error)) await finishParallelSessionTitle();
     throw error;
   } finally {
     await cancelParallelSessionTitle();

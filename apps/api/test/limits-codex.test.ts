@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import * as opengeniDb from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
-import type { Settings } from "@opengeni/config";
-import { checkLimit, requireLimit } from "@opengeni/core";
+import { withClaudeConnectionCatalog, type Settings } from "@opengeni/config";
+import { checkLimit, coreRoutedSubscriptionFunding, requireLimit } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 
 const ACCOUNT = "acct-1";
@@ -179,6 +179,39 @@ describe("API edge credit gate — codex bypass", () => {
       }
     },
   );
+
+  test("only an enabled SuperGrok reads its provider route for core funding", async () => {
+    const route = spyOn(opengeniDb, "readSubscriptionCoreRouteFunding");
+    try {
+      // SuperGrok switched off on the deployment: no read, as its catalog readiness.
+      expect(
+        await coreRoutedSubscriptionFunding({} as opengeniDb.Database, billedSettings(), {
+          accountId: ACCOUNT,
+          workspaceId: WORKSPACE,
+          model: "supergrok/grok-4.7",
+          subjectId: null,
+        }),
+      ).toBeUndefined();
+      // Claude's funding moves onto the core in its own track step, not here.
+      const claude = withClaudeConnectionCatalog(
+        billedSettings({ claudeSubscriptionEnabled: true }),
+        {
+          claude_subscription: { active: true, models: [{ upstreamModelId: "claude-opus-5-5" }] },
+        },
+      );
+      expect(
+        await coreRoutedSubscriptionFunding({} as opengeniDb.Database, claude, {
+          accountId: ACCOUNT,
+          workspaceId: WORKSPACE,
+          model: "organization-claude-subscription/claude-opus-5-5",
+          subjectId: "user:human",
+        }),
+      ).toBeUndefined();
+      expect(route).not.toHaveBeenCalled();
+    } finally {
+      route.mockRestore();
+    }
+  });
 
   test("a Codex model never reads a provider route for core funding", async () => {
     const restoreBal = mockZeroBalance();

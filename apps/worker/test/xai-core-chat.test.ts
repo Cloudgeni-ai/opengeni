@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import * as db from "@opengeni/db";
 import * as events from "@opengeni/events";
 import {
@@ -16,7 +17,11 @@ import {
   buildXaiCoreRequestAuthorization,
   selectXaiTurnCapacityByRoute,
   xaiCoreRequestOutcomeUnknown,
+  xaiCoreTitleCustody,
+  XAI_CORE_TURN_PROVIDER,
 } from "../src/activities/agent-turn/xai-core";
+import { isCoreSourceDisconnectedError } from "../src/activities/agent-turn/subscription-core-capacity";
+import { sessionTitleXaiRequestContext } from "../src/activities/agent-turn/run";
 import type { SubscriptionCoreTurn } from "../src/activities/agent-turn/turn-context";
 import { testSettings } from "@opengeni/testing";
 
@@ -460,10 +465,48 @@ describe("SuperGrok request custody on the core", () => {
   });
 
   test("session-title requests use their own custody lane under the same fence", async () => {
-    const { core, authorization } = placedCore();
+    const { order, core, authorization } = placedCore();
     expect(core.titleRequests).toBeDefined();
     expect(core.titleRequests).not.toBe(core.requests);
-    await authorization.assertDispatch();
+    const custody = xaiCoreTitleCustody(core, authorization)!;
+    expect(custody.requests).toBe(core.titleRequests!);
+    // One title request driven through the transport: fenced, reserved on
+    // the title lane only, and settled after its checkpoint.
+    let sequence = 0;
+    const title = sessionTitleXaiRequestContext(
+      {
+        clientVersion: "1.0.1",
+        sessionId: "session-1",
+        turnId: "turn-1",
+        getToken: authorization.getToken,
+        refresh: authorization.refresh,
+        resolveModel: (slug) => slug,
+        nextRequestId: () => "unused",
+      },
+      () => `attempt-1:1:1:xai:title:${++sequence}`,
+      custody,
+    );
+    const fetch = xaiSubscriptionFetch(async () => completed());
+    const response = await xaiSubscriptionRequestStorage.run(title, () =>
+      fetch("https://cli-chat-proxy.grok.com/v1/responses", {
+        method: "POST",
+        body: JSON.stringify({ model: "supergrok/grok-4.7", input: "title" }),
+      }),
+    );
+    await response.text();
+    expect(order).toEqual(["fence", "reserve:attempt-1:1:1:xai:title:1:1"]);
+    expect(core.requests!.canRecover()).toBe(true);
+    await core.titleRequests!.checkpoint();
+    expect(order.at(-1)).toBe("settle:operation-1:response_received");
+  });
+
+  test("a core turn without title custody fails closed; the legacy route has none", () => {
+    const { core, authorization } = placedCore();
+    expect(xaiCoreTitleCustody(null, null)).toBeUndefined();
+    expect(() => xaiCoreTitleCustody(core, null)).toThrow("no session-title request custody");
+    expect(() => xaiCoreTitleCustody({ ...core, titleRequests: undefined }, authorization)).toThrow(
+      "no session-title request custody",
+    );
   });
 });
 
@@ -473,4 +516,48 @@ test("no SuperGrok turn on the legacy route touches durable events through the c
   spy(xaiCapacity, "selectXaiTurnCapacity").mockResolvedValue({ ok: true });
   await selectXaiTurnCapacityByRoute(capacityDeps());
   expect(publish).not.toHaveBeenCalled();
+});
+
+test("a SuperGrok core source disconnect is recognised as a disconnect, as Codex's is", () => {
+  const xaiDisconnect = XAI_CORE_TURN_PROVIDER.sourceDisconnectedError();
+  expect(isCoreSourceDisconnectedError(xaiDisconnect)).toBe(true);
+  expect(isCoreSourceDisconnectedError(new Error("stream", { cause: xaiDisconnect }))).toBe(true);
+  expect(isCoreSourceDisconnectedError(new db.SubscriptionCoreCodexSourceDisconnectedError())).toBe(
+    true,
+  );
+  expect(
+    isCoreSourceDisconnectedError(
+      new db.SubscriptionCoreError("subscription_core_lease_lost", "lease lost"),
+    ),
+  ).toBe(false);
+  expect(isCoreSourceDisconnectedError(new Error("network"))).toBe(false);
+});
+
+test("a core-placed SuperGrok turn offers no legacy image or video tool until X2a", () => {
+  // Source-level wiring check (the agent builder is not unit-constructible):
+  // comments stripped, whitespace collapsed.
+  const file = readFileSync(
+    new URL("../src/activities/agent-turn/agent-build.ts", import.meta.url),
+    "utf8",
+  )
+    .replace(/^\s*\/\/.*$/gm, "")
+    .replace(/\s+/g, " ");
+  const source = file.slice(file.indexOf("export async function buildTurnAgent("));
+  expect(
+    source.includes(
+      'if (resolvedModel?.provider.kind === "xai-subscription") { if (providerTurn.xaiSubscriptionCore) return {};',
+    ),
+  ).toBe(true);
+  const videoGate =
+    'videoGenerationPolicy.fundingSource === "supergrok_subscription" && !providerTurn.xaiSubscriptionCore )';
+  expect(source.includes(videoGate)).toBe(true);
+  // The legacy credential reads exist only behind that gate.
+  for (const legacy of [
+    "materializeXaiCredentialForRun(",
+    "resolveXaiProviderAccountAuthoritySnapshotForAcceptance(",
+    "getXaiSessionAccountPin(",
+  ]) {
+    expect(source.split(legacy).length).toBe(2);
+    expect(source.indexOf(legacy)).toBeGreaterThan(source.indexOf(videoGate));
+  }
 });

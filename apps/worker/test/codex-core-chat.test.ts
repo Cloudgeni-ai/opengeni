@@ -2002,7 +2002,30 @@ describe("core Codex failure settlement", () => {
       retryable: false,
       recovery: "user_message",
     });
+    expect(String(settled.events[0]!.payload.error)).toContain("holding its Codex account");
     expect(parent).toHaveBeenCalledTimes(1);
+  });
+
+  test("an exhausted lease-busy chain keeps the provider named by the placement error", async () => {
+    spy(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(undefined as never);
+    const { deps, settle } = failureDeps(subscriptionCoreLeaseBusyFailure(null, "SuperGrok"), null);
+    Object.assign(deps.attempt, {
+      subscriptionLeaseBusy: {
+        startedAt: Date.now() - SUBSCRIPTION_CORE_LEASE_BUSY_MAX_MS - 1_000,
+        executionGeneration: 2,
+      },
+    });
+    expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "idle" });
+    const settled = settle.mock.calls[0]![0] as {
+      events: Array<{ payload: Record<string, unknown> }>;
+    };
+    expect(settled.events[0]!.payload).toMatchObject({
+      code: "subscription_lease_busy",
+      retryable: false,
+    });
+    expect(String(settled.events[0]!.payload.error)).toBe(
+      "A previous attempt of this turn kept holding its SuperGrok account, so the turn stopped. Send a new message to try again.",
+    );
   });
 
   test("a database failure while recovering from lease busy keeps the turn recoverable", async () => {

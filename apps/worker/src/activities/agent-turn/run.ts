@@ -129,6 +129,7 @@ import { selectClaudeTurnCapacity } from "./xai-capacity";
 import {
   buildXaiCoreRequestAuthorization,
   selectXaiTurnCapacityByRoute,
+  xaiCoreTitleCustody,
   type XaiCoreRequestAuthorization,
 } from "./xai-core";
 import type { CoreSubscriptionRequests } from "./subscription-core-requests";
@@ -1231,12 +1232,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             ? sessionTitleXaiRequestContext(
                 providerTurn.xaiRequestContext,
                 () => `${requestIdPrefix}:xai:title:${++xaiSessionTitleRequestSequence}`,
-                xaiCoreAuthorization && providerTurn.xaiSubscriptionCore?.titleRequests
-                  ? {
-                      assertDispatch: xaiCoreAuthorization.assertDispatch,
-                      requests: providerTurn.xaiSubscriptionCore.titleRequests,
-                    }
-                  : undefined,
+                xaiCoreTitleCustody(providerTurn.xaiSubscriptionCore, xaiCoreAuthorization),
               )
             : null;
           const withSessionTitleProviderRequestContext = <T>(fn: () => Promise<T>): Promise<T> =>
