@@ -4650,11 +4650,19 @@ It requires 0712 and, like 0712, grants to the configured application roles
   no table rewrite) and two triggers to `sessions`, `session_turns`,
   `scheduled_tasks`, `scheduled_task_revision_authorities`,
   `session_system_updates` and `session_system_update_outbox`, plus a
-  commit-time check trigger on each. Each lock waits at most 5 seconds; on a
-  busy database the Job can fail with a lock timeout, which rolls the whole
-  migration back, and is safe to retry.
+  deferred check trigger on each.
+- Locks: it first takes ACCESS EXCLUSIVE on those six tables together, in
+  the order above starting with `sessions` and `session_turns`, waiting at
+  most 100 ms per lock and releasing everything and retrying after a short
+  pause when it cannot take them all. It never holds a carrier lock for more
+  than about 600 ms while it waits, so it cannot deadlock with live session
+  or scheduled work as long as `deadlock_timeout` keeps its default of one
+  second or more. Once it holds them the migration runs in well under a
+  second; session and scheduled work waits for it meanwhile. If it cannot
+  take the whole set within 30 seconds the Job fails with `55P03`, the
+  migration rolls back entirely, and it is safe to retry.
 - The compatibility relation stays empty, and the copy routine, the
-  commit-time check and the personal helpers' record branch do nothing, until
+  deferred check and the personal helpers' record branch do nothing, until
   SuperGrok's or Claude's own drained cutover records its receipt. Codex and
   every other provider behave as before.
 - The scheduled-task execution digest ignores the new column, so existing run

@@ -3166,13 +3166,29 @@ No X1a or C1a call site merges before all three.
 
 #### PR 0b: authority compatibility and fences
 
-PR 0b ships as two rolling PRs. Part 1 (migration 0716) is inert: the
-marker, the compatibility relation, the per-path resolvers, the copy routine
-and reader, the commit-time check and the helpers' record branch act only
-for a provider whose own drained cutover wrote a receipt with a real commit
-time, which no provider has yet. Part 2 (stacked on part 1) adds the fences
-and comparisons, which act on deploy. Choices made where the plan left room,
-for reviewers:
+PR 0b ships as three rolling PRs, stacked in this order, and every PR 0b item
+of row 0 above lands in exactly one of them:
+
+- **Part 1 (migration 0716), inert:** the server-owned
+  `authority_inserted_at` marker; the compatibility relation; the per-path
+  resolvers; the copy routine and the reader; the compatibility deferred
+  check triggers; the compatibility-record branch of both personal helpers
+  (`connectionIds`). They act only for a provider whose own drained cutover
+  wrote a receipt with a real commit time, which no provider has yet.
+- **Part 2 (migration 0717), acts on deploy:** fence 0608 and the scheduled
+  occurrence comparing the v2 slot, and scheduled admission (see its choice
+  below); the Claude scheduled comparisons and
+  `scheduled_claude_authority_changed`; the v1 liveness check switching to
+  the core check at the provider's receipt; the inbox batching key carrying
+  each provider's effective authority; the pre-merge inventories (the
+  patched functions, the existing rows the new comparisons reject, and the
+  callers of `validate_scheduled_agent_run_live_authority`); and the defects
+  in earlier merged work listed there.
+- **Part 3 (migration 0718), acts on deploy:** a defect fix in earlier
+  merged work found while testing part 2: the v2 acceptance writers see the
+  owner's personal connections under an owner bound by row security.
+
+Choices made where the plan left room, for reviewers:
 
 - **Relation.** `opengeni_private.subscription_authority_compat` belongs to
   the migration owner; runtime roles hold no privilege on it. Besides the
@@ -3194,7 +3210,10 @@ for reviewers:
   nothing; a guard trigger rejects UPDATE and TRUNCATE for every role and
   DELETE unless it runs inside a referential cascade from the carrier
   (`pg_trigger_depth() > 1`), so session, task and organization deletion keep
-  working. INSERT requires the provider's receipt with a commit time later
+  working. The depth test would also admit a DELETE issued from some other
+  trigger, but none exists and only the owner's cascade (exempt from row
+  security) or a `BYPASSRLS` role can delete at all. INSERT requires the
+  provider's receipt with a commit time later
   than `-infinity` (`55000`): Codex and providers without a receipt never
   hold records.
 - **Marker.** `authority_inserted_at` on `sessions`, `session_turns`,
@@ -3203,8 +3222,25 @@ for reviewers:
   default, metadata-only). The stamping trigger is named `zzz_…` so it runs
   after every other `BEFORE INSERT` trigger and nothing can replace its
   value; the immutability trigger fires only when the value changes. Both
-  bind every role, including the owner. The column adds and trigger creation
-  run under `SET LOCAL lock_timeout = '5s'`.
+  bind every role, including the owner.
+- **Lock order.** The migration takes ACCESS EXCLUSIVE on the six carrier
+  tables first, in one statement, in the runtime's order (`sessions`,
+  `session_turns`, `session_system_updates`, `session_system_update_outbox`,
+  `scheduled_tasks`, `scheduled_task_revision_authorities`), and locks no
+  other runtime table. No static order is cycle-free for all six (runtime
+  work takes sessions before turns, but scheduled dispatch can lock a task
+  before creating its session, and deleting a session reaches tasks through
+  a foreign key), so the statement runs with a 100 ms per-wait lock timeout
+  inside a savepoint and is retried after a short pause until it holds the
+  whole set (30 s at most, then `55P03`, safe to retry). An attempt that
+  fails releases everything it took, so the migration never holds a carrier
+  lock for more than about 600 ms while it waits: a runtime transaction that
+  waits behind it gets its lock before PostgreSQL's deadlock check (default
+  `deadlock_timeout` one second) could pick it as a victim, and the
+  migration abandons each wait before its own check. A first draft took the
+  locks one `ALTER TABLE` at a time, `session_turns` first, and a reviewer
+  reproduced `40P01` against live session work; the race test
+  `migration-0716-authority-compat-lock-order.test.ts` covers both orders.
 - **Marker and the task digest.** The scheduled-task execution digest hashes
   the task row as JSON, so the marker would change every task's digest on
   its next rename or pause and invalidate run receipts holding the old one.
@@ -3241,7 +3277,7 @@ for reviewers:
   | other updates | causal | The `causalTurnId` turn |
   | outbox row | child outbox | The child's spawning parent turn |
 
-  The copy routine, the commit-time check and part 2's fences use only this
+  The copy routine, the deferred check and part 2's fences use only this
   function.
 - **Edits.** The queue's Edit resubmits a withdrawn prompt and copies its v1
   snapshots, v2 value and human verbatim, a copy path the table under
@@ -3263,7 +3299,7 @@ for reviewers:
   receipt yields the `missing` copy. A carrier with several sources (a
   delivery batch) requires them all to yield the same copy (`23514`
   otherwise).
-- **Commit-time check.** A `DEFERRABLE INITIALLY DEFERRED` constraint trigger
+- **Deferred check.** A `DEFERRABLE INITIALLY DEFERRED` constraint trigger
   (`zzz_subscription_authority_compat_check`, `AFTER INSERT`) on each carrier
   table. It returns after one lookup in the receipts table while no receipt
   has a real commit time. Otherwise, for each such provider, it requires the
@@ -3272,7 +3308,14 @@ for reviewers:
   predates the receipt, no v2 entry for the provider. A carrier deleted later
   in the same transaction is skipped. The copy routine and the check resolve
   under the carrier's own account and workspace with an empty subject, and
-  restore the caller's settings, so both see the same sources.
+  restore the caller's settings, so both see the same sources. A deferred
+  row trigger fires at the first constraint flush after the insert, which is
+  not always the commit: every session-activity scope
+  (`withSessionActivityRlsContext` and each
+  `withRestoredSessionActivityRlsContext`) runs `SET CONSTRAINTS ALL
+  IMMEDIATE` when it finalizes, and so do `fork_session_content` and the
+  0263/0278 membership commands. A writer must therefore copy inside the
+  same activity scope as the carrier insert, before that scope finalizes.
 - **Copy routine.** `opengeni_private.copy_subscription_authority_compat
   (provider, carrier_kind, workspace_id, carrier_id,
   task_authority_revision)` takes no content. It returns false without a
@@ -3280,7 +3323,8 @@ for reviewers:
   settings, a carrier visible to the caller and inserted by its own
   transaction (`55000` otherwise), and is idempotent. It returns whether the
   carrier now holds a record. Nothing in the runtime calls it yet; the
-  provider writers (X2b, C2b) will.
+  provider writers (X2b, C2b) will, each in the activity scope that inserted
+  the carrier (see the deferred check).
 - **Reader.** `opengeni_private.read_subscription_authority_compat` (same
   arguments) returns `{authority: v1}` before the provider's receipt, `v2`
   when the carrier holds the provider's entry, `record` with its content,
@@ -3292,6 +3336,11 @@ for reviewers:
   arguments, no visibility check), which part 2's fences also use.
   `opengeni_private.subscription_authority_compat_providers()` lists the
   providers that can hold records (empty while only Codex is cut over).
+- **Neutrality.** The shared routines take the provider as data and name no
+  provider in code (only comments say that Codex holds no records).
+  `check:subscription-core-neutral` scans TypeScript only; SQL neutrality is
+  checked by review. Extending the guard to migrations would flag part 2's
+  intentionally per-provider v1 checks and policies.
 - **Personal helpers.** Both helpers read the turn's (`session_turn`) record
   whose `owner_subject_id` is the session owner, only when the turn has no
   v2 entry for the provider. `authorize_subscription_personal_access` then
