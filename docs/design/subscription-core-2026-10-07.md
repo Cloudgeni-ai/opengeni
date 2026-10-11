@@ -4282,6 +4282,11 @@ the shared runtime bound to `SUBSCRIPTION_CORE_XAI`, which stays unregistered
 until X3. SuperGrok-specific code is the adapter's `fetchUsage`,
 `decodeQuota`, `liveModels` and bearer mapping, and route wiring.
 
+- **Replaces X1a's media gate.** X1a offered a core-placed SuperGrok turn no
+  image or video tool. X2a gives it the core image path on its placed
+  connection, and core video funding when the route is `core`. The legacy
+  video credential reads still run only on the `legacy` route for a turn the
+  core did not place, whatever the route reads later in the turn.
 - **Generalized, Codex unchanged.** The Codex operation pieces became
   provider-neutral (`subscriptionCoreOperationConnections(provider)`), and
   the Codex names are thin wrappers over them:

@@ -17,15 +17,18 @@ const LEGACY_REACHED = "legacy SuperGrok credential read";
 // Execute the production builder for a SuperGrok turn with SuperGrok-funded
 // video and a connected image credential, and capture the media options it
 // hands to the runtime. Every legacy SuperGrok credential reader is spied on
-// and fails loudly, so reaching one is observable.
+// and fails loudly, so reaching one is observable; the organization's
+// SuperGrok route and the core video funding reads are spied on too.
 async function buildSuperGrokTurn(
   core: boolean,
   videoFunding: "supergrok_subscription" | "opengeni_credits" = "supergrok_subscription",
+  route: "legacy" | "core" = core ? "core" : "legacy",
 ) {
   const settings: Settings = testSettings({
     sandboxBackend: "none",
     webSearchEnabled: false,
     environmentsEncryptionKey: Buffer.alloc(32, 7).toString("base64"),
+    supergrokSubscriptionEnabled: true,
   });
   const context = createTurnContext({ settings, cancellationRequestedAt: null });
   context.eventing.preparedTools = await prepareAgentTools(settings, [], {
@@ -45,7 +48,30 @@ async function buildSuperGrokTurn(
     spyOn(db, "materializeXaiCredentialForRun").mockRejectedValue(new Error(LEGACY_REACHED)),
     spyOn(db, "selectXaiCredentialForUse").mockRejectedValue(new Error(LEGACY_REACHED)),
   ];
+  const coreFundingCalls: string[] = [];
   restores.push(
+    spyOn(db, "readSubscriptionCoreProviderRouteForWorkspace").mockResolvedValue(route),
+    spyOn(db, "readSubscriptionCoreSessionOwner").mockResolvedValue({
+      ownerSubjectId: "user:owner",
+    } as Awaited<ReturnType<typeof db.readSubscriptionCoreSessionOwner>>),
+    // xai stays unregistered until X3, so the runtime is stubbed, not wrapped.
+    spyOn(db, "subscriptionCoreOperationConnections").mockReturnValue({
+      listSubscriptionCoreOperationCandidates: async () => {
+        coreFundingCalls.push("candidates");
+        return [
+          {
+            connectionId: "66666666-6666-4666-8666-666666666666",
+            planType: null,
+            explicit: false,
+            allowedModelIds: null,
+          },
+        ];
+      },
+      readSubscriptionCoreExhaustedConnectionIds: async () => {
+        coreFundingCalls.push("exhausted");
+        return new Set<string>();
+      },
+    } as unknown as ReturnType<typeof db.subscriptionCoreOperationConnections>),
     ...legacyReaders,
     spyOn(db, "getSandboxRecoveryDiscontinuity").mockResolvedValue(null),
     spyOn(db, "getWorkspaceVideoGenerationPolicy").mockResolvedValue({
@@ -145,15 +171,29 @@ async function buildSuperGrokTurn(
     xai: { subjectId: "user:owner", generation: 1 },
   };
   const built = buildTurnAgent(deps as BuildTurnAgentDeps);
-  return { built, options, legacyReaders };
+  return { built, options, legacyReaders, coreFundingCalls };
 }
 
-test("a core-placed SuperGrok turn offers no image or video tool and reads no legacy credential", async () => {
-  const { built, options, legacyReaders } = await buildSuperGrokTurn(true);
+test("a core-placed SuperGrok turn gets the core image tool and core video funding, and reads no legacy credential", async () => {
+  const { built, options, legacyReaders, coreFundingCalls } = await buildSuperGrokTurn(true);
   await built;
   expect(options).toHaveLength(1);
-  expect(options[0]?.imageGeneration).toBeUndefined();
-  expect(options[0]?.videoGeneration).toBeUndefined();
+  // The core image path (an `image` operation lease on the placed connection).
+  expect(options[0]?.imageGeneration).toMatchObject({ kind: "provider_adapter" });
+  // Video is funded by a shared candidate on the `core` route (no sandbox here,
+  // so the tool itself is not offered).
+  expect(coreFundingCalls[0]).toBe("candidates");
+  for (const reader of legacyReaders) expect(reader).not.toHaveBeenCalled();
+});
+
+test("a core-placed SuperGrok turn never reaches the legacy video credential, whatever the route reads", async () => {
+  const { built, legacyReaders, coreFundingCalls } = await buildSuperGrokTurn(
+    true,
+    "supergrok_subscription",
+    "legacy",
+  );
+  await built;
+  expect(coreFundingCalls).toEqual([]);
   for (const reader of legacyReaders) expect(reader).not.toHaveBeenCalled();
 });
 

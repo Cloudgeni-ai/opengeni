@@ -591,7 +591,7 @@ test("a SuperGrok core source disconnect is recognised as a disconnect, as Codex
   expect(isCoreSourceDisconnectedError(new Error("network"))).toBe(false);
 });
 
-test("a core-placed SuperGrok turn offers no legacy image or video tool until X2a", () => {
+test("a core-placed SuperGrok turn never reaches the legacy image or video credential path", () => {
   // Source-level wiring check, complementing the behavioural agent-build-core-xai-media.test.ts:
   // comments stripped, whitespace collapsed.
   const file = readFileSync(
@@ -601,13 +601,23 @@ test("a core-placed SuperGrok turn offers no legacy image or video tool until X2
     .replace(/^\s*\/\/.*$/gm, "")
     .replace(/\s+/g, " ");
   const source = file.slice(file.indexOf("export async function buildTurnAgent("));
-  expect(
-    source.includes(
-      'if (resolvedModel?.provider.kind === "xai-subscription") { if (providerTurn.xaiSubscriptionCore) return {};',
-    ),
-  ).toBe(true);
+  // Image: a core turn returns the core operation path before any legacy
+  // image authority is read.
+  const imageCore =
+    'if (resolvedModel?.provider.kind === "xai-subscription") { const core = providerTurn.xaiSubscriptionCore; if (core) {';
+  expect(source.includes(imageCore)).toBe(true);
+  const xaiImage = source.indexOf(imageCore);
+  const coreImageCall = source.indexOf("executeCoreXaiImageGeneration(", xaiImage);
+  const legacyImageAuthority = source.indexOf(
+    "connectedSubscriptionImageGenerationAuthority(",
+    xaiImage,
+  );
+  expect(coreImageCall).toBeGreaterThan(xaiImage);
+  expect(legacyImageAuthority).toBeGreaterThan(coreImageCall);
+  // Video: the legacy credential reads run only on the legacy route for a turn
+  // the core did not place.
   const videoGate =
-    'videoGenerationPolicy.fundingSource === "supergrok_subscription" && !providerTurn.xaiSubscriptionCore )';
+    'if (route === "legacy" && !providerTurn.xaiSubscriptionCore && encryptionKey && subjectId) {';
   expect(source.includes(videoGate)).toBe(true);
   // The legacy credential reads exist only behind that gate.
   for (const legacy of [
