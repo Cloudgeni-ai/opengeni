@@ -2697,16 +2697,18 @@ describe("One Models page for the organization and the workspace", () => {
     } finally {
       await cleanup(workspaceOnly);
     }
-    // Set to the organization's accounts, which here are only its own, shared.
+    // Set to the organization's accounts, which here are only its own, shared
+    // (the server lists that copy as the workspace's own).
     accounts = {
       ...accounts,
-      accounts: [codexAccount({ id: "acct-1", label: "Team plan", source: "organization" })],
+      accounts: [own],
       source: {
         ...source,
         mode: "organization",
         effectiveSource: "organization",
         organizationAvailable: true,
         organizationCount: 0,
+        workspaceSetAside: false,
       },
     };
     const organizationOnly = await render();
@@ -2718,6 +2720,50 @@ describe("One Models page for the organization and the workspace", () => {
       expect(text).not.toContain("even when accounts are connected here");
     } finally {
       await cleanup(organizationOnly);
+    }
+    // Two of its own, both shared: the plural.
+    accounts = {
+      ...accounts,
+      accounts: [own, codexAccount({ id: "acct-2", label: "Second plan", source: "workspace" })],
+    };
+    const two = await render();
+    try {
+      expect(two.container.textContent).toContain(
+        "New work uses the organization's Codex accounts, which here are only this workspace's own.",
+      );
+    } finally {
+      await cleanup(two);
+    }
+    // An older server without the count: the usual wording.
+    accounts = {
+      ...accounts,
+      accounts: [own],
+      source: { ...accounts.source!, organizationCount: undefined },
+    };
+    const olderServer = await render();
+    try {
+      expect(olderServer.container.textContent).toContain("even when accounts are connected here");
+    } finally {
+      await cleanup(olderServer);
+    }
+    accounts = {
+      ...accounts,
+      accounts: [own],
+      source: { ...accounts.source!, organizationCount: 0 },
+    };
+    // Another account of its own, not shared, is set aside: the usual wording.
+    accounts = {
+      ...accounts,
+      source: { ...accounts.source!, workspaceSetAside: true },
+    };
+    const withSetAside = await render();
+    try {
+      const text = withSetAside.container.textContent ?? "";
+      expect(text).toContain("even when accounts are connected here");
+      expect(text).not.toContain("which here is only this workspace's own");
+      expect(text).toContain("This workspace's Codex accounts");
+    } finally {
+      await cleanup(withSetAside);
     }
     // An older server doesn't report the count: the pool's availability decides.
     accounts = {

@@ -678,6 +678,16 @@ test("a workspace's own copy no workspace manages is an organization account: it
       version: 4,
     });
 
+    // Through people and back restores a saved Personal "off" too: no change.
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await act(async () => root.render(<Page />));
+    await flush();
+    await choose("Only selected people");
+    expect(saveButton().disabled).toBe(false);
+    await choose("All shared workspaces, including new ones");
+    expect(saveButton().disabled).toBe(true);
+
     // From all, chosen workspaces start from every shared one, its own
     // included: narrowing never drops that workspace's organization grant.
     await act(async () => root.unmount());
