@@ -498,6 +498,58 @@ describe("Claude refusal settlement on the core", () => {
     expect(order).toEqual(["observation", "wake", "refusal", "release"]);
   });
 
+  function queuedObservation(order: string[]) {
+    spy(db, "wakeSubscriptionCoreProviderCapacityWaiters").mockImplementation((async () => {
+      order.push("wake");
+      return [];
+    }) as never);
+    const chain = (async () => {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      order.push("observation");
+      return true;
+    })();
+    return core({ quota: { settled: () => chain } });
+  }
+
+  test("a graceful disconnect joins queued observations before it releases the lease, recording no refusal", async () => {
+    const order: string[] = [];
+    const runtime = coreRuntime({ disconnected: true });
+    recoveringRecovery();
+    const { deps, releaseCurrent } = failureDeps(
+      anthropic(401, "authentication_error"),
+      queuedObservation(order),
+    );
+    releaseCurrent.mockImplementation(async () => {
+      order.push("release");
+      return true;
+    });
+    expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "recovering" });
+    expect(order).toEqual(["observation", "wake", "release"]);
+    expect(runtime.apply).not.toHaveBeenCalled();
+  });
+
+  test("the refusal that reaches the bound joins queued observations before it is recorded", async () => {
+    const order: string[] = [];
+    const runtime = coreRuntime({ refusals: SUBSCRIPTION_CORE_TURN_REFUSAL_LIMIT });
+    runtime.apply.mockImplementation(async () => {
+      order.push("refusal");
+      return { receipt: true, health: true };
+    });
+    spy(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(undefined as never);
+    const { deps, releaseCurrent } = failureDeps(
+      anthropic(429, "rate_limit_error"),
+      queuedObservation(order),
+    );
+    releaseCurrent.mockImplementation(async () => {
+      order.push("release");
+      return true;
+    });
+    await settleTurnFailure(deps as never).catch(() => undefined);
+    expect(order.slice(0, 3)).toEqual(["observation", "wake", "refusal"]);
+    expect(order.indexOf("release")).toBe(order.lastIndexOf("release"));
+    if (order.includes("release")) expect(order.indexOf("release")).toBeGreaterThan(2);
+  });
+
   test("a joined observation chain wakes the account's Claude waiters once", async () => {
     const wake = spy(db, "wakeSubscriptionCoreProviderCapacityWaiters").mockResolvedValue([]);
     const chain = Promise.resolve(true);

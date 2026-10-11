@@ -835,6 +835,21 @@ describe("Claude usage headers on the core", () => {
     expect(await placed.core.quota!.settled()).toBe(false);
     expect(apply).toHaveBeenCalledTimes(1);
   });
+
+  test("a later failed write keeps what an earlier observation recovered", async () => {
+    const placed = placedCore();
+    const apply = quotaRuntime(true);
+    const first = send(placed, [familyLimited()]);
+    await (await first.response).text();
+    await placed.core.requests!.checkpoint();
+    apply.mockImplementation(async () => {
+      throw new Error("database unavailable");
+    });
+    const second = send(placed, [familyLimited()], { prefix: "attempt-1:1:2:claude" });
+    await (await second.response).text();
+    expect(await placed.core.quota!.settled()).toBe(true);
+    expect(apply).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe("Claude response inspection", () => {
