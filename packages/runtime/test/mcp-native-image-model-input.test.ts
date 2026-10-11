@@ -68,7 +68,30 @@ async function runOneCall(result: Record<string, unknown>, nested = false) {
   const modelOutput = ((model.requests[1]?.input ?? []) as any[]).find(
     (item) => item.type === "function_call_result",
   )?.output;
-  return { outputEvent, modelOutput };
+  return { outputEvent, modelOutput, history: run.history };
+}
+
+/** Replay a stored transcript (as durable storage would round-trip it) in a new turn. */
+async function replayNextTurn(history: unknown[]) {
+  const settings = testSettings({ sandboxBackend: "none", webSearchEnabled: false });
+  const model = new ScriptedModel([{ outputText: "still there" }]);
+  const agent = buildOpenGeniAgent(settings, [], { model, hostedWebSearch: false });
+  const stored = JSON.parse(JSON.stringify(history)) as any[];
+  const run = await runAgentStream(
+    agent,
+    {
+      input: [...stored, { type: "message", role: "user", content: "What did you see?" }],
+      persistedHistoryCount: stored.length,
+    },
+    settings,
+  );
+  for await (const _event of run.toStream()) {
+    // drain
+  }
+  await run.completed;
+  return ((model.requests[0]?.input ?? []) as any[]).find(
+    (item) => item.type === "function_call_result",
+  )?.output;
 }
 
 describe("MCP tool results reach the model as native content", () => {
@@ -98,6 +121,19 @@ describe("MCP tool results reach the model as native content", () => {
         { type: "media_preview", mediaType: "image/jpeg" },
       ],
     });
+  });
+
+  test("a later turn replaying the stored history still sends the image as an image", async () => {
+    const { history } = await runOneCall({
+      content: [
+        { type: "text", text: "frame 1920x1080" },
+        { type: "image", data: JPEG_BASE64, mimeType: "image/jpeg" },
+      ],
+    });
+    expect(await replayNextTurn(history)).toEqual([
+      { type: "input_text", text: "frame 1920x1080" },
+      { type: "input_image", image: `data:image/jpeg;base64,${JPEG_BASE64}` },
+    ]);
   });
 
   test("a nested prefixed server still delivers the image natively", async () => {
