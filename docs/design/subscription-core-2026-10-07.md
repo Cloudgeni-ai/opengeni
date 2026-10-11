@@ -4294,8 +4294,12 @@ data with workspace overrides). It adds:
 workspace administrators and organization administrators write). Writes take
 an optional `expectedVersion` (409 on a concurrent change), refuse a lock with
 409 `setting_locked` naming the settings, and deliver the core capacity wake
-(`core_settings_changed`). Every read goes through
+(`core_settings_changed`). An empty organization patch checks the version and
+changes nothing (no new version, no wake). Every read goes through
 `subscription_effective_settings`; nothing in the API resolves a value itself.
+An organization with no settings row yet (the resolver returns NULL; the 0712
+seed makes this rare) reads the seeded values at version 0, and its first
+write accepts `expectedVersion: 0`.
 
 **Sources.** Per setting: `locked` (the organization value applies and
 workspaces cannot override it), `workspace` (this workspace overrides it; for
@@ -4303,8 +4307,8 @@ a map, at least one entry), or `organization`. Per-entry sources stay
 available for maps.
 
 **Core.** The core already reads effective settings for placement
-(`readSubscriptionEffectiveSettings`); `fallbackOrderFor` reads the effective
-fallback order for a model. Turn placement still forces cross-provider
+(`readSubscriptionEffectiveSettings`); placement reads the effective fallback
+order for a model through `fallbackOrderFor`. Turn placement still forces cross-provider
 failover off with an empty fallback order (the M3 policy) until the failover
 runtime ships.
 
@@ -4312,8 +4316,11 @@ Fail-closed choices (contract ambiguous; strictest option taken):
 
 - A lock binds every writer: workspace administrators, organization
   administrators writing a workspace row, and the owner-run core routines
-  (for example a workspace rotation or source change through the provider
-  routes answers forbidden while that setting is locked).
+  (for example a workspace rotation, primary or source change through the
+  provider routes, and a person's own primary in their Personal workspace).
+  Every such refusal answers 409 `setting_locked` with the settings named,
+  mapped once in the API error handler; the core's "not visible" handling of
+  42501 excludes the guard's refusal.
 - Locking clears existing workspace overrides of that setting; unlocking does
   not bring them back.
 - A rotation lock also refuses setting or changing any workspace
@@ -4323,10 +4330,15 @@ Fail-closed choices (contract ambiguous; strictest option taken):
   source routes.
 - Rotation can be set only for providers registered on the shared core; any
   other provider is refused (422) because a value would have no effect.
-- Personal workspaces hold no overrides (409) and report `canEdit: false`;
-  they follow the organization. The overview lists shared workspaces only.
+- The settings API writes no overrides for Personal workspaces (409
+  `personal_workspace`, `canEdit: false`); they follow the organization. A
+  person's own primary may still set a rotation entry there (the existing
+  personal-account route), which a rotation lock then refuses. The overview
+  lists shared workspaces only.
 - Fallback order: at most 64 preferred models, 8 fallbacks each, model ids up
-  to 200 characters, no repeats and no self-reference. Model ids are not
+  to 200 characters, no repeats and no self-reference. The bound applies to
+  the stored workspace override after a patch is merged, not only to the
+  patch. Model ids are not
   checked against the catalog (placement skips unknown models).
 - Personal fallback is never active for ownerless work (no session owner);
   this was already the eligibility rule and is unchanged.

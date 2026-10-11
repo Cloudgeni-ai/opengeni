@@ -3,9 +3,13 @@
 // authority runs as the restricted application role (NOSUPERUSER,
 // NOBYPASSRLS); the superuser handle only seeds rows and reads ground truth.
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { acquireOwnerMigratedTestDatabase, type OwnerMigratedTestDatabase } from "@opengeni/testing";
+import {
+  acquireOwnerMigratedTestDatabase,
+  type OwnerMigratedTestDatabase,
+} from "@opengeni/testing";
 import {
   SUBSCRIPTION_SETTING_KEYS,
+  lockedSettingsWidened,
   settingsView,
   type SubscriptionSettingKey,
   type SubscriptionSettingsPolicy,
@@ -20,6 +24,9 @@ import {
   readOrganizationSubscriptionSettings,
   readSubscriptionSettingsOverview,
   readWorkspaceSubscriptionSettings,
+  setSubscriptionCoreCodexPrimary,
+  setSubscriptionCoreCodexRotation,
+  setSubscriptionCoreWorkspaceCodexSource,
   SubscriptionSettingsForbiddenError,
   SubscriptionSettingsInvalidError,
   SubscriptionSettingsLockedError,
@@ -270,7 +277,10 @@ describe.skipIf(!realDb)("subscription settings with lockable workspace override
     // A workspace administrator is not an organization administrator.
     expect(
       await rejected(
-        readOrganizationSubscriptionSettings(client!.db, organization(f, f.workspaceAdminSubjectId)),
+        readOrganizationSubscriptionSettings(
+          client!.db,
+          organization(f, f.workspaceAdminSubjectId),
+        ),
       ),
     ).toBeInstanceOf(SubscriptionSettingsForbiddenError);
     expect(
@@ -343,7 +353,10 @@ describe.skipIf(!realDb)("subscription settings with lockable workspace override
     expect(settings.canEdit).toBe(true);
     expect(settings.values.crossProviderFailover).toBe(false);
     expect(settings.values.personalFallbackAllowed).toBe(true);
-    expect(settings.values.fallbackOrder).toEqual({ "codex/a": ["xai/c"], "claude/b": ["codex/a"] });
+    expect(settings.values.fallbackOrder).toEqual({
+      "codex/a": ["xai/c"],
+      "claude/b": ["codex/a"],
+    });
     expect(settings.sources).toMatchObject({
       crossProviderFailover: "workspace",
       personalFallbackAllowed: "workspace",
@@ -503,13 +516,17 @@ describe.skipIf(!realDb)("subscription settings with lockable workspace override
       ) values (
         ${f.accountId}, 'codex', ${`provider-account-${crypto.randomUUID()}`}, 'v1:test', 'organization'
       ) returning id::text as id`;
-    await shared!.admin`update subscription_settings set codex_primary_connection_id = ${connection!.id}::uuid
+    await shared!
+      .admin`update subscription_settings set codex_primary_connection_id = ${connection!.id}::uuid
       where account_id = ${f.accountId}::uuid and workspace_id is null`;
 
     // A new workspace rotation entry carries the organization's primary.
     const rotated = await updateWorkspaceSubscriptionSettings(client!.db, {
       ...workspace(f, f.alphaId, f.workspaceAdminSubjectId),
-      patch: { rotation: { codex: { mode: "primary_first" } }, fallbackOrder: { "codex/a": ["codex/b"] } },
+      patch: {
+        rotation: { codex: { mode: "primary_first" } },
+        fallbackOrder: { "codex/a": ["codex/b"] },
+      },
     });
     expect(rotated.settings.values.rotation.codex).toEqual({
       mode: "primary_first",
@@ -529,7 +546,10 @@ describe.skipIf(!realDb)("subscription settings with lockable workspace override
       ...organization(f),
       patch: { locked: ["rotation", "fallbackOrder"] },
     });
-    expect(await workspaceRow(f, f.alphaId)).toMatchObject({ rotation: null, fallback_order: null });
+    expect(await workspaceRow(f, f.alphaId)).toMatchObject({
+      rotation: null,
+      fallback_order: null,
+    });
     const locked = await readWorkspaceSubscriptionSettings(
       client!.db,
       workspace(f, f.alphaId, f.workspaceAdminSubjectId),
@@ -576,9 +596,180 @@ describe.skipIf(!realDb)("subscription settings with lockable workspace override
     expect((lockKey as { code?: string }).code).toBe("23514");
   });
 
-  test("a Personal workspace follows the organization and holds no overrides", async () => {
+  test("existing Codex writers meet a lock as a typed refusal and write nothing", async () => {
     const f = await fixture();
-    await shared!.admin`insert into workspace_memberships (account_id, workspace_id, subject_id, role)
+    const [connection] = await shared!.admin<{ id: string }[]>`
+      insert into subscription_connections (
+        account_id, provider, provider_account_id, credential_encrypted, scope_kind
+      ) values (
+        ${f.accountId}, 'codex', ${`provider-account-${crypto.randomUUID()}`}, 'v1:test', 'organization'
+      ) returning id::text as id`;
+    const admin = workspace(f, f.alphaId, f.workspaceAdminSubjectId);
+    // Unlocked, the workspace rotation toggle writes its override.
+    const unlocked = await setSubscriptionCoreCodexRotation(client!.db, {
+      ...admin,
+      rotationEnabled: false,
+    });
+    expect(unlocked.rotation).not.toBeNull();
+    await setSubscriptionCoreCodexRotation(client!.db, { ...admin, rotationEnabled: true });
+
+    await updateOrganizationSubscriptionSettings(client!.db, {
+      ...organization(f),
+      patch: { locked: ["rotation", "providers"] },
+    });
+    const before = await workspaceRow(f, f.alphaId);
+    const rotation = await rejected(
+      setSubscriptionCoreCodexRotation(client!.db, { ...admin, rotationEnabled: false }),
+    );
+    expect(rotation).toBeInstanceOf(SubscriptionSettingsLockedError);
+    expect((rotation as SubscriptionSettingsLockedError).settings).toEqual(["rotation"]);
+    const source = await rejected(
+      setSubscriptionCoreWorkspaceCodexSource(client!.db, { ...admin, mode: "workspace" }),
+    );
+    expect(source).toBeInstanceOf(SubscriptionSettingsLockedError);
+    expect((source as SubscriptionSettingsLockedError).settings).toEqual(["providers"]);
+    // The organization administrator meets the same lock in a workspace.
+    const primary = await setSubscriptionCoreCodexPrimary(client!.db, {
+      ...workspace(f, f.alphaId, f.ownerSubjectId),
+      connectionId: connection!.id,
+    }).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(primary).toBeInstanceOf(SubscriptionSettingsLockedError);
+    expect((primary as SubscriptionSettingsLockedError).settings).toEqual(["rotation"]);
+    expect(await workspaceRow(f, f.alphaId)).toEqual(before);
+  });
+
+  test("an organization without a settings row reads the seeded values and accepts version 0", async () => {
+    const f = await fixture();
+    await shared!.admin`delete from subscription_settings where account_id = ${f.accountId}::uuid`;
+    const read = await readOrganizationSubscriptionSettings(client!.db, organization(f));
+    expect(read.version).toBe(0);
+    expect(read.values).toMatchObject({
+      crossProviderFailover: false,
+      personalConnectionsAllowed: true,
+      personalFallbackAllowed: false,
+    });
+    const alpha = await readWorkspaceSubscriptionSettings(
+      client!.db,
+      workspace(f, f.alphaId, f.workspaceAdminSubjectId),
+    );
+    expect(alpha.sources.personalConnectionsAllowed).toBe("organization");
+    const overview = await readSubscriptionSettingsOverview(client!.db, organization(f));
+    expect(overview.workspaces.length).toBeGreaterThan(0);
+    const written = await updateOrganizationSubscriptionSettings(client!.db, {
+      ...organization(f),
+      patch: { crossProviderFailover: true },
+      expectedVersion: read.version,
+    });
+    expect(written.settings.values.crossProviderFailover).toBe(true);
+    // An empty patch changes nothing: no new version and no wake.
+    const unchanged = await updateOrganizationSubscriptionSettings(client!.db, {
+      ...organization(f),
+      patch: {},
+      expectedVersion: written.settings.version,
+    });
+    expect(unchanged.settings.version).toBe(written.settings.version);
+    expect(unchanged.wake).toBeNull();
+  });
+
+  test("a workspace fallback order stays bounded across patches", async () => {
+    const f = await fixture();
+    const admin = workspace(f, f.alphaId, f.workspaceAdminSubjectId);
+    const page = (from: number) =>
+      Object.fromEntries(
+        Array.from({ length: 40 }, (_, index) => [`codex/m${from + index}`, ["claude/x"]]),
+      );
+    await updateWorkspaceSubscriptionSettings(client!.db, {
+      ...admin,
+      patch: { fallbackOrder: page(0) },
+    });
+    expect(
+      await rejected(
+        updateWorkspaceSubscriptionSettings(client!.db, {
+          ...admin,
+          patch: { fallbackOrder: page(40) },
+        }),
+      ),
+    ).toBeInstanceOf(SubscriptionSettingsInvalidError);
+    expect(Object.keys((await workspaceRow(f, f.alphaId))!.fallback_order!)).toHaveLength(40);
+  });
+
+  test("the guard's widening test and the TypeScript mirror agree on random values", async () => {
+    let seed = 0x9a4d;
+    const random = () => {
+      seed = (seed * 1_103_515_245 + 12_345) % 2_147_483_648;
+      return seed / 2_147_483_648;
+    };
+    const pick = <T>(values: readonly T[]): T => values[Math.floor(random() * values.length)]!;
+    // JSON values the stored columns can hold, including the odd shapes the
+    // guard must still judge: JSON null, empty objects, non-objects, arrays.
+    const leaf = (): unknown =>
+      pick([null, true, false, 0, 1, 7, "", "spread", "primary_first", [], ["codex/b"], {}]);
+    const value = (depth = 0): unknown => {
+      const kind = random();
+      if (depth > 1 || kind < 0.35) return leaf();
+      if (kind < 0.5)
+        return Array.from({ length: Math.floor(random() * 3) }, () => value(depth + 1));
+      const entries = Array.from({ length: Math.floor(random() * 3) }, () => [
+        pick(["codex", "claude", "xai", "mode", "a"]),
+        value(depth + 1),
+      ]);
+      return Object.fromEntries(entries);
+    };
+    // Reorders object keys, so key order never decides the answer.
+    const reordered = (input: unknown): unknown => {
+      if (input === null || typeof input !== "object") return input;
+      if (Array.isArray(input)) return input.map(reordered);
+      return Object.fromEntries(
+        Object.entries(input)
+          .reverse()
+          .map(([key, entry]) => [key, reordered(entry)]),
+      );
+    };
+    const cases: { next: unknown; previous: unknown; keyed: boolean }[] = [];
+    for (let index = 0; index < 1500; index += 1) {
+      const previous = random() < 0.2 ? undefined : value();
+      const roll = random();
+      const next =
+        roll < 0.15
+          ? undefined
+          : roll < 0.35
+            ? reordered(previous)
+            : roll < 0.5 && previous && typeof previous === "object" && !Array.isArray(previous)
+              ? Object.fromEntries(Object.entries(previous).slice(0, 1))
+              : value();
+      cases.push({ next, previous, keyed: random() < 0.5 });
+    }
+    const rows = await shared!.admin<{ index: number; widened: boolean }[]>`
+      select (item.ordinality - 1)::int as index,
+        opengeni_private.subscription_setting_override_widened(
+          item.value -> 'next', item.value -> 'previous', (item.value ->> 'keyed')::boolean
+        ) as widened
+      from jsonb_array_elements(${shared!.admin.json(cases as never)}::jsonb) with ordinality as item(value, ordinality)
+      order by item.ordinality`;
+    expect(rows).toHaveLength(cases.length);
+    // Both answers occur often, so agreement is not trivial.
+    expect(rows.filter((row) => row.widened).length).toBeGreaterThan(150);
+    expect(rows.filter((row) => !row.widened).length).toBeGreaterThan(150);
+    const mismatches = cases.filter((entry, index) => {
+      const key = entry.keyed ? "rotation" : "crossProviderFailover";
+      const typescript =
+        lockedSettingsWidened({
+          locked: [key],
+          before: (entry.previous === undefined ? {} : { [key]: entry.previous }) as never,
+          after: (entry.next === undefined ? {} : { [key]: entry.next }) as never,
+        }).length > 0;
+      return typescript !== rows[index]!.widened;
+    });
+    expect(mismatches).toEqual([]);
+  });
+
+  test("the settings API writes no overrides for a Personal workspace", async () => {
+    const f = await fixture();
+    await shared!
+      .admin`insert into workspace_memberships (account_id, workspace_id, subject_id, role)
       values (${f.accountId}::uuid, ${f.personalId}::uuid, ${f.workspaceAdminSubjectId}, 'admin')`;
     const read = await readWorkspaceSubscriptionSettings(
       client!.db,
@@ -614,7 +805,11 @@ describe.skipIf(!realDb)("subscription settings with lockable workspace override
     expect(overview.organization.locked).toEqual(["crossProviderFailover"]);
     expect(overview.nextCursor).toBeNull();
     // Shared workspaces only (the owner's default workspace is shared; the member's Personal workspace is not listed).
-    expect(overview.workspaces.map((row) => row.name).sort()).toEqual(["Alpha", "Beta", "Default workspace"]);
+    expect(overview.workspaces.map((row) => row.name).sort()).toEqual([
+      "Alpha",
+      "Beta",
+      "Default workspace",
+    ]);
     const alpha = overview.workspaces.find((row) => row.workspaceId === f.alphaId)!;
     const beta = overview.workspaces.find((row) => row.workspaceId === f.betaId)!;
     expect(alpha.values.personalConnectionsAllowed).toBe(false);
@@ -669,14 +864,21 @@ describe.skipIf(!realDb)("subscription settings with lockable workspace override
           .filter(() => bool())
           .map((provider) => [
             provider,
-            { useOrganizationAccounts: true, enabled: bool(), inferenceSource: pick(["automatic", "workspace", "organization"] as const) },
+            {
+              useOrganizationAccounts: true,
+              enabled: bool(),
+              inferenceSource: pick(["automatic", "workspace", "organization"] as const),
+            },
           ]),
       );
     const fallback = () =>
       Object.fromEntries(
         ["codex/a", "claude/b", "xai/c"]
           .filter(() => bool())
-          .map((model) => [model, ["codex/a", "claude/b", "xai/c"].filter((other) => other !== model && bool())]),
+          .map((model) => [
+            model,
+            ["codex/a", "claude/b", "xai/c"].filter((other) => other !== model && bool()),
+          ]),
       );
     const stored = (value: Record<string, unknown>) =>
       JSON.stringify(
@@ -708,7 +910,11 @@ describe.skipIf(!realDb)("subscription settings with lockable workspace override
         if (bool()) overrides.rotation = rotation();
         if (bool()) overrides.providers = providers();
         if (bool()) overrides.fallbackOrder = fallback();
-        for (const key of ["crossProviderFailover", "personalConnectionsAllowed", "personalFallbackAllowed"]) {
+        for (const key of [
+          "crossProviderFailover",
+          "personalConnectionsAllowed",
+          "personalFallbackAllowed",
+        ]) {
           if (bool()) overrides[key] = bool();
         }
         (policy.workspaces as Record<string, unknown>)[workspaceId] = overrides;
@@ -742,7 +948,10 @@ describe.skipIf(!realDb)("subscription settings with lockable workspace override
         where account_id = ${f.accountId}::uuid and workspace_id is null`;
       const overview = await readSubscriptionSettingsOverview(client!.db, organization(f));
       for (const row of overview.workspaces) {
-        expect({ round, view: { values: row.values, sources: row.sources, entrySources: row.entrySources } }).toEqual({
+        expect({
+          round,
+          view: { values: row.values, sources: row.sources, entrySources: row.entrySources },
+        }).toEqual({
           round,
           view: settingsView(policy, row.workspaceId),
         });
@@ -797,21 +1006,25 @@ describe.skipIf(!realDb)("subscription settings with lockable workspace override
     const held = new Promise<void>((resolve) => (lockHeld = resolve));
     let commit!: () => void;
     const commitGate = new Promise<void>((resolve) => (commit = resolve));
-    const rawLock = withRlsContext(client!.db, { accountId: f.accountId, workspaceId: null }, async (tx) => {
-      await setSubjectRlsContext(tx, f.ownerSubjectId);
-      await rawRows(
-        tx,
-        sql`select id from subscription_settings where account_id = ${f.accountId}::uuid
+    const rawLock = withRlsContext(
+      client!.db,
+      { accountId: f.accountId, workspaceId: null },
+      async (tx) => {
+        await setSubjectRlsContext(tx, f.ownerSubjectId);
+        await rawRows(
+          tx,
+          sql`select id from subscription_settings where account_id = ${f.accountId}::uuid
           and workspace_id is not null order by id for update`,
-      );
-      await rawRows(
-        tx,
-        sql`update subscription_settings set locked_settings = '{personalConnectionsAllowed}'
+        );
+        await rawRows(
+          tx,
+          sql`update subscription_settings set locked_settings = '{personalConnectionsAllowed}'
           where account_id = ${f.accountId}::uuid and workspace_id is null`,
-      );
-      lockHeld();
-      await commitGate;
-    });
+        );
+        lockHeld();
+        await commitGate;
+      },
+    );
     await held;
     const writes = [f.alphaId, f.betaId].map((workspaceId) =>
       updateWorkspaceSubscriptionSettings(client!.db, {
@@ -836,7 +1049,10 @@ describe.skipIf(!realDb)("subscription settings with lockable workspace override
     // 3. Free races: no deadlock, and no override of a locked setting survives.
     for (let round = 0; round < 15; round += 1) {
       const key = round % 2 === 0 ? "personalFallbackAllowed" : "crossProviderFailover";
-      await updateOrganizationSubscriptionSettings(client!.db, { ...organization(f), patch: { locked: [] } });
+      await updateOrganizationSubscriptionSettings(client!.db, {
+        ...organization(f),
+        patch: { locked: [] },
+      });
       const outcomes = await Promise.allSettled([
         updateOrganizationSubscriptionSettings(client!.db, {
           ...organization(f),
@@ -855,13 +1071,16 @@ describe.skipIf(!realDb)("subscription settings with lockable workspace override
           expect(outcome.reason).toBeInstanceOf(SubscriptionSettingsLockedError);
         }
       }
-      const column = key === "personalFallbackAllowed" ? "personal_fallback_allowed" : "cross_provider_failover";
+      const column =
+        key === "personalFallbackAllowed" ? "personal_fallback_allowed" : "cross_provider_failover";
       for (const workspaceId of [f.alphaId, f.betaId]) {
         const row = await workspaceRow(f, workspaceId);
-        expect({ round, value: (row as Record<string, unknown> | null)?.[column] ?? null }).toEqual({
-          round,
-          value: null,
-        });
+        expect({ round, value: (row as Record<string, unknown> | null)?.[column] ?? null }).toEqual(
+          {
+            round,
+            value: null,
+          },
+        );
       }
     }
   });

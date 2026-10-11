@@ -14,6 +14,7 @@ import {
   SubscriptionSettingsForbiddenError,
   SubscriptionSettingsInvalidError,
   SubscriptionSettingsLockedError,
+  subscriptionSettingLockRefusal,
   SubscriptionSettingsPersonalWorkspaceError,
   SubscriptionSettingsVersionConflictError,
   updateOrganizationSubscriptionSettings,
@@ -35,20 +36,34 @@ function parseId(value: string | undefined, what: "organization" | "workspace"):
   return parsed.data;
 }
 
+/**
+ * 409 `setting_locked` for any write the organization's settings lock refused:
+ * these routes and every older route whose write meets the 0716 guard (for
+ * example a Codex rotation, primary or source change). Mapped centrally in
+ * the app error handler.
+ */
+export function subscriptionSettingsLockedHttpError(error: unknown): ApiHttpError | null {
+  const settings =
+    error instanceof SubscriptionSettingsLockedError
+      ? [...error.settings]
+      : subscriptionSettingLockRefusal(error);
+  if (settings === null) return null;
+  return new ApiHttpError(409, {
+    code: "conflict",
+    message: "the organization locked this setting",
+    retryable: false,
+    outcomeUnknown: false,
+    details: { reason: "setting_locked", settings },
+  });
+}
+
 /** Typed refusals to HTTP: 403, 409 (locked, Personal workspace, version) or 422. */
 function refused(error: unknown): never {
   if (error instanceof SubscriptionSettingsForbiddenError) {
     throw new HTTPException(403, { message: error.message });
   }
-  if (error instanceof SubscriptionSettingsLockedError) {
-    throw new ApiHttpError(409, {
-      code: "conflict",
-      message: "the organization locked this setting",
-      retryable: false,
-      outcomeUnknown: false,
-      details: { reason: "setting_locked", settings: [...error.settings] },
-    });
-  }
+  const locked = subscriptionSettingsLockedHttpError(error);
+  if (locked) throw locked;
   if (error instanceof SubscriptionSettingsPersonalWorkspaceError) {
     throw new ApiHttpError(409, {
       code: "conflict",

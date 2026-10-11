@@ -146,7 +146,7 @@ const RULES: Rule[] = [
     method: "PATCH",
     pattern: /\/workspaces\/:workspaceId\/model-account-settings$/,
     text: () =>
-      "Give a workspace its own value for a subscription account setting the organization has not locked, or set it back to follow the organization (null). Workspace admins only.",
+      "Give a workspace its own value for a subscription account setting the organization has not locked, or set it back to follow the organization (null). Workspace and organization admins.",
   },
   {
     method: "GET",

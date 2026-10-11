@@ -34,6 +34,10 @@ import {
 } from "./access";
 import { SubscriptionCoreError } from "./errors";
 import {
+  subscriptionSettingLockRefusal,
+  throwIfSubscriptionSettingLocked,
+} from "../subscription-settings-lock";
+import {
   subscriptionCoreConnectionKind,
   subscriptionCoreProviderId,
   type SubscriptionCoreProvider,
@@ -478,7 +482,13 @@ export async function readSubscriptionCoreOrganizationPool(
   );
 }
 
+/**
+ * A row-level security refusal (42501). The settings lock guard (0716) also
+ * raises 42501; it is not a refusal to see the row, so it is excluded here and
+ * surfaces as `SubscriptionSettingsLockedError`.
+ */
 export function isSubscriptionCoreRlsRefusal(error: unknown): boolean {
+  if (subscriptionSettingLockRefusal(error) !== null) return false;
   const code = (error as { code?: unknown } | null)?.code;
   const causeCode = (error as { cause?: { code?: unknown } } | null)?.cause?.code;
   return code === "42501" || causeCode === "42501";
@@ -539,14 +549,21 @@ async function withAdministration<T>(
   input: SubscriptionCoreAdministration,
   fn: (tx: Database) => Promise<T>,
 ): Promise<T> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (tx) => {
-      await setSubjectRlsContext(tx, input.subjectId);
-      return await fn(tx);
-    },
-  );
+  try {
+    return await withRlsContext(
+      db,
+      { accountId: input.accountId, workspaceId: input.workspaceId },
+      async (tx) => {
+        await setSubjectRlsContext(tx, input.subjectId);
+        return await fn(tx);
+      },
+    );
+  } catch (error) {
+    // A write the organization's settings lock refused (0716), for example a
+    // workspace rotation, primary or source change: nothing was written.
+    throwIfSubscriptionSettingLocked(error);
+    throw error;
+  }
 }
 
 /**

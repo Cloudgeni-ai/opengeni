@@ -3,6 +3,7 @@ import type { ApiRouteDeps } from "@opengeni/core";
 import {
   createDb,
   ensureManagedAccessForUserWithOrganizationMemberships,
+  SubscriptionSettingsLockedError,
   type DbClient,
 } from "@opengeni/db";
 import { synchronizeCanonicalHumanLoginBindings } from "@opengeni/db/canonical-human-identities";
@@ -13,7 +14,10 @@ import {
 } from "@opengeni/testing";
 import { Hono } from "hono";
 import { ApiHttpError } from "../src/http/api-error";
-import { registerModelAccountSettingsRoutes } from "../src/routes/model-account-settings";
+import {
+  registerModelAccountSettingsRoutes,
+  subscriptionSettingsLockedHttpError,
+} from "../src/routes/model-account-settings";
 
 // Model-account settings routes (SUB-SET-01..05) over real PostgreSQL as the
 // application role, signed in through managed browser sessions: the
@@ -30,7 +34,13 @@ const settings = testSettings({
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
 
-type Human = { userId: string; subjectId: string; app: Hono; defaultWorkspaceId: string; accountId: string };
+type Human = {
+  userId: string;
+  subjectId: string;
+  app: Hono;
+  defaultWorkspaceId: string;
+  accountId: string;
+};
 
 async function human(label: string): Promise<Human> {
   const userId = `model-account-settings-${label}-${crypto.randomUUID()}`;
@@ -107,6 +117,7 @@ let owner: Human;
 let member: Human;
 let alphaId = "";
 let betaId = "";
+let personalId = "";
 
 beforeAll(async () => {
   if (!realDb) return;
@@ -127,6 +138,7 @@ beforeAll(async () => {
   const [personal] = await shared.admin<{ id: string }[]>`
     insert into workspaces (account_id, name) values (${owner.accountId}::uuid, 'Personal')
     returning id::text as id`;
+  personalId = personal!.id;
   await shared.admin`insert into organization_memberships (
       account_id, subject_id, status, personal_workspace_id, role
     ) values (${owner.accountId}::uuid, ${member.subjectId}, 'active', ${personal!.id}::uuid, 'member')`;
@@ -192,7 +204,9 @@ describe.skipIf(!realDb)("model-account settings routes", () => {
     const betaPath = `/v1/workspaces/${betaId}/model-account-settings`;
     await call(owner, "PATCH", organizationPath, { locked: [] });
 
-    const overridden = await call(member, "PATCH", alphaPath, { personalConnectionsAllowed: false });
+    const overridden = await call(member, "PATCH", alphaPath, {
+      personalConnectionsAllowed: false,
+    });
     expect(overridden.status).toBe(200);
     expect((overridden.json.sources as Record<string, string>).personalConnectionsAllowed).toBe(
       "workspace",
@@ -203,9 +217,9 @@ describe.skipIf(!realDb)("model-account settings routes", () => {
     const betaRead = await call(member, "GET", betaPath);
     expect(betaRead.status).toBe(200);
     expect(betaRead.json.canEdit).toBe(false);
-    expect((await call(member, "PATCH", betaPath, { personalConnectionsAllowed: false })).status).toBe(
-      403,
-    );
+    expect(
+      (await call(member, "PATCH", betaPath, { personalConnectionsAllowed: false })).status,
+    ).toBe(403);
 
     // Locking clears Alpha's override; setting it again is refused with the lock named.
     const locked = await call(owner, "PATCH", organizationPath, {
@@ -213,8 +227,12 @@ describe.skipIf(!realDb)("model-account settings routes", () => {
     });
     expect(locked.status).toBe(200);
     const afterLock = await call(member, "GET", alphaPath);
-    expect((afterLock.json.overrides as Record<string, unknown>).personalConnectionsAllowed).toBeNull();
-    expect((afterLock.json.sources as Record<string, string>).personalConnectionsAllowed).toBe("locked");
+    expect(
+      (afterLock.json.overrides as Record<string, unknown>).personalConnectionsAllowed,
+    ).toBeNull();
+    expect((afterLock.json.sources as Record<string, string>).personalConnectionsAllowed).toBe(
+      "locked",
+    );
     const refused = await call(member, "PATCH", alphaPath, { personalConnectionsAllowed: false });
     expect(refused.status).toBe(409);
     expect(refused.json.details).toEqual({
@@ -222,11 +240,13 @@ describe.skipIf(!realDb)("model-account settings routes", () => {
       settings: ["personalConnectionsAllowed"],
     });
     // Organization administrators cannot override a lock in a workspace either.
-    expect((await call(owner, "PATCH", alphaPath, { personalConnectionsAllowed: false })).status).toBe(
-      409,
-    );
+    expect(
+      (await call(owner, "PATCH", alphaPath, { personalConnectionsAllowed: false })).status,
+    ).toBe(409);
     // Unlocked settings stay editable.
-    expect((await call(member, "PATCH", alphaPath, { personalFallbackAllowed: true })).status).toBe(200);
+    expect((await call(member, "PATCH", alphaPath, { personalFallbackAllowed: true })).status).toBe(
+      200,
+    );
 
     const overview = await call(owner, "GET", `${organizationPath}/overview?limit=500`);
     expect(overview.status).toBe(200);
@@ -235,7 +255,9 @@ describe.skipIf(!realDb)("model-account settings routes", () => {
       name: string;
       sources: Record<string, string>;
     }[];
-    expect(rows.map((row) => row.name).sort()).toEqual(["Alpha", "Beta", "Default workspace"].sort());
+    expect(rows.map((row) => row.name).sort()).toEqual(
+      ["Alpha", "Beta", "Default workspace"].sort(),
+    );
     const alpha = rows.find((row) => row.workspaceId === alphaId)!;
     expect(alpha.sources).toMatchObject({
       personalConnectionsAllowed: "locked",
@@ -246,12 +268,67 @@ describe.skipIf(!realDb)("model-account settings routes", () => {
     expect((await call(owner, "GET", `${organizationPath}/overview?after=nope`)).status).toBe(422);
   });
 
+  test("Personal workspaces hold no overrides, and the overview pages by cursor", async () => {
+    await shared!.admin`insert into workspace_memberships (
+        account_id, workspace_id, subject_id, role, permissions
+      ) values (${owner.accountId}::uuid, ${personalId}::uuid, ${member.subjectId}, 'admin',
+        ${shared!.admin.json(["workspace:read", "workspace:admin"])}::jsonb)
+      on conflict do nothing`;
+    const personal = await call(
+      member,
+      "PATCH",
+      `/v1/workspaces/${personalId}/model-account-settings`,
+      {
+        personalFallbackAllowed: true,
+      },
+    );
+    expect(personal.status).toBe(409);
+    expect(personal.json.details).toEqual({ reason: "personal_workspace" });
+
+    const overviewPath = `/v1/organizations/${owner.accountId}/model-account-settings/overview`;
+    const seen: string[] = [];
+    let after: string | null = null;
+    do {
+      const page = await call(
+        owner,
+        "GET",
+        `${overviewPath}?limit=1${after ? `&after=${after}` : ""}`,
+      );
+      expect(page.status).toBe(200);
+      const rows = page.json.workspaces as { workspaceId: string }[];
+      expect(rows.length).toBeLessThanOrEqual(1);
+      seen.push(...rows.map((row) => row.workspaceId));
+      after = page.json.nextCursor as string | null;
+    } while (after);
+    expect(seen).toEqual([...seen].sort());
+    expect(new Set(seen)).toEqual(new Set([alphaId, betaId, owner.defaultWorkspaceId]));
+  });
+
+  test("a lock refusal from any writer maps to 409 setting_locked", () => {
+    const typed = subscriptionSettingsLockedHttpError(
+      new SubscriptionSettingsLockedError(["rotation"]),
+    );
+    expect(typed?.status).toBe(409);
+    expect(typed?.details).toEqual({ reason: "setting_locked", settings: ["rotation"] });
+    // The raw guard refusal, wrapped by the driver, from a writer that did not translate it.
+    const raw = subscriptionSettingsLockedHttpError(
+      Object.assign(new Error("query failed"), {
+        cause: { code: "42501", detail: "subscription_setting_locked:providers" },
+      }),
+    );
+    expect(raw?.details).toEqual({ reason: "setting_locked", settings: ["providers"] });
+    expect(
+      subscriptionSettingsLockedHttpError(Object.assign(new Error("rls"), { code: "42501" })),
+    ).toBeNull();
+    expect(subscriptionSettingsLockedHttpError(new Error("other"))).toBeNull();
+  });
+
   test("strict bodies and unknown ids", async () => {
     const alphaPath = `/v1/workspaces/${alphaId}/model-account-settings`;
     expect((await call(member, "PATCH", alphaPath, { locked: ["rotation"] })).status).toBe(422);
     expect((await call(member, "PATCH", alphaPath, { unknown: true })).status).toBe(422);
-    expect((await call(owner, "GET", "/v1/organizations/not-a-uuid/model-account-settings")).status).toBe(
-      404,
-    );
+    expect(
+      (await call(owner, "GET", "/v1/organizations/not-a-uuid/model-account-settings")).status,
+    ).toBe(404);
   });
 });

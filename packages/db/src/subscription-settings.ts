@@ -13,6 +13,7 @@
  */
 import {
   SUBSCRIPTION_SETTING_KEYS,
+  effectiveSettings,
   fallbackOrderProblem,
   isSubscriptionSettingKey,
   lockedSettingsWidened,
@@ -29,7 +30,16 @@ import { nestedPostgresSqlState } from "./persistence-errors";
 import { readSubscriptionEffectiveSettings } from "./subscription-core-repository";
 import { readSubscriptionCorePrimaryConnectionId } from "./subscription-core/administration";
 import { subscriptionCoreProvider } from "./subscription-core-providers";
+import {
+  SubscriptionSettingsLockedError,
+  throwIfSubscriptionSettingLocked,
+} from "./subscription-settings-lock";
 import type { SubscriptionCoreProvider } from "./subscription-core/provider";
+
+export {
+  SubscriptionSettingsLockedError,
+  subscriptionSettingLockRefusal,
+} from "./subscription-settings-lock";
 
 export type SubscriptionRotationMode = "spread" | "primary_first";
 
@@ -38,14 +48,6 @@ export class SubscriptionSettingsForbiddenError extends Error {
   constructor(message = "missing permission to manage these model account settings") {
     super(message);
     this.name = "SubscriptionSettingsForbiddenError";
-  }
-}
-
-/** The write would override settings the organization locked. */
-export class SubscriptionSettingsLockedError extends Error {
-  constructor(readonly settings: readonly SubscriptionSettingKey[]) {
-    super(`locked by the organization: ${settings.join(", ")}`);
-    this.name = "SubscriptionSettingsLockedError";
   }
 }
 
@@ -169,23 +171,8 @@ function iso(value: Date | string | null | undefined): string | null {
   return value === null || value === undefined ? null : new Date(value).toISOString();
 }
 
-function lockRefusal(error: unknown): SubscriptionSettingKey[] | null {
-  const queue: unknown[] = [error];
-  for (let index = 0; index < queue.length && index < 16; index += 1) {
-    const current = queue[index] as { detail?: unknown; cause?: unknown } | null;
-    if (!current || typeof current !== "object") continue;
-    if (typeof current.detail === "string" && current.detail.startsWith("subscription_setting_locked:")) {
-      const key = current.detail.slice("subscription_setting_locked:".length);
-      return isSubscriptionSettingKey(key) ? [key] : [];
-    }
-    if (current.cause !== undefined) queue.push(current.cause);
-  }
-  return null;
-}
-
 function translateWriteError(error: unknown): never {
-  const locked = lockRefusal(error);
-  if (locked) throw new SubscriptionSettingsLockedError(locked);
+  throwIfSubscriptionSettingLocked(error);
   if (nestedPostgresSqlState(error) === "42501") throw new SubscriptionSettingsForbiddenError();
   throw error;
 }
@@ -247,6 +234,50 @@ async function withOrganizationAdministrator<T>(
   );
 }
 
+/** The values 0712 seeds for an organization, and the organization PATCH inserts. */
+const SEEDED_ORGANIZATION_VALUES: SubscriptionSettingValues = {
+  rotation: {},
+  providers: {},
+  crossProviderFailover: false,
+  fallbackOrder: {},
+  personalConnectionsAllowed: true,
+  personalFallbackAllowed: false,
+};
+
+type EffectiveSettingsValue = Parameters<typeof settingsViewFromEffective>[0];
+
+/**
+ * The resolver's answer, or the seeded organization values when the
+ * organization has no settings row yet (the resolver returns NULL then; the
+ * 0712 seed trigger makes this rare). Workspace overrides cannot apply
+ * without an organization row.
+ */
+function seededWhenMissing(
+  effective: EffectiveSettingsValue | null | undefined,
+  workspaceId: string,
+): EffectiveSettingsValue {
+  return (
+    effective ??
+    effectiveSettings(
+      { organization: SEEDED_ORGANIZATION_VALUES, locked: [], workspaces: {} },
+      workspaceId,
+    )
+  );
+}
+
+async function effectiveOrSeeded(
+  tx: Database,
+  accountId: string,
+  workspaceId: string,
+): Promise<EffectiveSettingsValue> {
+  const effective = (await readSubscriptionEffectiveSettings(
+    tx,
+    accountId,
+    workspaceId,
+  )) as EffectiveSettingsValue | null;
+  return seededWhenMissing(effective, workspaceId);
+}
+
 async function readOrganizationState(
   tx: Database,
   organizationId: string,
@@ -260,7 +291,7 @@ async function readOrganizationState(
     sql`select locked_settings, version, updated_at from subscription_settings
       where account_id = ${organizationId}::uuid and workspace_id is null`,
   );
-  const effective = await readSubscriptionEffectiveSettings(tx, organizationId, NO_WORKSPACE);
+  const effective = await effectiveOrSeeded(tx, organizationId, NO_WORKSPACE);
   return {
     organizationId,
     values: effective.values,
@@ -293,7 +324,10 @@ export async function updateOrganizationSubscriptionSettings(
     patch: OrganizationSubscriptionSettingsPatch;
     expectedVersion?: number;
   },
-): Promise<{ settings: OrganizationSubscriptionSettingsState; wake: SubscriptionSettingsWake | null }> {
+): Promise<{
+  settings: OrganizationSubscriptionSettingsState;
+  wake: SubscriptionSettingsWake | null;
+}> {
   const patch = input.patch;
   const locked = patch.locked === undefined ? undefined : normalizeLocked(patch.locked);
   const fallbackOrder =
@@ -303,9 +337,17 @@ export async function updateOrganizationSubscriptionSettings(
     registeredProvider(providerId);
     rotation[providerId] = { mode: validateRotationMode(entry) };
   }
+  // An empty patch checks the version and changes nothing: no new version, no wake.
+  const changesOrganization =
+    locked !== undefined ||
+    fallbackOrder !== undefined ||
+    Object.keys(rotation).length > 0 ||
+    patch.crossProviderFailover !== undefined ||
+    patch.personalConnectionsAllowed !== undefined ||
+    patch.personalFallbackAllowed !== undefined;
   try {
     return await withOrganizationAdministrator(db, input, async (tx) => {
-      await rawRows(
+      const created = await rawRows(
         tx,
         sql`insert into subscription_settings (
             account_id, workspace_id, rotation, providers, cross_provider_failover, fallback_order,
@@ -313,7 +355,8 @@ export async function updateOrganizationSubscriptionSettings(
           ) values (
             ${input.organizationId}::uuid, null, '{}'::jsonb, '{}'::jsonb, false, '{}'::jsonb,
             true, false, ${input.actorSubjectId}
-          ) on conflict (account_id, workspace_id) do nothing`,
+          ) on conflict (account_id, workspace_id) do nothing
+          returning id`,
       );
       if (locked !== undefined) {
         await rawRows(
@@ -330,8 +373,13 @@ export async function updateOrganizationSubscriptionSettings(
           for update`,
       );
       if (!current) throw new SubscriptionSettingsForbiddenError();
-      if (input.expectedVersion !== undefined && Number(current.version) !== input.expectedVersion) {
-        throw new SubscriptionSettingsVersionConflictError(Number(current.version));
+      // A row created just now stands for the version 0 its reader saw.
+      const readVersion = created.length > 0 ? 0 : Number(current.version);
+      if (input.expectedVersion !== undefined && readVersion !== input.expectedVersion) {
+        throw new SubscriptionSettingsVersionConflictError(readVersion);
+      }
+      if (!changesOrganization) {
+        return { settings: await readOrganizationState(tx, input.organizationId), wake: null };
       }
       const rotationJson = Object.keys(rotation).length === 0 ? null : JSON.stringify(rotation);
       const lockedJson = locked === undefined ? null : JSON.stringify(locked);
@@ -463,7 +511,7 @@ async function readWorkspaceState(
       where account_id = ${input.accountId}::uuid and workspace_id = ${input.workspaceId}::uuid`,
   );
   const locked = storedLocked(organization?.locked_settings);
-  const effective = await readSubscriptionEffectiveSettings(tx, input.accountId, input.workspaceId);
+  const effective = await effectiveOrSeeded(tx, input.accountId, input.workspaceId);
   return {
     ...settingsViewFromEffective(effective, locked),
     workspaceId: input.workspaceId,
@@ -524,7 +572,10 @@ export async function updateWorkspaceSubscriptionSettings(
     patch: WorkspaceSubscriptionSettingsPatch;
     expectedVersion?: number;
   },
-): Promise<{ settings: WorkspaceSubscriptionSettingsState; wake: SubscriptionSettingsWake | null }> {
+): Promise<{
+  settings: WorkspaceSubscriptionSettingsState;
+  wake: SubscriptionSettingsWake | null;
+}> {
   const patch = input.patch;
   if (patch.fallbackOrder) {
     for (const [preferred, fallbacks] of Object.entries(patch.fallbackOrder)) {
@@ -533,14 +584,16 @@ export async function updateWorkspaceSubscriptionSettings(
   }
   const rotationProviders = new Map<string, SubscriptionCoreProvider>();
   for (const [providerId, entry] of Object.entries(patch.rotation ?? {})) {
-    if (!PROVIDER_ID.test(providerId)) throw new SubscriptionSettingsInvalidError("unknown provider");
+    if (!PROVIDER_ID.test(providerId))
+      throw new SubscriptionSettingsInvalidError("unknown provider");
     if (entry === null) continue;
     validateRotationMode(entry);
     rotationProviders.set(providerId, registeredProvider(providerId));
   }
   try {
     return await withWorkspaceSubject(db, input, async (tx) => {
-      if (await isPersonalWorkspace(tx, input)) throw new SubscriptionSettingsPersonalWorkspaceError();
+      if (await isPersonalWorkspace(tx, input))
+        throw new SubscriptionSettingsPersonalWorkspaceError();
       const [organization] = await rawRows<{ locked_settings: string[] | null }>(
         tx,
         sql`select locked_settings from subscription_settings
@@ -553,7 +606,10 @@ export async function updateWorkspaceSubscriptionSettings(
           where account_id = ${input.accountId}::uuid and workspace_id = ${input.workspaceId}::uuid
           for update`,
       );
-      if (input.expectedVersion !== undefined && (row ? Number(row.version) : 0) !== input.expectedVersion) {
+      if (
+        input.expectedVersion !== undefined &&
+        (row ? Number(row.version) : 0) !== input.expectedVersion
+      ) {
         throw new SubscriptionSettingsVersionConflictError(row ? Number(row.version) : 0);
       }
       const before = overridesOf(row);
@@ -576,6 +632,8 @@ export async function updateWorkspaceSubscriptionSettings(
                 string[]
               > | null);
       }
+      // The bound applies to the stored override, not only to this patch.
+      if (after.fallbackOrder !== null) validateFallbackOrder(after.fallbackOrder);
       if (patch.rotation !== undefined) {
         after.rotation =
           patch.rotation === null
@@ -691,7 +749,7 @@ export async function readSubscriptionSettingsOverview(
     const rows = await rawRows<{
       id: string;
       name: string;
-      effective: Parameters<typeof settingsViewFromEffective>[0];
+      effective: EffectiveSettingsValue | null;
     }>(
       tx,
       sql`select workspace.id::text as id, workspace.name,
@@ -709,7 +767,7 @@ export async function readSubscriptionSettingsOverview(
     return {
       organization,
       workspaces: page.map((row) => ({
-        ...settingsViewFromEffective(row.effective, organization.locked),
+        ...settingsViewFromEffective(seededWhenMissing(row.effective, row.id), organization.locked),
         workspaceId: row.id,
         name: row.name,
       })),
