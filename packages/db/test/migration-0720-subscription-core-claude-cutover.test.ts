@@ -93,6 +93,7 @@ const a = {
   t5: randomUUID(),
   t6: randomUUID(), // withdrawn for edit; a composer draft still edits it
   t12: randomUUID(), // W1 shared, queued with a malformed auth recovery value
+  t13: randomUUID(), // W1 shared, queued with an auth recovery of an older c1 version
   s12: randomUUID(),
   waiter: randomUUID(),
   goal: randomUUID(),
@@ -582,6 +583,9 @@ async function seed() {
       position: 2,
       human: a.owner,
       v1: workspaceV1,
+      // A renewal of the duplicate login c2 (version 2), now an alias of c1:
+      // never a receipt on c1, whose own credential was not renewed.
+      authRecovery: { credentialId: a.c2, credentialVersion: 2 },
     });
     await session({
       id: a.s2,
@@ -684,6 +688,19 @@ async function seed() {
       human: a.owner,
       v1: workspaceV1,
       authRecovery: { credentialId: a.c1, credentialVersion: "4" },
+    });
+    // A renewal of c1 at version 3, before its current version 4: not about
+    // the current credential.
+    await turn({
+      id: a.t13,
+      account: a.account,
+      workspace: a.w1,
+      session: a.s12,
+      status: "queued",
+      position: 1,
+      human: a.owner,
+      v1: workspaceV1,
+      authRecovery: { credentialId: a.c1, credentialVersion: 3 },
     });
     await admin`INSERT INTO claude_session_account_pins (account_id, workspace_id, session_id, authority_scope, owner_organization_membership_id, pinned_credential_id, pin_source, last_credential_id)
       VALUES (${a.account}, ${a.w2}, ${a.s1}, 'workspace', NULL, ${a.c2}, 'manual', ${a.c2}),
@@ -1417,7 +1434,7 @@ describe.skipIf(!realDb)(
             turn: a.t2,
             connection: a.c6,
             failure_kind: "unauthorized",
-            recovery_evidence: { refreshGeneration: 4 },
+            recovery_evidence: { refreshGeneration: 4, refusals: 0 },
           },
         ]);
         const after = await snapshotUntouched();
@@ -1463,7 +1480,7 @@ describe.skipIf(!realDb)(
         expect(metric("aliases")).toMatchObject({ legacy: 2 });
         expect(metric("live_leases")).toMatchObject({ legacy: 1 });
         expect(metric("waiting_waiters")).toMatchObject({ legacy: 2 });
-        expect(metric("auth_recovery_live_turns")).toMatchObject({ legacy: 3 });
+        expect(metric("auth_recovery_live_turns")).toMatchObject({ legacy: 5 });
         // c1's and c5's current readings and c11's unreadable current row
         // (unknown, listed).
         expect(metric("usage_generations")).toMatchObject({ legacy: 3 });
@@ -1474,6 +1491,7 @@ describe.skipIf(!realDb)(
         });
         expect(metric("disposition:auth_recovery_unmapped")).toMatchObject({ legacy: 1 });
         expect(metric("disposition:auth_recovery_malformed")).toMatchObject({ legacy: 1 });
+        expect(metric("disposition:auth_recovery_not_current")).toMatchObject({ legacy: 2 });
         expect(metric("disposition:usage_rows_stale")).toMatchObject({ legacy: 1 });
         expect(metric("disposition:usage_snapshot_unreadable")).toMatchObject({ legacy: 1 });
         expect(metric("disposition:usage_reconnect_pending")).toMatchObject({ legacy: 1 });

@@ -5346,6 +5346,8 @@ an older binary must never be restarted after it.
   `compat:dependent_sources_without_record` is zero. Claude adds these
   `disposition:*` rows to 0719's: `auth_recovery_unmapped` (a live
   `claudeAuthRecovery` value naming no moved credential; nothing to bound),
+  `auth_recovery_not_current` (a live value naming a duplicate login, now an
+  alias, or an older credential version; no receipt),
   `auth_recovery_malformed` (a value without a credential id and a positive
   version; ignored), `usage_rows_stale` (a usage row of an older credential
   version; only the legacy `exhausted_until` moved), `usage_snapshot_unreadable`
@@ -5361,8 +5363,11 @@ an older binary must never be restarted after it.
   enabled = true)`.
 - Waiting Claude turns keep their waiter (same id, generation and wake
   revisions) and resume through the core; no workflow reset is needed. A
-  live turn that had already spent its one forced token refresh has an
-  `unauthorized` row in `subscription_turn_failures` for that connection.
+  live turn that had already spent its one forced token refresh of a
+  connection's current credential has an `unauthorized` row in
+  `subscription_turn_failures` for that connection with `refusals: 0` (it
+  does not use the turn's failover bound); one that renewed a duplicate
+  login or an older version is listed as `auth_recovery_not_current`.
 
 **Release notes (behaviour users can see).**
 
@@ -5383,6 +5388,10 @@ an older binary must never be restarted after it.
   reading carry over; a stale or unreadable reading does not (only a running
   account exhaustion does), so such an account shows unknown usage until its
   next reading.
+- An account whose last usage check asked for a reconnect was held out of
+  selection; after the cutover it is selectable again (and chosen first when
+  it is the primary or a session's explicit choice) until a request or the
+  next refresh shows it still needs signing in, which then marks it.
 
 **Containment and fix forward.** As for 0719, with the Claude cutover row.
 

@@ -2585,7 +2585,7 @@ or refresh call.
 | EP-T01, EP-T03 chat placement (both) | `selectScopedSubscriptionTurnCapacity` (`agent-turn/xai-capacity.ts`), `selectSubscriptionAccount`, factory pins, synthetic subject for shared pools | Core placement with `provider`, the turn's accepted authority (v2 entry or compatibility record, below), session owner and attempt fence, under `withSubscriptionCoreAcceptedTurn`; one session binding; core turn lease. xAI's pre-selection quota refresh becomes a core quota observation (adapter `fetchUsage`) through the connection seam, not a list-all refresh. |
 | EP-T04 materialization, refresh and request custody | Claude `resolveClaudeAccountCredential`; xAI `buildXaiTurnRequestAuthorization` / `materializeXaiCredentialForRun`; serialized legacy refresh | Core materialization and the core refresh seam (advisory key, exact turn and live lease, generation compare-and-swap); adapter `transport` and `refresh`. Every physical model request, including each xAI hosted-search continuation, reserves a `model` operation row as Codex does (`reserveSubscriptionCoreCodexRequest` generalized); an in-turn usage precheck uses `credential_request`. A request whose outcome is unknown is never replayed automatically; typed refusals (429, 529, SSE capacity terminals) are known outcomes. Claude's `user` snapshot is no longer labelled `workspace` in run settings; `credentialBinding.credentialVersion` becomes the refresh generation and the run sees only a connection id. |
 | Session-title requests | `sessionTitleXaiRequestContext`; Claude title path through `withClaudeUsage` (`run.ts`) | The core title-request path Codex uses (`titleRequests`): same lease, request custody and usage recording as a chat request. |
-| Claude `claudeAuthRecovery` turn metadata | `session_turns.metadata.claudeAuthRecovery {credentialId, credentialVersion}` read in `claim.ts` and `failure-settlement.ts` | Replaced by core turn-failure receipts. The cutover converts each live value into a `subscription_turn_failures` row for the alias-resolved connection with the recorded generation as recovery evidence, so the one-forced-refresh bound survives; the metadata stays as history and is no longer read. |
+| Claude `claudeAuthRecovery` turn metadata | `session_turns.metadata.claudeAuthRecovery {credentialId, credentialVersion}` read in `claim.ts` and `failure-settlement.ts` | Replaced by core turn-failure receipts. The cutover converts each live value that names a moved connection's canonical credential at its current generation into a `subscription_turn_failures` row (evidence `{refreshGeneration, refusals: 0}`); an alias's or older version's value is a disposition (C3 below). The metadata stays as history and is no longer read. |
 | EP-S18..S24 acceptance writers | `packages/core/src/domain/sessions.ts`, `domain/scheduled-tasks.ts`, `goal-admission.ts`, `session-queue-commands.ts`, `child-outbox-authority.ts`, `claim_session_system_update_outbox` (0234) | X2b/C2b: write the provider's v2 entry at acceptance, and copy compatibility records along every path listed under "Accepted authority across the cutover", dormant until the provider's receipt. |
 | EP-T05 lease heartbeat and dispatch fence | `ScopedSubscriptionTurnLease` keyed by subject | Core `SubscriptionTurnLease` (already shared); `ScopedSubscriptionTurnLease` deleted. |
 | EP-T07 failure settlement | `failure-settlement.ts` Claude/xAI arm, `classifyXaiCredentialFailure`, `classifyClaudeCredentialFailure`, legacy arm and reconcile | Adapter `classifyError` into shared outcomes; core turn-failure receipts, quarantine, failover bound and wait. Claude's `claude_token_renewed` / `claude_credential_changed` recovery becomes the core rule "unauthorized: one forced refresh under the lock, then retry the same connection if the generation advanced". Claude 529 stays in the provider-overload lane (`overloaded`), never account rotation. |
@@ -4550,7 +4550,13 @@ Choices made where the plan left room, for reviewers:
 
 - **Format.** The legacy plaintext is copied unchanged; the stage writes
   `claude_oauth_v1` for a secret with `oauth` and `claude_setup_token_v1`
-  otherwise, the formats the adapter derives at runtime.
+  otherwise, the formats the adapter derives at runtime (as 0719 writes
+  `xai_oauth_v1`). The column is informational: no decision reads it, the
+  adapter derives the format from the decrypted secret, and the shared
+  connect and reconnect writers record the envelope version `v1`, so a
+  Claude row's value tells a migrated row from a newly connected one.
+  Recording the adapter format in the shared writers is a possible
+  follow-up outside C3.
 - **Identity.** The person is the token's `identity.accountUuid`. A stored
   `provider_account_id` of the form `oauth:<hmac>` or `setup:<hmac>` (the
   connect writers' derived id when the token reports no account) is its own
@@ -4576,14 +4582,24 @@ Choices made where the plan left room, for reviewers:
   and its workspaces' `claude_subscription` custom models that are not
   retired.
 - **`claudeAuthRecovery`.** A live turn's value (`{credentialId,
-  credentialVersion}`, the one forced refresh it already spent) becomes an
-  `unauthorized` row in `subscription_turn_failures` for the turn and the
-  credential's alias-resolved connection, with evidence
-  `{refreshGeneration: credentialVersion}`; C1b's core settlement reads it
-  in place of the metadata, so the turn never forces a second refresh of
-  that generation. Finished turns are ignored; a value naming no moved
-  credential is `auth_recovery_unmapped`, a malformed one
-  `auth_recovery_malformed`. The metadata stays as history.
+  credentialVersion}`, the one forced refresh it already spent) was kept per
+  credential by legacy. When it names the canonical credential of its moved
+  connection at that connection's current refresh generation it becomes an
+  `unauthorized` row in `subscription_turn_failures` for the turn and
+  connection, with evidence `{refreshGeneration: credentialVersion,
+  refusals: 0}`: the audited record of the renewal, which is not a refusal
+  and does not use the turn's failover bound
+  (`countSubscriptionCoreTurnRefusals` sums `refusals`). A value naming a
+  duplicate login (now an alias) or an older version is not about the
+  connection's current credential and writes no receipt
+  (`auth_recovery_not_current`), so a receipt never stands for another
+  credential's renewal. On the core, C1b's Claude transport runs the forced
+  refresh itself and settles a 401 after it as a sign-in quarantine, and no
+  core decision reads the old marker. Finished turns are
+  ignored; a value naming no moved credential is `auth_recovery_unmapped`, a
+  malformed one `auth_recovery_malformed`. The metadata stays as history.
+  (Review of #4137 found the first version attached an alias's renewal to
+  the canonical connection and counted it as a refusal.)
 - **Legacy model connections.** 0598 revoked and blanked every legacy
   Claude model connection (`connections` with `credentialRole =
   claude_subscription`, `organization_model_provider_connections` with

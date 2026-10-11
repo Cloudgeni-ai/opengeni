@@ -654,19 +654,30 @@ WHERE status = 'waiting';
 -- Claude authentication recovery (design 5.3, the `claudeAuthRecovery` row).
 -- A live turn whose Claude request was refused as unauthorized and whose
 -- token the worker then renewed records `{credentialId, credentialVersion}`
--- so it never forces a second refresh of that credential version. The core
--- bounds this with a turn-failure receipt: each live value becomes an
--- `unauthorized` receipt for the turn and the credential's alias-resolved
--- connection, with the recorded version as the refresh generation of the
--- refused credential. The metadata stays as history and is no longer read.
--- A value naming no moved credential (its account was removed) has nothing
--- to bound and is a disposition.
+-- so it never forces a second refresh of that credential version. Legacy
+-- kept this per credential. A value naming the canonical credential of its
+-- moved connection at that connection's current refresh generation becomes
+-- an `unauthorized` receipt for the turn and connection, with evidence
+-- `{refreshGeneration, refusals: 0}`: an audited record of the renewal the
+-- turn already spent, which is not a refusal and does not use the per-turn
+-- failover bound. A value naming a duplicate login (an alias of the moved
+-- connection) or an older version is not about the connection's current
+-- credential: no receipt, so it can never stand for another credential's
+-- refresh (`auth_recovery_not_current`). A value naming no moved credential
+-- (its account was removed) is `auth_recovery_unmapped`. The metadata stays
+-- as history and is no longer read.
 CREATE TEMP TABLE claude_cutover_auth_recovery AS
 SELECT turn.account_id, turn.workspace_id, turn.session_id, turn.id AS turn_id,
-  map.connection_id, (turn.metadata->'claudeAuthRecovery'->>'credentialVersion')::bigint AS refresh_generation
+  map.connection_id, (turn.metadata->'claudeAuthRecovery'->>'credentialVersion')::bigint AS refresh_generation,
+  coalesce(map.legacy_id = map.connection_id
+    AND connection.refresh_generation
+      = (turn.metadata->'claudeAuthRecovery'->>'credentialVersion')::bigint, false)
+    AS current_credential
 FROM session_turns turn
 LEFT JOIN pg_temp.subscription_cutover_connection_map map ON map.account_id = turn.account_id
   AND map.legacy_id::text = lower(turn.metadata->'claudeAuthRecovery'->>'credentialId')
+LEFT JOIN subscription_connections connection ON connection.account_id = map.account_id
+  AND connection.id = map.connection_id AND connection.provider = 'claude'
 WHERE turn.status IN ('queued', 'running', 'requires_action', 'recovering', 'waiting_capacity')
   AND turn.metadata ? 'claudeAuthRecovery'
   AND jsonb_typeof(turn.metadata->'claudeAuthRecovery'->'credentialVersion') = 'number'
@@ -679,8 +690,8 @@ INSERT INTO subscription_turn_failures (
 )
 SELECT recovery.account_id, recovery.workspace_id, recovery.session_id, recovery.turn_id,
   recovery.connection_id, 'claude', 'unauthorized',
-  jsonb_build_object('refreshGeneration', recovery.refresh_generation)
-FROM claude_cutover_auth_recovery recovery WHERE recovery.connection_id IS NOT NULL;
+  jsonb_build_object('refreshGeneration', recovery.refresh_generation, 'refusals', 0)
+FROM claude_cutover_auth_recovery recovery WHERE recovery.current_credential;
 
 -- Accepted authority across the cutover (design 5.3). One immutable record
 -- per carrier that a later read or copy can use as its source: live work,
@@ -1388,24 +1399,31 @@ INSERT INTO claude_cutover_parity
         dependent.source_revision) record))
   FROM claude_cutover_dependent_sources dependent GROUP BY dependent.account_id
   -- Authentication recovery: every live value is an exact turn-failure
-  -- receipt, unmapped (a disposition) or malformed (never read by legacy).
+  -- receipt, not about the current credential or unmapped (dispositions), or
+  -- malformed (never read by legacy); no other receipt exists.
   UNION ALL SELECT inventory.account_id, 'auth_recovery_live_turns', inventory.legacy_count,
     (SELECT count(*) FROM claude_cutover_auth_recovery recovery
-      WHERE recovery.account_id = inventory.account_id AND (recovery.connection_id IS NULL
+      WHERE recovery.account_id = inventory.account_id AND (NOT recovery.current_credential
         OR EXISTS (SELECT 1 FROM subscription_turn_failures receipt
           WHERE receipt.account_id = recovery.account_id
             AND receipt.workspace_id = recovery.workspace_id
             AND receipt.session_id = recovery.session_id AND receipt.turn_id = recovery.turn_id
             AND receipt.connection_id = recovery.connection_id AND receipt.provider = 'claude'
             AND receipt.failure_kind = 'unauthorized'
-            AND receipt.recovery_evidence
-              = jsonb_build_object('refreshGeneration', recovery.refresh_generation))))
+            AND receipt.recovery_evidence = jsonb_build_object(
+              'refreshGeneration', recovery.refresh_generation, 'refusals', 0))))
     + (SELECT count(*) FROM session_turns turn
       WHERE turn.account_id = inventory.account_id
         AND turn.status IN ('queued', 'running', 'requires_action', 'recovering', 'waiting_capacity')
         AND turn.metadata ? 'claudeAuthRecovery'
         AND NOT EXISTS (SELECT 1 FROM claude_cutover_auth_recovery recovery
           WHERE recovery.workspace_id = turn.workspace_id AND recovery.turn_id = turn.id))
+    - (SELECT count(*) FROM subscription_turn_failures receipt
+      WHERE receipt.account_id = inventory.account_id AND receipt.provider = 'claude'
+        AND NOT EXISTS (SELECT 1 FROM claude_cutover_auth_recovery recovery
+          WHERE recovery.current_credential AND recovery.workspace_id = receipt.workspace_id
+            AND recovery.turn_id = receipt.turn_id
+            AND recovery.connection_id = receipt.connection_id))
   FROM claude_cutover_inventory inventory WHERE inventory.metric = 'auth_recovery_live_turns'
   -- Usage: a usage row current for its canonical credential gives the quota
   -- row that credential's generation; any other is unknown (NULL). A current
@@ -1527,6 +1545,11 @@ GROUP BY before.account_id
 UNION ALL
 SELECT 'claude', 'disposition:auth_recovery_unmapped', recovery.account_id, count(*), count(*)
 FROM claude_cutover_auth_recovery recovery WHERE recovery.connection_id IS NULL
+GROUP BY recovery.account_id
+UNION ALL
+SELECT 'claude', 'disposition:auth_recovery_not_current', recovery.account_id, count(*), count(*)
+FROM claude_cutover_auth_recovery recovery
+WHERE recovery.connection_id IS NOT NULL AND NOT recovery.current_credential
 GROUP BY recovery.account_id
 UNION ALL
 SELECT 'claude', 'disposition:auth_recovery_malformed', turn.account_id, count(*), count(*)
