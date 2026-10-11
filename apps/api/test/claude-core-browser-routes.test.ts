@@ -434,7 +434,7 @@ describe.skipIf(!realDb)("Claude routes on the shared core, as a managed browser
       body: {
         code: null,
         message:
-          "This account was added with a setup token. Add it again with Sign in, then remove the old one.",
+          "This account was added without a verified sign-in. Add it again with Sign in, then remove the old one.",
       },
     });
     expect((await claudeRows()).find((row) => row.id === pasted.body.accountId)!.version).toBe(

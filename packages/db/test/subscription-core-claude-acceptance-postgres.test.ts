@@ -282,6 +282,15 @@ describe.skipIf(!realDb)("Claude on the shared core's writers (M4 C2b)", () => {
     expect(beforeReceipt!.claude).toEqual({ version: 1, scope: "organization" });
   });
 
+  test("a Claude access change wakes from Claude's binding", () => {
+    const accountId = crypto.randomUUID();
+    expect(db.subscriptionCoreAccessChangeWake("claude_subscription", accountId)).toEqual({
+      provider: "claude",
+      displayName: "Claude",
+      wake: { accountId, reason: "core_claude_access_changed" },
+    });
+  });
+
   test("OAuth and setup-token connections take Claude's formats and provider state", async () => {
     const accountUuid = crypto.randomUUID();
     const credential = oauthCredential(accountUuid);
@@ -384,7 +393,7 @@ describe.skipIf(!realDb)("Claude on the shared core's writers (M4 C2b)", () => {
         workspaceId: null,
         reconnectTarget: { ...target, expectedVersion: replaced.version! },
       }),
-    ).toEqual({ kind: "refused", reason: "sign_in_over_setup_token" });
+    ).toEqual({ kind: "refused", reason: "sign_in_over_unverified" });
     const accountUuid = crypto.randomUUID();
     const proven = await connectClaude(org!, {
       workspaceId: null,
@@ -415,6 +424,27 @@ describe.skipIf(!realDb)("Claude on the shared core's writers (M4 C2b)", () => {
       reconnectTarget: provenTarget,
     });
     expect(again).toMatchObject({ kind: "connected", id: proven.id, version: proven.version! + 1 });
+    // An earlier sign-in that recorded no account uuid is unverified too: a
+    // proven sign-in gets the same add-again refusal as over a setup token.
+    const unverifiedOauthId = `oauth:${"9".repeat(64)}`;
+    const unverified = await connectClaude(org!, {
+      workspaceId: null,
+      credential: oauthCredential(""),
+      providerAccountId: unverifiedOauthId,
+    });
+    if (unverified.kind !== "connected") throw new Error("refused");
+    const unverifiedBefore = await connection(unverified.id);
+    expect(
+      await connectClaude(org!, {
+        workspaceId: null,
+        reconnectTarget: {
+          connectionId: unverified.id,
+          expectedVersion: unverified.version!,
+          providerAccountId: unverifiedOauthId,
+        },
+      }),
+    ).toEqual({ kind: "refused", reason: "sign_in_over_unverified" });
+    expect(await connection(unverified.id)).toEqual(unverifiedBefore);
     // A reconnect never creates a connection: a gone target is `changed`.
     expect(
       await connectClaude(org!, {

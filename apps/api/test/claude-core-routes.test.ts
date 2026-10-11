@@ -278,6 +278,50 @@ describe.skipIf(!realDb)("Claude routes on the shared core (M4 C2b)", () => {
     });
     expect(disconnected.status).toBe(200);
     expect((await listed()).accounts).toEqual([]);
+    // Legacy authorizes the setup token exactly as before the core: an
+    // explicit grant (a custom organization key policy, which implies
+    // nothing) with workspace:admin and no workspace:read connects a shared
+    // account; the read grant is taken only once a receipt exists.
+    const adminOnlyToken = `ogk_${crypto.randomUUID().replaceAll("-", "")}`;
+    const adminOnlyKey = await opengeniDb.createOrganizationApiKey(client!.db, {
+      accountId,
+      name: "Workspace admin only",
+      prefix: adminOnlyToken.slice(0, 14),
+      keyHash: new Bun.CryptoHasher("sha256").update(adminOnlyToken).digest("hex"),
+      permissions: ["workspace:admin"],
+      policy: {
+        preset: "custom",
+        permissions: ["workspace:admin"],
+        workspaceScope: { kind: "all" },
+      },
+    });
+    // The legacy writer requires the connecting subject's workspace grant.
+    await shared!.admin`
+      insert into workspace_memberships (account_id, workspace_id, subject_id, role, permissions)
+      values (${accountId}::uuid, ${workspaceId}::uuid, ${`api_key:${adminOnlyKey.id}`}, 'admin',
+        '["workspace:admin"]'::jsonb)`;
+    const adminOnly = await app!.request(
+      `http://x/v1/workspaces/${workspaceId}/claude/accounts/setup-token`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${adminOnlyToken}`,
+          origin: ORIGIN,
+          "sec-fetch-site": "same-origin",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ token: setupToken(), scope: "workspace", label: "Admin only" }),
+      },
+    );
+    expect({ status: adminOnly.status, body: await adminOnly.clone().text() }).toMatchObject({
+      status: 200,
+    });
+    const adminOnlyBody = await adminOnly.json();
+    expect(adminOnlyBody).toMatchObject({ connected: true, scope: "workspace" });
+    expect(
+      (await request(`/claude/accounts/${adminOnlyBody.accountId}`, { method: "DELETE" })).status,
+    ).toBe(200);
+    expect((await listed()).accounts).toEqual([]);
     // The legacy OAuth start answers for the deployment key.
     expect((await keyOAuthStart()).status).toBe(200);
     const [core] = await shared!.admin<{ count: number }[]>`
