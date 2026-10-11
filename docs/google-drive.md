@@ -119,10 +119,14 @@ folder and rechecks its writability, account identity, live initiating authority
 and unchanged connection version. Source credentials and publishing settings
 change only after the second step succeeds. The callback and every active
 source-browser admission evaluate the exact returned/stored scope set through
-one deterministic capability decision. Source-read setup rejects unknown,
-partial, write-only, or malformed grants before Google identity lookup,
-credential persistence, or source-provider reads; the picker accepts file-only
-access solely for verifying the selected publishing folder.
+one deterministic capability decision. Source-read setup rejects grants without
+the required recursive-read capability before Google identity lookup,
+credential persistence, or source-provider reads. Unrelated scopes returned by
+incremental authorization do not grant additional Drive capabilities. The picker
+accepts file-only access solely for verifying the selected publishing folder.
+Definite callback validation failures finish native connection attempts with a
+terminal error receipt; transport and uncertain persistence failures retain the
+operation fence rather than retrying the authorization code.
 
 Google's picker scope restriction is documented in
 [Integrate the Google Picker into desktop and mobile apps](https://developers.google.com/workspace/drive/picker/guides/desktop-mobile-picker).

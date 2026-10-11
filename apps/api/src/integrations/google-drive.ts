@@ -381,6 +381,8 @@ export async function completeGoogleDriveOAuthCallback(
   let state: GoogleDriveOAuthState | null = null;
   let exactReturnUrl: string | undefined;
   let operation: { attemptId: string; operationId: string; inputDigest: string } | undefined;
+  let operationClaimed = false;
+  let operationSettlementStarted = false;
   try {
     state = readGoogleDriveOAuthState(input.state, deps.settings);
     if (state.connectAttemptId) {
@@ -422,6 +424,7 @@ export async function completeGoogleDriveOAuthCallback(
         }
         return { redirectTo: exactReturnUrl, exactReturn: true };
       }
+      operationClaimed = true;
     }
     await requireGoogleDriveCallbackGrant(deps, state);
     const consumed = await consumeIntegrationOAuthStateNonce(deps.db, {
@@ -436,6 +439,7 @@ export async function completeGoogleDriveOAuthCallback(
       throw new GoogleDriveCallbackError("state_replayed");
     }
     if (operation && (input.error || !input.code)) {
+      operationSettlementStarted = true;
       await finishConnectOperation(deps.db, state, {
         ...operation,
         authorize: (tx, _attempt, origin) =>
@@ -529,6 +533,7 @@ export async function completeGoogleDriveOAuthCallback(
         });
         if (operation) {
           const acceptedState = state;
+          operationSettlementStarted = true;
           await finishOAuthAcquisition(
             deps.db,
             acceptedState,
@@ -643,6 +648,7 @@ export async function completeGoogleDriveOAuthCallback(
           });
     };
     if (operation) {
+      operationSettlementStarted = true;
       await finishOAuthAcquisition(
         deps.db,
         acceptedState,
@@ -690,6 +696,50 @@ export async function completeGoogleDriveOAuthCallback(
       redirectTo: googleDriveReturnUrl(returnBaseUrl, state.returnPath, "connected", connection.id),
     };
   } catch (error) {
+    if (
+      state &&
+      operation &&
+      operationClaimed &&
+      !operationSettlementStarted &&
+      error instanceof GoogleDriveCallbackError &&
+      [
+        "state_replayed",
+        "scope_not_granted",
+        "connection_conflict",
+        "account_mismatch",
+        "output_folder_required",
+        "output_folder_unavailable",
+        "refresh_token_missing",
+        "identity_verification_failed",
+      ].includes(error.reason)
+    ) {
+      // A definite validation rejection before persistence has no connection
+      // effect. Record a terminal receipt so polling and replay can finish.
+      // Transport failures and errors after settlement starts remain fenced:
+      // their outcome may be unknown, so never overwrite or retry them here.
+      const acceptedState = state;
+      try {
+        await finishConnectOperation(deps.db, acceptedState, {
+          ...operation,
+          authorize: (tx, _attempt, origin) =>
+            requireConnectOwnerAuthority(tx, acceptedState, "connections:write", origin),
+          commit: async (_tx, current) => ({
+            ...current,
+            revision: current.revision + 1,
+            state: "failed",
+            nextAction: { type: "none" },
+            error: {
+              code: error.reason,
+              message: "Authorization was not completed. Start a new connection attempt.",
+              retryable: false,
+            },
+          }),
+        });
+      } catch {
+        // Revoked authority or unavailable storage cannot authorize settlement.
+        // Preserve the claim rather than manufacture a terminal outcome.
+      }
+    }
     if (exactReturnUrl) return { redirectTo: exactReturnUrl, exactReturn: true };
     // Reading the state is the first step, so no state means the link itself
     // was unusable: say whether it expired rather than blame configuration.
