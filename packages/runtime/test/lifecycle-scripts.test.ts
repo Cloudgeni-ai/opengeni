@@ -1645,7 +1645,17 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       writeFileSync(join(worked, "NOTES.md"), "agent work\n");
 
       // Someone else pushes the first commit (for example the user's backup).
+      // Commits on another branch only keep the stub; the mount's branch is
+      // still absent on the remote, so re-fetching it would fail every turn.
       const origin = makeOrigin(root);
+      execFileSync("git", ["-C", origin, "push", uri, "main:master"]);
+      const otherBranch = runScript(cloneScriptWithTarget(untouched, uri), { HOME: home });
+      expect(otherBranch.status).toBe(0);
+      expect(otherBranch.output).toContain("already present");
+      expect(execFileSync("git", ["-C", untouched, "symbolic-ref", "HEAD"])).toBe(
+        "refs/heads/main\n",
+      );
+
       execFileSync("git", ["-C", origin, "push", uri, "main"]);
 
       const refilled = runScript(cloneScriptWithTarget(untouched, uri), { HOME: home });

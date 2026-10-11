@@ -12044,10 +12044,11 @@ const cloneRepositoryFunctionLines: readonly string[] = [
   // for those the plain non-empty check stands (no stronger signal available).
   '    if [ -n "$subpath" ] || repository_git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then',
   '      if [ -z "$expected_commit" ] || { [ -z "$subpath" ] && [ "$(repository_git -C "$target" rev-parse HEAD 2>/dev/null || true)" = "$expected_commit" ]; }; then',
-  // An empty remote materializes as an unborn branch (below). If the remote has
-  // since gained commits and the mount still holds nothing but `.git` (no agent
-  // work, committed or not), clone it properly instead of keeping the stub.
-  '        if [ -z "$subpath" ] && ! repository_git -C "$target" rev-parse --verify --quiet HEAD >/dev/null 2>&1 && [ -z "$(find "$target" -mindepth 1 -maxdepth 1 ! -name .git -print -quit 2>/dev/null)" ] && present_refs="$(repository_git -C "$target" ls-remote origin 2>/dev/null)" && [ -n "$present_refs" ]; then',
+  // An empty remote materializes as an unborn branch (below). If the remote now
+  // has that branch and the mount still holds nothing but `.git` (no agent work,
+  // committed or not), clone it properly instead of keeping the stub. Commits
+  // on any other branch keep the stub: re-fetching the requested ref would fail.
+  '        if [ -z "$subpath" ] && ! repository_git -C "$target" rev-parse --verify --quiet HEAD >/dev/null 2>&1 && [ -z "$(find "$target" -mindepth 1 -maxdepth 1 ! -name .git -print -quit 2>/dev/null)" ] && unborn_ref="$(repository_git -C "$target" symbolic-ref --quiet HEAD 2>/dev/null)" && present_refs="$(repository_git -C "$target" ls-remote origin "$unborn_ref" 2>/dev/null)" && [ -n "$present_refs" ]; then',
   '          echo "Repository resource remote for $target now has commits; rematerializing" >&2',
   "        else",
   '          echo "Repository resource already present at $target"',
