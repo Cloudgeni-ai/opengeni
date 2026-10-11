@@ -4,6 +4,8 @@ import {
   recordClaudeAccountUsage,
   releaseClaudeCredentialLease,
   releaseXaiCredentialLease,
+  SUBSCRIPTION_CORE_CLAUDE,
+  type SubscriptionCoreProvider,
   updateXaiQuotaMetadata,
   type SessionAttemptQuiescenceCommit,
 } from "@opengeni/db";
@@ -518,6 +520,25 @@ async function finalizeTurnAttemptSteps(
         finalizerSignal,
       );
       leases.xai.held = false;
+    }
+    // The same for a core-placed Claude turn (its legacy usage receipts and
+    // legacy release never run: they need the legacy authority and subject).
+    if (providerTurn.claudeSubscriptionCore && leases.claude.held && attempt.turnId) {
+      await waitForTurnFinalizerStep(
+        finalizeCoreSubscriptionTurn({
+          db,
+          provider: SUBSCRIPTION_CORE_CLAUDE as SubscriptionCoreProvider,
+          core: providerTurn.claudeSubscriptionCore,
+          lease: leases.claude,
+        }).catch(() => undefined),
+        finalizerSignal,
+      );
+      leases.claude.stopHeartbeat();
+      await waitForTurnFinalizerStep(
+        leases.claude.releaseCurrent().catch(() => false),
+        finalizerSignal,
+      );
+      leases.claude.held = false;
     }
     // The per-turn SuperGrok quota call is legacy only: on the core, quota is
     // observed on refusal and by the out-of-turn probe.

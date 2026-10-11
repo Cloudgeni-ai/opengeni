@@ -17,6 +17,7 @@ import {
   quotaCapacity,
   modelCooldownUntil,
   subscriptionCoreCredentialRefresher,
+  subscriptionCoreModelPolicyProviderId,
 } from "@opengeni/subscriptions";
 import { subscriptionCoreProviderIds } from "../src/subscription-core-providers";
 import { ClaudeSubscriptionReconnectRequired } from "../src/claude-subscription-tokens";
@@ -28,6 +29,7 @@ import {
   SUBSCRIPTION_CORE_CLAUDE,
   SUBSCRIPTION_CORE_CLAUDE_OAUTH_FORMAT,
   SUBSCRIPTION_CORE_CLAUDE_SETUP_TOKEN_FORMAT,
+  subscriptionCoreClaudeModelPolicyProviderId,
   subscriptionCoreClaudeProvider,
   type SubscriptionCoreClaudeCredential,
 } from "../src/subscription-core-claude-adapter";
@@ -120,6 +122,28 @@ describe("Claude adapter", () => {
       errors.requestOutcomeUnknown(),
     ])
       expect(error.message).toContain("Claude");
+  });
+
+  test("workspace model policy names each Claude model by its own scope's provider id", () => {
+    const { adapter } = SUBSCRIPTION_CORE_CLAUDE;
+    for (const prefix of ["organization-claude-subscription", "workspace-claude-subscription"]) {
+      expect(subscriptionCoreClaudeModelPolicyProviderId(`${prefix}/claude-sonnet-5`)).toBe(prefix);
+      expect(subscriptionCoreModelPolicyProviderId(adapter, `${prefix}/claude-sonnet-5`)).toBe(
+        prefix,
+      );
+    }
+    // Any other id keeps the provider's declared identity.
+    for (const modelId of ["claude-sonnet-5", "anthropic/claude-sonnet-5", "/claude-sonnet-5"])
+      expect(subscriptionCoreModelPolicyProviderId(adapter, modelId)).toBe(
+        adapter.modelPolicyProviderId,
+      );
+    // A provider with a single identity declares no per-model mapping.
+    expect(
+      subscriptionCoreModelPolicyProviderId(
+        { modelPolicyProviderId: "codex-subscription" },
+        "codex/gpt-6",
+      ),
+    ).toBe("codex-subscription");
   });
 
   test("round-trips OAuth and setup-token credentials in the legacy secret format", () => {

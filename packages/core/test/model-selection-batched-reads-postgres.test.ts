@@ -245,9 +245,10 @@ test("the loader reads the catalog families in three transactions instead of fou
     ]),
   );
   expect(perProvider).toBe(14);
-  // 13 non-catalog reads (restrictions, readiness, policy, Codex) plus the
-  // three catalog-family reads. The per-provider loader took 13 + 14 = 27.
-  expect(batched).toBeLessThanOrEqual(16);
+  // 13 non-catalog reads (restrictions, readiness, policy, Codex), Claude's
+  // provider route receipt read, plus the three catalog-family reads. The
+  // per-provider loader took 13 + 14 = 27.
+  expect(batched).toBeLessThanOrEqual(17);
 });
 
 test("workspace catalog settings expose the same active and retained custom models", async () => {

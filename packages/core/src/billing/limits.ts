@@ -105,6 +105,7 @@ export function modelFundingForAdmission(
  */
 const CORE_ROUTED_FUNDING: Partial<Record<string, (settings: Settings) => boolean>> = {
   xai: (settings) => settings.supergrokSubscriptionEnabled,
+  claude: (settings) => settings.claudeSubscriptionEnabled,
 };
 
 export async function coreRoutedSubscriptionFunding(

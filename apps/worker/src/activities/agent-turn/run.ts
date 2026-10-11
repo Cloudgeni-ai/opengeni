@@ -125,7 +125,14 @@ import {
   establishTurnSandbox,
   bindLazySandboxProvisioner,
 } from "./sandbox-establish";
-import { selectClaudeTurnCapacity } from "./xai-capacity";
+import {
+  buildClaudeCoreRequestAuthorization,
+  claudeCoreModelScope,
+  claudeCoreRequestPreparer,
+  claudeSubscriptionProviderIds,
+  selectClaudeTurnCapacityByRoute,
+  type ClaudeCoreRequestAuthorization,
+} from "./claude-core";
 import {
   buildXaiCoreRequestAuthorization,
   selectXaiTurnCapacityByRoute,
@@ -643,12 +650,35 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             if ("exit" in codexCapacity) return codexCapacity.exit;
             const xaiCapacity = await selectXaiTurnCapacityByRoute(capacityDeps);
             if ("exit" in xaiCapacity) return xaiCapacity.exit;
-            const claudeCapacity = await selectClaudeTurnCapacity(capacityDeps);
+            const claudeCapacity = await selectClaudeTurnCapacityByRoute(capacityDeps);
             if ("exit" in claudeCapacity) return claudeCapacity.exit;
           }
 
           let selectedCapabilitySettings = capabilitySettings;
-          if (billingState.isClaudeTurn) {
+          let claudeCoreAuthorization: ClaudeCoreRequestAuthorization | null = null;
+          const claudeCore = billingState.isClaudeTurn ? providerTurn.claudeSubscriptionCore : null;
+          if (claudeCore) {
+            // On the shared core the bearer, refresh and request custody come
+            // from the core placement; the scope is the accepted model's.
+            claudeCoreAuthorization = buildClaudeCoreRequestAuthorization({
+              db,
+              settings,
+              core: claudeCore,
+              lease: leases.claude,
+              execution: {
+                attemptId: input.attemptId,
+                executionGeneration: attempt.executionGeneration!,
+              },
+            });
+            const token = await claudeCoreAuthorization.getToken();
+            selectedCapabilitySettings = withClaudeConnectionCredential(
+              capabilitySettings,
+              "claude_subscription",
+              JSON.stringify(token.credential),
+              claudeCoreModelScope(turnExecutionPolicy.productModelId),
+              { connectionId: claudeCore.connectionId, credentialVersion: token.credentialVersion },
+            );
+          } else if (billingState.isClaudeTurn) {
             const credentialId = providerTurn.effectiveClaudeCredentialId;
             const subjectId = leases.claude.subjectId;
             const authoritySnapshot = providerTurn.claudeAuthoritySnapshot;
@@ -1180,7 +1210,37 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             providerTurn.latestClaudeUsage,
             async () => null,
           );
+          // A core-placed Claude turn: every physical request carries the core
+          // bearer and the custody of its lane (the agent's, or the session
+          // title's); the legacy observer and its receipts are not used.
+          const claudeProviderIds = claudeSubscriptionProviderIds(runSettings);
+          let claudeModelRequestSequence = 0;
+          let claudeTitleRequestSequence = 0;
+          const withClaudeCoreLane =
+            (lane: "requests" | "titleRequests") =>
+            <T>(fn: () => Promise<T>): Promise<T> => {
+              const custody = claudeCore?.[lane];
+              if (!claudeCoreAuthorization || !custody)
+                throw new Error("Claude core request custody was not initialized");
+              return withClaudeUsageObserver(
+                () => undefined,
+                fn,
+                claudeCoreRequestPreparer({
+                  authorization: claudeCoreAuthorization,
+                  lane: custody,
+                  nextRequestId: () =>
+                    lane === "requests"
+                      ? `${requestIdPrefix}:claude:${++claudeModelRequestSequence}`
+                      : `${requestIdPrefix}:claude:title:${++claudeTitleRequestSequence}`,
+                  providerIds: claudeProviderIds,
+                }),
+              );
+            };
           const withClaudeUsage = <T>(fn: () => Promise<T>): Promise<T> =>
+            claudeCore ? withClaudeCoreLane("requests")(fn) : withLegacyClaudeUsage(fn);
+          const withClaudeTitleUsage = <T>(fn: () => Promise<T>): Promise<T> =>
+            claudeCore ? withClaudeCoreLane("titleRequests")(fn) : withLegacyClaudeUsage(fn);
+          const withLegacyClaudeUsage = <T>(fn: () => Promise<T>): Promise<T> =>
             withClaudeUsageObserver(claudeUsageObserver, fn, async (providerId, headers) => {
               return claudeUsageObserver.prepareRequestWithObserver(
                 providerId,
@@ -1259,7 +1319,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               )
             : null;
           const withSessionTitleProviderRequestContext = <T>(fn: () => Promise<T>): Promise<T> =>
-            withClaudeUsage(() =>
+            withClaudeTitleUsage(() =>
               xaiSessionTitleContext
                 ? xaiSubscriptionRequestStorage.run(xaiSessionTitleContext, fn)
                 : codexSessionTitleContext

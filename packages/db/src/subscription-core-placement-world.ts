@@ -2,6 +2,7 @@ import { sql } from "drizzle-orm";
 import { evaluateWorkspaceModelPolicy, SubscriptionPersonalAuthorityV2 } from "@opengeni/contracts";
 import {
   declaredCacheLifetimeMs,
+  subscriptionCoreModelPolicyProviderId,
   type ModelDescriptor,
   type PlacementInput,
   type ReselectionPoint,
@@ -211,10 +212,12 @@ export async function withSubscriptionCoreProviderPlacementWorld<T>(
               (model) =>
                 evaluateWorkspaceModelPolicy(workspacePolicy, {
                   // Workspace model policy uses the resolved provider identity;
-                  // the subscription core's provider key is intentionally neutral.
+                  // the subscription core's provider key is intentionally
+                  // neutral, and a provider may name its models under more
+                  // than one identity.
                   providerId:
                     model.provider === providerId
-                      ? provider.adapter.modelPolicyProviderId
+                      ? subscriptionCoreModelPolicyProviderId(provider.adapter, model.id)
                       : model.provider,
                   modelId: model.id,
                   // Subscription placement: these models never spend Opengeni credits.

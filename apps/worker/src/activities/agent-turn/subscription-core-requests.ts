@@ -5,6 +5,7 @@
  * is reserved before network I/O and settled once; an unknown outcome is
  * never replayed automatically.
  */
+import { SubscriptionCoreError } from "@opengeni/db";
 
 /**
  * Prefix for this activity execution's physical model request IDs.
@@ -133,3 +134,130 @@ export function createCoreSubscriptionRequests(deps: CoreSubscriptionRequestsDep
 }
 
 export type CoreSubscriptionRequests = ReturnType<typeof createCoreSubscriptionRequests>;
+
+/**
+ * An HTTP error status is a definite answer: no model response was produced.
+ * Timeouts (408, 504) and conflicts (409) stay ambiguous because the
+ * provider may still be processing the request (the Codex and SuperGrok
+ * transports' rule).
+ */
+export function definiteRefusalStatus(status: number): boolean {
+  return status >= 400 && status < 600 && status !== 408 && status !== 409 && status !== 504;
+}
+
+/**
+ * Reads a successful response body as it passes to the SDK and decides the
+ * request's outcome when the body ends (`ended`) or stops early (an error or
+ * a cancel by the reader). Without one, a body read to its end is a
+ * response and anything else is unknown.
+ */
+export type CoreResponseInspector = {
+  chunk: (bytes: Uint8Array) => void;
+  outcome: (ended: boolean) => SubscriptionCoreRequestSettlement["outcome"];
+};
+
+/**
+ * Settle one physical request of a lane from the response a fetch-level
+ * transport received: a definite error status is refused at once and an
+ * ambiguous one is unknown; any other response settles when its body ends or
+ * stops (the inspector decides; a body that stops early is unknown, never
+ * replayed). The returned response carries the same status, headers and
+ * bytes.
+ */
+export async function settleCoreResponse(
+  lane: Pick<CoreSubscriptionRequests, "observe">,
+  request: SubscriptionCoreRequestIdentity,
+  response: Response,
+  inspector?: CoreResponseInspector,
+): Promise<Response> {
+  let settled = false;
+  const settle = async (outcome: SubscriptionCoreRequestSettlement["outcome"]) => {
+    if (settled) return;
+    settled = true;
+    await lane.observe({ ...request, outcome });
+  };
+  if (response.status >= 400) {
+    await settle(definiteRefusalStatus(response.status) ? "refused" : "unknown");
+    return response;
+  }
+  if (!response.body) {
+    await settle("response_received");
+    return response;
+  }
+  const decide = (ended: boolean) =>
+    inspector ? inspector.outcome(ended) : ended ? "response_received" : "unknown";
+  const reader = response.body.getReader();
+  const body = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      let chunk: Awaited<ReturnType<typeof reader.read>>;
+      try {
+        chunk = await reader.read();
+      } catch (error) {
+        await settle(decide(false)).catch(() => undefined);
+        controller.error(error);
+        return;
+      }
+      if (chunk.done) {
+        await settle(decide(true));
+        controller.close();
+        return;
+      }
+      inspector?.chunk(chunk.value);
+      controller.enqueue(chunk.value);
+    },
+    async cancel(reason) {
+      await settle(decide(false)).catch(() => undefined);
+      await reader.cancel(reason).catch(() => undefined);
+    },
+  });
+  return new Response(body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  });
+}
+
+type CoreLanes = {
+  requests?: Pick<CoreSubscriptionRequests, "hasUnknownOutcome" | "canRecover" | "checkpoint">;
+  titleRequests?: Pick<CoreSubscriptionRequests, "hasUnknownOutcome" | "canRecover">;
+};
+
+/**
+ * The terminal unknown-outcome failure of a core turn, or null: an earlier or
+ * own request whose outcome is unknown (the error chain carries the core's
+ * code, or either lane observed one) is never replayed automatically.
+ */
+export function coreRequestOutcomeUnknownFailure(
+  error: unknown,
+  core: CoreLanes,
+  outcomeUnknown: () => Error,
+): (Error & { code: string }) | null {
+  let current: unknown = error;
+  let unknown = false;
+  for (let depth = 0; depth < 8 && current instanceof Error && !unknown; depth++) {
+    unknown =
+      current instanceof SubscriptionCoreError &&
+      current.code === "subscription_core_request_outcome_unknown";
+    current = current.cause;
+  }
+  if (!unknown && !core.requests?.hasUnknownOutcome() && !core.titleRequests?.hasUnknownOutcome())
+    return null;
+  return outcomeUnknown() as Error & { code: string };
+}
+
+/** After the history commit, settle completed responses; true when no request is unresolved. */
+export async function coreLanesRecoverAfterCheckpoint(
+  core: CoreLanes,
+  commitHistory: () => Promise<void>,
+): Promise<boolean> {
+  try {
+    await commitHistory();
+    await core.requests?.checkpoint();
+    return (
+      (!core.requests || core.requests.canRecover()) &&
+      (!core.titleRequests || core.titleRequests.canRecover())
+    );
+  } catch {
+    return false;
+  }
+}
