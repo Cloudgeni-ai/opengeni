@@ -14,7 +14,7 @@ import { CdpConnection } from "../src/cdp";
 const e2e = process.env.OPENGENI_BROWSERD_E2E === "1" ? test : test.skip;
 
 e2e(
-  "an unsupported key is refused before the locator is focused",
+  "unsupported keys and unfocusable locators are refused before any input",
   async () => {
     const directory = await mkdtemp("/tmp/ogb-press-key-");
     const browserSessionId = randomUUID();
@@ -97,6 +97,30 @@ e2e(
         command(initial, { type: "press", locator: button, key: "Escape" }),
       );
       expect(accepted.state).toBe("completed");
+      expect(await activeTag()).toBe("BUTTON");
+      expect(await evaluate("keys")).toEqual(["Escape"]);
+
+      // The document node is focusable in the accessibility snapshot but is
+      // not an Element, so Chromium refuses DOM.focus. That refusal must be a
+      // definite invalid_action with no key sent, not an unknown outcome.
+      const view = await driver.observe(initial.target.id);
+      const queue = view.semantic?.kind === "snapshot" ? [...view.semantic.roots] : [];
+      let documentRef: string | undefined;
+      while (queue.length && !documentRef) {
+        const node = queue.pop()!;
+        if (node.role === "document" || node.role === "RootWebArea") documentRef = node.ref;
+        if (node.children) queue.push(...node.children);
+      }
+      expect(documentRef).toBeDefined();
+      const refusedFocus = await controller.run(
+        command(view, {
+          type: "press",
+          locator: { kind: "ref", ref: documentRef! },
+          key: "Escape",
+        }),
+      );
+      expect(refusedFocus.state).toBe("failed");
+      expect(refusedFocus.error?.code).toBe("invalid_action");
       expect(await activeTag()).toBe("BUTTON");
       expect(await evaluate("keys")).toEqual(["Escape"]);
     } finally {

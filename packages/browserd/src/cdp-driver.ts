@@ -3680,9 +3680,24 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       }
       return;
     }
-    await this.sendActionTarget(state, "DOM.focus", {
-      backendNodeId: backendDOMNodeId,
-    });
+    const effectsBeforeFocus = state.actionEffectCount;
+    try {
+      await this.sendActionTarget(state, "DOM.focus", {
+        backendNodeId: backendDOMNodeId,
+      });
+    } catch (error) {
+      // Chromium validates the node (an Element that can take focus) before
+      // moving focus, so a protocol refusal changed nothing. Report it as a
+      // definite refusal instead of letting it surface as an unknown outcome.
+      if (error instanceof CdpProtocolError && error.method === "DOM.focus") {
+        state.actionEffectCount = effectsBeforeFocus;
+        throw new InteractionDefiniteDriverError(
+          "invalid_action",
+          "browser node cannot be focused",
+        );
+      }
+      throw error;
+    }
   }
 
   /**
