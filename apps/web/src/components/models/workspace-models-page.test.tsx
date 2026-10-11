@@ -1267,6 +1267,65 @@ describe("One Models page for the organization and the workspace", () => {
     }
   });
 
+  test("a shared SuperGrok account not in use here gives its reason right after its tag", async () => {
+    organizationAdmin = true;
+    routeOrganizationReads();
+    const grok = (id: string, label: string, scope: "workspace" | "organization") => ({
+      id,
+      label,
+      scope,
+      subject: id,
+      plan: "SuperGrok Heavy",
+      status: "active" as const,
+      active: false,
+      allocatorEnabled: true,
+      allocatorVersion: 1,
+    });
+    const settings = {
+      rotationEnabled: false,
+      rotationStrategy: "sharded",
+      activeCredentialId: null,
+    };
+    client.listSuperGrokAccounts.mockImplementation(async () => ({
+      accounts: [grok("grok-own", "Design grok", "workspace")],
+      activeAccountId: null,
+      settings,
+    }));
+    client.listOrganizationSuperGrokAccounts.mockImplementation(async () => ({
+      accounts: [
+        grok("grok-org", "Company grok", "organization"),
+        grok("grok-far", "Research grok", "organization"),
+      ],
+      activeAccountId: null,
+      settings,
+    }));
+    client.getModelConnectionAccess.mockImplementation(async (...args: unknown[]) => ({
+      policy:
+        (args[0] as { connectionId: string }).connectionId === "grok-far"
+          ? { ...openPolicy, allowedWorkspaces: ["workspace-b"] }
+          : openPolicy,
+      workspaces: [
+        { id: "workspace-a", name: "Design preview" },
+        { id: "workspace-b", name: "Research" },
+      ],
+      models: [],
+      personalWorkspacesSupported: true,
+    }));
+    const view = await render();
+    try {
+      await flush();
+      const row = (name: string) =>
+        [...view.container.querySelectorAll<HTMLElement>("[data-slot=list-row]")].find(
+          (candidate) => candidate.textContent?.includes(name),
+        )!.textContent ?? "";
+      // The reason comes before the plan, so a phone doesn't cut it off.
+      expect(row("Company grok")).toMatch(/Set aside[^]*SuperGrok Heavy/);
+      expect(row("Research grok")).toMatch(/Not available here[^]*SuperGrok Heavy/);
+    } finally {
+      await cleanup(view);
+    }
+  });
+
   test("an administrator's own organization account: the notice counts the others, its tag waits for its reach, and an access save re-reads both lists", async () => {
     organizationAdmin = true;
     const ownAccount = codexAccount({ id: "own-1", label: "Team plan", source: "workspace" });
@@ -2261,6 +2320,8 @@ describe("One Models page for the organization and the workspace", () => {
         await flush();
         const row = rowsNamed(view.container, "Research plan")[0]!;
         expect(row.textContent).toContain("Not available here");
+        // The reason comes before the plan, so a phone doesn't cut it off.
+        expect(row.textContent).toMatch(/Not available here[^]*ChatGPT/);
         expect(row.textContent).not.toContain("Set aside");
         expect(row.querySelector('[aria-label^="More actions"]')).toBeNull();
         // The organization's account that does reach here is still set aside, with its way back.
@@ -2536,6 +2597,52 @@ describe("One Models page for the organization and the workspace", () => {
       expect(rows[0]!.textContent).toContain("Used in Design preview, Research");
     } finally {
       await cleanup(view);
+    }
+  });
+
+  test("sharing a workspace's own account with the organization makes up no organization accounts on its page", async () => {
+    const own = codexAccount({ id: "acct-1", label: "Team plan", source: "workspace" });
+    // Its own account now also has an organization copy here, so the server
+    // reports the organization pool as available, with no other account.
+    accounts = {
+      ...accounts,
+      accounts: [own],
+      source: { ...source, organizationAvailable: true, organizationCount: 0 },
+    };
+    const automatic = await render();
+    try {
+      const text = automatic.container.textContent ?? "";
+      expect(text).not.toContain("Shared Codex accounts");
+      expect(text).not.toContain("The organization's");
+    } finally {
+      await cleanup(automatic);
+    }
+    accounts = {
+      ...accounts,
+      source: {
+        ...source,
+        mode: "workspace",
+        organizationAvailable: true,
+        organizationCount: 0,
+      },
+    };
+    const workspaceOnly = await render();
+    try {
+      const text = workspaceOnly.container.textContent ?? "";
+      expect(text).toContain(
+        "New work uses only this workspace's Codex account, never the organization's.",
+      );
+      expect(text).not.toContain("Shared Codex accounts");
+    } finally {
+      await cleanup(workspaceOnly);
+    }
+    // An older server doesn't report the count: the pool's availability decides.
+    accounts = { ...accounts, source: { ...source, organizationAvailable: true } };
+    const older = await render();
+    try {
+      expect(older.container.textContent).toContain("Shared Codex accounts");
+    } finally {
+      await cleanup(older);
     }
   });
 

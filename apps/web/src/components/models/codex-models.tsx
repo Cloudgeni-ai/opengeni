@@ -126,6 +126,19 @@ function editable(codex: CodexSubscriptions, account: CodexAccount): boolean {
  * uses exactly one Codex pool, its own accounts or the organization's, never
  * both (docs/codex-subscription-rotation.md).
  */
+/**
+ * The organization gives this workspace accounts besides its own. Sharing a
+ * workspace's own account with the organization gives the workspace an
+ * organization copy of it too, so `organizationAvailable` alone can't tell;
+ * older servers don't report the count.
+ */
+function organizationOthersAvailable(source: CodexSubscriptions["source"]): boolean {
+  if (!source) return false;
+  return source.organizationCount !== undefined
+    ? source.organizationCount > 0
+    : source.organizationAvailable;
+}
+
 function poolState(codex: CodexSubscriptions) {
   const source = codex.source;
   const inUse = source?.effectiveSource ?? "workspace";
@@ -133,7 +146,7 @@ function poolState(codex: CodexSubscriptions) {
     inUse,
     mode: source?.mode ?? "automatic",
     /** The organization shares accounts that new work here doesn't use. */
-    organizationSetAside: inUse === "workspace" && Boolean(source?.organizationAvailable),
+    organizationSetAside: inUse === "workspace" && organizationOthersAvailable(source),
     /** This workspace has accounts that new work here doesn't use. */
     workspaceSetAside:
       inUse === "organization" && Boolean(source?.workspaceSetAside ?? source?.workspaceAvailable),
@@ -531,11 +544,11 @@ export function CodexPoolNotice({
     return null;
   }
   const explicit = source.mode !== "automatic";
-  if (!explicit && !source.organizationAvailable) return null;
+  if (!explicit && !organizationOthersAvailable(source)) return null;
   const copy = codexPoolCopy({
     mode: source.mode,
     inUse: source.effectiveSource,
-    organizationAvailable: source.organizationAvailable,
+    organizationAvailable: organizationOthersAvailable(source),
     // Only the workspace's own: automatic also lists the organization's here.
     workspaceCount:
       source.effectiveSource === "workspace"

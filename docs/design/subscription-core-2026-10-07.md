@@ -3737,9 +3737,13 @@ as "not an organization account":
    The UI change also makes the pages decide "own" from data the server
    already computed: the organization list's `ownInWorkspaceIds` (workspaces
    using each account as their own copy) and the workspace pool's
-   `workspaceSetAside` (some own connection is outside the effective pool),
-   so rows, counts and the "set aside" row agree for administrators and
-   workspace administrators alike.
+   `workspaceSetAside` (some own connection is outside the effective pool)
+   and `organizationCount` (shared connections other than the workspace's
+   own that reach it; people-scoped ones aside), so rows, counts, the notice
+   and the "set aside" rows agree for administrators and workspace
+   administrators alike. `organizationAvailable` alone can't say whether the
+   organization gives a workspace anything besides its own account: sharing
+   that account gives the workspace an organization copy of it too.
    `organizationAdministeredConnection` (organization context only, through
    the shared-workspace inventory) is the one condition every organization
    route uses, except the organization primary: it keeps the legacy rule
