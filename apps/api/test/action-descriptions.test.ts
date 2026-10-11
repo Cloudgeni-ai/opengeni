@@ -68,6 +68,7 @@ describe("action descriptions", () => {
     expect(Object.keys((input.schema as { properties: object }).properties).sort()).toEqual([
       "allowPersonalWorkspaces",
       "allowedModels",
+      "allowedPeople",
       "allowedWorkspaces",
       "version",
     ]);

@@ -17,6 +17,9 @@ export const INTERACTION_MAX_SEMANTIC_NODES = 10_000;
 export const INTERACTION_MAX_CHANGED_NODES = 2_000;
 export const INTERACTION_MAX_DIAGNOSTIC_ENTRIES = 1_000;
 export const INTERACTION_MAX_ACTIONS_PER_BATCH = 32;
+/** A batch action resolves at most two locators (drag: from and to). */
+export const INTERACTION_MAX_RESOLVED_ACTION_TARGETS = INTERACTION_MAX_ACTIONS_PER_BATCH * 2;
+export const INTERACTION_MAX_RESOLVED_TARGET_TEXT = 200;
 export const INTERACTION_MAX_WORKSPACE_FILES_PER_COMMAND = 100;
 export const INTERACTION_MAX_CLIPBOARD_BYTES = 1024 * 1024;
 
@@ -2792,6 +2795,38 @@ export const BrowserSessionHeartbeatResponse = z
   .strict();
 export type BrowserSessionHeartbeatResponse = z.infer<typeof BrowserSessionHeartbeatResponse>;
 
+const resolvedTargetRole = z.string().min(1).max(64);
+const resolvedTargetText = z.string().min(1).max(INTERACTION_MAX_RESOLVED_TARGET_TEXT);
+
+/** The element one locator of an action resolved to, captured before input.
+ * `container` is the nearest dialog, landmark, menu or toolbar around it, so a
+ * reader can tell a dialog's "Close" from a page header's "Close". */
+export const BrowserActionResolvedTarget = z
+  .object({
+    actionIndex: z
+      .number()
+      .int()
+      .min(0)
+      .max(INTERACTION_MAX_ACTIONS_PER_BATCH - 1),
+    ref: boundedOpaqueId.nullable(),
+    role: resolvedTargetRole,
+    name: resolvedTargetText.nullable(),
+    container: z
+      .object({
+        role: resolvedTargetRole,
+        name: resolvedTargetText.nullable(),
+      })
+      .strict()
+      .nullable(),
+  })
+  .strict();
+export type BrowserActionResolvedTarget = z.infer<typeof BrowserActionResolvedTarget>;
+
+/** Query parameter by which a caller asks a browser controller to include
+ * `targets` in an action receipt. Controllers that predate the field ignore it,
+ * and callers that do not send it receive receipts without the field. */
+export const BROWSER_ACTION_RECEIPT_TARGETS_PARAMETER = "receiptTargets";
+
 export const BrowserActionReceipt = z
   .object({
     protocolVersion: z.literal(INTERACTION_PROTOCOL_VERSION),
@@ -2804,6 +2839,13 @@ export const BrowserActionReceipt = z
     settledAt: z.string().datetime({ offset: true }).nullable(),
     observation: BrowserObservation.nullable(),
     error: InteractionError.nullable(),
+    /** Elements resolved by locators, in dispatch order. Present only when the
+     * controller supports it and the caller asked for it; never persisted in
+     * the controller's operation journal, so an idempotent replay omits it. */
+    targets: z
+      .array(BrowserActionResolvedTarget)
+      .max(INTERACTION_MAX_RESOLVED_ACTION_TARGETS)
+      .optional(),
   })
   .strict()
   .superRefine((receipt, context) => {

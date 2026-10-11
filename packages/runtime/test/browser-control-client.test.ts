@@ -475,6 +475,73 @@ describe("BrowserControlClient", () => {
     }
   });
 
+  test("asks the controller for resolved targets and accepts receipts with or without them", async () => {
+    const reference = { browserSessionId: randomUUID(), controllerGeneration: "controller-1" };
+    const requests: string[] = [];
+    let includeTargets = true;
+    const resolved = {
+      actionIndex: 0,
+      ref: "e1",
+      role: "button",
+      name: "Close",
+      container: { role: "banner", name: null },
+    };
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        const url = new URL(request.url);
+        requests.push(`${request.method} ${url.pathname}${url.search}`);
+        const body = (await request.json()) as { operationId: string };
+        return success({
+          protocolVersion: 1,
+          operationId: body.operationId,
+          ...reference,
+          targetId: "target-1",
+          state: "completed",
+          dispatchedAt: "2026-08-10T12:00:00.000Z",
+          settledAt: "2026-08-10T12:00:01.000Z",
+          observation: null,
+          error: null,
+          ...(includeTargets ? { targets: [resolved] } : {}),
+        });
+      },
+    });
+    const browser = new BrowserControlClient(
+      {
+        resolveExposedPort: async () => ({ host: "127.0.0.1", port: server.port, tls: false }),
+      },
+      { adminToken },
+    ).sessionClient({ reference, controlToken, viewToken });
+    const command = () => ({
+      protocolVersion: 1 as const,
+      operationId: randomUUID(),
+      ...reference,
+      targetId: "target-1",
+      expectedTargetGeneration: "target-1",
+      expectedDocumentGeneration: "document-1",
+      expectedFrameId: "frame-1",
+      actor: { kind: "system" as const, subjectId: "test" },
+      observationMode: "none" as const,
+      action: {
+        type: "click" as const,
+        locator: { kind: "role" as const, role: "button", name: "Close", exact: true },
+      },
+    });
+    try {
+      expect((await browser.action(command())).targets).toEqual([resolved]);
+      // A controller that predates resolved targets ignores the parameter.
+      includeTargets = false;
+      expect(await browser.action(command())).not.toHaveProperty("targets");
+      expect(requests).toEqual(
+        Array(2).fill(
+          `POST /v1/browser-sessions/${reference.browserSessionId}/actions?receiptTargets=1`,
+        ),
+      );
+    } finally {
+      server.stop(true);
+    }
+  });
+
   test("reports legacy controller schema and DOM routes without replaying or restarting", async () => {
     const reference = { browserSessionId: randomUUID(), controllerGeneration: "controller-1" };
     const requests: string[] = [];

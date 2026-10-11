@@ -43,6 +43,9 @@ import { provisionRoles } from "../src/provision-roles";
 const REACH_MIGRATION = "0713_subscription_core_provider_keyed_reach.sql";
 // 0714 redefines 0713's reach setters, so it is held back with it.
 const LATER_MIGRATION = "0714_subscription_workspace_managed_organization_accounts.sql";
+// 0715 rewrites routines 0713 and 0714 create, so a deployment before 0713
+// is also before it: held back with 0713 and left pending.
+const API_KEY_CONNECTIONS = "0715_subscription_core_api_key_connections.sql";
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const key = Buffer.alloc(32, 73);
 // What the runner sends ahead of a migration body, in the same transaction
@@ -378,9 +381,9 @@ beforeAll(async () => {
   const owner = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
-    await owner`insert into schema_migrations(name) values (${REACH_MIGRATION}), (${LATER_MIGRATION})`;
+    await owner`insert into schema_migrations(name) values (${REACH_MIGRATION}), (${LATER_MIGRATION}), (${API_KEY_CONNECTIONS})`;
     await migrate(database.ownerUrl);
-    await owner`delete from schema_migrations where name in (${REACH_MIGRATION}, ${LATER_MIGRATION})`;
+    await owner`delete from schema_migrations where name in (${REACH_MIGRATION}, ${LATER_MIGRATION}, ${API_KEY_CONNECTIONS})`;
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
   } finally {
     await owner.end();

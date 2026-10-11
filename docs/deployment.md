@@ -4407,7 +4407,8 @@ its own side's copies; a request is unchanged only when every copy it writes
 already has the value. 0714 also makes the reach reader
 (`opengeni_private.subscription_core_reach`) report the reach row's switch and
 model list, additive keys older binaries ignore.
-It needs no drain or window: older binaries never call the helper for a
+It needs no drain or window (but see the Rollout rule and Rollback below for
+sharing and people choices): older binaries never call the helper for a
 managed connection and read the same rows with the same meaning. This
 release's API calls the new routine on every organization rotation switch and
 access save, so apply 0714 before rolling out the API (the normal order). It can ship
@@ -4472,19 +4473,131 @@ BEGIN
 END $$;
 ```
 
-**Rollout rule.** Do not limit any account to chosen people (`allowedPeople`)
-until every API pod runs this release. An older pod reads a people-scoped
-account as "no workspaces", and a save there would switch it back to
-workspace scope. Workspace-managed accounts can't be limited to people at all
-(`peopleSupported: false`, refused with 422) so their workspace's
-administrators keep managing them. Organizations with more than 1000
-memberships (revoked ones count) are not offered people: the member list
-refuses them, so the editor reads `peopleSupported: false`. An account that
-already has people there can still have them kept or removed and its models
-edited; adding someone is refused with 422.
+**Rollout rule.** Do not share a workspace-managed account with other
+workspaces until every API pod runs this release: an older pod still lets
+another workspace's route switch only the connection, and the managing
+workspace's next "on" would then undo the organization's "off" for every other
+workspace. A managing workspace's "on" that lands on an older pod after the
+organization switched the account on is answered "unchanged" and lost; it takes
+effect when retried on this release. Do not limit any account to chosen people
+(`allowedPeople`) until every API pod runs this release. An older pod reads a
+people-scoped account as "no workspaces", and a save there would switch it back
+to workspace scope (leaving its people rows behind). Workspace-managed accounts
+can't be limited to people at all (`peopleSupported: false`, refused with 422)
+so their workspace's administrators keep managing them. Organizations with more
+than 1000 memberships (revoked ones count) are not offered people: the member
+list refuses them, so the editor reads `peopleSupported: false`. An account
+that already has people there can still have them kept or removed and its
+models edited; adding someone is refused with 422.
 
-**Validation.** Use an operator-owned test organization (never a customer
-account: the `PUT` below widens a real account). As its administrator, call
+**Rollback.** The same rules hold before an older API image runs again. Older
+organization routes refuse workspace-managed accounts, so a shared one can't
+be narrowed after the rollback. Before rolling back, run this read-only check
+as a superuser or `BYPASSRLS` role (like the parity check). Row security hides
+these tables from any other role, including the migration owner, where an
+empty result proves nothing, so under one the block stops with an error; run
+it again as a superuser or `BYPASSRLS` role. Run it in `psql` from a file or
+standard input (`psql -X -f check.sql`, or `psql -X -f - < check.sql`), or
+paste it; never with `psql -c`, which runs only the first `\set` and checks
+nothing. The two `\set` lines make the guard's error abort the transaction,
+so both queries fail even when `~/.psqlrc` sets `ON_ERROR_ROLLBACK`, which
+would otherwise undo the error and print the passing empty results. Keep the
+`\\` that ends the second line: it ends the `\set` when a terminal pastes the
+block as one line. From a file or standard input, psql stops at the guard and
+exits with status 3. Pasted, or read with `\i`, the queries fail or are
+skipped. If the prompt then shows `!` (`=!>`), the session is still in an
+aborted transaction: send `ROLLBACK` before anything else. That happens after
+`\i`, or after a one-line paste when `ON_ERROR_STOP` was already on (as it is
+after an earlier run of this block in the same session). Both queries must
+return no rows:
+
+```sql
+\set ON_ERROR_ROLLBACK off
+\set ON_ERROR_STOP on \\
+BEGIN TRANSACTION READ ONLY;
+DO $$ BEGIN
+  IF NOT (SELECT rolsuper OR rolbypassrls FROM pg_roles
+      WHERE rolname = current_user) THEN
+    RAISE EXCEPTION 'run the 0714 rollback check as a superuser or BYPASSRLS role';
+  END IF;
+END $$;
+SELECT connection.account_id, connection.provider, connection.id,
+  connection.managed_by_workspace_id,
+  coalesce(to_jsonb(connection.allowed_model_ids), 'null'::jsonb)
+    AS allowed_models
+FROM subscription_connections connection
+WHERE connection.ownership = 'shared' AND connection.disconnected_at IS NULL
+  AND connection.managed_by_workspace_id IS NOT NULL
+  AND (EXISTS (SELECT 1 FROM subscription_connection_assignment_policies policy
+      WHERE policy.connection_id = connection.id
+        AND policy.inference_pool = 'organization')
+    OR EXISTS (SELECT 1 FROM subscription_connection_workspaces assignment
+      WHERE assignment.connection_id = connection.id
+        AND assignment.workspace_id <> connection.managed_by_workspace_id)
+    OR EXISTS (SELECT 1 FROM opengeni_private.subscription_core_auto_assignments auto
+      WHERE auto.connection_id = connection.id))
+ORDER BY connection.account_id, connection.provider, connection.id;
+SELECT connection.account_id, connection.provider, connection.id,
+  connection.managed_by_workspace_id
+FROM subscription_connections connection
+JOIN subscription_connection_assignment_policies own
+  ON own.connection_id = connection.id AND own.inference_pool = 'workspace'
+  AND own.workspace_id = connection.managed_by_workspace_id
+WHERE connection.ownership = 'shared' AND connection.disconnected_at IS NULL
+  AND connection.allocator_enabled AND NOT own.allocator_enabled;
+COMMIT;
+```
+
+Clear the rows in this order:
+
+1. For each row of the first query, that organization's administrator narrows
+   the account back to its workspace with both `allowedWorkspaces: []` and
+   `allowPersonalWorkspaces: false` (an account given to the whole organization
+   otherwise stays in every Personal workspace), and with `allowedModels` set
+   to the row's `allowed_models`: `null` when it prints `null` (every model),
+   otherwise the printed list, including `[]` when the managing workspace chose
+   no models. Never turn a `null` into `[]`, which admits none, or a printed
+   `[]` into `null`, which admits every model. That is the managing workspace's
+   current list; the editor shows the organization's list, and saving it would
+   widen a list the workspace narrowed.
+2. Run the check again. The second query lists workspace-managed accounts the
+   organization switched on after their workspace switched them off (for a
+   shared account, do this after narrowing: before it, the managing workspace
+   can be served through the organization's copy, and then its page reads the
+   organization's "on"): an older image's workspace route reads only the
+   connection's switch, so its "on" there answers "unchanged" and the
+   workspace stays off. For each such row, either that workspace switches the
+   account on on its page, or the organization's administrator switches it off
+   on the organization route; either way the older image can switch it again
+   once that workspace's page lists it. A workspace whose page doesn't list the
+   account after narrowing (one set to use only the organization's accounts,
+   or with Codex switched off) answers `not_found`: use the organization's
+   "off" for it.
+3. Run the check again until both queries return no rows; otherwise fix
+   forward instead of rolling back.
+4. Run it once more when every pod runs the older image: an account shared
+   while pods were still being replaced can't be narrowed then, so any row of
+   the first query means rolling forward again; for a row of the second, the
+   workspace's administrator sends "off" and then "on" through the API. If
+   that workspace's page doesn't list the account (it uses only the
+   organization's accounts, or Codex is off there), both routes answer
+   `not_found` on the older image, and the account is served nowhere until
+   that workspace uses its own accounts again; its administrator then sends
+   "off" and then "on" (or roll forward and use the organization's "off").
+
+Before rolling back, shared accounts limited to people (`ownership = 'shared'
+AND scope_kind = 'people'`) are read as "no workspaces" by an older image, and
+a save there replaces the people: move them back to workspaces first, or accept
+that. Run right after the rollout, the first query also shows whether anything
+was shared while older pods still served; for each such row, confirm with that
+organization's administrator that the account's workspaces and rotation switch
+are what they meant, since an "off" sent from another workspace's page on an
+older pod switched only the connection, which the managing workspace's next
+"on" undid.
+
+**Validation.** Once every API pod runs this release, use an operator-owned
+test organization (never a customer account: the `PUT` below widens a real
+account). As its administrator, call
 `GET /v1/organizations/<organization id>/model-connections/codex/<connection id>/access`
 for a workspace-managed account: it returns its workspace's own copy in
 `localWorkspaceIds`, its manager in `managedByWorkspaceId`,
@@ -4522,8 +4635,8 @@ found" surfaces as a server error while this release's API is deployed) and
 write nothing; rotation switches keep working on both routes; nothing else
 changes. That includes narrowing: an account already given to more
 workspaces stays that way. Narrow such accounts back to their workspace
-(`allowedWorkspaces: []`) before restoring the setters, or restore only if
-a defect requires it.
+as in Rollback (the check there lists them, with the model list to keep)
+before restoring the setters, or restore only if a defect requires it.
 
 ### Accepted authority compatibility (0716)
 
