@@ -187,7 +187,7 @@ describe("shared subscription core M2 PostgreSQL contracts", () => {
         false, ${shared!.admin.json(organizationFallbackOrder)}::jsonb, true, false,
         ARRAY['personalFallbackAllowed']::text[]
       )`;
-      // A locked workspace override stored before 0722's guard existed (the
+      // A locked workspace override stored before 0723's guard existed (the
       // guard refuses it now): the resolver must still ignore it.
       await shared!.admin.begin(async (tx) => {
         await tx`set local session_replication_role = replica`;
@@ -364,7 +364,7 @@ describe("shared subscription core M2 PostgreSQL contracts", () => {
           ${shared!.admin.json(organization.providers)}::jsonb, false,
           ${shared!.admin.json(organization.fallbackOrder)}::jsonb, true, false, ${locked}
         )`;
-      // Locked overrides stored before 0722's guard existed (it refuses them now).
+      // Locked overrides stored before 0723's guard existed (it refuses them now).
       await shared!.admin.begin(async (tx) => {
         await tx`set local session_replication_role = replica`;
         await tx`
