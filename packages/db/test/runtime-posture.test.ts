@@ -722,9 +722,19 @@ describe("runtime database posture evaluator", () => {
       ...SUBSCRIPTION_CORE_PRECURSOR_OWNER_ROUTINES,
     ];
     // The safe posture carries the neutral writers and no Codex twin writer.
+    // Every other owner-only routine is present and safe too, so owner
+    // requirements other PRs add to the same block stay satisfied; only the
+    // Codex writer context is left out, since it is asserted separately below.
     const withoutTwins = () => {
       const posture = safePosture();
-      posture.subscriptionOwnerRoutines = ownerRoutines.map(ownerRoutine);
+      posture.subscriptionOwnerRoutines = [
+        ...new Set([
+          ...ownerRoutines,
+          ...SUBSCRIPTION_M3_OWNER_ONLY_PRIVATE_ROUTINES.filter(
+            (name) => name !== codexWriterContext,
+          ),
+        ]),
+      ].map(ownerRoutine);
       return posture;
     };
     expect(withoutTwins().privateRoutines.some((routine) => routine.name === codexConnect)).toBe(

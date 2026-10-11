@@ -22,6 +22,7 @@ import {
 } from "../src";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
+import { SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES } from "../src/runtime-posture";
 
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const options = {
@@ -137,6 +138,30 @@ describe.skipIf(!realDb)("retiring the Codex twin routines (M4 step R)", () => {
       join pg_proc p on p.oid = t.tgfoid
       where not t.tgisinternal and p.proname = any(${names}::text[])`;
     expect([...textualDependents]).toEqual([]);
+  }, 180_000);
+
+  test("every subscription_codex private routine the application role can execute is classified", async () => {
+    // A runtime-executable M3 Codex routine is either a retiring twin (checked
+    // while present) or still required by the posture: none goes unchecked.
+    // The pre-core Codex factory helpers (codex_*, enforce_codex_*) belong to
+    // the retained legacy Codex tables and are outside this step.
+    const executable = await app!<{ name: string }[]>`
+      select p.proname || '(' || array_to_string(array(
+          select format_type(argument.type, null)
+          from unnest(p.proargtypes::oid[]) with ordinality as argument(type, position)
+          order by argument.position), ', ') || ')' as name
+      from pg_proc p
+      join pg_namespace n on n.oid = p.pronamespace
+      where n.nspname = 'opengeni_private'
+        and p.proname like '%subscription\\_codex%'
+        and has_function_privilege(p.oid, 'EXECUTE')
+      order by 1`;
+    const classified = new Set<string>([
+      ...SUBSCRIPTION_CODEX_TWIN_PRIVATE_ROUTINES,
+      ...SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES,
+    ]);
+    expect(executable.length).toBeGreaterThan(SUBSCRIPTION_CODEX_TWIN_PRIVATE_ROUTINES.length);
+    expect(executable.map(({ name }) => name).filter((name) => !classified.has(name))).toEqual([]);
   }, 180_000);
 
   test("a present twin is still held to the precursor hardening", async () => {
