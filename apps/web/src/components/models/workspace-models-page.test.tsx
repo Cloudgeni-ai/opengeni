@@ -1041,7 +1041,7 @@ describe("Codex account page", () => {
   });
 
   test("own accounts are set aside only when the server says some aren't in use", async () => {
-    const SET_ASIDE = "Set aside while the organization's are used";
+    const SET_ASIDE = "This workspace's Codex accounts";
     // Its own account, also given to it by the organization, is in use here.
     const own = codexAccount({ id: "acct-own", label: "Team plan", source: "workspace" });
     const setAside = async (workspaceSetAside: boolean | undefined) => {
@@ -1996,7 +1996,7 @@ describe("One Models page for the organization and the workspace", () => {
         expect(rowsNamed(view.container, "Team plan")).toHaveLength(1);
         expect(rowsNamed(view.container, "Team plan")[0]!.textContent).toContain("Everyone in");
         // It is in use through the organization's pool: nothing of its own is set aside.
-        expect(view.container.textContent).not.toContain("Set aside while the organization");
+        expect(view.container.textContent).not.toContain("This workspace's Codex accounts");
       } finally {
         await cleanup(view);
       }
@@ -2035,12 +2035,29 @@ describe("One Models page for the organization and the workspace", () => {
         expect(rowsNamed(view.container, "Team plan")).toHaveLength(1);
         const row = rowsNamed(view.container, "Team plan")[0]!;
         expect(row.textContent).toContain("Selected people");
-        // Chosen people's sessions here use it whichever pool the workspace uses.
+        // Chosen people's sessions here use it unless the workspace uses only its own.
         expect(row.textContent).not.toContain("Set aside");
         expect(row.textContent).not.toContain("Not in use");
         expect(row.querySelector('[aria-label^="More actions"]')).toBeNull();
       } finally {
         await cleanup(view);
+      }
+      // Set to use only its own accounts: nobody's sessions here use it.
+      accounts = {
+        ...accounts,
+        accounts: [codexAccount({ id: "acct-2", label: "Other plan", source: "workspace" })],
+        activeAccountId: "acct-2",
+        source: { ...source, mode: "workspace", effectiveSource: "workspace" },
+      };
+      const workspaceOnly = await render();
+      try {
+        await flush();
+        const row = rowsNamed(workspaceOnly.container, "Team plan")[0]!;
+        expect(row.textContent).toContain("Set aside while this workspace has its own");
+        expect(row.textContent).toContain("Not in use");
+        expect(row.querySelector('[aria-label^="More actions"]')).not.toBeNull();
+      } finally {
+        await cleanup(workspaceOnly);
       }
     });
 

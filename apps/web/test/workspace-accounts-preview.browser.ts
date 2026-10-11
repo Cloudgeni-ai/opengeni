@@ -153,7 +153,7 @@ try {
 
     // Design set to the organization's accounts: its own is only in the set-aside row.
     await open("workspace=00000000-0000-4000-8000-0000000000d1&designSource=organization");
-    await page.getByText("Set aside while the organization's are used").waitFor();
+    await page.getByText("This workspace's Codex accounts", { exact: true }).waitFor();
     await page.getByText("Acme Pro").waitFor();
     assert((await page.getByText("Design team plan").count()) === 0, "listed twice on Design");
     await noOverflow();
@@ -169,7 +169,7 @@ try {
     await page.getByText("Selected workspaces").first().waitFor();
     assert((await page.getByText("Design only").count()) === 0, "stale reach tag");
     assert(
-      (await page.getByText("Set aside while the organization's are used").count()) === 0,
+      (await page.getByText("This workspace's Codex accounts", { exact: true }).count()) === 0,
       "own account shown as set aside",
     );
     await noOverflow();

@@ -286,7 +286,8 @@ export function CodexAccountRows({
       disabled
       leading={<ProviderTile provider="codex" size="lg" />}
       title="This workspace's Codex accounts"
-      meta={[places.scope.workspace, "Set aside while the organization's are used"]}
+      // The notice above says why; "Set aside" stays readable on a phone.
+      meta={[places.scope.workspace, "Set aside"]}
       cells={{ usage: NOT_IN_USE }}
     />
   ) : null;
@@ -343,6 +344,7 @@ export function CodexAccountRows({
               organization={organization}
               places={places}
               ownInUse={pool.organizationSetAside}
+              workspaceOnly={codex.source?.mode === "workspace"}
               menu={pool.organizationSetAside ? alwaysOrganization : null}
             />
           );
@@ -454,6 +456,7 @@ function SharedCodexSetAsideRow({
   organization,
   places,
   ownInUse,
+  workspaceOnly,
   menu,
 }: {
   account: CodexAccount;
@@ -461,6 +464,8 @@ function SharedCodexSetAsideRow({
   places: CodexPlaces;
   /** This workspace's own accounts are in use, which sets the organization's aside. */
   ownInUse: boolean;
+  /** This workspace uses only its own accounts: chosen people's sessions here don't use it either. */
+  workspaceOnly: boolean;
   menu: ReactNode;
 }) {
   const access = useConnectionAccess({
@@ -469,18 +474,21 @@ function SharedCodexSetAsideRow({
     kind: "codex",
     connectionId: account.id,
   });
-  // Chosen people's sessions use it here whichever pool the workspace uses.
-  const forPeople = (access.data?.policy.allowedPeople?.length ?? 0) > 0;
+  // Chosen people's sessions use it here unless the workspace uses only its own.
+  const chosenPeople = (access.data?.policy.allowedPeople?.length ?? 0) > 0;
+  const forPeople = chosenPeople && !workspaceOnly;
   // Another workspace's own account, or one shared elsewhere, may not reach
   // this workspace at all: then this workspace's own accounts set nothing aside.
   const reaches = reachesWorkspace(access.data, organization.workspace);
   const reason = forPeople
     ? null
-    : reaches === false
-      ? `Not available in ${places.workspaceName}`
-      : reaches && ownInUse
-        ? "Set aside while this workspace has its own"
-        : null;
+    : chosenPeople
+      ? "Set aside while this workspace has its own"
+      : reaches === false
+        ? `Not available in ${places.workspaceName}`
+        : reaches && ownInUse
+          ? "Set aside while this workspace has its own"
+          : null;
   return (
     <ListRow
       leading={<ProviderTile provider="codex" size="lg" />}
@@ -492,7 +500,7 @@ function SharedCodexSetAsideRow({
         reason,
       ]}
       cells={forPeople ? undefined : { usage: NOT_IN_USE }}
-      menu={!forPeople && reaches ? menu : null}
+      menu={!forPeople && (reaches || chosenPeople) ? menu : null}
       indicator={
         account.status !== "active" ? { kind: "attention", label: "Needs reconnect" } : "open"
       }

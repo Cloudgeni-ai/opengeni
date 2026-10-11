@@ -381,7 +381,7 @@ export function ConnectionAccessFormPage({
                 <ChoiceCard
                   value="people"
                   title="Only selected people"
-                  description="Only their own chats and schedules, in any workspace."
+                  description="Only their own chats and schedules."
                 />
               ) : null}
             </ChoiceCards>
