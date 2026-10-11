@@ -946,6 +946,9 @@ describe.skipIf(!realDb)("Codex access editor on the shared core", () => {
       select allocator_enabled from opengeni_private.subscription_core_auto_assignments
       where connection_id = ${id}::uuid`;
     expect(reach?.allocator_enabled).toBe(true);
+    // The workspace this save added is served through its new organization copy.
+    await source(org, org.sharedWorkspaceId, "organization");
+    expect(await servedIn(org, org.sharedWorkspaceId)).toEqual([id]);
     const later = await workspace(org.accountId, org.ownerSubjectId, "Added later");
     expect(await servedIn(org, later)).toEqual([id]);
   });

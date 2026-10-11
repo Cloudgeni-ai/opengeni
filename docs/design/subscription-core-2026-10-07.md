@@ -3773,8 +3773,16 @@ people, and what then happens to the delegation (decision 5; refused until
 decided); whether to restore per-workspace management of merged copies
 (finding above); whether an organization administrator may designate a
 workspace-managed account for Codex Apps in other workspaces it reaches
-(decision 8); and whether one may become the organization primary
-(decision 10).
+(decision 8); whether one may become the organization primary
+(decision 10); whether narrowing a shared account back to its managing
+workspace should keep the organization's "off" (today it removes the
+organization's copies, so the switch is the connection's again until the next
+share; keeping it needs a place only organization administrators write;
+decision 5); and whether an organization save that keeps the model list should
+leave the managing workspace's narrowed list alone (today it writes the saved
+list to that workspace's copy; keeping the manager's list needs the workspace
+route to report its own copy's list instead of the connection's, so the reach
+setter never copies the manager's list into the reach; decision 5).
 
 ## 6. Specific behaviours
 

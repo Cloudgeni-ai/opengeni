@@ -4472,7 +4472,11 @@ BEGIN
 END $$;
 ```
 
-**Rollout rule.** Do not limit any account to chosen people (`allowedPeople`)
+**Rollout rule.** Do not share a workspace-managed account with other
+workspaces until every API pod runs this release: an older pod still lets
+another workspace's route switch only the connection, and the managing
+workspace's next "on" would then undo the organization's "off" for every other
+workspace. Do not limit any account to chosen people (`allowedPeople`)
 until every API pod runs this release. An older pod reads a people-scoped
 account as "no workspaces", and a save there would switch it back to
 workspace scope. Workspace-managed accounts can't be limited to people at all
