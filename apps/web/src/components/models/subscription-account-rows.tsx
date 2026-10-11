@@ -172,14 +172,16 @@ function SharedRow<T extends Account>({
       email={account.email}
       meta={[
         scopeLabel,
-        plan(account),
+        // Before the plan, so it stays readable on a phone.
         access.error
           ? "Couldn't check availability"
           : reaches === false
-            ? `Not available in ${places.scopeName}`
-            : ownInUse
-              ? "Set aside while this workspace has its own"
+            ? "Not available here"
+            : // Only once its reach is read, so nothing flashes while it loads.
+              access.data && ownInUse
+              ? "Set aside"
               : null,
+        plan(account),
       ]}
       cells={{ usage: NOT_IN_USE }}
       indicator={

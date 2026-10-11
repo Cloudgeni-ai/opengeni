@@ -133,13 +133,41 @@ function saveFailure(caught: unknown): ReactNode {
   );
 }
 
-/** The short value for the "Available in" row: "All workspaces + Personal", "No workspaces". */
+/** Same choices, whatever the key order; a missing `allowedPeople` is none. */
+function samePolicy(a: ModelConnectionAccessPolicy, b: ModelConnectionAccessPolicy): boolean {
+  const list = (value: readonly string[] | null | undefined) =>
+    value == null ? null : JSON.stringify([...value].sort());
+  return (
+    list(a.allowedModels) === list(b.allowedModels) &&
+    list(a.allowedWorkspaces) === list(b.allowedWorkspaces) &&
+    a.allowPersonalWorkspaces === b.allowPersonalWorkspaces &&
+    list(a.allowedPeople) === list(b.allowedPeople)
+  );
+}
+
+/** "1 person", "3 people". */
+function peopleCount(count: number): string {
+  return count === 1 ? "1 person" : `${count} people`;
+}
+
+/**
+ * The short value for the "Available in" row: "All workspaces + Personal",
+ * "No workspaces", "3 people". Workspaces that use the account as their own
+ * (`localWorkspaceIds`) always count.
+ */
 export function workspacesShort(
   policy: ModelConnectionAccessPolicy,
   personalSupported: boolean,
+  localWorkspaceIds: readonly string[] = [],
 ): string {
+  if (policy.allowedPeople) {
+    return policy.allowedPeople.length === 0 ? "No one" : peopleCount(policy.allowedPeople.length);
+  }
   const personal = personalSupported && policy.allowPersonalWorkspaces;
-  const count = policy.allowedWorkspaces?.length ?? null;
+  const count =
+    policy.allowedWorkspaces === null
+      ? null
+      : new Set([...policy.allowedWorkspaces, ...localWorkspaceIds]).size;
   if (count === 0) return personal ? "Personal workspaces only" : "No workspaces";
   const shared =
     count === null ? "All workspaces" : count === 1 ? "1 workspace" : `${count} workspaces`;
@@ -192,7 +220,11 @@ export function ConnectionAccessRows({
       {organization ? (
         <SettingNavRow
           label="Available in"
-          value={workspacesShort(policy, access.data!.personalWorkspacesSupported)}
+          value={workspacesShort(
+            policy,
+            access.data!.personalWorkspacesSupported,
+            access.data!.localWorkspaceIds,
+          )}
           disabled={!canManage}
           onOpen={onEdit}
         />
@@ -211,6 +243,24 @@ export function ConnectionAccessRows({
       />
     </>
   );
+}
+
+/** The workspaces that keep an account as their own, by name where listed. */
+function localNames(
+  local: readonly string[],
+  workspaces: readonly { id: string; name: string }[],
+): string {
+  const names = local.flatMap(
+    (id) => workspaces.find((workspace) => workspace.id === id)?.name ?? [],
+  );
+  if (names.length !== local.length) {
+    return local.length === 1
+      ? "the workspace that keeps it as its own"
+      : "the workspaces that keep it as their own";
+  }
+  return names.length <= 2
+    ? names.join(" and ")
+    : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
 }
 
 function toggle(values: string[], value: string, checked: boolean): string[] {
@@ -247,16 +297,33 @@ export function ConnectionAccessFormPage({
   useEffect(() => {
     if (data && !draft) setDraft(data.policy);
   }, [data, draft]);
-  const dirty = Boolean(draft && data && JSON.stringify(draft) !== JSON.stringify(data.policy));
+  const dirty = Boolean(draft && data && !samePolicy(draft, data.policy));
   const disabled = !canManage;
+  // Workspaces that use the account as their own keep it for any workspace choice.
+  const local = data?.localWorkspaceIds ?? [];
+  // People saved earlier stay a choice even when the member list can't be shown.
+  const people = Boolean(organization && (data?.peopleSupported || data?.policy.allowedPeople));
+  const peopleListed = Boolean(data?.people);
+  const scope = draft?.allowedPeople
+    ? "people"
+    : draft?.allowedWorkspaces === null
+      ? "all"
+      : "only";
   const reachesNoWorkspace = Boolean(
     organization &&
     draft &&
     data &&
-    draft.allowedWorkspaces !== null &&
-    draft.allowedWorkspaces.length === 0 &&
+    scope === "only" &&
+    draft.allowedWorkspaces!.length === 0 &&
+    local.length === 0 &&
     !(data.personalWorkspacesSupported && draft.allowPersonalWorkspaces),
   );
+  const reachesNoOne = scope === "people" && draft!.allowedPeople!.length === 0;
+  /** A workspace choice; `allowedPeople` is cleared only when people were saved. */
+  const withoutPeople = (policy: ModelConnectionAccessPolicy): ModelConnectionAccessPolicy => {
+    const { allowedPeople: _dropped, ...rest } = policy;
+    return data?.policy.allowedPeople ? { ...rest, allowedPeople: null } : rest;
+  };
 
   const body =
     access.error && !data ? (
@@ -282,16 +349,40 @@ export function ConnectionAccessFormPage({
         {organization ? (
           <div className="flex min-w-0 flex-col gap-3">
             <ChoiceCards
-              label="Which workspaces can use it"
-              value={draft.allowedWorkspaces === null ? "all" : "only"}
+              label={people ? "Who can use it" : "Which workspaces can use it"}
+              value={scope}
               disabled={disabled}
               onValueChange={(value) => {
                 setError(null);
-                setDraft({
-                  ...draft,
-                  allowedWorkspaces:
-                    value === "all" ? null : data.workspaces.map((workspace) => workspace.id),
-                });
+                if (value === "people") {
+                  setDraft({
+                    ...draft,
+                    allowedWorkspaces: [],
+                    allowPersonalWorkspaces: false,
+                    allowedPeople: data.policy.allowedPeople ?? [],
+                  });
+                  return;
+                }
+                // Chosen workspaces start from the saved ones: none when people
+                // were saved, every shared workspace when all were saved
+                // (including one that also keeps it as its own, so narrowing
+                // never drops that workspace's organization grant unseen).
+                const savedWorkspaces = data.policy.allowedPeople
+                  ? []
+                  : (data.policy.allowedWorkspaces ??
+                    data.workspaces.map((workspace) => workspace.id));
+                // Leaving people restores the saved Personal choice too.
+                const allowPersonalWorkspaces =
+                  draft.allowedPeople && !data.policy.allowedPeople
+                    ? data.policy.allowPersonalWorkspaces
+                    : draft.allowPersonalWorkspaces;
+                setDraft(
+                  withoutPeople({
+                    ...draft,
+                    allowPersonalWorkspaces,
+                    allowedWorkspaces: value === "all" ? null : savedWorkspaces,
+                  }),
+                );
               }}
             >
               <ChoiceCard
@@ -304,26 +395,47 @@ export function ConnectionAccessFormPage({
                 title="Only selected workspaces"
                 description="Other workspaces can't use it for new work."
               />
+              {people ? (
+                <ChoiceCard
+                  value="people"
+                  title="Only selected people"
+                  description="Only their own chats and schedules."
+                />
+              ) : null}
             </ChoiceCards>
-            {draft.allowedWorkspaces !== null ? (
+            {scope === "only" ? (
               <fieldset className="m-0 flex min-w-0 flex-col gap-3 border-0 p-0">
                 <legend className="mb-2 text-xs leading-4.5 font-medium text-fg">
                   Shared workspaces
                 </legend>
-                {data.workspaces.map((workspace) => (
-                  <CheckboxField
-                    key={workspace.id}
-                    label={workspace.name}
-                    disabled={disabled}
-                    checked={draft.allowedWorkspaces!.includes(workspace.id)}
-                    onCheckedChange={(checked) =>
-                      setDraft({
-                        ...draft,
-                        allowedWorkspaces: toggle(draft.allowedWorkspaces!, workspace.id, checked),
-                      })
-                    }
-                  />
-                ))}
+                {data.workspaces.map((workspace) =>
+                  local.includes(workspace.id) ? (
+                    <CheckboxField
+                      key={workspace.id}
+                      label={workspace.name}
+                      description="Connected in this workspace, which keeps it as its own."
+                      disabled
+                      checked
+                    />
+                  ) : (
+                    <CheckboxField
+                      key={workspace.id}
+                      label={workspace.name}
+                      disabled={disabled}
+                      checked={draft.allowedWorkspaces!.includes(workspace.id)}
+                      onCheckedChange={(checked) =>
+                        setDraft({
+                          ...draft,
+                          allowedWorkspaces: toggle(
+                            draft.allowedWorkspaces!,
+                            workspace.id,
+                            checked,
+                          ),
+                        })
+                      }
+                    />
+                  ),
+                )}
                 {data.workspaces.length === 0 ? (
                   <p className="m-0 text-sm text-fg-muted">
                     This organization has no shared workspaces yet.
@@ -331,27 +443,74 @@ export function ConnectionAccessFormPage({
                 ) : null}
               </fieldset>
             ) : null}
+            {scope === "people" && local.length > 0 ? (
+              // A workspace that keeps it as its own follows the people choice too.
+              <p className="m-0 text-sm text-fg-muted">
+                {`In ${localNames(local, data.workspaces)} too, only these people can use it.`}
+              </p>
+            ) : null}
+            {scope === "people" && !peopleListed ? (
+              <p className="m-0 text-sm text-fg-muted">
+                {draft.allowedPeople!.length > 0
+                  ? `${peopleCount(draft.allowedPeople!.length)} chosen. `
+                  : ""}
+                This organization has too many members to list here.
+              </p>
+            ) : null}
+            {scope === "people" && peopleListed ? (
+              <fieldset className="m-0 flex min-w-0 flex-col gap-3 border-0 p-0">
+                <legend className="mb-2 text-xs leading-4.5 font-medium text-fg">People</legend>
+                {[
+                  ...(data.people ?? []),
+                  // Someone chosen earlier who has since left the organization.
+                  ...draft
+                    .allowedPeople!.filter((id) => !data.people?.some((person) => person.id === id))
+                    .map((id) => ({ id, name: "Former member", email: null })),
+                ].map((person) => (
+                  <CheckboxField
+                    key={person.id}
+                    label={person.name ?? person.email ?? "Unnamed member"}
+                    description={person.name && person.email ? person.email : undefined}
+                    disabled={disabled}
+                    checked={draft.allowedPeople!.includes(person.id)}
+                    onCheckedChange={(checked) =>
+                      setDraft({
+                        ...draft,
+                        allowedPeople: toggle(draft.allowedPeople!, person.id, checked),
+                      })
+                    }
+                  />
+                ))}
+              </fieldset>
+            ) : null}
+            {reachesNoOne ? (
+              <EmptyChoiceHint>
+                No one can use it. It stays connected, ready to share later.
+              </EmptyChoiceHint>
+            ) : null}
             {/* Personal workspaces are their own choice, not one of the shared workspaces above. */}
-            <div className="mt-2 border-t border-border pt-4">
-              {data.personalWorkspacesSupported ? (
-                <CheckboxField
-                  label="Personal workspaces"
-                  description="Each member's own private workspace."
-                  disabled={disabled}
-                  checked={draft.allowPersonalWorkspaces}
-                  onCheckedChange={(checked) =>
-                    setDraft({ ...draft, allowPersonalWorkspaces: checked })
-                  }
-                />
-              ) : (
-                <CheckboxField
-                  label="Personal workspaces"
-                  description="Organization API keys can't be used in Personal workspaces."
-                  disabled
-                  checked={false}
-                />
-              )}
-            </div>
+            {scope === "people" ? null : (
+              <div className="mt-2 border-t border-border pt-4">
+                {data.personalWorkspacesSupported ? (
+                  <CheckboxField
+                    label="Personal workspaces"
+                    description="Each member's own private workspace."
+                    disabled={disabled}
+                    checked={draft.allowPersonalWorkspaces}
+                    onCheckedChange={(checked) =>
+                      setDraft({ ...draft, allowPersonalWorkspaces: checked })
+                    }
+                  />
+                ) : (
+                  <CheckboxField
+                    label="Personal workspaces"
+                    description="Organization API keys can't be used in Personal workspaces."
+                    disabled
+                    checked={false}
+                  />
+                )}
+              </div>
+            )}
             {reachesNoWorkspace ? (
               <EmptyChoiceHint>
                 No workspace can use it. It stays connected, ready to share later.

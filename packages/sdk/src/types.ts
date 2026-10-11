@@ -4122,6 +4122,13 @@ export type WorkspaceCodexSubscriptionSource = {
   effectiveSource: "workspace" | "organization" | "disabled";
   workspaceAvailable: boolean;
   organizationAvailable: boolean;
+  /** Some of the workspace's own accounts are not in use here. Absent from older servers. */
+  workspaceSetAside?: boolean;
+  /**
+   * How many organization accounts other than the workspace's own reach this
+   * workspace (accounts limited to chosen people aside). Absent from older servers.
+   */
+  organizationCount?: number;
 };
 
 /**
@@ -4183,6 +4190,11 @@ export type CodexPlanExcludedModel = {
 export type CodexAccount = {
   id: string;
   source?: "workspace" | "organization";
+  /**
+   * Organization list only: shared workspaces that list the account among
+   * their own (it was connected there).
+   */
+  ownInWorkspaceIds?: string[];
   chatgptAccountId?: string | null;
   label?: string | null;
   email?: string | null;

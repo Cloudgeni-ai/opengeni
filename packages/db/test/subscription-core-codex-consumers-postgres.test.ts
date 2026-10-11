@@ -818,8 +818,33 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
         .map((account) => account.id)
         .sort();
     expect(await listed()).toEqual([first]);
+    // Its own account is set aside; once the organization also gives it to
+    // this workspace it is in use through that pool, and nothing is set aside.
+    const setAside = async () =>
+      (await getSubscriptionCoreCodexWorkspaceProjection(client!.db, scope)).source
+        .workspaceSetAside;
+    expect(await setAside()).toBe(true);
+    // The organization gives this workspace one account besides its own.
+    const organizationCount = async () =>
+      (await getSubscriptionCoreCodexWorkspaceProjection(client!.db, scope)).source
+        .organizationCount;
+    expect(await organizationCount()).toBe(1);
+    await shared!.admin`
+      insert into subscription_connection_assignment_policies (
+        account_id, connection_id, workspace_id, inference_pool
+      ) values (${org.accountId}::uuid, ${second}::uuid, ${org.sharedWorkspaceId}::uuid,
+        'organization')`;
+    expect(await listed()).toEqual([first, second].sort());
+    expect(await setAside()).toBe(false);
+    // Its own account given through the organization's pool too is still its own.
+    expect(await organizationCount()).toBe(1);
+    await shared!.admin`delete from subscription_connection_assignment_policies
+      where connection_id = ${second}::uuid and inference_pool = 'organization'`;
     await setSubscriptionCoreWorkspaceCodexSource(client!.db, { ...admin, mode: "workspace" });
     expect(await listed()).toEqual([second]);
+    expect(await setAside()).toBe(false);
+    // Set aside, not listed, still counted.
+    expect(await organizationCount()).toBe(1);
     expect(
       (await setSubscriptionCoreWorkspaceCodexSource(client!.db, { ...admin, mode: "disabled" }))
         .source,
@@ -959,12 +984,18 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
     expect((await connectionRow(second)).label).toBe("Team");
     expect((await connectionRow(first)).label).toBe("projection-a");
 
-    // Organization projection: administrators see unmanaged shared accounts.
+    // Organization projection: administrators see every organization account,
+    // including the one a shared workspace manages (design 5.4).
     const orgProjection = await getSubscriptionCoreOrganizationCodexProjection(client!.db, {
       organizationId: org.accountId,
       subjectId: org.ownerSubjectId,
     });
-    expect(orgProjection.accounts.map((account) => account.id)).toEqual([first]);
+    expect(orgProjection.accounts.map((account) => account.id)).toEqual([first, second]);
+    // Each says which shared workspaces list it as their own.
+    expect(orgProjection.accounts.map((account) => account.ownInWorkspaceIds)).toEqual([
+      [],
+      [org.sharedWorkspaceId],
+    ]);
     expect(
       (
         await getSubscriptionCoreOrganizationCodexProjection(client!.db, {

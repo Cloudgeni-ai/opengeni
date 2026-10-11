@@ -122,6 +122,19 @@ function editable(codex: CodexSubscriptions, account: CodexAccount): boolean {
    -------------------------------------------------------------------------- */
 
 /**
+ * The organization gives this workspace accounts besides its own. Sharing a
+ * workspace's own account with the organization gives the workspace an
+ * organization copy of it too, so `organizationAvailable` alone can't tell;
+ * older servers don't report the count.
+ */
+function organizationOthersAvailable(source: CodexSubscriptions["source"]): boolean {
+  if (!source) return false;
+  return source.organizationCount !== undefined
+    ? source.organizationCount > 0
+    : source.organizationAvailable;
+}
+
+/**
  * Which pool new work uses, and which accounts are set aside. A workspace
  * uses exactly one Codex pool, its own accounts or the organization's, never
  * both (docs/codex-subscription-rotation.md).
@@ -133,10 +146,47 @@ function poolState(codex: CodexSubscriptions) {
     inUse,
     mode: source?.mode ?? "automatic",
     /** The organization shares accounts that new work here doesn't use. */
-    organizationSetAside: inUse === "workspace" && Boolean(source?.organizationAvailable),
+    organizationSetAside: inUse === "workspace" && organizationOthersAvailable(source),
     /** This workspace has accounts that new work here doesn't use. */
-    workspaceSetAside: inUse === "organization" && Boolean(source?.workspaceAvailable),
+    workspaceSetAside:
+      inUse === "organization" && Boolean(source?.workspaceSetAside ?? source?.workspaceAvailable),
   };
+}
+
+/**
+ * The organization's accounts other than this workspace's own. An account a
+ * shared workspace connected is also an organization account (design 5.4);
+ * on that workspace's page it is listed once, as its own (or in the "set
+ * aside" row of its own accounts while the organization's are used).
+ */
+export function organizationOnlyCodexAccounts(
+  organizationAccounts: readonly CodexAccount[],
+  codex: CodexSubscriptions,
+  workspaceId: string,
+): CodexAccount[] {
+  const own = new Set(
+    codex.accounts.filter((account) => account.source !== "organization").map((a) => a.id),
+  );
+  return organizationAccounts.filter(
+    (account) => !own.has(account.id) && !account.ownInWorkspaceIds?.includes(workspaceId),
+  );
+}
+
+/**
+ * For servers that don't report `source.organizationCount`: the
+ * organization's accounts the pool notice counts here, those other than this
+ * workspace's own, leaving out another workspace's own account unless this
+ * workspace's pool lists it (only then is it known to reach here).
+ */
+export function organizationNoticeCodexCount(
+  organizationAccounts: readonly CodexAccount[],
+  codex: CodexSubscriptions,
+  workspaceId: string,
+): number {
+  const listed = new Set(codex.accounts.map((account) => account.id));
+  return organizationOnlyCodexAccounts(organizationAccounts, codex, workspaceId).filter(
+    (account) => !account.ownInWorkspaceIds?.length || listed.has(account.id),
+  ).length;
 }
 
 /** How many rows Codex adds to the Accounts list once loaded. */
@@ -149,7 +199,8 @@ export function codexListedCount(
   const pool = poolState(codex);
   const own = codex.accounts.filter((account) => account.source !== "organization").length;
   const shared = organization
-    ? organization.codex.accounts.length
+    ? organizationOnlyCodexAccounts(organization.codex.accounts, codex, organization.workspace.id)
+        .length
     : codex.accounts.length - own + (pool.organizationSetAside ? 1 : 0);
   return own + shared + (codex.pending ? 1 : 0) + (pool.workspaceSetAside ? 1 : 0);
 }
@@ -208,15 +259,33 @@ export function CodexAccountRows({
   const alwaysOrganization = alwaysOrganizationItem(codex, places);
   const own = codex.accounts.filter((account) => account.source !== "organization");
   const sharedInUse = codex.accounts.filter((account) => account.source === "organization");
-  const ownRows = own.map((account) => (
-    <CodexRow
-      key={account.id}
-      codex={codex}
-      account={account}
-      places={places}
-      onOpen={() => places.openAccount(account.id)}
-    />
-  ));
+  const ownRows = own.map((account) =>
+    organization?.codex.accounts.some((candidate) => candidate.id === account.id) ? (
+      <OwnOrganizationCodexRow
+        key={account.id}
+        codex={codex}
+        account={account}
+        places={places}
+        organization={organization}
+      />
+    ) : (
+      <CodexRow
+        key={account.id}
+        codex={codex}
+        account={account}
+        places={places}
+        // When the organization's list can't say whether it is shared wider, no
+        // "<workspace> only" tag (the list loads before these rows render); a
+        // Personal workspace's account never is.
+        scopeLabel={
+          organization && !organization.workspace.personal && organization.codex.loadError
+            ? ""
+            : undefined
+        }
+        onOpen={() => places.openAccount(account.id)}
+      />
+    ),
+  );
   const pendingRow = codex.pending ? (
     <ListRow
       leading={<ProviderTile provider="codex" size="lg" />}
@@ -231,7 +300,8 @@ export function CodexAccountRows({
       disabled
       leading={<ProviderTile provider="codex" size="lg" />}
       title="This workspace's Codex accounts"
-      meta={[places.scope.workspace, "Set aside while the organization's are used"]}
+      // The notice above says why; "Set aside" stays readable on a phone.
+      meta={[places.scope.workspace, "Set aside"]}
       cells={{ usage: NOT_IN_USE }}
     />
   ) : null;
@@ -267,7 +337,11 @@ export function CodexAccountRows({
     }
     return (
       <>
-        {organization.codex.accounts.map((account) => {
+        {organizationOnlyCodexAccounts(
+          organization.codex.accounts,
+          codex,
+          organization.workspace.id,
+        ).map((account) => {
           const live = sharedInUse.find((candidate) => candidate.id === account.id);
           return live ? (
             <SharedCodexInUseRow
@@ -284,6 +358,7 @@ export function CodexAccountRows({
               organization={organization}
               places={places}
               ownInUse={pool.organizationSetAside}
+              workspaceOnly={codex.source?.mode === "workspace"}
               menu={pool.organizationSetAside ? alwaysOrganization : null}
             />
           );
@@ -313,7 +388,7 @@ export function CodexAccountRows({
           disabled
           leading={<ProviderTile provider="codex" size="lg" />}
           title="Shared Codex accounts"
-          meta={[places.scope.organization, "Set aside while this workspace has its own"]}
+          meta={[places.scope.organization, "Set aside"]}
           cells={{ usage: NOT_IN_USE }}
           menu={alwaysOrganization}
           menuLabel="More actions for the organization's Codex accounts"
@@ -321,6 +396,39 @@ export function CodexAccountRows({
       ) : null}
       {workspaceSetAsideRow}
     </>
+  );
+}
+
+/**
+ * This workspace's own account, which is also an organization account: tagged
+ * with where the organization makes it available once that is known.
+ */
+function OwnOrganizationCodexRow({
+  codex,
+  account,
+  places,
+  organization,
+}: {
+  codex: CodexSubscriptions;
+  account: CodexAccount;
+  places: CodexPlaces;
+  organization: OrganizationCodexPool;
+}) {
+  const access = useConnectionAccess({
+    client: organization.codex.client,
+    organizationId: organization.codex.organizationId,
+    kind: "codex",
+    connectionId: account.id,
+  });
+  return (
+    <CodexRow
+      codex={codex}
+      account={account}
+      places={places}
+      // No tag until its reach is known: "<workspace> only" may no longer be true.
+      scopeLabel={access.data ? organizationReachLabel(places.scope, access.data) : ""}
+      onOpen={() => places.openAccount(account.id)}
+    />
   );
 }
 
@@ -362,6 +470,7 @@ function SharedCodexSetAsideRow({
   organization,
   places,
   ownInUse,
+  workspaceOnly,
   menu,
 }: {
   account: CodexAccount;
@@ -369,6 +478,8 @@ function SharedCodexSetAsideRow({
   places: CodexPlaces;
   /** This workspace's own accounts are in use, which sets the organization's aside. */
   ownInUse: boolean;
+  /** This workspace uses only its own accounts: chosen people's sessions here don't use it either. */
+  workspaceOnly: boolean;
   menu: ReactNode;
 }) {
   const access = useConnectionAccess({
@@ -377,24 +488,34 @@ function SharedCodexSetAsideRow({
     kind: "codex",
     connectionId: account.id,
   });
-  const reaches = ownInUse ? true : reachesWorkspace(access.data, organization.workspace);
-  const reason = ownInUse
-    ? "Set aside while this workspace has its own"
-    : reaches === false
-      ? `Not available in ${places.workspaceName}`
-      : null;
+  // Chosen people's sessions use it here unless the workspace uses only its own.
+  const chosenPeople = (access.data?.policy.allowedPeople?.length ?? 0) > 0;
+  const forPeople = chosenPeople && !workspaceOnly;
+  // Another workspace's own account, or one shared elsewhere, may not reach
+  // this workspace at all: then this workspace's own accounts set nothing aside.
+  const reaches = reachesWorkspace(access.data, organization.workspace);
+  const reason = forPeople
+    ? null
+    : chosenPeople
+      ? "Set aside"
+      : reaches === false
+        ? "Not available here"
+        : reaches && ownInUse
+          ? "Set aside"
+          : null;
   return (
     <ListRow
       leading={<ProviderTile provider="codex" size="lg" />}
       title={codexAccountName(account)}
       meta={[
         organizationReachLabel(places.scope, access.data),
+        // Before the plan, so it stays readable on a phone.
+        reason,
         planLabel(account.plan, "ChatGPT"),
         resetsLabel(account.resetCreditAvailableCount),
-        reason,
       ]}
-      cells={{ usage: NOT_IN_USE }}
-      menu={menu}
+      cells={forPeople ? undefined : { usage: NOT_IN_USE }}
+      menu={!forPeople && (reaches || chosenPeople) ? menu : null}
       indicator={
         account.status !== "active" ? { kind: "attention", label: "Needs reconnect" } : "open"
       }
@@ -423,14 +544,24 @@ export function CodexPoolNotice({
     return null;
   }
   const explicit = source.mode !== "automatic";
-  if (!explicit && !source.organizationAvailable) return null;
+  if (!explicit && !organizationOthersAvailable(source)) return null;
   const copy = codexPoolCopy({
     mode: source.mode,
     inUse: source.effectiveSource,
-    organizationAvailable: source.organizationAvailable,
-    workspaceCount: source.effectiveSource === "workspace" ? codex.accounts.length : 0,
+    organizationAvailable: organizationOthersAvailable(source),
+    // Only the workspace's own: automatic also lists the organization's here.
+    workspaceCount:
+      source.effectiveSource === "workspace"
+        ? codex.accounts.filter((account) => account.source !== "organization").length
+        : 0,
     organizationCount:
       source.effectiveSource === "organization" ? codex.accounts.length : organizationAccountCount,
+    // The organization's accounts here are only this workspace's own, shared,
+    // and none of its own is set aside.
+    onlyOwnShared:
+      source.organizationCount === 0 &&
+      source.workspaceSetAside === false &&
+      codex.accounts.length > 0,
     canConnect: codex.canManage,
   });
   return (
@@ -466,6 +597,7 @@ export function codexPoolCopy({
   organizationAvailable,
   workspaceCount,
   organizationCount,
+  onlyOwnShared = false,
   canConnect,
 }: {
   mode: "automatic" | "workspace" | "organization" | "disabled";
@@ -473,6 +605,8 @@ export function codexPoolCopy({
   organizationAvailable: boolean;
   workspaceCount: number;
   organizationCount?: number | undefined;
+  /** The organization's accounts in use here are only this workspace's own, shared. */
+  onlyOwnShared?: boolean;
   canConnect: boolean;
 }): { text: string; blocked: boolean } {
   const orgOne = organizationCount === 1;
@@ -480,7 +614,12 @@ export function codexPoolCopy({
   if (inUse === "organization") {
     const used = `New work uses the organization's Codex ${orgOne ? "account" : "accounts"}`;
     if (mode === "organization") {
-      return { text: `${used}, even when accounts are connected here.`, blocked: false };
+      return {
+        text: onlyOwnShared
+          ? `${used}, which here ${orgOne ? "is" : "are"} only this workspace's own.`
+          : `${used}, even when accounts are connected here.`,
+        blocked: false,
+      };
     }
     return {
       text: canConnect ? `${used}. Connect an account here to use your own instead.` : `${used}.`,

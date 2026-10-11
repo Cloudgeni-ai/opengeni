@@ -444,5 +444,17 @@ describe("organization Codex subscriptions", () => {
     expect(reachesWorkspace({ ...access, personalWorkspacesSupported: false }, personal)).toBe(
       false,
     );
+    // The workspace that connected it always reaches it; an older response
+    // without that list is unchanged.
+    expect(reachesWorkspace({ ...limited, localWorkspaceIds: ["workspace-a"] }, shared)).toBe(true);
+    expect(reachesWorkspace({ ...limited, localWorkspaceIds: [] }, shared)).toBe(false);
+    // Chosen people use it wherever they work: not a property of the workspace.
+    expect(
+      reachesWorkspace({ ...access, policy: { ...access.policy, allowedPeople: ["p"] } }, shared),
+    ).toBeNull();
+    // An empty people choice reaches no one.
+    expect(
+      reachesWorkspace({ ...access, policy: { ...access.policy, allowedPeople: [] } }, shared),
+    ).toBe(false);
   });
 });

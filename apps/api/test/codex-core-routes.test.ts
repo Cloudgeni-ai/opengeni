@@ -9,6 +9,7 @@ import {
 import * as opengeniDb from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
 import { createApp } from "../src/app";
+import { codexAccountJson } from "../src/routes/codex";
 
 // Codex routes for an organization whose Codex cutover row exists. db
 // accessors are spied; every legacy Codex accessor is poisoned so a core or
@@ -1345,5 +1346,16 @@ describe("the Codex Apps designation for a run", () => {
       workspaceId: WS,
       connectionId: CONNECTION,
     });
+  });
+});
+
+describe("the organization account list's wire shape", () => {
+  test("says which workspaces use an account as their own, only when the list knows", () => {
+    // Pages list a workspace's own account once from this field (design 5.4).
+    expect(codexAccountJson({ ...account, ownInWorkspaceIds: [WS] }).ownInWorkspaceIds).toEqual([
+      WS,
+    ]);
+    expect(codexAccountJson({ ...account, ownInWorkspaceIds: [] }).ownInWorkspaceIds).toEqual([]);
+    expect("ownInWorkspaceIds" in codexAccountJson(account)).toBe(false);
   });
 });

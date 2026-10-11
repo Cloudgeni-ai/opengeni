@@ -87,8 +87,9 @@ export function modelsScopeLabels(
 }
 
 /**
- * The tag of an organization account, from its "Available in": everyone, or
- * selected workspaces, or none. "Shared by Acme" until the policy is known.
+ * The tag of an organization account, from its "Available in": everyone,
+ * one named workspace, selected workspaces or people, or none. "Shared by
+ * Acme" until the policy is known.
  */
 export function organizationReachLabel(
   labels: ModelsScopeLabels,
@@ -96,11 +97,20 @@ export function organizationReachLabel(
 ): string {
   if (!access) return labels.organization;
   const { policy, personalWorkspacesSupported } = access;
+  if (policy.allowedPeople) return policy.allowedPeople.length ? "Selected people" : "No one";
   const personal = personalWorkspacesSupported && policy.allowPersonalWorkspaces;
   if (policy.allowedWorkspaces === null && (!personalWorkspacesSupported || personal))
     return labels.everyone;
-  if (policy.allowedWorkspaces !== null && policy.allowedWorkspaces.length === 0 && !personal)
-    return labels.none;
+  // A workspace that connected the account always keeps it.
+  const reached =
+    policy.allowedWorkspaces === null
+      ? null
+      : [...new Set([...policy.allowedWorkspaces, ...(access.localWorkspaceIds ?? [])])];
+  if (reached !== null && reached.length === 0 && !personal) return labels.none;
+  if (reached?.length === 1 && !personal) {
+    const only = access.workspaces.find((workspace) => workspace.id === reached[0]);
+    if (only) return `${only.name} only`;
+  }
   return labels.selected;
 }
 

@@ -801,6 +801,14 @@ export function useCodexSubscriptions({
     };
   }, [refreshAccounts]);
 
+  // An access save elsewhere on the page can change which accounts this
+  // workspace lists as its own or sets aside.
+  useEffect(() => {
+    const changed = () => void refreshAccounts();
+    window.addEventListener("model-connections-changed", changed);
+    return () => window.removeEventListener("model-connections-changed", changed);
+  }, [refreshAccounts]);
+
   // Detailed reset rows are deliberately never cached as redemption authority, so
   // every mount performs exactly ONE independently-settled live overview read. The
   // account identity renders immediately, but usage waits for this read rather
