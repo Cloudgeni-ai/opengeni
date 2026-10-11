@@ -42,7 +42,8 @@ describe("core usage allowance admission", () => {
       updatedAt: "2026-09-30T00:00:00.000Z",
     });
     codex = spyOn(opengeniDb, "isCodexBilledTurn").mockResolvedValue(false);
-    // No provider has cut over: every connected subscription keeps its legacy funding.
+    // A provider still on its legacy route keeps its legacy funding (Claude);
+    // SuperGrok's tests answer from the core, its only route.
     route = spyOn(opengeniDb, "readSubscriptionCoreRouteFunding").mockResolvedValue({
       route: "legacy",
     });
@@ -239,6 +240,7 @@ describe("core usage allowance admission", () => {
     "admits externally funded $model unless the allowance counts unbilled usage",
     async ({ model, codexBilled, overrides }) => {
       codex.mockResolvedValue(codexBilled);
+      if (model.startsWith("supergrok/")) route.mockResolvedValue({ route: "core", value: true });
       // The real check admits credit-free work unless the allowance opts into
       // counting unbilled usage.
       allowance.mockImplementation(async (_db, check) =>

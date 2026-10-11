@@ -163,7 +163,6 @@ test("Claude participates in the shared serving lease with its exact scoped hold
   const heartbeat = spyOn(db, "heartbeatClaudeCredentialLeaseUntil").mockResolvedValue(
     new Date(Date.now() + 300_000),
   );
-  const xai = spyOn(db, "heartbeatXaiCredentialLeaseUntil");
   try {
     const dependencies = {
       db: {} as TurnCredentialLeaseDeps["db"],
@@ -194,7 +193,6 @@ test("Claude participates in the shared serving lease with its exact scoped hold
       generation: 3,
       leaseTtlMs: db.CLAUDE_CREDENTIAL_LEASE_TTL_MS,
     });
-    expect(xai).not.toHaveBeenCalled();
     expect(leases.servingLost()).toBe(false);
     heartbeat.mockResolvedValue(null);
     leases.claude.confirmedUntilMs = performance.now() + 10_000;
@@ -205,7 +203,6 @@ test("Claude participates in the shared serving lease with its exact scoped hold
     );
   } finally {
     heartbeat.mockRestore();
-    xai.mockRestore();
   }
 });
 

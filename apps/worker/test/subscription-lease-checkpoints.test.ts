@@ -7,14 +7,15 @@ import {
 import { recordCompletedModelCallBeforeOwnershipFences } from "../src/activities/agent-turn/model-usage";
 import { assertCodexDispatchAdmission } from "../src/activities/agent-turn/codex-credit-policy";
 
-test.each(["xai", "claude"] as const)(
+// SuperGrok's legacy scoped lease was deleted (M4 X4); it holds only the core
+// turn lease, covered below with Codex's.
+test.each(["claude"] as const)(
   "%s checkpoint lifecycle coalesces events while preserving scoped renewal and usage truth",
   async (provider) => {
     let now = 0;
     const clock = spyOn(performance, "now").mockImplementation(() => now);
-    const xai = spyOn(db, "heartbeatXaiCredentialLeaseUntil").mockResolvedValue(new Date());
     const claude = spyOn(db, "heartbeatClaudeCredentialLeaseUntil").mockResolvedValue(new Date());
-    const heartbeats = { xai, claude };
+    const heartbeats = { claude };
     const deps = {
       db: {} as TurnCredentialLeaseDeps["db"],
       observability: {
@@ -57,7 +58,6 @@ test.each(["xai", "claude"] as const)(
         await completedCall();
         lease.assertUsable();
       }
-      expect(xai).not.toHaveBeenCalled();
       expect(claude).not.toHaveBeenCalled();
       expect(lease.confirmedUntilMs).toBe(300_000);
       now = 60_000;
@@ -71,8 +71,7 @@ test.each(["xai", "claude"] as const)(
           turnId: "turn-fixture",
           holderId: "holder-fixture",
           generation: 2,
-          leaseTtlMs:
-            provider === "xai" ? db.XAI_CREDENTIAL_LEASE_TTL_MS : db.CLAUDE_CREDENTIAL_LEASE_TTL_MS,
+          leaseTtlMs: db.CLAUDE_CREDENTIAL_LEASE_TTL_MS,
         },
       ]);
       expect(lease.confirmedUntilMs).toBe(360_000);
@@ -93,7 +92,6 @@ test.each(["xai", "claude"] as const)(
       leases.codex.stopHeartbeat();
       leases.xai.stopHeartbeat();
       leases.claude.stopHeartbeat();
-      xai.mockRestore();
       claude.mockRestore();
       clock.mockRestore();
     }

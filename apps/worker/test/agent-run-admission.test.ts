@@ -28,6 +28,14 @@ function mockCodexBilled(active: boolean): () => void {
   return () => spy.mockRestore();
 }
 
+/** SuperGrok runs only on the shared core: its funding is the core's answer. */
+function mockXaiRoute(
+  answer: Awaited<ReturnType<typeof opengeniDb.readSubscriptionCoreRouteFunding>>,
+): () => void {
+  const spy = spyOn(opengeniDb, "readSubscriptionCoreRouteFunding").mockResolvedValue(answer);
+  return () => spy.mockRestore();
+}
+
 describe("worker agent-run admission funding", () => {
   let allowance: ReturnType<typeof spyOn<typeof opengeniDb, "checkWorkspaceAllowance">>;
   beforeEach(() => {
@@ -87,9 +95,10 @@ describe("worker agent-run admission funding", () => {
     }
   });
 
-  test("admits SuperGrok subscription runs with zero Opengeni credits", async () => {
+  test("admits SuperGrok subscription runs the shared core funds with zero Opengeni credits", async () => {
     const restoreBalance = mockZeroBalance();
     const restoreCodex = mockCodexBilled(false);
+    const restoreRoute = mockXaiRoute({ route: "core", value: true });
     try {
       expect(
         await agentRunAdmissionDenial(
@@ -111,6 +120,38 @@ describe("worker agent-run admission funding", () => {
         ),
       ).toBeNull();
     } finally {
+      restoreRoute();
+      restoreCodex();
+      restoreBalance();
+    }
+  });
+
+  test("keeps SuperGrok off the core route behind the credit gate", async () => {
+    const restoreBalance = mockZeroBalance();
+    const restoreCodex = mockCodexBilled(false);
+    const restoreRoute = mockXaiRoute({ route: "legacy" });
+    try {
+      expect(
+        await agentRunAdmissionDenial(
+          {
+            db: {} as opengeniDb.Database,
+            entitlements: null,
+            settings: testSettings({
+              billingMode: "stripe",
+              usageLimitsMode: "managed",
+              supergrokSubscriptionEnabled: true,
+            }),
+          },
+          {
+            accountId: ACCOUNT,
+            workspaceId: WORKSPACE,
+            model: "supergrok/grok-4.7",
+            requestedAgentRuns: 1,
+          },
+        ),
+      ).toBe("insufficient_credits");
+    } finally {
+      restoreRoute();
       restoreCodex();
       restoreBalance();
     }
@@ -218,6 +259,7 @@ describe("worker agent-run admission funding", () => {
     "admits externally funded $model unless the allowance counts unbilled usage",
     async ({ model, active, ...overrides }) => {
       const restoreCodex = mockCodexBilled(active);
+      const restoreRoute = mockXaiRoute({ route: "core", value: true });
       // The real check admits credit-free work unless the allowance opts into
       // counting unbilled usage.
       allowance.mockImplementation(async (_db, check) =>
@@ -258,6 +300,7 @@ describe("worker agent-run admission funding", () => {
           fundedWithoutCredits: true,
         });
       } finally {
+        restoreRoute();
         restoreCodex();
       }
     },

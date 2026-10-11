@@ -82,7 +82,6 @@ describe("fresh model admission versus live discovery", () => {
       ),
       balance,
       allowance,
-      spyOn(opengeniDb, "workspaceXaiSubscriptionActive").mockResolvedValue(false),
       spyOn(opengeniDb, "listConnectionsMetadata").mockResolvedValue([]),
       spyOn(opengeniDb, "listWorkspaceProviderCustomModelsByKind").mockResolvedValue({
         vercel_gateway: [],
@@ -221,6 +220,6 @@ describe("fresh model admission versus live discovery", () => {
     expect(loaded.workspaceClaudeConnections?.claude_subscription?.active).toBe(false);
     expect(loaded.claudeConnections?.claude_subscription?.active).toBe(false);
     expect(current).not.toHaveBeenCalled();
-    expect(restrictions.mock.calls[0]?.[4]).toEqual(snapshot);
+    expect(restrictions.mock.calls[0]?.[3]).toEqual(snapshot);
   });
 });

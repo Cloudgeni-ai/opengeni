@@ -7,18 +7,14 @@ import {
   XaiSubscriptionStreamingTerminalError,
 } from "@opengeni/xai-subscription";
 import * as parentWake from "../src/activities/parent-wake";
-import {
-  classifyXaiCredentialFailure,
-  classifyXaiProviderError,
-} from "../src/activities/agent-turn/errors";
+import { classifyXaiProviderError } from "../src/activities/agent-turn/errors";
 import { settleTurnFailure } from "../src/activities/agent-turn/failure-settlement";
 import { SUBSCRIPTION_CORE_TURN_REFUSAL_LIMIT } from "../src/activities/agent-turn/subscription-core-failover";
 import type { SubscriptionCoreTurn } from "../src/activities/agent-turn/turn-context";
 import { finalizeCoreSubscriptionTurn } from "../src/activities/agent-turn/subscription-core-settlement";
 
 // SuperGrok refusal settlement and finalization on the shared core
-// (design 5.3, SuperGrok track X1b). Dormant: these paths run only for a
-// turn the core placed, which needs the SuperGrok binding registered (X3).
+// (design 5.3, SuperGrok track X1b), the only SuperGrok path after X4.
 
 const restores: Array<{ mockRestore(): void }> = [];
 function spy<T extends object, K extends keyof T>(target: T, key: K) {
@@ -49,7 +45,7 @@ const marked = (status: number, headers: Record<string, string> = {}) =>
   });
 
 describe("SuperGrok provider-error classification", () => {
-  test("definitive refusals become shared outcomes; the legacy view keeps its shape", () => {
+  test("definitive refusals become shared outcomes", () => {
     expect(classifyXaiProviderError(new XaiSubscriptionReloginRequired())).toEqual({
       kind: "unauthorized",
     });
@@ -59,8 +55,7 @@ describe("SuperGrok provider-error classification", () => {
       kind: "rate_limited",
       retryAfterMs: 12_000,
     });
-    // No provider retry time: the adapter's fallback applies on the core,
-    // the legacy 60 s backpressure delay on the legacy path.
+    // No provider retry time: the adapter's fallback applies on the core.
     const capacity = new XaiSubscriptionStreamingTerminalError({
       message:
         "The model is currently at capacity due to high demand. Please try again in a few minutes.",
@@ -71,10 +66,6 @@ describe("SuperGrok provider-error classification", () => {
     expect(classifyXaiProviderError(capacity)).toEqual({
       kind: "rate_limited",
       retryAfterMs: null,
-    });
-    expect(classifyXaiCredentialFailure(capacity)).toEqual({
-      kind: "rate_limit",
-      cooldownMs: 60_000,
     });
     expect(classifyXaiProviderError(marked(503))).toBeNull();
     expect(
@@ -195,8 +186,9 @@ function coreRuntime(options: {
   spy(db, "subscriptionCoreRequests").mockReturnValue({
     isSubscriptionCoreSourceDisconnected: async () => options.disconnected ?? false,
   } as never);
-  // The legacy SuperGrok settlement must never run for a core turn.
-  const legacy = [spy(db, "armXaiCapacityWait"), spy(db, "reconcileXaiCapacityWait")];
+  // The scoped legacy settlement (Claude's, the only one left) must never
+  // run for a SuperGrok turn.
+  const legacy = [spy(db, "armClaudeCapacityWait"), spy(db, "reconcileClaudeCapacityWait")];
   return { apply, count, touch, settlementProviders, legacy };
 }
 

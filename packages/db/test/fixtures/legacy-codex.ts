@@ -3,6 +3,8 @@
  * database states. Snapshot source: main 8c43a921512078d302f671ae590d43645669f88d.
  * Never import this module from production. The runtime no-legacy guard enforces
  * that boundary. Current core authority and migration tests use production APIs.
+ * Its SuperGrok waiter instance uses the retired SuperGrok repository snapshot
+ * in ./legacy-xai (production deleted both with the legacy SuperGrok runtime).
  */
 
 
@@ -147,9 +149,9 @@ import {
 } from "../../src/codex-token-resolver";
 
 
-import { xaiSubscriptionRepository, xaiCredentialWorkspacePredicate, xaiRotationWorkspacePredicate } from "../../src/xai-subscription";
+import { xaiSubscriptionRepository, xaiCredentialWorkspacePredicate, xaiRotationWorkspacePredicate } from "./legacy-xai";
 
-import { UpsertCodexSubscriptionCredentialResult, CodexCapacityWakeTarget, enqueueSessionWorkflowWakeInTransaction, CodexAppsSettings, CodexAppsCredentialAuthorization, CodexAppsAuthorizationRevokedError, DesignateCodexAppsCredentialResult, ClearCodexAppsCredentialResult, CodexAcceptedLeaseAuthority, CodexCapacityMutationResult, CodexCredentialStatus, CodexLeaseAccountStatus, CodexCredentialLeaseCandidateFilter, CodexCredentialLeaseCandidateFilterResult, CodexCredentialLeaseSelectionContext, CodexCredentialLeaseSessionState, CodexCredentialLeasePolicyScopeResolver, CodexCredentialLeaseSelection, CodexCredentialLeaseResult, CODEX_CREDENTIAL_LEASE_TTL_MS, CodexCredentialLeaseAttemptFencedError, CodexCredentialFailoverExhaustedError, CodexCapacityWait, CodexCapacityWaitStatus, CodexCapacityResetKind, codexCapacityRefreshBackoffMs, ArmCodexCapacityWaitResult, CodexCapacitySelectionContext, CodexCapacityAvailabilityDecision, ReconcileCodexCapacityWaitResult, CodexPinSource, CodexCredentialLeaseQuarantine, CodexCredentialLeaseQuarantineResult, CodexAllocatorUpdateResult, CodexExtraCreditsUpdateResult, CodexResetRedemptionRecovery, CodexResetRedemptionOutcome, CodexResetRedemptionAttempt, CODEX_RESET_REDEMPTION_OUTCOMES, CodexResetRedemptionStatus, CodexFinalizationUsageAuthority, CodexRotationStrategy, CODEX_ROTATION_STRATEGIES, SessionCodexState, SetSessionCodexPinOptions, AppendEventInput, appendSessionEventsForTurnAttempt, SettleCodexCredentialLeaseLossResult, SettleCodexCredentialFailoverResult, CodexAppsRequestAuth, CodexResetRedemptionCredentialAuthority, CodexResetCreditFence, ClaimCodexResetRedemptionResult, AdoptCodexResetRedemptionResult, FenceCodexResetRedemptionSendResult, CodexResetRedemptionSendNotReadyReason, SessionWorkPeek, SubscriptionCoreCodexCapacityWait, subscriptionCoreCodexCapacityWaitRef, XaiCapacityWait, CODEX_CAPACITY_REFRESH_MIN_MS, XaiCredentialLeaseQuarantine, ArmXaiCapacityWaitResult, ReconcileXaiCapacityWaitResult, SandboxSetupOutcomeUnknown, SandboxSetupRecoveryExhausted, SANDBOX_SETUP_RECOVERY_LIMIT, SandboxLifecycleWait, SandboxLeaseLiveness, CONSUMED_CHILD_ANSWERS_METADATA_KEY, IDLE_COMMAND_CONTAINMENT_REASON } from "../../src/index";
+import { UpsertCodexSubscriptionCredentialResult, CodexCapacityWakeTarget, enqueueSessionWorkflowWakeInTransaction, CodexAppsSettings, CodexAppsCredentialAuthorization, CodexAppsAuthorizationRevokedError, DesignateCodexAppsCredentialResult, ClearCodexAppsCredentialResult, CodexAcceptedLeaseAuthority, CodexCapacityMutationResult, CodexCredentialStatus, CodexLeaseAccountStatus, CodexCredentialLeaseCandidateFilter, CodexCredentialLeaseCandidateFilterResult, CodexCredentialLeaseSelectionContext, CodexCredentialLeaseSessionState, CodexCredentialLeasePolicyScopeResolver, CodexCredentialLeaseSelection, CodexCredentialLeaseResult, CODEX_CREDENTIAL_LEASE_TTL_MS, CodexCredentialLeaseAttemptFencedError, CodexCredentialFailoverExhaustedError, CodexCapacityWait, CodexCapacityWaitStatus, CodexCapacityResetKind, codexCapacityRefreshBackoffMs, ArmCodexCapacityWaitResult, CodexCapacitySelectionContext, CodexCapacityAvailabilityDecision, ReconcileCodexCapacityWaitResult, CodexPinSource, CodexCredentialLeaseQuarantine, CodexCredentialLeaseQuarantineResult, CodexAllocatorUpdateResult, CodexExtraCreditsUpdateResult, CodexResetRedemptionRecovery, CodexResetRedemptionOutcome, CodexResetRedemptionAttempt, CODEX_RESET_REDEMPTION_OUTCOMES, CodexResetRedemptionStatus, CodexFinalizationUsageAuthority, CodexRotationStrategy, CODEX_ROTATION_STRATEGIES, SessionCodexState, SetSessionCodexPinOptions, AppendEventInput, appendSessionEventsForTurnAttempt, SettleCodexCredentialLeaseLossResult, SettleCodexCredentialFailoverResult, CodexAppsRequestAuth, CodexResetRedemptionCredentialAuthority, CodexResetCreditFence, ClaimCodexResetRedemptionResult, AdoptCodexResetRedemptionResult, FenceCodexResetRedemptionSendResult, CodexResetRedemptionSendNotReadyReason, SessionWorkPeek, SubscriptionCoreCodexCapacityWait, subscriptionCoreCodexCapacityWaitRef, ScopedSubscriptionCapacityWait as XaiCapacityWait, CODEX_CAPACITY_REFRESH_MIN_MS, ScopedSubscriptionCredentialLeaseQuarantine as XaiCredentialLeaseQuarantine, ArmScopedSubscriptionCapacityWaitResult as ArmXaiCapacityWaitResult, ReconcileScopedSubscriptionCapacityWaitResult as ReconcileXaiCapacityWaitResult, SandboxSetupOutcomeUnknown, SandboxSetupRecoveryExhausted, SANDBOX_SETUP_RECOVERY_LIMIT, SandboxLifecycleWait, SandboxLeaseLiveness, CONSUMED_CHILD_ANSWERS_METADATA_KEY, IDLE_COMMAND_CONTAINMENT_REASON } from "../../src/index";
 type SessionEventInsertWithPayload = typeof schema.sessionEvents.$inferInsert & {
   payload: unknown;
 };
@@ -5364,6 +5366,15 @@ const claudeCapacityRepository = createScopedSubscriptionCapacityWaiters({
 
 const getXaiCapacityWaitForSessionInTransaction =
   xaiCapacityRepository.getWaitForSessionInTransaction;
+
+/**
+ * The retired SuperGrok legacy waiter (deleted from production by M4 X4), for
+ * tests that construct a pre-0721 parked session.
+ */
+export const {
+  armCapacityWait: armXaiCapacityWait,
+  getWaitForSession: getXaiCapacityWaitForSession,
+} = xaiCapacityRepository;
 
 const getClaudeCapacityWaitForSessionInTransaction =
   claudeCapacityRepository.getWaitForSessionInTransaction;

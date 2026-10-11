@@ -9,17 +9,14 @@ import {
   createClaudeSubscriptionAccount,
   createDb,
   createSession,
-  createXaiSubscriptionCredential,
   initializeSessionStartAtomically,
   listOutstandingSessionSystemUpdates,
   markSessionWorkflowWakeDelivered,
   setInitialActiveClaudeCredential,
-  setInitialActiveXaiCredential,
   settleConnectedMachineSessionBackgroundCommand,
   settleSessionInputWait,
   settleSessionIdleWithParentOutbox,
   upsertOrganizationClaudeSubscription,
-  upsertOrganizationXaiSubscription,
   waitForSessionInputWithEvent,
   type SessionWorkflowWakeDeliveryResult,
 } from "@opengeni/db";
@@ -27,14 +24,6 @@ import type { EventBus } from "@opengeni/events";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 
 import { notifyParentOfChildIdle, type NotifyServices } from "../src/activities/parent-wake";
-import { SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS } from "@opengeni/db";
-
-// Characterizes the legacy SuperGrok runtime, which runs only before the
-// drained SuperGrok cutover: the database withholds that migration. Removed
-// with the legacy runtime.
-const LEGACY_XAI_WORLD = {
-  withheldMigrations: [SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.xai!],
-};
 
 // The child-to-parent handoff with real PostgreSQL. Only the Temporal
 // transport is replaced: the recorder stands in for signalWithStart and then
@@ -49,7 +38,7 @@ let shared: SharedTestDatabase | null = null;
 let client: ReturnType<typeof createDb> | null = null;
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("worker-parent-wake", LEGACY_XAI_WORLD);
+  shared = await acquireSharedTestDatabase("worker-parent-wake");
   if (!shared) {
     if (requireRealDatabase) throw new Error("Parent wake PostgreSQL harness is unavailable");
     console.warn("[worker-parent-wake] PostgreSQL unavailable, skipping");
@@ -64,7 +53,7 @@ afterAll(async () => {
 }, 60_000);
 
 test.each(["organization", "personal"] as const)(
-  "SUB-ACCESS-01: real child, background-command, and wait-timeout producers coalesce with accepted %s Claude and SuperGrok snapshots",
+  "SUB-ACCESS-01: real child, background-command, and wait-timeout producers coalesce with accepted %s Claude snapshots and copy SuperGrok's verbatim",
   async (scope) => {
     if (!shared || !client) return;
     const admin = shared.admin;
@@ -120,22 +109,6 @@ test.each(["organization", "personal"] as const)(
         authoritySnapshot: claude.authoritySnapshot,
         credentialId: claude.account.id,
       });
-      const xai = await createXaiSubscriptionCredential(db, {
-        accountId,
-        workspaceId,
-        subjectId,
-        scope: "user",
-        encryptionKey,
-        secret: { version: 1, accessToken: "parent-wake-personal" },
-        providerAccountId: `parent-wake-personal-${crypto.randomUUID()}`,
-      });
-      await setInitialActiveXaiCredential(db, {
-        accountId,
-        workspaceId,
-        subjectId,
-        authoritySnapshot: xai.authoritySnapshot,
-        credentialId: xai.account.id,
-      });
     } else {
       const claudeIdentity = crypto.randomUUID();
       await upsertOrganizationClaudeSubscription(db, {
@@ -151,16 +124,6 @@ test.each(["organization", "personal"] as const)(
         label: null,
         accountEmail: null,
         expiresAt: null,
-      });
-      await upsertOrganizationXaiSubscription(db, {
-        organizationId: accountId,
-        actorSubjectId: subjectId,
-        providerAccountId: `parent-wake-org-${crypto.randomUUID()}`,
-        encryptionKey,
-        secret: { version: 1, accessToken: "parent-wake-org" },
-        label: null,
-        accountEmail: null,
-        expiresAt: new Date(Date.now() + 3_600_000),
       });
     }
 
@@ -256,7 +219,9 @@ test.each(["organization", "personal"] as const)(
         xai_provider_account_authority_snapshot as xai
       from session_turns where id = ${parent.turn.id}`;
     expect(accepted?.claude.scope).toBe(scope === "personal" ? "user" : "organization");
-    expect(accepted?.xai).toEqual(accepted?.claude);
+    // SuperGrok runs only on the shared core (M4 X4): its v1 carrier is the
+    // workspace default, never computed from live pools, and copied verbatim.
+    expect(accepted?.xai).toEqual({ version: 1, scope: "workspace" });
 
     const child = await start("complete delegated work", parent);
     const [childAuthority] = await admin<{ claude: PoolSnapshot; xai: PoolSnapshot }[]>`

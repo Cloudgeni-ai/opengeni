@@ -103,12 +103,6 @@ mock.module("@opengeni/db", () => ({
     calls.push(`started:${input.providerJobId}`);
     return transition("provider_started", { providerJobId: input.providerJobId });
   },
-  refreshXaiSubscriptionCredentialSerialized: async () => {
-    throw new Error("the legacy refresh must not run on the core path");
-  },
-  materializeXaiCredentialForRun: async () => {
-    throw new Error("the legacy credential must not be read on the core path");
-  },
 }));
 
 const { encryptEnvironmentValue } = realDb;

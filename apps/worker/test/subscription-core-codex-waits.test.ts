@@ -301,7 +301,7 @@ describe("capacity activities accept both waiter shapes", () => {
       ...waiter,
       provider: "xai",
     });
-    const legacyXai = spy(db, "getXaiCapacityWaitForSession");
+    const legacyClaude = spy(db, "getClaudeCapacityWaitForSession");
     expect(
       await activities().getCodexCapacityWait({
         workspaceId: "workspace-1",
@@ -314,10 +314,11 @@ describe("capacity activities accept both waiter shapes", () => {
       wakeRevision: 5,
       provider: "xai",
     });
-    expect(legacyXai).not.toHaveBeenCalled();
+    expect(legacyClaude).not.toHaveBeenCalled();
   });
 
-  test.each(["xai", "claude"] as const)(
+  // SuperGrok has no legacy waiter any more (M4 X4): only Claude's remains.
+  test.each(["claude"] as const)(
     "without a core waiter the %s peek remains unchanged",
     async (provider) => {
       spy(db, "getSubscriptionCoreCapacityWaitForSession").mockResolvedValue(null);
@@ -330,12 +331,7 @@ describe("capacity activities accept both waiter shapes", () => {
         observedWakeRevision: 2,
         nextCheckAt,
       };
-      spy(db, "getXaiCapacityWaitForSession").mockResolvedValue(
-        provider === "xai" ? (row as never) : null,
-      );
-      spy(db, "getClaudeCapacityWaitForSession").mockResolvedValue(
-        provider === "claude" ? (row as never) : null,
-      );
+      spy(db, "getClaudeCapacityWaitForSession").mockResolvedValue(row as never);
       expect(
         await activities().getCodexCapacityWait({
           workspaceId: "workspace-1",
@@ -468,7 +464,6 @@ describe("capacity activities accept both waiter shapes", () => {
   test("a SuperGrok wait consults the core by id first; Claude never does", async () => {
     const core = spy(db, "getSubscriptionCoreCodexCapacityWaitById");
     const anyCore = spy(db, "getSubscriptionCoreCapacityWaitById").mockResolvedValue(null);
-    spy(db, "getXaiCapacityWaitForSession").mockResolvedValue(null);
     spy(db, "getClaudeCapacityWaitForSession").mockResolvedValue(null);
     expect(
       await activities().reconcileCodexCapacityWait({

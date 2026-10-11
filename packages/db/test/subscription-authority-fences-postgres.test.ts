@@ -27,9 +27,7 @@ import {
   createDb,
   createScheduledTask,
   createSession,
-  createXaiSubscriptionCredential,
   disconnectClaudeSubscriptionAccount,
-  disconnectXaiSubscriptionCredential,
   evaluateRuntimeDatabasePosture,
   inspectRuntimeDatabasePosture,
   sendAgentMessageInTransaction,
@@ -41,6 +39,12 @@ import {
   type DbClient,
 } from "../src";
 import { rawRows } from "../src/database";
+// 0717 is applied before the SuperGrok cutover, so its pre-cutover SuperGrok
+// rows are written with the test-only snapshot of the deleted legacy writers.
+import {
+  createXaiSubscriptionCredential,
+  disconnectXaiSubscriptionCredential,
+} from "./fixtures/legacy-xai";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 import { subscriptionAuthorityCompatForCarriersInTransaction } from "../src/subscription-core-acceptance-authority";

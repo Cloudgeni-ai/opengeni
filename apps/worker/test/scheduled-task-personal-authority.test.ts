@@ -40,8 +40,6 @@ import {
   recordScheduledTaskAdmissionFailure,
   createSession,
   createVariableSet,
-  createXaiSubscriptionCredential,
-  disconnectXaiSubscriptionCredential,
   getScheduledTaskRunAcceptedExecution,
   getScheduledVariableSetExpectedGenerationForAttempt,
   getScheduledTask,
@@ -55,7 +53,6 @@ import {
   requireSession,
   setVariableSetVariable,
   setInitialActiveClaudeCredential,
-  setInitialActiveXaiCredential,
   updateScheduledTask,
   type DbClient,
 } from "@opengeni/db";
@@ -322,6 +319,123 @@ async function claimedCommonVariableSetRun(
 }
 
 describe("scheduled task personal MCP authority", () => {
+  test.each(["organization", "personal"] as const)(
+    "SUB-ACCESS-01: a scheduled run carries its task's accepted Claude %s pool snapshot and SuperGrok's default v1 carrier into the generated turn",
+    async (scope) => {
+      if (!available) return;
+      const workspace = await workspaceFixture();
+      let claudeSnapshot:
+        | {
+            version: 1;
+            scope: "organization";
+          }
+        | {
+            version: 1;
+            scope: "user";
+            authorityGeneration: number;
+          };
+      // SuperGrok runs only on the shared core (M4 X4): its v1 carrier is the
+      // workspace default, never computed from live pools, and copied verbatim.
+      const xaiSnapshot = { version: 1, scope: "workspace" } as const;
+      if (scope === "personal") {
+        await admin`insert into workspace_memberships (
+        account_id, workspace_id, subject_id, role, permissions
+      ) values (
+        ${workspace.accountId}, ${workspace.workspaceId}, ${workspace.subjectId},
+        'owner', '[]'::jsonb
+      ) on conflict (workspace_id, subject_id) do update set role = 'owner', permissions = '[]'::jsonb`;
+        const claudeIdentity = crypto.randomUUID();
+        const claude = await createClaudeSubscriptionAccount(client.db, {
+          ...workspace,
+          scope: "user",
+          encryptionKey: new Uint8Array(32).fill(23),
+          secret: {
+            version: 1,
+            token: "sk-ant-oat01-scheduled-personal",
+            identity: { accountUuid: claudeIdentity, deviceId: "c".repeat(64) },
+          },
+          providerAccountId: claudeIdentity,
+          label: null,
+          accountEmail: null,
+          planType: "claude_max",
+          expiresAt: null,
+        });
+        await setInitialActiveClaudeCredential(client.db, {
+          ...workspace,
+          authoritySnapshot: claude.authoritySnapshot,
+          credentialId: claude.account.id,
+        });
+        claudeSnapshot = claude.authoritySnapshot;
+      } else {
+        claudeSnapshot = { version: 1, scope: "organization" };
+      }
+      const task = await createScheduledTask(client.db, {
+        ...workspace,
+        createdBy: { kind: "subject", subjectId: workspace.subjectId },
+        name: `subscription-authority-${crypto.randomUUID()}`,
+        status: "active",
+        schedule: { type: "manual" },
+        temporalScheduleId: `subscription-authority-${crypto.randomUUID()}`,
+        runMode: "new_session_per_run",
+        overlapPolicy: "allow_concurrent",
+        agentConfig: {
+          prompt: "Use the accepted subscription pool",
+          model: "scripted-model",
+          resources: [],
+          tools: [],
+          metadata: {},
+        },
+        claudeProviderAccountAuthoritySnapshot: claudeSnapshot,
+        metadata: {},
+      });
+
+      const dispatched = await activities().dispatchScheduledTaskRun({
+        workspaceId: workspace.workspaceId,
+        taskId: task.id,
+        triggerType: "scheduled",
+        producerKey: `subscription-authority:${crypto.randomUUID()}`,
+      });
+      expect(dispatched.action).toBe("start");
+      if (dispatched.action !== "start")
+        throw new Error(`Unexpected schedule result: ${dispatched.action}`);
+
+      const [run] = await admin<{ accepted_execution_snapshot: Record<string, unknown> }[]>`
+      select accepted_execution_snapshot from scheduled_task_runs
+      where workspace_id = ${workspace.workspaceId} and session_id = ${dispatched.sessionId}`;
+      expect(run?.accepted_execution_snapshot).toMatchObject({
+        claudeProviderAccountAuthoritySnapshot: claudeSnapshot,
+      });
+      const [session] = await admin<
+        {
+          xai: unknown;
+          claude: unknown;
+        }[]
+      >`
+      select initial_xai_provider_account_authority_snapshot as xai,
+        initial_claude_provider_account_authority_snapshot as claude
+      from sessions where id = ${dispatched.sessionId}`;
+      expect(session).toEqual({ xai: xaiSnapshot, claude: claudeSnapshot });
+
+      const claimed = await claimSessionWorkForAttempt(client.db, workspace.workspaceId, {
+        sessionId: dispatched.sessionId,
+        workflowId: dispatched.workflowId,
+        workflowRunId: crypto.randomUUID(),
+        attemptId: crypto.randomUUID(),
+        dispatchId: crypto.randomUUID(),
+        trigger: { kind: "next" },
+      });
+      expect(claimed.action).toBe("claimed");
+      if (claimed.action !== "claimed")
+        throw new Error(`Scheduled turn was not claimed: ${claimed.reason}`);
+      const [turn] = await admin<{ xai: unknown; claude: unknown }[]>`
+      select xai_provider_account_authority_snapshot as xai,
+        claude_provider_account_authority_snapshot as claude
+      from session_turns where id = ${claimed.turn.id}`;
+      expect(turn).toEqual({ xai: xaiSnapshot, claude: claudeSnapshot });
+    },
+    180_000,
+  );
+
   test("validated create and material update freeze an empty set; explicit replacement stays exact through dispatch", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
@@ -2507,241 +2621,6 @@ describe("scheduled task personal MCP authority", () => {
       runId: run!.id,
     });
     expect(accepted?.task.agentConfig.prompt).toBe(largePrompt);
-  });
-});
-
-describe("scheduled task personal authority: legacy SuperGrok before the cutover", () => {
-  // These two cases characterize legacy (v1) SuperGrok authority: they write
-  // the legacy tables and call the legacy disconnect, which the cutover makes
-  // read-only and refusing. They run on a database without the cutover; every
-  // other case in this file runs with it.
-  let cutover: { shared: SharedTestDatabase | null; admin: postgres.Sql; client: DbClient };
-  let legacy: SharedTestDatabase | null = null;
-  beforeAll(async () => {
-    cutover = { shared, admin, client };
-    if (!available) return;
-    legacy = await acquireSharedTestDatabase("worker-scheduled-personal-authority-legacy-xai", {
-      withheldMigrations: ["0721_subscription_core_xai_cutover.sql"],
-    });
-    if (!legacy) throw new Error("Legacy SuperGrok authority verification requires PostgreSQL");
-    shared = legacy;
-    admin = legacy.admin;
-    client = createDb(legacy.appUrl);
-  }, 180_000);
-  afterAll(async () => {
-    if (legacy) await client?.close().catch(() => undefined);
-    await legacy?.release();
-    ({ shared, admin, client } = cutover);
-  });
-
-  test.each(["organization", "personal"] as const)(
-    "SUB-ACCESS-01: a scheduled run carries its task's accepted Claude and SuperGrok %s pool snapshots into the generated turn",
-    async (scope) => {
-      if (!available) return;
-      const workspace = await workspaceFixture();
-      let claudeSnapshot:
-        | {
-            version: 1;
-            scope: "organization";
-          }
-        | {
-            version: 1;
-            scope: "user";
-            authorityGeneration: number;
-          };
-      let xaiSnapshot: typeof claudeSnapshot;
-      if (scope === "personal") {
-        await admin`insert into workspace_memberships (
-        account_id, workspace_id, subject_id, role, permissions
-      ) values (
-        ${workspace.accountId}, ${workspace.workspaceId}, ${workspace.subjectId},
-        'owner', '[]'::jsonb
-      ) on conflict (workspace_id, subject_id) do update set role = 'owner', permissions = '[]'::jsonb`;
-        const claudeIdentity = crypto.randomUUID();
-        const claude = await createClaudeSubscriptionAccount(client.db, {
-          ...workspace,
-          scope: "user",
-          encryptionKey: new Uint8Array(32).fill(23),
-          secret: {
-            version: 1,
-            token: "sk-ant-oat01-scheduled-personal",
-            identity: { accountUuid: claudeIdentity, deviceId: "c".repeat(64) },
-          },
-          providerAccountId: claudeIdentity,
-          label: null,
-          accountEmail: null,
-          planType: "claude_max",
-          expiresAt: null,
-        });
-        await setInitialActiveClaudeCredential(client.db, {
-          ...workspace,
-          authoritySnapshot: claude.authoritySnapshot,
-          credentialId: claude.account.id,
-        });
-        const xai = await createXaiSubscriptionCredential(client.db, {
-          ...workspace,
-          scope: "user",
-          encryptionKey: new Uint8Array(32).fill(23),
-          secret: { version: 1, accessToken: "scheduled-personal-access" },
-          providerAccountId: `scheduled-personal-${crypto.randomUUID()}`,
-        });
-        await setInitialActiveXaiCredential(client.db, {
-          ...workspace,
-          authoritySnapshot: xai.authoritySnapshot,
-          credentialId: xai.account.id,
-        });
-        claudeSnapshot = claude.authoritySnapshot;
-        xaiSnapshot = xai.authoritySnapshot;
-        expect(xaiSnapshot).toEqual(claudeSnapshot);
-      } else {
-        claudeSnapshot = { version: 1, scope: "organization" };
-        xaiSnapshot = claudeSnapshot;
-      }
-      const task = await createScheduledTask(client.db, {
-        ...workspace,
-        createdBy: { kind: "subject", subjectId: workspace.subjectId },
-        name: `subscription-authority-${crypto.randomUUID()}`,
-        status: "active",
-        schedule: { type: "manual" },
-        temporalScheduleId: `subscription-authority-${crypto.randomUUID()}`,
-        runMode: "new_session_per_run",
-        overlapPolicy: "allow_concurrent",
-        agentConfig: {
-          prompt: "Use the accepted subscription pool",
-          model: "scripted-model",
-          resources: [],
-          tools: [],
-          metadata: {},
-        },
-        xaiProviderAccountAuthoritySnapshot: xaiSnapshot,
-        claudeProviderAccountAuthoritySnapshot: claudeSnapshot,
-        metadata: {},
-      });
-
-      const dispatched = await activities().dispatchScheduledTaskRun({
-        workspaceId: workspace.workspaceId,
-        taskId: task.id,
-        triggerType: "scheduled",
-        producerKey: `subscription-authority:${crypto.randomUUID()}`,
-      });
-      expect(dispatched.action).toBe("start");
-      if (dispatched.action !== "start")
-        throw new Error(`Unexpected schedule result: ${dispatched.action}`);
-
-      const [run] = await admin<{ accepted_execution_snapshot: Record<string, unknown> }[]>`
-      select accepted_execution_snapshot from scheduled_task_runs
-      where workspace_id = ${workspace.workspaceId} and session_id = ${dispatched.sessionId}`;
-      expect(run?.accepted_execution_snapshot).toMatchObject({
-        xaiProviderAccountAuthoritySnapshot: xaiSnapshot,
-        claudeProviderAccountAuthoritySnapshot: claudeSnapshot,
-      });
-      const [session] = await admin<
-        {
-          xai: unknown;
-          claude: unknown;
-        }[]
-      >`
-      select initial_xai_provider_account_authority_snapshot as xai,
-        initial_claude_provider_account_authority_snapshot as claude
-      from sessions where id = ${dispatched.sessionId}`;
-      expect(session).toEqual({ xai: xaiSnapshot, claude: claudeSnapshot });
-
-      const claimed = await claimSessionWorkForAttempt(client.db, workspace.workspaceId, {
-        sessionId: dispatched.sessionId,
-        workflowId: dispatched.workflowId,
-        workflowRunId: crypto.randomUUID(),
-        attemptId: crypto.randomUUID(),
-        dispatchId: crypto.randomUUID(),
-        trigger: { kind: "next" },
-      });
-      expect(claimed.action).toBe("claimed");
-      if (claimed.action !== "claimed")
-        throw new Error(`Scheduled turn was not claimed: ${claimed.reason}`);
-      const [turn] = await admin<{ xai: unknown; claude: unknown }[]>`
-      select xai_provider_account_authority_snapshot as xai,
-        claude_provider_account_authority_snapshot as claude
-      from session_turns where id = ${claimed.turn.id}`;
-      expect(turn).toEqual({ xai: xaiSnapshot, claude: claudeSnapshot });
-    },
-    180_000,
-  );
-
-  test("revoking accepted user-scoped xAI authority rejects before claim", async () => {
-    if (!available) return;
-    const workspace = await workspaceFixture();
-    await admin`insert into workspace_memberships (
-      account_id, workspace_id, subject_id, role, permissions
-    ) values (
-      ${workspace.accountId}, ${workspace.workspaceId}, ${workspace.subjectId},
-      'owner', '[]'::jsonb
-    ) on conflict (workspace_id, subject_id) do update set role = 'owner', permissions = '[]'::jsonb`;
-    const credential = await createXaiSubscriptionCredential(client.db, {
-      ...workspace,
-      scope: "user",
-      encryptionKey: Buffer.alloc(32, 23),
-      secret: { version: 1, accessToken: "scheduled-xai-claim" },
-      providerAccountId: `scheduled-xai-${crypto.randomUUID()}`,
-      label: "scheduled xAI claim",
-    });
-    const task = await createScheduledTask(client.db, {
-      ...workspace,
-      createdBy: { kind: "subject", subjectId: workspace.subjectId },
-      name: "xAI claim authority",
-      status: "active",
-      schedule: { type: "manual" },
-      temporalScheduleId: `scheduled-xai-${crypto.randomUUID()}`,
-      runMode: "new_session_per_run",
-      overlapPolicy: "allow_concurrent",
-      agentConfig: {
-        prompt: "must retain exact xAI authority",
-        resources: [],
-        tools: [],
-        metadata: {},
-        model: "supergrok/grok-4.7",
-      },
-      xaiProviderAccountAuthoritySnapshot: credential.authoritySnapshot,
-      metadata: {},
-    });
-    const dispatched = await activities({
-      supergrokSubscriptionEnabled: true,
-    }).dispatchScheduledTaskRun({
-      workspaceId: workspace.workspaceId,
-      taskId: task.id,
-      triggerType: "scheduled",
-      producerKey: `scheduled-xai-${crypto.randomUUID()}`,
-    });
-    if (dispatched.action !== "start") throw new Error(`dispatch ${JSON.stringify(dispatched)}`);
-    await disconnectXaiSubscriptionCredential(client.db, {
-      ...workspace,
-      credentialId: credential.account.id,
-      authoritySnapshot: credential.authoritySnapshot,
-    });
-    const claimed = await claimSessionWorkForAttempt(client.db, workspace.workspaceId, {
-      sessionId: dispatched.sessionId,
-      workflowId: dispatched.workflowId,
-      workflowRunId: crypto.randomUUID(),
-      attemptId: crypto.randomUUID(),
-      dispatchId: crypto.randomUUID(),
-      trigger: { kind: "next" },
-    });
-    expect(claimed).toEqual({ action: "unclaimed", reason: "no-work" });
-    const [evidence] = await admin<
-      Array<{ runStatus: string; runError: string | null; updateState: string; attempts: number }>
-    >`
-      select run.status as "runStatus", run.error as "runError",
-        update_value.state as "updateState",
-        (select count(*)::int from session_turn_attempts attempt
-          where attempt.session_id = run.session_id) as attempts
-      from scheduled_task_runs run
-      join session_system_updates update_value on update_value.scheduled_task_run_id = run.id
-      where run.task_id = ${task.id}
-    `;
-    expect(evidence).toEqual({
-      runStatus: "failed",
-      runError: "scheduled_xai_authority_changed",
-      updateState: "failed",
-      attempts: 0,
-    });
   });
 });
 
