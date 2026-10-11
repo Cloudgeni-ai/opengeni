@@ -3820,6 +3820,76 @@ make); whether anyone depends on personal-only SuperGrok transcription or
 realtime, which decision 3 removes; and whether to repair Codex owners with
 several current generations (finding above) if the count is not zero.
 
+#### Claude track
+
+Claude (`claude`) joins the core as an adapter and binding
+(`packages/db/src/subscription-core-claude-adapter.ts`), unregistered until
+C3 adds its SQL registry row; a test asserts production registers nothing.
+Facts the adapter declares, each read from today's Claude path:
+
+- Credential. The stored plaintext is the legacy secret object unchanged
+  (`ClaudeSubscriptionCredential`: `version`, `token`, `identity
+  {accountUuid, deviceId}`, optional `oauth {refreshToken, expiresAt,
+  scopes}`), so C3 copies it without rewriting. `credential_format` is
+  `claude_oauth_v1` with `oauth`, else `claude_setup_token_v1`.
+  `capabilitiesFor` renews only `claude_oauth_v1`; any other format,
+  including one a newer binary might write, never refreshes (fail closed).
+  The embedded expiry is `oauth.expiresAt`; a setup token has none.
+- Refresh. The legacy OAuth call (`requestClaudeTokenRefresh`, ten-second
+  deadline), 60 seconds before expiry as the legacy resolver does. A 401 or
+  `invalid_grant`, or a response missing a required scope, is a relogin;
+  anything else is a retryable failure. A setup token is never refreshed: a
+  refusal marks it needs-relogin through the shared refresh (as today, where
+  only a new token recovers it). The identity, including the
+  scope-derived `deviceId`, is kept across refreshes.
+- Capabilities. No Opengeni-managed extra credits (Claude's paid overage is
+  the provider's own setting, read from its usage reports), no plan
+  entitlements, no media, realtime, Apps or remote compaction; usage
+  windows. Cache facts: the exact 5-minute TTL Opengeni sends.
+- Health. A 429 without a retry time rests 60 seconds, a limit without a
+  known reset is rechecked after 60 seconds (the legacy
+  `UNKNOWN_RESET_RECHECK_MS`). The forbidden quarantine is declared but
+  unused: Claude's 403 classifies as `fatal` (decision 7).
+- Usage in the shared quota model (`decodeSubscriptionCoreClaudeQuota`, for
+  response headers and the usage endpoint alike), preserving
+  `claudeSubscriptionCapacity`: the five-hour and seven-day windows decide
+  the connection's capacity (`rejected`, or full without a status, is
+  `exhausted` until the reset, a minute when unknown). A model-family window
+  (Opus, Sonnet) never decides the account: when full or rejected it becomes
+  a cooldown of each of the organization's models of that family, and is
+  reported with `unknown` status. The paid overage windows never block. A
+  rejected request cools the model it was made for, or exhausts the
+  connection (kind `quota`) when the model is unknown, unless the provider
+  allowed overage; a rejected overage with an earlier reset is checked then.
+  Cooldowns are keyed by product model id under both Claude prefixes
+  (`organization-claude-subscription/…`, `workspace-claude-subscription/…`).
+  Two deliberate differences, both toward waiting: a later allowed response
+  does not end a running cooldown early (the shared model never shortens a
+  cooldown; the reset or a usage reading ends it), and an observation
+  replaces the stored windows instead of merging them per window.
+- Classification (C1b, worker): a reconnect-required refresh or HTTP 401 is
+  `unauthorized`; 429 is `rate_limited` with the request's model and the
+  retry time; 529 or `overloaded_error` is `overloaded`; 403 is `fatal`; a
+  safety refusal is not a provider outcome.
+
+Recorded for the C1a call sites: Claude's workspace model policy names
+models by their scope-specific provider id
+(`organization-claude-subscription` or `workspace-claude-subscription`),
+while `modelPolicyProviderId` is one value per adapter (§5.1.3 lists this as
+still missing). The adapter declares the organization id; C1a makes the
+policy provider id a function of the model in the shared placement world,
+in a provider-neutral change after the SuperGrok track's X1a and X1b, so
+workspace-scoped Claude models keep their policy.
+
+Conformance. The shared suite runs against the production binding twice,
+with OAuth credentials and with setup tokens; the suite decides whether a
+subject's credentials renew from their format
+(`subscriptionCoreCredentialRefresher`), so a setup token takes the
+"refused static credential becomes needs-relogin" case while OAuth takes the
+"refreshed once and retried" case, and any token call fails the setup-token
+run. Claude's own refusal classification is the worker's (C1b); until then
+the suite's scripted classification is used.
+
 ### 5.4 Workspace-managed connections as organization accounts
 
 Owner request (M4 addition): an account connected in a workspace, which the

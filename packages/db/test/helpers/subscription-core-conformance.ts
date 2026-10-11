@@ -31,6 +31,7 @@ import {
   decidePlacement,
   type PlacementDecision,
   type PlacementInput,
+  subscriptionCoreCredentialRefresher,
   type ProviderErrorOutcome,
   type SubscriptionQuota,
 } from "@opengeni/subscriptions";
@@ -217,6 +218,13 @@ export function describeSubscriptionCoreConformance<Credential>(
   const TTL = 120_000;
   if (subject.models.length < 3)
     throw new Error("A conformance subject needs at least three models");
+  // Whether the subject's credentials renew: the adapter's refresher applies
+  // only to credential formats whose capabilities say so (a provider may
+  // offer renewable and non-renewable formats, such as OAuth and a setup
+  // token), so the format of the subject's credentials decides.
+  const renews =
+    subscriptionCoreCredentialRefresher(provider.adapter, subject.credential("renewal-probe")) !==
+    null;
   const m0 = subject.models[0]!;
   const m1 = subject.models[1]!;
   const m2 = subject.models[2]!;
@@ -2291,7 +2299,7 @@ export function describeSubscriptionCoreConformance<Credential>(
       await expectForeignUntouched(org);
     });
 
-    test.skipIf(provider.adapter.refresh !== null)(
+    test.skipIf(renews)(
       "a refused static credential becomes needs-relogin instead of being refreshed",
       async () => {
         const org = await organization();
@@ -2314,7 +2322,7 @@ export function describeSubscriptionCoreConformance<Credential>(
       },
     );
 
-    test.skipIf(provider.adapter.refresh === null)(
+    test.skipIf(!renews)(
       "a refused renewable credential is refreshed once and retried on the same connection",
       async () => {
         const org = await organization();
