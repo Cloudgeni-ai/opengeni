@@ -1760,10 +1760,13 @@ export function describeSubscriptionCoreConformance<Credential>(
     test("SUB-STICK-07: a session shared while warm on its owner's personal account leaves it at once", async () => {
       const org = await organization();
       const personal = await personalConnection(org, `stick-personal-${crypto.randomUUID()}`);
-      const shared = await sharedConnection(org, `stick-shared-${crypto.randomUUID()}`);
+      const organizationAccount = await sharedConnection(
+        org,
+        `stick-shared-${crypto.randomUUID()}`,
+      );
       // Only the owner's personal account can serve the private session at first.
       await admin()`update subscription_connections set allocator_enabled = false
-        where id = ${shared}::uuid`;
+        where id = ${organizationAccount}::uuid`;
       const first = await runningTurn(org, { visibility: "user_private", personalAuthority: true });
       expect(await placeChecked(first)).toMatchObject({
         kind: "run",
@@ -1771,7 +1774,7 @@ export function describeSubscriptionCoreConformance<Credential>(
         personal: true,
       });
       await admin()`update subscription_connections set allocator_enabled = true
-        where id = ${shared}::uuid`;
+        where id = ${organizationAccount}::uuid`;
       // Still private and warm: the session keeps the personal account.
       const second = await nextTurn(org, first, { personalAuthority: true });
       expect(await placeChecked(second)).toMatchObject({
@@ -1801,7 +1804,7 @@ export function describeSubscriptionCoreConformance<Credential>(
       const moved = await placeChecked(third);
       expect(moved).toMatchObject({
         kind: "run",
-        connectionId: shared,
+        connectionId: organizationAccount,
         personal: false,
         previousConnectionId: personal,
       });
@@ -1809,7 +1812,10 @@ export function describeSubscriptionCoreConformance<Credential>(
       expect(["account_unavailable", "account_ineligible"]).toContain(
         moved.reselection?.reason ?? "kept",
       );
-      expect(await bindingOf(third)).toMatchObject({ connectionId: shared, choice: "automatic" });
+      expect(await bindingOf(third)).toMatchObject({
+        connectionId: organizationAccount,
+        choice: "automatic",
+      });
     });
 
     test("SUB-STICK-06: a pin is kept whatever the cache; a pin change restarts the clock and unpinning re-runs selection", async () => {
