@@ -1,5 +1,12 @@
 import { registerSubscriptionAccountPoolRoutes } from "./subscription-account-pools";
 import {
+  coreConnectRefused,
+  deliverPoolCoreWake,
+  subscriptionCoreRoute,
+  type SubscriptionPoolCore,
+} from "./subscription-pool-core";
+import {
+  managedCookieHuman,
   requireSameOriginBrowserMutation,
   requirePrivateSubscriptionHuman,
   requireSubscriptionScopeMutation,
@@ -7,7 +14,11 @@ import {
 export { managedCookieHuman } from "./subscription-pool-access";
 import { requireOrganizationCodexHuman } from "./codex";
 import {
+  connectSubscriptionCoreXaiConnection,
+  getSubscriptionCoreXaiOrganizationProjection,
+  getSubscriptionCoreXaiWorkspaceProjection,
   listOrganizationXaiSubscriptions,
+  SUBSCRIPTION_CORE_XAI,
   upsertOrganizationXaiSubscription,
   updateOrganizationXaiSubscription,
   updateOrganizationXaiRotation,
@@ -81,6 +92,15 @@ type SuperGrokConnectState = {
 };
 
 const connectStartBody = SupergrokConnectStartRequest;
+
+/** SuperGrok on the shared subscription core (provider id `xai`), once its cutover committed. */
+const SUPERGROK_CORE: SubscriptionPoolCore = {
+  binding: SUBSCRIPTION_CORE_XAI,
+  workspaceProjection: getSubscriptionCoreXaiWorkspaceProjection,
+  organizationProjection: getSubscriptionCoreXaiOrganizationProjection,
+};
+const supergrokRoute = (deps: ApiRouteDeps, accountId: () => Promise<string>) =>
+  subscriptionCoreRoute(deps, "xai", "SuperGrok", accountId);
 const connectPollBody = SubscriptionConnectPollRequest;
 
 function requireEnabled(deps: ApiRouteDeps): void {
@@ -254,6 +274,48 @@ async function materializedAuthContext(
   };
 }
 
+/**
+ * Persist a finished SuperGrok device sign-in on the shared core: a personal
+ * connection for a `user` scope (only in the person's Personal workspace),
+ * else a shared one through the neutral writer. Returns the connection id.
+ */
+async function coreSuperGrokConnected(
+  c: Context,
+  deps: ApiRouteDeps,
+  input: {
+    accountId: string;
+    workspaceId: string | null;
+    subjectId: string;
+    personal?: boolean;
+    encryptionKey: Uint8Array;
+    tokens: { accessToken: string; refreshToken?: string | null; expiresInSeconds: number };
+    identity: ReturnType<typeof xaiIdentityFromDeviceTokens>;
+  },
+): Promise<string> {
+  const result = await connectSubscriptionCoreXaiConnection(deps.db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    subjectId: input.subjectId,
+    ...(input.personal ? { personal: true } : {}),
+    encryptionKey: input.encryptionKey,
+    tokens: {
+      accessToken: input.tokens.accessToken,
+      refreshToken: input.tokens.refreshToken || null,
+    },
+    identitySubject: input.identity.subject,
+    accountEmail: input.identity.email,
+    label: input.identity.name ?? input.identity.email ?? input.identity.subject,
+    expiresAt:
+      xaiAccessTokenExpiry(input.tokens.accessToken) ??
+      new Date(Date.now() + input.tokens.expiresInSeconds * 1_000),
+    connectedBySubjectId: (await managedCookieHuman(c, deps))?.subjectId ?? null,
+  });
+  if (result.kind === "refused")
+    throw coreConnectRefused(result.reason, "SuperGrok", input.personal === true);
+  await deliverPoolCoreWake(deps, SUPERGROK_CORE, result.wake);
+  return result.id;
+}
+
 export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {
   registerSubscriptionAccountPoolRoutes(app, deps, {
     provider: "xai",
@@ -261,6 +323,7 @@ export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {
     displayName: "SuperGrok",
     enabled: () => deps.settings.supergrokSubscriptionEnabled,
     accountJson,
+    core: SUPERGROK_CORE,
     repository: {
       listOrganizationSubscriptions: listOrganizationXaiSubscriptions,
       updateOrganizationSubscription: updateOrganizationXaiSubscription,
@@ -293,6 +356,8 @@ export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {
   };
   app.post(`${organizationPath}/connect/start`, async (c) => {
     const actor = await organizationActor(c, true);
+    // A sign-in that could not be saved is never started (maintenance fails closed).
+    await supergrokRoute(deps, async () => actor.organizationId);
     try {
       const start = await requestXaiDeviceCode({ fetch: (deps.xaiFetch ?? fetch) as XaiFetch });
       const expiresAt = Math.floor(Date.now() / 1000) + start.expiresInSeconds;
@@ -313,6 +378,7 @@ export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {
   });
   app.post(`${organizationPath}/connect/poll`, async (c) => {
     const actor = await organizationActor(c, true);
+    const runtime = await supergrokRoute(deps, async () => actor.organizationId);
     const parsed = connectPollBody.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) throw new HTTPException(400, { message: "SuperGrok state is required" });
     const state = readSignedState(parsed.data.state, deps.githubStateSecret) as {
@@ -343,6 +409,27 @@ export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {
       const encryptionKey = environmentsEncryptionKeyBytes(deps.settings);
       if (!encryptionKey)
         throw new HTTPException(500, { message: "Connection encryption is not configured" });
+      if (runtime === "core") {
+        const id = await coreSuperGrokConnected(c, deps, {
+          accountId: actor.organizationId,
+          workspaceId: null,
+          subjectId: actor.actorSubjectId,
+          encryptionKey,
+          tokens: poll.tokens,
+          identity,
+        });
+        const { activeCredentialId } = await getSubscriptionCoreXaiOrganizationProjection(db, {
+          organizationId: actor.organizationId,
+          subjectId: actor.actorSubjectId,
+        });
+        return c.json({
+          status: "connected",
+          accountId: id,
+          scope: "organization",
+          isActive: activeCredentialId === id,
+          email: identity.email,
+        });
+      }
       const connected = await upsertOrganizationXaiSubscription(db, {
         ...actor,
         encryptionKey,
@@ -375,6 +462,7 @@ export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {
     const parsed = connectStartBody.safeParse(await c.req.json().catch(() => ({})));
     if (!parsed.success) throw new HTTPException(400, { message: "invalid SuperGrok scope" });
     const authority = await requireScopeMutation(c, deps, workspaceId, parsed.data.scope);
+    await supergrokRoute(deps, async () => authority.accountId);
     const authorization = await requireAccessGrantAuthorization(
       c,
       deps,
@@ -442,6 +530,7 @@ export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
     }
     const authority = await requireScopeMutation(c, deps, workspaceId, state.scope);
+    const runtime = await supergrokRoute(deps, async () => authority.accountId);
     if (authority.subjectId !== state.subjectId) {
       throw new HTTPException(403, {
         message: "SuperGrok connect identity changed",
@@ -498,6 +587,29 @@ export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {
       if (!encryptionKey) {
         throw new HTTPException(500, {
           message: "OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is not configured",
+        });
+      }
+      if (runtime === "core") {
+        const id = await coreSuperGrokConnected(c, deps, {
+          accountId: authority.accountId,
+          workspaceId,
+          subjectId: authority.subjectId,
+          personal: state.scope === "user",
+          encryptionKey,
+          tokens: poll.tokens,
+          identity,
+        });
+        const { activeCredentialId } = await getSubscriptionCoreXaiWorkspaceProjection(deps.db, {
+          accountId: authority.accountId,
+          workspaceId,
+          viewerSubjectId: authority.subjectId,
+        });
+        return c.json({
+          status: "connected" as const,
+          accountId: id,
+          scope: state.scope,
+          isActive: activeCredentialId === id,
+          email: identity.email,
         });
       }
       const upserted = await upsertXaiSubscriptionCredential(deps.db, {

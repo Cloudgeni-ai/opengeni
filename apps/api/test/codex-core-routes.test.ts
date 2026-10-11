@@ -1166,7 +1166,7 @@ describe("the organization access editor for a workspace-managed Codex account",
 
   test("reads its reach and the managing workspace's own copy; people only when no workspace manages it", async () => {
     editor();
-    mock("readSubscriptionCoreCodexModelConnectionAccess", async () => ({
+    mock("readSubscriptionCoreProviderModelConnectionAccess", async () => ({
       policy: {
         allowedModels: null,
         allowedWorkspaces: [],
@@ -1196,7 +1196,7 @@ describe("the organization access editor for a workspace-managed Codex account",
     expect(body.people).toBeUndefined();
 
     // A workspace's own copy no workspace manages can be limited to people.
-    mock("readSubscriptionCoreCodexModelConnectionAccess", async () => ({
+    mock("readSubscriptionCoreProviderModelConnectionAccess", async () => ({
       policy: {
         allowedModels: null,
         allowedWorkspaces: [],
@@ -1246,7 +1246,7 @@ describe("the organization access editor for a workspace-managed Codex account",
       new opengeniDb.SubscriptionCoreAccessPeopleUnlistableError(),
       new opengeniDb.SubscriptionCoreAccessInvalidError("mixed"),
     ]) {
-      mock("updateSubscriptionCoreCodexModelConnectionAccess", async () => {
+      mock("updateSubscriptionCoreProviderModelConnectionAccess", async () => {
         throw error;
       });
       const body = JSON.stringify({

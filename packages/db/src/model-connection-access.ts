@@ -1,6 +1,7 @@
 import { sql, type SQL, type SQLWrapper } from "drizzle-orm";
 import { rawRows, type Database } from "./database";
 import { SUBSCRIPTION_CORE_CODEX_PROVIDER } from "./subscription-core-codex-provider";
+import { SUBSCRIPTION_CORE_XAI_PROVIDER } from "./subscription-core-xai-adapter";
 import {
   getSubscriptionCoreModelConnectionAccess,
   ModelConnectionWorkspaceNotInOrganizationError,
@@ -108,6 +109,53 @@ export async function getModelConnectionAccess(
 }
 
 /**
+ * The core provider of a connection kind whose access policy lives on the
+ * shared subscription core once that provider cut over; null for the kinds
+ * that never move (API-key connections) or have not moved yet.
+ */
+function subscriptionCoreProviderOfKind(kind: ModelConnectionKind): string | null {
+  if (kind === "codex") return SUBSCRIPTION_CORE_CODEX_PROVIDER;
+  if (kind === "supergrok") return SUBSCRIPTION_CORE_XAI_PROVIDER;
+  return null;
+}
+
+/**
+ * A shared subscription connection's access on the shared subscription core,
+ * with the workspaces that use it as their own and its delegated manager, for
+ * a kind whose provider is on the core (the caller checked its route is
+ * `core`).
+ */
+export async function readSubscriptionCoreProviderModelConnectionAccess(
+  db: Database,
+  target: ModelConnectionTarget,
+): Promise<SubscriptionCoreAccess | null> {
+  const provider = subscriptionCoreProviderOfKind(target.kind);
+  if (!provider) throw new Error("This connection kind is not read from the core");
+  return await readSubscriptionCoreModelConnectionAccess(db, provider, target);
+}
+
+/** A shared subscription connection's access policy on the core (see the reader). */
+export async function getSubscriptionCoreProviderModelConnectionAccess(
+  db: Database,
+  target: ModelConnectionTarget,
+): Promise<ModelConnectionAccess | null> {
+  const provider = subscriptionCoreProviderOfKind(target.kind);
+  if (!provider) throw new Error("This connection kind is not read from the core");
+  return await getSubscriptionCoreModelConnectionAccess(db, provider, target);
+}
+
+/** Save what a shared subscription connection serves on the core (see the reader). */
+export async function updateSubscriptionCoreProviderModelConnectionAccess(
+  db: Database,
+  target: ModelConnectionTarget,
+  policy: ModelConnectionAccess,
+): Promise<ModelConnectionAccess | null> {
+  const provider = subscriptionCoreProviderOfKind(target.kind);
+  if (!provider) throw new Error("This connection kind is not written to the core");
+  return await updateSubscriptionCoreModelConnectionAccess(db, provider, target, policy);
+}
+
+/**
  * A shared Codex connection's access on the shared subscription core, with
  * the workspaces that use it as their own and its delegated manager.
  */
@@ -116,11 +164,7 @@ export async function readSubscriptionCoreCodexModelConnectionAccess(
   target: ModelConnectionTarget,
 ): Promise<SubscriptionCoreAccess | null> {
   if (target.kind !== "codex") throw new Error("Only Codex connections are read from the core");
-  return await readSubscriptionCoreModelConnectionAccess(
-    db,
-    SUBSCRIPTION_CORE_CODEX_PROVIDER,
-    target,
-  );
+  return await readSubscriptionCoreProviderModelConnectionAccess(db, target);
 }
 
 /** A shared Codex connection's access policy on the shared subscription core. */
@@ -129,11 +173,7 @@ export async function getSubscriptionCoreCodexModelConnectionAccess(
   target: ModelConnectionTarget,
 ): Promise<ModelConnectionAccess | null> {
   if (target.kind !== "codex") throw new Error("Only Codex connections are read from the core");
-  return await getSubscriptionCoreModelConnectionAccess(
-    db,
-    SUBSCRIPTION_CORE_CODEX_PROVIDER,
-    target,
-  );
+  return await getSubscriptionCoreProviderModelConnectionAccess(db, target);
 }
 
 /** Save what a shared Codex connection serves on the core. */
@@ -143,12 +183,7 @@ export async function updateSubscriptionCoreCodexModelConnectionAccess(
   policy: ModelConnectionAccess,
 ): Promise<ModelConnectionAccess | null> {
   if (target.kind !== "codex") throw new Error("Only Codex connections are written to the core");
-  return await updateSubscriptionCoreModelConnectionAccess(
-    db,
-    SUBSCRIPTION_CORE_CODEX_PROVIDER,
-    target,
-    policy,
-  );
+  return await updateSubscriptionCoreProviderModelConnectionAccess(db, target, policy);
 }
 
 export async function updateModelConnectionAccess(

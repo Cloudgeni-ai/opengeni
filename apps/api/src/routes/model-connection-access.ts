@@ -14,18 +14,18 @@ import {
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
-  deliverSubscriptionCoreCodexWake,
+  deliverSubscriptionCoreWake,
   getModelConnectionAccess,
   listOrganizationAdministrationMembers,
   nestedPostgresSqlState,
-  readSubscriptionCoreCodexModelConnectionAccess,
+  readSubscriptionCoreProviderModelConnectionAccess,
   ModelConnectionAccessForbiddenError,
   SubscriptionCoreAccessInvalidError,
   SubscriptionCoreAccessPeopleUnlistableError,
   SubscriptionCoreAccessPersonNotInOrganizationError,
   ModelConnectionWorkspaceNotInOrganizationError,
   updateModelConnectionAccess,
-  updateSubscriptionCoreCodexModelConnectionAccess,
+  updateSubscriptionCoreProviderModelConnectionAccess,
   getOrganizationAdministrationOverview,
   getXaiSubscriptionAccountAuthoritySnapshot,
   getClaudeSubscriptionAccountAuthoritySnapshot,
@@ -43,6 +43,7 @@ import {
 } from "./codex";
 import { codexRouteDisposition } from "./codex-core";
 import { requireScopeMutation } from "./supergrok";
+import { subscriptionCoreRoute } from "./subscription-pool-core";
 import {
   requirePrivateSubscriptionHuman,
   requireSubscriptionScopeMutation,
@@ -71,19 +72,34 @@ function modelPrefix(target: ModelConnectionTarget) {
  * Codex access policies follow the organization's Codex cutover row (M3 PR
  * 3): the legacy credential row without one; the shared core connection with
  * an enabled one (the legacy rows are frozen after 0680); a disabled row is
- * maintenance (typed 503 from `codexRouteDisposition`).
+ * maintenance (typed 503 from `codexRouteDisposition`). SuperGrok's follow
+ * its provider route (design 5.3, X2b): legacy without the `xai` cutover
+ * receipt, the shared core connection with it, maintenance fails closed.
  */
-async function codexAccessDisposition(
+async function coreAccessDisposition(
   deps: ApiRouteDeps,
-  target: ModelConnectionTarget,
+  kind: ModelConnectionTarget["kind"],
+  accountId: string,
 ): Promise<"legacy" | "core"> {
-  return target.kind === "codex" ? await codexRouteDisposition(deps, target.accountId) : "legacy";
+  if (kind === "codex") return await codexRouteDisposition(deps, accountId);
+  if (kind === "supergrok")
+    return await subscriptionCoreRoute(deps, "xai", "SuperGrok", async () => accountId);
+  return "legacy";
 }
+
+/** The core wake reason of an access change, by connection kind. */
+const CORE_ACCESS_WAKE: Partial<Record<ModelConnectionTarget["kind"], [string, string, string]>> = {
+  codex: ["codex", "core_codex_access_changed", "Codex"],
+  supergrok: ["xai", "core_xai_access_changed", "SuperGrok"],
+};
 
 export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDeps) {
   for (const scope of ["organizations", "workspaces"] as const) {
     const path = `/v1/${scope}/:scopeId/model-connections/:kind/:connectionId/access`;
-    async function target(c: Context, mutate: boolean): Promise<ModelConnectionTarget> {
+    async function target(
+      c: Context,
+      mutate: boolean,
+    ): Promise<{ connection: ModelConnectionTarget; core: boolean }> {
       const kind = Kind.parse(c.req.param("kind"));
       if (kind === "claude_subscription" && !deps.settings.claudeSubscriptionEnabled)
         throw new HTTPException(404, { message: "Claude subscriptions are not enabled" });
@@ -95,15 +111,23 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
         if (mutate) requireSameOriginBrowserMutation(c, deps);
         const human = await requireOrganizationCodexHuman(c, deps, scopeId);
         return {
-          kind,
-          connectionId,
-          accountId: scopeId,
-          workspaceId: null,
-          subjectId: human.subjectId,
+          connection: {
+            kind,
+            connectionId,
+            accountId: scopeId,
+            workspaceId: null,
+            subjectId: human.subjectId,
+          },
+          core: (await coreAccessDisposition(deps, kind, scopeId)) === "core",
         };
       }
       const grant = await requireAccessGrant(c, deps, scopeId, "workspace:read");
-      if (kind === "supergrok") {
+      // On the core a SuperGrok access policy is a shared connection's, which
+      // the core editor authorizes; only the legacy pools have private rows.
+      const supergrokCore =
+        kind === "supergrok" &&
+        (await coreAccessDisposition(deps, kind, grant.accountId)) === "core";
+      if (kind === "supergrok" && !supergrokCore) {
         const snapshot = await getXaiSubscriptionAccountAuthoritySnapshot(deps.db, {
           workspaceId: scopeId,
           subjectId: grant.subjectId,
@@ -147,19 +171,24 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
         connectionId = metadata.connectionId;
       }
       return {
-        kind,
-        connectionId,
-        accountId: grant.accountId,
-        workspaceId: scopeId,
-        subjectId: grant.subjectId,
+        connection: {
+          kind,
+          connectionId,
+          accountId: grant.accountId,
+          workspaceId: scopeId,
+          subjectId: grant.subjectId,
+        },
+        core:
+          kind === "supergrok"
+            ? supergrokCore
+            : (await coreAccessDisposition(deps, kind, grant.accountId)) === "core",
       };
     }
     app.get(path, async (c) => {
       c.header("cache-control", "private, no-store");
-      const connection = await target(c, false);
-      const core = (await codexAccessDisposition(deps, connection)) === "core";
+      const { connection, core } = await target(c, false);
       const coreAccess = core
-        ? await readSubscriptionCoreCodexModelConnectionAccess(deps.db, connection)
+        ? await readSubscriptionCoreProviderModelConnectionAccess(deps.db, connection)
         : null;
       const policy = core
         ? coreAccess && {
@@ -266,9 +295,8 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
       );
     });
     app.put(path, async (c) => {
-      const connection = await target(c, true);
-      // Codex access lives on the shared core; the frozen legacy row is never written.
-      const core = (await codexAccessDisposition(deps, connection)) === "core";
+      // Access of a provider on the shared core lives there; the frozen legacy row is never written.
+      const { connection, core } = await target(c, true);
       const parsed = ModelConnectionAccessPolicy.safeParse(await c.req.json().catch(() => null));
       if (!parsed.success)
         throw new HTTPException(422, { message: "Invalid connection access policy" });
@@ -289,7 +317,7 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
       let updated;
       try {
         updated = core
-          ? await updateSubscriptionCoreCodexModelConnectionAccess(deps.db, connection, policy)
+          ? await updateSubscriptionCoreProviderModelConnectionAccess(deps.db, connection, policy)
           : await updateModelConnectionAccess(deps.db, connection, policy);
       } catch (error) {
         if (error instanceof ModelConnectionWorkspaceNotInOrganizationError)
@@ -308,13 +336,16 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
         throw new HTTPException(409, {
           message: "Connection access changed. Reload before saving.",
         });
-      if (core) {
+      const wake = core ? CORE_ACCESS_WAKE[connection.kind] : undefined;
+      if (wake) {
         // A wider scope or model list can make waiting work placeable.
         try {
-          await deliverSubscriptionCoreCodexWake(deps.db, {
-            accountId: connection.accountId,
-            reason: "core_codex_access_changed",
-          });
+          await deliverSubscriptionCoreWake(
+            deps.db,
+            wake[0],
+            { accountId: connection.accountId, reason: wake[1] },
+            wake[2],
+          );
         } catch {
           // Every core waiter has its own bounded recheck; a lost wake only delays.
         }

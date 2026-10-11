@@ -49,7 +49,7 @@ import {
 export const SUBSCRIPTION_CORE_CUTOVER_DISABLED = "subscription_core_cutover_disabled";
 
 /** The public error envelope with the core reason in `details.reason`. */
-function typedHttpError(status: 409 | 503, reason: string, message: string): ApiHttpError {
+export function typedHttpError(status: 409 | 503, reason: string, message: string): ApiHttpError {
   return new ApiHttpError(status, {
     code: status === 503 ? "upstream_unavailable" : "conflict",
     message,

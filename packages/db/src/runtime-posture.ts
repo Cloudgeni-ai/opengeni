@@ -759,6 +759,8 @@ export const SUBSCRIPTION_CORE_NEUTRAL_PRIVATE_ROUTINES = [
   "set_subscription_core_reach(text, uuid, uuid, boolean, boolean)",
   // Migration 0714: the organization's rotation switch on the reach row alone.
   "set_subscription_core_reach_allocator(text, uuid, uuid, boolean)",
+  // Migration 0717: the personal connect writer with the credential's format.
+  "connect_subscription_core_personal(text, uuid, uuid, text, text, text, text, text, jsonb, timestamp with time zone, timestamp with time zone, text, text, text, text)",
 ] as const;
 
 /** Migration 0707: the neutral writers' owner-only internals. */

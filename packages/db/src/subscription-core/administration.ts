@@ -472,6 +472,54 @@ export async function readSubscriptionCoreOrganizationPool(
   );
 }
 
+/** A workspace's pool as one person sees it: the shared pool plus, in their own Personal workspace, their personal connections. */
+export type SubscriptionCoreWorkspaceView = {
+  pool: SubscriptionCoreWorkspacePool;
+  /** The viewer's own personal connections (Personal workspace only), through the owner-only reader. */
+  personal: SubscriptionCoreConnectionRow[];
+  /**
+   * The primary connection as listed: when personal rows joined, a primary
+   * that is neither a listed shared nor a listed personal connection is null
+   * (personal rows are visible only through the owner reader).
+   */
+  primaryConnectionId: string | null;
+};
+
+/**
+ * The workspace's pool of this provider for one viewer, under the workspace
+ * RLS context. In the viewer's own Personal workspace their personal
+ * connections are listed too; nobody else ever sees them.
+ */
+export async function readSubscriptionCoreWorkspaceView(
+  db: Database,
+  provider: SubscriptionCoreProvider,
+  input: { accountId: string; workspaceId: string; viewerSubjectId?: string | null },
+): Promise<SubscriptionCoreWorkspaceView> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (tx) => {
+      const pool = await readSubscriptionCoreWorkspacePool(tx, provider, input);
+      if (!input.viewerSubjectId || pool.source.workspaceKind !== "personal") {
+        return { pool, personal: [], primaryConnectionId: pool.primaryConnectionId };
+      }
+      const personal = await listSubscriptionCorePersonalConnectionRowsInTransaction(tx, provider, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: input.viewerSubjectId,
+      });
+      const listed = [...pool.connections.map((entry) => entry.row), ...personal];
+      return {
+        pool,
+        personal,
+        primaryConnectionId: listed.some((row) => row.id === pool.primaryConnectionId)
+          ? pool.primaryConnectionId
+          : null,
+      };
+    },
+  );
+}
+
 export function isSubscriptionCoreRlsRefusal(error: unknown): boolean {
   const code = (error as { code?: unknown } | null)?.code;
   const causeCode = (error as { cause?: { code?: unknown } } | null)?.cause?.code;

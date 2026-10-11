@@ -22,6 +22,7 @@ import {
   readSubscriptionCoreCutoverDisposition,
   readSubscriptionCoreOrganizationPool,
   readSubscriptionCoreWorkspacePool,
+  readSubscriptionCoreWorkspaceView,
   renameSubscriptionCoreConnection,
   setSubscriptionCoreAllocator,
   setSubscriptionCoreExtraCredits,
@@ -211,43 +212,36 @@ export async function getSubscriptionCoreCodexWorkspaceProjection(
     viewerSubjectId?: string | null;
   },
 ): Promise<SubscriptionCoreCodexWorkspaceProjection> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (tx) => {
-      const projection = await projectSubscriptionCoreCodexWorkspace(tx, input);
-      if (!input.viewerSubjectId || projection.source.workspaceKind !== "personal") {
-        return projection;
-      }
-      const personal = await listSubscriptionCoreCodexPersonalAccountsInTransaction(tx, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        subjectId: input.viewerSubjectId,
-      });
-      // Personal rows are intentionally visible only through the owner reader,
-      // so sanitize the historical primary pointer after that projection joins.
-      if (
-        ![...projection.accounts, ...personal].some(
-          (account) => account.id === projection.rotation.activeCredentialId,
-        )
-      ) {
-        projection.rotation.activeCredentialId = null;
-      }
-      return personal.length === 0
-        ? projection
-        : {
-            ...projection,
-            accounts: [
-              ...projection.accounts,
-              ...personal.map((account) => ({
-                ...account,
-                isActive: account.id === projection.rotation.activeCredentialId,
-              })),
-            ],
-            personalAccountIds: personal.map((account) => account.id),
-          };
-    },
-  );
+  // The provider-neutral view lists personal rows and sanitizes the primary
+  // pointer after they join (they are visible only through the owner reader).
+  const view = await readSubscriptionCoreWorkspaceView(db, SUBSCRIPTION_CORE_CODEX, input);
+  const projection: SubscriptionCoreCodexWorkspaceProjection = {
+    accounts: view.pool.connections.map((entry) =>
+      projectAccount(entry.row, {
+        source: entry.source,
+        primaryConnectionId: view.pool.primaryConnectionId,
+        poolAllocatorEnabled: entry.poolAllocatorEnabled,
+      }),
+    ),
+    rotation: rotationSettings(view.primaryConnectionId, view.pool.rotationMode === "spread"),
+    source: view.pool.source,
+  };
+  return view.personal.length === 0
+    ? projection
+    : {
+        ...projection,
+        accounts: [
+          ...projection.accounts,
+          ...view.personal.map((row) =>
+            projectAccount(row, {
+              source: "workspace",
+              primaryConnectionId: view.primaryConnectionId,
+              poolAllocatorEnabled: true,
+            }),
+          ),
+        ],
+        personalAccountIds: view.personal.map((row) => row.id),
+      };
 }
 
 /**

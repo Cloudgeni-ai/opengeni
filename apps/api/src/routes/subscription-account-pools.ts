@@ -29,6 +29,19 @@ import {
   requireSameOriginBrowserMutation,
   requireSubscriptionScopeMutation,
 } from "./subscription-pool-access";
+import {
+  coreOrganizationAccount,
+  coreOrganizationAccounts,
+  coreOrganizationSettings,
+  coreWorkspaceAccounts,
+  coreWorkspaceActivate,
+  coreWorkspaceAllocator,
+  coreWorkspaceDisconnect,
+  coreWorkspaceRename,
+  coreWorkspaceSettings,
+  subscriptionCoreRoute,
+  type SubscriptionPoolCore,
+} from "./subscription-pool-core";
 const allocatorBody = SubscriptionAccountToggleRequest;
 const settingsBody = SubscriptionRotationSettingsRequest;
 const renameBody = SubscriptionAccountRenameRequest;
@@ -69,6 +82,12 @@ export function registerSubscriptionAccountPoolRoutes(
       activeId: string | null,
       authority: { accountId: string; workspaceId: string | null; subjectId: string },
     ) => Promise<Record<string, unknown>[]>;
+    /**
+     * Serve these routes from the shared subscription core once the
+     * provider's cutover receipt exists (design 5.3). Without it every route
+     * runs the legacy handler unchanged after one receipt read.
+     */
+    core?: SubscriptionPoolCore;
   },
 ) {
   const { db } = deps;
@@ -88,6 +107,17 @@ export function registerSubscriptionAccountPoolRoutes(
     disconnectSubscriptionCredentialAndRepick,
     wakeSubscriptionCapacityWaiters,
   } = options.repository;
+  const core = options.core;
+  const coreContext = core
+    ? { deps, core, displayName: options.displayName, accountJson: options.accountJson }
+    : null;
+  /** The pool's runtime for this organization; `legacy` without a core binding. */
+  const route = async (accountId: () => Promise<string>) =>
+    core
+      ? await subscriptionCoreRoute(deps, options.provider, options.displayName, accountId)
+      : "legacy";
+  const workspaceRoute = (c: Context, workspaceId: string) =>
+    route(async () => (await requireAccessGrant(c, deps, workspaceId, "workspace:read")).accountId);
   const workspacePath = `/v1/workspaces/:workspaceId/${options.route}`;
   const organizationPath = `/v1/organizations/:organizationId/${options.route}`;
   const requireEnabled = () => {
@@ -146,6 +176,8 @@ export function registerSubscriptionAccountPoolRoutes(
   };
   app.get(`${organizationPath}/accounts`, async (c) => {
     const actor = await organizationActor(c);
+    if ((await route(async () => actor.organizationId)) === "core")
+      return await coreOrganizationAccounts(c, coreContext!, actor);
     const { accounts, rotation } = await listOrganizationSubscriptions(db, actor);
     const activeAccountId = rotation?.activeCredentialId ?? null;
     return c.json({
@@ -170,6 +202,8 @@ export function registerSubscriptionAccountPoolRoutes(
     const actor = await organizationActor(c, true);
     const parsed = settingsBody.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) throw new HTTPException(400, { message: "rotationEnabled is required" });
+    if ((await route(async () => actor.organizationId)) === "core")
+      return await coreOrganizationSettings(c, coreContext!, actor, parsed.data.rotationEnabled);
     const rotation = await updateOrganizationSubscriptionRotation(db, { ...actor, ...parsed.data });
     return c.json({
       rotationEnabled: rotation.rotationEnabled,
@@ -185,6 +219,23 @@ export function registerSubscriptionAccountPoolRoutes(
     >,
   ) => {
     const actor = await organizationActor(c, true);
+    if ((await route(async () => actor.organizationId)) === "core")
+      return await coreOrganizationAccount(
+        c,
+        coreContext!,
+        actor,
+        c.req.param("accountId")!,
+        changes.activate
+          ? { activate: true }
+          : changes.disconnect
+            ? { disconnect: true }
+            : changes.label !== undefined
+              ? { label: changes.label }
+              : {
+                  allocatorEnabled: changes.allocatorEnabled!,
+                  expectedAllocatorVersion: changes.expectedAllocatorVersion!,
+                },
+      );
     try {
       const result = await updateOrganizationSubscription(db, {
         ...actor,
@@ -228,6 +279,8 @@ export function registerSubscriptionAccountPoolRoutes(
   app.get(`${workspacePath}/accounts`, async (c) => {
     requireEnabled();
     const workspaceId = c.req.param("workspaceId")!;
+    if ((await workspaceRoute(c, workspaceId)) === "core")
+      return await coreWorkspaceAccounts(c, coreContext!, workspaceId);
     const authority = await resolveReadAuthority(c, deps, workspaceId);
     const [accounts, settings] = await Promise.all([
       listSubscriptionAccountsMetadata(deps.db, {
@@ -274,6 +327,8 @@ export function registerSubscriptionAccountPoolRoutes(
     requireEnabled();
     const workspaceId = c.req.param("workspaceId")!;
     const credentialId = c.req.param("accountId")!;
+    if ((await workspaceRoute(c, workspaceId)) === "core")
+      return await coreWorkspaceActivate(c, coreContext!, workspaceId, credentialId);
     const authority = await authorityForAccountMutation(c, deps, workspaceId, credentialId);
     const activated = await setActiveSubscriptionCredential(deps.db, {
       accountId: authority.accountId,
@@ -300,6 +355,8 @@ export function registerSubscriptionAccountPoolRoutes(
     const workspaceId = c.req.param("workspaceId")!;
     const parsed = settingsBody.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) throw new HTTPException(400, { message: "rotationEnabled is required" });
+    if ((await workspaceRoute(c, workspaceId)) === "core")
+      return await coreWorkspaceSettings(c, coreContext!, workspaceId, parsed.data.rotationEnabled);
     const readAuthority = await resolveReadAuthority(c, deps, workspaceId);
     const authority = await requireSubscriptionScopeMutation(
       c,
@@ -340,6 +397,12 @@ export function registerSubscriptionAccountPoolRoutes(
     requireEnabled();
     const workspaceId = c.req.param("workspaceId")!;
     const credentialId = c.req.param("accountId")!;
+    if ((await workspaceRoute(c, workspaceId)) === "core") {
+      const parsed = allocatorBody.safeParse(await c.req.json().catch(() => null));
+      if (!parsed.success)
+        throw new HTTPException(400, { message: "enabled and expectedVersion are required" });
+      return await coreWorkspaceAllocator(c, coreContext!, workspaceId, credentialId, parsed.data);
+    }
     const authority = await authorityForAccountMutation(c, deps, workspaceId, credentialId);
     const parsed = allocatorBody.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
@@ -380,6 +443,17 @@ export function registerSubscriptionAccountPoolRoutes(
     requireEnabled();
     const workspaceId = c.req.param("workspaceId")!;
     const credentialId = c.req.param("accountId")!;
+    if ((await workspaceRoute(c, workspaceId)) === "core") {
+      const parsed = renameBody.safeParse(await c.req.json().catch(() => null));
+      if (!parsed.success) throw new HTTPException(400, { message: "label is invalid" });
+      return await coreWorkspaceRename(
+        c,
+        coreContext!,
+        workspaceId,
+        credentialId,
+        parsed.data.label || null,
+      );
+    }
     const authority = await authorityForAccountMutation(c, deps, workspaceId, credentialId);
     const parsed = renameBody.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) throw new HTTPException(400, { message: "label is invalid" });
@@ -405,6 +479,8 @@ export function registerSubscriptionAccountPoolRoutes(
     requireEnabled();
     const workspaceId = c.req.param("workspaceId")!;
     const credentialId = c.req.param("accountId")!;
+    if ((await workspaceRoute(c, workspaceId)) === "core")
+      return await coreWorkspaceDisconnect(c, coreContext!, workspaceId, credentialId);
     const authority = await authorityForAccountMutation(c, deps, workspaceId, credentialId);
     if (authority.snapshot.scope === "user") {
       await wakeSubscriptionCapacityWaiters(deps.db, {

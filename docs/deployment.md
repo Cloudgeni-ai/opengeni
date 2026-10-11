@@ -4755,6 +4755,24 @@ ORDER BY 1, 2, 3, 4;
 Staging and production were not queried when 0716 was written; run the
 inventory there before deploying it.
 
+### Personal connect writer with a credential format (0717)
+
+Migration `0717_subscription_core_personal_connect_format.sql` is
+**rolling**: deploy it like any release, without draining. Design record:
+[subscription core, SuperGrok track](design/subscription-core-2026-10-07.md#x2b-routes-and-writers).
+It adds one overload of the neutral personal connect writer,
+`opengeni_private.connect_subscription_core_personal`, whose last argument
+is the stored credential format (SuperGrok stores `xai_oauth_v1`), built
+from the live 0707 definition with every check, lock and security setting
+unchanged. The 0707 writer stays for older binaries; Codex keeps calling it
+and still stores `v1`. Like 0712 and 0713, it grants the new overload to the
+configured application roles: a deployment whose runtime role is not
+`opengeni_app` must pass them through
+`OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`. It locks no table and
+changes no row. Nothing acts on deploy: only a provider whose own cutover
+receipt exists reaches the writer, so it stays unused until the SuperGrok
+cutover.
+
 ### Slack API pilot activation (0597)
 
 Stop every old/new API, control worker, and turn worker before applying

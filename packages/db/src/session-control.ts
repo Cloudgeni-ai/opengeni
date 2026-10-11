@@ -24,6 +24,7 @@ import {
   childRequiresActionResolvedSummary,
 } from "./child-lifecycle-notices";
 import { closePendingSessionToolCallsInTransaction } from "./session-tool-call-settlement";
+import { copySubscriptionAuthorityCompatInTransaction } from "./subscription-core-acceptance-authority";
 import { deleteSubscriptionCoreCodexWaitersForTurns } from "./subscription-core-codex-waiter-cleanup";
 import {
   mirrorSessionRealtimeContextInTransaction,
@@ -2956,7 +2957,7 @@ async function insertChildOutboxRowInTransaction(
     ...input.childSession,
     parentSessionId,
   });
-  await db
+  const inserted = await db
     .insert(schema.sessionSystemUpdateOutbox)
     .values(
       withLosslessContentWriteVersion(
@@ -2987,7 +2988,16 @@ async function insertChildOutboxRowInTransaction(
         schema.sessionSystemUpdateOutbox.workspaceId,
         schema.sessionSystemUpdateOutbox.dedupeKey,
       ],
-    });
+    })
+    .returning({ id: schema.sessionSystemUpdateOutbox.id });
+  await copySubscriptionAuthorityCompatInTransaction(
+    db,
+    inserted.map((row) => ({
+      kind: "session_system_update_outbox" as const,
+      workspaceId: input.workspaceId,
+      id: row.id,
+    })),
+  );
 }
 
 async function enqueueCancelledChildOutboxInTransaction(

@@ -1715,8 +1715,10 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
       expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
       // Four Codex writer internals, four neutral ones (0707), the two
       // cutover-receipt and cutover-identity triggers (0712), and 0713's
-      // provider-keyed auto-assignment apply path.
-      expect(posture.subscriptionOwnerRoutines).toHaveLength(11);
+      // provider-keyed auto-assignment apply path, the accepted authority
+      // compatibility marker, guards, resolvers and commit check (19), and
+      // the fences' v2 comparison helpers (4).
+      expect(posture.subscriptionOwnerRoutines).toHaveLength(34);
       await disconnectDesignationCase();
       for (const routine of posture.subscriptionOwnerRoutines!) {
         expect(posture.privateRoutines.some((entry) => entry.name === routine.name)).toBe(false);

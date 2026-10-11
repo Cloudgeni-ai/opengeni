@@ -21,6 +21,7 @@ import {
 import { subjectHasLiveWorkspaceAuthorityInScope } from "./workspace-authority";
 
 import type { SubscriptionPoolTables } from "./subscription-pool-schema";
+import { subscriptionProviderCutoverCommittedInTransaction } from "./subscription-core-acceptance-authority";
 
 export type SubscriptionAccountCapacity = {
   available: boolean;
@@ -783,6 +784,12 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
     db: Database,
     input: { workspaceId: string },
   ): Promise<SubscriptionAuthoritySnapshot> {
+    // After the provider's drained cutover its v1 value is never read and
+    // never computed from live state: acceptance writes the column default
+    // (design 5.3, "v1 columns after a provider's cutover").
+    if (await subscriptionProviderCutoverCommittedInTransaction(db, options.provider)) {
+      return WORKSPACE_AUTHORITY_SNAPSHOT_V1;
+    }
     const [row] = await db
       .select({
         authorityGeneration: tables.credentials.organizationUserResourceAuthorityGeneration,
@@ -804,9 +811,7 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
         ),
       )
       .limit(1);
-    if (!row) {
-      return await resolveSubscriptionSharedPoolAuthoritySnapshotInTransaction(db, input);
-    }
+    if (!row) return await sharedPoolAuthoritySnapshotFromLiveState(db, input);
     return SubscriptionAuthoritySnapshotV1.parse({
       version: 1,
       scope: "user",
@@ -822,6 +827,16 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
    * caller's transaction must carry the account/workspace RLS context.
    */
   async function resolveSubscriptionSharedPoolAuthoritySnapshotInTransaction(
+    db: Database,
+    input: { workspaceId: string },
+  ): Promise<SubscriptionAuthoritySnapshot> {
+    if (await subscriptionProviderCutoverCommittedInTransaction(db, options.provider)) {
+      return WORKSPACE_AUTHORITY_SNAPSHOT_V1;
+    }
+    return await sharedPoolAuthoritySnapshotFromLiveState(db, input);
+  }
+
+  async function sharedPoolAuthoritySnapshotFromLiveState(
     db: Database,
     input: { workspaceId: string },
   ): Promise<SubscriptionAuthoritySnapshot> {

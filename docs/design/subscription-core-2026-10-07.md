@@ -3092,8 +3092,9 @@ the plan left room, for reviewers:
 - **Credential format.** 0707's neutral refresh writers stored the encryption
   envelope version in `credential_format`; they no longer touch it, so an
   adapter format such as a setup token's survives refresh. Codex stores
-  `v1` either way. The neutral connect writer still writes `v1`; a provider
-  with another format passes it when its writer lands (X2b, C2b).
+  `v1` either way. The neutral connect writers take the format from X2b on
+  (`credentialFormat`, and 0717's personal writer overload); `v1` when
+  omitted, as Codex does.
 - **Adapter.** `SubscriptionCoreAdapter.capabilitiesFor(format)` and
   `credential.format(credential)` let `autoRenews` depend on the credential
   format; the resolver and both refresh paths choose the refresher through
@@ -3478,6 +3479,71 @@ aborts the migration) and adds four owner-only helpers in
   The test stages each kind before 0714, runs the query there as an operator
   would, and asserts it lists exactly them; after 0714 the same query lists
   them less the repaired authorities.
+
+#### SuperGrok track
+
+##### X2b: routes and writers
+
+Dormant until the SuperGrok cutover receipt: each SuperGrok route, the
+SuperGrok access policy and every acceptance path first ask whether the
+`xai` receipt exists (one read); without it they run today's code
+unchanged. With it, `readSubscriptionCoreProviderRoute` decides: `core`
+serves the route from the shared core, `maintenance` (switch row missing or
+disabled) answers the typed 503 `subscription_core_cutover_disabled`.
+
+- **Routes (EP-S09, EP-S10, EP-S14, EP-S16).** The pool routes take an
+  optional core hook (`apps/api/src/routes/subscription-pool-core.ts`,
+  provider-neutral; Claude passes none yet and is unchanged). Paths, verbs,
+  bodies and response shapes stay; accounts are core connections projected
+  into the legacy SuperGrok account shape (`subscription-core-xai-compat.ts`;
+  the one quota window is the legacy percentage and reset), so the legacy
+  `accountJson` renders both. Route ids resolve through the cutover aliases.
+  Activate sets the effective primary at the scope the caller administers;
+  rotation maps to `spread` / `primary_first`; rename, allocator and
+  disconnect use the neutral writers, behind the legacy browser and scope
+  checks. Connect start fails closed in maintenance.
+- **Connect.** Organization and workspace connects create shared
+  connections through the neutral writer with `credential_format =
+  'xai_oauth_v1'`; the token identity subject is both the upstream account
+  and the person. `scope: "user"` creates a personal connection only in the
+  person's own Personal workspace and is refused elsewhere, never turned
+  into a shared one (the strictest reading of "personal connections only in
+  the owner's private session or Personal workspace"). Migration 0717 adds
+  the personal writer overload that takes the format; Codex keeps the 0707
+  writer and `v1`. A shared workspace's connect is step W's shape
+  ([§5.4](#54-workspace-managed-connections-as-organization-accounts)): an
+  organization account that workspace manages, which the organization
+  access editor shares. As for Codex on the core, a first connect leaves
+  the primary unset (`isActive` false until an administrator activates
+  one); with no primary the pool fails over across every eligible account
+  (D-13).
+- **Workspace listing.** `source` is `user` when the viewer's own personal
+  connections are listed (their Personal workspace, owner-only), else the
+  effective shared source. Listing personal rows requires the private
+  browser human, as legacy.
+- **Acceptance (EP-S18..S24).** The v2 writers merge every registered
+  provider's entry (the `core*V2` writers); with only Codex registered the
+  value is exactly Codex's. After each carrier insert on every path of
+  "Accepted authority across the cutover",
+  `copySubscriptionAuthorityCompatInTransaction` copies the record of each
+  provider whose own cutover holds records: one read while none does. A
+  carrier an upsert did not insert is skipped.
+- **v1 after the receipt.** The SuperGrok v1 resolvers return the column
+  default once the `xai` receipt exists; derived rows already copy v1
+  verbatim.
+- **Status (EP-S15) and media** stay with X2a; SDK, React and event names
+  and shapes (EP-S26..S31) are unchanged.
+
+Generalizations (old name, new name; the old names remain as aliases):
+`receiverCodexSubscriptionAuthorityV2InTransaction` to
+`receiverSubscriptionAuthorityV2InTransaction`; the
+`codexSubscriptionAuthorityV2*` call sites to the merged
+`coreSubscriptionAuthorityV2*` writers; the Codex workspace projection's
+personal join to `readSubscriptionCoreWorkspaceView`;
+`deliverSubscriptionCoreCodexWake` to `deliverSubscriptionCoreWake`;
+`read/get/updateSubscriptionCoreCodexModelConnectionAccess` to
+`read/get/updateSubscriptionCoreProviderModelConnectionAccess`; the neutral
+connect writer gains `credentialFormat` and `personal`.
 
 #### Verification plan
 

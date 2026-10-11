@@ -52,6 +52,11 @@ beforeAll(async () => {
     "0713_subscription_core_provider_keyed_reach.sql",
     // Redefines 0713's reach setters.
     "0714_subscription_workspace_managed_organization_accounts.sql",
+    // The accepted authority compatibility and the fences require 0712's receipts.
+    "0715_subscription_authority_compat.sql",
+    "0716_subscription_authority_fences.sql",
+    // 0717 replaces 0707's personal connect writer with the format-aware one.
+    "0717_subscription_core_personal_connect_format.sql",
   ];
   const owner = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
@@ -64,7 +69,7 @@ beforeAll(async () => {
     const [applied] = await owner<{ count: number }[]>`
       select count(*)::int as count from schema_migrations where name in ${owner(withheld)}`;
     if (applied?.count !== withheld.length)
-      throw new Error("0707, 0712, 0713 and 0714 were not applied by the second migrate");
+      throw new Error("the withheld migrations were not applied by the second migrate");
   } finally {
     await owner.end();
   }
