@@ -407,6 +407,24 @@ CREATE TEMP TABLE claude_cutover_workspace_settings AS
    AND primary_map.legacy_scope = 'workspace'
    AND primary_map.legacy_workspace_id = workspace.id;
 
+-- Workspace override writers take the organization's settings-lock key
+-- shared (the lock writer takes it exclusive), one organization at a time in
+-- ascending order, before touching rows; the migrator runs at READ COMMITTED
+-- and this transaction never re-keys a settings row.
+DO $claude_cutover_settings_locks$
+DECLARE organization uuid;
+BEGIN
+  FOR organization IN
+    SELECT DISTINCT ws.account_id FROM claude_cutover_workspace_settings ws
+    WHERE (ws.has_local_shared AND NOT (ws.rotation_locked AND ws.providers_locked))
+      OR (ws.personal AND ws.has_moved_personal AND NOT ws.fallback_locked)
+    ORDER BY ws.account_id
+  LOOP
+    PERFORM pg_advisory_xact_lock_shared(
+      hashtextextended('subscription-settings-locks:' || organization::text, 0));
+  END LOOP;
+END $claude_cutover_settings_locks$;
+
 INSERT INTO subscription_settings (
   account_id, workspace_id, claude_primary_connection_id, rotation, providers,
   personal_fallback_allowed, updated_by_subject_id, updated_at
