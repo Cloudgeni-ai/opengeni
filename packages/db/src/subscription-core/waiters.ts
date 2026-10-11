@@ -169,7 +169,9 @@ export async function wakeSubscriptionCoreCapacityWaiters(
           // The generic durable wake is the crash-safe backstop: the global
           // dispatcher delivers it even if the typed outbox row's signal is
           // never sent. A waiter that ended since the read leaves its session
-          // a spurious but harmless wake.
+          // a spurious but harmless wake. A waiter armed since the read is not
+          // bumped by this wake: arming evaluates fresh capacity, and the
+          // bounded recheck covers it, as with a single-statement snapshot.
           await enqueueSessionWorkflowWake(tx, {
             accountId: input.accountId,
             workspaceId,
