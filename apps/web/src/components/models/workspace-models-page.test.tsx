@@ -1267,7 +1267,7 @@ describe("One Models page for the organization and the workspace", () => {
     }
   });
 
-  test("a shared SuperGrok account not in use here gives its reason right after its tag", async () => {
+  test("a shared SuperGrok account not in use here gives its reason right after its tag, once its reach is known", async () => {
     organizationAdmin = true;
     routeOrganizationReads();
     const grok = (id: string, label: string, scope: "workspace" | "organization") => ({
@@ -1299,18 +1299,26 @@ describe("One Models page for the organization and the workspace", () => {
       activeAccountId: null,
       settings,
     }));
-    client.getModelConnectionAccess.mockImplementation(async (...args: unknown[]) => ({
-      policy:
-        (args[0] as { connectionId: string }).connectionId === "grok-far"
-          ? { ...openPolicy, allowedWorkspaces: ["workspace-b"] }
-          : openPolicy,
-      workspaces: [
-        { id: "workspace-a", name: "Design preview" },
-        { id: "workspace-b", name: "Research" },
-      ],
-      models: [],
-      personalWorkspacesSupported: true,
-    }));
+    const pending: (() => void)[] = [];
+    client.getModelConnectionAccess.mockImplementation(
+      (...args: unknown[]) =>
+        new Promise((resolve) =>
+          pending.push(() =>
+            resolve({
+              policy:
+                (args[0] as { connectionId: string }).connectionId === "grok-far"
+                  ? { ...openPolicy, allowedWorkspaces: ["workspace-b"] }
+                  : openPolicy,
+              workspaces: [
+                { id: "workspace-a", name: "Design preview" },
+                { id: "workspace-b", name: "Research" },
+              ],
+              models: [],
+              personalWorkspacesSupported: true,
+            }),
+          ),
+        ),
+    );
     const view = await render();
     try {
       await flush();
@@ -1318,6 +1326,12 @@ describe("One Models page for the organization and the workspace", () => {
         [...view.container.querySelectorAll<HTMLElement>("[data-slot=list-row]")].find(
           (candidate) => candidate.textContent?.includes(name),
         )!.textContent ?? "";
+      // No reason while its reach loads.
+      expect(row("Company grok")).not.toContain("Set aside");
+      await act(async () => {
+        for (const settle of pending.splice(0)) settle();
+      });
+      await flush();
       // The reason comes before the plan, so a phone doesn't cut it off.
       expect(row("Company grok")).toMatch(/Set aside[^]*SuperGrok Heavy/);
       expect(row("Research grok")).toMatch(/Not available here[^]*SuperGrok Heavy/);

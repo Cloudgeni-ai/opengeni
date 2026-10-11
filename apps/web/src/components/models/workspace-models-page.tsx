@@ -1261,7 +1261,7 @@ function OrganizationGatewayRow({
         reaches === false
           ? workspace.personal
             ? "Shared workspaces only"
-            : `Not available in ${workspaceName}`
+            : "Not available here"
           : null
       }
       onOpen={onOpen}
