@@ -619,6 +619,15 @@ describe("Claude refusal settlement on the core", () => {
     expect(wake).toHaveBeenCalledTimes(1);
   });
 
+  test("a wake that never returns cannot hold the join: its delivery is bounded", async () => {
+    const wake = spy(db, "wakeSubscriptionCoreProviderCapacityWaiters").mockImplementation(
+      (() => new Promise(() => undefined)) as never,
+    );
+    const turn = core({ quota: { settled: () => Promise.resolve(true) } });
+    await joinCoreClaudeObservations({ db: {} as db.Database }, turn, 10);
+    expect(wake).toHaveBeenCalledTimes(1);
+  });
+
   test("a 429 without the accepted model is not settled: it never widens to the whole connection", async () => {
     const binding = claudeCoreRefusal(undefined);
     expect(binding.classify(anthropic(429, "rate_limit_error"))).toBeNull();

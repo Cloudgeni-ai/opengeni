@@ -5277,7 +5277,10 @@ like C1a.
   with its reset, reach placement before the re-placement, and no write is
   dropped by the moved lease fence. One that ended a stored exhaustion
   wakes the account's Claude waiters (`quota_observed_available`), once per
-  joined chain. This relies on the partial-reading fix of
+  joined chain; the queued writes are awaited in full, while the wake
+  delivery is bounded like a finalizer step (the capacity outbox is its
+  backstop), so a stuck signal never holds settlement. This relies on the
+  partial-reading fix of
   `applyQuotaObservation` (#4120), so C1b merges on a base that contains it.
 - Waits. The core waiter accepts `claude` with the legacy Claude wait's
   vocabulary (`turn.capacity_waiting`, `turn.recovery.requested`,

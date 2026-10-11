@@ -52,6 +52,7 @@ import {
   type CoreRefusalBinding,
 } from "./subscription-core-settlement";
 import type { SubscriptionCoreTurn } from "./turn-context";
+import { TURN_FINALIZER_STEP_TIMEOUT_MS, waitForTurnFinalizerStep } from "./quiescence";
 import { subscriptionTurnLeaseHolderId } from "./subscription-lease";
 import { selectClaudeTurnCapacity } from "./xai-capacity";
 import {
@@ -529,21 +530,29 @@ export function claudeCoreRefusal(productModelId: string | undefined): CoreRefus
  * Joins a core Claude turn's usage-header observations so far, under its
  * still-held lease: one that ended a stored exhaustion is a capacity change
  * for the account's Claude waiters, delivered once per joined chain (the
- * refusal settlement and finalization may both join it). Never throws.
+ * refusal settlement and finalization may both join it). Never throws. The
+ * queued writes are awaited in full (nothing may be released while one is
+ * queued); the wake delivery is bounded like a finalizer step, and the
+ * capacity outbox remains its backstop.
  */
 export async function joinCoreClaudeObservations(
   services: CoreCodexWakeServices,
   core: SubscriptionCoreTurn,
+  wakeTimeoutMs = TURN_FINALIZER_STEP_TIMEOUT_MS,
 ): Promise<void> {
   const chain = core.quota?.settled();
   if (!chain || wokenObservationChains.get(core) === chain) return;
   const recovered = await chain.catch(() => false);
   if (!recovered || wokenObservationChains.get(core) === chain) return;
   wokenObservationChains.set(core, chain);
-  await wakeSubscriptionCoreWaitersAndDeliver(services, CLAUDE_CORE_WAIT_BINDING, {
-    accountId: core.identity.accountId,
-    reason: "quota_observed_available",
-  }).catch(() => undefined);
+  await waitForTurnFinalizerStep(
+    wakeSubscriptionCoreWaitersAndDeliver(services, CLAUDE_CORE_WAIT_BINDING, {
+      accountId: core.identity.accountId,
+      reason: "quota_observed_available",
+    }).catch(() => undefined),
+    undefined,
+    wakeTimeoutMs,
+  );
 }
 
 const wokenObservationChains = new WeakMap<SubscriptionCoreTurn, Promise<boolean>>();
