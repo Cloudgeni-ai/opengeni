@@ -190,6 +190,8 @@ async function createCoreXaiRealtimeConnectionSecret(input: {
       "credential_unavailable",
       "No eligible connected SuperGrok account is available",
     );
+  // The deployment switch for SuperGrok subscriptions, as the Codex broker checks its own.
+  if (!input.settings.supergrokSubscriptionEnabled) throw unavailable();
   const context = {
     accountId: input.accountId,
     workspaceId: input.workspaceId,

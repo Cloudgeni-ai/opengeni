@@ -6,10 +6,15 @@
  * recovery deadline (EP-N14, decision 6). The core runtime is scripted; its
  * SQL authority is covered by the db package's real-PostgreSQL suite.
  */
-import { beforeEach, describe, expect, mock, test } from "bun:test";
+import { afterAll, beforeEach, describe, expect, mock, test } from "bun:test";
 import * as realDb from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
 import { videoGenerationRequestDigest, type CanonicalVideoGenerationRequest } from "@opengeni/core";
+
+const originalFetch = globalThis.fetch;
+afterAll(() => {
+  globalThis.fetch = originalFetch;
+});
 
 const KEY = Buffer.alloc(32, 9);
 const settings = testSettings({ environmentsEncryptionKey: KEY.toString("base64") });
@@ -22,6 +27,10 @@ let calls: string[];
 let candidates: string[];
 let owner: { ownerSubjectId: string | null } | undefined;
 let lease: "granted" | "refused" | "relogin";
+let fenceHeld: boolean;
+let refreshRefused: boolean;
+let providerAccountId: string | null;
+let reservationRefused: boolean;
 let provider: (url: string, init?: RequestInit) => Promise<Response>;
 
 const transition = (status: string, extra: Partial<Operation> = {}) => {
@@ -42,14 +51,19 @@ mock.module("@opengeni/db", () => ({
       _db: unknown,
       _settings: unknown,
       scope: { kind: string; sessionOwnerSubjectId: string | null },
-      input: { candidates: string[]; operationKind: string; holderId: string },
+      input: {
+        candidates: string[];
+        operationKind: string;
+        holderId: string;
+        fetchImpl: (url: string, init?: RequestInit) => Promise<Response>;
+      },
       run: (operation: unknown) => Promise<unknown>,
     ) => {
       calls.push(
         `lease:${input.operationKind}:${input.candidates.join(",")}:${scope.kind}:${scope.sessionOwnerSubjectId}`,
       );
       if (lease === "refused") return { kind: "unavailable" };
-      const token = { credential: { accessToken: "core-access" }, providerAccountId: "xai-user" };
+      const token = { credential: { accessToken: "core-access" }, providerAccountId };
       return {
         kind: "ran",
         value: await run({
@@ -61,14 +75,17 @@ mock.module("@opengeni/db", () => ({
             },
             refresh: async () => {
               calls.push("refresh:core");
+              if (refreshRefused) throw new Error("relogin required");
               return token;
             },
           },
+          // The core's custody: reserve, then the operation's transport.
           fetch: async (url: string, init?: RequestInit) => {
+            if (reservationRefused) throw new Error("request reservation refused");
             calls.push(`fetch:${new Headers(init?.headers).get("authorization")}`);
-            return await provider(url, init);
+            return await input.fetchImpl(url, init);
           },
-          fence: async () => true,
+          fence: async () => fenceHeld,
         }),
       };
     },
@@ -172,6 +189,12 @@ beforeEach(() => {
   candidates = [CONNECTION];
   owner = { ownerSubjectId: "user:owner" };
   lease = "granted";
+  fenceHeld = true;
+  refreshRefused = false;
+  providerAccountId = "xai-user";
+  reservationRefused = false;
+  globalThis.fetch = (async (url: string | URL, init?: RequestInit) =>
+    await provider(String(url), init)) as typeof fetch;
   provider = async () => Response.json({ request_id: "xai-job-1" });
 });
 
@@ -181,6 +204,7 @@ describe("SuperGrok video on the shared core", () => {
       {} as never,
       settings,
       SUBSCRIPTION_CORE_XAI as never,
+      "supergrok_subscription",
       { accountId: "a", workspaceId: "w", sessionId: "s" },
     );
     expect(funded).toMatchObject({ fundingSource: "supergrok_subscription", connectionId: null });
@@ -196,6 +220,7 @@ describe("SuperGrok video on the shared core", () => {
         {} as never,
         settings,
         SUBSCRIPTION_CORE_XAI as never,
+        "supergrok_subscription",
         { accountId: "a", workspaceId: "w", sessionId: "s" },
       ),
     ).toBeNull();
@@ -206,6 +231,7 @@ describe("SuperGrok video on the shared core", () => {
         {} as never,
         settings,
         SUBSCRIPTION_CORE_XAI as never,
+        "supergrok_subscription",
         { accountId: "a", workspaceId: "w", sessionId: "s" },
       ),
     ).toBeNull();
@@ -291,5 +317,78 @@ describe("SuperGrok video on the shared core", () => {
     await reconcile();
     expect(calls).toContain("refresh:core");
     expect(calls.at(-1)).toBe("started:xai-job-2");
+  });
+
+  test("a 401 whose renewal is refused never reached xAI: a known failure, not outcome-unknown", async () => {
+    operation = admitted("accepted");
+    refreshRefused = true;
+    provider = async () => new Response("{}", { status: 401 });
+    expect(await reconcile()).toEqual({ action: "terminal", status: "provider_failed" });
+    expect(calls).toEqual([
+      `lease:video:${CONNECTION}:session:user:owner`,
+      "intent",
+      "fetch:Bearer core-access",
+      "refresh:core",
+      "provider_failed",
+    ]);
+  });
+
+  test("an operation lease lost before the start request is a known failure, and nothing is sent", async () => {
+    operation = admitted("accepted");
+    fenceHeld = false;
+    expect(await reconcile()).toEqual({ action: "terminal", status: "provider_failed" });
+    expect(calls).toEqual([
+      `lease:video:${CONNECTION}:session:user:owner`,
+      "intent",
+      "provider_failed",
+    ]);
+  });
+
+  test("a start that may have reached xAI after a 401 stays uncertain", async () => {
+    operation = admitted("accepted");
+    let first = true;
+    provider = async () => {
+      if (first) {
+        first = false;
+        return new Response("{}", { status: 401 });
+      }
+      throw new TypeError("connection reset");
+    };
+    expect(await reconcile()).toMatchObject({ action: "waiting" });
+    expect(calls.slice(-2)).toEqual(["fetch:Bearer core-access", "uncertain"]);
+  });
+
+  test("a poll whose lease is lost waits; while retaining, the deadline ends it retention_failed", async () => {
+    fenceHeld = false;
+    operation = admitted("provider_started", { providerJobId: "xai-job-1" });
+    expect(await reconcile()).toMatchObject({ action: "waiting" });
+    expect(calls).toEqual([`lease:video:${CONNECTION}:session:user:owner`, "reschedule"]);
+    calls = [];
+    lease = "refused";
+    operation = admitted("retaining", {
+      providerJobId: "xai-job-1",
+      recoveryDeadlineAt: new Date(Date.now() - 1_000),
+    } as Partial<Operation>);
+    expect(await reconcile()).toEqual({ action: "terminal", status: "retention_failed" });
+    expect(calls).toEqual([`lease:video:${CONNECTION}:session:user:owner`, "retention_failed"]);
+  });
+
+  test("a connection without a usable SuperGrok bearer waits before anything is sent", async () => {
+    operation = admitted("accepted");
+    providerAccountId = null;
+    expect(await reconcile()).toMatchObject({ action: "waiting" });
+    expect(calls).toEqual([`lease:video:${CONNECTION}:session:user:owner`, "reschedule"]);
+    expect(operation.status).toBe("accepted");
+  });
+
+  test("a refused request reservation never reached xAI: a known failure", async () => {
+    operation = admitted("accepted");
+    reservationRefused = true;
+    expect(await reconcile()).toEqual({ action: "terminal", status: "provider_failed" });
+    expect(calls).toEqual([
+      `lease:video:${CONNECTION}:session:user:owner`,
+      "intent",
+      "provider_failed",
+    ]);
   });
 });

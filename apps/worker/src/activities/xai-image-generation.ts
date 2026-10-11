@@ -7,8 +7,8 @@ import {
 import type { Settings } from "@opengeni/config";
 import {
   SUBSCRIPTION_CORE_XAI,
+  subscriptionCoreXaiBearer,
   subscriptionCoreXaiFetch,
-  subscriptionCoreXaiRequestAuth,
   type Database,
   type SubscriptionCoreFetch,
   type SubscriptionCoreProvider,
@@ -156,10 +156,10 @@ export async function executeCoreXaiImageGeneration(
           operationId: imageGenerationOperationIdentity(request).operationId,
           toolCallId: input.toolCallId,
           assertChatLease: input.assertChatLease,
+          bearer: subscriptionCoreXaiBearer,
           ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
         },
-        async ({ resolver, fetch }) => {
-          const auth = subscriptionCoreXaiRequestAuth(resolver);
+        async ({ auth, fetch }) => {
           const generated = await ports.generate({
             prompt: input.prompt,
             sessionId: input.sessionId,

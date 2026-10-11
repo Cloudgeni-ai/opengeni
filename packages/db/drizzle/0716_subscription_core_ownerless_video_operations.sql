@@ -15,13 +15,18 @@ DECLARE definition text; anchor text;
 BEGIN
   definition := pg_get_functiondef(
     'opengeni_private.guard_subscription_operation_lease_reference()'::regprocedure);
-  anchor := $old$IF NEW.operation_kind <> 'realtime'
+  anchor := $old$-- An ownerless session has no owner context to carry; only its
+          -- realtime operation exists, and no person stands behind it.
+          IF NEW.operation_kind <> 'realtime'
             OR nullif(current_setting('opengeni.initiating_human_subject_id', true), '') IS NOT NULL$old$;
   IF (length(definition) - length(replace(definition, anchor, ''))) <> length(anchor) THEN
     RAISE EXCEPTION 'Ownerless subscription operation guard source changed';
   END IF;
   EXECUTE replace(definition, anchor,
-    $new$IF NEW.operation_kind NOT IN ('realtime', 'video')
+    $new$-- An ownerless session has no owner context to carry; only its
+          -- realtime and video operations exist (shared connections only),
+          -- and no person stands behind them.
+          IF NEW.operation_kind NOT IN ('realtime', 'video')
             OR nullif(current_setting('opengeni.initiating_human_subject_id', true), '') IS NOT NULL$new$);
 END
 $ownerless_video_operations$;

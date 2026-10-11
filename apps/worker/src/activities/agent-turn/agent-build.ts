@@ -537,13 +537,15 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         workspaceId: input.workspaceId,
         provider: SUBSCRIPTION_CORE_XAI_PROVIDER,
       });
-      if (route === "core") {
+      if (route === "core" && eventing.modelRunSettings.supergrokSubscriptionEnabled) {
         // After the receipt: a shared connection for the session's owner,
-        // referenced (never copied) by the operation (EP-T17/EP-N12).
+        // referenced (never copied) by the operation (EP-T17/EP-N12), only
+        // while the deployment enables SuperGrok subscriptions.
         videoGenerationCredential = await subscriptionCoreVideoGenerationCredentialLease(
           db,
           eventing.modelRunSettings,
           SUBSCRIPTION_CORE_XAI,
+          videoGenerationPolicy.fundingSource,
           {
             accountId: input.accountId,
             workspaceId: input.workspaceId,

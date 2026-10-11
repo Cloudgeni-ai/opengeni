@@ -2649,7 +2649,7 @@ or refresh call.
 | EP-T09, EP-T10 waits and wakes | `getCodexCapacityWait` probes the xAI then Claude factory waiters; `reconcileCodexCapacityWait` branches on `provider`; `wakeSubscriptionCapacityWaiters`, `wakeOrganizationPool` | Core waiter and wake outbox. Activity and signal names, the optional `provider` field and its "absent means Codex" meaning stay for the legacy peek; core reconciliation looks the waiter up by its id and generation regardless of `provider`, so a recorded `provider: "xai"` or `"claude"` reconciles against the core waiter with the same preserved waiter id and generation. Organization wakes use the provider-neutral workspace enumeration. |
 | EP-T11..T15, EP-N27 accepted authority, goals, children, inbox, schedules | v1 readers in `accepted-subscription-authority.ts`, `session-queue-commands.ts`, `child-outbox-authority.ts`, `parent-wake.ts`, `scheduled-tasks.ts` (xAI human from `createdBy`, Claude from `ownerSubjectId`) | After the provider's cutover: the v2 entry written at acceptance, else the copied compatibility record, else no personal authority, through one provider-neutral reader. Schedules use the revision's authorizing membership for every provider (ends the EP-N27 asymmetry). |
 | EP-T16 compaction | Same capacity phase; cancelled with `requestPreserved` when no account | Core compaction placement exactly as Codex PR 2c (cancel, never park). |
-| EP-T17, EP-N12 in-turn video funding and selection | Live acceptance for non-xAI turns, un-leased `selectXaiCredentialForUse`, writes a policy pin | Per-operation core placement under the turn's accepted xAI authority with a `video` operation lease keyed by turn and call; never reads or writes the chat binding. An xAI turn prefers its own live chat connection. |
+| EP-T17, EP-N12 in-turn video funding and selection | Live acceptance for non-xAI turns, un-leased `selectXaiCredentialForUse`, writes a policy pin | As built in X2a: the first shared organization- or workspace-scoped candidate for the session's recorded owner funds the video (the session's explicit choice, then the effective primary, then pool order), for every chat model; the operation stores only a reference to that connection. Submission and polling take a session-bound `video` operation lease keyed by the operation, not the turn: the job outlives its turn, so neither a personal connection nor the turn's own chat connection (which may be personal) funds it. Never reads or writes the chat binding. |
 | Claude custom-model admission (`organization-model-providers.ts`) | Session creation reads the new session's `initial_claude`; fresh prompts pass the snapshot computed at acceptance; scheduled-task updates pass the task's frozen snapshot (`domain/scheduled-tasks.ts`). Admits only `organization` with a live organization Claude account (`workspaceClaudeSubscriptionActiveForAuthority`) | After C3: session creation and fresh prompts are always new acceptances and admit when the workspace's effective Claude source admits organization connections and a serviceable organization-scoped Claude connection exists. Scheduled-task updates read the task's `scheduled_task` record (admit only when `shared_pool` is `organization`) or, for post-cutover tasks, apply the same source rule; the liveness requirement stays in both cases. |
 | EP-T18, EP-S25, EP-N26 model listing and readiness | `loadWorkspaceModelSelectionInput` with frozen v1 snapshots; `connectionRestrictionsAndXaiReadiness`, `loadWorkspaceClaudeSubscriptionReadiness` | The core eligibility projection used for Codex (shared pools; personal only through the owner-only reader in the owner's Personal workspace or for an exact accepted turn). |
 | EP-N03 SuperGrok transcription | Caller's live pool, personal wins, no lease | Codex PR 2c rule: sessionless `transcription` operation lease on a shared organization- or workspace-scoped connection; personal and people-scoped refused; once selected, failures are not retried through another provider. |
@@ -4291,7 +4291,7 @@ until X3. SuperGrok-specific code is the adapter's `fetchUsage`,
   | `listSubscriptionCoreCodexOperationCandidates` | `.listSubscriptionCoreOperationCandidates` |
   | `buildSubscriptionCoreCodexConnectionTokenResolver` | `.buildSubscriptionCoreConnectionTokenResolver` |
   | `fetchSubscriptionCoreCodexUsage`, `usageQuotaObservation` | adapter `fetchUsage` and `decodeQuota`, `.probeSubscriptionCoreConnectionUsage` |
-  | Codex transcription helpers in `codex-subscription.ts` | `transcription/providers/subscription-core.ts` (`transcribeOnSubscriptionCore`) |
+  | Codex transcription helpers in `codex-subscription.ts` | shared helpers in `transcription/providers/subscription-core.ts`; SuperGrok runs on `transcribeOnSubscriptionCore`, Codex keeps its own lease loop over the shared helpers |
   | (new) | `.runSubscriptionCoreOperation`, `.probeSubscriptionCoreConnectionLiveModels`, `.readSubscriptionCoreWorkspaceConnections`, `.refreshExhaustedSubscriptionCoreQuota`, `deliverSubscriptionCoreProviderWake` |
 
 - **Transcription and realtime** (EP-N03, EP-N05/N07/S17) use shared
@@ -4315,20 +4315,41 @@ until X3. SuperGrok-specific code is the adapter's `fetchUsage`,
   owner context, refused lease, relogin) the run reschedules until the
   recovery deadline, then ends: `cancelled_before_submit` before
   submission, `outcome_unknown` after it, `retention_failed` while
-  retaining (decision 6). Migration 0716 admits a `video` lease in an
+  retaining (decision 6). A request counts as dispatched only when it
+  reaches the transport after the core's custody reservation commits, and
+  a 401 counts as none. A start stopped before any request was dispatched
+  (the operation lease's fence failed, the reservation was refused, or a
+  401 whose renewal needs a new sign-in) is verified
+  (`SubscriptionCoreVideoDispatchRejected`) and ends `provider_failed`
+  with no send time recorded, as the legacy path ends a relogin. It does
+  not go back to `accepted`: the strictest outcome is a known, refunded
+  failure, and the core path never replays a frozen start body. A start
+  that may have reached xAI stays `submission_uncertain` and ends
+  `outcome_unknown`. Funding does not read stored quota: the first shared
+  candidate funds the video even when it is exhausted (xAI then refuses
+  the start with a 429, which, as on the legacy path, is not treated as
+  proof that nothing started); quota-aware candidate order would change
+  the candidate routine Codex shares and is left for the SuperGrok
+  cutover hardening.
+  Core video funding and core realtime also require the deployment's
+  SuperGrok subscription switch. Migration 0716 admits a `video` lease in an
   ownerless session (shared connections only, no person), as 0698 did for
   ownerless turns; otherwise a scheduled task's video could never submit.
 - **Status** (EP-N23) reads the workspace's shared pool and validates the
   effective primary with one `liveModels` read; without an effective primary
   it reports `valid: false`. The payload shape is unchanged.
-- **Quota** (EP-N22). `refreshExhaustedXaiQuota` on the core route probes
+- **Quota** (EP-N22). Core SuperGrok placement (`beforePlacement`) and the
+  legacy callers on the core route (`refreshExhaustedXaiCoreQuota`) probe
   each shared connection whose stored quota is exhausted and was not read in
-  the last 30 seconds, in the caller's explicit workspace context, and wakes
-  the SuperGrok core waiters on recovery. The core keeps a running
+  the last 30 seconds, in the turn's explicit workspace context as the
+  core's service subject (never a person, so never a personal connection),
+  and wake the organization's SuperGrok core waiters on recovery (a shared
+  connection serves every workspace it reaches). The core keeps a running
   exhaustion deadline against later readings (design 2.2); the adapter flag
   `usageReadEndsQuotaExhaustion` (SuperGrok only) makes a billing reading
   below the limit end a quota exhaustion, the legacy SuperGrok rule. Codex
-  does not set it.
+  does not set it. An at-limit reading (no known reset) is not below the
+  limit and leaves the exhaustion and its deadline in place.
 - **Image** (EP-N09/N10). A core-placed SuperGrok turn generates images on
   its own placed connection (`executeCoreXaiImageGeneration`): an `image`
   operation lease keyed by the ledger operation id at the turn's execution
@@ -4336,7 +4357,11 @@ until X3. SuperGrok-specific code is the adapter's `fetchUsage`,
   lease and before every request, the bearer from the core seam and every
   physical request in the core's custody. Anything that stops it before its
   first request reaches xAI returns the ledger row to `prepared`
-  (`SubscriptionCoreImageDispatchRejected`). The session binding is never
+  (`SubscriptionCoreImageDispatchRejected`): a request counts only when it
+  reaches the transport after its custody reservation commits, a 401 counts
+  as none, and any failure before that (lease acquisition, a refused
+  reservation, a bearer that cannot be mapped to the xAI client's, a refused
+  renewal after a 401) is a rejection. The session binding is never
   read or written; a legacy-placed turn keeps the legacy image path.
 
 #### Verification plan

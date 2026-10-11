@@ -706,10 +706,12 @@ export const subscriptionCoreOperations = memoByProvider((provider: Subscription
       if (!observed || observed === current) return { applied: false, recovered: false };
       // An authoritative usage read below the limit ends a quota exhaustion
       // (adapter opt-in; this row is locked, and the write bumps its revision).
+      // An at-limit read without a known reset is not below the limit.
       const next =
         provider.adapter.usageReadEndsQuotaExhaustion === true &&
         observation.source === "usage_endpoint" &&
         observation.exhaustedUntil === null &&
+        observation.exhaustedKind === null &&
         observed.exhaustedKind === "quota"
           ? { ...observed, exhaustedUntil: null, exhaustedKind: null }
           : observed;

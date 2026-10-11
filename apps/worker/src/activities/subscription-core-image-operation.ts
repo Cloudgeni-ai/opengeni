@@ -12,8 +12,9 @@
  *
  * Anything that stops the operation before its first request reached the
  * provider (the chat lease or the operation lease is gone, the bearer
- * cannot be read) is a `SubscriptionCoreImageDispatchRejected`: the ledger
- * returns the operation to `prepared` instead of `outcome_unknown`.
+ * cannot be read or mapped to the provider client's bearer) is a
+ * `SubscriptionCoreImageDispatchRejected`: the ledger returns the operation
+ * to `prepared` instead of `outcome_unknown`.
  */
 import { createHash } from "node:crypto";
 import type { Settings } from "@opengeni/config";
@@ -34,7 +35,7 @@ export class SubscriptionCoreImageDispatchRejected extends Error {
   }
 }
 
-export async function runSubscriptionCoreImageOperation<T>(
+export async function runSubscriptionCoreImageOperation<T, Bearer>(
   input: {
     db: Database;
     settings: Settings;
@@ -48,18 +49,26 @@ export async function runSubscriptionCoreImageOperation<T>(
     toolCallId: string;
     /** The turn's chat-lease dispatch fence: the live attempt still holds the chat lease. */
     assertChatLease: () => Promise<void>;
+    /** Maps the core token to the provider client's bearer (inside the pre-dispatch guard). */
+    bearer: (token: SubscriptionCoreConnectionToken) => Bearer;
     fetchImpl?: SubscriptionCoreFetch;
   },
   generate: (operation: {
-    resolver: {
-      getToken: () => Promise<SubscriptionCoreConnectionToken>;
-      refresh: () => Promise<SubscriptionCoreConnectionToken>;
-    };
+    auth: { getToken: () => Promise<Bearer>; refresh: () => Promise<Bearer> };
     fetch: SubscriptionCoreFetch;
   }) => Promise<T>,
 ): Promise<T> {
-  // Requests that may have reached the provider (a refused bearer generated nothing).
+  // Requests that reached the transport, after the core's custody reservation
+  // committed (a 401 generated nothing). Until one did, every failure is a
+  // verified pre-dispatch rejection.
   let dispatched = 0;
+  const transport = input.fetchImpl ?? fetch;
+  const countedTransport: SubscriptionCoreFetch = async (url, init) => {
+    dispatched += 1;
+    const response = await transport(url, init);
+    if (response.status === 401) dispatched -= 1;
+    return response;
+  };
   const beforeDispatch = async <R>(step: () => Promise<R>): Promise<R> => {
     let result: R;
     try {
@@ -75,38 +84,43 @@ export async function runSubscriptionCoreImageOperation<T>(
     return result;
   };
   await beforeDispatch(input.assertChatLease);
-  const ran = await subscriptionCoreOperationConnections(
-    input.provider,
-  ).runSubscriptionCoreOperation(
-    input.db,
-    input.settings,
-    { kind: "turn", identity: input.identity },
-    {
-      candidates: [input.connectionId],
-      operationKind: "image",
-      operationId: input.operationId,
-      attemptId: input.attemptId,
-      generation: input.executionGeneration,
-      // Bounded (the column allows 256 characters): tool-call ids are provider-supplied.
-      holderId: `image:${createHash("sha256").update(`${input.attemptId}\0${input.toolCallId}`).digest("hex")}`,
-      ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
-    },
-    async ({ resolver, fetch, fence }) =>
-      await generate({
-        resolver: {
-          getToken: () => beforeDispatch(resolver.getToken),
-          refresh: () => beforeDispatch(resolver.refresh),
-        },
-        fetch: async (url, init) => {
-          await beforeDispatch(input.assertChatLease);
-          await beforeDispatch(fence);
-          dispatched += 1;
-          const response = await fetch(url, init);
-          if (response.status === 401) dispatched -= 1;
-          return response;
-        },
-      }),
-  );
+  let ran: { kind: "ran"; value: T } | { kind: "unavailable" };
+  try {
+    ran = await subscriptionCoreOperationConnections(input.provider).runSubscriptionCoreOperation(
+      input.db,
+      input.settings,
+      { kind: "turn", identity: input.identity },
+      {
+        candidates: [input.connectionId],
+        operationKind: "image",
+        operationId: input.operationId,
+        attemptId: input.attemptId,
+        generation: input.executionGeneration,
+        // Bounded (the column allows 256 characters): tool-call ids are provider-supplied.
+        holderId: `image:${createHash("sha256").update(`${input.attemptId}\0${input.toolCallId}`).digest("hex")}`,
+        fetchImpl: countedTransport,
+      },
+      async ({ resolver, fetch: custody, fence }) =>
+        await generate({
+          auth: {
+            getToken: () => beforeDispatch(async () => input.bearer(await resolver.getToken())),
+            refresh: () => beforeDispatch(async () => input.bearer(await resolver.refresh())),
+          },
+          fetch: async (url, init) => {
+            await beforeDispatch(input.assertChatLease);
+            await beforeDispatch(fence);
+            return await custody(url, init);
+          },
+        }),
+    );
+  } catch (error) {
+    // Lease acquisition, a refused custody reservation, or anything else
+    // before the first request reached the transport: nothing was sent.
+    if (dispatched === 0 && !(error instanceof SubscriptionCoreImageDispatchRejected)) {
+      throw new SubscriptionCoreImageDispatchRejected();
+    }
+    throw error;
+  }
   if (ran.kind === "unavailable") throw new SubscriptionCoreImageDispatchRejected();
   return ran.value;
 }

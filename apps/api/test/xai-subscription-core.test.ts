@@ -238,6 +238,22 @@ describe("SuperGrok realtime by route", () => {
     expect(calls).toContain(`lease:realtime:session:${SHARED}`);
     expect(calls.some((call) => call.startsWith("legacy:"))).toBe(false);
   });
+
+  test("core with SuperGrok subscriptions disabled for the deployment reads no credential", async () => {
+    calls.length = 0;
+    await expect(
+      createXaiRealtimeConnectionSecret({
+        db: {} as never,
+        settings: testSettings({ supergrokSubscriptionEnabled: false }),
+        accountId: ACCOUNT,
+        workspaceId: WORKSPACE,
+        subjectId: "user:caller",
+        sessionId: SESSION,
+        model: SUPERGROK_REALTIME_MODEL_ID,
+      } as never),
+    ).rejects.toBeInstanceOf(XaiRealtimeBrokerError);
+    expect(calls.filter((call) => !call.startsWith("route:"))).toEqual([]);
+  });
 });
 
 describe("SuperGrok status by route", () => {

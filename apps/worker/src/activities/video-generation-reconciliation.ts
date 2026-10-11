@@ -26,8 +26,8 @@ import {
   cancelVideoGenerationBeforeSubmit,
   SUBSCRIPTION_CORE_XAI,
   SUBSCRIPTION_CORE_XAI_PROVIDER,
+  subscriptionCoreXaiBearer,
   subscriptionCoreXaiFetch,
-  subscriptionCoreXaiRequestAuth,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import type { ObjectStorage } from "@opengeni/storage";
@@ -54,7 +54,10 @@ import {
   type XaiFetch,
   type XaiSubscriptionRequestContext,
 } from "@opengeni/xai-subscription";
-import { withSubscriptionCoreVideoConnection } from "./video-generation-subscription-core";
+import {
+  SubscriptionCoreVideoDispatchRejected,
+  withSubscriptionCoreVideoConnection,
+} from "./video-generation-subscription-core";
 import {
   buildXaiVideoStartBody,
   getXaiVideoGenerationStatus,
@@ -116,11 +119,12 @@ export async function reconcileVideoGenerationOperation(
       SUBSCRIPTION_CORE_XAI,
       operation,
       providerCredential.connectionId,
-      async ({ resolver, fetch }) =>
+      subscriptionCoreXaiBearer,
+      async ({ auth, fetch }) =>
         await reconcileWithProviderCredential(service, input, storage, key, operation, {
           apiKey: null,
           xai: {
-            auth: subscriptionCoreXaiRequestAuth(resolver),
+            auth,
             fetch: subscriptionCoreXaiFetch(fetch) as XaiFetch,
           },
         }),
@@ -312,6 +316,27 @@ async function reconcileWithProviderCredential(
       );
       return waitResult(service);
     } catch (error) {
+      if (error instanceof SubscriptionCoreVideoDispatchRejected) {
+        // Verified: the start never reached the provider (the operation
+        // lease's fence failed, or the bearer was refused and could not be
+        // renewed). The frozen request cannot be replayed on the core path,
+        // so the operation ends as a known failure, never outcome-unknown.
+        operation = retainReferences(
+          operation,
+          await settleVideoGenerationFailure(service.db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            operationId: operation.id,
+            requestDigest: operation.requestDigest,
+            status: "provider_failed",
+            publicReason:
+              "The connected subscription funding this video could not start it. Nothing was generated.",
+            privateError: privateError(error),
+          }),
+        );
+        await deliverTerminalResult(service, operation);
+        return { action: "terminal", status: terminalStatus(operation.status) };
+      }
       if (isPermanentProviderFailure(error)) {
         operation = retainReferences(
           operation,

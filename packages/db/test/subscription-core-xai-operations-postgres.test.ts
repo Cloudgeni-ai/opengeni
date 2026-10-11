@@ -35,20 +35,26 @@ const XAI = subscriptionCoreXaiProvider({
     };
   }) as never,
 });
+// Captured before mocking: the namespace is a live binding to the mock.
+const realProviderIds = realRegistry.subscriptionCoreProviderIds;
+const realProvider = realRegistry.subscriptionCoreProvider;
+const realAdapter = realRegistry.subscriptionCoreAdapter;
 mock.module(Bun.resolveSync("../src/subscription-core-providers", import.meta.dir), () => ({
   ...realRegistry,
-  subscriptionCoreProviderIds: () => [...realRegistry.subscriptionCoreProviderIds(), "xai"].sort(),
-  subscriptionCoreProvider: (id: string) =>
-    id === "xai" ? XAI : realRegistry.subscriptionCoreProvider(id),
-  subscriptionCoreAdapter: (id: string) =>
-    id === "xai" ? XAI.adapter : realRegistry.subscriptionCoreAdapter(id),
+  subscriptionCoreProviderIds: () => [...realProviderIds(), "xai"].sort(),
+  subscriptionCoreProvider: (id: string) => (id === "xai" ? XAI : realProvider(id)),
+  subscriptionCoreAdapter: (id: string) => (id === "xai" ? XAI.adapter : realAdapter(id)),
 }));
 const {
+  claimSessionWorkForAttempt,
   createDb,
   createSession,
+  enqueueSessionTurn,
   ensureManagedAccessForUser,
+  readSubscriptionCoreTurnIdentity,
   subscriptionCoreOperationConnections,
   subscriptionCoreOperations,
+  subscriptionCoreTurns,
   withSessionRlsActorContext,
 } = await import("../src");
 type DbClient = Awaited<ReturnType<typeof createDb>>;
@@ -251,6 +257,75 @@ async function bindingCount(sessionId: string): Promise<number> {
   return row!.count;
 }
 
+const TURN_MODEL = "supergrok/grok-4.7";
+
+/** An accepted, claimed SuperGrok turn in an owned session, placed on the core. */
+async function placedTurn(org: Org) {
+  const owned = await withSessionRlsActorContext({ subjectId: org.ownerSubjectId }, () =>
+    createSession(client!.db, {
+      accountId: org.accountId,
+      workspaceId: org.workspaceId,
+      initialMessage: "core SuperGrok image fixture",
+      resources: [],
+      metadata: {},
+      model: TURN_MODEL,
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      subjectId: org.ownerSubjectId,
+      createdBy: { kind: "subject" as const, subjectId: org.ownerSubjectId },
+      createdByContext: {},
+    }),
+  );
+  const turn = await withSessionRlsActorContext({ subjectId: org.ownerSubjectId }, () =>
+    enqueueSessionTurn(client!.db, {
+      accountId: org.accountId,
+      workspaceId: org.workspaceId,
+      sessionId: owned.id,
+      triggerEventId: crypto.randomUUID(),
+      temporalWorkflowId: `session-${owned.id}`,
+      source: "user",
+      prompt: "core SuperGrok image fixture",
+      resources: [],
+      tools: [],
+      model: TURN_MODEL,
+      reasoningEffort: "medium",
+      sandboxBackend: "none",
+      metadata: {},
+      initiator: { kind: "subject", subjectId: org.ownerSubjectId },
+    }),
+  );
+  const attemptId = crypto.randomUUID();
+  const claimed = await claimSessionWorkForAttempt(client!.db, org.workspaceId, {
+    sessionId: owned.id,
+    workflowId: `session-${owned.id}`,
+    workflowRunId: crypto.randomUUID(),
+    dispatchId: crypto.randomUUID(),
+    attemptId,
+    trigger: { kind: "next" },
+  });
+  if (claimed.action !== "claimed") throw new Error(`claim failed: ${claimed.reason}`);
+  const identity = await readSubscriptionCoreTurnIdentity(client!.db, {
+    accountId: org.accountId,
+    workspaceId: org.workspaceId,
+    sessionId: owned.id,
+    turnId: turn.id,
+  });
+  if (!identity) throw new Error("accepted turn identity was not readable");
+  const executionGeneration = claimed.turn.executionGeneration;
+  const placed = await subscriptionCoreTurns(XAI).placeSubscriptionCoreTurn(client!.db, {
+    identity,
+    attemptId,
+    executionGeneration,
+    holderId: `xai-turn:${owned.id}:${turn.id}:${attemptId}`,
+    productModelId: TURN_MODEL,
+    reasoningLevel: "medium",
+    leaseTtlMs: 120_000,
+  });
+  if (placed.kind !== "run") throw new Error(`placement did not run: ${placed.kind}`);
+  return { identity, attemptId, executionGeneration, connectionId: placed.connectionId };
+}
+
 async function runOn(
   org: Org,
   scope: Parameters<ReturnType<typeof operations>["runSubscriptionCoreOperation"]>[2],
@@ -325,7 +400,7 @@ describe.skipIf(!realDb)("SuperGrok operations on the shared core (X2a)", () => 
     expect(await bindingCount(sessionId)).toBe(0);
   });
 
-  test("video leases an organization-scope connection in owned and ownerless sessions (EP-N13, 0715)", async () => {
+  test("video leases an organization-scope connection in owned and ownerless sessions (EP-N13, 0716)", async () => {
     const org = await organization();
     const connection = await sharedConnection(org, "org-video");
     const personal = await personalConnection(org, "personal-video");
@@ -361,6 +436,48 @@ describe.skipIf(!realDb)("SuperGrok operations on the shared core (X2a)", () => 
     expect(image.kind).toBe("refused");
     expect(await bindingCount(owned)).toBe(0);
     expect(await bindingCount(ownerless)).toBe(0);
+  });
+
+  test("a placed SuperGrok turn's image lease is admitted at its execution generation only (EP-N09/N10)", async () => {
+    const org = await organization();
+    const connection = await sharedConnection(org, "image");
+    const turn = await placedTurn(org);
+    expect(turn.connectionId).toBe(connection);
+    const image = (generation: number) =>
+      operations().runSubscriptionCoreOperation(
+        client!.db,
+        settings,
+        { kind: "turn", identity: turn.identity },
+        {
+          candidates: [connection],
+          operationKind: "image",
+          operationId: crypto.randomUUID(),
+          attemptId: turn.attemptId,
+          generation,
+          holderId: `image:${crypto.randomUUID()}`,
+        },
+        async ({ resolver, fence }) => {
+          const token = await resolver.getToken();
+          return {
+            accessToken: (token.credential as { accessToken: string }).accessToken,
+            fenced: await fence(),
+          };
+        },
+      );
+    expect(await image(turn.executionGeneration)).toEqual({
+      kind: "ran",
+      value: { accessToken: "access-image", fenced: true },
+    });
+    // A stale or future execution generation is refused by the database guard.
+    expect(await image(turn.executionGeneration + 1)).toEqual({ kind: "unavailable" });
+    if (turn.executionGeneration > 1) {
+      expect(await image(turn.executionGeneration - 1)).toEqual({ kind: "unavailable" });
+    }
+    // Every image lease was released when its operation ended.
+    const [lease] = await shared!.admin<{ count: number }[]>`
+      select count(*)::int as count from subscription_operation_leases
+      where turn_id = ${turn.identity.turnId}::uuid`;
+    expect(lease!.count).toBe(0);
   });
 
   test("a video operation refreshes only under the core lock, once for concurrent callers (EP-N14)", async () => {
@@ -403,14 +520,20 @@ describe.skipIf(!realDb)("SuperGrok operations on the shared core (X2a)", () => 
     const org = await organization();
     const exhausted = await sharedConnection(org, "exhausted");
     const fresh = await sharedConnection(org, "fresh");
+    // The worker probes as the core's service subject (never a person).
+    const serviceScope = { ...workspaceScope(org), subjectId: "service:subscription-core" };
     const periodEnd = new Date(Date.now() + 7 * 86_400_000).toISOString();
     const seen: string[] = [];
     let usedPercent = 100;
+    let period: { end: string } | null = { end: periodEnd };
     const fetchImpl = (async (input: string | URL, init?: RequestInit) => {
       const authorization = new Headers(init?.headers).get("authorization") ?? "";
       seen.push(`${String(input).replace(/^.*\//, "")} ${authorization}`);
       return Response.json({
-        config: { creditUsagePercent: usedPercent, currentPeriod: { end: periodEnd } },
+        config: {
+          creditUsagePercent: usedPercent,
+          ...(period ? { currentPeriod: period } : {}),
+        },
       });
     }) as typeof fetch;
     const first = await operations().probeSubscriptionCoreConnectionUsage(
@@ -426,21 +549,36 @@ describe.skipIf(!realDb)("SuperGrok operations on the shared core (X2a)", () => 
     seen.length = 0;
     usedPercent = 40;
     expect(
-      await operations().refreshExhaustedSubscriptionCoreQuota(
-        client!.db,
-        settings,
-        workspaceScope(org),
-        { fetchImpl },
-      ),
+      await operations().refreshExhaustedSubscriptionCoreQuota(client!.db, settings, serviceScope, {
+        fetchImpl,
+      }),
     ).toEqual([]);
     expect(seen).toEqual([]);
+    // An at-limit reading without a known period end is not below the limit:
+    // the stored exhaustion and its deadline stand.
+    period = null;
+    usedPercent = 100;
     expect(
-      await operations().refreshExhaustedSubscriptionCoreQuota(
-        client!.db,
-        settings,
-        workspaceScope(org),
-        { fetchImpl, minIntervalMs: 0 },
-      ),
+      await operations().refreshExhaustedSubscriptionCoreQuota(client!.db, settings, serviceScope, {
+        fetchImpl,
+        minIntervalMs: 0,
+      }),
+    ).toEqual([]);
+    expect(seen).toEqual(["billing?format=credits Bearer access-exhausted"]);
+    const [stored] = await shared!.admin<
+      { exhausted_until: unknown; exhausted_kind: string | null }[]
+    >`
+      select quota->'exhaustedUntil' as exhausted_until, quota->>'exhaustedKind' as exhausted_kind
+      from subscription_connection_quota where connection_id = ${exhausted}::uuid`;
+    expect(stored).toEqual({ exhausted_until: Date.parse(periodEnd), exhausted_kind: "quota" });
+    seen.length = 0;
+    period = { end: periodEnd };
+    usedPercent = 40;
+    expect(
+      await operations().refreshExhaustedSubscriptionCoreQuota(client!.db, settings, serviceScope, {
+        fetchImpl,
+        minIntervalMs: 0,
+      }),
     ).toEqual([exhausted]);
     expect(seen).toEqual(["billing?format=credits Bearer access-exhausted"]);
     void fresh;

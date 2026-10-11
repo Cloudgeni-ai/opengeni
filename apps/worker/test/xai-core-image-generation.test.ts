@@ -5,10 +5,15 @@
  * or fence before dispatch is a verified pre-dispatch rejection (the ledger
  * row returns to `prepared`), anything after dispatch is not.
  */
-import { beforeEach, expect, mock, test } from "bun:test";
+import { afterAll, beforeEach, expect, mock, test } from "bun:test";
 import * as realDb from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
 import { XAI_IMAGE_MODEL } from "@opengeni/xai-subscription";
+
+const originalFetch = globalThis.fetch;
+afterAll(() => {
+  globalThis.fetch = originalFetch;
+});
 
 const CONNECTION = "55555555-5555-4555-8555-555555555555";
 const identity = {
@@ -22,6 +27,11 @@ let calls: string[];
 let lease: "granted" | "refused";
 let fenceLive: boolean;
 let leases: Array<{ scope: unknown; input: Record<string, unknown> }>;
+let status: number;
+let providerAccountId: string | null;
+let refreshRefused: boolean;
+let reservationRefused: boolean;
+let acquireFails: boolean;
 
 mock.module("@opengeni/db", () => ({
   ...realDb,
@@ -31,18 +41,29 @@ mock.module("@opengeni/db", () => ({
       _settings: unknown,
       scope: unknown,
       input: Record<string, unknown>,
-      run: (operation: unknown) => Promise<unknown>,
+      operate: (operation: unknown) => Promise<unknown>,
     ) => {
       leases.push({ scope, input });
+      if (acquireFails) throw new Error("connection reset while taking the lease");
       if (lease === "refused") return { kind: "unavailable" };
-      const token = { credential: { accessToken: "core-access" }, providerAccountId: "xai-user" };
+      const transport = input.fetchImpl as (url: string, init?: RequestInit) => Promise<Response>;
+      const token = { credential: { accessToken: "core-access" }, providerAccountId };
       return {
         kind: "ran",
-        value: await run({
-          resolver: { getToken: async () => token, refresh: async () => token },
+        value: await operate({
+          resolver: {
+            getToken: async () => token,
+            refresh: async () => {
+              calls.push("refresh:core");
+              if (refreshRefused) throw new Error("relogin required");
+              return token;
+            },
+          },
+          // The core's custody: reserve, then the operation's transport.
           fetch: async (url: string, init?: RequestInit) => {
+            if (reservationRefused) throw new Error("request reservation refused");
             calls.push(`fetch:${new Headers(init?.headers).get("authorization")}`);
-            return new Response("{}");
+            return await transport(url, init);
           },
           fence: async () => fenceLive,
         }),
@@ -60,6 +81,7 @@ type Outcome = { receipt?: unknown; rejected?: boolean; error?: unknown };
 function run(
   generate: (input: {
     getToken: () => Promise<{ accessToken: string }>;
+    refresh: () => Promise<{ accessToken: string }>;
     fetch: (url: string, init?: RequestInit) => Promise<Response>;
   }) => Promise<unknown>,
   chatLease: () => Promise<void> = async () => undefined,
@@ -114,6 +136,12 @@ beforeEach(() => {
   lease = "granted";
   fenceLive = true;
   leases = [];
+  status = 200;
+  providerAccountId = "xai-user";
+  refreshRefused = false;
+  reservationRefused = false;
+  acquireFails = false;
+  globalThis.fetch = (async () => new Response("{}", { status })) as unknown as typeof fetch;
 });
 
 test("runs under an image lease keyed by the ledger operation on the turn's connection", async () => {
@@ -171,4 +199,38 @@ test("a failure after the request may have reached the provider is not a rejecti
       throw new TypeError("connection reset after send");
     }),
   ).toMatchObject({ rejected: false });
+});
+
+test("a 401 generated nothing: a refused renewal after it is still a pre-dispatch rejection", async () => {
+  status = 401;
+  refreshRefused = true;
+  const retry = async (
+    input: Parameters<typeof send>[0] & {
+      refresh: () => Promise<{ accessToken: string }>;
+    },
+  ) => {
+    await send(input);
+    await input.refresh();
+  };
+  expect(await run(retry)).toMatchObject({ rejected: true });
+  expect(calls).toEqual(["fetch:Bearer core-access", "refresh:core"]);
+  // After a non-401 response the request may have done work: not a rejection.
+  calls = [];
+  status = 500;
+  expect(await run(retry)).toMatchObject({ rejected: false });
+});
+
+test("a connection without a usable SuperGrok bearer is rejected before dispatch", async () => {
+  providerAccountId = null;
+  expect(await run(send)).toMatchObject({ rejected: true });
+  expect(calls).toEqual([]);
+});
+
+test("a refused request reservation or a failed lease acquisition is rejected before dispatch", async () => {
+  reservationRefused = true;
+  expect(await run(send)).toMatchObject({ rejected: true });
+  reservationRefused = false;
+  acquireFails = true;
+  expect(await run(send)).toMatchObject({ rejected: true });
+  expect(calls).toEqual([]);
 });
