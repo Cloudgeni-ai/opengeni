@@ -1,30 +1,28 @@
 /**
  * Codex operations outside chat on the shared subscription core: the
- * provider-neutral operations runtime (`./subscription-core/operations`)
- * bound to Codex under the names M3 shipped, plus what is genuinely Codex:
- * the token snapshot (ChatGPT account id and FedRAMP flag), live usage from
- * `/wham/usage` and its quota decoding, the plan's voice entitlement, and
- * operation candidates over the Codex workspace projection.
+ * provider-neutral operations runtime (`./subscription-core/operations` and
+ * `./subscription-core/operation-connections`) bound to Codex under the
+ * names M3 shipped, plus what is genuinely Codex: the token snapshot
+ * (ChatGPT account id and FedRAMP flag), the legacy usage payload, and the
+ * plan's voice entitlement. The `/wham/usage` read and its quota decoding
+ * are the Codex adapter's `fetchUsage` and `decodeQuota`.
  */
-import { sql } from "drizzle-orm";
 import type { Settings } from "@opengeni/config";
 import {
-  CODEX_CLIENT_VERSION,
   CodexReloginRequired,
   codexPlanKey,
-  fetchCodexUsage,
-  normalizeCodexUsage,
   refreshCodexToken,
   type CodexFetch,
   type CodexUsagePayload,
 } from "@opengeni/codex";
-import type { SubscriptionQuota } from "@opengeni/subscriptions";
 import type { CodexCredentialTokenSnapshot } from "./codex-token-resolver";
-import { rawRows, type Database } from "./database";
+import { type Database } from "./database";
 import {
-  buildSubscriptionCoreCredentialResolver,
-  subscriptionCoreRefreshPolicy,
-} from "./subscription-core/credential-resolver";
+  subscriptionCoreOperationConnections,
+  type SubscriptionCoreConnectionResolverDeps,
+  type SubscriptionCoreConnectionToken,
+  type SubscriptionCoreOperationCandidate,
+} from "./subscription-core/operation-connections";
 import {
   subscriptionCoreOperations,
   type SubscriptionCoreConnectionCredential,
@@ -39,16 +37,10 @@ import {
   subscriptionCoreCodexProvider,
   type SubscriptionCoreCodexTokens,
 } from "./subscription-core-codex-adapter";
-import { projectSubscriptionCoreCodexWorkspace } from "./subscription-core-codex-compat";
-import { SubscriptionCoreCodexOperationUnavailableError } from "./subscription-core-codex-errors";
 import {
   reserveSubscriptionCoreCodexOperationRequest,
   settleSubscriptionCoreCodexOperationRequest,
 } from "./subscription-core-codex-requests";
-import {
-  readSubscriptionProviderCutoverState,
-  readSubscriptionSessionBinding,
-} from "./subscription-core-repository";
 
 export { SubscriptionCoreCodexOperationUnavailableError } from "./subscription-core-codex-errors";
 export {
@@ -201,12 +193,88 @@ export type SubscriptionCoreCodexConnectionResolverDeps =
     refreshCredential?: typeof refreshSubscriptionCoreCodexConnectionCredential;
   };
 
+/** The core connection credential behind a Codex-shaped one (test seams). */
+function coreConnectionCredential(
+  credential: SubscriptionCoreCodexConnectionCredential,
+): SubscriptionCoreConnectionCredential {
+  return {
+    connectionId: credential.connectionId,
+    refreshGeneration: credential.refreshGeneration,
+    credential: credential.tokens,
+    providerAccountId: credential.chatgptAccountId,
+    providerState: credential.isFedramp ? { isFedramp: true } : {},
+    planType: credential.planType,
+    expiresAt: credential.expiresAt,
+    lastRefreshAt: credential.lastRefreshAt,
+  };
+}
+
+/** The Codex binding and generic resolver seams for Codex-shaped deps. */
+function coreResolver(deps: SubscriptionCoreCodexConnectionResolverDeps): {
+  connections: ReturnType<typeof subscriptionCoreOperationConnections>;
+  deps: SubscriptionCoreConnectionResolverDeps;
+} {
+  const { load, refreshCredential, refresh: _refresh, ...rest } = deps;
+  return {
+    connections: subscriptionCoreOperationConnections(
+      deps.refresh
+        ? subscriptionCoreCodexProvider({ refresh: deps.refresh })
+        : SUBSCRIPTION_CORE_CODEX,
+    ),
+    deps: {
+      ...rest,
+      ...(load
+        ? {
+            load: async (db, settings, scope, connectionId, ref) => {
+              const loaded = await load(db, settings, scope, connectionId, ref);
+              return loaded.kind === "loaded"
+                ? { kind: "loaded", credential: coreConnectionCredential(loaded.credential) }
+                : loaded;
+            },
+          }
+        : {}),
+      ...(refreshCredential
+        ? {
+            refreshCredential: async (db, settings, scope, connectionId, ref, generation) => {
+              const outcome = await refreshCredential(
+                db,
+                settings,
+                scope,
+                connectionId,
+                ref,
+                generation,
+                deps,
+              );
+              // The Codex snapshot reads only the rotated access token.
+              return outcome.kind === "refreshed"
+                ? {
+                    kind: "refreshed",
+                    credential: { accessToken: outcome.accessToken },
+                    refreshGeneration: outcome.refreshGeneration,
+                  }
+                : outcome;
+            },
+          }
+        : {}),
+      relogin: (message) =>
+        new CodexReloginRequired(message ?? "The Codex subscription needs a new sign-in."),
+    },
+  };
+}
+
+function codexTokenSnapshot(token: SubscriptionCoreConnectionToken): CodexCredentialTokenSnapshot {
+  return {
+    accessToken: (token.credential as Pick<SubscriptionCoreCodexTokens, "accessToken">).accessToken,
+    chatgptAccountId: token.providerAccountId,
+    isFedramp: token.providerState.isFedramp === true,
+    credentialVersion: token.credentialVersion,
+    planType: token.planType,
+  };
+}
+
 /**
- * Bearer resolver for one operation (or connection read): the same snapshot
- * shape and staleness refresh as chat, with process-wide single-flight per
- * connection and generation (the shared core resolver, in its own flight
- * namespace). Only connection-level outcomes are shared; a refused
- * authorization belongs to the operation that hit it.
+ * Bearer resolver for one operation (or connection read): the core
+ * connection resolver with Codex's snapshot shape and relogin error.
  */
 export function buildSubscriptionCoreCodexConnectionTokenResolver(
   db: Database,
@@ -219,167 +287,40 @@ export function buildSubscriptionCoreCodexConnectionTokenResolver(
   getToken: () => Promise<CodexCredentialTokenSnapshot>;
   refresh: () => Promise<CodexCredentialTokenSnapshot>;
 } {
-  const loadCredential = deps.load ?? loadSubscriptionCoreCodexConnectionCredential;
-  const refreshCredential =
-    deps.refreshCredential ?? refreshSubscriptionCoreCodexConnectionCredential;
-  const snapshot = (
-    credential: SubscriptionCoreCodexConnectionCredential,
-    accessToken = credential.tokens.accessToken,
-    credentialVersion = credential.refreshGeneration,
-  ): CodexCredentialTokenSnapshot => ({
-    accessToken,
-    chatgptAccountId: credential.chatgptAccountId,
-    isFedramp: credential.isFedramp,
-    credentialVersion,
-    planType: credential.planType,
-  });
-  return buildSubscriptionCoreCredentialResolver<
-    SubscriptionCoreCodexConnectionCredential,
-    Extract<SubscriptionCoreCodexConnectionRefreshOutcome, { kind: "refreshed" }>,
-    CodexCredentialTokenSnapshot
-  >({
-    flightNamespace: "connection",
+  const core = coreResolver(deps);
+  const resolver = core.connections.buildSubscriptionCoreConnectionTokenResolver(
+    db,
+    settings,
+    scope,
     connectionId,
-    holderKey: ref
-      ? `${ref.operationId}:${ref.holderId}:${ref.generation}`
-      : `connection:${connectionId}`,
-    policy: (credential) =>
-      subscriptionCoreRefreshPolicy(SUBSCRIPTION_CORE_CODEX.adapter, credential.tokens),
-    load: () => loadCredential(db, settings, scope, connectionId, ref),
-    embeddedExpiry: (credential) =>
-      SUBSCRIPTION_CORE_CODEX.adapter.credential.expiry(credential.tokens),
-    refresh: (credential) =>
-      refreshCredential(db, settings, scope, connectionId, ref, credential.refreshGeneration, deps),
-    snapshot: (credential) => snapshot(credential),
-    refreshedSnapshot: (outcome, credential) =>
-      snapshot(credential, outcome.accessToken, outcome.refreshGeneration),
-    errors: {
-      relogin: (message) =>
-        new CodexReloginRequired(message ?? "The Codex subscription needs a new sign-in."),
-      leaseLost: () => new SubscriptionCoreCodexOperationUnavailableError(),
-      accessLost: () => new SubscriptionCoreCodexOperationUnavailableError(),
-    },
-  });
+    ref,
+    core.deps,
+  );
+  return {
+    getToken: async () => codexTokenSnapshot(await resolver.getToken()),
+    refresh: async () => codexTokenSnapshot(await resolver.refresh()),
+  };
 }
 
-export type SubscriptionCoreCodexOperationCandidate = {
-  connectionId: string;
-  planType: string | null;
-  /** The session's explicit choice (realtime only). */
-  explicit: boolean;
-  /** The connection's model allowlist (null: every model). */
-  allowedModelIds: string[] | null;
-};
+export type SubscriptionCoreCodexOperationCandidate = SubscriptionCoreOperationCandidate;
 
 /**
  * Shared organization- or workspace-scoped Codex connections that can serve
- * an operation in this workspace, in placement order: the session's
- * explicit choice (session scope only), then the effective primary, then
- * pool order. Only active, allocatable connections in the effective
- * inference pool qualify. Empty when the cutover is not enabled.
+ * an operation in this workspace, in placement order (the core's operation
+ * candidates).
  */
 export async function listSubscriptionCoreCodexOperationCandidates(
   db: Database,
   scope: Exclude<SubscriptionCoreCodexOperationScope, { kind: "turn" }>,
 ): Promise<SubscriptionCoreCodexOperationCandidate[]> {
-  const access = await withOperationScope(db, scope, async (tx) => {
-    if (
-      (await readSubscriptionProviderCutoverState(tx, {
-        accountId: scope.accountId,
-        provider: "codex",
-      })) !== "enabled"
-    )
-      return [];
-    const projection = await projectSubscriptionCoreCodexWorkspace(tx, scope);
-    const effective = projection.source.effectiveSource;
-    if (effective === "disabled") return [];
-    const scoped = await rawRows<{ id: string }>(
-      tx,
-      sql`select connection.id::text as id from subscription_connections connection
-        where connection.account_id = ${scope.accountId}::uuid
-          and connection.provider = 'codex' and connection.kind = 'subscription'
-          and connection.ownership = 'shared' and connection.status = 'active'
-          and (connection.scope_kind = 'organization'
-            or (connection.scope_kind = 'workspaces' and exists (
-              select 1 from subscription_connection_workspaces assignment
-              where assignment.account_id = connection.account_id
-                and assignment.connection_id = connection.id
-                and assignment.workspace_id = ${scope.workspaceId}::uuid)))`,
-    );
-    const inScope = new Set(scoped.map((row) => row.id));
-    const eligible = projection.accounts.filter(
-      (account) =>
-        inScope.has(account.id) &&
-        account.status === "active" &&
-        account.allocatorEnabled &&
-        account.source === effective,
-    );
-    let explicitId: string | null = null;
-    if (scope.kind === "session") {
-      const binding = await readSubscriptionSessionBinding(tx, scope).catch(() => null);
-      if (binding?.provider === "codex" && binding.choice === "explicit") {
-        explicitId = binding.connectionId;
-      }
-    }
-    const rank = (id: string, isActive: boolean) => (id === explicitId ? 0 : isActive ? 1 : 2);
-    return eligible
-      .map((account, index) => ({ account, index }))
-      .sort(
-        (a, b) =>
-          rank(a.account.id, a.account.isActive) - rank(b.account.id, b.account.isActive) ||
-          a.index - b.index,
-      )
-      .map(({ account }) => ({
-        connectionId: account.id,
-        planType: account.planType,
-        explicit: account.id === explicitId,
-        allowedModelIds: account.allowedModelIds ?? null,
-      }));
-  });
-  return access?.value ?? [];
+  return await subscriptionCoreOperationConnections(
+    SUBSCRIPTION_CORE_CODEX,
+  ).listSubscriptionCoreOperationCandidates(db, scope);
 }
 
 /** ChatGPT Free has no voice: its realtime calls are refused. */
 export function subscriptionCoreCodexPlanHasVoice(planType: string | null): boolean {
   return codexPlanKey(planType) !== "free";
-}
-
-function usageWindow(id: string, percent: number, resetAt: string | null) {
-  return {
-    id,
-    usedPercent: percent,
-    resetsAt: resetAt ? new Date(resetAt).getTime() : null,
-    status:
-      percent >= 100
-        ? ("exhausted" as const)
-        : percent >= 90
-          ? ("warning" as const)
-          : ("ok" as const),
-  };
-}
-
-function usageQuotaObservation(
-  usage: CodexUsagePayload,
-  observedRefreshGeneration: number,
-  observedAt: number,
-): SubscriptionQuota | null {
-  const windows = [
-    ...(usage.fiveHour
-      ? [usageWindow("primary", usage.fiveHour.percent, usage.fiveHour.resetAt)]
-      : []),
-    ...(usage.weekly ? [usageWindow("secondary", usage.weekly.percent, usage.weekly.resetAt)] : []),
-  ];
-  if (windows.length === 0) return null;
-  return {
-    windows,
-    modelCooldowns: {},
-    exhaustedUntil: null,
-    exhaustedKind: null,
-    revision: 0,
-    observedAt,
-    observedRefreshGeneration,
-    source: "usage_endpoint",
-  };
 }
 
 function errorUsagePayload(reason?: "needs_relogin"): CodexUsagePayload {
@@ -396,11 +337,10 @@ function errorUsagePayload(reason?: "needs_relogin"): CodexUsagePayload {
 }
 
 /**
- * Live usage for one shared connection in the caller's workspace scope:
- * resolve a refreshing bearer through the core seam, read /wham/usage,
- * normalize, and record the windows as a generation-fenced quota
- * observation. `recovered` reports an ended exhaustion (the caller wakes
- * the account's core waiters). Provider and refresh failures become an
+ * Live usage for one shared connection in the caller's workspace scope: the
+ * core quota probe with the Codex adapter's `/wham/usage` read, as the
+ * legacy route payload. `recovered` reports an ended exhaustion (the caller
+ * wakes the account's core waiters). Provider and refresh failures become an
  * error payload, never a thrown route error.
  */
 export async function fetchSubscriptionCoreCodexUsage(
@@ -411,54 +351,41 @@ export async function fetchSubscriptionCoreCodexUsage(
   fetchImpl: CodexFetch = fetch,
   deps: SubscriptionCoreCodexConnectionResolverDeps = {},
 ): Promise<{ usage: CodexUsagePayload; recovered: boolean }> {
-  const resolver = buildSubscriptionCoreCodexConnectionTokenResolver(
+  const core = coreResolver(deps);
+  const probe = await core.connections.probeSubscriptionCoreConnectionUsage(
     db,
     settings,
     scope,
     connectionId,
-    null,
-    deps,
+    {
+      requestFetch: buildSubscriptionCoreCodexOperationFetch(
+        db,
+        scope,
+        null,
+        connectionId,
+        fetchImpl,
+      ),
+      resolver: core.deps,
+    },
   );
-  let token: CodexCredentialTokenSnapshot;
-  try {
-    token = await resolver.getToken();
-  } catch (error) {
-    if (error instanceof SubscriptionCoreCodexOperationUnavailableError) {
+  switch (probe.kind) {
+    case "read":
+      return { usage: probe.response as CodexUsagePayload, recovered: probe.recovered };
+    case "not_visible":
       // Not readable in this workspace context (for example a personal or
       // people-scoped connection, which only its owner's turns may read):
       // "no data here", not an error.
       return { usage: { ...errorUsagePayload(), status: "no-data" }, recovered: false };
-    }
-    return {
-      usage: errorUsagePayload(error instanceof CodexReloginRequired ? "needs_relogin" : undefined),
-      recovered: false,
-    };
+    case "relogin":
+      return { usage: errorUsagePayload("needs_relogin"), recovered: false };
+    case "token_error":
+      return {
+        usage: errorUsagePayload(
+          probe.error instanceof CodexReloginRequired ? "needs_relogin" : undefined,
+        ),
+        recovered: false,
+      };
+    default:
+      return { usage: errorUsagePayload(), recovered: false };
   }
-  let usage: CodexUsagePayload;
-  try {
-    const response = await fetchCodexUsage(
-      {
-        accessToken: token.accessToken,
-        chatgptAccountId: token.chatgptAccountId,
-        isFedramp: token.isFedramp,
-        clientVersion: CODEX_CLIENT_VERSION,
-      },
-      buildSubscriptionCoreCodexOperationFetch(db, scope, null, connectionId, fetchImpl),
-    );
-    usage = normalizeCodexUsage(response.status, response.payload);
-  } catch {
-    return { usage: errorUsagePayload(), recovered: false };
-  }
-  if (usage.status === "error" || token.credentialVersion === null) {
-    return { usage, recovered: false };
-  }
-  const observation = usageQuotaObservation(usage, token.credentialVersion, Date.now());
-  if (!observation) return { usage, recovered: false };
-  const applied = await recordSubscriptionCoreCodexUsageObservation(
-    db,
-    scope,
-    connectionId,
-    observation,
-  ).catch(() => ({ applied: false, recovered: false }));
-  return { usage, recovered: applied.recovered };
 }

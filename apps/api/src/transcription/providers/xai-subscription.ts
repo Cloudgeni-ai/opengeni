@@ -4,7 +4,15 @@ import {
   type TranscriptionProvider,
   TranscriptionServiceError,
 } from "@opengeni/core";
-import { workspaceXaiSubscriptionActive, type Database } from "@opengeni/db";
+import {
+  getWorkspace,
+  readSubscriptionCoreProviderRouteInScope,
+  SUBSCRIPTION_CORE_XAI,
+  SUBSCRIPTION_CORE_XAI_PROVIDER,
+  subscriptionCoreXaiBearer,
+  type Database,
+  type SubscriptionCoreFetch,
+} from "@opengeni/db";
 import {
   XAI_CLIENT_MODE,
   XAI_CLIENT_VERSION,
@@ -13,6 +21,8 @@ import {
 } from "@opengeni/xai-subscription";
 import { buildXaiSubscriptionAuthorization } from "../../xai-subscription-auth";
 import { fetchError, responseError } from "./openai";
+import { workspaceXaiOperationAvailable } from "../../xai-subscription-core";
+import { coreTranscriptionUnavailable, transcribeOnSubscriptionCore } from "./subscription-core";
 
 const TRANSCRIBE_URL = `${XAI_PUBLIC_API_BASE_URL}/stt`;
 
@@ -30,12 +40,14 @@ export function createXaiSubscriptionTranscriptionProvider(input: {
       if (!context?.workspaceId || !context.subjectId) {
         return input.settings.supergrokSubscriptionEnabled;
       }
-      return await workspaceXaiSubscriptionActive(
-        input.db,
-        input.settings,
-        context.workspaceId,
-        context.subjectId,
-      );
+      const accountId = (await getWorkspace(input.db, context.workspaceId))?.accountId;
+      // An unresolvable account fails closed rather than guessing a path.
+      if (!accountId) return false;
+      return await workspaceXaiOperationAvailable(input.db, input.settings, {
+        accountId,
+        workspaceId: context.workspaceId,
+        subjectId: context.subjectId,
+      });
     },
     async transcribe({
       audio,
@@ -47,6 +59,38 @@ export function createXaiSubscriptionTranscriptionProvider(input: {
       requestId,
       signal,
     }) {
+      const send = async (fetcher: SubscriptionCoreFetch, accessToken: string) =>
+        await sendXaiTranscription(fetcher, accessToken, {
+          audio,
+          mimeType,
+          filename,
+          requestId,
+          signal,
+        });
+      const route = await readSubscriptionCoreProviderRouteInScope(input.db, {
+        accountId,
+        workspaceId,
+        provider: SUBSCRIPTION_CORE_XAI_PROVIDER,
+      });
+      if (route === "maintenance") throw coreTranscriptionUnavailable();
+      if (route === "core") {
+        // Decision 3: shared organization- or workspace-scoped connections
+        // only; personal SuperGrok accounts never transcribe on the core.
+        return await transcribeOnSubscriptionCore({
+          db: input.db,
+          settings: input.settings,
+          provider: SUBSCRIPTION_CORE_XAI,
+          fetch: fetchImpl,
+          accountId,
+          workspaceId,
+          subjectId,
+          requestId,
+          send: async (token, requestFetch) =>
+            await send(requestFetch, subscriptionCoreXaiBearer(token).accessToken),
+          unauthorized: async (response) =>
+            response.status === 401 || (await isXaiInvalidCredentialResponse(response)),
+        });
+      }
       let auth: Awaited<ReturnType<typeof buildXaiSubscriptionAuthorization>>;
       try {
         auth = await buildXaiSubscriptionAuthorization({
@@ -66,27 +110,7 @@ export function createXaiSubscriptionTranscriptionProvider(input: {
           message: "Transcription is unavailable.",
         });
       }
-      const request = async (accessToken: string) => {
-        const form = new FormData();
-        form.append(
-          "file",
-          new Blob([Uint8Array.from(audio).buffer], { type: mimeType }),
-          filename,
-        );
-        return await fetchImpl(TRANSCRIBE_URL, {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-            "User-Agent": `opengeni/${XAI_CLIENT_VERSION}`,
-            "x-grok-client-version": XAI_CLIENT_VERSION,
-            "x-grok-client-identifier": "opengeni",
-            "x-grok-client-mode": XAI_CLIENT_MODE,
-            "x-grok-session-id": requestId,
-          },
-          body: form,
-          ...(signal ? { signal } : {}),
-        });
-      };
+      const request = async (accessToken: string) => await send(fetchImpl, accessToken);
       const tokenForRequest = async (refresh: boolean) => {
         try {
           return await (refresh ? auth.context.refresh() : auth.context.getToken());
@@ -120,6 +144,38 @@ export function createXaiSubscriptionTranscriptionProvider(input: {
       };
     },
   };
+}
+
+async function sendXaiTranscription(
+  fetchImpl: SubscriptionCoreFetch,
+  accessToken: string,
+  input: {
+    audio: Uint8Array;
+    mimeType: string;
+    filename: string;
+    requestId: string;
+    signal?: AbortSignal | undefined;
+  },
+): Promise<Response> {
+  const form = new FormData();
+  form.append(
+    "file",
+    new Blob([Uint8Array.from(input.audio).buffer], { type: input.mimeType }),
+    input.filename,
+  );
+  return await fetchImpl(TRANSCRIBE_URL, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "User-Agent": `opengeni/${XAI_CLIENT_VERSION}`,
+      "x-grok-client-version": XAI_CLIENT_VERSION,
+      "x-grok-client-identifier": "opengeni",
+      "x-grok-client-mode": XAI_CLIENT_MODE,
+      "x-grok-session-id": input.requestId,
+    },
+    body: form,
+    ...(input.signal ? { signal: input.signal } : {}),
+  });
 }
 
 export async function isXaiInvalidCredentialResponse(response: Response): Promise<boolean> {

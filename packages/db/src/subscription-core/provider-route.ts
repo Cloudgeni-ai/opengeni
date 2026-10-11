@@ -14,7 +14,7 @@
  * a date (a provider cut over before receipts existed has `-infinity`).
  */
 import { sql } from "drizzle-orm";
-import { rawRows, type Database } from "../database";
+import { rawRows, withRlsContext, type Database } from "../database";
 
 export type SubscriptionCoreProviderRoute = "legacy" | "core" | "maintenance";
 
@@ -32,4 +32,20 @@ export async function readSubscriptionCoreProviderRoute(
   );
   if (row?.committed !== true) return "legacy";
   return row.enabled === true ? "core" : "maintenance";
+}
+
+/**
+ * The route read inside the caller's account (and workspace) scope: the
+ * switch row is visible only in its account's RLS context, so a caller
+ * without one would read a missing row and fail closed into `maintenance`.
+ */
+export async function readSubscriptionCoreProviderRouteInScope(
+  db: Database,
+  input: { accountId: string; workspaceId: string | null; provider: string },
+): Promise<SubscriptionCoreProviderRoute> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (tx) => await readSubscriptionCoreProviderRoute(tx, input),
+  );
 }

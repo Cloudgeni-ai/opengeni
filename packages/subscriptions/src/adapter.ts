@@ -194,7 +194,49 @@ export interface SubscriptionCoreAdapter<Credential = unknown> {
   readonly refresh: CredentialRefresher<Credential> | null;
   /** Stored needs-relogin text for a provider message (fills an empty one). */
   reloginText(message: string): string;
+  /**
+   * Optional out-of-turn quota probe: read the provider's usage endpoint
+   * with one connection's bearer. Every physical request goes through
+   * `input.fetch` (the core's request custody). The response is opaque to
+   * the core and decoded by `decodeQuota`.
+   */
+  fetchUsage?(input: SubscriptionCoreConnectionRead<Credential>): Promise<unknown>;
+  /**
+   * Decode a `fetchUsage` response into the shared quota model, fenced on
+   * the refresh generation of the bearer that read it. Null when the
+   * response carries no quota (an error payload or no windows).
+   */
+  decodeQuota?(input: {
+    response: unknown;
+    observedAt: number;
+    refreshGeneration: number;
+  }): SubscriptionQuota | null;
+  /**
+   * Optional live model catalog of one connection (provider model ids),
+   * read with its bearer through `input.fetch`. Throws when the provider
+   * refuses the credential.
+   */
+  liveModels?(input: SubscriptionCoreConnectionRead<Credential>): Promise<readonly ModelId[]>;
 }
+
+/** One connection's bearer as a connection read sees it. */
+export type SubscriptionCoreConnectionBearer<Credential> = {
+  /** The decoded, current credential. */
+  credential: Credential;
+  providerAccountId: string | null;
+  /** Provider-owned connection facts; only the provider's adapter interprets them. */
+  providerState: Record<string, unknown>;
+};
+
+/** What a connection read (usage, live catalog) receives from the core. */
+export type SubscriptionCoreConnectionRead<Credential> = {
+  /** The current bearer (refreshed under the core lock when stale). */
+  getToken(): Promise<SubscriptionCoreConnectionBearer<Credential>>;
+  /** A forced refresh under the core lock, after the provider refused the bearer. */
+  refresh(): Promise<SubscriptionCoreConnectionBearer<Credential>>;
+  /** A provider HTTP call under the core's request custody. */
+  fetch: (input: string | URL, init?: RequestInit) => Promise<Response>;
+};
 
 /** Renewal of one credential; the core persists the result before anything else. */
 export type CredentialRefresher<Credential> = {

@@ -169,6 +169,7 @@ import {
 } from "@opengeni/config";
 import { AddExternalWorkspaceMemberRequest } from "@opengeni/contracts/external-identities";
 import { parseRequestBody, parseRequestJson, readRequestJson } from "../http/request-body";
+import { workspaceXaiOperationAvailable } from "../xai-subscription-core";
 
 export function canonicalWorkspacePolicyModelIds(
   settings: Settings,
@@ -1152,7 +1153,11 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
     const [codexConnected, supergrokConnected, workspaceGatewayConnected] = await Promise.all([
       workspaceCodexRealtimeReady(deps, grant, workspaceId),
-      workspaceXaiSubscriptionActive(deps.db, deps.settings, workspaceId, grant.subjectId),
+      workspaceXaiOperationAvailable(deps.db, deps.settings, {
+        accountId: grant.accountId,
+        workspaceId,
+        subjectId: grant.subjectId,
+      }),
       workspaceVercelAiGatewayConnectionActive(deps.db, workspaceId),
     ]);
     const availability = (

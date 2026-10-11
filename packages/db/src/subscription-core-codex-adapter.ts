@@ -15,13 +15,17 @@
 import { sql } from "drizzle-orm";
 import {
   accessTokenExpiry,
+  CODEX_CLIENT_VERSION,
   CODEX_REFRESH_FALLBACK_MS,
   CODEX_REFRESH_WINDOW_MS,
   CodexReloginRequired,
+  fetchCodexUsage,
+  normalizeCodexUsage,
   parseIdToken,
   refreshCodexToken,
+  type CodexUsagePayload,
 } from "@opengeni/codex";
-import type { SubscriptionCoreAdapter } from "@opengeni/subscriptions";
+import type { SubscriptionCoreAdapter, SubscriptionQuota } from "@opengeni/subscriptions";
 import { withCodexTokenDeadline } from "./codex-token-resolver";
 import type { SubscriptionCoreProvider } from "./subscription-core/provider";
 import {
@@ -152,6 +156,68 @@ export function subscriptionCoreCodexAdapter(
       },
     },
     reloginText: subscriptionCoreCodexReloginText,
+    // Live usage from /wham/usage, normalized to the route payload; one
+    // request with the resolved bearer (no refresh-and-retry, as in M3).
+    async fetchUsage(read) {
+      const token = await read.getToken();
+      const response = await fetchCodexUsage(
+        {
+          accessToken: token.credential.accessToken,
+          chatgptAccountId: token.providerAccountId,
+          isFedramp: token.providerState.isFedramp === true,
+          clientVersion: CODEX_CLIENT_VERSION,
+        },
+        read.fetch,
+      );
+      return normalizeCodexUsage(response.status, response.payload);
+    },
+    decodeQuota: ({ response, observedAt, refreshGeneration }) => {
+      const usage = response as CodexUsagePayload;
+      return usage.status === "error"
+        ? null
+        : codexUsageQuotaObservation(usage, refreshGeneration, observedAt);
+    },
+  };
+}
+
+function codexUsageWindow(id: string, percent: number, resetAt: string | null) {
+  return {
+    id,
+    usedPercent: percent,
+    resetsAt: resetAt ? new Date(resetAt).getTime() : null,
+    status:
+      percent >= 100
+        ? ("exhausted" as const)
+        : percent >= 90
+          ? ("warning" as const)
+          : ("ok" as const),
+  };
+}
+
+/** The five-hour and weekly windows of a usage payload as a quota observation. */
+function codexUsageQuotaObservation(
+  usage: CodexUsagePayload,
+  observedRefreshGeneration: number,
+  observedAt: number,
+): SubscriptionQuota | null {
+  const windows = [
+    ...(usage.fiveHour
+      ? [codexUsageWindow("primary", usage.fiveHour.percent, usage.fiveHour.resetAt)]
+      : []),
+    ...(usage.weekly
+      ? [codexUsageWindow("secondary", usage.weekly.percent, usage.weekly.resetAt)]
+      : []),
+  ];
+  if (windows.length === 0) return null;
+  return {
+    windows,
+    modelCooldowns: {},
+    exhaustedUntil: null,
+    exhaustedKind: null,
+    revision: 0,
+    observedAt,
+    observedRefreshGeneration,
+    source: "usage_endpoint",
   };
 }
 

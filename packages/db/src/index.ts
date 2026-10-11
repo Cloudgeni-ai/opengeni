@@ -317,6 +317,29 @@ export {
   readSubscriptionCoreProviderRoute,
   type SubscriptionCoreProviderRoute,
 } from "./subscription-core/provider-route";
+export { readSubscriptionCoreProviderRouteInScope } from "./subscription-core/provider-route";
+// Provider-neutral operations outside chat (media, transcription, realtime,
+// usage and catalog probes), bound per provider by the caller.
+export {
+  subscriptionCoreOperations,
+  type SubscriptionCoreFetch,
+  type SubscriptionCoreOperationLeaseRef,
+  type SubscriptionCoreOperationScope,
+} from "./subscription-core/operations";
+export type { SubscriptionCoreProvider } from "./subscription-core/provider";
+export {
+  subscriptionCoreOperationConnections,
+  type SubscriptionCoreConnectionToken,
+  type SubscriptionCoreOperationCandidate,
+  type SubscriptionCoreUsageProbe,
+} from "./subscription-core/operation-connections";
+export {
+  SUBSCRIPTION_CORE_XAI,
+  SUBSCRIPTION_CORE_XAI_PROVIDER,
+  subscriptionCoreXaiBearer,
+  subscriptionCoreXaiFetch,
+  subscriptionCoreXaiRequestAuth,
+} from "./subscription-core-xai-adapter";
 import {
   listSubscriptionCoreCodexServingConnections,
   readCodexCutoverDispositionForWorkspace,

@@ -64,6 +64,7 @@ import {
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { projectClientModel } from "../model-catalog";
+import { readXaiCoreStatus } from "../xai-subscription-core";
 import { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
 import { requireConnectOwnerAuthority } from "../integrations/connect-authority";
 
@@ -104,12 +105,13 @@ async function resolveReadAuthority(
   c: Context,
   deps: ApiRouteDeps,
   workspaceId: string,
+  checkedGrant?: { accountId: string; subjectId: string },
 ): Promise<{
   accountId: string;
   subjectId: string;
   snapshot: XaiAuthoritySnapshot;
 }> {
-  const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+  const grant = checkedGrant ?? (await requireAccessGrant(c, deps, workspaceId, "workspace:read"));
   const snapshot = await resolveXaiProviderAccountAuthoritySnapshotForAcceptance(deps.db, {
     workspaceId,
     subjectId: grant.subjectId,
@@ -573,7 +575,26 @@ export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/supergrok/status", async (c) => {
     requireEnabled(deps);
     const workspaceId = c.req.param("workspaceId");
-    const authority = await resolveReadAuthority(c, deps, workspaceId);
+    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    const supergrokModels = async () =>
+      configuredModels(
+        withXaiSubscriptionCatalogProvider((await deps.resolveCatalogSettings()).settings),
+      )
+        .filter(
+          (model) =>
+            model.credentialSource.kind === "connected_subscription" &&
+            model.credentialSource.provider === "xai",
+        )
+        .map(projectClientModel);
+    const coreStatus = await readXaiCoreStatus(deps, {
+      accountId: grant.accountId,
+      workspaceId,
+      subjectId: grant.subjectId,
+      models: supergrokModels,
+      ...(deps.xaiFetch ? { fetch: deps.xaiFetch } : {}),
+    });
+    if (coreStatus) return c.json(coreStatus);
+    const authority = await resolveReadAuthority(c, deps, workspaceId, grant);
     const [accounts, settings] = await Promise.all([
       listXaiSubscriptionAccountsMetadata(deps.db, {
         workspaceId,
@@ -610,16 +631,7 @@ export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {
     } catch {
       valid = false;
     }
-    const catalogSettings = valid ? (await deps.resolveCatalogSettings()).settings : null;
-    const catalog = catalogSettings
-      ? configuredModels(withXaiSubscriptionCatalogProvider(catalogSettings))
-          .filter(
-            (model) =>
-              model.credentialSource.kind === "connected_subscription" &&
-              model.credentialSource.provider === "xai",
-          )
-          .map(projectClientModel)
-      : [];
+    const catalog = valid ? await supergrokModels() : [];
     return c.json({
       connected: true,
       valid,

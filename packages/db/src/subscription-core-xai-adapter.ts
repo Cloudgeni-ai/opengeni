@@ -19,16 +19,26 @@
  * the `xai` cutover receipt.
  */
 import {
+  fetchXaiSubscriptionModels,
+  fetchXaiSubscriptionQuota,
   refreshXaiToken,
   xaiAccessTokenExpiry,
   XaiSubscriptionReloginRequired,
+  type XaiFetchLike,
+  type XaiSubscriptionQuota,
+  type XaiSubscriptionTokenSnapshot,
 } from "@opengeni/xai-subscription";
 import {
   XAI_REFRESH_FALLBACK_MS,
   XAI_REFRESH_WINDOW_MS,
   XAI_SUBSCRIPTION_PROVIDER_ID,
 } from "@opengeni/xai-subscription";
-import type { SubscriptionCoreAdapter } from "@opengeni/subscriptions";
+import type {
+  SubscriptionCoreAdapter,
+  SubscriptionCoreConnectionBearer,
+  SubscriptionCoreConnectionRead,
+  SubscriptionQuota,
+} from "@opengeni/subscriptions";
 import { subscriptionCoreDefaultErrors } from "./subscription-core/errors";
 import type { SubscriptionCoreProvider } from "./subscription-core/provider";
 
@@ -55,6 +65,87 @@ export type SubscriptionCoreXaiAdapterDeps = {
   /** The OAuth token refresh call (tests inject a scripted upstream). */
   refresh?: typeof refreshXaiToken;
 };
+
+/**
+ * The SuperGrok bearer of a core connection: the access token and the token
+ * identity subject (`provider_account_id`), which every xAI request sends.
+ */
+export function subscriptionCoreXaiBearer(
+  bearer: SubscriptionCoreConnectionBearer<unknown>,
+): XaiSubscriptionTokenSnapshot {
+  const tokens = bearer.credential as SubscriptionCoreXaiTokens;
+  if (!bearer.providerAccountId) {
+    throw new XaiSubscriptionReloginRequired("The SuperGrok connection has no account identity.");
+  }
+  return { accessToken: tokens.accessToken, userId: bearer.providerAccountId };
+}
+
+/** An xAI request context over a core connection read or operation resolver. */
+export function subscriptionCoreXaiRequestAuth(source: {
+  getToken(): Promise<SubscriptionCoreConnectionBearer<unknown>>;
+  refresh(): Promise<SubscriptionCoreConnectionBearer<unknown>>;
+}): {
+  getToken: () => Promise<XaiSubscriptionTokenSnapshot>;
+  refresh: () => Promise<XaiSubscriptionTokenSnapshot>;
+} {
+  return {
+    getToken: async () => subscriptionCoreXaiBearer(await source.getToken()),
+    refresh: async () => subscriptionCoreXaiBearer(await source.refresh()),
+  };
+}
+
+/**
+ * The billing endpoint as one quota window (`billing`, the current credit
+ * period) and, at 100 percent, quota exhaustion until the period ends.
+ * Unknown billing is not evidence either way: no observation.
+ */
+export function decodeSubscriptionCoreXaiQuota(input: {
+  response: unknown;
+  observedAt: number;
+  refreshGeneration: number;
+}): SubscriptionQuota | null {
+  const quota = input.response as XaiSubscriptionQuota;
+  const usedPercent = quota.usedPercent;
+  if (usedPercent === null || !Number.isFinite(usedPercent)) return null;
+  const periodEnd = quota.period?.end?.getTime() ?? null;
+  const exhausted = usedPercent >= 100;
+  return {
+    windows: [
+      {
+        id: "billing",
+        usedPercent,
+        resetsAt: periodEnd,
+        status: exhausted ? "exhausted" : usedPercent >= 90 ? "warning" : "ok",
+      },
+    ],
+    modelCooldowns: {},
+    exhaustedUntil: exhausted ? periodEnd : null,
+    exhaustedKind: exhausted ? "quota" : null,
+    revision: 0,
+    observedAt: input.observedAt,
+    observedRefreshGeneration: input.refreshGeneration,
+    source: "usage_endpoint",
+  };
+}
+
+/** An xAI client's fetch over the core's custody fetch (fixed URLs only, never a Request). */
+export function subscriptionCoreXaiFetch(
+  fetchImpl: (input: string | URL, init?: RequestInit) => Promise<Response>,
+): XaiFetchLike {
+  return async (input, init) => {
+    if (typeof input !== "string" && !(input instanceof URL)) {
+      throw new Error("A core SuperGrok request must name its URL");
+    }
+    return await fetchImpl(input, init);
+  };
+}
+
+function xaiReadContext(read: SubscriptionCoreConnectionRead<unknown>) {
+  return {
+    context: subscriptionCoreXaiRequestAuth(read),
+    fetch: subscriptionCoreXaiFetch(read.fetch),
+  };
+}
 
 /** Decode the stored plaintext; fixed texts, never echoing the plaintext. */
 export function decodeSubscriptionCoreXaiCredential(plaintext: string): SubscriptionCoreXaiTokens {
@@ -157,6 +248,11 @@ export function subscriptionCoreXaiAdapter(
       },
     },
     reloginText: (message) => (message.trim().length > 0 ? message : RELOGIN_TEXT),
+    // Quota is the billing endpoint; never an inference request.
+    fetchUsage: async (read) => await fetchXaiSubscriptionQuota(xaiReadContext(read)),
+    decodeQuota: decodeSubscriptionCoreXaiQuota,
+    liveModels: async (read) =>
+      (await fetchXaiSubscriptionModels(xaiReadContext(read))).map((model) => model.slug),
   };
 }
 
@@ -170,9 +266,6 @@ export function subscriptionCoreXaiProvider(
     sessionCompactionLock: null,
     errors: subscriptionCoreDefaultErrors("SuperGrok"),
     settings: { primaryColumn: "xai_primary_connection_id" },
-    // No organization reach table for SuperGrok (design 5.1.3): an
-    // organization-scope connection already reaches later workspaces.
-    organizationAllocatorChanged: null,
   };
 }
 
