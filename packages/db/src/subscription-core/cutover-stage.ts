@@ -173,7 +173,8 @@ export async function writeSubscriptionCutoverConnections<Row>(
         provider_subject_id, created_at, updated_at, extra_credits_enabled,
         extra_credits_version, extra_credits_updated_by_subject_id, extra_credits_updated_at
       ) VALUES (
-        ${connection.id}::uuid, ${connection.accountId}::uuid, ${provider}, 'subscription',
+        ${connection.id}::uuid, ${connection.accountId}::uuid, ${provider},
+        opengeni_private.subscription_core_connection_kind(${provider}),
         ${connection.identity}, ${staged.accountEmail}, ${staged.label}, ${staged.planType},
         ${encryptEnvironmentValue(encryptionKey, staged.plaintext)}, ${staged.credentialFormat},
         ${staged.expiresAt}, ${staged.lastRefreshAt}, ${staged.refreshGeneration},
