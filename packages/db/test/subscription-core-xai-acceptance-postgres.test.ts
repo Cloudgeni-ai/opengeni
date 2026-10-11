@@ -11,6 +11,7 @@
  * */
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { sql } from "drizzle-orm";
 import * as realRegistry from "../src/subscription-core-providers";
 import { SUBSCRIPTION_CORE_XAI } from "../src/subscription-core-xai-adapter";
 
@@ -19,6 +20,7 @@ const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
 const db = await import("../src");
 const { encryptEnvironmentValue } = await import("../src/environment-crypto");
+const { rawRows } = await import("../src/database");
 const { connectSubscriptionCoreConnection } = await import("../src/subscription-core/connections");
 
 let shared: SharedTestDatabase | null = null;
@@ -218,6 +220,16 @@ afterAll(async () => {
 }, 180_000);
 
 describe.skipIf(!realDb)("SuperGrok on the shared core's writers (M4 X2b)", () => {
+  test("runs as the non-superuser, non-bypass application role", async () => {
+    const [role] = await rawRows<{ currentUser: string; superuser: boolean; bypassRls: boolean }>(
+      client!.db,
+      sql`select current_user as "currentUser", rolsuper as superuser,
+          rolbypassrls as "bypassRls"
+        from pg_catalog.pg_roles where rolname = current_user`,
+    );
+    expect(role).toEqual({ currentUser: "opengeni_app", superuser: false, bypassRls: false });
+  });
+
   test("production registers Codex and SuperGrok", () => {
     expect(realRegistry.subscriptionCoreProviderIds()).toEqual(["codex", "xai"]);
   });

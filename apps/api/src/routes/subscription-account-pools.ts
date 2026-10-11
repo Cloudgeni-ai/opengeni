@@ -63,6 +63,9 @@ type PoolRepository = {
   wakeSubscriptionCapacityWaiters: typeof wakeXaiCapacityWaiters;
 };
 
+/** The legacy pool account shape SuperGrok and Claude share (SuperGrok's metadata defines it). */
+export type SubscriptionPoolAccount = XaiSubscriptionAccountMetadata;
+
 /** Account CRUD uses one authority, allocator and wake contract for every pool. */
 export function registerSubscriptionAccountPoolRoutes(
   app: Hono,

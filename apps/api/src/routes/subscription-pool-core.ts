@@ -30,16 +30,16 @@ import {
   type SubscriptionCoreDisconnectOutcome,
   type SubscriptionCoreProvider,
   type SubscriptionCoreWake,
-  type XaiSubscriptionAccountMetadata,
 } from "@opengeni/db";
-import { SUBSCRIPTION_CORE_CUTOVER_DISABLED, typedHttpError } from "./codex-core";
+import type { SubscriptionPoolAccount } from "./subscription-account-pools";
+import { SUBSCRIPTION_CORE_CUTOVER_DISABLED, typedHttpError } from "./subscription-core-http";
 import {
   requirePrivateSubscriptionHuman,
   requireSubscriptionScopeMutation,
 } from "./subscription-pool-access";
 
-/** The legacy pool account shape the SuperGrok and Claude routes share. */
-type PoolAccount = XaiSubscriptionAccountMetadata;
+/** The legacy pool account shape every pool route shares. */
+type PoolAccount = SubscriptionPoolAccount;
 
 export type SubscriptionCorePoolProjection = {
   source: "workspace" | "user" | "organization";
@@ -418,6 +418,18 @@ export async function coreOrganizationAccount(
   }
   let wake: SubscriptionCoreWake | null = null;
   if ("activate" in change) {
+    // Legacy refused a primary that cannot serve: only an active account the
+    // allocator may use becomes the organization's primary.
+    const projection = await core.organizationProjection(deps.db, {
+      organizationId: actor.organizationId,
+      subjectId: actor.actorSubjectId,
+    });
+    const account = projection.accounts.find((candidate) => candidate.id === connectionId);
+    if (!account) throw notFound();
+    if (account.status !== "active" || !account.allocatorEnabled)
+      throw new HTTPException(409, {
+        message: `Choose an active, enabled ${displayName} subscription`,
+      });
     const result = await setSubscriptionCorePrimary(deps.db, core.binding, {
       ...admin,
       connectionId,

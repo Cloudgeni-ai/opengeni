@@ -10,8 +10,9 @@
 -- the live 0707 definition (drift-checked anchors, never a restated body),
 -- so it keeps every check, lock, search path and security mode of the
 -- original. The 14-argument writer stays unchanged for binaries that still
--- call it (Codex writes `v1` through either). Nothing else changes: no
--- table, policy or lock. The retirement migration drops the old overload
+-- call it (Codex writes `v1` through either). It also adds the owner-run
+-- "inserted by this transaction" predicate described below. No table,
+-- policy or lock changes. The retirement migration drops the old overload
 -- when no older binary can run.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '5min';
@@ -46,13 +47,45 @@ $new$]
 END
 $personal_connect_format$;
 
+-- The "inserted by this transaction" predicate of the compatibility copy
+-- (0715) for a carrier the application role cannot read: a scheduled task
+-- revision. A writer that may return an existing revision (a replayed or
+-- detached reusable-session materialization) skips the copy, which the copy
+-- routine would otherwise refuse with 55000 for a revision an earlier
+-- transaction inserted. It answers only for a carrier of the current account
+-- and workspace settings and reveals nothing else. No table, policy or lock.
+CREATE FUNCTION opengeni_private.subscription_authority_carrier_inserted_now(
+  p_carrier_kind text, p_workspace_id uuid, p_carrier_id uuid, p_task_authority_revision bigint)
+RETURNS boolean
+LANGUAGE plpgsql STABLE
+SECURITY DEFINER
+AS $body$
+DECLARE carrier_state record;
+BEGIN
+  IF p_workspace_id IS DISTINCT FROM nullif(current_setting('opengeni.workspace_id', true), '')::uuid THEN
+    RETURN false;
+  END IF;
+  SELECT * INTO carrier_state FROM opengeni_subscription_internal.subscription_compat_carrier_state(
+    p_carrier_kind, p_workspace_id, p_carrier_id, p_task_authority_revision);
+  RETURN carrier_state.inserted_at IS NOT NULL
+    AND carrier_state.account_id IS NOT DISTINCT FROM
+      nullif(current_setting('opengeni.account_id', true), '')::uuid
+    AND carrier_state.inserted_at = pg_catalog.transaction_timestamp();
+END
+$body$;
+
 -- PUBLIC loses the default EXECUTE; every configured application role gets
 -- it (0713's pattern), so the previous release's readiness, which rejects an
 -- opengeni_private routine the runtime role cannot execute, passes before
 -- provision-roles runs.
 DO $personal_connect_format_grants$
-DECLARE application_role text;
+DECLARE application_role text; data_schema text := current_schema();
 BEGIN
+  EXECUTE format(
+    'ALTER FUNCTION opengeni_private.subscription_authority_carrier_inserted_now(text,uuid,uuid,bigint) '
+    'SET search_path = pg_catalog, %I, opengeni_private, pg_temp', data_schema);
+  REVOKE ALL ON FUNCTION opengeni_private.subscription_authority_carrier_inserted_now(
+    text,uuid,uuid,bigint) FROM PUBLIC;
   REVOKE ALL ON FUNCTION opengeni_private.connect_subscription_core_personal(
     text,uuid,uuid,text,text,text,text,text,jsonb,timestamptz,timestamptz,text,text,text,text)
     FROM PUBLIC;
@@ -67,7 +100,8 @@ BEGIN
   LOOP
     EXECUTE format(
       'GRANT EXECUTE ON FUNCTION opengeni_private.connect_subscription_core_personal('
-      'text,uuid,uuid,text,text,text,text,text,jsonb,timestamptz,timestamptz,text,text,text,text) TO %I',
+      'text,uuid,uuid,text,text,text,text,text,jsonb,timestamptz,timestamptz,text,text,text,text), '
+      'opengeni_private.subscription_authority_carrier_inserted_now(text,uuid,uuid,bigint) TO %I',
       application_role);
   END LOOP;
 END

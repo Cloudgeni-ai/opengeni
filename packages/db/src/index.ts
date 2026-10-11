@@ -437,6 +437,7 @@ import {
   type SubscriptionCoreWakeScope,
 } from "./subscription-core/waiters";
 import { SUBSCRIPTION_CORE_CODEX_PROVIDER } from "./subscription-core-codex-provider";
+import type { SubscriptionCoreWake } from "./subscription-core/administration";
 export {
   EMPTY_SUBSCRIPTION_AUTHORITY_V2,
   copySubscriptionAuthorityCompatInTransaction,
@@ -29263,7 +29264,7 @@ export async function readSubscriptionCoreProviderRouteForRequest(
 export async function deliverSubscriptionCoreWake(
   db: Database,
   provider: string,
-  wake: SubscriptionCoreCodexWake | null,
+  wake: SubscriptionCoreWake | null,
   /** The provider's display name in the log line. */
   label: string = provider,
 ): Promise<void> {
