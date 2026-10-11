@@ -66,6 +66,8 @@ const subscriptionCoreMigrations = [
   "0724_subscription_settings_locks.sql",
   // Patches the acceptance writers withheld 0669, 0688 and 0707 define.
   "0726_subscription_personal_acceptance_reads.sql",
+  // Patches the operation-lease guard withheld 0671 and 0711 define.
+  "0716_subscription_core_ownerless_video_operations.sql",
 ] as const;
 const key = Buffer.alloc(32, 67);
 const ids = {
