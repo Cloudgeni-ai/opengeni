@@ -985,8 +985,11 @@ describe.skipIf(!realDb)("0716 compatibility paths after a provider's own receip
           { deliver: [message] },
         );
       };
+      // Without the copy the delivering turn's effective authority differs
+      // from the message's, so 0717's inbox fence refuses it (42501) before
+      // the deferred check would (23514).
       expect(await failure(() => delivered(org!.subjectId, ownerCaller!, false))).toStartWith(
-        "23514",
+        "42501",
       );
       expect(
         await records("session_turn", await delivered(org!.subjectId, ownerCaller!, true)),
