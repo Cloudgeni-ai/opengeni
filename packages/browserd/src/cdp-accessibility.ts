@@ -110,6 +110,21 @@ export function normalizeCdpAccessibilityTree(options: {
       nameSources: nameSourceTokens(node.name?.sources),
     });
   }
+  // The spin buttons of a native date/time input edit one part each and do
+  // not take text. Fill belongs to the input, which accepts a whole value.
+  for (const entry of entriesByNodeId.values()) {
+    if (entry.role !== "spinbutton" || !entry.actions.includes("fill")) continue;
+    let parentId = entry.parentNodeId;
+    for (let depth = 0; depth < 4 && parentId; depth++) {
+      const parent = rawById.get(parentId);
+      if (!parent) break;
+      if (NATIVE_DATE_TIME_ROLES.has(roleValue(parent))) {
+        entry.actions = entry.actions.filter((action) => action !== "fill");
+        break;
+      }
+      parentId = typeof parent.parentId === "string" ? parent.parentId : null;
+    }
+  }
 
   const roots: InteractionSemanticNodeValue[] = [];
   let focusedRef: string | null = null;
@@ -233,6 +248,9 @@ function isEditableControlRole(role: string): boolean {
   return ["textbox", "searchbox", "combobox", "spinbutton"].includes(role);
 }
 
+/** Chromium's roles for native date, time, month, week and datetime-local inputs. */
+const NATIVE_DATE_TIME_ROLES: ReadonlySet<string> = new Set(["Date", "DateTime", "InputTime"]);
+
 function semanticRef(options: {
   controllerGeneration: string;
   targetId: string;
@@ -297,6 +315,7 @@ function actionsForRole(
   if (["textbox", "searchbox", "spinbutton"].includes(role)) {
     return ["focus", "fill", "type", "press"];
   }
+  if (NATIVE_DATE_TIME_ROLES.has(role)) return ["focus", "fill"];
   if (["checkbox", "radio", "switch"].includes(role)) return ["click", "check"];
   if (["combobox", "listbox"].includes(role)) return ["click", "select"];
   return [];

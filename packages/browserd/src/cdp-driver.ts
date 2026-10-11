@@ -2853,6 +2853,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       }
       case "fill": {
         const node = await this.resolveActionLocator(state, action.locator);
+        if (await this.fillNativeDateTimeInput(state, node.backendDOMNodeId, action.value)) return;
         await this.focusNode(state, node.backendDOMNodeId);
         await this.selectAllAndDelete(state, node.backendDOMNodeId);
         if (action.value || this.engine === "lightpanda")
@@ -3674,6 +3675,57 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     await this.sendActionTarget(state, "DOM.focus", {
       backendNodeId: backendDOMNodeId,
     });
+  }
+
+  /**
+   * Native date, time, month, week and datetime-local inputs render their
+   * editable parts as spin buttons inside a user-agent shadow root, and they
+   * ignore text insertion. Select-all plus Backspace would only clear the
+   * focused part. Fill such a control, or any of its parts, by setting the
+   * host input's value in the input's own format, the way a date picker
+   * commits a choice. Returns false for every other element so the ordinary
+   * text path still applies.
+   */
+  private async fillNativeDateTimeInput(
+    state: TargetState,
+    backendDOMNodeId: number | null,
+    value: string,
+  ): Promise<boolean> {
+    const inspected = await this.callOnNode(
+      state,
+      backendDOMNodeId,
+      INSPECT_NATIVE_DATE_TIME_FILL_FUNCTION,
+      [{ value }],
+    );
+    if (!isRecord(inspected) || inspected.kind === "other") return false;
+    const type = typeof inspected.type === "string" ? inspected.type : "date";
+    if (inspected.kind === "not_editable") {
+      throw new InteractionDefiniteDriverError(
+        "invalid_action",
+        `browser ${type} input is disabled or read-only`,
+      );
+    }
+    if (inspected.kind === "invalid_value") {
+      const part = inspected.part === true ? "this field is one part of a native " : "a native ";
+      throw new InteractionDefiniteDriverError(
+        "invalid_action",
+        `${part}${type} input; fill the whole input with a value in its format (${NATIVE_DATE_TIME_FORMATS[type] ?? "its value format"}), or an empty string to clear it`,
+      );
+    }
+    const retained = await this.callOnNode(
+      state,
+      backendDOMNodeId,
+      SET_NATIVE_DATE_TIME_VALUE_FUNCTION,
+      [{ value }],
+      { potentialEffect: true },
+    );
+    if (retained !== true) {
+      throw new InteractionOutcomeUnknownDriverError(
+        "outcome_unknown",
+        `browser set the ${type} input's value but the page did not keep it; re-observe before continuing`,
+      );
+    }
+    return true;
   }
 
   private async selectAllAndDelete(
@@ -4898,6 +4950,58 @@ const CONFIRM_EDITABLE_VALUE_FUNCTION = `async function(expected) {
   if (tag === "input" || tag === "textarea") return String(this.value) === String(expected);
   if (this.isContentEditable === true) return String(this.textContent || "") === String(expected);
   return false;
+}`;
+
+const NATIVE_DATE_TIME_FORMATS: Readonly<Record<string, string>> = {
+  date: "YYYY-MM-DD",
+  time: "HH:MM in 24-hour time, optionally HH:MM:SS",
+  "datetime-local": "YYYY-MM-DDTHH:MM",
+  month: "YYYY-MM",
+  week: "YYYY-Www",
+};
+
+// Resolves a native date/time input from the input itself or from one of the
+// parts in its user-agent shadow root. Inputs cannot host author shadow roots,
+// so a shadow root whose host is an input is always the browser's own.
+const NATIVE_DATE_TIME_HOST_SOURCE = `
+  const nativeDateTimeHost = (node) => {
+    let element = node;
+    for (let depth = 0; depth < 4 && element; depth++) {
+      if (String(element.tagName || "").toLowerCase() === "input") break;
+      const root = typeof element.getRootNode === "function" ? element.getRootNode() : null;
+      element = root && root.host ? root.host : null;
+    }
+    if (!element || String(element.tagName || "").toLowerCase() !== "input") return null;
+    const type = String(element.type || "").toLowerCase();
+    return ${JSON.stringify(Object.keys(NATIVE_DATE_TIME_FORMATS))}.includes(type) ? element : null;
+  };`;
+
+const INSPECT_NATIVE_DATE_TIME_FILL_FUNCTION = `function(expected) {${NATIVE_DATE_TIME_HOST_SOURCE}
+  const input = nativeDateTimeHost(this);
+  if (!input) return { kind: "other" };
+  const type = String(input.type).toLowerCase();
+  const part = input !== this;
+  if (input.disabled || input.readOnly) return { kind: "not_editable", type, part };
+  const probe = input.ownerDocument.createElement("input");
+  probe.type = type;
+  probe.value = String(expected);
+  if (probe.value !== String(expected)) return { kind: "invalid_value", type, part };
+  return { kind: "native", type, part };
+}`;
+
+// The prototype setter bypasses per-instance value trackers that frameworks
+// install, so their input listeners see the change as user input.
+const SET_NATIVE_DATE_TIME_VALUE_FUNCTION = `async function(expected) {${NATIVE_DATE_TIME_HOST_SOURCE}
+  const input = nativeDateTimeHost(this);
+  if (!input || !input.isConnected) return false;
+  const view = input.ownerDocument.defaultView;
+  const setter = Object.getOwnPropertyDescriptor(view.HTMLInputElement.prototype, "value").set;
+  input.focus();
+  setter.call(input, String(expected));
+  input.dispatchEvent(new view.Event("input", { bubbles: true, composed: true }));
+  input.dispatchEvent(new view.Event("change", { bubbles: true }));
+  await Promise.resolve();
+  return input.isConnected && input.value === String(expected);
 }`;
 
 function cssString(value: string): string {
