@@ -526,7 +526,9 @@ async function grantAppRoleIfSchemaExists(
   const runtimeReadInsertUpdateTables = `ARRAY[${RUNTIME_READ_INSERT_UPDATE_TABLES.map(literal).join(", ")}]`;
   // (provider, table) pairs: read-only once the provider's cutover receipt exists.
   const cutoverReadOnlyTables = `ARRAY[${Object.entries(SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES)
-    .flatMap(([provider, tables]) => tables.map((table) => `ARRAY[${literal(provider)}, ${literal(table)}]`))
+    .flatMap(([provider, tables]) =>
+      tables.map((table) => `ARRAY[${literal(provider)}, ${literal(table)}]`),
+    )
     .join(", ")}]::text[][]`;
   const workClaimCapabilityRoutines = `ARRAY[${WORK_CLAIM_CAPABILITY_ROUTINES.map(literal).join(", ")}]`;
   const organizationMembershipLifecycleRoutines = `ARRAY[${[

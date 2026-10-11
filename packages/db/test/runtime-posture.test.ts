@@ -720,12 +720,17 @@ describe("runtime database posture evaluator", () => {
   test("a provider's legacy tables are read-only once its receipt exists", () => {
     const posture = safePosture();
     const existing = posture.tables.find((table) => table.name === "xai_subscription_credentials");
-    const legacy = existing ?? xaiAuthorityTables().find((table) => table.name === "xai_subscription_credentials")!;
+    const legacy =
+      existing ??
+      xaiAuthorityTables().find((table) => table.name === "xai_subscription_credentials")!;
     if (!existing) posture.tables.push(legacy);
     Object.assign(legacy, { select: true, insert: true, update: true, delete: true });
     const legacyOptions = {
       ...options,
-      tablePrivileges: { ...options.tablePrivileges, xai_subscription_credentials: ["SELECT"] as const },
+      tablePrivileges: {
+        ...options.tablePrivileges,
+        xai_subscription_credentials: ["SELECT"] as const,
+      },
     };
     expect(evaluateRuntimeDatabasePosture(posture, legacyOptions)).toContain(
       "table xai_subscription_credentials grants excess runtime privileges: INSERT, UPDATE, DELETE",
@@ -734,7 +739,9 @@ describe("runtime database posture evaluator", () => {
     // receipt is reported.
     posture.subscriptionProviderCutoverReceipts = ["codex"];
     const before = evaluateRuntimeDatabasePosture(posture, legacyOptions);
-    expect(before.filter((violation) => violation.includes("xai_subscription_credentials"))).toEqual([]);
+    expect(
+      before.filter((violation) => violation.includes("xai_subscription_credentials")),
+    ).toEqual([]);
     expect(before).toContain(
       "database is missing the xai subscription-core cutover receipt (0717_subscription_core_xai_cutover.sql); apply the pending migrations first",
     );

@@ -22,7 +22,10 @@
  * nothing logs.
  */
 import type postgres from "postgres";
-import { decodeXaiJwtPayload, isXaiSubscriptionRateLimitDiagnostic } from "@opengeni/xai-subscription";
+import {
+  decodeXaiJwtPayload,
+  isXaiSubscriptionRateLimitDiagnostic,
+} from "@opengeni/xai-subscription";
 import { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
 import {
   encodeSubscriptionCoreXaiCredential,
@@ -379,7 +382,10 @@ async function moveXaiCredentials(
   for (const operation of operations) {
     const [stored] = await tx<{ credential_encrypted: string }[]>`
       SELECT credential_encrypted FROM video_generation_operations WHERE id = ${operation.id}::uuid`;
-    envelopes.set(operation.id, videoEnvelopeCredentialId(encryptionKey, stored!.credential_encrypted));
+    envelopes.set(
+      operation.id,
+      videoEnvelopeCredentialId(encryptionKey, stored!.credential_encrypted),
+    );
   }
   if (rows.length > 0) await moveXaiCredentialRows(tx, encryptionKey, rows);
   await stageVideoReferences(tx, encryptionKey, operations, envelopes);
