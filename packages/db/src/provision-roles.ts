@@ -2183,7 +2183,7 @@ BEGIN
       'grant_subscription_core_owner_capability(text,text,uuid,uuid,text,uuid)',
       'drop_subscription_core_owner_capabilities(text,uuid)',
       'subscription_core_connection_target(text,uuid,uuid,uuid,uuid,uuid,text,bigint)',
-      -- Migration 0713: the authority marker and compatibility guards,
+      -- Migration 0714: the authority marker and compatibility guards,
       -- resolvers and commit-time check are owner-only.
       'stamp_subscription_authority_inserted_at()',
       'keep_subscription_authority_inserted_at()',

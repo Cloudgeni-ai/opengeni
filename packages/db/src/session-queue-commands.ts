@@ -2305,7 +2305,7 @@ export async function submitHumanPromptInTransaction(
             ? metadataWithTurnExecutionPolicyV1(input.turnMetadata ?? {}, input.turnExecutionPolicy)
             : (input.turnMetadata ?? {}),
           // An edit names the exact withdrawn turn it copies, so the database
-          // resolves the same source for accepted authority (0713).
+          // resolves the same source for accepted authority (0714).
           lineage: editedSourceTurn
             ? { actor: input.actor.type, editedFromTurnId: editedSourceTurn.id }
             : { actor: input.actor.type },

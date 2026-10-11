@@ -4343,9 +4343,9 @@ total). New work those owners accept gets no personal Codex access. If the
 total is not zero, raise it with the product owner; the repair is a separate
 decision and is not part of this migration.
 
-### Accepted authority compatibility (0713)
+### Accepted authority compatibility (0714)
 
-Migration `0713_subscription_authority_compat.sql` is **rolling** and inert on
+Migration `0714_subscription_authority_compat.sql` is **rolling** and inert on
 deploy. Design record:
 [subscription core, PR 0b](design/subscription-core-2026-10-07.md#pr-0b-authority-compatibility-and-fences).
 It requires 0712 and, like 0712, grants to the configured application roles

@@ -35,8 +35,8 @@ test("a pre-writer personal-resource task retains its execution proof across mig
   // 0712 records the provider cutover receipts and requires the 0689 cutover,
   // so both are deferred and replayed with the writer in ledger order.
   const precursor = "0712_subscription_core_generic_precursor.sql";
-  // 0713 builds on 0712's receipts and patches its helpers; it follows 0712.
-  const compat = "0713_subscription_authority_compat.sql";
+  // 0714 builds on 0712's receipts and patches its helpers; it follows 0712.
+  const compat = "0714_subscription_authority_compat.sql";
   try {
     // Stage the actual pre-writer ledger, including on the stacked cutover
     // branch. This is a rolling/gate-off regression, not cutover activation.

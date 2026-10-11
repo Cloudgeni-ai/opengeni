@@ -152,9 +152,9 @@ describeRealDatabase("legacy Codex disconnect: known pre-fix behavior", () => {
       // positive core suite separately exercises the NOBYPASSRLS owner posture.
       await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
       // 0712 requires the committed 0689 cutover, so it is held back with it,
-      // and 0713 builds on 0712.
+      // and 0714 builds on 0712.
       await owner`insert into schema_migrations(name) values ('0689_subscription_core_codex_cutover.sql'),
-        ('0712_subscription_core_generic_precursor.sql'), ('0713_subscription_authority_compat.sql')`;
+        ('0712_subscription_core_generic_precursor.sql'), ('0714_subscription_authority_compat.sql')`;
       await migrate(owned.databaseUrl);
       await provisionRoles(owned.databaseUrl, { appPassword: owned.appPassword });
     } finally {

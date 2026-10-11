@@ -45,8 +45,8 @@ beforeAll(async () => {
   // full runtime posture as the runtime role before provisioning again.
   const neutral = "0707_subscription_core_neutral_routines.sql";
   const precursor = "0712_subscription_core_generic_precursor.sql";
-  // 0713 builds on 0712's receipts and patches its helpers; it follows 0712.
-  const compat = "0713_subscription_authority_compat.sql";
+  // 0714 builds on 0712's receipts and patches its helpers; it follows 0712.
+  const compat = "0714_subscription_authority_compat.sql";
   const owner = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;

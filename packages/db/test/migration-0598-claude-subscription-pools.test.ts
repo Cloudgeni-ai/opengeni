@@ -45,12 +45,12 @@ const subscriptionCoreMigrations = [
   "0702_subscription_codex_access_editor.sql",
   // Adds provider-neutral routines over the shared core tables from withheld 0642.
   "0707_subscription_core_neutral_routines.sql",
-  // Rewrites the operation-lease constraints and guard from withheld 0671.
+  // Rewrites the operation-lease constraints and guard that withheld 0691 defines; replay after it.
   "0711_subscription_codex_completion_operations.sql",
   // Records provider cutover receipts over withheld 0689 and restricts its tables.
   "0712_subscription_core_generic_precursor.sql",
   // Builds on withheld 0712's receipts and patches the helpers it patched.
-  "0713_subscription_authority_compat.sql",
+  "0714_subscription_authority_compat.sql",
 ] as const;
 const key = Buffer.alloc(32, 67);
 const ids = {
