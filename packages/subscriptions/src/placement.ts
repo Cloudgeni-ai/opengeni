@@ -8,6 +8,7 @@ import {
   personalFallbackActive,
   providerEnabled,
   servableAgainAt,
+  type Ineligibility,
 } from "./eligibility";
 import { mapReasoningLevel } from "./reasoning";
 import { rotationFor } from "./settings";
@@ -18,6 +19,7 @@ import type {
   PlacementDecision,
   PlacementInput,
   PlacementSwitch,
+  ReselectionPoint,
   SubscriptionConnection,
   WaitReason,
 } from "./types";
@@ -104,6 +106,89 @@ export function rankConnections(
 }
 
 /**
+ * Why an automatic binding does not keep its account for this placement
+ * (SUB-STICK-03). Every reason except `cache_cold` is forced: the account or
+ * its model cannot (or should not) serve this work now, whatever the cache.
+ */
+export type ReselectionReason =
+  /** The session has no account yet. */
+  | "unbound"
+  /** The bound account is not in this session's world: removed, disconnected or unreachable. */
+  | "account_unavailable"
+  /** The bound model may no longer be used here (workspace, provider switch, compaction lock). */
+  | "model_not_permitted"
+  /** The bound account cannot serve now; `ineligibility` says why (exhausted, unhealthy, out of scope...). */
+  | "account_ineligible"
+  /** The bound account would spend paid credits while another has included allowance (SUB-CREDITS-01). */
+  | "extra_credits"
+  /** A compaction or model change replaced the cached prefix (SUB-STICK-05). */
+  | "reselection_point"
+  /** Idle longer than the provider's declared cache lifetime (SUB-STICK-04). */
+  | "cache_cold";
+
+export type BindingStickiness =
+  | { kind: "keep"; connectionId: string; modelId: ModelId }
+  | {
+      kind: "reselect";
+      reason: ReselectionReason;
+      /** The bound account's ineligibility for its model (empty unless `account_ineligible`). */
+      ineligibility: readonly Ineligibility[];
+      /** The re-selection points that applied (empty unless `reselection_point`). */
+      points: readonly ReselectionPoint[];
+    };
+
+/**
+ * Does the session's automatic binding keep its account (SUB-STICK-02,
+ * SUB-STICK-03)? It does while the account can still serve the bound model,
+ * no re-selection point applies and the prompt cache is warm; otherwise
+ * placement re-runs normal selection, which may land on the same account.
+ * Forced reasons are checked before warmth, so a warm cache never keeps an
+ * account the session may not use (SUB-STICK-07). An explicit choice is not
+ * evaluated here: placement keeps it or waits for it (SUB-STICK-06).
+ */
+export function bindingStickiness(input: PlacementInput): BindingStickiness {
+  const { session, connections } = input;
+  const binding = session.binding;
+  const reselect = (
+    reason: ReselectionReason,
+    ineligibility: readonly Ineligibility[] = [],
+    points: readonly ReselectionPoint[] = [],
+  ): BindingStickiness => ({ kind: "reselect", reason, ineligibility, points });
+  if (!binding) return reselect("unbound");
+  const bound = connections.find((connection) => connection.id === binding.connectionId);
+  if (!bound) return reselect("account_unavailable");
+  const permitted = failoverCandidateModels(input).filter((modelId) =>
+    modelPermitted(input, modelId),
+  );
+  if (!permitted.includes(binding.modelId))
+    // The session moved to another model (no longer a candidate at all) is
+    // a re-selection point; a candidate the session may not use is forced.
+    return session.reselectionPoints.length > 0 &&
+      !failoverCandidateModels(input).includes(binding.modelId)
+      ? reselect("reselection_point", [], session.reselectionPoints)
+      : reselect("model_not_permitted");
+  const ineligibility = connectionIneligibility(input, bound, binding.modelId);
+  if (ineligibility.length > 0) return reselect("account_ineligible", ineligibility);
+  const fallback = personalFallbackActive(input);
+  if (
+    connectionUsesExtraCredits(input, bound) &&
+    connections.some(
+      (candidate) =>
+        (candidate.ownership.kind === "shared" || fallback) &&
+        !connectionUsesExtraCredits(input, candidate) &&
+        canServe(input, candidate, binding.modelId),
+    )
+  ) {
+    return reselect("extra_credits");
+  }
+  if (session.reselectionPoints.length > 0)
+    return reselect("reselection_point", [], session.reselectionPoints);
+  if (!isCacheWarm(binding, input.cacheFacts[bound.provider], input.now))
+    return reselect("cache_cold");
+  return { kind: "keep", connectionId: bound.id, modelId: binding.modelId };
+}
+
+/**
  * Place one session's turn (design 4): run on an account and model, or wait
  * with an explained reason. The sender is deliberately not an input: the
  * account belongs to the session (SUB-STICK-01).
@@ -181,23 +266,9 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
     canServe(input, bound, binding.modelId);
 
   // Keep a warm session where it is unless a re-selection point applies
-  // (SUB-STICK-02, SUB-STICK-03, SUB-STICK-05).
-  if (
-    binding &&
-    bound &&
-    bindingServable &&
-    (!connectionUsesExtraCredits(input, bound) ||
-      !connections.some(
-        (candidate) =>
-          (candidate.ownership.kind === "shared" || fallback) &&
-          !connectionUsesExtraCredits(input, candidate) &&
-          canServe(input, candidate, binding.modelId),
-      )) &&
-    session.reselectionPoints.length === 0 &&
-    isCacheWarm(binding, input.cacheFacts[bound.provider], input.now)
-  ) {
-    return run(bound, binding.modelId, "sticky");
-  }
+  // or the account is forced away (SUB-STICK-02, SUB-STICK-03, SUB-STICK-05).
+  const stickiness = bindingStickiness(input);
+  if (stickiness.kind === "keep" && bound) return run(bound, stickiness.modelId, "sticky");
 
   // Each model on shared connections, then (opt-in) on the owner's personal
   // connections, before the next model (SUB-SEL-01, SUB-SEL-02, D-12).

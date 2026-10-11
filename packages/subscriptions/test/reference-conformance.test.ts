@@ -13,7 +13,12 @@ import {
   referenceRandom,
   referenceScenarioCheckpoints,
 } from "@opengeni/testing/subscription-reference-worlds";
-import { decidePlacement, effectiveSettings, SCALAR_SETTING_KEYS } from "../src/index";
+import {
+  bindingStickiness,
+  decidePlacement,
+  effectiveSettings,
+  SCALAR_SETTING_KEYS,
+} from "../src/index";
 import { toReferenceDecision } from "../src/reference";
 import { mapSettingsPolicy, toPlacementInput } from "./reference-mapping";
 
@@ -91,6 +96,37 @@ describe("reference conformance over generated worlds", () => {
         "wait:model_not_allowed",
       ].sort(),
     );
+  });
+
+  test("the stickiness verdict agrees with every generated placement of an automatic binding (SUB-STICK-02, SUB-STICK-03)", () => {
+    const reasons = new Set<string>();
+    const findings = generatedFindings((world, sessionId, now) => {
+      const input = toPlacementInput(world, sessionId, now);
+      const binding = input.session.binding;
+      if (!binding || binding.choice !== "automatic") return null;
+      const verdict = bindingStickiness(input);
+      const decision = decidePlacement(input);
+      const onBinding =
+        decision.kind === "run" &&
+        decision.connectionId === binding.connectionId &&
+        decision.modelId === binding.modelId;
+      reasons.add(verdict.kind === "keep" ? "keep" : verdict.reason);
+      if (verdict.kind === "keep")
+        return decision.kind === "run" && decision.switch === "sticky" && onBinding
+          ? null
+          : { verdict, decision };
+      // A forced reason never lands back on the bound account and model; a
+      // cold cache, a re-selection point or avoidable credits may.
+      const forced =
+        verdict.reason === "account_unavailable" ||
+        verdict.reason === "account_ineligible" ||
+        verdict.reason === "model_not_permitted";
+      return forced && onBinding ? { verdict, decision } : null;
+    });
+    expect(findings.slice(0, 5)).toEqual([]);
+    expect(findings.length).toBe(0);
+    for (const reason of ["keep", "cache_cold", "account_ineligible", "reselection_point"])
+      expect(reasons.has(reason)).toBe(true);
   });
 
   test("effective settings and their sources agree with the reference model (SUB-SET-01, SUB-SET-02, SUB-SET-03)", () => {

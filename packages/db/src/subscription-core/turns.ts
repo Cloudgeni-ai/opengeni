@@ -24,16 +24,19 @@ import {
 
 import {
   applyQuotaObservation,
+  bindingStickiness,
   connectionIneligibility,
   connectionUsesExtraCredits,
   personalFallbackActive,
   decidePlacement,
   quotaCapacity,
   subscriptionCoreCredentialRefresher,
+  type Ineligibility,
   type PlacementDecision,
   type PlacementInput,
   type PlacementSwitch,
   type ReselectionPoint,
+  type ReselectionReason,
   type SubscriptionQuota,
   type WaitReason,
 } from "@opengeni/subscriptions";
@@ -51,6 +54,7 @@ import {
 
 import {
   acquireSubscriptionTurnLease,
+  advanceSubscriptionBindingCacheClock,
   assertSubscriptionTurnLeaseCurrent,
   decodeSubscriptionQuota,
   persistSubscriptionCoreRefreshWithPlan,
@@ -236,6 +240,16 @@ export type SubscriptionCorePlacement =
       leasedUntil: Date;
       eligibleCount: number;
       connectedCount: number;
+      /**
+       * Why an automatic binding's account was not simply kept
+       * (SUB-STICK-03): a forced reason or a cold cache. Null when the warm
+       * account was kept, for an explicit choice and for a reused lease.
+       */
+      reselection: {
+        reason: ReselectionReason;
+        ineligibility: readonly Ineligibility[];
+        points: readonly ReselectionPoint[];
+      } | null;
     };
 
 class SubscriptionBindingConflict extends Error {
@@ -506,12 +520,24 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
 
         const binding = input.session.binding;
         const explicitConnectionId = binding?.choice === "explicit" ? binding.connectionId : null;
-        const decision =
+        const reused =
           reuse !== null &&
           (explicitConnectionId === null || explicitConnectionId === reuse) &&
-          !connectionUsesExtraCredits(input, input.connections.find((row) => row.id === reuse)!)
-            ? ({ kind: "run", connectionId: reuse, switch: "sticky" } as const)
-            : decidePlacement(input);
+          !connectionUsesExtraCredits(input, input.connections.find((row) => row.id === reuse)!);
+        const decision = reused
+          ? ({ kind: "run", connectionId: reuse!, switch: "sticky" } as const)
+          : decidePlacement(input);
+        // Why an automatic binding moved or was re-evaluated (SUB-STICK-03).
+        const stickiness =
+          reused || explicitConnectionId !== null ? null : bindingStickiness(input);
+        const reselection =
+          stickiness?.kind === "reselect"
+            ? {
+                reason: stickiness.reason,
+                ineligibility: stickiness.ineligibility,
+                points: stickiness.points,
+              }
+            : null;
         if (decision.kind === "wait") {
           if (reuse !== null)
             await releaseSubscriptionTurnLease(tx, { ...lease, connectionId: reuse });
@@ -538,10 +564,15 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
 
         const previousConnectionId = binding?.connectionId ?? null;
         if (identity.sessionOwnerSubjectId) {
-          await writeBinding(tx, identity, {
+          await commitBinding(tx, identity, {
+            decidedFrom: binding,
+            clockDecided:
+              stickiness?.kind === "reselect" &&
+              (stickiness.reason === "cache_cold" || stickiness.reason === "reselection_point"),
             connectionId: connection.id,
             modelId: request.productModelId,
             placementSwitch: decision.switch,
+            now,
           });
         }
         const rotation = input.settings.rotation[providerId];
@@ -560,6 +591,7 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
             (row) => connectionIneligibility(input, row, request.productModelId).length === 0,
           ).length,
           connectedCount: input.connections.length,
+          reselection,
         };
       },
     );
@@ -1018,18 +1050,61 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
     };
   }
 
-  async function writeBinding(
+  /**
+   * Commit the placement to the session binding under its row lock
+   * (SUB-STICK-02). The world was read without locks, so the locked row must
+   * still be the binding the decision was made from: its account, model and
+   * choice always, and its cache clock when the decision depended on it (a
+   * cold cache or a re-selection point). Otherwise another placement or a pin
+   * committed first and this placement retries on the new binding, so
+   * parallel turns of one session never split accounts. Placing a turn uses
+   * the account: the clock moves to the placement time, so a parallel turn
+   * that waited for this lock finds the account warm and keeps it. A cache
+   * clock never carries to another account or model (the database trigger
+   * `subscription_session_bindings_cache_clock` enforces the same for every
+   * writer).
+   */
+  async function commitBinding(
     tx: Database,
     identity: SubscriptionCoreAcceptedTurnIdentity,
-    next: { connectionId: string; modelId: string; placementSwitch: PlacementSwitch },
+    next: {
+      /** The binding the placement world showed when the decision was made. */
+      decidedFrom: PlacementInput["session"]["binding"];
+      /** Whether the decision depended on the cache clock. */
+      clockDecided: boolean;
+      connectionId: string;
+      modelId: string;
+      placementSwitch: PlacementSwitch;
+      now: Date;
+    },
   ): Promise<void> {
-    const current = await readSubscriptionSessionBinding(tx, identity);
+    const current = await readSubscriptionSessionBinding(tx, { ...identity, forUpdate: true });
+    const seen = current?.connectionId ? current : null;
+    const decided = next.decidedFrom;
+    const unchanged =
+      seen === null
+        ? decided === null
+        : decided !== null &&
+          seen.connectionId === decided.connectionId &&
+          seen.provider === decided.provider &&
+          seen.modelId === decided.modelId &&
+          seen.choice === decided.choice &&
+          (!next.clockDecided ||
+            (seen.lastModelCallAt?.getTime() ?? 0) === decided.lastModelCallAt);
+    if (!unchanged) throw new SubscriptionBindingConflict();
     if (
       current &&
       current.provider === providerId &&
       current.connectionId === next.connectionId &&
       current.modelId === next.modelId
     ) {
+      await advanceSubscriptionBindingCacheClock(tx, {
+        workspaceId: identity.workspaceId,
+        sessionId: identity.sessionId,
+        provider: providerId,
+        connectionId: next.connectionId,
+        at: next.now,
+      });
       return;
     }
     const written = await writeSubscriptionSessionBinding(tx, {
@@ -1042,7 +1117,8 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
       // A person's explicit choice is changed only by that person.
       choice: current?.choice ?? "automatic",
       onlyThisModel: current?.onlyThisModel ?? false,
-      lastModelCallAt: current?.lastModelCallAt ?? null,
+      // The clock starts on the new account or model at this placement.
+      lastModelCallAt: next.now,
       lastSwitchReason: bindingSwitchReason(
         next.placementSwitch,
         current?.lastSwitchReason ?? null,
@@ -1457,7 +1533,8 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
   /**
    * Record a completed model call on the session's chat binding so the next
    * placement measures cache warmth from it (design 3.4). Only the leased
-   * connection's binding moves, and only forward, through the binding CAS.
+   * connection's binding moves, and only forward; the clock is not part of
+   * the binding version (`advanceSubscriptionBindingCacheClock`).
    */
   async function touchSubscriptionCoreBinding(
     db: Database,
@@ -1466,23 +1543,15 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
     lastModelCallAt: Date,
   ): Promise<boolean> {
     if (!identity.sessionOwnerSubjectId) return false;
-    const access = await withLeasedConnection(db, identity, lease, async (tx) => {
-      const current = await readSubscriptionSessionBinding(tx, identity);
-      if (
-        !current ||
-        current.provider !== providerId ||
-        current.connectionId !== lease.connectionId ||
-        (current.lastModelCallAt !== null && current.lastModelCallAt >= lastModelCallAt)
-      ) {
-        return false;
-      }
-      const written = await writeSubscriptionSessionBinding(tx, {
-        ...current,
-        lastModelCallAt,
-        expectedVersion: current.version,
-      });
-      return written !== null;
-    });
+    const access = await withLeasedConnection(db, identity, lease, (tx) =>
+      advanceSubscriptionBindingCacheClock(tx, {
+        workspaceId: identity.workspaceId,
+        sessionId: identity.sessionId,
+        provider: providerId,
+        connectionId: lease.connectionId,
+        at: lastModelCallAt,
+      }),
+    );
     return access.status === "ok" && access.value;
   }
 

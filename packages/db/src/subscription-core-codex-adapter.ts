@@ -57,6 +57,16 @@ export const SUBSCRIPTION_CORE_CODEX_CREDENTIAL_FORMAT = "v1";
  */
 export const SUBSCRIPTION_CORE_CODEX_RATE_LIMIT_FALLBACK_MS = 60 * 1000;
 export const SUBSCRIPTION_CORE_CODEX_EXHAUSTED_FALLBACK_MS = 5 * 60 * 60 * 1000;
+/**
+ * How long a Codex session keeps its account after its last request
+ * (SUB-STICK-04). OpenAI documents in-memory prompt-cache entries as active
+ * for about 5 to 10 minutes of inactivity and at most one hour, and newer
+ * models as reusable for at least 30 minutes after the last write or reuse
+ * (https://developers.openai.com/api/docs/guides/prompt-caching). The Codex
+ * backend publishes no retention of its own, so the documented one-hour
+ * maximum is the conservative cut-off until measured cut-offs exist.
+ */
+export const SUBSCRIPTION_CORE_CODEX_CACHE_IDLE_CUTOFF_MS = 60 * 60 * 1000;
 
 export type SubscriptionCoreCodexAdapterDeps = {
   /** The OAuth token refresh call (tests inject a scripted upstream). */
@@ -88,7 +98,10 @@ export function subscriptionCoreCodexAdapter(
     quotaKind: "usage_windows",
     // Workspace model policy names Codex models by their resolved provider.
     modelPolicyProviderId: "codex-subscription",
-    cacheFacts: { kind: "measured_idle_cutoff", cutoffMs: null },
+    cacheFacts: {
+      kind: "measured_idle_cutoff",
+      cutoffMs: SUBSCRIPTION_CORE_CODEX_CACHE_IDLE_CUTOFF_MS,
+    },
     health: {
       forbiddenQuarantineMs: SUBSCRIPTION_CORE_CODEX_FORBIDDEN_QUARANTINE_MS,
       entitlementCooldownMs: SUBSCRIPTION_CORE_CODEX_ENTITLEMENT_COOLDOWN_MS,

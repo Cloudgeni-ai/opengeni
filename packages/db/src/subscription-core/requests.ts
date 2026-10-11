@@ -7,6 +7,7 @@ import { sql } from "drizzle-orm";
 import { rawRows, withRlsContext, withSessionRlsActorContext, type Database } from "../database";
 
 import { withSubscriptionCoreAcceptedTurn } from "../subscription-core-placement-world";
+import { advanceSubscriptionBindingCacheClock } from "../subscription-core-repository";
 
 import type {
   SubscriptionCoreOperationLeaseRef,
@@ -228,12 +229,24 @@ export const subscriptionCoreRequests = memoByProvider((provider: SubscriptionCo
     ) as current`,
       );
       if (!lease?.current) throw provider.errors.leaseLost();
-      return insertRequestReservation(tx, scope, ref.connectionId, {
+      const reservation = await insertRequestReservation(tx, scope, ref.connectionId, {
         ...request,
         holderId: ref.holderId,
         generation: request.executionGeneration,
         operationKind,
       });
+      // A model request on the bound account is the latest use of its prompt
+      // cache (SUB-STICK-04), recorded in the same transaction as the
+      // reservation: placement after a lost or crashed attempt still sees it.
+      if (operationKind === "model" && identity.sessionOwnerSubjectId)
+        await advanceSubscriptionBindingCacheClock(tx, {
+          workspaceId: identity.workspaceId,
+          sessionId: identity.sessionId,
+          provider: providerId,
+          connectionId: ref.connectionId,
+          at: "now",
+        });
+      return reservation;
     });
   }
 
