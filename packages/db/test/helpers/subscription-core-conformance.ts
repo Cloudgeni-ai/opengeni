@@ -2142,6 +2142,42 @@ export function describeSubscriptionCoreConformance<Credential>(
       expect(await bindingOf(third)).toMatchObject({ connectionId: other });
     });
 
+    test("SUB-STICK-05: removing a pin while a turn runs re-runs selection at the next turn, whatever the running turn still uses", async () => {
+      const org = await organization();
+      await sharedConnection(org, `unpin-mid-a-${crypto.randomUUID()}`);
+      await sharedConnection(org, `unpin-mid-b-${crypto.randomUUID()}`);
+      const first = await runningTurn(org);
+      const bound = await placeChecked(first);
+      if (bound.kind !== "run") throw new Error("expected a run");
+      const account = bound.connectionId;
+      // A person pins the account and removes the pin while the turn runs.
+      for (const choice of ["explicit", "automatic"] as const) {
+        const pin = stickPausedPin(org, first, account, choice);
+        await pin.locked;
+        pin.proceed();
+        expect(await pin.done).toBe("pin committed (1)");
+      }
+      expect(await bindingOf(first)).toMatchObject({ choice: "automatic", clock: null });
+      // The running turn keeps requesting on the account and completes a
+      // call: neither restarts the cleared clock.
+      expect(await callUpstream(first, account, [])).toBeNull();
+      await runtime().touchSubscriptionCoreBinding(
+        db(),
+        first.identity,
+        leaseOf(first, account),
+        new Date(),
+      );
+      expect((await bindingOf(first))!.clock).toBeNull();
+      const second = await nextTurn(org, first);
+      const placedAt = Date.now();
+      expect(await placeChecked(second, new Date(placedAt))).toMatchObject({
+        kind: "run",
+        explicit: false,
+        reselection: { reason: "cache_cold" },
+      });
+      expect((await bindingOf(second))!.clock).toBe(placedAt);
+    });
+
     test("administration lists and manages exactly this provider's connections of its kind", async () => {
       const org = await organization();
       const a = await sharedConnection(org, `admin-a-${crypto.randomUUID()}`);

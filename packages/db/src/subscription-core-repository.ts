@@ -500,8 +500,13 @@ export async function writeSubscriptionSessionBinding(
  * so a use on an account the session has already left never warms the new
  * one. The clock is not part of the binding's version: the version guards the
  * account, model and choice, and a clock-only advance must not make a
- * concurrent placement or pin lose its compare-and-swap. `at: "now"` uses
- * the database clock (a request reserved in this transaction).
+ * concurrent placement or pin lose its compare-and-swap.
+ *
+ * A cleared clock (a pin change, or a switch by a writer that stated none)
+ * means the next turn re-runs selection (SUB-STICK-05, D-31). Only a
+ * placement restarts it (`restart: true`); a request or completed call of the
+ * turn already running never does, so removing a pin mid-turn still takes
+ * effect at the next turn.
  */
 export async function advanceSubscriptionBindingCacheClock(
   db: Database,
@@ -510,18 +515,19 @@ export async function advanceSubscriptionBindingCacheClock(
     sessionId: string;
     provider: ProviderId;
     connectionId: string;
-    at: Date | "now";
+    at: Date;
+    /** A placement on the account: may start a cleared clock. */
+    restart?: boolean;
   },
 ): Promise<boolean> {
-  const at =
-    input.at === "now" ? sql`clock_timestamp()` : sql`${input.at.toISOString()}::timestamptz`;
+  const at = sql`${input.at.toISOString()}::timestamptz`;
   const rows = await rawRows<{ advanced: boolean }>(
     db,
     sql`update subscription_session_bindings
       set last_model_call_at = ${at}
       where workspace_id = ${input.workspaceId}::uuid and session_id = ${input.sessionId}::uuid
         and provider = ${input.provider} and connection_id = ${input.connectionId}::uuid
-        and (last_model_call_at is null or last_model_call_at < ${at})
+        and ${input.restart === true ? sql`(last_model_call_at is null or last_model_call_at < ${at})` : sql`last_model_call_at < ${at}`}
       returning true as advanced`,
   );
   return rows.length > 0;

@@ -1114,6 +1114,7 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
         provider: providerId,
         connectionId: next.connectionId,
         at: next.now,
+        restart: true,
       });
       return;
     }
