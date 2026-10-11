@@ -5714,6 +5714,12 @@ export type InboxSettings = {
    * Off by default. Always present in responses; leave it out to keep it.
    */
   replies?: boolean;
+  /**
+   * Alert the phone for the agent's questions and approvals as time-sensitive,
+   * so they break through Focus on iPhone. Off by default. Always present in
+   * responses; leave it out to keep it.
+   */
+  timeSensitiveNeedsYou?: boolean;
 };
 
 /**
