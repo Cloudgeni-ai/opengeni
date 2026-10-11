@@ -46,13 +46,15 @@
 --    the shared lock before it meets (and waits for) an existing row, so a
 --    lock writer holding that row must not wait for the exclusive lock: it
 --    only tries, and raises 55P03 (`subscription_settings_lock_busy`) while
---    any workspace write is in flight. The lock writer yields and retries
---    its whole transaction (the repository does, with a bounded backoff);
---    workspace writers never wait on it while holding a row. Lock writers
---    should still lock the organization's workspace rows before the
---    organization row (the repository does): a raw lock writer that updates
---    workspace rows without that can still meet a plain UPDATE in a
---    deadlock, which PostgreSQL resolves by aborting one side.
+--    any workspace write is in flight. Holding the exclusive lock, it locks
+--    the rows it clears with NOWAIT and raises the same 55P03 if another
+--    writer holds one (that writer may be waiting for this lock). It never
+--    waits while holding the exclusive lock, so it cannot deadlock with a
+--    workspace writer; it yields and its caller retries the whole
+--    transaction (the repository does, with a bounded backoff). The
+--    repository also locks the organization's workspace rows before the
+--    organization row, so a lock change waits for in-flight writes to
+--    existing rows instead of spinning.
 -- 5. Identity: a settings row never changes its organization or workspace
 --    (42501, `subscription_settings_identity_immutable`), so neither a moved
 --    workspace row nor a converted organization row can carry a value past
@@ -232,6 +234,25 @@ BEGIN
     RAISE EXCEPTION 'a workspace settings write is in flight; retry the lock change'
       USING ERRCODE = '55P03', DETAIL = 'subscription_settings_lock_busy';
   END IF;
+  -- Holding the exclusive lock, never wait for a row either: a writer that
+  -- locked a row it is about to widen waits for this lock (see 4. above).
+  BEGIN
+    PERFORM 1 FROM subscription_settings workspace_row
+    WHERE workspace_row.account_id = NEW.account_id
+      AND workspace_row.workspace_id IS NOT NULL
+      AND (('rotation' = ANY(added) AND workspace_row.rotation IS NOT NULL)
+        OR ('providers' = ANY(added) AND workspace_row.providers IS NOT NULL)
+        OR ('fallbackOrder' = ANY(added) AND workspace_row.fallback_order IS NOT NULL)
+        OR ('crossProviderFailover' = ANY(added) AND workspace_row.cross_provider_failover IS NOT NULL)
+        OR ('personalConnectionsAllowed' = ANY(added)
+          AND workspace_row.personal_connections_allowed IS NOT NULL)
+        OR ('personalFallbackAllowed' = ANY(added)
+          AND workspace_row.personal_fallback_allowed IS NOT NULL))
+    FOR UPDATE NOWAIT;
+  EXCEPTION WHEN lock_not_available THEN
+    RAISE EXCEPTION 'a workspace settings write is in flight; retry the lock change'
+      USING ERRCODE = '55P03', DETAIL = 'subscription_settings_lock_busy';
+  END;
   UPDATE subscription_settings workspace_row SET
     rotation = CASE WHEN 'rotation' = ANY(added) THEN NULL ELSE workspace_row.rotation END,
     providers = CASE WHEN 'providers' = ANY(added) THEN NULL ELSE workspace_row.providers END,

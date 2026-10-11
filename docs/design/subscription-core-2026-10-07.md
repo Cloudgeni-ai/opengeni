@@ -4286,17 +4286,20 @@ data with workspace overrides). It adds:
    `subscription-settings-locks:<organization>`, the lock writer an exclusive
    one. A workspace write either commits before the clear or sees the lock.
    An upsert's guard takes the shared lock before it meets an existing row
-   and waits for that row's lock, so the lock writer never waits for the
-   exclusive lock: it tries once and, while any workspace write is in
-   flight, raises 55P03 `subscription_settings_lock_busy`. The repository
-   retries the whole lock change with a bounded backoff (about 3 s) and then
-   answers 503 `settings_busy` (retryable, nothing written). Workspace
-   writers therefore never deadlock with a lock change (tested by racing the
-   upsert shape of the personal-primary routine against lock changes). The
-   repository also locks workspace rows before the organization row; a raw
-   lock writer that skips that and updates workspace rows can still meet a
-   plain `UPDATE` in a deadlock, which PostgreSQL resolves by aborting one
-   side.
+   and waits for that row's lock, and a plain `UPDATE` locks its row before
+   its guard asks for the shared lock. So the lock writer never waits while
+   it could close a cycle: it only tries the exclusive lock, then locks the
+   rows it clears with `NOWAIT`, and raises 55P03
+   `subscription_settings_lock_busy` when either is taken. The repository
+   retries the whole lock change with a bounded backoff (about 3 s; also on
+   40P01, should a raw writer elsewhere close a cycle) and then answers 503
+   `settings_busy` (retryable, nothing written). Tested deterministically for
+   both cycles (an upsert waiting on a row the lock writer holds, and a
+   writer holding a row the lock writer would clear) and by racing the real
+   personal-primary routine and raw upserts against lock changes. The
+   repository also locks workspace rows before the organization row, so a
+   lock change waits for in-flight writes to existing rows instead of
+   spinning.
 5. A `BEFORE UPDATE OF account_id, workspace_id` trigger: a settings row never
    moves to another organization or workspace, and the organization row never
    becomes a workspace row or the reverse (42501

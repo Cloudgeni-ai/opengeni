@@ -4653,10 +4653,23 @@ effective model-account settings are the same before and after it. It adds:
 - an `AFTER INSERT OR UPDATE OF locked_settings` trigger on the organization
   row that clears newly locked settings from the organization's workspace
   rows in the same transaction;
+- a `BEFORE UPDATE OF account_id, workspace_id` trigger that keeps every
+  settings row in its organization and workspace (42501, detail
+  `subscription_settings_identity_immutable`);
 - an owner-only `SELECT` policy through which the guard reads the
-  organization row, and `EXECUTE` on the three new `opengeni_private`
+  organization row, and `EXECUTE` on the four new `opengeni_private`
   routines for the configured application roles (so an older binary's
   posture check stays clean before roles are provisioned again).
+
+A workspace-row write that sets or changes any setting, and a lock change,
+run only at READ COMMITTED (SQLSTATE 0A000, detail
+`subscription_settings_requires_read_committed`, otherwise); writes that only
+clear values are unaffected. Application writers pin READ COMMITTED on their
+own transactions. A database whose `default_transaction_isolation` is
+stricter must run any later migration that writes workspace overrides (for
+example a provider cutover) at READ COMMITTED. A lock change never waits
+while a workspace write is in flight: it raises 55P03 (detail
+`subscription_settings_lock_busy`), and the API retries it.
 
 No release before this one writes `locked_settings` (a workspace row cannot
 hold locks, and no API wrote the organization's), so the guard refuses
@@ -4680,8 +4693,8 @@ WHERE NOT (locked_settings <@ ARRAY['rotation', 'providers', 'crossProviderFailo
 
 **Rollback.** Older binaries never write locks and run unchanged on 0716, so
 rolling the application back needs nothing. Locks set after the rollout stay
-enforced. To remove enforcement, ship a forward migration dropping the two
-triggers, the policy `subscription_settings_lock_guard_read`, the three
+enforced. To remove enforcement, ship a forward migration dropping the three
+triggers, the policy `subscription_settings_lock_guard_read`, the four
 routines and the two CHECKs; the stored locks stay and the resolver keeps
 ignoring locked workspace overrides.
 

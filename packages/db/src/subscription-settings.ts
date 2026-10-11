@@ -239,7 +239,11 @@ async function withOrganizationAdministrator<T>(
   );
 }
 
-/** The values 0712 seeds for an organization, and the organization PATCH inserts. */
+/**
+ * The values an organization PATCH inserts when the organization has no
+ * settings row. The 0712 seed also writes a `spread` rotation entry for each
+ * provider on the core, which resolves the same (spread is the default).
+ */
 const SEEDED_ORGANIZATION_VALUES: SubscriptionSettingValues = {
   rotation: {},
   providers: {},
@@ -351,7 +355,7 @@ export async function updateOrganizationSubscriptionSettings(
     patch.personalConnectionsAllowed !== undefined ||
     patch.personalFallbackAllowed !== undefined;
   // A lock change yields to in-flight workspace writes (0716 raises 55P03
-  // rather than wait while holding workspace rows); retry the transaction.
+  // rather than wait while holding the settings lock); retry the transaction.
   for (let attempt = 1; ; attempt += 1) {
     try {
       return await updateOrganizationSubscriptionSettingsOnce(db, input, {
@@ -361,7 +365,11 @@ export async function updateOrganizationSubscriptionSettings(
         changesOrganization,
       });
     } catch (error) {
-      if (!isSubscriptionSettingsLockBusy(error)) throw error;
+      // 0716's yield (55P03), or a deadlock PostgreSQL resolved against this
+      // transaction (a raw writer elsewhere): nothing was written either way.
+      if (!isSubscriptionSettingsLockBusy(error) && nestedPostgresSqlState(error) !== "40P01") {
+        throw error;
+      }
       if (attempt >= LOCK_CHANGE_ATTEMPTS) throw new SubscriptionSettingsBusyError();
       const backoff = Math.min(25 * 2 ** (attempt - 1), 400);
       await new Promise((resolve) => setTimeout(resolve, backoff / 2 + Math.random() * backoff));

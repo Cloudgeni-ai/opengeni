@@ -1327,6 +1327,56 @@ describe.skipIf(!realDb)("subscription settings with lockable workspace override
     }
   });
 
+  // The other cycle: a writer holds a row it is about to widen (its guard will
+  // ask for the shared lock); a lock writer holding the exclusive lock must
+  // not wait for that row.
+  test("concurrency: a lock change never waits on a row a workspace writer holds", async () => {
+    const f = await fixture();
+    await updateWorkspaceSubscriptionSettings(client!.db, {
+      ...workspace(f, f.alphaId, f.workspaceAdminSubjectId),
+      patch: { crossProviderFailover: true },
+    });
+    let rowLocked!: () => void;
+    const locked = new Promise<void>((resolve) => (rowLocked = resolve));
+    let proceed!: () => void;
+    const proceedGate = new Promise<void>((resolve) => (proceed = resolve));
+    const writer = asApp(f, f.alphaId, f.workspaceAdminSubjectId, async (tx) => {
+      await rawRows(
+        tx,
+        sql`select id from subscription_settings where account_id = ${f.accountId}::uuid
+          and workspace_id = ${f.alphaId}::uuid for update`,
+      );
+      rowLocked();
+      await proceedGate;
+      await rawRows(
+        tx,
+        sql`update subscription_settings set personal_fallback_allowed = true
+          where account_id = ${f.accountId}::uuid and workspace_id = ${f.alphaId}::uuid`,
+      );
+    });
+    await locked;
+    // A raw lock writer (no row pre-lock) takes the exclusive lock, then meets Alpha's row.
+    const lockWriter = await asApp(f, null, f.ownerSubjectId, (tx) =>
+      rawRows(
+        tx,
+        sql`update subscription_settings set locked_settings = '{crossProviderFailover}'
+          where account_id = ${f.accountId}::uuid and workspace_id is null`,
+      ),
+    );
+    expect(lockWriter).toEqual({ code: "55P03", detail: "subscription_settings_lock_busy" });
+    proceed();
+    expect(await writer).toBeNull();
+    // Through the repository the lock change lands, and clears the override.
+    await updateOrganizationSubscriptionSettings(client!.db, {
+      ...organization(f),
+      patch: { locked: ["crossProviderFailover"] },
+    });
+    expect(await workspaceRow(f, f.alphaId)).toMatchObject({
+      cross_provider_failover: null,
+      personal_fallback_allowed: true,
+    });
+  });
+
   test("a settings row never changes organization or workspace", async () => {
     const f = await fixture();
     await updateWorkspaceSubscriptionSettings(client!.db, {
