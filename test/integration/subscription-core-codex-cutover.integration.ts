@@ -46,6 +46,8 @@ const PRECURSOR = "0712_subscription_core_generic_precursor.sql";
 const PROVIDER_KEYED_REACH = "0713_subscription_core_provider_keyed_reach.sql";
 const WORKSPACE_MANAGED_ACCOUNTS = "0714_subscription_workspace_managed_organization_accounts.sql";
 const API_KEY_CONNECTIONS = "0715_subscription_core_api_key_connections.sql";
+// 0716 builds on 0712's receipts and patches its helpers; it follows 0712.
+const COMPAT = "0716_subscription_authority_compat.sql";
 const MODEL = "codex/gpt-5.5";
 const key = Buffer.alloc(32, 77);
 const settings = { environmentsEncryptionKey: key.toString("base64") } as never;
@@ -86,9 +88,9 @@ describe.skipIf(!realDb)(
       const owner = postgres(owned.ownerUrl, { max: 1 });
       try {
         await owner`CREATE TABLE schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`;
-        await owner`INSERT INTO schema_migrations(name) VALUES(${MIGRATION}), (${PRECURSOR}), (${PROVIDER_KEYED_REACH}), (${WORKSPACE_MANAGED_ACCOUNTS}), (${API_KEY_CONNECTIONS})`;
+        await owner`INSERT INTO schema_migrations(name) VALUES(${MIGRATION}), (${PRECURSOR}), (${PROVIDER_KEYED_REACH}), (${WORKSPACE_MANAGED_ACCOUNTS}), (${API_KEY_CONNECTIONS}), (${COMPAT})`;
         await migrate(owned.ownerUrl, undefined, { applicationDatabaseRoles: ["opengeni_app"] });
-        await owner`DELETE FROM schema_migrations WHERE name IN (${MIGRATION}, ${PRECURSOR}, ${PROVIDER_KEYED_REACH}, ${WORKSPACE_MANAGED_ACCOUNTS}, ${API_KEY_CONNECTIONS})`;
+        await owner`DELETE FROM schema_migrations WHERE name IN (${MIGRATION}, ${PRECURSOR}, ${PROVIDER_KEYED_REACH}, ${WORKSPACE_MANAGED_ACCOUNTS}, ${API_KEY_CONNECTIONS}, ${COMPAT})`;
       } finally {
         await owner.end();
       }

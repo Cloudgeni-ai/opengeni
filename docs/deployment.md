@@ -4638,6 +4638,43 @@ workspaces stays that way. Narrow such accounts back to their workspace
 as in Rollback (the check there lists them, with the model list to keep)
 before restoring the setters, or restore only if a defect requires it.
 
+### Accepted authority compatibility (0716)
+
+Migration `0716_subscription_authority_compat.sql` is **rolling** and inert on
+deploy. Design record:
+[subscription core, PR 0b](design/subscription-core-2026-10-07.md#pr-0b-authority-compatibility-and-fences).
+It requires 0712 and, like 0712, grants to the configured application roles
+(`OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`).
+
+- It adds the server-owned `authority_inserted_at` column (constant default,
+  no table rewrite) and two triggers to `sessions`, `session_turns`,
+  `scheduled_tasks`, `scheduled_task_revision_authorities`,
+  `session_system_updates` and `session_system_update_outbox`, plus a
+  deferred check trigger on each.
+- Locks: it first takes ACCESS EXCLUSIVE on those six tables together, in
+  the order above starting with `sessions` and `session_turns`, waiting at
+  most 100 ms per lock and releasing everything and retrying after a short
+  pause when it cannot take them all. It never holds a carrier lock for more
+  than about 600 ms while it waits, so no cycle between it and one live
+  transaction can form as long as `deadlock_timeout` keeps its default of
+  one second or more. A cycle through a third transaction can still abort a
+  live one with a deadlock error (one that had already waited about a second
+  behind other live work); this is rare and reported as retryable, and the
+  migration is never the victim. While it retries, session and scheduled
+  reads and writes stall up to 100 ms at a time. Once it holds the set the
+  migration runs in well under a second; session and scheduled work waits
+  for it meanwhile. If it cannot take the whole set within 30 seconds the Job
+  fails with `55P03`, the migration rolls back entirely, and it is safe to
+  retry. Before retrying, look for what held a carrier table: a running
+  vacuum (`pg_stat_progress_vacuum`; the short waits never cancel
+  autovacuum) or a long-open transaction (`pg_stat_activity`).
+- The compatibility relation stays empty, and the copy routine, the
+  deferred check and the personal helpers' record branch do nothing, until
+  SuperGrok's or Claude's own drained cutover records its receipt. Codex and
+  every other provider behave as before.
+- The scheduled-task execution digest ignores the new column, so existing run
+  receipts stay valid.
+
 ### Slack API pilot activation (0597)
 
 Stop every old/new API, control worker, and turn worker before applying
