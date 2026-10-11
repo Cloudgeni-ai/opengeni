@@ -4492,12 +4492,17 @@ its models edited; adding someone is refused with 422.
 organization routes refuse workspace-managed accounts, so a shared one can't
 be narrowed after the rollback. Before rolling back, run this read-only check
 as a superuser or `BYPASSRLS` role (like the parity check). Row security hides
-these tables from any other role, so first confirm the role (this must return
-true):
-`SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = current_user`.
-The check must then return no rows:
+these tables from any other role, including the migration owner, where an
+empty result proves nothing, so the check refuses to run under one. It must
+return no rows:
 
 ```sql
+DO $$ BEGIN
+  IF NOT (SELECT rolsuper OR rolbypassrls FROM pg_roles
+      WHERE rolname = current_user) THEN
+    RAISE EXCEPTION 'run the 0714 rollback check as a superuser or BYPASSRLS role';
+  END IF;
+END $$;
 SELECT connection.account_id, connection.provider, connection.id,
   connection.managed_by_workspace_id, connection.allowed_model_ids
 FROM subscription_connections connection
@@ -4528,7 +4533,9 @@ forward again. Likewise, shared accounts limited to people
 workspaces" by an older image, and a save there replaces the people: move them
 back to workspaces first, or accept that. Run right after the rollout, the
 same check also shows whether anything was shared while older pods still
-served.
+served; for each such row, confirm with that organization's administrator
+that the account's workspaces and rotation switch are what they meant, since
+an older pod's switch may have undone an organization "off".
 
 **Validation.** Once every API pod runs this release, use an operator-owned
 test organization (never a customer account: the `PUT` below widens a real
