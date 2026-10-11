@@ -31,7 +31,7 @@ import { provisionRoles } from "../src/provision-roles";
 setDefaultTimeout(180_000);
 
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
-const COMPAT = "0715_subscription_authority_compat.sql";
+const COMPAT = "0716_subscription_authority_compat.sql";
 const CORE_SUBJECT = "service:subscription-core";
 let database: OwnerMigratedTestDatabase | null = null;
 let client: DbClient | null = null;
