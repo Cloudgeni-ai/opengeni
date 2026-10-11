@@ -8,7 +8,7 @@
  * Authority is the database's: organization rows are written only by
  * organization administrators (the settings manager policy), workspace rows
  * by workspace or organization administrators, and a locked setting cannot be
- * widened by anyone (the 0716 guard). The checks below only turn those
+ * widened by anyone (the 0717 guard). The checks below only turn those
  * refusals into typed errors before anything is written.
  */
 import {
@@ -322,7 +322,7 @@ export async function readOrganizationSubscriptionSettings(
 
 /**
  * Update organization settings and locks in one transaction. Locking a
- * setting clears its workspace overrides (the 0716 trigger). A lock change
+ * setting clears its workspace overrides (the 0717 trigger). A lock change
  * first queues for the organization's exclusive settings lock and never
  * waits for a workspace row while holding it; a row held elsewhere makes it
  * retry, and then answer busy.
@@ -357,7 +357,7 @@ export async function updateOrganizationSubscriptionSettings(
     patch.personalConnectionsAllowed !== undefined ||
     patch.personalFallbackAllowed !== undefined;
   // A lock change queues fairly for the exclusive settings lock (bounded by
-  // LOCK_CHANGE_LOCK_TIMEOUT). It retries when 0716 yields (55P03 busy: a row
+  // LOCK_CHANGE_LOCK_TIMEOUT). It retries when 0717 yields (55P03 busy: a row
   // it would clear is held by a writer outside the repository) or PostgreSQL
   // resolved a deadlock against it; nothing was written either way.
   const started = Date.now();
@@ -415,7 +415,7 @@ async function updateOrganizationSubscriptionSettingsOnce(
       if (locked !== undefined) {
         // Before any row lock: queue for the exclusive settings lock, so
         // widening writes cannot starve the change, and hold it while the
-        // 0716 trigger clears overrides.
+        // 0717 trigger clears overrides.
         await rawRows(
           tx,
           sql`select set_config('lock_timeout', ${LOCK_CHANGE_LOCK_TIMEOUT}, true)`,
@@ -434,7 +434,7 @@ async function updateOrganizationSubscriptionSettingsOnce(
           returning id`,
       );
       // No workspace row is locked here: holding the exclusive lock, only the
-      // 0716 trigger touches them, with NOWAIT (a writer outside the
+      // 0717 trigger touches them, with NOWAIT (a writer outside the
       // repository may hold a row while it waits for the shared lock).
       const [current] = await rawRows<{ version: number | string; locked_settings: string[] }>(
         tx,

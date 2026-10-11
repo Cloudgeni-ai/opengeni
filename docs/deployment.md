@@ -4675,9 +4675,9 @@ It requires 0712 and, like 0712, grants to the configured application roles
 - The scheduled-task execution digest ignores the new column, so existing run
   receipts stay valid.
 
-### Organization settings locks (0716)
+### Organization settings locks (0717)
 
-Migration `0716_subscription_settings_locks.sql` is **rolling**. It changes no
+Migration `0717_subscription_settings_locks.sql` is **rolling**. It changes no
 column, no existing routine and no stored value, so every workspace's
 effective model-account settings are the same before and after it. It adds:
 
@@ -4737,7 +4737,7 @@ WHERE NOT (locked_settings <@ ARRAY['rotation', 'providers', 'crossProviderFailo
     OR jsonb_path_exists(fallback_order, 'strict $.*[*] ? (@.type() != "string")', '{}', true)));
 ```
 
-**Rollback.** Older binaries never write locks and run unchanged on 0716, so
+**Rollback.** Older binaries never write locks and run unchanged on 0717, so
 rolling the application back needs nothing. Locks set after the rollout stay
 enforced. To remove enforcement, ship a forward migration dropping the three
 triggers, the policy `subscription_settings_lock_guard_read`, the four

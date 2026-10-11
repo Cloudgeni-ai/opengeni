@@ -210,7 +210,7 @@ const OVERRIDE_COLUMN_VALUE = (
 
 /**
  * The locked settings a workspace-row write would widen: the TypeScript
- * mirror of the database guard (migration 0716). A write widens a setting
+ * mirror of the database guard (migration 0717). A write widens a setting
  * when it sets a value that is not already stored unchanged; for a
  * map-valued setting, when it adds or changes an entry. Clearing an override,
  * or leaving it unchanged, never widens. A rotation lock also covers the
@@ -273,7 +273,9 @@ export function jsonEqual(left: unknown, right: unknown): boolean {
   if (Array.isArray(left) !== Array.isArray(right)) return false;
   if (Array.isArray(left)) {
     const other = right as unknown[];
-    return left.length === other.length && left.every((value, index) => jsonEqual(value, other[index]));
+    return (
+      left.length === other.length && left.every((value, index) => jsonEqual(value, other[index]))
+    );
   }
   const leftEntries = Object.entries(left).filter(([, value]) => value !== undefined);
   const rightRecord = right as Record<string, unknown>;
