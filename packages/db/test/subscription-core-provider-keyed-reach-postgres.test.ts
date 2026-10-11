@@ -42,6 +42,8 @@ import {
 import { wakeSubscriptionCoreCapacityWaiters } from "../src/subscription-core/waiters";
 
 const REACH_MIGRATION = "0713_subscription_core_provider_keyed_reach.sql";
+// 0714 redefines 0713's reach setters, so it is withheld and applied with it.
+const LATER_MIGRATIONS = ["0714_subscription_workspace_managed_organization_accounts.sql"];
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const key = Buffer.alloc(32, 71);
 const MODEL = "codex/gpt-5.5";
@@ -238,7 +240,14 @@ async function reachOf(
           : sql`select opengeni_private.subscription_core_reach(
               ${provider}, ${org.accountId}::uuid, ${connectionId}::uuid) as reach`,
       );
-      return row?.reach ?? null;
+      // The reach rule is its two flags; 0714 also reports the row's switch
+      // (`allocatorEnabled`), which its own tests cover.
+      const reach = row?.reach as Record<string, unknown> | null | undefined;
+      if (!reach) return null;
+      return {
+        sharedWorkspaces: reach.sharedWorkspaces,
+        personalWorkspaces: reach.personalWorkspaces,
+      };
     }),
   );
 }
@@ -261,6 +270,22 @@ async function setReach(
               ${provider}, ${org.accountId}::uuid, ${connectionId}::uuid,
               ${reach[0]}::boolean, ${reach[1]}::boolean)`,
       );
+      return "set";
+    }),
+  );
+}
+
+async function setReachAllocator(
+  org: Org,
+  provider: string | null,
+  connectionId: string,
+  enabled: boolean | null,
+  subjectId = org.ownerSubjectId,
+): Promise<Outcome> {
+  return await outcome(() =>
+    asOrganizationSubject(org.accountId, subjectId, async (tx) => {
+      await tx.execute(sql`select opengeni_private.set_subscription_core_reach_allocator(
+        ${provider}, ${org.accountId}::uuid, ${connectionId}::uuid, ${enabled}::boolean)`);
       return "set";
     }),
   );
@@ -387,6 +412,8 @@ beforeAll(async () => {
   try {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
     await owner`insert into schema_migrations(name) values (${REACH_MIGRATION})`;
+    for (const later of LATER_MIGRATIONS)
+      await owner`insert into schema_migrations(name) values (${later})`;
     await migrate(database.ownerUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
   } finally {
@@ -404,6 +431,8 @@ beforeAll(async () => {
   const applying = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
     await applying`delete from schema_migrations where name = ${REACH_MIGRATION}`;
+    for (const later of LATER_MIGRATIONS)
+      await applying`delete from schema_migrations where name = ${later}`;
     await migrate(database.ownerUrl);
     const [applied] = await applying<{ count: number }[]>`
       select count(*)::int as count from schema_migrations where name = ${REACH_MIGRATION}`;
@@ -490,6 +519,12 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
           publicExecute: false,
         },
         {
+          // 0714, applied with 0713 here.
+          routine: "opengeni_private.set_subscription_core_reach_allocator(text,uuid,uuid,boolean)",
+          execute: true,
+          publicExecute: false,
+        },
+        {
           routine: "opengeni_private.subscription_core_reach(text,uuid,uuid)",
           execute: true,
           publicExecute: false,
@@ -547,6 +582,8 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
         "relation opengeni_private.subscription_core_plan_change_providers_pkey",
         "routine list_organization_subscription_workspace_ids(uuid)",
         "routine opengeni_private.set_subscription_core_reach(text,uuid,uuid,boolean,boolean)",
+        // 0714 (applied with 0713 here): the organization's switch on the reach row alone.
+        "routine opengeni_private.set_subscription_core_reach_allocator(text,uuid,uuid,boolean)",
         "routine opengeni_private.subscription_core_reach(text,uuid,uuid)",
         "routine opengeni_subscription_internal.apply_subscription_core_auto_assignments(text,uuid,uuid,boolean)",
       ]);
@@ -738,6 +775,11 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
       const local = await connection(org, "codex", "workspace-managed", {
         managedByWorkspaceId: org.sharedWorkspaceId,
       });
+      // A shared connection managed by a Personal workspace is no
+      // organization account (0714 admits only a shared-workspace manager).
+      const personalManaged = await connection(org, "codex", "personal-managed", {
+        managedByWorkspaceId: memberPersonal,
+      });
       const missing = crypto.randomUUID();
       const refusals = {
         codexReadNotAdmin: await reachOf(org, "codex-named", id, memberSubjectId),
@@ -756,6 +798,8 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
         coreSetMissing: await setReach(org, "codex", missing, [true, true]),
         codexSetWorkspaceManaged: await setReach(org, "codex-named", local, [true, true]),
         coreSetWorkspaceManaged: await setReach(org, "codex", local, [true, true]),
+        codexSetPersonalManaged: await setReach(org, "codex-named", personalManaged, [true, true]),
+        coreSetPersonalManaged: await setReach(org, "codex", personalManaged, [true, true]),
       };
       const readNotAdmin = (provider: string) => ({
         code: "42501",
@@ -793,16 +837,63 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
           code: "P0002",
           message: "organization subscription connection not found",
         },
-        codexSetWorkspaceManaged: {
+        // 0714: a shared workspace's account is an organization account.
+        codexSetWorkspaceManaged: { value: "set" },
+        coreSetWorkspaceManaged: { value: "set" },
+        codexSetPersonalManaged: {
           code: "P0002",
           message: "organization Codex connection not found",
         },
-        coreSetWorkspaceManaged: {
+        coreSetPersonalManaged: {
           code: "P0002",
           message: "organization subscription connection not found",
         },
       });
       expect(await reachOf(org, "codex", id)).toEqual({ value: null });
+      expect(await reachOf(org, "codex", local)).toEqual({
+        value: { sharedWorkspaces: true, personalWorkspaces: true },
+      });
+      expect(await reachOf(org, "codex", personalManaged)).toEqual({ value: null });
+
+      // 0714's reach switch: organization administrators only, a registered
+      // provider, a value, and an organization account; it sets only the switch.
+      const allocatorRefusals = {
+        notAdmin: await setReachAllocator(org, "codex", local, false, memberSubjectId),
+        unregistered: await setReachAllocator(org, "xai", local, false),
+        nullProvider: await setReachAllocator(org, null, local, false),
+        nullValue: await setReachAllocator(org, "codex", local, null),
+        missing: await setReachAllocator(org, "codex", missing, false),
+        personalManaged: await setReachAllocator(org, "codex", personalManaged, false),
+      };
+      expect(allocatorRefusals).toEqual({
+        notAdmin: {
+          code: "42501",
+          message: "only organization administrators may change subscription connection reach",
+        },
+        unregistered,
+        nullProvider: unregistered,
+        nullValue: {
+          code: "22023",
+          message: "subscription connection reach allocator is required",
+        },
+        missing: { code: "P0002", message: "organization subscription connection not found" },
+        personalManaged: {
+          code: "P0002",
+          message: "organization subscription connection not found",
+        },
+      });
+      const [before] = await reachRows(
+        org.accountId,
+        "opengeni_private.subscription_codex_auto_assignments",
+      ).then((rows) => rows.filter((row) => row.connection_id === local));
+      if (!before) throw new Error("expected the local reach row");
+      expect(before.allocator_enabled).toBe(true);
+      expect(await setReachAllocator(org, "codex", local, false)).toEqual({ value: "set" });
+      const [after] = await reachRows(
+        org.accountId,
+        "opengeni_private.subscription_codex_auto_assignments",
+      ).then((rows) => rows.filter((row) => row.connection_id === local));
+      expect(after).toEqual({ ...before, allocator_enabled: false });
     },
     180_000,
   );

@@ -24,6 +24,7 @@ import {
   ensureManagedAccessForUser,
   loadSubscriptionCoreCodexCredential,
   placeSubscriptionCoreCodexTurn,
+  pinSubscriptionCoreSessionCodexAccount,
   evaluateSubscriptionCoreCodexPlacement,
   recordSubscriptionCoreCodexModelCatalog,
   readSubscriptionCoreTurnIdentity,
@@ -38,6 +39,7 @@ import {
   SubscriptionCoreCodexAccessLostError,
   subscriptionCoreTurnActor,
   touchSubscriptionCoreCodexBinding,
+  updateSubscriptionCoreCodexModelConnectionAccess,
   withRlsContext,
   withSessionRlsActorContext,
   writeSubscriptionSessionBinding,
@@ -2007,5 +2009,257 @@ describe.skipIf(!realDb)("durable model catalog observations", () => {
         { slugs: [], refreshGeneration: 1, observedAt: Date.now() },
       ),
     ).toBe(false);
+  });
+});
+
+describe.skipIf(!realDb)("a workspace-managed Codex account under organization reach", () => {
+  /** `managed: false`: a workspace's own copy that no workspace manages (copies 0689 merged). */
+  async function managedConnection(org: Org, label: string, managed = true): Promise<string> {
+    const manager = managed ? org.sharedWorkspaceId : null;
+    const [row] = await shared!.admin<{ id: string }[]>`
+      insert into subscription_connections (
+        account_id, provider, kind, credential_encrypted, ownership, scope_kind,
+        allow_personal_workspaces, provider_account_id, plan_type, provider_state, expires_at,
+        managed_by_workspace_id
+      ) values (
+        ${org.accountId}::uuid, 'codex', 'subscription', ${encryptedTokens(label)},
+        'shared', 'workspaces', false, ${`chatgpt-${label}`}, 'pro',
+        ${shared!.admin.json({ isFedramp: false })}::jsonb,
+        ${new Date(Date.now() + 86_400_000).toISOString()}::timestamptz,
+        ${manager}::uuid
+      ) returning id::text as id`;
+    await shared!.admin`insert into subscription_connection_workspaces
+      (account_id, connection_id, workspace_id)
+      values (${org.accountId}::uuid, ${row!.id}::uuid, ${org.sharedWorkspaceId}::uuid)`;
+    await shared!.admin`insert into subscription_connection_assignment_policies (
+        account_id, connection_id, workspace_id, inference_pool, managed_by_workspace_id
+      ) values (${org.accountId}::uuid, ${row!.id}::uuid, ${org.sharedWorkspaceId}::uuid,
+        'workspace', ${manager}::uuid)`;
+    return row!.id;
+  }
+
+  async function release(org: Org, turn: TurnFixture, connectionId: string) {
+    await withSessionRlsActorContext(subscriptionCoreTurnActor(turn.identity), () =>
+      withRlsContext(
+        client!.db,
+        { accountId: org.accountId, workspaceId: org.sharedWorkspaceId },
+        (db) =>
+          releaseSubscriptionTurnLease(db, {
+            ...turn.identity,
+            provider: "codex",
+            ...leaseOf(turn, connectionId),
+          }),
+      ),
+    );
+  }
+
+  test("a managed account keeps serving its pin across organization reach edits; people are refused", async () => {
+    const org = await organization();
+    await enableCodexCutover(org.accountId);
+    const managed = await managedConnection(org, "managed-pin");
+    const admin = {
+      kind: "codex" as const,
+      connectionId: managed,
+      accountId: org.accountId,
+      workspaceId: null,
+      subjectId: org.ownerSubjectId,
+    };
+    const turn = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
+    expect(
+      (
+        await pinSubscriptionCoreSessionCodexAccount(client!.db, {
+          accountId: org.accountId,
+          workspaceId: org.sharedWorkspaceId,
+          sessionId: turn.identity.sessionId,
+          connectionId: managed,
+          subjectId: org.ownerSubjectId,
+        })
+      ).result.changed,
+    ).toBe(true);
+    expect(await place(turn)).toMatchObject({ kind: "run", connectionId: managed, explicit: true });
+    await release(org, turn, managed);
+
+    await expect(
+      updateSubscriptionCoreCodexModelConnectionAccess(client!.db, admin, {
+        allowedModels: null,
+        allowedWorkspaces: [],
+        allowPersonalWorkspaces: false,
+        allowedPeople: [org.ownerMembershipId],
+        version: 1,
+      }),
+    ).rejects.toThrow("cannot be limited to people");
+    for (const [version, allowedWorkspaces] of [
+      [1, null],
+      [2, []],
+    ] as const) {
+      expect(
+        await updateSubscriptionCoreCodexModelConnectionAccess(client!.db, admin, {
+          allowedModels: null,
+          allowedWorkspaces: allowedWorkspaces ? [] : null,
+          allowPersonalWorkspaces: false,
+          version,
+        }),
+      ).toMatchObject({ version: version + 1 });
+      expect(await place(turn)).toMatchObject({
+        kind: "run",
+        connectionId: managed,
+        explicit: true,
+      });
+      await release(org, turn, managed);
+    }
+    const [row] = await shared!.admin<{ managed: string; refresh_generation: string }[]>`
+      select managed_by_workspace_id::text as managed, refresh_generation::text as refresh_generation
+      from subscription_connections where id = ${managed}::uuid`;
+    expect(row).toEqual({ managed: org.sharedWorkspaceId, refresh_generation: "1" });
+  });
+
+  test("people scope is evaluated against the session owner, and an excluded pin waits", async () => {
+    const org = await organization();
+    await enableCodexCutover(org.accountId);
+    // People scope is offered only while no workspace manages the account.
+    const managed = await managedConnection(org, "managed-reach", false);
+    const [otherPersonal] = await shared!.admin<{ id: string }[]>`
+      insert into workspaces (account_id, name) values (${org.accountId}::uuid, 'Personal workspace')
+      returning id::text as id`;
+    const [other] = await shared!.admin<{ id: string }[]>`
+      insert into organization_memberships (account_id, subject_id, role, status, personal_workspace_id)
+      values (${org.accountId}::uuid, ${`user:other-${crypto.randomUUID()}`}, 'member', 'active',
+        ${otherPersonal!.id}::uuid)
+      returning id::text as id`;
+    const admin = {
+      kind: "codex" as const,
+      connectionId: managed,
+      accountId: org.accountId,
+      workspaceId: null,
+      subjectId: org.ownerSubjectId,
+    };
+    const save = (version: number, policy: { workspaces?: string[]; people?: string[] }) =>
+      updateSubscriptionCoreCodexModelConnectionAccess(client!.db, admin, {
+        allowedModels: null,
+        allowedWorkspaces: policy.workspaces ?? [],
+        allowPersonalWorkspaces: false,
+        allowedPeople: policy.people ?? null,
+        version,
+      });
+
+    // Before any edit it serves its workspace exactly as before.
+    const turn = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
+    expect(await place(turn)).toMatchObject({ kind: "run", connectionId: managed });
+    await release(org, turn, managed);
+
+    // Chosen people including the owner: the owner's shared and private work runs.
+    expect(await save(1, { people: [org.ownerMembershipId] })).toMatchObject({ version: 2 });
+    expect(await place(turn)).toMatchObject({ kind: "run", connectionId: managed });
+    await release(org, turn, managed);
+    const privateTurn = await runningTurn(org, {
+      workspaceId: org.sharedWorkspaceId,
+      visibility: "user_private",
+    });
+    expect(await place(privateTurn)).toMatchObject({ kind: "run", connectionId: managed });
+    await release(org, privateTurn, managed);
+    // An ownerless session never reaches a people-scoped account.
+    const ownerless = await runningTurn(org, {
+      workspaceId: org.sharedWorkspaceId,
+      owner: "none",
+      initiator: { kind: "service" },
+    });
+    expect(await place(ownerless)).toMatchObject({ kind: "wait", reason: "no_eligible_capacity" });
+
+    // The owner pins the account while it serves them.
+    const pinned = await pinSubscriptionCoreSessionCodexAccount(client!.db, {
+      accountId: org.accountId,
+      workspaceId: org.sharedWorkspaceId,
+      sessionId: turn.identity.sessionId,
+      connectionId: managed,
+      subjectId: org.ownerSubjectId,
+    });
+    expect(pinned.result.changed).toBe(true);
+    const bindingRow = async () => [
+      ...(await shared!.admin<{ connection_id: string | null; choice: string }[]>`
+          select connection_id::text as connection_id, choice from subscription_session_bindings
+          where session_id = ${turn.identity.sessionId}::uuid and provider = 'codex'`),
+    ];
+    expect(await bindingRow()).toEqual([{ connection_id: managed, choice: "explicit" }]);
+    // Someone else only: the owner's private session is not widened...
+    expect(await save(2, { people: [other!.id] })).toMatchObject({ version: 3 });
+    expect(await place(privateTurn)).toMatchObject({ kind: "wait" });
+    expect(await leaseRows(org, privateTurn)).toEqual([]);
+    expect(await bindingRow()).toEqual([{ connection_id: managed, choice: "explicit" }]);
+    // ...and the explicit pin keeps waiting for the account (D-24).
+    expect(await place(turn)).toMatchObject({
+      kind: "wait",
+      reason: "pinned_account_ineligible",
+      explicitConnectionId: managed,
+    });
+    expect(
+      await withRlsContext(
+        client!.db,
+        { accountId: org.accountId, workspaceId: org.sharedWorkspaceId },
+        (db) => readSubscriptionSessionBinding(db, turn.identity),
+      ),
+    ).toMatchObject({ connectionId: managed, choice: "explicit" });
+
+    // Back to its own workspace: the pin runs again on the same credential.
+    expect(await save(3, {})).toMatchObject({ version: 4, allowedWorkspaces: [] });
+    expect(await place(turn)).toMatchObject({
+      kind: "run",
+      connectionId: managed,
+      explicit: true,
+    });
+    await release(org, turn, managed);
+    const [row] = await shared!.admin<{ managed: string | null; refresh_generation: string }[]>`
+      select managed_by_workspace_id::text as managed, refresh_generation::text as refresh_generation
+      from subscription_connections where id = ${managed}::uuid`;
+    expect(row).toEqual({ managed: null, refresh_generation: "1" });
+
+    // The organization can also disconnect it.
+    expect(
+      (
+        await withSessionRlsActorContext({ subjectId: org.ownerSubjectId }, () =>
+          disconnectSubscriptionCoreCodexConnection(client!.db, {
+            accountId: org.accountId,
+            workspaceId: null,
+            subjectId: org.ownerSubjectId,
+            connectionId: managed,
+          }),
+        )
+      ).outcome,
+    ).toBe("removed");
+  });
+
+  test("the organization disconnects an account a shared workspace manages, never one a Personal workspace manages", async () => {
+    const org = await organization();
+    await enableCodexCutover(org.accountId);
+    const disconnect = async (connectionId: string) =>
+      (
+        await withSessionRlsActorContext({ subjectId: org.ownerSubjectId }, () =>
+          disconnectSubscriptionCoreCodexConnection(client!.db, {
+            accountId: org.accountId,
+            workspaceId: null,
+            subjectId: org.ownerSubjectId,
+            connectionId,
+          }),
+        )
+      ).outcome;
+    const personalManaged = await managedConnection(org, "personal-managed-disconnect");
+    // No writer produces this shape; the fixture bypasses the scope guard.
+    await shared!.admin.begin(async (tx) => {
+      await tx`set local session_replication_role = replica`;
+      await tx`update subscription_connections
+        set managed_by_workspace_id = ${org.personalWorkspaceId}::uuid
+        where id = ${personalManaged}::uuid`;
+    });
+    expect(await disconnect(personalManaged)).toBe("not_found");
+    const disconnected = async (connectionId: string) =>
+      (
+        await shared!.admin<{ disconnected: boolean }[]>`
+          select disconnected_at is not null as disconnected from subscription_connections
+          where id = ${connectionId}::uuid`
+      )[0]?.disconnected;
+    expect(await disconnected(personalManaged)).toBe(false);
+
+    const managed = await managedConnection(org, "managed-disconnect");
+    expect(await disconnect(managed)).toBe("removed");
+    expect(await disconnected(managed)).toBe(true);
   });
 });

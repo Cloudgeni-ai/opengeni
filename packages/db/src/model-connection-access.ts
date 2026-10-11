@@ -4,10 +4,12 @@ import { SUBSCRIPTION_CORE_CODEX_PROVIDER } from "./subscription-core-codex-prov
 import {
   getSubscriptionCoreModelConnectionAccess,
   ModelConnectionWorkspaceNotInOrganizationError,
+  readSubscriptionCoreModelConnectionAccess,
   updateSubscriptionCoreModelConnectionAccess,
   withModelConnectionAccessScope,
   type ModelConnectionAccess,
 } from "./subscription-core/access-editor";
+import type { SubscriptionCoreAccess } from "./subscription-core/access";
 
 // The policy shape, its errors and the route scope are shared with the
 // provider-neutral core editor; the public names stay exported from here.
@@ -105,6 +107,22 @@ export async function getModelConnectionAccess(
   });
 }
 
+/**
+ * A shared Codex connection's access on the shared subscription core, with
+ * the workspaces that use it as their own and its delegated manager.
+ */
+export async function readSubscriptionCoreCodexModelConnectionAccess(
+  db: Database,
+  target: ModelConnectionTarget,
+): Promise<SubscriptionCoreAccess | null> {
+  if (target.kind !== "codex") throw new Error("Only Codex connections are read from the core");
+  return await readSubscriptionCoreModelConnectionAccess(
+    db,
+    SUBSCRIPTION_CORE_CODEX_PROVIDER,
+    target,
+  );
+}
+
 /** A shared Codex connection's access policy on the shared subscription core. */
 export async function getSubscriptionCoreCodexModelConnectionAccess(
   db: Database,
@@ -139,6 +157,8 @@ export async function updateModelConnectionAccess(
   policy: ModelConnectionAccess,
 ): Promise<ModelConnectionAccess | null> {
   if (target.kind === "codex") return null;
+  if (policy.allowedPeople != null)
+    throw new Error("Only accounts on the shared subscription core can be limited to people");
   return await withModelConnectionAccessScope(db, target, async (tx) => {
     const { table, condition } = relation(target);
     if (target.workspaceId !== null && policy.allowedWorkspaces !== null)

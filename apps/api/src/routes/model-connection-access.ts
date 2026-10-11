@@ -16,8 +16,13 @@ import {
 import {
   deliverSubscriptionCoreCodexWake,
   getModelConnectionAccess,
-  getSubscriptionCoreCodexModelConnectionAccess,
+  listOrganizationAdministrationMembers,
+  nestedPostgresSqlState,
+  readSubscriptionCoreCodexModelConnectionAccess,
   ModelConnectionAccessForbiddenError,
+  SubscriptionCoreAccessInvalidError,
+  SubscriptionCoreAccessPeopleUnlistableError,
+  SubscriptionCoreAccessPersonNotInOrganizationError,
   ModelConnectionWorkspaceNotInOrganizationError,
   updateModelConnectionAccess,
   updateSubscriptionCoreCodexModelConnectionAccess,
@@ -152,11 +157,20 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
     app.get(path, async (c) => {
       c.header("cache-control", "private, no-store");
       const connection = await target(c, false);
-      const policy =
-        (await codexAccessDisposition(deps, connection)) === "core"
-          ? await getSubscriptionCoreCodexModelConnectionAccess(deps.db, connection)
-          : await getModelConnectionAccess(deps.db, connection);
+      const core = (await codexAccessDisposition(deps, connection)) === "core";
+      const coreAccess = core
+        ? await readSubscriptionCoreCodexModelConnectionAccess(deps.db, connection)
+        : null;
+      const policy = core
+        ? coreAccess && {
+            ...coreAccess.policy,
+            allowedPeople: coreAccess.policy.allowedPeople ?? undefined,
+          }
+        : await getModelConnectionAccess(deps.db, connection);
       if (!policy) throw new HTTPException(404, { message: "Connection not found" });
+      // Shared core connections at organization scope can be limited to people
+      // and report the workspaces that use them as their own (design 5.4).
+      const organizationCore = coreAccess !== null && connection.workspaceId === null;
       let settings =
         connection.workspaceId === null
           ? (await deps.resolveCatalogSettings()).settings
@@ -203,6 +217,32 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
                 : withOrganizationOpenRouterCatalogProvider(settings, models);
         }
       }
+      // The people an administrator can choose, or null when the account
+      // can't be limited to people or the organization has more members than
+      // its member list shows (people are then not offered).
+      const people =
+        organizationCore && coreAccess?.peopleSupported
+          ? await listOrganizationAdministrationMembers(deps.db, {
+              organizationId: connection.accountId,
+              actorSubjectId: connection.subjectId,
+            }).then(
+              (members) =>
+                members
+                  .filter(
+                    (member) =>
+                      member.status === "active" &&
+                      member.revokedAt === null &&
+                      member.subjectId.startsWith("user:"),
+                  )
+                  .map(({ id, name, email }) => ({ id, name, email })),
+              (error: unknown) => {
+                // The member list refuses organizations above its bound
+                // (SQLSTATE 54000); people are then not offered.
+                if (nestedPostgresSqlState(error) === "54000") return null;
+                throw error;
+              },
+            )
+          : null;
       return c.json(
         ModelConnectionAccessResponse.parse({
           policy,
@@ -215,6 +255,13 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
             (connection.kind === "codex" ||
               connection.kind === "supergrok" ||
               connection.kind === "claude_subscription"),
+          ...(organizationCore
+            ? {
+                ...(people ? { peopleSupported: true, people } : { peopleSupported: false }),
+                localWorkspaceIds: coreAccess.localWorkspaceIds,
+                managedByWorkspaceId: coreAccess.managedByWorkspaceId,
+              }
+            : {}),
         }),
       );
     });
@@ -230,10 +277,15 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
         throw new HTTPException(422, {
           message: "Model belongs to a different connection provider",
         });
-      if (connection.workspaceId !== null && policy.allowedWorkspaces !== null)
+      if (
+        connection.workspaceId !== null &&
+        (policy.allowedWorkspaces !== null || policy.allowedPeople != null)
+      )
         throw new HTTPException(422, {
           message: "Workspace connections cannot be assigned to other workspaces",
         });
+      if (!core && policy.allowedPeople != null)
+        throw new HTTPException(422, { message: "This account cannot be limited to people" });
       let updated;
       try {
         updated = core
@@ -241,6 +293,12 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
           : await updateModelConnectionAccess(deps.db, connection, policy);
       } catch (error) {
         if (error instanceof ModelConnectionWorkspaceNotInOrganizationError)
+          throw new HTTPException(422, { message: error.message });
+        if (
+          error instanceof SubscriptionCoreAccessPersonNotInOrganizationError ||
+          error instanceof SubscriptionCoreAccessPeopleUnlistableError ||
+          error instanceof SubscriptionCoreAccessInvalidError
+        )
           throw new HTTPException(422, { message: error.message });
         if (error instanceof ModelConnectionAccessForbiddenError)
           throw new HTTPException(403, { message: error.message });

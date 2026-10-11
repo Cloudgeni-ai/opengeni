@@ -71,6 +71,8 @@ const withheldMigrations = [
   "0712_subscription_core_generic_precursor.sql",
   // Keys and redefines the auto-assignment objects the withheld 0689 creates.
   "0713_subscription_core_provider_keyed_reach.sql",
+  // Redefines the reach setters withheld 0713 creates.
+  "0714_subscription_workspace_managed_organization_accounts.sql",
   // Builds on withheld 0712's receipts and patches the helpers it patched.
   "0715_subscription_authority_compat.sql",
 ];

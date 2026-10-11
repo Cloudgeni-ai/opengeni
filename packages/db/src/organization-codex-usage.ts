@@ -15,6 +15,7 @@ import { rawRows, type Database } from "./database";
 import { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
 import { buildCodexTokenResolver, type CodexAuthDeps } from "./codex-token-resolver";
 import { readCodexCutoverDisposition } from "./subscription-core-codex-compat";
+import { organizationAdministeredConnection } from "./subscription-core/access";
 import { resolveSubscriptionConnectionId } from "./subscription-core-repository";
 
 type AdministratorScope = <T>(db: Database, use: (tx: Database) => Promise<T>) => Promise<T>;
@@ -284,7 +285,7 @@ function organizationCodexCredentialAccess(
   const condition = () =>
     sql`account_id = ${input.organizationId}::uuid and id = ${credentialId}::uuid
         and provider = 'codex' and kind = 'subscription' and ownership = 'shared'
-        and managed_by_workspace_id is null and disconnected_at is null`;
+        and ${organizationAdministeredConnection()} and disconnected_at is null`;
   const scoped: AdministratorScope = (targetDb, use) =>
     withAdministrator(targetDb, async (tx) => {
       if ((await readCodexCutoverDisposition(tx, input.organizationId)) !== "core") {

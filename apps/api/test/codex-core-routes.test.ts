@@ -1090,6 +1090,12 @@ describe("organization Codex routes with a cutover row", () => {
     expect(rotation.mock.calls[0]![1]).toEqual({ ...orgAdmin, rotationEnabled: false });
 
     const rename = mock("renameSubscriptionCoreCodexConnection", async () => CONNECTION);
+    // The response reads the renamed account itself: the organization route
+    // also renames accounts a shared workspace manages, which its list omits.
+    const renamedAccount = mock("getSubscriptionCoreOrganizationCodexAccount", async () => ({
+      ...account,
+      label: "Renamed",
+    }));
     const renamed = await app().fetch(
       organizationAdminRequest(`${orgPath}/accounts/${CONNECTION}`, {
         method: "PATCH",
@@ -1102,6 +1108,11 @@ describe("organization Codex routes with a cutover row", () => {
       ...orgAdmin,
       connectionId: CONNECTION,
       label: "Renamed",
+    });
+    expect(renamedAccount.mock.calls[0]![1]).toEqual({
+      organizationId: ACCOUNT,
+      subjectId: orgAdmin.subjectId,
+      connectionId: CONNECTION,
     });
 
     // A refused account (not an organization account, or not manageable) is the legacy 404.
@@ -1116,6 +1127,139 @@ describe("organization Codex routes with a cutover row", () => {
       );
       expect(refused.status).toBe(404);
     }
+  });
+});
+
+describe("the organization access editor for a workspace-managed Codex account", () => {
+  const MANAGER = "00000000-0000-4000-8000-0000000000b2";
+  const PERSON = "00000000-0000-4000-8000-0000000000d4";
+  const path = `/v1/organizations/${ACCOUNT}/model-connections/codex/${CONNECTION}/access`;
+  function editor() {
+    cutover("core");
+    mock("assertOrganizationCodexAdministrator", async () => undefined);
+    mock("getOrganizationAdministrationOverview", async () => ({
+      workspaces: [
+        { id: WS, name: "Research" },
+        { id: MANAGER, name: "Platform" },
+      ],
+    }));
+    const member = (id: string, subjectId: string, status = "active") => ({
+      id,
+      organizationId: ACCOUNT,
+      subjectId,
+      name: subjectId,
+      email: null,
+      role: "member",
+      status,
+      authorizationRevision: 1,
+      sharedWorkspaceAccess: [],
+      revokedAt: null,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    mock("listOrganizationAdministrationMembers", async () => [
+      member(PERSON, "user:ada"),
+      member("00000000-0000-4000-8000-0000000000d5", "service:robot"),
+      member("00000000-0000-4000-8000-0000000000d6", "user:left", "revoked"),
+    ]);
+  }
+
+  test("reads its reach and the managing workspace's own copy; people only when no workspace manages it", async () => {
+    editor();
+    mock("readSubscriptionCoreCodexModelConnectionAccess", async () => ({
+      policy: {
+        allowedModels: null,
+        allowedWorkspaces: [],
+        allowPersonalWorkspaces: false,
+        allowedPeople: null,
+        version: 1,
+      },
+      localWorkspaceIds: [MANAGER],
+      managedByWorkspaceId: MANAGER,
+      peopleSupported: false,
+    }));
+    const response = await app().fetch(organizationAdminRequest(path));
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    // An older form saves exactly what it saved before: no people key.
+    expect(body.policy).toEqual({
+      allowedModels: null,
+      allowedWorkspaces: [],
+      allowPersonalWorkspaces: false,
+      version: 1,
+    });
+    expect(body).toMatchObject({
+      peopleSupported: false,
+      localWorkspaceIds: [MANAGER],
+      managedByWorkspaceId: MANAGER,
+    });
+    expect(body.people).toBeUndefined();
+
+    // A workspace's own copy no workspace manages can be limited to people.
+    mock("readSubscriptionCoreCodexModelConnectionAccess", async () => ({
+      policy: {
+        allowedModels: null,
+        allowedWorkspaces: [],
+        allowPersonalWorkspaces: false,
+        allowedPeople: null,
+        version: 1,
+      },
+      localWorkspaceIds: [MANAGER],
+      managedByWorkspaceId: null,
+      peopleSupported: true,
+    }));
+    const unmanaged = await (await app().fetch(organizationAdminRequest(path))).json();
+    expect(unmanaged).toMatchObject({
+      peopleSupported: true,
+      people: [{ id: PERSON, name: "user:ada", email: null }],
+      localWorkspaceIds: [MANAGER],
+      managedByWorkspaceId: null,
+    });
+
+    // Beyond what the member list can show, people are not offered; the editor
+    // still works. The database refuses with SQLSTATE 54000, wrapped by the
+    // query layer, before any response parsing.
+    mock("listOrganizationAdministrationMembers", async () => {
+      throw Object.assign(new Error("Failed query"), {
+        cause: Object.assign(
+          new Error("organization member inventory exceeds the bounded projection"),
+          { code: "54000" },
+        ),
+      });
+    });
+    const large = await app().fetch(organizationAdminRequest(path));
+    expect(large.status).toBe(200);
+    const largeBody = await large.json();
+    expect(largeBody.peopleSupported).toBe(false);
+    expect(largeBody.people).toBeUndefined();
+    // Any other failure is not hidden.
+    mock("listOrganizationAdministrationMembers", async () => {
+      throw Object.assign(new Error("Failed query"), { cause: { code: "42501" } });
+    });
+    expect((await app().fetch(organizationAdminRequest(path))).status).toBe(500);
+  });
+
+  test("a person outside the organization or a mixed choice is a 422, never a write", async () => {
+    editor();
+    for (const error of [
+      new opengeniDb.SubscriptionCoreAccessPersonNotInOrganizationError(),
+      new opengeniDb.SubscriptionCoreAccessPeopleUnlistableError(),
+      new opengeniDb.SubscriptionCoreAccessInvalidError("mixed"),
+    ]) {
+      mock("updateSubscriptionCoreCodexModelConnectionAccess", async () => {
+        throw error;
+      });
+      const body = JSON.stringify({
+        allowedModels: null,
+        allowedWorkspaces: [],
+        allowPersonalWorkspaces: false,
+        allowedPeople: [PERSON],
+        version: 1,
+      });
+      const response = await app().fetch(organizationAdminRequest(path, { method: "PUT", body }));
+      expect(response.status).toBe(422);
+    }
+    expect(wakes).toEqual([]);
   });
 });
 

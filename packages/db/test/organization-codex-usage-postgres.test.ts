@@ -399,7 +399,7 @@ describe("organization Codex usage through retained core aliases", () => {
   );
 
   test.skipIf(!real)(
-    "rejects foreign and workspace-managed aliases before provider I/O",
+    "rejects foreign aliases before provider I/O and reads workspace-managed organization accounts",
     async () => {
       const canonical = await fixture("core");
       const alias = await aliasFor(canonical);
@@ -415,12 +415,21 @@ describe("organization Codex usage through retained core aliases", () => {
           )
         ).status,
       ).toBe("error");
-      const managedAlias = await aliasFor(await fixture("core", false, true));
-      expect(
-        (await fetchOrganizationCodexUsageForAccount(client!.db, settings, managedAlias, fetch))
-          .status,
-      ).toBe("error");
       expect(fetch).not.toHaveBeenCalled();
+      // A connection managed by a shared workspace is an organization account
+      // (design 5.4): its administrator reads its usage like any other.
+      const managedAlias = await aliasFor(await fixture("core", false, true));
+      const managedFetch = provider();
+      expect(
+        (
+          await fetchOrganizationCodexUsageForAccount(
+            client!.db,
+            settings,
+            managedAlias,
+            managedFetch,
+          )
+        ).status,
+      ).toBe("ok");
     },
   );
 });
