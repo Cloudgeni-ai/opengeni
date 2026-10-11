@@ -1625,6 +1625,32 @@ describe("One Models page for the organization and the workspace", () => {
     }
   });
 
+  test("an organization key whose workspaces leave this one out is not available here", async () => {
+    organizationAdmin = true;
+    routeOrganizationReads();
+    client.getOrganizationModelProviderConnection.mockImplementation(async (...args: unknown[]) =>
+      args[1] === "openrouter" ? { status: "active", version: 1 } : null,
+    );
+    client.getModelConnectionAccess.mockImplementation(async () => ({
+      policy: { ...openPolicy, allowedWorkspaces: ["workspace-b"], allowPersonalWorkspaces: false },
+      workspaces: [],
+      models: [],
+      personalWorkspacesSupported: false,
+    }));
+    const view = await render();
+    try {
+      await flush();
+      const row = [...view.container.querySelectorAll<HTMLElement>("[data-slot=list-row]")].find(
+        (candidate) => candidate.textContent?.includes("OpenRouter"),
+      )!;
+      expect(row.textContent).toContain("Not available here");
+      expect(row.textContent).not.toContain("Not available in");
+    } finally {
+      await cleanup(view);
+      client.getOrganizationModelProviderConnection.mockImplementation(async () => null);
+    }
+  });
+
   test("an organization Opper key connects through the generic provider rail with its workspace choice", async () => {
     organizationAdmin = true;
     routeOrganizationReads();
@@ -2650,8 +2676,34 @@ describe("One Models page for the organization and the workspace", () => {
     } finally {
       await cleanup(workspaceOnly);
     }
+    // Set to the organization's accounts, which here are only its own, shared.
+    accounts = {
+      ...accounts,
+      accounts: [codexAccount({ id: "acct-1", label: "Team plan", source: "organization" })],
+      source: {
+        ...source,
+        mode: "organization",
+        effectiveSource: "organization",
+        organizationAvailable: true,
+        organizationCount: 0,
+      },
+    };
+    const organizationOnly = await render();
+    try {
+      const text = organizationOnly.container.textContent ?? "";
+      expect(text).toContain(
+        "New work uses the organization's Codex account, which here is only this workspace's own.",
+      );
+      expect(text).not.toContain("even when accounts are connected here");
+    } finally {
+      await cleanup(organizationOnly);
+    }
     // An older server doesn't report the count: the pool's availability decides.
-    accounts = { ...accounts, source: { ...source, organizationAvailable: true } };
+    accounts = {
+      ...accounts,
+      accounts: [own],
+      source: { ...source, organizationAvailable: true },
+    };
     const older = await render();
     try {
       expect(older.container.textContent).toContain("Shared Codex accounts");

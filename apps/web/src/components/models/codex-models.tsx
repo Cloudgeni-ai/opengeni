@@ -122,11 +122,6 @@ function editable(codex: CodexSubscriptions, account: CodexAccount): boolean {
    -------------------------------------------------------------------------- */
 
 /**
- * Which pool new work uses, and which accounts are set aside. A workspace
- * uses exactly one Codex pool, its own accounts or the organization's, never
- * both (docs/codex-subscription-rotation.md).
- */
-/**
  * The organization gives this workspace accounts besides its own. Sharing a
  * workspace's own account with the organization gives the workspace an
  * organization copy of it too, so `organizationAvailable` alone can't tell;
@@ -139,6 +134,11 @@ function organizationOthersAvailable(source: CodexSubscriptions["source"]): bool
     : source.organizationAvailable;
 }
 
+/**
+ * Which pool new work uses, and which accounts are set aside. A workspace
+ * uses exactly one Codex pool, its own accounts or the organization's, never
+ * both (docs/codex-subscription-rotation.md).
+ */
 function poolState(codex: CodexSubscriptions) {
   const source = codex.source;
   const inUse = source?.effectiveSource ?? "workspace";
@@ -556,6 +556,8 @@ export function CodexPoolNotice({
         : 0,
     organizationCount:
       source.effectiveSource === "organization" ? codex.accounts.length : organizationAccountCount,
+    // The organization's accounts here are only this workspace's own, shared.
+    onlyOwnShared: source.organizationCount === 0 && codex.accounts.length > 0,
     canConnect: codex.canManage,
   });
   return (
@@ -591,6 +593,7 @@ export function codexPoolCopy({
   organizationAvailable,
   workspaceCount,
   organizationCount,
+  onlyOwnShared = false,
   canConnect,
 }: {
   mode: "automatic" | "workspace" | "organization" | "disabled";
@@ -598,6 +601,8 @@ export function codexPoolCopy({
   organizationAvailable: boolean;
   workspaceCount: number;
   organizationCount?: number | undefined;
+  /** The organization's accounts in use here are only this workspace's own, shared. */
+  onlyOwnShared?: boolean;
   canConnect: boolean;
 }): { text: string; blocked: boolean } {
   const orgOne = organizationCount === 1;
@@ -605,7 +610,12 @@ export function codexPoolCopy({
   if (inUse === "organization") {
     const used = `New work uses the organization's Codex ${orgOne ? "account" : "accounts"}`;
     if (mode === "organization") {
-      return { text: `${used}, even when accounts are connected here.`, blocked: false };
+      return {
+        text: onlyOwnShared
+          ? `${used}, which here ${orgOne ? "is" : "are"} only this workspace's own.`
+          : `${used}, even when accounts are connected here.`,
+        blocked: false,
+      };
     }
     return {
       text: canConnect ? `${used}. Connect an account here to use your own instead.` : `${used}.`,

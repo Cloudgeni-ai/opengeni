@@ -1126,7 +1126,6 @@ export function WorkspaceModelsPageBody({
                     state={orgGateways[id]}
                     labels={labels}
                     workspace={here}
-                    workspaceName={workspaceName}
                     onOpen={() => nav.openAccount(accountKey("gateway", id, true))}
                   />
                 ))}
@@ -1232,20 +1231,19 @@ function modelCount(count: number): string {
 
 /**
  * An organization API key on this workspace's list, for people who manage
- * it. "Not in use" when its "Available in" leaves this workspace out, or this
- * is a Personal workspace (organization keys serve shared workspaces only).
+ * it. "Not available here" when its "Available in" leaves this workspace out;
+ * "Shared workspaces only" on a Personal workspace (organization keys serve
+ * shared workspaces only).
  */
 function OrganizationGatewayRow({
   state,
   labels,
   workspace,
-  workspaceName,
   onOpen,
 }: {
   state: ProviderConnection;
   labels: ModelsScopeLabels;
   workspace: { id: string; personal: boolean };
-  workspaceName: string;
   onOpen: () => void;
 }) {
   const access = useConnectionAccess({
