@@ -71,6 +71,9 @@ export interface NativeTimelineMessages {
   rename: string;
   pin: string;
   unpin: string;
+  /** A pinned chat (its list section and row label). */
+  pinned: string;
+  pinFailed: (pinned: boolean) => string;
   renameChat: string;
   chatTitle: string;
   renameFailed: (reason: string | null) => string;
@@ -158,6 +161,8 @@ export const defaultNativeTimelineMessages: NativeTimelineMessages = {
   rename: "Rename",
   pin: "Pin",
   unpin: "Unpin",
+  pinned: "Pinned",
+  pinFailed: (pinned) => `Couldn't ${pinned ? "pin" : "unpin"} this chat.`,
   renameChat: "Rename chat",
   chatTitle: "Chat title",
   renameFailed: (reason) => `Couldn't rename this chat. ${reason ?? "Try again."}`,
