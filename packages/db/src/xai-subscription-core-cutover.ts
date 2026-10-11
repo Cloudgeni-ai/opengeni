@@ -31,6 +31,7 @@ import {
   encodeSubscriptionCoreXaiCredential,
   SUBSCRIPTION_CORE_XAI_CREDENTIAL_FORMAT,
   SUBSCRIPTION_CORE_XAI_PROVIDER,
+  SUBSCRIPTION_CORE_XAI_QUOTA_WINDOW_ID,
 } from "./subscription-core-xai-adapter";
 import {
   planSubscriptionCoreCutover,
@@ -179,7 +180,14 @@ export function planXaiCutoverQuota(
   const exhaustedUntil = time(row.exhausted_until);
   return {
     quota: {
-      windows: [{ id: "primary", usedPercent, resetsAt: time(row.quota_reset_at), status }],
+      windows: [
+        {
+          id: SUBSCRIPTION_CORE_XAI_QUOTA_WINDOW_ID,
+          usedPercent,
+          resetsAt: time(row.quota_reset_at),
+          status,
+        },
+      ],
       modelCooldowns: {},
       exhaustedUntil,
       exhaustedKind:

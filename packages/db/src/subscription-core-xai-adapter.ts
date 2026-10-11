@@ -36,6 +36,8 @@ import type { SubscriptionCoreProvider } from "./subscription-core/provider";
 export const SUBSCRIPTION_CORE_XAI_PROVIDER = "xai";
 /** The `credential_format` of a SuperGrok connection: OAuth tokens, which renew. */
 export const SUBSCRIPTION_CORE_XAI_CREDENTIAL_FORMAT = "xai_oauth_v1";
+/** The id of SuperGrok's one quota window (its billing usage), wherever it is written. */
+export const SUBSCRIPTION_CORE_XAI_QUOTA_WINDOW_ID = "billing";
 /** How long a connection SuperGrok refused (forbidden) stays quarantined. */
 export const SUBSCRIPTION_CORE_XAI_FORBIDDEN_QUARANTINE_MS = 60 * 60 * 1000;
 /** SuperGrok has no plan entitlements; kept equal to Codex for the shared health policy. */

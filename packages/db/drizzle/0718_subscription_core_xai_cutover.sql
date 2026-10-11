@@ -85,6 +85,24 @@ BEGIN
     WHERE c.relowner <> (SELECT oid FROM pg_roles WHERE rolname = current_user)) THEN
     RAISE EXCEPTION '0718 requires the schema owner' USING ERRCODE = '55000';
   END IF;
+  -- A runtime login missing from the passed role list still writes: refuse
+  -- every other client backend whose role may insert, update or delete a
+  -- moved relation. The schema owner's own sessions (serialized by the
+  -- migration lock) and superusers are not runtime logins.
+  IF EXISTS (
+    SELECT 1 FROM pg_stat_activity activity
+    JOIN pg_roles login ON login.oid = activity.usesysid
+    WHERE activity.datname = current_database() AND activity.pid <> pg_backend_pid()
+      AND activity.backend_type = 'client backend'
+      AND login.rolname <> current_user AND NOT login.rolsuper
+      AND EXISTS (SELECT 1 FROM xai_cutover_relations relation
+        WHERE has_table_privilege(activity.usesysid, relation.oid, 'INSERT')
+          OR has_table_privilege(activity.usesysid, relation.oid, 'UPDATE')
+          OR has_table_privilege(activity.usesysid, relation.oid, 'DELETE'))
+  ) THEN
+    RAISE EXCEPTION '0718 requires drained application sessions (a connected role outside the listed application roles can write moved relations)'
+      USING ERRCODE = '55000';
+  END IF;
   FOR item IN SELECT * FROM xai_cutover_relations ORDER BY oid LOOP
     EXECUTE format('LOCK TABLE %s IN ACCESS EXCLUSIVE MODE', item.oid::regclass);
   END LOOP;
@@ -375,12 +393,16 @@ ON CONFLICT (account_id, workspace_id) DO UPDATE SET
   updated_by_subject_id = EXCLUDED.updated_by_subject_id,
   updated_at = EXCLUDED.updated_at;
 
--- The owner of a migrated personal connection opts in to personal fallback,
--- so a Personal-workspace account keeps serving its owner after shared
--- capacity (design 5.2, D-18).
+-- The owner of a moved Personal-workspace account opts in to personal
+-- fallback (design 5.2, the "Workspace-scoped credential in a Personal
+-- workspace" row; D-18). The preference is per person, not per provider, so
+-- an owner whose SuperGrok accounts were only `user`-scope gets none: the
+-- cutover never records consent for another provider's personal fallback
+-- that the owner did not give.
 INSERT INTO subscription_person_preferences (account_id, organization_membership_id, personal_fallback_opt_in, updated_at)
 SELECT DISTINCT account_id, owner_membership_id, true, now()
-FROM pg_temp.subscription_cutover_connection_map WHERE ownership = 'personal'
+FROM pg_temp.subscription_cutover_connection_map
+WHERE ownership = 'personal' AND legacy_scope = 'workspace'
 ON CONFLICT (account_id, organization_membership_id) DO UPDATE SET
   personal_fallback_opt_in = true,
   version = subscription_person_preferences.version + 1,
@@ -1455,13 +1477,33 @@ END $xai_cutover_restore$;
 -- Read-only legacy (design 5.3 "Read-only legacy"). The legacy
 -- `xai_subscription` resource authorities stay for forensics, and membership
 -- lifecycle keeps revoking, retaining and restoring them with every other
--- authority of a member; after the receipt no role adds one (the legacy
--- connect routines run as the owner, which FORCE row security binds too).
--- Runtime write grants on the factory tables are withdrawn by
--- provision-roles and asserted by the runtime posture contract.
+-- authority of a member; after the receipt no role adds one. The five legacy
+-- tables admit no insert or update after the receipt either: the legacy
+-- create, disconnect and lease routines run as the owner, which FORCE row
+-- security binds, so a restrictive policy refuses them whatever runtime
+-- grants a login still holds (before provision-roles runs again, or a login
+-- it does not provision). Deletes stay open: membership lifecycle deletes
+-- an offboarded member's `user` credentials. provision-roles also withdraws
+-- runtime write grants on these tables, and the runtime posture contract
+-- asserts it.
 DO $xai_cutover_read_only$
-DECLARE data_schema text := current_schema();
+DECLARE data_schema text := current_schema(); legacy text;
 BEGIN
+  IF (SELECT count(*) FROM xai_cutover_relations relation JOIN pg_class c ON c.oid = relation.oid
+      WHERE c.relname IN ('xai_subscription_credentials', 'xai_rotation_settings',
+        'xai_credential_leases', 'xai_session_account_pins', 'xai_capacity_waiters')
+        AND c.relrowsecurity AND c.relforcerowsecurity) <> 5 THEN
+    RAISE EXCEPTION '0718 requires FORCE row security on the legacy SuperGrok tables'
+      USING ERRCODE = '55000';
+  END IF;
+  FOREACH legacy IN ARRAY ARRAY['xai_subscription_credentials', 'xai_rotation_settings',
+    'xai_credential_leases', 'xai_session_account_pins', 'xai_capacity_waiters'] LOOP
+    EXECUTE format($ddl$
+      CREATE POLICY %2$I ON %1$I.%3$I AS RESTRICTIVE FOR ALL
+      USING (true)
+      WITH CHECK (NOT opengeni_private.subscription_provider_cutover_committed('xai'))
+    $ddl$, data_schema, legacy || '_closed', legacy);
+  END LOOP;
   EXECUTE format($ddl$
     CREATE POLICY xai_subscription_authority_closed
     ON %1$I.organization_user_resource_authorities AS RESTRICTIVE FOR INSERT
