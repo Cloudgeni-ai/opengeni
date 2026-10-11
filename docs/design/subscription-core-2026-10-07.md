@@ -3657,7 +3657,11 @@ as "not an organization account":
    workspace's page opens the organization's page for it). Older API pods
    still switch the connection alone there, so the runbook forbids sharing a
    workspace-managed account until every pod runs the release, and asks for
-   such accounts to be narrowed back before an older image runs again.
+   such accounts to be narrowed back before an older image runs again. An
+   older pod's workspace route also decides "unchanged" from the connection's
+   switch alone, so after the organization switches on an account its
+   managing workspace had switched off, the workspace's "on" there is lost;
+   the runbook lists such accounts before a rollback.
    Until a workspace-managed account is first shared it has
    no organization copies, so the organization's switch is the connection's,
    which its managing workspace also flips; the organization's choice is
