@@ -3589,7 +3589,8 @@ as "not an organization account":
    since left may stay listed and is not served, since people scope admits
    only active memberships). A people-scoped connection
    serves only sessions whose owner is a chosen person (§3.8), in any
-   workspace that person uses and in their Personal workspace, and never an
+   workspace that person uses (except one set to use only its own accounts,
+   whose source excludes it) and in their Personal workspace, and never an
    ownerless session (SQL and placement already refuse people scope there).
    Choosing people removes the organization-pool rows and the reach for
    workspaces created later; local copies keep their rows, which serve again
@@ -3648,14 +3649,25 @@ as "not an organization account":
    manages is the organization's alone: its route shows the connection's
    switch (as the shipped organization page always did) and its "off" turns
    every copy off, including copies 0689 merged with their organization
-   copies paused. Until a workspace-managed account is first shared it has
+   copies paused; the editor gives copies it adds, and the reach, the
+   connection's switch too. A workspace-managed account switches only on the
+   organization's route and the managing workspace's: another workspace's
+   route would switch the connection alone, which the manager's next "on"
+   would undo for every other workspace, so it is refused as not found (that
+   workspace's page opens the organization's page for it). Until a workspace-managed account is first shared it has
    no organization copies, so the organization's switch is the connection's,
    which its managing workspace also flips; the organization's choice is
    recorded on its copies from the first share on (new copies take the
    organization's switch, or the connection's while there were none). The
    organization's switch and model list are read from its copies, the reach
    row included, so a reach row without organization-pool rows (its
-   workspaces deleted) still holds the organization's values.
+   workspaces deleted) still holds the organization's values. Narrowing a
+   workspace-managed account back to its managing workspace alone removes the
+   organization's copies, so its "off" is not kept: the account is then
+   unshared, its organization switch reads the connection's again (which the
+   managing workspace also flips), and a later share takes that value. The
+   organization administrator sees that value on the account's page before
+   sharing it again.
    The organization's switch sets the reach row's switch alone (0714's
    `set_subscription_core_reach_allocator`), since the reach setter would
    also copy the connection's model list, which the delegated manager
