@@ -11,7 +11,8 @@
 // does. The runbook's inventory queries (docs/deployment.md) run against the
 // fixtures staged before 0718.
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
+import { join } from "node:path";
 import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
@@ -463,11 +464,17 @@ beforeAll(async () => {
   if (!realDb) return;
   database = await acquireOwnerMigratedTestDatabase("subscription-personal-acceptance-reads");
   if (!database) throw new Error("Real PostgreSQL is required");
-  // Stage a provisioned database without 0718, as a deployment is before it.
+  // Stage a provisioned database without 0718, as a deployment is before it:
+  // 0718 and every later migration (which may require 0718, or retire the
+  // routines it patches) are held back, and only 0718 is applied below.
+  const heldBack = (await readdir(join(import.meta.dir, "../drizzle")))
+    .filter((file) => file.endsWith(".sql") && file >= MIGRATION)
+    .sort();
   const staging = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
     await staging`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
-    await staging`insert into schema_migrations(name) values (${MIGRATION})`;
+    for (const name of heldBack)
+      await staging`insert into schema_migrations(name) values (${name})`;
     await migrate(database.ownerUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
   } finally {
