@@ -317,6 +317,29 @@ describe("capacity activities accept both waiter shapes", () => {
     expect(legacyXai).not.toHaveBeenCalled();
   });
 
+  test("a Claude core waiter is peeked before the legacy waiters and names its provider", async () => {
+    spy(db, "getSubscriptionCoreCapacityWaitForSession").mockResolvedValue({
+      ...waiter,
+      provider: "claude",
+    });
+    const legacyXai = spy(db, "getXaiCapacityWaitForSession");
+    const legacyClaude = spy(db, "getClaudeCapacityWaitForSession");
+    expect(
+      await activities().getCodexCapacityWait({
+        workspaceId: "workspace-1",
+        sessionId: "session-1",
+      }),
+    ).toEqual({
+      waiterId: "waiter-1",
+      generation: 2,
+      nextCheckAt: new Date(0).toISOString(),
+      wakeRevision: 5,
+      provider: "claude",
+    });
+    expect(legacyXai).not.toHaveBeenCalled();
+    expect(legacyClaude).not.toHaveBeenCalled();
+  });
+
   test.each(["xai", "claude"] as const)(
     "without a core waiter the %s peek remains unchanged",
     async (provider) => {
@@ -465,7 +488,7 @@ describe("capacity activities accept both waiter shapes", () => {
     expect(legacyRead).not.toHaveBeenCalled();
   });
 
-  test("a SuperGrok wait consults the core by id first; Claude never does", async () => {
+  test("SuperGrok and Claude waits consult the core by id first; a Codex-only lookup never runs", async () => {
     const core = spy(db, "getSubscriptionCoreCodexCapacityWaitById");
     const anyCore = spy(db, "getSubscriptionCoreCapacityWaitById").mockResolvedValue(null);
     spy(db, "getXaiCapacityWaitForSession").mockResolvedValue(null);
@@ -493,7 +516,30 @@ describe("capacity activities accept both waiter shapes", () => {
         provider: "claude",
       }),
     ).toEqual({ action: "stale" });
-    expect(anyCore).toHaveBeenCalledTimes(1);
+    expect(anyCore).toHaveBeenCalledTimes(2);
     expect(core).not.toHaveBeenCalled();
+  });
+
+  test("a core waiter of another provider never reconciles through the Claude binding", async () => {
+    // The exact id names a SuperGrok core waiter: the Claude reference does
+    // not adopt it and falls back to the legacy Claude waiter (none here).
+    spy(db, "getSubscriptionCoreCapacityWaitById").mockResolvedValue({
+      ...waiter,
+      provider: "xai",
+    });
+    const reconcile = spy(db, "reconcileSubscriptionCoreCapacityWait");
+    spy(db, "getClaudeCapacityWaitForSession").mockResolvedValue(null);
+    expect(
+      await activities().reconcileCodexCapacityWait({
+        accountId: "account-1",
+        workspaceId: "workspace-1",
+        sessionId: "session-1",
+        waiterId: "waiter-1",
+        generation: 2,
+        cause: "timer",
+        provider: "claude",
+      }),
+    ).toEqual({ action: "stale" });
+    expect(reconcile).not.toHaveBeenCalled();
   });
 });

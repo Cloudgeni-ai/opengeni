@@ -445,16 +445,67 @@ async function connectionRestrictionsAndXaiReadiness(
 }
 
 /**
+ * Claude readiness on the shared core once its provider route is `core`
+ * (design 5.3, Claude track C1a): the core eligibility projection for the
+ * subject (shared pools; their own personal connection only in their own
+ * Personal workspace), not ready under maintenance. Null on the legacy route
+ * (one receipt read), so the caller keeps its legacy answer.
+ */
+export async function loadCoreRoutedClaudeCatalogReadiness(
+  db: Database,
+  context: { accountId: string; workspaceId: string; subjectId: string | null },
+): Promise<{ ready: boolean; allowedModelIds: string[] | null } | null> {
+  const answer = await readSubscriptionCoreRouteReadiness(db, { provider: "claude", ...context });
+  return answer.route === "core" ? answer.value : null;
+}
+
+/**
+ * The connection restrictions with Claude's replaced by the core's answer.
+ * On the core every Claude connection belongs to the organization, so new
+ * selections offer the organization's Claude models only; a workspace-scoped
+ * Claude model id an accepted turn already carries still runs (placement
+ * serves product model ids under both prefixes).
+ */
+export function withCoreRoutedClaudeRestriction(
+  restrictions: ConnectionModelRestrictions,
+  core: { allowedModelIds: string[] | null },
+): ConnectionModelRestrictions {
+  return {
+    ...restrictions,
+    "organization-claude-subscription/": core.allowedModelIds,
+    "workspace-claude-subscription/": [],
+  };
+}
+
+/**
  * Readiness for the subject's current or already accepted Claude pool observes
  * metadata only; quota is handled by the runtime allocator. This is not an
  * authorization: callers must supply their authenticated or frozen subject.
+ * After Claude's cutover the core answers instead (`core`, with the model
+ * restriction the caller applies through `withCoreRoutedClaudeRestriction`),
+ * and a frozen legacy authority no longer selects the pool.
  */
 export async function loadWorkspaceClaudeSubscriptionReadiness(
   db: Database,
   settings: Settings,
   context: WorkspaceModelSelectionContext,
-): Promise<{ workspace: boolean; organization: boolean }> {
+): Promise<{
+  workspace: boolean;
+  organization: boolean;
+  core?: { allowedModelIds: string[] | null };
+}> {
   if (!settings.claudeSubscriptionEnabled) return { workspace: false, organization: false };
+  const core = await loadCoreRoutedClaudeCatalogReadiness(db, {
+    accountId: context.accountId,
+    workspaceId: context.workspaceId,
+    subjectId: context.subjectId,
+  });
+  if (core)
+    return {
+      workspace: false,
+      organization: core.ready,
+      core: { allowedModelIds: core.allowedModelIds },
+    };
   const authoritySnapshot =
     context.claudeAuthoritySnapshot ??
     (await resolveClaudeProviderAccountAuthoritySnapshotForAcceptance(db, context));
@@ -532,12 +583,15 @@ export async function loadWorkspaceModelSelectionInput(
   if (inputResult.status === "rejected") throw inputResult.reason;
   if (catalogResult.status === "rejected") throw catalogResult.reason;
   const [
-    { restrictions: connectionModelRestrictions, xaiSubscriptionActive },
+    { restrictions: currentConnectionModelRestrictions, xaiSubscriptionActive },
     claudePool,
     policy,
     { active: codexSubscriptionActive, observations },
   ] = inputResult.value;
   const [workspaceConnections, workspaceCustomModels, organizationProviders] = catalogResult.value;
+  const connectionModelRestrictions = claudePool.core
+    ? withCoreRoutedClaudeRestriction(currentConnectionModelRestrictions, claudePool.core)
+    : currentConnectionModelRestrictions;
   const workspaceConnectionActive = (kind: WorkspaceCustomModelProviderKind) =>
     workspaceProviderApiKeyConnectionMetadataFromConnections(workspaceConnections, kind) !== null;
   const claudeConnections: ClaudeConnectionCatalog = {};

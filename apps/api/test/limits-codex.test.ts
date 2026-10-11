@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import * as opengeniDb from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
-import type { Settings } from "@opengeni/config";
+import { withClaudeConnectionCatalog, type Settings } from "@opengeni/config";
 import { checkLimit, requireLimit } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 
@@ -170,6 +170,52 @@ describe("API edge credit gate — codex bypass", () => {
           workspaceId: WORKSPACE,
           subjectId: "user:human",
           productModelId: "supergrok/grok-4.7",
+          acceptedTurn: { sessionId: "session-1", turnId: "turn-1" },
+        });
+      } finally {
+        route.mockRestore();
+        restoreCred();
+        restoreBal();
+      }
+    },
+  );
+
+  test.each([
+    ["organization-claude-subscription/claude-sonnet-5", true],
+    ["workspace-claude-subscription/claude-sonnet-5", false],
+  ] as const)(
+    "on Claude's core route the core's funding answer for %s (%p) replaces the legacy one",
+    async (model, funded) => {
+      const restoreBal = mockZeroBalance();
+      const restoreCred = mockCodexBilled(false);
+      const route = spyOn(opengeniDb, "readSubscriptionCoreRouteFunding").mockResolvedValue({
+        route: "core",
+        value: funded,
+      });
+      try {
+        let settings = billedSettings({ claudeSubscriptionEnabled: true });
+        for (const scope of ["organization", "workspace"] as const)
+          settings = withClaudeConnectionCatalog(
+            settings,
+            { claude_subscription: { models: [{ upstreamModelId: "claude-sonnet-5" }] } },
+            scope,
+          );
+        const decision = await checkLimit(deps(settings), {
+          accountId: ACCOUNT,
+          workspaceId: WORKSPACE,
+          initiatingHumanSubjectId: "user:human",
+          acceptedTurn: { sessionId: "session-1", turnId: "turn-1" },
+          action: "agent_run:create",
+          quantity: 1,
+          model,
+        });
+        expect(decision.allowed).toBe(funded);
+        expect(route).toHaveBeenCalledWith(expect.anything(), {
+          provider: "claude",
+          accountId: ACCOUNT,
+          workspaceId: WORKSPACE,
+          subjectId: "user:human",
+          productModelId: model,
           acceptedTurn: { sessionId: "session-1", turnId: "turn-1" },
         });
       } finally {

@@ -355,6 +355,8 @@ export type { SubscriptionCoreProvider } from "./subscription-core/provider";
 export { buildSubscriptionCoreTurnTokenResolver } from "./subscription-core/turn-token-resolver";
 export * from "./subscription-core-xai-adapter";
 export * from "./subscription-core-xai";
+export * from "./subscription-core-claude-adapter";
+export * from "./subscription-core-claude";
 import {
   listSubscriptionCoreCodexServingConnections,
   readCodexCutoverDispositionForWorkspace,
@@ -24844,12 +24846,13 @@ export function codexCapacityRefreshBackoffMs(attempt: number): number {
 // ---------------------------------------------------------------------------
 
 /** A provider whose chat turns park on the shared core waiter. */
-export type SubscriptionCoreWaiterProvider = "codex" | "xai";
+export type SubscriptionCoreWaiterProvider = "codex" | "xai" | "claude";
 
 /**
  * The session-event vocabulary of one provider's core waiter. Codex keeps
- * the names its core waiter shipped with (M3); SuperGrok keeps the names of
- * its legacy waiter, so a wait reads the same before and after its cutover.
+ * the names its core waiter shipped with (M3); SuperGrok and Claude keep the
+ * names of their legacy waiters, so a wait reads the same before and after
+ * the provider's cutover.
  */
 type SubscriptionCoreWaitVocabulary = {
   /** Product name in internal error texts. */
@@ -24936,6 +24939,39 @@ const SUBSCRIPTION_CORE_WAIT_VOCABULARY: Record<
       },
     }),
     cancelledBy: "xai_capacity_reconcile",
+  },
+  // Claude keeps the names of its legacy waiter (Claude track C1b).
+  claude: {
+    label: "Claude",
+    waitingEventType: "turn.capacity_waiting",
+    waitingPayload: {
+      provider: "claude-subscription",
+      recovery: "provider_capacity",
+      retryable: true,
+    },
+    statusReason: "claude_capacity",
+    closeToolsReason: "claude_capacity_wait",
+    exhaustedCode: "claude_capacity_recovery_exhausted",
+    resumedEvent: (waiter) => ({
+      type: "turn.recovery.requested",
+      payload: {
+        reason: "claude_capacity_available",
+        provider: "claude-subscription",
+        waiterId: waiter.waiterId,
+        generation: waiter.generation,
+        wakeRevision: waiter.wakeRevision,
+      },
+    }),
+    supersededEvent: (waiter, reason) => ({
+      type: "turn.superseded",
+      payload: {
+        provider: "claude-subscription",
+        waiterId: waiter.waiterId,
+        generation: waiter.generation,
+        reason,
+      },
+    }),
+    cancelledBy: "claude_capacity_reconcile",
   },
 };
 
@@ -25042,14 +25078,14 @@ function mapSubscriptionCoreCodexWaiter(
  */
 export function subscriptionCoreCodexCapacityWaitRef(wait: SubscriptionCoreCodexCapacityWait): {
   /** Absent for Codex (the legacy peek's "absent means Codex"). */
-  provider?: "xai";
+  provider?: "xai" | "claude";
   waiterId: string;
   generation: number;
   nextCheckAt: string;
   wakeRevision: number;
 } {
   return {
-    ...(wait.provider === "xai" ? { provider: "xai" as const } : {}),
+    ...(wait.provider === "codex" ? {} : { provider: wait.provider }),
     waiterId: wait.waiterId,
     generation: wait.generation,
     nextCheckAt:
@@ -75381,10 +75417,11 @@ export async function peekSessionWork(
 
     // A core waiter (any provider) is the only waiter written after its
     // provider's cutover; it keeps that provider's legacy reference shape
-    // (`provider: "xai"` for SuperGrok, none for Codex), so the workflow
-    // waits on it exactly as on a legacy waiter. A row that no longer belongs
-    // to the session's active waiting turn becomes an immediate check, whose
-    // reconcile deletes it, rather than a sleep until its next check.
+    // (`provider: "xai"` for SuperGrok, `"claude"` for Claude, none for
+    // Codex), so the workflow waits on it exactly as on a legacy waiter. A
+    // row that no longer belongs to the session's active waiting turn
+    // becomes an immediate check, whose reconcile deletes it, rather than a
+    // sleep until its next check.
     const coreCapacityWait = await readSubscriptionCoreWaiterInTransaction(scopedDb, {
       workspaceId,
       sessionId,

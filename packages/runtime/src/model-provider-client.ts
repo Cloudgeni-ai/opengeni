@@ -44,6 +44,7 @@ import { withoutQuotaExhaustedRetries } from "./provider-quota";
 import {
   captureClaudeRequestToken,
   prepareClaudeSubscriptionRequest,
+  type PreparedClaudeRequest,
 } from "./claude-subscription-usage";
 
 let runtimeMetricsHooks: RuntimeMetricsHooks | null = null;
@@ -507,16 +508,48 @@ export function instrumentedModelFetch(provider: string, inner: typeof fetch): t
     }
     const prepared = await prepareClaudeSubscriptionRequest(provider, input, init);
     init = prepared.init;
-    const claudeRequestToken = captureClaudeRequestToken(input, init);
     // The attempt-local observer durably checkpoints provider dispatch before
     // this process can place request bytes on the network.
     await recordModelTransportStarted();
     const capture = captureProviderRequestBody(provider, input, init);
     const started = performance.now();
     recordModelTransportDispatched(started);
+    // A request whose bearer a subscription core leased is admitted by its
+    // custody as the last awaited step before the fetch, then settled from
+    // its outcome; any other request passes straight through.
+    const send = async (current: PreparedClaudeRequest, requestInit: RequestInit | undefined) => {
+      const requestToken = captureClaudeRequestToken(input, requestInit);
+      await current.admit();
+      let response: Response;
+      try {
+        response = await inner(input, requestInit);
+      } catch (error) {
+        await current.failed();
+        throw error;
+      }
+      current.observe(response, requestToken);
+      return await current.responded(response);
+    };
     try {
-      const response = await inner(input, capture.init);
-      prepared.observe(response, claudeRequestToken);
+      let response = await send(prepared, capture.init);
+      // A leased bearer refused as unauthorized is renewed (at most once per
+      // request; the custody decides whether the retry may run) and the same
+      // request sent again when its body can be sent again.
+      if (response.status === 401 && prepared.renew && replayableRequest(input, capture.init)) {
+        const refused = response;
+        const renewed = await prepared.renew().catch(async (error: unknown) => {
+          await refused.body?.cancel().catch(() => undefined);
+          throw error;
+        });
+        // Without a renewal the refusal the provider sent is surfaced as is.
+        if (renewed) {
+          await refused.body?.cancel().catch(() => undefined);
+          response = await send(renewed, {
+            ...capture.init,
+            ...(renewed.init?.headers ? { headers: renewed.init.headers } : {}),
+          });
+        }
+      }
       recordModelCallMetric(provider, response.ok ? "completed" : "failed", started);
       return response;
     } catch (error) {
@@ -525,6 +558,20 @@ export function instrumentedModelFetch(provider: string, inner: typeof fetch): t
       throw error;
     }
   }) as typeof fetch;
+}
+
+/** Whether a request can be sent a second time unchanged (its body is not a consumed stream). */
+function replayableRequest(input: Parameters<typeof fetch>[0], init: RequestInit | undefined) {
+  if (input instanceof Request && input.body !== null) return false;
+  const body = init?.body;
+  return (
+    body === undefined ||
+    body === null ||
+    typeof body === "string" ||
+    body instanceof ArrayBuffer ||
+    ArrayBuffer.isView(body) ||
+    body instanceof URLSearchParams
+  );
 }
 
 function recordModelCallMetric(

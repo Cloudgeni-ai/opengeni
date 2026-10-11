@@ -127,10 +127,15 @@ export async function assertCoreCodexSourceConnected(
 export async function assertTurnModelConnection(
   db: Database,
   providerTurn: Pick<ProviderTurnState, "codexSubscriptionCore"> &
-    Partial<Pick<ProviderTurnState, "xaiSubscriptionCore">>,
+    Partial<Pick<ProviderTurnState, "xaiSubscriptionCore" | "claudeSubscriptionCore">>,
   input: Parameters<typeof assertModelConnectionAllowsTurn>[1],
 ): Promise<void> {
-  if (providerTurn.codexSubscriptionCore || providerTurn.xaiSubscriptionCore) return;
+  if (
+    providerTurn.codexSubscriptionCore ||
+    providerTurn.xaiSubscriptionCore ||
+    providerTurn.claudeSubscriptionCore
+  )
+    return;
   await assertModelConnectionAllowsTurn(db, input);
 }
 
