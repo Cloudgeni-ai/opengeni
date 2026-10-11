@@ -886,7 +886,8 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
         org.accountId,
         "opengeni_private.subscription_codex_auto_assignments",
       ).then((rows) => rows.filter((row) => row.connection_id === local));
-      expect(before?.allocator_enabled).toBe(true);
+      if (!before) throw new Error("expected the local reach row");
+      expect(before.allocator_enabled).toBe(true);
       expect(await setReachAllocator(org, "codex", local, false)).toEqual({ value: "set" });
       const [after] = await reachRows(
         org.accountId,
