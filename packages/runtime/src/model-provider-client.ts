@@ -527,8 +527,14 @@ export function instrumentedModelFetch(provider: string, inner: typeof fetch): t
         await current.failed();
         throw error;
       }
-      current.observe(response, requestToken);
-      return await current.responded(response);
+      try {
+        current.observe(response, requestToken);
+        return await current.responded(response);
+      } catch (error) {
+        // A response the custody could not take is never left open.
+        await response.body?.cancel().catch(() => undefined);
+        throw error;
+      }
     };
     try {
       let response = await send(prepared, capture.init);

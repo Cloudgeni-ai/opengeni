@@ -227,4 +227,103 @@ describe("fresh model admission versus live discovery", () => {
     expect(current).not.toHaveBeenCalled();
     expect(restrictions.mock.calls[0]?.[4]).toEqual(snapshot);
   });
+
+  describe("on Claude's core route", () => {
+    const claudeSettings = { ...settings, claudeSubscriptionEnabled: true };
+    function coreRoute(value: { ready: boolean; allowedModelIds: string[] | null }) {
+      const route = spyOn(opengeniDb, "readSubscriptionCoreRouteReadiness").mockImplementation(
+        async (_db, input) =>
+          input.provider === "claude" ? { route: "core", value } : { route: "legacy" },
+      );
+      const current = spyOn(
+        opengeniDb,
+        "resolveClaudeProviderAccountAuthoritySnapshotForAcceptance",
+      ).mockResolvedValue({ version: 1, scope: "organization" });
+      const pool = spyOn(
+        opengeniDb,
+        "workspaceClaudeSubscriptionActiveForAuthority",
+      ).mockResolvedValue(true);
+      const catalog = spyOn(
+        opengeniDb,
+        "getOrganizationModelProviderCatalogForWorkspace",
+      ).mockResolvedValue({
+        vercel_gateway: { active: false, models: [] },
+        openrouter: { active: false, models: [] },
+        anthropic: { active: false, models: [] },
+        claude_subscription: {
+          active: true,
+          models: [{ upstreamModelId: "claude-sonnet-5" }, { upstreamModelId: "claude-opus-5-5" }],
+        },
+      } as never);
+      const custom = spyOn(opengeniDb, "listWorkspaceProviderCustomModelsByKind").mockResolvedValue(
+        {
+          vercel_gateway: [],
+          openrouter: [],
+          anthropic: [],
+          claude_subscription: [{ upstreamModelId: "claude-sonnet-5" }],
+        } as never,
+      );
+      mocks.push(route, current, pool, catalog, custom);
+      return { route, current, pool };
+    }
+
+    test("the core's answer replaces the legacy pool, and workspace-scoped Claude models are hidden", async () => {
+      // Core allowlists name product model ids.
+      const { route, current, pool } = coreRoute({
+        ready: true,
+        allowedModelIds: ["organization-claude-subscription/claude-sonnet-5"],
+      });
+      const loaded = await loadWorkspaceModelSelectionInput(db, claudeSettings, context, {
+        observeAvailability: false,
+      });
+      expect(route).toHaveBeenCalledWith(db, expect.objectContaining({ provider: "claude" }));
+      expect(loaded.claudeConnections?.claude_subscription?.active).toBe(true);
+      expect(loaded.workspaceClaudeConnections?.claude_subscription?.active).toBe(false);
+      expect(loaded.connectionModelRestrictions["organization-claude-subscription/"]).toEqual([
+        "organization-claude-subscription/claude-sonnet-5",
+      ]);
+      expect(loaded.connectionModelRestrictions["workspace-claude-subscription/"]).toEqual([]);
+      // The legacy Claude pool's readiness is never read on the core route.
+      expect(pool).not.toHaveBeenCalled();
+      expect(current).not.toHaveBeenCalled();
+      const selections = await resolveCallerWorkspaceModelSelections(db, claudeSettings, context);
+      expect(
+        admissibleWorkspaceModel(selections, "organization-claude-subscription/claude-sonnet-5"),
+      ).toBeDefined();
+      expect(
+        admissibleWorkspaceModel(selections, "organization-claude-subscription/claude-opus-5-5"),
+      ).toBeUndefined();
+      expect(
+        admissibleWorkspaceModel(selections, "workspace-claude-subscription/claude-sonnet-5"),
+      ).toBeUndefined();
+    });
+
+    test("a null core allowlist leaves the organization's Claude models unrestricted", async () => {
+      coreRoute({ ready: true, allowedModelIds: null });
+      const loaded = await loadWorkspaceModelSelectionInput(db, claudeSettings, context, {
+        observeAvailability: false,
+      });
+      expect(loaded.connectionModelRestrictions["organization-claude-subscription/"]).toBeNull();
+      expect(loaded.connectionModelRestrictions["workspace-claude-subscription/"]).toEqual([]);
+      const selections = await resolveCallerWorkspaceModelSelections(db, claudeSettings, context);
+      for (const model of ["claude-sonnet-5", "claude-opus-5-5"])
+        expect(
+          admissibleWorkspaceModel(selections, `organization-claude-subscription/${model}`),
+        ).toBeDefined();
+    });
+
+    test("maintenance shows Claude not ready with every Claude model closed", async () => {
+      coreRoute({ ready: false, allowedModelIds: [] });
+      const loaded = await loadWorkspaceModelSelectionInput(db, claudeSettings, context, {
+        observeAvailability: false,
+      });
+      expect(loaded.claudeConnections?.claude_subscription?.active).toBe(false);
+      expect(loaded.workspaceClaudeConnections?.claude_subscription?.active).toBe(false);
+      expect(loaded.connectionModelRestrictions["organization-claude-subscription/"]).toEqual([]);
+      const selections = await resolveCallerWorkspaceModelSelections(db, claudeSettings, context);
+      expect(
+        admissibleWorkspaceModel(selections, "organization-claude-subscription/claude-sonnet-5"),
+      ).toBeUndefined();
+    });
+  });
 });

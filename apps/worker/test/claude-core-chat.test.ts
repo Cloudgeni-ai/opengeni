@@ -397,6 +397,7 @@ function send(
     claudeCoreRequestPreparer({
       authorization: placed.authorization,
       lane,
+      mainLane: (options.lane ?? "requests") === "requests",
       nextRequestId: () => `${options.prefix ?? "attempt-1:1:1:claude"}:${++sequence}`,
       providerIds: new Set([PROVIDER_ID]),
     }),
@@ -411,8 +412,8 @@ describe("Claude request custody on the core", () => {
       credential: credential("sk-ant-oat01-core"),
       credentialVersion: 4,
     });
-    // The refusal settlement fences on the generation the latest bearer carried.
-    expect(placed.core.credentialVersion).toBe(4);
+    // Obtaining a bearer moves no refusal fence: only an admitted main-lane request does.
+    expect(placed.core.credentialVersion).toBeUndefined();
     expect((placed.resolverInputs[0] as unknown[])[2]).toEqual(identity);
     expect((placed.resolverInputs[0] as unknown[])[3]).toEqual({
       connectionId: "connection-core",
@@ -433,6 +434,8 @@ describe("Claude request custody on the core", () => {
       },
     ]);
     expect(placed.order).toEqual(["fence", "reserve:attempt-1:1:1:claude:1:1"]);
+    // The refusal settlement fences on the generation the admitted main-lane bearer carried.
+    expect(placed.core.credentialVersion).toBe(4);
     // A completed response is settled only after the history checkpoint.
     await placed.core.requests!.checkpoint();
     expect(placed.order.at(-1)).toBe("settle:operation-1:response_received");
@@ -601,6 +604,23 @@ describe("Claude request custody on the core", () => {
     expect(claudeCoreRequestOutcomeUnknown(new Error("plain"), placed.core)).not.toBeNull();
   });
 
+  test("a session-title request, even one renewed after a 401, never moves the main lane's refusal fence", async () => {
+    const placed = placedCore();
+    const main = send(placed, [answered]);
+    await (await main.response).text();
+    expect(placed.core.credentialVersion).toBe(4);
+    const title = send(placed, [() => new Response("{}", { status: 401 }), answered], {
+      lane: "titleRequests",
+      prefix: "attempt-1:1:1:claude:title",
+    });
+    await (await title.response).text();
+    expect(title.sent.map((request) => request.authorization)).toEqual([
+      "Bearer sk-ant-oat01-core",
+      "Bearer sk-ant-oat01-fresh",
+    ]);
+    expect(placed.core.credentialVersion).toBe(4);
+  });
+
   test("a request to another provider passes through without custody", async () => {
     const placed = placedCore();
     const sent = send(placed, [() => new Response("ok")], { providerId: "openai" });
@@ -626,13 +646,32 @@ describe("Claude response inspection", () => {
     expect(inspector.outcome(false)).toBe("response_received");
   });
 
-  test("an error event before any content is refused; after content it is unknown", () => {
-    const refused = claudeResponseInspector(streamed());
-    chunks(refused, "event: message_start\ndata: {}\n\nevent: error\ndata: {}\n\n");
-    expect(refused.outcome(true)).toBe("refused");
-    const cut = claudeResponseInspector(streamed());
-    chunks(cut, "event: content_block_start\ndata: {}\n\nevent: error\ndata: {}\n\n");
-    expect(cut.outcome(true)).toBe("unknown");
+  const error = (type: string) =>
+    `event: error\ndata: ${JSON.stringify({ type: "error", error: { type, message: "x" } })}\n\n`;
+
+  test("an overload or rate-limit error event before any content is refused; after content it is unknown", () => {
+    for (const type of ["overloaded_error", "rate_limit_error"]) {
+      const refused = claudeResponseInspector(streamed());
+      chunks(refused, `event: message_start\ndata: {}\n\n${error(type)}`);
+      expect(refused.outcome(true)).toBe("refused");
+      const cut = claudeResponseInspector(streamed());
+      chunks(cut, `event: content_block_start\ndata: {}\n\n${error(type)}`);
+      expect(cut.outcome(true)).toBe("unknown");
+    }
+  });
+
+  test("any other stream error, or one without a readable type, is unknown", () => {
+    for (const body of [
+      error("timeout_error"),
+      error("conflict_error"),
+      error("api_error"),
+      "event: error\ndata: {}\n\n",
+      "event: error\ndata: not json\n\n",
+    ]) {
+      const inspector = claudeResponseInspector(streamed());
+      chunks(inspector, `event: message_start\ndata: {}\n\n${body}`);
+      expect(inspector.outcome(true)).toBe("unknown");
+    }
   });
 
   test("a stream that ends without a final event is unknown; a plain body is a response once it ends", () => {
@@ -651,9 +690,17 @@ describe("Claude model scope and provider ids", () => {
       "organization",
     );
     expect(claudeCoreModelScope("workspace-claude-subscription/claude-sonnet-5")).toBe("workspace");
-    expect(db.subscriptionCoreClaudeModelPolicyProviderId("supergrok/grok-4")).toBe(
+    expect(claudeCoreModelScope("supergrok/grok-4")).toBe("organization");
+    // A workspace-scoped model runs on organization connections on the core,
+    // so workspace policy must allow it under both identities.
+    expect(
+      db.subscriptionCoreClaudeModelPolicyProviderIds(
+        "workspace-claude-subscription/claude-sonnet-5",
+      ),
+    ).toEqual(["workspace-claude-subscription", "organization-claude-subscription"]);
+    expect(db.subscriptionCoreClaudeModelPolicyProviderIds("supergrok/grok-4")).toEqual([
       "organization-claude-subscription",
-    );
+    ]);
   });
 
   test("only the Claude subscription providers of the catalog carry core custody", () => {

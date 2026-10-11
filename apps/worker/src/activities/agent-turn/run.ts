@@ -1228,6 +1228,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 claudeCoreRequestPreparer({
                   authorization: claudeCoreAuthorization,
                   lane: custody,
+                  mainLane: lane === "requests",
                   nextRequestId: () =>
                     lane === "requests"
                       ? `${requestIdPrefix}:claude:${++claudeModelRequestSequence}`

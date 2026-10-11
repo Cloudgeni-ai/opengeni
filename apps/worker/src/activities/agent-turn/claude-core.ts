@@ -14,7 +14,6 @@ import {
   SUBSCRIPTION_CORE_CLAUDE,
   SUBSCRIPTION_CORE_CLAUDE_MODEL_PREFIXES,
   SubscriptionCoreError,
-  subscriptionCoreClaudeModelPolicyProviderId,
   subscriptionCoreRequests,
   subscriptionCoreTurns,
   withRlsContext,
@@ -148,6 +147,13 @@ export type ClaudeCoreRequestAuthorization = {
   ) => Promise<SubscriptionCoreClaudeTokenSnapshot | null>;
   /** The dispatch fence every physical request passes before its reservation. */
   assertDispatch: () => Promise<void>;
+  /**
+   * A main-lane request with a bearer of `generation` was admitted: the
+   * refusal settlement fences its health write on that generation. Main-lane
+   * requests are sequential, so at settlement it is the refused request's;
+   * session-title requests (their own lane) never move it.
+   */
+  mainLaneAdmitted: (generation: number) => void;
 };
 
 /**
@@ -175,33 +181,29 @@ export function buildClaudeCoreRequestAuthorization(input: {
     buildSubscriptionCoreClaudeTokenResolver(db, input.settings, core.identity, ref),
     (error) => hasCoreCode(error, "subscription_core_lease_lost"),
   );
-  // The refusal settlement fences its quota write on the generation the
-  // refused bearer carried.
-  const carried = (token: SubscriptionCoreClaudeTokenSnapshot) => {
-    core.credentialVersion = token.credentialVersion;
-    return token;
-  };
   let forced: Promise<SubscriptionCoreClaudeTokenSnapshot> | null = null;
   return {
-    getToken: async () => carried(await resolver.getToken()),
+    getToken: () => resolver.getToken(),
     renewAfterUnauthorized: async (generation) => {
       forced ??= resolver.refresh();
       const token = await forced;
-      return token.credentialVersion > generation ? carried(token) : null;
+      return token.credentialVersion > generation ? token : null;
     },
     assertDispatch: async () => {
       await assertCoreSourceConnected(db, CLAUDE_CORE_TURN_PROVIDER, core);
       await lease.assertCurrentForDispatch();
+    },
+    mainLaneAdmitted: (generation) => {
+      core.credentialVersion = generation;
     },
   };
 }
 
 /** The scope a Claude product model id names (its prefix). */
 export function claudeCoreModelScope(productModelId: string): "organization" | "workspace" {
-  return subscriptionCoreClaudeModelPolicyProviderId(productModelId) ===
-    SUBSCRIPTION_CORE_CLAUDE_MODEL_PREFIXES[0]
-    ? "organization"
-    : "workspace";
+  return productModelId.startsWith(`${SUBSCRIPTION_CORE_CLAUDE_MODEL_PREFIXES[1]}/`)
+    ? "workspace"
+    : "organization";
 }
 
 /** The Claude subscription provider ids of the deployment's catalog. */
@@ -220,15 +222,19 @@ export function claudeSubscriptionProviderIds(
 }
 
 const SSE_EVENT = /^event:\s*(\S+)/;
+const SSE_DATA = /^data:\s*(.*)$/;
+/** Stream error types that are a refusal (the provider did no model work). */
+const CLAUDE_REFUSAL_ERROR_TYPES = new Set(["overloaded_error", "rate_limit_error"]);
 
 /**
  * The outcome of a streamed Claude response, read from its event names as
  * the body passes: a `message_delta` (the model's final stop reason) or
  * `message_stop` means the model answered, even when the reader stops right
- * after it; an `error` event before any content block is a refusal (an
- * overload or limit the provider reported with HTTP 200); anything else
- * that ends or stops early is unknown. A body that is not a stream is a
- * response once it ends.
+ * after it; an `error` event before any content block whose type is an
+ * overload or rate limit is a refusal (reported with HTTP 200); any other
+ * stream error (a timeout or conflict, as their HTTP statuses) and anything
+ * else that ends or stops early is unknown. A body that is not a stream is
+ * a response once it ends.
  */
 export function claudeResponseInspector(response: Response): CoreResponseInspector {
   const streamed = (response.headers.get("content-type") ?? "").includes("text/event-stream");
@@ -236,7 +242,8 @@ export function claudeResponseInspector(response: Response): CoreResponseInspect
   let pending = "";
   let content = false;
   let answered = false;
-  let failed = false;
+  let inError = false;
+  let refused = false;
   return {
     chunk(bytes) {
       if (!streamed || answered) return;
@@ -244,19 +251,35 @@ export function claudeResponseInspector(response: Response): CoreResponseInspect
       const lines = pending.split("\n");
       pending = lines.pop() ?? "";
       for (const line of lines) {
-        const event = SSE_EVENT.exec(line.trim())?.[1];
+        const trimmed = line.trim();
+        const data = inError ? SSE_DATA.exec(trimmed)?.[1] : undefined;
+        if (data !== undefined) {
+          inError = false;
+          refused ||= CLAUDE_REFUSAL_ERROR_TYPES.has(claudeStreamErrorType(data) ?? "");
+          continue;
+        }
+        const event = SSE_EVENT.exec(trimmed)?.[1];
         if (!event) continue;
+        inError = event === "error";
         if (event === "message_delta" || event === "message_stop") answered = true;
         else if (event.startsWith("content_block_")) content = true;
-        else if (event === "error") failed = true;
       }
     },
     outcome(ended) {
       if (!streamed) return ended ? "response_received" : "unknown";
       if (answered) return "response_received";
-      return failed && !content ? "refused" : "unknown";
+      return refused && !content ? "refused" : "unknown";
     },
   };
+}
+
+function claudeStreamErrorType(data: string): string | null {
+  try {
+    const value = JSON.parse(data) as { error?: { type?: unknown } } | null;
+    return typeof value?.error?.type === "string" ? value.error.type : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -272,6 +295,8 @@ export function claudeResponseInspector(response: Response): CoreResponseInspect
 export function claudeCoreRequestPreparer(input: {
   authorization: ClaudeCoreRequestAuthorization;
   lane: CoreSubscriptionRequests;
+  /** The agent's lane (not the session title's): admissions move the refusal fence. */
+  mainLane: boolean;
   nextRequestId: () => string;
   providerIds: ReadonlySet<string>;
   observe?: (response: Response, generation: number, upstreamModelId?: string) => void;
@@ -295,6 +320,7 @@ export function claudeCoreRequestPreparer(input: {
           admit: async () => {
             await input.authorization.assertDispatch();
             await input.lane.reserve(request);
+            if (input.mainLane) input.authorization.mainLaneAdmitted(token.credentialVersion);
           },
           responded: (response) =>
             settleCoreResponse(input.lane, request, response, claudeResponseInspector(response)),

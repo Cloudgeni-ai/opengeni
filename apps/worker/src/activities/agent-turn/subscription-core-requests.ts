@@ -138,8 +138,7 @@ export type CoreSubscriptionRequests = ReturnType<typeof createCoreSubscriptionR
 /**
  * An HTTP error status is a definite answer: no model response was produced.
  * Timeouts (408, 504) and conflicts (409) stay ambiguous because the
- * provider may still be processing the request (the Codex and SuperGrok
- * transports' rule).
+ * provider may still be processing the request (every core transport's rule).
  */
 export function definiteRefusalStatus(status: number): boolean {
   return status >= 400 && status < 600 && status !== 408 && status !== 409 && status !== 504;

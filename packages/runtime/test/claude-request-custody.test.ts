@@ -106,6 +106,39 @@ test("a refused admission sends nothing", async () => {
   expect(fetched).toBe(0);
 });
 
+test("a response the custody cannot settle is cancelled, not left open", async () => {
+  let cancelled = false;
+  const fetcher = instrumentedModelFetch(
+    "organization-claude-subscription",
+    (async () =>
+      new Response(
+        new ReadableStream({
+          cancel() {
+            cancelled = true;
+          },
+        }),
+      )) as typeof fetch,
+  );
+  await expect(
+    withClaudeUsageObserver(
+      () => undefined,
+      () => fetcher(URL_MESSAGES, { method: "POST", body: "{}" }),
+      async (_provider, headers) => ({
+        headers,
+        observe: () => undefined,
+        custody: {
+          admit: async () => undefined,
+          responded: async () => {
+            throw new Error("settlement failed");
+          },
+          failed: async () => undefined,
+        },
+      }),
+    ),
+  ).rejects.toThrow("settlement failed");
+  expect(cancelled).toBe(true);
+});
+
 test("a 401 renews the bearer once and retries the same body as its own request", async () => {
   const log: string[] = [];
   const bodies: string[] = [];

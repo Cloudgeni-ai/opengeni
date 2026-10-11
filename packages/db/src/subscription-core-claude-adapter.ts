@@ -143,9 +143,10 @@ export function subscriptionCoreClaudeAdapter(
     credentialKind: "oauth",
     quotaKind: "usage_windows",
     // Workspace model policy names Claude models by their scope-specific
-    // provider id: a workspace-scoped model keeps its own policy.
+    // provider id; on the core a workspace-scoped model runs on organization
+    // connections, so it must be allowed under both identities.
     modelPolicyProviderId: SUBSCRIPTION_CORE_CLAUDE_MODEL_PREFIXES[0],
-    modelPolicyProviderIdFor: subscriptionCoreClaudeModelPolicyProviderId,
+    modelPolicyProviderIdsFor: subscriptionCoreClaudeModelPolicyProviderIds,
     cacheFacts: { kind: "exact_ttl", ttlMs: SUBSCRIPTION_CORE_CLAUDE_CACHE_TTL_MS },
     health: {
       forbiddenQuarantineMs: SUBSCRIPTION_CORE_CLAUDE_FORBIDDEN_QUARANTINE_MS,
@@ -195,15 +196,18 @@ export function subscriptionCoreClaudeProductModelIds(upstreamModelId: string): 
 }
 
 /**
- * The workspace-policy provider id of a Claude product model: its own
- * prefix (`workspace-claude-subscription` or
- * `organization-claude-subscription`), the organization id otherwise.
+ * The workspace-policy provider ids a Claude product model must all be
+ * allowed under: its own prefix plus the organization id its connections
+ * carry (`workspace-claude-subscription` models need both), the
+ * organization id alone otherwise.
  */
-export function subscriptionCoreClaudeModelPolicyProviderId(modelId: string): string {
+export function subscriptionCoreClaudeModelPolicyProviderIds(modelId: string): readonly string[] {
   const prefix = modelId.slice(0, Math.max(0, modelId.indexOf("/")));
-  return (SUBSCRIPTION_CORE_CLAUDE_MODEL_PREFIXES as readonly string[]).includes(prefix)
-    ? prefix
-    : SUBSCRIPTION_CORE_CLAUDE_MODEL_PREFIXES[0];
+  const organization = SUBSCRIPTION_CORE_CLAUDE_MODEL_PREFIXES[0];
+  return prefix !== organization &&
+    (SUBSCRIPTION_CORE_CLAUDE_MODEL_PREFIXES as readonly string[]).includes(prefix)
+    ? [prefix, organization]
+    : [organization];
 }
 
 const ACCOUNT_WINDOWS = new Set(["five_hour", "seven_day"]);

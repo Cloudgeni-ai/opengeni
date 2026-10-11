@@ -193,11 +193,13 @@ export interface SubscriptionCoreAdapter<Credential = unknown> {
   /** Provider identity used by workspace model policy for this provider's models. */
   readonly modelPolicyProviderId: string;
   /**
-   * The workspace model policy's provider identity of one model, for a
-   * provider whose models carry more than one (absent or null:
-   * `modelPolicyProviderId`). Read through `subscriptionCoreModelPolicyProviderId`.
+   * Every workspace model policy provider identity one model must be allowed
+   * under, for a provider whose models carry more than one (absent, null or
+   * empty: `modelPolicyProviderId` alone). A model is allowed only when the
+   * policy allows each identity, so a second identity can only narrow access.
+   * Read through `subscriptionCoreModelPolicyProviderIds`.
    */
-  readonly modelPolicyProviderIdFor?: (modelId: ModelId) => string | null;
+  readonly modelPolicyProviderIdsFor?: (modelId: ModelId) => readonly string[] | null;
   /**
    * The prompt-cache lifetime placement keeps a session's account for
    * (SUB-STICK-04): an exact TTL Opengeni sends, or a documented idle cut-off.
@@ -347,12 +349,16 @@ export function subscriptionCoreCredentialRefresher<Credential>(
     : null;
 }
 
-/** The workspace model policy's provider identity for one of the adapter's models. */
-export function subscriptionCoreModelPolicyProviderId(
-  adapter: Pick<SubscriptionCoreAdapter, "modelPolicyProviderId" | "modelPolicyProviderIdFor">,
+/**
+ * The workspace model policy provider identities one of the adapter's models
+ * must all be allowed under (never empty).
+ */
+export function subscriptionCoreModelPolicyProviderIds(
+  adapter: Pick<SubscriptionCoreAdapter, "modelPolicyProviderId" | "modelPolicyProviderIdsFor">,
   modelId: ModelId,
-): string {
-  return adapter.modelPolicyProviderIdFor?.(modelId) ?? adapter.modelPolicyProviderId;
+): readonly string[] {
+  const ids = adapter.modelPolicyProviderIdsFor?.(modelId);
+  return ids && ids.length > 0 ? ids : [adapter.modelPolicyProviderId];
 }
 
 /**

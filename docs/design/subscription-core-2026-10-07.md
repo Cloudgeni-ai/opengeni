@@ -4919,8 +4919,11 @@ models by their scope-specific provider id
 while `modelPolicyProviderId` is one value per adapter (§5.1.3 lists this as
 still missing). The adapter declares the organization id; C1a makes the
 policy provider id a function of the model in the shared placement world,
-in a provider-neutral change after the SuperGrok track's X1a and X1b, so
-workspace-scoped Claude models keep their policy.
+in a provider-neutral change after the SuperGrok track's X1a and X1b. Until
+C2 adds workspace-scoped connections, a workspace-scoped Claude model runs
+on organization connections on the core, so it must be allowed under both
+its own identity and the organization identity: the per-model identities
+only ever narrow access (review finding on #4132).
 
 ##### C1a: Claude chat call sites (implemented)
 
@@ -4930,12 +4933,17 @@ every Claude entry point reads the provider route first and the binding is
 unregistered until then.
 
 - Policy identity. The shared adapter interface gains an optional
-  `modelPolicyProviderIdFor(modelId)`, read through
-  `subscriptionCoreModelPolicyProviderId(adapter, modelId)` by the
-  placement world. The Claude adapter maps each product model id to its own
-  prefix; providers with one identity declare nothing. The shared
-  conformance suite asserts, for every provider, that a workspace policy
-  naming one model's policy identity admits exactly the models sharing it.
+  `modelPolicyProviderIdsFor(modelId)`, read through
+  `subscriptionCoreModelPolicyProviderIds(adapter, modelId)` by the
+  placement world, which admits a model only when the workspace policy
+  allows every identity it carries (an empty or absent list means the
+  declared `modelPolicyProviderId`). The Claude adapter returns
+  `[organization]` for an organization model and `[workspace,
+  organization]` for a workspace-scoped model, because on the core it runs
+  on organization connections; providers with one identity declare nothing.
+  The shared conformance suite asserts, for every provider, that a policy
+  naming only a model's first identity never admits a model that carries
+  another, and that allowing all of them places it.
 - Placement. `selectClaudeTurnCapacityByRoute`: `legacy` runs the legacy
   Claude selection unchanged after one route read; `maintenance` fails
   closed; `core` places the accepted turn (holder
@@ -4946,6 +4954,10 @@ unregistered until then.
   legacy rotation, and carries no legacy authority snapshot or credential
   version. No park until C1b: a core wait is a terminal capacity failure,
   and compaction defers with its request preserved.
+  Until C1b, a core 429, 529 or unrenewed 401 settles through the generic
+  provider recovery (no account refusal is recorded and the overload lane
+  is not yet distinguished), so C3 must not register Claude before C1b has
+  merged. Unreachable while dormant.
 - Materialization and refresh. The bearer comes from the shared turn token
   resolver under the exact accepted turn and the attempt's live core lease;
   the decoded credential is bound into the capability settings with the
@@ -4960,13 +4972,17 @@ unregistered until then.
   and reservation are the last awaited step before each physical fetch; an
   error status settles refused (408, 409 and 504 unknown); a successful body
   settles when it ends or stops, read by a Claude response inspector
-  (`message_delta` or `message_stop` is a response, an `error` event before
-  any content block a refusal, anything else unknown); a failed fetch is
-  unknown. An unknown outcome is never replayed: later requests of the
+  (`message_delta` or `message_stop` is a response, an `overloaded_error` or
+  `rate_limit_error` event before any content block a refusal, any other
+  stream error such as a timeout or conflict and anything else unknown); a
+  failed fetch is unknown, and a response the custody cannot settle is
+  cancelled. An unknown outcome is never replayed: later requests of the
   attempt are refused locally. The 401 renewal resends the same body only
   when it can be sent again. A 529 is a refusal on the same connection
   (never a refresh or a rotation). Session titles use their own lane under
-  the same fence. The legacy usage observer, its receipts and its usage
+  the same fence; only an admitted main-lane request moves the generation
+  the refusal settlement fences on (`core.credentialVersion`), so a title
+  request renewed after a 401 never does. The legacy usage observer, its receipts and its usage
   rows are not used on a core turn; header usage becomes quota
   observations in C1b.
 - Readiness and `list_models`. On the core route the catalog answers from
@@ -4975,8 +4991,11 @@ unregistered until then.
   organization's Claude models (the union of the serving connections'
   allowlists) and no workspace-scoped Claude model, while an accepted turn
   that already names a workspace-scoped id still runs. A frozen legacy
-  authority snapshot no longer selects the pool. The legacy route costs one
-  receipt read in the catalog loader.
+  authority snapshot no longer selects the pool, and the connection
+  restriction loader reads Claude's route and skips the legacy Claude pool
+  (authority, accounts, rotation) unless it is `legacy`, so a retired
+  legacy pool can never fail the catalog. The legacy route costs one
+  receipt read in the catalog loader and one in the restriction loader.
 - Funding and attribution were already provider-neutral (credential source
   `claude`); usage facts attribute the core connection through the placed
   core turn, and the legacy model-connection check is skipped for a core

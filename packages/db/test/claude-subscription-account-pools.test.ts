@@ -812,6 +812,43 @@ test("model admission uses the exact frozen Claude account and keeps exhausted m
   );
   expect(restrictions["workspace-claude-subscription/"]).toEqual([sonnet]);
   expect(restrictions["organization-claude-subscription/"]).toEqual([]);
+  // After Claude's cutover the restriction loader never reads this legacy
+  // pool: both Claude prefixes start closed for the core's answer, and the
+  // other providers' restrictions are unchanged.
+  const { getWorkspaceConnectionModelRestrictions: resolveRestrictions } =
+    await import("../src/workspace-model-connection-access");
+  const onCore = await resolveRestrictions(
+    client.db,
+    input.workspaceId,
+    input.subjectId,
+    [],
+    undefined,
+    null,
+  );
+  expect(onCore["workspace-claude-subscription/"]).toEqual([]);
+  expect(onCore["organization-claude-subscription/"]).toEqual([]);
+  const legacy = await resolveRestrictions(
+    client.db,
+    input.workspaceId,
+    input.subjectId,
+    [],
+    undefined,
+    {
+      authoritySnapshot,
+    },
+  );
+  expect(legacy["workspace-claude-subscription/"]).toEqual([sonnet]);
+  const {
+    "workspace-claude-subscription/": _onCoreWorkspace,
+    "organization-claude-subscription/": _onCoreOrganization,
+    ...otherOnCore
+  } = onCore;
+  const {
+    "workspace-claude-subscription/": _legacyWorkspace,
+    "organization-claude-subscription/": _legacyOrganization,
+    ...otherLegacy
+  } = legacy;
+  expect(otherOnCore).toEqual(otherLegacy);
 });
 
 test("capacity deadlines respect a manual pin instead of another account's earlier reset", async () => {
