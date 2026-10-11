@@ -38,16 +38,26 @@
 -- xai_subscription_credentials, claude_subscription_credentials,
 -- organization_user_resource_authorities and session_turns (sections 5 and 6
 -- and the turn-execution trigger), all taken first by one statement in that
--- order, and no other runtime table: every other statement creates or
--- replaces a routine. Runtime work reads memberships before turns (session
+-- order. No later statement takes a stronger lock on any runtime table:
+-- the rest create or replace routines and policies, which take only ACCESS
+-- SHARE on other tables they name (scheduled_tasks,
+-- scheduled_task_revision_authorities and the capability tables), and that
+-- conflicts with no runtime work. Runtime work reads memberships before turns (session
 -- visibility) and turns before memberships (the turn enqueue then the v2
 -- writer), so no static order is cycle-free. As in 0716, the set is taken
 -- under a 100 ms per-wait lock timeout inside a savepoint and retried after
 -- a short pause until the migration holds it all: it never holds one of
 -- these locks for more than about 500 ms while it waits, under PostgreSQL's
--- default one-second deadlock_timeout, so neither side becomes a deadlock
--- victim. After 30 seconds without the whole set it fails with 55P03 and
--- changes nothing (safe to retry).
+-- default one-second deadlock_timeout, so no cycle between the migration and
+-- one runtime transaction can form and the migration is never a deadlock
+-- victim. A cycle through a third transaction can still pick a live one as
+-- the victim (40P01): one that has already waited about a second behind
+-- another live transaction, which in turn waits behind an attempt. That is
+-- rare and the runtime treats it as retryable. Waits of 100 ms never cancel a
+-- running autovacuum (PostgreSQL cancels one only for a waiter that has
+-- waited deadlock_timeout), so a long vacuum of one of these tables makes
+-- every attempt fail. After 30 seconds without the whole set it fails with
+-- 55P03 and changes nothing (safe to retry).
 SET LOCAL lock_timeout = '5s';
 
 DO $prerequisite$

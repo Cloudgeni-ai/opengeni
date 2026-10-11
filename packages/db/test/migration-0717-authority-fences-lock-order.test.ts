@@ -232,6 +232,43 @@ function hold(first: (tx: Database) => Promise<void>, then: (tx: Database) => Pr
   };
 }
 
+/**
+ * A transaction holding one table in ACCESS SHARE mode, then reading
+ * memberships, as the test administrator: a stand-in for the owner's
+ * routines, the only runtime path to tables the application role holds no
+ * privilege on (the authorities and, for reads, the Claude credentials).
+ */
+function holdAsOwnerRoutine(table: string): Held {
+  const reached = gate();
+  const release = gate();
+  let backendPid = 0;
+  const done = settle(
+    (async () => {
+      const reserved = await database!.admin.reserve();
+      try {
+        await reserved`begin`;
+        const [row] = await reserved<{ pid: number }[]>`select pg_backend_pid()::int as pid`;
+        backendPid = row!.pid;
+        await reserved.unsafe(`lock table ${table} in access share mode`);
+        reached.open();
+        await release.opened;
+        await reserved`select count(*) from organization_memberships`;
+        await reserved`commit`;
+      } catch (error) {
+        await reserved`rollback`.catch(() => undefined);
+        throw error;
+      } finally {
+        reserved.release();
+      }
+    })(),
+  );
+  return {
+    pid: Promise.race([reached.opened, done.then(() => undefined)]).then(() => backendPid),
+    release: release.open,
+    done,
+  };
+}
+
 // Each runtime step takes exactly one of 0717's tables (row security on other
 // reads reaches further tables), the shape in which a lock cycle could form.
 // The application role reads memberships only through the owner's routines.
@@ -396,20 +433,30 @@ describe("migration 0717 lock order", () => {
   for (const shape of [
     {
       name: "a turn writer holding turns that reaches memberships (the enqueue then the v2 writer)",
-      first: holdTurns,
+      start: () => hold(holdTurns, readMemberships),
       waitsOn: "session_turns",
     },
     {
       name: "a credential reader holding xAI credentials that reaches memberships",
-      first: holdXaiCredentials,
+      start: () => hold(holdXaiCredentials, readMemberships),
       waitsOn: "xai_subscription_credentials",
+    },
+    {
+      name: "an owner routine holding Claude credentials that reaches memberships",
+      start: () => holdAsOwnerRoutine("claude_subscription_credentials"),
+      waitsOn: "claude_subscription_credentials",
+    },
+    {
+      name: "an owner routine holding authorities that reaches memberships",
+      start: () => holdAsOwnerRoutine("organization_user_resource_authorities"),
+      waitsOn: "organization_user_resource_authorities",
     },
   ]) {
     test.skipIf(!realDb)(
       `${shape.name} is granted it within one attempt and neither side is a deadlock victim`,
       async () => {
         const before = await deadlockCount();
-        const runtime = hold(shape.first, readMemberships);
+        const runtime = shape.start();
         await runtime.pid;
         const applying = await startMigration();
         try {

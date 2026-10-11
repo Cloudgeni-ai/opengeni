@@ -75,6 +75,8 @@ let staged: {
   planner: PreReceipt;
   /** For the inbox fence: the same shape in another session. */
   fence: PreReceipt;
+  /** For the planner's batching without a receiving context: the same shape again. */
+  coalesce: PreReceipt;
   /** A run with an accepted `user` xAI snapshot whose owner then disconnected it. */
   xaiRun: XaiRun;
 } | null = null;
@@ -500,6 +502,7 @@ beforeAll(async () => {
   staged = {
     planner: await preReceiptContext(),
     fence: await preReceiptContext(),
+    coalesce: await preReceiptContext(),
     xaiRun: await revokedXaiRun(),
   };
 }, 180_000);
@@ -539,6 +542,7 @@ describe.skipIf(!realDb)("0717 subscription authority fences after a provider's 
       }
       await cutoverWorkspaceRecords(staged!.planner);
       await cutoverWorkspaceRecords(staged!.fence);
+      await cutoverWorkspaceRecords(staged!.coalesce);
     });
 
     test("the runtime planner keeps a causal update with another effective authority out of the receiving context", async () => {
@@ -584,6 +588,38 @@ describe.skipIf(!realDb)("0717 subscription authority fences after a provider's 
         state: "delivered",
         deliveredTurnId: otherReceiving.turn.id,
       });
+    });
+
+    test("the runtime planner keeps updates with different effective authorities in separate batches when no receiving context owns them", async () => {
+      // Wait timeouts are not informational agent input, so with no queued
+      // human turn the claim plans them without the receiving context. Both
+      // carry the same v1 values and causal human; only their records differ.
+      const { grant, sessionId, turnId: recordedCause } = staged!.coalesce;
+      const plainCause = await contextTurn(grant, sessionId);
+      // The plain update is first in the inbox and leads the batch.
+      const plain = await causalUpdate(grant, sessionId, plainCause, false);
+      const recorded = await causalUpdate(grant, sessionId, recordedCause, true);
+      expect(
+        await effective(grant, [
+          { kind: "session_system_update", id: plain },
+          { kind: "session_system_update", id: recorded },
+        ]),
+      ).toEqual({
+        [`session_system_update:${plain}`]: { claude: NONE, xai: NONE },
+        [`session_system_update:${recorded}`]: { claude: WORKSPACE_RECORD, xai: WORKSPACE_RECORD },
+      });
+      const first = await claim(grant, sessionId);
+      expect(first.turn.source).toBe("system");
+      const [delivering] = await database!.admin<{ context: string | null }[]>`
+        select execution_context_turn_id::text as context from session_turns
+        where id = ${first.turn.id}::uuid`;
+      expect(delivering).toEqual({ context: null });
+      expect(await updateState(plain)).toEqual({
+        state: "delivered",
+        deliveredTurnId: first.turn.id,
+      });
+      // Another effective authority: not coalesced into the same turn.
+      expect(await updateState(recorded)).toEqual({ state: "pending", deliveredTurnId: null });
     });
 
     test("the inbox fence refuses a delivery borrowing a context whose effective authority differs from its update's", async () => {
