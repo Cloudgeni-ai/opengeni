@@ -32,6 +32,9 @@ workspaces, external users) in [`product-integration.md`](product-integration.md
   creation, plus explicit invitation revoke
 - `GET /v1/organizations/:id/members` and revision-fenced member lifecycle `PATCH`
 - `GET|PATCH /v1/organizations/:id/retention-policy`
+- `GET|POST /v1/organizations/:id/personal-api-keys` and
+  `DELETE /v1/organizations/:id/personal-api-keys/:apiKeyId` (keys that act as
+  the person who created them; see [`credentials.md`](credentials.md))
 - `GET /v1/workspaces`
 - `POST /v1/workspaces`
 - `POST /v1/workspaces/:workspaceId/sessions`

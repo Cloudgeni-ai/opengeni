@@ -27,7 +27,11 @@ import {
   registerAnalyticsConsentRoutes,
 } from "./routes/analytics-consent";
 import { codemodeSessionRequest } from "./codemode";
-import { SiteSessionPathError, OrganizationIntegrationDeniedError } from "@opengeni/contracts";
+import {
+  SiteSessionPathError,
+  OrganizationIntegrationDeniedError,
+  normalizeOrganizationAccessPolicy,
+} from "@opengeni/contracts";
 import {
   httpRejectionFactsFromEnvelope,
   httpRejectionFactsFromError,
@@ -177,6 +181,8 @@ import {
   SessionAuthorizationUnavailableError,
   createUserPresenceRecorder,
   registerProductUsageMetricBaselines,
+  stampPersonalApiKeyRequest,
+  verifiedDelegatedHumanAuthorizationForRequest,
 } from "@opengeni/core";
 import { createManagedAuthNewSignupsGate } from "./auth/new-signups-gate";
 import {
@@ -284,6 +290,7 @@ import { registerEnvironmentRoutes } from "./routes/environments";
 import { registerFileRoutes } from "./routes/files";
 import { registerApiKeyRoutes } from "./routes/api-keys";
 import { registerOrganizationMcpConnectionRoutes } from "./routes/organization-mcp-connections";
+import { registerPersonalApiKeyRoutes } from "./routes/personal-api-keys";
 import { registerOrganizationServiceAccountRoutes } from "./routes/organization-service-accounts";
 import { registerBillingRoutes } from "./routes/billing";
 import { registerBrowserIdentityRoutes } from "./routes/browser-identities";
@@ -1035,6 +1042,14 @@ export function createAppComposition(deps: AppDependencies): {
     );
   });
 
+  // A personal API key acts as its owner. Verify it and stamp this exact raw
+  // Request before any route resolves access; the body limit above may have
+  // rebuilt the Request, so this runs after it.
+  app.use("/v1/*", async (c, next) => {
+    await stampPersonalApiKeyRequest(c.req.raw, deps);
+    await next();
+  });
+
   app.use("/v1/*", async (c, next) => {
     c.header(OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION);
     if (
@@ -1553,6 +1568,9 @@ export function createAppComposition(deps: AppDependencies): {
     let caller: OrganizationMcpCaller;
     try {
       const connection = await resolveOrganizationMcpOAuthAccess(routeDeps, c.req.raw);
+      const personalKey = connection
+        ? null
+        : verifiedDelegatedHumanAuthorizationForRequest(c.req.raw);
       if (connection) {
         caller = {
           kind: "person",
@@ -1560,12 +1578,27 @@ export function createAppComposition(deps: AppDependencies): {
           subjectId: connection.subjectId,
           access: connection.organizationAccess,
         };
+      } else if (personalKey) {
+        // A personal API key: the person who created it, with its access.
+        // Each action rechecks their live access, exactly as for sign-in.
+        await requireAccessContext(c, routeDeps);
+        caller = {
+          kind: "person",
+          accountId: personalKey.organizationId,
+          subjectId: personalKey.subjectId,
+          access: normalizeOrganizationAccessPolicy({
+            preset: "custom",
+            permissions: [...personalKey.permissions],
+            workspaceScope: personalKey.workspaceScope,
+          }),
+        };
       } else {
         const context = await requireAccessContext(c, routeDeps);
         const authorization = c.req.header("authorization");
         if (!accountScopedApiKeyWorkspaceAuthority(context) || !authorization) {
           throw new HTTPException(403, {
-            message: "Connect with Opengeni sign-in or an organization API key.",
+            message:
+              "Connect with Opengeni sign-in, a personal API key or an organization API key.",
           });
         }
         caller = {
@@ -2104,6 +2137,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerSessionArtifactAssociationRoutes(app, routeDeps);
   registerApiKeyRoutes(app, routeDeps);
   registerOrganizationMcpConnectionRoutes(app, routeDeps);
+  registerPersonalApiKeyRoutes(app, routeDeps);
   registerOrganizationServiceAccountRoutes(app, routeDeps);
   registerBillingRoutes(app, routeDeps);
   registerBrowserIdentityRoutes(app, routeDeps);

@@ -68,6 +68,10 @@ const LazyOrganizationConnectedAgents = lazy(async () => {
   return { default: module.OrganizationConnectedAgents };
 });
 
+const LazyOrganizationPersonalApiKeys = lazy(async () => {
+  const module = await import("@/components/organization-access/personal-api-keys");
+  return { default: module.OrganizationPersonalApiKeys };
+});
 const LazyOrganizationServiceAccounts = lazy(async () => {
   const module = await import("@/components/organization-access/organization-service-accounts");
   return { default: module.OrganizationServiceAccounts };
@@ -466,7 +470,21 @@ export function OrgSettingsRoute({
           {!modelsRefused &&
           section === "developer" &&
           showConnectedAgents &&
-          (developer?.view === "connect-agent" || developer?.agent) ? (
+          developer?.view === "new-personal-key" ? (
+            <Suspense fallback={<Skeleton className="h-48 w-full rounded-lg" />}>
+              <LazyOrganizationPersonalApiKeys
+                key={`${identityKey}:personal-api-keys`}
+                client={client}
+                organizationId={accountId}
+                organizationName={fallbackLabel}
+                location={{ view: "new-personal-key" }}
+                onNavigate={navigateDeveloper}
+              />
+            </Suspense>
+          ) : !modelsRefused &&
+            section === "developer" &&
+            showConnectedAgents &&
+            (developer?.view === "connect-agent" || developer?.agent) ? (
             <Suspense fallback={<Skeleton className="h-48 w-full rounded-lg" />}>
               <LazyOrganizationConnectedAgents
                 key={`${identityKey}:connected-agents`}
@@ -525,6 +543,18 @@ export function OrgSettingsRoute({
                 <Suspense fallback={<Skeleton className="h-48 w-full rounded-lg" />}>
                   <LazyOrganizationConnectedAgents
                     key={`${identityKey}:connected-agents`}
+                    client={client}
+                    organizationId={accountId}
+                    organizationName={fallbackLabel}
+                    location={{}}
+                    onNavigate={navigateDeveloper}
+                  />
+                </Suspense>
+              ) : null}
+              {organizationView !== "new-key" && showConnectedAgents ? (
+                <Suspense fallback={<Skeleton className="h-48 w-full rounded-lg" />}>
+                  <LazyOrganizationPersonalApiKeys
+                    key={`${identityKey}:personal-api-keys`}
                     client={client}
                     organizationId={accountId}
                     organizationName={fallbackLabel}

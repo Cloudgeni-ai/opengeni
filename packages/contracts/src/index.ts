@@ -3871,6 +3871,51 @@ export const CreateOrganizationApiKeyRequest = z
   });
 export type CreateOrganizationApiKeyRequest = z.infer<typeof CreateOrganizationApiKeyRequest>;
 
+/**
+ * A personal API key acts as the person who created it: anything done with it
+ * is done as them, with their current access in this organization, capped by
+ * the key's own access setting. It stops working when they leave.
+ */
+export const PersonalApiKey = z.object({
+  id: z.string().uuid(),
+  organizationId: z.string().uuid(),
+  name: z.string(),
+  description: z.string().nullable(),
+  /** The first characters of the key, to recognize it. */
+  prefix: z.string(),
+  access: OrganizationAccessPolicy,
+  owner: z.object({ subjectId: z.string(), name: z.string() }),
+  expiresAt: z.string().nullable(),
+  lastUsedAt: z.string().nullable(),
+  createdAt: z.string(),
+});
+export type PersonalApiKey = z.infer<typeof PersonalApiKey>;
+
+export const ListPersonalApiKeysResponse = z.object({
+  apiKeys: z.array(PersonalApiKey),
+  /** Owners and admins see everyone's keys and can revoke them. */
+  canManageAll: z.boolean(),
+});
+export type ListPersonalApiKeysResponse = z.infer<typeof ListPersonalApiKeysResponse>;
+
+export const CreatePersonalApiKeyRequest = z
+  .object({
+    name: z.string().trim().min(1).max(200),
+    description: z.string().trim().min(1).max(500).optional(),
+    access: OrganizationAccessPolicy,
+    /** Omitted means the key never expires. */
+    expiresAt: z.string().datetime({ offset: true }).optional(),
+  })
+  .strict();
+export type CreatePersonalApiKeyRequest = z.infer<typeof CreatePersonalApiKeyRequest>;
+
+export const CreatePersonalApiKeyResponse = z.object({
+  apiKey: PersonalApiKey,
+  /** Shown once. Only a hash is stored. */
+  token: z.string().min(1),
+});
+export type CreatePersonalApiKeyResponse = z.infer<typeof CreatePersonalApiKeyResponse>;
+
 export const UpdateOrganizationApiKeyRequest = z
   .object({
     name: z.string().trim().min(1).max(200).optional(),

@@ -1005,6 +1005,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "createPersonalApiKey",
+    "method": "POST",
+    "path": "/v1/organizations/:organizationId/personal-api-keys",
+    "request": [
+      "CreatePersonalApiKeyRequest"
+    ],
+    "response": [
+      "CreatePersonalApiKeyResponse"
+    ]
+  },
+  {
     "id": "createPreferenceRegistryProposal",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/preferences/proposals",
@@ -4095,6 +4106,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "listPersonalApiKeys",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/personal-api-keys",
+    "request": [],
+    "response": [
+      "ListPersonalApiKeysResponse"
+    ]
+  },
+  {
     "id": "listPersonalGitHubRepositories",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/connections/:connectionId/github/repositories",
@@ -5778,6 +5798,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "CancelExternalWorkspaceMemberGrantResponse",
       "RevokeOrganizationWorkspaceMemberResponse"
     ]
+  },
+  {
+    "id": "revokePersonalApiKey",
+    "method": "DELETE",
+    "path": "/v1/organizations/:organizationId/personal-api-keys/:apiKeyId",
+    "request": [],
+    "response": []
   },
   {
     "id": "revokeSessionAdminAccess",
