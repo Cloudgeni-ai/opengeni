@@ -779,6 +779,7 @@ describe("embedded worker lifecycle contract", () => {
           "subscription_codex_owner_membership_held(uuid, uuid)",
           ...opengeniDb.SUBSCRIPTION_CORE_NEUTRAL_PRIVATE_ROUTINES,
           ...opengeniDb.SUBSCRIPTION_CORE_PRECURSOR_PRIVATE_ROUTINES,
+          ...opengeniDb.SUBSCRIPTION_AUTHORITY_COMPAT_PRIVATE_ROUTINES,
         ].map((name) => ({
           name,
           owner: "opengeni_migrator",
@@ -800,6 +801,7 @@ describe("embedded worker lifecycle contract", () => {
         "derive_scheduled_revision_subscription_authority()",
         ...opengeniDb.SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES,
         ...opengeniDb.SUBSCRIPTION_CORE_PRECURSOR_OWNER_ROUTINES,
+        ...opengeniDb.SUBSCRIPTION_AUTHORITY_COMPAT_OWNER_ROUTINES,
       ].map((name) => ({
         name,
         owner: "opengeni_migrator",

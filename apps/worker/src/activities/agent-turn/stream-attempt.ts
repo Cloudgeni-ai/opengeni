@@ -48,6 +48,7 @@ import {
   modelResponseHasVisibleText,
   type SandboxFileDownload,
   type OpenGeniRuntime,
+  type GeneratedSessionTitle,
   type HistoryProviderApi,
   type GitCredentialTokenWriterSession,
   type NormalizedRunCredentialMaterial,
@@ -414,11 +415,16 @@ export async function runTurnStreamAttempt(
   let creditPolicyRevision: number | undefined;
   let titleCreditPolicyRevision: number | undefined;
   let titleUsageModelId: string | null = null;
-  const finishParallelSessionTitle = async (): Promise<void> => {
-    if (parallelSessionTitleFinished) return;
-    parallelSessionTitleFinished = true;
-    const generated = await parallelSessionTitle?.finish();
-    if (!generated) return;
+  const persistParallelSessionTitle = async (
+    generated: GeneratedSessionTitle | null,
+  ): Promise<void> => {
+    if (!generated) {
+      // A cancelled title may have received a complete provider response before
+      // its result was discarded. Checkpoint only that positive observation;
+      // pending or unknown requests keep their replay fence.
+      await providerTurn.codexSubscriptionCore?.titleRequests?.checkpoint();
+      return;
+    }
 
     if (generated.usage) {
       await processSessionTitleModelUsageEvent({
@@ -474,6 +480,11 @@ export async function runTurnStreamAttempt(
         origin: "worker",
       });
     }
+  };
+  const finishParallelSessionTitle = async (): Promise<void> => {
+    if (parallelSessionTitleFinished) return;
+    parallelSessionTitleFinished = true;
+    await parallelSessionTitle?.finish();
   };
   const cancelParallelSessionTitle = async (): Promise<void> => {
     if (parallelSessionTitleFinished) return;
@@ -2191,6 +2202,7 @@ export async function runTurnStreamAttempt(
     titleUsageModelId = titleRoute.usageModelId;
     parallelSessionTitle = startParallelSessionTitleGeneration({
       signal: runtimeCancellationSignal,
+      onFinish: persistParallelSessionTitle,
       generate: async (signal) =>
         await withSessionTitleProviderRequestContext(() =>
           runtime.generateSessionTitle!(

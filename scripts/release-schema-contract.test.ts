@@ -2265,6 +2265,7 @@ describe("release schema contract", () => {
     }
     const appendedMigrationPaths = [
       "0716_subscription_settings_locks.sql",
+      "0716_subscription_authority_compat.sql",
       "0715_subscription_core_api_key_connections.sql",
       "0714_subscription_workspace_managed_organization_accounts.sql",
       "0713_subscription_core_provider_keyed_reach.sql",

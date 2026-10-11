@@ -106,13 +106,30 @@ Shared Drive boundary. That product mode requires
   contract is explicitly limited to the individually selected files. It must
   not be represented as a recursively synchronized folder.
 
-OAuth start continues to use Google's incremental-authorization flag. A future
-Drive publishing feature may request `drive.file` as a separate write capability
-without replacing the read-only source grant. The callback and every active
+Source-read OAuth uses Google's incremental-authorization flag.
+Drive publishing requests `drive.file` as a separate write capability
+without replacing the read-only source grant. Its OAuth-integrated folder
+picker requests only `drive.file` and disables incremental authorization:
+Google rejects that picker when other previously granted scopes are included.
+After verifying the selected writable folder and the same Google account,
+Opengeni starts a separate ordinary OAuth request for `drive.readonly` and
+`drive.file`, with incremental authorization enabled. Each step has fresh
+single-use signed state and PKCE; the second step carries the server-verified
+folder and rechecks its writability, account identity, live initiating authority,
+and unchanged connection version. Source credentials and publishing settings
+change only after the second step succeeds. The callback and every active
 source-browser admission evaluate the exact returned/stored scope set through
-one deterministic capability decision. Unknown, partial, write-only, or malformed
-grants fail before Google identity lookup, credential persistence, or
-source-provider reads.
+one deterministic capability decision. Source-read setup rejects grants without
+the required recursive-read capability before Google identity lookup,
+credential persistence, or source-provider reads. Unrelated scopes returned by
+incremental authorization do not grant additional Drive capabilities. The picker
+accepts file-only access solely for verifying the selected publishing folder.
+Definite callback validation failures finish native connection attempts with a
+terminal error receipt; transport and uncertain persistence failures retain the
+operation fence rather than retrying the authorization code.
+
+Google's picker scope restriction is documented in
+[Integrate the Google Picker into desktop and mobile apps](https://developers.google.com/workspace/drive/picker/guides/desktop-mobile-picker).
 
 ## Local setup
 

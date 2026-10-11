@@ -65,7 +65,7 @@ const withheldMigrations = [
   "0707_subscription_core_neutral_routines.sql",
   // Rewrites the inbox routines from the withheld inbox tail and reads its columns.
   "0708_inbox_member_notifications.sql",
-  // Rewrites the operation-lease constraints and guard from withheld 0671.
+  // Rewrites the operation-lease constraints and guard that withheld 0691 defines; replay after it.
   "0711_subscription_codex_completion_operations.sql",
   // Records receipts over withheld 0689 and patches the capture function from withheld 0478.
   "0712_subscription_core_generic_precursor.sql",
@@ -76,6 +76,8 @@ const withheldMigrations = [
   // Rewrites routines 0707, 0713 and 0714 create from their live definitions;
   // replay after them.
   "0715_subscription_core_api_key_connections.sql",
+  // Builds on withheld 0712's receipts and patches the helpers it patched.
+  "0716_subscription_authority_compat.sql",
 ];
 let database: OwnerMigratedTestDatabase | null = null;
 

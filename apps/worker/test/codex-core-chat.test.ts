@@ -53,6 +53,7 @@ import {
 } from "../src/activities/agent-turn/codex-core-failover";
 import type { CodexSubscriptionCoreTurn } from "../src/activities/agent-turn/turn-context";
 import { createCoreCodexRequests } from "../src/activities/agent-turn/codex-core-requests";
+import { startParallelSessionTitleGeneration } from "../src/activities/agent-turn/session-title";
 import {
   ensureRunAllowed,
   turnExecutionPolicyBillingIdentity,
@@ -1226,6 +1227,118 @@ describe("core Codex failure settlement", () => {
       status,
       headers: new Headers({ [CODEX_TRANSPORT_ERROR_HEADER]: "1" }),
     });
+
+  test("a 503 after completed title generation recovers after exceptional title cleanup", async () => {
+    const order: string[] = [];
+    const requestDeps = {
+      reserve: async ({ requestId }: { requestId: string }) => ({ operationId: requestId }),
+      settle: async ({ operationId, outcome }: { operationId: string; outcome: string }) => {
+        order.push(`${operationId}:${outcome}`);
+      },
+    };
+    const requests = createCoreCodexRequests(requestDeps);
+    const titleRequests = createCoreCodexRequests(requestDeps);
+    const titleRequest = { requestId: "title", transportAttempt: 1 };
+    await titleRequests.reserve(titleRequest);
+    const titleTask = startParallelSessionTitleGeneration({
+      generate: async () => {
+        await titleRequests.observe({ ...titleRequest, outcome: "response_received" });
+        return { title: "Relevant partner events", usage: null };
+      },
+      onFinish: async (result) => {
+        expect(result?.title).toBe("Relevant partner events");
+        order.push("persist_title");
+        await titleRequests.checkpoint();
+      },
+    });
+    const mainRequest = { requestId: "main", transportAttempt: 1 };
+    await requests.reserve(mainRequest);
+    await requests.observe({ ...mainRequest, outcome: "refused" });
+    expect(titleRequests.canRecover()).toBe(false);
+    await titleTask.cancel();
+
+    const { deps, settle } = failureDeps(httpTransportError(503), {
+      ...core,
+      requests,
+      titleRequests,
+    });
+    const recovery = spy(db, "requestSessionTurnRecovery").mockImplementation(async () => {
+      order.push("recover");
+      return { action: "recovering", events: [] };
+    });
+    spy(events, "publishDurableSessionEvents").mockResolvedValue(undefined as never);
+
+    expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "recovering" });
+    expect(order).toEqual(["main:refused", "persist_title", "title:response_received", "recover"]);
+    expect(recovery).toHaveBeenCalledWith(
+      {},
+      "workspace-1",
+      expect.objectContaining({
+        turnId: "turn-1",
+        attemptId: "attempt-1",
+        reason: "provider_unavailable",
+        providerRecoveryCount: 1,
+      }),
+    );
+    expect(settle).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    "reserved",
+    "unknown_settlement_failed",
+    "admission_refused",
+    "checkpoint_failed",
+  ] as const)(
+    "exceptional title cleanup preserves the %s replay fence on a main 503",
+    async (state) => {
+      const titleRequests = createCoreCodexRequests({
+        reserve: async () => {
+          if (state === "admission_refused")
+            throw new db.SubscriptionCoreCodexRequestOutcomeUnknownError();
+          return { operationId: "title" };
+        },
+        settle: async () => {
+          if (state === "checkpoint_failed") throw new Error("title checkpoint failed");
+          if (state === "unknown_settlement_failed") throw new Error("unknown receipt failed");
+        },
+      });
+      const request = { requestId: "title", transportAttempt: 1 };
+      const titleTask = startParallelSessionTitleGeneration({
+        generate: async (signal) => {
+          await titleRequests.reserve(request);
+          if (state === "reserved") {
+            await new Promise<void>((resolve) => {
+              if (signal.aborted) resolve();
+              else signal.addEventListener("abort", () => resolve(), { once: true });
+            });
+            return { title: null, usage: null };
+          }
+          await titleRequests.observe({
+            ...request,
+            outcome: state === "unknown_settlement_failed" ? "unknown" : "response_received",
+          });
+          return { title: "Completed title", usage: null };
+        },
+        onFinish: async () => titleRequests.checkpoint(),
+      });
+      if (state === "checkpoint_failed") {
+        await expect(titleTask.cancel()).rejects.toThrow("title checkpoint failed");
+      } else {
+        await titleTask.cancel();
+      }
+      expect(titleRequests.canRecover()).toBe(false);
+      const { deps, settle } = failureDeps(httpTransportError(503), {
+        ...core,
+        titleRequests,
+      });
+      const recovery = spy(db, "requestSessionTurnRecovery");
+      spy(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(undefined as never);
+
+      expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "failed" });
+      expect(recovery).not.toHaveBeenCalled();
+      expect(settle).toHaveBeenCalledTimes(1);
+    },
+  );
 
   test.each([
     ["HTTP 503", "requests", () => httpTransportError(503)],

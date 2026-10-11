@@ -1003,7 +1003,18 @@ always stays after them.
   empty-subject worker scope the outbox policy requires, never through legacy
   active pointers. Each woken waiter gets a provider-neutral outbox row and a
   generic session workflow wake in the same commit; the generic wake is the
-  crash-safe backstop the global dispatcher always delivers. Typed delivery
+  crash-safe backstop the global dispatcher always delivers. The wake takes
+  the canonical workspace, then session, then waiter lock order: per
+  workspace, in ascending workspace order and after the tenancy fence, it
+  reads the waiters' sessions without locking and, only if there are any,
+  key-share-locks the workspace row (as `lockSessionEventWriteRows` does, and
+  before a runnable wake or a context clear's `FOR UPDATE` could interleave;
+  only a key share, because session-first writers key-share it through
+  foreign keys). It then records each session's generic wake in ascending
+  session order (whose archive guard locks the session, so Steer, Cancel and
+  a resume, which lock the session before its waiter, cannot interleave), and
+  only then bumps
+  those sessions' waiters and records their typed wakes. Typed delivery
   claims due rows (claim-generation fenced), signals `codexCapacityChanged`
   with the waiter's wake revision through `signalWithStart`, then marks the
   row delivered; a failed signal retries after 1 second doubling to 5
@@ -3166,6 +3177,202 @@ M4-A hand-over are:
 
 No X1a or C1a call site merges before all three.
 
+#### PR 0b: authority compatibility and fences
+
+PR 0b ships as three rolling PRs, stacked in this order, and every PR 0b item
+of row 0 above lands in exactly one of them:
+
+- **Part 1 (migration 0716), inert:** the server-owned
+  `authority_inserted_at` marker; the compatibility relation; the per-path
+  resolvers; the copy routine and the reader; the compatibility deferred
+  check triggers; the compatibility-record branch of both personal helpers
+  (`connectionIds`). They act only for a provider whose own drained cutover
+  wrote a receipt with a real commit time, which no provider has yet.
+- **Part 2 (migration 0717), acts on deploy:** fence 0608 and the scheduled
+  occurrence comparing the v2 slot, and scheduled admission (see its choice
+  below); the Claude scheduled comparisons and
+  `scheduled_claude_authority_changed`; the v1 liveness check switching to
+  the core check at the provider's receipt; the inbox batching key carrying
+  each provider's effective authority; the pre-merge inventories (the
+  patched functions, the existing rows the new comparisons reject, and the
+  callers of `validate_scheduled_agent_run_live_authority`); and the defects
+  in earlier merged work listed there.
+- **Part 3 (migration 0718), acts on deploy:** a defect fix in earlier
+  merged work found while testing part 2: the v2 acceptance writers see the
+  owner's personal connections under an owner bound by row security.
+
+Choices made where the plan left room, for reviewers:
+
+- **Relation.** `opengeni_private.subscription_authority_compat` belongs to
+  the migration owner; runtime roles hold no privilege on it. Besides the
+  planned columns it stores `workspace_id` (every carrier is workspace-bound,
+  so session, turn and update references are composite `(workspace_id, id)`
+  foreign keys) and `owner_subject_id`, the human whose personal authority
+  the record carries (a `user` record, or one with a personal entry; NULL
+  otherwise). Narrowing compares the causal human with this column, so a
+  copy never has to re-derive the owner from the source's lineage. A content
+  CHECK enforces the mapping table's shapes: `organization` has
+  `shared_pool = organization` and no entry, `workspace` has `workspace`,
+  `user` and `missing` have `none`, `missing` has no entry; at most one entry
+  with exactly `ownerMembershipId` (a UUID), `authorityGeneration` (a
+  positive safe integer) and 1 to 64 distinct connection UUIDs.
+- **Row security.** FORCE RLS with a SELECT and an INSERT policy: a record is
+  visible exactly when its carrier row is visible to the same account and
+  workspace under the reader's own row security (which carries session
+  visibility). There is no UPDATE or DELETE policy, so even the owner changes
+  nothing; a guard trigger rejects UPDATE and TRUNCATE for every role and
+  DELETE unless it runs inside a referential cascade from the carrier
+  (`pg_trigger_depth() > 1`), so session, task and organization deletion keep
+  working. The depth test would also admit a DELETE issued from some other
+  trigger, but none exists and only the owner's cascade (exempt from row
+  security) or a `BYPASSRLS` role can delete at all. INSERT requires the
+  provider's receipt with a commit time later
+  than `-infinity` (`55000`): Codex and providers without a receipt never
+  hold records.
+- **Marker.** `authority_inserted_at` on `sessions`, `session_turns`,
+  `scheduled_tasks`, `scheduled_task_revision_authorities`,
+  `session_system_updates` and `session_system_update_outbox` (constant
+  default, metadata-only). The stamping trigger is named `zzz_…` so it runs
+  after every other `BEFORE INSERT` trigger and nothing can replace its
+  value; the immutability trigger fires only when the value changes. Both
+  bind every role, including the owner.
+- **Lock order.** The migration takes ACCESS EXCLUSIVE on the six carrier
+  tables first, in one statement, in the runtime's order (`sessions`,
+  `session_turns`, `session_system_updates`, `session_system_update_outbox`,
+  `scheduled_tasks`, `scheduled_task_revision_authorities`), and locks no
+  other runtime table. No static order is cycle-free for all six (runtime
+  work takes sessions before turns, but scheduled dispatch can lock a task
+  before creating its session, and deleting a session reaches tasks through
+  a foreign key), so the statement runs with a 100 ms per-wait lock timeout
+  inside a savepoint and is retried after a short pause until it holds the
+  whole set (30 s at most, then `55P03`, safe to retry). An attempt that
+  fails releases everything it took, so the migration never holds a carrier
+  lock for more than about 600 ms while it waits: a runtime transaction that
+  waits behind it gets its lock before PostgreSQL's deadlock check (default
+  `deadlock_timeout` one second) could pick it as a victim, and the
+  migration abandons each wait before its own check. A first draft took the
+  locks one `ALTER TABLE` at a time, `session_turns` first, and a reviewer
+  reproduced `40P01` against live session work; the race test
+  `migration-0716-authority-compat-lock-order.test.ts` covers both orders.
+- **Marker and the task digest.** The scheduled-task execution digest hashes
+  the task row as JSON, so the marker would change every task's digest on
+  its next rename or pause and invalidate run receipts holding the old one.
+  The digest function and its trigger now exclude `authority_inserted_at`
+  (the anchored replacement 0688 used for `subscription_authority`). The
+  unused `scheduled_task_execution_state` is left as it is.
+- **"Inserted by this transaction"** is the marker equal to
+  `transaction_timestamp()`. The copy routine copies only into a carrier its
+  own transaction inserted, and the receiver and compaction resolvers skip
+  turns the current transaction inserted (the writer resolved its source
+  before inserting them). Two transactions that start in the same
+  microsecond are indistinguishable here; the record content is still
+  computed from the verified source, never supplied.
+- **Resolvers.** One owner-only function,
+  `opengeni_subscription_internal.subscription_compat_carrier_sources(kind,
+  workspace, id, revision)`, returns each carrier's sources by path, with the
+  causal human used for narrowing:
+
+  | Carrier | Path | Source |
+  | --- | --- | --- |
+  | turn of a scheduled run | scheduled firing | The run's task revision (the task itself when the revision row is missing); personal only when the revision's authorizer is the task owner |
+  | `system` or `goal` turn | delivery | When every delivered update is a goal continuation: the causal turn of the first one in delivery order (`created_at`, then `id`), only when its `initiating_human_subject_id` is the delivering turn's (else none, as the Codex v2 writer). Otherwise, with an execution context: the context turn and every delivered causal update (not Agent messages or child results, which 0608 checks by human only). Otherwise: each delivered update |
+  | `compaction` turn | compaction | The turn of the session's latest `turn.started` event (`latestStartedSessionTurnRow`), excluding turns this transaction inserted |
+  | `user` or `api` turn with `lineage.editedFromTurnId` | edit | The exact turn withdrawn for this edit (same session, `withdrawn_for_edit`, the same human); anything else is refused (`23514`). The copy is verbatim, as the queue writer copies v1, v2 and the human |
+  | `user` or `api` turn submitted by an agent attempt | agent prompt | The receiving session's source: execution-context turn, else latest accepted turn (both excluding this transaction's turns), else spawning parent turn, else `session_initial` |
+  | first `user` or `api` turn of a child or scheduler-created session | creation | The parent turn, or the occurrence's revision |
+  | any other turn (including the first turn of a human-created session, whose v2 the start computes afresh); archive-imported sessions | new acceptance | none |
+  | `session_initial` | creation | The parent turn of a child; the occurrence's revision for a scheduler-created session; else none |
+  | scheduled task | agent-created task | The creating turn (the last agent hop of the frozen creator context); personal only for an owner destination (Personal workspace, or the owner's private reusable session); else none |
+  | task revision | revision | The task; personal only when the authorizer is the task owner (0688's v2 derivation rule), so a clone on rename or pause yields what its predecessor yields |
+  | update of a scheduled run | scheduled occurrence | The run's revision |
+  | Agent Message or Steer update | receiver | The receiving session's source; personal only for the sender's causal human |
+  | child result update | child result | Its outbox row (same workspace, target session and dedupe key), else the `parentTurnId` turn |
+  | other updates | causal | The `causalTurnId` turn |
+  | outbox row | child outbox | The child's spawning parent turn |
+
+  The copy routine, the deferred check and part 2's fences use only this
+  function.
+- **Edits.** The queue's Edit resubmits a withdrawn prompt and copies its v1
+  snapshots, v2 value and human verbatim, a copy path the table under
+  "Writing" does not list. Treating the resubmission as a new acceptance
+  would drop a source record's narrowing (a widening), so it is a path of
+  its own. No column linked the two turns (the draft's `source_turn_id` is
+  cleared in the submitting transaction), so the writer now records
+  `lineage.editedFromTurnId` on the resubmitted turn, and the resolver
+  verifies it. Older binaries omit the link; that matters only after a
+  provider's receipt, when they no longer run. The provider cutovers (X3,
+  C3) must also write records for turns withdrawn for edit that a composer
+  draft still references, or an edit submitted after the cutover waits with
+  the `missing` copy.
+- **Copy rule.** As "Writing" above: a source with the provider's v2 entry
+  yields no record; a source record is copied verbatim when it is `missing`,
+  ownerless, or its owner is the causal human; otherwise the entry is dropped
+  and a remaining `workspace` or `organization` narrowing is copied, and a
+  `user` record yields no record; a source with neither that predates the
+  receipt yields the `missing` copy. A carrier with several sources (a
+  delivery batch) requires them all to yield the same copy (`23514`
+  otherwise).
+- **Deferred check.** A `DEFERRABLE INITIALLY DEFERRED` constraint trigger
+  (`zzz_subscription_authority_compat_check`, `AFTER INSERT`) on each carrier
+  table. It returns after one lookup in the receipts table while no receipt
+  has a real commit time. Otherwise, for each such provider, it requires the
+  stored record to equal the expected copy in every content column (or to be
+  absent when none is expected) and, when the source has a record or
+  predates the receipt, no v2 entry for the provider. A carrier deleted later
+  in the same transaction is skipped. The copy routine and the check resolve
+  under the carrier's own account and workspace with an empty subject, and
+  restore the caller's settings, so both see the same sources. A deferred
+  row trigger fires at the first constraint flush after the insert, which is
+  not always the commit: every session-activity scope
+  (`withSessionActivityRlsContext` and each
+  `withRestoredSessionActivityRlsContext`) runs `SET CONSTRAINTS ALL
+  IMMEDIATE` when it finalizes, and so do `fork_session_content` and the
+  0263/0278 membership commands. A writer must therefore copy inside the
+  same activity scope as the carrier insert, before that scope finalizes.
+- **Copy routine.** `opengeni_private.copy_subscription_authority_compat
+  (provider, carrier_kind, workspace_id, carrier_id,
+  task_authority_revision)` takes no content. It returns false without a
+  real-time receipt (inert), requires the caller's account and workspace
+  settings, a carrier visible to the caller and inserted by its own
+  transaction (`55000` otherwise), and is idempotent. It returns whether the
+  carrier now holds a record. Nothing in the runtime calls it yet; the
+  provider writers (X2b, C2b) will, each in the activity scope that inserted
+  the carrier (see the deferred check).
+- **Reader.** `opengeni_private.read_subscription_authority_compat` (same
+  arguments) returns `{authority: v1}` before the provider's receipt, `v2`
+  when the carrier holds the provider's entry, `record` with its content,
+  `missing` (`personal: []`, `sharedPool: none`: the work waits) for a
+  pre-receipt carrier with neither, `none` for post-receipt work with
+  neither, and NULL when the carrier is not visible to the caller.
+  The answer itself comes from the owner-only
+  `opengeni_subscription_internal.subscription_compat_effective` (same
+  arguments, no visibility check), which part 2's fences also use.
+  `opengeni_private.subscription_authority_compat_providers()` lists the
+  providers that can hold records (empty while only Codex is cut over).
+- **Neutrality.** The shared routines take the provider as data and name no
+  provider in code (only comments say that Codex holds no records).
+  `check:subscription-core-neutral` scans TypeScript only; SQL neutrality is
+  checked by review. Extending the guard to migrations would flag part 2's
+  intentionally per-provider v1 checks and policies.
+- **Personal helpers.** Both helpers read the turn's (`session_turn`) record
+  whose `owner_subject_id` is the session owner, only when the turn has no
+  v2 entry for the provider. `authorize_subscription_personal_access` then
+  requires the entry's membership to be the connection's owner membership
+  (which it already requires to be the session owner's active membership),
+  the entry's generation to be the connection's current generation, the
+  connection to be listed, and `personalConnectionsAllowed`. The placement
+  helper reads the record's connections for the requested membership and
+  generation; with none it refuses, and otherwise it mints capabilities and
+  checks visibility only for those connections. The v2 branches are
+  unchanged. Both patches are anchored replacements of the live definitions
+  (each anchor must occur exactly once).
+- **Grants and posture.** The copy routine, the reader and the provider list
+  are granted to every configured application role (0712's pattern); every
+  other new routine is owner-only in `opengeni_subscription_internal` with
+  `search_path = pg_catalog, <data schema>, opengeni_private, pg_temp`. The
+  previous release's posture check passes against the migrated schema before
+  and after role provisioning.
+
 #### PR 0c: provider-keyed cutover planner and organization reach
 
 PR 0c is the slice of PR 0 that makes the M3 cutover planner rules and the
@@ -3869,17 +4076,24 @@ Facts the adapter declares, each read from today's Claude path:
     to every model of the account (deliberate, recorded difference toward
     dispatch). It is bounded like the others: a model whose own limit the
     overage does not cover is refused once, and that response's headers
-    record its limit again. A
-    rejected request whose overage was refused with a known reset ends the
-    blocks that response reports for the models it concerns (its own model;
+    record its limit again. A rejected request whose overage was refused
+    with a known reset before the request's own plan reset ends the blocks
+    that response reports for the models it concerns (its own model;
     without one, the family its limit names, else every model) no later
-    than that reset, as today's `nextCheckAt` does for the models whose
-    capacity that request decides, and only while the request's own plan
-    limit still runs; the other models keep waiting for their own limits. An overage allowance whose reset has already passed
+    than the overage reset, as today's `nextCheckAt` does for the models
+    whose capacity that request decides, and only while the request's own
+    plan limit still runs; the other models keep waiting for their own
+    limits. An overage reset at or after the plan reset ends nothing, as
+    today's rule never rechecks then. After such a recheck, today's rule
+    blocks the model again once the plan reset passes if a longer limit
+    (a family window) still runs; one cooldown cannot express "free, then
+    blocked again", so the core keeps the model free: a recorded difference
+    toward dispatch, bounded by one refused request, whose headers record
+    the limit again. An overage allowance whose reset has already passed
     covers nothing. One whose reset falls before the plan limit's covers
     the limit until a newer response arrives, where today's rule blocks
     again after the overage reset: a recorded difference toward dispatch,
-    bounded by one refused request, whose headers record the limit again.
+    bounded the same way.
   - The five-hour and seven-day windows decide the connection's capacity
     (`rejected`, or full without a status, is `exhausted` until the reset, a
     minute when unknown). A model-family window (Opus, Sonnet) never decides
@@ -3917,13 +4131,16 @@ Facts the adapter declares, each read from today's Claude path:
     reading keeps it. Recording the window in `exhaustedUntil` instead
     would let no later usage reading show an early reset, which today's
     reading does. So C1a, before any Claude call site exists, makes the
-    shared `applyQuotaObservation` keep a stored exhausted window that a
-    newer observation omits until that window's reset (provider-neutral,
-    toward waiting, with the Codex and SuperGrok suites run against it),
-    with a two-observation test. The adapter's unit tests hold that test as
-    `test.failing` until the fix lands, and C3 (which registers Claude)
-    requires it to pass as an ordinary test. C3's combined cutover ledger
-    test covers the case on real data.
+    shared `applyQuotaObservation` keep a stored exhausted window with a
+    known future reset that a newer response-header reading or refusal
+    omits, until that window's reset (provider-neutral, toward waiting, with
+    the Codex and SuperGrok suites run against it). A usage-endpoint reading
+    is complete and still replaces the stored windows, so it can show an
+    early reset, including of a refusal's `exhausted_without_reset` fallback
+    window. A two-observation shared test covers all three sources, and the
+    adapter's former `test.failing` case is an ordinary test, which C3
+    (which registers Claude) requires. C3's combined cutover ledger test
+    covers the case on real data.
   - C3 re-keys the legacy cooldowns and restrictions: the legacy reading is
     keyed by Anthropic's upstream model id, the core by product model id, so
     the cutover maps each through `subscriptionCoreClaudeProductModelIds`

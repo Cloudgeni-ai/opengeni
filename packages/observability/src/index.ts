@@ -25,6 +25,15 @@ export {
 } from "./agent-tool-metrics";
 export { failureDiagnostic } from "./failure-diagnostic";
 export { createLogThrottle, type LogThrottle } from "./log-throttle";
+import { TEMPORAL_SDK_COMPONENT_PATTERN, TEMPORAL_TYPE_NAME_PATTERN } from "./temporal-sdk-logger";
+export {
+  createTemporalSdkLogger,
+  projectTemporalSdkLogRecord,
+  TEMPORAL_SDK_FALLBACK_LOG_MESSAGE,
+  type TemporalSdkLogger,
+  type TemporalSdkLogLevel,
+  type TemporalSdkLoggerOptions,
+} from "./temporal-sdk-logger";
 export {
   withMcpTelemetry,
   withMcpCallIdentity,
@@ -421,6 +430,10 @@ const PUBLIC_TELEMETRY_OPAQUE_ATTRIBUTE_PATTERNS = new Map<string, RegExp>([
   // the exact wire grammar the API route admits.
   ["clientRoute", CLIENT_ERROR_ROUTE_PATTERN],
   ["clientRevision", CLIENT_ERROR_REVISION_PATTERN],
+  // Temporal SDK records (temporal-sdk-logger.ts): the SDK's closed component
+  // enum and a code-registered workflow type name, never an identifier.
+  ["sdkComponent", TEMPORAL_SDK_COMPONENT_PATTERN],
+  ["workflowType", TEMPORAL_TYPE_NAME_PATTERN],
 ]);
 
 const PUBLIC_CHANNEL_A_OPERATIONS = new Set([
@@ -503,6 +516,7 @@ const PUBLIC_TELEMETRY_ERROR_CLASSES = new Set([
   "SnapshotOperationError",
   "StartupDependencyError",
   "TelemetryExportError",
+  "TemporalSdkOperationError",
   "CodemodeOperationError",
   "CodemodeTokenRenewalOperationError",
   "WorkerLifecycleOperation",
@@ -578,6 +592,7 @@ const PUBLIC_TELEMETRY_ERROR_CODES = new Set([
   "session_workflow_wake_failed",
   "snapshot_operation_failed",
   "startup_dependency_retry",
+  "temporal_sdk_failure_logged",
   "tool_list_too_large",
   "tool_result_too_large",
   "codemode_operation_failed",
@@ -1666,6 +1681,7 @@ function projectPublicTelemetryAttributes(attributes: Attributes): Attributes {
       ...projectHttpDiagnosticAttributes(attributes),
       ...projectSnapshotDiagnosticAttributes(attributes),
       ...projectKnowledgeIndexDiagnosticAttributes(attributes),
+      ...projectTemporalSdkDiagnosticAttributes(attributes),
       ...projectPublicDiagnosticAttributes(attributes),
     };
   }
@@ -1833,6 +1849,28 @@ function projectKnowledgeIndexDiagnosticAttributes(attributes: Attributes): Attr
   const sqlState = attributes.sqlState;
   // A SQLSTATE is a five-character protocol code, never message or SQL text.
   return typeof sqlState === "string" && /^[0-9A-Z]{5}$/.test(sqlState) ? { sqlState } : {};
+}
+
+function projectTemporalSdkDiagnosticAttributes(attributes: Attributes): Attributes {
+  if (attributes.errorClass !== "TemporalSdkOperationError") return {};
+  const { sdkComponent, activity, workflowType, attempt, durationMs } = attributes;
+  // Code-registered type names and the SDK's component enum only; task
+  // tokens, workflow/run identifiers and the cause never cross this boundary.
+  return {
+    ...(typeof sdkComponent === "string" && TEMPORAL_SDK_COMPONENT_PATTERN.test(sdkComponent)
+      ? { sdkComponent }
+      : {}),
+    ...(typeof activity === "string" && TEMPORAL_TYPE_NAME_PATTERN.test(activity)
+      ? { activity }
+      : {}),
+    ...(typeof workflowType === "string" && TEMPORAL_TYPE_NAME_PATTERN.test(workflowType)
+      ? { workflowType }
+      : {}),
+    ...(typeof attempt === "number" && Number.isInteger(attempt) && attempt > 0 ? { attempt } : {}),
+    ...(typeof durationMs === "number" && Number.isFinite(durationMs) && durationMs >= 0
+      ? { durationMs }
+      : {}),
+  };
 }
 
 function projectPublicDiagnosticAttributes(attributes: Attributes): Attributes {
