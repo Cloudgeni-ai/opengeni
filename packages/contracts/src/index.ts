@@ -181,8 +181,10 @@ export {
 
 export {
   SESSION_EVENT_PAYLOAD_MAX_BYTES,
+  TOOL_CALL_OUTPUT_EVENT_MAX_BYTES,
   approximateSessionEventTokens,
   boundSessionEventPayload,
+  boundSessionEventPayloadForWrite,
   measureSessionEventJson,
   sessionEventJsonBytes,
   sessionEventMediaPreview,

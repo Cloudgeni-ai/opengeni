@@ -3,6 +3,7 @@ import {
   SESSION_EVENT_RAW_DELTA_TYPES,
   SESSION_EVENT_PAYLOAD_MAX_BYTES,
   SESSION_GOAL_TEXT_MAX_BYTES,
+  TOOL_CALL_OUTPUT_EVENT_MAX_BYTES,
   boundSessionEventPayload,
   renderMessageSentAtForModel,
   sessionEventJsonBytes,
@@ -2701,9 +2702,18 @@ describe("clean session control plane", () => {
         event.type === "agent.toolCall.output" &&
         (event.payload as { id?: unknown }).id === "pending-call",
     )?.payload as { output: { text: string }; truncation: unknown };
-    expect(recoveryOutput.output.text).toBe(huge);
+    // The recovery audit event is bounded at write; model history and the
+    // pending receipt above keep their own exact representations.
+    expect(recoveryOutput.output.text).toContain("bytes omitted");
     expect(sessionEventJsonBytes(recoveryOutput)).toBeGreaterThan(SESSION_EVENT_PAYLOAD_MAX_BYTES);
-    expect(sessionEventPayloadTruncation(recoveryOutput)).toBeNull();
+    expect(sessionEventJsonBytes(recoveryOutput)).toBeLessThanOrEqual(
+      TOOL_CALL_OUTPUT_EVENT_MAX_BYTES,
+    );
+    expect(sessionEventPayloadTruncation(recoveryOutput)).toMatchObject({
+      truncated: true,
+      surface: "durable_audit",
+      fullEvidence: { available: false, reason: "not_retained" },
+    });
     const recoveryPreview = boundSessionEventPayload(recoveryOutput, {
       surface: "durable_audit",
     });
