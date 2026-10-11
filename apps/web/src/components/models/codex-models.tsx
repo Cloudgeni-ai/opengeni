@@ -496,9 +496,10 @@ function SharedCodexSetAsideRow({
       title={codexAccountName(account)}
       meta={[
         organizationReachLabel(places.scope, access.data),
+        // Before the plan, so it stays readable on a phone.
+        reason,
         planLabel(account.plan, "ChatGPT"),
         resetsLabel(account.resetCreditAvailableCount),
-        reason,
       ]}
       cells={forPeople ? undefined : { usage: NOT_IN_USE }}
       menu={!forPeople && (reaches || chosenPeople) ? menu : null}
