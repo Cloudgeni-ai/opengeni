@@ -31,12 +31,16 @@ import { readSubscriptionEffectiveSettings } from "./subscription-core-repositor
 import { readSubscriptionCorePrimaryConnectionId } from "./subscription-core/administration";
 import { subscriptionCoreProvider } from "./subscription-core-providers";
 import {
+  isSubscriptionSettingsLockBusy,
+  SUBSCRIPTION_SETTINGS_TRANSACTION,
+  SubscriptionSettingsBusyError,
   SubscriptionSettingsLockedError,
   throwIfSubscriptionSettingLocked,
 } from "./subscription-settings-lock";
 import type { SubscriptionCoreProvider } from "./subscription-core/provider";
 
 export {
+  SubscriptionSettingsBusyError,
   SubscriptionSettingsLockedError,
   subscriptionSettingLockRefusal,
 } from "./subscription-settings-lock";
@@ -231,6 +235,7 @@ async function withOrganizationAdministrator<T>(
       }
       return await use(tx);
     },
+    SUBSCRIPTION_SETTINGS_TRANSACTION,
   );
 }
 
@@ -345,6 +350,48 @@ export async function updateOrganizationSubscriptionSettings(
     patch.crossProviderFailover !== undefined ||
     patch.personalConnectionsAllowed !== undefined ||
     patch.personalFallbackAllowed !== undefined;
+  // A lock change yields to in-flight workspace writes (0716 raises 55P03
+  // rather than wait while holding workspace rows); retry the transaction.
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await updateOrganizationSubscriptionSettingsOnce(db, input, {
+        locked,
+        fallbackOrder,
+        rotation,
+        changesOrganization,
+      });
+    } catch (error) {
+      if (!isSubscriptionSettingsLockBusy(error)) throw error;
+      if (attempt >= LOCK_CHANGE_ATTEMPTS) throw new SubscriptionSettingsBusyError();
+      const backoff = Math.min(25 * 2 ** (attempt - 1), 400);
+      await new Promise((resolve) => setTimeout(resolve, backoff / 2 + Math.random() * backoff));
+    }
+  }
+}
+
+/** Attempts of a lock change before it answers busy (about 3 s of backoff in total). */
+const LOCK_CHANGE_ATTEMPTS = 10;
+
+async function updateOrganizationSubscriptionSettingsOnce(
+  db: Database,
+  input: {
+    organizationId: string;
+    actorSubjectId: string;
+    patch: OrganizationSubscriptionSettingsPatch;
+    expectedVersion?: number;
+  },
+  validated: {
+    locked: SubscriptionSettingKey[] | undefined;
+    fallbackOrder: Record<string, string[]> | undefined;
+    rotation: Record<string, { mode: SubscriptionRotationMode }>;
+    changesOrganization: boolean;
+  },
+): Promise<{
+  settings: OrganizationSubscriptionSettingsState;
+  wake: SubscriptionSettingsWake | null;
+}> {
+  const patch = input.patch;
+  const { locked, fallbackOrder, rotation, changesOrganization } = validated;
   try {
     return await withOrganizationAdministrator(db, input, async (tx) => {
       const created = await rawRows(
@@ -535,6 +582,7 @@ async function withWorkspaceSubject<T>(
       await setSubjectRlsContext(tx, input.subjectId);
       return await use(tx);
     },
+    SUBSCRIPTION_SETTINGS_TRANSACTION,
   );
 }
 

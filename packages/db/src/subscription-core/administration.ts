@@ -34,6 +34,7 @@ import {
 } from "./access";
 import { SubscriptionCoreError } from "./errors";
 import {
+  SUBSCRIPTION_SETTINGS_TRANSACTION,
   subscriptionSettingLockRefusal,
   throwIfSubscriptionSettingLocked,
 } from "../subscription-settings-lock";
@@ -557,6 +558,9 @@ async function withAdministration<T>(
         await setSubjectRlsContext(tx, input.subjectId);
         return await fn(tx);
       },
+      // These routines write settings rows: 0716 admits a widening write
+      // only at READ COMMITTED, whatever the connection default.
+      SUBSCRIPTION_SETTINGS_TRANSACTION,
     );
   } catch (error) {
     // A write the organization's settings lock refused (0716), for example a

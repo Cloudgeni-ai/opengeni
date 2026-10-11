@@ -4271,7 +4271,9 @@ data with workspace overrides). It adds:
 2. A `BEFORE INSERT OR UPDATE` guard on workspace rows. Setting or changing a
    locked setting is refused with 42501 and detail
    `subscription_setting_locked:<key>`; clearing it, or leaving it unchanged,
-   is allowed. For map-valued settings the test is per entry: adding or
+   is allowed. An upsert is judged on its proposed row, so `INSERT ... ON
+   CONFLICT` (including `DO NOTHING`) carrying a locked value is refused even
+   when it would change nothing. For map-valued settings the test is per entry: adding or
    changing an entry widens, removing one does not. The guard is SECURITY
    DEFINER so a caller who cannot see the organization row is not mistaken
    for an organization without locks; it reads that row through an owner-only
@@ -4283,9 +4285,30 @@ data with workspace overrides). It adds:
 4. Serialization: the guard takes a shared transaction advisory lock on
    `subscription-settings-locks:<organization>`, the lock writer an exclusive
    one. A workspace write either commits before the clear or sees the lock.
-   The repository locks workspace rows before the organization row when locks
-   change; a raw writer that does not can deadlock, and PostgreSQL aborts one
-   side (nothing partial is written).
+   An upsert's guard takes the shared lock before it meets an existing row
+   and waits for that row's lock, so the lock writer never waits for the
+   exclusive lock: it tries once and, while any workspace write is in
+   flight, raises 55P03 `subscription_settings_lock_busy`. The repository
+   retries the whole lock change with a bounded backoff (about 3 s) and then
+   answers 503 `settings_busy` (retryable, nothing written). Workspace
+   writers therefore never deadlock with a lock change (tested by racing the
+   upsert shape of the personal-primary routine against lock changes). The
+   repository also locks workspace rows before the organization row; a raw
+   lock writer that skips that and updates workspace rows can still meet a
+   plain `UPDATE` in a deadlock, which PostgreSQL resolves by aborting one
+   side.
+5. A `BEFORE UPDATE OF account_id, workspace_id` trigger: a settings row never
+   moves to another organization or workspace, and the organization row never
+   becomes a workspace row or the reverse (42501
+   `subscription_settings_identity_immutable`). Otherwise a moved row could
+   carry a value past the guard, which compares a row with its old values.
+6. Isolation: a workspace write that widens any setting, and a lock change,
+   run only at READ COMMITTED (0A000
+   `subscription_settings_requires_read_committed` otherwise), because an
+   older snapshot could miss a concurrent lock or a concurrent workspace
+   insert. Writes that only clear or keep values are allowed at any level.
+   The settings repository and the core administration writers pin READ
+   COMMITTED on their transactions whatever the connection default.
 
 **API.** `GET/PATCH /v1/organizations/:organizationId/model-account-settings`
 (organization owners and admins), `GET .../model-account-settings/overview`
@@ -4333,8 +4356,11 @@ Fail-closed choices (contract ambiguous; strictest option taken):
 - The settings API writes no overrides for Personal workspaces (409
   `personal_workspace`, `canEdit: false`); they follow the organization. A
   person's own primary may still set a rotation entry there (the existing
-  personal-account route), which a rotation lock then refuses. The overview
-  lists shared workspaces only.
+  personal-account route), and the workspace view then reports that entry's
+  source as `workspace` with `canEdit: false`. A rotation lock binds Personal
+  workspaces like any other: locking clears that entry, and choosing a
+  personal primary is refused with 409 `setting_locked` while the lock holds.
+  The overview lists shared workspaces only.
 - Fallback order: at most 64 preferred models, 8 fallbacks each, model ids up
   to 200 characters, no repeats and no self-reference. The bound applies to
   the stored workspace override after a patch is merged, not only to the
@@ -4342,10 +4368,8 @@ Fail-closed choices (contract ambiguous; strictest option taken):
   checked against the catalog (placement skips unknown models).
 - Personal fallback is never active for ownerless work (no session owner);
   this was already the eligibility rule and is unchanged.
-- Under REPEATABLE READ or SERIALIZABLE a workspace writer whose snapshot
-  predates a lock can miss it in the guard. Such an override stays inert (the
-  resolver ignores locked overrides) and is reported as `locked`. Application
-  writers use READ COMMITTED.
+- Writes that could miss a lock under an older snapshot are refused outside
+  READ COMMITTED (item 6 above) rather than admitted as dormant overrides.
 
 ## 6. Specific behaviours
 

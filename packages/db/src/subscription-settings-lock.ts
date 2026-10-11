@@ -1,5 +1,12 @@
 import { isSubscriptionSettingKey, type SubscriptionSettingKey } from "@opengeni/subscriptions";
 
+/**
+ * Settings transactions run at READ COMMITTED whatever the connection
+ * default: 0716's guard and lock writer refuse a widening write or a lock
+ * change under an older snapshot, which could miss a concurrent lock.
+ */
+export const SUBSCRIPTION_SETTINGS_TRANSACTION = { isolationLevel: "read committed" } as const;
+
 /** The detail prefix migration 0716's guard raises (SQLSTATE 42501) for a locked setting. */
 const LOCK_DETAIL = "subscription_setting_locked:";
 
@@ -38,4 +45,30 @@ export function throwIfSubscriptionSettingLocked(error: unknown): void {
   if (locked === null) return;
   if (error instanceof SubscriptionSettingsLockedError) throw error;
   throw new SubscriptionSettingsLockedError(locked);
+}
+
+/** The detail 0716's lock writer raises (SQLSTATE 55P03) while a workspace write is in flight. */
+const BUSY_DETAIL = "subscription_settings_lock_busy";
+
+/**
+ * A lock change kept yielding to in-flight workspace writes; nothing was
+ * written and the change can be retried.
+ */
+export class SubscriptionSettingsBusyError extends Error {
+  constructor() {
+    super("workspace settings writes are in flight; retry the lock change");
+    this.name = "SubscriptionSettingsBusyError";
+  }
+}
+
+/** Whether the error, or one of its causes, is 0716's lock-writer yield. */
+export function isSubscriptionSettingsLockBusy(error: unknown): boolean {
+  const queue: unknown[] = [error];
+  for (let index = 0; index < queue.length && index < 16; index += 1) {
+    const current = queue[index] as { code?: unknown; detail?: unknown; cause?: unknown } | null;
+    if (!current || typeof current !== "object") continue;
+    if (current.code === "55P03" && current.detail === BUSY_DETAIL) return true;
+    if (current.cause !== undefined) queue.push(current.cause);
+  }
+  return false;
 }

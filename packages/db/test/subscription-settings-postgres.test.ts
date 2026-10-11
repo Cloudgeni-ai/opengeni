@@ -1231,4 +1231,226 @@ describe.skipIf(!realDb)("subscription settings with lockable workspace override
       xai_primary_connection_id: connection!.id,
     });
   });
+
+  // An upsert's guard takes the shared settings lock before it meets the
+  // existing row; a lock writer holding that row must yield, not wait.
+  test("concurrency: a lock change yields to an upsert waiting on its row (no deadlock)", async () => {
+    const f = await fixture();
+    await updateWorkspaceSubscriptionSettings(client!.db, {
+      ...workspace(f, f.alphaId, f.workspaceAdminSubjectId),
+      patch: { crossProviderFailover: true },
+    });
+    let rowsHeld!: () => void;
+    const held = new Promise<void>((resolve) => (rowsHeld = resolve));
+    let proceed!: () => void;
+    const proceedGate = new Promise<void>((resolve) => (proceed = resolve));
+    // The lock writer in the repository's order: workspace rows, then the organization row.
+    const lockWriter = asApp(f, null, f.ownerSubjectId, async (tx) => {
+      await rawRows(
+        tx,
+        sql`select id from subscription_settings where account_id = ${f.accountId}::uuid
+          and workspace_id is not null order by id for update`,
+      );
+      rowsHeld();
+      await proceedGate;
+      await rawRows(
+        tx,
+        sql`update subscription_settings set locked_settings = '{crossProviderFailover}'
+          where account_id = ${f.accountId}::uuid and workspace_id is null`,
+      );
+    });
+    await held;
+    // The personal-primary routine's shape: insert, or on conflict merge rotation.
+    const upsert = asApp(f, f.alphaId, f.workspaceAdminSubjectId, (tx) =>
+      rawRows(
+        tx,
+        sql`insert into subscription_settings (account_id, workspace_id, rotation)
+          values (${f.accountId}::uuid, ${f.alphaId}::uuid, '{"codex":{"mode":"spread"}}'::jsonb)
+          on conflict (account_id, workspace_id) do update set
+            rotation = coalesce(subscription_settings.rotation, '{}'::jsonb) || excluded.rotation`,
+      ),
+    );
+    // Wait until the upsert holds the shared lock and waits for Alpha's row.
+    for (let tries = 0; tries < 100; tries += 1) {
+      const [waiting] = await shared!.admin<{ count: number }[]>`
+        select count(*)::int as count from pg_locks
+        where locktype = 'advisory' and mode = 'ShareLock' and granted`;
+      if ((waiting?.count ?? 0) > 0) break;
+      await Bun.sleep(20);
+    }
+    await Bun.sleep(100);
+    proceed();
+    expect(await lockWriter).toEqual({ code: "55P03", detail: "subscription_settings_lock_busy" });
+    expect(await upsert).toBeNull();
+    expect(await workspaceRow(f, f.alphaId)).toMatchObject({
+      rotation: { codex: { mode: "spread" } },
+      cross_provider_failover: true,
+    });
+
+    // Free races through the repository: every lock change and every upsert lands.
+    for (let round = 0; round < 15; round += 1) {
+      await updateOrganizationSubscriptionSettings(client!.db, {
+        ...organization(f),
+        patch: { locked: [] },
+      });
+      const outcomes = await Promise.allSettled([
+        updateOrganizationSubscriptionSettings(client!.db, {
+          ...organization(f),
+          patch: { locked: ["crossProviderFailover"] },
+        }),
+        ...[0, 1].map((index) =>
+          asApp(f, f.alphaId, f.workspaceAdminSubjectId, (tx) =>
+            rawRows(
+              tx,
+              sql`insert into subscription_settings (account_id, workspace_id, rotation)
+                values (${f.accountId}::uuid, ${f.alphaId}::uuid,
+                  ${JSON.stringify({ codex: { mode: index === 0 ? "spread" : "primary_first" } })}::jsonb)
+                on conflict (account_id, workspace_id) do update set
+                  rotation = coalesce(subscription_settings.rotation, '{}'::jsonb) || excluded.rotation`,
+            ),
+          ),
+        ),
+      ]);
+      expect({ round, statuses: outcomes.map((outcome) => outcome.status) }).toEqual({
+        round,
+        statuses: ["fulfilled", "fulfilled", "fulfilled"],
+      });
+      expect({
+        round,
+        upserts: outcomes
+          .slice(1)
+          .map((outcome) => (outcome as PromiseFulfilledResult<unknown>).value),
+      }).toEqual({
+        round,
+        upserts: [null, null],
+      });
+    }
+  });
+
+  test("a settings row never changes organization or workspace", async () => {
+    const f = await fixture();
+    await updateWorkspaceSubscriptionSettings(client!.db, {
+      ...workspace(f, f.alphaId, f.workspaceAdminSubjectId),
+      patch: { crossProviderFailover: true },
+    });
+    const identity = { code: "42501", detail: "subscription_settings_identity_immutable" };
+    // An organization administrator turning the organization row into a workspace row.
+    expect(
+      await asApp(f, null, f.ownerSubjectId, (tx) =>
+        rawRows(
+          tx,
+          sql`update subscription_settings set workspace_id = ${f.betaId}::uuid, locked_settings = '{}'
+            where account_id = ${f.accountId}::uuid and workspace_id is null`,
+        ),
+      ),
+    ).toEqual(identity);
+    // Moving a workspace override to another workspace.
+    expect(
+      await asApp(f, f.alphaId, f.ownerSubjectId, (tx) =>
+        rawRows(
+          tx,
+          sql`update subscription_settings set workspace_id = ${f.betaId}::uuid
+            where account_id = ${f.accountId}::uuid and workspace_id = ${f.alphaId}::uuid`,
+        ),
+      ),
+    ).toEqual(identity);
+    // The table owner is bound too, for either column and either direction.
+    const other = await fixture();
+    for (const statement of [
+      shared!.admin`update subscription_settings set account_id = ${other.accountId}::uuid,
+          workspace_id = null
+        where account_id = ${f.accountId}::uuid and workspace_id = ${f.alphaId}::uuid`,
+      shared!.admin`update subscription_settings set workspace_id = null
+        where account_id = ${f.accountId}::uuid and workspace_id = ${f.alphaId}::uuid`,
+    ]) {
+      expect(await rejected(statement)).toMatchObject(identity);
+    }
+    expect(await workspaceRow(f, f.alphaId)).toMatchObject({ cross_provider_failover: true });
+    expect(await workspaceRow(f, f.betaId)).toBeNull();
+    // Setting the same identity is not a move.
+    expect(
+      await asApp(f, f.alphaId, f.ownerSubjectId, (tx) =>
+        rawRows(
+          tx,
+          sql`update subscription_settings set workspace_id = ${f.alphaId}::uuid
+            where account_id = ${f.accountId}::uuid and workspace_id = ${f.alphaId}::uuid`,
+        ),
+      ),
+    ).toBeNull();
+  });
+
+  test("overrides and locks are written at READ COMMITTED only, whatever the connection default", async () => {
+    const f = await fixture();
+    const repeatable = createDb(appUrl(shared!), { max: 2, isolationLevel: "repeatable read" });
+    try {
+      const raw = (
+        workspaceId: string | null,
+        subjectId: string,
+        statement: ReturnType<typeof sql>,
+      ) =>
+        withRlsContext(repeatable.db, { accountId: f.accountId, workspaceId }, async (tx) => {
+          await setSubjectRlsContext(tx, subjectId);
+          const [isolation] = await rawRows<{ level: string }>(
+            tx,
+            sql`select current_setting('transaction_isolation') as level`,
+          );
+          expect(isolation?.level).toBe("repeatable read");
+          await rawRows(tx, statement);
+        }).then(
+          () => null,
+          (error: unknown) => {
+            let current = error as { code?: string; detail?: string; cause?: unknown } | undefined;
+            while (current && !current.code && current.cause)
+              current = current.cause as typeof current;
+            return { code: current?.code ?? "unknown", detail: current?.detail ?? null };
+          },
+        );
+      const readCommittedOnly = {
+        code: "0A000",
+        detail: "subscription_settings_requires_read_committed",
+      };
+      // A widening workspace write and a lock change are refused.
+      expect(
+        await raw(
+          f.alphaId,
+          f.workspaceAdminSubjectId,
+          sql`insert into subscription_settings (account_id, workspace_id, cross_provider_failover)
+            values (${f.accountId}::uuid, ${f.alphaId}::uuid, true)`,
+        ),
+      ).toEqual(readCommittedOnly);
+      expect(
+        await raw(
+          null,
+          f.ownerSubjectId,
+          sql`update subscription_settings set locked_settings = '{crossProviderFailover}'
+            where account_id = ${f.accountId}::uuid and workspace_id is null`,
+        ),
+      ).toEqual(readCommittedOnly);
+      // The repository pins READ COMMITTED, so its writes work on this connection.
+      await updateWorkspaceSubscriptionSettings(repeatable.db, {
+        ...workspace(f, f.alphaId, f.workspaceAdminSubjectId),
+        patch: { crossProviderFailover: true, personalFallbackAllowed: true },
+      });
+      await updateOrganizationSubscriptionSettings(repeatable.db, {
+        ...organization(f),
+        patch: { locked: ["crossProviderFailover"] },
+      });
+      expect(await workspaceRow(f, f.alphaId)).toMatchObject({
+        cross_provider_failover: null,
+        personal_fallback_allowed: true,
+      });
+      // Clearing (or an unrelated column) is allowed at any level.
+      expect(
+        await raw(
+          f.alphaId,
+          f.workspaceAdminSubjectId,
+          sql`update subscription_settings set personal_fallback_allowed = null, updated_at = now()
+            where account_id = ${f.accountId}::uuid and workspace_id = ${f.alphaId}::uuid`,
+        ),
+      ).toBeNull();
+      expect(await workspaceRow(f, f.alphaId)).toMatchObject({ personal_fallback_allowed: null });
+    } finally {
+      await repeatable.close();
+    }
+  });
 });

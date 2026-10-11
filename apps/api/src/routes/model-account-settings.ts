@@ -11,6 +11,7 @@ import {
   readOrganizationSubscriptionSettings,
   readSubscriptionSettingsOverview,
   readWorkspaceSubscriptionSettings,
+  SubscriptionSettingsBusyError,
   SubscriptionSettingsForbiddenError,
   SubscriptionSettingsInvalidError,
   SubscriptionSettingsLockedError,
@@ -57,7 +58,7 @@ export function subscriptionSettingsLockedHttpError(error: unknown): ApiHttpErro
   });
 }
 
-/** Typed refusals to HTTP: 403, 409 (locked, Personal workspace, version) or 422. */
+/** Typed refusals to HTTP: 403, 409 (locked, Personal workspace, version), 422 or 503 (busy). */
 function refused(error: unknown): never {
   if (error instanceof SubscriptionSettingsForbiddenError) {
     throw new HTTPException(403, { message: error.message });
@@ -84,6 +85,16 @@ function refused(error: unknown): never {
   }
   if (error instanceof SubscriptionSettingsInvalidError) {
     throw new HTTPException(422, { message: error.message });
+  }
+  if (error instanceof SubscriptionSettingsBusyError) {
+    // A lock change kept yielding to workspace writes; nothing was written.
+    throw new ApiHttpError(503, {
+      code: "upstream_unavailable",
+      message: error.message,
+      retryable: true,
+      outcomeUnknown: false,
+      details: { reason: "settings_busy" },
+    });
   }
   throw error;
 }

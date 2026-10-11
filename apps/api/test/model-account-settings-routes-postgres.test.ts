@@ -304,6 +304,41 @@ describe.skipIf(!realDb)("model-account settings routes", () => {
     expect(new Set(seen)).toEqual(new Set([alphaId, betaId, owner.defaultWorkspaceId]));
   });
 
+  test("a lock change that keeps meeting a workspace write answers 503 settings_busy", async () => {
+    const organizationPath = `/v1/organizations/${owner.accountId}/model-account-settings`;
+    await call(owner, "PATCH", organizationPath, { locked: [] });
+    // An open workspace write that widens a setting holds the shared settings lock.
+    let began!: () => void;
+    const started = new Promise<void>((resolve) => (began = resolve));
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const held = shared!.admin
+      .begin(async (tx) => {
+        await tx`insert into subscription_settings (account_id, workspace_id, fallback_order)
+          values (${owner.accountId}::uuid, ${betaId}::uuid,
+            ${tx.json({ [`codex/busy-${crypto.randomUUID()}`]: [] })}::jsonb)
+          on conflict (account_id, workspace_id) do update set
+            fallback_order = coalesce(subscription_settings.fallback_order, '{}'::jsonb)
+              || excluded.fallback_order`;
+        began();
+        await gate;
+        throw new Error("roll back");
+      })
+      .catch(() => undefined);
+    await started;
+    try {
+      const busy = await call(owner, "PATCH", organizationPath, {
+        locked: ["crossProviderFailover"],
+      });
+      expect(busy.status).toBe(503);
+      expect(busy.json.details).toEqual({ reason: "settings_busy" });
+    } finally {
+      release();
+      await held;
+    }
+    expect((await call(owner, "GET", organizationPath)).json.locked).toEqual([]);
+  }, 30_000);
+
   test("a lock refusal from any writer maps to 409 setting_locked", () => {
     const typed = subscriptionSettingsLockedHttpError(
       new SubscriptionSettingsLockedError(["rotation"]),
