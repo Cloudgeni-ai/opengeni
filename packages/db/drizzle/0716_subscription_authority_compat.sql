@@ -32,11 +32,17 @@
 -- per wait rolls back to its savepoint, which releases what it took, and
 -- tries again after a short pause. The migration therefore never holds a
 -- carrier lock for more than about 600 ms while it waits, well under
--- PostgreSQL's default one-second deadlock_timeout, so a runtime transaction
--- that waits behind it is granted its lock before any deadlock check could
--- choose it as a victim, and the migration itself gives up a wait before its
--- own check runs. After 30 seconds without the whole set it fails with 55P03
--- and changes nothing (safe to retry).
+-- PostgreSQL's default one-second deadlock_timeout, so no cycle between the
+-- migration and one runtime transaction can form, and the migration itself
+-- gives up a wait before its own deadlock check runs. A cycle through a third
+-- transaction can still pick a live one as the victim (40P01): a transaction
+-- that has already waited about a second behind another live transaction,
+-- which in turn waits behind an attempt. That is rare and the runtime treats
+-- it as retryable; the migration is never the victim. Waits of 100 ms never
+-- cancel a running autovacuum (PostgreSQL cancels one only for a waiter that
+-- has waited deadlock_timeout), so a long vacuum of a carrier table makes
+-- every attempt fail. After 30 seconds without the whole set it fails with
+-- 55P03 and changes nothing (safe to retry).
 SET LOCAL lock_timeout = '5s';
 
 DO $prerequisite$
@@ -1225,7 +1231,7 @@ $body$;
 -- created before the receipt that holds neither (no personal authority,
 -- shared_pool none: the work waits), else `none` (no personal authority and
 -- no narrowing). NULL when the carrier does not exist. The reader below and
--- the inbox fence (0716) both answer with it.
+-- the inbox fence (0717) both answer with it.
 CREATE FUNCTION opengeni_subscription_internal.subscription_compat_effective(
   p_provider text, p_carrier_kind text, p_workspace_id uuid, p_carrier_id uuid,
   p_task_authority_revision bigint)
