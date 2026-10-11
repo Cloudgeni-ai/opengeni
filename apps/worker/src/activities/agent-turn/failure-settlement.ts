@@ -122,6 +122,8 @@ export type TurnFailureDeps = {
   bus: ActivityServices["bus"];
   observability: ActivityServices["observability"];
   wakeSessionWorkflow: ActivityServices["wakeSessionWorkflow"];
+  /** Typed capacity-wake signals of core waiters (a refusal's joined observations may wake them). */
+  signalCodexCapacityWorkflow?: ActivityServices["signalCodexCapacityWorkflow"];
   cancellationSignal: AbortSignal | undefined;
   sandboxRotationController: AbortController;
   noteCancellationRequested: () => void;

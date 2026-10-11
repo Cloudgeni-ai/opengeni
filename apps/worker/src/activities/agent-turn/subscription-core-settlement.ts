@@ -118,6 +118,13 @@ export type CoreRefusalBinding = {
   credential: CoreRefusalCredential;
   /** The provider's classification of a failed model request (null: not a refusal). */
   classify: (error: unknown) => ProviderErrorOutcome | null;
+  /**
+   * Joins the turn's in-flight observations of the leased connection (a
+   * provider that reports quota per response) before the refusal is recorded
+   * and the lease released, so placement sees them and none is dropped by
+   * the lease fence. Best effort.
+   */
+  joinObservations?: (deps: TurnFailureDeps, core: SubscriptionCoreTurn) => Promise<void>;
   lease: (deps: TurnFailureDeps) => CoreSubscriptionTurnLease;
   isSourceDisconnected: (
     db: Database,
@@ -154,6 +161,9 @@ export async function settleCoreSubscriptionRefusal(
 ): Promise<{ result: RunAgentTurnResult | null; failure: SubscriptionCoreCodexTurnError | null }> {
   const { error, db, eventing, attempt } = deps;
   const outcome = binding.classify(error);
+  const joinObservations = async () => {
+    await binding.joinObservations?.(deps, core).catch(() => undefined);
+  };
   // Only a pre-dispatch lifecycle fence or a definite refusal can enter
   // graceful recovery; a concurrent disconnect never upgrades an ambiguous
   // failure into replay proof.
@@ -164,6 +174,7 @@ export async function settleCoreSubscriptionRefusal(
         .isSourceDisconnected(db, core.identity, core.connectionId)
         .catch(() => false)));
   if (disconnected) {
+    await joinObservations();
     const settled = await failOverCoreSubscriptionTurn(
       deps,
       core,
@@ -172,6 +183,7 @@ export async function settleCoreSubscriptionRefusal(
     );
     if (settled) return { result: settled, failure: null };
   } else if (outcome) {
+    await joinObservations();
     const recorded = await recordCoreSubscriptionRefusal({
       db,
       provider: binding.provider,

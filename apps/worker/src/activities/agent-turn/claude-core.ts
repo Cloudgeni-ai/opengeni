@@ -243,7 +243,11 @@ export function buildClaudeCoreRequestAuthorization(input: {
       const observedAt = new Date();
       observed = observed.then(async (recovered) => {
         try {
-          const observation = parseClaudeUsageHeaders(response.headers, observedAt, upstreamModelId);
+          const observation = parseClaudeUsageHeaders(
+            response.headers,
+            observedAt,
+            upstreamModelId,
+          );
           if (!observation) return recovered;
           const quota = {
             ...decodeSubscriptionCoreClaudeQuota({
@@ -485,12 +489,27 @@ export function claudeCoreRequestOutcomeUnknown(
  * sign-in quarantine, a 429 cools that model of the connection, and both
  * re-place the same turn within the shared bound; 529 (overload) and 403
  * (fatal) record nothing and never move the turn to another account.
+ * A 429 without the accepted model is not settled (null): it never widens
+ * into a whole-connection exhaustion.
+ *
+ * The transport already spent the turn's one forced refresh before a 401
+ * reaches settlement (`refreshedBeforeRefusal`), so the plan never asks for
+ * a second one: a refused bearer is a sign-in quarantine.
  */
 export function claudeCoreRefusal(productModelId: string | undefined): CoreRefusalBinding {
   return {
     provider: CLAUDE,
     displayName: DISPLAY_NAME,
-    classify: (error) => classifyClaudeProviderError(error, productModelId),
+    credential: { renewable: true, refreshedBeforeRefusal: true },
+    classify: (error) => {
+      const outcome = classifyClaudeProviderError(error, productModelId);
+      return outcome?.kind === "rate_limited" && productModelId === undefined ? null : outcome;
+    },
+    joinObservations: (deps, core) =>
+      joinCoreClaudeObservations(
+        { db: deps.db, signalCodexCapacityWorkflow: deps.signalCodexCapacityWorkflow },
+        core,
+      ),
     lease: (deps) => deps.leases.claude,
     isSourceDisconnected: CLAUDE_CORE_TURN_PROVIDER.isSourceDisconnected,
     failover: {
@@ -507,10 +526,33 @@ export function claudeCoreRefusal(productModelId: string | undefined): CoreRefus
 }
 
 /**
+ * Joins a core Claude turn's usage-header observations so far, under its
+ * still-held lease: one that ended a stored exhaustion is a capacity change
+ * for the account's Claude waiters, delivered once per joined chain (the
+ * refusal settlement and finalization may both join it). Never throws.
+ */
+export async function joinCoreClaudeObservations(
+  services: CoreCodexWakeServices,
+  core: SubscriptionCoreTurn,
+): Promise<void> {
+  const chain = core.quota?.settled();
+  if (!chain || wokenObservationChains.get(core) === chain) return;
+  const recovered = await chain.catch(() => false);
+  if (!recovered || wokenObservationChains.get(core) === chain) return;
+  wokenObservationChains.set(core, chain);
+  await wakeSubscriptionCoreWaitersAndDeliver(services, CLAUDE_CORE_WAIT_BINDING, {
+    accountId: core.identity.accountId,
+    reason: "quota_observed_available",
+  }).catch(() => undefined);
+}
+
+const wokenObservationChains = new WeakMap<SubscriptionCoreTurn, Promise<boolean>>();
+
+/**
  * Finalization of a core Claude turn before its lease is released: the
- * turn's usage-header observations are joined first (one that ended a stored
- * exhaustion is a capacity change for the account's Claude waiters), then
- * the shared step moves the binding's cache clock. Best effort.
+ * turn's usage-header observations are joined first
+ * (`joinCoreClaudeObservations`), then the shared step moves the binding's
+ * cache clock. Best effort.
  */
 export async function finalizeCoreClaudeTurn(
   input: CoreCodexWakeServices & {
@@ -518,13 +560,7 @@ export async function finalizeCoreClaudeTurn(
     lease: ClaudeTurnLease;
   },
 ): Promise<void> {
-  const recovered = await (input.core.quota?.settled() ?? false);
-  if (recovered) {
-    await wakeSubscriptionCoreWaitersAndDeliver(input, CLAUDE_CORE_WAIT_BINDING, {
-      accountId: input.core.identity.accountId,
-      reason: "quota_observed_available",
-    });
-  }
+  await joinCoreClaudeObservations(input, input.core);
   await finalizeCoreSubscriptionTurn({
     db: input.db,
     provider: CLAUDE,

@@ -5,7 +5,11 @@ import { AnthropicRequestError } from "@opengeni/runtime";
 import * as parentWake from "../src/activities/parent-wake";
 import { classifyClaudeProviderError } from "../src/activities/agent-turn/errors";
 import { settleTurnFailure } from "../src/activities/agent-turn/failure-settlement";
-import { finalizeCoreClaudeTurn } from "../src/activities/agent-turn/claude-core";
+import {
+  claudeCoreRefusal,
+  finalizeCoreClaudeTurn,
+  joinCoreClaudeObservations,
+} from "../src/activities/agent-turn/claude-core";
 import { SUBSCRIPTION_CORE_TURN_REFUSAL_LIMIT } from "../src/activities/agent-turn/subscription-core-failover";
 import type { SubscriptionCoreTurn } from "../src/activities/agent-turn/turn-context";
 
@@ -459,6 +463,100 @@ describe("Claude refusal settlement on the core", () => {
       expect.anything(),
       expect.objectContaining({ reason: "claude_credential_failover" }),
     );
+  });
+
+  test("a refused response's queued usage observations are joined before the refusal is recorded and the lease released", async () => {
+    const order: string[] = [];
+    const runtime = coreRuntime({ refusals: 1 });
+    runtime.apply.mockImplementation(async () => {
+      order.push("refusal");
+      return { receipt: true, health: true };
+    });
+    recoveringRecovery();
+    spy(db, "wakeSubscriptionCoreProviderCapacityWaiters").mockImplementation((async () => {
+      order.push("wake");
+      return [];
+    }) as never);
+    // The 429's own headers (a rejected window with its reset) are still
+    // queued when settlement starts.
+    const chain = (async () => {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      order.push("observation");
+      return true;
+    })();
+    const { deps, releaseCurrent } = failureDeps(
+      anthropic(429, "rate_limit_error", { "anthropic-ratelimit-unified-status": "rejected" }),
+      core({ quota: { settled: () => chain } }),
+    );
+    releaseCurrent.mockImplementation(async () => {
+      order.push("release");
+      return true;
+    });
+    expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "recovering" });
+    // Placement sees the observed exhaustion before the refusal, and no write
+    // runs after the lease fence moved; the recovery wakes Claude waiters.
+    expect(order).toEqual(["observation", "wake", "refusal", "release"]);
+  });
+
+  test("a joined observation chain wakes the account's Claude waiters once", async () => {
+    const wake = spy(db, "wakeSubscriptionCoreProviderCapacityWaiters").mockResolvedValue([]);
+    const chain = Promise.resolve(true);
+    const turn = core({ quota: { settled: () => chain } });
+    await joinCoreClaudeObservations({ db: {} as db.Database }, turn);
+    await joinCoreClaudeObservations({ db: {} as db.Database }, turn);
+    expect(wake).toHaveBeenCalledTimes(1);
+    expect(wake).toHaveBeenCalledWith({}, "claude", {
+      accountId: "account-1",
+      reason: "quota_observed_available",
+    });
+    // A failed chain records nothing and wakes nobody.
+    await joinCoreClaudeObservations(
+      { db: {} as db.Database },
+      core({ quota: { settled: () => Promise.reject(new Error("write failed")) } }),
+    );
+    expect(wake).toHaveBeenCalledTimes(1);
+  });
+
+  test("a 429 without the accepted model is not settled: it never widens to the whole connection", async () => {
+    const binding = claudeCoreRefusal(undefined);
+    expect(binding.classify(anthropic(429, "rate_limit_error"))).toBeNull();
+    expect(binding.classify(anthropic(401, "authentication_error"))).toEqual({
+      kind: "unauthorized",
+    });
+    const runtime = coreRuntime({ refusals: 1 });
+    spy(db, "requestSessionTurnRecovery").mockResolvedValue({
+      action: "recovering",
+      events: [],
+    } as never);
+    spy(events, "publishDurableSessionEvents").mockResolvedValue(undefined as never);
+    spy(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(undefined as never);
+    const { deps } = failureDeps(
+      anthropic(429, "rate_limit_error"),
+      core({ productModelId: undefined }),
+    );
+    await settleTurnFailure(deps as never).catch(() => undefined);
+    expect(runtime.apply).not.toHaveBeenCalled();
+  });
+
+  test("the transport spent the one forced refresh: settlement never plans a second", () => {
+    expect(claudeCoreRefusal(MODEL).credential).toEqual({
+      renewable: true,
+      refreshedBeforeRefusal: true,
+    });
+  });
+
+  test("a 529 keeps the turn's lease and binding: the retry runs on the same connection", async () => {
+    const runtime = coreRuntime({ refusals: 1 });
+    recoveringRecovery();
+    const { deps, releaseCurrent } = failureDeps(anthropic(529, "overloaded_error"), core());
+    expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "recovering" });
+    // Nothing recorded and the lease still held: the next attempt's placement
+    // reuses the binding (the shared conformance scenario "overloaded, failed
+    // and lost requests neither fail over nor change health" proves the same
+    // connection is placed again on real PostgreSQL for both Claude subjects).
+    expect(runtime.apply).not.toHaveBeenCalled();
+    expect(releaseCurrent).not.toHaveBeenCalled();
+    expect(deps.leases.claude.held).toBe(true);
   });
 });
 

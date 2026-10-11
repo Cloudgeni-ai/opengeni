@@ -4868,7 +4868,8 @@ Facts the adapter declares, each read from today's Claude path:
     A family limit, and an account limit judged per model, reaches the
     models listed when the response is decoded, and always the response's
     own model: C1b and C2a pass every Claude model the connection can serve
-    (its organization's catalog at that moment), and C1b tests that the
+    (the deployment's Claude catalog at that moment, a superset of any
+    organization's), and C1b tests that the
     worker does. A model missing from the list (for example one added later)
     is dispatched until its first refused response records its limit.
   - Differences from today's merged reading. A later allowed response does
@@ -5252,15 +5253,27 @@ like C1a.
   turn, and the core never reads the v1 `claudeAuthRecovery` marker (the
   receipts replace it); the claim keeps reading it for legacy turns until
   C3 converts live values.
+  The binding declares `credential: { renewable: true,
+  refreshedBeforeRefusal: true }`, so the shared plan never asks for a
+  second refresh (one forced refresh per turn, as for a setup token, which
+  cannot renew at all). A 429 without the accepted model is not settled
+  (null) rather than widening to a whole-connection exhaustion. The refusal
+  is fenced on the generation of the bearer the last admitted main-lane
+  request carried (C1a's `mainLaneAdmitted`).
 - Header usage. Each response's usage headers are decoded with
   `decodeSubscriptionCoreClaudeQuota`, using the refresh generation of the
   bearer that made the request and every Claude model of the deployment's
   catalog, and applied in order to the leased connection under the lease
-  fence (best effort). Finalization joins them before the lease is
-  released; one that ended a stored exhaustion wakes the account's Claude
-  waiters (`quota_observed_available`). This relies on the partial-reading
-  fix of `applyQuotaObservation` (#4120), so C1b merges on a base that
-  contains it.
+  fence (best effort; every link of the chain is total, so the join never
+  rejects). Finalization joins them before the lease is released, and so
+  does the refusal settlement before it records the refusal and the
+  failover releases the lease (the shared binding's optional
+  `joinObservations` step): a 429's own headers, such as a rejected window
+  with its reset, reach placement before the re-placement, and no write is
+  dropped by the moved lease fence. One that ended a stored exhaustion
+  wakes the account's Claude waiters (`quota_observed_available`), once per
+  joined chain. This relies on the partial-reading fix of
+  `applyQuotaObservation` (#4120), so C1b merges on a base that contains it.
 - Waits. The core waiter accepts `claude` with the legacy Claude wait's
   vocabulary (`turn.capacity_waiting`, `turn.recovery.requested`,
   `turn.superseded`, status reason `claude_capacity`), and its workflow
@@ -5271,6 +5284,15 @@ like C1a.
   (only a Claude core waiter), then the legacy Claude waiter. Compaction
   never parks (C1a). The shared conformance suite runs its session-wait
   scenarios for both Claude subjects.
+  Before the receipt a v1 Claude waiter lives in its own table: the exact-id
+  core lookup finds nothing, so the v1 reconcile runs unchanged, and a core
+  Claude wake fails closed while Claude is unregistered (a real-PostgreSQL
+  test covers both). The false-resumption breaker's terminal code
+  `claude_capacity_recovery_exhausted` joins the shared exhausted codes, so
+  a human Retry replenishes it as for Codex and SuperGrok (legacy Claude
+  never emits that code), and a core Claude turn's generic completed model
+  request event carries `meaningfulOutput` (completed assistant text or a
+  complete function call) so real progress resets the breaker.
 
 ### 5.4 Workspace-managed connections as organization accounts
 

@@ -706,4 +706,121 @@ describe("core waiter recheck schedule", () => {
     ).toEqual({ action: "stale" });
     expect(reconcile).not.toHaveBeenCalled();
   });
+
+  test("a Claude core waiter found by exact id and generation reconciles on the core, never the legacy waiter", async () => {
+    spy(db, "getSubscriptionCoreCapacityWaitById").mockResolvedValue({
+      ...waiter,
+      provider: "claude",
+    });
+    outbox([]);
+    spy(db, "readSubscriptionCoreTurnIdentity").mockResolvedValue(null);
+    const reconcile = spy(db, "reconcileSubscriptionCoreCapacityWait").mockResolvedValue({
+      action: "superseded",
+      events: [],
+    });
+    spy(events, "publishDurableSessionEvents").mockResolvedValue(undefined as never);
+    const legacyRead = spy(db, "getClaudeCapacityWaitForSession");
+    const legacyReconcile = spy(db, "reconcileClaudeCapacityWait");
+    const codexReconcile = spy(db, "reconcileSubscriptionCoreCodexCapacityWait");
+    expect(
+      await activities().reconcileCodexCapacityWait({
+        accountId: "account-1",
+        workspaceId: "workspace-1",
+        sessionId: "session-1",
+        waiterId: "waiter-1",
+        generation: 2,
+        cause: "signal",
+        provider: "claude",
+      }),
+    ).toEqual({ action: "superseded" });
+    expect(reconcile).toHaveBeenCalledWith(
+      {},
+      expect.objectContaining({
+        provider: "claude",
+        waiterId: "waiter-1",
+        generation: 2,
+        evaluatedWakeRevision: 5,
+        evaluation: { kind: "revoked" },
+      }),
+    );
+    expect(legacyRead).not.toHaveBeenCalled();
+    expect(legacyReconcile).not.toHaveBeenCalled();
+    expect(codexReconcile).not.toHaveBeenCalled();
+  });
+
+  test("an older generation of a Claude core waiter is stale and evaluates nothing", async () => {
+    spy(db, "getSubscriptionCoreCapacityWaitById").mockResolvedValue({
+      ...waiter,
+      provider: "claude",
+    });
+    outbox([]);
+    const identityRead = spy(db, "readSubscriptionCoreTurnIdentity");
+    const reconcile = spy(db, "reconcileSubscriptionCoreCapacityWait");
+    const legacyRead = spy(db, "getClaudeCapacityWaitForSession");
+    expect(
+      await activities().reconcileCodexCapacityWait({
+        accountId: "account-1",
+        workspaceId: "workspace-1",
+        sessionId: "session-1",
+        waiterId: "waiter-1",
+        generation: 1,
+        cause: "timer",
+        provider: "claude",
+      }),
+    ).toEqual({ action: "stale" });
+    expect(identityRead).not.toHaveBeenCalled();
+    expect(reconcile).not.toHaveBeenCalled();
+    expect(legacyRead).not.toHaveBeenCalled();
+  });
+
+  test("a v1 Claude waiter the core does not hold reconciles only through the v1 path", async () => {
+    // Before the receipt the exact-id core lookup finds nothing: the v1
+    // reconcile runs unchanged, and no core reconcile, placement or wake does.
+    spy(db, "getSubscriptionCoreCapacityWaitById").mockResolvedValue(null);
+    const coreReconcile = spy(db, "reconcileSubscriptionCoreCapacityWait");
+    const coreIdentity = spy(db, "readSubscriptionCoreTurnIdentity");
+    const coreWake = spy(db, "wakeSubscriptionCoreProviderCapacityWaiters");
+    const nextCheckAt = new Date("2030-01-01T00:00:00.000Z");
+    spy(db, "getClaudeCapacityWaitForSession").mockResolvedValue({
+      id: "legacy-waiter",
+      generation: 3,
+    } as never);
+    spy(db, "resolveClaudeWaiterSubject").mockResolvedValue(null);
+    const legacyReconcile = spy(db, "reconcileClaudeCapacityWait").mockResolvedValue({
+      action: "waiting",
+      waiter: { id: "legacy-waiter", generation: 3, nextCheckAt, wakeRevision: 9 },
+      events: [],
+    } as never);
+    expect(
+      await activities().reconcileCodexCapacityWait({
+        accountId: "account-1",
+        workspaceId: "workspace-1",
+        sessionId: "session-1",
+        waiterId: "legacy-waiter",
+        generation: 3,
+        cause: "timer",
+        provider: "claude",
+      }),
+    ).toEqual({
+      action: "waiting",
+      provider: "claude",
+      waiterId: "legacy-waiter",
+      generation: 3,
+      nextCheckAt: nextCheckAt.toISOString(),
+      wakeRevision: 9,
+    });
+    expect(legacyReconcile).toHaveBeenCalledWith(
+      {},
+      {
+        accountId: "account-1",
+        workspaceId: "workspace-1",
+        sessionId: "session-1",
+        waiterId: "legacy-waiter",
+        generation: 3,
+      },
+    );
+    expect(coreReconcile).not.toHaveBeenCalled();
+    expect(coreIdentity).not.toHaveBeenCalled();
+    expect(coreWake).not.toHaveBeenCalled();
+  });
 });

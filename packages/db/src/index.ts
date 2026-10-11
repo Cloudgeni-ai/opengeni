@@ -25235,7 +25235,7 @@ const SUBSCRIPTION_CORE_WAIT_VOCABULARY: {
     },
     statusReason: "claude_capacity",
     closeToolsReason: "claude_capacity_wait",
-    exhaustedCode: "claude_capacity_recovery_exhausted",
+    exhaustedCode: SUBSCRIPTION_CORE_WAIT_EXHAUSTED_CODES.claude,
     resumedEvent: (waiter) => ({
       type: "turn.recovery.requested",
       payload: {

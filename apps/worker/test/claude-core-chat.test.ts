@@ -28,6 +28,7 @@ import {
   claudeCoreRequestPreparer,
   claudeResponseInspector,
   claudeSubscriptionProviderIds,
+  claudeSubscriptionUpstreamModelIds,
   selectClaudeTurnCapacityByRoute,
 } from "../src/activities/agent-turn/claude-core";
 import {
@@ -139,9 +140,10 @@ function route(value: db.SubscriptionCoreProviderRoute) {
 function coreTurns(
   placement: db.SubscriptionCorePlacement,
   evaluation?: Awaited<ReturnType<typeof db.evaluateSubscriptionCoreCodexPlacement>>,
+  recovered = 0,
 ) {
   const place = spyOn({ place: async () => placement }, "place");
-  const recover = spyOn({ recover: async () => 0 }, "recover");
+  const recover = spyOn({ recover: async () => recovered }, "recover");
   const evaluate = spyOn({ evaluate: async () => evaluation }, "evaluate");
   spy(db, "subscriptionCoreTurns").mockReturnValue({
     placeSubscriptionCoreTurn: place,
@@ -241,6 +243,26 @@ describe("Claude capacity by provider route", () => {
       expect(deps.leases.claude.held).toBe(true);
       expect(legacy).not.toHaveBeenCalled();
       expect(legacyLease).not.toHaveBeenCalled();
+    } finally {
+      deps.leases.claude.stopHeartbeat();
+    }
+  });
+
+  test("a recovered connection wakes the account's Claude waiters, never Codex's", async () => {
+    route("core");
+    spy(db, "readSubscriptionCoreTurnIdentity").mockResolvedValue(identity);
+    const wake = spy(db, "wakeSubscriptionCoreProviderCapacityWaiters").mockResolvedValue([]);
+    const codexWake = spy(db, "wakeSubscriptionCoreCodexCapacityWaiters");
+    const { recover } = coreTurns(runPlacement, undefined, 1);
+    const deps = capacityDeps();
+    try {
+      expect(await selectClaudeTurnCapacityByRoute(deps)).toEqual({ ok: true });
+      expect(recover).toHaveBeenCalledTimes(1);
+      expect(wake).toHaveBeenCalledWith(deps.db, "claude", {
+        accountId: identity.accountId,
+        reason: "connection_health_recovered",
+      });
+      expect(codexWake).not.toHaveBeenCalled();
     } finally {
       deps.leases.claude.stopHeartbeat();
     }
@@ -908,6 +930,48 @@ describe("Claude model scope and provider ids", () => {
       "organization-claude-subscription",
       "workspace-claude-subscription",
     ]);
+  });
+
+  test("header observations decode against every Claude model of the deployment's catalog", () => {
+    const provider = (
+      id: string,
+      kind: string,
+      models: Array<{ id: string; upstreamModelId?: string }>,
+    ) => ({
+      id,
+      kind,
+      api: "anthropic-messages",
+      apiKey: "sk-ant-api03-fixture",
+      baseUrl: "https://api.anthropic.com",
+      models,
+    });
+    const ids = claudeSubscriptionUpstreamModelIds({
+      modelProvidersJson: JSON.stringify([
+        provider("workspace-claude-subscription", "claude-subscription-workspace", [
+          {
+            id: "workspace-claude-subscription/claude-sonnet-5",
+            upstreamModelId: "claude-sonnet-5",
+          },
+          { id: "claude-haiku-5" },
+        ]),
+        provider("organization-claude-subscription", "claude-subscription-organization", [
+          {
+            id: "organization-claude-subscription/claude-sonnet-5",
+            upstreamModelId: "claude-sonnet-5",
+          },
+          {
+            id: "organization-claude-subscription/claude-opus-5-5",
+            upstreamModelId: "claude-opus-5-5",
+          },
+        ]),
+        provider("organization-anthropic", "anthropic-organization", [
+          { id: "organization-anthropic/claude-api-only", upstreamModelId: "claude-api-only" },
+        ]),
+      ]),
+    });
+    // Both Claude subscription kinds, the model id when no upstream id is
+    // set, each model once, and no other provider's models.
+    expect(ids.toSorted()).toEqual(["claude-haiku-5", "claude-opus-5-5", "claude-sonnet-5"]);
   });
 });
 
