@@ -34,12 +34,12 @@ let client: DbClient | null = null;
 let appConnectionUrl = "";
 /** This binary requires the SuperGrok receipt, which the rolling state lacks. */
 const BEFORE_XAI_CUTOVER = [
-  "database is missing the xai subscription-core cutover receipt (0718_subscription_core_xai_cutover.sql); apply the pending migrations first",
+  "database is missing the xai subscription-core cutover receipt (0719_subscription_core_xai_cutover.sql); apply the pending migrations first",
 ];
 /** Runtime posture violations right after applying 0707 to a provisioned database, before provisioning again. */
 let unprovisionedPostureViolations: string[] | null = null;
 // A deployment's own application role (not named opengeni_app), configured
-// for the migration, and the 0715 routines it could execute before roles were
+// for the migration, and the 0716 routines it could execute before roles were
 // provisioned again (an older binary's posture requires EXECUTE on them).
 const customApplicationRole = `og_m4f_custom_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
 let customRoleKindRoutinesBeforeProvision: Record<string, boolean> | null = null;
@@ -53,7 +53,7 @@ beforeAll(async () => {
   // 0707 (as a deployment is before it), apply 0707 alone, and evaluate the
   // full runtime posture as the runtime role before provisioning again. 0712
   // patches routines 0707 creates, 0713 builds on 0707's registry, 0714
-  // redefines 0713's reach setters, 0715 rewrites routines 0707, 0713 and
+  // redefines 0713's reach setters, 0716 rewrites routines 0707, 0713 and
   // 0714 create, the compatibility migration builds on 0712's receipts and
   // patches its helpers, the fences require its routines and the acceptance
   // reads patch the writers 0707 defines, so all are withheld and applied with
@@ -69,13 +69,13 @@ beforeAll(async () => {
     "0714_subscription_workspace_managed_organization_accounts.sql",
     // Rewrites routines 0707, 0713 and 0714 create.
     "0715_subscription_core_api_key_connections.sql",
-    "0715_subscription_authority_compat.sql",
-    "0716_subscription_authority_fences.sql",
-    "0717_subscription_personal_acceptance_reads.sql",
+    "0716_subscription_authority_compat.sql",
+    "0717_subscription_authority_fences.sql",
+    "0718_subscription_personal_acceptance_reads.sql",
   ];
   // The drained SuperGrok cutover is maintenance-only: a rolling deployment
   // of 0707 never applies it, so it stays recorded and unapplied here.
-  const xaiCutover = "0718_subscription_core_xai_cutover.sql";
+  const xaiCutover = "0719_subscription_core_xai_cutover.sql";
   const owner = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
@@ -432,7 +432,7 @@ describe("provider-neutral subscription-core routines (migration 0707)", () => {
       expect(rows.length).toBe(
         SUBSCRIPTION_CORE_NEUTRAL_PRIVATE_ROUTINES.length +
           SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES.length +
-          // 0715: the registered connection-kind lookup the routines call.
+          // 0716: the registered connection-kind lookup the routines call.
           1,
       );
       expect(rows.some((row) => row.name === "subscription_core_connection_kind")).toBe(true);
@@ -452,9 +452,9 @@ describe("provider-neutral subscription-core routines (migration 0707)", () => {
           connectionKind: null,
         });
       }
-      // Each routine 0715 rewrote still reads the registered kind exactly
+      // Each routine 0716 rewrote still reads the registered kind exactly
       // where its earlier definition compared (or inserted) a literal kind, plus
-      // the two personal reads 0715 gave a kind filter (personal management's
+      // the two personal reads 0716 gave a kind filter (personal management's
       // target lookup and the personal connect's authority generation): a
       // dropped kind filter fails here even where no seeded row reaches it.
       const kindReads: Record<string, number> = {
@@ -937,7 +937,7 @@ describe("provider-neutral subscription-core routines (migration 0707)", () => {
     "applied to a provisioned database, 0707 keeps the runtime posture clean before provisioning again",
     () => {
       expect(unprovisionedPostureViolations).toEqual(BEFORE_XAI_CUTOVER);
-      // 0715 grants its two routines to every configured application role,
+      // 0716 grants its two routines to every configured application role,
       // not only the default name, before provision-roles.
       expect(customRoleKindRoutinesBeforeProvision).toEqual({
         "opengeni_private.subscription_core_connection_kind(text)": true,

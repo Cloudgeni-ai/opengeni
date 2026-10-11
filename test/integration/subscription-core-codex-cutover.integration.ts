@@ -41,19 +41,19 @@ const MIGRATION = "0689_subscription_core_codex_cutover.sql";
 // 0712 requires the committed 0689 cutover, so it is held back with it.
 const PRECURSOR = "0712_subscription_core_generic_precursor.sql";
 // 0713 locks and alters tables 0689 creates, 0714 redefines 0713's reach
-// setters and 0715 rewrites routines 0713 and 0714 create: all are held back
+// setters and 0716 rewrites routines 0713 and 0714 create: all are held back
 // and replayed after the cutover.
 const PROVIDER_KEYED_REACH = "0713_subscription_core_provider_keyed_reach.sql";
 const WORKSPACE_MANAGED_ACCOUNTS = "0714_subscription_workspace_managed_organization_accounts.sql";
 const API_KEY_CONNECTIONS = "0715_subscription_core_api_key_connections.sql";
-// 0715 builds on 0712's receipts and patches its helpers; it follows 0712.
-const COMPAT = "0715_subscription_authority_compat.sql";
-// 0716 requires 0715's routines; it follows 0715.
-const FENCES = "0716_subscription_authority_fences.sql";
+// 0716 builds on 0712's receipts and patches its helpers; it follows 0712.
+const COMPAT = "0716_subscription_authority_compat.sql";
+// 0717 requires 0716's routines; it follows 0716.
+const FENCES = "0717_subscription_authority_fences.sql";
 // The drained SuperGrok cutover requires 0712 through 0717 and the codec
 // stage; it is recorded and never applied, so this database stays the Codex
 // seam fixture before any SuperGrok cutover.
-const XAI_CUTOVER = "0718_subscription_core_xai_cutover.sql";
+const XAI_CUTOVER = "0719_subscription_core_xai_cutover.sql";
 const MODEL = "codex/gpt-5.5";
 const key = Buffer.alloc(32, 77);
 const settings = { environmentsEncryptionKey: key.toString("base64") } as never;

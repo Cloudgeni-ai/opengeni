@@ -38,18 +38,18 @@ test("a pre-writer personal-resource task retains its execution proof across mig
   // 0713 alters objects 0689 creates, so it is deferred with it and replayed
   // after it.
   const providerKeyedReach = "0713_subscription_core_provider_keyed_reach.sql";
-  // 0714 redefines 0713's reach setters and 0715 rewrites routines 0707,
+  // 0714 redefines 0713's reach setters and 0716 rewrites routines 0707,
   // 0713 and 0714 create: both are deferred and replayed after them.
   const workspaceManagedAccounts = "0714_subscription_workspace_managed_organization_accounts.sql";
   const apiKeyConnections = "0715_subscription_core_api_key_connections.sql";
-  // 0715 builds on 0712's receipts and patches its helpers; it follows 0712.
-  const compat = "0715_subscription_authority_compat.sql";
-  // 0716 requires 0715's routines; it follows 0715.
-  const fences = "0716_subscription_authority_fences.sql";
-  // 0717 patches the acceptance writers 0688 and 0707 define; it follows them.
-  const acceptanceReads = "0717_subscription_personal_acceptance_reads.sql";
-  // The drained SuperGrok cutover requires 0717; held back (never applied).
-  const xaiCutover = "0718_subscription_core_xai_cutover.sql";
+  // 0716 builds on 0712's receipts and patches its helpers; it follows 0712.
+  const compat = "0716_subscription_authority_compat.sql";
+  // 0717 requires 0716's routines; it follows 0716.
+  const fences = "0717_subscription_authority_fences.sql";
+  // 0718 patches the acceptance writers 0688 and 0707 define; it follows them.
+  const acceptanceReads = "0718_subscription_personal_acceptance_reads.sql";
+  // The drained SuperGrok cutover requires 0718; held back (never applied).
+  const xaiCutover = "0719_subscription_core_xai_cutover.sql";
   try {
     // Stage the actual pre-writer ledger, including on the stacked cutover
     // branch. This is a rolling/gate-off regression, not cutover activation.

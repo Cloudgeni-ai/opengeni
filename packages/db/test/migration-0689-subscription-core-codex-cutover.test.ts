@@ -47,17 +47,17 @@ const PRECURSOR = "0712_subscription_core_generic_precursor.sql";
 // replayed right after it, so these cases also cover the provider-keyed
 // reach, auto-assignment and plan-change paths on cutover data.
 const PROVIDER_KEYED_REACH = "0713_subscription_core_provider_keyed_reach.sql";
-// 0714 redefines 0713's reach setters and 0715 rewrites routines 0713 and
+// 0714 redefines 0713's reach setters and 0716 rewrites routines 0713 and
 // 0714 create: held back and replayed after it.
 const WORKSPACE_MANAGED_ACCOUNTS = "0714_subscription_workspace_managed_organization_accounts.sql";
 const API_KEY_CONNECTIONS = "0715_subscription_core_api_key_connections.sql";
-// 0715 builds on 0712's receipts and patches its helpers; it follows 0712.
-const COMPAT = "0715_subscription_authority_compat.sql";
-// 0716 requires 0715's routines; it follows 0715.
-const FENCES = "0716_subscription_authority_fences.sql";
+// 0716 builds on 0712's receipts and patches its helpers; it follows 0712.
+const COMPAT = "0716_subscription_authority_compat.sql";
+// 0717 requires 0716's routines; it follows 0716.
+const FENCES = "0717_subscription_authority_fences.sql";
 // The drained SuperGrok cutover requires 0717; held back (never applied) so
 // this database stays a Codex-only cutover fixture.
-const XAI_CUTOVER = "0718_subscription_core_xai_cutover.sql";
+const XAI_CUTOVER = "0719_subscription_core_xai_cutover.sql";
 const key = Buffer.alloc(32, 72);
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 

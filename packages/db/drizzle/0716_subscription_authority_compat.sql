@@ -24,7 +24,7 @@ BEGIN
   IF to_regprocedure('opengeni_private.subscription_provider_cutover_committed(text)') IS NULL
     OR to_regclass('opengeni_private.subscription_provider_cutover_receipts') IS NULL
   THEN
-    RAISE EXCEPTION '0715 requires the 0712 provider cutover receipts' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0716 requires the 0712 provider cutover receipts' USING ERRCODE = '55000';
   END IF;
 END
 $prerequisite$;

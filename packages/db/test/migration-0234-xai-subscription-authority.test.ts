@@ -251,7 +251,7 @@ describe("migration 0234 xAI subscription authority", () => {
       expect(migration).toContain(`CREATE TABLE "${table}"`);
       expect(migration).toContain(`ALTER TABLE "${table}" FORCE ROW LEVEL SECURITY`);
       expect(FORCE_RLS_TABLES).toContain(table);
-      // Read-only forensics once the SuperGrok cutover receipt exists (0718).
+      // Read-only forensics once the SuperGrok cutover receipt exists (0719).
       expect(SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES.xai).toContain(table);
     }
     expect(migration).toContain("\"authority_scope\" IN ('workspace', 'user')");
@@ -1017,7 +1017,7 @@ describe("migration 0234 xAI subscription authority", () => {
   }, 180_000);
 
   // Steering a capacity-blocked SuperGrok turn ends its core waiter since the
-  // drained cutover (0718); migration-0718-subscription-core-xai-cutover.test.ts
+  // drained cutover (0719); migration-0719-subscription-core-xai-cutover.test.ts
   // covers it. This legacy world keeps no Steer path for xai_capacity_waiters.
 
   test("persists pool-scoped capacity waiters and immutable accepted-work snapshots", async () => {

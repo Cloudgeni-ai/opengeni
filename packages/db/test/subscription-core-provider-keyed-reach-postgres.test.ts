@@ -46,11 +46,11 @@ const REACH_MIGRATION = "0713_subscription_core_provider_keyed_reach.sql";
 const LATER_MIGRATIONS = ["0714_subscription_workspace_managed_organization_accounts.sql"];
 // The drained SuperGrok cutover is a maintenance step this rolling test never
 // runs: it stays recorded as applied throughout.
-const MAINTENANCE_MIGRATIONS = ["0718_subscription_core_xai_cutover.sql"];
-// A binary that knows 0718 reports only the missing SuperGrok receipt until
+const MAINTENANCE_MIGRATIONS = ["0719_subscription_core_xai_cutover.sql"];
+// A binary that knows 0719 reports only the missing SuperGrok receipt until
 // the maintenance step runs.
 const BEFORE_XAI_CUTOVER = [
-  "database is missing the xai subscription-core cutover receipt (0718_subscription_core_xai_cutover.sql); apply the pending migrations first",
+  "database is missing the xai subscription-core cutover receipt (0719_subscription_core_xai_cutover.sql); apply the pending migrations first",
 ];
 // 0715 rewrites routines 0713 and 0714 create, so a deployment before 0713
 // is also before it: held back while 0713 is applied, then applied.
