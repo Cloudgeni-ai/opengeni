@@ -101,6 +101,21 @@ connection's current `refresh_generation`, so a stale refusal cannot
 quarantine a renewed credential (this replaces `version` fencing, which does
 not change on Claude refresh).
 
+Merging (`applyQuotaObservation`) depends on `source`. A usage-endpoint
+reading replaces the stored windows, so it can show an early reset. That is
+an adapter obligation: an adapter tags a reading `usage_endpoint` only when
+it reports every window the provider tracks, because the store treats such a
+reading as complete whether or not it is (a reading that omits an exhausted
+window ends that window's block). Whether a provider's usage endpoint meets
+this is checked before the provider is registered; for Claude it is a C3
+precondition, tracked separately. Response-header readings and refusals
+report only some windows: a stored exhausted window with a known future
+reset that such an observation does not report stays until that reset (one
+that reports the window again replaces it). Whatever the source, a running
+`exhaustedUntil` deadline or model cooldown is never shortened, and an older
+or undated reading never replaces a newer dated one. So a writer's own
+refusal is tagged `refusal`, never `usage_endpoint`.
+
 ## 3. Data model
 
 Every table is `ENABLE` + `FORCE ROW LEVEL SECURITY` and keyed by
@@ -3998,6 +4013,29 @@ Decisions:
    refresh happens in the worker's own seam before classification; and its
    writes are best effort. Codex's `rateLimitFallbackMs` and
    `exhaustedFallbackMs` equal the worker's 60 seconds and 5 hours.
+   The credit-policy branch records its refusals as `refusal` observations
+   (§2.2): `usage_verification_policy` as no windows with a 60-second
+   `rate_limit` deadline, `included_usage_policy` as one exhausted
+   `included_usage` window until now + max(60 s, the policy's cooldown). Like
+   any refusal they keep a stored exhausted window with a known future
+   reset (a weekly `secondary` window days away, say), so the connection
+   keeps waiting for it after the 60-second hold; before, they were tagged
+   `usage_endpoint` and erased it. Codex header readings report only
+   `primary` and `secondary` (the credit guard's own `/wham/usage` reads
+   reach the store as header readings through finalization too), so a
+   header reading no longer ends the `included_usage` hold: it ends at its
+   reset or with a real usage reading (`fetchSubscriptionCoreCodexUsage`),
+   which replaces every window. Both only wait longer, and the credit guard
+   would refuse again before dispatch anyway. Legacy set this hold to
+   min(the policy's reset, now + 60 s) (`includedUsageUnavailableUntil`)
+   and only time ended it. So the core waits longer than legacy, except
+   that a usage reading in the first 60 seconds ends the hold earlier than
+   legacy did: the connection is placeable again (the reading's wake reaches
+   waiters), and the credit guard re-reads usage and refuses again before
+   dispatch, at the cost of one refused admission. A reset-credit redemption
+   ends only `exhaustedUntil`, so an exhausted window kept through a
+   credit-policy refusal still blocks after it until its reset or the next
+   usage reading, as any stored exhausted window already did.
 6. A connector not registered in production is registered for tests only:
    `testSubscriptionCoreProviderModules(binding)` returns the replacement
    TypeScript registry and v2 provider-list modules, which the test file
@@ -4308,10 +4346,10 @@ Facts the adapter declares, each read from today's Claude path:
   - Differences from today's merged reading. A later allowed response does
     not end a running cooldown or connection exhaustion early (the shared
     model never shortens either; the reset or an explicit store operation
-    ends it), which only waits longer. The shared store replaces the stored
-    windows with the newest observation's, so a reading that omits a window
-    would drop that window's running exhaustion, where today's merged
-    reading keeps it. Recording the window in `exhaustedUntil` instead
+    ends it), which only waits longer. Before C1a the shared store replaced
+    the stored windows with the newest observation's, so a reading that
+    omitted a window dropped that window's running exhaustion, where today's
+    merged reading keeps it. Recording the window in `exhaustedUntil` instead
     would let no later usage reading show an early reset, which today's
     reading does. So C1a, before any Claude call site exists, makes the
     shared `applyQuotaObservation` keep a stored exhausted window with a

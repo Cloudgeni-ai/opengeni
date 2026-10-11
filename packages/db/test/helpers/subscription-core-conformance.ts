@@ -3561,6 +3561,61 @@ export function describeSubscriptionCoreConformance<Credential>(
       });
     });
 
+    test("a header reading that omits a stored exhausted window keeps it and reports no recovery", async () => {
+      const org = await organization();
+      const connectionId = await sharedConnection(org, `partial-${crypto.randomUUID()}`);
+      const turn = await runningTurn(org);
+      const now = Date.now();
+      const resetsAt = now + 3_600_000;
+      expect(await placeChecked(turn, new Date(now))).toMatchObject({ kind: "run", connectionId });
+      const [connection] = await admin()<{ refresh_generation: number }[]>`
+        select refresh_generation::int as refresh_generation from subscription_connections
+        where id = ${connectionId}::uuid`;
+      const reading = (
+        observedAt: number,
+        windows: SubscriptionQuota["windows"],
+      ): SubscriptionQuota => ({
+        windows,
+        modelCooldowns: {},
+        exhaustedUntil: null,
+        exhaustedKind: null,
+        revision: 0,
+        observedAt,
+        observedRefreshGeneration: connection!.refresh_generation,
+        source: "response_headers",
+      });
+      const short = { id: "fixture_short", usedPercent: 20, resetsAt: now + 600_000 };
+      const lease = leaseOf(turn, connectionId);
+      expect(
+        await runtime().applySubscriptionCoreQuotaObservation(
+          db(),
+          turn.identity,
+          lease,
+          reading(now, [
+            { ...short, status: "ok" },
+            { id: "fixture_long", usedPercent: 100, resetsAt, status: "exhausted" },
+          ]),
+        ),
+      ).toEqual({ applied: true, recovered: false });
+      // A later header reading reports only the short window: the long
+      // window's block stands, so nothing recovered and no waiter is woken.
+      expect(
+        await runtime().applySubscriptionCoreQuotaObservation(
+          db(),
+          turn.identity,
+          lease,
+          reading(now + 1_000, [{ ...short, usedPercent: 25, status: "ok" }]),
+        ),
+      ).toEqual({ applied: true, recovered: false });
+      const waiting = await placeChecked(turn, new Date(now + 2_000));
+      expect(waiting).toMatchObject({ kind: "wait" });
+      expect(instantOf(waiting, "earliestResetAt")).toBe(resetsAt);
+      expect(await evaluateChecked(turn, new Date(resetsAt + 1_000))).toMatchObject({
+        kind: "run",
+        connectionId,
+      });
+    });
+
     test("overloaded, failed and lost requests neither fail over nor change health", async () => {
       const org = await organization();
       await sharedConnection(org, `a-${crypto.randomUUID()}`);
