@@ -354,6 +354,20 @@ export type { SubscriptionCoreProvider } from "./subscription-core/provider";
 export { buildSubscriptionCoreTurnTokenResolver } from "./subscription-core/turn-token-resolver";
 export * from "./subscription-core-xai-adapter";
 export * from "./subscription-core-xai";
+// Provider-neutral operations outside chat (media, transcription, realtime,
+// usage and catalog probes), bound per provider by the caller.
+export {
+  subscriptionCoreOperations,
+  type SubscriptionCoreFetch,
+  type SubscriptionCoreOperationLeaseRef,
+  type SubscriptionCoreOperationScope,
+} from "./subscription-core/operations";
+export {
+  subscriptionCoreOperationConnections,
+  type SubscriptionCoreConnectionToken,
+  type SubscriptionCoreOperationCandidate,
+  type SubscriptionCoreUsageProbe,
+} from "./subscription-core/operation-connections";
 import {
   listSubscriptionCoreCodexServingConnections,
   readCodexCutoverDispositionForWorkspace,
@@ -29130,6 +29144,34 @@ export async function deliverSubscriptionCoreCodexWake(
         (error as { code?: unknown } | null)?.code ??
         (error as { cause?: { code?: unknown } } | null)?.cause?.code ??
         null,
+    });
+  }
+}
+
+/**
+ * Deliver a committed capacity change to one provider's core waiters (the
+ * provider-neutral form of `deliverSubscriptionCoreCodexWake`, for the
+ * providers that have no own wake binding). Never fails the committed
+ * change: every core waiter has its own bounded recheck.
+ */
+export async function deliverSubscriptionCoreProviderWake(
+  db: Database,
+  provider: import("@opengeni/subscriptions").ProviderId,
+  wake: { accountId: string; reason: string; workspaceIds?: readonly string[] },
+): Promise<void> {
+  try {
+    await wakeSubscriptionCoreCapacityWaiters(
+      db,
+      provider,
+      wake,
+      enqueueSessionWorkflowWakeInTransaction,
+    );
+  } catch (error) {
+    console.warn("core subscription wake delivery failed; waiters recheck on their own timer", {
+      provider,
+      accountId: wake.accountId,
+      reason: wake.reason,
+      error: error instanceof Error ? error.name : typeof error,
     });
   }
 }

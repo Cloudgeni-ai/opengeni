@@ -4273,6 +4273,72 @@ Fail-closed choices:
 - The route is read when the turn's capacity phase runs, not at claim time:
   a turn claimed before the cutover and placed after it places on the core.
 
+##### X2a: media and probes
+
+Every consumer reads the organization's SuperGrok route
+(`readSubscriptionCoreProviderRouteForWorkspace`): `legacy` (no receipt)
+keeps the legacy path unchanged, `maintenance` fails closed, `core` runs on
+the shared runtime bound to `SUBSCRIPTION_CORE_XAI`, which stays unregistered
+until X3. SuperGrok-specific code is the adapter's `fetchUsage`,
+`decodeQuota`, `liveModels` and bearer mapping, and route wiring.
+
+- **Generalized, Codex unchanged.** The Codex operation pieces became
+  provider-neutral (`subscriptionCoreOperationConnections(provider)`), and
+  the Codex names are thin wrappers over them:
+
+  | Before | After |
+  | --- | --- |
+  | `listSubscriptionCoreCodexOperationCandidates` | `.listSubscriptionCoreOperationCandidates` |
+  | `buildSubscriptionCoreCodexConnectionTokenResolver` | `.buildSubscriptionCoreConnectionTokenResolver` |
+  | `fetchSubscriptionCoreCodexUsage`, `usageQuotaObservation` | adapter `fetchUsage` and `decodeQuota`, `.probeSubscriptionCoreConnectionUsage` |
+  | Codex transcription helpers in `codex-subscription.ts` | `transcription/providers/subscription-core.ts` (`transcribeOnSubscriptionCore`) |
+  | (new) | `.runSubscriptionCoreOperation`, `.probeSubscriptionCoreConnectionLiveModels`, `.readSubscriptionCoreWorkspaceConnections`, `.refreshExhaustedSubscriptionCoreQuota`, `deliverSubscriptionCoreProviderWake` |
+
+- **Transcription and realtime** (EP-N03, EP-N05/N07/S17) use shared
+  organization- or workspace-scoped connections only (decision 3): a
+  sessionless `transcription` lease for the caller, a session-bound
+  `realtime` lease for the session's recorded owner. Release note: after
+  the cutover a personal SuperGrok account no longer serves transcription
+  or realtime.
+- **Video** (EP-T17/N11/N12/N13/N14). Funding availability (the policy
+  route, the realtime catalog and transcription availability) is "a shared
+  candidate exists for this workspace". In a turn, the video is funded by
+  the first shared candidate for the session's owner, also when the chat
+  model is not SuperGrok. The operation stores an encrypted reference to
+  that canonical connection (`kind: "subscription-connection"`, no token
+  material; `connection_id` stays null, as the funding CHECK requires).
+  Submission and polling run under a session-bound `video` operation lease
+  on exactly that connection, read the bearer through the core seam and
+  refresh only under the core lock. A personal connection never funds a
+  video: the job outlives its turn and the lease guard refuses personal
+  connections outside a turn. Without a usable connection (no session or
+  owner context, refused lease, relogin) the run reschedules until the
+  recovery deadline, then ends: `cancelled_before_submit` before
+  submission, `outcome_unknown` after it, `retention_failed` while
+  retaining (decision 6). Migration 0716 admits a `video` lease in an
+  ownerless session (shared connections only, no person), as 0698 did for
+  ownerless turns; otherwise a scheduled task's video could never submit.
+- **Status** (EP-N23) reads the workspace's shared pool and validates the
+  effective primary with one `liveModels` read; without an effective primary
+  it reports `valid: false`. The payload shape is unchanged.
+- **Quota** (EP-N22). `refreshExhaustedXaiQuota` on the core route probes
+  each shared connection whose stored quota is exhausted and was not read in
+  the last 30 seconds, in the caller's explicit workspace context, and wakes
+  the SuperGrok core waiters on recovery. The core keeps a running
+  exhaustion deadline against later readings (design 2.2); the adapter flag
+  `usageReadEndsQuotaExhaustion` (SuperGrok only) makes a billing reading
+  below the limit end a quota exhaustion, the legacy SuperGrok rule. Codex
+  does not set it.
+- **Image** (EP-N09/N10). A core-placed SuperGrok turn generates images on
+  its own placed connection (`executeCoreXaiImageGeneration`): an `image`
+  operation lease keyed by the ledger operation id at the turn's execution
+  generation, the chat lease checked (never taken) before the operation
+  lease and before every request, the bearer from the core seam and every
+  physical request in the core's custody. Anything that stops it before its
+  first request reaches xAI returns the ledger row to `prepared`
+  (`SubscriptionCoreImageDispatchRejected`). The session binding is never
+  read or written; a legacy-placed turn keeps the legacy image path.
+
 #### Verification plan
 
 - `bun install`; adapter conformance per provider without network (scripted

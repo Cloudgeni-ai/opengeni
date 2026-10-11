@@ -12,7 +12,6 @@ import {
   getWorkspaceVideoGenerationPolicy,
   updateWorkspaceVideoGenerationPolicy,
   VideoGenerationConflictError,
-  workspaceXaiSubscriptionActive,
 } from "@opengeni/db";
 import {
   requireAccessGrant,
@@ -27,6 +26,7 @@ import {
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { parseRequestJson } from "../http/request-body";
+import { workspaceXaiOperationAvailable } from "../xai-subscription-core";
 
 export function registerVideoGenerationRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/video-generation", async (c) => {
@@ -35,7 +35,11 @@ export function registerVideoGenerationRoutes(app: Hono, deps: ApiRouteDeps): vo
     const [policy, connection, supergrokConfigured, modelPolicy] = await Promise.all([
       getWorkspaceVideoGenerationPolicy(deps.db, workspaceId),
       getWorkspaceVercelAiGatewayConnectionMetadata(deps.db, workspaceId),
-      workspaceXaiSubscriptionActive(deps.db, deps.settings, workspaceId, grant.subjectId),
+      workspaceXaiOperationAvailable(deps.db, deps.settings, {
+        accountId: grant.accountId,
+        workspaceId,
+        subjectId: grant.subjectId,
+      }),
       getWorkspaceModelPolicy(deps.db, workspaceId),
     ]);
     const fundingOptions = videoGenerationFundingOptions({
@@ -70,7 +74,11 @@ export function registerVideoGenerationRoutes(app: Hono, deps: ApiRouteDeps): vo
     const payload = await parseRequestJson(c, UpdateVideoGenerationPolicyRequest);
     const [connection, supergrokConfigured, modelPolicy] = await Promise.all([
       getWorkspaceVercelAiGatewayConnectionMetadata(deps.db, workspaceId),
-      workspaceXaiSubscriptionActive(deps.db, deps.settings, workspaceId, grant.subjectId),
+      workspaceXaiOperationAvailable(deps.db, deps.settings, {
+        accountId: grant.accountId,
+        workspaceId,
+        subjectId: grant.subjectId,
+      }),
       getWorkspaceModelPolicy(deps.db, workspaceId),
     ]);
     const fundingOptions = videoGenerationFundingOptions({
