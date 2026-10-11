@@ -31117,6 +31117,12 @@ export type SessionCreateInput = {
   maxNestedAgentDepthOverride?: number | null;
   allowNestedAgentDepthIncrease?: boolean;
   subjectId?: string | null;
+  /**
+   * An archived-session import: its `beforeCreateCommit` marks the session
+   * imported, which has no accepted-authority source (0716), so the writer
+   * copies no compatibility record for it.
+   */
+  archivedImport?: true;
   /** Trusted, transaction-local linkage run after the exact session row and
    * MCP metadata exist but before either can commit. It must perform database
    * work only; throwing rolls the complete create/replay transaction back. */
@@ -32009,7 +32015,7 @@ async function createSessionInTransaction(
     throw error;
   }
   const [inserted] = insertedRows;
-  if (inserted) {
+  if (inserted && !input.archivedImport) {
     await copySubscriptionAuthorityCompatInTransaction(tx, [
       { kind: "session_initial", workspaceId: input.workspaceId, id: inserted.id },
     ]);

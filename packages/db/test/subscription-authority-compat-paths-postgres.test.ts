@@ -8,7 +8,9 @@
 // - the copy keeps the owner's record verbatim for the owner as causal human,
 // - the copy is narrowed (personal entry dropped, the workspace narrowing
 //   kept) when the causal human differs or the path's narrowing rule applies,
-// - the deferred check rejects the carrier without its copy (23514).
+// - the deferred check rejects the carrier without its copy (23514). Since
+//   X2b the session and task writers copy their own carriers, so for those
+//   paths the case shows the writer's copy instead.
 // Runtime calls run as the restricted application role; fixture rows the
 // application never writes directly (scheduler runs, cutover records,
 // delivered internal turns) are written by the database owner, as in
@@ -763,7 +765,9 @@ describe.skipIf(!realDb)("0716 compatibility paths after a provider's own receip
         createdBy: { kind: "service", subjectId: "scheduler" },
         createdByContext: { scheduledTaskRunId: runId },
       });
-      expect(await failure(() => newSession(scheduler(ownerRun), false))).toStartWith("23514");
+      // Since X2b the session writer copies the record itself.
+      const byWriter = await newSession(scheduler(ownerRun), false);
+      expect(await records("session_initial", byWriter)).toEqual([kept()]);
       const owned = await newSession(scheduler(ownerRun), true);
       expect(await records("session_initial", owned)).toEqual([kept()]);
       const foreign = await newSession(scheduler(otherRun), true);
@@ -787,7 +791,9 @@ describe.skipIf(!realDb)("0716 compatibility paths after a provider's own receip
     test("task revision: a new authorization copies the task, personal only for the task owner as authorizer", async () => {
       const task = await scheduledTask(org!.subjectId);
       await cutoverRecord("scheduled_task", task.id);
-      expect(await failure(() => reauthorize(task.id, org!.subjectId, false))).toStartWith("23514");
+      // Since X2b the task writer copies the revision's record itself.
+      const byWriter = await reauthorize(task.id, org!.subjectId, false);
+      expect(await records("scheduled_task_revision", task.id, byWriter)).toEqual([kept()]);
       const ownerAgain = await reauthorize(task.id, org!.subjectId, true);
       expect(await records("scheduled_task_revision", task.id, ownerAgain)).toEqual([kept()]);
       const byOther = await reauthorize(task.id, other, true);
@@ -819,7 +825,8 @@ describe.skipIf(!realDb)("0716 compatibility paths after a provider's own receip
           },
           copyInitial,
         );
-      expect(await failure(() => spawn(false))).toStartWith("23514");
+      // Since X2b the session writer copies the record itself.
+      expect(await records("session_initial", await spawn(false))).toEqual([kept()]);
       child = await spawn(true);
       expect(await records("session_initial", child)).toEqual([kept()]);
     });
@@ -1075,9 +1082,9 @@ describe.skipIf(!realDb)("0716 compatibility paths after a provider's own receip
     });
 
     test("to the owner's own destination: kept", async () => {
-      expect(
-        await failure(() => scheduledTask(org!.subjectId, { createdByActor: creator! })),
-      ).toStartWith("23514");
+      // Since X2b the task writer copies the record itself.
+      const byWriter = await scheduledTask(org!.subjectId, { createdByActor: creator! });
+      expect(await records("scheduled_task", byWriter.id)).toEqual([kept()]);
       const task = await scheduledTask(org!.subjectId, {
         createdByActor: creator!,
         copyRecords: true,

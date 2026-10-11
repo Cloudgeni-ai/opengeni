@@ -15,7 +15,7 @@
  */
 import { codexPlanKey } from "@opengeni/codex";
 import { CODEX_PLAN_ENTITLEMENT_EXCLUSION_TTL_MS } from "./codex-plan-entitlement";
-import { withRlsContext, type Database } from "./database";
+import type { Database } from "./database";
 import { decodeSubscriptionQuota } from "./subscription-core-repository";
 import {
   listSubscriptionCorePersonalConnectionRowsInTransaction,
