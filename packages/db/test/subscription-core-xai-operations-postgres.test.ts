@@ -545,6 +545,32 @@ describe.skipIf(!realDb)("SuperGrok operations on the shared core (X2a)", () => 
     );
     expect(first).toMatchObject({ kind: "read", recovered: false });
     expect(seen).toEqual(["billing?format=credits Bearer access-exhausted"]);
+    // Video funding skips a connection whose stored quota is exhausted now,
+    // read in a session's scope (owned and ownerless).
+    const owned = await session(org, "owner");
+    const ownerless = await session(org, "none");
+    for (const scope of [
+      sessionScope(org, owned, org.ownerSubjectId),
+      sessionScope(org, ownerless, null),
+    ]) {
+      expect([
+        ...(await operations().readSubscriptionCoreExhaustedConnectionIds(client!.db, scope, [
+          exhausted,
+          fresh,
+        ])),
+      ]).toEqual([exhausted]);
+    }
+    // Once the stored exhaustion has passed, it no longer excludes the connection.
+    expect(
+      (
+        await operations().readSubscriptionCoreExhaustedConnectionIds(
+          client!.db,
+          sessionScope(org, owned, org.ownerSubjectId),
+          [exhausted],
+          Date.parse(periodEnd) + 1,
+        )
+      ).size,
+    ).toBe(0);
     // Nothing exhausted is due for a re-read yet; the fresh connection is never read.
     seen.length = 0;
     usedPercent = 40;
@@ -581,7 +607,15 @@ describe.skipIf(!realDb)("SuperGrok operations on the shared core (X2a)", () => 
       }),
     ).toEqual([exhausted]);
     expect(seen).toEqual(["billing?format=credits Bearer access-exhausted"]);
-    void fresh;
+    expect(
+      (
+        await operations().readSubscriptionCoreExhaustedConnectionIds(
+          client!.db,
+          sessionScope(org, owned, org.ownerSubjectId),
+          [exhausted, fresh],
+        )
+      ).size,
+    ).toBe(0);
     // A personal connection is not visible to a workspace probe.
     const personal = await personalConnection(org, "personal-quota");
     expect(

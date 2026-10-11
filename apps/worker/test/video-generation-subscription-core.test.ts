@@ -25,6 +25,7 @@ type Operation = realDb.VideoGenerationOperationWithReferences;
 let operation: Operation;
 let calls: string[];
 let candidates: string[];
+let exhausted: string[];
 let owner: { ownerSubjectId: string | null } | undefined;
 let lease: "granted" | "refused" | "relogin";
 let fenceHeld: boolean;
@@ -46,6 +47,14 @@ mock.module("@opengeni/db", () => ({
     listSubscriptionCoreOperationCandidates: async (_db: unknown, scope: { kind: string }) => {
       calls.push(`candidates:${scope.kind}`);
       return candidates.map((connectionId) => ({ connectionId }));
+    },
+    readSubscriptionCoreExhaustedConnectionIds: async (
+      _db: unknown,
+      scope: { kind: string },
+      ids: string[],
+    ) => {
+      calls.push(`exhausted:${scope.kind}:${ids.join(",")}`);
+      return new Set(ids.filter((id) => exhausted.includes(id)));
     },
     runSubscriptionCoreOperation: async (
       _db: unknown,
@@ -187,6 +196,7 @@ const reconcile = () =>
 beforeEach(() => {
   calls = [];
   candidates = [CONNECTION];
+  exhausted = [];
   owner = { ownerSubjectId: "user:owner" };
   lease = "granted";
   fenceHeld = true;
@@ -213,7 +223,33 @@ describe("SuperGrok video on the shared core", () => {
       provider: "xai",
       connectionId: CONNECTION,
     });
-    expect(calls).toEqual(["candidates:session"]);
+    expect(calls).toEqual(["candidates:session", `exhausted:session:${CONNECTION}`]);
+    // A candidate whose stored quota is exhausted now is skipped; the next funds.
+    const SECOND = "66666666-6666-4666-8666-666666666666";
+    candidates = [CONNECTION, SECOND];
+    exhausted = [CONNECTION];
+    const skipped = await subscriptionCoreVideoGenerationCredentialLease(
+      {} as never,
+      settings,
+      SUBSCRIPTION_CORE_XAI as never,
+      "supergrok_subscription",
+      { accountId: "a", workspaceId: "w", sessionId: "s" },
+    );
+    expect(decryptVideoGenerationCredential(KEY, skipped!.credentialEncrypted)).toMatchObject({
+      connectionId: SECOND,
+    });
+    // Every candidate exhausted: no funding, so no video tool.
+    exhausted = [CONNECTION, SECOND];
+    expect(
+      await subscriptionCoreVideoGenerationCredentialLease(
+        {} as never,
+        settings,
+        SUBSCRIPTION_CORE_XAI as never,
+        "supergrok_subscription",
+        { accountId: "a", workspaceId: "w", sessionId: "s" },
+      ),
+    ).toBeNull();
+    exhausted = [];
     candidates = [];
     expect(
       await subscriptionCoreVideoGenerationCredentialLease(

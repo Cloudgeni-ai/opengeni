@@ -527,24 +527,7 @@ export const subscriptionCoreOperationConnections = memoByProvider(
         .filter((connection) => connection.status === "active")
         .map((connection) => connection.connectionId);
       if (ids.length === 0) return [];
-      const access = await operations().withOperationScope(db, scope, async (tx) =>
-        rawRows<{
-          connection_id: string;
-          quota: unknown;
-          quota_revision: number | string | null;
-          quota_observed_refresh_generation: number | string | null;
-          quota_updated_at: Date | string | null;
-        }>(
-          tx,
-          sql`select connection_id::text as connection_id, quota, revision as quota_revision,
-            observed_refresh_generation as quota_observed_refresh_generation,
-            updated_at as quota_updated_at
-          from subscription_connection_quota
-          where account_id = ${scope.accountId}::uuid
-            and connection_id = any(${`{${ids.join(",")}}`}::uuid[])`,
-        ),
-      );
-      const stale = (access?.value ?? []).filter((row) => {
+      const stale = (await readStoredQuotaRows(db, scope, ids)).filter((row) => {
         const quota = decodeSubscriptionQuota(row);
         if (!quota || quotaCapacity(quota, now).kind !== "exhausted") return false;
         const updatedAt = row.quota_updated_at ? new Date(row.quota_updated_at).getTime() : 0;
@@ -564,8 +547,59 @@ export const subscriptionCoreOperationConnections = memoByProvider(
       return recovered;
     }
 
+    /** The stored quota rows of `connectionIds`, read in the caller's scope. */
+    async function readStoredQuotaRows(
+      db: Database,
+      scope: Exclude<SubscriptionCoreOperationScope, { kind: "turn" }>,
+      connectionIds: readonly string[],
+    ) {
+      if (connectionIds.length === 0) return [];
+      const access = await operations().withOperationScope(db, scope, async (tx) =>
+        rawRows<{
+          connection_id: string;
+          quota: unknown;
+          quota_revision: number | string | null;
+          quota_observed_refresh_generation: number | string | null;
+          quota_updated_at: Date | string | null;
+        }>(
+          tx,
+          sql`select connection_id::text as connection_id, quota, revision as quota_revision,
+            observed_refresh_generation as quota_observed_refresh_generation,
+            updated_at as quota_updated_at
+          from subscription_connection_quota
+          where account_id = ${scope.accountId}::uuid
+            and connection_id = any(${`{${connectionIds.join(",")}}`}::uuid[])`,
+        ),
+      );
+      return access?.value ?? [];
+    }
+
+    /**
+     * The connections among `connectionIds` whose stored quota is exhausted
+     * now (design 5.3): a caller that commits one shared connection to work
+     * that outlives the turn (video funding) skips them, as legacy selection
+     * treated an exhausted account as unavailable. A connection with no
+     * stored observation, or whose exhaustion has passed, is not exhausted.
+     */
+    async function readSubscriptionCoreExhaustedConnectionIds(
+      db: Database,
+      scope: Exclude<SubscriptionCoreOperationScope, { kind: "turn" }>,
+      connectionIds: readonly string[],
+      now: number = Date.now(),
+    ): Promise<Set<string>> {
+      const exhausted = new Set<string>();
+      for (const row of await readStoredQuotaRows(db, scope, connectionIds)) {
+        const quota = decodeSubscriptionQuota(row);
+        if (quota && quotaCapacity(quota, now).kind === "exhausted") {
+          exhausted.add(row.connection_id);
+        }
+      }
+      return exhausted;
+    }
+
     return {
       listSubscriptionCoreOperationCandidates,
+      readSubscriptionCoreExhaustedConnectionIds,
       readSubscriptionCoreWorkspaceConnections,
       buildSubscriptionCoreConnectionTokenResolver,
       runSubscriptionCoreOperation,

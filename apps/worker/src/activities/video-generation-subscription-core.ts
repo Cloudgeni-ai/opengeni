@@ -5,8 +5,10 @@
  *
  * - Selection: the first shared organization- or workspace-scoped candidate
  *   for the session's recorded owner (the session's explicit choice, then
- *   the effective primary, then pool order). Never a personal connection: a
- *   video job outlives its turn, and reconciliation has no turn authority.
+ *   the effective primary, then pool order) whose stored quota is not
+ *   exhausted now; none when every candidate is exhausted. Never a personal
+ *   connection: a video job outlives its turn, and reconciliation has no
+ *   turn authority.
  * - Admission records a reference to that canonical connection, never token
  *   material, so no organization-scope envelope can be refused (EP-N13).
  * - Reconciliation reads the credential through the core connection seam
@@ -52,7 +54,11 @@ async function sessionScope(db: Database, context: SessionContext) {
   };
 }
 
-/** The video funding lease for this session, or null when no shared connection can fund it. */
+/**
+ * The video funding lease for this session, or null when no shared
+ * connection can fund it (none assigned, or every one's stored quota is
+ * exhausted now: the provider would refuse the start).
+ */
 export async function subscriptionCoreVideoGenerationCredentialLease(
   db: Database,
   settings: Settings,
@@ -64,9 +70,15 @@ export async function subscriptionCoreVideoGenerationCredentialLease(
   if (!encryptionKey) return null;
   const scope = await sessionScope(db, context);
   if (!scope) return null;
-  const [selected] = await subscriptionCoreOperationConnections(
-    provider,
-  ).listSubscriptionCoreOperationCandidates(db, scope);
+  const connections = subscriptionCoreOperationConnections(provider);
+  const candidates = await connections.listSubscriptionCoreOperationCandidates(db, scope);
+  if (candidates.length === 0) return null;
+  const exhausted = await connections.readSubscriptionCoreExhaustedConnectionIds(
+    db,
+    scope,
+    candidates.map((candidate) => candidate.connectionId),
+  );
+  const selected = candidates.find((candidate) => !exhausted.has(candidate.connectionId));
   if (!selected) return null;
   return Object.freeze({
     fundingSource,
