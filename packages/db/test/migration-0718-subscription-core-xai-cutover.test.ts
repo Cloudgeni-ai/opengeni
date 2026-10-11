@@ -1598,15 +1598,14 @@ describe.skipIf(!realDb)(
       }, 60_000);
 
       test("the legacy disconnect refuses after the receipt and changes nothing", async () => {
-        const disconnect = await withRlsContext(
-          client.db,
-          { accountId: a.account, workspaceId: a.w1, subjectId: a.owner },
-          (tx) =>
+        const disconnect = await withSessionRlsActorContext({ subjectId: a.owner }, () =>
+          withRlsContext(client.db, { accountId: a.account, workspaceId: a.w1 }, (tx) =>
             rawRows(
               tx,
               sql`select disconnect_xai_subscription_credential(${a.account}::uuid, ${a.w1}::uuid,
                 ${a.owner}, ${a.x1}::uuid, '{"version":1,"scope":"workspace"}'::jsonb) as disconnected`,
             ),
+          ),
         ).then(
           () => "disconnected",
           (error: unknown) => errorChain(error),
