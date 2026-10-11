@@ -138,7 +138,11 @@ async function setCutover(accountId: string, enabled: boolean): Promise<void> {
 function encryptedTokens(label: string): string {
   return encryptEnvironmentValue(
     key,
-    JSON.stringify({ version: 1, accessToken: `access-${label}`, refreshToken: `refresh-${label}` }),
+    JSON.stringify({
+      version: 1,
+      accessToken: `access-${label}`,
+      refreshToken: `refresh-${label}`,
+    }),
   );
 }
 
@@ -389,7 +393,10 @@ describe.skipIf(!realDb)("SuperGrok operations on the shared core (X2a)", () => 
       connection,
       "video",
     );
-    expect(after).toEqual({ kind: "ran", value: { accessToken: `rotated-access-${refreshCalls}` } });
+    expect(after).toEqual({
+      kind: "ran",
+      value: { accessToken: `rotated-access-${refreshCalls}` },
+    });
   });
 
   test("the quota probe reads one connection at a time in an explicit workspace context (EP-N22)", async () => {
