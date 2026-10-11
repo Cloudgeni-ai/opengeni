@@ -195,15 +195,16 @@ const allowed = (status: string | null | undefined) =>
  *   blocks. Overage is the Claude account's own setting, so it covers every
  *   model of the account.
  * - A rejected request whose overage was refused with a known reset is
- *   checked again at that reset: every block the response reports ends no
- *   later than it.
+ *   checked again at that reset: the blocks that response reports for the
+ *   models it concerns (its own model; without one, the family its limit
+ *   names, else every model) end no later than it.
  * - The account windows (five hours, seven days) decide the connection's
  *   capacity: `rejected`, or full without a status, is `exhausted` until its
  *   reset (a minute when the reset is unknown).
  * - A model-family window (Opus, Sonnet) limits only that family: when full
  *   or rejected it becomes a cooldown of each listed model of the family, and
  *   the window itself is reported with `unknown` status so it never decides
- *   the account's capacity. The paid overage windows never block the plan.
+ *   the account's capacity. The paid overage windows never block.
  * - A rejected request, and each rejected request restriction the
  *   observation carries (unless a later allowance of the same model lifts
  *   it), limits the model it was made for (a cooldown of that model's
@@ -211,8 +212,11 @@ const allowed = (status: string | null | undefined) =>
  *   whole connection (`exhaustedUntil`, kind `quota`).
  * - The model a response was allowed for dispatches whatever else that
  *   response reports, until the allowance's reset (a limit outlasting it
- *   limits that model too, from now): an account limit beside it cools the
- *   listed models instead of the connection, and the window is a `warning`.
+ *   limits that model too, from now).
+ * - When some models are judged apart (an allowed model, or a recheck that
+ *   concerns only some models), an account limit cools the listed models
+ *   one by one instead of exhausting the connection, and the window is a
+ *   `warning`.
  *
  * `upstreamModelIds` must list every Claude model the connection can serve
  * (the organization's catalog when decoded), so a family limit reaches each
@@ -227,53 +231,61 @@ export function decodeSubscriptionCoreClaudeQuota(input: {
   const observedAt = Date.parse(observation.observedAt);
   const request = observation.requestStatus ?? null;
   const rejected = request?.status === "rejected";
+  const own = request?.upstreamModelId ?? null;
   const overageReset = request?.overageResetsAt ? Date.parse(request.overageResetsAt) : null;
   const overageCovers =
     rejected && allowed(request.overageStatus) && (overageReset ?? Infinity) > observedAt;
-  const recheckAt =
-    rejected && request.overageStatus === "rejected" ? (overageReset ?? Infinity) : Infinity;
-  const until = (reset: string | null, at: string) =>
-    Math.min(
-      reset === null
-        ? Date.parse(at) + SUBSCRIPTION_CORE_CLAUDE_UNKNOWN_RESET_MS
-        : Date.parse(reset),
-      recheckAt,
-    );
+  const recheck = rejected && request.overageStatus === "rejected" ? overageReset : null;
+  const recheckFamily =
+    own === null && request?.representativeClaim
+      ? FAMILY_WINDOWS[request.representativeClaim]
+      : undefined;
+  /** The latest a block of this model (null: the connection) may run. */
+  const capOf = (model: string | null) =>
+    recheck === null
+      ? Infinity
+      : own !== null
+        ? model === own
+          ? recheck
+          : Infinity
+        : recheckFamily
+          ? model !== null && recheckFamily.test(model)
+            ? recheck
+            : Infinity
+          : recheck;
+  const base = (reset: string | null, at: string) =>
+    reset === null ? Date.parse(at) + SUBSCRIPTION_CORE_CLAUDE_UNKNOWN_RESET_MS : Date.parse(reset);
   // The model this response was allowed for dispatches whatever else it
-  // reports, until the allowance's own reset (a minute when unknown). A
-  // limit that outlasts the allowance limits that model too, from now.
-  const spared =
-    request && allowed(request.status) ? (request.upstreamModelId ?? undefined) : undefined;
+  // reports, until the allowance's own reset (a minute when unknown).
+  const spared = request && allowed(request.status) ? own : null;
   const allowanceEnd =
-    spared === undefined
+    spared === null
       ? -Infinity
       : request?.resetsAt
         ? Date.parse(request.resetsAt)
         : observedAt + SUBSCRIPTION_CORE_CLAUDE_UNKNOWN_RESET_MS;
+  const perModel = spared !== null || (recheck !== null && capOf(null) === Infinity);
   // The response's own model is limited by its family's window even when the
   // listed catalog misses it.
-  const listed = [
-    ...new Set([
-      ...input.upstreamModelIds,
-      ...(request?.upstreamModelId ? [request.upstreamModelId] : []),
-    ]),
-  ];
+  const listed = [...new Set([...input.upstreamModelIds, ...(own ? [own] : [])])];
   const modelCooldowns: Record<string, number> = {};
-  const cool = (upstreamModelId: string, end: number) => {
+  const cool = (upstreamModelId: string, limit: number) => {
+    const end = Math.min(limit, capOf(upstreamModelId));
     if (end <= observedAt || (upstreamModelId === spared && end <= allowanceEnd)) return;
     for (const modelId of subscriptionCoreClaudeProductModelIds(upstreamModelId)) {
       modelCooldowns[modelId] = Math.max(modelCooldowns[modelId] ?? end, end);
     }
   };
   let exhaustedUntil: number | null = null;
-  const block = (model: string | null, claim: string | null, end: number) => {
+  const block = (model: string | null, claim: string | null, limit: number) => {
     const family = claim === null ? undefined : FAMILY_WINDOWS[claim];
-    if (model !== null) cool(model, end);
-    else if (family || spared !== undefined) {
-      // A family limit, or an account limit beside an allowed model: every
-      // other listed model it covers.
-      for (const id of listed) if (!family || family.test(id)) cool(id, end);
-    } else if (end > observedAt) exhaustedUntil = Math.max(exhaustedUntil ?? end, end);
+    if (model !== null) cool(model, limit);
+    else if (family || perModel) {
+      for (const id of listed) if (!family || family.test(id)) cool(id, limit);
+    } else {
+      const end = Math.min(limit, capOf(null));
+      if (end > observedAt) exhaustedUntil = Math.max(exhaustedUntil ?? end, end);
+    }
   };
   const windows = observation.windows.map((window) => {
     const full =
@@ -282,11 +294,13 @@ export function decodeSubscriptionCoreClaudeQuota(input: {
         (window.status === null && (window.usedPercent ?? 0) >= 100));
     const resetsAt = window.resetsAt === null ? null : Date.parse(window.resetsAt);
     const account = ACCOUNT_WINDOWS.has(window.id);
-    if (full && (!account || spared !== undefined))
-      block(null, window.id, until(window.resetsAt, window.observedAt));
+    // Only plan windows block: a family window its family, an account window
+    // the connection (or, judged per model, each listed model).
+    if (full && (FAMILY_WINDOWS[window.id] !== undefined || (account && perModel)))
+      block(null, window.id, base(window.resetsAt, window.observedAt));
     const status = !account
       ? ("unknown" as const)
-      : full && spared === undefined
+      : full && !perModel
         ? ("exhausted" as const)
         : full || overageCovers || window.status === "allowed_warning"
           ? ("warning" as const)
@@ -296,16 +310,15 @@ export function decodeSubscriptionCoreClaudeQuota(input: {
     return {
       id: window.id,
       usedPercent: window.usedPercent,
-      resetsAt: status === "exhausted" ? until(window.resetsAt, window.observedAt) : resetsAt,
+      resetsAt:
+        status === "exhausted"
+          ? Math.min(base(window.resetsAt, window.observedAt), capOf(null))
+          : resetsAt,
       status,
     };
   });
   if (rejected && !overageCovers) {
-    block(
-      request.upstreamModelId,
-      request.representativeClaim,
-      until(request.resetsAt, request.observedAt),
-    );
+    block(own, request.representativeClaim, base(request.resetsAt, request.observedAt));
   }
   const restrictions = observation.requestRestrictions ?? [];
   for (const item of restrictions) {
@@ -322,7 +335,7 @@ export function decodeSubscriptionCoreClaudeQuota(input: {
         other.observedAt > item.observedAt,
     );
     if (!lifted)
-      block(item.upstreamModelId, item.representativeClaim, until(item.resetsAt, item.observedAt));
+      block(item.upstreamModelId, item.representativeClaim, base(item.resetsAt, item.observedAt));
   }
   return {
     windows,

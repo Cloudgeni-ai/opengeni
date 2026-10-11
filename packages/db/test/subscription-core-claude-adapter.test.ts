@@ -13,6 +13,7 @@ import {
   parseClaudeUsageResponse,
 } from "@opengeni/config";
 import {
+  applyQuotaObservation,
   quotaCapacity,
   modelCooldownUntil,
   subscriptionCoreCredentialRefresher,
@@ -571,6 +572,90 @@ describe("Claude usage in the shared quota model", () => {
     );
   });
 
+  test("a refused or full paid-overage window never blocks the plan", () => {
+    const ordinary = {
+      "anthropic-ratelimit-unified-status": "allowed",
+      "anthropic-ratelimit-unified-representative-claim": "five_hour",
+      "anthropic-ratelimit-unified-5h-utilization": "0.3",
+      "anthropic-ratelimit-unified-7d-utilization": "0.2",
+      "anthropic-ratelimit-unified-overage-status": "rejected",
+    };
+    const cases = [
+      parseClaudeUsageHeaders(new Headers(ordinary), now, "claude-sonnet-5-5")!,
+      parseClaudeUsageHeaders(
+        new Headers({
+          ...ordinary,
+          "anthropic-ratelimit-unified-overage-reset": String(at(20 * 86_400)),
+        }),
+        now,
+        "claude-sonnet-5-5",
+      )!,
+      parseClaudeUsageHeaders(
+        new Headers({
+          ...ordinary,
+          "anthropic-ratelimit-unified-overage-reset": String(at(20 * 86_400)),
+        }),
+        now,
+      )!,
+      parseClaudeUsageResponse(
+        {
+          five_hour: { utilization: 10, resets_at: null },
+          overage: { utilization: 120, resets_at: new Date(at(86_400) * 1000).toISOString() },
+          seven_day_overage_included: {
+            utilization: 100,
+            resets_at: new Date(at(86_400) * 1000).toISOString(),
+          },
+        },
+        now,
+      )!,
+    ];
+    for (const observation of cases) {
+      const decoded = expectParity(observation);
+      expect(decoded.modelCooldowns).toEqual({});
+      expect(decoded.exhaustedUntil).toBeNull();
+    }
+  });
+
+  test("a refused overage's recheck frees only the models that response concerns", () => {
+    const sevenDay = {
+      "anthropic-ratelimit-unified-status": "rejected",
+      "anthropic-ratelimit-unified-representative-claim": "seven_day",
+      "anthropic-ratelimit-unified-reset": String(at(5 * 86_400)),
+      "anthropic-ratelimit-unified-7d-utilization": "1.0",
+      "anthropic-ratelimit-unified-7d-reset": String(at(5 * 86_400)),
+      "anthropic-ratelimit-unified-overage-status": "rejected",
+      "anthropic-ratelimit-unified-overage-reset": String(at(600)),
+    };
+    // For Sonnet: Sonnet is checked again at the overage reset; Opus and
+    // Haiku wait for the seven-day reset.
+    const decoded = expectParity(
+      parseClaudeUsageHeaders(new Headers(sevenDay), now, "claude-sonnet-5-5")!,
+    );
+    expect(decoded.exhaustedUntil).toBeNull();
+    expect(decoded.modelCooldowns["organization-claude-subscription/claude-sonnet-5-5"]).toBe(
+      at(600) * 1000,
+    );
+    expect(decoded.modelCooldowns["organization-claude-subscription/claude-opus-5-5"]).toBe(
+      at(5 * 86_400) * 1000,
+    );
+    // Without a model and with an account limit: every model, the connection.
+    const modelless = expectParity(parseClaudeUsageHeaders(new Headers(sevenDay), now)!);
+    expect(modelless.exhaustedUntil).toBe(at(600) * 1000);
+    // Without a model and with the Sonnet limit: Sonnet is rechecked, the
+    // others still wait for the account window.
+    expectParity(
+      parseClaudeUsageHeaders(
+        new Headers({
+          ...sevenDay,
+          "anthropic-ratelimit-unified-representative-claim": "seven_day_sonnet",
+          "anthropic-ratelimit-unified-7d-sonnet-utilization": "1.0",
+          "anthropic-ratelimit-unified-7d-sonnet-reset": String(at(5 * 86_400)),
+        }),
+        now,
+      )!,
+    );
+  });
+
   test("a family limit reaches the response's own model even when the list misses it", () => {
     const observation = parseClaudeUsageHeaders(
       new Headers({
@@ -644,6 +729,46 @@ describe("Claude usage in the shared quota model", () => {
     );
     expect(nearly.windows[0]).toMatchObject({ id: "five_hour", status: "ok" });
   });
+
+  // The shared store replaces stored windows with the newest observation's,
+  // so a reading that omits an exhausted window drops its block, where
+  // today's merged reading keeps it. The provider-neutral fix in the shared
+  // `applyQuotaObservation` ships with the C1a call sites, before Claude is
+  // registered (design 5.3, Claude track); this test turns from failing to
+  // passing with it, and must then become an ordinary test.
+  test.failing(
+    "a reading that omits an exhausted window keeps its block (shared fix pending)",
+    () => {
+      const first = decode(
+        parseClaudeUsageResponse(
+          {
+            five_hour: { utilization: 20, resets_at: null },
+            seven_day: {
+              utilization: 100,
+              resets_at: new Date(at(3 * 86_400) * 1000).toISOString(),
+            },
+          },
+          now,
+        )!,
+      );
+      const later = new Date(now.getTime() + 600_000);
+      const second = decode(
+        parseClaudeUsageHeaders(
+          new Headers({ "anthropic-ratelimit-unified-5h-utilization": "0.25" }),
+          later,
+          "claude-sonnet-5-5",
+        )!,
+      );
+      const stored = applyQuotaObservation(
+        { refreshGeneration: 4, quota: quota(first) },
+        quota(second),
+      );
+      expect(quotaCapacity(stored, later.getTime() + 1_000)).toEqual({
+        kind: "exhausted",
+        resetsAt: at(3 * 86_400) * 1000,
+      });
+    },
+  );
 
   test("a rejection for an unknown model limits the whole connection; unknown resets recheck in a minute", () => {
     const decoded = decode(

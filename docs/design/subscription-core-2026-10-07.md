@@ -3865,9 +3865,12 @@ Facts the adapter declares, each read from today's Claude path:
     blocks. Today's rule grants this only to the model the response was
     for; overage is the Claude account's own setting, so the core grants it
     to every model of the account (deliberate, recorded difference). A
-    rejected request whose overage was refused with a known reset ends every
-    block that response reports no later than that reset, as today's
-    `nextCheckAt` does. An overage allowance whose reset has already passed
+    rejected request whose overage was refused with a known reset ends the
+    blocks that response reports for the models it concerns (its own model;
+    without one, the family its limit names, else every model) no later
+    than that reset, as today's `nextCheckAt` does for the models whose
+    capacity that request decides; the other models keep waiting for their
+    own limits. An overage allowance whose reset has already passed
     covers nothing. One whose reset falls before the plan limit's covers
     the limit until a newer response arrives, where today's rule blocks
     again after the overage reset: a recorded difference toward dispatch,
@@ -3877,17 +3880,21 @@ Facts the adapter declares, each read from today's Claude path:
     minute when unknown). A model-family window (Opus, Sonnet) never decides
     the account: when full or rejected it becomes a cooldown of each of the
     organization's models of that family, and is reported with `unknown`
-    status. The paid overage windows never block.
+    status. The paid overage windows (`overage`,
+    `seven_day_overage_included`) never block, refused or full, as today's
+    rule never consults them.
   - A rejected request, and each rejected request restriction the
     observation carries (unless a later allowance of the same model lifts
     it), cools the model it was made for; without a model, the family its
     limit names, else it exhausts the connection (kind `quota`).
   - The model a response was allowed for dispatches whatever else that
     response reports, until the allowance's own reset (a minute when
-    unknown); an account limit beside it cools the listed models instead of
-    exhausting the connection. A limit that outlasts the allowance limits
-    that model too, from the observation on, where today's rule still
-    dispatches it until the allowance's reset (a difference toward waiting).
+    unknown). A limit that outlasts the allowance limits that model too,
+    from the observation on, where today's rule still dispatches it until
+    the allowance's reset (a difference toward waiting). When some models
+    are judged apart (an allowed model, or a recheck concerning only some
+    models), an account limit cools the listed models one by one instead of
+    exhausting the connection, and the window is reported as a `warning`.
   - Cooldowns are keyed by product model id under both Claude prefixes
     (`organization-claude-subscription/…`, `workspace-claude-subscription/…`).
     A family limit reaches the models listed when the response is decoded,
@@ -3906,7 +3913,9 @@ Facts the adapter declares, each read from today's Claude path:
     shared `applyQuotaObservation` keep a stored exhausted window that a
     newer observation omits until that window's reset (provider-neutral,
     toward waiting, with the Codex and SuperGrok suites run against it),
-    with a two-observation test. C3's combined cutover ledger
+    with a two-observation test. The adapter's unit tests hold that test as
+    `test.failing` until the fix lands, and C3 (which registers Claude)
+    requires it to pass as an ordinary test. C3's combined cutover ledger
     test covers the case on real data.
   - C3 re-keys the legacy cooldowns and restrictions: the legacy reading is
     keyed by Anthropic's upstream model id, the core by product model id, so
