@@ -12044,12 +12044,21 @@ const cloneRepositoryFunctionLines: readonly string[] = [
   // for those the plain non-empty check stands (no stronger signal available).
   '    if [ -n "$subpath" ] || repository_git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then',
   '      if [ -z "$expected_commit" ] || { [ -z "$subpath" ] && [ "$(repository_git -C "$target" rev-parse HEAD 2>/dev/null || true)" = "$expected_commit" ]; }; then',
-  '        echo "Repository resource already present at $target"',
-  "        return 0",
+  // An empty remote materializes as an unborn branch (below). If the remote has
+  // since gained commits and the mount still holds nothing but `.git` (no agent
+  // work, committed or not), clone it properly instead of keeping the stub.
+  '        if [ -z "$subpath" ] && ! repository_git -C "$target" rev-parse --verify --quiet HEAD >/dev/null 2>&1 && [ -z "$(find "$target" -mindepth 1 -maxdepth 1 ! -name .git -print -quit 2>/dev/null)" ] && present_refs="$(repository_git -C "$target" ls-remote origin 2>/dev/null)" && [ -n "$present_refs" ]; then',
+  '          echo "Repository resource remote for $target now has commits; rematerializing" >&2',
+  "        else",
+  '          echo "Repository resource already present at $target"',
+  "          return 0",
+  "        fi",
+  "      else",
+  '        echo "Repository resource at $target does not match expected commit; rematerializing" >&2',
   "      fi",
-  '      echo "Repository resource at $target does not match expected commit; rematerializing" >&2',
+  "    else",
+  '      echo "Re-materializing partial repository resource at $target" >&2',
   "    fi",
-  '    echo "Re-materializing partial repository resource at $target" >&2',
   '    find "$target" -mindepth 1 -maxdepth 1 -exec rm -rf {} +',
   "  fi",
   '  mkdir -p "$(dirname "$target")"',
@@ -12077,9 +12086,13 @@ const cloneRepositoryFunctionLines: readonly string[] = [
   '      case "$empty_branch" in',
   "        refs/*|pull/*/head|pull/*/merge) empty_branch='' ;;",
   "        *[!0-9a-f]*) ;;",
-  '        *) if [ "${#empty_branch}" -eq 40 ] || [ "${#empty_branch}" -eq 64 ]; then empty_branch=\'\'; fi ;;',
+  // All-hex refs of commit-SHA length (abbreviated or full) are commits, which
+  // an empty remote cannot have.
+  '        *) if [ "${#empty_branch}" -ge 7 ] && [ "${#empty_branch}" -le 64 ]; then empty_branch=\'\'; fi ;;',
   "      esac",
-  '      if [ -z "$expected_commit" ] && [ -z "$subpath" ] && [ -n "$empty_branch" ] && command git check-ref-format "refs/heads/$empty_branch" >/dev/null 2>&1 && repository_git -C "$tmp" symbolic-ref HEAD "refs/heads/$empty_branch"; then',
+  // Track origin like `git clone` of an empty repository does, so a plain
+  // `git push` works after the first commit.
+  '      if [ -z "$expected_commit" ] && [ -z "$subpath" ] && [ -n "$empty_branch" ] && command git check-ref-format "refs/heads/$empty_branch" >/dev/null 2>&1 && repository_git -C "$tmp" symbolic-ref HEAD "refs/heads/$empty_branch" && repository_git -C "$tmp" config "branch.$empty_branch.remote" origin && repository_git -C "$tmp" config "branch.$empty_branch.merge" "refs/heads/$empty_branch"; then',
   "        repository_empty=1",
   '        echo "Repository resource remote is empty; $target starts on unborn branch $empty_branch"',
   "      fi",
