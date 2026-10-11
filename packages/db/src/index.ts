@@ -386,9 +386,6 @@ export {
   type SubscriptionCoreConnectRefusal,
   type SubscriptionCoreDisconnectOutcome,
 } from "./subscription-core/connections";
-export { subscriptionCoreOperations } from "./subscription-core/operations";
-export type { SubscriptionCoreProvider } from "./subscription-core/provider";
-export { SUBSCRIPTION_CORE_XAI } from "./subscription-core-xai-adapter";
 export * from "./subscription-core-xai-compat";
 import {
   listSubscriptionCoreCodexServingConnections,
