@@ -4291,15 +4291,19 @@ data with workspace overrides). It adds:
    it could close a cycle: it only tries the exclusive lock, then locks the
    rows it clears with `NOWAIT`, and raises 55P03
    `subscription_settings_lock_busy` when either is taken. The repository
-   retries the whole lock change with a bounded backoff (about 3 s; also on
-   40P01, should a raw writer elsewhere close a cycle) and then answers 503
-   `settings_busy` (retryable, nothing written). Tested deterministically for
-   both cycles (an upsert waiting on a row the lock writer holds, and a
-   writer holding a row the lock writer would clear) and by racing the real
-   personal-primary routine and raw upserts against lock changes. The
-   repository also locks workspace rows before the organization row, so a
-   lock change waits for in-flight writes to existing rows instead of
-   spinning.
+   takes the same advisory lock first, before any row lock: its workspace
+   writers (the settings API and the core administration writers) take it
+   shared, and a lock change queues for it exclusively with a 3 s lock
+   timeout. Widening writes that arrive after the change queue behind it, so
+   a stream of writes cannot starve it, and none of the repository's writers
+   holds a row while waiting for the lock. A lock change retries a busy
+   answer or a 40P01 (a raw writer outside the repository) for up to about
+   5 s, and answers 503 `settings_busy` (retryable, nothing written) when the
+   lock timeout or the retries run out. Tested deterministically for both
+   cycles (an upsert waiting on a row the lock writer holds, and a writer
+   holding a row the lock writer would clear), for a lock change landing
+   under four continuous upsert loops, and by racing the real
+   personal-primary routine and raw upserts against lock changes.
 5. A `BEFORE UPDATE OF account_id, workspace_id` trigger: a settings row never
    moves to another organization or workspace, and the organization row never
    becomes a workspace row or the reverse (42501

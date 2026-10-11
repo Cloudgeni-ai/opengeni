@@ -1,4 +1,7 @@
 import { isSubscriptionSettingKey, type SubscriptionSettingKey } from "@opengeni/subscriptions";
+import { sql } from "drizzle-orm";
+
+import { rawRows, type Database } from "./database";
 
 /**
  * Settings transactions run at READ COMMITTED whatever the connection
@@ -45,6 +48,27 @@ export function throwIfSubscriptionSettingLocked(error: unknown): void {
   if (locked === null) return;
   if (error instanceof SubscriptionSettingsLockedError) throw error;
   throw new SubscriptionSettingsLockedError(locked);
+}
+
+/**
+ * Take the organization's settings lock: the transaction advisory lock 0716's
+ * guard (shared) and lock writer (exclusive) use. Writers take it before any
+ * row lock, so a lock change queued for the exclusive lock is admitted fairly
+ * (new widening writes queue behind it) and never meets a writer that holds a
+ * row while waiting for this lock.
+ */
+export async function lockSubscriptionSettings(
+  tx: Database,
+  accountId: string,
+  mode: "shared" | "exclusive",
+): Promise<void> {
+  const key = sql`pg_catalog.hashtextextended('subscription-settings-locks:' || ${accountId}::uuid::text, 0)`;
+  await rawRows(
+    tx,
+    mode === "shared"
+      ? sql`select pg_catalog.pg_advisory_xact_lock_shared(${key}) is null as locked`
+      : sql`select pg_catalog.pg_advisory_xact_lock(${key}) is null as locked`,
+  );
 }
 
 /** The detail 0716's lock writer raises (SQLSTATE 55P03) while a workspace write is in flight. */

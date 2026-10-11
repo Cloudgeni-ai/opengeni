@@ -51,10 +51,11 @@
 --    writer holds one (that writer may be waiting for this lock). It never
 --    waits while holding the exclusive lock, so it cannot deadlock with a
 --    workspace writer; it yields and its caller retries the whole
---    transaction (the repository does, with a bounded backoff). The
---    repository also locks the organization's workspace rows before the
---    organization row, so a lock change waits for in-flight writes to
---    existing rows instead of spinning.
+--    transaction. The repository takes the same advisory lock itself, before
+--    any row lock: workspace writers take it shared, and a lock change
+--    queues for it exclusively (bounded by a lock timeout), so widening
+--    writes that arrive later wait behind the change instead of starving it,
+--    and the trigger's try finds the lock already held.
 -- 5. Identity: a settings row never changes its organization or workspace
 --    (42501, `subscription_settings_identity_immutable`), so neither a moved
 --    workspace row nor a converted organization row can carry a value past
@@ -134,7 +135,8 @@ BEGIN
           new_row -> entry.key, old_row -> entry.key, false)) THEN
     RETURN NEW;
   END IF;
-  IF pg_catalog.current_setting('transaction_isolation') <> 'read committed' THEN
+  -- READ UNCOMMITTED runs as READ COMMITTED in PostgreSQL.
+  IF pg_catalog.current_setting('transaction_isolation') NOT IN ('read committed', 'read uncommitted') THEN
     RAISE EXCEPTION 'subscription settings overrides are written at READ COMMITTED only'
       USING ERRCODE = '0A000', DETAIL = 'subscription_settings_requires_read_committed';
   END IF;
@@ -223,7 +225,8 @@ BEGIN
   IF pg_catalog.cardinality(added) = 0 THEN
     RETURN NULL;
   END IF;
-  IF pg_catalog.current_setting('transaction_isolation') <> 'read committed' THEN
+  -- READ UNCOMMITTED runs as READ COMMITTED in PostgreSQL.
+  IF pg_catalog.current_setting('transaction_isolation') NOT IN ('read committed', 'read uncommitted') THEN
     RAISE EXCEPTION 'subscription settings locks are written at READ COMMITTED only'
       USING ERRCODE = '0A000', DETAIL = 'subscription_settings_requires_read_committed';
   END IF;

@@ -1377,6 +1377,47 @@ describe.skipIf(!realDb)("subscription settings with lockable workspace override
     });
   });
 
+  // Sustained widening writes cannot starve a lock change: it queues for the
+  // exclusive settings lock, and writes arriving after it wait behind it.
+  test("concurrency: a lock change lands while workspace writes keep arriving", async () => {
+    const f = await fixture();
+    let stop = false;
+    let writes = 0;
+    const loop = async (index: number) => {
+      while (!stop) {
+        const outcome = await asApp(f, f.alphaId, f.workspaceAdminSubjectId, (tx) =>
+          rawRows(
+            tx,
+            sql`insert into subscription_settings (account_id, workspace_id, rotation)
+              values (${f.accountId}::uuid, ${f.alphaId}::uuid,
+                ${JSON.stringify({ codex: { mode: (writes + index) % 2 === 0 ? "spread" : "primary_first" } })}::jsonb)
+              on conflict (account_id, workspace_id) do update set
+                rotation = coalesce(subscription_settings.rotation, '{}'::jsonb) || excluded.rotation`,
+          ),
+        );
+        expect(outcome).toBeNull();
+        writes += 1;
+      }
+    };
+    const loops = [0, 1, 2, 3].map((index) => loop(index));
+    await Bun.sleep(200);
+    const before = writes;
+    const startedAt = Date.now();
+    const changed = await updateOrganizationSubscriptionSettings(client!.db, {
+      ...organization(f),
+      patch: { locked: ["crossProviderFailover"] },
+    });
+    const elapsed = Date.now() - startedAt;
+    await Bun.sleep(100);
+    stop = true;
+    await Promise.all(loops);
+    expect(changed.settings.locked).toEqual(["crossProviderFailover"]);
+    expect(elapsed).toBeLessThan(2_000);
+    // The writers really were busy throughout, and kept going after the change.
+    expect(before).toBeGreaterThan(0);
+    expect(writes).toBeGreaterThan(before);
+  });
+
   test("a settings row never changes organization or workspace", async () => {
     const f = await fixture();
     await updateWorkspaceSubscriptionSettings(client!.db, {

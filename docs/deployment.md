@@ -4664,12 +4664,13 @@ effective model-account settings are the same before and after it. It adds:
 A workspace-row write that sets or changes any setting, and a lock change,
 run only at READ COMMITTED (SQLSTATE 0A000, detail
 `subscription_settings_requires_read_committed`, otherwise); writes that only
-clear values are unaffected. Application writers pin READ COMMITTED on their
+clear or keep values are unaffected. Application writers pin READ COMMITTED on their
 own transactions. A database whose `default_transaction_isolation` is
 stricter must run any later migration that writes workspace overrides (for
-example a provider cutover) at READ COMMITTED. A lock change never waits
-while a workspace write is in flight: it raises 55P03 (detail
-`subscription_settings_lock_busy`), and the API retries it.
+example a provider cutover) at READ COMMITTED. Inside the trigger a lock
+change never waits for a workspace writer: it raises 55P03 (detail
+`subscription_settings_lock_busy`). The API queues for the lock first, retries,
+and answers 503 `settings_busy` if writes keep it busy for several seconds.
 
 No release before this one writes `locked_settings` (a workspace row cannot
 hold locks, and no API wrote the organization's), so the guard refuses

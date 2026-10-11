@@ -34,6 +34,7 @@ import {
 } from "./access";
 import { SubscriptionCoreError } from "./errors";
 import {
+  lockSubscriptionSettings,
   SUBSCRIPTION_SETTINGS_TRANSACTION,
   subscriptionSettingLockRefusal,
   throwIfSubscriptionSettingLocked,
@@ -556,6 +557,11 @@ async function withAdministration<T>(
       { accountId: input.accountId, workspaceId: input.workspaceId },
       async (tx) => {
         await setSubjectRlsContext(tx, input.subjectId);
+        // A workspace route may write the workspace's settings row: take the
+        // settings lock before any row lock (see lockSubscriptionSettings).
+        if (input.workspaceId !== null) {
+          await lockSubscriptionSettings(tx, input.accountId, "shared");
+        }
         return await fn(tx);
       },
       // These routines write settings rows: 0716 admits a widening write

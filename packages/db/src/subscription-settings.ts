@@ -32,6 +32,7 @@ import { readSubscriptionCorePrimaryConnectionId } from "./subscription-core/adm
 import { subscriptionCoreProvider } from "./subscription-core-providers";
 import {
   isSubscriptionSettingsLockBusy,
+  lockSubscriptionSettings,
   SUBSCRIPTION_SETTINGS_TRANSACTION,
   SubscriptionSettingsBusyError,
   SubscriptionSettingsLockedError,
@@ -354,8 +355,11 @@ export async function updateOrganizationSubscriptionSettings(
     patch.crossProviderFailover !== undefined ||
     patch.personalConnectionsAllowed !== undefined ||
     patch.personalFallbackAllowed !== undefined;
-  // A lock change yields to in-flight workspace writes (0716 raises 55P03
-  // rather than wait while holding the settings lock); retry the transaction.
+  // A lock change queues fairly for the exclusive settings lock (bounded by
+  // LOCK_CHANGE_LOCK_TIMEOUT). It retries when 0716 yields (55P03 busy: a row
+  // it would clear is held by a writer outside the repository) or PostgreSQL
+  // resolved a deadlock against it; nothing was written either way.
+  const started = Date.now();
   for (let attempt = 1; ; attempt += 1) {
     try {
       return await updateOrganizationSubscriptionSettingsOnce(db, input, {
@@ -365,20 +369,25 @@ export async function updateOrganizationSubscriptionSettings(
         changesOrganization,
       });
     } catch (error) {
-      // 0716's yield (55P03), or a deadlock PostgreSQL resolved against this
-      // transaction (a raw writer elsewhere): nothing was written either way.
-      if (!isSubscriptionSettingsLockBusy(error) && nestedPostgresSqlState(error) !== "40P01") {
-        throw error;
+      const busy = isSubscriptionSettingsLockBusy(error);
+      const state = nestedPostgresSqlState(error);
+      // The lock timeout: in-flight writes held the settings lock throughout.
+      if (!busy && state === "55P03") throw new SubscriptionSettingsBusyError();
+      if (!busy && state !== "40P01") throw error;
+      if (attempt >= LOCK_CHANGE_ATTEMPTS || Date.now() - started > LOCK_CHANGE_RETRY_MS) {
+        throw new SubscriptionSettingsBusyError();
       }
-      if (attempt >= LOCK_CHANGE_ATTEMPTS) throw new SubscriptionSettingsBusyError();
       const backoff = Math.min(25 * 2 ** (attempt - 1), 400);
       await new Promise((resolve) => setTimeout(resolve, backoff / 2 + Math.random() * backoff));
     }
   }
 }
 
-/** Attempts of a lock change before it answers busy (about 3 s of backoff in total). */
+/** Attempts of a lock change, and the time after which it stops retrying. */
 const LOCK_CHANGE_ATTEMPTS = 10;
+const LOCK_CHANGE_RETRY_MS = 5_000;
+/** The longest one attempt of a lock change waits for a lock. */
+const LOCK_CHANGE_LOCK_TIMEOUT = "3s";
 
 async function updateOrganizationSubscriptionSettingsOnce(
   db: Database,
@@ -402,6 +411,16 @@ async function updateOrganizationSubscriptionSettingsOnce(
   const { locked, fallbackOrder, rotation, changesOrganization } = validated;
   try {
     return await withOrganizationAdministrator(db, input, async (tx) => {
+      if (locked !== undefined) {
+        // Before any row lock: queue for the exclusive settings lock, so
+        // widening writes cannot starve the change, and hold it while the
+        // 0716 trigger clears overrides.
+        await rawRows(
+          tx,
+          sql`select set_config('lock_timeout', ${LOCK_CHANGE_LOCK_TIMEOUT}, true)`,
+        );
+        await lockSubscriptionSettings(tx, input.organizationId, "exclusive");
+      }
       const created = await rawRows(
         tx,
         sql`insert into subscription_settings (
@@ -648,6 +667,8 @@ export async function updateWorkspaceSubscriptionSettings(
   }
   try {
     return await withWorkspaceSubject(db, input, async (tx) => {
+      // The settings lock before the row lock (see lockSubscriptionSettings).
+      await lockSubscriptionSettings(tx, input.accountId, "shared");
       if (await isPersonalWorkspace(tx, input))
         throw new SubscriptionSettingsPersonalWorkspaceError();
       const [organization] = await rawRows<{ locked_settings: string[] | null }>(
