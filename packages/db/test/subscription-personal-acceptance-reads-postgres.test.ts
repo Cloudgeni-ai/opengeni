@@ -55,14 +55,69 @@ const RECOVERY = [
   "opengeni_private.recover_subscription_codex_connection_health(uuid,uuid,uuid,uuid)",
   "opengeni_private.recover_subscription_core_connection_health(text,uuid,uuid,uuid,uuid)",
 ];
-/** The exact text 0718 inserts into each writer. */
-const INSERTED = [
-  "      prior_lifecycle text := current_setting('opengeni.organization_tenancy_lifecycle', true);\n",
-  "        PERFORM pg_catalog.set_config('opengeni.organization_tenancy_lifecycle',\n" +
-    "          'organization_membership_lifecycle', true);\n",
-  "        PERFORM pg_catalog.set_config('opengeni.organization_tenancy_lifecycle',\n" +
-    "          coalesce(prior_lifecycle, ''), true);\n",
+const SET_MARKER = "pg_catalog.set_config('opengeni.organization_tenancy_lifecycle',\n";
+/**
+ * The exact replacements 0718 makes in each writer, written out here rather
+ * than read from the migration, so the live definition pins where the marker
+ * is set and where it is restored (immediately around the generation count).
+ */
+const WRITER_PATCHES: [string, string][] = [
+  [
+    "      minted_lifecycle boolean := false;\n",
+    "      minted_lifecycle boolean := false;\n" +
+      "      prior_lifecycle text := current_setting('opengeni.organization_tenancy_lifecycle', true);\n",
+  ],
+  [
+    "        SELECT coalesce(array_agg(DISTINCT authority.generation ORDER BY authority.generation), '{}')\n" +
+      "          INTO generations\n",
+    `        PERFORM ${SET_MARKER}` +
+      "          'organization_membership_lifecycle', true);\n" +
+      "        SELECT coalesce(array_agg(DISTINCT authority.generation ORDER BY authority.generation), '{}')\n" +
+      "          INTO generations\n",
+  ],
+  [
+    "          AND authority.status = 'active' AND authority.revoked_at IS NULL;\n      END IF;\n",
+    "          AND authority.status = 'active' AND authority.revoked_at IS NULL;\n" +
+      `        PERFORM ${SET_MARKER}` +
+      "          coalesce(prior_lifecycle, ''), true);\n" +
+      "      END IF;\n",
+  ],
 ];
+/**
+ * The exact replacements 0718 makes in each recovery routine: the candidates
+ * are collected under the marker and it is restored before the first write.
+ */
+const RECOVERY_PATCHES: [string, string][] = [
+  [
+    "      recovered integer := 0;\n",
+    "      recovered integer := 0;\n" +
+      "      targets uuid[];\n" +
+      "      prior_lifecycle text := current_setting('opengeni.organization_tenancy_lifecycle', true);\n",
+  ],
+  [
+    "      FOR target IN\n        SELECT connection.id FROM ",
+    `      PERFORM ${SET_MARKER}` +
+      "        'organization_membership_lifecycle', true);\n" +
+      "      SELECT coalesce(array_agg(connection.id ORDER BY connection.id), '{}')\n" +
+      "        INTO targets\n" +
+      "        FROM ",
+  ],
+  [
+    "        ORDER BY connection.id\n      LOOP\n",
+    "        ;\n" +
+      `      PERFORM ${SET_MARKER}` +
+      "        coalesce(prior_lifecycle, ''), true);\n" +
+      "      FOREACH target IN ARRAY targets LOOP\n",
+  ],
+];
+
+/** A definition with each replacement applied once, where its anchor occurs exactly once. */
+function patched(definition: string, patches: [string, string][]): string {
+  return patches.reduce((text, [anchor, replacement]) => {
+    expect(text.split(anchor)).toHaveLength(2);
+    return text.replace(anchor, () => replacement);
+  }, definition);
+}
 
 type Owner = {
   accountId: string;
@@ -595,9 +650,21 @@ describe.skipIf(!realDb)("0718 personal acceptance reads", () => {
     });
   });
 
-  test("the recovery routines keep their attributes", async () => {
+  test("each recovery routine keeps its attributes and changes by exactly 0718's replacements", async () => {
+    const after = await routines(RECOVERY);
     const attributes = (rows: Routine[]) => rows.map(({ definition: _, ...rest }) => rest);
-    expect(attributes(await routines(RECOVERY))).toEqual(attributes(before!.recovery));
+    expect(attributes(after)).toEqual(attributes(before!.recovery));
+    for (const [index, routine] of after.entries()) {
+      expect(routine.definition).toBe(
+        patched(before!.recovery[index]!.definition, RECOVERY_PATCHES),
+      );
+      // The marker is restored before the loop's first write.
+      const restore = routine.definition.indexOf("coalesce(prior_lifecycle, ''), true);");
+      expect(restore).toBeGreaterThan(0);
+      for (const write of ["INSERT INTO", "UPDATE subscription_connections", "DELETE FROM"]) {
+        expect(routine.definition.indexOf(write)).toBeGreaterThan(restore);
+      }
+    }
   });
 
   test("the membership-lifecycle marker is restored to the caller's value", async () => {
@@ -611,17 +678,12 @@ describe.skipIf(!realDb)("0718 personal acceptance reads", () => {
     expect(preset.marker).toBe("caller-value");
   });
 
-  test("each writer keeps its attributes and changes only by the inserted marker lines", async () => {
+  test("each writer keeps its attributes and changes by exactly 0718's replacements", async () => {
     const after = await routines();
     const attributes = (rows: Routine[]) => rows.map(({ definition: _, ...rest }) => rest);
     expect(attributes(after)).toEqual(attributes(before!.routines));
     for (const [index, routine] of after.entries()) {
-      for (const inserted of INSERTED) expect(routine.definition.split(inserted)).toHaveLength(2);
-      const stripped = INSERTED.reduce(
-        (text, inserted) => text.replace(inserted, ""),
-        routine.definition,
-      );
-      expect(stripped).toBe(before!.routines[index]!.definition);
+      expect(routine.definition).toBe(patched(before!.routines[index]!.definition, WRITER_PATCHES));
     }
   });
 });
