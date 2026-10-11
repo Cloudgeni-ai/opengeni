@@ -384,7 +384,7 @@ describe.skipIf(!realDb)("Claude on the shared core's writers (M4 C2b)", () => {
         workspaceId: null,
         reconnectTarget: { ...target, expectedVersion: replaced.version! },
       }),
-    ).toEqual({ kind: "refused", reason: "different_account" });
+    ).toEqual({ kind: "refused", reason: "sign_in_over_setup_token" });
     const accountUuid = crypto.randomUUID();
     const proven = await connectClaude(org!, {
       workspaceId: null,
@@ -407,7 +407,7 @@ describe.skipIf(!realDb)("Claude on the shared core's writers (M4 C2b)", () => {
         providerAccountId: `setup:${"e".repeat(64)}`,
         reconnectTarget: provenTarget,
       }),
-    ).toEqual({ kind: "refused", reason: "different_account" });
+    ).toEqual({ kind: "refused", reason: "setup_token_over_sign_in" });
     const again = await connectClaude(org!, {
       workspaceId: null,
       credential: oauthCredential(accountUuid),
@@ -540,5 +540,159 @@ describe.skipIf(!realDb)("Claude on the shared core's writers (M4 C2b)", () => {
     expect(sharedTurn.claude).toEqual({ version: 1, scope: "workspace" });
     const service = await accept(org!, org!.sharedWorkspaceId, team.id, "service");
     expect(service.v2).toEqual({ version: 2, personal: [] });
+  });
+
+  test("a human prompt, its edit, a human scheduled task and an agent's child carry the claude entry", async () => {
+    // Runs after the test above: the owner holds a personal Claude and a
+    // personal Codex connection.
+    const expected = {
+      version: 2,
+      personal: [
+        {
+          provider: "claude",
+          ownerMembershipId: org!.membershipId,
+          authorityGeneration: await generation(org!, "claude"),
+        },
+        {
+          provider: "codex",
+          ownerMembershipId: org!.membershipId,
+          authorityGeneration: await generation(org!, "codex"),
+        },
+      ],
+    };
+    const workspaceId = org!.personalWorkspaceId;
+    const turnAuthority = async (turnId: string) => {
+      const [row] = await shared!.admin<{ v2: unknown; claude: unknown }[]>`
+        select subscription_authority as v2, claude_provider_account_authority_snapshot as claude
+        from session_turns where id = ${turnId}::uuid`;
+      return row!;
+    };
+    const submit = (sessionId: string, text: string, expectedDraftRevision?: number) =>
+      db.withWorkspaceSubjectSessionActivityRls(client!.db, workspaceId, org!.subjectId, (scoped) =>
+        scoped.transaction((tx) =>
+          db.submitHumanPromptInTransaction(tx as unknown as typeof scoped, {
+            accountId: org!.accountId,
+            workspaceId,
+            sessionId,
+            subjectId: org!.subjectId,
+            actor: { type: "human", subjectId: org!.subjectId },
+            operationKey: crypto.randomUUID(),
+            delivery: "send",
+            text,
+            resources: [],
+            model: "scripted-model",
+            reasoningEffort: "low",
+            reasoningEffortFallback: "medium",
+            source: "user",
+            ...(expectedDraftRevision === undefined ? {} : { expectedDraftRevision }),
+          }),
+        ),
+      );
+
+    // The human prompt writer (EP-S18..S24's submit path), twice queued.
+    const own = await session(org!, workspaceId, "user_private");
+    await submit(own.id, "first queued prompt");
+    const queued = await submit(own.id, "second queued prompt");
+    expect(await turnAuthority(queued.turnId)).toEqual({
+      v2: expected,
+      claude: { version: 1, scope: "workspace" },
+    });
+
+    // Its edit: the resubmitted prompt carries the withdrawn turn's authority.
+    const [queuedRow] = await shared!.admin<{ version: number }[]>`
+      select version from session_turns where id = ${queued.turnId}::uuid`;
+    const checkedOut = await db.withWorkspaceSubjectSessionActivityRls(
+      client!.db,
+      workspaceId,
+      org!.subjectId,
+      (scoped) =>
+        scoped.transaction((tx) =>
+          db.editQueuedTurnInTransaction(tx as unknown as typeof scoped, {
+            accountId: org!.accountId,
+            workspaceId,
+            sessionId: own.id,
+            turnId: queued.turnId,
+            subjectId: org!.subjectId,
+            expectedTurnVersion: queuedRow!.version,
+            expectedDraftRevision: 0,
+            replaceDraft: false,
+            actor: { type: "human", subjectId: org!.subjectId },
+            operationKey: crypto.randomUUID(),
+          }),
+        ),
+    );
+    const resubmitted = await submit(own.id, checkedOut.draft.text, checkedOut.draft.revision);
+    expect(resubmitted.turnId).not.toBe(queued.turnId);
+    expect(await turnAuthority(resubmitted.turnId)).toEqual({
+      v2: expected,
+      claude: { version: 1, scope: "workspace" },
+    });
+
+    // A scheduled task the owner creates in their Personal workspace.
+    const task = await db.withSessionRlsActorContext({ subjectId: org!.subjectId }, () =>
+      db.createScheduledTask(client!.db, {
+        accountId: org!.accountId,
+        workspaceId,
+        name: "Claude acceptance task",
+        status: "active",
+        schedule: { type: "manual" },
+        temporalScheduleId: `claude-acceptance-${crypto.randomUUID()}`,
+        runMode: "new_session_per_run",
+        overlapPolicy: "allow_concurrent",
+        agentConfig: { prompt: "Check the deployment", resources: [], tools: [], metadata: {} },
+        metadata: {},
+        createdBy: { kind: "subject", subjectId: org!.subjectId },
+      } as never),
+    );
+    const [taskRow] = await shared!.admin<{ v2: unknown; claude: unknown }[]>`
+      select subscription_authority as v2, claude_provider_account_authority_snapshot as claude
+      from scheduled_tasks where id = ${task.id}::uuid`;
+    expect(taskRow).toEqual({ v2: expected, claude: { version: 1, scope: "workspace" } });
+
+    // An agent's child: the running turn's authority, verbatim, never widened.
+    const attemptId = crypto.randomUUID();
+    const claimed = await db.claimSessionWorkForAttempt(client!.db, workspaceId, {
+      sessionId: own.id,
+      workflowId: `session-${own.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (claimed.action !== "claimed") throw new Error(`not claimed: ${claimed.reason}`);
+    const running = await turnAuthority(claimed.turn.id);
+    expect(running.v2).toEqual(expected);
+    const child = await db.createSession(client!.db, {
+      accountId: org!.accountId,
+      workspaceId,
+      initialMessage: "Claude acceptance child",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      // A private session's child is private to the same owner (0313).
+      visibility: "user_private",
+      subjectId: org!.subjectId,
+      parentSessionId: own.id,
+      createdByActor: {
+        type: "agent_attempt",
+        sessionId: own.id,
+        turnId: claimed.turn.id,
+        attemptId,
+        executionGeneration: claimed.turn.executionGeneration,
+      },
+    } as never);
+    await db.initializeSessionStartAtomically(client!.db, {
+      accountId: org!.accountId,
+      workspaceId,
+      sessionId: child.id,
+      reasoningEffortFallback: "medium",
+      createdEventPayload: {},
+    });
+    const [childTurn] = await shared!.admin<{ id: string }[]>`
+      select id::text as id from session_turns where session_id = ${child.id}::uuid`;
+    expect(await turnAuthority(childTurn!.id)).toEqual(running);
   });
 });

@@ -15,6 +15,7 @@ import {
   applySessionTurnSettlement,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
+  copySubscriptionAuthorityCompatInTransaction,
   createDb,
   createScheduledTask,
   createSession,
@@ -25,6 +26,7 @@ import {
   initializeSessionStartAtomically,
   materializeGoalContinuation,
   sendAgentMessageInTransaction,
+  settleConnectedMachineSessionBackgroundCommand,
   settleSessionIdleWithParentOutbox,
   steerAgentSessionInTransaction,
   submitHumanPromptInTransaction,
@@ -35,7 +37,7 @@ import {
   type DbClient,
   type SessionCommandActor,
 } from "../src";
-import { rawRows } from "../src/database";
+import { rawRows, withRlsContext } from "../src/database";
 
 setDefaultTimeout(180_000);
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
@@ -452,7 +454,7 @@ beforeAll(async () => {
   await shared.admin`
     insert into opengeni_private.subscription_provider_cutover_receipts (
       provider, migration, committed_at, seed_rotation
-    ) values ('claude', '0899_subscription_core_claude_cutover.sql', clock_timestamp(),
+    ) values ('claude', '0799_subscription_core_claude_cutover.sql', clock_timestamp(),
       '{"mode":"spread"}')`;
   // What the drained cutover wrote for the recorded world's sources.
   const sources = recorded;
@@ -686,6 +688,48 @@ describe.skipIf(!realDb)("Claude compatibility copies on every path (M4 C2b)", (
       expect(await records("session_system_update", update.update.id)).toEqual(only(expected()));
     });
 
+    test(`${name}: a background command's result copies the turn that launched it`, async () => {
+      const { grant, caller } = current();
+      const commandId = crypto.randomUUID();
+      const enrollmentId = crypto.randomUUID();
+      const opId = `${crypto.randomUUID()}:0`;
+      await shared!.admin`insert into session_background_commands ${shared!.admin({
+        id: commandId,
+        account_id: grant.accountId,
+        workspace_id: grant.workspaceId,
+        session_id: caller.sessionId,
+        provider: "connected_machine",
+        state: "running",
+        control_workspace_id: grant.workspaceId,
+        enrollment_id: enrollmentId,
+        connection_instance_id: "launch",
+        op_id: opId,
+        launch_turn_id: caller.turnId,
+        launch_attempt_id: caller.actor.attemptId,
+        launch_execution_generation: caller.actor.executionGeneration,
+      })}`;
+      const settled = await settleConnectedMachineSessionBackgroundCommand(client!.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: caller.sessionId,
+        commandId,
+        controlWorkspaceId: grant.workspaceId,
+        enrollmentId,
+        connectionInstanceId: "launch",
+        opId,
+        outcome: "exited",
+        exitCode: 0,
+        reason: "exited",
+      });
+      expect(settled?.command.state).toBe("exited");
+      const [result] = await shared!.admin<{ id: string; lineage: Record<string, unknown> }[]>`
+        select id::text as id, lineage from session_system_updates
+        where session_id = ${caller.sessionId}::uuid and source_id = ${commandId}
+          and kind = 'background_command_result'`;
+      expect(result!.lineage).toMatchObject({ commandId });
+      expect(await records("session_system_update", result!.id)).toEqual(only(expected()));
+    });
+
     test(`${name}: an agent-created task and its revision copy the creating turn`, async () => {
       const { grant, caller } = current().scheduled;
       const task = await scheduledTask(grant, caller.actor);
@@ -703,6 +747,20 @@ describe.skipIf(!realDb)("Claude compatibility copies on every path (M4 C2b)", (
           authorityUpdatedBy: { kind: "subject", subjectId: grant.subjectId },
         }),
       );
+      expect(
+        await records("scheduled_task_revision", task.id, Number(updated!.authorityRevision)),
+      ).toEqual(only(expected()));
+    });
+
+    test(`${name}: a revision cloned from an earlier one copies the task`, async () => {
+      const { grant, task } = current().scheduled;
+      const updated = await withSessionRlsActorContext({ subjectId: grant.subjectId }, () =>
+        updateScheduledTask(client!.db, grant.workspaceId, task.id, {
+          name: `cloned ${crypto.randomUUID()}`,
+          clonePersonalResourceAuthorityFromRevision: 1,
+        }),
+      );
+      expect(Number(updated!.authorityRevision)).toBeGreaterThan(1);
       expect(
         await records("scheduled_task_revision", task.id, Number(updated!.authorityRevision)),
       ).toEqual(only(expected()));
@@ -765,9 +823,77 @@ describe.skipIf(!realDb)("Claude compatibility copies on every path (M4 C2b)", (
   });
 
   test("Codex never gets a record", async () => {
+    await assertNoCodexRecords();
+  });
+
+  test("a revision an earlier transaction inserted is skipped, not refused (a replayed or detached materialization)", async () => {
+    // A reusable-session materialization's replay and detached-occurrence
+    // branches return the existing head revision; the copy must skip it
+    // instead of failing the retry with 55000 forever.
+    const { grant, task } = recorded!.scheduled;
+    await withRlsContext(
+      client!.db,
+      { accountId: grant.accountId, workspaceId: grant.workspaceId },
+      (db) =>
+        copySubscriptionAuthorityCompatInTransaction(db, [
+          {
+            kind: "scheduled_task_revision",
+            workspaceId: grant.workspaceId,
+            id: task.id,
+            taskAuthorityRevision: 1,
+          },
+        ]),
+    );
+    expect(await records("scheduled_task_revision", task.id, 1)).toEqual([]);
+    // The predicate answers only inside the current account and workspace.
+    const other = missed!.scheduled;
+    const [answer] = await withRlsContext(
+      client!.db,
+      { accountId: grant.accountId, workspaceId: grant.workspaceId },
+      (db) =>
+        rawRows<{ own: boolean; foreign: boolean }>(
+          db,
+          sql`select
+            opengeni_private.subscription_authority_carrier_inserted_now(
+              'scheduled_task_revision', ${grant.workspaceId}::uuid, ${task.id}::uuid, 1) as own,
+            opengeni_private.subscription_authority_carrier_inserted_now(
+              'scheduled_task_revision', ${other.grant.workspaceId}::uuid, ${other.task.id}::uuid,
+              1) as foreign`,
+        ),
+    );
+    expect(answer).toEqual({ own: false, foreign: false });
+  });
+
+  test("a carrier written without the copy fails at commit (23514)", async () => {
+    const { grant, caller } = recorded!;
+    const failure = await withRlsContext(
+      client!.db,
+      { accountId: grant.accountId, workspaceId: grant.workspaceId },
+      (db) =>
+        rawRows(
+          db,
+          sql`insert into session_system_updates (
+            account_id, workspace_id, session_id, kind, classification, source_id, dedupe_key,
+            summary, payload, lineage
+          ) values (
+            ${grant.accountId}::uuid, ${grant.workspaceId}::uuid, ${caller.sessionId}::uuid,
+            'child_terminal_result', 'success', ${crypto.randomUUID()},
+            ${`claude-copy-skipped:${crypto.randomUUID()}`}, 'Child done',
+            ${JSON.stringify({ type: "child_terminal_result", childSessionId: crypto.randomUUID(), status: "idle" })}::jsonb,
+            ${JSON.stringify({ parentTurnId: caller.turnId })}::jsonb
+          )`,
+        ),
+    ).then(
+      () => null,
+      (error: unknown) => error as { code?: string; cause?: { code?: string } },
+    );
+    expect(failure?.code ?? failure?.cause?.code).toBe("23514");
+  });
+
+  async function assertNoCodexRecords() {
     const [codex] = await shared!.admin<{ count: number }[]>`
       select count(*)::int as count from opengeni_private.subscription_authority_compat
       where provider <> 'claude'`;
     expect(codex!.count).toBe(0);
-  });
+  }
 });

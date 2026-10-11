@@ -358,6 +358,9 @@ describe.skipIf(!realDb)("Claude routes on the shared core (M4 C2b)", () => {
       connected: true,
       windows: [],
       refreshStatus: "scope_required",
+      // One credential version: the web client treats a difference as a
+      // credential change.
+      credentialVersion: body.credentialVersion,
     });
     expect(JSON.stringify(first)).not.toContain("sk-ant-");
     const [stored] = await shared!.admin<
@@ -399,7 +402,15 @@ describe.skipIf(!realDb)("Claude routes on the shared core (M4 C2b)", () => {
       body: { label: "Primary Claude" },
     });
     expect(renamed.status).toBe(200);
-    expect(await renamed.json()).toMatchObject({ label: "Primary Claude", active: false });
+    const renamedBody = await renamed.json();
+    expect(renamedBody).toMatchObject({ label: "Primary Claude", active: false });
+    // The legacy rename shape: the plain account, no usage reading.
+    expect(renamedBody).not.toHaveProperty("usage");
+    const afterRename = (await listed()).accounts[0]!;
+    expect(afterRename.version).toBe(replacedBody.credentialVersion + 1);
+    expect((afterRename.usage as { credentialVersion: number }).credentialVersion).toBe(
+      afterRename.version as number,
+    );
 
     const allocatorVersion = Number((await listed()).accounts[0]!.allocatorVersion);
     const disabled = await request(`/claude/accounts/${body.accountId}/allocator`, {
@@ -564,6 +575,86 @@ describe.skipIf(!realDb)("Claude routes on the shared core (M4 C2b)", () => {
       scope: "workspace",
       credentialVersion: complete.credentialVersion + 1,
     });
+    // A status transition (here the row change of 0707's needs_relogin
+    // refresh-failure writer: status and version + 1) between start and
+    // complete changes the account: 409, start again, nothing written.
+    const raced = await startClaudeSubscriptionOAuth(
+      deps,
+      scope,
+      { reconnectAccountId: complete.accountId },
+      core,
+    );
+    await shared!.admin`
+      update subscription_connections set status = 'needs_relogin',
+        last_error = 'Sign-in expired', version = version + 1
+      where id = ${complete.accountId}::uuid`;
+    const [marked] = await shared!.admin<{ version: number; credential_encrypted: string }[]>`
+      select version, credential_encrypted from subscription_connections
+      where id = ${complete.accountId}::uuid`;
+    await expect(
+      completeClaudeSubscriptionOAuth(
+        deps,
+        scope,
+        {
+          attemptId: raced.attemptId,
+          code: "core-code#" + new URL(raced.authorizationUrl).searchParams.get("state"),
+        },
+        async () => {},
+        fetchImpl,
+        core,
+      ),
+    ).rejects.toMatchObject({
+      status: 409,
+      message: "Claude account changed during sign-in. Start again.",
+    });
+    const [unchanged] = await shared!.admin<{ version: number; credential_encrypted: string }[]>`
+      select version, credential_encrypted from subscription_connections
+      where id = ${complete.accountId}::uuid`;
+    expect(unchanged).toEqual(marked!);
+    // Started again, the reconnect lands and the account is active again.
+    const retry = await startClaudeSubscriptionOAuth(
+      deps,
+      scope,
+      { reconnectAccountId: complete.accountId },
+      core,
+    );
+    expect(
+      await completeClaudeSubscriptionOAuth(
+        deps,
+        scope,
+        {
+          attemptId: retry.attemptId,
+          code: "core-code#" + new URL(retry.authorizationUrl).searchParams.get("state"),
+        },
+        async () => {},
+        fetchImpl,
+        core,
+      ),
+    ).toMatchObject({ accountId: complete.accountId, credentialVersion: marked!.version + 1 });
+    expect(
+      (await listed()).accounts.find((entry) => entry.id === complete.accountId),
+    ).toMatchObject({ status: "active", version: marked!.version + 1 });
+
+    // An attempt completes only on the runtime it started on: a core
+    // attempt never completes on the legacy path.
+    const coreAttempt = await startClaudeSubscriptionOAuth(deps, scope, {}, core);
+    await expect(
+      completeClaudeSubscriptionOAuth(
+        deps,
+        scope,
+        {
+          attemptId: coreAttempt.attemptId,
+          code: "core-code#" + new URL(coreAttempt.authorizationUrl).searchParams.get("state"),
+        },
+        async () => {},
+        fetchImpl,
+        null,
+      ),
+    ).rejects.toMatchObject({
+      status: 409,
+      message: "Claude account changed during sign-in. Start again.",
+    });
+
     // Another Claude account never replaces it.
     const other = await startClaudeSubscriptionOAuth(
       deps,
