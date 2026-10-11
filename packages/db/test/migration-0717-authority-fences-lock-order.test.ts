@@ -13,7 +13,7 @@
 // application role, and take the evidence from each side's outcome and
 // PostgreSQL's own deadlock counter. Every case but the last rolls 0717 back.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   acquireOwnerMigratedTestDatabase,
@@ -318,13 +318,17 @@ beforeAll(async () => {
   database = await acquireOwnerMigratedTestDatabase("migration-0717-lock-order");
   if (!database) throw new Error("Real PostgreSQL is required");
   migrationText = await readFile(join(import.meta.dir, "../drizzle", FENCES), "utf8");
-  // A provisioned database without 0717, as a deployment is before it.
+  // A provisioned database without 0717, as a deployment is before it: 0717
+  // and every later migration (which may require 0717) are held back.
+  const heldBack = (await readdir(join(import.meta.dir, "../drizzle")))
+    .filter((file) => file.endsWith(".sql") && file >= FENCES)
+    .sort();
   const owner = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
-    await owner`insert into schema_migrations(name) values (${FENCES})`;
+    for (const name of heldBack) await owner`insert into schema_migrations(name) values (${name})`;
     await migrate(database.ownerUrl);
-    await owner`delete from schema_migrations where name = ${FENCES}`;
+    await owner`delete from schema_migrations where name = any(${heldBack}::text[])`;
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
   } finally {
     await owner.end();
