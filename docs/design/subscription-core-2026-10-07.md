@@ -5363,7 +5363,8 @@ including comments.
   accepted (confirmed decision; a test pins it). The refresh generation
   stays internal for usage staleness. C2a's usage routes report the same
   row version. Personal rows are read through the
-  owner reader, which does not return the version, so migration 0729 adds
+  owner reader, which does not return the version, so migration 0730
+  (designed here, carried by C2a, which merges first) adds
   `opengeni_private.subscription_core_personal_connection_versions`,
   derived from the live owner reader (0707, as 0715 rewrote it) by
   drift-checked replacement (the 0728 pattern) and returning only
@@ -5467,11 +5468,10 @@ including comments.
 
 Generalizations (provider-neutral): the connect writer's `reconnect` fence,
 `returnVersion` and the connected result's `version`; the `changed`
-refusal; `SubscriptionCoreConnectionRow.version` and
-`readSubscriptionCorePersonalConnectionVersionsInTransaction` (0729; C2a
-carries identical copies and merges first);
-`SubscriptionPoolCore.listedAccountJson`; `deliverPoolCoreWake` takes only
-the binding.
+refusal; `SubscriptionPoolCore.listedAccountJson`; `deliverPoolCoreWake`
+takes only the binding. `SubscriptionCoreConnectionRow.version` and
+`readSubscriptionCorePersonalConnectionVersionsInTransaction` (0730) were
+designed here and are carried by C2a.
 
 ### 5.4 Workspace-managed connections as organization accounts
 
