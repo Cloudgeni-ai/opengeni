@@ -231,7 +231,7 @@ async function retryFailedSessionInTransaction(
     failurePayload !== null &&
     typeof failurePayload === "object" &&
     !Array.isArray(failurePayload) &&
-    // Every core waiter's breaker (Codex and SuperGrok) shares this state.
+    // Every core waiter's breaker (one code per provider) shares this state.
     isSubscriptionCoreWaitExhaustedCode((failurePayload as Record<string, unknown>).code);
   // Only this explicitly authorized, exact failure-event Retry may replenish
   // the breaker. Preserve accepted credential policy/refusal ledgers and all

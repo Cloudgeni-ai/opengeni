@@ -131,6 +131,7 @@ import {
   claudeCoreModelScope,
   claudeCoreRequestPreparer,
   claudeSubscriptionProviderIds,
+  claudeSubscriptionUpstreamModelIds,
   selectClaudeTurnCapacityByRoute,
   type ClaudeCoreRequestAuthorization,
 } from "./claude-core";
@@ -670,6 +671,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 attemptId: input.attemptId,
                 executionGeneration: attempt.executionGeneration!,
               },
+              upstreamModelIds: claudeSubscriptionUpstreamModelIds(capabilitySettings),
             });
             const token = await claudeCoreAuthorization.getToken();
             // The settings carry the account identity but never the live
@@ -1238,6 +1240,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                       ? `${requestIdPrefix}:claude:${++claudeModelRequestSequence}`
                       : `${requestIdPrefix}:claude:title:${++claudeTitleRequestSequence}`,
                   providerIds: claudeProviderIds,
+                  observe: claudeCoreAuthorization.observeResponse,
                 }),
               );
             };
@@ -2164,6 +2167,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         bus,
         observability,
         wakeSessionWorkflow,
+        signalCodexCapacityWorkflow,
         cancellationSignal,
         sandboxRotationController,
         noteCancellationRequested,

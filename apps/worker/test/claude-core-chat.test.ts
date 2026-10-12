@@ -28,6 +28,7 @@ import {
   claudeCoreRequestPreparer,
   claudeResponseInspector,
   claudeSubscriptionProviderIds,
+  claudeSubscriptionUpstreamModelIds,
   selectClaudeTurnCapacityByRoute,
 } from "../src/activities/agent-turn/claude-core";
 import {
@@ -136,14 +137,20 @@ function route(value: db.SubscriptionCoreProviderRoute) {
   return spy(db, "readSubscriptionCoreProviderRoute").mockResolvedValue(value);
 }
 
-function coreTurns(placement: db.SubscriptionCorePlacement) {
+function coreTurns(
+  placement: db.SubscriptionCorePlacement,
+  evaluation?: Awaited<ReturnType<typeof db.evaluateSubscriptionCoreCodexPlacement>>,
+  recovered = 0,
+) {
   const place = spyOn({ place: async () => placement }, "place");
-  const recover = spyOn({ recover: async () => 0 }, "recover");
+  const recover = spyOn({ recover: async () => recovered }, "recover");
+  const evaluate = spyOn({ evaluate: async () => evaluation }, "evaluate");
   spy(db, "subscriptionCoreTurns").mockReturnValue({
     placeSubscriptionCoreTurn: place,
     recoverSubscriptionCoreConnectionHealth: recover,
+    evaluateSubscriptionCorePlacement: evaluate,
   } as never);
-  return { place, recover };
+  return { place, recover, evaluate };
 }
 
 const runPlacement = {
@@ -221,6 +228,7 @@ describe("Claude capacity by provider route", () => {
         connectionId: "connection-core",
         placedRefreshGeneration: 4,
         personal: false,
+        productModelId: PRODUCT_MODEL,
       });
       expect(deps.providerTurn.codexSubscriptionCore).toBeNull();
       expect(deps.providerTurn.xaiSubscriptionCore).toBeNull();
@@ -240,22 +248,112 @@ describe("Claude capacity by provider route", () => {
     }
   });
 
-  test("a core wait is a terminal capacity failure until the Claude waits exist", async () => {
+  test("a recovered connection wakes the account's Claude waiters, never Codex's", async () => {
     route("core");
     spy(db, "readSubscriptionCoreTurnIdentity").mockResolvedValue(identity);
-    const arm = spy(db, "armSubscriptionCoreCapacityWait");
-    coreTurns({
+    const wake = spy(db, "wakeSubscriptionCoreProviderCapacityWaiters").mockResolvedValue([]);
+    const codexWake = spy(db, "wakeSubscriptionCoreCodexCapacityWaiters");
+    const { recover } = coreTurns(runPlacement, undefined, 1);
+    const deps = capacityDeps();
+    try {
+      expect(await selectClaudeTurnCapacityByRoute(deps)).toEqual({ ok: true });
+      expect(recover).toHaveBeenCalledTimes(1);
+      expect(wake).toHaveBeenCalledWith(deps.db, "claude", {
+        accountId: identity.accountId,
+        reason: "connection_health_recovered",
+      });
+      expect(codexWake).not.toHaveBeenCalled();
+    } finally {
+      deps.leases.claude.stopHeartbeat();
+    }
+  });
+
+  test("a core wait parks the same turn on its Claude core waiter and re-evaluates it", async () => {
+    route("core");
+    spy(db, "readSubscriptionCoreTurnIdentity").mockResolvedValue(identity);
+    spy(db, "readSubscriptionCoreTurnModel").mockResolvedValue({
+      productModelId: PRODUCT_MODEL,
+      reasoningLevel: "medium",
+    });
+    spy(db, "getSessionGoal").mockResolvedValue(null);
+    spy(events, "publishDurableSessionEvents").mockResolvedValue(undefined as never);
+    const resetAt = new Date(Date.now() + 3_600_000);
+    const wait = {
       kind: "wait",
-      reason: "all_accounts_exhausted",
-      earliestResetAt: null,
+      reason: "no_eligible_capacity",
+      earliestResetAt: resetAt,
       healthRetryAt: null,
       explicitConnectionId: null,
-    } as unknown as db.SubscriptionCorePlacement);
-    const deps = capacityDeps();
-    await expect(selectClaudeTurnCapacityByRoute(deps)).rejects.toMatchObject({
-      payload: { code: "subscription_capacity_unavailable" },
+    } as const;
+    const { evaluate } = coreTurns(wait as unknown as db.SubscriptionCorePlacement, wait);
+    const waiter = {
+      waiterId: "waiter-1",
+      provider: "claude",
+      accountId: "account-1",
+      workspaceId: "workspace-1",
+      sessionId: "session-1",
+      blockedTurnId: "turn-1",
+      blockedTurnGeneration: 3,
+      generation: 1,
+      wakeRevision: 1,
+      observedWakeRevision: 1,
+      waitReason: "no_eligible_capacity",
+      resetKind: "authoritative",
+      refreshAttempt: 0,
+      earliestResetAt: resetAt,
+      nextCheckAt: resetAt,
+      goalId: null,
+      goalVersion: null,
+      lastWakeReason: "capacity_wait_armed",
+    } satisfies db.SubscriptionCoreCodexCapacityWait;
+    const arm = spy(db, "armSubscriptionCoreCapacityWait").mockResolvedValue({
+      action: "waiting",
+      waiter,
+      events: [],
     });
-    expect(arm).not.toHaveBeenCalled();
+    const codexArm = spy(db, "armSubscriptionCoreCodexCapacityWait");
+    const legacyArm = spy(db, "armClaudeCapacityWait");
+    spy(db, "getSubscriptionCoreCapacityWaitById").mockResolvedValue(waiter);
+    const reconcile = spy(db, "reconcileSubscriptionCoreCapacityWait").mockResolvedValue({
+      action: "waiting",
+      waiter,
+      events: [],
+    });
+    const deps = capacityDeps();
+    expect(await selectClaudeTurnCapacityByRoute(deps)).toEqual({
+      exit: {
+        status: "waiting_capacity",
+        capacityWait: {
+          provider: "claude",
+          waiterId: "waiter-1",
+          generation: 1,
+          nextCheckAt: resetAt.toISOString(),
+          wakeRevision: 1,
+        },
+        turnId: "turn-1",
+      },
+    });
+    expect(arm).toHaveBeenCalledTimes(1);
+    expect(arm.mock.calls[0]![1]).toBe("claude");
+    expect(arm.mock.calls[0]![2]).toMatchObject({
+      turnId: "turn-1",
+      attemptId: "attempt-1",
+      waitReason: "no_eligible_capacity",
+      earliestResetAt: resetAt,
+      failurePayload: { code: "subscription_capacity_unavailable" },
+    });
+    expect(
+      String((arm.mock.calls[0]![2] as { failurePayload: { error: string } }).failurePayload.error),
+    ).toContain("Claude");
+    expect(codexArm).not.toHaveBeenCalled();
+    expect(legacyArm).not.toHaveBeenCalled();
+    expect(evaluate).toHaveBeenCalledTimes(1);
+    expect(reconcile.mock.calls[0]![1]).toMatchObject({
+      waiterId: "waiter-1",
+      generation: 1,
+      provider: "claude",
+      evaluation: { kind: "wait", waitReason: "no_eligible_capacity" },
+    });
     expect(deps.leases.claude.held).toBe(false);
   });
 
@@ -353,6 +451,7 @@ function placedCore(options: { fence?: () => Promise<void>; refreshAdvances?: bo
     core,
     lease,
     execution: { attemptId: "attempt-1", executionGeneration: 3 },
+    upstreamModelIds: ["claude-sonnet-5", "claude-opus-5-5"],
   });
   return { order, core, lease, authorization, refreshes: () => refreshes, resolverInputs };
 }
@@ -412,6 +511,7 @@ function send(
       mainLane: (options.lane ?? "requests") === "requests",
       nextRequestId: () => `${options.prefix ?? "attempt-1:1:1:claude"}:${++sequence}`,
       providerIds: new Set([PROVIDER_ID]),
+      observe: placed.authorization.observeResponse,
     }),
   );
   return { response, calls: () => call, sent };
@@ -642,6 +742,116 @@ describe("Claude request custody on the core", () => {
   });
 });
 
+describe("Claude usage headers on the core", () => {
+  const sonnetReset = Math.floor(Date.now() / 1000) + 3_600;
+  const familyLimited =
+    (status = 200) =>
+    () =>
+      new Response(status === 200 ? "{}" : JSON.stringify({ type: "error" }), {
+        status,
+        headers: {
+          "anthropic-ratelimit-unified-7d-sonnet-utilization": "1",
+          "anthropic-ratelimit-unified-7d-sonnet-reset": String(sonnetReset),
+        },
+      });
+
+  function quotaRuntime(recovered = false) {
+    const apply = spyOn(
+      {
+        apply: async (..._args: unknown[]) => ({ applied: true, recovered }),
+      },
+      "apply",
+    );
+    spy(db, "subscriptionCoreTurns").mockReturnValue({
+      applySubscriptionCoreQuotaObservation: apply,
+    } as never);
+    return apply;
+  }
+
+  test("a response's usage headers become a quota observation fenced on its bearer's generation", async () => {
+    const placed = placedCore();
+    const apply = quotaRuntime();
+    const sent = send(placed, [familyLimited()]);
+    await (await sent.response).text();
+    expect(await placed.core.quota!.settled()).toBe(false);
+    expect(apply).toHaveBeenCalledTimes(1);
+    const [, appliedIdentity, ref, quota] = apply.mock.calls[0]!;
+    expect(appliedIdentity).toEqual(identity);
+    expect(ref).toEqual({
+      connectionId: "connection-core",
+      holderId: "claude-turn:session-1:turn-1",
+      generation: 3,
+    });
+    // A family window cools each listed model of that family (the catalog's,
+    // under both product prefixes); other families keep serving.
+    expect(quota).toMatchObject({
+      observedRefreshGeneration: 4,
+      source: "response_headers",
+      revision: 0,
+      exhaustedUntil: null,
+      modelCooldowns: {
+        "organization-claude-subscription/claude-sonnet-5": sonnetReset * 1000,
+        "workspace-claude-subscription/claude-sonnet-5": sonnetReset * 1000,
+      },
+    });
+    expect(Object.keys((quota as { modelCooldowns: object }).modelCooldowns)).not.toContain(
+      "organization-claude-subscription/claude-opus-5-5",
+    );
+  });
+
+  test("the observation after a renewal carries the renewed generation", async () => {
+    const placed = placedCore();
+    const apply = quotaRuntime();
+    const sent = send(placed, [familyLimited(401), familyLimited()]);
+    await (await sent.response).text();
+    await placed.core.quota!.settled();
+    expect(
+      apply.mock.calls.map(
+        (call) => (call[3] as { observedRefreshGeneration: number }).observedRefreshGeneration,
+      ),
+    ).toEqual([4, 5]);
+  });
+
+  test("an observation that ended a stored exhaustion is reported when the turn joins them", async () => {
+    const placed = placedCore();
+    quotaRuntime(true);
+    const sent = send(placed, [familyLimited()]);
+    await (await sent.response).text();
+    expect(await placed.core.quota!.settled()).toBe(true);
+  });
+
+  test("a response without usage headers records nothing; a failed write never throws", async () => {
+    const placed = placedCore();
+    const apply = quotaRuntime();
+    apply.mockImplementation(async () => {
+      throw new Error("database unavailable");
+    });
+    const quiet = send(placed, [answered]);
+    await (await quiet.response).text();
+    await placed.core.requests!.checkpoint();
+    expect(apply).not.toHaveBeenCalled();
+    const failing = send(placed, [familyLimited()], { prefix: "attempt-1:1:2:claude" });
+    await (await failing.response).text();
+    expect(await placed.core.quota!.settled()).toBe(false);
+    expect(apply).toHaveBeenCalledTimes(1);
+  });
+
+  test("a later failed write keeps what an earlier observation recovered", async () => {
+    const placed = placedCore();
+    const apply = quotaRuntime(true);
+    const first = send(placed, [familyLimited()]);
+    await (await first.response).text();
+    await placed.core.requests!.checkpoint();
+    apply.mockImplementation(async () => {
+      throw new Error("database unavailable");
+    });
+    const second = send(placed, [familyLimited()], { prefix: "attempt-1:1:2:claude" });
+    await (await second.response).text();
+    expect(await placed.core.quota!.settled()).toBe(true);
+    expect(apply).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe("Claude response inspection", () => {
   const chunks = (inspector: ReturnType<typeof claudeResponseInspector>, text: string) => {
     const bytes = new TextEncoder().encode(text);
@@ -735,6 +945,48 @@ describe("Claude model scope and provider ids", () => {
       "organization-claude-subscription",
       "workspace-claude-subscription",
     ]);
+  });
+
+  test("header observations decode against every Claude model of the deployment's catalog", () => {
+    const provider = (
+      id: string,
+      kind: string,
+      models: Array<{ id: string; upstreamModelId?: string }>,
+    ) => ({
+      id,
+      kind,
+      api: "anthropic-messages",
+      apiKey: "sk-ant-api03-fixture",
+      baseUrl: "https://api.anthropic.com",
+      models,
+    });
+    const ids = claudeSubscriptionUpstreamModelIds({
+      modelProvidersJson: JSON.stringify([
+        provider("workspace-claude-subscription", "claude-subscription-workspace", [
+          {
+            id: "workspace-claude-subscription/claude-sonnet-5",
+            upstreamModelId: "claude-sonnet-5",
+          },
+          { id: "claude-haiku-5" },
+        ]),
+        provider("organization-claude-subscription", "claude-subscription-organization", [
+          {
+            id: "organization-claude-subscription/claude-sonnet-5",
+            upstreamModelId: "claude-sonnet-5",
+          },
+          {
+            id: "organization-claude-subscription/claude-opus-5-5",
+            upstreamModelId: "claude-opus-5-5",
+          },
+        ]),
+        provider("organization-anthropic", "anthropic-organization", [
+          { id: "organization-anthropic/claude-api-only", upstreamModelId: "claude-api-only" },
+        ]),
+      ]),
+    });
+    // Both Claude subscription kinds, the model id when no upstream id is
+    // set, each model once, and no other provider's models.
+    expect(ids.toSorted()).toEqual(["claude-haiku-5", "claude-opus-5-5", "claude-sonnet-5"]);
   });
 });
 

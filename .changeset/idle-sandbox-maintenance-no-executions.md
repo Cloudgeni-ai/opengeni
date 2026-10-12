@@ -2,7 +2,6 @@
 "@opengeni/worker-bundle": patch
 "@opengeni/db": patch
 "@opengeni/runtime": patch
-"@opengeni/testing": patch
 ---
 
 An idle deployment no longer starts five Temporal workflows on every sandbox reaper tick (every 30 seconds by default): the reaper router, the drain inventory, its maintenance pass, the idle checkpoint sweep and the browser checkpoint sweep. The control worker now drives three work-checked cadences on the same reaper period:

@@ -368,8 +368,12 @@ describe("intent-preserving failed-session retry", () => {
   });
 
   // Every core waiter's breaker shares the same turn state: a SuperGrok core
-  // turn's exhaustion is replenished exactly as a Codex one.
-  test.each(["codex_capacity_recovery_exhausted", "xai_capacity_recovery_exhausted"])(
+  // or Claude core turn's exhaustion is replenished exactly as a Codex one.
+  test.each([
+    "codex_capacity_recovery_exhausted",
+    "xai_capacity_recovery_exhausted",
+    "claude_capacity_recovery_exhausted",
+  ])(
     "exact capacity Retry (%s) replenishes only its budget and suppression; Pause, stale failure and replay cannot reset it",
     async (exhaustedCode) => {
       const f = await fixture(false, "completed", exhaustedCode);

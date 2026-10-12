@@ -39,6 +39,7 @@ import {
   recordIdleCheckpointAttempt,
   claimSandboxCheckpointArtifactsForGc,
   claimTerminalRetainedProcesses,
+  getEnrollment,
   countActiveRetainedProcessesByOwnerState,
   countSandboxCheckpointArtifactsByState,
   countExpiredDrainingSandboxLeases,
@@ -1288,6 +1289,65 @@ function recordConnectedCommandReconciliation(
   });
 }
 
+/** Why a connected command's runner can never answer for it again. */
+type ConnectedRunnerRetirement =
+  | "enrollment_revoked"
+  | "connection_replaced"
+  | "connection_stopped";
+type ConnectedRunnerLookups = Map<string, Promise<ConnectedRunnerRetirement | null>>;
+
+/** Offline reasons after which the runner process has exited for good. */
+const CONNECTED_RUNNER_STOPPED_REASONS = new Set([
+  "GOING_OFFLINE_REASON_USER_STOP",
+  "GOING_OFFLINE_REASON_UPDATE",
+  "GOING_OFFLINE_REASON_HOST_SHUTDOWN",
+]);
+
+/**
+ * A connected command's operation lives in the memory of the runner process
+ * that launched it and is addressed through that process's connection
+ * instance. No responder on that exact address is not proof by itself: the
+ * machine may be offline or reconnecting. It is proof once the enrollment
+ * also retires that process, by the same rules the running-command claim
+ * applies: the enrollment was revoked, a different runner process now holds
+ * the connection, or the runner went offline by stopping, updating or shutting
+ * down. Anything else, including a failed read, keeps the existing retry. One
+ * read per runner address per sweep.
+ */
+async function connectedCommandRunnerRetirement(
+  db: ActivityServices["db"],
+  claim: { controlWorkspaceId: string; enrollmentId: string; connectionInstanceId: string },
+  error: unknown,
+  lookups: ConnectedRunnerLookups,
+): Promise<ConnectedRunnerRetirement | null> {
+  if (!(error instanceof SelfhostedControlError) || !error.agentOffline || !error.neverSent) {
+    return null;
+  }
+  const key = JSON.stringify([
+    claim.controlWorkspaceId,
+    claim.enrollmentId,
+    claim.connectionInstanceId,
+  ]);
+  let lookup = lookups.get(key);
+  if (!lookup) {
+    lookup = (async (): Promise<ConnectedRunnerRetirement | null> => {
+      const enrollment = await getEnrollment(db, claim.controlWorkspaceId, claim.enrollmentId);
+      if (!enrollment) return null;
+      if (enrollment.status === "revoked") return "enrollment_revoked";
+      if (enrollment.connectionInstanceId) {
+        return enrollment.connectionInstanceId === claim.connectionInstanceId
+          ? null
+          : "connection_replaced";
+      }
+      return CONNECTED_RUNNER_STOPPED_REASONS.has(enrollment.wentOfflineReason ?? "")
+        ? "connection_stopped"
+        : null;
+    })().catch(() => null);
+    lookups.set(key, lookup);
+  }
+  return await lookup;
+}
+
 async function forEachWithConcurrency<T>(
   values: readonly T[],
   concurrency: number,
@@ -1671,6 +1731,7 @@ export async function reconcileConnectedCommandOutputReleases(
   const deadline = Date.now() + settings.sandboxLeaseReaperPeriodMs;
   const controlRpc =
     controlRpcOverride ?? new NatsControlRpc(async () => bus.getRequestConnection());
+  const runnerLookups: ConnectedRunnerLookups = new Map();
   do {
     let claims: Awaited<ReturnType<typeof claimConnectedCommandOutputReleases>>;
     try {
@@ -1688,6 +1749,7 @@ export async function reconcileConnectedCommandOutputReleases(
       return;
     }
     await forEachWithConcurrency(claims, SANDBOX_MAINTENANCE_ITEM_CONCURRENCY, async (claim) => {
+      let receipt = claim.receipt;
       try {
         if (!bus.getOpStreamConnection)
           throw new Error("Connected command output transport unavailable");
@@ -1717,7 +1779,6 @@ export async function reconcileConnectedCommandOutputReleases(
             },
           },
         });
-        let receipt = claim.receipt;
         if (!receipt) {
           const status = await querySelfhostedOp({
             controlRpc,
@@ -1773,6 +1834,23 @@ export async function reconcileConnectedCommandOutputReleases(
           outcome === "published" ? "output_ack_published" : "output_released",
         );
       } catch (error) {
+        const retired = await connectedCommandRunnerRetirement(db, claim, error, runnerLookups);
+        // A retired runner retains nothing: captured output is released, and
+        // output it never handed over is recorded as missing.
+        if (
+          retired &&
+          (await settleConnectedCommandOutputReleaseClaim(db, {
+            claim,
+            outcome: receipt ? "not_retained" : "unavailable",
+            retryAfterMs: 0,
+          }).catch(() => false))
+        ) {
+          recordConnectedCommandReconciliation(
+            observability,
+            receipt ? "output_released" : "output_unavailable",
+          );
+          return;
+        }
         await settleConnectedCommandOutputReleaseClaim(db, {
           claim,
           outcome: "retry",

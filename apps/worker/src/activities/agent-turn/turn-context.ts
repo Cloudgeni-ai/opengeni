@@ -198,8 +198,19 @@ export type SubscriptionCoreTurn = {
    */
   credentialVersion?: number;
   personal: boolean;
+  /**
+   * The accepted product model id, for a provider whose refusals cool one
+   * model of the connection (Claude's per-model rate limits).
+   */
+  productModelId?: string;
   requests?: import("./subscription-core-requests").CoreSubscriptionRequests;
   titleRequests?: import("./subscription-core-requests").CoreSubscriptionRequests;
+  /**
+   * The turn's quota observations from its responses (usage headers), when
+   * the provider reports them per response (Claude). `settled` joins every
+   * write so far and is true when one ended a stored exhaustion.
+   */
+  quota?: { settled(): Promise<boolean> };
 };
 
 /** A Codex chat turn running on the shared subscription core (M3 name). */
