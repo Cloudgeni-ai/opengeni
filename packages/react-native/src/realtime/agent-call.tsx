@@ -54,8 +54,12 @@ export const DEFAULT_NATIVE_AGENT_CALL_MESSAGES: NativeAgentCallMessages = {
 export type NativeAgentCallContextValue = {
   /** The session on a call, if any. */
   sessionId: string | null;
-  /** Call the agent in this session (or bring its call back to the front). */
-  callSession(sessionId: string): void;
+  /**
+   * Call the agent in this session (or bring its call back to the front).
+   * `workspaceId` names the session's workspace when it is not the provider's
+   * current one, for example a session opened from a link.
+   */
+  callSession(sessionId: string, workspaceId?: string): void;
   /** A call from outside the app: `sessionId`, or wherever the host sends outside calls. */
   callFromOutside(sessionId: string | null): Promise<void>;
   /**
@@ -154,12 +158,13 @@ export function NativeAgentCallProvider(props: NativeAgentCallProviderProps) {
   const [expanded, setExpanded] = useState(false);
 
   const callSession = useCallback(
-    (sessionId: string) => {
-      if (!workspaceId) return;
+    (sessionId: string, sessionWorkspaceId?: string) => {
+      const callWorkspaceId = sessionWorkspaceId || workspaceId;
+      if (!callWorkspaceId) return;
       setTarget((current) =>
-        current?.sessionId === sessionId
+        current?.sessionId === sessionId && current.workspaceId === callWorkspaceId
           ? current
-          : { workspaceId, sessionId, systemTarget: sessionId },
+          : { workspaceId: callWorkspaceId, sessionId, systemTarget: sessionId },
       );
       setExpanded(true);
     },

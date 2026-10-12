@@ -404,11 +404,16 @@ export type SubscriptionSessionBinding = {
   version: number;
 };
 
+/**
+ * The session's binding for one provider (0733, D-32): a session keeps one
+ * binding per provider, and a provider reads and writes only its own.
+ */
 export async function readSubscriptionSessionBinding(
   db: Database,
   input: {
     workspaceId: string;
     sessionId: string;
+    provider: ProviderId;
     /**
      * Lock the row until the transaction ends, so a placement compares and
      * writes the binding it decided from while parallel placements of the
@@ -436,6 +441,7 @@ export async function readSubscriptionSessionBinding(
       model_id, choice, only_this_model, last_model_call_at, last_switch_reason, version
     from subscription_session_bindings
     where workspace_id = ${input.workspaceId}::uuid and session_id = ${input.sessionId}::uuid
+      and provider = ${input.provider}
     ${input.forUpdate ? sql`for update` : sql``}`,
   );
   if (!row) return null;
@@ -454,7 +460,32 @@ export async function readSubscriptionSessionBinding(
   };
 }
 
-/** Inserts once or compare-and-swaps an existing binding version. */
+const ROLLING_SESSION_BINDING_INDEX = "subscription_session_bindings_rolling_session_idx";
+
+/**
+ * Whether an error is a concurrent first binding of the session meeting 0733's
+ * rolling `(workspace_id, session_id)` index. That index is not the conflict
+ * target of `writeSubscriptionSessionBinding`, so two first bindings of one
+ * session can race on it as a unique violation instead of a lost
+ * compare-and-swap. Callers treat it as the lost compare-and-swap; the
+ * transaction (or savepoint) is aborted and must be retried in a new one.
+ */
+export function isSubscriptionSessionBindingRollingConflict(error: unknown): boolean {
+  for (let current = error, depth = 0; current && depth < 4; depth += 1) {
+    const fields = current as { code?: unknown; constraint_name?: unknown; cause?: unknown };
+    if (fields.code === "23505" && fields.constraint_name === ROLLING_SESSION_BINDING_INDEX)
+      return true;
+    current = fields.cause;
+  }
+  return false;
+}
+
+/**
+ * Inserts the provider's binding once or compare-and-swaps its version. A
+ * binding never changes provider (the 0733 trigger refuses it). While 0733's
+ * rolling index exists a racing first binding can fail with
+ * `isSubscriptionSessionBindingRollingConflict`.
+ */
 export async function writeSubscriptionSessionBinding(
   db: Database,
   input: Omit<SubscriptionSessionBinding, "version"> & { expectedVersion?: number | null },
@@ -476,9 +507,8 @@ export async function writeSubscriptionSessionBinding(
       ${input.lastModelCallAt?.toISOString() ?? null}::timestamptz,
       ${input.lastSwitchReason ?? null}, 1
     )
-    on conflict (workspace_id, session_id) do update
-      set provider = excluded.provider,
-          connection_id = excluded.connection_id,
+    on conflict (workspace_id, session_id, provider) do update
+      set connection_id = excluded.connection_id,
           model_id = excluded.model_id,
           choice = excluded.choice,
           only_this_model = excluded.only_this_model,

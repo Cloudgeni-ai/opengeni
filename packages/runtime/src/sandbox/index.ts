@@ -203,6 +203,7 @@ export {
   findModalProviderCreateReceipt,
   resolveModalCheckpointProviderBindingForLiveSandbox,
   resolveModalCheckpointProviderBindingForSession,
+  modalAppHasRunningSandboxes,
   sweepModalOrphanSandboxes,
   tagModalSandbox,
   terminateModalSandboxById,

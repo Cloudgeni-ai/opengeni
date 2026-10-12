@@ -29,6 +29,7 @@ import {
   ensureManagedAccessForUser,
   evaluateRuntimeDatabasePosture,
   inspectRuntimeDatabasePosture,
+  MAINTENANCE_WORK_PROBE_ROUTINES,
   readSubscriptionCoreTurnIdentity,
   recoverSubscriptionCoreCodexConnectionHealth,
   withSessionRlsActorContext,
@@ -560,10 +561,11 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
       sql`select current_user::text as role`,
     );
     expect(identity!.role).toBe("opengeni_app");
-    // 0728 (the personal connect writer with a credential format) and 0730
-    // (the owner's personal connections with their row version) are held
-    // back here with every later migration, so this binary's posture reports
-    // exactly the routines they add, and nothing else.
+    // 0728 (the personal connect writer with a credential format), both
+    // published 0730 migrations (personal row versions and maintenance probes)
+    // and every later migration (including more maintenance probes) are held
+    // back here, so this binary's posture reports exactly the routines they
+    // add, and nothing else.
     const heldBack = [
       // 0728
       "connect_subscription_core_personal(text, uuid, uuid, text, text, text, text, text, jsonb, timestamp with time zone, timestamp with time zone, text, text, text, text)",
@@ -572,6 +574,11 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
       // 0728
       "subscription_authority_carrier_inserted_now(text, uuid, uuid, bigint)",
     ].map((routine) => `subscription M3 precursor private routine ${routine} is missing or unsafe`);
+    heldBack.push(
+      ...MAINTENANCE_WORK_PROBE_ROUTINES.map(
+        ([routine]) => `maintenance work check ${routine} is missing or has unsafe posture`,
+      ),
+    );
     expect(posture).toEqual({ unprovisioned: heldBack, provisioned: heldBack });
   });
 

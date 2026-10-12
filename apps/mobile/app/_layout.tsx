@@ -8,7 +8,11 @@ import { AccountProvider, useAccount } from "@/account";
 import { restoreAppearance } from "@/appearance";
 import { CallProvider } from "@/call";
 import { restoreOutsideCallTarget } from "@/call-preferences";
+import { AppLinkRouting } from "@/app-link-routing";
 import { NotificationRouting } from "@/notifications";
+
+// A link opened from outside lands on its screen with Home underneath, so Back works.
+export const unstable_settings = { initialRouteName: "index" };
 
 void restoreAppearance();
 void restoreOutsideCallTarget();
@@ -39,6 +43,7 @@ export default function RootLayout() {
               {/* oxlint-disable-next-line react/style-prop-object -- expo-status-bar takes a string */}
               <StatusBar style="auto" />
               <NotificationRouting />
+              <AppLinkRouting />
               <Stack screenOptions={{ headerShown: true }}>
                 <Stack.Screen name="index" options={{ title: "Opengeni" }} />
                 <Stack.Screen name="sessions" options={{ title: "Sessions" }} />
@@ -60,6 +65,14 @@ export default function RootLayout() {
                   options={{ headerShown: false, presentation: "modal" }}
                 />
                 <Stack.Screen name="call" options={{ headerShown: false }} />
+                <Stack.Screen
+                  name="open"
+                  options={{
+                    headerShown: false,
+                    animation: "none",
+                    presentation: "transparentModal",
+                  }}
+                />
               </Stack>
             </CallProvider>
           </NativeEnvironment>

@@ -11,6 +11,7 @@ export const CODEX_CAPACITY_FALSE_RESUMPTION_LIMIT = 10;
 export const SUBSCRIPTION_CORE_WAIT_EXHAUSTED_CODES = {
   codex: "codex_capacity_recovery_exhausted",
   xai: "xai_capacity_recovery_exhausted",
+  claude: "claude_capacity_recovery_exhausted",
 } as const;
 
 export function isSubscriptionCoreWaitExhaustedCode(code: unknown): boolean {

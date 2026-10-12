@@ -476,7 +476,9 @@ function ArtifactDetailPage({
       </ContentPage>
     );
   }
-  if (!detail || !content) {
+  // Content is null once loaded when the Site has no version this person can
+  // open; that is a final state, not a reason to keep showing the skeleton.
+  if (!detail) {
     return (
       <ContentPage width="standard" className={ARTIFACT_DETAIL_FRAME}>
         <DetailPage back={back}>
@@ -497,7 +499,7 @@ function ArtifactDetailPage({
   }
 
   const artifact = detail.artifact;
-  const toolCount = content.requestedTools.length;
+  const toolCount = content?.requestedTools.length ?? 0;
   return (
     <ContentPage width="standard" className={ARTIFACT_DETAIL_FRAME}>
       <DetailPage back={back}>
@@ -578,17 +580,34 @@ function ArtifactDetailPage({
                   back an earlier version.
                 </Notice>
               ) : null}
-              <ArtifactSandbox
-                html={content.html}
-                title={artifact.title}
-                versionLabel={
-                  artifact.currentVersion ? `v${artifact.currentVersion.revision}` : undefined
-                }
-                editDisabled={context.busy || archived}
-                onEdit={canPublish ? () => void startEditSession() : undefined}
-                toolBridge={archived ? undefined : siteToolBridge}
-                connectedToolCount={toolCount}
-              />
+              {content ? (
+                <ArtifactSandbox
+                  html={content.html}
+                  title={artifact.title}
+                  versionLabel={
+                    artifact.currentVersion ? `v${artifact.currentVersion.revision}` : undefined
+                  }
+                  editDisabled={context.busy || archived}
+                  onEdit={canPublish ? () => void startEditSession() : undefined}
+                  toolBridge={archived ? undefined : siteToolBridge}
+                  connectedToolCount={toolCount}
+                />
+              ) : (
+                <Notice
+                  tone="failed"
+                  title="There's nothing to show for this Site"
+                  actionLayout="responsive"
+                  action={
+                    <Button type="button" size="sm" variant="outline" onClick={() => void load()}>
+                      <RotateCcwIcon aria-hidden="true" />
+                      Retry
+                    </Button>
+                  }
+                >
+                  It has no published version you can open. Try again, or ask whoever published it
+                  to publish it again.
+                </Notice>
+              )}
             </div>
           </LineTabsContent>
           <LineTabsContent value="versions">

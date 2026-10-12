@@ -42,6 +42,7 @@ import {
   readSubscriptionEffectiveSettings,
   readSubscriptionProviderCutoverState,
   resolveSubscriptionConnectionId,
+  isSubscriptionSessionBindingRollingConflict,
   writeSubscriptionSessionBinding,
 } from "../subscription-core-repository";
 import {
@@ -49,6 +50,10 @@ import {
   subscriptionCoreProviderIds,
 } from "../subscription-core-providers";
 import { subscriptionCoreProviderId, type SubscriptionCoreProvider } from "./provider";
+import {
+  projectSubscriptionCoreAccountUsage,
+  type SubscriptionCoreAccountUsage,
+} from "./account-usage-presentation";
 import {
   listSubscriptionCorePersonalConnectionRowsInTransaction,
   readSubscriptionCoreWorkspacePool,
@@ -89,19 +94,24 @@ export type SubscriptionCoreChoosableConnection = {
   allowedModelIds: string[] | null;
   choosable: boolean;
   refusal: SubscriptionCoreAccountChoiceRefusal | null;
+  /** Cached observation for this already-visible account; never an eligibility decision. */
+  usage: SubscriptionCoreAccountUsage | null;
 };
 
 export type SubscriptionCoreSessionAccountChoice = {
   /**
-   * The session's binding: `explicit` after a person's choice, else the
-   * account automatic placement last used. The connection is withheld
-   * (null) unless the caller may see it in the list.
+   * The session's binding when it has exactly one: `explicit` after a
+   * person's choice, else the account automatic placement last used. Null
+   * when it has none, or bindings for several providers (see `bindings`).
+   * The connection is withheld (null) unless the caller may see it in the
+   * list.
    */
-  binding: {
-    provider: string;
-    connectionId: string | null;
-    choice: "explicit" | "automatic";
-  } | null;
+  binding: SubscriptionCoreSessionChoiceBinding | null;
+  /**
+   * Every binding of the session, one per provider (D-32), ordered by
+   * provider, with the same connection withholding.
+   */
+  bindings: SubscriptionCoreSessionChoiceBinding[];
   connections: SubscriptionCoreChoosableConnection[];
   personal: {
     /** Effective `personalConnectionsAllowed` for this workspace. */
@@ -111,6 +121,12 @@ export type SubscriptionCoreSessionAccountChoice = {
     /** The caller's own opt-in (fallback needs it and the setting). */
     fallbackOptIn: boolean;
   };
+};
+
+export type SubscriptionCoreSessionChoiceBinding = {
+  provider: string;
+  connectionId: string | null;
+  choice: "explicit" | "automatic";
 };
 
 type SessionFacts = {
@@ -226,6 +242,7 @@ async function listChoosableConnections(
         allowedModelIds: row.allowed_model_ids,
         choosable: refusal === null,
         refusal,
+        usage: projectSubscriptionCoreAccountUsage(row),
       });
     };
     // A provider switched off for the workspace offers nothing, shared or
@@ -306,7 +323,7 @@ export async function readSubscriptionCoreSessionAccountChoice(
         providers,
       );
       await setSubjectRlsContext(tx, input.subjectId);
-      const [binding] = await rawRows<{
+      const stored = await rawRows<{
         provider: string;
         connection_id: string | null;
         choice: string;
@@ -316,23 +333,26 @@ export async function readSubscriptionCoreSessionAccountChoice(
           from subscription_session_bindings
           where account_id = ${input.accountId}::uuid
             and workspace_id = ${input.workspaceId}::uuid
-            and session_id = ${input.sessionId}::uuid`,
+            and session_id = ${input.sessionId}::uuid
+          order by provider`,
       );
       const optIn = await readOwnOptIn(tx, input);
+      const bindings = stored.map(
+        (binding): SubscriptionCoreSessionChoiceBinding => ({
+          provider: binding.provider,
+          connectionId: connections.some(
+            (connection) =>
+              connection.provider === binding.provider &&
+              connection.connectionId === binding.connection_id,
+          )
+            ? binding.connection_id
+            : null,
+          choice: binding.choice === "explicit" ? "explicit" : "automatic",
+        }),
+      );
       return {
-        binding: binding
-          ? {
-              provider: binding.provider,
-              connectionId: connections.some(
-                (connection) =>
-                  connection.provider === binding.provider &&
-                  connection.connectionId === binding.connection_id,
-              )
-                ? binding.connection_id
-                : null,
-              choice: binding.choice === "explicit" ? "explicit" : "automatic",
-            }
-          : null,
+        binding: bindings.length === 1 ? bindings[0]! : null,
+        bindings,
         connections,
         personal: {
           connectionsAllowed,
@@ -417,6 +437,12 @@ export async function chooseSubscriptionCoreSessionAccount(
     sessionId: string;
     connectionId: string | null;
     subjectId: string;
+    /**
+     * With `connectionId: null`, return only this provider's choice to
+     * automatic; without it, every provider's. With a connection, it must
+     * be that connection's provider.
+     */
+    provider?: string | null;
   },
   providers: SubscriptionCoreChoiceProviders = registeredProviders(),
 ): Promise<SubscriptionCoreSessionChoiceResult> {
@@ -452,6 +478,9 @@ export async function chooseSubscriptionCoreSessionAccount(
   }
 }
 
+/** A defensive lost compare-and-swap inside a choice's savepoint (rolls it back). */
+class LostSessionChoice extends Error {}
+
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 async function chooseOnce(
@@ -462,6 +491,7 @@ async function chooseOnce(
     sessionId: string;
     connectionId: string | null;
     subjectId: string;
+    provider?: string | null;
   },
   providers: SubscriptionCoreChoiceProviders,
 ): Promise<SubscriptionCoreSessionChoiceResult> {
@@ -519,6 +549,7 @@ async function chooseOnce(
           }
         }
         if (!target) return none("not_found");
+        if (input.provider != null && input.provider !== target.provider) return none("not_found");
       }
       // The binding guard requires an initiating subject for every binding
       // write and uses it only to match a personal account's owner, so the
@@ -542,14 +573,20 @@ async function chooseOnce(
       const session = locks.sessions.find((row) => row.id === input.sessionId);
       if (!session || session.accountId !== input.accountId) return none("not_found");
 
-      let previousProvider: string | null = null;
+      // A session keeps one binding per provider (D-32). A choice locks and
+      // writes only the chosen connection's provider row and never changes a
+      // row's provider, so another provider's choice stays exactly as stored.
+      // A return to automatic changes only explicit rows: the named
+      // provider's, or without one every provider's (the whole session).
+      const resetProvider = target === null ? (input.provider ?? null) : null;
+      let touched: string[] = [];
       let written = false;
       // An absent binding can be inserted by a concurrent placement between
       // our read and our insert; the retry then finds and locks that row.
       for (let attempt = 0; attempt < 3 && !written; attempt += 1) {
-        // Lock the binding so a running turn's placement cannot advance its
+        // Lock the rows so a running turn's placement cannot advance their
         // version between this read and the compare-and-swap below.
-        const [locked] = await rawRows<{
+        const locked = await rawRows<{
           provider: string;
           connection_id: string | null;
           choice: string;
@@ -560,22 +597,29 @@ async function chooseOnce(
             from subscription_session_bindings
             where workspace_id = ${input.workspaceId}::uuid
               and session_id = ${input.sessionId}::uuid
+              and ${
+                target !== null
+                  ? sql`provider = ${target.provider}`
+                  : resetProvider !== null
+                    ? sql`provider = ${resetProvider} and choice = 'explicit'`
+                    : sql`choice = 'explicit'`
+              }
+            order by provider
             for update`,
         );
-        previousProvider = locked?.provider ?? null;
         if (target === null) {
-          if (!locked || locked.choice !== "explicit") return none("unchanged");
-        } else if (
-          locked &&
-          locked.choice === "explicit" &&
-          locked.provider === target.provider &&
-          locked.connection_id === target.connectionId
-        ) {
-          return {
-            ...none("unchanged"),
-            provider: target.provider,
-            connectionId: target.connectionId,
-          };
+          if (locked.length === 0) return none("unchanged");
+          touched = locked.map((row) => row.provider);
+        } else {
+          const own = locked[0];
+          if (own && own.choice === "explicit" && own.connection_id === target.connectionId) {
+            return {
+              ...none("unchanged"),
+              provider: target.provider,
+              connectionId: target.connectionId,
+            };
+          }
+          touched = [target.provider];
         }
         try {
           written = await tx.transaction(async (savepoint) => {
@@ -583,27 +627,34 @@ async function chooseOnce(
             if (target === null) {
               // Only the choice changes: the connection guard (which needs an
               // active connection) is not run for a return to automatic.
-              const rows = await rawRows<{ version: number | string }>(
-                scoped,
-                sql`update subscription_session_bindings
-                  set choice = 'automatic', version = version + 1
-                  where workspace_id = ${input.workspaceId}::uuid
-                    and session_id = ${input.sessionId}::uuid
-                    and version = ${Number(locked!.version)}
-                  returning version`,
-              );
-              return rows.length > 0;
+              for (const row of locked) {
+                const rows = await rawRows<{ version: number | string }>(
+                  scoped,
+                  sql`update subscription_session_bindings
+                    set choice = 'automatic', version = version + 1
+                    where workspace_id = ${input.workspaceId}::uuid
+                      and session_id = ${input.sessionId}::uuid
+                      and provider = ${row.provider}
+                      and version = ${Number(row.version)}
+                    returning version`,
+                );
+                // Defensive (the rows are locked): undo every change.
+                if (rows.length === 0) throw new LostSessionChoice();
+              }
+              return true;
             }
-            if (locked) {
+            const own = locked[0];
+            if (own) {
               const rows = await rawRows<{ version: number | string }>(
                 scoped,
                 sql`update subscription_session_bindings
-                  set provider = ${target.provider}, connection_id = ${target.connectionId}::uuid,
+                  set connection_id = ${target.connectionId}::uuid,
                       choice = 'explicit', last_switch_reason = 'explicit_choice',
                       version = version + 1
                   where workspace_id = ${input.workspaceId}::uuid
                     and session_id = ${input.sessionId}::uuid
-                    and version = ${Number(locked.version)}
+                    and provider = ${target.provider}
+                    and version = ${Number(own.version)}
                   returning version`,
               );
               return rows.length > 0;
@@ -627,10 +678,15 @@ async function chooseOnce(
           if (postgresErrorCode(error) === "42501") {
             return { ...none("refused"), provider: target?.provider ?? null };
           }
+          // A lost compare-and-swap, or a racing first binding that met
+          // 0733's rolling index: the savepoint rolled back; retry.
+          if (error instanceof LostSessionChoice) continue;
+          if (isSubscriptionSessionBindingRollingConflict(error)) continue;
           throw error;
         }
       }
       if (!written) return none("conflict");
+      const changedProvider = target?.provider ?? (touched.length === 1 ? touched[0]! : null);
 
       const appliedTo: "waiting_turn" | "next_turn" =
         session.status === "waiting_capacity" && session.activeTurnId
@@ -648,7 +704,8 @@ async function chooseOnce(
                 sequence: session.lastSequence + 1,
                 type: SUBSCRIPTION_CORE_ACCOUNT_CHOICE_EVENT,
                 payload: {
-                  provider: target?.provider ?? previousProvider,
+                  provider: changedProvider,
+                  providers: touched,
                   connectionId: target?.connectionId ?? null,
                   choice: target ? "explicit" : "automatic",
                   appliedTo,
@@ -672,16 +729,12 @@ async function chooseOnce(
             eq(schema.sessions.id, input.sessionId),
           ),
         );
-      // Wake this session's waiters of the providers the choice touched
-      // (the one it left and the one it chose): a choice changes nothing
-      // another session can place on.
-      const touched = [
-        ...new Set([previousProvider, target?.provider ?? null].filter((id) => id !== null)),
-      ];
+      // Wake this session's waiters of the providers the choice touched: a
+      // choice changes nothing another session can place on.
       return {
         outcome: "changed",
         appliedTo,
-        provider: target?.provider ?? previousProvider,
+        provider: changedProvider,
         connectionId: target?.connectionId ?? null,
         events: inserted.map(mapSessionEvent),
         wakes: touched.flatMap((providerId) => {
