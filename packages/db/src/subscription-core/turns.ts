@@ -267,6 +267,17 @@ class SubscriptionBindingConflict extends Error {
 const BINDING_CONFLICT_RETRIES = 3;
 
 /**
+ * The session's explicit choice for this provider names a connection that was
+ * deleted: it can never serve the work, so the turn waits on it (D-24) until
+ * the person chooses again.
+ */
+const DELETED_EXPLICIT_WAIT = {
+  kind: "wait",
+  reason: "pinned_account_ineligible",
+  earliestResetAt: null,
+} as const satisfies PlacementDecision;
+
+/**
  * Re-selection points since the binding's last model call (SUB-STICK-05).
  *
  * - `model_changed`: the turn's accepted model is not the bound model.
@@ -484,7 +495,7 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
         const fence = await readAttemptFence(tx, request);
         if (!fence) return { kind: "attempt_fenced" };
 
-        const input = await providerPlacementInput(
+        const { input, storedBinding } = await providerPlacementInput(
           tx,
           identity,
           worldInput,
@@ -535,11 +546,14 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
         const explicitConnectionId = binding?.choice === "explicit" ? binding.connectionId : null;
         const reused =
           reuse !== null &&
+          !storedBinding.deletedExplicit &&
           (explicitConnectionId === null || explicitConnectionId === reuse) &&
           !connectionUsesExtraCredits(input, input.connections.find((row) => row.id === reuse)!);
-        const decision = reused
-          ? ({ kind: "run", connectionId: reuse!, switch: "sticky" } as const)
-          : decidePlacement(input);
+        const decision = storedBinding.deletedExplicit
+          ? DELETED_EXPLICIT_WAIT
+          : reused
+            ? ({ kind: "run", connectionId: reuse!, switch: "sticky" } as const)
+            : decidePlacement(input);
         // Why an automatic binding moved or was re-evaluated (SUB-STICK-03).
         const stickiness =
           reused || explicitConnectionId !== null ? null : bindingStickiness(input);
@@ -576,9 +590,13 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
         if (!acquired) return { kind: "lease_busy", leasedUntil: existing?.leasedUntil ?? null };
 
         const previousConnectionId = binding?.connectionId ?? null;
-        if (identity.sessionOwnerSubjectId) {
+        // Another provider's explicit choice is that person's pin for that
+        // provider: this turn placed automatically and leaves it untouched.
+        if (identity.sessionOwnerSubjectId && !storedBinding.foreignExplicit) {
           await commitBinding(tx, identity, {
-            decidedFrom: binding,
+            // The stored binding as the world read it (another provider's
+            // automatic binding included), which this placement replaces.
+            decidedFrom: worldInput.session.binding,
             clockDecided:
               stickiness?.kind === "reselect" &&
               (stickiness.reason === "cache_cold" || stickiness.reason === "reselection_point"),
@@ -642,14 +660,37 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
     };
   }
 
-  /** Strict placement input: this provider's connections only, no cross-provider failover. */
+  /**
+   * Strict placement input: this provider's connections only, no cross-provider
+   * failover. A session has one binding row; a binding of another provider is
+   * not a choice for this provider's work (D-32), so placement sees none and
+   * the turn places automatically among this provider's connections.
+   * `storedBinding` tells the caller what the stored row is: another
+   * provider's explicit choice (never overwritten), or this provider's
+   * explicit choice whose connection was deleted (the foreign key cleared
+   * it), which waits as `pinned_account_ineligible` (D-24) and never turns
+   * into a choice of another account.
+   */
   async function providerPlacementInput(
     tx: Database,
     identity: SubscriptionCoreAcceptedTurnIdentity,
     worldInput: PlacementInput,
     productModelId: string,
-  ): Promise<PlacementInput> {
-    const binding = worldInput.session.binding;
+  ): Promise<{
+    input: PlacementInput;
+    storedBinding: { foreignExplicit: boolean; deletedExplicit: boolean };
+  }> {
+    // The world read (and, for a placement, locked) this row in this transaction.
+    const stored = await readSubscriptionSessionBinding(tx, {
+      workspaceId: identity.workspaceId,
+      sessionId: identity.sessionId,
+    });
+    const own = stored === null || stored.provider === providerId;
+    const binding = own ? worldInput.session.binding : null;
+    const storedBinding = {
+      foreignExplicit: !own && stored?.choice === "explicit",
+      deletedExplicit: own && stored?.choice === "explicit" && stored.connectionId === null,
+    };
     const lastContextReplacedAt =
       binding && binding.lastModelCallAt > 0 ? await readLastContextReplacedAt(tx, identity) : null;
     const [turn] = await rawRows<{ metadata: Record<string, unknown> | null }>(
@@ -665,10 +706,12 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
       policy.kind === "valid" && policy.policy.productModelId === productModelId
         ? policy.policy.upstreamModelId
         : null;
-    return {
+    const input: PlacementInput = {
       ...worldInput,
       session: {
         ...worldInput.session,
+        binding,
+        onlyThisModel: own ? worldInput.session.onlyThisModel : false,
         reselectionPoints: subscriptionCoreReselectionPoints({
           binding: binding
             ? { modelId: binding.modelId, lastModelCallAt: binding.lastModelCallAt }
@@ -691,6 +734,7 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
             : connection,
         ),
     };
+    return { input, storedBinding };
   }
 
   /**
@@ -755,7 +799,7 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
           }))
         )
           return false;
-        const input = await providerPlacementInput(
+        const { input } = await providerPlacementInput(
           tx,
           identity,
           worldInput,
@@ -817,7 +861,7 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
       placementWorldRequest(identity, request.productModelId, "medium", new Date()),
       async (tx, world) => {
         if (!(await cutoverEnabled(tx, identity.accountId))) return false;
-        const input = await providerPlacementInput(tx, identity, world, request.productModelId);
+        const { input } = await providerPlacementInput(tx, identity, world, request.productModelId);
         return input.connections.some(
           (connection) =>
             (connection.ownership.kind === "shared" || personalFallbackActive(input)) &&
@@ -847,13 +891,15 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
       placementWorldRequest(identity, request.productModelId, request.reasoningLevel, now),
       async (tx, worldInput): Promise<SubscriptionCorePlacementEvaluation> => {
         if (!(await cutoverEnabled(tx, identity.accountId))) return { kind: "cutover_not_enabled" };
-        const input = await providerPlacementInput(
+        const { input, storedBinding } = await providerPlacementInput(
           tx,
           identity,
           worldInput,
           request.productModelId,
         );
-        const decision: PlacementDecision = decidePlacement(input);
+        const decision: PlacementDecision = storedBinding.deletedExplicit
+          ? DELETED_EXPLICIT_WAIT
+          : decidePlacement(input);
         if (decision.kind === "run") {
           return { kind: "run", connectionId: decision.connectionId, switch: decision.switch };
         }
@@ -1113,6 +1159,16 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
             ? (seen.lastModelCallAt?.getTime() ?? 0) === decided.lastModelCallAt
             : (seen.lastModelCallAt?.getTime() ?? 0) >= decided.lastModelCallAt);
     if (!unchanged) throw new SubscriptionBindingConflict();
+    // Placement never replaces another provider's explicit choice or this
+    // provider's choice of a deleted connection (placeOnce waits or skips).
+    if (
+      current?.choice === "explicit" &&
+      (current.provider !== providerId || current.connectionId === null)
+    )
+      throw new Error("Core placement may not replace an explicit choice it cannot serve");
+    // Choice, model scope and switch reason carry over only from this
+    // provider's own binding; another provider's automatic binding is replaced.
+    const own = current?.provider === providerId ? current : null;
     if (
       current &&
       current.provider === providerId &&
@@ -1137,15 +1193,12 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
       connectionId: next.connectionId,
       modelId: next.modelId,
       // A person's explicit choice is changed only by that person.
-      choice: current?.choice ?? "automatic",
-      onlyThisModel: current?.onlyThisModel ?? false,
+      choice: own?.choice ?? "automatic",
+      onlyThisModel: own?.onlyThisModel ?? false,
       // The clock starts on the new account or model at this placement, or
       // cold when the placement made no new selection.
       lastModelCallAt: next.restartClock ? next.now : null,
-      lastSwitchReason: bindingSwitchReason(
-        next.placementSwitch,
-        current?.lastSwitchReason ?? null,
-      ),
+      lastSwitchReason: bindingSwitchReason(next.placementSwitch, own?.lastSwitchReason ?? null),
       expectedVersion: current?.version ?? null,
     });
     if (written === null) throw new SubscriptionBindingConflict();

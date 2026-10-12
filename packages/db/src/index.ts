@@ -29068,14 +29068,22 @@ export async function pinSubscriptionCoreSessionCodexAccount(
       // (`writeSubscriptionSessionBinding`) advances its version, and an
       // unlocked read would lose the version compare-and-swap below to it and
       // report the choice as not found. Cache-clock advances do not bump it.
-      const [lockedBinding] = await rawRows<{ choice: string; version: number | string }>(
+      const [lockedBinding] = await rawRows<{
+        provider: string;
+        choice: string;
+        version: number | string;
+      }>(
         tx,
-        sql`select choice, version from subscription_session_bindings
+        sql`select provider, choice, version from subscription_session_bindings
           where workspace_id = ${input.workspaceId}::uuid and session_id = ${input.sessionId}::uuid
           for update`,
       );
       const binding = lockedBinding
-        ? { choice: lockedBinding.choice, version: Number(lockedBinding.version) }
+        ? {
+            provider: lockedBinding.provider,
+            choice: lockedBinding.choice,
+            version: Number(lockedBinding.version),
+          }
         : null;
       let connectionId: string | null = null;
       if (input.connectionId !== null) {
@@ -29093,7 +29101,10 @@ export async function pinSubscriptionCoreSessionCodexAccount(
         const written = await tx.transaction(async (savepoint) => {
           const scoped = savepoint as unknown as Database;
           if (connectionId === null) {
-            if (!binding || binding.choice !== "explicit") return true;
+            // Only a Codex choice returns to automatic: another provider's
+            // explicit choice is that provider's pin and stays (D-32).
+            if (!binding || binding.provider !== "codex" || binding.choice !== "explicit")
+              return true;
             // Leave connection_id alone: only the choice changes, so the
             // connection guard (which needs an active connection) is not run.
             const rows = await rawRows<{ version: number | string }>(

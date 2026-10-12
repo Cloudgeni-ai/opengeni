@@ -1125,6 +1125,60 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
     ).toEqual({ pinnedCredentialId: null, lastCredentialId: null });
   });
 
+  test("Codex 'auto' never returns another provider's explicit choice to automatic (D-32)", async () => {
+    const org = await organization();
+    await setCutover(org.accountId, true);
+    const sessionId = await ownedSession(org, org.sharedWorkspaceId);
+    // Another provider's shared account, explicitly chosen for this session.
+    const [foreign] = await shared!.admin<{ id: string }[]>`
+      insert into subscription_connections (
+        account_id, provider, kind, credential_encrypted, ownership, scope_kind,
+        provider_account_id, label
+      ) values (
+        ${org.accountId}::uuid, 'xai', 'subscription', ${encryptedTokens("auto-foreign")},
+        'shared', 'organization', ${`xai-auto-foreign-${org.accountId}`}, 'auto-foreign'
+      ) returning id::text as id`;
+    // Fixture only: that provider's pin writer is tested with that provider.
+    await shared!.admin.begin(async (tx) => {
+      await tx`set local session_replication_role = replica`;
+      await tx`
+        insert into subscription_session_bindings (
+          account_id, workspace_id, session_id, provider, connection_id, model_id, choice,
+          last_switch_reason
+        ) values (
+          ${org.accountId}::uuid, ${org.sharedWorkspaceId}::uuid, ${sessionId}::uuid, 'xai',
+          ${foreign!.id}::uuid, 'supergrok/grok-4', 'explicit', 'explicit_choice'
+        )`;
+    });
+    const stored = async () => [
+      ...(await shared!.admin<Record<string, unknown>[]>`
+        select provider, connection_id::text as connection_id, choice, version::int as version
+        from subscription_session_bindings where session_id = ${sessionId}::uuid`),
+    ];
+    const before = await stored();
+    expect(before).toEqual([
+      { provider: "xai", connection_id: foreign!.id, choice: "explicit", version: 1 },
+    ]);
+    await pinSubscriptionCoreSessionCodexAccount(client!.db, {
+      accountId: org.accountId,
+      workspaceId: org.sharedWorkspaceId,
+      sessionId,
+      subjectId: org.ownerSubjectId,
+      connectionId: null,
+    });
+    expect(await stored()).toEqual(before);
+    // The Codex projection never shows another provider's choice.
+    expect(
+      (
+        await getSubscriptionCoreCodexSessionPointers(client!.db, {
+          accountId: org.accountId,
+          workspaceId: org.sharedWorkspaceId,
+          sessionIds: [sessionId],
+        })
+      ).get(sessionId),
+    ).toEqual({ pinnedCredentialId: null, lastCredentialId: null });
+  });
+
   test("route wakes reach waiting core waiters only with an enabled cutover", async () => {
     const org = await organization();
     const sessionId = await ownedSession(org, org.sharedWorkspaceId);

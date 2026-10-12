@@ -923,11 +923,15 @@ export function describeSubscriptionCoreConformance<Credential>(
     );
     if (result.status !== "completed") throw new Error("placement world was not visible");
     const world = result.value;
-    const binding = world.session.binding;
+    // Another provider's binding is no choice for this provider (D-32).
+    const own = world.session.binding === null || world.session.binding.provider === providerId;
+    const binding = own ? world.session.binding : null;
     return {
       ...world,
       session: {
         ...world.session,
+        binding,
+        onlyThisModel: own ? world.session.onlyThisModel : false,
         reselectionPoints: subscriptionCoreReselectionPoints({
           binding: binding
             ? { modelId: binding.modelId, lastModelCallAt: binding.lastModelCallAt }
@@ -1997,6 +2001,220 @@ export function describeSubscriptionCoreConformance<Credential>(
         connectionId: preferred,
         reselection: { reason: "cache_cold" },
       });
+    });
+
+    /** The whole stored binding row, to show a placement left it exactly as it was. */
+    async function storedBindingRow(turn: Turn) {
+      const [row] = await admin()<Record<string, unknown>[]>`
+        select provider, connection_id::text as connection_id, model_id, choice,
+          only_this_model, last_model_call_at, last_switch_reason, version::int as version
+        from subscription_session_bindings
+        where workspace_id = ${turn.identity.workspaceId}::uuid
+          and session_id = ${turn.identity.sessionId}::uuid`;
+      return row ?? null;
+    }
+
+    /**
+     * The session's binding as another provider's pin or placement stored it
+     * (a session has one binding row), with a warm clock and its model scope.
+     * Written as the application role in a pin's context (the choosing human,
+     * under the binding guard), as a pin writes it.
+     */
+    async function storeBinding(
+      turn: Turn,
+      chooser: string,
+      binding: {
+        provider: string;
+        connectionId: string | null;
+        choice: "explicit" | "automatic";
+        modelId?: string;
+      },
+    ) {
+      await withWorkspaceSubjectSessionActivityRls(
+        db(),
+        turn.identity.workspaceId,
+        chooser,
+        async (scoped) => {
+          const tx = scoped as unknown as Parameters<typeof rawRows>[0];
+          await tx.execute(
+            sql`select set_config('opengeni.initiating_human_subject_id', ${chooser}, true)`,
+          );
+          const written = await rawRows(
+            tx,
+            sql`insert into subscription_session_bindings (
+          account_id, workspace_id, session_id, provider, connection_id, model_id, choice,
+          only_this_model, last_model_call_at, last_switch_reason
+        ) values (
+          ${turn.identity.accountId}::uuid, ${turn.identity.workspaceId}::uuid,
+          ${turn.identity.sessionId}::uuid, ${binding.provider}, ${binding.connectionId}::uuid,
+          ${binding.modelId ?? "foreign-model"}, ${binding.choice}, true,
+          ${new Date(Date.now() - 30_000).toISOString()}::timestamptz,
+          ${binding.choice === "explicit" ? "explicit_choice" : "initial"}
+        )
+        on conflict (workspace_id, session_id) do update set
+          provider = excluded.provider, connection_id = excluded.connection_id,
+          model_id = excluded.model_id, choice = excluded.choice,
+          only_this_model = excluded.only_this_model,
+          last_model_call_at = excluded.last_model_call_at,
+          last_switch_reason = excluded.last_switch_reason,
+          version = subscription_session_bindings.version + 1
+        returning version`,
+          );
+          expect(written).toHaveLength(1);
+        },
+      );
+    }
+
+    test("D-32: another provider's explicit choice: this provider places automatically and leaves the pin exactly as stored", async () => {
+      const org = await organization();
+      const own = await sharedConnection(org, `foreign-pin-${crypto.randomUUID()}`);
+      const first = await runningTurn(org);
+      await storeBinding(first, org.ownerSubjectId, {
+        provider: subject.foreignProvider,
+        connectionId: org.foreign.healthy,
+        choice: "explicit",
+      });
+      const pinned = await storedBindingRow(first);
+      expect(pinned).toMatchObject({
+        provider: subject.foreignProvider,
+        connection_id: org.foreign.healthy,
+        choice: "explicit",
+      });
+      // Never `pinned_account_ineligible`: the pin is not a choice for this provider.
+      expect(await placeChecked(first)).toMatchObject({
+        kind: "run",
+        connectionId: own,
+        explicit: false,
+        previousConnectionId: null,
+      });
+      expect(await storedBindingRow(first)).toEqual(pinned);
+      // A model request on this provider's account never moves the pin's clock.
+      await subscriptionCoreRequests(provider).reserveSubscriptionCoreRequest(
+        db(),
+        first.identity,
+        leaseOf(first, own),
+        {
+          requestId: crypto.randomUUID(),
+          transportAttempt: 1,
+          attemptId: first.attemptId,
+          executionGeneration: first.executionGeneration,
+        },
+      );
+      expect(await storedBindingRow(first)).toEqual(pinned);
+      // The next turn, and the evaluation waits use, do the same.
+      const second = await nextTurn(org, first);
+      expect(await evaluateChecked(second, new Date())).toMatchObject({
+        kind: "run",
+        connectionId: own,
+      });
+      expect(await placeChecked(second)).toMatchObject({
+        kind: "run",
+        connectionId: own,
+        explicit: false,
+      });
+      expect(await storedBindingRow(second)).toEqual(pinned);
+      await expectForeignUntouched(org);
+    });
+
+    test("D-32: another provider's automatic binding is replaced by this provider's placement", async () => {
+      const org = await organization();
+      const own = await sharedConnection(org, `foreign-auto-${crypto.randomUUID()}`);
+      const first = await runningTurn(org);
+      await storeBinding(first, org.ownerSubjectId, {
+        provider: subject.foreignProvider,
+        connectionId: org.foreign.healthy,
+        choice: "automatic",
+      });
+      const before = await storedBindingRow(first);
+      expect(await placeChecked(first)).toMatchObject({
+        kind: "run",
+        connectionId: own,
+        explicit: false,
+        previousConnectionId: null,
+      });
+      // Nothing of the other provider's binding carries over: not its model
+      // scope, its switch reason or its clock.
+      const after = await storedBindingRow(first);
+      expect(after).toMatchObject({
+        provider: providerId,
+        connection_id: own,
+        model_id: first.productModelId,
+        choice: "automatic",
+        only_this_model: false,
+        last_switch_reason: "initial",
+        version: (before!.version as number) + 1,
+      });
+      expect(after!.last_model_call_at).not.toEqual(before!.last_model_call_at);
+      await expectForeignUntouched(org);
+    });
+
+    test("D-24: this provider's explicit choice of a deleted account waits; another provider's never blocks", async () => {
+      const org = await organization();
+      const own = await sharedConnection(org, `deleted-pin-own-${crypto.randomUUID()}`);
+      const doomed = await sharedConnection(org, `deleted-pin-${crypto.randomUUID()}`);
+      const first = await runningTurn(org);
+      await storeBinding(first, org.ownerSubjectId, {
+        provider: providerId,
+        connectionId: doomed,
+        choice: "explicit",
+        modelId: first.productModelId,
+      });
+      // Deleting the account clears the reference (ON DELETE SET NULL) and
+      // leaves the explicit choice.
+      await admin()`delete from subscription_connections where id = ${doomed}::uuid`;
+      const pinned = await storedBindingRow(first);
+      expect(pinned).toMatchObject({
+        provider: providerId,
+        connection_id: null,
+        choice: "explicit",
+      });
+      // It waits on the choice and never becomes a choice of another account.
+      const waited = await place(first);
+      expect(waited).toMatchObject({
+        kind: "wait",
+        reason: "pinned_account_ineligible",
+        explicitConnectionId: null,
+      });
+      expect(instantOf(waited, "earliestResetAt")).toBeNull();
+      expect(
+        await runtime().evaluateSubscriptionCorePlacement(db(), {
+          identity: first.identity,
+          productModelId: first.productModelId,
+          reasoningLevel: "medium",
+        }),
+      ).toMatchObject({ kind: "wait", reason: "pinned_account_ineligible" });
+      expect(await storedBindingRow(first)).toEqual(pinned);
+      const [lease] = await admin()<{ count: number }[]>`
+        select count(*)::int as count from subscription_leases
+        where workspace_id = ${first.identity.workspaceId}::uuid
+          and turn_id = ${first.identity.turnId}::uuid`;
+      expect(lease!.count).toBe(0);
+      // The person returns the session to automatic: it places again.
+      await admin()`update subscription_session_bindings set choice = 'automatic'
+        where workspace_id = ${first.identity.workspaceId}::uuid
+          and session_id = ${first.identity.sessionId}::uuid`;
+      expect(await place(first)).toMatchObject({ kind: "run", connectionId: own, explicit: false });
+      expect(await storedBindingRow(first)).toMatchObject({
+        provider: providerId,
+        connection_id: own,
+        choice: "automatic",
+      });
+      // Another provider's explicit choice of a deleted account does not block
+      // this provider and stays as it is.
+      const second = await nextTurn(org, first);
+      await storeBinding(second, org.ownerSubjectId, {
+        provider: subject.foreignProvider,
+        connectionId: null,
+        choice: "explicit",
+      });
+      const foreignPin = await storedBindingRow(second);
+      expect(await placeChecked(second)).toMatchObject({
+        kind: "run",
+        connectionId: own,
+        explicit: false,
+      });
+      expect(await storedBindingRow(second)).toEqual(foreignPin);
+      await expectForeignUntouched(org);
     });
 
     // A smoke test only: the racers place one turn, so its lease serializes

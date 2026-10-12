@@ -343,7 +343,13 @@ reservation), which never block one another.
 1. Read effective settings (SQL).
 2. If the binding is `explicit`, use that connection or wait
    (`pinned_account_unavailable`); a choice that can never serve the work
-   waits as `pinned_account_ineligible` (D-24).
+   waits as `pinned_account_ineligible` (D-24), including this provider's
+   choice of a deleted account (its reference cleared by the foreign key).
+   A binding of another provider is not a choice for this provider's work
+   (D-32 of the contract): placement sees no binding, places automatically
+   among this provider's connections, and never writes over another
+   provider's explicit choice, so that provider's pin, clock and version
+   stay as stored. Another provider's automatic binding is replaced.
 3. Candidate models: the preferred model, then the fallback order (same or
    other providers, the latter only if cross-provider failover is on), or
    only the preferred model when the session is "only this model"
