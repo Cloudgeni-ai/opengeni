@@ -4987,9 +4987,11 @@ export function describeSubscriptionCoreConformance<Credential>(
       });
     });
 
-    // Runs before the tests that close the rolling window: production keeps
-    // 0733's rolling index until the next drained provider cutover drops it.
+    // Reconstruct the pre-cutover rolling window. A fully migrated fixture
+    // may already have dropped this index in a drained provider cutover.
     test("rolling window: a first binding that meets 0733's rolling index is a lost compare-and-swap, not an error", async () => {
+      await admin()`CREATE UNIQUE INDEX IF NOT EXISTS subscription_session_bindings_rolling_session_idx
+        ON subscription_session_bindings (workspace_id, session_id)`;
       const [index] = await admin()<{ present: boolean }[]>`
         select to_regclass('subscription_session_bindings_rolling_session_idx') is not null
           as present`;

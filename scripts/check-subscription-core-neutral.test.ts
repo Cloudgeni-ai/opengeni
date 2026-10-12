@@ -22,8 +22,11 @@ describe("subscription-core neutrality guard", () => {
     expect(files).toContain("packages/subscriptions/src/eligibility.ts");
     expect(files).toContain("packages/subscriptions/src/adapter.ts");
     expect(files.some((path) => path.includes("codex"))).toBe(false);
-    expect(sqlRegistryProviders(root)).toEqual(["codex"]);
-    expect(sqlRegistryConnectionKinds(root)).toEqual({ codex: "subscription" });
+    expect(sqlRegistryProviders(root)).toEqual(["codex", "xai"]);
+    expect(sqlRegistryConnectionKinds(root)).toEqual({
+      codex: "subscription",
+      xai: "subscription",
+    });
   }, 60_000);
 
   test("registry rows are read with their connection kind (default subscription)", () => {

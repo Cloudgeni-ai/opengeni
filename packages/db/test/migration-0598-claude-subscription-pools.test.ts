@@ -80,6 +80,7 @@ const subscriptionCoreMigrations = [
   "0732_sandbox_maintenance_work_probes.sql",
   // Owner-only routines over the shared connection table from withheld 0642.
   "0735_subscription_core_owned_connection_usage.sql",
+  "0738_subscription_core_xai_cutover.sql",
 ] as const;
 const key = Buffer.alloc(32, 67);
 const ids = {

@@ -2541,7 +2541,7 @@ Module map (old Codex module, its new shared home, and what stays Codex):
 | `subscription-core-codex.ts` | `subscription-core/turns.ts`, `subscription-core/credential-resolver.ts` | credential mapping (ChatGPT account id, FedRAMP flag), the turn token resolver wrapper, every exported name |
 | `subscription-core-codex-operations.ts` | `subscription-core/operations.ts` | connection token resolver, candidate ordering, plan voice entitlement, usage endpoint fetch and decoding |
 | `subscription-core-codex-requests.ts` | `subscription-core/requests.ts` | Apps request reservation and settlement |
-| `subscription-core-codex-waiter-cleanup.ts` | `subscription-core/waiters.ts` | the Codex-named wrapper |
+| `subscription-core-codex-waiter-cleanup.ts` (now `subscription-core-waiter-cleanup.ts`, every provider; see X3) | `subscription-core/waiters.ts` | nothing since X3 |
 | `subscription-core-codex-compat.ts` | `subscription-core/administration.ts` (cutover disposition, workspace and organization pools, personal rows, allocator, extra credits, rename, primary, rotation, workspace source) | the legacy Codex account projection (ChatGPT account id, reset credits, plan history, plan-entitlement exclusions), rotation shape, every exported name |
 | `subscription-core-codex-connections.ts` | `subscription-core/connections.ts` (connect personal and shared, disconnect, disconnect all) | the FedRAMP flag as provider state, every exported name |
 | `subscription-core-codex-catalog.ts` | `subscription-core/catalog.ts` (serving connections, model admission, readiness) | every exported name |
@@ -2700,7 +2700,7 @@ or refresh call.
 | EP-N11 video policy route | Saving administrator's live pool | "A shared xAI candidate exists for this workspace" (no viewer, no personal). |
 | EP-N13, EP-N14 video admission and reconciliation | Envelope with access and refresh token; organization scope rejected; direct `refreshXaiToken` outside the lock | The operation references the canonical connection; reconciliation reads the credential through the core connection seam under the operation's `video` lease and refreshes only under the core lock. No token envelope, so both defects disappear. |
 | EP-N19, EP-N20 funding and attribution | Static overlay for xAI and Claude | Core funding result with explicit workspace, owner, accepted authority and model (the Codex `isCodexBilledTurn` rule, provider-neutral); `model_call_facts.connection_id` attribution. |
-| EP-N22, EP-N23 xAI quota refresh and status probe | List-all refresh; a third auth-context copy | Core quota probe per connection with explicit context (adapter `fetchUsage`); the status route reads the effective primary through the connection seam and adapter `liveModels`. |
+| EP-N22, EP-N23 xAI quota refresh and status probe | List-all refresh; a third auth-context copy | Core quota probe per connection with explicit context (adapter `fetchUsage`); status validates a shared effective primary with `liveModels`. Own personal accounts count towards connected status; in the owner's Personal workspace, without a shared primary, a verified owner may validate an active personal account through the administered billing probe. Other callers get stored counts, never another person's live probe. |
 | EP-N24, EP-S13 Claude usage | `refreshClaudeAccountUsage`, `claude_subscription_account_usage` | Same routes over the core quota row and connection seam; `scope_required` and `reconnect` stay response values. Dead connection-based usage code is deleted. |
 | EP-N28 and M1 shadow | Shadow for Claude and SuperGrok | Removed per provider at its legacy deletion. |
 | EP-S09, EP-S10 pool routes; EP-S11, EP-S12 Claude OAuth and setup token; EP-S14, EP-S15 SuperGrok connect and status; EP-S16 access policy | Factory repository, `create_*` / `disconnect_*` SQL, per-pool rotation and active pointer | Same paths, verbs and payloads as adapters over core connections and settings with alias translation (Codex PR 3b pattern). `scope: "user"` connects create a personal connection; workspace and organization connects create shared connections. "Activate" sets the provider's effective primary at the scope the caller administers; rotation maps to `spread` / `primary_first`. |
@@ -3073,7 +3073,7 @@ touches only that provider's rows.
 | Source | Legacy acceptance used the workspace pool when the workspace had its own credentials, else the organization pool; it never admitted organization accounts while local accounts existed. A workspace with workspace-scope credentials of the provider gets `inference_source = workspace`; other workspaces get no override (`automatic`, which today admits only organization connections there). `enabled` stays true. This deliberately diverges from §5.2's Codex `automatic` row (no override, rotation to keep local first): legacy Codex `automatic` already mixed both pools, so leaving it automatic was exact, whereas freezing `workspace` is the exact preservation for SuperGrok and Claude and the strictest one. Release note: such workspaces stop using organization accounts only if an administrator later changes the source, as today. |
 | Session pins | One binding per session for this provider (D-32, 0733): another provider's binding is never read, replaced or counted, so a session with a Codex pin and a SuperGrok pin keeps both. The first provider cutover (planned: SuperGrok's) drops 0733's rolling index in its drained window, after the preflight and before it writes any binding (its inserts would otherwise hit the index on sessions with a Codex row), and enables its provider only after the drop; a later cutover tolerates the index's absence. The drop is safe only while no previous binary can run, because that binary's binding reads and Codex pin update carry no provider. A cutover that disables the table's triggers for its bulk move keeps `subscription_session_bindings_provider_fixed` enabled (a move never changes a row's provider), or asserts afterwards that no pre-existing row changed provider. Among this provider's pool rows, the row of the pool in the session's latest accepted v1 snapshot wins. A manual pin is `explicit` (owner-only, non-dispatching seam; kept when unhealthy); a policy pin, else the last account, is `automatic`. A personal target is kept only when the session owner owns it and the session is private or in their Personal workspace; otherwise disposition `pin_owner_ineligible`. An existing binding of this provider is kept and the legacy rows become dispositions. `last_model_call_at` comes from the latest model-call fact. |
 | Leases | Live leases move with turn, holder, generation, expiry and the alias-resolved connection; parity compares exact tuples. Expired leases are a disposition; a live core lease on the same turn aborts (`lease_conflict`). |
-| Waiters | Only `waiting` rows whose blocked turn and generation equal the session's parked turn move; others collapse with a disposition. When several of the provider's pool waiters match the parked turn, the one for the pool of the turn's v1 snapshot moves (the `user` pool for a `user` snapshot). Preserve the legacy `id` as `waiter_id`, `generation`, `wake_revision`, `observed_wake_revision`, `next_check_at`, `earliest_reset_at`, `blocked_turn_generation`, the goal fence and `last_wake_reason`. `wait_reason` takes a core value: `pinned_account_unavailable` or `pinned_account_ineligible` for a pinned wait, `model_not_allowed` for a model policy refusal, else `no_eligible_capacity`; `reset_kind` `quota` only when a reset is known. `workflow_id` must equal the session's workflow id, else abort. Any existing core waiter for the session aborts the cutover (`waiter_conflict`); the migration never modifies Codex or other-provider core rows. A pending wake (`wake_revision > observed_wake_revision`) gets a wake-outbox row. |
+| Waiters | Only `waiting` rows whose blocked turn and generation equal the session's parked turn move; others collapse with a disposition. When several of the provider's pool waiters match the parked turn, the one for the pool of the turn's v1 snapshot moves (the `user` pool for a `user` snapshot). Preserve the legacy `id` as `waiter_id`, `generation`, `wake_revision`, `observed_wake_revision`, `next_check_at`, `earliest_reset_at`, `blocked_turn_generation`, the goal fence and `last_wake_reason`. `wait_reason` takes a core value derivable from the legacy row, which records no reason: `pinned_account_unavailable` when the session's moved binding is explicit, else `no_eligible_capacity`; the core reconcile sets a more specific reason at its next check; `reset_kind` takes the core's values: `authoritative` when a future reset is known, else `mutation_only`. `workflow_id` must equal the session's workflow id, else abort. Any existing core waiter for the session aborts the cutover (`waiter_conflict`); the migration never modifies another provider's waiter or lease. A pending wake (`wake_revision > observed_wake_revision`) gets a wake-outbox row. |
 | Accepted authority | Compatibility records on every carrier listed under "Accepted authority across the cutover" (live work plus each session's execution-context, latest accepted and child-parent turns, or `session_initial`). v1 columns and existing v2 values are not modified. |
 | Media and transcription ledgers | Non-terminal xAI video operations get the canonical connection and a `video` operation reference; their envelopes are blanked after parity. Non-terminal image operations keep their recorded identity and resolve the recorded credential through aliases; nothing is reissued after an uncertain write. Transcription holds no durable credential state. |
 | Read-only legacy | Factory tables, `claude_subscription_account_usage`, `opengeni_private.{xai,claude}_subscription_runtime_capabilities`, and the legacy `xai_subscription` / `claude_subscription` resource authorities stay read-only for forensics until M6; v1 columns on carriers follow "v1 columns after a provider's cutover" (still written, by default or verbatim copy, never read). Runtime roles lose write grants on them through role provisioning (`provision-roles` stops granting them once the provider's receipt exists) and the deployed runtime-posture contract, which X3/C3 extend and assert; a revocation inside the migration alone would be re-granted by the next `provision-roles`. Claude's revoked legacy model connections stay; any non-revoked one aborts the Claude cutover. |
@@ -4621,8 +4621,10 @@ until X3. SuperGrok-specific code is the adapter's `fetchUsage`,
   ownerless session (shared connections only, no person), as 0698 did for
   ownerless turns; otherwise a scheduled task's video could never submit.
 - **Status** (EP-N23) reads the workspace's shared pool and validates the
-  effective primary with one `liveModels` read; without an effective primary
-  it reports `valid: false`. The payload shape is unchanged.
+  effective primary with one `liveModels` read. Without a shared effective
+  primary, only the owner-only Personal-workspace billing check below can
+  establish validity; otherwise it reports `valid: false`. The payload shape
+  is unchanged.
   The viewer's own personal connections, through the owner-only reader,
   count towards `connected` and `accountCount` wherever that reader shows
   them (another person's never). Only in the viewer's own Personal
@@ -4830,6 +4832,143 @@ personal join to `readSubscriptionCoreWorkspaceView`;
 `read/get/updateSubscriptionCoreCodexModelConnectionAccess` to
 `read/get/updateSubscriptionCoreProviderModelConnectionAccess`; the neutral
 connect writer gains `credentialFormat` and `personal`.
+
+#### X3: the drained SuperGrok cutover
+
+Migration 0738 (`-- deployment-mode: maintenance`) is the SuperGrok
+counterpart of 0689 and follows "Data mapping", "Accepted authority across
+the cutover", "Personal authority generations" and "Cutover protocol"
+above. The runbook is `docs/deployment.md`, "SuperGrok on the shared
+subscription core (0738)". Choices made where the plan left room, for
+reviewers:
+
+- **One writer for every provider's stage.** The credential stage is
+  `packages/db/src/xai-subscription-core-cutover.ts`; it holds only the
+  SuperGrok row shape, token identity, its four statuses and the quota
+  mapping. Staging tables, personal generation minting and the connection,
+  reach, alias, map and readability writes are the provider-neutral
+  `packages/db/src/subscription-core/cutover-stage.ts`, which the Claude
+  cutover calls with its own decoder and rules. 0689's Codex stage keeps its
+  own writer unchanged: it belongs to a shipped migration whose SQL reads
+  Codex-named staging tables and 0689-era relations, and a historical
+  migration is not rewritten. The planner is 0c's
+  `planSubscriptionCoreCutover` with SuperGrok's `SubscriptionCutoverRules`.
+- **Video.** A non-terminal SuperGrok video operation's token envelope is
+  replaced by the connection reference X2a's core video path reads
+  (`{kind: "subscription-connection", provider: "xai", connectionId}`),
+  read back before the replacement. An envelope whose credential cannot be
+  resolved gets the nil connection id and a
+  `disposition:video_operation_unmapped` row: the core path finds no
+  connection and the operation ends at its recovery deadline (decision 6).
+  An envelope funded by a `user` credential points at that owner's personal
+  connection, which X2a's video lease refuses (video is never funded by a
+  personal connection), so it ends the same way. Image operations keep
+  their recorded identity and resolve it through aliases.
+- **Organization locks.** A workspace override is never written for a key
+  the organization row locks (`rotation`, which also governs the
+  `*_primary_connection_id` columns, `providers` and
+  `personalFallbackAllowed`). `subscription_effective_settings` already
+  ignores a workspace override of a locked key, so the effective outcome is
+  the one the lock gives, and M5's trigger, which refuses a workspace write
+  of a locked key with `42501`, is never contradicted (0738 disables
+  non-internal triggers on the relations it moves during the owner window,
+  so the trigger would not fire there, but an unseen override would take
+  effect if the organization later unlocked the key). The workspace follows
+  the organization's locked value after the cutover. Each such workspace is
+  listed in the report as `disposition:local_pool_freeze_locked:<workspace>`
+  (its inference source was not frozen on `workspace`) or
+  `disposition:local_rotation_locked:<workspace>` (its local rotation mode
+  and primary were not applied), and the parity metric
+  `locked_workspace_keys_untouched` proves every such key kept its value.
+  An administrator who later unlocks the key re-applies the setting by hand.
+  The settings trigger also admits a widening workspace write only at READ
+  COMMITTED. The cutover's triggers are disabled during the owner window, so
+  it is never reached, but the preflight still refuses any other isolation
+  up front (`55000`), so a database or role default cannot change the
+  outcome. The runbook says not to set one.
+  Before any relation lock or settings read, the cutover takes each
+  organization's shared settings lock
+  (`pg_advisory_xact_lock_shared(hashtextextended('subscription-settings-locks:'
+  || account_id, 0))`) in ascending order, as every workspace override
+  writer must. The drained window means nothing contends. Every existing
+  organization is locked because its cutover and settings rows are moved.
+  Personal-workspace rotation and primary overrides move too: D-18 refuses
+  them only through the administrator settings API, not the owner's routes
+  or data migration. Organization locks still win and produce explicit
+  non-parity dispositions.
+- **Per-provider bindings.** Require the three-column binding key and the
+  enabled provider-identity trigger. Keep that trigger enabled during the
+  owner window; snapshot every non-xai binding and compare the whole row
+  after migration. Automatic and explicit xai pins coexist with other
+  providers' pins. The first drained provider cutover drops the rolling
+  session-only index after preflight and before inserting bindings; later
+  cutovers tolerate absence. Never restart an old image after that drop:
+  old readers and Codex automatic UPDATE do not fail closed.
+- **Steer and Cancel.** The legacy SuperGrok supersede in the Steer path is
+  gone (no legacy waiter can be live after the receipt the binary
+  requires). Steer and Cancel call
+  `deleteSubscriptionCoreWaitersForTurns` with no provider filter, the same
+  provider-neutral cleanup used by the core waiter runtime.
+- **Read-only legacy.** `SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES` in
+  `runtime-posture.ts` lists each provider's legacy tables (SuperGrok's five
+  now, Claude's in C3). Role provisioning grants the runtime `SELECT` only
+  on them once the provider's receipt exists. The posture evaluator
+  tolerates full DML on a provider's legacy tables while its receipt is
+  missing and then reports only the missing receipt, so a rolling binary
+  before the window sees one violation, not five. Once the receipt exists,
+  restrictive `<table>_closed_insert` and `<table>_closed_update` policies
+  on each of the five tables refuse every insert and update (`WITH CHECK
+  (NOT subscription_provider_cutover_committed('xai'))`). They are per
+  command, never `FOR ALL`: a restrictive read policy without the
+  `lifecycle_backfill_read_active` branch makes the product lifecycle
+  backfill refuse the table as a source (found by its real-PostgreSQL
+  suite), and reads need no change. New legacy
+  `xai_subscription` authorities are refused by a restrictive `INSERT`
+  policy on `organization_user_resource_authorities`. The legacy connect,
+  rotation and pin routines run as the owner, which FORCE row security
+  binds, so they cannot write either. The policies leave deletes open.
+  Organization retention deletion removes an offboarded member's migrated
+  connection with their Personal workspace; row security hides their legacy
+  `user` rows from it, as before the cutover, and 0738 has blanked those rows'
+  ciphertext. 0738 reduces the legacy disconnect routine to a refusal with
+  `55000` (its old body could never run after the receipt), so it can never
+  report a revocation while the moved connection keeps serving. Membership lifecycle still revokes, retains and restores the
+  existing authorities. The migration asserts FORCE on the five tables.
+- **Drain check.** Besides the listed runtime logins, the drain check
+  refuses any other client session whose non-superuser role, other than the
+  schema owner, can insert, update or delete any of the 37 relations the
+  cutover locks, so a runtime login missing from the passed list cannot
+  write during the window.
+- **Personal fallback opt-in.** The opt-in follows the "Workspace-scoped
+  credential in a Personal workspace" row only: owners of accounts connected
+  in their Personal workspace are opted in, owners of only `user`-scoped
+  accounts are not, because the preference is per person and would also
+  cover their other providers' personal connections.
+- **Quota window.** A SuperGrok connection's quota snapshot has one window,
+  id `billing` (`SUBSCRIPTION_CORE_XAI_QUOTA_WINDOW_ID`), the id the core
+  adapter writes for SuperGrok usage.
+- **Readiness.** `SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.xai` is 0738, so a
+  binary with 0738 in its ledger refuses to start without the `xai` receipt
+  (the provider-keyed readiness function
+  `subscription_provider_cutover_committed('xai')`).
+- **Tests of the legacy runtime.** Characterization tests of the legacy
+  SuperGrok runtime run in a database that withholds 0738 (the shared test
+  harness's `withheldMigrations` option builds a separate template with
+  those ledger rows pre-recorded), the state a rolling deployment has
+  before the window. X4 deletes them with the legacy runtime.
+- **Temporal seam.** 0738 keeps every live waiter's id (as `waiter_id`),
+  generation, wake revisions and blocked-turn generation and moves its
+  pending wake to the wake outbox, so a workflow parked on a legacy
+  SuperGrok wait reconciles the reference its history recorded (`provider:
+  "xai"`, waiter id, generation) against the core waiter with the same id
+  and fences. `test/integration/subscription-core-xai-cutover.integration.ts`
+  parks a turn through the legacy arm path, records the peek result,
+  migrates, asserts the moved waiter and outbox row, and replays the pinned
+  capacity-wait history rewritten with SuperGrok references. Resuming
+  through that reference needs X1b's core reconcile path for `xai`; X3
+  merges after X1b. The integration suite covers the moved waiter,
+  unchanged wake fences and reset timers, and workflow replay; activation
+  also requires the parked Personal-turn quota-recovery path to pass.
 
 #### Verification plan
 

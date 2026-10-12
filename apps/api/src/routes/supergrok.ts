@@ -78,6 +78,7 @@ import { projectClientModel } from "../model-catalog";
 import { readXaiCoreStatus } from "../xai-subscription-core";
 import { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
 import { requireConnectOwnerAuthority } from "../integrations/connect-authority";
+import { databaseUnavailableHttpError } from "../http/api-error";
 
 type XaiAuthoritySnapshot = XaiProviderAccountAuthoritySnapshotV1;
 
@@ -173,6 +174,11 @@ async function resolveReadAuthority(
 }
 
 function xaiHttpError(error: unknown, fallback: string): HTTPException {
+  // A connect poll can lose its database connection after provider login or
+  // persistence. Preserve retryability and unknown mutation outcome instead
+  // of misclassifying the outage as a provider 502.
+  const databaseError = databaseUnavailableHttpError(error, "POST");
+  if (databaseError) return databaseError;
   if (error instanceof HTTPException) return error;
   if (error instanceof XaiSubscriptionError) {
     const status =

@@ -148,25 +148,33 @@ describe.skipIf(!realDb)("B1 failover on real PostgreSQL as non-owner app role",
     expect(result).toEqual({ status: "completed", value: true });
   });
   test("D-46 rolling uniqueness blocks crossing but preserves same-provider fallback", async () => {
-    const org = await fixture.organization();
-    await fixture.connection(org, home, { allowedModelIds: ["home/second"] });
-    await fixture.connection(org, target);
-    const work = await fixture.turn(org);
-    expect(
-      await withSubscriptionCoreAcceptedTurn(fixture.client.db, work.identity, (tx) =>
-        subscriptionCoreBindingsPermitCrossing(tx),
-      ),
-    ).toEqual({ status: "completed", value: false });
-    const result = await place(fixture.client.db, home, work);
-    expect(result).toMatchObject({
-      kind: "run",
-      provider: home.adapter.provider,
-      modelId: "home/second",
-    });
-    expect(await fixture.binding(work, target.adapter.provider)).toBeNull();
+    // The drained provider cutover removes this rolling compatibility index.
+    // Recreate that historical posture explicitly, rather than depending on
+    // which migration happened to be the latest when this suite was written.
+    await fixture.admin`create unique index if not exists subscription_session_bindings_rolling_session_idx
+      on subscription_session_bindings (workspace_id, session_id)`;
+    try {
+      const org = await fixture.organization();
+      await fixture.connection(org, home, { allowedModelIds: ["home/second"] });
+      await fixture.connection(org, target);
+      const work = await fixture.turn(org);
+      expect(
+        await withSubscriptionCoreAcceptedTurn(fixture.client.db, work.identity, (tx) =>
+          subscriptionCoreBindingsPermitCrossing(tx),
+        ),
+      ).toEqual({ status: "completed", value: false });
+      const result = await place(fixture.client.db, home, work);
+      expect(result).toMatchObject({
+        kind: "run",
+        provider: home.adapter.provider,
+        modelId: "home/second",
+      });
+      expect(await fixture.binding(work, target.adapter.provider)).toBeNull();
+    } finally {
+      await fixture.admin`drop index subscription_session_bindings_rolling_session_idx`;
+    }
   });
   test("D-33/D-36 cross-provider placement writes only target after rolling window closes", async () => {
-    await fixture.admin`drop index subscription_session_bindings_rolling_session_idx`;
     const org = await fixture.organization();
     const homeId = await fixture.connection(org, home);
     const targetId = await fixture.connection(org, target);
@@ -1333,6 +1341,48 @@ describe.skipIf(!realDb)("B1 failover on real PostgreSQL as non-owner app role",
       release();
       await first;
     }
+  });
+
+  test("D-33 home-only placement holds the same session fence as provider switching", async () => {
+    const org = await fixture.organization();
+    await fixture.connection(org, home);
+    const work = await fixture.turn(org);
+    const key = `subscription-failover:${org.workspaceId}:${work.identity.sessionId}`;
+    let release!: () => void;
+    let entered!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const ready = new Promise<void>((resolve) => { entered = resolve; });
+    const blocker = withSubscriptionCoreAcceptedTurn(fixture.client.db, work.identity, async (tx) => {
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${key}, 0))`);
+      entered();
+      await held;
+    });
+    await ready;
+    const placing = place(fixture.client.db, home, {
+      ...work,
+      crossProviderFailoverEnabled: false,
+    });
+    try {
+      let waiting = false;
+      for (let attempt = 0; attempt < 100 && !waiting; attempt++) {
+        const [row] = await fixture.admin<{ waiting: boolean }[]>`select exists (
+          select 1 from pg_locks where locktype = 'advisory' and not granted
+            and classid = ((hashtextextended(${key}, 0) >> 32) & 4294967295)::oid
+            and objid = (hashtextextended(${key}, 0) & 4294967295)::oid
+        ) as waiting`;
+        waiting = row!.waiting;
+        if (!waiting) await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      expect(waiting).toBe(true);
+      const [leases] = await fixture.admin<{ count: number }[]>`select count(*)::int as count
+        from subscription_leases where turn_id = ${work.identity.turnId}::uuid`;
+      expect(leases!.count).toBe(0);
+    } finally {
+      release();
+      await blocker;
+      await placing;
+    }
+    expect(await placing).toMatchObject({ kind: "run" });
   });
 
   test("D-46 transactional rolling-index drop preserves provider key and rolls back on failure", async () => {

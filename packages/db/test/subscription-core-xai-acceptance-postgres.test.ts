@@ -8,33 +8,18 @@
  * exact owner only; and after the receipt no acceptance computes xai's v1
  * value from live state.
  *
- * Run this file in its own process: the registration below replaces module
- * bindings for the whole process (the CI shard classifier isolates files that
- * call mock.module).
+ * Uses the registered production binding, with the receipt withheld until
+ * the before/after acceptance fixture has recorded its legacy source.
  */
-import { afterAll, beforeAll, describe, expect, mock, setDefaultTimeout, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { sql } from "drizzle-orm";
 import * as realRegistry from "../src/subscription-core-providers";
-import type { SubscriptionCoreProvider } from "../src/subscription-core/provider";
 import { SUBSCRIPTION_CORE_XAI } from "../src/subscription-core-xai-adapter";
 
 setDefaultTimeout(180_000);
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
-// What production registers, read before the test registration.
-const productionProviderIds = realRegistry.subscriptionCoreProviderIds();
-const realProvider = realRegistry.subscriptionCoreProvider;
-const lookup = (providerId: string): SubscriptionCoreProvider =>
-  providerId === "xai"
-    ? (SUBSCRIPTION_CORE_XAI as SubscriptionCoreProvider)
-    : realProvider(providerId);
-mock.module(Bun.resolveSync("../src/subscription-core-providers", import.meta.dir), () => ({
-  ...realRegistry,
-  subscriptionCoreProviderIds: () => [...productionProviderIds, "xai"].sort(),
-  subscriptionCoreProvider: lookup,
-  subscriptionCoreAdapter: (providerId: string) => lookup(providerId).adapter,
-}));
 const db = await import("../src");
 const { encryptEnvironmentValue } = await import("../src/environment-crypto");
 const { rawRows, setSubjectRlsContext, withRlsContext } = await import("../src/database");
@@ -208,7 +193,9 @@ let beforeReceipt: { v2: unknown; xai: unknown } | null = null;
 
 beforeAll(async () => {
   if (!realDb) return;
-  shared = await acquireSharedTestDatabase("subscription-core-xai-acceptance");
+  shared = await acquireSharedTestDatabase("subscription-core-xai-acceptance", {
+    withheldMigrations: ["0738_subscription_core_xai_cutover.sql"],
+  });
   if (!shared) throw new Error("Real PostgreSQL is required");
   client = db.createDb(shared.appUrl, { max: 4 });
   org = await organization();
@@ -244,8 +231,7 @@ describe.skipIf(!realDb)("SuperGrok on the shared core's writers (M4 X2b)", () =
     expect(role).toEqual({ currentUser: "opengeni_app", superuser: false, bypassRls: false });
   });
 
-  test("production registers only Codex; this process registers SuperGrok", () => {
-    expect(productionProviderIds).toEqual(["codex"]);
+  test("production registers Codex and SuperGrok", () => {
     expect(realRegistry.subscriptionCoreProviderIds()).toEqual(["codex", "xai"]);
   });
 

@@ -158,6 +158,24 @@ export async function placeSubscriptionCoreTurnWithFailover(
 ): Promise<SubscriptionCoreFailoverPlacement> {
   if (!Number.isSafeInteger(request.executionGeneration) || request.executionGeneration < 1)
     throw new Error("Failover placement requires a positive execution generation");
+  // The route probe, foreign-lease cleanup and home-only placement must
+  // share the same session fence as cross-provider placement. Otherwise a
+  // concurrent caller can switch the lease between those transactions and
+  // send a foreign lease into the home-only reader. Nested RLS scopes use
+  // savepoints on this transaction, so the fence survives every branch.
+  const result = await withSubscriptionCoreAcceptedTurn(db, request.identity, async (tx) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(
+      ${`subscription-failover:${request.identity.workspaceId}:${request.identity.sessionId}`}, 0))`);
+    return placeSubscriptionCoreTurnWithFailoverLocked(tx, home, request);
+  });
+  return result.status === "not_visible" ? { kind: "not_visible" } : result.value;
+}
+
+async function placeSubscriptionCoreTurnWithFailoverLocked(
+  db: Database,
+  home: SubscriptionCoreProvider,
+  request: SubscriptionCoreFailoverRequest,
+): Promise<SubscriptionCoreFailoverPlacement> {
   const homeId = subscriptionCoreProviderId(home);
   const homePlacement = async (): Promise<SubscriptionCorePlacement> => {
     // An old cross-provider lease must never reach M4's home-only reader.

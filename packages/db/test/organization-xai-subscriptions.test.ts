@@ -46,6 +46,14 @@ import {
   getSubscriptionCoreOrganizationCodexProjection,
   type Database,
 } from "../src";
+import { SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS } from "../src/runtime-posture";
+
+// Characterizes the legacy SuperGrok runtime, which runs only before the
+// drained SuperGrok cutover: the database withholds that migration. Removed
+// with the legacy runtime.
+const LEGACY_XAI_WORLD = {
+  withheldMigrations: [SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.xai!],
+};
 
 const realTest = test.skipIf(process.env.OPENGENI_REQUIRE_REAL_DB !== "1");
 let shared: SharedTestDatabase;
@@ -644,7 +652,10 @@ realTest.each(["vercel_gateway", "openrouter"] as const)(
 );
 beforeAll(async () => {
   if (process.env.OPENGENI_REQUIRE_REAL_DB !== "1") return;
-  const database = await acquireSharedTestDatabase("organization-xai-subscriptions");
+  const database = await acquireSharedTestDatabase(
+    "organization-xai-subscriptions",
+    LEGACY_XAI_WORLD,
+  );
   if (!database) throw new Error("Real PostgreSQL is required");
   shared = database;
   client = createDb(shared.appUrl, { max: 4 });

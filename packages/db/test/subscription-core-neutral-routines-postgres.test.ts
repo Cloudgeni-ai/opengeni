@@ -32,6 +32,10 @@ const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let database: OwnerMigratedTestDatabase | null = null;
 let client: DbClient | null = null;
 let appConnectionUrl = "";
+/** This binary requires the SuperGrok receipt, which the rolling state lacks. */
+const BEFORE_XAI_CUTOVER = [
+  "database is missing the xai subscription-core cutover receipt (0738_subscription_core_xai_cutover.sql); apply the pending migrations first",
+];
 /** Runtime posture violations right after applying 0707 to a provisioned database, before provisioning again. */
 let unprovisionedPostureViolations: string[] | null = null;
 // A deployment's own application role (not named opengeni_app), configured
@@ -76,10 +80,14 @@ beforeAll(async () => {
     // Reads the registry/receipt and rewrites the admission guard withheld above.
     "0737_subscription_failover_readiness_and_request_fence.sql",
   ];
+  // The drained SuperGrok cutover is maintenance-only: a rolling deployment
+  // of 0707 never applies it, so it stays recorded and unapplied here.
+  const xaiCutover = "0738_subscription_core_xai_cutover.sql";
   const owner = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
-    for (const name of withheld) await owner`insert into schema_migrations(name) values (${name})`;
+    for (const name of [...withheld, xaiCutover])
+      await owner`insert into schema_migrations(name) values (${name})`;
     await migrate(database.ownerUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
     await owner`delete from schema_migrations where name in ${owner(withheld)}`;
@@ -397,7 +405,7 @@ describe("provider-neutral subscription-core routines (migration 0707)", () => {
         targetSchema: "public",
       };
       const posture = await inspectRuntimeDatabasePosture(client!.db, options);
-      expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
+      expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual(BEFORE_XAI_CUTOVER);
       for (const name of SUBSCRIPTION_CORE_NEUTRAL_PRIVATE_ROUTINES) {
         const found = posture.privateRoutines.filter((entry) => entry.name === name);
         expect(found).toHaveLength(1);
@@ -1025,7 +1033,7 @@ describe("provider-neutral subscription-core routines (migration 0707)", () => {
   test.skipIf(!realDb)(
     "applied to a provisioned database, 0707 keeps the runtime posture clean before provisioning again",
     () => {
-      expect(unprovisionedPostureViolations).toEqual([]);
+      expect(unprovisionedPostureViolations).toEqual(BEFORE_XAI_CUTOVER);
       // 0715 grants its two routines to every configured application role,
       // not only the default name, before provision-roles.
       expect(customRoleKindRoutinesBeforeProvision).toEqual({

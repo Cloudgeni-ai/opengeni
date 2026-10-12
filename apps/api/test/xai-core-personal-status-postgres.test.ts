@@ -16,19 +16,14 @@
  *   current generation, personal connections allowed). Nobody else
  *   re-reads it.
  *
- * SuperGrok stays unregistered in production until its cutover (X3); this
- * file registers the production binding in its own process and admits it on
- * its own test database. Billing is scripted; real network is denied.
- *
- * Run this file in its own process: the registration replaces module
- * bindings for the whole process.
+ * The migrated fixture uses the production SuperGrok registration and
+ * cutover receipt. Billing is scripted; real network is denied.
  */
 import {
   afterAll,
   beforeAll,
   describe,
   expect,
-  mock,
   setDefaultTimeout,
   spyOn,
   test,
@@ -48,10 +43,6 @@ import { subscriptionCoreXaiProvider } from "../../../packages/db/src/subscripti
 import { encryptEnvironmentValue } from "../../../packages/db/src/environment-crypto";
 import { rawRows } from "../../../packages/db/src/database";
 import { installNetworkDenialGuard } from "../../../packages/db/test/fixtures/subscription-core-fake-api-key";
-import {
-  admitTestSubscriptionCoreProvider,
-  testSubscriptionCoreProviderModules,
-} from "../../../packages/db/test/helpers/subscription-core-test-provider";
 
 setDefaultTimeout(180_000);
 
@@ -60,8 +51,6 @@ const XAI = subscriptionCoreXaiProvider({
     throw new Error("no token refresh is expected in this suite");
   }) as never,
 });
-for (const [specifier, factory] of testSubscriptionCoreProviderModules(XAI))
-  mock.module(specifier, factory);
 
 const {
   armSubscriptionCoreCapacityWait,
@@ -103,7 +92,6 @@ beforeAll(async () => {
   const acquired = await acquireSharedTestDatabase("xai-core-personal-status-postgres");
   if (!acquired) throw new Error("Real PostgreSQL is required");
   shared = acquired;
-  await admitTestSubscriptionCoreProvider(shared.admin, XAI);
   client = createDb(shared.appUrl, { max: 6 });
   network = installNetworkDenialGuard(() => []);
 }, 180_000);

@@ -434,7 +434,10 @@ let foreign: { grant: Grant; caller: Agent; target: { id: string } } | null = nu
 
 beforeAll(async () => {
   if (!realDb) return;
-  shared = await acquireSharedTestDatabase("subscription-core-xai-copy-paths");
+  shared = await acquireSharedTestDatabase("subscription-core-xai-copy-paths", {
+    // Sources must be accepted before the receipt installed below.
+    withheldMigrations: ["0738_subscription_core_xai_cutover.sql"],
+  });
   if (!shared) throw new Error("Real PostgreSQL is required");
   client = createDb(shared.appUrl, { max: 6 });
   // Every source is accepted before the receipt.
