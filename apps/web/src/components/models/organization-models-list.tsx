@@ -35,6 +35,11 @@ import {
 } from "@/components/model-access-policy";
 import { DefaultSessionModelPreferenceRow } from "@/components/default-session-model";
 import { compactionSummary } from "@/components/models/model-compaction-page";
+import {
+  AccountRulesOverviewSection,
+  OrganizationAccountRulesSection,
+  type ModelAccountSettingsOverviewState,
+} from "@/components/models/model-account-settings";
 import type { OrganizationModelDefaultsState } from "@/components/models/use-organization-model-defaults";
 import { ACCOUNT_COLUMNS } from "@/components/models/codex-models";
 import {
@@ -250,6 +255,8 @@ function useWorkspaceSnapshots(
 export function OrganizationModelsList({
   client,
   organizationDefaults,
+  accountRules,
+  modelLabel,
   onEditAllowed,
   onEditCompaction,
   organizationName,
@@ -273,6 +280,10 @@ export function OrganizationModelsList({
   client: OpenGeniBrowserClient;
   /** The defaults every workspace follows; owners and admins only, otherwise null. */
   organizationDefaults: OrganizationModelDefaultsState | null;
+  /** The organization's account rules and every workspace's; owners and admins only, otherwise null. */
+  accountRules?: ModelAccountSettingsOverviewState | null;
+  /** A model's name, for the fallback order. */
+  modelLabel?: (id: string) => string;
   onEditAllowed: () => void;
   onEditCompaction: () => void;
   organizationName: string;
@@ -453,6 +464,20 @@ export function OrganizationModelsList({
           onEditAllowed={onEditAllowed}
           onEditCompaction={onEditCompaction}
         />
+      ) : null}
+      {accountRules ? (
+        <>
+          <OrganizationAccountRulesSection
+            organizationName={organizationName}
+            state={accountRules}
+            modelLabel={modelLabel}
+          />
+          <AccountRulesOverviewSection
+            organizationName={organizationName}
+            state={accountRules}
+            onOpenWorkspace={(id) => onOpenWorkspace(id)}
+          />
+        </>
       ) : null}
       <Section
         title="Accounts"

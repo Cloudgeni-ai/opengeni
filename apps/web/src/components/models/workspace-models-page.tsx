@@ -124,6 +124,11 @@ import {
 import { useFocusOnNavigation } from "@/lib/use-focus-on-navigation";
 import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
 import { useOrganizationModelDefaults } from "./use-organization-model-defaults";
+import {
+  WorkspaceAccountRulesSection,
+  useModelAccountSettingsOverview,
+  useWorkspaceModelAccountSettings,
+} from "./model-account-settings";
 import { compactionSummary } from "./model-compaction-page";
 
 /* ----------------------------------------------------------------------------
@@ -332,6 +337,10 @@ export function WorkspaceModelsPageBody({
   const credits = useOpenGeniCredits(organizationId);
   // What every workspace follows until it changes it: owners and admins only.
   const organizationDefaults = useOrganizationModelDefaults(organizationId, organizationAdmin);
+  const accountRules = useModelAccountSettingsOverview(
+    organizationId,
+    organizationAdmin && !workspacePage,
+  );
 
   const backToList = () => nav.openAccount(undefined);
   const codexPlaces: CodexPlaces = {
@@ -1002,6 +1011,8 @@ export function WorkspaceModelsPageBody({
       <OrganizationModelsList
         client={client}
         organizationDefaults={organizationAdmin ? organizationDefaults : null}
+        accountRules={organizationAdmin ? accountRules : null}
+        modelLabel={(id) => catalog.models.find((model) => model.id === id)?.label ?? id}
         onEditAllowed={() => nav.openView("allowed-models")}
         onEditCompaction={() => nav.openView("compaction")}
         organizationName={organizationName}
@@ -1072,6 +1083,7 @@ export function WorkspaceModelsPageBody({
         <div className="mt-8 min-w-0">
           <ModelsList
             workspaceId={workspaceId}
+            personal={personal}
             organizationName={organizationName}
             revision={revision}
             canManageSettings={canManageSettings}
@@ -1377,6 +1389,7 @@ function WhoCanConnect({ organizationName }: { organizationName: string }) {
 
 function ModelsList({
   workspaceId,
+  personal,
   organizationName,
   revision,
   canManageSettings,
@@ -1392,6 +1405,8 @@ function ModelsList({
   providerSections,
 }: {
   workspaceId: string;
+  /** A Personal workspace follows the organization's account rules and has none of its own. */
+  personal: boolean;
   /** The organization whose defaults this workspace follows until it changes them. */
   organizationName: string;
   revision: number;
@@ -1413,6 +1428,7 @@ function ModelsList({
   providerSections: ReactNode;
 }) {
   const policy = useModelAccessPolicy(workspaceId);
+  const accountRules = useWorkspaceModelAccountSettings(workspaceId, !personal);
   const firstRevision = useRef(revision);
   useEffect(() => {
     if (revision !== firstRevision.current) void policy.reload();
@@ -1437,6 +1453,9 @@ function ModelsList({
         onEditAllowed={onEditAllowed}
         onEditCompaction={onEditCompaction}
       />
+      {personal ? null : (
+        <WorkspaceAccountRulesSection organizationName={organizationName} state={accountRules} />
+      )}
       <Section
         title="Accounts"
         description="Subscriptions, API keys and credits that pay for models here."
