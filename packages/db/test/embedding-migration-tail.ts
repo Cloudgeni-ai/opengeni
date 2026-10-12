@@ -224,4 +224,6 @@ export const embeddingMigrationTail = [
   "0730_maintenance_work_probes.sql",
   // Reads browser/outbox claim routines withheld by historical lifecycle fixtures.
   "0732_sandbox_maintenance_work_probes.sql",
+  // Owner-only routines over the shared connection table from withheld 0642.
+  "0721_subscription_core_owned_connection_usage.sql",
 ];
