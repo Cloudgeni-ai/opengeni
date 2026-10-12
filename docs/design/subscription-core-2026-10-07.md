@@ -2816,8 +2816,9 @@ cooldowns), are already readable without a credential through the 0707
 owner reader (`listSubscriptionCorePersonalConnectionRowsInTransaction`):
 exact owner membership, in their Personal workspace or a workspace they are
 a member of. A provider's status route serves personal-only users from that
-reader and refreshes live through `personal_owner`; no further routine is
-needed for the stored re-read.
+reader and refreshes live through `personal_owner` only for the verified
+owning person (the private-account owner check, below); no further routine
+is needed for the stored re-read.
 
 Known limit (not fail-open). These reads record no workspace operation
 ledger entry: the organization route has no workspace, and the ledger's
@@ -4520,14 +4521,16 @@ SuperGrok on the core:
   capped at the reset and at a sooner quarantine end
   (`reset_kind = bounded_refresh`). Its reconcile
   (`CoreWaitBinding.refreshBeforeReconcile`) re-reads billing for the
-  workspace's exhausted shared connections before placement evaluates,
+  workspace's exhausted shared connections and the personal connections
+  placement's personal authorization admits before placement evaluates,
   under the parked turn's exact accepted identity
   (`readSubscriptionCoreTurnIdentity`, never a synthetic one; without it the
   evaluation revokes and nothing is read), as the legacy waiter re-read
   billing. Without this, a parked turn in a quiet
   organization would sleep until the end of the credit period after credits
-  were back. A personal connection is never probed out of turn (X2a, shared
-  only); its exhaustion stands until its stored deadline (X2a). Codex
+  were back. The personal probe receives that exact identity as
+  `personalTurn`; ownerless or shared-only accepted work cannot borrow a
+  person's connection. Codex
   waiters are unchanged: they sleep until an authoritative reset. The waiter
   vocabulary's `recheckBeforeReset` mirrors the adapter flag, and the
   conformance suite checks that the two agree.
@@ -4620,6 +4623,27 @@ until X3. SuperGrok-specific code is the adapter's `fetchUsage`,
 - **Status** (EP-N23) reads the workspace's shared pool and validates the
   effective primary with one `liveModels` read; without an effective primary
   it reports `valid: false`. The payload shape is unchanged.
+  The viewer's own personal connections, through the owner-only reader,
+  count towards `connected` and `accountCount` wherever that reader shows
+  them (another person's never). Only in the viewer's own Personal
+  workspace, only when the shared pool has no effective primary, and only
+  for a caller who passes the owner check of a private account
+  (`requirePrivateSubscriptionHuman` with the Personal-workspace place, as
+  the Claude core usage route gates a personal connection: the owning
+  person with `connections:write`, by browser sign-in, a verified
+  external-identity assertion linked to them, or an agent with their full
+  access), is a personal connection the effective account (the first
+  `active` one, scope `user` as on the legacy path), validated by one live
+  billing read as its owner through the administered `personal_owner`
+  probe, which also applies the organization's personal-connections rule
+  (0735). Any other caller (a read-only agent, a plain bearer, the
+  person's own API keys, read-only or full) gets the stored count with
+  `valid: false`, and nothing is read live, recorded or woken. That reading is
+  stored like any usage observation; when it ends an exhaustion the status
+  wakes the organization's SuperGrok core waiters (`usage_recovered`, a
+  failed wake never fails the status), as the Codex and Claude usage
+  routes do. In a shared workspace a personal connection is never the
+  workspace's effective account, so nothing is read live there.
 - **Quota** (EP-N22). Core SuperGrok placement (`beforePlacement`) and the
   legacy callers on the core route (`refreshExhaustedXaiCoreQuota`) probe
   each shared connection whose stored quota is exhausted and was not read in
@@ -4632,19 +4656,47 @@ until X3. SuperGrok-specific code is the adapter's `fetchUsage`,
   below the limit end a quota exhaustion, the legacy SuperGrok rule. Codex
   does not set it. An at-limit reading (no known reset) is not below the
   limit and leaves the exhaustion and its deadline in place.
-- **Gap: personal connections (fails closed).** The legacy probe re-read
-  every exhausted account the person could use, personal ones included.
-  On the core nothing re-reads a personal SuperGrok connection's billing:
-  the service-subject probe sees shared connections only, and the
-  credential seam refuses a personal connection outside an exact accepted
-  turn. A personal connection's stored exhaustion therefore stands until
-  its stored deadline. The status likewise reports only the workspace's
-  shared pool, so a person whose only SuperGrok connection is personal
-  sees `connected: false` there. SuperGrok has no organization-level
-  status or usage route, so nothing else is affected. This is the same gap
-  Claude has; closing it needs provider-neutral owner-only reads (the
-  Claude C2c step). X3 either lands after them or ships with this
-  behaviour documented.
+  The exact accepted turn also re-reads the personal connections that
+  placement's personal authorization admits for that turn, and no others,
+  with the same 30-second interval
+  (`refreshExhaustedSubscriptionCoreTurnPersonalQuota`). Placement's later
+  choice can still pass over such an account (outside the Personal workspace
+  it needs fallback consent or an explicit binding, and the provider switch
+  applies in every workspace); the re-read is then the owner's own billing
+  read under the 0735 owner checks, which widens nothing. Inside the
+  accepted turn, placement's own `authorizeSubscriptionCoreFrozenPersonal`
+  (`authorize_subscription_personal_placement_access`) requires the turn's
+  initiating human to be the session owner, a private session or the
+  owner's Personal workspace, the frozen v2 entry for exactly the owner's
+  membership, and the organization's personal-connections rule, and mints
+  per-connection access only at the connection's current authority
+  generation; the personal rows that transaction can see are the allow-list.
+  The stored rows of those connections come from the owner-only reader in
+  the owner's Personal workspace, and each live read runs as the owner
+  through the administered `personal_owner` probe there (whatever workspace
+  the turn runs in), which rechecks the owner's membership, authority
+  generation and the personal-connections rule. Another initiator, a shared
+  session, background or shared-only work (no frozen entry), another
+  provider's or membership's entry, a stale generation and personal
+  connections turned off re-read no personal connection. A recovery wakes the
+  organization's SuperGrok core waiters; any failure keeps the stored state
+  and never blocks placement. The provider-neutral pieces live in
+  `subscription-core/personal-connections.ts`
+  (`subscriptionCorePersonalConnections`), keyed by provider only; the
+  SuperGrok wiring lives in the worker's `subscription-core-xai-quota.ts`.
+- **Personal connections (closed before X3).** X2a's core re-read only
+  shared billing and its status listed only the shared pool, so a person
+  whose only SuperGrok connection is personal saw `connected: false` and
+  kept a stored exhaustion until its deadline. The status and quota rules
+  above close that on the provider-neutral owner-only reads (#4159).
+  The core waiter reconcile (X1b's `refreshBeforeReconcile` hook) calls
+  `refreshExhaustedXaiCoreQuota` with the waiting turn's exact accepted
+  identity (`personalTurn`) before it reconciles, so a personal connection
+  is re-read only under placement's personal check for that turn, never as
+  background work on its own. A parked personal turn can therefore resume
+  before the stored deadline once billing recovers. SuperGrok
+  has no organization-level status or usage route, so nothing else is
+  affected.
 - **Image** (EP-N09/N10). A core-placed SuperGrok turn generates images on
   its own placed connection (`executeCoreXaiImageGeneration`): an `image`
   operation lease keyed by the ledger operation id at the turn's execution

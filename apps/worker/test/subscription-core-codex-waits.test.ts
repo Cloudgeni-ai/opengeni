@@ -12,7 +12,7 @@ import {
   wakeSubscriptionCoreCodexWaitersAndDeliver,
 } from "../src/activities/subscription-core-codex-waits";
 import { XAI_CORE_WAIT_BINDING } from "../src/activities/subscription-core-xai-waits";
-import * as xaiQuota from "../src/activities/xai-quota";
+import * as xaiQuota from "../src/activities/subscription-core-xai-quota";
 
 const restores: Array<{ mockRestore(): void }> = [];
 function spy<T extends object, K extends keyof T>(target: T, key: K) {
@@ -575,6 +575,7 @@ describe("capacity activities accept both waiter shapes", () => {
       settings: {},
       accountId: "account-1",
       workspaceId: "workspace-1",
+      personalTurn: parkedTurn,
     });
     expect(read).toHaveBeenCalledTimes(2);
     expect(reconcile).toHaveBeenCalledWith(

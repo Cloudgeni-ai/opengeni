@@ -44,9 +44,9 @@ import type { CoreRefusalBinding } from "./subscription-core-settlement";
 import type { SubscriptionCoreTurn } from "./turn-context";
 import { subscriptionTurnLeaseHolderId } from "./subscription-lease";
 import { selectXaiTurnCapacity } from "./xai-capacity";
-import { refreshExhaustedXaiCoreQuota } from "../xai-quota";
 import { recoverCoreHealthAndWake } from "../subscription-core-codex-waits";
 import { XAI_CORE_WAIT_BINDING } from "../subscription-core-xai-waits";
+import { refreshExhaustedXaiCoreQuota } from "../subscription-core-xai-quota";
 
 const XAI = SUBSCRIPTION_CORE_XAI as SubscriptionCoreProvider;
 const DISPLAY_NAME = "SuperGrok";
@@ -70,14 +70,17 @@ export const XAI_CORE_TURN_PROVIDER: CoreTurnPlacementProvider = {
       identity,
     );
   },
-  // Re-read billing for exhausted shared connections before placement
-  // trusts a stored exhaustion, as the legacy path did (EP-N22, X2a).
+  // Re-read billing for exhausted connections before placement trusts a
+  // stored exhaustion, as the legacy path did (EP-N22): the shared pool, and
+  // the personal connections placement's personal authorization admits for
+  // this exact turn.
   beforePlacement: async ({ db, settings }, identity) => {
     await refreshExhaustedXaiCoreQuota({
       db,
       settings,
       accountId: identity.accountId,
       workspaceId: identity.workspaceId,
+      personalTurn: identity,
     });
   },
   adopt: ({ providerTurn }, core, placement) => {
