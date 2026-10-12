@@ -204,6 +204,8 @@ export const embeddingMigrationTail = [
   "0718_inbox_time_sensitive_needs_you.sql",
   // Adds a trigger on the session bindings table from withheld 0642.
   "0723_subscription_binding_cache_clock.sql",
+  // Adds checks and triggers on the settings table from withheld 0642.
+  "0724_subscription_settings_locks.sql",
   // Patches the acceptance writers withheld 0669, 0688 and 0707 define.
-  "0724_subscription_personal_acceptance_reads.sql",
+  "0725_subscription_personal_acceptance_reads.sql",
 ];

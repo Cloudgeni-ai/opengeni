@@ -44,6 +44,8 @@ import {
   subscriptionCoreCodexResetAuthority,
   subscriptionCoreCodexResetCreditFence,
   SubscriptionCoreCodexOrganizationManagedError,
+  SubscriptionSettingsLockedError,
+  updateOrganizationSubscriptionSettings,
   withSessionRlsActorContext,
   withSubscriptionCoreAcceptedTurn,
   type DbClient,
@@ -2036,6 +2038,56 @@ async function personalCase(): Promise<void> {
   );
   expect(anonymous?.currentAccount).toBeNull();
   await shared!.admin`delete from subscription_leases where turn_id = ${turn.id}::uuid`;
+
+  // The personal primary is an upsert: its guard holds the shared settings
+  // lock while it waits for the Personal row a lock change has locked. The
+  // lock change yields and retries (0724), so neither side deadlocks.
+  for (let round = 0; round < 12; round += 1) {
+    await updateOrganizationSubscriptionSettings(client!.db, {
+      organizationId: org.accountId,
+      actorSubjectId: org.ownerSubjectId,
+      patch: { locked: [] },
+    });
+    const [lockChange, primary] = await Promise.allSettled([
+      updateOrganizationSubscriptionSettings(client!.db, {
+        organizationId: org.accountId,
+        actorSubjectId: org.ownerSubjectId,
+        patch: { locked: ["crossProviderFailover"] },
+      }),
+      withSessionRlsActorContext({ subjectId: member.subjectId }, () =>
+        setSubscriptionCoreCodexPrimary(client!.db, personalAdmin),
+      ),
+    ]);
+    expect({ round, lockChange: lockChange.status, primary: primary.status }).toEqual({
+      round,
+      lockChange: "fulfilled",
+      primary: "fulfilled",
+    });
+  }
+  await updateOrganizationSubscriptionSettings(client!.db, {
+    organizationId: org.accountId,
+    actorSubjectId: org.ownerSubjectId,
+    patch: { locked: [] },
+  });
+
+  // A rotation lock (0724) binds the person's own primary too: it is refused
+  // as a lock (not a 500), and nothing is written.
+  await shared!.admin`update subscription_settings set locked_settings = '{rotation}'
+    where account_id = ${org.accountId}::uuid and workspace_id is null`;
+  const lockedPrimary = await withSessionRlsActorContext({ subjectId: member.subjectId }, () =>
+    setSubscriptionCoreCodexPrimary(client!.db, personalAdmin),
+  ).then(
+    () => null,
+    (error: unknown) => error,
+  );
+  expect(lockedPrimary).toBeInstanceOf(SubscriptionSettingsLockedError);
+  expect((lockedPrimary as SubscriptionSettingsLockedError).settings).toEqual(["rotation"]);
+  const [personalRow] = await shared!.admin<{ rotation: unknown }[]>`
+    select rotation from subscription_settings
+    where account_id = ${org.accountId}::uuid and workspace_id = ${member.personalWorkspaceId}::uuid`;
+  expect(personalRow?.rotation ?? null).toBeNull();
+  await shared!.admin`update subscription_settings set locked_settings = '{}'
+    where account_id = ${org.accountId}::uuid and workspace_id is null`;
 }
 
 async function organizationRedemptionCase(): Promise<void> {

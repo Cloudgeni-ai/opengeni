@@ -272,6 +272,11 @@ import type {
   WorkspaceModelAccessPolicy,
   OrganizationModelDefaults,
   UpdateOrganizationModelDefaultsRequest,
+  ModelAccountSettingsOverview,
+  OrganizationModelAccountSettings,
+  UpdateOrganizationModelAccountSettingsRequest,
+  UpdateWorkspaceModelAccountSettingsRequest,
+  WorkspaceModelAccountSettings,
   OrganizationAgentAdminAccess,
   UpdateOrganizationAgentAdminAccessRequest,
   SessionAdminAccess,
@@ -5507,6 +5512,64 @@ export class OpenGeniClient {
     return await this.requestJson<OrganizationModelDefaults>(
       "PATCH",
       `/v1/organizations/${organizationId}/model-defaults`,
+      request,
+    );
+  }
+
+  /** Organization model-account settings and locks (owners and admins). */
+  async getOrganizationModelAccountSettings(
+    organizationId: string,
+  ): Promise<OrganizationModelAccountSettings> {
+    return await this.requestJson<OrganizationModelAccountSettings>(
+      "GET",
+      `/v1/organizations/${organizationId}/model-account-settings`,
+    );
+  }
+
+  /** Change organization model-account settings or locks (owners and admins). */
+  async updateOrganizationModelAccountSettings(
+    organizationId: string,
+    request: UpdateOrganizationModelAccountSettingsRequest,
+  ): Promise<OrganizationModelAccountSettings> {
+    return await this.requestJson<OrganizationModelAccountSettings>(
+      "PATCH",
+      `/v1/organizations/${organizationId}/model-account-settings`,
+      request,
+    );
+  }
+
+  /** Every shared workspace's effective model-account settings and their sources (owners and admins). */
+  async getModelAccountSettingsOverview(
+    organizationId: string,
+    options: { after?: string; limit?: number } = {},
+  ): Promise<ModelAccountSettingsOverview> {
+    const query = new URLSearchParams();
+    if (options.after !== undefined) query.set("after", options.after);
+    if (options.limit !== undefined) query.set("limit", String(options.limit));
+    return await this.requestJson<ModelAccountSettingsOverview>(
+      "GET",
+      `/v1/organizations/${organizationId}/model-account-settings/overview${query.size ? `?${query}` : ""}`,
+    );
+  }
+
+  /** A workspace's effective model-account settings, sources and overrides. */
+  async getWorkspaceModelAccountSettings(
+    workspaceId: string,
+  ): Promise<WorkspaceModelAccountSettings> {
+    return await this.requestJson<WorkspaceModelAccountSettings>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/model-account-settings`,
+    );
+  }
+
+  /** Override, or follow again, the organization's unlocked settings (workspace admins). */
+  async updateWorkspaceModelAccountSettings(
+    workspaceId: string,
+    request: UpdateWorkspaceModelAccountSettingsRequest,
+  ): Promise<WorkspaceModelAccountSettings> {
+    return await this.requestJson<WorkspaceModelAccountSettings>(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/model-account-settings`,
       request,
     );
   }

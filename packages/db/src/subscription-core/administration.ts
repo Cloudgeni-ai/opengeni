@@ -34,6 +34,12 @@ import {
 } from "./access";
 import { SubscriptionCoreError } from "./errors";
 import {
+  lockSubscriptionSettings,
+  SUBSCRIPTION_SETTINGS_TRANSACTION,
+  subscriptionSettingLockRefusal,
+  throwIfSubscriptionSettingLocked,
+} from "../subscription-settings-lock";
+import {
   subscriptionCoreConnectionKind,
   subscriptionCoreProviderId,
   type SubscriptionCoreProvider,
@@ -478,7 +484,13 @@ export async function readSubscriptionCoreOrganizationPool(
   );
 }
 
+/**
+ * A row-level security refusal (42501). The settings lock guard (0724) also
+ * raises 42501; it is not a refusal to see the row, so it is excluded here and
+ * surfaces as `SubscriptionSettingsLockedError`.
+ */
 export function isSubscriptionCoreRlsRefusal(error: unknown): boolean {
+  if (subscriptionSettingLockRefusal(error) !== null) return false;
   const code = (error as { code?: unknown } | null)?.code;
   const causeCode = (error as { cause?: { code?: unknown } } | null)?.cause?.code;
   return code === "42501" || causeCode === "42501";
@@ -538,15 +550,41 @@ async function withAdministration<T>(
   db: Database,
   input: SubscriptionCoreAdministration,
   fn: (tx: Database) => Promise<T>,
+  options: { writesSettings?: boolean } = {},
 ): Promise<T> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (tx) => {
-      await setSubjectRlsContext(tx, input.subjectId);
-      return await fn(tx);
-    },
-  );
+  try {
+    return await withRlsContext(
+      db,
+      { accountId: input.accountId, workspaceId: input.workspaceId },
+      async (tx) => {
+        await setSubjectRlsContext(tx, input.subjectId);
+        // A workspace route that writes the workspace's settings row takes the
+        // settings lock before any row lock (see lockSubscriptionSettings);
+        // routes that never write settings do not queue behind a lock change.
+        if (input.workspaceId !== null && options.writesSettings === true) {
+          await lockSubscriptionSettings(tx, input.accountId, "shared");
+        }
+        return await fn(tx);
+      },
+      // These routines write settings rows: 0724 admits a widening write
+      // only at READ COMMITTED, whatever the connection default.
+      SUBSCRIPTION_SETTINGS_TRANSACTION,
+    );
+  } catch (error) {
+    // A write the organization's settings lock refused (0724), for example a
+    // workspace rotation, primary or source change: nothing was written.
+    throwIfSubscriptionSettingLocked(error);
+    throw error;
+  }
+}
+
+/** `withAdministration` for a route that may write a settings row. */
+async function withSettingsAdministration<T>(
+  db: Database,
+  input: SubscriptionCoreAdministration,
+  fn: (tx: Database) => Promise<T>,
+): Promise<T> {
+  return await withAdministration(db, input, fn, { writesSettings: true });
 }
 
 /**
@@ -1170,7 +1208,7 @@ export async function setSubscriptionCorePrimary(
   // connections alike (after the binding's own checks).
   subscriptionCoreProviderId(provider);
   if (provider.settings.primaryColumn === null) throw primaryUnsupported(provider);
-  return await withAdministration(db, input, async (tx) => {
+  return await withSettingsAdministration(db, input, async (tx) => {
     const personal = await managePersonalConnection(tx, provider, input, "primary");
     if (personal)
       return { activated: personal.id, wake: wakeFor(provider, input, "primary_changed") };
@@ -1228,7 +1266,7 @@ export async function setSubscriptionCoreRotation(
   provider: SubscriptionCoreProvider,
   input: SubscriptionCoreAdministration & { rotationEnabled: boolean },
 ): Promise<{ primaryConnectionId: string | null; wake: SubscriptionCoreWake } | null> {
-  return await withAdministration(db, input, async (tx) => {
+  return await withSettingsAdministration(db, input, async (tx) => {
     const written = await writeSettingsRow(tx, provider, input, {
       rotationMode: input.rotationEnabled ? "spread" : "primary_first",
       ...(await inheritedPrimaryForOverride(tx, provider, input)),
@@ -1262,7 +1300,7 @@ export async function setSubscriptionCoreWorkspaceSource(
     mode: SubscriptionCoreWorkspaceSourceMode;
   },
 ): Promise<{ pool: SubscriptionCoreWorkspacePool; wake: SubscriptionCoreWake }> {
-  return await withAdministration(db, input, async (tx) => {
+  return await withSettingsAdministration(db, input, async (tx) => {
     const [workspace] = await rawRows<{ workspace_kind: string }>(
       tx,
       sql`select get_workspace_kind(${input.accountId}::uuid, ${input.workspaceId}::uuid)

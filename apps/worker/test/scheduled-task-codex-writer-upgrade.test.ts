@@ -46,8 +46,8 @@ test("a pre-writer personal-resource task retains its execution proof across mig
   const compat = "0716_subscription_authority_compat.sql";
   // 0717 requires 0716's routines; it follows 0716.
   const fences = "0717_subscription_authority_fences.sql";
-  // 0724 patches the acceptance writers 0688 and 0707 define; it follows them.
-  const acceptanceReads = "0724_subscription_personal_acceptance_reads.sql";
+  // 0725 patches the acceptance writers 0688 and 0707 define; it follows them.
+  const acceptanceReads = "0725_subscription_personal_acceptance_reads.sql";
   try {
     // Stage the actual pre-writer ledger, including on the stacked cutover
     // branch. This is a rolling/gate-off regression, not cutover activation.

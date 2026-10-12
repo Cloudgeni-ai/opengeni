@@ -187,16 +187,21 @@ describe("shared subscription core M2 PostgreSQL contracts", () => {
         false, ${shared!.admin.json(organizationFallbackOrder)}::jsonb, true, false,
         ARRAY['personalFallbackAllowed']::text[]
       )`;
-      await shared!.admin`
-      insert into subscription_settings (
-        account_id, workspace_id, codex_primary_connection_id, rotation, providers,
-        cross_provider_failover, fallback_order, personal_fallback_allowed
-      ) values (
-        ${fixture.accountId}, ${fixture.workspaceId}, ${connection!.id}::uuid,
-        ${shared!.admin.json({ codex: { mode: "primary_first" } })}::jsonb,
-        ${shared!.admin.json(workspaceProviders)}::jsonb, true,
-        ${shared!.admin.json(workspaceFallbackOrder)}::jsonb, true
-      )`;
+      // A locked workspace override stored before 0724's guard existed (the
+      // guard refuses it now): the resolver must still ignore it.
+      await shared!.admin.begin(async (tx) => {
+        await tx`set local session_replication_role = replica`;
+        await tx`
+        insert into subscription_settings (
+          account_id, workspace_id, codex_primary_connection_id, rotation, providers,
+          cross_provider_failover, fallback_order, personal_fallback_allowed
+        ) values (
+          ${fixture.accountId}, ${fixture.workspaceId}, ${connection!.id}::uuid,
+          ${shared!.admin.json({ codex: { mode: "primary_first" } })}::jsonb,
+          ${shared!.admin.json(workspaceProviders)}::jsonb, true,
+          ${shared!.admin.json(workspaceFallbackOrder)}::jsonb, true
+        )`;
+      });
 
       const policy: SubscriptionSettingsPolicy = {
         organization: {
@@ -359,15 +364,19 @@ describe("shared subscription core M2 PostgreSQL contracts", () => {
           ${shared!.admin.json(organization.providers)}::jsonb, false,
           ${shared!.admin.json(organization.fallbackOrder)}::jsonb, true, false, ${locked}
         )`;
-      await shared!.admin`
-        insert into subscription_settings (
-          account_id, workspace_id, rotation, providers, fallback_order
-        ) values (
-          ${fixture.accountId}, ${fixture.workspaceId},
-          ${shared!.admin.json(workspace.rotation)}::jsonb,
-          ${shared!.admin.json(workspace.providers)}::jsonb,
-          ${shared!.admin.json(workspace.fallbackOrder)}::jsonb
-        )`;
+      // Locked overrides stored before 0724's guard existed (it refuses them now).
+      await shared!.admin.begin(async (tx) => {
+        await tx`set local session_replication_role = replica`;
+        await tx`
+          insert into subscription_settings (
+            account_id, workspace_id, rotation, providers, fallback_order
+          ) values (
+            ${fixture.accountId}, ${fixture.workspaceId},
+            ${shared!.admin.json(workspace.rotation)}::jsonb,
+            ${shared!.admin.json(workspace.providers)}::jsonb,
+            ${shared!.admin.json(workspace.fallbackOrder)}::jsonb
+          )`;
+      });
 
       const expected = effectiveSettings(
         {

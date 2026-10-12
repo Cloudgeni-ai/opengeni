@@ -101,6 +101,21 @@ connection's current `refresh_generation`, so a stale refusal cannot
 quarantine a renewed credential (this replaces `version` fencing, which does
 not change on Claude refresh).
 
+Merging (`applyQuotaObservation`) depends on `source`. A usage-endpoint
+reading replaces the stored windows, so it can show an early reset. That is
+an adapter obligation: an adapter tags a reading `usage_endpoint` only when
+it reports every window the provider tracks, because the store treats such a
+reading as complete whether or not it is (a reading that omits an exhausted
+window ends that window's block). Whether a provider's usage endpoint meets
+this is checked before the provider is registered; for Claude it is a C3
+precondition, tracked separately. Response-header readings and refusals
+report only some windows: a stored exhausted window with a known future
+reset that such an observation does not report stays until that reset (one
+that reports the window again replaces it). Whatever the source, a running
+`exhaustedUntil` deadline or model cooldown is never shortened, and an older
+or undated reading never replaces a newer dated one. So a writer's own
+refusal is tagged `refusal`, never `usage_endpoint`.
+
 ## 3. Data model
 
 Every table is `ENABLE` + `FORCE ROW LEVEL SECURITY` and keyed by
@@ -171,6 +186,8 @@ One row per connection with the shared quota model and placement statistics
   enforcement source; the TypeScript `effectiveSettings` has a parity test.
   An organization overview reads the same function for every workspace
   (SUB-SET-05).
+- Locks are enforced at write time by migration 0724 and exposed through the
+  model-account settings API; see §5.5.
 
 ### 3.4 `subscription_session_bindings`
 
@@ -1034,12 +1051,16 @@ always stays after them.
   reads the waiters' sessions without locking and, only if there are any,
   key-share-locks the workspace row (as `lockSessionEventWriteRows` does, and
   before a runnable wake or a context clear's `FOR UPDATE` could interleave;
-  only a key share, because session-first writers key-share it through
-  foreign keys). It then records each session's generic wake in ascending
-  session order (whose archive guard locks the session, so Steer, Cancel and
-  a resume, which lock the session before its waiter, cannot interleave), and
-  only then bumps
-  those sessions' waiters and records their typed wakes. Typed delivery
+  only a key share, the weakest lock that excludes those `FOR UPDATE`
+  lockers: a stronger one would also hold off workspace updates, `FOR SHARE`
+  authority checks and concurrent wakes). It then locks those sessions
+  `FOR NO KEY UPDATE` in ascending session order (the generic wake's archive
+  guard's own mode, so Steer, Cancel and a resume, which lock the session
+  before its waiter, cannot interleave), skipping any that no longer exist or
+  are archived or imported (whose generic wake the guard would refuse), so
+  one such session no longer fails the whole wake. Only for the sessions it
+  locked and found executable does it record the generic wake, bump the
+  waiters and record their typed wakes. Typed delivery
   claims due rows (claim-generation fenced), signals `codexCapacityChanged`
   with the waiter's wake revision through `signalWithStart`, then marks the
   row delivered; a failed signal retries after 1 second doubling to 5
@@ -3223,7 +3244,7 @@ of row 0 above lands in exactly one of them:
   patched functions, the existing rows the new comparisons reject, and the
   callers of `validate_scheduled_agent_run_live_authority`); and the defects
   in earlier merged work listed there.
-- **Part 3 (migration 0724), acts on deploy:** a defect fix in earlier
+- **Part 3 (migration 0725), acts on deploy:** a defect fix in earlier
   merged work found while testing part 2: the v2 acceptance writers and the
   two health-recovery routines see the owner's personal connections under an
   owner bound by row security.
@@ -3553,7 +3574,7 @@ provision-roles revokes them from the runtime role). Choices:
   would, and asserts it lists exactly them; after 0717 the same query lists
   them less the repaired authorities.
 
-Part 3 (migration 0724) fixes a defect found while testing part 2 under the
+Part 3 (migration 0725) fixes a defect found while testing part 2 under the
 documented owner posture (finding below). The v2 writers
 (`subscription_core_acceptance_authority_v2`,
 `subscription_core_task_authority_v2` and their Codex forms) count the
@@ -4042,6 +4063,29 @@ Decisions:
    refresh happens in the worker's own seam before classification; and its
    writes are best effort. Codex's `rateLimitFallbackMs` and
    `exhaustedFallbackMs` equal the worker's 60 seconds and 5 hours.
+   The credit-policy branch records its refusals as `refusal` observations
+   (§2.2): `usage_verification_policy` as no windows with a 60-second
+   `rate_limit` deadline, `included_usage_policy` as one exhausted
+   `included_usage` window until now + max(60 s, the policy's cooldown). Like
+   any refusal they keep a stored exhausted window with a known future
+   reset (a weekly `secondary` window days away, say), so the connection
+   keeps waiting for it after the 60-second hold; before, they were tagged
+   `usage_endpoint` and erased it. Codex header readings report only
+   `primary` and `secondary` (the credit guard's own `/wham/usage` reads
+   reach the store as header readings through finalization too), so a
+   header reading no longer ends the `included_usage` hold: it ends at its
+   reset or with a real usage reading (`fetchSubscriptionCoreCodexUsage`),
+   which replaces every window. Both only wait longer, and the credit guard
+   would refuse again before dispatch anyway. Legacy set this hold to
+   min(the policy's reset, now + 60 s) (`includedUsageUnavailableUntil`)
+   and only time ended it. So the core waits longer than legacy, except
+   that a usage reading in the first 60 seconds ends the hold earlier than
+   legacy did: the connection is placeable again (the reading's wake reaches
+   waiters), and the credit guard re-reads usage and refuses again before
+   dispatch, at the cost of one refused admission. A reset-credit redemption
+   ends only `exhaustedUntil`, so an exhausted window kept through a
+   credit-policy refusal still blocks after it until its reset or the next
+   usage reading, as any stored exhausted window already did.
 6. A connector not registered in production is registered for tests only:
    `testSubscriptionCoreProviderModules(binding)` returns the replacement
    TypeScript registry and v2 provider-list modules, which the test file
@@ -4242,8 +4286,8 @@ step, not the worker's own settlement that live Codex turns use today.
 | The `scheduled_turn_execution_immutable` trigger fires `BEFORE UPDATE OF` a column list with only the xAI snapshot, so a Claude snapshot or v2 update of a scheduled turn never reaches its fence. | 0275 and its xAI successor | PR 0b part 2 (0717) |
 | 0598 copied the xAI policies of `organization_memberships` by the pattern `xai_subscription_capability_%` and missed `xai_subscription_membership_lock`: under a migration owner without `BYPASSRLS` (the documented posture) connecting a personal Claude account fails with `42501`. | 0598 (0442's xAI policy) | PR 0b part 2 (0717) |
 | No policy lets the SuperGrok or Claude lifecycle capability update `organization_user_resource_authorities`, so under such an owner a personal disconnect deletes the credential and leaves its authority active, and runs accepted for the disconnected account keep passing the `user` generation check. Existing tests ran as a superuser. | 0234, 0442, 0598 | PR 0b part 2 (0717): revoke policies, and a repair of the authorities left active |
-| Under such an owner the v2 writers see no personal connection: they count the owner's personal generations holding only an account `lifecycle` capability, which no `subscription_connections` policy honours for personal rows, so every acceptance freezes the empty value and a personal Codex account is never used after the cutover, even in the owner's private session. Existing tests ran the writers on superuser-owned databases. | 0669, 0688, 0707 | PR 0b part 3 (0724): the writers count through the owner-only membership-lifecycle read |
-| Under such an owner the health-recovery routines see no personal connection either, so a due 403 quarantine of a personal account is never lifted, even for the owner's own turn whose frozen entry names it. | 0669, 0707, 0715 | PR 0b part 3 (0724): both collect their candidates under the same marker, restored before they write |
+| Under such an owner the v2 writers see no personal connection: they count the owner's personal generations holding only an account `lifecycle` capability, which no `subscription_connections` policy honours for personal rows, so every acceptance freezes the empty value and a personal Codex account is never used after the cutover, even in the owner's private session. Existing tests ran the writers on superuser-owned databases. | 0669, 0688, 0707 | PR 0b part 3 (0725): the writers count through the owner-only membership-lifecycle read |
+| Under such an owner the health-recovery routines see no personal connection either, so a due 403 quarantine of a personal account is never lifted, even for the owner's own turn whose frozen entry names it. | 0669, 0707, 0715 | PR 0b part 3 (0725): both collect their candidates under the same marker, restored before they write |
 | The `{codex,claude,xai}_primary_connection_id` foreign keys omit `provider`, so a primary can reference another provider's connection. | 0642 `subscription_settings` | PR 0, or M4-A's settings shape |
 | The non-Codex branch of `authorize_subscription_personal_access` compares the owner subject but neither requires the connection's owner membership id to equal the session owner's membership nor checks `personalConnectionsAllowed`. | 0668 | PR 0 |
 | `autoRenews` is a static adapter flag but is documented as false for setup tokens. | `packages/subscriptions/src/adapter.ts` | PR 0 |
@@ -4354,10 +4398,10 @@ Facts the adapter declares, each read from today's Claude path:
   - Differences from today's merged reading. A later allowed response does
     not end a running cooldown or connection exhaustion early (the shared
     model never shortens either; the reset or an explicit store operation
-    ends it), which only waits longer. The shared store replaces the stored
-    windows with the newest observation's, so a reading that omits a window
-    would drop that window's running exhaustion, where today's merged
-    reading keeps it. Recording the window in `exhaustedUntil` instead
+    ends it), which only waits longer. Before C1a the shared store replaced
+    the stored windows with the newest observation's, so a reading that
+    omitted a window dropped that window's running exhaustion, where today's
+    merged reading keeps it. Recording the window in `exhaustedUntil` instead
     would let no later usage reading show an early reset, which today's
     reading does. So C1a, before any Claude call site exists, makes the
     shared `applyQuotaObservation` keep a stored exhausted window with a
@@ -4695,6 +4739,141 @@ workspace route would then report the list placement reads for its source, as
 its switch does, and where that workspace also has an organization-pool row,
 its automatic and organization sources would still serve the organization's
 list; decision 5).
+
+### 5.5 M5: settings with lockable overrides and the overview
+
+Scope: SUB-SET-01, SUB-SET-02, SUB-SET-03 and the data of SUB-SET-05. The
+screens (SUB-SET-04 and the SUB-SET-05 page) ship in a separate UI change,
+previewed before merge. Cross-provider failover at run time is a later track;
+this one stores and resolves its switch and fallback order.
+
+**What exists.** The settings table, the NULL-inherits workspace rows, the
+`locked_settings` column and the resolver that ignores a locked workspace
+override all date from 0642/0644. Nothing wrote a lock, and nothing stopped a
+workspace row from storing an override of a locked setting.
+
+**Migration 0724 (rolling).** It changes no column, routine or value, so
+every effective setting is the same before and after (asserted on staged
+data with workspace overrides). It adds:
+
+1. CHECKs: `locked_settings` names only the six keys; `fallback_order` maps
+   each model to an array of model-id strings.
+2. A `BEFORE INSERT OR UPDATE` guard on workspace rows. Setting or changing a
+   locked setting is refused with 42501 and detail
+   `subscription_setting_locked:<key>`; clearing it, or leaving it unchanged,
+   is allowed. An upsert is judged on its proposed row, so `INSERT ... ON
+   CONFLICT` (including `DO NOTHING`) carrying a locked value is refused even
+   when it would change nothing. For map-valued settings the test is per entry: adding or
+   changing an entry widens, removing one does not. The guard is SECURITY
+   DEFINER so a caller who cannot see the organization row is not mistaken
+   for an organization without locks; it reads that row through an owner-only
+   `SELECT` policy scoped to the organization it names in a
+   transaction-local setting (the table keeps FORCE RLS).
+3. An `AFTER INSERT OR UPDATE OF locked_settings` trigger on the organization
+   row (SECURITY INVOKER) that clears newly locked settings from the
+   organization's workspace rows in the same transaction.
+4. Serialization: the guard takes a shared transaction advisory lock on
+   `subscription-settings-locks:<organization>`, the lock writer an exclusive
+   one. A workspace write either commits before the clear or sees the lock.
+   An upsert's guard takes the shared lock before it meets an existing row
+   and waits for that row's lock, and a plain `UPDATE` locks its row before
+   its guard asks for the shared lock. So the lock writer never waits while
+   it could close a cycle: it only tries the exclusive lock, then locks the
+   rows it clears with `NOWAIT`, and raises 55P03
+   `subscription_settings_lock_busy` when either is taken. The repository
+   takes the same advisory lock first, before any row lock: its workspace
+   writers (the settings API and the core administration routes that write
+   settings: primary, rotation and source; allocator, extra-credit and rename
+   routes never take it) take it shared, and a lock change queues for it
+   exclusively with a 3 s lock
+   timeout. Widening writes that arrive after the change queue behind it, so
+   a stream of writes cannot starve it, and none of the repository's writers
+   holds a row while waiting for the lock. Holding the exclusive lock, the
+   lock change locks no workspace row itself; only the trigger does, with
+   `NOWAIT`. A writer outside the repository (the previous release during the
+   rolling upgrade, which updates a row before its guard asks for the shared
+   lock, or a raw or migration writer) can therefore make a lock change
+   answer busy, never deadlock it. A lock change retries a busy answer or a
+   40P01 for about 5 s (up to about 8 s in the worst case, with the lock
+   timeout) and then answers 503 `settings_busy` (retryable, nothing
+   written). Tested deterministically for both
+   cycles (an upsert waiting on a row the lock writer holds, and a writer
+   holding a row the lock writer would clear), for a lock change landing
+   under four continuous upsert loops, and by racing the real
+   personal-primary routine and raw upserts against lock changes.
+5. A `BEFORE UPDATE OF account_id, workspace_id` trigger: a settings row never
+   moves to another organization or workspace, and the organization row never
+   becomes a workspace row or the reverse (42501
+   `subscription_settings_identity_immutable`). Otherwise a moved row could
+   carry a value past the guard, which compares a row with its old values.
+6. Isolation: a workspace write that widens any setting, and a lock change,
+   run only at READ COMMITTED (0A000
+   `subscription_settings_requires_read_committed` otherwise), because an
+   older snapshot could miss a concurrent lock or a concurrent workspace
+   insert. Writes that only clear or keep values are allowed at any level.
+   The settings repository and the core administration writers pin READ
+   COMMITTED on their transactions whatever the connection default.
+
+**API.** `GET/PATCH /v1/organizations/:organizationId/model-account-settings`
+(organization owners and admins), `GET .../model-account-settings/overview`
+(paged by workspace id, at most 500 per page), and
+`GET/PATCH /v1/workspaces/:workspaceId/model-account-settings` (members read;
+workspace administrators and organization administrators write). Writes take
+an optional `expectedVersion` (409 on a concurrent change), refuse a lock with
+409 `setting_locked` naming the settings, and deliver the core capacity wake
+(`core_settings_changed`). An empty organization patch checks the version and
+changes nothing (no new version, no wake). Every read goes through
+`subscription_effective_settings`; nothing in the API resolves a value itself.
+An organization with no settings row yet (the resolver returns NULL; the 0712
+seed makes this rare) reads the seeded values at version 0, and its first
+write accepts `expectedVersion: 0`.
+
+**Sources.** Per setting: `locked` (the organization value applies and
+workspaces cannot override it), `workspace` (this workspace overrides it; for
+a map, at least one entry), or `organization`. Per-entry sources stay
+available for maps.
+
+**Core.** The core already reads effective settings for placement
+(`readSubscriptionEffectiveSettings`); placement reads the effective fallback
+order for a model through `fallbackOrderFor`. Turn placement still forces cross-provider
+failover off with an empty fallback order (the M3 policy) until the failover
+runtime ships.
+
+Fail-closed choices (contract ambiguous; strictest option taken):
+
+- A lock binds every writer: workspace administrators, organization
+  administrators writing a workspace row, and the owner-run core routines
+  (for example a workspace rotation, primary or source change through the
+  provider routes, and a person's own primary in their Personal workspace).
+  Every such refusal answers 409 `setting_locked` with the settings named,
+  mapped once in the API error handler; the core's "not visible" handling of
+  42501 excludes the guard's refusal.
+- Locking clears existing workspace overrides of that setting; unlocking does
+  not bring them back.
+- A rotation lock also refuses setting or changing any workspace
+  `*_primary_connection_id` column (found by name, so later provider columns
+  are covered).
+- `providers` is lockable, but changes only through the existing provider
+  source routes.
+- Rotation can be set only for providers registered on the shared core; any
+  other provider is refused (422) because a value would have no effect.
+- The settings API writes no overrides for Personal workspaces (409
+  `personal_workspace`, `canEdit: false`); they follow the organization. A
+  person's own primary may still set a rotation entry there (the existing
+  personal-account route), and the workspace view then reports that entry's
+  source as `workspace` with `canEdit: false`. A rotation lock binds Personal
+  workspaces like any other: locking clears that entry, and choosing a
+  personal primary is refused with 409 `setting_locked` while the lock holds.
+  The overview lists shared workspaces only.
+- Fallback order: at most 64 preferred models, 8 fallbacks each, model ids up
+  to 200 characters, no repeats and no self-reference. The bound applies to
+  the stored workspace override after a patch is merged, not only to the
+  patch. Model ids are not
+  checked against the catalog (placement skips unknown models).
+- Personal fallback is never active for ownerless work (no session owner);
+  this was already the eligibility rule and is unchanged.
+- Writes that could miss a lock under an older snapshot are refused outside
+  READ COMMITTED (item 6 above) rather than admitted as dormant overrides.
 
 ## 6. Specific behaviours
 

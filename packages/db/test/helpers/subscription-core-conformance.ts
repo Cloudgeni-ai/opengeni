@@ -3115,6 +3115,27 @@ export function describeSubscriptionCoreConformance<Credential>(
       }
     }
 
+    /** Whether another transaction could lock the session row in this mode right now. */
+    async function sessionLockableAs(
+      sessionId: string,
+      mode: "for key share" | "for share",
+    ): Promise<boolean> {
+      const probe = await admin().reserve();
+      try {
+        await probe`begin`;
+        if (mode === "for key share")
+          await probe`select id from sessions where id = ${sessionId}::uuid for key share nowait`;
+        else await probe`select id from sessions where id = ${sessionId}::uuid for share nowait`;
+        return true;
+      } catch (error) {
+        if ((error as { code?: string }).code === "55P03") return false;
+        throw error;
+      } finally {
+        await probe`rollback`.catch(() => undefined);
+        probe.release();
+      }
+    }
+
     test("a capacity wake locks the workspace before its sessions, like a runnable wake or a context clear", async () => {
       const org = await organization();
       const turn = await runningTurn(org);
@@ -3205,12 +3226,13 @@ export function describeSubscriptionCoreConformance<Credential>(
           where workspace_id = ${org.sharedWorkspaceId}::uuid and session_id = ${sessionId}::uuid
           for update nowait`;
         expect(locked.map((row) => row.waiter_id)).toEqual([waiterId]);
-        // The wake holds the workspace only as a key share: a session-first
-        // writer key-shares it through a foreign key (an outbox insert), so
-        // a stronger workspace lock would deadlock with it.
+        // The wake holds the workspace only as a key share, the weakest lock
+        // that excludes its FOR UPDATE lockers: anything stronger (FOR SHARE,
+        // FOR NO KEY UPDATE, FOR UPDATE) conflicts with this probe and would
+        // hold off workspace updates, authority checks and other wakes.
         const workspace = await holder<{ id: string }[]>`
           select id::text as id from workspaces where id = ${org.sharedWorkspaceId}::uuid
-          for key share nowait`;
+          for no key update nowait`;
         expect(workspace.map((row) => row.id)).toEqual([org.sharedWorkspaceId]);
         await holder`commit`;
       } catch (error) {
@@ -3265,6 +3287,13 @@ export function describeSubscriptionCoreConformance<Credential>(
           second: await sessionLockable(second),
           fourth: await sessionLockable(fourth),
         }).toEqual({ first: false, second: false, fourth: true });
+        // The sessions it holds are locked FOR NO KEY UPDATE, the generic
+        // wake's archive guard's mode: key shares (foreign keys) still pass,
+        // shares do not.
+        expect({
+          keyShare: await sessionLockableAs(first, "for key share"),
+          share: await sessionLockableAs(first, "for share"),
+        }).toEqual({ keyShare: true, share: false });
         await holder`commit`;
       } catch (error) {
         failed = true;
@@ -3513,6 +3542,190 @@ export function describeSubscriptionCoreConformance<Credential>(
       await expectForeignUntouched(org);
     });
 
+    test("a session deleted while a capacity wake waits drops out; the wake still wakes the rest", async () => {
+      const org = await organization();
+      const turns = [await runningTurn(org), await runningTurn(org)];
+      const waiterBySession = new Map<string, string>();
+      for (const turn of turns)
+        waiterBySession.set(turn.identity.sessionId, await armedWaiter(org, turn));
+      const [lower, higher] = turns.map((turn) => turn.identity.sessionId).sort() as [
+        string,
+        string,
+      ];
+      // The wake reads both waiters, then waits on the lower session. Cancel
+      // then a quiescent delete removes the higher session meanwhile; the wake
+      // must skip it rather than fail (and roll back) the whole wake.
+      const holder = await admin().reserve();
+      let wake: ReturnType<typeof wakePool> | null = null;
+      let failed = false;
+      try {
+        await holder`begin`;
+        await holder`select id from sessions where id = ${lower}::uuid for update`;
+        wake = wakePool(org, "fixture_deleted_session");
+        await waitUntilBlockedBy(holder, wake);
+        // Bounded: a wake that locked the higher session out of order would
+        // block this delete on a wait PostgreSQL cannot see as a deadlock.
+        await admin().begin(async (tx) => {
+          await tx`set local lock_timeout = '5s'`;
+          await tx`delete from sessions where id = ${higher}::uuid`;
+        });
+        await holder`commit`;
+      } catch (error) {
+        failed = true;
+        await holder`rollback`.catch(() => undefined);
+        throw error;
+      } finally {
+        holder.release();
+        if (failed) await wake?.catch(() => undefined);
+      }
+      expect(await wake).toEqual([
+        { accountId: org.accountId, workspaceId: org.sharedWorkspaceId },
+      ]);
+      expect(await waiterRevision(waiterBySession.get(lower)!)).toBe(2);
+      const [generic] = await admin()<{ count: number }[]>`
+        select count(*)::int as count from session_workflow_wake_outbox
+        where session_id = ${higher}::uuid`;
+      expect(generic!.count).toBe(0);
+      await expectForeignUntouched(org);
+    });
+
+    test("a capacity wake skips an archived session and still wakes the rest", async () => {
+      const org = await organization();
+      const archivedTurn = await runningTurn(org);
+      const liveTurn = await runningTurn(org);
+      const archivedWaiter = await armedWaiter(org, archivedTurn);
+      const liveWaiter = await armedWaiter(org, liveTurn);
+      // The generic wake's archive guard refuses an archiving session's wake;
+      // the capacity wake must leave it out instead of failing for everyone.
+      await admin()`update sessions
+        set content_archive_state = 'archiving', content_archive_started_at = now(),
+          content_archive = '{"format":"fixture","version":1,"objectKeys":[]}'::jsonb
+        where id = ${archivedTurn.identity.sessionId}::uuid`;
+      expect(await wakePool(org, "fixture_archived_session")).toEqual([
+        { accountId: org.accountId, workspaceId: org.sharedWorkspaceId },
+      ]);
+      expect(await waiterRevision(liveWaiter)).toBe(2);
+      expect(await waiterRevision(archivedWaiter)).toBe(1);
+      const [generic] = await admin()<{ count: number }[]>`
+        select count(*)::int as count from session_workflow_wake_outbox
+        where session_id = ${archivedTurn.identity.sessionId}::uuid`;
+      expect(generic!.count).toBe(0);
+      await expectForeignUntouched(org);
+    });
+
+    test("a capacity wake skips a workspace whose only waiting session is archived", async () => {
+      const org = await organization();
+      const [lower, higher] = [org.sharedWorkspaceId, org.otherWorkspaceId].sort() as [
+        string,
+        string,
+      ];
+      const archivedTurn = await runningTurn(org, { workspaceId: lower });
+      const liveTurn = await runningTurn(org, { workspaceId: higher });
+      const archivedWaiter = await armedWaiter(org, archivedTurn, { workspaceId: lower });
+      const liveWaiter = await armedWaiter(org, liveTurn, { workspaceId: higher });
+      // Archiving keeps turns, so a stale waiter can outlive its session's
+      // archive. Nothing in the lower workspace is left to wake; the wake
+      // must move on to the higher one rather than fail.
+      await admin()`update sessions
+        set content_archive_state = 'archived', content_archive_started_at = now(),
+          content_archived_at = now(),
+          content_archive = '{"format":"fixture","version":1,"objectKeys":[],"sha256":"fixture"}'::jsonb
+        where id = ${archivedTurn.identity.sessionId}::uuid`;
+      expect(
+        await wakeSubscriptionCoreCapacityWaiters(
+          db(),
+          providerId,
+          {
+            accountId: org.accountId,
+            reason: "fixture_archived_workspace",
+            workspaceIds: [higher, lower],
+          },
+          enqueueSessionWorkflowWakeInTransaction,
+        ),
+      ).toEqual([{ accountId: org.accountId, workspaceId: higher }]);
+      expect(await waiterRevision(archivedWaiter)).toBe(1);
+      expect(await waiterRevision(liveWaiter)).toBe(2);
+      await expectForeignUntouched(org);
+    });
+
+    test("a workspace deleted while a capacity wake waits on it is skipped", async () => {
+      const org = await organization();
+      const doomed = await sharedWorkspace(
+        org.accountId,
+        org.ownerSubjectId,
+        "Doomed",
+        crypto.randomUUID(),
+      );
+      const turn = await runningTurn(org, { workspaceId: doomed });
+      await armedWaiter(org, turn, { workspaceId: doomed });
+      // The wake reads the waiter, then waits on the workspace row that an
+      // uncommitted delete holds; once the delete commits it has nothing to
+      // wake there.
+      const holder = await admin().reserve();
+      let wake: Promise<unknown> | null = null;
+      let failed = false;
+      try {
+        await holder`begin`;
+        await holder`delete from workspaces where id = ${doomed}::uuid`;
+        wake = wakeSubscriptionCoreCapacityWaiters(
+          db(),
+          providerId,
+          { accountId: org.accountId, reason: "fixture_deleted_workspace", workspaceIds: [doomed] },
+          enqueueSessionWorkflowWakeInTransaction,
+        );
+        await waitUntilBlockedBy(holder, wake);
+        await holder`commit`;
+      } catch (error) {
+        failed = true;
+        await holder`rollback`.catch(() => undefined);
+        throw error;
+      } finally {
+        holder.release();
+        if (failed) await wake?.catch(() => undefined);
+      }
+      expect(await wake).toEqual([]);
+      await expectForeignUntouched(org);
+    });
+
+    test("a capacity wake given an uppercase workspace id uses its canonical form", async () => {
+      const org = await organization();
+      const turn = await runningTurn(org);
+      const waiterId = await armedWaiter(org, turn);
+      // Workspace scope and the tenancy fence key are the lowercase uuid text.
+      // An uppercase id alone must still take the canonical fence and wake.
+      const holder = await admin().reserve();
+      let wake: Promise<unknown> | null = null;
+      let failed = false;
+      try {
+        await holder`begin`;
+        await holder`select pg_advisory_xact_lock(hashtextextended(${`session-tenancy:${org.sharedWorkspaceId}`}, 0))`;
+        wake = wakeSubscriptionCoreCapacityWaiters(
+          db(),
+          providerId,
+          {
+            accountId: org.accountId,
+            reason: "fixture_uppercase_workspace",
+            workspaceIds: [org.sharedWorkspaceId.toUpperCase()],
+          },
+          enqueueSessionWorkflowWakeInTransaction,
+        );
+        await waitUntilBlockedBy(holder, wake);
+        await holder`commit`;
+      } catch (error) {
+        failed = true;
+        await holder`rollback`.catch(() => undefined);
+        throw error;
+      } finally {
+        holder.release();
+        if (failed) await wake?.catch(() => undefined);
+      }
+      expect(await wake).toEqual([
+        { accountId: org.accountId, workspaceId: org.sharedWorkspaceId },
+      ]);
+      expect(await waiterRevision(waiterId)).toBe(2);
+      await expectForeignUntouched(org);
+    });
+
     test("an exhausted budget with no known reset waits for the adapter's fallback or a usage reading", async () => {
       const org = await organization();
       const label = `budget-${crypto.randomUUID()}`;
@@ -3556,6 +3769,61 @@ export function describeSubscriptionCoreConformance<Credential>(
       );
       expect(recorded).toEqual({ applied: true, recovered: true });
       expect(await placeChecked(turn, new Date(now + 2_000))).toMatchObject({
+        kind: "run",
+        connectionId,
+      });
+    });
+
+    test("a header reading that omits a stored exhausted window keeps it and reports no recovery", async () => {
+      const org = await organization();
+      const connectionId = await sharedConnection(org, `partial-${crypto.randomUUID()}`);
+      const turn = await runningTurn(org);
+      const now = Date.now();
+      const resetsAt = now + 3_600_000;
+      expect(await placeChecked(turn, new Date(now))).toMatchObject({ kind: "run", connectionId });
+      const [connection] = await admin()<{ refresh_generation: number }[]>`
+        select refresh_generation::int as refresh_generation from subscription_connections
+        where id = ${connectionId}::uuid`;
+      const reading = (
+        observedAt: number,
+        windows: SubscriptionQuota["windows"],
+      ): SubscriptionQuota => ({
+        windows,
+        modelCooldowns: {},
+        exhaustedUntil: null,
+        exhaustedKind: null,
+        revision: 0,
+        observedAt,
+        observedRefreshGeneration: connection!.refresh_generation,
+        source: "response_headers",
+      });
+      const short = { id: "fixture_short", usedPercent: 20, resetsAt: now + 600_000 };
+      const lease = leaseOf(turn, connectionId);
+      expect(
+        await runtime().applySubscriptionCoreQuotaObservation(
+          db(),
+          turn.identity,
+          lease,
+          reading(now, [
+            { ...short, status: "ok" },
+            { id: "fixture_long", usedPercent: 100, resetsAt, status: "exhausted" },
+          ]),
+        ),
+      ).toEqual({ applied: true, recovered: false });
+      // A later header reading reports only the short window: the long
+      // window's block stands, so nothing recovered and no waiter is woken.
+      expect(
+        await runtime().applySubscriptionCoreQuotaObservation(
+          db(),
+          turn.identity,
+          lease,
+          reading(now + 1_000, [{ ...short, usedPercent: 25, status: "ok" }]),
+        ),
+      ).toEqual({ applied: true, recovered: false });
+      const waiting = await placeChecked(turn, new Date(now + 2_000));
+      expect(waiting).toMatchObject({ kind: "wait" });
+      expect(instantOf(waiting, "earliestResetAt")).toBe(resetsAt);
+      expect(await evaluateChecked(turn, new Date(resetsAt + 1_000))).toMatchObject({
         kind: "run",
         connectionId,
       });
