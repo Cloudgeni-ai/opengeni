@@ -2,6 +2,7 @@
  * Schedules, run history, Knowledge review queue, capabilities and usage data
  * for the design-preview seed. Data only; the main script applies it.
  */
+import { generateKeyPairSync, randomBytes } from "node:crypto";
 import type { ConversationBuilder } from "./timeline";
 import type { RichSessionSeed } from "./rich-sessions";
 
@@ -255,8 +256,7 @@ export const SCHEDULE_RUNS: Record<string, Record<string, RunSeed[]>> = {
         daysAgo: 0.3,
         status: "failed",
         minutes: 1,
-        error:
-          "Zendesk returned 401 Unauthorized: the API token in the Zendesk variable set was revoked.",
+        error: "Zendesk returned 401 Unauthorized: the API token in the Zendesk vault was revoked.",
       },
       { daysAgo: 1.3, status: "succeeded", minutes: 3 },
       { daysAgo: 2.3, status: "succeeded", minutes: 4 },
@@ -540,19 +540,255 @@ export const INTEGRATIONS: Record<
 };
 
 // ---------------------------------------------------------------------------
-// Variable sets beyond the workspace-scoped ones in the main seed
+// Vaults beyond the workspace-scoped ones in the main seed
 // ---------------------------------------------------------------------------
 
-export type VariableSetSeed = {
+/** One seeded vault item (all values fake). */
+export type VaultItemSeed = {
+  type: "login" | "api_key" | "note" | "file" | "passkey";
+  name: string;
+  websites?: string[];
+  /** ISO date, or days from now (negative = already expired). */
+  expiresInDays?: number;
+  fields: { name: string; kind?: "text" | "concealed" | "totp" | "file"; value: string }[];
+  /** Later values per field name, written as new versions. */
+  updates?: Record<string, string[]>;
+  /** Renamed after creation, so the first name stays as an alias. */
+  renameTo?: string;
+};
+
+/**
+ * A vault as people see it after the Variable Set migration: each `vars`
+ * entry becomes an `api_key` item with a `value` field, like a migrated set.
+ * `items` adds richer items. All values are fake.
+ */
+export type VaultSeed = {
   name: string;
   description: string;
   scope: "workspace" | "user" | "organization";
-  vars: Record<string, string>;
+  vars?: Record<string, string>;
   updates?: Record<string, string[]>;
+  items?: VaultItemSeed[];
+  /** Organization vaults: workspace names, or "all". Default "all". */
+  availableIn?: string[] | "all";
+  allowPersonalWorkspaces?: boolean;
 };
 
-/** All values are fake. `user` sets are the owner's own; `organization` sets are shared. */
-export const EXTRA_VARIABLE_SETS: Record<string, VariableSetSeed[]> = {
+const DENSE_KINDS = ["login", "api_key", "note"] as const;
+
+/** 140 deterministic items: long names, many websites, every fifth with TOTP. */
+function denseItems(): VaultItemSeed[] {
+  return Array.from({ length: 140 }, (_, index) => {
+    const n = String(index + 1).padStart(3, "0");
+    const type = DENSE_KINDS[index % DENSE_KINDS.length]!;
+    const name =
+      index % 23 === 0
+        ? `Legacy reporting service account for the quarterly finance reconciliation export ${n}`
+        : `${type === "login" ? "Vendor portal" : type === "api_key" ? "Integration key" : "Runbook note"} ${n}`;
+    const websites =
+      index === 7
+        ? Array.from({ length: 10 }, (_unused, site) => `https://region-${site + 1}.vendor.example`)
+        : type === "login"
+          ? [`https://portal-${n}.vendor.example`]
+          : [];
+    const fields: VaultItemSeed["fields"] =
+      type === "login"
+        ? [
+            { name: "username", kind: "text", value: `svc-${n}@acme.example` },
+            { name: "password", value: `fake-dense-password-${n}` },
+            ...(index % 5 === 0
+              ? [{ name: "one-time code", kind: "totp" as const, value: "JBSWY3DPEHPK3PXP" }]
+              : []),
+          ]
+        : type === "api_key"
+          ? [{ name: "value", value: `fake-dense-key-${n}` }]
+          : [{ name: "note", kind: "text", value: `Steps for runbook ${n}. All fake.` }];
+    return { type, name, websites, fields };
+  });
+}
+
+/** A software passkey for the fake login site (rpId localhost); never a real credential. */
+function fakePasskeyFields(): VaultItemSeed["fields"] {
+  const { privateKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
+  const pkcs8 = privateKey.export({ format: "der", type: "pkcs8" }).toString("base64");
+  return [
+    { name: "rpId", kind: "text", value: "localhost" },
+    { name: "credentialId", kind: "text", value: randomBytes(16).toString("base64url") },
+    { name: "userHandle", kind: "text", value: randomBytes(16).toString("base64url") },
+    { name: "userName", kind: "text", value: "alice" },
+    { name: "privateKey", kind: "concealed", value: pkcs8 },
+  ];
+}
+
+/**
+ * Secrets showcase for Platform engineering (dossier §13B.1): every item type,
+ * TOTP, a passkey, a file, history, a renamed item, expiry badges, a dense and
+ * an empty vault, and organization vaults with narrow availability. The
+ * "Fake Login" items match the fake login site's default accounts.
+ */
+const SECRETS_SHOWCASE_VAULTS: VaultSeed[] = [
+  {
+    name: "Private",
+    description: "Bendik's own logins and keys.",
+    scope: "user",
+    items: [
+      {
+        type: "login",
+        name: "GitHub",
+        websites: ["https://github.com"],
+        fields: [
+          { name: "username", kind: "text", value: "bendik-acme" },
+          { name: "password", value: "fake-github-password-0001" },
+          { name: "one-time code", kind: "totp", value: "JBSWY3DPEHPK3PXP" },
+        ],
+      },
+      { type: "passkey", name: "Fake Login Passkey", fields: fakePasskeyFields() },
+      {
+        type: "api_key",
+        name: "OpenAI API",
+        websites: ["https://platform.openai.com"],
+        fields: [{ name: "value", value: "sk-fake-openai-0000000000000000" }],
+      },
+      {
+        type: "note",
+        name: "Recovery codes",
+        fields: [{ name: "note", kind: "text", value: "fake-1111 fake-2222 fake-3333 fake-4444" }],
+      },
+      {
+        type: "file",
+        name: "Service account",
+        fields: [
+          {
+            name: "file",
+            kind: "file",
+            value: JSON.stringify(
+              {
+                type: "service_account",
+                project_id: "acme-fake",
+                private_key_id: "fake",
+                client_email: "seed@acme-fake.iam.example",
+                padding: "x".repeat(2_800),
+              },
+              null,
+              2,
+            ),
+          },
+        ],
+      },
+    ],
+  },
+  {
+    name: "Shared",
+    description: "Everyday credentials for Platform engineering.",
+    scope: "workspace",
+    items: [
+      {
+        type: "api_key",
+        name: "Deploy key",
+        fields: [{ name: "value", value: "fake-deploy-key-v1" }],
+        updates: { value: ["fake-deploy-key-v2", "fake-deploy-key-v3"] },
+      },
+      {
+        type: "login",
+        name: "Staging database",
+        renameTo: "Staging DB",
+        websites: ["postgres://staging-db.acme.internal"],
+        fields: [
+          { name: "username", kind: "text", value: "app" },
+          { name: "password", value: "fake-staging-db-password" },
+        ],
+      },
+      {
+        type: "api_key",
+        name: "Expired cert",
+        expiresInDays: -12,
+        fields: [{ name: "value", value: "fake-expired-cert" }],
+      },
+      {
+        type: "api_key",
+        name: "Rotating soon",
+        expiresInDays: 3,
+        fields: [{ name: "value", value: "fake-rotating-soon" }],
+      },
+      {
+        type: "login",
+        name: "Fake Login",
+        websites: ["http://localhost"],
+        fields: [
+          { name: "username", kind: "text", value: "alice" },
+          { name: "password", value: "Fake-Login-Alice-Password-1" },
+        ],
+      },
+      {
+        type: "login",
+        name: "Fake TOTP",
+        websites: ["http://localhost"],
+        fields: [
+          { name: "username", kind: "text", value: "totp-user" },
+          { name: "password", value: "Fake-Login-Totp-Password-2" },
+          { name: "one-time code", kind: "totp", value: "JBSWY3DPEHPK3PXP" },
+        ],
+      },
+    ],
+  },
+  {
+    name: "Dense",
+    description: "Many items, for density and truncation.",
+    scope: "workspace",
+    items: denseItems(),
+  },
+  { name: "Empty", description: "Nothing here yet.", scope: "workspace", items: [] },
+  {
+    name: "Org tooling",
+    description: "Monitoring and paging tokens for every workspace.",
+    scope: "organization",
+    availableIn: "all",
+    allowPersonalWorkspaces: true,
+    items: [
+      {
+        type: "api_key",
+        name: "Sentry token",
+        fields: [{ name: "value", value: "sntrys_fake_org" }],
+      },
+      {
+        type: "login",
+        name: "PagerDuty",
+        websites: ["https://acme.pagerduty.example"],
+        fields: [
+          { name: "username", kind: "text", value: "oncall@acme.example" },
+          { name: "password", value: "fake-pagerduty-password" },
+        ],
+      },
+    ],
+  },
+  {
+    name: "Finance only",
+    description: "Bank access, available to Finance ops only.",
+    scope: "organization",
+    availableIn: ["Finance ops"],
+    allowPersonalWorkspaces: false,
+    items: [
+      { type: "api_key", name: "Bank API", fields: [{ name: "value", value: "fake-bank-api" }] },
+    ],
+  },
+  {
+    name: "No personal",
+    description: "Hidden in personal workspaces.",
+    scope: "organization",
+    availableIn: "all",
+    allowPersonalWorkspaces: false,
+    items: [
+      {
+        type: "note",
+        name: "Shared calendar",
+        fields: [{ name: "note", kind: "text", value: "Fake calendar link" }],
+      },
+    ],
+  },
+];
+
+/** `user` vaults are the owner's own (Only me); `organization` vaults are shared. */
+export const EXTRA_VAULTS: Record<string, VaultSeed[]> = {
   Personal: [
     {
       name: "My GitHub",
@@ -584,6 +820,7 @@ export const EXTRA_VARIABLE_SETS: Record<string, VariableSetSeed[]> = {
     },
   ],
   "Platform engineering": [
+    ...SECRETS_SHOWCASE_VAULTS,
     {
       name: "Acme shared: Sentry",
       description: "Organization-wide Sentry read access for every workspace.",
@@ -607,8 +844,8 @@ export const EXTRA_VARIABLE_SETS: Record<string, VariableSetSeed[]> = {
   ],
 };
 
-/** Variable sets attached to seeded sessions, by workspace and session title. */
-export const SESSION_VARIABLE_SETS: Record<string, Record<string, string[]>> = {
+/** Seeded sessions narrowed to these vaults (vault policy), by workspace and session title. */
+export const SESSION_VAULT_POLICIES: Record<string, Record<string, string[]>> = {
   "Platform engineering": {
     "Upgrade Kubernetes to 1.31 in staging": ["AWS production", "Terraform state"],
     "Break down September AWS spend": ["AWS production"],
@@ -634,7 +871,6 @@ export type RigSeed = {
   setupScript: string;
   checks: { name: string; command: string }[];
   credentialHooks?: string[];
-  variableSets?: string[];
   /** A later version, to show version history. */
   nextVersion?: { setupScript: string; changelog: string };
   /**
@@ -665,7 +901,6 @@ export const RIGS: Record<string, RigSeed[]> = {
         { name: "Node version", command: "node --version | grep -q '^v22'" },
         { name: "pnpm available", command: "pnpm --version" },
       ],
-      variableSets: ["GitHub automation"],
       health: { passed: true },
       nextVersion: {
         setupScript: [
@@ -690,7 +925,6 @@ export const RIGS: Record<string, RigSeed[]> = {
         { name: "tflint", command: "tflint --version" },
       ],
       credentialHooks: ["aws-sso-login"],
-      variableSets: ["AWS production", "Terraform state"],
       health: { passed: true },
     },
     {
@@ -698,7 +932,6 @@ export const RIGS: Record<string, RigSeed[]> = {
       description: "Polars, DuckDB and Jupyter for cost and telemetry analysis.",
       setupScript: "pip install --quiet polars==1.9.0 duckdb==1.1.1 jupyterlab==4.2.5",
       checks: [{ name: "Imports", command: "python -c 'import polars, duckdb'" }],
-      variableSets: ["Datadog"],
       health: {
         passed: false,
         failing: "Imports",
