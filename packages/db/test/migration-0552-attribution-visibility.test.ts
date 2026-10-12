@@ -123,6 +123,10 @@ test("real non-bypass owner preserves source policy bytes through receipt repair
     // ...and the M3 PR 3b slots on the other accepted-work carriers.
     for (const table of v2CarrierTables)
       await owner.unsafe(`ALTER TABLE ${table} ADD COLUMN subscription_authority jsonb`);
+    // The current schedule adapter projects 0720's audience; remove it before
+    // the real ordered replay.
+    await owner`ALTER TABLE scheduled_tasks
+      ADD COLUMN visibility text NOT NULL DEFAULT 'workspace_shared'`;
     // Renumbering the independent nullable agent-config column after this
     // repair must not break current session writers used to seed legacy rows.
     // Apply those adapter prerequisites early; allowance/collaborator repairs
@@ -319,11 +323,33 @@ test("real non-bypass owner preserves source policy bytes through receipt repair
         and polname = 'attribution_expected_planned_visibility'`;
     expect(planned?.qual).toBeDefined();
     await owner.unsafe("DROP POLICY attribution_expected_planned_visibility ON usage_events");
+    // 0721 later widens the run read policy by exactly one disjunct: the
+    // capability-gated summary of private schedules. Parse that expected
+    // predicate in PostgreSQL too instead of loosening the comparison.
+    const runVisibility = before.find(
+      (row) =>
+        row.relname === "scheduled_task_runs" && row.polname === "session_visibility_isolation",
+    );
+    expect(runVisibility?.qual).toBeDefined();
+    await owner.unsafe(`CREATE POLICY attribution_expected_private_schedule_runs ON scheduled_task_runs
+      AS RESTRICTIVE FOR SELECT USING ((${runVisibility!.qual}) OR
+        (SELECT insights_fact_read_policy_capability_active((CURRENT_USER)::text,
+          (pg_get_userbyid((SELECT relation.relowner FROM pg_class relation
+            WHERE relation.oid = 'scheduled_task_runs'::regclass)))::text,
+          'private_scheduled_task_summary')))`);
+    const [plannedRuns] = await owner`select pg_get_expr(polqual, polrelid) as qual
+      from pg_policy where polrelid = 'scheduled_task_runs'::regclass
+        and polname = 'attribution_expected_private_schedule_runs'`;
+    expect(plannedRuns?.qual).toBeDefined();
+    await owner.unsafe(
+      "DROP POLICY attribution_expected_private_schedule_runs ON scheduled_task_runs",
+    );
     await owner`ALTER TABLE sessions DROP COLUMN execution_context_turn_id`;
     await owner`ALTER TABLE session_turns DROP COLUMN execution_context_turn_id`;
     await owner`ALTER TABLE session_turns DROP COLUMN subscription_authority`;
     for (const table of v2CarrierTables)
       await owner.unsafe(`ALTER TABLE ${table} DROP COLUMN subscription_authority`);
+    await owner`ALTER TABLE scheduled_tasks DROP COLUMN visibility`;
     for (const name of planningSuffix)
       await owner`delete from schema_migrations where name=${name}`;
     await migrate(owned.ownerUrl);
@@ -333,9 +359,13 @@ test("real non-bypass owner preserves source policy bytes through receipt repair
       { session_context: null, turn_context: null },
     ]);
     const plannedPolicies = before.map((row) =>
-      row.relname === "usage_events" && row.polname === "session_visibility_isolation"
-        ? { ...row, qual: planned!.qual }
-        : row,
+      row.polname !== "session_visibility_isolation"
+        ? row
+        : row.relname === "usage_events"
+          ? { ...row, qual: planned!.qual }
+          : row.relname === "scheduled_task_runs"
+            ? { ...row, qual: plannedRuns!.qual }
+            : row,
     );
     expect([...(await snapshot())]).toEqual(plannedPolicies);
     const [backfill] =

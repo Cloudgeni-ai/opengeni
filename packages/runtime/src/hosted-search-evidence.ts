@@ -1,3 +1,5 @@
+import { anthropicWebSearchFacts, isAnthropicWebSearchItem } from "./anthropic-web-search";
+
 /** Hard bound on the UTF-8 JSON encoding of one projected message, not its text alone. */
 export const HOSTED_SEARCH_EVIDENCE_MAX_BYTES = 32 * 1024;
 const MAX_EXAMINED_ENTRIES = 64;
@@ -29,11 +31,19 @@ function sourceUrl(value: unknown): string | undefined {
  * model on replay without the stored ws_ id. Preserve the actually included
  * evidence as inert, portable transcript text instead. The canonical hosted
  * item remains untouched; this is a one-for-one request-local projection.
+ *
+ * Claude's own searches carry encrypted results that only the Claude Messages
+ * API can read. Its transport replays them verbatim, so a caller that will
+ * still hand history to that transport passes `preserveAnthropicNative`. Every
+ * other destination receives their readable facts (query, URLs, titles).
  */
 export function projectHostedSearchEvidence(
   item: Record<string, unknown>,
+  options: { preserveAnthropicNative?: boolean } = {},
 ): Record<string, unknown> {
   if (item.type !== "hosted_tool_call") return item;
+  if (isAnthropicWebSearchItem(item))
+    return options.preserveAnthropicNative ? item : projectAnthropicSearchEvidence(item);
   const data = record(item.providerData);
   if (data?.type !== "web_search_call" && data?.type !== "web_search") return item;
   const action = record(data.action);
@@ -116,4 +126,51 @@ export function projectHostedSearchEvidence(
     projected = message();
   }
   return projected;
+}
+
+/** Claude search facts for a non-Claude model: no encrypted page content exists to show. */
+function projectAnthropicSearchEvidence(item: Record<string, unknown>): Record<string, unknown> {
+  const facts = anthropicWebSearchFacts(item);
+  const entries: Array<{ url: string; title?: string; pageAge?: string }> = [];
+  const evidence = {
+    status: facts.status,
+    action: "search",
+    ...(facts.query === undefined ? {} : { query: clip(facts.query, 512) }),
+    ...(facts.errorCode ? { error: facts.errorCode } : {}),
+    included: { results: facts.resultCount ?? "not_returned", pageText: "provider_encrypted" },
+    entries,
+    omittedEntries: 0,
+    truncated: false,
+  };
+  for (const [index, entry] of (facts.results ?? []).entries()) {
+    const url = sourceUrl(entry.url);
+    if (!url || index >= MAX_EXAMINED_ENTRIES || entries.length >= MAX_ENTRIES) {
+      evidence.omittedEntries += 1;
+      if (url) evidence.truncated = true;
+      continue;
+    }
+    entries.push({
+      url,
+      ...(entry.title === undefined ? {} : { title: clip(entry.title, 512) }),
+      ...(entry.pageAge === undefined ? {} : { pageAge: clip(entry.pageAge, 64) }),
+    });
+  }
+  const message = () => ({
+    type: "message",
+    role: "assistant",
+    status: "completed",
+    content: [{ type: "output_text", text: HEADER + JSON.stringify(evidence) }],
+  });
+  let projected = message();
+  while (Buffer.byteLength(JSON.stringify(projected), "utf8") > HOSTED_SEARCH_EVIDENCE_MAX_BYTES) {
+    entries.pop();
+    evidence.omittedEntries += 1;
+    evidence.truncated = true;
+    projected = message();
+  }
+  return projected;
+}
+
+function clip(value: string, max: number): string {
+  return value.length <= max ? value : `${value.slice(0, max)}…[truncated]`;
 }

@@ -1,6 +1,10 @@
 export { managedUserEmailAllowed } from "./managed-user-admission";
 export * from "./realtime-voice-pricing";
 export * from "./web-search";
+import {
+  WebSearchProviderCredentialsSchema,
+  webSearchProviderCredentialsFromEnv,
+} from "./web-search";
 import { EnvCreditPromotionPolicy } from "./credit-promotions";
 export {
   CreditPromotionPolicy,
@@ -412,7 +416,7 @@ const SettingsSchema = z.object({
   agentStableVersion: z
     .string()
     .regex(/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u)
-    .default("0.1.16"),
+    .default("0.1.54"),
   // Optional independent beta-channel pointer. When unset, the beta update
   // manifest route is unavailable rather than silently serving stable.
   agentBetaVersion: z
@@ -477,6 +481,14 @@ const SettingsSchema = z.object({
   integrationsStateSecret: z.string().optional(),
   integrationsOauthShortStateEnabled: EnvBoolean.default(false),
   integrationsAllowPrivateNetworkTargets: EnvBoolean.default(false),
+  // Privacy limits a deployment (for example a product that embeds Opengeni)
+  // sets for every organization. They only narrow what organizations choose:
+  // Only me chats and schedules off in shared workspaces, new chats and
+  // schedules always starting as Workspace, and admins always seeing that
+  // other people's Only me schedules exist.
+  privacyOnlyMeAllowed: EnvBoolean.default(true),
+  privacyWorkspaceDefaultRequired: EnvBoolean.default(false),
+  privacyAdminScheduleSummariesRequired: EnvBoolean.default(false),
   integrationsOauthClientsJson: z.string().default("{}"),
   gmailWatchTopicName: z
     .string()
@@ -957,12 +969,15 @@ const SettingsSchema = z.object({
   // and the sandbox capability tools, never replacing them.
   webSearchEnabled: EnvBoolean.default(true),
   // Provider-agnostic web search (`web_search` / `web_fetch` agent tools,
-  // see ./web-search.ts). Inert until a provider is named; validated lazily so
-  // a misconfiguration withholds the tools instead of failing boot.
+  // see ./web-search.ts). Inert until a provider and its key are set; validated
+  // lazily so a misconfiguration withholds the tools instead of failing boot.
   webSearchProvider: z.string().optional(),
+  webFetchProvider: z.string().optional(),
+  webSearchPrefer: z.string().optional(),
+  webSearchProviderCredentials: WebSearchProviderCredentialsSchema,
+  // Earlier single-provider settings, applied to the first provider of a slot.
   webSearchApiKey: z.string().optional(),
   webSearchBaseUrl: z.string().optional(),
-  webFetchProvider: z.string().optional(),
   webFetchApiKey: z.string().optional(),
   webFetchBaseUrl: z.string().optional(),
   webSearchProviderMode: z.string().optional(),
@@ -1602,6 +1617,12 @@ const SettingsSchema = z.object({
         url: z.string().url(),
         allowedTools: z.array(z.string().min(1)).optional(),
         timeoutMs: z.number().int().positive().optional(),
+        /**
+         * Bound for session setup requests only (initialize and tools/list),
+         * when it should be longer than the client's default. Tool calls keep
+         * `timeoutMs` (or the client default) unchanged.
+         */
+        setupTimeoutMs: z.number().int().positive().optional(),
         cacheToolsList: z.boolean().default(false),
         /** Runtime approval policy, overlaid from an attempt-frozen session snapshot. */
         requireApproval: SessionMcpApprovalPolicy.optional(),
@@ -4458,6 +4479,11 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     integrationsAllowPrivateNetworkTargets: optional(
       "OPENGENI_INTEGRATIONS_ALLOW_PRIVATE_NETWORK_TARGETS",
     ),
+    privacyOnlyMeAllowed: optional("OPENGENI_PRIVACY_ONLY_ME_ALLOWED"),
+    privacyWorkspaceDefaultRequired: optional("OPENGENI_PRIVACY_WORKSPACE_DEFAULT_REQUIRED"),
+    privacyAdminScheduleSummariesRequired: optional(
+      "OPENGENI_PRIVACY_ADMIN_SCHEDULE_SUMMARIES_REQUIRED",
+    ),
     integrationsOauthClientsJson: optional("OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON"),
     gmailWatchTopicName: optional("OPENGENI_GMAIL_WATCH_TOPIC_NAME"),
     slackClientId: optional("OPENGENI_SLACK_CLIENT_ID"),
@@ -4620,6 +4646,8 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     openaiMaxRetries: optional("OPENGENI_OPENAI_MAX_RETRIES"),
     webSearchEnabled: optional("OPENGENI_WEB_SEARCH_ENABLED"),
     webSearchProvider: optional("OPENGENI_WEB_SEARCH_PROVIDER"),
+    webSearchPrefer: optional("OPENGENI_WEB_SEARCH_PREFER"),
+    webSearchProviderCredentials: webSearchProviderCredentialsFromEnv(source),
     webSearchApiKey: optional("OPENGENI_WEB_SEARCH_API_KEY"),
     webSearchBaseUrl: optional("OPENGENI_WEB_SEARCH_BASE_URL"),
     webFetchProvider: optional("OPENGENI_WEB_FETCH_PROVIDER"),
@@ -6314,7 +6342,10 @@ function isReviewedGptVisionModel(slug: string): boolean {
 }
 
 /** Repair missing reviewed capabilities in live/stored Codex definitions.
- * Explicit latency restrictions and every unrelated catalog field remain authoritative.
+ * GPT-6 models accept image input and JSON-schema output (`text.format`, as the
+ * Codex CLI's `--output-schema` sends it; verified live). Explicit latency and
+ * structured-output restrictions and every unrelated catalog field remain
+ * authoritative.
  */
 function reviewedCodexCatalogCapabilities(
   slug: string,
@@ -6327,6 +6358,10 @@ function reviewedCodexCatalogCapabilities(
   return normalizeCapabilities({
     ...capabilities,
     inputModalities: [...new Set([...capabilities.inputModalities, "image" as const])],
+    structuredOutput:
+      capabilities.structuredOutput.upstream === "unknown"
+        ? { upstream: "supported", runnable: true }
+        : capabilities.structuredOutput,
     latencyModes:
       fast && !capabilities.latencyModes.some((mode) => mode.id === "fast")
         ? [...capabilities.latencyModes, fast]
@@ -6750,6 +6785,47 @@ function matchesAdditiveCapabilityDefinitionVersion(
 }
 
 /**
+ * The model as accepted before runnable structured output was declared, or
+ * null when it is not declared. Agent turns never request structured output
+ * (only stateless single calls do), so enabling it from the exact unknown/off
+ * declaration cannot change an accepted turn's execution. Every definition
+ * compatibility check also runs against this one historical declaration;
+ * every other field still has to reproduce the frozen digest.
+ */
+function structuredOutputPreEnablementModel(
+  model: ConfiguredModel,
+  provider: ResolvedModelProvider,
+): ConfiguredModel | null {
+  if (!model.capabilities.structuredOutput.runnable) return null;
+  const { definitionVersion: _definitionVersion, ...modelWithoutVersion } = model;
+  const historical = {
+    ...modelWithoutVersion,
+    capabilities: {
+      ...model.capabilities,
+      structuredOutput: { upstream: "unknown" as const, runnable: false },
+    },
+  };
+  return { ...historical, definitionVersion: definitionVersionFor(historical, provider) };
+}
+
+/** Whether a frozen digest matches this model definition or one tolerated historical form of it. */
+function acceptedDefinitionVersionMatches(
+  model: ConfiguredModel,
+  provider: ResolvedModelProvider,
+  policy: TurnExecutionPolicyV1,
+): boolean {
+  return (
+    policy.definitionVersion === model.definitionVersion ||
+    policy.definitionVersion === legacyFrozenAutoCompactDefinitionVersionFor(model, provider) ||
+    policy.definitionVersion === legacyImplicitOpenAiDefinitionVersionFor(model, provider) ||
+    policy.definitionVersion ===
+      legacyCodexAstraImplicitCachingDefinitionVersionFor(model, provider) ||
+    matchesAdditiveCapabilityDefinitionVersion(model, provider, policy) ||
+    matchesWebSearchEnablementDefinitionVersion(model, provider, policy)
+  );
+}
+
+/**
  * Operator-change compatibility (an added capability or enabled web search)
  * also applies to a turn accepted before the compaction trigger left the
  * digest. This is the same single historical declaration in either digest
@@ -6950,7 +7026,7 @@ export function withCodexCatalogProvider(settings: Settings): Settings {
     models:
       catalogModels ??
       CODEX_FALLBACK_MODEL_SLUGS.map((slug) => {
-        const capabilities = {
+        const capabilities = reviewedCodexCatalogCapabilities(slug, {
           ...legacyModelCapabilities(settings, {
             reasoningEffort: true,
             hostedWebSearch: true,
@@ -6962,7 +7038,7 @@ export function withCodexCatalogProvider(settings: Settings): Settings {
               }
             : {}),
           latencyModes: builtinLatencyModesForModel(`${CODEX_MODEL_ID_PREFIX}${slug}`),
-        };
+        });
         return {
           id: `${CODEX_MODEL_ID_PREFIX}${slug}`,
           upstreamModelId: slug,
@@ -7082,6 +7158,60 @@ export function policyProviderIdForModel(settings: Settings, modelId: string): s
   }
   const configured = configuredModels(settings).find((model) => model.id === canonicalModelId);
   return configured?.providerId ?? builtinProviderId(settings);
+}
+
+/**
+ * Provider ids whose models are never paid with Opengeni credits: connected
+ * subscriptions and workspace/organization-owned API keys. A model id under
+ * one of these prefixes is attributed to its own payer even against BASE
+ * settings, where the per-workspace overlay that defines it is not injected.
+ */
+const NON_CREDIT_POLICY_PROVIDER_IDS = new Set<string>([
+  CODEX_PROVIDER_ID,
+  XAI_SUBSCRIPTION_PROVIDER_ID,
+  WORKSPACE_GATEWAY_PROVIDER_ID,
+  ORGANIZATION_GATEWAY_PROVIDER_ID,
+  WORKSPACE_OPENROUTER_PROVIDER_ID,
+  ORGANIZATION_OPENROUTER_PROVIDER_ID,
+  WORKSPACE_OPPER_PROVIDER_ID,
+  ORGANIZATION_OPPER_PROVIDER_ID,
+  "workspace-anthropic",
+  "organization-anthropic",
+  "workspace-claude-subscription",
+  "organization-claude-subscription",
+]);
+
+/**
+ * Whether a model id spends Opengeni credits, for the workspace model
+ * policy's credit switch. MUST agree with the cost the worker bills
+ * (`ConfiguredModel.cost === "credits"`):
+ *   - a configured model → its own cost class;
+ *   - `codex/…`, `xai…/`, and workspace/organization connection ids → never;
+ *   - anything else → the legacy built-in fallback, which the deployment pays
+ *     and bills in credits unless the cost policy marks that exact id free.
+ *     Failing closed here keeps an unknown id from slipping past a workspace
+ *     that turned credits off.
+ */
+export function policyChargesCreditsForModel(settings: Settings, modelId: string): boolean {
+  const canonicalModelId = canonicalizeConfiguredModelId(settings, modelId);
+  const configured = configuredModels(settings).find((model) => model.id === canonicalModelId);
+  if (configured) return configured.cost === "credits";
+  if (canonicalModelId.startsWith(CODEX_MODEL_ID_PREFIX)) return false;
+  if (canonicalModelId.startsWith(XAI_SUBSCRIPTION_MODEL_ID_PREFIX)) return false;
+  const slash = canonicalModelId.indexOf("/");
+  const providerPrefix = slash > 0 ? canonicalModelId.slice(0, slash) : "";
+  if (
+    NON_CREDIT_POLICY_PROVIDER_IDS.has(providerPrefix) ||
+    // Direct workspace OpenAI / Azure OpenAI keys (`workspace-openai-<id>/…`).
+    providerPrefix.startsWith("workspace-openai-") ||
+    providerPrefix.startsWith("workspace-azure-openai-")
+  ) {
+    return false;
+  }
+  return (
+    (parseModelCostPolicyJson(settings.modelCostPolicyJson)[canonicalModelId] ?? "credits") ===
+    "credits"
+  );
 }
 
 function resolvedExecutionLimits(
@@ -7662,20 +7792,17 @@ export function assertTurnExecutionPolicyMatchesConfigV1(
   // wireProfile was added to the definition digest after policies already
   // existed in durable in-flight turns. An omitted profile meant exactly
   // "openai", so accept that one legacy digest only; Azure and every other
-  // executable-definition change remain fail-closed.
-  const legacyImplicitOpenAiDefinitionVersion = legacyImplicitOpenAiDefinitionVersionFor(
+  // executable-definition change remain fail-closed. A model whose structured
+  // output was enabled after acceptance is also checked in its one
+  // pre-enablement form.
+  const structuredOutputHistorical = structuredOutputPreEnablementModel(
     resolved.model,
     resolved.provider,
   );
   const definitionVersionMatches =
-    parsed.definitionVersion === resolved.model.definitionVersion ||
-    parsed.definitionVersion ===
-      legacyFrozenAutoCompactDefinitionVersionFor(resolved.model, resolved.provider) ||
-    parsed.definitionVersion === legacyImplicitOpenAiDefinitionVersion ||
-    parsed.definitionVersion ===
-      legacyCodexAstraImplicitCachingDefinitionVersionFor(resolved.model, resolved.provider) ||
-    matchesAdditiveCapabilityDefinitionVersion(resolved.model, resolved.provider, parsed) ||
-    matchesWebSearchEnablementDefinitionVersion(resolved.model, resolved.provider, parsed);
+    acceptedDefinitionVersionMatches(resolved.model, resolved.provider, parsed) ||
+    (structuredOutputHistorical !== null &&
+      acceptedDefinitionVersionMatches(structuredOutputHistorical, resolved.provider, parsed));
   const identityMismatched =
     parsed.providerId !== resolved.provider.id ||
     parsed.upstreamModelId !== resolved.model.upstreamModelId ||
@@ -9236,6 +9363,13 @@ function positiveInt(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
 }
 
+/**
+ * Setup bound for Opengeni's own MCP servers. They are the deployment's API,
+ * which is briefly slow while it restarts or is under load; the client's
+ * 5-second default turned that into failed turns. Tool calls are unaffected.
+ */
+export const FIRST_PARTY_MCP_SETUP_TIMEOUT_MS = 30_000;
+
 function ensureBuiltInMcpServers(settings: Settings): Settings["mcpServers"] {
   const existing = settings.mcpServers.filter((server) => server.id !== "opengeni");
   const firstPartyMcpUrl = firstPartyMcpServerUrl(settings);
@@ -9260,6 +9394,7 @@ function ensureBuiltInMcpServers(settings: Settings): Settings["mcpServers"] {
       // permission-invariant tool and docs is already uncached, so both stay
       // safe to cache / leave as-is.)
       cacheToolsList: false,
+      setupTimeoutMs: FIRST_PARTY_MCP_SETUP_TIMEOUT_MS,
     },
     ...(hasFiles
       ? []
@@ -9270,6 +9405,7 @@ function ensureBuiltInMcpServers(settings: Settings): Settings["mcpServers"] {
             url: firstPartyFilesMcpUrl,
             allowedTools: ["files_get_download_url"],
             cacheToolsList: true,
+            setupTimeoutMs: FIRST_PARTY_MCP_SETUP_TIMEOUT_MS,
           },
         ]),
     ...(hasDocs
@@ -9281,6 +9417,7 @@ function ensureBuiltInMcpServers(settings: Settings): Settings["mcpServers"] {
             url: firstPartyDocsMcpUrl,
             allowedTools: ["knowledge_search", "knowledge_get", "knowledge_browse"],
             cacheToolsList: false,
+            setupTimeoutMs: FIRST_PARTY_MCP_SETUP_TIMEOUT_MS,
           },
         ]),
     ...existing,
@@ -10723,11 +10860,13 @@ export function withClaudeConnectionCatalog(
                   ? "Claude Haiku 5.5"
                   : model.upstreamModelId),
           reasoningEffort: adaptiveThinking,
-          hostedWebSearch: false,
+          // Claude's server-side web search runs on every Claude route (API
+          // key and subscription) under the deployment's web search switch.
+          hostedWebSearch: settings.webSearchEnabled,
           capabilities: {
             ...legacyModelCapabilities(settings, {
               reasoningEffort: adaptiveThinking,
-              hostedWebSearch: false,
+              hostedWebSearch: settings.webSearchEnabled,
               vision: true,
             }),
             inputFileMediaTypes: [],

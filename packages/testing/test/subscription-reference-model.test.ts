@@ -500,7 +500,7 @@ describe("reference model scenarios", () => {
     expect(effective.sources.personalConnectionsAllowed).toBe("organization");
   });
 
-  test("model:SUB-SEL-03, model:SUB-ELIG-06: a Primary-first primary with unknown quota still takes new work; otherwise known capacity ranks first", () => {
+  test("model:SUB-SEL-03, model:SUB-ELIG-06: unknown quota preserves Primary-first and Spread selection", () => {
     const unknownPrimary: World = {
       ...base(),
       connections: base().connections.map((connection) =>
@@ -519,7 +519,16 @@ describe("reference model scenarios", () => {
         organization: { ...unknownPrimary.settings.organization, rotation: {} },
       },
     };
-    expect(decide(spread, "session-1", NOW)).toMatchObject({ connectionId: "claude-b" });
+    const knownSpread: World = { ...spread, connections: base().connections };
+    for (const id of ["session-1", "session-2", "session-3", "session-4"]) {
+      const withSession = (world: World): World => ({
+        ...world,
+        sessions: [{ ...world.sessions[0]!, id }],
+      });
+      const knownDecision = decide(withSession(knownSpread), id, NOW);
+      expect(knownDecision.kind).toBe("run");
+      expect(decide(withSession(spread), id, NOW)).toEqual(knownDecision);
+    }
   });
 
   test("model:SUB-FAIL-03: reasoning levels map by name, then by closest relative position with ties to the lower level", () => {

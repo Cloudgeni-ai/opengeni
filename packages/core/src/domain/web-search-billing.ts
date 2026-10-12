@@ -1,4 +1,4 @@
-import type { Settings } from "@opengeni/config";
+import { webSearchCreditBillingActive, type Settings } from "@opengeni/config";
 import {
   applyCreditDebitAfterUse,
   checkWorkspaceAllowance,
@@ -10,6 +10,7 @@ import {
   type CreditDebitAttribution,
   type Database,
 } from "@opengeni/db";
+import { workspaceCreditsDisabled } from "./workspace-credits";
 
 /** Credit ledger type and usage source for deployment-funded web search calls. */
 export const WEB_SEARCH_DEBIT_TYPE = "web_search_debit";
@@ -17,11 +18,7 @@ export const WEB_SEARCH_SOURCE_TYPE = "web_search";
 const WEB_SEARCH_BILLING_INITIATOR = "worker:web-search";
 
 /** Same rule as other deployment-funded resources: Stripe or managed limits. */
-export function webSearchCreditBillingActive(
-  settings: Pick<Settings, "billingMode" | "usageLimitsMode">,
-): boolean {
-  return settings.billingMode === "stripe" || settings.usageLimitsMode === "managed";
-}
+export { webSearchCreditBillingActive } from "@opengeni/config";
 
 /** Exact attempt that called the tool. Every charge is attributed to its turn. */
 export type WebSearchCallScope = {
@@ -45,7 +42,7 @@ export type WebSearchCallCost = {
 
 export class WebSearchBillingRefusedError extends Error {
   constructor(
-    readonly code: "insufficient_credits" | "allowance_exhausted",
+    readonly code: "insufficient_credits" | "allowance_exhausted" | "credits_disabled",
     message: string,
   ) {
     super(message);
@@ -53,12 +50,20 @@ export class WebSearchBillingRefusedError extends Error {
   }
 }
 
+/** Model-facing refusal when the workspace turned Opengeni credits off. */
+export const WEB_SEARCH_CREDITS_DISABLED_MESSAGE =
+  "Web search uses Opengeni credits, which are turned off in this workspace.";
+
 /**
  * Admission and post-use settlement for paid web search, matching paid
- * Knowledge queries and voice input: admission reads general credits and the
- * workspace/member allowance (a read, not a reservation); settlement records a
- * durable usage receipt and the idempotent debit in one transaction. Calls
- * that cost nothing (free providers, or billing inactive) are never refused.
+ * Knowledge queries and voice input: admission reads the workspace credit
+ * switch, general credits and the workspace/member allowance (a read, not a
+ * reservation); settlement records a durable usage receipt and the idempotent
+ * debit in one transaction. Calls that cost nothing (free providers, or
+ * billing inactive) are never refused. A workspace that turned Opengeni
+ * credits off is refused paid calls, and settlement skips the debit (and the
+ * cost receipt) for a call that was in flight when the switch turned off or
+ * that was admitted as free but reported a provider cost.
  */
 export function createWebSearchBilling(deps: { db: Database; settings: Settings }) {
   const active = webSearchCreditBillingActive(deps.settings);
@@ -76,6 +81,12 @@ export function createWebSearchBilling(deps: { db: Database; settings: Settings 
     active,
     async admit(scope: WebSearchCallScope, expectedProviderMicros: number): Promise<void> {
       if (!active || expectedProviderMicros <= 0) return;
+      if (await workspaceCreditsDisabled(deps.db, scope.workspaceId)) {
+        throw new WebSearchBillingRefusedError(
+          "credits_disabled",
+          WEB_SEARCH_CREDITS_DISABLED_MESSAGE,
+        );
+      }
       const attribution = await attributionFor(scope);
       // Non-model resources spend general credits only.
       const balance = await getSpendableCreditBalance(deps.db, scope.accountId);
@@ -112,6 +123,10 @@ export function createWebSearchBilling(deps: { db: Database; settings: Settings 
         idempotencyKey: `usage:web_search.${cost.operation}_requests:${shared.sourceResourceId}`,
       });
       if (!active || cost.creditMicros <= 0) return;
+      // Admission refused paid calls already; this covers a switch turned off
+      // during the provider call and provider-reported cost on a call admitted
+      // as free. The workspace spends no credits; the request count stays.
+      if (await workspaceCreditsDisabled(deps.db, scope.workspaceId)) return;
       const attribution = await attributionFor(scope);
       await withRlsContext(
         deps.db,

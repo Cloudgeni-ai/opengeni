@@ -46,13 +46,13 @@ enum ManagedSystemdCgroup {
 }
 
 fn launchd_install_action(
-    loaded_program_matches: Option<bool>,
+    loaded_configuration_matches: Option<bool>,
     restart: bool,
     definition_changed: bool,
 ) -> LaunchdInstallAction {
-    if loaded_program_matches.is_none() {
+    if loaded_configuration_matches.is_none() {
         LaunchdInstallAction::Bootstrap
-    } else if restart || definition_changed || loaded_program_matches == Some(false) {
+    } else if restart || definition_changed || loaded_configuration_matches == Some(false) {
         LaunchdInstallAction::Reload
     } else {
         LaunchdInstallAction::KeepLoaded
@@ -66,6 +66,20 @@ fn launchd_loaded_program_matches(output: &str, binary_path: &Path) -> bool {
             .strip_prefix("program = ")
             .is_some_and(|program| program == expected)
     })
+}
+
+fn launchd_loaded_configuration_matches(
+    output: &str,
+    binary_path: &Path,
+    user_home: &Path,
+) -> bool {
+    let expected_home = user_home.to_string_lossy();
+    launchd_loaded_program_matches(output, binary_path)
+        && output.lines().any(|line| {
+            line.trim_start()
+                .strip_prefix("working directory = ")
+                .is_some_and(|directory| directory == expected_home)
+        })
 }
 
 fn launchd_enable_args(target: &str) -> [&str; 2] {
@@ -126,10 +140,7 @@ fn binary_path() -> Result<PathBuf, String> {
 }
 
 fn home() -> Result<PathBuf, String> {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
-        .ok_or_else(|| "could not resolve a home directory ($HOME/$USERPROFILE)".to_string())
+    service::service_user_home().map_err(|error| error.to_string())
 }
 
 fn systemd_unit_path_for_scope(install_scope: ServiceScope) -> Result<PathBuf, String> {
@@ -636,8 +647,9 @@ fn install_systemd(spec: &ServiceSpec, restart: bool) -> Result<(), String> {
 
 /// macOS: write the LaunchAgent plist and bootstrap it into the user's GUI session.
 fn install_launchd(spec: &ServiceSpec, restart: bool) -> Result<(), String> {
-    let plist_path = service::launchd_plist_path(&home()?);
-    let body = service::render_launchd_plist(spec);
+    let user_home = home()?;
+    let plist_path = service::launchd_plist_path(&user_home);
+    let body = service::render_launchd_plist(spec, &user_home).map_err(|e| e.to_string())?;
     let definition_changed =
         std::fs::read(&plist_path).map_or(true, |existing| existing != body.as_bytes());
     if let Some(parent) = plist_path.parent() {
@@ -656,10 +668,13 @@ fn install_launchd(spec: &ServiceSpec, restart: bool) -> Result<(), String> {
     // the opaque exit status 5 on a previously disabled installation.
     enable_launchd_label(&target)?;
     let loaded_definition = capture("launchctl", &["print", &target]).ok();
-    let loaded_program_matches = loaded_definition
+    // A previous install can write the desired plist and fail before reloading
+    // the old job. Compare the loaded cwd too, so retrying without --restart
+    // cannot mistake an unchanged disk plist for an applied definition.
+    let loaded_configuration_matches = loaded_definition
         .as_deref()
-        .map(|output| launchd_loaded_program_matches(output, &spec.binary_path));
-    match launchd_install_action(loaded_program_matches, restart, definition_changed) {
+        .map(|output| launchd_loaded_configuration_matches(output, &spec.binary_path, &user_home));
+    match launchd_install_action(loaded_configuration_matches, restart, definition_changed) {
         LaunchdInstallAction::KeepLoaded => {}
         LaunchdInstallAction::Reload => {
             // launchd caches a loaded job's definition. Rewriting the plist and
@@ -673,10 +688,24 @@ fn install_launchd(spec: &ServiceSpec, restart: bool) -> Result<(), String> {
                     return Err(error);
                 }
             }
-            activate_launchd_definition(&domain, &target, &plist_path, &spec.binary_path, true)?;
+            activate_launchd_definition(
+                &domain,
+                &target,
+                &plist_path,
+                &spec.binary_path,
+                &user_home,
+                true,
+            )?;
         }
         LaunchdInstallAction::Bootstrap => {
-            activate_launchd_definition(&domain, &target, &plist_path, &spec.binary_path, false)?;
+            activate_launchd_definition(
+                &domain,
+                &target,
+                &plist_path,
+                &spec.binary_path,
+                &user_home,
+                false,
+            )?;
         }
     }
     println!(
@@ -695,6 +724,7 @@ fn activate_launchd_definition(
     target: &str,
     plist_path: &Path,
     expected_binary: &Path,
+    expected_home: &Path,
     await_retirement: bool,
 ) -> Result<(), String> {
     activate_launchd_definition_with_capture(
@@ -702,6 +732,7 @@ fn activate_launchd_definition(
         target,
         plist_path,
         expected_binary,
+        expected_home,
         await_retirement,
         capture_launchctl_activation,
     )
@@ -712,6 +743,7 @@ fn activate_launchd_definition_with_capture(
     target: &str,
     plist_path: &Path,
     expected_binary: &Path,
+    expected_home: &Path,
     mut await_retirement: bool,
     mut launchctl: impl FnMut(&[&str]) -> Result<Option<String>, String>,
 ) -> Result<(), String> {
@@ -729,11 +761,15 @@ fn activate_launchd_definition_with_capture(
                 if await_retirement {
                     last_error = "the previous launchd job is still retiring".to_string();
                 } else if let Some(definition) = definition {
-                    if launchd_loaded_program_matches(&definition, expected_binary) {
+                    if launchd_loaded_configuration_matches(
+                        &definition,
+                        expected_binary,
+                        expected_home,
+                    ) {
                         return Ok(());
                     }
                     last_error =
-                        "launchd loaded the label with an unexpected program path".to_string();
+                        "launchd loaded the label with an unexpected program path or working directory".to_string();
                 } else {
                     match launchctl(&["bootstrap", domain, &plist]) {
                         Ok(_) => {}
@@ -1161,9 +1197,71 @@ mod tests {
     }
 
     #[test]
+    fn launchd_retry_reloads_a_stale_cwd_even_when_disk_plist_is_unchanged() {
+        let binary = Path::new("/Applications/OpenGeni Agent/opengeni-agent");
+        let home = Path::new("/Users/Runner & Co");
+        let program = format!("program = {}\n", binary.display());
+        for cwd in [
+            None,
+            Some("/"),
+            Some("/Users/username"),
+            Some("/Users/Runner & Co-extra"),
+        ] {
+            let definition = cwd.map_or_else(
+                || program.clone(),
+                |cwd| format!("{program}working directory = {cwd}\n"),
+            );
+            let matches = launchd_loaded_configuration_matches(&definition, binary, home);
+            assert!(!matches);
+            assert_eq!(
+                launchd_install_action(Some(matches), false, false),
+                LaunchdInstallAction::Reload
+            );
+        }
+        let current = format!("{program}\tworking directory = /Users/Runner & Co\n");
+        assert!(launchd_loaded_configuration_matches(&current, binary, home));
+        assert_eq!(
+            launchd_install_action(Some(true), false, false),
+            LaunchdInstallAction::KeepLoaded
+        );
+        assert!(!launchd_loaded_configuration_matches(
+            &current,
+            Path::new("/tmp/old-agent"),
+            home
+        ));
+    }
+
+    #[test]
+    fn launchd_activation_does_not_accept_a_matching_program_with_a_stale_cwd() {
+        let binary = Path::new("/Applications/OpenGeni Agent/opengeni-agent");
+        let program = format!("program = {}\n", binary.display());
+        let mut replies = std::collections::VecDeque::from([
+            Some(format!("{program}working directory = /\n")),
+            Some(format!("{program}working directory = /Users/runner\n")),
+        ]);
+        activate_launchd_definition_with_capture(
+            "gui/501",
+            "gui/501/ai.opengeni.agent",
+            Path::new("/tmp/agent.plist"),
+            binary,
+            Path::new("/Users/runner"),
+            false,
+            |args| {
+                assert_eq!(args[0], "print");
+                Ok(replies.pop_front().expect("bounded launchd calls"))
+            },
+        )
+        .expect("confirm the directory before accepting the replacement");
+        assert!(replies.is_empty());
+    }
+
+    #[test]
     fn launchd_restart_waits_for_retirement_even_when_the_program_path_matches() {
         let binary = Path::new("/Applications/OpenGeni Agent/opengeni-agent");
-        let definition = format!("program = {}\n", binary.display());
+        let definition = format!(
+            "program = {}\nworking directory = /Users/runner\n",
+            binary.display()
+        );
         let mut replies = std::collections::VecDeque::from([
             ("print", Ok(Some(definition.clone()))),
             ("print", Err("transient launchd IPC failure".to_string())),
@@ -1177,6 +1275,7 @@ mod tests {
             "gui/501/ai.opengeni.agent",
             Path::new("/tmp/agent.plist"),
             binary,
+            Path::new("/Users/runner"),
             true,
             |args| {
                 let (command, reply) = replies.pop_front().expect("bounded launchd calls");
@@ -1199,7 +1298,10 @@ mod tests {
             ("bootstrap", Err("reply lost".to_string())),
             (
                 "print",
-                Ok(Some(format!("program = {}\n", binary.display()))),
+                Ok(Some(format!(
+                    "program = {}\nworking directory = /Users/runner\n",
+                    binary.display()
+                ))),
             ),
         ]);
         activate_launchd_definition_with_capture(
@@ -1207,6 +1309,7 @@ mod tests {
             "gui/501/ai.opengeni.agent",
             Path::new("/tmp/agent.plist"),
             binary,
+            Path::new("/Users/runner"),
             false,
             |args| {
                 let (command, reply) = replies.pop_front().expect("no duplicate bootstrap");

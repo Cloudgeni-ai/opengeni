@@ -8,15 +8,12 @@ import {
   addSessionSystemUpdate,
   addSessionSystemUpdateWithSourceMutation,
   applySessionTurnSettlement,
-  armCodexCapacityWait,
   armXaiCapacityWait,
   bootstrapWorkspace,
   childWaitingCapacityDedupeKey,
   claimPendingSessionSystemUpdateOutbox,
-  ensureCodexRotationSettings,
   failSessionWorkBeforeAttemptClaim,
   getSessionGoal,
-  updateCodexRotationSettings,
   childPausedDedupeKey,
   childProgressDedupeKey,
   childRequiresActionDedupeKey,
@@ -41,6 +38,11 @@ import {
   withWorkspaceSessionActivityRls,
   type SessionSystemUpdateOutboxDelivery,
 } from "../src/index";
+import {
+  armCodexCapacityWait,
+  ensureCodexRotationSettings,
+  updateCodexRotationSettings,
+} from "./fixtures/legacy-codex";
 
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;

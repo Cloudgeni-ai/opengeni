@@ -22,6 +22,10 @@ import { hasWorkspacePermission } from "@/lib/permissions";
 import type { CapabilityCatalogItem, ResourceRef } from "@/types";
 import type { ChatSendContext } from "./session-github-repositories";
 import { SessionGitHubCapabilityCard } from "./session-github-card";
+import { SessionMachineCapabilityCard } from "./session-machine-card";
+
+/** The built-in card for connecting a person's own computer to this chat. */
+export const CONNECTED_MACHINE_CAPABILITY_ID = "api:connected-machine";
 
 const CodexSubscriptionsCard = lazy(async () => ({
   default: (await import("@/components/models/codex-models")).CodexSubscriptionsCard,
@@ -76,6 +80,18 @@ export function SessionCapabilityCard(props: SessionCapabilityCardProps) {
       }
     : props.item;
   const capability = item.capability;
+  if (capability?.id === CONNECTED_MACHINE_CAPABILITY_ID) {
+    return (
+      <SessionMachineCapabilityCard
+        key={`${props.workspaceId}:${props.sessionId}`}
+        item={item}
+        workspaceId={props.workspaceId}
+        sessionId={props.sessionId}
+        sendContext={props.sendContext}
+        onConfigured={props.onConfigured}
+      />
+    );
+  }
   if (capability?.id === "api:github-app") {
     return (
       <SessionGitHubCapabilityCard

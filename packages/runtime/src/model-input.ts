@@ -506,9 +506,12 @@ export function baseModelInputFilterForSettings(settings: Settings): CallModelIn
       item = normalizeComputerCallAction(
         item as unknown as Record<string, unknown>,
       ) as unknown as AgentInputItem;
-      item = projectHostedSearchEvidence(
-        item as unknown as Record<string, unknown>,
-      ) as AgentInputItem;
+      // Claude's own searches stay native here: every model transport then
+      // calls projectHistoryForProvider, which replays them verbatim to Claude
+      // and projects their readable facts for any other provider.
+      item = projectHostedSearchEvidence(item as unknown as Record<string, unknown>, {
+        preserveAnthropicNative: true,
+      }) as AgentInputItem;
       return stripProviderIds ? stripProviderItemId(item) : item;
     },
     // The SDK's externally-owned run history is immutable and append-only.

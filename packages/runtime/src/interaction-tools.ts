@@ -1,4 +1,5 @@
 import {
+  OPENGENI_BROWSER_EXTENSION_URL,
   CUA_DESKTOP_TOOLS,
   cuaDesktopToolVariants,
   AttemptToolResult,
@@ -732,8 +733,7 @@ export function createInteractionAttemptToolDefinitions(
     name: "interaction_discover",
     codemodePath: ["interaction", "discover"],
     title: "Discover browsers and computers",
-    description:
-      "Discover browsers and computers. For the user's existing/current/personal Chrome, use scope=attached_browsers before browser_open and select an actual attachedBrowsers device. This reads only Chrome profiles and extension bridges, avoiding unrelated sessions and saved identities. The default current_session scope lists this agent session's BrowserSessions and ComputerSessions. Use scope=workspace only for reusable identities or peer/child resources; that inventory can be large. An attachedBrowserBridge only means the machine is ready for the extension; only attachedBrowsers are real user Chrome profiles/tabs. Leave includeTerminal=false unless ended history is specifically required.",
+    description: `Discover browsers and computers. For the user's existing/current/personal Chrome, use scope=attached_browsers before browser_open and select an actual attachedBrowsers device. This reads only Chrome profiles and extension bridges, avoiding unrelated sessions and saved identities. The default current_session scope lists this agent session's BrowserSessions and ComputerSessions. Use scope=workspace only for reusable identities or peer/child resources; that inventory can be large. An attachedBrowserBridge only means the machine is ready for the extension; only attachedBrowsers are real user Chrome profiles/tabs. If none exist, the person needs a Connected Machine first (post the Connected Machine card with capability_authorization_request api:connected-machine) and then the OpenGeni Browser Chrome extension: ${OPENGENI_BROWSER_EXTENSION_URL}. Leave includeTerminal=false unless ended history is specifically required.`,
     input: DiscoveryInput,
     output: DiscoveryOutput,
     readOnly: true,
@@ -796,8 +796,7 @@ export function createInteractionAttemptToolDefinitions(
     name: "browser_open",
     codemodePath: ["interaction", "browser", "open"],
     title: "Open or reuse browser",
-    description:
-      "Open a managed BrowserSession on the current agent placement, reuse a relevant compatible live session by default, attach to an explicit workspace BrowserSession, or open an attached Chrome profile by passing placement={kind:'attached_device',deviceId}. This does not infer or attach the user's existing Chrome: for requests about 'my browser', 'my tabs', or current Chrome, call interaction_discover first and select an actual attachedBrowsers device; if none exists, explain that the Chrome extension must be connected instead of silently creating a blank managed browser. BrowserSessions persist across tool calls; shell-launched browser daemons do not survive remote-command cleanup. Never switch to the user's attached Chrome as a fallback for a failed managed browser unless the user requested that profile. A new attached session opens a dedicated tab. Managed Chromium defaults to headed so OAuth and later human interaction use a supported browser; request headless=true only for agent-only work that will not require sign-in or human control. Operator-enabled disposable sandbox verification may explicitly request storageMode=ephemeral_context with headless=true: no saved identity, route, Computer, checkpoint or resume; process loss ends the session. Default private_profile storage is unchanged. Returns exact session and tab state.",
+    description: `Open a managed BrowserSession on the current agent placement, reuse a relevant compatible live session by default, attach to an explicit workspace BrowserSession, or open an attached Chrome profile by passing placement={kind:'attached_device',deviceId}. This does not infer or attach the user's existing Chrome: for requests about 'my browser', 'my tabs', or current Chrome, call interaction_discover first and select an actual attachedBrowsers device; if none exists, explain that the Chrome extension must be connected instead of silently creating a blank managed browser (it needs a Connected Machine, then the OpenGeni Browser extension: ${OPENGENI_BROWSER_EXTENSION_URL}). BrowserSessions persist across tool calls; shell-launched browser daemons do not survive remote-command cleanup. Never switch to the user's attached Chrome as a fallback for a failed managed browser unless the user requested that profile. A new attached session opens a dedicated tab. Managed Chromium defaults to headed so OAuth and later human interaction use a supported browser; request headless=true only for agent-only work that will not require sign-in or human control. Operator-enabled disposable sandbox verification may explicitly request storageMode=ephemeral_context with headless=true: no saved identity, route, Computer, checkpoint or resume; process loss ends the session. Default private_profile storage is unchanged. Returns exact session and tab state.`,
     input: BrowserOpenInput,
     output: BrowserOpenOutput,
     readOnly: false,
@@ -861,18 +860,29 @@ export function createInteractionAttemptToolDefinitions(
     readOnly: true,
     idempotent: true,
     execute: async (value) => {
-      let observation = await input.transport.observeBrowserTarget(
+      const observationRequest = input.transport.observeBrowserTarget(
         input.workspaceId,
         value.browserSessionId,
         value.targetId,
       );
       if (!value.includeScreenshot)
-        return projectBrowserObservation(observation, value.view ?? "compact");
-      const frame = await input.transport.captureBrowserTarget(
-        input.workspaceId,
-        value.browserSessionId,
-        value.targetId,
-      );
+        return projectBrowserObservation(await observationRequest, value.view ?? "compact");
+      // These are independent reads. Settle both before returning an error so
+      // the tool never leaves an outstanding capture behind after a failed read.
+      const [observed, captured] = await Promise.allSettled([
+        observationRequest,
+        Promise.resolve().then(() =>
+          input.transport.captureBrowserTarget(
+            input.workspaceId,
+            value.browserSessionId,
+            value.targetId,
+          ),
+        ),
+      ]);
+      if (observed.status === "rejected") throw observed.reason;
+      if (captured.status === "rejected") throw captured.reason;
+      let observation = observed.value;
+      const frame = captured.value;
       if (
         observation.target.targetGeneration !== frame.targetGeneration ||
         observation.target.documentGeneration !== frame.documentGeneration
@@ -1017,7 +1027,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "act"],
     title: "Act in browser tab",
     description:
-      "Perform one semantic-first browser action or bounded batch. Prefer action={type:'batch',actions:[...],fenceEachAction:true} for predictable edits in the same observed document, such as filling known form fields before one authorized submit. Pause for new page state, a dialog, or a decision instead of batching steps that depend on an unseen result. Reuse a page observation, when present, from tab open/select or a prior action; browser_open returns only session/tab metadata, so observe when page content is needed. Observe again after page changes or when needed content was omitted. If an action reports outcome_unknown, inspect the outcome and do not replay the batch. Use viewport to set page width, height, desktop/mobile layout and touch emulation, then check the measured viewport in the returned observation; emulation does not prove physical mobile-browser behavior. Use history back/forward for tab navigation; keypress shortcuts are page input and may not navigate browser history. The explicit activate action foregrounds the target in the user's desktop browser; use only when that is intended. Permission actions set a managed browser's web permission for this tab's exact current top-level origin. Omit generation fences to fetch fresh generation metadata without scanning accessibility; supplying all three fences skips that state read while preserving controller validation. The default receipt includes a compact accessibility view with explicit omissions; set view=full for the complete observation, or view=none when no post-action tree is needed.",
+      "Perform one semantic-first browser action or bounded batch. Prefer action={type:'batch',actions:[...],fenceEachAction:true} for predictable edits in the same observed document, such as filling known form fields before one authorized submit. Pause for new page state, a dialog, or a decision instead of batching steps that depend on an unseen result. Reuse a page observation, when present, from tab open/select or a prior action; browser_open returns only session/tab metadata, so observe when page content is needed. Observe again after page changes or when needed content was omitted. If an action reports outcome_unknown, inspect the outcome and do not replay the batch. Use viewport to set page width, height, desktop/mobile layout and touch emulation, then check the measured viewport in the returned observation; emulation does not prove physical mobile-browser behavior. Use history back/forward for tab navigation; keypress shortcuts are page input and may not navigate browser history. The explicit activate action foregrounds the target in the user's desktop browser; use only when that is intended. Permission actions set a managed browser's web permission for this tab's exact current top-level origin. Omit generation fences to fetch fresh generation metadata without scanning accessibility; supplying all three fences skips that state read while preserving controller validation. The default receipt includes a compact accessibility view with explicit omissions; set view=full for the complete observation, or view=none when no post-action tree is needed. An upload action takes workspace File IDs; the artifact.artifactId returned by sandbox_file_publish is one.",
     input: BrowserActInput,
     output: BrowserAgentActionReceipt,
     readOnly: false,
@@ -1141,7 +1151,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "downloadSave"],
     title: "Save browser download to workspace",
     description:
-      "Save one exact completed managed browser download to a portable relative path in the browser's source session workspace. Requires sessions:control and files:upload. Returns the materialized destinationPath, fileId and integrity metadata; read the saved bytes with ordinary workspace file tools. Existing files are protected unless overwrite=true. The attempt operation id fences retries; uncertain outcomes must reconcile that same operation. Attached browsers and Lightpanda cannot publish managed downloads.",
+      "Save one exact completed managed browser download to a portable relative path in the browser's source session workspace. Missing folders on that path are created. Requires sessions:control and files:upload. Returns the materialized destinationPath, fileId and integrity metadata; read the saved bytes with ordinary workspace file tools. Existing files are protected unless overwrite=true. The attempt operation id fences retries; uncertain outcomes must reconcile that same operation. Attached browsers and Lightpanda cannot publish managed downloads.",
     input: BrowserDownloadSaveInput,
     output: BrowserDownloadSaveResponse,
     readOnly: false,

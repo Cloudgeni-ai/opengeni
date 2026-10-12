@@ -54,7 +54,7 @@ const HUMAN_INPUT_EXPIRY_STALE_RETRY_MS = 1_000;
  * The minimum hold for a rotation all-capped idle (`idleUntilReset`). A MANDATORY
  * floor so that even a 0/elapsed continueDelayMs (a stale/unknown reset) can never
  * collapse the hold into a tight re-dispatch loop that hammers CPU/DB and never runs
- * the model (invariant 4: NO THRASH). Mirrors MIN_IDLE_MS in codex-rotation.ts; kept
+ * the model (invariant 4: NO THRASH). Retains the historical cooldown; kept
  * local so the deterministic workflow bundle does not import the activities module.
  */
 const ROTATION_IDLE_FLOOR_MS = 60_000; // 60s

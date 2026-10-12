@@ -21,6 +21,7 @@ export function isCodexAccountEvent(event: Pick<SessionEvent, "type">): boolean 
     "codex.credential.selected",
     "codex.account.switched",
     "codex.account.selection.changed",
+    "model_account.selection.changed",
     "codex.capacity.waiting",
     "codex.capacity.resumed",
     "codex.capacity.superseded",

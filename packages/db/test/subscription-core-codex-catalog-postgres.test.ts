@@ -1,26 +1,27 @@
-import { afterAll, beforeAll, describe, expect, setDefaultTimeout, spyOn, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import type { Settings } from "@opengeni/config";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
-import * as db from "../src";
 import {
   claimSessionWorkForAttempt,
   createDb,
   createSession,
   enqueueSessionTurn,
-  ensureCodexRotationSettings,
   ensureManagedAccessForUser,
   getSubscriptionCoreCodexCurrentSelections,
   getWorkspaceConnectionModelRestrictions,
   isCodexBilledTurn,
   listSubscriptionCoreCodexServingConnections,
-  setInitialActiveCodexCredential,
   subscriptionCoreCodexConnectionAllowlist,
   subscriptionCoreCodexConnectionAllowsModel,
-  upsertCodexSubscriptionCredential,
   withSessionRlsActorContext,
   workspaceCodexSubscriptionActive,
   type DbClient,
 } from "../src";
+import {
+  ensureCodexRotationSettings,
+  setInitialActiveCodexCredential,
+  upsertCodexSubscriptionCredential,
+} from "./fixtures/legacy-codex";
 import { encryptEnvironmentValue } from "../src/environment-crypto";
 
 // Codex readiness after the drained cutover (0680): every organization is
@@ -306,8 +307,7 @@ describe.skipIf(!realDb)("Codex readiness on the shared core after the cutover",
     ]);
     // Subjectless readers see the same shared capacity.
     expect((await serving(org, ws, null)).map((row) => row.connectionId)).toEqual([connectionId]);
-    const legacyList = spyOn(db, "listCodexAccountStatuses");
-    try {
+    {
       expect(await workspaceCodexSubscriptionActive(client!.db, settings, ws)).toBe(true);
       expect(
         await isCodexBilledTurn({ db: client!.db, settings, workspaceId: ws, model: MODEL }),
@@ -318,9 +318,6 @@ describe.skipIf(!realDb)("Codex readiness on the shared core after the cutover",
         org.ownerSubjectId,
       );
       expect(restrictions["codex/"]).toBeNull();
-      expect(legacyList).not.toHaveBeenCalled();
-    } finally {
-      legacyList.mockRestore();
     }
   });
 
@@ -330,10 +327,10 @@ describe.skipIf(!realDb)("Codex readiness on the shared core after the cutover",
     // A legacy credential written in the pre-cutover world, then the row returns.
     await setCutover(org, null);
     await legacyCredential(org, ws);
-    expect(await workspaceCodexSubscriptionActive(client!.db, settings, ws)).toBe(true);
+    expect(await workspaceCodexSubscriptionActive(client!.db, settings, ws)).toBe(false);
     expect(
       (await getWorkspaceConnectionModelRestrictions(client!.db, ws, org.ownerSubjectId))["codex/"],
-    ).toBeNull();
+    ).toEqual([]);
     await setCutover(org, true);
     expect(await workspaceCodexSubscriptionActive(client!.db, settings, ws)).toBe(false);
     expect(
@@ -350,8 +347,7 @@ describe.skipIf(!realDb)("Codex readiness on the shared core after the cutover",
     const ws = org.sharedWorkspaceId;
     await sharedConnection(org, "shared-maintenance");
     await setCutover(org, false);
-    const legacyList = spyOn(db, "listCodexAccountStatuses");
-    try {
+    {
       expect(await serving(org, ws, org.ownerSubjectId)).toEqual([]);
       expect(await workspaceCodexSubscriptionActive(client!.db, settings, ws)).toBe(false);
       expect(
@@ -362,9 +358,6 @@ describe.skipIf(!realDb)("Codex readiness on the shared core after the cutover",
           "codex/"
         ],
       ).toEqual([]);
-      expect(legacyList).not.toHaveBeenCalled();
-    } finally {
-      legacyList.mockRestore();
     }
   });
 
@@ -390,13 +383,11 @@ describe.skipIf(!realDb)("Codex readiness on the shared core after the cutover",
     ).toEqual(["codex/gpt-5.5"]);
   });
 
-  test("a personal connection serves only its owner, in their own Personal workspace, with personal fallback allowed", async () => {
+  test("a personal connection serves its owner in their own Personal workspace without fallback opt-in", async () => {
     const org = await organization();
     const personal = await personalConnection(org, "personal-owner");
-    // 0680 seeds new organizations with personal fallback off: placement
-    // would not use the connection, so the catalog does not count it.
-    expect(await serving(org, org.personalWorkspaceId, org.ownerSubjectId)).toEqual([]);
-    await allowPersonalFallback(org, true);
+    // Fresh organization defaults keep fallback off; ordinary Personal work
+    // is still usable without modifying fallback preferences.
     const own = await serving(org, org.personalWorkspaceId, org.ownerSubjectId);
     expect(own.map((row) => [row.connectionId, row.ownership])).toEqual([[personal, "personal"]]);
     expect(
@@ -444,6 +435,37 @@ describe.skipIf(!realDb)("Codex readiness on the shared core after the cutover",
         })}::jsonb, 1, 1)`;
     const [cooled] = await serving(org, org.personalWorkspaceId, org.ownerSubjectId);
     expect(cooled?.cooledDownModelIds).toEqual([MODEL]);
+    // Expired cooldowns drop out and live ones are listed by model id.
+    await shared!.admin`
+      update subscription_connection_quota
+      set quota = ${shared!.admin.json({
+        windows: [],
+        modelCooldowns: {
+          "codex/zz-later": Date.now() + 3_600_000,
+          [MODEL]: Date.now() + 3_600_000,
+          "codex/expired": Date.now() - 60_000,
+          "codex/a-earlier": Date.now() + 60_000,
+        },
+        exhaustedUntil: null,
+        exhaustedKind: null,
+        source: "refusal",
+      })}::jsonb, revision = revision + 1
+      where connection_id = ${personal}::uuid`;
+    const [ordered] = await serving(org, org.personalWorkspaceId, org.ownerSubjectId);
+    expect(ordered?.cooledDownModelIds).toEqual(["codex/a-earlier", MODEL, "codex/zz-later"]);
+    // Once every cooldown has passed, none is listed.
+    await shared!.admin`
+      update subscription_connection_quota
+      set quota = ${shared!.admin.json({
+        windows: [],
+        modelCooldowns: { [MODEL]: Date.now() - 1 },
+        exhaustedUntil: null,
+        exhaustedKind: null,
+        source: "refusal",
+      })}::jsonb, revision = revision + 1
+      where connection_id = ${personal}::uuid`;
+    const [expired] = await serving(org, org.personalWorkspaceId, org.ownerSubjectId);
+    expect(expired?.cooledDownModelIds).toEqual([]);
   });
 
   test("a session's current Codex selection comes from its core lease or explicit choice", async () => {

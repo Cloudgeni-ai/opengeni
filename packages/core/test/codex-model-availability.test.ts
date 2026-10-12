@@ -9,7 +9,7 @@ import { testSettings } from "@opengeni/testing";
 import {
   loadCodexAccountsLackingModel,
   loadWorkspaceCodexModelAvailability,
-} from "../src/codex-model-availability";
+} from "./fixtures/legacy-codex-model-availability";
 import { resolveWorkspaceModelSelection } from "../src/model-catalog";
 
 const baseSettings = testSettings({ codexSubscriptionEnabled: true });

@@ -15,6 +15,9 @@ let task: ScheduledTask;
 let chats: Session[];
 let pendingAccountBaseline: Promise<Session> | null = null;
 let sourceReads = 0;
+let privateAllowed = false;
+let defaultVisibility: "private" | "workspace" = "workspace";
+let machines: unknown[] = [];
 const updateScheduledTask = mock(
   async (_workspace: string, _id: string, _request: unknown) => task,
 );
@@ -27,6 +30,12 @@ const client = {
     return chats.find((chat) => chat.id === id)!;
   },
   listSessions: async () => chats,
+  getSessionTenancyCreateCapabilities: async () => ({
+    activated: true,
+    canCreatePrivate: privateAllowed,
+    reason: privateAllowed ? "available" : "not_activated",
+    defaultVisibility: privateAllowed ? defaultVisibility : "workspace",
+  }),
   getAgentLearningSettings: async () => ({
     settings: {},
     version: 1,
@@ -71,7 +80,7 @@ mock.module("./create-with-opengeni", () => ({
   useCreateWithOpenGeni: () => ({ dialog: null }),
 }));
 mock.module("@/lib/use-workspace-machines", () => ({
-  useWorkspaceMachines: () => ({ machines: [], loading: false }),
+  useWorkspaceMachines: () => ({ machines, loading: false }),
 }));
 mock.module("@/lib/use-workspace-model-catalog", () => ({
   useWorkspaceModelCatalog: () => ({ defaultSelection: null, rows: [], loading: false }),
@@ -149,17 +158,22 @@ mock.module("@/components/ui/select-menu", () => ({
   ),
 }));
 const { ScheduleFormPage } = await import("./schedule-form-page");
+type ScheduleFormMode = import("./schedule-form-page").ScheduleFormMode;
 
 beforeEach(() => {
   document.body.replaceChildren();
   updateScheduledTask.mockClear();
   pendingAccountBaseline = null;
   sourceReads = 0;
+  privateAllowed = false;
+  defaultVisibility = "workspace";
+  machines = [];
   task = {
     id: "task-example",
     workspaceId,
     name: "Example schedule",
     ownerSubjectId: "viewer",
+    visibility: "workspace",
     runMode: "new_session_per_run",
     reusableSessionId: null,
     targetSessionId: null,
@@ -204,13 +218,16 @@ afterAll(() => {
 async function flush() {
   await new Promise((resolve) => setTimeout(resolve, 20));
 }
-async function render() {
+async function render(mode?: ScheduleFormMode) {
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
   await act(async () => {
     root.render(
-      <ScheduleFormPage workspaceId={workspaceId} mode={{ kind: "edit", scheduleId: task.id }} />,
+      <ScheduleFormPage
+        workspaceId={workspaceId}
+        mode={mode ?? { kind: "edit", scheduleId: task.id }}
+      />,
     );
     await flush();
   });
@@ -389,4 +406,97 @@ test("choosing an account while the original chat loads does not freeze another 
     { serverId: "added", connectionId: "new-account" },
   ]);
   await act(async () => root.unmount());
+});
+
+function audienceOption(container: HTMLElement, label: string) {
+  return [...container.querySelectorAll<HTMLElement>('[role="radio"]')].find(
+    (option) => option.textContent === label,
+  );
+}
+
+test("who can see a schedule is only asked when the organization allows Only me", async () => {
+  const hidden = await render();
+  expect(hidden.container.textContent).not.toContain("Who can see it");
+  await act(async () => hidden.root.unmount());
+
+  privateAllowed = true;
+  const { container, root } = await render();
+  expect(container.textContent).toContain("Who can see it");
+  expect(audienceOption(container, "Workspace")!.getAttribute("aria-checked")).toBe("true");
+  expect(container.textContent).toContain(
+    "Everyone in this workspace can see this schedule and its chats.",
+  );
+  await act(async () => {
+    audienceOption(container, "Only me")!.click();
+    await flush();
+  });
+  expect(container.textContent).toContain("Only you can see this schedule and its chats.");
+  const request = (await save(container)) as { visibility?: string };
+  expect(request.visibility).toBe("private");
+  await act(async () => root.unmount());
+});
+
+test("a schedule that posts into an Only me chat stays Only me", async () => {
+  privateAllowed = true;
+  task = {
+    ...task,
+    visibility: "private",
+    runMode: "existing_session",
+    targetSessionId: "source-chat",
+  } as ScheduledTask;
+  chats = chats.map((chat) =>
+    chat.id === "source-chat"
+      ? ({ ...chat, tenancy: { visibility: "private" } } as unknown as Session)
+      : chat,
+  );
+  const { container, root } = await render();
+  expect(audienceOption(container, "Only me")!.getAttribute("aria-checked")).toBe("true");
+  expect(audienceOption(container, "Workspace")!.getAttribute("aria-disabled")).toBe("true");
+  expect(container.textContent).toContain("It posts into an Only me chat.");
+  await act(async () => root.unmount());
+});
+
+test("a schedule on your own machine is Only me", async () => {
+  privateAllowed = true;
+  machines = [
+    {
+      kind: "selfhosted",
+      isSessionGroup: false,
+      scope: "user",
+      sandboxId: "my-laptop",
+      name: "My laptop",
+      state: "online",
+    },
+  ];
+  task = {
+    ...task,
+    visibility: "private",
+    agentConfig: { ...task.agentConfig, machineTarget: { targetSandboxId: "my-laptop" } },
+  } as ScheduledTask;
+  const { container, root } = await render();
+  expect(audienceOption(container, "Only me")!.getAttribute("aria-checked")).toBe("true");
+  expect(audienceOption(container, "Workspace")!.getAttribute("aria-disabled")).toBe("true");
+  expect(container.textContent).toContain(
+    "It runs on your own machine, so only you can see this schedule and its chats.",
+  );
+  expect(container.textContent).toContain("My laptop");
+  await act(async () => root.unmount());
+});
+
+test("a new schedule starts with the organization's default audience; an existing one keeps its own", async () => {
+  privateAllowed = true;
+  defaultVisibility = "private";
+  const created = await render({ kind: "create" });
+  expect(audienceOption(created.container, "Only me")!.getAttribute("aria-checked")).toBe("true");
+  // Picking Workspace sticks.
+  await act(async () => {
+    audienceOption(created.container, "Workspace")!.click();
+    await flush();
+  });
+  expect(audienceOption(created.container, "Workspace")!.getAttribute("aria-checked")).toBe("true");
+  await act(async () => created.root.unmount());
+
+  const edited = await render();
+  expect(audienceOption(edited.container, "Workspace")!.getAttribute("aria-checked")).toBe("true");
+  await act(async () => edited.root.unmount());
 });

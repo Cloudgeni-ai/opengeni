@@ -32,7 +32,12 @@ class PtyProcess:
         if self.pid == 0:
             os.environ["PS1"] = "NATIVE_PROMPT> "
             os.environ["TERM"] = "dumb"
-            if redirected:
+            if redirected == "other-pty":
+                peer_master, peer_slave = pty.openpty()
+                os.set_inheritable(peer_master, True)
+                os.dup2(peer_slave, 1)
+                os.close(peer_slave)
+            elif redirected:
                 fd = os.open("/dev/null", os.O_WRONLY)
                 os.dup2(fd, 1)
                 os.close(fd)
@@ -403,6 +408,24 @@ class SupervisorTests(unittest.TestCase):
         redirected = PtyProcess([BINARY, "capabilities", "--pty"], redirected=True)
         self.children.append(redirected)
         self.assertEqual(redirected.wait(timeout=3), 125)
+
+    def test_pty_identity_without_device_ioctl_requires_exact_terminal_inode(self):
+        for mode, redirected, expected in [
+            ("identity-inode", False, 0),
+            ("identity-inode", True, 125),
+            ("identity-inode", "other-pty", 125),
+            ("identity-mismatch", False, 125),
+            ("identity-denied", False, 125),
+        ]:
+            with self.subTest(mode=mode, redirected=redirected):
+                process = PtyProcess([KERNEL, mode, "capabilities", "--pty"], redirected=redirected)
+                self.children.append(process)
+                if expected == 0:
+                    self.assertEqual(process.read_until(b"native-subreaper-pty-v1"),
+                                     b"native-subreaper-pty-v1")
+                self.assertEqual(process.wait(timeout=3), expected)
+                self.assertFalse(self.path.exists())
+                self.assertFalse(self.marker.exists())
 
     def test_pty_launch_without_terminal_fails_before_user_code(self):
         self.pty = True

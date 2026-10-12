@@ -1,4 +1,5 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
+import * as db from "@opengeni/db";
 import {
   parseRealtimeVoicePricingJson,
   parseRealtimeVoicePricingTableJson,
@@ -8,8 +9,12 @@ import {
 import { spendableCreditMicros, VOICE_CREDIT_USAGE } from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
 import {
+  createRealtimeVoiceBilling,
+  createVoiceInputBilling,
   deploymentRealtimeVoice,
+  RealtimeVoiceUnavailableError,
   realtimeVoiceOfferProblem,
+  TranscriptionServiceError,
   voiceCreditStanding,
   voiceInsufficientCreditsMessage,
 } from "../src";
@@ -127,4 +132,53 @@ test("signup credits are spendable for voice; other scoped grants are not", () =
       balanceMicros: spendableCreditMicros(couponOnly, VOICE_CREDIT_USAGE),
     }),
   ).toBe("promotional_only");
+});
+
+test("credit-funded voice honors the workspace switch that turns Opengeni credits off", async () => {
+  const policy = spyOn(db, "getWorkspaceModelPolicy").mockResolvedValue({
+    allowedProviders: null,
+    allowedModels: null,
+    allowCreditModels: false,
+  });
+  const reconcile = spyOn(db, "reconcileUnsettledVoiceInputCharges").mockResolvedValue(
+    undefined as never,
+  );
+  try {
+    const settings = testSettings({
+      billingMode: "stripe",
+      azureLiveEndpoint: "https://voice.example.test",
+      azureLiveApiKey: "key",
+      azureLivePricingJson: '{"microsPerMinute":50000}',
+    });
+    const database = {} as db.Database;
+    const live = createRealtimeVoiceBilling({ db: database, settings });
+    expect(await live.creditsDisabled("workspace-a")).toBe(true);
+    const admitted = live.admit({
+      accountId: "account-a",
+      workspaceId: "workspace-a",
+      model: "opengeni-azure/gpt-live-1" as never,
+      attribution: { kind: "human", initiatingHumanSubjectId: "user:a" } as never,
+    });
+    await expect(admitted).rejects.toBeInstanceOf(RealtimeVoiceUnavailableError);
+    await expect(admitted).rejects.toMatchObject({ code: "credits_disabled" });
+
+    const dictation = createVoiceInputBilling({ db: database, settings });
+    const refused = dictation.admit({
+      accountId: "account-a",
+      workspaceId: "workspace-a",
+      attribution: { kind: "human", initiatingHumanSubjectId: "user:a" } as never,
+    });
+    await expect(refused).rejects.toBeInstanceOf(TranscriptionServiceError);
+    await expect(refused).rejects.toMatchObject({ code: "policy_blocked", fallbackSafe: true });
+
+    // Without credit billing nothing is charged, so the switch has nothing to block.
+    const selfHosted = createRealtimeVoiceBilling({
+      db: database,
+      settings: { ...settings, billingMode: "disabled", usageLimitsMode: "none" },
+    });
+    expect(await selfHosted.creditsDisabled("workspace-a")).toBe(false);
+  } finally {
+    policy.mockRestore();
+    reconcile.mockRestore();
+  }
 });

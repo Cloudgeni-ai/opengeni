@@ -628,6 +628,11 @@ async function exportWorkbook(workbook: Workbook): Promise<ExcelJS.Workbook> {
     exportImages(output, worksheet, sheet);
     exportComments(workbook, worksheet, sheet);
   }
+  // OOXML requires at least one <sheet>, and Excel rejects a sheetless
+  // package as corrupt, so an empty workbook exports as one blank sheet.
+  if (workbook.worksheets.items.length === 0) {
+    output.addWorksheet("Sheet1", { views: [{ state: "normal" }] });
+  }
   return output;
 }
 

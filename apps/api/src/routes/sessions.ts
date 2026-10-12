@@ -25,7 +25,6 @@ import { SandboxRecoveryConflictError } from "@opengeni/db";
 import { codexAccountJson } from "./codex";
 import {
   deliverSubscriptionCoreCodexWake,
-  getSessionCodexAccounts,
   getSubscriptionCoreSessionCodexAccounts,
   pinSubscriptionCoreSessionCodexAccount,
 } from "@opengeni/db";
@@ -107,6 +106,7 @@ import {
   UpdateSessionVisibilityRequest,
   UpdateSessionToolPolicyRequest,
   UpdateSessionAgentRequest,
+  UpdateSessionSkillsRequest,
   AgentConfigError,
   ViewerHeartbeatRequest,
   WORKSPACE_CONTROL_ACTOR_MAX_BYTES,
@@ -178,7 +178,6 @@ import {
   projectSessionForRelatedAccess,
   recordStreamAcknowledgment,
   requestSessionCompaction,
-  switchSessionCodexAccount,
   setSessionChannel,
   updateSessionVariableSets,
   ChannelNotFoundError,
@@ -198,6 +197,7 @@ import {
   upsertSessionGoalWithEvent,
   updatePtySessionActivity,
   QueueCommandConflictError,
+  PersonalSessionInitiatorRequiredError,
   beginSessionRealtimeInTransaction,
   activateSessionRealtimeConnectionInTransaction,
   claimSessionRealtimeConnectionInTransaction,
@@ -336,6 +336,7 @@ import {
   updateManagedHumanSessionVisibility,
   updateSessionToolPolicy,
   updateSessionAgent,
+  updateSessionSkills,
   updateSessionTitle,
   setSessionRetention,
   workflowIdForSession,
@@ -1518,6 +1519,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           sessionId,
           realtimeId,
           ownerSubjectId: grant.subjectId,
+          ownerSubjectLabel: grant.subjectLabel ?? null,
           ...parsed.data,
         }),
       );
@@ -2105,6 +2107,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
                 sessionId,
                 realtimeId,
                 ownerSubjectId: grant.subjectId,
+                ownerSubjectLabel: grant.subjectLabel ?? null,
                 ...parsed.data,
                 controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
               },
@@ -2244,6 +2247,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
 
   // Personal chat organization: archived roots leave the ordinary rail only
   // for this member and remain recoverable through the archived list view.
+  // Archiving a chat you started that still has work also pauses it (see
+  // pauseOwnArchivedWork); archiving anyone else's chat only hides it for you.
   app.put("/v1/workspaces/:workspaceId/sessions/:sessionId/archive", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const authorization = await requireAccessGrantAuthorization(
@@ -2259,14 +2264,22 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       throw new HTTPException(400, { message: "invalid session archive request" });
     }
     try {
-      const session = await setSessionArchive(db, {
+      const archived = await setSessionArchive(db, {
         workspaceId,
         subjectId: grant.subjectId,
         sessionId,
         personalWorkspaceOwnerException: hasVerifiedOwningUserAuthorization(authorization),
         ...parsed.data,
       });
-      if (!session) throw new HTTPException(404, { message: "session not found" });
+      if (!archived) throw new HTTPException(404, { message: "session not found" });
+      let session = archived;
+      if (parsed.data.archived) {
+        try {
+          session = await pauseOwnArchivedWork(deps, grant, workspaceId, archived);
+        } catch (error) {
+          return commandConflictResponse(c, error);
+        }
+      }
       return c.json(
         await withEffectivePolicy(
           deps,
@@ -2338,16 +2351,14 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     await requireAccessGrant(c, deps, workspaceId, "sessions:read");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
     // authorizeSessionHttp has already enforced private-session and agent scope.
-    const projection =
-      (await codexRouteDisposition(deps, grant.accountId)) === "core"
-        ? await getSubscriptionCoreSessionCodexAccounts(db, {
-            accountId: grant.accountId,
-            workspaceId,
-            sessionId: c.req.param("sessionId"),
-            // A turn on the viewer's own personal connection shows it to them.
-            viewerSubjectId: grant.subjectId,
-          })
-        : await getSessionCodexAccounts(db, workspaceId, c.req.param("sessionId"));
+    await codexRouteDisposition(deps, grant.accountId);
+    const projection = await getSubscriptionCoreSessionCodexAccounts(db, {
+      accountId: grant.accountId,
+      workspaceId,
+      sessionId: c.req.param("sessionId"),
+      // A turn on the viewer's own personal connection shows it to them.
+      viewerSubjectId: grant.subjectId,
+    });
     if (!projection) throw new HTTPException(404, { message: "session not found" });
     const activeAccountId = projection.rotation?.activeCredentialId ?? null;
     return c.json({
@@ -2395,60 +2406,23 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       }
     }
     const pinned = target === "auto" ? null : target;
-    if ((await codexRouteDisposition(deps, grant.accountId)) === "core") {
-      const core = await pinSubscriptionCoreSessionCodexAccount(db, {
-        accountId: grant.accountId,
-        workspaceId,
-        sessionId,
-        connectionId: pinned,
-        subjectId: grant.subjectId,
-      });
-      if (!core.result.changed) {
-        throw new HTTPException(404, { message: "session or codex account not found" });
-      }
-      await deliverSubscriptionCoreCodexWake(db, core.wake);
-      await publishDurableSessionEvents(bus, workspaceId, sessionId, core.result.events);
-      return c.json({
-        pinned: target === "auto" ? "auto" : target,
-        appliedTo: core.result.appliedTo,
-      });
-    }
-    const mutation = await switchSessionCodexAccount(db, {
+    await codexRouteDisposition(deps, grant.accountId);
+
+    const core = await pinSubscriptionCoreSessionCodexAccount(db, {
+      accountId: grant.accountId,
       workspaceId,
       sessionId,
-      credentialId: pinned,
+      connectionId: pinned,
       subjectId: grant.subjectId,
     });
-    const ok = mutation.result.changed;
-    if (!ok) {
-      throw new HTTPException(404, {
-        message: "session or codex account not found",
-      });
+    if (!core.result.changed) {
+      throw new HTTPException(404, { message: "session or codex account not found" });
     }
-    await Promise.allSettled(
-      mutation.wakeTargets.map((wake) =>
-        workflowClient.signalCodexCapacity
-          ? workflowClient.signalCodexCapacity({
-              accountId: wake.accountId,
-              workspaceId: wake.workspaceId,
-              sessionId: wake.sessionId,
-              workflowId: wake.workflowId,
-              wakeRevision: wake.wakeRevision,
-              workflowWakeRevision: wake.workflowWakeRevision,
-            })
-          : workflowClient.wakeSessionWorkflow({
-              accountId: wake.accountId,
-              workspaceId: wake.workspaceId,
-              sessionId: wake.sessionId,
-              workflowId: wake.workflowId,
-              wakeRevision: wake.workflowWakeRevision,
-            }),
-      ),
-    );
-    await publishDurableSessionEvents(bus, workspaceId, sessionId, mutation.result.events);
+    await deliverSubscriptionCoreCodexWake(db, core.wake);
+    await publishDurableSessionEvents(bus, workspaceId, sessionId, core.result.events);
     return c.json({
       pinned: target === "auto" ? "auto" : target,
-      appliedTo: mutation.result.appliedTo,
+      appliedTo: core.result.appliedTo,
     });
   });
 
@@ -2777,6 +2751,34 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     );
     try {
       const session = await updateSessionAgent(deps, grant, sessionId, payload);
+      return c.json(await withEffectivePolicy(deps, workspaceId, grant.subjectId, session));
+    } catch (error) {
+      if (error instanceof SessionToolPolicyVersionConflictError) {
+        return c.json(
+          {
+            code: error.code,
+            message: error.message,
+            currentVersion: error.currentVersion,
+          },
+          409,
+        );
+      }
+      throw error;
+    }
+  });
+
+  // Replace the Skills the session carries itself. Shares the tool-policy
+  // version CAS and applies from the next attempt.
+  app.put("/v1/workspaces/:workspaceId/sessions/:sessionId/skills", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const sessionId = c.req.param("sessionId");
+    const payload = parseRequestBody(
+      UpdateSessionSkillsRequest,
+      await c.req.json().catch(() => null),
+    );
+    try {
+      const session = await updateSessionSkills(deps, grant, sessionId, payload);
       return c.json(await withEffectivePolicy(deps, workspaceId, grant.subjectId, session));
     } catch (error) {
       if (error instanceof SessionToolPolicyVersionConflictError) {
@@ -5364,6 +5366,12 @@ export function sessionAuthorizationOperationForHttp(
   if (suffix === "/variable-sets" && verb === "PUT") return "session.variable_sets.write";
   if (suffix === "/tool-policy" && verb === "PUT") return "session.tool_policy.write";
   if (suffix === "/agent" && verb === "PUT") return "session.tool_policy.write";
+  if (suffix === "/skills" && verb === "PUT") return "session.tool_policy.write";
+  if (suffix === "/admin-access") {
+    if (verb === "GET") return "session.read";
+    if (verb === "PUT" || verb === "DELETE") return "session.tool_policy.write";
+    return null;
+  }
   if (suffix === "/mcp-credentials/rotate" && verb === "POST")
     return "session.mcp.credentials.rotate";
   if (/^\/mcp-servers\/[^/]+\/approval-policy$/.test(suffix) && verb === "PATCH") {
@@ -5379,6 +5387,13 @@ export function sessionAuthorizationOperationForHttp(
   }
   if (suffix === "/codex-account" && verb === "POST") {
     return "session.codex_account.write";
+  }
+  // The provider-neutral account choice (any provider) shares the session's
+  // account-choice operation, which is named for its first provider.
+  if (suffix === "/model-account") {
+    if (verb === "GET") return "session.read";
+    if (verb === "PUT") return "session.codex_account.write";
+    return null;
   }
   if (suffix === "/realtime/webrtc" && verb === "POST") {
     return "session.realtime.start";
@@ -6325,6 +6340,52 @@ function zodErrorFields(error: ZodError): string {
   return `${shown.join(", ")}${remainder > 0 ? `, and ${remainder} more` : ""}`;
 }
 
+/** Statuses in which a chat still has work that would keep running after it is archived. */
+const ARCHIVE_LIVE_WORK_STATUSES: ReadonlySet<string> = new Set([
+  "queued",
+  "running",
+  "requires_action",
+  "recovering",
+  "waiting_capacity",
+]);
+
+/**
+ * Archiving a chat you started means you are done with it, so work it still
+ * has (a running or queued turn, a pending wait, an active goal) must not keep
+ * running out of sight. It is paused exactly like the Pause control: reversible
+ * with Resume, and a paused chat dispatches no goal continuations either. A
+ * chat someone else started is never paused: archiving only hides it for you.
+ * Settled chats are left alone so a later message to them still just runs.
+ */
+async function pauseOwnArchivedWork(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  workspaceId: string,
+  session: Session,
+): Promise<Session> {
+  if (session.createdBy.kind !== "subject" || session.createdBy.subjectId !== grant.subjectId)
+    return session;
+  if (!hasPermission(grant.permissions, "sessions:control")) return session;
+  if (session.effectiveControl.directState === "paused") return session;
+  const liveWork =
+    ARCHIVE_LIVE_WORK_STATUSES.has(session.status) ||
+    session.activeTurnId !== null ||
+    Boolean(session.inputWait) ||
+    (await getSessionGoal(deps.db, workspaceId, session.id))?.status === "active";
+  if (!liveWork) return session;
+  const paused = await controlHumanSessionWorkstream(
+    deps,
+    { accountId: grant.accountId, workspaceId, sessionId: session.id, subjectId: grant.subjectId },
+    {
+      action: "pause",
+      reason: "Archived",
+      // One pause per archive: a retried archive replays it instead of pausing twice.
+      clientEventId: `archive-pause:${session.id}:${session.archiveVersion}`,
+    },
+  );
+  return { ...session, effectiveControl: paused.effectiveControl };
+}
+
 function commandConflictResponse(c: Context, error: unknown): Response {
   if (error instanceof QueueCommandConflictError) {
     return c.json({ code: error.code, message: error.message, current: error.current }, 409);
@@ -6334,6 +6395,9 @@ function commandConflictResponse(c: Context, error: unknown): Response {
   }
   if (error instanceof SessionCommandIdempotencyError) {
     return c.json({ code: error.code, message: error.message }, 409);
+  }
+  if (error instanceof PersonalSessionInitiatorRequiredError) {
+    return c.json({ code: error.code, message: error.message }, 403);
   }
   throw error;
 }

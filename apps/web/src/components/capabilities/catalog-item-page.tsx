@@ -4,8 +4,8 @@ import {
   PuzzleIcon,
   RefreshCwIcon,
   SparklesIcon,
+  PowerOffIcon,
   TrashIcon,
-  UnplugIcon,
 } from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 
@@ -42,6 +42,7 @@ import type { IntegrationViewModel } from "./integration-view-model";
 import { McpAuthDiscoveryNotice } from "./mcp-auth-discovery-notice";
 import {
   CatalogConnectedAccounts,
+  type CatalogConnectedAccountsManagement,
   type CatalogConnectedAccountsProps,
 } from "./catalog-connected-accounts";
 import { MoreMenu, RowButton } from "@/components/ui/page-actions";
@@ -93,6 +94,7 @@ export function CatalogItemPage({
   fikenSetup,
   socialSetupAvailable = true,
   connectionAccounts,
+  accountManagement,
 }: {
   workspaceId: string;
   item: CapabilityCatalogItem;
@@ -114,7 +116,12 @@ export function CatalogItemPage({
   fikenSetup?: { oauthAvailable: boolean; tokenAvailable: boolean };
   /** Existing social rows stay manageable; any new OAuth attempt still needs provider readiness. */
   socialSetupAvailable?: boolean;
-  connectionAccounts?: Omit<CatalogConnectedAccountsProps, "item">;
+  connectionAccounts?: Omit<CatalogConnectedAccountsProps, "item" | "management">;
+  /** Per-account Reconnect / Remove / Add. Omit to show the accounts read-only. */
+  accountManagement?: Pick<
+    CatalogConnectedAccountsManagement,
+    "viewerSubjectId" | "canWrite" | "onRemove"
+  >;
 }) {
   const setupBlocked = !item.enabled && setupUnavailable !== undefined;
   const plan = useMemo(() => capabilityConnectPlan(item), [item]);
@@ -144,6 +151,7 @@ export function CatalogItemPage({
     health.connection === null &&
     (personalOnly || item.connectionRef?.subjectScope === "subject");
   const canDisconnect = item.enabled && item.kind === "mcp" && item.actions.includes("disconnect");
+  const addAccountOwnership = catalogAddAccountOwnership(item, personalOnly);
   const isSkill = item.kind === "skill";
   const signInFlow =
     item.kind === "mcp" && item.authKind === "oauth2" && !item.enabled && onConnectAccount;
@@ -296,12 +304,11 @@ export function CatalogItemPage({
       menu.push(
         <DropdownMenuItem
           key="disconnect"
-          variant="destructive"
           disabled={busy}
           onSelect={() => onAction({ type: "disconnect", item })}
         >
-          <UnplugIcon />
-          Disconnect
+          <PowerOffIcon />
+          Turn off for this workspace
         </DropdownMenuItem>,
       );
     }
@@ -666,7 +673,46 @@ export function CatalogItemPage({
         setup
       )}
 
-      {connectionAccounts ? <CatalogConnectedAccounts item={item} {...connectionAccounts} /> : null}
+      {connectionAccounts ? (
+        <CatalogConnectedAccounts
+          item={item}
+          {...connectionAccounts}
+          {...(accountManagement
+            ? {
+                management: {
+                  ...accountManagement,
+                  busy,
+                  // Re-sign-in reuses exactly this row. Only while the connector
+                  // is on: the OAuth return would otherwise also turn it on.
+                  ...(item.enabled
+                    ? {
+                        onReconnect: (account) =>
+                          onAction({
+                            type: "reconnect_oauth",
+                            item,
+                            connectionId: account.id,
+                            ownership: account.subjectId === null ? "workspace" : "personal",
+                            ...(account.workspaceId !== workspaceId
+                              ? { connectionWorkspaceId: account.workspaceId }
+                              : {}),
+                          }),
+                      }
+                    : {}),
+                  ...(addAccountOwnership
+                    ? {
+                        onAdd: () =>
+                          onAction({
+                            type: "add_oauth_account",
+                            item,
+                            ownership: addAccountOwnership,
+                          }),
+                      }
+                    : {}),
+                },
+              }
+            : {})}
+        />
+      ) : null}
 
       {workspaceId && hasConnectorToolPermissionTarget(item, health) ? (
         <DetailSection
@@ -735,4 +781,19 @@ function ExternalLink({ href }: { href: string }) {
       {label}
     </a>
   );
+}
+
+/** A further account can be added only where the installation uses every
+ * eligible account (never an exact single-account pin, which a new sign-in
+ * would replace). The new account keeps the installation's ownership. */
+export function catalogAddAccountOwnership(
+  item: Pick<CapabilityCatalogItem, "enabled" | "kind" | "surfaceType" | "connectionRef">,
+  personalOnly: boolean,
+): ConnectionOwnership | null {
+  const ref = item.connectionRef;
+  if (!item.enabled || item.kind !== "mcp" || item.surfaceType === "codex_apps" || !ref)
+    return null;
+  if (ref.authoritySource === "host" || ref.connectionId || ref.kind !== "oauth2") return null;
+  if (ref.subjectScope === "subject" || personalOnly) return "personal";
+  return ref.accountSelection === "all_eligible" ? "workspace" : null;
 }

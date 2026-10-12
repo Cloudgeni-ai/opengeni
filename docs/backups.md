@@ -181,6 +181,15 @@ other databases into their isolated targets, validate rows/grants/application
 behavior, then perform an explicit operational cutover. A failed restore rolls
 back its transaction; it does not automatically switch traffic or start workers.
 
+Extension ownership needs separate attention: PostgreSQL creates extensions and
+their member objects under the restore login, rather than restoring their
+original owners from the archive. Use the intended original extension-owner role
+as the recovery login where supported, and inspect extension-owned
+security-definer functions after recovery. Do not assume that reassigning a
+bootstrap superuser's objects will work: that role also owns required system
+objects. An isolated successful restore proves archive recoverability, not exact
+application/security parity without these operator checks.
+
 ## Coverage limits
 
 These are **database-only** backups. Object files, host enrollment identities,

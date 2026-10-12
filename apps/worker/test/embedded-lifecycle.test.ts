@@ -487,6 +487,9 @@ describe("embedded worker lifecycle contract", () => {
       [{ present: true }],
       [{ present: true }],
       [{ present: true }],
+      // Migration 0712: the cutover receipt reader exists and Codex holds its receipt.
+      [{ present: true }],
+      [{ provider: "codex" }],
       [],
       [
         { name: "opengeni_private", owner: "opengeni_migrator", usage: true, create: false },
@@ -770,8 +773,13 @@ describe("embedded worker lifecycle contract", () => {
           "subscription_codex_task_authority_v2(uuid, uuid, uuid, text)",
           "subscription_codex_revision_authority_v2(uuid, uuid, uuid, bigint)",
           "manage_subscription_codex_personal(uuid, uuid, text, uuid, text, text, boolean, integer)",
+          "subscription_codex_reach(uuid, uuid)",
+          "set_subscription_codex_reach(uuid, uuid, boolean, boolean)",
           "subscription_codex_owner_capability_held(uuid, text[], text, uuid, boolean)",
           "subscription_codex_owner_membership_held(uuid, uuid)",
+          ...opengeniDb.SUBSCRIPTION_CORE_NEUTRAL_PRIVATE_ROUTINES,
+          ...opengeniDb.SUBSCRIPTION_CORE_PRECURSOR_PRIVATE_ROUTINES,
+          ...opengeniDb.SUBSCRIPTION_AUTHORITY_COMPAT_PRIVATE_ROUTINES,
         ].map((name) => ({
           name,
           owner: "opengeni_migrator",
@@ -779,7 +787,8 @@ describe("embedded worker lifecycle contract", () => {
           public_execute: false,
           security_definer: true,
           configuration: [
-            name === "subscription_codex_refresh_write_allowed(uuid, uuid, uuid)"
+            name === "subscription_codex_refresh_write_allowed(uuid, uuid, uuid)" ||
+            name === "subscription_core_refresh_write_allowed(text, uuid, uuid, uuid)"
               ? "search_path=pg_catalog, opengeni_private, pg_temp"
               : "search_path=pg_catalog, public, opengeni_private, pg_temp",
           ],
@@ -790,6 +799,10 @@ describe("embedded worker lifecycle contract", () => {
         "grant_subscription_codex_owner_capability(text, uuid, uuid, text, uuid)",
         "drop_subscription_codex_owner_capabilities(uuid)",
         "derive_scheduled_revision_subscription_authority()",
+        ...opengeniDb.SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES,
+        ...opengeniDb.SUBSCRIPTION_CORE_PRECURSOR_OWNER_ROUTINES,
+        ...opengeniDb.SUBSCRIPTION_AUTHORITY_COMPAT_OWNER_ROUTINES,
+        ...opengeniDb.SUBSCRIPTION_AUTHORITY_FENCE_OWNER_ROUTINES,
       ].map((name) => ({
         name,
         owner: "opengeni_migrator",
@@ -854,7 +867,7 @@ describe("embedded worker lifecycle contract", () => {
         "session_tenancy_additional_organization_activation_evidence",
       ],
     })();
-    expect((catalogResults[10] as Array<{ name: string }>).map((routine) => routine.name)).toEqual([
+    expect((catalogResults[12] as Array<{ name: string }>).map((routine) => routine.name)).toEqual([
       ...RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
       ...RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES,
     ]);
@@ -894,6 +907,8 @@ describe("embedded worker lifecycle contract", () => {
         [{ present: variableSetCutoverPresent }],
         [{ present: claudePoolActivationPresent }],
         [{ present: codexCutoverActivationPresent }],
+        [{ present: true }],
+        [{ provider: "codex" }],
       ];
       let index = 0;
       return {
@@ -920,7 +935,7 @@ describe("embedded worker lifecycle contract", () => {
       /missing the Claude subscription account activation receipt/,
     );
     await expect(dbReadyCheck(embeddedDb(true, true, false), options)()).rejects.toThrow(
-      /missing the 0680 Codex subscription-core cutover receipt/,
+      /missing the 0689 Codex subscription-core cutover receipt/,
     );
   });
 

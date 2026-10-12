@@ -98,6 +98,8 @@ export type RenewSessionRealtimeInput = {
 
 export type EndSessionRealtimeInput = Omit<RenewSessionRealtimeInput, "leaseMs" | "extendLease"> & {
   reason: Extract<SessionRealtimeEndReason, "user_stop" | "browser_unload">;
+  /** The ending person's own label (their email), so the flushed tail names its sender. */
+  ownerSubjectLabel?: string | null | undefined;
 };
 
 export type AssertSessionRealtimeOwnerInput = Omit<
@@ -279,6 +281,7 @@ async function endWithEvent(
   row: RealtimeRow,
   reason: SessionRealtimeEndReason,
   now: Date,
+  ownerSubjectLabel?: string | null,
 ): Promise<{
   mode: SessionRealtimeMode;
   eventId: string;
@@ -315,6 +318,7 @@ async function endWithEvent(
     sessionId: session.id,
     realtimeId: ended.id,
     ownerSubjectId: ended.ownerSubjectId,
+    ownerSubjectLabel,
     now,
   });
   const workflowWakeRevision = await registerNormalModeWake(db, session, `realtime_${reason}`);
@@ -666,7 +670,7 @@ export async function endSessionRealtimeInTransaction(
   }
   const reason: SessionRealtimeEndReason =
     row.leaseExpiresAt <= now ? "lease_expired" : input.reason;
-  const ended = await endWithEvent(db, session, row, reason, now);
+  const ended = await endWithEvent(db, session, row, reason, now, input.ownerSubjectLabel);
   return {
     mode: ended.mode,
     replay: false,

@@ -104,6 +104,22 @@ export function initiatorFromStorage(
   };
 }
 
+/**
+ * Who sent a person's message, for the model: the label frozen with the turn
+ * at acceptance (never re-read). Service, key, agent and scheduler turns have
+ * no person behind the prompt, so they get none.
+ */
+export function humanTurnSenderLabel(row: {
+  initiatorKind: string;
+  initiatorContext: unknown;
+}): string | null {
+  if (row.initiatorKind !== "subject") return null;
+  const context = row.initiatorContext;
+  if (typeof context !== "object" || context === null || Array.isArray(context)) return null;
+  const label = (context as Record<string, unknown>).label;
+  return typeof label === "string" && label.trim() ? label : null;
+}
+
 export function initiatorColumns(value: FrozenTurnInitiator): {
   initiatorKind: TurnInitiator["kind"];
   initiatorSubjectId: string;

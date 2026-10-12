@@ -179,42 +179,42 @@ async function fixture(connectionKind: "subscription" | "api_key" = "subscriptio
 }
 
 /**
- * Run work with the Codex refresh seam owned by a NOSUPERUSER, NOBYPASSRLS
- * role, as in production. The shared test database's objects are owned by a
- * superuser, which ignores FORCE RLS and would hide a missing refresh policy.
+ * Run work with the refresh seam (the provider-named routines and their
+ * provider-neutral equivalents from migration 0707) owned by a NOSUPERUSER,
+ * NOBYPASSRLS role, as in production. The shared test database's objects are
+ * owned by a superuser, which ignores FORCE RLS and would hide a missing
+ * refresh policy.
  */
+const REFRESH_SEAM_ROUTINES = [
+  "opengeni_private.subscription_codex_refresh_write_allowed(uuid,uuid,uuid)",
+  "opengeni_private.begin_subscription_codex_refresh(uuid,uuid,uuid,uuid,text,text,uuid,text,bigint)",
+  "opengeni_private.persist_subscription_codex_refresh(uuid,uuid,uuid,uuid,uuid,bigint,text,timestamptz,timestamptz)",
+  "opengeni_private.subscription_core_refresh_write_allowed(text,uuid,uuid,uuid)",
+  "opengeni_private.begin_subscription_core_refresh(text,uuid,uuid,uuid,uuid,text,text,uuid,text,bigint)",
+  "opengeni_private.persist_subscription_core_refresh(text,uuid,uuid,uuid,uuid,uuid,bigint,text,timestamptz,timestamptz)",
+] as const;
+
 async function withNonSuperuserRefreshOwners<T>(work: () => Promise<T>): Promise<T> {
   const probeRole = `subscription_refresh_owner_${crypto.randomUUID().replaceAll("-", "_")}`;
   const [originalOwners] = await shared!.admin<
-    {
-      connectionOwner: string;
-      capabilityOwner: string;
-      refreshPolicyOwner: string;
-      beginOwner: string;
-      persistOwner: string;
-    }[]
+    { connectionOwner: string; capabilityOwner: string; routineOwners: string[] }[]
   >`
     select pg_get_userbyid(connection.relowner) as "connectionOwner",
       pg_get_userbyid(capability.relowner) as "capabilityOwner",
-      pg_get_userbyid(refresh_policy.proowner) as "refreshPolicyOwner",
-      pg_get_userbyid(begin_refresh.proowner) as "beginOwner",
-      pg_get_userbyid(persist.proowner) as "persistOwner"
+      array(select pg_get_userbyid(routine.proowner)
+        from unnest(${REFRESH_SEAM_ROUTINES as unknown as string[]}::text[])
+          with ordinality as signature(name, position)
+        join pg_proc routine on routine.oid = pg_catalog.to_regprocedure(signature.name)
+        order by signature.position) as "routineOwners"
     from pg_class connection
     join pg_namespace connection_schema on connection_schema.oid = connection.relnamespace
       and connection_schema.nspname = current_schema()
     join pg_class capability on capability.oid =
       'opengeni_private.subscription_runtime_capabilities'::regclass
-    join pg_proc begin_refresh on begin_refresh.oid = pg_catalog.to_regprocedure(
-      'opengeni_private.begin_subscription_codex_refresh(uuid,uuid,uuid,uuid,text,text,uuid,text,bigint)'
-    )
-    join pg_proc persist on persist.oid = pg_catalog.to_regprocedure(
-      'opengeni_private.persist_subscription_codex_refresh(uuid,uuid,uuid,uuid,uuid,bigint,text,timestamptz,timestamptz)'
-    )
-    join pg_proc refresh_policy on refresh_policy.oid = pg_catalog.to_regprocedure(
-      'opengeni_private.subscription_codex_refresh_write_allowed(uuid,uuid,uuid)'
-    )
     where connection.relname = 'subscription_connections'`;
-  if (!originalOwners) throw new Error("Codex refresh seam objects are missing");
+  if (originalOwners?.routineOwners.length !== REFRESH_SEAM_ROUTINES.length) {
+    throw new Error("Refresh seam objects are missing");
+  }
   try {
     await shared!.admin.unsafe(`
       create role ${probeRole} nosuperuser nobypassrls nologin;
@@ -224,14 +224,7 @@ async function withNonSuperuserRefreshOwners<T>(work: () => Promise<T>): Promise
       grant execute on all functions in schema public, opengeni_private to ${probeRole};
       alter table subscription_connections owner to ${probeRole};
       alter table opengeni_private.subscription_runtime_capabilities owner to ${probeRole};
-      alter function opengeni_private.subscription_codex_refresh_write_allowed(uuid,uuid,uuid)
-        owner to ${probeRole};
-      alter function opengeni_private.begin_subscription_codex_refresh(
-        uuid,uuid,uuid,uuid,text,text,uuid,text,bigint
-      ) owner to ${probeRole};
-      alter function opengeni_private.persist_subscription_codex_refresh(
-        uuid,uuid,uuid,uuid,uuid,bigint,text,timestamptz,timestamptz
-      ) owner to ${probeRole};
+      ${REFRESH_SEAM_ROUTINES.map((routine) => `alter function ${routine} owner to ${probeRole};`).join("\n")}
     `);
     const [owner] = await shared!.admin<{ superuser: boolean; bypassrls: boolean }[]>`
       select rolsuper as superuser, rolbypassrls as bypassrls from pg_roles
@@ -240,14 +233,10 @@ async function withNonSuperuserRefreshOwners<T>(work: () => Promise<T>): Promise
     return await work();
   } finally {
     await shared!.admin.unsafe(`
-      alter function opengeni_private.persist_subscription_codex_refresh(
-        uuid,uuid,uuid,uuid,uuid,bigint,text,timestamptz,timestamptz
-      ) owner to ${originalOwners.persistOwner};
-      alter function opengeni_private.begin_subscription_codex_refresh(
-        uuid,uuid,uuid,uuid,text,text,uuid,text,bigint
-      ) owner to ${originalOwners.beginOwner};
-      alter function opengeni_private.subscription_codex_refresh_write_allowed(uuid,uuid,uuid)
-        owner to ${originalOwners.refreshPolicyOwner};
+      ${REFRESH_SEAM_ROUTINES.map(
+        (routine, index) =>
+          `alter function ${routine} owner to ${originalOwners.routineOwners[index]};`,
+      ).join("\n")}
       alter table opengeni_private.subscription_runtime_capabilities
         owner to ${originalOwners.capabilityOwner};
       alter table subscription_connections owner to ${originalOwners.connectionOwner};
@@ -563,7 +552,9 @@ describe("provider-neutral subscription runtime persistence", () => {
         wrongAccount: false,
         wrongWorkspace: false,
         wrongTurn: false,
-        humanTurn: false,
+        // An ownerless session stays shared-only when a person starts the
+        // turn; the grant records no person and carries no personal access.
+        humanTurn: true,
         ownedSession: false,
       });
 
@@ -1175,13 +1166,54 @@ describe("provider-neutral subscription runtime persistence", () => {
       expect(String(uppercaseAuthorityError)).toContain(
         "session_turns_subscription_authority_v2_chk",
       );
-      expect(
-        await runAccessCase({
-          cutover: "enabled",
-          provider: "claude",
-          cutoverProvider: "claude",
-        }),
-      ).toMatchObject({ authorized: false, visible: false });
+      // Claude has no cutover receipt (migration 0712): the application role
+      // can neither create nor enable its switch row, and a row that already
+      // exists (possible before 0712) with a matching v2 entry still grants
+      // no personal placement. Its personal access is decided by its v1 path.
+      const claudeRowError = await runAccessCase({
+        cutover: "enabled",
+        provider: "claude",
+        cutoverProvider: "claude",
+      }).then(
+        () => null,
+        (error: unknown) => error,
+      );
+      expect(String((claudeRowError as { cause?: unknown } | null)?.cause)).toContain(
+        "subscription_provider_cutovers_receipt_insert",
+      );
+      await shared!.admin`
+        insert into subscription_provider_cutovers (account_id, provider, enabled)
+        values (${state.accountId}::uuid, 'claude', true)`;
+      await shared!.admin`
+        update session_turns
+        set subscription_authority = ${shared!.admin.json({
+          version: 2,
+          personal: [
+            { provider: "codex", ownerMembershipId: membership!.id, authorityGeneration: 1 },
+            { provider: "claude", ownerMembershipId: membership!.id, authorityGeneration: 1 },
+          ],
+        })}::jsonb
+        where account_id = ${state.accountId}::uuid and id = ${personalTurn.id}::uuid`;
+      try {
+        expect(await runAccessCase({ cutover: "enabled", provider: "claude" })).toMatchObject({
+          authorized: false,
+        });
+        // The same turn still authorizes Codex, which has its receipt.
+        expect(await runAccessCase({ cutover: "enabled" })).toMatchObject({ authorized: true });
+      } finally {
+        await shared!.admin`
+          delete from subscription_provider_cutovers
+          where account_id = ${state.accountId}::uuid and provider = 'claude'`;
+        await shared!.admin`
+          update session_turns
+          set subscription_authority = ${shared!.admin.json({
+            version: 2,
+            personal: [
+              { provider: "codex", ownerMembershipId: membership!.id, authorityGeneration: 1 },
+            ],
+          })}::jsonb
+          where account_id = ${state.accountId}::uuid and id = ${personalTurn.id}::uuid`;
+      }
       expect(await runAccessCase({ cutover: "enabled", generation: 2 })).toMatchObject({
         authorized: false,
         visible: false,
@@ -2255,22 +2287,29 @@ describe("provider-neutral subscription runtime persistence", () => {
             'authorize_subscription_personal_placement_access',
             'subscription_codex_refresh_write_allowed',
             'begin_subscription_codex_refresh',
-            'persist_subscription_codex_refresh'
+            'persist_subscription_codex_refresh',
+            'subscription_core_refresh_write_allowed',
+            'begin_subscription_core_refresh',
+            'persist_subscription_core_refresh'
           )
         order by proc.proname`;
-      expect(refreshRoutinePosture).toHaveLength(5);
+      expect(refreshRoutinePosture).toHaveLength(8);
       for (const routine of refreshRoutinePosture) {
         expect(routine.owner).toBe(routine.table_owner);
         expect(routine.security_definer).toBe(true);
         expect(routine.search_path.split("search_path=")[1]?.split(", ")).toEqual(
-          routine.name === "subscription_codex_refresh_write_allowed"
+          routine.name === "subscription_codex_refresh_write_allowed" ||
+            routine.name === "subscription_core_refresh_write_allowed"
             ? ["pg_catalog", "opengeni_private", "pg_temp"]
             : ["pg_catalog", "public", "opengeni_private", "pg_temp"],
         );
         expect(routine.app_execute).toBe(true);
         expect(routine.public_execute).toBe(false);
         expect(routine.lock_timeout).toBe(
-          routine.name === "persist_subscription_codex_refresh" ? "lock_timeout=0" : null,
+          routine.name === "persist_subscription_codex_refresh" ||
+            routine.name === "persist_subscription_core_refresh"
+            ? "lock_timeout=0"
+            : null,
         );
       }
       const [persisted] = await shared!.admin<
@@ -2306,8 +2345,8 @@ describe("provider-neutral subscription runtime persistence", () => {
               const attempt = { ...request, ...overrides };
               const rows = await rawRows(
                 db,
-                sql`select * from opengeni_private.begin_subscription_codex_refresh(
-                  ${attempt.accountId}::uuid, ${attempt.workspaceId}::uuid,
+                sql`select * from opengeni_private.begin_subscription_core_refresh(
+                  'codex', ${attempt.accountId}::uuid, ${attempt.workspaceId}::uuid,
                   ${attempt.sessionId}::uuid, ${attempt.turnId}::uuid,
                   ${attempt.sessionOwnerSubjectId}, ${attempt.initiatingHumanSubjectId},
                   ${attempt.connectionId}::uuid, ${attempt.holderId}, ${attempt.generation}::bigint
@@ -2511,8 +2550,8 @@ describe("provider-neutral subscription runtime persistence", () => {
           transaction as never,
           sql`select current_setting('opengeni.session_owner_subject_id', true) as owner,
               current_setting('opengeni.turn_human_subject_id', true) as human,
-              opengeni_private.subscription_codex_refresh_write_allowed(
-                ${state.accountId}::uuid, ${state.workspaceId}::uuid, ${state.connectionId}::uuid
+              opengeni_private.subscription_core_refresh_write_allowed(
+                'codex', ${state.accountId}::uuid, ${state.workspaceId}::uuid, ${state.connectionId}::uuid
               ) as "refreshCapability"`,
         );
         return { ownedSessionAuthorized, refresh, context };
@@ -2949,23 +2988,23 @@ describe("provider-neutral subscription runtime persistence", () => {
           ${state.accountId}::uuid, '{}'::jsonb, '{}'::jsonb, false, '{}'::jsonb, true, true
         ) on conflict (account_id, workspace_id) do update
           set personal_connections_allowed = true`;
-      // The accepted turn froze the owner's personal Codex authority (v1 stays
-      // authoritative until the drained cutover replaces the helper's source).
-      // The snapshot is immutable after acceptance, so this fixture writes it
-      // as the table owner with the immutability trigger briefly disabled.
-      await shared!.admin.begin(async (tx) => {
-        await tx.unsafe(
-          "alter table session_turns disable trigger session_turns_codex_authority_snapshot_immutable_trg",
-        );
-        await tx`
-          update session_turns
-          set codex_provider_account_authority_snapshot =
-            '{"version":1,"scope":"user","authorityGeneration":1}'::jsonb
-          where account_id = ${state.accountId}::uuid and id = ${personalTurn.id}::uuid`;
-        await tx.unsafe(
-          "alter table session_turns enable trigger session_turns_codex_authority_snapshot_immutable_trg",
-        );
-      });
+      // The accepted turn froze the owner's personal Codex authority in its v2
+      // entry, which the helper reads once the Codex cutover row is enabled
+      // (migration 0712 removed the legacy-generation v1 branch). Accepted
+      // authority is immutable to the application role; the fixture writes it
+      // as the table owner.
+      await shared!.admin`
+        insert into subscription_provider_cutovers (account_id, provider, enabled)
+        values (${state.accountId}::uuid, 'codex', true)`;
+      await shared!.admin`
+        update session_turns
+        set subscription_authority = ${shared!.admin.json({
+          version: 2,
+          personal: [
+            { provider: "codex", ownerMembershipId: membership!.id, authorityGeneration: 1 },
+          ],
+        })}::jsonb
+        where account_id = ${state.accountId}::uuid and id = ${personalTurn.id}::uuid`;
       const request = {
         accountId: state.accountId,
         workspaceId: personalWorkspaceId,

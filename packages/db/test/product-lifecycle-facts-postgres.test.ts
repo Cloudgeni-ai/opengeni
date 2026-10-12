@@ -35,11 +35,11 @@ import {
   registerHostExportConsumer,
   revokeConnection,
   saveSlackBotUserLink,
-  upsertCodexSubscriptionCredential,
   upsertOrganizationModelProviderConnection,
   upsertOrganizationClaudeSubscription,
   type DbClient,
 } from "../src";
+import { upsertCodexSubscriptionCredential } from "./fixtures/legacy-codex";
 import {
   ensureCanonicalHumanIdentityForAuthUser,
   getCanonicalHumanExactLoginBindingForAuthUser,

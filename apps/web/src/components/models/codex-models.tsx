@@ -390,6 +390,7 @@ function SharedCodexSetAsideRow({
       meta={[
         organizationReachLabel(places.scope, access.data),
         planLabel(account.plan, "ChatGPT"),
+        resetsLabel(account.resetCreditAvailableCount),
         reason,
       ]}
       cells={{ usage: NOT_IN_USE }}
@@ -726,8 +727,8 @@ function CodexRow({
         scopeLabel ?? (organizationAccount ? places.scope.organization : places.scope.workspace),
         planLabel(account.plan, "ChatGPT"),
         account.appsDesignated ? "Codex Apps" : null,
-        // Resets can only be redeemed on the account's own page, which org accounts don't have here.
-        organizationAccount ? null : resetsLabel(resets),
+        // An organization account's resets are redeemed on its page in Organization settings.
+        resetsLabel(resets ?? account.resetCreditAvailableCount),
       ]}
       cells={{
         usage:
@@ -943,11 +944,11 @@ function CodexAccountDetail({
           <DetailSection title="Settings">
             <SettingRowGroup className="-my-3">
               <SettingRow
-                label="Available for new chats"
-                description="Turn off to stop sending new chats and schedules to this account. Work already running continues."
+                label="Use for new work"
+                description="When off, this account isn't picked for new chats or schedules. Work already running continues."
                 control={
                   <Switch
-                    aria-label={`${name} is available for new chats`}
+                    aria-label={`Use ${name} for new work`}
                     checked={account.allocatorEnabled}
                     pending={codex.working === `allocator:${account.id}`}
                     disabled={codex.busy}
@@ -971,7 +972,7 @@ function CodexAccountDetail({
               {codex.accounts.length > 1 ? (
                 <SettingRow
                   label="Primary account"
-                  description="Used with Primary only. Spread work chooses an available account."
+                  description="Used for new work when sharing is set to Primary only."
                   control={
                     account.id === codex.activeAccountId ? (
                       <span className="inline-flex h-8 items-center gap-1.5 text-sm font-medium text-fg-muted">

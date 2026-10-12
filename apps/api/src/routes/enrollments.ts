@@ -77,6 +77,7 @@ const ENROLLMENT_OUTCOMES = new Set([
   "denied",
   "disabled",
   "invalid",
+  "used",
   "unauthorized",
 ]);
 
@@ -272,6 +273,14 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
         // The credential plane is off for this deployment (no signing secret).
         throw new HTTPException(503, {
           message: "enrollment credential plane is not configured",
+        });
+      }
+      if (result.reason === "used") {
+        // Single-use: another machine already redeemed this token. Same 401 as
+        // an invalid token, with a message the install script prints verbatim.
+        throw new HTTPException(401, {
+          message:
+            "this connect command was already used to connect another machine; create a new one for this machine",
         });
       }
       // An invalid / expired / wrong-typ token — the token is the auth, so 401.

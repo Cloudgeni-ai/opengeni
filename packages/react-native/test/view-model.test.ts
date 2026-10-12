@@ -65,6 +65,20 @@ describe("native session view-models", () => {
     expect(nativeSessionStatusTone("running")).toBe("working");
     expect(nativeSessionStatusTone("requires_action")).toBe("attention");
     expect(nativeSessionStatusTone("failed")).toBe("failed");
+    // The runtime could not start the next turn: not a request of the person.
+    expect(nativeSessionStatusTone("blocked")).toBe("failed");
+    expect(
+      timelineAccessibilityLabel(
+        {
+          kind: "session-status",
+          id: "blocked",
+          status: "requires_action",
+          blocked: true,
+          occurredAt: "2026-09-28T00:00:00.000Z",
+        },
+        DEFAULT_OPENGENI_NATIVE_LABELS,
+      ),
+    ).toBe("Stuck");
   });
 
   test("bounds inspectable tool payloads", () => {

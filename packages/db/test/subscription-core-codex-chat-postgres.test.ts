@@ -1,6 +1,15 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
-import type { Settings } from "@opengeni/config";
+import {
+  acquireSharedTestDatabase,
+  testSettings,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
+import {
+  resolveTurnExecutionPolicyV1,
+  configuredModels,
+  withCodexCatalogProvider,
+  type Settings,
+} from "@opengeni/config";
 import { CodexReloginRequired } from "@opengeni/codex";
 import { sql } from "drizzle-orm";
 import {
@@ -15,8 +24,12 @@ import {
   ensureManagedAccessForUser,
   loadSubscriptionCoreCodexCredential,
   placeSubscriptionCoreCodexTurn,
+  pinSubscriptionCoreSessionCodexAccount,
+  evaluateSubscriptionCoreCodexPlacement,
+  recordSubscriptionCoreCodexModelCatalog,
   readSubscriptionCoreTurnIdentity,
   readSubscriptionSessionBinding,
+  reserveSubscriptionCoreCodexRequest,
   recordSubscriptionCoreCodexQuotaObservation,
   recordSubscriptionCoreCodexSelectionForTurnAttempt,
   recordSubscriptionCoreCodexTurnFailure,
@@ -26,6 +39,7 @@ import {
   SubscriptionCoreCodexAccessLostError,
   subscriptionCoreTurnActor,
   touchSubscriptionCoreCodexBinding,
+  updateSubscriptionCoreCodexModelConnectionAccess,
   withRlsContext,
   withSessionRlsActorContext,
   writeSubscriptionSessionBinding,
@@ -34,6 +48,8 @@ import {
   type SubscriptionCoreTurnIdentity,
 } from "../src";
 import { rawRows } from "../src/database";
+import { subscriptionCoreCodexProvider } from "../src/subscription-core-codex-adapter";
+import { subscriptionCoreTurns } from "../src/subscription-core/turns";
 import { encryptEnvironmentValue, decryptEnvironmentValue } from "../src/environment-crypto";
 
 setDefaultTimeout(180_000);
@@ -203,8 +219,10 @@ async function runningTurn(
     owner?: "owner" | "none";
     initiator?: { kind: "subject"; subjectId: string } | { kind: "service" };
     personalAuthority?: boolean;
+    upstreamModelId?: string;
   },
 ): Promise<TurnFixture> {
+  const catalog = withCodexCatalogProvider(testSettings({ codexSubscriptionEnabled: true }));
   const ownerless = input.owner === "none";
   const createSessionCall = () =>
     createSession(client!.db, {
@@ -248,7 +266,25 @@ async function runningTurn(
       model: MODEL,
       reasoningEffort: "medium",
       sandboxBackend: "none",
-      metadata: {},
+      metadata: input.upstreamModelId
+        ? {
+            turnExecutionPolicyV1: {
+              ...resolveTurnExecutionPolicyV1(catalog, {
+                modelId: configuredModels(catalog).find(
+                  (model) =>
+                    model.credentialSource.kind === "connected_subscription" &&
+                    model.credentialSource.provider === "codex",
+                )!.id,
+                requestedModelId: null,
+                modelSource: "session",
+                reasoningEffort: "medium",
+                reasoningSource: "session",
+              }),
+              productModelId: MODEL,
+              upstreamModelId: input.upstreamModelId,
+            },
+          }
+        : {},
       initiator:
         initiator.kind === "subject"
           ? { kind: "subject", subjectId: initiator.subjectId }
@@ -942,6 +978,166 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
     ).toMatchObject({ kind: "loaded", credential: { connectionId: sharedId } });
   });
 
+  test("ownerless authorization cleans only its own lifecycle capability and preserves the caller transaction", async () => {
+    const org = await organization();
+    const unrelated = await organization();
+    const turn = await runningTurn(org, {
+      workspaceId: org.sharedWorkspaceId,
+      owner: "none",
+      initiator: { kind: "service" },
+    });
+    for (const preexisting of [false, true]) {
+      for (const validTurn of [false, true]) {
+        let transaction: { pid: number; xid: string } | undefined;
+        try {
+          await withSessionRlsActorContext(subscriptionCoreTurnActor(turn.identity), () =>
+            withRlsContext(
+              client!.db,
+              { accountId: org.accountId, workspaceId: org.sharedWorkspaceId },
+              async (tx) => {
+                const [identity] = await rawRows<{
+                  pid: number;
+                  xid: string;
+                  role: string;
+                  privileged: boolean;
+                }>(
+                  tx,
+                  sql`select pg_backend_pid() as pid, pg_current_xact_id()::text as xid,
+                current_user as role, (rolsuper or rolbypassrls) as privileged
+                from pg_roles where rolname = current_user`,
+                );
+                transaction = identity;
+                expect(identity!.role).toBe("opengeni_app");
+                expect(identity!.privileged).toBe(false);
+                await tx.execute(
+                  sql`select set_config('opengeni.pr4_cleanup_probe', 'retained', true)`,
+                );
+                // Administrative fixture setup only: the restricted connection has
+                // no grant to forge/read capabilities. Seed its exact pid/xid so
+                // the real SECURITY DEFINER helper observes prior transaction state.
+                for (const accountId of [
+                  unrelated.accountId,
+                  ...(preexisting ? [org.accountId] : []),
+                ]) {
+                  await shared!.admin`insert into opengeni_private.subscription_runtime_capabilities
+                (backend_pid, transaction_id, capability_kind, account_id)
+                values (${identity!.pid}, ${identity!.xid}::xid8, 'lifecycle', ${accountId})`;
+                }
+                const [result] = await rawRows<{ authorized: boolean }>(
+                  tx,
+                  sql`select opengeni_private.authorize_subscription_ownerless_session_access(
+                  ${org.accountId}::uuid, ${org.sharedWorkspaceId}::uuid,
+                  ${turn.identity.sessionId}::uuid,
+                  ${validTurn ? turn.identity.turnId : crypto.randomUUID()}::uuid) as authorized`,
+                );
+                expect(result!.authorized).toBe(validTurn);
+                const [after] = await rawRows<{
+                  xid: string;
+                  probe: string;
+                  account_id: string;
+                  workspace_id: string;
+                  subject_id: string;
+                }>(
+                  tx,
+                  sql`select pg_current_xact_id()::text as xid,
+                  current_setting('opengeni.pr4_cleanup_probe') as probe,
+                  current_setting('opengeni.account_id') as account_id,
+                  current_setting('opengeni.workspace_id') as workspace_id,
+                  current_setting('opengeni.subject_id') as subject_id`,
+                );
+                expect(after).toEqual({
+                  xid: identity!.xid,
+                  probe: "retained",
+                  account_id: org.accountId,
+                  workspace_id: org.sharedWorkspaceId,
+                  subject_id: "service:subscription-core",
+                });
+              },
+            ),
+          );
+          // Observe AFTER commit: another connection cannot see the helper's
+          // uncommitted insert/delete, so an in-transaction read is insufficient.
+          const retained = await shared!.admin<{ account_id: string }[]>`
+          select account_id::text from opengeni_private.subscription_runtime_capabilities
+          where backend_pid = ${transaction!.pid} and transaction_id = ${transaction!.xid}::xid8
+            and capability_kind = 'lifecycle' order by account_id`;
+          expect(retained.map((row) => row.account_id).sort()).toEqual(
+            [unrelated.accountId, ...(preexisting ? [org.accountId] : [])].sort(),
+          );
+        } finally {
+          if (transaction)
+            await shared!.admin`delete from opengeni_private.subscription_runtime_capabilities
+            where backend_pid = ${transaction.pid} and transaction_id = ${transaction.xid}::xid8`;
+        }
+      }
+    }
+  });
+
+  test("a person's turn in an ownerless session places shared-only, like a scheduled run", async () => {
+    // A scheduled task that opens a new session per run creates the session
+    // without an owner, while its turn still records the person it runs for.
+    // That turn must place on shared capacity, never on personal capacity.
+    const org = await organization();
+    await enableCodexCutover(org.accountId);
+    const personal = await personalConnection(org, "not-for-ownerless");
+    const turn = await runningTurn(org, {
+      workspaceId: org.sharedWorkspaceId,
+      owner: "none",
+      initiator: { kind: "subject", subjectId: org.ownerSubjectId },
+    });
+    expect(turn.identity).toMatchObject({
+      sessionOwnerSubjectId: null,
+      sessionOwnerMembershipId: null,
+      initiatingHumanSubjectId: org.ownerSubjectId,
+    });
+    expect(await place(turn)).toMatchObject({ kind: "wait", reason: "no_eligible_capacity" });
+    const sharedId = await sharedConnection(org, {
+      workspaceId: org.sharedWorkspaceId,
+      label: "ownerless-person",
+    });
+    expect(await place(turn)).toMatchObject({
+      kind: "run",
+      connectionId: sharedId,
+      personal: false,
+    });
+    const binding = await withRlsContext(
+      client!.db,
+      { accountId: org.accountId, workspaceId: org.sharedWorkspaceId },
+      (db) => readSubscriptionSessionBinding(db, turn.identity),
+    );
+    expect(binding).toBeNull();
+    expect(
+      await loadSubscriptionCoreCodexCredential(
+        client!.db,
+        settings,
+        turn.identity,
+        leaseOf(turn, personal),
+      ),
+    ).toEqual({ kind: "lease_lost" });
+    expect(
+      await loadSubscriptionCoreCodexCredential(
+        client!.db,
+        settings,
+        turn.identity,
+        leaseOf(turn, sharedId),
+      ),
+    ).toMatchObject({ kind: "loaded", credential: { connectionId: sharedId } });
+    // The turn can also admit its model requests on the shared lease.
+    expect(
+      await reserveSubscriptionCoreCodexRequest(
+        client!.db,
+        turn.identity,
+        leaseOf(turn, sharedId),
+        {
+          requestId: crypto.randomUUID(),
+          transportAttempt: 1,
+          attemptId: turn.attemptId,
+          executionGeneration: turn.executionGeneration,
+        },
+      ),
+    ).toMatchObject({ operationId: expect.any(String) });
+  });
+
   test("concurrent refreshes of one generation persist one rotation and call the provider once", async () => {
     const org = await organization();
     await enableCodexCutover(org.accountId);
@@ -1068,6 +1264,88 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
     );
     expect(direct!.marked).toBe(false);
   });
+
+  // Two adapter shapes of a credential that never renews: no refresher at all
+  // (an API key), and a refresher the credential's format does not use (a
+  // setup token next to renewable OAuth credentials of the same provider).
+  test.each(["no refresher", "format does not renew"] as const)(
+    "a credential that never renews is not rotated: its refresh marks the connection needs-relogin (%s)",
+    async (shape) => {
+      const org = await organization();
+      await enableCodexCutover(org.accountId);
+      const connectionId = await sharedConnection(org, {
+        workspaceId: org.sharedWorkspaceId,
+        label: "non-renewing",
+        expiresAt: new Date(Date.now() - 60_000),
+      });
+      const turn = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
+      expect(await place(turn)).toMatchObject({ kind: "run", connectionId });
+      // A binding of the registered provider whose adapter declares no refresh,
+      // the shape of a setup token or an API key.
+      const codex = subscriptionCoreCodexProvider();
+      let rotations = 0;
+      const nonRenewing =
+        shape === "no refresher"
+          ? { ...codex, adapter: { ...codex.adapter, refresh: null } }
+          : {
+              ...codex,
+              adapter: {
+                ...codex.adapter,
+                capabilitiesFor: (format: string) => ({
+                  ...codex.adapter.capabilitiesFor(format),
+                  autoRenews: false,
+                }),
+                refresh: {
+                  ...codex.adapter.refresh!,
+                  rotate: async () => {
+                    rotations += 1;
+                    throw new Error("a non-renewing format must not be rotated");
+                  },
+                },
+              },
+            };
+      const turns = subscriptionCoreTurns(nonRenewing);
+      // A superseded generation is reported before anything is written.
+      expect(
+        await turns.refreshSubscriptionCoreCredential(
+          client!.db,
+          settings,
+          turn.identity,
+          leaseOf(turn, connectionId),
+          2,
+        ),
+      ).toEqual({ kind: "superseded" });
+      const message = codex.adapter.reloginText("");
+      expect(
+        await turns.refreshSubscriptionCoreCredential(
+          client!.db,
+          settings,
+          turn.identity,
+          leaseOf(turn, connectionId),
+          1,
+        ),
+      ).toEqual({ kind: "relogin", message, marked: true });
+      const [row] = await shared!.admin<
+        { status: string; last_error: string | null; refresh_generation: string }[]
+      >`
+      select status, last_error, refresh_generation::text as refresh_generation
+      from subscription_connections where id = ${connectionId}::uuid`;
+      expect(row).toEqual({
+        status: "needs_relogin",
+        last_error: message,
+        refresh_generation: "1",
+      });
+      expect(rotations).toBe(0);
+      expect(
+        await loadSubscriptionCoreCodexCredential(
+          client!.db,
+          settings,
+          turn.identity,
+          leaseOf(turn, connectionId),
+        ),
+      ).toEqual({ kind: "needs_relogin" });
+    },
+  );
 
   test("quota observations and failure receipts are fenced to the leased connection", async () => {
     const org = await organization();
@@ -1239,7 +1517,7 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
     expect(live!.live).toBe(true);
   });
 
-  test("a disabled Codex cutover row refuses v1 personal authority; no row keeps v1", async () => {
+  test("personal access reads only the v2 entry, behind an enabled Codex cutover row (v1 snapshots grant nothing)", async () => {
     const org = await organization();
     const personal = await personalConnection(org, "v1-only");
     const turn = await runningTurn(org, { workspaceId: org.personalWorkspaceId });
@@ -1272,12 +1550,71 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
           },
         ),
       );
-    expect(await authorize()).toBe(true);
+    // Migration 0712 replaced 0668's legacy-generation branch: without a
+    // cutover row (unreachable for Codex after 0689) the v1 snapshot no
+    // longer authorizes anything.
+    expect(await authorize()).toBe(false);
     await enableCodexCutover(org.accountId, false);
     expect(await authorize()).toBe(false);
     // Enabled: only the v2 entry counts, and this turn has none.
     await enableCodexCutover(org.accountId, true);
     expect(await authorize()).toBe(false);
+    await shared!.admin`
+      update session_turns set subscription_authority = ${shared!.admin.json({
+        version: 2,
+        personal: [
+          { provider: "codex", ownerMembershipId: org.ownerMembershipId, authorityGeneration: 1 },
+        ],
+      })}::jsonb
+      where account_id = ${org.accountId}::uuid and id = ${turn.identity.turnId}::uuid`;
+    expect(await authorize()).toBe(true);
+    // A disabled row grants nothing, even with the v2 entry.
+    await enableCodexCutover(org.accountId, false);
+    expect(await authorize()).toBe(false);
+    await enableCodexCutover(org.accountId, true);
+    expect(await authorize()).toBe(true);
+    // The same grant for a provider without a cutover receipt (SuperGrok,
+    // Claude) is refused: an enabled switch row, a v2 entry, the exact owner
+    // and the current generation are not enough before that provider's
+    // receipt, so its personal access stays decided by its v1 path alone.
+    for (const provider of ["claude", "xai"]) {
+      await shared!.admin.begin(async (owner) => {
+        // Fixture only: move this connection and its v2 entry to the provider
+        // and give it an enabled switch row, bypassing the guards that keep
+        // such rows from appearing.
+        await owner`set local session_replication_role = replica`;
+        await owner`update subscription_connections set provider = ${provider}
+          where id = ${personal}::uuid`;
+        await owner`insert into subscription_provider_cutovers (account_id, provider, enabled)
+          values (${org.accountId}::uuid, ${provider}, true)
+          on conflict (account_id, provider) do update set enabled = true`;
+        await owner`update session_turns set subscription_authority = ${owner.json({
+          version: 2,
+          personal: [
+            { provider, ownerMembershipId: org.ownerMembershipId, authorityGeneration: 1 },
+          ],
+        })}::jsonb
+          where account_id = ${org.accountId}::uuid and id = ${turn.identity.turnId}::uuid`;
+      });
+      const [granted] = await withSessionRlsActorContext(
+        subscriptionCoreTurnActor(turn.identity),
+        () =>
+          withRlsContext(
+            client!.db,
+            { accountId: org.accountId, workspaceId: org.personalWorkspaceId },
+            (db) =>
+              rawRows<{ authorized: boolean }>(
+                db,
+                sql`select opengeni_private.authorize_subscription_personal_access(
+                  ${org.accountId}::uuid, ${org.personalWorkspaceId}::uuid,
+                  ${turn.identity.sessionId}::uuid, ${turn.identity.turnId}::uuid,
+                  ${personal}::uuid, ${provider}, ${org.ownerSubjectId}, ${org.ownerSubjectId}
+                ) as authorized`,
+              ),
+          ),
+      );
+      expect(granted!.authorized).toBe(false);
+    }
   });
 
   test("turn recovery stores the shared-core lease-busy chain on the turn", async () => {
@@ -1570,5 +1907,359 @@ describe("core Codex resolver single-flight", () => {
       { load: async () => ({ kind: "needs_relogin" }) },
     );
     await expect(revoked.getToken()).rejects.toBeInstanceOf(CodexReloginRequired);
+  });
+});
+
+describe.skipIf(!realDb)("durable model catalog observations", () => {
+  test("placement, wait reconciliation and credit admission share exact accepted model facts", async () => {
+    const org = await organization();
+    await enableCodexCutover(org.accountId);
+    const a = await sharedConnection(org, {
+      workspaceId: org.sharedWorkspaceId,
+      label: "catalog-a",
+    });
+    const b = await sharedConnection(org, {
+      workspaceId: org.sharedWorkspaceId,
+      label: "catalog-b",
+    });
+    // This upstream slug deliberately differs from the product id and need not
+    // occur in today's picker: retained accepted turns must keep working.
+    const upstream = "retained-upstream-model";
+    const turn = await runningTurn(org, {
+      workspaceId: org.sharedWorkspaceId,
+      upstreamModelId: upstream,
+    });
+    const scope = {
+      kind: "workspace" as const,
+      accountId: org.accountId,
+      workspaceId: org.sharedWorkspaceId,
+      subjectId: org.ownerSubjectId,
+    };
+    const observe = (
+      connectionId: string,
+      slugs: string[],
+      generation = 1,
+      observedAt = Date.now(),
+    ) =>
+      recordSubscriptionCoreCodexModelCatalog(client!.db, scope, connectionId, {
+        slugs,
+        refreshGeneration: generation,
+        observedAt,
+      });
+    const evaluate = (now = new Date()) =>
+      evaluateSubscriptionCoreCodexPlacement(client!.db, {
+        identity: turn.identity,
+        productModelId: MODEL,
+        reasoningLevel: "medium",
+        now,
+      });
+    expect(await observe(a, [])).toBe(true);
+    expect(await observe(b, ["other-model", upstream])).toBe(true);
+    expect(await place(turn)).toMatchObject({ kind: "run", connectionId: b });
+    expect(await evaluate()).toMatchObject({ kind: "run", connectionId: b });
+    expect(await observe(b, [])).toBe(true);
+    expect(await place(turn)).toMatchObject({ kind: "wait", reason: "no_eligible_capacity" });
+    // The same evaluator used immediately after arming a waiter must not wake
+    // the turn on the model-ineligible account it just rejected.
+    const parked = await evaluate();
+    expect(parked).toMatchObject({ kind: "wait", reason: "no_eligible_capacity" });
+    if (parked.kind !== "wait") throw Error("expected wait");
+    expect(parked.healthRetryAt).toBeInstanceOf(Date);
+    expect(await evaluate(new Date(Date.now() + 61_000))).toMatchObject({ kind: "run" });
+
+    expect(await observe(a, [upstream])).toBe(true);
+    // An older response cannot replace the newer catalog.
+    expect(await observe(a, [], 1, Date.now() - 5_000)).toBe(false);
+    await shared!
+      .admin`update subscription_connections set extra_credits_enabled=true where id=${a}::uuid`;
+    await shared!.admin`update subscription_connection_quota set quota=${shared!.admin.json({
+      windows: [
+        { id: "primary", usedPercent: 100, status: "exhausted", resetsAt: Date.now() + 3600_000 },
+      ],
+      modelCooldowns: {},
+      exhaustedUntil: null,
+      exhaustedKind: null,
+    })}::jsonb, observed_refresh_generation=1 where connection_id=${a}::uuid`;
+    expect(await place(turn)).toMatchObject({ kind: "run", connectionId: a });
+    expect(
+      await canSpendSubscriptionCoreCodexExtraCredits(client!.db, {
+        ...turn,
+        connectionId: a,
+        productModelId: MODEL,
+        reasoningLevel: "medium",
+        leaseTtlMs: TTL,
+      }),
+    ).toBe(true);
+    // Refresh invalidates observations immediately, without waiting for TTL.
+    await shared!
+      .admin`update subscription_connections set refresh_generation=2 where id=${b}::uuid`;
+    expect(await observe(b, [], 1)).toBe(false);
+    expect(await evaluate()).toMatchObject({ kind: "run", connectionId: b });
+    const stranger = await organization();
+    expect(
+      await recordSubscriptionCoreCodexModelCatalog(
+        client!.db,
+        {
+          kind: "workspace",
+          accountId: stranger.accountId,
+          workspaceId: stranger.sharedWorkspaceId,
+          subjectId: stranger.ownerSubjectId,
+        },
+        a,
+        { slugs: [], refreshGeneration: 1, observedAt: Date.now() },
+      ),
+    ).toBe(false);
+  });
+});
+
+describe.skipIf(!realDb)("a workspace-managed Codex account under organization reach", () => {
+  /** `managed: false`: a workspace's own copy that no workspace manages (copies 0689 merged). */
+  async function managedConnection(org: Org, label: string, managed = true): Promise<string> {
+    const manager = managed ? org.sharedWorkspaceId : null;
+    const [row] = await shared!.admin<{ id: string }[]>`
+      insert into subscription_connections (
+        account_id, provider, kind, credential_encrypted, ownership, scope_kind,
+        allow_personal_workspaces, provider_account_id, plan_type, provider_state, expires_at,
+        managed_by_workspace_id
+      ) values (
+        ${org.accountId}::uuid, 'codex', 'subscription', ${encryptedTokens(label)},
+        'shared', 'workspaces', false, ${`chatgpt-${label}`}, 'pro',
+        ${shared!.admin.json({ isFedramp: false })}::jsonb,
+        ${new Date(Date.now() + 86_400_000).toISOString()}::timestamptz,
+        ${manager}::uuid
+      ) returning id::text as id`;
+    await shared!.admin`insert into subscription_connection_workspaces
+      (account_id, connection_id, workspace_id)
+      values (${org.accountId}::uuid, ${row!.id}::uuid, ${org.sharedWorkspaceId}::uuid)`;
+    await shared!.admin`insert into subscription_connection_assignment_policies (
+        account_id, connection_id, workspace_id, inference_pool, managed_by_workspace_id
+      ) values (${org.accountId}::uuid, ${row!.id}::uuid, ${org.sharedWorkspaceId}::uuid,
+        'workspace', ${manager}::uuid)`;
+    return row!.id;
+  }
+
+  async function release(org: Org, turn: TurnFixture, connectionId: string) {
+    await withSessionRlsActorContext(subscriptionCoreTurnActor(turn.identity), () =>
+      withRlsContext(
+        client!.db,
+        { accountId: org.accountId, workspaceId: org.sharedWorkspaceId },
+        (db) =>
+          releaseSubscriptionTurnLease(db, {
+            ...turn.identity,
+            provider: "codex",
+            ...leaseOf(turn, connectionId),
+          }),
+      ),
+    );
+  }
+
+  test("a managed account keeps serving its pin across organization reach edits; people are refused", async () => {
+    const org = await organization();
+    await enableCodexCutover(org.accountId);
+    const managed = await managedConnection(org, "managed-pin");
+    const admin = {
+      kind: "codex" as const,
+      connectionId: managed,
+      accountId: org.accountId,
+      workspaceId: null,
+      subjectId: org.ownerSubjectId,
+    };
+    const turn = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
+    expect(
+      (
+        await pinSubscriptionCoreSessionCodexAccount(client!.db, {
+          accountId: org.accountId,
+          workspaceId: org.sharedWorkspaceId,
+          sessionId: turn.identity.sessionId,
+          connectionId: managed,
+          subjectId: org.ownerSubjectId,
+        })
+      ).result.changed,
+    ).toBe(true);
+    expect(await place(turn)).toMatchObject({ kind: "run", connectionId: managed, explicit: true });
+    await release(org, turn, managed);
+
+    await expect(
+      updateSubscriptionCoreCodexModelConnectionAccess(client!.db, admin, {
+        allowedModels: null,
+        allowedWorkspaces: [],
+        allowPersonalWorkspaces: false,
+        allowedPeople: [org.ownerMembershipId],
+        version: 1,
+      }),
+    ).rejects.toThrow("cannot be limited to people");
+    for (const [version, allowedWorkspaces] of [
+      [1, null],
+      [2, []],
+    ] as const) {
+      expect(
+        await updateSubscriptionCoreCodexModelConnectionAccess(client!.db, admin, {
+          allowedModels: null,
+          allowedWorkspaces: allowedWorkspaces ? [] : null,
+          allowPersonalWorkspaces: false,
+          version,
+        }),
+      ).toMatchObject({ version: version + 1 });
+      expect(await place(turn)).toMatchObject({
+        kind: "run",
+        connectionId: managed,
+        explicit: true,
+      });
+      await release(org, turn, managed);
+    }
+    const [row] = await shared!.admin<{ managed: string; refresh_generation: string }[]>`
+      select managed_by_workspace_id::text as managed, refresh_generation::text as refresh_generation
+      from subscription_connections where id = ${managed}::uuid`;
+    expect(row).toEqual({ managed: org.sharedWorkspaceId, refresh_generation: "1" });
+  });
+
+  test("people scope is evaluated against the session owner, and an excluded pin waits", async () => {
+    const org = await organization();
+    await enableCodexCutover(org.accountId);
+    // People scope is offered only while no workspace manages the account.
+    const managed = await managedConnection(org, "managed-reach", false);
+    const [otherPersonal] = await shared!.admin<{ id: string }[]>`
+      insert into workspaces (account_id, name) values (${org.accountId}::uuid, 'Personal workspace')
+      returning id::text as id`;
+    const [other] = await shared!.admin<{ id: string }[]>`
+      insert into organization_memberships (account_id, subject_id, role, status, personal_workspace_id)
+      values (${org.accountId}::uuid, ${`user:other-${crypto.randomUUID()}`}, 'member', 'active',
+        ${otherPersonal!.id}::uuid)
+      returning id::text as id`;
+    const admin = {
+      kind: "codex" as const,
+      connectionId: managed,
+      accountId: org.accountId,
+      workspaceId: null,
+      subjectId: org.ownerSubjectId,
+    };
+    const save = (version: number, policy: { workspaces?: string[]; people?: string[] }) =>
+      updateSubscriptionCoreCodexModelConnectionAccess(client!.db, admin, {
+        allowedModels: null,
+        allowedWorkspaces: policy.workspaces ?? [],
+        allowPersonalWorkspaces: false,
+        allowedPeople: policy.people ?? null,
+        version,
+      });
+
+    // Before any edit it serves its workspace exactly as before.
+    const turn = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
+    expect(await place(turn)).toMatchObject({ kind: "run", connectionId: managed });
+    await release(org, turn, managed);
+
+    // Chosen people including the owner: the owner's shared and private work runs.
+    expect(await save(1, { people: [org.ownerMembershipId] })).toMatchObject({ version: 2 });
+    expect(await place(turn)).toMatchObject({ kind: "run", connectionId: managed });
+    await release(org, turn, managed);
+    const privateTurn = await runningTurn(org, {
+      workspaceId: org.sharedWorkspaceId,
+      visibility: "user_private",
+    });
+    expect(await place(privateTurn)).toMatchObject({ kind: "run", connectionId: managed });
+    await release(org, privateTurn, managed);
+    // An ownerless session never reaches a people-scoped account.
+    const ownerless = await runningTurn(org, {
+      workspaceId: org.sharedWorkspaceId,
+      owner: "none",
+      initiator: { kind: "service" },
+    });
+    expect(await place(ownerless)).toMatchObject({ kind: "wait", reason: "no_eligible_capacity" });
+
+    // The owner pins the account while it serves them.
+    const pinned = await pinSubscriptionCoreSessionCodexAccount(client!.db, {
+      accountId: org.accountId,
+      workspaceId: org.sharedWorkspaceId,
+      sessionId: turn.identity.sessionId,
+      connectionId: managed,
+      subjectId: org.ownerSubjectId,
+    });
+    expect(pinned.result.changed).toBe(true);
+    const bindingRow = async () => [
+      ...(await shared!.admin<{ connection_id: string | null; choice: string }[]>`
+          select connection_id::text as connection_id, choice from subscription_session_bindings
+          where session_id = ${turn.identity.sessionId}::uuid and provider = 'codex'`),
+    ];
+    expect(await bindingRow()).toEqual([{ connection_id: managed, choice: "explicit" }]);
+    // Someone else only: the owner's private session is not widened...
+    expect(await save(2, { people: [other!.id] })).toMatchObject({ version: 3 });
+    expect(await place(privateTurn)).toMatchObject({ kind: "wait" });
+    expect(await leaseRows(org, privateTurn)).toEqual([]);
+    expect(await bindingRow()).toEqual([{ connection_id: managed, choice: "explicit" }]);
+    // ...and the explicit pin keeps waiting for the account (D-24).
+    expect(await place(turn)).toMatchObject({
+      kind: "wait",
+      reason: "pinned_account_ineligible",
+      explicitConnectionId: managed,
+    });
+    expect(
+      await withRlsContext(
+        client!.db,
+        { accountId: org.accountId, workspaceId: org.sharedWorkspaceId },
+        (db) => readSubscriptionSessionBinding(db, turn.identity),
+      ),
+    ).toMatchObject({ connectionId: managed, choice: "explicit" });
+
+    // Back to its own workspace: the pin runs again on the same credential.
+    expect(await save(3, {})).toMatchObject({ version: 4, allowedWorkspaces: [] });
+    expect(await place(turn)).toMatchObject({
+      kind: "run",
+      connectionId: managed,
+      explicit: true,
+    });
+    await release(org, turn, managed);
+    const [row] = await shared!.admin<{ managed: string | null; refresh_generation: string }[]>`
+      select managed_by_workspace_id::text as managed, refresh_generation::text as refresh_generation
+      from subscription_connections where id = ${managed}::uuid`;
+    expect(row).toEqual({ managed: null, refresh_generation: "1" });
+
+    // The organization can also disconnect it.
+    expect(
+      (
+        await withSessionRlsActorContext({ subjectId: org.ownerSubjectId }, () =>
+          disconnectSubscriptionCoreCodexConnection(client!.db, {
+            accountId: org.accountId,
+            workspaceId: null,
+            subjectId: org.ownerSubjectId,
+            connectionId: managed,
+          }),
+        )
+      ).outcome,
+    ).toBe("removed");
+  });
+
+  test("the organization disconnects an account a shared workspace manages, never one a Personal workspace manages", async () => {
+    const org = await organization();
+    await enableCodexCutover(org.accountId);
+    const disconnect = async (connectionId: string) =>
+      (
+        await withSessionRlsActorContext({ subjectId: org.ownerSubjectId }, () =>
+          disconnectSubscriptionCoreCodexConnection(client!.db, {
+            accountId: org.accountId,
+            workspaceId: null,
+            subjectId: org.ownerSubjectId,
+            connectionId,
+          }),
+        )
+      ).outcome;
+    const personalManaged = await managedConnection(org, "personal-managed-disconnect");
+    // No writer produces this shape; the fixture bypasses the scope guard.
+    await shared!.admin.begin(async (tx) => {
+      await tx`set local session_replication_role = replica`;
+      await tx`update subscription_connections
+        set managed_by_workspace_id = ${org.personalWorkspaceId}::uuid
+        where id = ${personalManaged}::uuid`;
+    });
+    expect(await disconnect(personalManaged)).toBe("not_found");
+    const disconnected = async (connectionId: string) =>
+      (
+        await shared!.admin<{ disconnected: boolean }[]>`
+          select disconnected_at is not null as disconnected from subscription_connections
+          where id = ${connectionId}::uuid`
+      )[0]?.disconnected;
+    expect(await disconnected(personalManaged)).toBe(false);
+
+    const managed = await managedConnection(org, "managed-disconnect");
+    expect(await disconnect(managed)).toBe("removed");
+    expect(await disconnected(managed)).toBe(true);
   });
 });

@@ -28,7 +28,11 @@ import {
   type TranscriptionBilling,
   type TranscriptionBillingContext,
 } from "../transcription";
-import { voiceCreditStanding, voiceInsufficientCreditsMessage } from "./realtime-voice-billing";
+import {
+  voiceCreditStanding,
+  voiceInsufficientCreditsMessage,
+  workspaceCreditsDisabled,
+} from "./realtime-voice-billing";
 
 /** Credit debit type and usage source for deployment-funded voice input. */
 export const VOICE_INPUT_DEBIT_TYPE = VOICE_TRANSCRIPTION_DEBIT_TYPE;
@@ -123,6 +127,17 @@ export function createVoiceInputBilling(deps: {
           code: "policy_blocked",
           status: 403,
           message: "Voice input payer could not be verified.",
+        });
+      }
+      // Deployment-paid voice input spends Opengeni credits, so it honors the
+      // workspace switch that turns them off. Nothing was sent yet, so another
+      // (subscription) provider may still serve the request.
+      if (await workspaceCreditsDisabled(deps.db, workspaceId)) {
+        throw new TranscriptionServiceError({
+          code: "policy_blocked",
+          status: 403,
+          fallbackSafe: true,
+          message: "Opengeni credits are turned off in this workspace.",
         });
       }
       // Debits whose receipt committed but whose ledger write failed are

@@ -22,6 +22,12 @@ export interface NativeTimelineMessages {
   workedFor: string;
   stillWaiting: string;
   longerThanUsual: string;
+  /**
+   * The loading copy that rotates beside the orb while a reply starts. Empty
+   * keeps the built-in phrases; a host's own voice replaces them, as the web
+   * timeline's loading `phrases` option does.
+   */
+  loadingPhrases: readonly string[];
   command: string;
   output: string;
   startupDetail: string;
@@ -39,6 +45,13 @@ export interface NativeTimelineMessages {
   previewUnavailable: (name: string) => string;
   loadFailedTitle: string;
   connectionFailed: string;
+  /** A session whose next step the runtime could not start (an admission block). */
+  stuckTitle: string;
+  stuckBody: string;
+  /** The block clears only once someone restores access the work needs. */
+  stuckAccessBody: string;
+  stuckRetry: string;
+  stuckRetryFailed: string;
   retry: string;
   cancel: string;
   save: string;
@@ -58,6 +71,9 @@ export interface NativeTimelineMessages {
   rename: string;
   pin: string;
   unpin: string;
+  /** A pinned chat (its list section and row label). */
+  pinned: string;
+  pinFailed: (pinned: boolean) => string;
   renameChat: string;
   chatTitle: string;
   renameFailed: (reason: string | null) => string;
@@ -73,6 +89,10 @@ export interface NativeTimelineMessages {
   recordingSaved: string;
   discard: string;
   followUpPlaceholder: string;
+  /** The composer's call button: start a voice call with the agent. */
+  startCall: string;
+  /** The composer's call button while this conversation is already on a call. */
+  returnToCall: string;
 }
 
 export const defaultNativeTimelineMessages: NativeTimelineMessages = {
@@ -96,6 +116,7 @@ export const defaultNativeTimelineMessages: NativeTimelineMessages = {
   workedFor: "Worked for",
   stillWaiting: "Still waiting for a response…",
   longerThanUsual: "A little longer than usual…",
+  loadingPhrases: [],
   command: "Command",
   output: "Output",
   startupDetail:
@@ -114,6 +135,13 @@ export const defaultNativeTimelineMessages: NativeTimelineMessages = {
   previewUnavailable: (name) => `${name} (preview unavailable)`,
   loadFailedTitle: "Couldn't load this session",
   connectionFailed: "Couldn't connect. Check your connection; this retries automatically.",
+  stuckTitle: "Stuck",
+  stuckBody:
+    "This chat couldn't start its next step. Nothing is needed from you, and its work is kept. Try again to continue.",
+  stuckAccessBody:
+    "This chat can't continue until access it needs is restored. Its work is kept; try again once that's sorted.",
+  stuckRetry: "Try again",
+  stuckRetryFailed: "That didn't go through. Try again in a moment.",
   retry: "Retry",
   cancel: "Cancel",
   save: "Save",
@@ -133,6 +161,8 @@ export const defaultNativeTimelineMessages: NativeTimelineMessages = {
   rename: "Rename",
   pin: "Pin",
   unpin: "Unpin",
+  pinned: "Pinned",
+  pinFailed: (pinned) => `Couldn't ${pinned ? "pin" : "unpin"} this chat.`,
   renameChat: "Rename chat",
   chatTitle: "Chat title",
   renameFailed: (reason) => `Couldn't rename this chat. ${reason ?? "Try again."}`,
@@ -148,6 +178,8 @@ export const defaultNativeTimelineMessages: NativeTimelineMessages = {
   recordingSaved: "Your recording is saved.",
   discard: "Discard",
   followUpPlaceholder: "Send a follow-up...",
+  startCall: "Start a call",
+  returnToCall: "Return to call",
 };
 
 const MessagesContext = createContext<NativeTimelineMessages>(defaultNativeTimelineMessages);

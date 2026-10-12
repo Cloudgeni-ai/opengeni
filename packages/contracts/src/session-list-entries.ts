@@ -66,6 +66,8 @@ export function sessionListEntry(session: SessionListEntryInput): SessionListEnt
     scheduledTaskId:
       typeof scheduledTaskId === "string" && scheduledTaskId.length > 0 ? scheduledTaskId : null,
     siteOrigin,
+    ...(session.model ? { model: session.model } : {}),
+    ...(session.reasoningEffort ? { reasoningEffort: session.reasoningEffort } : {}),
     createdBy: session.createdBy,
     channelId: session.channelId,
     parentSessionId: session.parentSessionId,
@@ -86,6 +88,8 @@ export function sessionListEntry(session: SessionListEntryInput): SessionListEnt
     archiveVersion: session.archiveVersion ?? 0,
     treeStats: session.treeStats,
     requiresActionSince: session.requiresActionSince,
+    // Lets lists tell a runtime-held session apart from one waiting on a person.
+    ...(session.admissionBlock !== undefined ? { admissionBlock: session.admissionBlock } : {}),
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
   };

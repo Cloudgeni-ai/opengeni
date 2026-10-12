@@ -33,6 +33,10 @@
       "types": "./src/mcp-network.ts",
       "default": "./src/mcp-network.ts"
     },
+    "./model-call": {
+      "types": "./src/model-call.ts",
+      "default": "./src/model-call.ts"
+    },
     "./gmail-rest-mcp": {
       "types": "./src/gmail-rest-mcp.ts",
       "default": "./src/gmail-rest-mcp.ts"

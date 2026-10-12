@@ -79,7 +79,7 @@ describe("native push presentation", () => {
     ).toEqual({ title: "Release is out" });
   });
 
-  test("only notifications the agent marked time-sensitive break through Focus", () => {
+  test("time-sensitive notifications, questions and approvals break through Focus", () => {
     expect(nativePushInterruptionLevel(payload)).toBe("active");
     expect(nativePushInterruptionLevel({ ...payload, rule: "agent" })).toBe("active");
     expect(nativePushInterruptionLevel({ ...payload, rule: "agent", urgency: "normal" })).toBe(
@@ -88,8 +88,19 @@ describe("native push presentation", () => {
     expect(
       nativePushInterruptionLevel({ ...payload, rule: "agent", urgency: "time_sensitive" }),
     ).toBe("time-sensitive");
-    // Urgency only counts on an agent notification.
-    expect(nativePushInterruptionLevel({ ...payload, urgency: "time_sensitive" })).toBe("active");
+    // A question or approval is ordinary unless its person asked for
+    // time-sensitive ones, which puts the urgency on the delivery.
+    expect(nativePushInterruptionLevel(payload)).toBe("active");
+    expect(nativePushInterruptionLevel({ ...payload, urgency: "time_sensitive" })).toBe(
+      "time-sensitive",
+    );
+    // Replies and failures never are.
+    expect(
+      nativePushInterruptionLevel({ ...payload, rule: "reply_ready", urgency: "time_sensitive" }),
+    ).toBe("active");
+    expect(
+      nativePushInterruptionLevel({ ...payload, rule: "failed", urgency: "time_sensitive" }),
+    ).toBe("active");
     expect(nativePushInterruptionLevel({ ...payload, rule: "reply_ready" })).toBe("active");
   });
 

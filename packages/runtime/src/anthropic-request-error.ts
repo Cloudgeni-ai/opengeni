@@ -14,6 +14,11 @@ function bounded(value: unknown, maxBytes: number): string | undefined {
 export class AnthropicRequestError extends Error {
   readonly request_id: string | null;
   readonly headers: Record<string, string>;
+  /**
+   * Raised by a Claude subscription (OAuth) transport. Subscription limits are
+   * owned by account rotation and capacity waits, never by API-key quota rules.
+   */
+  readonly subscription: boolean;
   #detail: string | undefined;
   #errorType: string | undefined;
 
@@ -23,9 +28,11 @@ export class AnthropicRequestError extends Error {
     readonly code: string,
     source: unknown,
     headers: Headers,
+    options: { subscription?: boolean } = {},
   ) {
     super(message);
     this.name = "AnthropicRequestError";
+    this.subscription = options.subscription === true;
     const error =
       source && typeof source === "object" && !Array.isArray(source)
         ? (source as Record<string, unknown>)

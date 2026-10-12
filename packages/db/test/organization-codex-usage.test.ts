@@ -451,15 +451,17 @@ test("a concurrently replaced bearer cannot dispatch after its refresh enters ma
         row.version += 1;
         return { rows: [{ id: credentialId }] };
       }
-      if (/set local lock_timeout|select pg_advisory_xact_lock/.test(query.sql))
-        return { rows: [] };
+      if (/set local|select pg_advisory_xact_lock/.test(query.sql)) return { rows: [] };
       throw new Error("Unexpected database operation");
     },
   } as unknown as Database;
   const disposition = spyOn(compatibility, "readCodexCutoverDisposition").mockImplementation(
-    async () => (maintenance ? "maintenance" : "legacy"),
+    async () => (maintenance ? "maintenance" : "core"),
   );
-  const provider = mock(async () => new Response("{}"));
+  const alias = spyOn(repository, "resolveSubscriptionConnectionId").mockResolvedValue(
+    credentialId,
+  );
+  const provider = joined(mock(async () => new Response("{}")));
   const refresh = mock(async () => {
     maintenance = true;
     return {
@@ -472,7 +474,7 @@ test("a concurrently replaced bearer cannot dispatch after its refresh enters ma
     const result = await readOrganizationCodexUsage(
       db,
       { environmentsEncryptionKey: key.toString("base64") } as Settings,
-      { organizationId, credentialId, mode: "legacy" },
+      { organizationId, credentialId, mode: "core" },
       async (target, use) => use(target),
       provider,
       refresh,
@@ -485,5 +487,6 @@ test("a concurrently replaced bearer cannot dispatch after its refresh enters ma
     );
   } finally {
     disposition.mockRestore();
+    alias.mockRestore();
   }
 });

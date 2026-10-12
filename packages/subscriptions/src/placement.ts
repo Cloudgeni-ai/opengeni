@@ -1,7 +1,6 @@
 import { isCacheWarm } from "./cache";
 import {
   canServe,
-  connectionCapacity,
   connectionUsesExtraCredits,
   connectionIneligibility,
   isPermanentIneligibility,
@@ -9,16 +8,24 @@ import {
   personalFallbackActive,
   providerEnabled,
   servableAgainAt,
+  type Ineligibility,
 } from "./eligibility";
 import { mapReasoningLevel } from "./reasoning";
-import { rotationFor } from "./settings";
+import {
+  FALLBACK_ORDER_LIMITS,
+  fallbackOrderFor,
+  hasFallbackOrderEntry,
+  rotationFor,
+} from "./settings";
 import { spreadHash } from "./spread";
 import type {
   ModelDescriptor,
   ModelId,
+  ModelTier,
   PlacementDecision,
   PlacementInput,
   PlacementSwitch,
+  ReselectionPoint,
   SubscriptionConnection,
   WaitReason,
 } from "./types";
@@ -27,14 +34,58 @@ function findModel(input: PlacementInput, modelId: ModelId): ModelDescriptor | u
   return input.models.find((model) => model.id === modelId);
 }
 
+/** Every model tier, as declared once in the pure package (D-35). */
+export const MODEL_TIERS: readonly ModelTier[] = Object.freeze(["frontier", "standard", "fast"]);
+
+/** Whether a value is one of the declared model tiers. */
+export function isModelTier(value: unknown): value is ModelTier {
+  return typeof value === "string" && (MODEL_TIERS as readonly string[]).includes(value);
+}
+
+/**
+ * The default fallback order of a preferred model that has no explicit
+ * entry (D-35): the models of other providers that declare the preferred
+ * model's tier, never a lower or a higher one, providers in id order and
+ * each provider's models in their input (declaration) order, at most
+ * `FALLBACK_ORDER_LIMITS.fallbacksPerModel`. Empty while cross-provider
+ * failover is off, and for a preferred model that is unknown or declares no
+ * tier; a model without a tier is never derived. Same-provider model
+ * fallback stays explicit only. Stepping down a tier is not allowed until
+ * the owner decides it (Q-04). Provider ids are opaque keys here: which
+ * providers' models the input carries is the caller's choice.
+ */
+export function derivedFallbackOrder(input: PlacementInput): ModelId[] {
+  if (!input.settings.crossProviderFailover) return [];
+  const preferred = findModel(input, input.session.preferredModelId);
+  if (!preferred || !isModelTier(preferred.tier)) return [];
+  const tier = preferred.tier;
+  const derived = input.models
+    .map((model, index) => ({ model, index }))
+    .filter(
+      ({ model }) =>
+        model.provider !== preferred.provider && model.tier === tier && model.id !== preferred.id,
+    )
+    .sort(
+      (left, right) =>
+        (left.model.provider < right.model.provider
+          ? -1
+          : left.model.provider > right.model.provider
+            ? 1
+            : 0) || left.index - right.index,
+    )
+    .map(({ model }) => model.id);
+  return [...new Set(derived)].slice(0, FALLBACK_ORDER_LIMITS.fallbacksPerModel);
+}
+
 /**
  * Candidate models in failover order (design 4 step 3): the preferred model,
- * then its configured fallbacks. Same-provider fallbacks are always candidates;
- * other providers need cross-provider failover (SUB-FAIL-02, SUB-FAIL-03). A
- * session limited to "only this model" or bound by an explicit choice has only
- * the preferred model (SUB-FAIL-05). Restrictions do not remove candidates, so
- * a restricted preferred model keeps its place in the order (D-17); see
- * `modelPermitted`.
+ * then its fallbacks: the explicit effective entry when there is one, even
+ * an empty one, else the same-tier order `derivedFallbackOrder` derives
+ * (D-35). Same-provider fallbacks are always candidates; other providers
+ * need cross-provider failover (SUB-FAIL-02, SUB-FAIL-03). A session limited
+ * to "only this model" or bound by an explicit choice has only the preferred
+ * model (SUB-FAIL-05). Restrictions do not remove candidates, so a restricted
+ * preferred model keeps its place in the order (D-17); see `modelPermitted`.
  */
 export function failoverCandidateModels(input: PlacementInput): ModelId[] {
   const { session, settings } = input;
@@ -42,7 +93,10 @@ export function failoverCandidateModels(input: PlacementInput): ModelId[] {
   if (session.onlyThisModel || session.binding?.choice === "explicit") return [preferredId];
   const preferred = findModel(input, preferredId);
   const candidates: ModelId[] = [preferredId];
-  for (const modelId of settings.fallbackOrder[preferredId] ?? []) {
+  const order = hasFallbackOrderEntry(settings, preferredId)
+    ? fallbackOrderFor(settings, preferredId)
+    : derivedFallbackOrder(input);
+  for (const modelId of order) {
     if (candidates.includes(modelId)) continue;
     const model = findModel(input, modelId);
     if (!model) continue;
@@ -74,8 +128,8 @@ export function modelPermitted(
 
 /**
  * Order servable connections for one model (design 4 step 5): the primary
- * first, whether or not its quota is known (D-13, D-15), then known capacity
- * before unknown (D-14), then the session's spread hash (D-21, D-23), then id.
+ * first, whether or not its quota is known (D-13, D-15), then the session's
+ * spread hash (D-14, D-21, D-23), then id. Missing telemetry is not a penalty.
  */
 export function rankConnections(
   input: PlacementInput,
@@ -87,7 +141,6 @@ export function rankConnections(
       connection,
       credits: connectionUsesExtraCredits(input, connection),
       primary: rotation.mode === "primary_first" && rotation.primaryConnectionId === connection.id,
-      known: connectionCapacity(input, connection).kind === "available",
       hash: spreadHash(input.session.id, connection.id),
     };
   });
@@ -95,7 +148,6 @@ export function rankConnections(
     (left, right) =>
       Number(left.credits) - Number(right.credits) ||
       Number(right.primary) - Number(left.primary) ||
-      Number(right.known) - Number(left.known) ||
       left.hash - right.hash ||
       (left.connection.id < right.connection.id
         ? -1
@@ -104,6 +156,97 @@ export function rankConnections(
           : 0),
   );
   return keyed.map((entry) => entry.connection);
+}
+
+/**
+ * Why an automatic binding does not keep its account for this placement
+ * (SUB-STICK-03). Every reason except `cache_cold` is forced: the account or
+ * its model cannot (or should not) serve this work now, whatever the cache.
+ */
+export type ReselectionReason =
+  /** The session has no account yet. */
+  | "unbound"
+  /**
+   * The bound account is not in this session's world: removed, or outside
+   * the session's scope (a disconnected account stays in the world and is
+   * `account_ineligible`).
+   */
+  | "account_unavailable"
+  /** The bound model may no longer be used here (workspace, provider switch, compaction lock). */
+  | "model_not_permitted"
+  /**
+   * The bound account cannot serve now; `ineligibility` says why (exhausted
+   * or rate-limited, unhealthy or quarantined, disconnected, switched off,
+   * personal authority or owner gone).
+   */
+  | "account_ineligible"
+  /** The bound account would spend paid credits while another has included allowance (SUB-CREDITS-01). */
+  | "extra_credits"
+  /** A compaction or model change replaced the cached prefix (SUB-STICK-05). */
+  | "reselection_point"
+  /** Idle longer than the provider's declared cache lifetime (SUB-STICK-04). */
+  | "cache_cold";
+
+export type BindingStickiness =
+  | { kind: "keep"; connectionId: string; modelId: ModelId }
+  | {
+      kind: "reselect";
+      reason: ReselectionReason;
+      /** The bound account's ineligibility for its model (empty unless `account_ineligible`). */
+      ineligibility: readonly Ineligibility[];
+      /** The re-selection points that applied (empty unless `reselection_point`). */
+      points: readonly ReselectionPoint[];
+    };
+
+/**
+ * Does the session's automatic binding keep its account (SUB-STICK-02,
+ * SUB-STICK-03)? It does while the account can still serve the bound model,
+ * no re-selection point applies and the prompt cache is warm; otherwise
+ * placement re-runs normal selection, which may land on the same account.
+ * Forced reasons are checked before warmth, so a warm cache never keeps an
+ * account the session may not use (SUB-STICK-07). An explicit choice is not
+ * evaluated here: placement keeps it or waits for it (SUB-STICK-06).
+ */
+export function bindingStickiness(input: PlacementInput): BindingStickiness {
+  const { session, connections } = input;
+  const binding = session.binding;
+  const reselect = (
+    reason: ReselectionReason,
+    ineligibility: readonly Ineligibility[] = [],
+    points: readonly ReselectionPoint[] = [],
+  ): BindingStickiness => ({ kind: "reselect", reason, ineligibility, points });
+  if (!binding) return reselect("unbound");
+  const bound = connections.find((connection) => connection.id === binding.connectionId);
+  if (!bound) return reselect("account_unavailable");
+  const permitted = failoverCandidateModels(input).filter((modelId) =>
+    modelPermitted(input, modelId),
+  );
+  if (!permitted.includes(binding.modelId))
+    // The session moved to another model (no longer a candidate at all) is
+    // a re-selection point; a candidate the session may not use is forced.
+    return session.reselectionPoints.length > 0 &&
+      !failoverCandidateModels(input).includes(binding.modelId)
+      ? reselect("reselection_point", [], session.reselectionPoints)
+      : reselect("model_not_permitted");
+  const ineligibility = connectionIneligibility(input, bound, binding.modelId);
+  if (ineligibility.length > 0) return reselect("account_ineligible", ineligibility);
+  const fallback = personalFallbackActive(input);
+  if (
+    connectionUsesExtraCredits(input, bound) &&
+    connections.some(
+      (candidate) =>
+        (candidate.ownership.kind === "shared" || fallback) &&
+        !connectionUsesExtraCredits(input, candidate) &&
+        canServe(input, candidate, binding.modelId),
+    )
+  ) {
+    return reselect("extra_credits");
+  }
+  if (session.reselectionPoints.length > 0)
+    return reselect("reselection_point", [], session.reselectionPoints);
+  if (!isCacheWarm(binding, input.cacheFacts[bound.provider], input.now))
+    return reselect("cache_cold");
+  return { kind: "keep", connectionId: bound.id, modelId: binding.modelId };
 }
 
 /**
@@ -184,23 +327,9 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
     canServe(input, bound, binding.modelId);
 
   // Keep a warm session where it is unless a re-selection point applies
-  // (SUB-STICK-02, SUB-STICK-03, SUB-STICK-05).
-  if (
-    binding &&
-    bound &&
-    bindingServable &&
-    (!connectionUsesExtraCredits(input, bound) ||
-      !connections.some(
-        (candidate) =>
-          (candidate.ownership.kind === "shared" || fallback) &&
-          !connectionUsesExtraCredits(input, candidate) &&
-          canServe(input, candidate, binding.modelId),
-      )) &&
-    session.reselectionPoints.length === 0 &&
-    isCacheWarm(binding, input.cacheFacts[bound.provider], input.now)
-  ) {
-    return run(bound, binding.modelId, "sticky");
-  }
+  // or the account is forced away (SUB-STICK-02, SUB-STICK-03, SUB-STICK-05).
+  const stickiness = bindingStickiness(input);
+  if (stickiness.kind === "keep" && bound) return run(bound, stickiness.modelId, "sticky");
 
   // Each model on shared connections, then (opt-in) on the owner's personal
   // connections, before the next model (SUB-SEL-01, SUB-SEL-02, D-12).

@@ -32,7 +32,9 @@ import { apiErrorAdvice, userErrorText } from "@/lib/api-error";
 import {
   ApiError,
   prepareCodexResetRedemption,
+  prepareOrganizationCodexResetRedemption,
   redeemCodexResetCredit,
+  redeemOrganizationCodexResetCredit,
   type CodexResetRedemptionPreparation,
 } from "@/api";
 
@@ -255,7 +257,13 @@ export function codexUsageReadings(
    -------------------------------------------------------------------------- */
 
 /** One muted line: who can redeem, or why the list is view only. */
-export function resetAuthorityNote(overview: CodexAccountOverview): string | null {
+export function resetAuthorityNote(
+  overview: CodexAccountOverview,
+  options: {
+    /** On the organization's page, where its owners and admins redeem them. */
+    organization?: boolean;
+  } = {},
+): string | null {
   const reset = overview.resetCredits;
   const count = reset.availableCount ?? 0;
   const detail: Record<typeof reset.detailState, string | null> = {
@@ -268,6 +276,11 @@ export function resetAuthorityNote(overview: CodexAccountOverview): string | nul
   };
   if (detail[reset.detailState]) return detail[reset.detailState];
   if (count === 0) return null;
+  if (options.organization) {
+    return overview.canRedeem
+      ? "Each gives this account a fresh usage limit. Owners and admins of the organization can redeem them here."
+      : "Only the organization's owners and admins can redeem these resets, signed in to Opengeni in their own browser.";
+  }
   if (overview.canRedeem) {
     return "Each gives this account a fresh usage limit. Only you can redeem them, as the person who connected it.";
   }
@@ -308,6 +321,7 @@ export function ResetCreditInventory({
   recoveryAttempts,
   onRedeem,
   onReconnectSameAccount,
+  organization = false,
 }: {
   overview: CodexAccountOverview | undefined;
   /** Kept for callers that tick a clock; expiry labels use the absolute time. */
@@ -316,10 +330,12 @@ export function ResetCreditInventory({
   recoveryAttempts: RedemptionAttemptView[];
   onRedeem: (credit: CodexResetCredit, recovery?: RedemptionAttemptView) => void;
   onReconnectSameAccount: () => void;
+  /** An organization account, redeemed by the organization's owners and admins. */
+  organization?: boolean;
 }) {
   if (!overview) return null;
   const reset = overview.resetCredits;
-  const note = resetAuthorityNote(overview);
+  const note = resetAuthorityNote(overview, { organization });
   const visibleCreditIds = new Set(reset.credits.map((credit) => credit.id));
   const hiddenRecoveries = overview.canResumeRedemption
     ? recoveryAttempts.filter((attempt) => !visibleCreditIds.has(attempt.creditId))
@@ -515,6 +531,148 @@ export type CodexRedemption = {
   uncertain: boolean;
 };
 
+/**
+ * Redeeming usage limit resets, from a workspace's account page or the
+ * organization's. Both use the same browser-only, single-use flow: a stored
+ * attempt id survives a lost response or reload, and an ambiguous outcome is
+ * retried only as that same attempt.
+ */
+export function useCodexResetRedemption(
+  scope: "workspace" | "organization",
+  scopeId: string,
+  refreshUsage: () => Promise<void>,
+) {
+  const [preparingReset, setPreparingReset] = useState<string | null>(null);
+  const [redemption, setRedemption] = useState<CodexRedemption | null>(null);
+  // Workspace attempts keep their original key; organization ones get their own namespace.
+  const storageScope = scope === "workspace" ? scopeId : `organization:${scopeId}`;
+  const prepare =
+    scope === "workspace" ? prepareCodexResetRedemption : prepareOrganizationCodexResetRedemption;
+  const redeem =
+    scope === "workspace" ? redeemCodexResetCredit : redeemOrganizationCodexResetCredit;
+
+  const beginRedemption = useCallback(
+    async (accountId: string, credit: CodexResetCredit, recovery?: RedemptionAttemptView) => {
+      setPreparingReset(credit.id);
+      let createdLocalAttempt = false;
+      try {
+        const startsFreshAfterNonConsumingCompletion = Boolean(
+          recovery?.status === "completed" &&
+          (recovery.outcome === "nothingToReset" || recovery.outcome === "noCredit"),
+        );
+        // A lost HTTP response may leave the old completed UUID in
+        // sessionStorage. nothingToReset/noCredit did not consume the provider
+        // credit, so a newly provider-authorized click must mint a fresh
+        // logical/upstream key rather than replay that completed attempt.
+        if (startsFreshAfterNonConsumingCompletion) {
+          removeStoredRedemptionAttempt(storageScope, accountId, credit.id);
+        }
+        const resumableRecovery = startsFreshAfterNonConsumingCompletion ? undefined : recovery;
+        const stored = startsFreshAfterNonConsumingCompletion
+          ? null
+          : storedRedemptionAttempt(storageScope, accountId, credit.id);
+        const attempt: StoredRedemptionAttempt = resumableRecovery ??
+          stored ?? {
+            attemptId: crypto.randomUUID(),
+            creditId: credit.id,
+            title: credit.title,
+            expiresAt: credit.expiresAt,
+          };
+        createdLocalAttempt = resumableRecovery == null && stored == null;
+        // Session storage is only a convenience checkpoint. Durable server
+        // discovery restores provider_started/completed attempts if storage is
+        // unavailable or the owning human opens a new browser session.
+        storeRedemptionAttempt(storageScope, accountId, attempt);
+        const preparation = await prepare(scopeId, accountId, {
+          attemptId: attempt.attemptId,
+          creditId: credit.id,
+        });
+        if (resumableRecovery && !preparation.resumable) {
+          removeStoredRedemptionAttempt(storageScope, accountId, credit.id);
+          toast.error("This reset was not sent to ChatGPT and can't be redeemed any more.");
+          await refreshUsage();
+          return;
+        }
+        setRedemption({ accountId, credit, preparation, uncertain: false });
+      } catch (error) {
+        // Preparation itself never calls or claims the provider. If this was a
+        // fresh local UUID, do not leave a false "uncertain/resume" affordance.
+        // A pre-existing attempt is preserved because it may already be
+        // provider_started or completed in durable server state.
+        if (createdLocalAttempt) {
+          removeStoredRedemptionAttempt(storageScope, accountId, credit.id);
+        }
+        toast.error("Couldn't prepare the reset", { description: userErrorText(error) });
+      } finally {
+        setPreparingReset(null);
+      }
+    },
+    [storageScope, scopeId, prepare, refreshUsage],
+  );
+
+  const confirmRedemption = useCallback(async (): Promise<boolean> => {
+    if (!redemption) return false;
+    try {
+      const result = await redeem(scopeId, redemption.accountId, {
+        attemptId: redemption.preparation.attemptId,
+        creditId: redemption.credit.id,
+        confirmationToken: redemption.preparation.confirmationToken,
+        confirmation: "REDEEM_USAGE_LIMIT_RESET",
+      });
+      removeStoredRedemptionAttempt(storageScope, redemption.accountId, redemption.credit.id);
+      toast.success(redemptionOutcomeCopy(result.outcome));
+      setRedemption(null);
+      await refreshUsage();
+      return true;
+    } catch (error) {
+      const status = managedRedemptionErrorStatus(error);
+      const definitePreProviderFailure =
+        redemption.preparation.recoveryStatus == null &&
+        ((error instanceof ApiError && (error.status === 400 || error.status === 403)) ||
+          status === "not_actionable" ||
+          status === "preflight_unavailable" ||
+          status === "provider_unavailable" ||
+          status === "confirmation_expired");
+      if (definitePreProviderFailure) {
+        removeStoredRedemptionAttempt(storageScope, redemption.accountId, redemption.credit.id);
+        setRedemption(null);
+        await refreshUsage();
+        toast.error("The reset was not sent", { description: userErrorText(error) });
+        return false;
+      }
+      // Preserve only genuinely ambiguous provider work under the same logical
+      // id. The overview is the durable discovery authority after tab loss.
+      setRedemption((current) => (current ? { ...current, uncertain: true } : current));
+      toast.error("The outcome is uncertain", { description: "Retry this same attempt." });
+      return false;
+    }
+  }, [redemption, storageScope, scopeId, redeem, refreshUsage]);
+
+  const closeRedemption = useCallback(() => {
+    setRedemption((current) => {
+      if (!current) return current;
+      // Cancel before the first POST has no durable/provider side effect,
+      // so clear the local UUID instead of presenting it as uncertain.
+      // Once a prior attempt is resumable or a POST failed, preserve the
+      // exact logical id for ambiguity-safe retry after close/reload.
+      if (!current.preparation.resumable && !current.uncertain) {
+        removeStoredRedemptionAttempt(storageScope, current.accountId, current.credit.id);
+      }
+      return null;
+    });
+  }, [storageScope]);
+
+  return {
+    preparingReset,
+    redemption,
+    beginRedemption,
+    confirmRedemption,
+    closeRedemption,
+    redemptionAttempts: (accountId: string, overview: CodexAccountOverview | undefined) =>
+      redemptionAttemptViews(storageScope, accountId, overview),
+  };
+}
+
 export type CodexWorking =
   | "source"
   | "rotation"
@@ -555,8 +713,6 @@ export function useCodexSubscriptions({
   const [usageError, setUsageError] = useState(false);
   // The account whose single-account live refresh is in flight (per-page spinner).
   const [refreshingRow, setRefreshingRow] = useState<string | null>(null);
-  const [preparingReset, setPreparingReset] = useState<string | null>(null);
-  const [redemption, setRedemption] = useState<CodexRedemption | null>(null);
   const cancelled = useRef(false);
   const usageRefreshedRef = useRef(false);
   // A clock for reset times and usage labels - one timer, never a backend re-hit.
@@ -894,116 +1050,7 @@ export function useCodexSubscriptions({
     [client, data, workspaceId, refreshAccounts],
   );
 
-  const beginRedemption = useCallback(
-    async (accountId: string, credit: CodexResetCredit, recovery?: RedemptionAttemptView) => {
-      setPreparingReset(credit.id);
-      let createdLocalAttempt = false;
-      try {
-        const startsFreshAfterNonConsumingCompletion = Boolean(
-          recovery?.status === "completed" &&
-          (recovery.outcome === "nothingToReset" || recovery.outcome === "noCredit"),
-        );
-        // A lost HTTP response may leave the old completed UUID in
-        // sessionStorage. nothingToReset/noCredit did not consume the provider
-        // credit, so a newly provider-authorized click must mint a fresh
-        // logical/upstream key rather than replay that completed attempt.
-        if (startsFreshAfterNonConsumingCompletion) {
-          removeStoredRedemptionAttempt(workspaceId, accountId, credit.id);
-        }
-        const resumableRecovery = startsFreshAfterNonConsumingCompletion ? undefined : recovery;
-        const stored = startsFreshAfterNonConsumingCompletion
-          ? null
-          : storedRedemptionAttempt(workspaceId, accountId, credit.id);
-        const attempt: StoredRedemptionAttempt = resumableRecovery ??
-          stored ?? {
-            attemptId: crypto.randomUUID(),
-            creditId: credit.id,
-            title: credit.title,
-            expiresAt: credit.expiresAt,
-          };
-        createdLocalAttempt = resumableRecovery == null && stored == null;
-        // Session storage is only a convenience checkpoint. Durable server
-        // discovery restores provider_started/completed attempts if storage is
-        // unavailable or the owning human opens a new browser session.
-        storeRedemptionAttempt(workspaceId, accountId, attempt);
-        const preparation = await prepareCodexResetRedemption(workspaceId, accountId, {
-          attemptId: attempt.attemptId,
-          creditId: credit.id,
-        });
-        if (resumableRecovery && !preparation.resumable) {
-          removeStoredRedemptionAttempt(workspaceId, accountId, credit.id);
-          toast.error("This reset was not sent to ChatGPT and can't be redeemed any more.");
-          await refreshUsage();
-          return;
-        }
-        setRedemption({ accountId, credit, preparation, uncertain: false });
-      } catch (error) {
-        // Preparation itself never calls or claims the provider. If this was a
-        // fresh local UUID, do not leave a false "uncertain/resume" affordance.
-        // A pre-existing attempt is preserved because it may already be
-        // provider_started or completed in durable server state.
-        if (createdLocalAttempt) {
-          removeStoredRedemptionAttempt(workspaceId, accountId, credit.id);
-        }
-        toast.error("Couldn't prepare the reset", { description: userErrorText(error) });
-      } finally {
-        setPreparingReset(null);
-      }
-    },
-    [workspaceId, refreshUsage],
-  );
-
-  const confirmRedemption = useCallback(async (): Promise<boolean> => {
-    if (!redemption) return false;
-    try {
-      const result = await redeemCodexResetCredit(workspaceId, redemption.accountId, {
-        attemptId: redemption.preparation.attemptId,
-        creditId: redemption.credit.id,
-        confirmationToken: redemption.preparation.confirmationToken,
-        confirmation: "REDEEM_USAGE_LIMIT_RESET",
-      });
-      removeStoredRedemptionAttempt(workspaceId, redemption.accountId, redemption.credit.id);
-      toast.success(redemptionOutcomeCopy(result.outcome));
-      setRedemption(null);
-      await refreshUsage();
-      return true;
-    } catch (error) {
-      const status = managedRedemptionErrorStatus(error);
-      const definitePreProviderFailure =
-        redemption.preparation.recoveryStatus == null &&
-        ((error instanceof ApiError && (error.status === 400 || error.status === 403)) ||
-          status === "not_actionable" ||
-          status === "preflight_unavailable" ||
-          status === "provider_unavailable" ||
-          status === "confirmation_expired");
-      if (definitePreProviderFailure) {
-        removeStoredRedemptionAttempt(workspaceId, redemption.accountId, redemption.credit.id);
-        setRedemption(null);
-        await refreshUsage();
-        toast.error("The reset was not sent", { description: userErrorText(error) });
-        return false;
-      }
-      // Preserve only genuinely ambiguous provider work under the same logical
-      // id. The overview is the durable discovery authority after tab loss.
-      setRedemption((current) => (current ? { ...current, uncertain: true } : current));
-      toast.error("The outcome is uncertain", { description: "Retry this same attempt." });
-      return false;
-    }
-  }, [redemption, workspaceId, refreshUsage]);
-
-  const closeRedemption = useCallback(() => {
-    setRedemption((current) => {
-      if (!current) return current;
-      // Cancel before the first POST has no durable/provider side effect,
-      // so clear the local UUID instead of presenting it as uncertain.
-      // Once a prior attempt is resumable or a POST failed, preserve the
-      // exact logical id for ambiguity-safe retry after close/reload.
-      if (!current.preparation.resumable && !current.uncertain) {
-        removeStoredRedemptionAttempt(workspaceId, current.accountId, current.credit.id);
-      }
-      return null;
-    });
-  }, [workspaceId]);
+  const resets = useCodexResetRedemption("workspace", workspaceId, refreshUsage);
 
   /** Throws so the confirm dialog can say what to do (API facts go in Technical details). */
   const disconnect = useCallback(
@@ -1077,8 +1124,8 @@ export function useCodexSubscriptions({
     usageMap,
     overviewMap,
     refreshingRow,
-    preparingReset,
-    redemption,
+    preparingReset: resets.preparingReset,
+    redemption: resets.redemption,
     now,
     refreshAccounts,
     refreshAccountUsage,
@@ -1089,18 +1136,22 @@ export function useCodexSubscriptions({
     setAllocator,
     setExtraCredits,
     setAppsCredential,
-    beginRedemption,
-    confirmRedemption,
-    closeRedemption,
+    beginRedemption: resets.beginRedemption,
+    confirmRedemption: resets.confirmRedemption,
+    closeRedemption: resets.closeRedemption,
     disconnect,
     rename,
     redemptionAttempts: (accountId: string) =>
-      redemptionAttemptViews(workspaceId, accountId, overviewMap[accountId]),
+      resets.redemptionAttempts(accountId, overviewMap[accountId]),
   };
 }
 
 /** The irreversible "redeem a reset" confirm. Mount once per page. */
-export function CodexRedemptionDialog({ codex }: { codex: CodexSubscriptions }) {
+export function CodexRedemptionDialog({
+  codex,
+}: {
+  codex: Pick<CodexSubscriptions, "redemption" | "now" | "closeRedemption" | "confirmRedemption">;
+}) {
   const { redemption, now } = codex;
   return (
     <ConfirmDialog

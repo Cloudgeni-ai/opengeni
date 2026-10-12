@@ -1,13 +1,13 @@
+import { legacyWorkspaceCodexSubscriptionActive as workspaceCodexSubscriptionActive } from "./fixtures/legacy-codex";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { randomBytes } from "node:crypto";
 import type postgres from "postgres";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
+import { createDb, encryptEnvironmentValue, type Database, type DbClient } from "../src/index";
 import {
-  createDb,
   disconnectAllCodexAccounts,
   disconnectCodexAccount,
-  encryptEnvironmentValue,
   ensureCodexRotationSettings,
   getCodexCredentialStatus,
   getCodexRotationSettings,
@@ -18,10 +18,7 @@ import {
   setActiveCodexCredential,
   setCodexCredentialStatus,
   upsertCodexSubscriptionCredential,
-  workspaceCodexSubscriptionActive,
-  type Database,
-  type DbClient,
-} from "../src/index";
+} from "./fixtures/legacy-codex";
 
 // Integration proof for the codex_subscription_credentials accessors: round-trip
 // decryption, secret-free status reads, refresh rotation, disconnect, multi-account

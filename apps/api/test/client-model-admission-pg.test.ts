@@ -87,7 +87,7 @@ async function fixture(overrides: Parameters<typeof testSettings>[0] = {}) {
     path: string,
     body?: unknown,
     actor: AccessGrant = grant,
-    method?: "GET" | "POST" | "PUT",
+    method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
   ): Promise<Response> {
     return app.request(path, {
       method: method ?? (body === undefined ? "GET" : "POST"),
@@ -528,4 +528,103 @@ test("PG: provider_unhealthy xAI model remains listed and creatable with unavail
     reason: "provider_unhealthy",
     checkedAt: null,
   });
+}, 180_000);
+
+test("PG: turning Opengeni credits off blocks every credit model but keeps subscriptions and workspace keys", async () => {
+  if (!client || !shared) return;
+  const f = await fixture();
+  await connectCoreCodex(f.grant);
+  await createConnection(client.db, {
+    accountId: f.grant.accountId,
+    workspaceId: f.grant.workspaceId,
+    subjectId: null,
+    providerDomain: "api.anthropic.com",
+    kind: "api_key",
+    credentialEncrypted: "metadata-only-fake-secret",
+    metadata: { credentialRole: "anthropic" },
+    createdBySubjectId: f.grant.subjectId,
+  });
+  await createWorkspaceProviderCustomModel(client.db, {
+    accountId: f.grant.accountId,
+    workspaceId: f.grant.workspaceId,
+    providerKind: "anthropic",
+    upstreamModelId: "claude-fixture-model",
+    label: "Fixture Claude",
+    operationId: crypto.randomUUID(),
+    requestHash: "b".repeat(64),
+    createdBySubjectId: f.grant.subjectId,
+  });
+  const before = await f.config();
+  const creditModels = before.models
+    .filter((model) => model.cost === "credits")
+    .map((model) => model.id);
+  expect(creditModels.length).toBeGreaterThan(0);
+
+  const policyPath = `/v1/workspaces/${f.grant.workspaceId}/model-policy`;
+  const settingsPath = `/v1/workspaces/${f.grant.workspaceId}/settings`;
+  const off = await f.request(settingsPath, { allowCreditModels: false }, f.grant, "PATCH");
+  expect(off.status).toBe(200);
+  expect((await off.json()).settings.allowCreditModels).toBe(false);
+  // A workspace setting: the workspace keeps following (no) allowlist of its own.
+  expect(await (await f.request(policyPath)).json()).toEqual({
+    allowedProviders: null,
+    allowedModels: null,
+    source: "none",
+    organization: null,
+    allowCreditModels: false,
+  });
+
+  // Every credit model is gone from the list and refused at create (422, with
+  // a reason that names credits); subscription and workspace-key models stay.
+  const after = await f.parity(creditModels);
+  expect(after.allowedModels).toContain("codex/gpt-6-sol");
+  expect(after.allowedModels).toContain("workspace-anthropic/claude-fixture-model");
+  expect(after.models.some((model) => model.cost === "credits")).toBe(false);
+  const refused = await f.request(`/v1/workspaces/${f.grant.workspaceId}/sessions`, {
+    model: creditModels[0],
+    initialMessage: "Spend credits",
+    visibility: "workspace",
+    tools: [],
+  });
+  expect(refused.status).toBe(422);
+  expect((await refused.json()).message).toContain("Opengeni credits");
+
+  // An omitted model never falls back to a credit model.
+  const implicit = await f.request(`/v1/workspaces/${f.grant.workspaceId}/sessions`, {
+    initialMessage: "Use whatever the workspace allows",
+    visibility: "workspace",
+    tools: [],
+  });
+  expect(implicit.status).toBe(202);
+  expect(creditModels).not.toContain((await implicit.json()).model);
+
+  // Saving or removing an allowlist never turns credits back on, even one
+  // that lists credit models or sends the field (PUT ignores it).
+  const allowlistOnly = await f.request(
+    policyPath,
+    {
+      allowedProviders: null,
+      allowedModels: [...creditModels, "codex/gpt-6-sol"],
+      allowCreditModels: true,
+    },
+    f.grant,
+    "PUT",
+  );
+  expect(allowlistOnly.status).toBe(200);
+  expect((await allowlistOnly.json()).allowCreditModels).toBe(false);
+  await f.parity(creditModels);
+  const removed = await f.request(policyPath, undefined, f.grant, "DELETE");
+  expect(removed.status).toBe(200);
+  expect((await removed.json()).allowCreditModels).toBe(false);
+  await f.parity(creditModels);
+
+  // A non-boolean value is refused rather than stored.
+  const malformed = await f.request(settingsPath, { allowCreditModels: "no" }, f.grant, "PATCH");
+  expect(malformed.status).toBe(400);
+  expect((await (await f.request(policyPath)).json()).allowCreditModels).toBe(false);
+
+  const on = await f.request(settingsPath, { allowCreditModels: true }, f.grant, "PATCH");
+  expect(on.status).toBe(200);
+  expect((await (await f.request(policyPath)).json()).allowCreditModels).toBe(true);
+  expect((await f.config()).allowedModels).toEqual(expect.arrayContaining(creditModels));
 }, 180_000);

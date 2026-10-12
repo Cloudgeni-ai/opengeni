@@ -21,8 +21,9 @@ import { withAlpha } from "./primitives";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
 import type { NativeVoiceInput } from "../voice-input";
 import type { NativePickedFile } from "../adapters";
-import { useNativeTimelineMessages } from "./messages";
+import { useNativeTimelineMessages, type NativeTimelineMessages } from "./messages";
 import { useComposerImagePaste } from "./paste";
+import { composerTrailingMode } from "./composer-state";
 
 /* ----------------------------------------------------------------------------
    The session composer, designed for each platform rather than copied from
@@ -84,6 +85,23 @@ export interface SessionComposerProps {
   voice?: NativeVoiceInput | undefined;
   /** Images pasted into the field (iOS), added as attachments. */
   onPasteImages?: ((files: NativePickedFile[]) => void) | undefined;
+  /**
+   * A voice call with the agent from the composer itself. With nothing to
+   * send and nothing to pause or resume, the trailing action becomes the call
+   * button (as native chat apps offer voice), so a new conversation can start
+   * as a call. `active` marks that this conversation is already on a call:
+   * the button then returns to it.
+   */
+  call?: ComposerCall | undefined;
+}
+
+export interface ComposerCall {
+  onPress: () => void;
+  /** This conversation is on a call; the button returns to it. */
+  active?: boolean | undefined;
+  /** Starting the call (creating its conversation, connecting). */
+  busy?: boolean | undefined;
+  disabled?: boolean | undefined;
 }
 
 /** Whether to draw Liquid Glass: iOS 26+, the native module present, transparency allowed. */
@@ -180,9 +198,10 @@ export function SessionComposer(props: SessionComposerProps) {
   // inside modals and overlays; the animated keyboard height does not.
   const keyboard = useAnimatedKeyboard();
   const floating = props.floating ?? false;
-  // Only Liquid Glass lets the conversation scroll visibly beneath the composer;
-  // a solid surface (Android, older iOS) sits on an opaque band down to the
-  // screen edge, or text would peek out under the card and the gesture handle.
+  // Only Liquid Glass lets the conversation scroll beneath the composer, and
+  // then under a scroll-edge fade like the system bars: the glass picks up the
+  // page color, never legible text behind or below it. A solid surface
+  // (Android, older iOS) sits on an opaque band down to the screen edge.
   const glass = useLiquidGlass();
   const seeThrough = floating && glass;
   // Floating: iOS tucks the glass toward the home indicator like system bars;
@@ -278,6 +297,7 @@ export function SessionComposer(props: SessionComposerProps) {
         lift,
       ]}
     >
+      {seeThrough ? <ScrollEdgeFade color={c.bg} /> : null}
       {props.above ? <View pointerEvents="box-none">{props.above}</View> : null}
       <ComposerSurface radius={compact ? 22 : 24}>
         {props.header}
@@ -355,6 +375,36 @@ export function SessionComposer(props: SessionComposerProps) {
         )}
       </ComposerSurface>
     </Animated.View>
+  );
+}
+
+/** How far the scroll-edge fade reaches above the floating composer. */
+const SCROLL_EDGE_PX = 24;
+/** Page-color opacity of each band in the fade, top to bottom. */
+const SCROLL_EDGE_STEPS = [0.1, 0.28, 0.48, 0.68, 0.84, 0.95] as const;
+
+/**
+ * The scroll-edge effect under a floating glass composer: the conversation
+ * fades into the page color just above the composer and is fully covered
+ * behind and below it, down to the screen edge (or the keyboard).
+ *
+ * Plain views, not an SVG gradient: a percentage-sized SVG inside this
+ * absolutely positioned layer painted nothing on device, which left the
+ * conversation legible under and below the glass.
+ */
+function ScrollEdgeFade({ color }: { color: string }) {
+  return (
+    <View
+      pointerEvents="none"
+      style={{ position: "absolute", top: -SCROLL_EDGE_PX, left: 0, right: 0, bottom: 0 }}
+    >
+      <View style={{ height: SCROLL_EDGE_PX }}>
+        {SCROLL_EDGE_STEPS.map((alpha) => (
+          <View key={alpha} style={{ flex: 1, backgroundColor: withAlpha(color, alpha) }} />
+        ))}
+      </View>
+      <View style={{ flex: 1, backgroundColor: color }} />
+    </View>
   );
 }
 
@@ -557,21 +607,23 @@ function VoiceStrip({ voice }: { voice: NativeVoiceInput }) {
 /**
  * One trailing control, as native chat apps do: send when there is something
  * to send (a message to a running agent joins the queue), otherwise pause a
- * running workstream or resume a paused one; an idle empty composer shows a
- * quiet, disabled send.
+ * running workstream or resume a paused one; an idle empty composer offers a
+ * call when the host supplies one, else a quiet, disabled send.
  */
 function TrailingAction(props: SessionComposerProps & { messages: ChatComposerMessages }) {
   const theme = useNativeTimelineTheme();
+  const m = useNativeTimelineMessages();
   const c = theme.colors;
-  const hasText = props.value.trim().length > 0;
-  const mode: "send" | "pause" | "resume" | "idle" =
-    hasText || props.canSend
-      ? "send"
-      : props.paused && props.onResume
-        ? "resume"
-        : props.running && props.onPause
-          ? "pause"
-          : "idle";
+  const mode = composerTrailingMode({
+    value: props.value,
+    canSend: props.canSend,
+    paused: props.paused,
+    running: props.running,
+    canResume: Boolean(props.onResume),
+    canPause: Boolean(props.onPause),
+    canCall: Boolean(props.call),
+  });
+  if (mode === "call" && props.call) return <CallAction call={props.call} messages={m} />;
   const active = mode !== "idle";
   const busy = mode === "send" ? props.sending : mode === "idle" ? false : props.pauseBusy;
   const disabled = mode === "send" ? !props.canSend : !active;
@@ -691,6 +743,53 @@ export function ComposerPill({
       ) : null}
       {fast ? <Icon name="zap" size={13} color={theme.colors.fg} fill={theme.colors.fg} /> : null}
       <Icon name="chevron-down" size={12} color={theme.colors["fg-muted"]} />
+    </Pressable>
+  );
+}
+
+/**
+ * The empty composer's call button: the web composer's voice control
+ * (audio lines), lit like send so it reads as the composer's main action. On a
+ * call it turns call-green and returns to the call.
+ */
+function CallAction({ call, messages }: { call: ComposerCall; messages: NativeTimelineMessages }) {
+  const theme = useNativeTimelineTheme();
+  const c = theme.colors;
+  const active = call.active ?? false;
+  const busy = call.busy ?? false;
+  const disabled = call.disabled ?? false;
+  const background = disabled
+    ? withAlpha(c.fg, 0.08)
+    : active
+      ? Platform.OS === "ios"
+        ? "#34C759"
+        : "#1E8E3E"
+      : c.accent;
+  const fg = disabled ? c["fg-subtle"] : active ? "#FFFFFF" : c["accent-fg"];
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={active ? messages.returnToCall : messages.startCall}
+      accessibilityState={{ disabled, busy }}
+      disabled={disabled || busy}
+      hitSlop={6}
+      onPress={call.onPress}
+      style={({ pressed }) => ({
+        width: 34,
+        height: 34,
+        borderRadius: 17,
+        alignItems: "center",
+        justifyContent: "center",
+        backgroundColor: background,
+        opacity: pressed ? 0.8 : 1,
+        transform: [{ scale: pressed ? 0.94 : 1 }],
+      })}
+    >
+      {busy ? (
+        <ActivityIndicator size="small" color={fg} />
+      ) : (
+        <Icon name="audio-lines" size={18} strokeWidth={2.25} color={fg} />
+      )}
     </Pressable>
   );
 }

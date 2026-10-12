@@ -35,15 +35,19 @@ import {
   type BrowserProtectedAuthFillCommand as BrowserProtectedAuthFillCommandValue,
   type BrowserProtectedAuthObservation as BrowserProtectedAuthObservationValue,
   type BrowserTarget as BrowserTargetValue,
+  type BrowserActionResolvedTarget as BrowserActionResolvedTargetValue,
   type InteractionSemanticNodeValue,
+  INTERACTION_MAX_RESOLVED_TARGET_TEXT,
 } from "@opengeni/contracts";
 import {
   InteractionControllerError,
   InteractionDefiniteDriverError,
   InteractionOutcomeUnknownDriverError,
   type BrowserInteractionDriver,
+  type InteractionDispatchTrace,
 } from "@opengeni/interaction";
 import {
+  accessibilityContainer,
   namespaceCdpAccessibilityFrame,
   normalizeCdpAccessibilityTree,
   type CdpAccessibilityEntry,
@@ -241,6 +245,8 @@ type TargetState = {
   protectedAuthQuietUntil: number;
   tail: Promise<void>;
   unsubscribe: Array<() => void>;
+  /** Set only while dispatching one action of a traced command. */
+  actionTrace?: { actionIndex: number; trace: InteractionDispatchTrace } | undefined;
 };
 
 type ProtectedElementMetadata = {
@@ -379,6 +385,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private readonly firstSeenAt = new Map<string, string>();
   private readonly attaching = new Map<string, Promise<TargetState>>();
   private readonly attachingSessions = new Map<string, string>();
+  /** Tabs whose renderer process died. Cleared when the tab attaches healthily again. */
+  private readonly crashedTargets = new Set<string>();
   private readonly targetPhysicalGenerations = new Map<string, string>();
   private connection: BrowserCdpConnection | null = null;
   private connectionPromise: Promise<BrowserCdpConnection> | null = null;
@@ -1063,15 +1071,24 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
 
   async dispatch(
     commandInput: BrowserActionCommandValue & { observationMode: "none" },
+    trace?: InteractionDispatchTrace,
   ): Promise<null>;
   async dispatch(
     commandInput: BrowserActionCommandValue & { observationMode: "input" },
+    trace?: InteractionDispatchTrace,
   ): Promise<BrowserObservationValue | null>;
   async dispatch(
     commandInput: BrowserActionCommandValue & { observationMode?: "full" },
+    trace?: InteractionDispatchTrace,
   ): Promise<BrowserObservationValue>;
-  async dispatch(commandInput: BrowserActionCommandValue): Promise<BrowserObservationValue>;
-  async dispatch(commandInput: BrowserActionCommandValue): Promise<BrowserObservationValue | null> {
+  async dispatch(
+    commandInput: BrowserActionCommandValue,
+    trace?: InteractionDispatchTrace,
+  ): Promise<BrowserObservationValue>;
+  async dispatch(
+    commandInput: BrowserActionCommandValue,
+    trace?: InteractionDispatchTrace,
+  ): Promise<BrowserObservationValue | null> {
     const command = BrowserActionCommand.parse(commandInput);
     const observation = await this.withTarget(command.targetId, async (state, info) => {
       if (!state.dialog) await this.refreshFrame(state);
@@ -1085,7 +1102,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       }
       let completedActions = 0;
       const initialEffectCount = state.actionEffectCount;
-      for (const action of actions) {
+      for (const [actionIndex, action] of actions.entries()) {
+        state.actionTrace = trace ? { actionIndex, trace } : undefined;
         try {
           if (
             completedActions > 0 &&
@@ -1096,6 +1114,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             this.assertExpectedGenerations(command, state);
           }
           await this.dispatchAction(state, action, command.operationId);
+          state.actionTrace = undefined;
           completedActions += 1;
           if (state.dialog) {
             if (completedActions < actions.length) {
@@ -1104,6 +1123,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             break;
           }
         } catch (error) {
+          state.actionTrace = undefined;
           if (error instanceof DialogOpenedSignal) {
             completedActions += 1;
             if (completedActions < actions.length) {
@@ -1122,7 +1142,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           throw error instanceof InteractionDefiniteDriverError
             ? new InteractionOutcomeUnknownDriverError(
                 "outcome_unknown",
-                `browser action sent input or completed ${completedActions} action(s) before a later failure (${error.code}); inspect the outcome before continuing and do not replay automatically`,
+                `browser action sent input or completed ${completedActions} action(s) before a later failure (${error.code}: ${error.message}); inspect the outcome before continuing and do not replay automatically`,
               )
             : error;
         }
@@ -1171,6 +1191,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         return null;
       }
       try {
+        await this.settleFiniteAnimations(state);
         const currentInfo = await this.requireTargetInfo(
           await this.ensureConnection(),
           info.targetId,
@@ -1297,11 +1318,14 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           await this.clickNode(state, submitNodeId, "left", 1);
           submitted = true;
         } else if (command.submit.type === "press") {
+          // Validate the key before focusing, so an unsupported key is a
+          // definite refusal with no input sent.
+          const key = this.parseActionKey(command.submit.key);
           await this.focusNode(
             state,
             submitNodeId ?? resolvedFields.at(-1)?.backendDOMNodeId ?? null,
           );
-          await this.pressKey(state, command.submit.key);
+          await this.pressKey(state, key);
           submitted = true;
         }
 
@@ -1585,7 +1609,14 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       () => undefined,
       () => undefined,
     );
-    return await result;
+    try {
+      return await result;
+    } catch (error) {
+      // A renderer that died mid-command ends that command through the detach
+      // below; report the crash itself rather than the transport symptom.
+      if (this.crashedTargets.has(targetId)) throw tabCrashedError();
+      throw error;
+    }
   }
 
   private async ensureTargetState(info: TargetInfo): Promise<TargetState> {
@@ -1612,18 +1643,39 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     if (typeof attached.sessionId !== "string") throw new Error("CDP did not attach the target");
     const sessionId = attached.sessionId;
     this.attachingSessions.set(info.targetId, sessionId);
+    // A tab whose renderer already died answers no page command; Chrome says so
+    // on Inspector.enable. Watch for it so attachment fails fast instead of
+    // hanging every later command until its timeout.
+    let signalCrash: () => void = () => undefined;
+    const crashed = new Promise<null>((resolve) => {
+      signalCrash = () => resolve(null);
+    });
+    const stopCrashWatch = connection.on("Inspector.targetCrashed", () => signalCrash(), sessionId);
+    // Only the crash signal matters here; a slow or unsupported enable must not
+    // replace the real initialization outcome.
+    void connection.send("Inspector.enable", {}, { sessionId }).catch(() => undefined);
     let frame: MainFrame;
     try {
-      await Promise.all([
-        connection.send("Page.enable", {}, { sessionId }),
-        connection.send("Runtime.enable", {}, { sessionId }),
-        connection.send("DOM.enable", {}, { sessionId }),
-        connection.send("Accessibility.enable", {}, { sessionId }),
-        connection.send("Network.enable", {}, { sessionId }),
-        connection.send("Log.enable", {}, { sessionId }),
-      ]);
-      await this.applyEmulation(connection, sessionId);
-      frame = await this.mainFrame(sessionId);
+      const initialized = (async () => {
+        await Promise.all([
+          connection.send("Page.enable", {}, { sessionId }),
+          connection.send("Runtime.enable", {}, { sessionId }),
+          connection.send("DOM.enable", {}, { sessionId }),
+          connection.send("Accessibility.enable", {}, { sessionId }),
+          connection.send("Network.enable", {}, { sessionId }),
+          connection.send("Log.enable", {}, { sessionId }),
+        ]);
+        await this.applyEmulation(connection, sessionId);
+        return await this.mainFrame(sessionId);
+      })();
+      const outcome = await Promise.race([initialized, crashed]);
+      if (!outcome) {
+        // Detaching below ends the enables still waiting on the dead renderer.
+        void initialized.catch(() => undefined);
+        this.crashedTargets.add(info.targetId);
+        throw tabCrashedError();
+      }
+      frame = outcome;
       if (
         this.attachingSessions.get(info.targetId) !== sessionId ||
         this.targetPhysicalGeneration(info.targetId) !== authorityGeneration
@@ -1642,9 +1694,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         .catch(() => undefined);
       throw error;
     } finally {
+      stopCrashWatch();
       if (this.attachingSessions.get(info.targetId) === sessionId)
         this.attachingSessions.delete(info.targetId);
     }
+    this.crashedTargets.delete(info.targetId);
     const state: TargetState = {
       targetId: info.targetId,
       sessionId,
@@ -1687,6 +1741,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       unsubscribe: [],
     };
     state.unsubscribe.push(
+      connection.on("Inspector.targetCrashed", () => this.onTargetCrashed(state), sessionId),
       connection.on(
         "Page.frameNavigated",
         (event) => this.onFrameNavigated(state, event),
@@ -2781,18 +2836,35 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         });
         return;
       case "click": {
-        const node = await this.resolveLocator(state, action.locator);
-        await this.clickNode(state, node.backendDOMNodeId, action.button ?? "left", 1);
+        const node = await this.resolveActionLocator(state, action.locator);
+        await this.clickNode(
+          state,
+          node.backendDOMNodeId,
+          action.button ?? "left",
+          1,
+          node.frameId ?? state.frame.id,
+        );
         return;
       }
       case "double_click": {
-        const node = await this.resolveLocator(state, action.locator);
-        await this.clickNode(state, node.backendDOMNodeId, "left", 2);
+        const node = await this.resolveActionLocator(state, action.locator);
+        await this.clickNode(
+          state,
+          node.backendDOMNodeId,
+          "left",
+          2,
+          node.frameId ?? state.frame.id,
+        );
         return;
       }
       case "hover": {
-        const node = await this.resolveLocator(state, action.locator);
-        const point = await this.actionPoint(state, node.backendDOMNodeId, true);
+        const node = await this.resolveActionLocator(state, action.locator);
+        const point = await this.actionPoint(
+          state,
+          node.backendDOMNodeId,
+          true,
+          node.frameId ?? state.frame.id,
+        );
         await this.sendActionTarget(state, "Input.dispatchMouseEvent", {
           type: "mouseMoved",
           x: point.x,
@@ -2801,7 +2873,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         return;
       }
       case "fill": {
-        const node = await this.resolveLocator(state, action.locator);
+        const node = await this.resolveActionLocator(state, action.locator);
+        if (await this.fillNativeDateTimeInput(state, node.backendDOMNodeId, action.value)) return;
         await this.focusNode(state, node.backendDOMNodeId);
         await this.selectAllAndDelete(state, node.backendDOMNodeId);
         if (action.value || this.engine === "lightpanda")
@@ -2824,7 +2897,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       }
       case "type":
         if (action.locator) {
-          const node = await this.resolveLocator(state, action.locator);
+          const node = await this.resolveActionLocator(state, action.locator);
           await this.focusNode(state, node.backendDOMNodeId);
         }
         if (
@@ -2844,15 +2917,20 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             text: action.text,
           });
         return;
-      case "press":
+      case "press": {
+        // Validate the key before focusing: focus is an input effect, so a
+        // key rejected after it would surface as outcome_unknown instead of
+        // a definite, side-effect-free invalid_action.
+        const key = this.parseActionKey(action.key);
         if (action.locator) {
-          const node = await this.resolveLocator(state, action.locator);
+          const node = await this.resolveActionLocator(state, action.locator);
           await this.focusNode(state, node.backendDOMNodeId);
         }
-        await this.pressKey(state, action.key);
+        await this.pressKey(state, key);
         return;
+      }
       case "select": {
-        const node = await this.resolveLocator(state, action.locator);
+        const node = await this.resolveActionLocator(state, action.locator);
         const result = await this.callOnNode(
           state,
           node.backendDOMNodeId,
@@ -2871,7 +2949,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         return;
       }
       case "check": {
-        const node = await this.resolveLocator(state, action.locator);
+        const node = await this.resolveActionLocator(state, action.locator);
         const current = await this.callOnNode(state, node.backendDOMNodeId, CHECKED_FUNCTION, []);
         if (typeof current !== "boolean") {
           throw new InteractionDefiniteDriverError(
@@ -2883,26 +2961,41 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           await this.clickNode(state, node.backendDOMNodeId, "left", 1);
         return;
       }
-      case "scroll":
+      case "scroll": {
+        // A located scroll moves the nearest box that can scroll that way, as a
+        // wheel over the element would; a page scroll moves the viewport. When
+        // nothing moves, no scroll event fired, so the refusal is definite.
+        const effectsBeforeScroll = state.actionEffectCount;
+        let moved: unknown;
         if (action.locator) {
-          const node = await this.resolveLocator(state, action.locator);
-          await this.callOnNode(
+          const node = await this.resolveActionLocator(state, action.locator);
+          moved = await this.callOnNode(
             state,
             node.backendDOMNodeId,
             SCROLL_FUNCTION,
             [{ value: action.deltaX }, { value: action.deltaY }],
-            { potentialEffect: true },
+            { isolatedFrameId: node.frameId ?? state.frame.id, potentialEffect: true },
           );
         } else {
-          await this.evaluateAction(
+          moved = await this.evaluateAction(
             state,
-            `window.scrollBy(${json(action.deltaX)}, ${json(action.deltaY)})`,
+            `(${PAGE_SCROLL_FUNCTION})(${json(action.deltaX)}, ${json(action.deltaY)})`,
+          );
+        }
+        if (moved !== true && (action.deltaX !== 0 || action.deltaY !== 0)) {
+          state.actionEffectCount = effectsBeforeScroll;
+          throw new InteractionDefiniteDriverError(
+            "invalid_action",
+            action.locator
+              ? "nothing at this element can scroll further in that direction"
+              : "the page cannot scroll further in that direction; to scroll an inner panel, pass its locator",
           );
         }
         return;
+      }
       case "drag": {
-        const from = await this.resolveLocator(state, action.from);
-        const to = await this.resolveLocator(state, action.to);
+        const from = await this.resolveActionLocator(state, action.from);
+        const to = await this.resolveActionLocator(state, action.to);
         await this.dragNodes(state, from.backendDOMNodeId, to.backendDOMNodeId);
         return;
       }
@@ -2962,7 +3055,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     locator: BrowserLocator,
     paths: readonly string[],
   ): Promise<void> {
-    const node = await this.resolveLocator(state, locator);
+    const node = await this.resolveActionLocator(state, locator);
     const frameId = node.frameId ?? state.frame.id;
     if (this.engine === "lightpanda") {
       // Lightpanda supports direct file inputs, not Chromium's native chooser.
@@ -3156,7 +3249,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const text = action.text ?? this.clipboardText;
     if (action.text !== undefined) this.setClipboard(text, "paste", state.targetId);
     if (action.locator) {
-      const node = await this.resolveLocator(state, action.locator);
+      const node = await this.resolveActionLocator(state, action.locator);
       await this.focusNode(state, node.backendDOMNodeId);
     }
     if (text) {
@@ -3204,7 +3297,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   ): Promise<string> {
     let value: unknown;
     if (locator) {
-      const node = await this.resolveLocator(state, locator);
+      const node = await this.resolveActionLocator(state, locator);
       value = await this.callOnNode(state, node.backendDOMNodeId, COPY_BROWSER_TEXT_FUNCTION, [
         { value: content },
       ]);
@@ -3268,6 +3361,89 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         "browser clipboard text exceeds its UTF-8 byte envelope",
       );
     }
+  }
+
+  /** Resolve a locator an action is about to act on and, when the command is
+   * traced, record which element it resolved to before any input is sent. */
+  private async resolveActionLocator(
+    state: TargetState,
+    locator: BrowserLocator,
+  ): Promise<CdpAccessibilityEntry> {
+    const entry = await this.resolveLocator(state, locator);
+    const current = state.actionTrace;
+    if (current) {
+      current.trace.record(await this.describeResolvedTarget(state, entry, current.actionIndex));
+    }
+    return entry;
+  }
+
+  private async describeResolvedTarget(
+    state: TargetState,
+    entry: CdpAccessibilityEntry,
+    actionIndex: number,
+  ): Promise<BrowserActionResolvedTargetValue> {
+    if (entry.nodeId !== "") {
+      // Accessibility-resolved locators already carry role, name and ancestry.
+      const snapshot = state.accessibility;
+      const container =
+        snapshot && snapshot.entriesByNodeId.has(entry.nodeId)
+          ? accessibilityContainer(snapshot, entry.nodeId)
+          : null;
+      return {
+        actionIndex,
+        ref: entry.ref || null,
+        role: boundedTargetRole(entry.role),
+        name: boundedTargetText(entry.name),
+        container: container
+          ? { role: boundedTargetRole(container.role), name: boundedTargetText(container.name) }
+          : null,
+      };
+    }
+    // CSS, test id and placeholder locators resolve through the DOM. Read that
+    // node and its ancestors from Chromium's accessibility tree. The read is
+    // optional: an engine or frame without it reports no role or container.
+    const unknown: BrowserActionResolvedTargetValue = {
+      actionIndex,
+      ref: null,
+      role: "generic",
+      name: null,
+      container: null,
+    };
+    if (entry.backendDOMNodeId === null) return unknown;
+    let response: { nodes?: unknown };
+    try {
+      response = await this.sendTarget(state, "Accessibility.getPartialAXTree", {
+        backendNodeId: entry.backendDOMNodeId,
+        fetchRelatives: true,
+      });
+    } catch {
+      return unknown;
+    }
+    if (!Array.isArray(response.nodes)) return unknown;
+    let snapshot: CdpAccessibilitySnapshot;
+    try {
+      snapshot = normalizeCdpAccessibilityTree({
+        nodes: response.nodes as CdpAxNode[],
+        controllerGeneration: this.controllerGeneration,
+        targetId: state.targetId,
+        documentGeneration: state.documentGeneration,
+      });
+    } catch {
+      return unknown;
+    }
+    const resolved = snapshot.entries.find(
+      (candidate) => candidate.backendDOMNodeId === entry.backendDOMNodeId,
+    );
+    if (!resolved) return unknown;
+    const container = accessibilityContainer(snapshot, resolved.nodeId);
+    return {
+      ...unknown,
+      role: boundedTargetRole(resolved.role),
+      name: boundedTargetText(resolved.name),
+      container: container
+        ? { role: boundedTargetRole(container.role), name: boundedTargetText(container.name) }
+        : null,
+    };
   }
 
   private async resolveLocator(
@@ -3440,8 +3616,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     backendDOMNodeId: number | null,
     button: "left" | "right" | "middle",
     count: 1 | 2,
+    frameId?: string,
   ): Promise<void> {
-    const point = await this.actionPoint(state, backendDOMNodeId, true);
+    const point = await this.actionPoint(state, backendDOMNodeId, true, frameId);
     await this.sendActionTarget(state, "Input.dispatchMouseEvent", {
       type: "mouseMoved",
       x: point.x,
@@ -3465,10 +3642,34 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
   }
 
+  /** Scroll offsets of the window, visual viewport and every composed
+   * ancestor of a top-level-frame node, read in an isolated world so page
+   * scripts cannot fake them. Null means unknown: treat any scroll as an effect. */
+  private async scrollPositions(
+    state: TargetState,
+    backendDOMNodeId: number,
+    frameId: string | undefined,
+  ): Promise<string | null> {
+    if (frameId === undefined) return null;
+    try {
+      const positions = await this.callOnNode(
+        state,
+        backendDOMNodeId,
+        SCROLL_POSITIONS_FUNCTION,
+        [],
+        { isolatedFrameId: frameId },
+      );
+      return typeof positions === "string" ? positions : null;
+    } catch {
+      return null;
+    }
+  }
+
   private async actionPoint(
     state: TargetState,
     backendDOMNodeId: number | null,
     requireHit: boolean,
+    frameId?: string,
   ): Promise<{ x: number; y: number }> {
     if (backendDOMNodeId === null) {
       throw new InteractionDefiniteDriverError(
@@ -3476,9 +3677,40 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         "browser node cannot receive pointer input",
       );
     }
+    // Scrolling runs page scroll listeners, so it counts as a possible effect
+    // and a later refusal stays an unknown outcome. When the target is already
+    // in view nothing scrolls, and a refusal (covered, no box) is definite.
+    const scrollBefore = await this.scrollPositions(state, backendDOMNodeId, frameId);
+    const effectsBeforeScroll = state.actionEffectCount;
     await this.sendActionTarget(state, "DOM.scrollIntoViewIfNeeded", {
       backendNodeId: backendDOMNodeId,
     });
+    if (
+      scrollBefore !== null &&
+      (await this.scrollPositions(state, backendDOMNodeId, frameId)) === scrollBefore
+    )
+      state.actionEffectCount = effectsBeforeScroll;
+    let point = await this.centerPoint(state, backendDOMNodeId);
+    if (requireHit && !(await this.hitsAtCenter(state, backendDOMNodeId))) {
+      const revealed =
+        (await this.revealFromStickyCover(state, backendDOMNodeId, frameId)) ??
+        (await this.revealByHover(state, backendDOMNodeId, frameId, point));
+      if (!revealed) {
+        throw new InteractionDefiniteDriverError(
+          "invalid_action",
+          "browser element is covered or not pointer-actionable",
+          true,
+        );
+      }
+      point = revealed;
+    }
+    return point;
+  }
+
+  private async centerPoint(
+    state: TargetState,
+    backendDOMNodeId: number,
+  ): Promise<{ x: number; y: number }> {
     const result = await this.sendTarget<{ model?: unknown }>(state, "DOM.getBoxModel", {
       backendNodeId: backendDOMNodeId,
     });
@@ -3501,21 +3733,92 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
     const xs = [numbers[0]!, numbers[2]!, numbers[4]!, numbers[6]!];
     const ys = [numbers[1]!, numbers[3]!, numbers[5]!, numbers[7]!];
-    const point = {
+    return {
       x: xs.reduce((sum, value) => sum + value, 0) / xs.length,
       y: ys.reduce((sum, value) => sum + value, 0) / ys.length,
     };
-    if (requireHit) {
-      const hit = await this.callOnNode(state, backendDOMNodeId, HIT_TEST_FUNCTION, []);
-      if (hit !== true) {
-        throw new InteractionDefiniteDriverError(
-          "invalid_action",
-          "browser element is covered or not pointer-actionable",
-          true,
-        );
+  }
+
+  private async hitsAtCenter(state: TargetState, backendDOMNodeId: number): Promise<boolean> {
+    return (await this.callOnNode(state, backendDOMNodeId, HIT_TEST_FUNCTION, [])) === true;
+  }
+
+  /**
+   * Row actions and toolbar buttons are often hidden and pointer-transparent
+   * until the pointer is over their row or card (CSS :hover). The hit test
+   * then lands on the target's own ancestor. A person moves the pointer onto
+   * the spot first, so do the same and test again. The move is real input, so
+   * a refusal after it is an unknown outcome. Returns the action point, or
+   * null when the target is not hover-revealed or stays unreachable.
+   */
+  private async revealByHover(
+    state: TargetState,
+    backendDOMNodeId: number,
+    frameId: string | undefined,
+    point: { x: number; y: number },
+  ): Promise<{ x: number; y: number } | null> {
+    if (frameId === undefined) return null;
+    const transparent = await this.callOnNode(
+      state,
+      backendDOMNodeId,
+      POINTER_TRANSPARENT_FUNCTION,
+      [],
+      { isolatedFrameId: frameId },
+    ).catch(() => false);
+    if (transparent !== true) return null;
+    await this.sendActionTarget(state, "Input.dispatchMouseEvent", {
+      type: "mouseMoved",
+      x: point.x,
+      y: point.y,
+    });
+    if (!(await this.hitsAtCenter(state, backendDOMNodeId))) return null;
+    return await this.centerPoint(state, backendDOMNodeId);
+  }
+
+  /**
+   * Sticky table columns and headers, and fixed toolbars, can cover a target
+   * that Chromium already considers in view, so scrolling "if needed" does
+   * nothing. A person scrolls the container until the target clears the bar;
+   * try the same with other scroll alignments. A layer over the whole viewport
+   * (a modal or its backdrop) is not scrolled past, so that refusal stays
+   * definite. Returns the new action point, or null when still covered.
+   */
+  private async revealFromStickyCover(
+    state: TargetState,
+    backendDOMNodeId: number,
+    frameId: string | undefined,
+  ): Promise<{ x: number; y: number } | null> {
+    if (frameId === undefined) return null;
+    const sticky = await this.callOnNode(state, backendDOMNodeId, STICKY_COVER_FUNCTION, [], {
+      isolatedFrameId: frameId,
+    }).catch(() => false);
+    if (sticky !== true) return null;
+    const scrollBefore = await this.scrollPositions(state, backendDOMNodeId, frameId);
+    const effectsBeforeScroll = state.actionEffectCount;
+    for (const alignment of ["end", "center", "start"] as const) {
+      // Scrolling runs page scroll listeners, so it is a possible effect: a
+      // refusal after it is reported as an unknown outcome.
+      await this.callOnNode(
+        state,
+        backendDOMNodeId,
+        SCROLL_INTO_VIEW_FUNCTION,
+        [{ value: alignment }],
+        {
+          potentialEffect: true,
+        },
+      );
+      if (await this.hitsAtCenter(state, backendDOMNodeId)) {
+        return await this.centerPoint(state, backendDOMNodeId);
       }
     }
-    return point;
+    // Nothing could move (for example a sticky bar taller than its scroller):
+    // no scroll listener ran, so the refusal is still definite.
+    if (
+      scrollBefore !== null &&
+      (await this.scrollPositions(state, backendDOMNodeId, frameId)) === scrollBefore
+    )
+      state.actionEffectCount = effectsBeforeScroll;
+    return null;
   }
 
   private async focusNode(state: TargetState, backendDOMNodeId: number | null): Promise<void> {
@@ -3537,9 +3840,75 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       }
       return;
     }
-    await this.sendActionTarget(state, "DOM.focus", {
-      backendNodeId: backendDOMNodeId,
-    });
+    const effectsBeforeFocus = state.actionEffectCount;
+    try {
+      await this.sendActionTarget(state, "DOM.focus", {
+        backendNodeId: backendDOMNodeId,
+      });
+    } catch (error) {
+      // Chromium validates the node (an Element that can take focus) before
+      // moving focus, so a protocol refusal changed nothing. Report it as a
+      // definite refusal instead of letting it surface as an unknown outcome.
+      if (error instanceof CdpProtocolError && error.method === "DOM.focus") {
+        state.actionEffectCount = effectsBeforeFocus;
+        throw new InteractionDefiniteDriverError(
+          "invalid_action",
+          "browser node cannot be focused",
+        );
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Native date, time, month, week and datetime-local inputs render their
+   * editable parts as spin buttons inside a user-agent shadow root, and they
+   * ignore text insertion. Select-all plus Backspace would only clear the
+   * focused part. Fill such a control, or any of its parts, by setting the
+   * host input's value in the input's own format, the way a date picker
+   * commits a choice. Returns false for every other element so the ordinary
+   * text path still applies.
+   */
+  private async fillNativeDateTimeInput(
+    state: TargetState,
+    backendDOMNodeId: number | null,
+    value: string,
+  ): Promise<boolean> {
+    const inspected = await this.callOnNode(
+      state,
+      backendDOMNodeId,
+      INSPECT_NATIVE_DATE_TIME_FILL_FUNCTION,
+      [{ value }],
+    );
+    if (!isRecord(inspected) || inspected.kind === "other") return false;
+    const type = typeof inspected.type === "string" ? inspected.type : "date";
+    if (inspected.kind === "not_editable") {
+      throw new InteractionDefiniteDriverError(
+        "invalid_action",
+        `browser ${type} input is disabled or read-only`,
+      );
+    }
+    if (inspected.kind === "invalid_value") {
+      const part = inspected.part === true ? "this field is one part of a native " : "a native ";
+      throw new InteractionDefiniteDriverError(
+        "invalid_action",
+        `${part}${type} input; fill the whole input with a value in its format (${NATIVE_DATE_TIME_FORMATS[type] ?? "its value format"}), or an empty string to clear it`,
+      );
+    }
+    const retained = await this.callOnNode(
+      state,
+      backendDOMNodeId,
+      SET_NATIVE_DATE_TIME_VALUE_FUNCTION,
+      [{ value }],
+      { potentialEffect: true },
+    );
+    if (retained !== true) {
+      throw new InteractionOutcomeUnknownDriverError(
+        "outcome_unknown",
+        `browser set the ${type} input's value but the page did not keep it; re-observe before continuing`,
+      );
+    }
+    return true;
   }
 
   private async selectAllAndDelete(
@@ -3598,8 +3967,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     });
   }
 
-  private async pressKey(state: TargetState, input: string): Promise<void> {
-    const key = parseKey(input, /Macintosh|Mac OS/u.test(this.userAgent));
+  private parseActionKey(input: string): ParsedKey {
+    return parseKey(input, /Macintosh|Mac OS/u.test(this.userAgent));
+  }
+
+  private async pressKey(state: TargetState, key: ParsedKey): Promise<void> {
     await this.sendActionTarget(state, "Input.dispatchKeyEvent", {
       type: "keyDown",
       key: key.key,
@@ -3909,6 +4281,39 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       throw error;
     }
     return (await this.callOnNode(state, entry.backendDOMNodeId, VISIBLE_FUNCTION, [])) === true;
+  }
+
+  /**
+   * Menus, listboxes and dialogs usually animate out before they leave the
+   * DOM. A snapshot taken mid-animation reports UI the action already
+   * dismissed, so briefly wait for finite running animations to finish.
+   * Infinite ones (spinners) are ignored and the wait is bounded. This is a
+   * read in an isolated world: page scripts cannot stall or observe it, and
+   * any failure simply observes the page as it is.
+   */
+  private async settleFiniteAnimations(state: TargetState): Promise<void> {
+    if (this.engine !== "chromium" || state.dialog) return;
+    try {
+      const world = await this.sendTarget<{ executionContextId?: unknown }>(
+        state,
+        "Page.createIsolatedWorld",
+        { frameId: state.frame.id, worldName: "opengeni-dom-read" },
+      );
+      if (!Number.isSafeInteger(world.executionContextId)) return;
+      await this.sendTarget(
+        state,
+        "Runtime.evaluate",
+        {
+          expression: SETTLE_FINITE_ANIMATIONS_EXPRESSION,
+          contextId: world.executionContextId,
+          returnByValue: true,
+          awaitPromise: true,
+        },
+        { timeoutMs: ANIMATION_SETTLE_LIMIT_MS + 1_000 },
+      );
+    } catch {
+      // Settling only improves the snapshot; it never decides the outcome.
+    }
   }
 
   private async evaluate(state: TargetState, expression: string): Promise<unknown> {
@@ -4269,12 +4674,39 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   private removeState(targetId: string, preserveFirstSeen = false): void {
+    // A closed or destroyed tab is gone; a crashed one that we only detached from stays marked.
+    if (!preserveFirstSeen) this.crashedTargets.delete(targetId);
     const state = this.states.get(targetId);
     if (!state) return;
     this.failAllScreencasts(state, new CdpTransportError("browser target closed"));
     for (const unsubscribe of state.unsubscribe) unsubscribe();
     this.states.delete(targetId);
     if (!preserveFirstSeen) this.firstSeenAt.delete(targetId);
+  }
+
+  /**
+   * The tab's renderer died. Nothing will answer its pending or later page
+   * commands, so detach: that ends every command waiting on it at once, and
+   * the next use re-attaches and reports the crash immediately.
+   */
+  private onTargetCrashed(state: TargetState): void {
+    if (this.states.get(state.targetId) !== state) return;
+    this.crashedTargets.add(state.targetId);
+    const forget = () => {
+      if (this.states.get(state.targetId) !== state) return;
+      this.targetPhysicalGenerations.set(state.targetId, randomUUID());
+      this.removeState(state.targetId, true);
+    };
+    void this.ensureConnection()
+      .then((connection) =>
+        connection.send(
+          "Target.detachFromTarget",
+          { sessionId: state.sessionId },
+          { timeoutMs: 1_000 },
+        ),
+      )
+      .catch(() => undefined)
+      .finally(forget);
   }
 
   private protectedAuthQuiet(state: TargetState): boolean {
@@ -4292,6 +4724,15 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private timestamp(): string {
     return this.now().toISOString();
   }
+}
+
+/** Retrying can't help a tab whose page process died; say what will. */
+function tabCrashedError(): InteractionDefiniteDriverError {
+  return new InteractionDefiniteDriverError(
+    "resource_unavailable",
+    "This browser tab crashed and no longer responds. Open a new tab (and close this one), then continue there.",
+    false,
+  );
 }
 
 function frameStreamDiagnostic(event: string, fields: Readonly<Record<string, unknown>>): void {
@@ -4376,6 +4817,20 @@ function uniqueEntries(entries: CdpAccessibilityEntry[]): CdpAccessibilityEntry 
   return byBackend.size === 1 ? [...byBackend.values()][0]! : null;
 }
 
+function boundedTargetText(value: string | null): string | null {
+  const text = value?.replace(/\s+/gu, " ").trim() ?? "";
+  if (!text) return null;
+  const codePoints = Array.from(text);
+  return codePoints.length <= INTERACTION_MAX_RESOLVED_TARGET_TEXT
+    ? text
+    : `${codePoints.slice(0, INTERACTION_MAX_RESOLVED_TARGET_TEXT - 1).join("")}\u2026`;
+}
+
+function boundedTargetRole(value: string): string {
+  const role = value.trim().slice(0, 64);
+  return role || "generic";
+}
+
 function syntheticEntry(backendDOMNodeId: number): CdpAccessibilityEntry {
   return {
     ref: "",
@@ -4417,16 +4872,15 @@ function isFormControlRole(role: string): boolean {
   ].includes(role);
 }
 
-function parseKey(
-  input: string,
-  mac: boolean,
-): {
+type ParsedKey = {
   key: string;
   code: string;
   keyCode: number;
   modifiers: number;
   text: string;
-} {
+};
+
+function parseKey(input: string, mac: boolean): ParsedKey {
   const parts = input.split("+");
   const rawKey = parts.pop()?.trim();
   if (!rawKey) throw new InteractionDefiniteDriverError("invalid_action", "browser key is invalid");
@@ -4478,6 +4932,59 @@ const KEY_DEFINITIONS: Record<
   space: { key: " ", code: "Space", keyCode: 32, text: " " },
 };
 
+// Typical exit animations take 100-300 ms. Longer finite animations are
+// waited for only this long, so a slow transition cannot stall every action.
+const ANIMATION_SETTLE_LIMIT_MS = 750;
+
+// Waits until no finite animation is running, then lets animationend
+// handlers commit their DOM removal (which can chain another animation).
+const SETTLE_FINITE_ANIMATIONS_EXPRESSION = `(async () => {
+  const deadline = performance.now() + ${ANIMATION_SETTLE_LIMIT_MS};
+  const pause = (ms) => new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+  const remaining = () => deadline - performance.now();
+  const running = () =>
+    document.getAnimations().filter((animation) => {
+      if (animation.playState !== "running") return false;
+      const end = animation.effect?.getComputedTiming().endTime;
+      return typeof end === "number" && Number.isFinite(end);
+    });
+  // Hidden documents do not advance animations, so there is nothing to wait for.
+  if (document.visibilityState === "hidden") return true;
+  let pending = running();
+  if (pending.length === 0) return true;
+  while (pending.length > 0) {
+    if (remaining() <= 0) return false;
+    await Promise.race([
+      Promise.allSettled(pending.map((animation) => animation.finished)),
+      pause(remaining()),
+    ]);
+    await Promise.race([
+      new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 0))),
+      pause(Math.min(50, remaining())),
+    ]);
+    pending = running();
+  }
+  return true;
+})()`;
+
+// A child frame's scroll can also move its parent documents, which this frame
+// cannot read, so only top-level frames report positions.
+const SCROLL_POSITIONS_FUNCTION = `function() {
+  if (window !== window.top) return null;
+  const start = this instanceof Element ? this : this.parentElement;
+  if (!(start instanceof Element)) return null;
+  const viewport = window.visualViewport;
+  const positions = [window.scrollX, window.scrollY, viewport ? viewport.offsetLeft : 0, viewport ? viewport.offsetTop : 0];
+  for (let node = start; node; ) {
+    if (node instanceof Element) positions.push(node.scrollLeft, node.scrollTop);
+    const parent = node.assignedSlot || node.parentNode;
+    node = parent instanceof ShadowRoot ? parent.host : parent instanceof Element ? parent : null;
+  }
+  const root = document.scrollingElement;
+  if (root) positions.push(root.scrollLeft, root.scrollTop);
+  return positions.join(",");
+}`;
+
 const HIT_TEST_FUNCTION = `function() {
   const element = this instanceof Element ? this : this.parentElement;
   if (!(element instanceof Element) || !element.isConnected) return false;
@@ -4486,6 +4993,51 @@ const HIT_TEST_FUNCTION = `function() {
   const hitTest = root && typeof root.elementFromPoint === "function" ? root : document;
   const hit = hitTest.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
   return Boolean(hit && (element === hit || element.contains?.(hit)));
+}`;
+
+// Whether pointer input at the target's centre falls through it to one of its
+// own ancestors: the target (or a wrapper) is pointer-transparent there, as a
+// hover-revealed control is before the pointer arrives, rather than covered.
+const POINTER_TRANSPARENT_FUNCTION = `function() {
+  const element = this instanceof Element ? this : this.parentElement;
+  if (!(element instanceof Element) || !element.isConnected) return false;
+  const rect = element.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) return false;
+  const root = element.getRootNode();
+  const hitTest = root && typeof root.elementFromPoint === "function" ? root : document;
+  const hit = hitTest.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+  return Boolean(hit && hit !== element && !element.contains(hit) && hit.contains(element));
+}`;
+
+// Whether the element at the target's centre belongs to a sticky element, or
+// to a fixed one smaller than the viewport, i.e. a bar that scrolling can
+// move the target out from under.
+const STICKY_COVER_FUNCTION = `function() {
+  const element = this instanceof Element ? this : this.parentElement;
+  if (!(element instanceof Element) || !element.isConnected) return false;
+  const rect = element.getBoundingClientRect();
+  const root = element.getRootNode();
+  const hitTest = root && typeof root.elementFromPoint === "function" ? root : document;
+  let node = hitTest.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+  if (!node || element === node || element.contains(node)) return false;
+  while (node instanceof Element) {
+    const position = getComputedStyle(node).position;
+    if (position === "sticky") return true;
+    if (position === "fixed") {
+      const box = node.getBoundingClientRect();
+      return !(box.left <= 0 && box.top <= 0 && box.right >= innerWidth && box.bottom >= innerHeight);
+    }
+    const parentRoot = node.getRootNode();
+    node = node.parentElement ?? (parentRoot instanceof ShadowRoot ? parentRoot.host : null);
+  }
+  return false;
+}`;
+
+const SCROLL_INTO_VIEW_FUNCTION = `function(alignment) {
+  const element = this instanceof Element ? this : this.parentElement;
+  if (!(element instanceof Element)) return false;
+  element.scrollIntoView({ block: alignment, inline: alignment, behavior: "instant" });
+  return true;
 }`;
 
 const VISIBLE_FUNCTION = `function() {
@@ -4512,9 +5064,55 @@ const SELECT_OPTIONS_FUNCTION = `function(values) {
   return true;
 }`;
 
+/** Scroll the nearest box around the element that can move in each requested
+ * direction, crossing shadow roots and slots like a wheel event would. Only
+ * boxes a user can scroll count: overflow auto, scroll or overlay, or the
+ * viewport unless it hides overflow. Returns whether anything moved. */
 const SCROLL_FUNCTION = `function(deltaX, deltaY) {
-  this.scrollBy({ left: deltaX, top: deltaY, behavior: "instant" });
-  return true;
+  const start = this && this.nodeType === 1 ? this : this?.parentElement;
+  if (!start || !start.isConnected) return false;
+  const doc = start.ownerDocument;
+  const view = doc.defaultView;
+  const root = doc.scrollingElement || doc.documentElement;
+  const parentOf = (element) =>
+    element.assignedSlot ||
+    element.parentElement ||
+    (element.parentNode && element.parentNode.nodeType === 11 ? element.parentNode.host : null);
+  const overflow = (element, axis) =>
+    view.getComputedStyle(element)[axis === "x" ? "overflowX" : "overflowY"];
+  const scrollable = (element, axis) => {
+    if (element !== root) return ["auto", "scroll", "overlay"].includes(overflow(element, axis));
+    const html = overflow(doc.documentElement, axis);
+    const viewport = html === "visible" && doc.body ? overflow(doc.body, axis) : html;
+    return viewport !== "hidden" && viewport !== "clip";
+  };
+  const scrollAxis = (axis, delta) => {
+    if (!delta) return false;
+    const read = (element) => (axis === "x" ? element.scrollLeft : element.scrollTop);
+    const candidates = [];
+    for (let element = start; element; element = element === root ? null : parentOf(element))
+      candidates.push(element);
+    if (!candidates.includes(root)) candidates.push(root);
+    for (const element of candidates) {
+      if (!scrollable(element, axis)) continue;
+      const before = read(element);
+      element.scrollBy(
+        axis === "x" ? { left: delta, behavior: "instant" } : { top: delta, behavior: "instant" },
+      );
+      if (read(element) !== before) return true;
+    }
+    return false;
+  };
+  const movedX = scrollAxis("x", deltaX);
+  const movedY = scrollAxis("y", deltaY);
+  return movedX || movedY;
+}`;
+
+const PAGE_SCROLL_FUNCTION = `function(deltaX, deltaY) {
+  const root = document.scrollingElement || document.documentElement;
+  const before = [root.scrollLeft, root.scrollTop];
+  window.scrollBy({ left: deltaX, top: deltaY, behavior: "instant" });
+  return root.scrollLeft !== before[0] || root.scrollTop !== before[1];
 }`;
 
 /** Fixed browser-side projection. Every field shares one character budget, so
@@ -4714,6 +5312,58 @@ const CONFIRM_EDITABLE_VALUE_FUNCTION = `async function(expected) {
   if (tag === "input" || tag === "textarea") return String(this.value) === String(expected);
   if (this.isContentEditable === true) return String(this.textContent || "") === String(expected);
   return false;
+}`;
+
+const NATIVE_DATE_TIME_FORMATS: Readonly<Record<string, string>> = {
+  date: "YYYY-MM-DD",
+  time: "HH:MM in 24-hour time, optionally HH:MM:SS",
+  "datetime-local": "YYYY-MM-DDTHH:MM",
+  month: "YYYY-MM",
+  week: "YYYY-Www",
+};
+
+// Resolves a native date/time input from the input itself or from one of the
+// parts in its user-agent shadow root. Inputs cannot host author shadow roots,
+// so a shadow root whose host is an input is always the browser's own.
+const NATIVE_DATE_TIME_HOST_SOURCE = `
+  const nativeDateTimeHost = (node) => {
+    let element = node;
+    for (let depth = 0; depth < 4 && element; depth++) {
+      if (String(element.tagName || "").toLowerCase() === "input") break;
+      const root = typeof element.getRootNode === "function" ? element.getRootNode() : null;
+      element = root && root.host ? root.host : null;
+    }
+    if (!element || String(element.tagName || "").toLowerCase() !== "input") return null;
+    const type = String(element.type || "").toLowerCase();
+    return ${JSON.stringify(Object.keys(NATIVE_DATE_TIME_FORMATS))}.includes(type) ? element : null;
+  };`;
+
+const INSPECT_NATIVE_DATE_TIME_FILL_FUNCTION = `function(expected) {${NATIVE_DATE_TIME_HOST_SOURCE}
+  const input = nativeDateTimeHost(this);
+  if (!input) return { kind: "other" };
+  const type = String(input.type).toLowerCase();
+  const part = input !== this;
+  if (input.disabled || input.readOnly) return { kind: "not_editable", type, part };
+  const probe = input.ownerDocument.createElement("input");
+  probe.type = type;
+  probe.value = String(expected);
+  if (probe.value !== String(expected)) return { kind: "invalid_value", type, part };
+  return { kind: "native", type, part };
+}`;
+
+// The prototype setter bypasses per-instance value trackers that frameworks
+// install, so their input listeners see the change as user input.
+const SET_NATIVE_DATE_TIME_VALUE_FUNCTION = `async function(expected) {${NATIVE_DATE_TIME_HOST_SOURCE}
+  const input = nativeDateTimeHost(this);
+  if (!input || !input.isConnected) return false;
+  const view = input.ownerDocument.defaultView;
+  const setter = Object.getOwnPropertyDescriptor(view.HTMLInputElement.prototype, "value").set;
+  input.focus();
+  setter.call(input, String(expected));
+  input.dispatchEvent(new view.Event("input", { bubbles: true, composed: true }));
+  input.dispatchEvent(new view.Event("change", { bubbles: true }));
+  await Promise.resolve();
+  return input.isConnected && input.value === String(expected);
 }`;
 
 function cssString(value: string): string {

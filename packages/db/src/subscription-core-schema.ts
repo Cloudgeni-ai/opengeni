@@ -45,6 +45,8 @@ export const subscriptionConnections = pgTable(
     extraCreditsUpdatedAt: timestamp("extra_credits_updated_at", { withTimezone: true }),
     allocatorEnabled: boolean("allocator_enabled").notNull().default(true),
     allocatorVersion: integer("allocator_version").notNull().default(1),
+    /** Optimistic-concurrency version of the models and workspaces it serves. */
+    accessVersion: integer("access_version").notNull().default(1),
     excludedModels: text("excluded_models").array().notNull().default([]),
     allowedModelIds: text("allowed_model_ids").array(),
     ownership: text("ownership").notNull().default("shared"),
@@ -204,6 +206,10 @@ export const subscriptionConnectionQuota = pgTable("subscription_connection_quot
   selectionCount: bigint("selection_count", { mode: "number" }).notNull().default(0),
   lastSelectedAt: timestamp("last_selected_at", { withTimezone: true }),
   observedRefreshGeneration: bigint("observed_refresh_generation", { mode: "number" }),
+  modelCatalogSlugs: text("model_catalog_slugs").array(),
+  modelCatalogRefreshGeneration: bigint("model_catalog_refresh_generation", { mode: "number" }),
+  modelCatalogObservedAt: timestamp("model_catalog_observed_at", { withTimezone: true }),
+  modelCatalogExpiresAt: timestamp("model_catalog_expires_at", { withTimezone: true }),
   revision: bigint("revision", { mode: "number" }).notNull().default(1),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
@@ -338,8 +344,8 @@ export const subscriptionOperationLeases = pgTable(
       .where(sql`${table.sessionId} is not null`),
     operationKindValid: check(
       "subscription_operation_leases_kind_chk",
-      sql`${table.operationKind} in ('image', 'realtime', 'transcription', 'model', 'credential_request', 'apps')
-        and (${table.operationKind} in ('image', 'realtime', 'transcription') or ${table.provider} = 'codex')`,
+      sql`${table.operationKind} in ('image', 'video', 'realtime', 'transcription', 'model', 'credential_request', 'apps', 'completion')
+        and (${table.operationKind} not in ('apps', 'completion') or ${table.provider} = 'codex')`,
     ),
     requestIdentity: uniqueIndex("subscription_operation_request_identity_uq")
       .on(table.accountId, table.requestId, table.transportAttempt)
@@ -357,7 +363,7 @@ export const subscriptionOperationLeases = pgTable(
     referenceShape: check(
       "subscription_operation_leases_reference_chk",
       sql`(${table.turnId} is null or ${table.sessionId} is not null)
-        and (${table.sessionId} is not null or (${table.turnId} is null and ${table.operationKind} in ('transcription', 'credential_request', 'apps')))
+        and (${table.sessionId} is not null or (${table.turnId} is null and ${table.operationKind} in ('transcription', 'credential_request', 'apps', 'completion')))
         and (${table.operationKind} <> 'model' or ${table.turnId} is not null)`,
     ),
   }),

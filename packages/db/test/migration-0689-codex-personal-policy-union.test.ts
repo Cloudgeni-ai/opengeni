@@ -14,6 +14,21 @@ import { provisionRoles } from "../src/provision-roles";
 import { encryptEnvironmentValue } from "../src/environment-crypto";
 
 const migration = "0689_subscription_core_codex_cutover.sql";
+// 0712 requires the committed 0689 cutover, so it is held back with it.
+const precursor = "0712_subscription_core_generic_precursor.sql";
+// 0713 keys and redefines objects 0689 creates: held back and replayed right
+// after it.
+const providerKeyedReach = "0713_subscription_core_provider_keyed_reach.sql";
+// 0714 redefines 0713's reach setters and 0715 rewrites routines 0713 and
+// 0714 create: held back and replayed after it.
+const workspaceManagedAccounts = "0714_subscription_workspace_managed_organization_accounts.sql";
+const apiKeyConnections = "0715_subscription_core_api_key_connections.sql";
+// Built from the connect writer withheld 0715 rewrites; it follows 0715.
+const personalConnectFormat = "0728_subscription_core_personal_connect_format.sql";
+// 0716 builds on 0712's receipts and patches its helpers; it follows 0712.
+const compat = "0716_subscription_authority_compat.sql";
+// 0717 requires 0716's routines; it follows 0716.
+const fences = "0717_subscription_authority_fences.sql";
 const key = Buffer.alloc(32, 87);
 const cases: Array<{
   name: string;
@@ -71,9 +86,9 @@ for (const shape of ["workspace-workspace", "workspace-user"] as const) {
     }));
     try {
       await owner`CREATE TABLE schema_migrations(name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`;
-      await owner`INSERT INTO schema_migrations(name) VALUES (${migration})`;
+      await owner`INSERT INTO schema_migrations(name) VALUES (${migration}), (${precursor}), (${providerKeyedReach}), (${workspaceManagedAccounts}), (${apiKeyConnections}), (${personalConnectFormat}), (${compat}), (${fences})`;
       await migrate(owned.ownerUrl, undefined, { applicationDatabaseRoles: ["opengeni_app"] });
-      await owner`DELETE FROM schema_migrations WHERE name = ${migration}`;
+      await owner`DELETE FROM schema_migrations WHERE name IN (${migration}, ${precursor}, ${providerKeyedReach}, ${workspaceManagedAccounts}, ${apiKeyConnections}, ${personalConnectFormat}, ${compat}, ${fences})`;
       const seedTables = [
         "managed_accounts",
         "workspaces",

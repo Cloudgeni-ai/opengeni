@@ -1871,11 +1871,13 @@ describe("deployment contract", () => {
       helm_set_values: { value: {} },
     };
     const configured = generateRuntimeArtifacts(withSandboxBackend("docker"), outputs, {
-      OPENGENI_WEB_SEARCH_PROVIDER: "tinyfish",
-      OPENGENI_WEB_SEARCH_API_KEY: "search-key",
+      OPENGENI_WEB_SEARCH_PROVIDER: "tinyfish,parallel",
+      OPENGENI_WEB_TINYFISH_API_KEY: "tinyfish-key",
+      OPENGENI_WEB_PARALLEL_API_KEY: "parallel-key",
     });
-    expect(configured.runtimeEnv).toContain("OPENGENI_WEB_SEARCH_PROVIDER=tinyfish");
-    expect(configured.runtimeEnv).toContain("OPENGENI_WEB_SEARCH_API_KEY=search-key");
+    expect(configured.runtimeEnv).toContain("OPENGENI_WEB_SEARCH_PROVIDER=tinyfish,parallel");
+    expect(configured.runtimeEnv).toContain("OPENGENI_WEB_TINYFISH_API_KEY=tinyfish-key");
+    expect(configured.runtimeEnv).toContain("OPENGENI_WEB_PARALLEL_API_KEY=parallel-key");
     const absent = generateRuntimeArtifacts(withSandboxBackend("docker"), outputs, {});
     for (const key of WEB_SEARCH_PROVIDER_PASSTHROUGH_ENV) {
       expect(absent.runtimeEnv).not.toContain(`${key}=`);

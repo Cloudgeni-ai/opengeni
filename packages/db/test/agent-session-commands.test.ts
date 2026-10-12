@@ -27,11 +27,13 @@ import {
   listSessionSystemUpdatesForTurn,
   markSessionAttemptQuiesced,
   markSessionWorkflowWakeDelivered,
+  materializeGoalContinuation,
   mutateSessionControlInTransaction,
   sendAgentMessageInTransaction,
   setSessionGoalStatus,
   setSessionModelInTransaction,
   settleSessionAttemptInterruptions,
+  settleSessionIdleWithParentOutbox,
   steerAgentSessionInTransaction,
   submitHumanPromptInTransaction,
   withWorkspaceSessionActivityRls as withWorkspaceRls,
@@ -1992,5 +1994,211 @@ describe("attempt-fenced Agent session commands", () => {
         }),
       ]),
     );
+  });
+});
+
+describe("machine input after a terminal context compaction failure", () => {
+  async function sendMessage(
+    grant: Awaited<ReturnType<typeof fixture>>,
+    caller: Awaited<ReturnType<typeof activeAgent>>,
+    targetSessionId: string,
+    text: string,
+  ) {
+    return await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db.transaction((tx) =>
+        sendAgentMessageInTransaction(tx as unknown as typeof db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          targetSessionId,
+          actor: caller.actor,
+          operationKey: crypto.randomUUID(),
+          text,
+        }),
+      ),
+    );
+  }
+
+  function deliver(
+    grant: Awaited<ReturnType<typeof fixture>>,
+    sessionId: string,
+    wakeRevision: number,
+  ) {
+    return markSessionWorkflowWakeDelivered(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId,
+      temporalWorkflowId: `session-${sessionId}`,
+      wakeRevision,
+    });
+  }
+
+  function claimNext(grant: Awaited<ReturnType<typeof fixture>>, sessionId: string) {
+    return claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+      sessionId,
+      workflowId: `session-${sessionId}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+  }
+
+  function materialize(grant: Awaited<ReturnType<typeof fixture>>, sessionId: string) {
+    return materializeGoalContinuation(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId,
+      workflowId: `session-${sessionId}`,
+      budgetBlocked: null,
+      policy: {
+        model: "scripted-model",
+        reasoningEffort: "low",
+        latencyMode: "standard" as const,
+        tools: [],
+        sandboxBackend: "none",
+      },
+      prompt: (goal, count) => `continue ${goal.text} (${count})`,
+    });
+  }
+
+  test("newer agent input wakes a goal session whose last turn failed compaction; held backlog rides along", async () => {
+    const grant = await fixture();
+    const workspaceId = grant.workspaceId!;
+    // Staging shape: a coordinator parent with an active goal and a CI-watch
+    // worker that keeps messaging it through session_send_message.
+    const watcher = await activeAgent(grant);
+    const parent = await makeSession(grant, watcher.session.id);
+    await createSessionGoal(client.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      sessionId: parent.id,
+      text: "Keep main green",
+      createdBy: "api",
+    });
+    const first = await sendMessage(grant, watcher, parent.id, "CI run 1 failed");
+    const failingAttemptId = crypto.randomUUID();
+    const failing = await claimSessionWorkForAttempt(client.db, workspaceId, {
+      sessionId: parent.id,
+      workflowId: `session-${parent.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: failingAttemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (failing.action !== "claimed") throw new Error(`Not claimed: ${failing.reason}`);
+    // Arrives while the failing attempt runs: never model-visible, pending at
+    // the failure, so it saw only the unchanged history and stays held.
+    const backlog = await sendMessage(grant, watcher, parent.id, "CI run 2 queued");
+    await applySessionTurnSettlement(client.db, workspaceId, {
+      sessionId: parent.id,
+      turnId: failing.turn.id,
+      triggerEventId: failing.turn.triggerEventId,
+      attemptId: failingAttemptId,
+      turnStatus: "failed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [
+        {
+          type: "turn.failed",
+          payload: {
+            error: "compaction summarization failed: provider timeout",
+            code: "context_compaction_failed",
+            retryable: false,
+            recovery: "user_message",
+            compacted: false,
+          },
+        },
+      ],
+    });
+    expect(
+      (
+        await listSessionSystemUpdatesForTurn(client.db, workspaceId, parent.id, failing.turn.id)
+      ).map((update) => update.id),
+    ).toEqual([first.updateId]);
+
+    // The held backlog alone neither starts inference nor keeps the wake
+    // revision open: the dispatcher must not re-signal a closed workflow
+    // forever for input the peek will never admit.
+    expect(await peekSessionWork(client.db, workspaceId, parent.id)).toEqual({ kind: "idle" });
+    expect(await claimNext(grant, parent.id)).toEqual({ action: "unclaimed", reason: "no-work" });
+    expect(await materialize(grant, parent.id)).toMatchObject({ action: "none" });
+    const heldWake = await wakeRow(workspaceId, parent.id);
+    expect(await deliver(grant, parent.id, heldWake!.wakeRevision)).toEqual({
+      action: "acknowledged",
+    });
+
+    // Genuinely new machine input is newer truth: it wakes the session once,
+    // exactly as its sender's receipt promised.
+    const newer = await sendMessage(grant, watcher, parent.id, "CI run 3 failed");
+    expect(newer.wakeRevision).not.toBeNull();
+    expect(await peekSessionWork(client.db, workspaceId, parent.id)).toEqual({ kind: "runnable" });
+    expect(await deliver(grant, parent.id, newer.wakeRevision!)).toEqual({
+      action: "pending_admission",
+      blocker: "pending_machine_input",
+    });
+    expect(await materialize(grant, parent.id)).toMatchObject({ action: "queue" });
+    expect(await settleSessionIdleWithParentOutbox(client.db, workspaceId, parent.id)).toEqual({
+      action: "stale",
+      episodeKey: null,
+      events: [],
+    });
+    const retry = await claimNext(grant, parent.id);
+    if (retry.action !== "claimed") throw new Error(`Newer input was not claimed: ${retry.reason}`);
+    expect(
+      (await listSessionSystemUpdatesForTurn(client.db, workspaceId, parent.id, retry.turn.id)).map(
+        (update) => update.id,
+      ),
+    ).toEqual([backlog.updateId, newer.updateId]);
+    expect(await listOutstandingSessionSystemUpdates(client.db, workspaceId, parent.id)).toEqual(
+      [],
+    );
+    expect(await deliver(grant, parent.id, newer.wakeRevision!)).toEqual({
+      action: "acknowledged",
+    });
+  });
+
+  test("a repeated compaction failure holds input it already saw and wakes again only for newer input", async () => {
+    const grant = await fixture();
+    const workspaceId = grant.workspaceId!;
+    const watcher = await activeAgent(grant);
+    const parent = await makeSession(grant, watcher.session.id);
+    async function failNext() {
+      const attemptId = crypto.randomUUID();
+      const claim = await claimSessionWorkForAttempt(client.db, workspaceId, {
+        sessionId: parent.id,
+        workflowId: `session-${parent.id}`,
+        workflowRunId: crypto.randomUUID(),
+        attemptId,
+        dispatchId: crypto.randomUUID(),
+        trigger: { kind: "next" },
+      });
+      if (claim.action !== "claimed") throw new Error(`Not claimed: ${claim.reason}`);
+      await applySessionTurnSettlement(client.db, workspaceId, {
+        sessionId: parent.id,
+        turnId: claim.turn.id,
+        triggerEventId: claim.turn.triggerEventId,
+        attemptId,
+        turnStatus: "failed",
+        sessionStatus: "idle",
+        activeTurnId: null,
+        events: [
+          {
+            type: "turn.failed",
+            payload: { error: "checkpoint failed", code: "context_compaction_failed" },
+          },
+        ],
+      });
+      return claim.turn;
+    }
+    await sendMessage(grant, watcher, parent.id, "first");
+    await failNext();
+    await sendMessage(grant, watcher, parent.id, "second");
+    await failNext();
+    // No input newer than the latest failure: no autonomous retry loop.
+    expect(await peekSessionWork(client.db, workspaceId, parent.id)).toEqual({ kind: "idle" });
+    expect(await claimNext(grant, parent.id)).toEqual({ action: "unclaimed", reason: "no-work" });
+    await sendMessage(grant, watcher, parent.id, "third");
+    expect(await peekSessionWork(client.db, workspaceId, parent.id)).toEqual({ kind: "runnable" });
+    expect(await claimNext(grant, parent.id)).toMatchObject({ action: "claimed" });
   });
 });

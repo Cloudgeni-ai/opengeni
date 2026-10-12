@@ -1031,8 +1031,7 @@ describe("trusted input wait runtime yield", () => {
         expect(JSON.stringify(outputs)).toContain("sibling-call");
         if (siblingIsError) {
           const sibling = outputs.find((item) => item.callId === "sibling-call");
-          const output = sibling?.output as { type: "text"; text: string };
-          expect(JSON.parse(output.text).isError).toBe(true);
+          expect(JSON.stringify(sibling?.output)).toContain("The tool reported an error.");
         }
         expect(
           stream.history.filter((item) => item.type === "message" && item.role === "assistant"),

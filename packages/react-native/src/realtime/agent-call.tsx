@@ -1,5 +1,4 @@
 import { useSession, useSessionEvents, useTurnQueue } from "@opengeni/react/session";
-import { sessionDisplayTitle } from "@opengeni/react/session-list-model";
 import { useRealtimeModelSelection } from "@opengeni/react/session-realtime";
 import { OpenGeniApiError, type EffectiveSessionControl, type OpenGeniClient } from "@opengeni/sdk";
 import {
@@ -15,6 +14,7 @@ import {
 import { Alert, Modal, Pressable, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useNativeTimelineTheme } from "../timeline/theme";
+import { nativeCallTitle } from "./call-title";
 import {
   DEFAULT_OPENGENI_NATIVE_CALL_LABELS,
   OpenGeniNativeCallView,
@@ -320,7 +320,7 @@ function ActiveAgentCall(
     modelUnavailableReason: voice.unavailableReason,
     webrtc: props.webrtc,
   });
-  const title = session.session ? sessionDisplayTitle(session.session) : messages.untitledSession;
+  const title = nativeCallTitle(session.session, messages.untitledSession);
   const call = useNativeRealtimeCall({
     realtime,
     call: props.callAdapter,

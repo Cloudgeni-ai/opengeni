@@ -224,8 +224,13 @@ to use their machine's ambient Git authentication.
 
 ## Operational notes
 
-- Set `OPENGENI_GITHUB_APP_MANIFEST_STATE_SECRET` explicitly for multi-instance
-  deployments; a random per-process secret cannot survive callback routing.
+- Signed setup state (GitHub App setup, Codex sign-in and similar round trips)
+  must verify on every API replica. `OPENGENI_GITHUB_APP_MANIFEST_STATE_SECRET`
+  is used when set; otherwise the key is derived from
+  `OPENGENI_INTEGRATIONS_STATE_SECRET`, `OPENGENI_BETTER_AUTH_SECRET` or
+  `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`, in that order. Only a deployment with
+  none of these uses a per-process key, which works for a single API process
+  only and is logged as a warning at startup.
 - GitHub Enterprise hosts are not supported; provider URLs currently target
   github.com and api.github.com.
 - The generated App does not register webhooks. Live installation and repository

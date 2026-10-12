@@ -1716,6 +1716,54 @@ describe("Workspace file import (real local box)", () => {
     }
   });
 
+  test("creates missing destination folders inside the workspace only", async () => {
+    const { session, root } = await makeBox();
+    const placement = withPlacementPrivateStaging(session);
+    const outside = mkdtempSync(join(tmpdir(), "opengeni-import-outside-"));
+    temporaryRoots.push(outside);
+    symlinkSync(outside, join(root, "linked"));
+    const bytes = Buffer.from("report bytes");
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const server = Bun.serve({ port: 0, fetch: () => new Response(bytes) });
+    const service = new SandboxChannelAService({
+      session: placement.session,
+      workspaceRoot: root,
+    });
+    const source = {
+      url: server.url.toString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    };
+    try {
+      const saved = await service.importWorkspaceFile({
+        operationId: "00000000-0000-4000-8000-000000000086",
+        destinationPath: "reports/2026/report.pdf",
+        overwrite: false,
+        mayReplaceExisting: false,
+        createParents: true,
+        sizeBytes: bytes.byteLength,
+        sha256,
+        source,
+      });
+      expect(saved.destinationPath).toBe("reports/2026/report.pdf");
+      expect(readFileSync(join(root, "reports/2026/report.pdf"))).toEqual(bytes);
+      await expect(
+        service.importWorkspaceFile({
+          operationId: "00000000-0000-4000-8000-000000000087",
+          destinationPath: "linked/new/escape.pdf",
+          overwrite: false,
+          mayReplaceExisting: false,
+          createParents: true,
+          sizeBytes: bytes.byteLength,
+          sha256,
+          source,
+        }),
+      ).rejects.toThrow(/outside workspace/);
+      expect(existsSync(join(outside, "new"))).toBeFalse();
+    } finally {
+      server.stop(true);
+    }
+  });
+
   test("rejects corrupt source bytes without publishing a target", async () => {
     const { session, root } = await makeBox();
     const placement = withPlacementPrivateStaging(session);

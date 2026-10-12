@@ -3,6 +3,11 @@ import type { Permission } from "./permissions";
 
 export type FirstPartyToolAuthorization = {
   sessionRequired?: true;
+  /**
+   * Registered only while the session has admin access (live, per request),
+   * whatever its tool selection; the tool then acts as the person who gave it.
+   */
+  adminAccessRequired?: true;
   allOf?: readonly Permission[];
   anyOf?: readonly Permission[];
 };
@@ -99,6 +104,7 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   sandbox_provision: { sessionRequired: true, allOf: ["sessions:control"] },
   connected_machine_remove: { allOf: ["enrollments:manage"] },
   connected_machine_enroll_token: { allOf: ["enrollments:manage"] },
+  connected_machine_enable_screen_control: { allOf: ["enrollments:manage"] },
   rig_list: { allOf: ["rigs:use"] },
   rig_get: { allOf: ["rigs:use"] },
   rig_propose_change: { allOf: ["rigs:use"] },
@@ -290,6 +296,9 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   project_reorder: { allOf: ["sessions:create"] },
   project_delete: { allOf: ["sessions:create"] },
   session_set_project: { allOf: ["sessions:control"] },
+  admin_actions_search: { sessionRequired: true, adminAccessRequired: true },
+  admin_action_describe: { sessionRequired: true, adminAccessRequired: true },
+  admin_action_call: { sessionRequired: true, adminAccessRequired: true },
 } satisfies Record<FirstPartyMcpToolName, FirstPartyToolAuthorization>;
 
 /**

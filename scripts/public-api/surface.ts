@@ -32,12 +32,16 @@ export const ALLOWLIST_PATH = "scripts/public-api/breaking-changes.json";
 const HTTP_VERBS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"]);
 
 /**
- * Public ingress formats that no SDK method calls (third parties post to them).
- * Provider callbacks whose format the provider owns (Stripe, GitHub, Slack) are
- * not Opengeni's surface and stay out.
+ * Public routes that no SDK method calls: ingress formats third parties post
+ * to, and the OpenAI-compatible single-call routes a stock OpenAI client calls
+ * with base URL `/v1/workspaces/{workspaceId}`. Provider callbacks whose format
+ * the provider owns (Stripe, GitHub, Slack) are not Opengeni's surface and stay
+ * out.
  */
 export const PUBLIC_INGRESS_ROUTES: readonly string[] = [
   "POST /v1/webhooks/automations/:endpointId",
+  "GET /v1/workspaces/:workspaceId/models",
+  "POST /v1/workspaces/:workspaceId/chat/completions",
 ];
 
 /** Documented event contracts, by `@opengeni/contracts` export name. */

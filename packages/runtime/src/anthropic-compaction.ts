@@ -10,13 +10,78 @@ export type AnthropicCompactionOptions = {
   systemInstructions?: string;
   promptCacheKey?: string;
   signal?: AbortSignal;
+  /**
+   * The ordinary request this agent prepared for its next model call (tools,
+   * instructions and settings, without history). Claude caches the prefix in
+   * the order tools → system → messages, and the thinking mode, effort and
+   * tool choice are part of the cache key, so the checkpoint request reuses
+   * all of them unchanged and only appends the checkpoint instruction.
+   */
+  preparedRequest?: Omit<ModelRequest, "input">;
+  /**
+   * Retry after the model called a tool instead of writing the summary. This
+   * changes `tool_choice`, which costs the cached history (tools and
+   * instructions stay cached), so it is never the first attempt.
+   */
+  forbidToolCalls?: boolean;
 };
+
+/**
+ * Appended after the checkpoint prompt when the request keeps the agent's
+ * tools for cache reuse. A separate trailing user message merges into the same
+ * Claude user turn, so the shared Codex checkpoint prompt stays verbatim.
+ */
+export const ANTHROPIC_COMPACTION_TEXT_ONLY_INSTRUCTION =
+  "Respond with the summary as plain text only. Do not call any tools.";
+
+/**
+ * Thinking shares `max_tokens` with the summary. The checkpoint keeps the
+ * agent's effort because it is part of the cache key, so it gets room to reason
+ * beyond the summary budget. `max_tokens` itself is not part of the cache key.
+ */
+export const ANTHROPIC_COMPACTION_THINKING_HEADROOM_TOKENS = 32_000;
 
 /** One request constructor for both fitting and the actual checkpoint call. */
 export function anthropicCompactionRequest(
   input: CompactionItem[],
   options: AnthropicCompactionOptions,
 ): ModelRequest {
+  const prepared = options.preparedRequest;
+  if (prepared) {
+    const { signal: _preparedSignal, ...prefix } = prepared;
+    const keepsTools = prefix.tools.length > 0 || prefix.handoffs.length > 0;
+    const forbid = options.forbidToolCalls === true && keepsTools;
+    const effort = prefix.modelSettings.reasoning?.effort;
+    const thinks = Boolean(effort) && effort !== "none";
+    // `disable_parallel_tool_use` is not valid with `tool_choice: none`.
+    const { parallelToolCalls: _parallel, ...unforcedSettings } = prefix.modelSettings;
+    return {
+      ...prefix,
+      input: (keepsTools
+        ? [
+            ...input,
+            {
+              type: "message",
+              role: "user",
+              content: ANTHROPIC_COMPACTION_TEXT_ONLY_INSTRUCTION,
+            },
+          ]
+        : input) as ModelRequest["input"],
+      modelSettings: {
+        ...(forbid ? unforcedSettings : prefix.modelSettings),
+        maxTokens:
+          options.maxOutputTokens + (thinks ? ANTHROPIC_COMPACTION_THINKING_HEADROOM_TOKENS : 0),
+        ...(forbid ? { toolChoice: "none" as const } : {}),
+        providerData: {
+          ...prefix.modelSettings.providerData,
+          opengeni_compaction_prefix: "prepared",
+        },
+      },
+      outputType: "text",
+      tracing: false,
+      ...(options.signal ? { signal: options.signal } : {}),
+    };
+  }
   return {
     input: input as ModelRequest["input"],
     systemInstructions: options.systemInstructions ?? "",

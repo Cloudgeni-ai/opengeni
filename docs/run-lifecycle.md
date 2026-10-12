@@ -231,7 +231,11 @@ agent runner, as the compaction summarizer does. The main agent does not wait
 for a title tool result or make a title follow-up model call. When the main
 stream reaches normal settlement, the worker waits for the already-running
 bounded sidecar and joins it without cancelling. Exceptional or
-cancelled exits abort and join any still-pending sidecar. A completed candidate
+cancelled exits abort and join any still-pending sidecar, then persist any
+already-completed candidate and checkpoint its separate Codex request custody
+before failure settlement tests same-turn recovery. A discarded result can
+checkpoint only an observed complete response; a still-pending or unknown
+request retains its replay fence. A completed candidate
 then uses the canonical title mutation, which updates the session row and
 appends `session.title_set`. Generation or persistence failure leaves the safe
 pending marker in place, and a human title remains protected from every later
@@ -460,7 +464,7 @@ that delegation, renders a bounded Codex-style XML tail, and submits it through
 the canonical ordinary `Steer` path. The associated
 `session_realtime_context_projections` row is idempotency/audit provenance for
 that durable tail turn; workers perform no hidden next-turn injection. An empty
-tail creates no turn. A later voice call receives both bounded durable session
+tail, or one with no finalized user transcript (assistant-only voice chatter), creates no turn. A later voice call receives both bounded durable session
 history and bounded prior finalized voice turns as inert, role-labeled startup
 context with an explicit silence instruction. Canonical:
 `packages/sdk/src/codex-realtime-v3.ts`,
@@ -1198,6 +1202,16 @@ paused, already quiesced session is excluded until Resume. The critical
 more than 10 minutes past due (overdue > 5 min held for 5 min), so sustained
 429s that always keep some session in backoff do not page. Never alert on the
 backlog count alone.
+The workflow-wake reaper also repairs `quiescence_missing` sessions: when the
+closing activity died before its receipt (or the workflow saw a still-leased
+activity and closed), nothing else revisits the session. A bounded,
+identity-only inventory (`list_quiescence_receipt_wake_repairs_v1`, migration
+0701) finds attempts closed more than two minutes ago with no undelivered
+wake and no wake in the last ten minutes; the scoped repair rechecks them under
+the session locks and registers one ordinary queue wake. It writes no receipt:
+the woken workflow still proves through Temporal that the exact activity is
+gone and rechecks both writer gates before `reconcileSessionAttemptQuiescence`
+commits. A paused session then parks idle for Resume as usual.
 The initial session status and replay cursor come from one SQL statement
 snapshot, so a concurrent revival cannot pair an old failed status with a cursor
 that skips the revival event. Diagnostic text is decoded through the lossless
@@ -1432,7 +1446,9 @@ durable history; it is never requeued or terminalized. Newly arriving machine
 updates remain pending. Without a newer actionable work wake, the workflow
 cannot synthesize another goal continuation from unchanged history. A later
 human/API prompt, Steer, explicitly requested Compact, or genuinely new machine
-input may create newer truth and make one new attempt.
+input may create newer truth and make one new attempt; machine input is new
+when its pending event follows the failure's `turn.failed` event (see
+[`context-compaction.md`](context-compaction.md)).
 
 Resolved model context metadata is authoritative on every model-facing path.
 For the Codex subscription catalog this means a 272,000-token raw window, a
@@ -2173,7 +2189,12 @@ cursors; a truncated or merged presentation banner is not a collection receipt.
 The SDK-native collection scope starts before dispatch and tees the original
 process streams without replacing its child, handle, or ordinary shell behavior.
 Shared terminal reads and custody retries preserve the trusted page until
-capture and settlement succeed. A status query may prove physical quiescence
+capture and settlement succeed. An immediate Modal exit without retained-process
+persistence keeps its trusted page inside the synchronous collection scope,
+including nested routing snapshots. That session-bound transient receipt is
+cleared on return or rejection; running and durably retained pages keep their
+existing capture/acknowledgment lifetime. No completed-command timer or global
+output cache is introduced. A status query may prove physical quiescence
 after stream loss, but must not turn incomplete output into filesystem success.
 
 Daytona filesystem collection uses a runtime-owned binding to the registered
@@ -3131,6 +3152,67 @@ the exact provider before settling those commands lost and atomically queuing
 an owner workflow wake. Admission and the quiescence receipt stay fenced until
 physical settlement and exact reconciliation; missing output or an elapsed
 observation window is never substituted for termination proof.
+
+**Idle browsers and desktops.** A BrowserSession or ComputerSession holds its
+box through a non-expiring interaction holder, so before migration 0705 an
+open browser or desktop that nobody used kept its Modal box warm until the
+provider deadline. They now follow the general idle grace
+(`OPENGENI_SANDBOX_IDLE_GRACE_MS`, default 15 minutes, never under one minute);
+there is no separate window.
+
+Activity is deliberate and durable: the newest of the interaction holder's
+`last_heartbeat_at` and the resource's `last_used_at` and
+`controller_heartbeat_at`. Every controller request moves all three: an agent
+tool call, a person's input, and the live view's 2 s poll and 30 s heartbeat.
+The live view polls and heartbeats only while its page is visible, so a hidden
+tab or a closed view stops counting within seconds, and a view that stopped
+heartbeating never keeps the box. An in-flight lifecycle operation (create,
+suspend, resume, end) counts as use. A pending intervention waiting for a
+person does not: a wait is not use, as for commands below. Known limit: a
+visible tab left open on an unattended screen keeps polling and keeps the box
+warm, as a visible terminal tab does.
+
+The reaper lists warm Modal leases held only by interaction and process
+holders, with no requested rotation, capture, enrolled containment or reaper
+hold, whose interaction resources and holder set have all been unused for the
+grace (`list_idle_interaction_leases`, migration 0705). Exact release
+(`releaseIdleInteractionHolders`) re-checks under the workspace control fence
+and the lease -> holder -> operation -> resource row locks, which controller
+requests also take before touching their resource, and applies the general
+idle rule to the whole sandbox group (no open turn, attempt, quiescence or
+recent turn finish; a wait is not use). It is all or nothing per box: one
+browser or desktop in use keeps all of them.
+
+- A checkpoint-capable browser (private checkpoint) is saved through the
+  system browser checkpoint that the provider deadline uses, with an `idle`
+  reason: the release prepares its `suspend` operation (actor
+  `system:sandbox-idle`, operation id derived from `browser-idle.v1`, lease
+  epoch, instance and controller generation), and the browser checkpoint sweep
+  captures the encrypted profile, commits the suspension, removes the local
+  profile and releases the holder in one transaction. The orphan sweep keeps
+  the holder of that exact saved generation until cleanup; if the box goes
+  away first, the reaper clears only the stale controller binding
+  (`list_orphaned_idle_browser_checkpoints`) so the saved profile resumes. Only
+  a tenant-scoped caller may prepare an idle save. A save that fails
+  returns the browser to `active`; the next idle decision releases it without
+  a second attempt.
+- Desktops, ephemeral browsers, browsers that cannot be saved, and every
+  browser when the worker cannot save profiles (no object storage, delegation
+  secret or environments key) become `lost` with failure code `idle_released`
+  and their holders are deleted. The UI says the browser or desktop stopped
+  after it went unused.
+
+When the last holder leaves, the lease drains immediately (the grace already
+elapsed): the ordinary drain saves `/workspace` and stops the box, and the next
+turn or viewer restores it (about 5 s at p50 on staging). A box left with only
+legacy retained commands goes to idle command containment. A saved browser
+resumes on demand, from the person or the agent; when the desktop it was shown
+in has stopped, resume clears the link (`linked_computer_session_id`) and
+restores it as an ordinary browser. `opengeni_sandbox_idle_interaction_release_total{outcome}`
+counts inspections (`checkpointing` when browser saves were prepared,
+`released` when holders were released without a save, `not_eligible`,
+`inspection_failed`). A person returning exactly as the box is being released
+may see the browser `suspending`, then resume it.
 
 **Idle command containment.** A legacy retained command keeps its Modal box
 warm through a non-expiring process holder, so the zero-holder idle drain never
@@ -4349,6 +4431,12 @@ transactionally exactly-once; a replica-safe Postgres-backed metrics projector
 would be a separate observability architecture.
 
 Provider request lifecycle diagnostics are synchronous, bounded, and best-effort. Codex reports `headers`, `first_byte`, and one semantic `terminal` phase; SuperGrok reports the equivalent `headers`, first valid SSE event, and terminal phases plus valid-event count/gap telemetry. Terminal outcomes are `completed`, `failed`, or `timed_out`. The worker maps these to `opengeni_model_request_phases_total{provider,phase,outcome}` and `opengeni_model_request_phase_duration_seconds{provider,phase}`. SuperGrok additionally exposes `opengeni_model_requests_inflight`, `opengeni_model_request_oldest_no_event_age_seconds`, `opengeni_model_request_stream_events_total`, and `opengeni_model_request_stream_event_gap_seconds`, all with provider-only labels. Provider ids come from the resolved provider registry; request ids, model bodies, credentials, session ids, and token content are not metric labels.
+
+When Codex request custody is unknown, the terminal `turn.failed` event retains
+the underlying failure in `detail` when available. The governing code remains
+`subscription_core_request_outcome_unknown` with `retryable: false`; diagnostic
+text never grants replay authority. The detail belongs only in the
+permission-controlled session event, not logs or telemetry.
 
 To locate one worker execution, derive
 `turnExecutionTelemetryKey(workspaceId, sessionId, attemptId)` from

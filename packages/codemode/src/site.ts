@@ -136,9 +136,9 @@ export function createCodemodeSiteRequestHandler(
         }
         const operationId = body.operationId ?? randomUUID();
         const entry = catalog.entries.find(
-          (entry) =>
-            entry.identity.serverId === body.identity.serverId &&
-            entry.identity.toolName === body.identity.toolName,
+          (candidate) =>
+            candidate.identity.serverId === body.identity.serverId &&
+            candidate.identity.toolName === body.identity.toolName,
         );
         if (!entry) return siteError(404, "tool_unavailable", "Tool unavailable");
         const result = await active.call(body.identity, body.arguments, {

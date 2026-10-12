@@ -26,7 +26,8 @@ export function connectedMachineComputerAccessError(
   if (requiresControl && !state.allowScreenControl) {
     return {
       status: 403,
-      message: "Screen control is not enabled for this Connected Machine.",
+      message:
+        "Screen control is not enabled for this Connected Machine. Turn it on in place with connected_machine_enable_screen_control (no reconnect or human click needed), then retry.",
     };
   }
   return null;

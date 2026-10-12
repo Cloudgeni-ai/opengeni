@@ -2836,6 +2836,9 @@
 :where(.og-root).rounded-\[2px\],:where(.og-root) .rounded-\[2px\] {
     border-radius: 2px;
   }
+:where(.og-root).rounded-\[3px\],:where(.og-root) .rounded-\[3px\] {
+    border-radius: 3px;
+  }
 :where(.og-root).rounded-\[5px\],:where(.og-root) .rounded-\[5px\] {
     border-radius: 5px;
   }

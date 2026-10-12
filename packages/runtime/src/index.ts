@@ -15,6 +15,20 @@ export {
   compactionPrefixCuts,
 } from "./anthropic-compaction";
 export { AnthropicProviderRejection } from "./anthropic-messages";
+import { runSingleModelCall, type SingleModelCallTarget } from "./single-model-call";
+export {
+  runSingleModelCall,
+  SingleModelCallProviderError,
+  SingleModelCallUnsupportedError,
+  type SingleModelCallContentPart,
+  type SingleModelCallFinishReason,
+  type SingleModelCallMessage,
+  type SingleModelCallOptions,
+  type SingleModelCallOutputFormat,
+  type SingleModelCallRequest,
+  type SingleModelCallResult,
+  type SingleModelCallTarget,
+} from "./single-model-call";
 import { instrumentedModelFetch } from "./model-provider-client";
 import type { ModelProviderApi, ResolvedModelProvider, Settings } from "@opengeni/config";
 import { isRunMcpCredentialError, RunMcpCredentials } from "./mcp-run-credentials";
@@ -139,6 +153,8 @@ import {
   type ToolGatewayCatalog,
   type ToolGatewayCatalogEntry,
   type ToolDisplayMetadata,
+  type McpAccountRouteLabel,
+  mcpAccountRouteReviewLabel,
   type ToolRef,
   type VideoGenerationCapabilities,
   type VideoGenerationToolResult,
@@ -671,6 +687,7 @@ export {
   OPENGENI_INNER_MCP_CUSTOM_DATA_KEY,
   OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY,
   mcpResultFromCustomData,
+  mcpResultModelContent,
   releaseMcpResultCustomDataFromSdkEvent,
 } from "./mcp-result-custom-data";
 export type {
@@ -1109,114 +1126,31 @@ export async function generateSessionTitle(
   }
 
   const modelName = options.modelName ?? settings.openaiModel;
-  // The SDK Model.getResponse() is runner-facing and throws outside an agent
-  // trace, so every provider route sends one direct request. Only a runtime
-  // model override (tests) has no provider client and keeps getResponse().
+  // Only a runtime model override (tests) has no provider client.
   const binding =
     options.client && options.provider
       ? { client: options.client, provider: options.provider, modelId: modelName }
       : options.model
         ? null
         : new MultiProviderModelProvider(settings).resolveBinding(modelName);
-  if (binding?.provider.api === "chat") {
-    return await generateChatSessionTitle(binding.client, binding.modelId, boundedPrompt, options);
-  }
-  const wireProvider = binding?.provider ?? options.provider;
-  const azureWire = wireProvider
-    ? wireProvider.wireProfile === "azure-openai"
-    : settings.openaiProvider === "azure";
-  const request: ModelRequest = {
-    systemInstructions: SESSION_TITLE_GENERATION_INSTRUCTIONS,
-    input: boundedPrompt,
-    modelSettings: {
-      maxTokens: SESSION_TITLE_GENERATION_MAX_OUTPUT_TOKENS,
-      ...(options.reasoningEffort ? { reasoning: { effort: options.reasoningEffort } } : {}),
-      text: { verbosity: "low" },
-      ...(azureWire ? {} : { store: false }),
-      ...(options.serviceTier ? { providerData: { service_tier: options.serviceTier } } : {}),
-    },
-    tools: [],
-    toolsExplicitlyProvided: true,
-    outputType: "text",
-    handoffs: [],
-    tracing: false,
+  const target: SingleModelCallTarget = binding
+    ? { client: binding.client, provider: binding.provider, modelId: binding.modelId }
+    : { model: options.model! };
+  const result = await runSingleModelCall(target, {
+    messages: [
+      { role: "system", content: SESSION_TITLE_GENERATION_INSTRUCTIONS },
+      { role: "user", content: boundedPrompt },
+    ],
+    maxOutputTokens: SESSION_TITLE_GENERATION_MAX_OUTPUT_TOKENS,
+    ...(options.reasoningEffort ? { reasoningEffort: options.reasoningEffort } : {}),
+    verbosity: "low",
+    ...(options.serviceTier ? { serviceTier: options.serviceTier } : {}),
     ...(options.signal ? { signal: options.signal } : {}),
-  };
-
-  const response =
-    binding?.provider.api === "anthropic-messages"
-      ? await new AnthropicMessagesModel(
-          binding.provider,
-          binding.modelId,
-          instrumentedModelFetch(binding.provider.id, globalThis.fetch),
-        ).getResponse(request)
-      : binding
-        ? await new CompactionResponsesModel(
-            binding.client,
-            binding.modelId,
-            binding.provider,
-          ).fetchResponse(request)
-        : await options.model!.getResponse(request);
+  });
   return {
-    title: normalizeGeneratedSessionTitle(
-      extractResponseOutputText(response),
-      responseStoppedAtOutputLimit(response),
-    ),
-    usage: modelResponseUsageFromResponse(response),
+    title: normalizeGeneratedSessionTitle(result.text, result.finishReason === "length"),
+    usage: result.usage,
   };
-}
-
-/**
- * Chat-completions providers (such as OpenRouter connections) use one direct,
- * trace-free request. The SDK chat model's getResponse() is runner-facing and
- * opens a tracing span, which throws outside an agent run. The worker sends no
- * title request on the managed OpenRouter free route.
- */
-async function generateChatSessionTitle(
-  client: OpenAI,
-  modelName: string,
-  prompt: string,
-  options: GenerateSessionTitleOptions,
-): Promise<GeneratedSessionTitle> {
-  const completion = await client.chat.completions.create(
-    {
-      model: modelName,
-      max_tokens: SESSION_TITLE_GENERATION_MAX_OUTPUT_TOKENS,
-      messages: [
-        { role: "system", content: SESSION_TITLE_GENERATION_INSTRUCTIONS },
-        { role: "user", content: prompt },
-      ],
-      ...(options.reasoningEffort ? { reasoning_effort: options.reasoningEffort } : {}),
-      ...(options.serviceTier ? { service_tier: options.serviceTier } : {}),
-    } as any,
-    options.signal ? { signal: options.signal } : undefined,
-  );
-  const choice = (
-    completion as {
-      choices?: Array<{ finish_reason?: unknown; message?: { content?: unknown } }>;
-    }
-  ).choices?.[0];
-  const content = choice?.message?.content;
-  return {
-    title: normalizeGeneratedSessionTitle(
-      typeof content === "string" ? content : "",
-      choice?.finish_reason === "length",
-    ),
-    usage: modelResponseUsageFromResponse(completion),
-  };
-}
-
-/**
- * Whether a non-streamed Responses reply stopped at the output limit. The
- * streamed subscription transports reject an incomplete terminal before any
- * response exists, so that title attempt fails and a later turn retries.
- */
-function responseStoppedAtOutputLimit(response: unknown): boolean {
-  if (!response || typeof response !== "object") return false;
-  return (
-    (response as { status?: unknown }).status === "incomplete" ||
-    (response as ModelResponse).providerData?.anthropic?.stopReason === "max_tokens"
-  );
 }
 
 const INLINE_REASONING_CLOSE_TAG = /<\/(?:think|thinking|reasoning)>/giu;
@@ -1391,31 +1325,49 @@ export async function summarizeForCompaction(
         tracing: false,
         ...(options.signal ? { signal: options.signal } : {}),
       };
+  const dispatch = async (send: () => Promise<unknown>): Promise<unknown> => {
+    let result: unknown;
+    try {
+      result = await send();
+    } catch (error) {
+      throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(error), error);
+    }
+    const usage = modelResponseUsageFromResponse(result);
+    if (usage) {
+      await options.onUsage?.(usage);
+    }
+    return result;
+  };
   let response: unknown;
-  try {
-    response =
-      provider.api === "anthropic-messages"
-        ? await new AnthropicMessagesModel(
-            provider,
-            model,
-            instrumentedModelFetch(provider.id, globalThis.fetch),
-          ).getResponse(
-            anthropicCompactionRequest(input, {
-              maxOutputTokens: maxTokens,
-              ...(options.systemInstructions
-                ? { systemInstructions: options.systemInstructions }
-                : {}),
-              ...(options.promptCacheKey ? { promptCacheKey: options.promptCacheKey } : {}),
-              ...(options.signal ? { signal: options.signal } : {}),
-            }),
-          )
-        : await new CompactionResponsesModel(client, model, provider).fetchResponse(request);
-  } catch (error) {
-    throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(error), error);
+  if (provider.api === "anthropic-messages") {
+    const claude = new AnthropicMessagesModel(
+      provider,
+      model,
+      instrumentedModelFetch(provider.id, globalThis.fetch),
+    );
+    const claudeRequest = (forbidToolCalls: boolean) =>
+      anthropicCompactionRequest(input, {
+        maxOutputTokens: maxTokens,
+        ...(options.systemInstructions ? { systemInstructions: options.systemInstructions } : {}),
+        ...(options.promptCacheKey ? { promptCacheKey: options.promptCacheKey } : {}),
+        ...(options.signal ? { signal: options.signal } : {}),
+        ...(options.preparedRequest ? { preparedRequest: options.preparedRequest } : {}),
+        ...(forbidToolCalls ? { forbidToolCalls } : {}),
+      });
+    response = await dispatch(() => claude.getResponse(claudeRequest(false)));
+    // The cache-preserving request keeps the agent's tools. If the model calls
+    // one instead of summarizing, ask once more with tool selection disabled;
+    // partial text beside a tool call is never accepted as the summary.
+    if (options.preparedRequest && compactionResponseCalledTool(response)) {
+      response = await dispatch(() => claude.getResponse(claudeRequest(true)));
+    }
+  } else {
+    response = await dispatch(() =>
+      new CompactionResponsesModel(client, model, provider).fetchResponse(request),
+    );
   }
-  const usage = modelResponseUsageFromResponse(response);
-  if (usage) {
-    await options.onUsage?.(usage);
+  if (compactionResponseCalledTool(response)) {
+    throw new EmptyCompactionSummaryError({ stage: "checkpoint_response", reason: "tool_call" });
   }
   if (
     (response as ModelResponse)?.providerData?.anthropic?.stopReason === "max_tokens" ||
@@ -1683,6 +1635,24 @@ function isFailedCompactionProviderResponse(response: unknown): boolean {
     record.status === "failed" ||
     record.status === "incomplete" ||
     (record.error !== null && record.error !== undefined)
+  );
+}
+
+/** A checkpoint reply that selected a function tool is not a summary. */
+function compactionResponseCalledTool(response: unknown): boolean {
+  if (!response || typeof response !== "object") return false;
+  const output = (response as { output?: unknown }).output;
+  // A provider-run search (Claude keeps its web search tool for the cached
+  // prefix) is a tool call too: the summary must come from a tool-free reply.
+  return (
+    Array.isArray(output) &&
+    output.some(
+      (item) =>
+        Boolean(item) &&
+        typeof item === "object" &&
+        ((item as { type?: unknown }).type === "function_call" ||
+          (item as { type?: unknown }).type === "hosted_tool_call"),
+    )
   );
 }
 
@@ -3483,15 +3453,19 @@ function installMcpApprovalPolicy(
         continue;
       for (const descriptor of await server.listTools()) {
         if (identities.has(descriptor.name)) throw new Error("MCP model tool identity collision");
+        const display = server.toolDisplayMetadata(descriptor.name);
+        const accountLabel = display?.connector
+          ? display.accountLabel
+            ? `${display.connector} · ${display.accountLabel}`
+            : display.connector
+          : display?.accountLabel;
         identities.set(descriptor.name, {
           serverId: server.registryId,
           toolName: await server.unprefixedToolName(descriptor.name),
           inputSchema: descriptor.inputSchema,
           readReview: (name, args) => server.reviewContext(name, args),
           ...(descriptor.title ? { title: descriptor.title } : {}),
-          ...(server.toolDisplayMetadata(descriptor.name)?.accountLabel
-            ? { accountLabel: server.toolDisplayMetadata(descriptor.name)!.accountLabel }
-            : {}),
+          ...(accountLabel ? { accountLabel } : {}),
         });
       }
     }
@@ -4377,7 +4351,7 @@ export type PrepareToolsOptions = {
    */
   inputWaitReplyGuard?: () => Promise<string | null>;
   /** Frozen, explicitly selected account labels keyed by execution route, not provider. */
-  mcpAccountLabels?: ReadonlyMap<string, string>;
+  mcpAccountLabels?: ReadonlyMap<string, McpAccountRouteLabel>;
   /** Opt-in exact-attempt persistence; absence preserves ordinary MCP execution. */
   mcpOperationPersistence?: McpOperationPersistence;
   /** Live exact-owner control refresh; API remains read/observation authority. */
@@ -4896,7 +4870,7 @@ export async function prepareAgentTools(
             optional,
             eager: tool.eager === true,
             joinsFirstRequestBarrier: tool.eager === true,
-            timeoutMs: config.timeoutMs,
+            timeoutMs: mcpSetupTimeoutMs(config),
           };
         }
         const url =
@@ -5059,12 +5033,8 @@ export async function prepareAgentTools(
             // also captures each tool's original connector namespace (P4 Part B.1).
             fetch: fetchImpl,
             ...(await mcpServerRequestInit(settings, config)),
-            ...(config.timeoutMs
-              ? {
-                  timeout: config.timeoutMs,
-                  clientSessionTimeoutSeconds: Math.ceil(config.timeoutMs / 1000),
-                }
-              : {}),
+            ...(config.timeoutMs ? { timeout: config.timeoutMs } : {}),
+            ...mcpSessionTimeoutOptions(config),
           });
         if (bridge) options.runMcpCredentials?.excludeLocalTarget(config.id);
         const server = configureMcpOperationRecovery(
@@ -5106,7 +5076,7 @@ export async function prepareAgentTools(
             (firstParty &&
               config.id === HARNESS_CONTROL_MCP_SERVER_ID &&
               harnessControlToolsPossible),
-          timeoutMs: config.timeoutMs,
+          timeoutMs: mcpSetupTimeoutMs(config),
         };
       }),
   );
@@ -5615,7 +5585,7 @@ function installAttemptConnectorActionGatewayLifecycle(
   resolvedMcpConnectionIds: ReadonlyMap<string, string>,
   bindings: readonly AttemptConnectorActionBinding[],
   connectorActionPolicy?: ConnectorActionPolicyHooks,
-  accountLabels?: ReadonlyMap<string, string>,
+  accountLabels?: ReadonlyMap<string, McpAccountRouteLabel>,
   reviewReaders?: ReadonlyMap<string, ToolReviewReader>,
 ): AttemptToolDefinition[] {
   const byModelName = new Map<string, AttemptConnectorActionBinding>();
@@ -5698,7 +5668,11 @@ function installAttemptConnectorActionGatewayLifecycle(
                 : "generic",
             ...(definition.title ? { title: definition.title } : {}),
             ...(accountLabels?.get(definition.identity.serverId)
-              ? { accountLabel: accountLabels.get(definition.identity.serverId)! }
+              ? {
+                  accountLabel: mcpAccountRouteReviewLabel(
+                    accountLabels.get(definition.identity.serverId)!,
+                  ),
+                }
               : {}),
           }),
         }),
@@ -7564,6 +7538,26 @@ function isFirstPartyMcpServer(
   return firstPartyMcpUrls(settings).some((candidate) => candidate === url);
 }
 
+/**
+ * The bound for one server's setup requests (initialize, tools/list): the
+ * longer of its call timeout and its setup timeout. Undefined keeps the
+ * client default.
+ */
+function mcpSetupTimeoutMs(config: Settings["mcpServers"][number]): number | undefined {
+  const timeoutMs = Math.max(config.timeoutMs ?? 0, config.setupTimeoutMs ?? 0);
+  return timeoutMs > 0 ? timeoutMs : undefined;
+}
+
+/** Session-request options for the streamable HTTP client; tool calls keep `timeout`. */
+export function mcpSessionTimeoutOptions(config: Settings["mcpServers"][number]): {
+  clientSessionTimeoutSeconds?: number;
+} {
+  const timeoutMs = mcpSetupTimeoutMs(config);
+  return timeoutMs === undefined
+    ? {}
+    : { clientSessionTimeoutSeconds: Math.ceil(timeoutMs / 1000) };
+}
+
 function firstPartyMcpServerUrlForRun(
   settings: Settings,
   config: Settings["mcpServers"][number],
@@ -8019,7 +8013,7 @@ export class PrefixedMcpServer implements MCPServer {
     private readonly approvalAuthority?: unknown,
     private readonly inputWaitYield?: InputWaitYield,
     private readonly refreshOwnedCommand?: (commandId: string) => Promise<boolean>,
-    private readonly accountLabel?: string,
+    private readonly accountLabel?: McpAccountRouteLabel,
     private readonly runMcpCredentials?: RunMcpCredentials,
     private readonly effectAuthority?: LocalMcpServerRegistration["effectAuthority"],
     /**
@@ -8223,7 +8217,13 @@ export class PrefixedMcpServer implements MCPServer {
           const display: ToolDisplayMetadata = {
             toolName: tool.name,
             ...(tool.title ? { title: tool.title } : {}),
-            ...(this.accountLabel ? { accountLabel: this.accountLabel } : {}),
+            ...(this.accountLabel
+              ? {
+                  connector: this.accountLabel.connector,
+                  providerDomain: this.accountLabel.providerDomain,
+                  ...(this.accountLabel.account ? { accountLabel: this.accountLabel.account } : {}),
+                }
+              : {}),
           };
           this.displayMetadata.set(name, display);
           this.displayMetadata.set(legacyMcpToolDigest(this.registryId, tool.name), display);
@@ -8233,7 +8233,7 @@ export class PrefixedMcpServer implements MCPServer {
             ...(this.accountLabel
               ? {
                   description:
-                    `Account: ${this.accountLabel}. Use only this account; if the intended account for a write is unclear, ask before calling.\n${tool.description ?? ""}`.trimEnd(),
+                    `Account: ${this.accountLabel.model}. Use only this account; if the intended account for a write is unclear, ask before calling.\n${tool.description ?? ""}`.trimEnd(),
                 }
               : {}),
           };
@@ -12044,24 +12044,73 @@ const cloneRepositoryFunctionLines: readonly string[] = [
   // for those the plain non-empty check stands (no stronger signal available).
   '    if [ -n "$subpath" ] || repository_git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then',
   '      if [ -z "$expected_commit" ] || { [ -z "$subpath" ] && [ "$(repository_git -C "$target" rev-parse HEAD 2>/dev/null || true)" = "$expected_commit" ]; }; then',
-  '        echo "Repository resource already present at $target"',
-  "        return 0",
+  // An empty remote materializes as an unborn branch (below). If the remote now
+  // has that branch and the mount still holds nothing but `.git` (no agent work,
+  // committed or not), clone it properly instead of keeping the stub. Commits
+  // on any other branch keep the stub: re-fetching the requested ref would fail.
+  '        if [ -z "$subpath" ] && ! repository_git -C "$target" rev-parse --verify --quiet HEAD >/dev/null 2>&1 && [ -z "$(find "$target" -mindepth 1 -maxdepth 1 ! -name .git -print -quit 2>/dev/null)" ] && unborn_ref="$(repository_git -C "$target" symbolic-ref --quiet HEAD 2>/dev/null)" && present_refs="$(repository_git -C "$target" ls-remote origin "$unborn_ref" 2>/dev/null)" && [ -n "$present_refs" ]; then',
+  '          echo "Repository resource remote for $target now has commits; rematerializing" >&2',
+  "        else",
+  '          echo "Repository resource already present at $target"',
+  "          return 0",
+  "        fi",
+  "      else",
+  '        echo "Repository resource at $target does not match expected commit; rematerializing" >&2',
   "      fi",
-  '      echo "Repository resource at $target does not match expected commit; rematerializing" >&2',
+  "    else",
+  '      echo "Re-materializing partial repository resource at $target" >&2',
   "    fi",
-  '    echo "Re-materializing partial repository resource at $target" >&2',
   '    find "$target" -mindepth 1 -maxdepth 1 -exec rm -rf {} +',
   "  fi",
   '  mkdir -p "$(dirname "$target")"',
   '  tmp="${target}.tmp.$$"',
   '  rm -rf "$tmp"',
+  "  fetch_output=''",
+  "  remote_refs=''",
+  "  remote_empty=0",
+  "  repository_empty=0",
   // Fetch failures must not leak the pid-suffixed tmp clone beside the mount
-  // (set -eu would exit before any cleanup).
-  '  if ! { repository_git init "$tmp" >/dev/null && repository_git -C "$tmp" remote add origin "$uri" && repository_git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref"; }; then',
-  '    rm -rf "$tmp"',
-  '    echo "Repository resource fetch failed for $target" >&2',
-  '    echo "Check repository access and the requested ref. Use a full commit SHA or an existing branch, tag, or PR ref; an abbreviated commit SHA is not a fetchable remote ref." >&2',
-  "    exit 1",
+  // (set -eu would exit before any cleanup). Fetch diagnostics are held back so
+  // an empty remote (below) does not print a misleading "couldn't find remote
+  // ref"; every other outcome replays them unchanged.
+  '  if ! { repository_git -c init.defaultBranch=main init "$tmp" >/dev/null && repository_git -C "$tmp" remote add origin "$uri" && fetch_output="$(repository_git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref" 2>&1)"; }; then',
+  // A freshly created repository has no refs at all, so no ref can be fetched.
+  // `ls-remote` succeeding with no output (it fails on auth or access errors)
+  // proves that. Attaching such a repository is valid: leave an initialized
+  // repository with origin configured on the requested branch, unborn, so the
+  // agent can commit and `git push origin <branch>`. A pinned commit, a subpath,
+  // or a non-branch ref cannot exist on an empty remote and stays fatal.
+  '    if [ -d "$tmp/.git" ] && remote_refs="$(repository_git -C "$tmp" ls-remote origin 2>/dev/null)" && [ -z "$remote_refs" ]; then',
+  "      remote_empty=1",
+  '      empty_branch="${ref#refs/heads/}"',
+  '      if [ "$empty_branch" = HEAD ]; then empty_branch=main; fi',
+  '      case "$empty_branch" in',
+  "        refs/*|pull/*/head|pull/*/merge) empty_branch='' ;;",
+  "        *[!0-9a-f]*) ;;",
+  // All-hex refs of commit-SHA length (abbreviated or full) are commits, which
+  // an empty remote cannot have.
+  '        *) if [ "${#empty_branch}" -ge 7 ] && [ "${#empty_branch}" -le 64 ]; then empty_branch=\'\'; fi ;;',
+  "      esac",
+  // Track origin like `git clone` of an empty repository does, so a plain
+  // `git push` works after the first commit.
+  '      if [ -z "$expected_commit" ] && [ -z "$subpath" ] && [ -n "$empty_branch" ] && command git check-ref-format "refs/heads/$empty_branch" >/dev/null 2>&1 && repository_git -C "$tmp" symbolic-ref HEAD "refs/heads/$empty_branch" && repository_git -C "$tmp" config "branch.$empty_branch.remote" origin && repository_git -C "$tmp" config "branch.$empty_branch.merge" "refs/heads/$empty_branch"; then',
+  "        repository_empty=1",
+  '        echo "Repository resource remote is empty; $target starts on unborn branch $empty_branch"',
+  "      fi",
+  "    fi",
+  '    if [ "$repository_empty" -eq 0 ]; then',
+  '      if [ -n "$fetch_output" ]; then printf \'%s\\n\' "$fetch_output" >&2; fi',
+  '      rm -rf "$tmp"',
+  '      echo "Repository resource fetch failed for $target" >&2',
+  '      if [ "$remote_empty" -eq 1 ]; then',
+  '        echo "The remote repository is empty; attach it by branch name, without a pinned commit or subpath, until it has commits." >&2',
+  "      else",
+  '        echo "Check repository access and the requested ref. Use a full commit SHA or an existing branch, tag, or PR ref; an abbreviated commit SHA is not a fetchable remote ref." >&2',
+  "      fi",
+  "      exit 1",
+  "    fi",
+  '  elif [ -n "$fetch_output" ]; then',
+  "    printf '%s\\n' \"$fetch_output\" >&2",
   "  fi",
   // origin/HEAD is best-effort: workspace capture diffs the branch against it
   // when present and already treats a missing origin/HEAD as additive. `git
@@ -12071,7 +12120,7 @@ const cloneRepositoryFunctionLines: readonly string[] = [
   '  if repository_git -C "$tmp" rev-parse --verify --quiet "refs/remotes/origin/$ref" >/dev/null; then',
   '    repository_git -C "$tmp" remote set-head origin "$ref" >/dev/null || true',
   "  fi",
-  '  if ! repository_git -C "$tmp" checkout --detach FETCH_HEAD >/dev/null; then',
+  '  if [ "$repository_empty" -eq 0 ] && ! repository_git -C "$tmp" checkout --detach FETCH_HEAD >/dev/null; then',
   '    rm -rf "$tmp"',
   '    echo "Repository resource fetch failed for $target" >&2',
   "    exit 1",

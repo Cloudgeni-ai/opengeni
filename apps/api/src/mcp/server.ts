@@ -14,6 +14,7 @@ import {
 import { createHash, randomUUID } from "node:crypto";
 import { assertGoalResumeAllowed } from "@opengeni/core";
 import { mintEnrollToken } from "../sandbox/enrollment";
+import { enableMachineScreenControl, enrollmentAccess } from "../sandbox/screen-control";
 import { registerNotificationTools } from "./notification-tools";
 import { capabilityAccountReadiness } from "./capability-account-readiness";
 import {
@@ -120,6 +121,8 @@ import {
   listSessionEventPage,
   listOutstandingSessionSystemUpdates,
   listSessionDiscoverySummaries,
+  getSandbox,
+  authorizePersonalMachineForAttempt,
   listEnrollments,
   projectEffectiveControlForRelatedAccess,
   projectSessionForRelatedAccess,
@@ -134,7 +137,7 @@ import {
   readVariableSetSecretAtomically,
   recordSyncedSocialPosts,
   listVariableSets,
-  requireScheduledTask,
+  getScheduledTaskIncludingDeleted,
   requireSession,
   type MemoryAgentScope,
   serializeEffectiveSessionControl,
@@ -199,7 +202,9 @@ import {
   hasPermission,
   authorizedSocialConnectionsForGrant,
   buildCapabilityCatalog,
+  CONNECTED_MACHINE_CAPABILITY_ID,
   nativeConnectionCapabilityRecommendations,
+  OPENGENI_BROWSER_EXTENSION_URL,
   requireLiveAgentAttemptAuthorization,
   requireSessionAuthorization,
   requireSessionAuthorizationListScope,
@@ -257,6 +262,12 @@ import {
   manualScheduledTaskTriggerUsageKey,
   manualScheduledTaskTriggerWorkflowId,
   scheduledTaskForGrant,
+  pauseScheduledTaskAsAdmin,
+  pausePrivateScheduledTaskAsAdmin,
+  requirePausableScheduledTask,
+  requireVisibleScheduledTask,
+  scheduledTaskAccess,
+  scheduledTaskViewerForGrant,
   scheduledTaskRunForGrant,
   scheduledTaskToolsProvided,
   scheduledTaskTriggerToken,
@@ -315,6 +326,11 @@ import {
 } from "./session-view";
 import { completeChildReadSequences } from "./child-read-evidence";
 import {
+  sessionEventAuditSelectorMessage,
+  addUnknownSessionEventTypeIssues,
+  unknownSessionEventTypeMessage,
+} from "./session-event-errors";
+import {
   acknowledgeConsumedChildEvents,
   listOutstandingSessionSystemUpdatesForAttempt,
   recordConsumedChildAnswers,
@@ -363,6 +379,10 @@ import { deleteScheduledTaskWithDurableCleanup } from "../scheduled-task-deletio
 import { observeWorkDiscovery, summarizeWorkDiscoveryRows } from "../work-discovery-observability";
 import { orchestrationFailureDiagnostic } from "./orchestration-failure-diagnostic";
 import { loadCodexSessionPointerProjection } from "../codex-session-pointers";
+import {
+  registerSessionAdminAccessTools,
+  type SessionAdminAccessDispatch,
+} from "./session-admin-access-tools";
 
 export type McpServerOptions = {
   // Origin of the HTTP request that reached the MCP route. Browser-oriented
@@ -377,6 +397,13 @@ export type McpServerOptions = {
    * save into that private layer. Omitted/null keeps the workspace layer.
    */
   sessionMemory?: MemoryAgentScope | null | undefined;
+  /**
+   * Set by the route only when the bound session has admin access right now
+   * (allowed by the organization, given by an owner or admin who still is
+   * one). It adds the admin tools whatever the session's tool selection;
+   * each call checks the access again.
+   */
+  sessionAdminAccess?: SessionAdminAccessDispatch | null | undefined;
 };
 
 const ORCHESTRATION_FAILURE_CODE_MAX_LENGTH = 128;
@@ -785,6 +812,7 @@ class PolicyMcpServer extends McpServer {
     private readonly grant: AccessGrant,
     private readonly sessionId: string | null,
     private readonly selectedTools: ReadonlySet<FirstPartyMcpToolName> | null,
+    private readonly sessionAdminAccess: boolean = false,
   ) {
     super({ name: "opengeni", version: "1.0.0" });
   }
@@ -809,14 +837,20 @@ class PolicyMcpServer extends McpServer {
     if (catalogued) {
       const toolName = name as FirstPartyMcpToolName;
       const policy: FirstPartyToolAuthorization = FIRST_PARTY_TOOL_AUTHORIZATION[toolName];
-      const authorized =
-        (!policy.sessionRequired || this.sessionId !== null) &&
-        (policy.allOf?.every((permission) => hasPermission(this.grant.permissions, permission)) ??
-          true) &&
-        (policy.anyOf?.some((permission) => hasPermission(this.grant.permissions, permission)) ??
-          true);
-      const selected = this.selectedTools === null || this.selectedTools.has(toolName);
-      admitted = authorized && selected;
+      if (policy.adminAccessRequired) {
+        // Admin access, not the tool selection or the agent's own
+        // permissions, decides: the tools act as the person who gave it.
+        admitted = this.sessionId !== null && this.sessionAdminAccess;
+      } else {
+        const authorized =
+          (!policy.sessionRequired || this.sessionId !== null) &&
+          (policy.allOf?.every((permission) => hasPermission(this.grant.permissions, permission)) ??
+            true) &&
+          (policy.anyOf?.some((permission) => hasPermission(this.grant.permissions, permission)) ??
+            true);
+        const selected = this.selectedTools === null || this.selectedTools.has(toolName);
+        admitted = authorized && selected;
+      }
     }
     if (!admitted) {
       return {
@@ -976,7 +1010,23 @@ export function buildOpenGeniMcpServer(
     typeof nestedAgentDepth !== "number" ||
     typeof effectiveMaxNestedAgentDepth !== "number" ||
     nestedAgentDepth < effectiveMaxNestedAgentDepth;
-  const server = new PolicyMcpServer(grant, sessionId, selectedTools);
+  const sessionAdminAccess =
+    sessionId !== null && exactAgentAttemptClaims(grant) !== null
+      ? (options.sessionAdminAccess ?? null)
+      : null;
+  const server = new PolicyMcpServer(grant, sessionId, selectedTools, sessionAdminAccess !== null);
+  if (sessionId !== null && sessionAdminAccess !== null) {
+    registerSessionAdminAccessTools({
+      server,
+      db: deps.db,
+      grant,
+      sessionId,
+      access: sessionAdminAccess,
+      authorize: async () => {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      },
+    });
+  }
   // set_session_title names the agent's OWN session — pure session metadata,
   // not a goal operation — so it is available on every session, gated only on
   // the signed sessionId (NOT goals:manage, and NOT on a goal existing).
@@ -1679,6 +1729,16 @@ export function buildOpenGeniMcpServer(
   }
 
   if (can("scheduled_tasks:manage") || can("scheduled_tasks:run")) {
+    // Someone else's Only me schedule is indistinguishable from a missing one.
+    const requireVisibleTask = async (id: string) => {
+      try {
+        return await requireVisibleScheduledTask(deps.db, grant, id);
+      } catch (error) {
+        if (error instanceof HTTPException && error.status === 404)
+          throw new Error(`Scheduled task not found: ${id}`, { cause: error });
+        throw error;
+      }
+    };
     server.registerTool(
       "scheduled_tasks_list",
       {
@@ -1692,7 +1752,15 @@ export function buildOpenGeniMcpServer(
       async ({ limit: requestedLimit, offset: requestedOffset }) => {
         const limit = requestedLimit ?? 25;
         const offset = requestedOffset ?? 0;
-        const rows = await listScheduledTasks(deps.db, grant.workspaceId, limit + 1, offset);
+        const viewer = await scheduledTaskViewerForGrant(deps.db, grant, deps.settings);
+        const rows = await listScheduledTasks(
+          deps.db,
+          grant.workspaceId,
+          limit + 1,
+          offset,
+          undefined,
+          viewer.subjectId,
+        );
         return json(
           boundScheduledTaskMcpPage({
             tasks: rows.slice(0, limit).map((task) => scheduledTaskForGrant(task, grant)),
@@ -1717,10 +1785,7 @@ export function buildOpenGeniMcpServer(
         },
       },
       async ({ id, includeEntity, promptOffset, expectedExecutionDigest }) => {
-        const task = scheduledTaskForGrant(
-          await requireScheduledTask(deps.db, grant.workspaceId, id),
-          grant,
-        );
+        const task = scheduledTaskForGrant(await requireVisibleTask(id), grant);
         if (promptOffset !== undefined)
           return json(scheduledTaskPromptPage(task, promptOffset, expectedExecutionDigest));
         return json(
@@ -1789,7 +1854,7 @@ export function buildOpenGeniMcpServer(
         inputSchema: scheduledTaskUpdateToolInput(),
       },
       async ({ id, ...raw }) => {
-        const existing = await requireScheduledTask(deps.db, grant.workspaceId, id);
+        const existing = await requireVisibleTask(id);
         const previous = await captureScheduledTaskRestoreState(deps.db, existing);
         const payload = UpdateScheduledTaskRequest.parse(raw);
         const patchWarnings = (task: ScheduledTask) =>
@@ -1858,14 +1923,32 @@ export function buildOpenGeniMcpServer(
         inputSchema: { id: z4.string().uuid() },
       },
       async ({ id }) => {
-        const existing = await requireScheduledTask(deps.db, grant.workspaceId, id);
+        // Admins can pause any schedule, including someone else's Only me one,
+        // which they only ever see as a summary.
+        const viewer = await scheduledTaskViewerForGrant(deps.db, grant, deps.settings);
+        let pausable: Awaited<ReturnType<typeof requirePausableScheduledTask>>;
+        try {
+          pausable = await requirePausableScheduledTask(deps.db, grant, id, viewer);
+        } catch (error) {
+          if (error instanceof HTTPException && error.status === 404)
+            throw new Error(`Scheduled task not found: ${id}`, { cause: error });
+          throw error;
+        }
+        if (pausable.access === "summary") {
+          const changed = pausable.summary.status !== "paused";
+          if (changed) await pausePrivateScheduledTaskAsAdmin(deps.db, grant, id, viewer);
+          return json({ operation: "scheduled_tasks_pause", id, status: "paused", changed });
+        }
+        const existing = pausable.task;
         if (existing.status === "paused") {
           return json(scheduledTaskReceipt("scheduled_tasks_pause", existing, "unchanged", false));
         }
         const previous = await captureScheduledTaskRestoreState(deps.db, existing);
-        const task = await updateScheduledTaskForApi(deps.db, grant, id, {
-          status: "paused",
-        });
+        const task =
+          viewer.admin &&
+          (viewer.subjectId === null || existing.ownerSubjectId !== viewer.subjectId)
+            ? await pauseScheduledTaskAsAdmin(deps.db, grant.workspaceId, id)
+            : await updateScheduledTaskForApi(deps.db, grant, id, { status: "paused" });
         await syncUpdatedScheduledTask({
           db: deps.db,
           workflowClient: deps.workflowClient,
@@ -1883,7 +1966,7 @@ export function buildOpenGeniMcpServer(
         inputSchema: { id: z4.string().uuid() },
       },
       async ({ id }) => {
-        const existing = await requireScheduledTask(deps.db, grant.workspaceId, id);
+        const existing = await requireVisibleTask(id);
         if (existing.status === "active") {
           return json(scheduledTaskReceipt("scheduled_tasks_resume", existing, "unchanged", false));
         }
@@ -1920,7 +2003,7 @@ export function buildOpenGeniMcpServer(
         },
       },
       async ({ id, triggerId }) => {
-        const task = await requireScheduledTask(deps.db, grant.workspaceId, id);
+        const task = await requireVisibleTask(id);
         if (task.action.kind === "agent_turn") {
           const targetSession = await validateScheduledTaskTarget({
             db: deps.db,
@@ -1948,6 +2031,7 @@ export function buildOpenGeniMcpServer(
             grant,
             runMode: task.runMode,
             agentConfig: task.agentConfig,
+            audience: task.visibility === "private" ? "user_private" : "workspace_shared",
             requireOnline: true,
           });
           const taskAuthoritySubjectId = await getScheduledTaskRevisionAuthoritySubject(deps.db, {
@@ -2029,6 +2113,15 @@ export function buildOpenGeniMcpServer(
         inputSchema: { id: z4.string().uuid() },
       },
       async ({ id }) => {
+        const target = await getScheduledTaskIncludingDeleted(deps.db, grant.workspaceId, id);
+        if (
+          target &&
+          scheduledTaskAccess(
+            await scheduledTaskViewerForGrant(deps.db, grant, deps.settings),
+            target,
+          ) !== "full"
+        )
+          throw new Error(`Scheduled task not found: ${id}`);
         const { task, changed } = await deleteScheduledTaskWithDurableCleanup(deps, {
           grant,
           taskId: id,
@@ -2055,12 +2148,14 @@ export function buildOpenGeniMcpServer(
           limit: z4.number().int().positive().optional(),
         },
       },
-      async ({ taskId, limit }) =>
-        json({
+      async ({ taskId, limit }) => {
+        await requireVisibleTask(taskId);
+        return json({
           runs: (await listScheduledTaskRuns(deps.db, grant.workspaceId, taskId, limit ?? 100)).map(
             (run) => scheduledTaskRunForGrant(run, grant),
           ),
-        }),
+        });
+      },
     );
   }
 
@@ -2080,7 +2175,7 @@ function registerSandboxFileArtifactTool(
     "sandbox_file_publish",
     {
       description:
-        "Publish one exact file from this session's /workspace into durable workspace storage. Use this before presenting a video, ZIP, CSV, JSON, Markdown, HTML, PDF, Office file, or other sandbox output as downloadable. Present the returned artifact.artifactId as [Open file](artifact:<artifactId>), or ![Preview](artifact:<artifactId>) for inline image/video/audio/PDF previews. Replace <artifactId> with the exact returned ID and use a descriptive label. Never expose a sandbox: URL as the durable result.",
+        "Publish one exact file from this session's /workspace into durable workspace storage. Use this before presenting a video, ZIP, CSV, JSON, Markdown, HTML, PDF, Office file, or other sandbox output as downloadable. Present the returned artifact.artifactId as [Open file](artifact:<artifactId>), or ![Preview](artifact:<artifactId>) for inline image/video/audio/PDF previews. Replace <artifactId> with the exact returned ID and use a descriptive label. Never expose a sandbox: URL as the durable result. The artifactId is also the file's workspace File ID, so tools that take workspace file IDs, such as a browser upload action, accept it.",
       inputSchema: {
         path: z4.string().min(1).max(4_096),
       },
@@ -4109,19 +4204,57 @@ function registerFleetTools(
     "sandbox_provision",
     {
       description:
-        "Provision a new sandbox for the fleet. kind=selfhosted returns interactive device-flow instructions for a human to approve. For authorized headless enrollment, use connected_machine_enroll_token when available instead. kind=modal creates a named Modal sandbox record, but it is NOT yet attachable as a swap target: routing a session onto a second Modal box is not supported yet, so sandbox_swap to its id is rejected. Use the session's own box (the default) or attach a Connected Machine instead.",
+        "Provision a new sandbox for the fleet. kind=selfhosted posts the Connected Machine card in this chat: the person copies a one-line connect command, runs it on their own computer, and picks Use in this chat; the card also offers the OpenGeni Browser Chrome extension once the machine is connected. When you can already run commands on the target machine, install it yourself with connected_machine_enroll_token instead. kind=modal creates a named Modal sandbox record, but it is NOT yet attachable as a swap target: routing a session onto a second Modal box is not supported yet, so sandbox_swap to its id is rejected. Use the session's own box (the default) or attach a Connected Machine instead.",
       inputSchema: {
         kind: z4.enum(["selfhosted", "modal"]),
         name: z4.string().min(1).max(120).optional(),
       },
     },
-    async ({ kind, name }) =>
-      json(
+    async ({ kind, name }) => {
+      if (kind === "selfhosted" && exactAgentAttemptClaims(grant)) {
+        // Same live-attempt authority the other fleet tools resolve, without
+        // requiring a session box: a chat with no sandbox can still connect one.
+        await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId);
+        const item = nativeConnectionCapabilityRecommendations({ connectedMachines: true }).find(
+          (candidate) => candidate.id === CONNECTED_MACHINE_CAPABILITY_ID,
+        )!;
+        const setup = await capabilitySetupProjection(
+          deps,
+          grant.workspaceId,
+          item,
+          new Set(),
+          new Set(),
+          false,
+          new Set(),
+          new Set(),
+        );
+        if (setup.status === "unavailable") {
+          return json({ kind: "selfhosted", status: "unavailable", message: setup.detail });
+        }
+        const eventId = await appendCapabilityCardEvent(deps, grant, sessionId, {
+          item,
+          action: "connect",
+          rationale: "Connect your computer so this chat can run on it.",
+          toolName: "sandbox_provision",
+        });
+        return json({
+          kind: "selfhosted",
+          status: "card_posted",
+          eventId,
+          message: `${
+            setup.status === "ready"
+              ? `${setup.detail} The Connected Machine card lists them with Use in this chat and can connect another.`
+              : "The Connected Machine card was posted. The person copies its one-line connect command, runs it on their machine, and picks Use in this chat; nothing is connected yet."
+          } Check sandboxes_list after they confirm. Chrome needs the OpenGeni Browser extension (${OPENGENI_BROWSER_EXTENSION_URL}) on the connected machine.`,
+        });
+      }
+      return json(
         await provisionSandbox(services, await fleetContext(), {
           kind,
           ...(name ? { name } : {}),
         }),
-      ),
+      );
+    },
   );
 }
 
@@ -4141,7 +4274,9 @@ function registerConnectedMachineTools(
     "connected_machine_enroll_token",
     {
       description:
-        "Create a short-lived Connected Machine enrollment token for this workspace using existing enrollments:manage authority. Returns the token, expiry and Unix/PowerShell install commands. Run the appropriate command on the intended machine through an already-authorized execution path, then verify it with sandboxes_list. No separate device approval is required. Screen control is optional and defaults off. The token grants whole-machine access on enrollment; do not put it in public code or unrelated logs. Existing machine connections are preserved.",
+        "Create a single-use Connected Machine enrollment token for this workspace (expires in one hour) using existing enrollments:manage authority. Returns the token, expiry and Unix/PowerShell install commands. Use it when you can run commands on the target machine yourself (run_on, SSH, a VM you control): run the matching command there, then verify the machine with sandboxes_list. One token connects one machine; mint another for each additional machine (the same machine may rerun its command). When the person must run it on their own computer, post the Connected Machine card instead (capability_authorization_request with api:connected-machine), which mints the command in their browser; do not paste a token into the chat. Screen control is optional and defaults off; to turn it on for a machine that is already connected, use connected_machine_enable_screen_control instead of reconnecting. The token grants whole-machine access on enrollment; do not put it in public code or unrelated logs. Existing machine connections are preserved. For Chrome, the person installs the OpenGeni Browser extension (" +
+        OPENGENI_BROWSER_EXTENSION_URL +
+        ") after the machine is connected.",
       inputSchema: { allowScreenControl: z4.boolean().optional() },
     },
     async ({ allowScreenControl }) => {
@@ -4167,10 +4302,83 @@ function registerConnectedMachineTools(
     },
   );
   server.registerTool(
+    "connected_machine_enable_screen_control",
+    {
+      description:
+        "Turn screen control on for a machine that is already connected, in place, so agents can see and use its screen (computer and attached-Chrome tools). `target` is a sandboxes_list id or an enrollment id. Needs no human click, token, terminal or reconnect: OpenGeni records the consent on that machine and its agent refreshes its own credentials over the live connection. status=active means it is on now. status=pending means it is allowed and turns on by itself: reason=offline when the machine next connects; reason=agent_update_required after its agent is updated (update it with the machine update action, POST /v1/workspaces/{workspaceId}/machines/{enrollmentId}/update); reason=renewal_failed: call again shortly; reason=reconnect_required: the machine's connection predates in-place changes, so rerun the connect command on it (connected_machine_enroll_token with allowScreenControl=true). On a Mac the OS must also allow Screen Recording, Accessibility and Input Monitoring for OpenGeni: open each pane on the Mac with run_on exec `open 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'` (Privacy_Accessibility, Privacy_ListenEvent; also the privacy-settings machine action) and ask the person to switch OpenGeni on there, choosing Quit & Reopen if macOS asks; the machine list reports runtime.macPermissions. Chrome additionally needs the OpenGeni Browser extension (" +
+        OPENGENI_BROWSER_EXTENSION_URL +
+        ") on that machine.",
+      inputSchema: { target: z4.string().min(1) },
+    },
+    async ({ target }) => {
+      if (sessionId) {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      }
+      // Personal machines belong to the person the attempt acts for.
+      const attempt = sessionId ? exactAgentAttemptClaims(grant) : null;
+      const resourceGrant =
+        sessionId && attempt
+          ? {
+              ...grant,
+              subjectId:
+                (await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId))
+                  .initiatingHumanSubjectId ?? grant.subjectId,
+            }
+          : grant;
+      const enrollments = await listEnrollments(deps.db, resourceGrant, { status: "active" });
+      let enrollment = enrollments.find((candidate) => candidate.id === target);
+      if (!enrollment) {
+        const sandbox = await getSandbox(deps.db, resourceGrant, target).catch(() => null);
+        enrollment = enrollments.find((candidate) => candidate.id === sandbox?.enrollmentId);
+      }
+      if (!enrollment) {
+        throw new Error("machine not found in this access scope; use a sandboxes_list id");
+      }
+      if (enrollment.scope === "organization" && !grant.permissions.includes("account:admin")) {
+        throw new Error("missing permission: account:admin");
+      }
+      if (enrollment.scope === "user" && sessionId && attempt) {
+        // The same per-attempt admission run_on requires for personal machines.
+        const admitted = await authorizePersonalMachineForAttempt(deps.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          subjectId: resourceGrant.subjectId,
+          sessionId,
+          turnId: attempt.turnId,
+          attemptId: attempt.attemptId,
+          executionGeneration: attempt.executionGeneration,
+          enrollmentId: enrollment.id,
+          requireActiveSandbox: false,
+        }).catch(() => false);
+        if (!admitted) {
+          throw new Error("personal Connected Machine authority was not admitted for this attempt");
+        }
+      }
+      const result = await enableMachineScreenControl(
+        {
+          db: deps.db,
+          settings: deps.settings,
+          ...(deps.bus ? { bus: deps.bus } : {}),
+          observability: deps.observability,
+        },
+        {
+          enrollment,
+          access: enrollmentAccess(enrollment, resourceGrant),
+          actor: {
+            subjectId: grant.subjectId,
+            sessionId: sessionId ?? null,
+            attemptId: attempt?.attemptId ?? null,
+          },
+        },
+      );
+      return json({ ...result, machine: enrollment.id });
+    },
+  );
+  server.registerTool(
     "connected_machine_remove",
     {
       description:
-        "Remove one enrolled self-hosted machine while it is offline. Access is revoked, future heartbeat/reconnect credentials are rejected, and session, route, lease, archive, and audit history is retained. Idle dependent sessions are detached atomically; machine-home sessions become compute-less (backend none) until another sandbox is selected. Active turns, live leases, and recovery work remain fail-closed blockers whose typed outcome explains what must settle before retrying. Pass the enrollmentId from the Machines surface, never a Modal sandbox id. Reconnecting later requires fresh enrollment through device approval or an authorized enrollment token.",
+        "Remove one enrolled self-hosted machine while it is offline. Access is revoked, future heartbeat/reconnect credentials are rejected, and session, route, lease, archive, and audit history is retained. Sessions that point at the machine are detached atomically, including ones whose turn is queued, paused or recovering (their next attempt uses no machine); machine-home sessions become compute-less (backend none) until another sandbox is selected. Only a live machine lease or pending lease recovery blocks removal, with a typed outcome that explains what must settle before retrying. Pass the enrollmentId from the Machines surface, never a Modal sandbox id. Reconnecting later requires fresh enrollment through device approval or an authorized enrollment token.",
       inputSchema: {
         enrollmentId: z4.string().uuid(),
         expectedUpdatedAt: z4.string().datetime({ offset: true }).optional(),
@@ -5028,7 +5236,7 @@ function registerWorkspaceOrchestrationTools(
       "session_events",
       {
         description:
-          "Read session history. Default view=conversation returns roughly ten complete user/assistant messages, including completed commentary, in a 16 KiB envelope; no token deltas or execution records. Prefer fewer complete messages; a single oversized message has fragment offsets and a lossless nextCursor continuation over retained source text, including large legacy rows. Fragment unit is codepoint for plain text or utf16 for codec text; pass the opaque v2 cursor unchanged (v1 cursors must restart). Pass cursor=nextCursor with sessionId, omitting other selectors; it preserves the view, detail, direction and page size. limit is 1–50 for content views; larger values are rejected. after/nextAfter and before/nextBefore only change position, never view or detail; use nextCursor when present to avoid skipping a message fragment. view=results returns final turn answers and actionable outcomes without duplicate message-completion text. view=tools returns compact call/result identities; toolName finds exact named calls across retained history, then use a returned callId to read its result. includeArguments/includeOutput opt into one text or JSON-encoded value, and callId selects an exact call (sparse scans can return an empty advancing page). sourceExact=false and sourceOmitted identify oversized structured values that were omitted, never partial JSON presented as complete; scalar text remains resumable. Conversation/results/tools omit never-claimed human/API prompts and stale duplicate events. view=debug exposes the existing authorized audit query with explicit type/class filters, mode=monitoring|forensic and payloadMode=none|summary|full; raw deltas and never-claimed prompts require mode=forensic. Explicit legacy audit selectors remain supported without view. latest is an exclusive semantic-class lookup; resultMode=compact requires latest. No read observes commands or changes append-only history. REST behavior is unchanged.",
+          "Read session history. Default view=conversation returns roughly ten complete user/assistant messages, including completed commentary, in a 16 KiB envelope; no token deltas or execution records. Prefer fewer complete messages; a single oversized message has fragment offsets and a lossless nextCursor continuation over retained source text, including large legacy rows. Fragment unit is codepoint for plain text or utf16 for codec text; pass the opaque v2 cursor unchanged (v1 cursors must restart). Pass cursor=nextCursor with sessionId, omitting other selectors; it preserves the view, detail, direction and page size. Copy nextCursor byte-for-byte, never retype or build one; when you cannot, repeat the call with before=nextBefore (or after=nextAfter) instead. limit is 1–50 for content views; larger values are rejected. after/nextAfter and before/nextBefore only change position, never view or detail; use nextCursor when present to avoid skipping a message fragment. view=results returns final turn answers and actionable outcomes without duplicate message-completion text. view=tools returns compact call/result identities; toolName finds exact named calls across retained history. includeArguments/includeOutput opt into one text or JSON-encoded value, and callId selects an exact call (sparse scans can return an empty advancing page). toolName with includeOutput=true returns each named call with its result, limit 1-3 (default 1, the newest unless direction=after). sourceExact=false and sourceOmitted identify oversized structured values that were omitted, never partial JSON presented as complete; scalar text remains resumable. Conversation/results/tools omit never-claimed human/API prompts and stale duplicate events. view=debug exposes the existing authorized audit query with explicit type/class filters, mode=monitoring|forensic and payloadMode=none|summary|full; raw deltas and never-claimed prompts require mode=forensic. Explicit legacy audit selectors remain supported without view. latest is an exclusive semantic-class lookup; resultMode=compact requires latest. No read observes commands or changes append-only history. REST behavior is unchanged.",
         inputSchema: {
           sessionId: z4.string().uuid(),
           view: z4.enum(["conversation", "results", "tools", "debug"]).optional(),
@@ -5040,7 +5248,7 @@ function registerWorkspaceOrchestrationTools(
             .max(256)
             .optional()
             .describe(
-              "Exact tool name; selects calls in view=tools. Use a returned callId for its result.",
+              "Exact tool name; selects calls in view=tools. With includeOutput=true each call carries its result.",
             ),
           includeArguments: z4.boolean().optional(),
           includeOutput: z4.boolean().optional(),
@@ -5057,29 +5265,29 @@ function registerWorkspaceOrchestrationTools(
           payloadMode: z4.enum(SessionEventPayloadMode.options).optional(),
           resultMode: z4.enum(SessionEventResultMode.options).optional(),
           includeTypes: z4
-            .array(
-              z4
-                .string()
-                .refine(
-                  (value) => SessionEventType.safeParse(value).success,
-                  "Unknown session event type",
-                ),
-            )
+            .array(z4.string())
             .max(100)
+            .superRefine((values, context) =>
+              addUnknownSessionEventTypeIssues(
+                values,
+                (value) => SessionEventType.safeParse(value).success,
+                (issue) => context.addIssue(issue),
+              ),
+            )
             .describe(
               "Debug audit event types, e.g. turn.completed, user.message, agent.message.completed, agent.toolCall.output. Validated against the canonical event-type registry.",
             )
             .optional(),
           excludeTypes: z4
-            .array(
-              z4
-                .string()
-                .refine(
-                  (value) => SessionEventType.safeParse(value).success,
-                  "Unknown session event type",
-                ),
-            )
+            .array(z4.string())
             .max(100)
+            .superRefine((values, context) =>
+              addUnknownSessionEventTypeIssues(
+                values,
+                (value) => SessionEventType.safeParse(value).success,
+                (issue) => context.addIssue(issue),
+              ),
+            )
             .describe(
               "Debug audit event types to exclude; validated against the canonical event-type registry.",
             )
@@ -5122,8 +5330,13 @@ function registerWorkspaceOrchestrationTools(
         await authorizeFirstPartySession(deps, grant, sessionId, "session.events.read");
         // Keep the model schema compact without weakening either MCP validation
         // or direct adapter calls: the canonical registry owns accepted types.
-        const includeTypes = requestedIncludeTypes?.map((type) => SessionEventType.parse(type));
-        const excludeTypes = requestedExcludeTypes?.map((type) => SessionEventType.parse(type));
+        const canonicalType = (type: string) => {
+          const parsed = SessionEventType.safeParse(type);
+          if (!parsed.success) throw new Error(unknownSessionEventTypeMessage(type));
+          return parsed.data;
+        };
+        const includeTypes = requestedIncludeTypes?.map(canonicalType);
+        const excludeTypes = requestedExcludeTypes?.map(canonicalType);
         const latestClass =
           latest === undefined ? undefined : sessionEventLatestClassToSemanticClass(latest);
         if (requestedResultMode === "compact" && latestClass === undefined) {
@@ -5142,7 +5355,22 @@ function registerWorkspaceOrchestrationTools(
         ].some((value) => value !== undefined);
         if (((view !== undefined && view !== "debug") || cursor !== undefined) && auditRequested) {
           throw new Error(
-            "Audit selectors require view=debug and cannot change a conversation cursor",
+            sessionEventAuditSelectorMessage({
+              sessionId,
+              view,
+              cursor,
+              audit: {
+                mode: requestedMode,
+                payloadMode: requestedPayloadMode,
+                resultMode: requestedResultMode,
+                includeTypes,
+                excludeTypes,
+                includeClasses,
+                excludeClasses,
+                latest,
+              },
+              position: { after, before, direction: requestedDirection, limit },
+            }),
           );
         }
         if (view !== "debug" && !auditRequested) {
@@ -5185,7 +5413,21 @@ function registerWorkspaceOrchestrationTools(
           includeOutput !== undefined
         ) {
           throw new Error(
-            "cursor/callId/toolName/includeArguments/includeOutput require a non-debug view",
+            `cursor/callId/toolName/includeArguments/includeOutput require a non-debug view; view=debug pages with after/before. Use ${JSON.stringify(
+              callId === undefined &&
+                toolName === undefined &&
+                includeArguments === undefined &&
+                includeOutput === undefined
+                ? { sessionId, cursor: "<nextCursor, unchanged>" }
+                : {
+                    sessionId,
+                    view: "tools",
+                    ...(callId !== undefined ? { callId } : {}),
+                    ...(toolName !== undefined ? { toolName } : {}),
+                    ...(includeArguments !== undefined ? { includeArguments } : {}),
+                    ...(includeOutput !== undefined ? { includeOutput } : {}),
+                  },
+            )} instead.`,
           );
         }
         if (
@@ -6406,7 +6648,12 @@ function registerCapabilityDiscoveryTools(
     async ({ query, limit }) => {
       await authorize();
       const current = await catalog();
-      const candidates = [...current.items, ...nativeConnectionCapabilityRecommendations()];
+      const candidates = [
+        ...current.items,
+        ...nativeConnectionCapabilityRecommendations({
+          connectedMachines: deps.settings.sandboxSelfhostedEnabled,
+        }),
+      ];
       const ranked = searchCapabilityCatalogItems(candidates, query, limit ?? 8);
       const setups = await setupProjections(ranked.map(({ item }) => item));
       const matches = ranked.map(({ item, matchedOn, approximate }, index) => ({
@@ -6462,7 +6709,7 @@ function registerCapabilityDiscoveryTools(
     "capability_authorization_request",
     {
       description:
-        "Show a Connect card in this chat for a suitable capability returned by capability_catalog_search with setup.nextAction. Supply its capability ID and a brief rationale explaining how it helps the task; no separate confirmation is needed before showing the card. Requesting setup needs no integration-management permission and grants no access. The authenticated human completes setup through the card; never ask them to paste credentials into chat. Do not request another card for the same pending setup, or for a candidate reported ready or unavailable. GitHub App (api:github-app) is the exception: when it is already connected the card is still shown, listing repositories the person can use in this chat.",
+        "Show a Connect card in this chat for a suitable capability returned by capability_catalog_search with setup.nextAction. Supply its capability ID and a brief rationale explaining how it helps the task; no separate confirmation is needed before showing the card. Requesting setup needs no integration-management permission and grants no access. The authenticated human completes setup through the card; never ask them to paste credentials into chat. Do not request another card for the same pending setup, or for a candidate reported ready or unavailable. GitHub App (api:github-app) and Connected Machine (api:connected-machine) are exceptions: when already connected their card is still shown, listing repositories or machines the person can use in this chat. Use api:connected-machine when the person should connect their own computer: the card gives them a one-line connect command and the OpenGeni Browser Chrome extension link; never paste an enroll token into the chat yourself.",
       inputSchema: {
         capabilityId: z4.string().min(1).max(512),
         rationale: z4.string().min(1).max(2000),
@@ -6471,9 +6718,12 @@ function registerCapabilityDiscoveryTools(
     async ({ capabilityId, rationale }) => {
       await authorize();
       const current = await catalog();
-      const item = [...current.items, ...nativeConnectionCapabilityRecommendations()].find(
-        (candidate) => candidate.id === capabilityId,
-      );
+      const item = [
+        ...current.items,
+        ...nativeConnectionCapabilityRecommendations({
+          connectedMachines: deps.settings.sandboxSelfhostedEnabled,
+        }),
+      ].find((candidate) => candidate.id === capabilityId);
       if (!item || !capabilityCatalogItemIsTrustedForExposure(item)) {
         throw new Error("Unknown or untrusted capability; search the catalog again.");
       }
@@ -6483,7 +6733,11 @@ function registerCapabilityDiscoveryTools(
       // it lists the shared repositories with a "Use" action that attaches one
       // to this chat, so a ready GitHub still gets its card.
       const githubCardWhenReady = setup.status === "ready" && item.id === "api:github-app";
-      if (setup.status === "ready" && !githubCardWhenReady) {
+      // The machine card likewise lists connected machines with "Use in this
+      // chat" and can connect another, so it is shown when machines exist too.
+      const machineCardWhenReady =
+        setup.status === "ready" && item.id === CONNECTED_MACHINE_CAPABILITY_ID;
+      if (setup.status === "ready" && !githubCardWhenReady && !machineCardWhenReady) {
         return json({
           capabilityId: item.id,
           status: "ready",
@@ -6497,42 +6751,24 @@ function registerCapabilityDiscoveryTools(
           message: setup.detail,
         });
       }
-      const claims = exactAgentCommandContext(grant, sessionId);
-      const payload = ToolAuthNeededPayload.parse({
-        serverId: item.runtime.mcpServerId ?? "opengeni",
-        toolName: "capability_authorization_request",
-        providerDomain: capabilityProviderDomain(item),
-        reason: "missing_connection",
-        capability: {
-          id: item.id,
-          name: item.name,
-          kind: item.kind,
-          source: item.source,
-          action: setup.action ?? "connect",
-          rationale,
-          requiredVariables: capabilityRequiredVariables(item),
-        },
+      const eventId = await appendCapabilityCardEvent(deps, grant, sessionId, {
+        item,
+        action: setup.action ?? "connect",
+        rationale,
       });
-      const appended = await appendAndPublishTurnEventsFenced(
-        deps.db,
-        deps.bus,
-        grant.workspaceId,
-        sessionId,
-        claims.callerTurnId,
-        claims.callerExecutionGeneration,
-        claims.callerAttemptId,
-        [{ type: "tool.auth_needed", payload }],
-      );
-      if (!appended.accepted) {
-        throw new Error(
-          "The calling turn was replaced before the authorization request committed.",
-        );
+      if (machineCardWhenReady) {
+        return json({
+          capabilityId: item.id,
+          status: "ready",
+          eventId,
+          message: `${setup.detail} The Connected Machine card is in this chat: the person can pick a machine with "Use in this chat" or connect another. Chrome needs the OpenGeni Browser extension (${OPENGENI_BROWSER_EXTENSION_URL}) on a connected machine.`,
+        });
       }
       if (githubCardWhenReady) {
         return json({
           capabilityId: item.id,
           status: "ready",
-          eventId: appended.events[0]?.id ?? null,
+          eventId,
           message: `${setup.detail} The GitHub card is in this chat: the person picks a repository with its "Use" button, which attaches it to this chat.`,
         });
       }
@@ -6540,9 +6776,11 @@ function registerCapabilityDiscoveryTools(
         capabilityId: item.id,
         status: "authorization_requested",
         action: setup.action,
-        eventId: appended.events[0]?.id ?? null,
+        eventId,
         message:
-          "The recommendation was posted for human confirmation. No access has been granted yet.",
+          item.id === CONNECTED_MACHINE_CAPABILITY_ID
+            ? "The Connected Machine card was posted. The person copies its connect command, runs it on their machine, and picks Use in this chat; nothing is connected yet. Do not paste an enroll token into the chat."
+            : "The recommendation was posted for human confirmation. No access has been granted yet.",
       });
     },
   );
@@ -6724,6 +6962,29 @@ async function capabilitySetupProjection(
         "Fiken is connected, but its selected tools are unavailable in this execution. Check tool permissions and setup before retrying; reconnection is not required by this status.",
     };
   }
+  if (item.id === CONNECTED_MACHINE_CAPABILITY_ID) {
+    if (!deps.settings.sandboxSelfhostedEnabled) {
+      return {
+        status: "unavailable",
+        action: null,
+        detail: "Connected Machines are not enabled on this deployment.",
+      };
+    }
+    const enrolled = await listEnrollments(deps.db, workspaceId, { status: "active" });
+    if (enrolled.length > 0) {
+      return {
+        status: "ready",
+        action: null,
+        detail: "Machines are connected to this workspace; sandboxes_list shows which are online.",
+      };
+    }
+    return {
+      status: "authorization_required",
+      action: "connect",
+      detail:
+        "No machine is connected yet. The person copies a one-line connect command from the chat card and runs it on their machine.",
+    };
+  }
   if (item.id === "api:github-app" || item.surfaceType === "first_party_github") {
     const missing = githubAppMissingSettings(deps.settings);
     if (missing.length > 0) {
@@ -6822,6 +7083,54 @@ async function capabilitySetupProjection(
     action: "enable",
     detail: "A workspace admin must review and enable this capability.",
   };
+}
+
+/**
+ * Post a capability Connect card in the calling turn. The card carries identity
+ * and rationale only; the authenticated person completes setup through it.
+ */
+async function appendCapabilityCardEvent(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  sessionId: string,
+  input: {
+    item: CapabilityCatalogItem;
+    action: "connect" | "add_credentials" | "enable";
+    rationale: string;
+    toolName?: string;
+  },
+): Promise<string | null> {
+  const { item } = input;
+  const claims = exactAgentCommandContext(grant, sessionId);
+  const payload = ToolAuthNeededPayload.parse({
+    serverId: item.runtime.mcpServerId ?? "opengeni",
+    toolName: input.toolName ?? "capability_authorization_request",
+    providerDomain: capabilityProviderDomain(item),
+    reason: "missing_connection",
+    capability: {
+      id: item.id,
+      name: item.name,
+      kind: item.kind,
+      source: item.source,
+      action: input.action,
+      rationale: input.rationale,
+      requiredVariables: capabilityRequiredVariables(item),
+    },
+  });
+  const appended = await appendAndPublishTurnEventsFenced(
+    deps.db,
+    deps.bus,
+    grant.workspaceId,
+    sessionId,
+    claims.callerTurnId,
+    claims.callerExecutionGeneration,
+    claims.callerAttemptId,
+    [{ type: "tool.auth_needed", payload }],
+  );
+  if (!appended.accepted) {
+    throw new Error("The calling turn was replaced before the authorization request committed.");
+  }
+  return appended.events[0]?.id ?? null;
 }
 
 function capabilityRequiredVariables(item: CapabilityCatalogItem): string[] {

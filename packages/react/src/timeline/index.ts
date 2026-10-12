@@ -42,6 +42,7 @@ export type {
   MachineInputBatchItem,
   MachineInputMember,
   MemoryItem,
+  MessageSender,
   KnowledgeItem,
   NoticeItem,
   ReasoningItem,

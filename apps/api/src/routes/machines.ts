@@ -15,6 +15,7 @@
 //     The downsampled (~1/min) history for ONE machine over a time window.
 
 import {
+  OpenMachinePrivacySettingsRequest,
   MachineMetricsSeriesResponse,
   MachineOperationPolicy,
   MachinesResponse,
@@ -44,6 +45,12 @@ import {
 } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { buildFleetContextForSession, swapActiveSandbox } from "@opengeni/core";
+import {
+  enableMachineScreenControl,
+  enrollmentAccess,
+  MachineNotActiveError,
+  openMachinePrivacySettings,
+} from "../sandbox/screen-control";
 import { listMachines, machineUpdateBlockedReason, metricRowToSample } from "../sandbox/machines";
 import { ensureSessionGroupReady as ensureViewerSessionGroupReady } from "../sandbox/viewer";
 import { ControlRequest, ErrorCode } from "@opengeni/agent-proto";
@@ -182,6 +189,87 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
     }
     return c.json(MachineOperationPolicy.parse(updated.operationPolicy));
+  });
+
+  // ── POST /workspaces/:ws/machines/:enrollmentId/screen-control ─────────────
+  // Turn screen control on for one connected machine, in place (see
+  // ../sandbox/screen-control.ts): record the consent, then have the live agent
+  // renew its credentials. Needs enrollments:manage, like connecting the
+  // machine; agents holding it call this too (or the
+  // connected_machine_enable_screen_control tool). No request body.
+  app.post("/v1/workspaces/:workspaceId/machines/:enrollmentId/screen-control", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "enrollments:manage",
+    );
+    const grant = authorization.grant;
+    assertSelfhostedEnabled();
+    const enrollmentId = c.req.param("enrollmentId");
+    const enrollment = await requireScopedEnrollment(grant, enrollmentId);
+    if (
+      enrollment.scope === "organization" &&
+      authorization.accountGrant?.permissions.includes("account:admin") !== true
+    ) {
+      throw new HTTPException(403, { message: "missing permission: account:admin" });
+    }
+    try {
+      return c.json(
+        await enableMachineScreenControl(
+          { db, settings, bus, observability: deps.observability },
+          {
+            enrollment,
+            access: enrollmentAccess(enrollment, grant),
+            actor: { subjectId: grant.subjectId },
+          },
+        ),
+      );
+    } catch (error) {
+      if (error instanceof MachineNotActiveError) {
+        throw new HTTPException(404, { message: error.message });
+      }
+      throw error;
+    }
+  });
+
+  // ── POST /workspaces/:ws/machines/:enrollmentId/privacy-settings ───────────
+  // Open one macOS Privacy & Security pane on the connected Mac, so the person
+  // only flips the switch for OpenGeni. Opening a pane grants nothing.
+  app.post("/v1/workspaces/:workspaceId/machines/:enrollmentId/privacy-settings", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "enrollments:manage",
+    );
+    const grant = authorization.grant;
+    assertSelfhostedEnabled();
+    const enrollmentId = c.req.param("enrollmentId");
+    const parsed = OpenMachinePrivacySettingsRequest.safeParse(
+      await c.req.json().catch(() => null),
+    );
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: "invalid privacy settings request" });
+    }
+    const enrollment = await requireScopedEnrollment(grant, enrollmentId);
+    if (
+      enrollment.scope === "organization" &&
+      authorization.accountGrant?.permissions.includes("account:admin") !== true
+    ) {
+      throw new HTTPException(403, { message: "missing permission: account:admin" });
+    }
+    if (enrollment.os !== "macos") {
+      throw new HTTPException(422, { message: "privacy settings panes exist only on macOS" });
+    }
+    return c.json(
+      await openMachinePrivacySettings(
+        { db, settings, bus, observability: deps.observability },
+        { enrollment, access: enrollmentAccess(enrollment, grant), pane: parsed.data.pane },
+      ),
+    );
   });
 
   // ── POST /workspaces/:ws/machines/:enrollmentId/update ─────────────────────

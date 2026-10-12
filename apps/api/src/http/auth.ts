@@ -195,6 +195,28 @@ async function isAuthorized(c: Context, settings: Settings): Promise<boolean> {
   );
 }
 
+/**
+ * A request to a key-only (configured) deployment that presents the deployment
+ * key itself, from the operator rather than an agent acting for someone. The
+ * key travels in a request header that a page on another site can't add, so
+ * browser same-origin checks have nothing to protect on such a request.
+ */
+export function isConfiguredDeploymentKeyRequest(c: Context, settings: Settings): boolean {
+  const expected = settings.accessKey;
+  if (settings.productAccessMode !== "configured" || !settings.authRequired || !expected) {
+    return false;
+  }
+  if (verifiedDelegatedHumanAuthorizationForRequest(c.req.raw) !== null) return false;
+  const authorization = c.req.header("authorization");
+  const bearer = authorization?.startsWith("Bearer ")
+    ? authorization.slice("Bearer ".length)
+    : undefined;
+  return (
+    constantTimeEqual(c.req.header("x-opengeni-access-key"), expected) ||
+    constantTimeEqual(bearer, expected)
+  );
+}
+
 function constantTimeEqual(actual: string | undefined, expected: string): boolean {
   if (typeof actual !== "string") {
     return false;

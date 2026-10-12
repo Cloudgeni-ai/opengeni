@@ -38,6 +38,8 @@ import {
   clearEnrollmentWentOffline,
   disconnectAttachedBrowserDevices,
   advanceEnrollmentAgentUpdate,
+  enrollmentMacPermissionCapabilities,
+  enrollmentMacPermissions,
   getEnrollment,
   getLiveEnrollmentConnection,
   ingestMachineMetricsSample,
@@ -50,6 +52,7 @@ import {
   setEnrollmentOpStreamState,
   type AppendEventInput,
   type Database,
+  type EnrollmentMacPermissions,
   type MachineMetricsSample,
 } from "@opengeni/db";
 import {
@@ -71,6 +74,7 @@ import {
   type MetricsSample,
 } from "@opengeni/agent-proto";
 import { AGENT_CONNECTION_LEASE_MS } from "./connection-authority";
+import { reconcileScreenControlOnHello } from "./screen-control";
 
 /** The wildcard subject the agent event plane publishes heartbeats on. */
 export const AGENT_EVENTS_SUBJECT = "agent.*.*.connection.*.events";
@@ -638,12 +642,18 @@ export async function handleAgentEventPayload(
       const status = heartbeat.desktopStatus;
       const available = status.available && !status.unavailableReason;
       const reason = status.unavailableReason || null;
+      const macPermissions = status.macPermissions;
+      const stored = enrollmentMacPermissions(enrollment.agentCapabilities);
       // The heartbeat already read the exact enrollment. Steady state adds no
       // extra query; the change path re-reads and fences its eventual write.
       if (
         enrollment.hasDisplay !== available ||
         (enrollment.desktopUnavailableReason ?? null) !== reason ||
-        enrollment.agentCapabilities?.desktop !== available
+        enrollment.agentCapabilities?.desktop !== available ||
+        (macPermissions !== undefined &&
+          (stored?.screenRecording !== macPermissions.screenRecording ||
+            stored?.accessibility !== macPermissions.accessibility ||
+            stored?.inputMonitoring !== macPermissions.inputMonitoring))
       ) {
         await refreshEnrollmentDisplay(db, {
           workspaceId: ids.workspaceId,
@@ -651,6 +661,7 @@ export async function handleAgentEventPayload(
           hasDisplay: available,
           desktopUnavailableReason: reason,
           runtimeDesktop: available,
+          ...(macPermissions ? { macPermissions } : {}),
           connectionInstanceId: ids.connectionInstanceId,
         });
       }
@@ -770,6 +781,9 @@ export function helloRuntimeCapabilities(hello: Hello): Record<string, boolean> 
     operationResourcePolicy: caps.operationResourcePolicy === true,
     operationCpuQuota: caps.operationCpuQuota === true,
     transactionalFsWrite: caps.transactionalFsWrite === true,
+    credentialRenew: caps.credentialRenew === true,
+    screenControl: caps.consentedScreenControl === true,
+    ...(caps.macPermissions ? enrollmentMacPermissionCapabilities(caps.macPermissions) : {}),
   };
 }
 
@@ -810,6 +824,7 @@ export async function refreshEnrollmentDisplay(
     hasDisplay: boolean;
     desktopUnavailableReason?: string | null;
     runtimeDesktop?: boolean;
+    macPermissions?: EnrollmentMacPermissions;
     connectionInstanceId?: string;
   },
 ): Promise<{ updated: boolean }> {
@@ -822,7 +837,14 @@ export async function refreshEnrollmentDisplay(
     enrollment.hasDisplay === input.hasDisplay &&
     (enrollment.desktopUnavailableReason ?? null) === desktopUnavailableReason &&
     (input.runtimeDesktop === undefined ||
-      enrollment.agentCapabilities?.desktop === input.runtimeDesktop)
+      enrollment.agentCapabilities?.desktop === input.runtimeDesktop) &&
+    (input.macPermissions === undefined ||
+      JSON.stringify(enrollmentMacPermissions(enrollment.agentCapabilities)) ===
+        JSON.stringify({
+          screenRecording: input.macPermissions.screenRecording,
+          accessibility: input.macPermissions.accessibility,
+          inputMonitoring: input.macPermissions.inputMonitoring,
+        }))
   ) {
     // Both fields unchanged — do not even issue the UPDATE (no churn on a
     // steady-state Hello).
@@ -835,6 +857,7 @@ export async function refreshEnrollmentDisplay(
     hasDisplay: input.hasDisplay,
     desktopUnavailableReason,
     ...(input.runtimeDesktop !== undefined ? { runtimeDesktop: input.runtimeDesktop } : {}),
+    ...(input.macPermissions ? { macPermissions: input.macPermissions } : {}),
     ...(input.connectionInstanceId ? { connectionInstanceId: input.connectionInstanceId } : {}),
   });
 }
@@ -958,6 +981,21 @@ export async function handleHelloPayload(
       error: error instanceof Error ? error.message : String(error),
     });
   }
+  // Screen control allowed while this machine was offline (or before its agent
+  // could renew on request) applies now. Detached: it waits for the agent to
+  // subscribe and must not hold up Hello ingestion.
+  void reconcileScreenControlOnHello(
+    { bus, observability },
+    {
+      authority,
+      hello,
+      target: {
+        workspaceId: ids.workspaceId,
+        enrollmentId: ids.agentId,
+        connectionInstanceId: ids.connectionInstanceId,
+      },
+    },
+  );
   // A reconnect Hello re-announces the machine, so any pending clean going-offline
   // marker no longer holds — clear it so the liveness derivation stops reading the
   // machine offline. Best-effort + fail-soft, and change-guarded in the DB (a

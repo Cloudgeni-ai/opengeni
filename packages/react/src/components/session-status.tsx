@@ -1,6 +1,8 @@
-import type { SessionStatus as SessionStatusValue } from "@opengeni/sdk";
 import { cn } from "../lib/cn";
-import { SESSION_STATUS_PRESENTATION } from "../session-status-model";
+import { SESSION_STATUS_PRESENTATION, type SessionDisplayStatus } from "../session-status-model";
+
+/** A server status, or the display-only `blocked` (see `sessionDisplayStatus`). */
+type SessionStatusValue = SessionDisplayStatus;
 
 export type SessionStatusMeta = {
   label: string;
@@ -47,6 +49,12 @@ export const SESSION_STATUS_META: Record<SessionStatusValue, SessionStatusMeta> 
     dotClassName: "bg-og-status-waiting",
     badgeClassName: "text-og-status-waiting border-og-status-waiting/35 bg-og-status-waiting/10",
     pulse: SESSION_STATUS_PRESENTATION.requires_action.pulse,
+  },
+  blocked: {
+    label: SESSION_STATUS_PRESENTATION.blocked.label,
+    dotClassName: "bg-og-status-failed",
+    badgeClassName: "text-og-status-failed border-og-status-failed/35 bg-og-status-failed/10",
+    pulse: SESSION_STATUS_PRESENTATION.blocked.pulse,
   },
   failed: {
     label: SESSION_STATUS_PRESENTATION.failed.label,

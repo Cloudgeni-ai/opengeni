@@ -17,6 +17,7 @@ import { z } from "zod";
 
 import type { ActionCatalogEntry } from "./mcp/action-catalog-types";
 import { ACTION_CATALOG } from "./mcp/action-catalog.gen";
+import { actionDescription } from "./mcp/action-descriptions";
 
 /* ----------------------------------------------------------------------------
    The organization MCP server (`/v1/mcp`).
@@ -64,15 +65,17 @@ export const READ_ONLY_POST_ACTIONS: ReadonlySet<string> = new Set([
 const MAX_RESPONSE_BYTES = 256 * 1024;
 const STREAM_READ_MS = 2_000;
 
-const SearchInput = z
+export const OrganizationActionSearchInput = z
   .object({
     query: z.string().max(200).default(""),
     limit: z.number().int().min(1).max(50).default(20),
     offset: z.number().int().min(0).default(0),
   })
   .strict();
-const DescribeInput = z.object({ id: z.string().min(1).max(300) }).strict();
-const CallInput = z
+export const OrganizationActionDescribeInput = z
+  .object({ id: z.string().min(1).max(300) })
+  .strict();
+export const OrganizationActionCallInput = z
   .object({
     id: z.string().min(1).max(300),
     pathParameters: z.record(z.string(), z.string().min(1).max(1024)).default({}),
@@ -85,6 +88,9 @@ const CallInput = z
     body: z.unknown().optional(),
   })
   .strict();
+const SearchInput = OrganizationActionSearchInput;
+const DescribeInput = OrganizationActionDescribeInput;
+const CallInput = OrganizationActionCallInput;
 
 const TOOLS = [
   {
@@ -152,7 +158,7 @@ export function organizationMcpIcons(publicOrigin: string | null): Icon[] {
   return icons;
 }
 
-export function buildOrganizationMcpServer(input: {
+export type OrganizationActionContext = {
   caller: OrganizationMcpCaller;
   /** This API's own origin; the call never leaves the process. */
   origin: string;
@@ -160,7 +166,9 @@ export function buildOrganizationMcpServer(input: {
   publicOrigin?: string | null;
   dispatch: (request: Request) => Promise<Response>;
   signal?: AbortSignal;
-}): Server {
+};
+
+export function buildOrganizationMcpServer(input: OrganizationActionContext): Server {
   const server = new Server(
     {
       name: "opengeni",
@@ -189,15 +197,12 @@ export function buildOrganizationMcpServer(input: {
       case "opengeni_action_describe": {
         const parsed = DescribeInput.safeParse(args);
         if (!parsed.success) return invalid(parsed.error);
-        const entry = findAction(parsed.data.id);
-        if (!entry) return failure(`No action "${parsed.data.id}". Search for it first.`);
-        if (entry.browserOnly) return browserOnly(entry);
-        return json(describeAction(entry));
+        return describeActionResult(parsed.data.id);
       }
       case "opengeni_action_call": {
         const parsed = CallInput.safeParse(args);
         if (!parsed.success) return invalid(parsed.error);
-        return await callAction(input, parsed.data);
+        return await callOrganizationAction(input, parsed.data);
       }
       default:
         return failure(`Unknown tool ${request.params.name}.`);
@@ -223,6 +228,9 @@ function words(value: string): string[] {
 
 /** Actions an MCP caller can complete: browser-only ones are left out. */
 const CALLABLE_ACTIONS = ACTION_CATALOG.filter((entry) => !entry.browserOnly);
+const DESCRIPTIONS = new Map(
+  CALLABLE_ACTIONS.map((entry) => [entry.id, actionDescription(entry)] as const),
+);
 
 export function searchActions(input: { query: string; limit: number; offset: number }) {
   // Singular and plural match ("workspace" finds listWorkspaces).
@@ -236,6 +244,9 @@ export function searchActions(input: { query: string; limit: number; offset: num
     // nearly every path contains "workspaces".
     const name = words(entry.id).map(stem);
     const path = [...words(entry.path.replace(/:\w+/g, "")), entry.method.toLowerCase()].map(stem);
+    // A described action also matches the words people use for it
+    // ("pause", "primary", "reset"), below a name match.
+    const described = words(DESCRIPTIONS.get(entry.id) ?? "").map(stem);
     const score = wanted.reduce(
       (total, word) =>
         total +
@@ -247,7 +258,9 @@ export function searchActions(input: { query: string; limit: number; offset: num
               ? 1
               : path.some((token) => token.startsWith(word))
                 ? 0.5
-                : 0),
+                : described.includes(word)
+                  ? 0.5
+                  : 0),
       0,
     );
     return {
@@ -267,11 +280,15 @@ export function searchActions(input: { query: string; limit: number; offset: num
   return {
     total: scored.length,
     offset: input.offset,
-    actions: scored.slice(input.offset, input.offset + input.limit).map(({ entry }) => ({
-      id: entry.id,
-      method: entry.method,
-      path: entry.path,
-    })),
+    actions: scored.slice(input.offset, input.offset + input.limit).map(({ entry }) => {
+      const description = DESCRIPTIONS.get(entry.id);
+      return {
+        id: entry.id,
+        method: entry.method,
+        path: entry.path,
+        ...(description ? { description } : {}),
+      };
+    }),
   };
 }
 
@@ -289,12 +306,22 @@ function schemaFor(name: string): unknown {
   }
 }
 
+/** The describe tool's answer for an action id, or why it can't be used. */
+export function describeActionResult(id: string): CallToolResult {
+  const entry = findAction(id);
+  if (!entry) return failure(`No action "${id}". Search for it first.`);
+  if (entry.browserOnly) return browserOnly(entry);
+  return json(describeAction(entry));
+}
+
 export function describeAction(entry: ActionCatalogEntry) {
   const reads = entry.method === "GET" || entry.method === "HEAD";
+  const description = actionDescription(entry);
   return {
     id: entry.id,
     method: entry.method,
     path: entry.path,
+    ...(description ? { description } : {}),
     pathParameters: pathParameters(entry.path),
     input: entry.request.map((name) => ({
       name,
@@ -305,9 +332,10 @@ export function describeAction(entry: ActionCatalogEntry) {
   };
 }
 
-async function callAction(
-  context: Parameters<typeof buildOrganizationMcpServer>[0],
-  input: z.infer<typeof CallInput>,
+/** Run one public action in process as the caller; the route's own checks decide. */
+export async function callOrganizationAction(
+  context: OrganizationActionContext,
+  input: z.infer<typeof OrganizationActionCallInput>,
 ): Promise<CallToolResult> {
   const entry = findAction(input.id);
   if (!entry) return failure(`No action "${input.id}". Search for it first.`);

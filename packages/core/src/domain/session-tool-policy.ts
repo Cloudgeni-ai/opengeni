@@ -22,6 +22,7 @@ import {
   resolveAgentMediaToolSurface,
   resolveWorkspaceAgentHumanInputEnabled,
   resolveWorkspaceSessionToolDefaults,
+  workspaceSettingsAllowCreditModels,
   type AgentFunctionToolName,
   type AgentToolEnvironment,
   type AgentMediaAttachment,
@@ -464,6 +465,7 @@ export function sessionEffectiveToolProjectionInput(
     ? webSearchToolPlan(context.settings, {
         hostedWebSearch: model?.model.hostedWebSearch ?? context.settings.webSearchEnabled,
         transportHostedSearch: model?.provider.kind === "xai-subscription",
+        creditsDisabled: !workspaceSettingsAllowCreditModels(context.workspaceSettings),
       })
     : { hostedWebSearch: false, providerTools: [] };
   if (model?.provider.kind === "xai-subscription") {

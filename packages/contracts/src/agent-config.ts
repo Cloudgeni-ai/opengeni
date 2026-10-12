@@ -288,6 +288,7 @@ export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   sandbox_provision: "workspaceAdmin",
   connected_machine_remove: "workspaceAdmin",
   connected_machine_enroll_token: "workspaceAdmin",
+  connected_machine_enable_screen_control: "workspaceAdmin",
   project_list: "workspaceAdmin",
   project_get: "workspaceAdmin",
   project_create: "workspaceAdmin",
@@ -295,6 +296,10 @@ export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   project_reorder: "workspaceAdmin",
   project_delete: "workspaceAdmin",
   session_set_project: "workspaceAdmin",
+  // Present only while a person has given the session admin access.
+  admin_actions_search: "workspaceAdmin",
+  admin_action_describe: "workspaceAdmin",
+  admin_action_call: "workspaceAdmin",
   rig_list: "workspaceAdmin",
   rig_get: "workspaceAdmin",
   rig_propose_change: "workspaceAdmin",

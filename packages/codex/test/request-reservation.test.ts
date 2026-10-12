@@ -91,6 +91,30 @@ describe("one-shot Codex physical request admission", () => {
     expect(settlements.map((value) => value.outcome)).toEqual(["refused", "response_received"]);
   });
 
+  test.each([
+    [503, "refused", "upstream connect error or disconnect/reset before headers"],
+    [507, "refused", "exceeded request buffer limit while retrying upstream"],
+    [500, "refused", '{"error":{"message":"server error"}}'],
+    [504, "unknown", "upstream request timeout"],
+    [408, "unknown", "request timeout"],
+    [409, "unknown", '{"error":{"message":"request in progress"}}'],
+  ] as const)(
+    "a provider %i answer settles as %s, so only a definite error is retried",
+    async (status, expected, body) => {
+      const settlements: CodexProviderRequestSettlement[] = [];
+      const response = await dispatch(
+        context({
+          onProviderRequestSettled: (value) => {
+            settlements.push(value);
+          },
+        }),
+        async () => new Response(body, { status }),
+      );
+      expect(response.status).toBe(status);
+      expect(settlements.map((value) => value.outcome)).toEqual([expected]);
+    },
+  );
+
   test("cancellation during reservation never spends the permit on fetch", async () => {
     const controller = new AbortController();
     let fetches = 0;

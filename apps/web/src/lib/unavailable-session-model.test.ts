@@ -136,7 +136,7 @@ describe("unavailableModelName", () => {
       "Nemotron 3 Super 120B A12B",
     );
     expect(unavailableModelName("organization-claude-subscription/claude-opus-5-5")).toBe(
-      "Claude Opus 5.5",
+      "Opus 5.5",
     );
     expect(unavailableModelName("custom-model")).toBe("Custom Model");
   });

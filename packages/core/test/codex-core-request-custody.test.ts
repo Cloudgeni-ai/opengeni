@@ -3,7 +3,10 @@ import { fetchCodexModels, type CodexFetch } from "@opengeni/codex";
 import { configuredModels, withCodexCatalogProvider } from "@opengeni/config";
 import * as dbApi from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
-import { loadWorkspaceCodexCatalogReadiness } from "../src/codex-model-availability";
+import {
+  refreshCoreCodexModelEntitlements,
+  loadWorkspaceCodexCatalogReadiness,
+} from "../src/codex-model-availability";
 
 const settings = testSettings({ codexSubscriptionEnabled: true });
 const models = configuredModels(withCodexCatalogProvider(settings)).filter(
@@ -46,6 +49,7 @@ function fixture(fetchImpl: CodexFetch) {
   );
   restores.push(() => wrapper.mockRestore());
   const deps: NonNullable<Parameters<typeof loadWorkspaceCodexCatalogReadiness>[4]> = {
+    recordModels: mock(async () => true),
     disposition: async () => "core",
     legacyActive: async () => {
       throw new Error("no legacy access");
@@ -76,6 +80,51 @@ function fixture(fetchImpl: CodexFetch) {
 }
 
 describe("core model discovery physical request custody", () => {
+  test("placement reads the picker's per-credential facts and refresh invalidates old entitlements", async () => {
+    let slugs = [models[0]!.upstreamModelId];
+    const upstream = mock<CodexFetch>(async () =>
+      Response.json({ models: slugs.map((slug) => ({ slug })) }),
+    );
+    const f = fixture(upstream);
+    const read = () => refreshCoreCodexModelEntitlements(db, settings, f.context, f.deps);
+    await f.read();
+    await read();
+    expect(f.deps.recordModels).toHaveBeenCalledTimes(1);
+    expect((f.deps.recordModels as ReturnType<typeof mock>).mock.calls[0]?.[3]).toMatchObject({
+      refreshGeneration: 1,
+      slugs: [models[0]!.upstreamModelId],
+    });
+    expect(upstream).toHaveBeenCalledTimes(1);
+    const token = await f.deps.getCoreToken(db, settings, f.context, f.connection.connectionId);
+    f.deps.getCoreToken = async () => ({ ...token, credentialVersion: 2 });
+    slugs = models.map((model) => model.upstreamModelId);
+    slugs.push("retired-but-accepted-model");
+    await read();
+    expect((f.deps.recordModels as ReturnType<typeof mock>).mock.calls[1]?.[3]).toMatchObject({
+      refreshGeneration: 2,
+      slugs,
+    });
+    expect(upstream).toHaveBeenCalledTimes(2);
+  });
+
+  test("failed catalogs, maintenance, and personal connections produce no entitlement exclusions", async () => {
+    const upstream = mock<CodexFetch>(async () => {
+      throw new Error("unreachable");
+    });
+    const f = fixture(upstream);
+    await refreshCoreCodexModelEntitlements(db, settings, f.context, f.deps);
+    expect(f.deps.recordModels).not.toHaveBeenCalled();
+    f.connection.ownership = "personal";
+    await refreshCoreCodexModelEntitlements(db, settings, f.context, f.deps);
+    expect(f.deps.recordModels).not.toHaveBeenCalled();
+    f.deps.disposition = async () => "maintenance";
+    f.deps.listServing = async () => {
+      throw new Error("must not read disabled core");
+    };
+    await refreshCoreCodexModelEntitlements(db, settings, f.context, f.deps);
+    expect(f.deps.recordModels).not.toHaveBeenCalled();
+    expect(upstream).toHaveBeenCalledTimes(1);
+  });
   test("one cache miss reserves under the exact caller; cached catalog is not another request", async () => {
     const upstream = mock<CodexFetch>(async () =>
       Response.json({ models: models.map((model) => ({ slug: model.upstreamModelId })) }),

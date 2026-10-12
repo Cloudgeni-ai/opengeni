@@ -296,6 +296,7 @@ export function SuperGrokConnectPage({
   fields,
   blockedReason,
   onAccountConnected,
+  scope: fixedScope,
 }: {
   grok: SuperGrokSubscriptions;
   places: SuperGrokPlaces;
@@ -307,9 +308,12 @@ export function SuperGrokConnectPage({
   blockedReason?: string | null;
   /** Runs once the account is connected, before its page opens, even if this page was left. */
   onAccountConnected?: ((accountId: string | null) => Promise<void> | void) | undefined;
+  /** Connect with this scope and don't offer the choice. */
+  scope?: "workspace" | "user" | undefined;
 }) {
   const organization = Boolean(grok.organizationId);
-  const [scope, setScope] = useState<"workspace" | "user">("workspace");
+  const [chosenScope, setScope] = useState<"workspace" | "user">("workspace");
+  const scope = fixedScope ?? chosenScope;
   const [connected, setConnected] = useState(false);
   const active = useRef(true);
   useEffect(() => {
@@ -353,7 +357,7 @@ export function SuperGrokConnectPage({
     >
       <FieldStack>
         {fields}
-        {!organization ? (
+        {!organization && !fixedScope ? (
           <SubscriptionConnectScope
             value={scope}
             disabled={signingIn}

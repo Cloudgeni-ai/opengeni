@@ -25,6 +25,7 @@ import { getComposerSendBlocker } from "@/lib/composer-send-blocking";
 import { isEditableArtifactKind } from "@/lib/artifact-catalog";
 import type { NativeConnectRequest } from "@/components/capabilities/native-connect-setup";
 import { FailureRecoveryBoundary } from "@/components/session/failure-recovery-boundary";
+import { useMessageSenderRenderer } from "@/components/session/message-senders";
 import { createFailedSessionRetry, type FailedSessionRetryInput } from "@/lib/failed-session-retry";
 import { useSessionStartupTimeline } from "@/lib/session-startup-timeline";
 import { failedSessionCopy } from "@/lib/failed-session-copy";
@@ -48,7 +49,12 @@ import {
 // The session view — live timeline plus one compact prompt queue above the
 // composer. Enter queues and Cmd/Ctrl+Enter steers; failed sessions stay
 // honest (reason + retry history) and revivable from the same composer.
-import { LightboxProvider, type WorkspaceTab } from "@opengeni/react";
+import {
+  LightboxProvider,
+  sessionAdmissionBlocked,
+  sessionDisplayStatus,
+  type WorkspaceTab,
+} from "@opengeni/react";
 import { MACHINES_SESSION_POLL_MS } from "@opengeni/react/machines";
 import {
   ApprovalSurface,
@@ -2491,7 +2497,8 @@ function SessionChatPane(props: {
           : personalAttachment.requiresDecision
             ? "Finish the personal access choice in the composer first."
             : null,
-    awaitingHuman: props.session.status === "requires_action",
+    awaitingHuman:
+      props.session.status === "requires_action" && !sessionAdmissionBlocked(props.session),
     extras: {
       ...(composer.policy ?? {}),
       ...((props.queue.effectiveControl ?? props.session.effectiveControl)?.controlEtag
@@ -2774,7 +2781,7 @@ function SessionChatPane(props: {
     queue: props.queue.snapshot,
   });
   const timelineEmptyStateCopy = sessionTimelineEmptyStateCopy(
-    props.session.status,
+    sessionDisplayStatus(props.session),
     (props.queue.effectiveControl ?? props.session.effectiveControl).state === "paused",
   );
 
@@ -2791,6 +2798,11 @@ function SessionChatPane(props: {
   const workspaceAccountId = context.workspaces.find(
     (candidate) => candidate.id === props.session.workspaceId,
   )?.accountId;
+  const renderMessageSender = useMessageSenderRenderer(
+    context.client,
+    props.session.workspaceId,
+    context.accessContext.subjectId,
+  );
   const commandContext = useMemo(
     () => ({
       client: context.client,
@@ -3121,6 +3133,7 @@ function SessionChatPane(props: {
                   >
                     <MessageTimeline
                       resolveLink={consoleLinkResolver}
+                      renderMessageSender={renderMessageSender}
                       allowanceExhaustedLabels={CONSOLE_TIMELINE_ALLOWANCE_LABELS}
                       trailingState={
                         <>

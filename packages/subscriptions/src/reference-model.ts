@@ -48,7 +48,7 @@ export type ConnectionScope =
 export type Quota =
   | { kind: "available" }
   | { kind: "unknown" }
-  | { kind: "exhausted"; resetsAt: number };
+  | { kind: "exhausted"; resetsAt: number | null };
 
 export type Connection = {
   id: string;
@@ -67,9 +67,13 @@ export type Connection = {
     allocatorEnabled: boolean;
     managedByWorkspaceId?: string | null;
   }[];
-  /** Per-model cooldowns (Claude reports model-specific limits). */
+  /** Per-model cooldowns (some providers report model-specific limits). */
   modelCooldowns?: Readonly<Record<ModelId, number>>;
   quota: Quota;
+  /** Explicit consent to spend credits after the included allowance (extra-credits providers only). */
+  extraCreditsEnabled?: boolean;
+  /** A provider refusal blocks even paid credits until this deadline. */
+  refusalUntil?: number | null;
 };
 
 export type Workspace = {
@@ -83,7 +87,17 @@ export type Workspace = {
 
 export type Person = { id: string; active: boolean; personalFallbackOptIn: boolean };
 
-export type Model = { id: ModelId; provider: ProviderId; reasoningLevels: readonly string[] };
+/** The contract's closed set of model tiers (D-35). Tiers compare by equality only. */
+export type Tier = "frontier" | "standard" | "fast";
+const TIERS: readonly string[] = ["frontier", "standard", "fast"];
+
+export type Model = {
+  id: ModelId;
+  provider: ProviderId;
+  reasoningLevels: readonly string[];
+  /** The tier its provider declares; absent or null when it declares none. */
+  tier?: Tier | null;
+};
 
 export type SessionBinding = { connectionId: string; modelId: ModelId; lastUsedAt: number };
 
@@ -130,7 +144,9 @@ export type WaitReason =
   /** The explicit choice can never serve this work until a person changes something (D-24). */
   | "pinned_account_ineligible"
   | "no_eligible_capacity"
-  | "model_not_allowed";
+  | "model_not_allowed"
+  /** Decided before placement (an unusable accepted authority); never produced here. */
+  | "accepted_authority_unavailable";
 
 export type Decision =
   | {
@@ -196,7 +212,20 @@ export function isCacheWarm(world: World, binding: SessionBinding, now: number):
 
 function hasCapacity(connection: Connection, now: number): boolean {
   // Unknown quota stays unknown: it is neither availability nor exhaustion (SUB-ELIG-06).
-  return connection.quota.kind !== "exhausted" || connection.quota.resetsAt <= now;
+  return (
+    connection.quota.kind !== "exhausted" ||
+    (connection.quota.resetsAt !== null && connection.quota.resetsAt <= now) ||
+    spendsCredits(connection, now)
+  );
+}
+
+function spendsCredits(connection: Connection, now: number): boolean {
+  return (
+    connection.extraCreditsEnabled === true &&
+    (connection.refusalUntil == null || connection.refusalUntil <= now) &&
+    connection.quota.kind === "exhausted" &&
+    (connection.quota.resetsAt === null || connection.quota.resetsAt > now)
+  );
 }
 
 function modelAllowed(world: World, session: Session, modelId: ModelId): boolean {
@@ -393,8 +422,6 @@ function pick(world: World, session: Session, candidates: Connection[]): Connect
     if (primary) return primary;
   }
   const ranked = [...candidates].sort((left, right) => {
-    const known = Number(left.quota.kind === "unknown") - Number(right.quota.kind === "unknown");
-    if (known !== 0) return known;
     const spread = spreadHash(session.id, left.id) - spreadHash(session.id, right.id);
     if (spread !== 0) return spread;
     return left.id < right.id ? -1 : left.id > right.id ? 1 : 0;
@@ -436,15 +463,55 @@ export function nearestReasoningLevel(
   return levels[best]!;
 }
 
-/** Candidate models in failover order: the preferred model, then (if allowed) its fallbacks. */
+/**
+ * D-35: the fallback order of a preferred model the settings name no entry
+ * for. Only with cross-provider failover on, and only when the preferred
+ * model declares a tier: every model of another provider declaring exactly
+ * that tier (Q-04: never a lower or higher one), provider by provider in
+ * sorted id order, each provider's models in the world's order, at most 8.
+ * The preferred model's own provider contributes nothing (same-provider
+ * model fallback is explicit only).
+ */
+export function derivedFallbacks(
+  world: World,
+  settings: SubscriptionSettings,
+  preferredModelId: ModelId,
+): ModelId[] {
+  const preferred = byId(world.models, preferredModelId);
+  if (!settings.crossProviderFailover || !preferred) return [];
+  const tier = preferred.tier;
+  if (typeof tier !== "string" || !TIERS.includes(tier)) return [];
+  const otherProviders = [...new Set(world.models.map((model) => model.provider))]
+    .filter((provider) => provider !== preferred.provider)
+    .sort();
+  const derived: ModelId[] = [];
+  for (const provider of otherProviders) {
+    for (const model of world.models) {
+      if (model.provider !== provider || model.tier !== tier) continue;
+      if (model.id === preferredModelId || derived.includes(model.id)) continue;
+      derived.push(model.id);
+    }
+  }
+  return derived.slice(0, 8);
+}
+
+/**
+ * Candidate models in failover order: the preferred model, then (if allowed)
+ * its fallbacks. An explicit entry for the preferred model, even an empty
+ * list, is the order; only a missing entry derives one (D-35).
+ */
 export function candidateModels(world: World, session: Session): ModelId[] {
   const settings = effectiveSettings(world.settings, session.workspaceId).values;
   const preferred = session.preferredModelId;
   if (session.onlyThisModel || session.pinnedConnectionId) return [preferred];
   const preferredProvider = byId(world.models, preferred)?.provider;
+  const explicit = Object.prototype.hasOwnProperty.call(settings.fallbackOrder, preferred);
+  const order = explicit
+    ? (settings.fallbackOrder[preferred] ?? [])
+    : derivedFallbacks(world, settings, preferred);
   // Same-provider fallback models are always allowed; other providers only
   // when cross-provider failover is on (SUB-FAIL-02, SUB-FAIL-03).
-  const fallbacks = (settings.fallbackOrder[preferred] ?? []).filter(
+  const fallbacks = order.filter(
     (modelId, index, all) =>
       modelId !== preferred &&
       all.indexOf(modelId) === index &&
@@ -452,64 +519,6 @@ export function candidateModels(world: World, session: Session): ModelId[] {
         settings.crossProviderFailover),
   );
   return [preferred, ...fallbacks];
-}
-
-/**
- * The earliest reset among accounts automatic selection could use for these
- * models. A personal account counts only under the opt-in fallback (SUB-SEL-02).
- */
-function earliestReset(
-  world: World,
-  session: Session,
-  models: ModelId[],
-  personalFallback: boolean,
-  now: number,
-): number | null {
-  let earliest: number | null = null;
-  for (const connection of world.connections) {
-    if (connection.ownership.kind === "personal" && !personalFallback) continue;
-    if (!isAuthorized(world, session, connection)) continue;
-    for (const modelId of models) {
-      const model = byId(world.models, modelId);
-      if (
-        !model ||
-        model.provider !== connection.provider ||
-        !connection.entitledModels.includes(modelId) ||
-        (connection.allowedModelIds != null && !connection.allowedModelIds.includes(modelId))
-      ) {
-        continue;
-      }
-      if (connection.assignmentPolicies !== undefined) {
-        const source =
-          effectiveSettings(world.settings, session.workspaceId).values.inferenceSource?.[
-            connection.provider
-          ] ?? "automatic";
-        const assignments = connection.assignmentPolicies.filter(
-          (policy) =>
-            policy.workspaceId === session.workspaceId &&
-            (source === "automatic" || policy.inferencePool === source),
-        );
-        if (
-          !assignments.some(
-            (policy) =>
-              policy.allocatorEnabled &&
-              (policy.allowedModelIds === null || policy.allowedModelIds.includes(modelId)) &&
-              !policy.excludedModelIds?.includes(modelId),
-          )
-        ) {
-          continue;
-        }
-      }
-      const cooldownUntil = connection.modelCooldowns?.[modelId] ?? -Infinity;
-      const quotaUntil =
-        connection.quota.kind === "exhausted" ? connection.quota.resetsAt : -Infinity;
-      const availableAt = Math.max(cooldownUntil, quotaUntil);
-      if (availableAt > now) {
-        earliest = earliest === null ? availableAt : Math.min(earliest, availableAt);
-      }
-    }
-  }
-  return earliest;
 }
 
 /**
@@ -555,9 +564,15 @@ export function pinnedNeverServes(
 function futureResetTimes(world: World, now: number): number[] {
   const times = new Set<number>();
   for (const connection of world.connections) {
-    if (connection.quota.kind === "exhausted" && connection.quota.resetsAt > now) {
+    if (
+      connection.quota.kind === "exhausted" &&
+      connection.quota.resetsAt !== null &&
+      connection.quota.resetsAt > now
+    ) {
       times.add(connection.quota.resetsAt);
     }
+    if (connection.refusalUntil != null && connection.refusalUntil > now)
+      times.add(connection.refusalUntil);
     for (const until of Object.values(connection.modelCooldowns ?? {})) {
       if (until > now) times.add(until);
     }
@@ -581,7 +596,10 @@ function personalFallbackFor(world: World, session: Session): boolean {
   if (session.ownerId === null) return false;
   const settings = effectiveSettings(world.settings, session.workspaceId).values;
   return (
-    settings.personalFallbackAllowed && !!byId(world.people, session.ownerId)?.personalFallbackOptIn
+    (byId(world.workspaces, session.workspaceId)?.kind === "personal" &&
+      byId(world.workspaces, session.workspaceId)?.ownerId === session.ownerId) ||
+    (settings.personalFallbackAllowed &&
+      !!byId(world.people, session.ownerId)?.personalFallbackOptIn)
   );
 }
 
@@ -643,16 +661,34 @@ export function decide(world: World, sessionId: string, now: number): Decision {
     canServe(world, session, bound, binding.modelId, now);
 
   // Stickiness while the cache is warm (SUB-STICK-02, SUB-STICK-03, SUB-FAIL-07).
-  if (binding && bindingServable && !session.reselectionPoint && isCacheWarm(world, binding, now)) {
+  const includedAlternative = (modelId: string) =>
+    world.connections.some(
+      (connection) =>
+        (connection.ownership.kind === "shared" || personalFallback) &&
+        !spendsCredits(connection, now) &&
+        canServe(world, session, connection, modelId, now),
+    );
+  if (
+    binding &&
+    bound &&
+    bindingServable &&
+    !session.reselectionPoint &&
+    isCacheWarm(world, binding, now) &&
+    (!spendsCredits(bound, now) || !includedAlternative(binding.modelId))
+  ) {
     return run(binding.connectionId, binding.modelId, "sticky");
   }
 
   // Order: each candidate model on shared accounts, then (opt-in) on the
   // owner's personal accounts, before moving to the next model (D-12).
   for (const [index, modelId] of models.entries()) {
-    const servable = world.connections.filter((connection) =>
-      canServe(world, session, connection, modelId, now),
+    const eligible = world.connections.filter(
+      (connection) =>
+        (connection.ownership.kind === "shared" || personalFallback) &&
+        canServe(world, session, connection, modelId, now),
     );
+    const included = eligible.filter((connection) => !spendsCredits(connection, now));
+    const servable = included.length ? included : eligible;
     const shared = servable.filter((connection) => connection.ownership.kind === "shared");
     const personal = servable.filter((connection) => connection.ownership.kind === "personal");
     const chosen =
@@ -675,7 +711,15 @@ export function decide(world: World, sessionId: string, now: number): Decision {
   return {
     kind: "wait",
     reason: "no_eligible_capacity",
-    earliestResetAt: earliestReset(world, session, allowedModels, personalFallback, now),
+    earliestResetAt: earliestRunnableAt(world, now, (at) =>
+      allowedModels.some((modelId) =>
+        world.connections.some(
+          (connection) =>
+            (connection.ownership.kind === "shared" || personalFallback) &&
+            canServe(world, session, connection, modelId, at),
+        ),
+      ),
+    ),
   };
 }
 
@@ -725,14 +769,12 @@ export function checkDecision(
   const models = candidateModels(world, session);
   const fail = (requirement: string, message: string) => violations.push({ requirement, message });
 
-  const personalFallback =
-    session.ownerId !== null &&
-    settings.personalFallbackAllowed &&
-    !!byId(world.people, session.ownerId)?.personalFallbackOptIn;
-  const servableShared = (modelId: ModelId) =>
+  const personalFallback = personalFallbackFor(world, session);
+  const servableShared = (modelId: ModelId, credits: boolean) =>
     world.connections.some(
       (connection) =>
         connection.ownership.kind === "shared" &&
+        (credits || !spendsCredits(connection, now)) &&
         canServe(world, session, connection, modelId, now),
     );
   const servableAutomatically = (modelId: ModelId) =>
@@ -790,15 +832,30 @@ export function checkDecision(
       }
       if (
         connection.ownership.kind === "personal" &&
-        (!personalFallback || servableShared(decision.modelId))
+        (!personalFallback || servableShared(decision.modelId, spendsCredits(connection, now)))
       ) {
         fail("SUB-SEL-02", "used a personal account without an explicit choice or opt-in fallback");
       }
+    }
+    const includedAlternative = (modelId: string) =>
+      world.connections.some(
+        (candidate) =>
+          (candidate.ownership.kind === "shared" || personalFallback) &&
+          !spendsCredits(candidate, now) &&
+          canServe(world, session, candidate, modelId, now),
+      );
+    if (
+      !session.pinnedConnectionId &&
+      spendsCredits(connection, now) &&
+      includedAlternative(decision.modelId)
+    ) {
+      fail("SUB-CREDITS-01", "spent extra credits while an eligible account had included capacity");
     }
     if (binding && bindingWarm && !session.pinnedConnectionId) {
       const bound = byId(world.connections, binding.connectionId);
       const stillServable =
         !!bound &&
+        (!spendsCredits(bound, now) || !includedAlternative(binding.modelId)) &&
         models.includes(binding.modelId) &&
         canServe(world, session, bound, binding.modelId, now);
       if (

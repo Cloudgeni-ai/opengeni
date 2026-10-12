@@ -12,6 +12,7 @@ import { ActivityIndicator, RefreshControl, ScrollView, Text, TextInput, View } 
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useAccount } from "@/account";
 import { cachedLists, rememberLists } from "@/session-list-cache";
+import { EMPTY_SESSION_LISTS, useSessionPinToggle, type SessionLists } from "@/session-pins";
 import { AppThemeProvider } from "@/theme";
 import { WorkspaceSwitcherBlock } from "@/workspace-switcher";
 
@@ -23,17 +24,18 @@ export default function SessionsScreen() {
   );
 }
 
-/* The web rail's session list at phone width: search, then the workspace's
-   projects in their server order (running sessions first in each), then
-   Default for unfiled sessions (shared grouping rules). */
+/* The web rail's session list at phone width: search, the person's pinned
+   chats, then the workspace's projects in their server order (running
+   sessions first in each), then Default for unfiled sessions (shared grouping
+   rules). A long press on a row pins or unpins it, as on the web. */
 function Sessions() {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
   const insets = useSafeAreaInsets();
   const { client, models, workspaceId } = useAccount();
   // The last list paints at once; refreshes run quietly behind it.
-  const [sessions, setSessions] = useState<Session[]>(
-    () => cachedLists(workspaceId).sessions ?? [],
+  const [lists, setLists] = useState<SessionLists>(
+    () => cachedLists(workspaceId).sessions ?? EMPTY_SESSION_LISTS,
   );
   const [projects, setProjects] = useState<Channel[]>(
     () => cachedLists(workspaceId).projects ?? [],
@@ -45,13 +47,15 @@ function Sessions() {
   const load = useCallback(async () => {
     if (!workspaceId) return;
     try {
-      const [list, channels] = await Promise.all([
-        // Top-level conversations, as web's rail: sub-agents open from their parent.
-        client.listSessions(workspaceId, { limit: 100, parentSessionId: null }),
+      const [page, channels] = await Promise.all([
+        // Top-level conversations, as web's rail: sub-agents open from their
+        // parent. The page also carries every pin, wherever it is.
+        client.listSessionPage(workspaceId, { limit: 100, parentSessionId: null }),
         client.listChannels(workspaceId).catch(() => [] as Channel[]),
       ]);
-      rememberLists(workspaceId, { sessions: list, projects: channels });
-      setSessions(list);
+      const next = { pinned: page.pinned, sessions: page.sessions };
+      rememberLists(workspaceId, { sessions: next, projects: channels });
+      setLists(next);
       setProjects(channels);
     } finally {
       setLoaded(true);
@@ -60,7 +64,7 @@ function Sessions() {
 
   useEffect(() => {
     const cached = cachedLists(workspaceId);
-    setSessions(cached.sessions ?? []);
+    setLists(cached.sessions ?? EMPTY_SESSION_LISTS);
     setProjects(cached.projects ?? []);
     setLoaded(cached.sessions !== undefined);
   }, [workspaceId]);
@@ -71,15 +75,26 @@ function Sessions() {
     }, [load]),
   );
 
-  const sections = useMemo(() => {
+  // Keep the cache in step with pin changes, so returning shows them at once.
+  useEffect(() => {
+    if (workspaceId && loaded) rememberLists(workspaceId, { sessions: lists });
+  }, [lists, loaded, workspaceId]);
+  const togglePin = useSessionPinToggle({ client, workspaceId, setLists });
+
+  const { pinned, sections } = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    const visible = needle
-      ? sessions.filter((session) => sessionDisplayTitle(session).toLowerCase().includes(needle))
-      : sessions;
-    // As on web, projects show even when empty, so a new one is visible at once.
-    return groupSessionsByProject(visible, projects, { keepEmpty: !needle });
-  }, [projects, query, sessions]);
+    const matches = (session: Session) =>
+      !needle || sessionDisplayTitle(session).toLowerCase().includes(needle);
+    return {
+      pinned: lists.pinned.filter(matches),
+      // As on web, projects show even when empty, so a new one is visible at once.
+      sections: groupSessionsByProject(lists.sessions.filter(matches), projects, {
+        keepEmpty: !needle,
+      }),
+    };
+  }, [lists, projects, query]);
   const open = (sessionId: string) => router.push(`/session/${sessionId}`);
+  const onTogglePin = (session: Session) => void togglePin(session);
 
   return (
     <>
@@ -135,41 +150,31 @@ function Sessions() {
             style={{ ...fontStyle(theme), flex: 1, fontSize: 14, color: c.fg }}
           />
         </View>
+        {pinned.length > 0 ? (
+          <View style={{ marginTop: 16 }}>
+            <SectionHeader icon="pin" name="Pinned" count={pinned.length} />
+            <SessionRowList
+              sessions={pinned}
+              models={models}
+              onOpen={open}
+              onTogglePin={onTogglePin}
+            />
+          </View>
+        ) : null}
         {sections.map((section) => (
           <View key={section.key} style={{ marginTop: 16 }}>
-            <View
-              style={{
-                flexDirection: "row",
-                alignItems: "center",
-                gap: 6,
-                paddingHorizontal: 4,
-                marginBottom: 2,
-              }}
-            >
-              <Icon name="folder" size={13} color={c["fg-subtle"]} />
-              <Text
-                accessibilityRole="header"
-                numberOfLines={1}
-                style={{
-                  ...fontStyle(theme, 600),
-                  fontSize: 12,
-                  lineHeight: 16,
-                  color: c["fg-muted"],
-                  flexShrink: 1,
-                }}
-              >
-                {section.name}
-              </Text>
-              <Text style={{ ...fontStyle(theme), fontSize: 11, color: c["fg-subtle"] }}>
-                {section.sessions.length}
-              </Text>
-            </View>
-            <SessionRowList sessions={section.sessions} models={models} onOpen={open} />
+            <SectionHeader icon="folder" name={section.name} count={section.sessions.length} />
+            <SessionRowList
+              sessions={section.sessions}
+              models={models}
+              onOpen={open}
+              onTogglePin={onTogglePin}
+            />
           </View>
         ))}
         {!loaded ? (
           <ActivityIndicator style={{ marginTop: 32 }} color={c["fg-muted"]} />
-        ) : sections.length === 0 ? (
+        ) : sections.length === 0 && pinned.length === 0 ? (
           <Text
             style={{
               ...fontStyle(theme),
@@ -184,5 +189,39 @@ function Sessions() {
         ) : null}
       </ScrollView>
     </>
+  );
+}
+
+function SectionHeader(props: { icon: "pin" | "folder"; name: string; count: number }) {
+  const theme = useNativeTimelineTheme();
+  const c = theme.colors;
+  return (
+    <View
+      style={{
+        flexDirection: "row",
+        alignItems: "center",
+        gap: 6,
+        paddingHorizontal: 4,
+        marginBottom: 2,
+      }}
+    >
+      <Icon name={props.icon} size={13} color={c["fg-subtle"]} />
+      <Text
+        accessibilityRole="header"
+        numberOfLines={1}
+        style={{
+          ...fontStyle(theme, 600),
+          fontSize: 12,
+          lineHeight: 16,
+          color: c["fg-muted"],
+          flexShrink: 1,
+        }}
+      >
+        {props.name}
+      </Text>
+      <Text style={{ ...fontStyle(theme), fontSize: 11, color: c["fg-subtle"] }}>
+        {props.count}
+      </Text>
+    </View>
   );
 }

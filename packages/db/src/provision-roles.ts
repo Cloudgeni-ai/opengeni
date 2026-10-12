@@ -546,6 +546,7 @@ async function grantAppRoleIfSchemaExists(
     "capture_legacy_codex_turn_sources(uuid,uuid)",
     "list_organization_workspace_ids(uuid)",
     "list_organization_codex_workspace_ids(uuid)",
+    "list_organization_subscription_workspace_ids(uuid)",
     "organization_workspace_command(jsonb)",
     "authorize_organization_shared_workspace_administration(uuid,uuid,text)",
     "resolve_organization_workspace_removal_subject(uuid,text,uuid)",
@@ -2155,6 +2156,37 @@ BEGIN
       'subscription_codex_task_authority_v2(uuid,uuid,uuid,text)',
       'subscription_codex_revision_authority_v2(uuid,uuid,uuid,bigint)',
       'manage_subscription_codex_personal(uuid,uuid,text,uuid,text,text,boolean,integer)',
+      'subscription_codex_reach(uuid,uuid)',
+      'set_subscription_codex_reach(uuid,uuid,boolean,boolean)',
+      'subscription_core_owner_capability_held(text,uuid,text[],text,uuid,boolean)',
+      'subscription_core_owner_membership_held(uuid,uuid)',
+      'subscription_core_refresh_write_allowed(text,uuid,uuid,uuid)',
+      'begin_subscription_core_refresh(text,uuid,uuid,uuid,uuid,text,text,uuid,text,bigint)',
+      'persist_subscription_core_refresh(text,uuid,uuid,uuid,uuid,uuid,bigint,text,timestamptz,timestamptz)',
+      'persist_subscription_core_refresh_with_plan(text,uuid,uuid,uuid,uuid,uuid,bigint,text,timestamptz,timestamptz,text)',
+      'fail_subscription_core_refresh(text,uuid,uuid,uuid,uuid,uuid,bigint,text)',
+      'quarantine_subscription_core_connection(text,uuid,uuid,uuid,uuid,uuid,text,bigint,bigint,text,text,timestamptz)',
+      'recover_subscription_core_connection_health(text,uuid,uuid,uuid,uuid)',
+      'subscription_core_acceptance_authority_v2(text,uuid,uuid,uuid,text)',
+      'subscription_core_task_authority_v2(text,uuid,uuid,uuid,text)',
+      'subscription_core_revision_authority_v2(uuid,uuid,uuid,bigint)',
+      'read_subscription_core_connection_credential(text,uuid,uuid,uuid,uuid,uuid,text,bigint)',
+      'begin_subscription_core_connection_refresh(text,uuid,uuid,uuid,uuid,uuid,text,bigint)',
+      'persist_subscription_core_connection_refresh(text,uuid,uuid,uuid,bigint,text,timestamptz,timestamptz)',
+      'fail_subscription_core_connection_refresh(text,uuid,uuid,uuid,bigint,text)',
+      'connect_subscription_core_personal(text,uuid,uuid,text,text,text,text,text,jsonb,timestamptz,timestamptz,text,text,text)',
+      'connect_subscription_core_personal(text,uuid,uuid,text,text,text,text,text,jsonb,timestamptz,timestamptz,text,text,text,text)',
+      'subscription_authority_carrier_inserted_now(text,uuid,uuid,bigint)',
+      'disconnect_subscription_core_connection(text,uuid,uuid,text,uuid)',
+      'manage_subscription_core_personal(text,uuid,uuid,text,uuid,text,text,boolean,integer)',
+      'subscription_core_personal_connections(text,uuid,uuid,text)',
+      'subscription_core_reach(text,uuid,uuid)',
+      'set_subscription_core_reach(text,uuid,uuid,boolean,boolean)',
+      'set_subscription_core_reach_allocator(text,uuid,uuid,boolean)',
+      'subscription_provider_cutover_committed(text)',
+      'copy_subscription_authority_compat(text,text,uuid,uuid,bigint)',
+      'read_subscription_authority_compat(text,text,uuid,uuid,bigint)',
+      'subscription_authority_compat_providers()',
       'subscription_organization_admin(uuid)',
       'subscription_people_assignment_visible(uuid,uuid,uuid,text,text)',
       'subscription_person_preference_visible(uuid,uuid,text,text)',
@@ -2163,6 +2195,7 @@ BEGIN
       'guard_subscription_connection_scope()',
       'guard_subscription_turn_session_reference()',
       'guard_subscription_connection_reference()',
+      'reset_subscription_binding_cache_clock()',
       'authorize_subscription_service_session_access(uuid,uuid,uuid,uuid,text)'
     ] LOOP
       IF to_regprocedure('opengeni_private.' || routine_signature) IS NOT NULL THEN
@@ -2191,12 +2224,45 @@ BEGIN
     -- M3 PR 3b: the writers' caller check, capability internals and the
     -- revision-authority trigger function are owner-only. Migration 0680: the
     -- cutover receipt and its owner-run trigger functions are owner-only.
+    -- Migration 0713: the provider-keyed auto-assignment apply path is
+    -- owner-only.
     -- Triggers fire without the caller holding EXECUTE.
     FOREACH routine_signature IN ARRAY ARRAY[
       'subscription_codex_writer_context(uuid,uuid,text)',
       'grant_subscription_codex_owner_capability(text,uuid,uuid,text,uuid)',
       'drop_subscription_codex_owner_capabilities(uuid)',
-      'derive_scheduled_revision_subscription_authority()'
+      'derive_scheduled_revision_subscription_authority()',
+      'subscription_core_writer_context(text,uuid,uuid,text)',
+      'grant_subscription_core_owner_capability(text,text,uuid,uuid,text,uuid)',
+      'drop_subscription_core_owner_capabilities(text,uuid)',
+      'subscription_core_connection_target(text,uuid,uuid,uuid,uuid,uuid,text,bigint)',
+      'apply_subscription_core_auto_assignments(text,uuid,uuid,boolean)',
+      -- Migration 0716: the authority marker and compatibility guards,
+      -- resolvers and deferred check are owner-only.
+      'stamp_subscription_authority_inserted_at()',
+      'keep_subscription_authority_inserted_at()',
+      'subscription_authority_compat_entry_valid(jsonb)',
+      'guard_subscription_authority_compat()',
+      'subscription_compat_turn_human(uuid,uuid)',
+      'subscription_compat_v2_has_entry(jsonb,text)',
+      'subscription_compat_receiver_source(uuid,uuid)',
+      'subscription_compat_delivery_sources(uuid,uuid,uuid,uuid,text)',
+      'subscription_compat_compaction_source(uuid,uuid)',
+      'subscription_compat_scheduled_source(uuid,uuid)',
+      'subscription_compat_carrier_sources(text,uuid,uuid,bigint)',
+      'subscription_compat_carrier_state(text,uuid,uuid,bigint)',
+      'subscription_compat_record(text,text,uuid,uuid,bigint)',
+      'subscription_compat_expected(text,timestamptz,uuid,text,uuid,bigint,text)',
+      'subscription_compat_carrier_expected(text,timestamptz,text,uuid,uuid,bigint)',
+      'subscription_compat_enter_scope(uuid,uuid)',
+      'subscription_compat_leave_scope(text[])',
+      'subscription_compat_effective(text,text,uuid,uuid,bigint)',
+      'enforce_subscription_authority_compat()',
+      -- Migration 0717: the fences' helpers are owner-only.
+      'subscription_v2_copy_matches(jsonb,jsonb)',
+      'subscription_scheduled_firing_v2(uuid,uuid,uuid,bigint)',
+      'subscription_personal_entry_serviceable(uuid,jsonb)',
+      'subscription_scheduled_run_personal_entries(uuid,uuid,uuid)'
     ] LOOP
       IF to_regprocedure('opengeni_subscription_internal.' || routine_signature) IS NOT NULL THEN
         EXECUTE format(
@@ -2232,6 +2298,13 @@ BEGIN
           WHERE oid = 'opengeni_private.claim_session_workflow_wakes(integer)'::regprocedure));
       REVOKE ALL ON FUNCTION opengeni_private.list_pending_child_terminal_wake_repairs_v1(integer,uuid,uuid) FROM PUBLIC;
       EXECUTE format('GRANT EXECUTE ON FUNCTION opengeni_private.list_pending_child_terminal_wake_repairs_v1(integer,uuid,uuid) TO %I', ${literal(role)});
+    END IF;
+    IF to_regprocedure('opengeni_private.list_quiescence_receipt_wake_repairs_v1(integer,uuid,uuid)') IS NOT NULL THEN
+      EXECUTE format('ALTER FUNCTION opengeni_private.list_quiescence_receipt_wake_repairs_v1(integer,uuid,uuid) OWNER TO %I',
+        (SELECT pg_get_userbyid(proowner) FROM pg_proc
+          WHERE oid = 'opengeni_private.claim_session_workflow_wakes(integer)'::regprocedure));
+      REVOKE ALL ON FUNCTION opengeni_private.list_quiescence_receipt_wake_repairs_v1(integer,uuid,uuid) FROM PUBLIC;
+      EXECUTE format('GRANT EXECUTE ON FUNCTION opengeni_private.list_quiescence_receipt_wake_repairs_v1(integer,uuid,uuid) TO %I', ${literal(role)});
     END IF;
     IF to_regclass('opengeni_private.session_import_batches') IS NOT NULL THEN
       EXECUTE format('REVOKE ALL ON TABLE opengeni_private.session_import_batches FROM %I', ${literal(role)});
@@ -2307,6 +2380,10 @@ BEGIN
     END IF;
     IF to_regprocedure('opengeni_private.workspace_insights_amount_fact_rows(uuid,timestamptz,timestamptz,text,text,uuid,uuid)') IS NOT NULL THEN
       REVOKE ALL ON FUNCTION opengeni_private.workspace_insights_amount_fact_rows(uuid,timestamptz,timestamptz,text,text,uuid,uuid) FROM PUBLIC;
+    END IF;
+    IF to_regprocedure('opengeni_private.private_scheduled_task_summaries(uuid,uuid,text,uuid,timestamptz,integer)') IS NOT NULL THEN
+      REVOKE ALL ON FUNCTION opengeni_private.private_scheduled_task_summaries(uuid,uuid,text,uuid,timestamptz,integer) FROM PUBLIC;
+      REVOKE ALL ON FUNCTION opengeni_private.pause_private_scheduled_task(uuid,uuid,text,uuid) FROM PUBLIC;
     END IF;
     IF to_regprocedure('opengeni_private.insights_scoped_usage_rows(uuid,uuid,timestamptz,timestamptz,text,uuid[],boolean)') IS NOT NULL THEN
       REVOKE ALL ON FUNCTION opengeni_private.insights_scoped_usage_rows(uuid,uuid,timestamptz,timestamptz,text,uuid[],boolean) FROM PUBLIC;

@@ -293,6 +293,14 @@ byte. Agent configuration is always on; a new top-level session that omits
 [Product integration](product-integration.md#configure-the-agent); the design
 and enforcement details are in [Agent configuration](design/agent-configuration.md).
 
+The Skills a session carries itself (`skills` on create) can be replaced later
+with `PUT /v1/workspaces/:workspaceId/sessions/:sessionId/skills` (SDK
+`updateSessionSkills`): send the complete list and the session's
+`toolPolicyVersion` as `expectedVersion`. The change applies from the next turn
+and is recorded as a `session.skills.updated` event with the Skill names. An
+agent can only remove Skills this way. A session Skill shadows a workspace
+Skill with the same name.
+
 ### Agent instructions and per-message application context
 
 For sessions without an agent configuration, a host has two system-level instruction scopes, composed as **deployment default

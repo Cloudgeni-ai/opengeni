@@ -42,6 +42,22 @@ import {
 } from "../src";
 
 const MIGRATION = "0689_subscription_core_codex_cutover.sql";
+const PRECURSOR = "0712_subscription_core_generic_precursor.sql";
+// 0713 keys and redefines objects 0689 creates: held back with it and
+// replayed right after it, so these cases also cover the provider-keyed
+// reach, auto-assignment and plan-change paths on cutover data.
+const PROVIDER_KEYED_REACH = "0713_subscription_core_provider_keyed_reach.sql";
+// 0714 redefines 0713's reach setters and 0715 rewrites routines 0713 and
+// 0714 create: held back and replayed after it.
+const WORKSPACE_MANAGED_ACCOUNTS = "0714_subscription_workspace_managed_organization_accounts.sql";
+const API_KEY_CONNECTIONS = "0715_subscription_core_api_key_connections.sql";
+// The format-aware personal connect writer is built from the live connect
+// writer 0715 rewrites: held back with 0715 and replayed after it.
+const PERSONAL_CONNECT_FORMAT = "0728_subscription_core_personal_connect_format.sql";
+// 0716 builds on 0712's receipts and patches its helpers; it follows 0712.
+const COMPAT = "0716_subscription_authority_compat.sql";
+// 0717 requires 0716's routines; it follows 0716.
+const FENCES = "0717_subscription_authority_fences.sql";
 const key = Buffer.alloc(32, 72);
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
@@ -697,9 +713,11 @@ describe.skipIf(!realDb)(
       owned = fixture;
       owner = postgres(owned.ownerUrl, { max: 1 });
       await owner`CREATE TABLE schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`;
-      await owner`INSERT INTO schema_migrations(name) VALUES(${MIGRATION})`;
+      // 0712 records the provider cutover receipts and requires the committed
+      // 0689, so it is withheld with it and applied by the same cutover run.
+      await owner`INSERT INTO schema_migrations(name) VALUES(${MIGRATION}), (${PRECURSOR}), (${PROVIDER_KEYED_REACH}), (${WORKSPACE_MANAGED_ACCOUNTS}), (${API_KEY_CONNECTIONS}), (${PERSONAL_CONNECT_FORMAT}), (${COMPAT}), (${FENCES})`;
       await migrate(owned.ownerUrl, undefined, { applicationDatabaseRoles: ["opengeni_app"] });
-      await owner`DELETE FROM schema_migrations WHERE name = ${MIGRATION}`;
+      await owner`DELETE FROM schema_migrations WHERE name IN (${MIGRATION}, ${PRECURSOR}, ${PROVIDER_KEYED_REACH}, ${WORKSPACE_MANAGED_ACCOUNTS}, ${API_KEY_CONNECTIONS}, ${PERSONAL_CONNECT_FORMAT}, ${COMPAT}, ${FENCES})`;
       await seed();
     }, 180_000);
 
@@ -1463,8 +1481,9 @@ describe.skipIf(!realDb)(
       });
 
       test("scope: organization reach covers workspaces created after the cutover, Personal or not as legacy did", async () => {
-        const reach = await owned.admin`SELECT connection_id::text AS connection, shared_workspaces,
-            personal_workspaces, allocator_enabled
+        // 0713 keeps the rows the cutover wrote, each keyed by its provider.
+        const reach = await owned.admin`SELECT connection_id::text AS connection, provider,
+            shared_workspaces, personal_workspaces, allocator_enabled
           FROM opengeni_private.subscription_codex_auto_assignments
           WHERE account_id = ${d.account} ORDER BY connection_id`;
         expect(new Map(reach.map((row) => [row.connection, row]))).toEqual(
@@ -1473,6 +1492,7 @@ describe.skipIf(!realDb)(
               d.allow,
               {
                 connection: d.allow,
+                provider: "codex",
                 shared_workspaces: false,
                 personal_workspaces: true,
                 allocator_enabled: true,
@@ -1482,6 +1502,7 @@ describe.skipIf(!realDb)(
               d.shared,
               {
                 connection: d.shared,
+                provider: "codex",
                 shared_workspaces: true,
                 personal_workspaces: false,
                 allocator_enabled: false,
@@ -1771,9 +1792,18 @@ describe.skipIf(!realDb)(
         expect((await disconnect(a.owner, a.w1)).outcome).toBe("not_found");
         const result = await disconnect(a.owner, a.personalOwner);
         expect(result).toMatchObject({ outcome: "removed", connectionId: a.c5 });
-        const remaining =
-          await owned.admin`select 1 from subscription_connections where id = ${a.c5}`;
-        expect(remaining).toHaveLength(0);
+        // The current disconnect contract keeps nonsecret request history,
+        // while removing credentials and making the connection ineligible.
+        const [remaining] = await owned.admin`select disconnected_at, status,
+          credential_encrypted, provider_account_id, allocator_enabled
+          from subscription_connections where id = ${a.c5}`;
+        expect(remaining).toMatchObject({
+          disconnected_at: expect.any(Date),
+          status: "disabled",
+          credential_encrypted: "",
+          provider_account_id: null,
+          allocator_enabled: false,
+        });
       });
 
       test("an organization created after the cutover is born on the core", async () => {

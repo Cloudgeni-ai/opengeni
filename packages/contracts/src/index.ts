@@ -15,6 +15,8 @@ export * from "./direct-model-provider";
 export * from "./artifact-catalog";
 export * from "./claude-subscription-usage";
 export * from "./claude-subscription-oauth";
+export * from "./model-account-settings";
+export * from "./model-account-choice";
 export * from "./workspace-integrations";
 export * from "./session-message-search";
 export * from "./session-goal-reports";
@@ -50,6 +52,7 @@ import {
   SKILL_MAX_TOTAL_BYTES,
 } from "./skill-files";
 export * from "./model-connection-access";
+export * from "./subscription-account-actions";
 export * from "./sandbox-provider-command";
 import { z } from "zod";
 import {
@@ -180,8 +183,10 @@ export {
 
 export {
   SESSION_EVENT_PAYLOAD_MAX_BYTES,
+  TOOL_CALL_OUTPUT_EVENT_MAX_BYTES,
   approximateSessionEventTokens,
   boundSessionEventPayload,
+  boundSessionEventPayloadForWrite,
   measureSessionEventJson,
   sessionEventJsonBytes,
   sessionEventMediaPreview,
@@ -911,6 +916,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "sandbox_provision",
   "connected_machine_remove",
   "connected_machine_enroll_token",
+  "connected_machine_enable_screen_control",
   "project_list",
   "project_get",
   "project_create",
@@ -918,6 +924,9 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "project_reorder",
   "project_delete",
   "session_set_project",
+  "admin_actions_search",
+  "admin_action_describe",
+  "admin_action_call",
   "rig_list",
   "rig_get",
   "rig_propose_change",
@@ -1184,6 +1193,20 @@ export const EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS = {
 } as const satisfies Partial<Record<FirstPartyMcpToolName, readonly [string, string]>>;
 
 /**
+ * Tools a session has only while it has admin access: the organization's
+ * actions, run as the owner or admin who gave it. Admin access, not the
+ * session's tool selection, decides whether they are there.
+ */
+export const SESSION_ADMIN_ACCESS_TOOL_NAMES = [
+  "admin_actions_search",
+  "admin_action_describe",
+  "admin_action_call",
+] as const satisfies readonly FirstPartyMcpToolName[];
+export const SESSION_ADMIN_ACCESS_TOOL_NAME_SET: ReadonlySet<string> = new Set<string>(
+  SESSION_ADMIN_ACCESS_TOOL_NAMES,
+);
+
+/**
  * Connector-wide tools are explicit-only except prepared bot sending. Ordinary
  * chats may select the bot's explicit channel without borrowing a personal
  * account; accepted turn/task policies and permission ceilings remain fixed.
@@ -1199,7 +1222,8 @@ export const DEFAULT_FIRST_PARTY_MCP_TOOLS = FIRST_PARTY_MCP_TOOL_NAMES.filter(
       name === "slack_bot_prepare_message" ||
       name === "slack_bot_send_prepared_message") &&
     !name.startsWith("fiken_") &&
-    !name.startsWith("atlassian_"),
+    !name.startsWith("atlassian_") &&
+    !SESSION_ADMIN_ACCESS_TOOL_NAME_SET.has(name),
 ) satisfies readonly FirstPartyMcpToolName[];
 
 export function prefixedMcpToolName(registryId: string, toolName: string): string {
@@ -2512,6 +2536,69 @@ export type UpdateOrganizationModelDefaultsRequest = z.infer<
   typeof UpdateOrganizationModelDefaultsRequest
 >;
 
+/**
+ * Whether owners and admins may give an agent session admin access. Off by
+ * default; turning it off ends every session's admin access.
+ */
+export const OrganizationAgentAdminAccess = z.object({
+  sessionAdminAccessAllowed: z.boolean(),
+  updatedAt: z.string().nullable(),
+});
+export type OrganizationAgentAdminAccess = z.infer<typeof OrganizationAgentAdminAccess>;
+
+export const UpdateOrganizationAgentAdminAccessRequest = z
+  .object({ sessionAdminAccessAllowed: z.boolean() })
+  .strict();
+export type UpdateOrganizationAgentAdminAccessRequest = z.infer<
+  typeof UpdateOrganizationAgentAdminAccessRequest
+>;
+
+/**
+ * A session's admin access as the viewer sees it. While `active`, the agent
+ * in this session can do what `grantedBy` can manage across the
+ * organization, checked live on every action.
+ */
+export const SessionAdminAccess = z.object({
+  active: z.boolean(),
+  grantedBy: z.object({ subjectId: z.string(), name: z.string().nullable() }).nullable(),
+  grantedAt: z.string().nullable(),
+  /** While active: when it ends by itself, or null for no time limit. */
+  expiresAt: z.string().nullable().default(null),
+  /** The organization allows admin access for sessions. */
+  allowed: z.boolean(),
+  /**
+   * The viewer may turn it on, or choose a new time limit while it is on: an
+   * owner or admin, in person, on their own session.
+   */
+  canGrant: z.boolean(),
+  /** The viewer may turn it off. */
+  canRevoke: z.boolean(),
+});
+export type SessionAdminAccess = z.infer<typeof SessionAdminAccess>;
+
+/** The longest time limit for a session's admin access, in hours (30 days). */
+export const MAX_SESSION_ADMIN_ACCESS_HOURS = 720;
+
+/**
+ * How long a session's admin access lasts from now: whole hours, or null for
+ * no time limit. Omitted means one hour.
+ */
+export const GrantSessionAdminAccessRequest = z
+  .object({
+    durationHours: z
+      .number()
+      .int()
+      .min(1)
+      .max(MAX_SESSION_ADMIN_ACCESS_HOURS)
+      .nullable()
+      .default(1)
+      .describe(
+        "Hours until admin access ends by itself (1 to 720), or null for no time limit. Defaults to 1.",
+      ),
+  })
+  .strict();
+export type GrantSessionAdminAccessRequest = z.input<typeof GrantSessionAdminAccessRequest>;
+
 /** The organization's compaction preference for one exact model, or null. */
 export function organizationModelCompactionThreshold(
   defaults: Pick<OrganizationModelDefaults, "modelCompactionThresholds"> | null | undefined,
@@ -2568,9 +2655,22 @@ export const WorkspaceSettingsSchema = z
     // resolveWorkspaceAgentDefaults, so a value written by a newer release can
     // never fail this bag and revert unrelated settings; writes are strict.
     sessionAgentDefaults: z.unknown().optional(),
+    // The workspace credit switch: only an explicit false blocks every model
+    // billed in Opengeni credits (current and future); absent allows them.
+    // Read leniently so a malformed value never fails the whole bag.
+    allowCreditModels: z.boolean().optional().catch(undefined),
   })
   .passthrough();
 export type WorkspaceSettings = z.infer<typeof WorkspaceSettingsSchema>;
+
+/** Whether workspace settings allow models billed in Opengeni credits. */
+export function workspaceSettingsAllowCreditModels(settings: unknown): boolean {
+  return !(
+    settings !== null &&
+    typeof settings === "object" &&
+    (settings as { allowCreditModels?: unknown }).allowCreditModels === false
+  );
+}
 
 /** Explicit agent defaults for new sessions, or null when unset/unreadable. */
 export function resolveWorkspaceAgentDefaults(settings: unknown): WorkspaceAgentDefaults | null {
@@ -2751,6 +2851,8 @@ export const UpdateWorkspaceSettingsRequest = z
     defaultSandboxImage: WorkspaceDefaultSandboxImage.nullable().optional(),
     // Agent defaults for new sessions; null clears them.
     sessionAgentDefaults: WorkspaceAgentDefaults.nullable().optional(),
+    // False blocks every model billed in Opengeni credits in this workspace.
+    allowCreditModels: z.boolean().optional(),
   })
   .passthrough();
 export type UpdateWorkspaceSettingsRequest = z.infer<typeof UpdateWorkspaceSettingsRequest>;
@@ -2764,6 +2866,9 @@ export type SetWorkspaceDefaultRigRequest = z.infer<typeof SetWorkspaceDefaultRi
 // omitted) = unrestricted for that dimension; an EMPTY array is a valid,
 // explicit total block. Entries are provider ids / exact model ids as the
 // router resolves them (see evaluateWorkspaceModelPolicy).
+// The credit switch is not part of this body: it is the workspace setting
+// `allowCreditModels` (PATCH /v1/workspaces/:workspaceId/settings), so a PUT
+// never changes it and following the organization's allowlists keeps it.
 export const UpdateWorkspaceModelPolicyRequest = z.object({
   allowedProviders: z.array(z.string().min(1).max(128)).max(64).nullable().optional(),
   allowedModels: z.array(z.string().min(1).max(256)).max(256).nullable().optional(),
@@ -2786,6 +2891,12 @@ export const WorkspaceModelPolicyResponse = z.object({
       allowedModels: z.array(z.string()).nullable(),
     })
     .nullable(),
+  /**
+   * The workspace's credit switch (its `allowCreditModels` setting), whichever
+   * allowlist it follows. False blocks every model billed in Opengeni credits,
+   * including credit models added later.
+   */
+  allowCreditModels: z.boolean(),
 });
 export type WorkspaceModelPolicyResponse = z.infer<typeof WorkspaceModelPolicyResponse>;
 
@@ -3389,6 +3500,14 @@ export async function verifyEnrollmentBearer(
 // bearer (verifyEnrollmentBearer's `oge_` prefix check rejects it) and vice-versa
 // (verifyEnrollToken's `oget_` prefix + typ check rejects an `oge_` bearer). The
 // secret value is NEVER logged.
+/**
+ * The OpenGeni Browser Chrome extension (Chrome Web Store). It bridges Chrome to
+ * an installed Connected Machine agent through native messaging, so the machine
+ * must be connected before the extension can link up.
+ */
+export const OPENGENI_BROWSER_EXTENSION_URL =
+  "https://chromewebstore.google.com/detail/opengeni-browser/phpmmcbeelfkcinjfbbggegjdcdmnnch";
+
 export const EnrollTokenPayload = z.object({
   // Domain-separation claim — fixed "enroll" so an `oge_`/`ogd_`/`ogs_` payload (no
   // typ, or a different typ) can never satisfy verifyEnrollToken even past the prefix.
@@ -3400,6 +3519,13 @@ export const EnrollTokenPayload = z.object({
   allowScreenControl: z.boolean(),
   iat: z.number().int().nonnegative(),
   exp: z.number().int().positive(),
+  // Unique token id. The exchange records it so one token connects one machine;
+  // the same machine (same public key) may retry. Optional only for tokens minted
+  // before single-use redemption shipped; those still expire after one hour.
+  jti: z
+    .string()
+    .regex(/^[A-Za-z0-9_-]{16,128}$/)
+    .optional(),
 });
 export type EnrollTokenPayload = z.infer<typeof EnrollTokenPayload>;
 
@@ -3745,6 +3871,51 @@ export const CreateOrganizationApiKeyRequest = z
     message: "Choose either a policy or a legacy access tier/preset",
   });
 export type CreateOrganizationApiKeyRequest = z.infer<typeof CreateOrganizationApiKeyRequest>;
+
+/**
+ * A personal API key acts as the person who created it: anything done with it
+ * is done as them, with their current access in this organization, capped by
+ * the key's own access setting. It stops working when they leave.
+ */
+export const PersonalApiKey = z.object({
+  id: z.string().uuid(),
+  organizationId: z.string().uuid(),
+  name: z.string(),
+  description: z.string().nullable(),
+  /** The first characters of the key, to recognize it. */
+  prefix: z.string(),
+  access: OrganizationAccessPolicy,
+  owner: z.object({ subjectId: z.string(), name: z.string() }),
+  expiresAt: z.string().nullable(),
+  lastUsedAt: z.string().nullable(),
+  createdAt: z.string(),
+});
+export type PersonalApiKey = z.infer<typeof PersonalApiKey>;
+
+export const ListPersonalApiKeysResponse = z.object({
+  apiKeys: z.array(PersonalApiKey),
+  /** Owners and admins see everyone's keys and can revoke them. */
+  canManageAll: z.boolean(),
+});
+export type ListPersonalApiKeysResponse = z.infer<typeof ListPersonalApiKeysResponse>;
+
+export const CreatePersonalApiKeyRequest = z
+  .object({
+    name: z.string().trim().min(1).max(200),
+    description: z.string().trim().min(1).max(500).optional(),
+    access: OrganizationAccessPolicy,
+    /** Omitted means the key never expires. */
+    expiresAt: z.string().datetime({ offset: true }).optional(),
+  })
+  .strict();
+export type CreatePersonalApiKeyRequest = z.infer<typeof CreatePersonalApiKeyRequest>;
+
+export const CreatePersonalApiKeyResponse = z.object({
+  apiKey: PersonalApiKey,
+  /** Shown once. Only a hash is stored. */
+  token: z.string().min(1),
+});
+export type CreatePersonalApiKeyResponse = z.infer<typeof CreatePersonalApiKeyResponse>;
 
 export const UpdateOrganizationApiKeyRequest = z
   .object({
@@ -8014,9 +8185,31 @@ export function formatModelContextTimestamp(value: Date | string): string {
   return `${MODEL_CONTEXT_WEEKDAYS[date.getUTCDay()]} ${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC`;
 }
 
-/** The time part of one accepted user-role message, from its acceptance time. */
-export function renderMessageSentAtForModel(sentAt: Date | string): string {
-  return `[Message sent ${formatModelContextTimestamp(sentAt)}]`;
+const MAX_MESSAGE_SENDER_CHARS = 200;
+
+/**
+ * The person a human message came from, as frozen with its turn, made safe for
+ * the one-line metadata part: no brackets or line breaks, bounded length.
+ * Empty when nothing readable remains.
+ */
+export function messageSenderForModel(sender: string | null | undefined): string | undefined {
+  const text = (sender ?? "")
+    .replace(/[[\]\r\n\t]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, MAX_MESSAGE_SENDER_CHARS)
+    .trim();
+  return text || undefined;
+}
+
+/**
+ * The metadata part of one accepted user-role message: its acceptance time
+ * and, for a person's message, who sent it. Members of a shared workspace use
+ * the same agent, so the model must be able to tell them apart.
+ */
+export function renderMessageSentAtForModel(sentAt: Date | string, sender?: string | null): string {
+  const from = messageSenderForModel(sender);
+  return `[Message sent ${formatModelContextTimestamp(sentAt)}${from ? ` by ${from}` : ""}]`;
 }
 
 /**
@@ -8048,7 +8241,8 @@ export function renderSessionGoalContext(snapshot?: SessionGoalSnapshot): string
  * turn acceptance. `sentAt` is the message's durable acceptance time, so the
  * model knows the current date without spending a tool call on it. All of them
  * remain in the visible message's chronological position, and presentation
- * layers may omit their leading parts.
+ * layers may omit their leading parts. `sender` names the person who sent a
+ * human message; it rides on the `sentAt` part.
  */
 export function renderUserMessageContentForModel(
   text: string,
@@ -8056,6 +8250,7 @@ export function renderUserMessageContentForModel(
   modelContext?: string | null,
   goalSnapshot?: SessionGoalSnapshot,
   sentAt?: Date | string | null,
+  sender?: string | null,
 ): string | Array<{ type: "input_text"; text: string }> {
   const visibleContent = renderTimelineAnnotationsForModel(text, annotations);
   const context = modelContext?.trim();
@@ -8079,7 +8274,7 @@ export function renderUserMessageContentForModel(
         ]
       : []),
     ...(sentAt != null
-      ? [{ type: "input_text" as const, text: renderMessageSentAtForModel(sentAt) }]
+      ? [{ type: "input_text" as const, text: renderMessageSentAtForModel(sentAt, sender) }]
       : []),
     { type: "input_text", text: visibleContent },
   ];
@@ -8406,7 +8601,11 @@ const WorkspaceControlReason = z
   );
 
 export const SessionControlRequest = z.object({
-  action: z.enum(["pause", "resume", "cancel"]),
+  action: z
+    .enum(["pause", "resume", "cancel"])
+    .describe(
+      "pause stops the session and its sub-sessions until resume. cancel ends them for good and can't be undone; use pause to stop work you may want back.",
+    ),
   reason: WorkspaceControlReason.optional(),
   clientEventId: SessionOperationKey,
   expectedControlEtag: z.string().min(1).optional(),
@@ -10448,6 +10647,12 @@ export const ScheduledTask = /* @__PURE__ */ z.object({
   name: z.string(),
   /** Immutable execution owner; null for workspace/service tasks. */
   ownerSubjectId: z.string().min(1).nullable(),
+  /**
+   * Who can see this schedule. `workspace`: everyone in the workspace (only the
+   * owner can change or run it). `private`: only its owner; its runs create
+   * Only me chats owned by that person.
+   */
+  visibility: SessionVisibility.default("workspace"),
   status: ScheduledTaskStatus,
   schedule: ScheduledTaskScheduleSpec,
   temporalScheduleId: z.string(),
@@ -10478,6 +10683,40 @@ export const ScheduledTask = /* @__PURE__ */ z.object({
   policyDrift: ScheduledTaskPolicyDrift.nullable().optional(),
 });
 export type ScheduledTask = z.infer<typeof ScheduledTask>;
+
+/**
+ * What an admin sees of someone else's Only me schedule: that it exists, whose
+ * it is, how often it runs and what it costs. Never its name, prompt, settings
+ * or runs. An admin can pause it.
+ */
+export const PrivateScheduledTaskSummary = /* @__PURE__ */ z
+  .object({
+    id: z.string().uuid(),
+    ownerSubjectId: z.string().min(1),
+    /** The owner's display name or email, when known. */
+    ownerName: z.string().nullable(),
+    status: ScheduledTaskStatus,
+    schedule: ScheduledTaskScheduleSpec,
+    lastRunAt: z.string().nullable(),
+    /** Usage of this schedule's runs over the last 30 days. */
+    last30Days: z
+      .object({
+        runs: z.number().int().nonnegative(),
+        creditUsd: z.number().nonnegative(),
+        estimatedProviderUsd: z.number().nonnegative(),
+      })
+      .strict(),
+    createdAt: z.string(),
+  })
+  .strict();
+export type PrivateScheduledTaskSummary = z.infer<typeof PrivateScheduledTaskSummary>;
+
+export const ListPrivateScheduledTaskSummariesResponse = /* @__PURE__ */ z
+  .object({ schedules: z.array(PrivateScheduledTaskSummary) })
+  .strict();
+export type ListPrivateScheduledTaskSummariesResponse = z.infer<
+  typeof ListPrivateScheduledTaskSummariesResponse
+>;
 
 /**
  * Complete credential-free execution truth accepted for one scheduled agent
@@ -10936,6 +11175,8 @@ const CreateAgentScheduledTaskRequest = /* @__PURE__ */ withVariableSetIdAlias(
     runMode: ScheduledTaskRunMode.default("new_session_per_run"),
     overlapPolicy: ScheduledTaskOverlapPolicy.default("allow_concurrent"),
     targetSessionId: z.string().uuid().nullable().optional(),
+    /** Who can see it. Omitted: the organization's default for new schedules. */
+    visibility: SessionVisibility.optional(),
     connectionAuthorities: z.never().optional(),
     connectionAccounts: McpConnectionAccountSelections.default([]),
 
@@ -11011,6 +11252,8 @@ export const CreateSessionScheduledTaskRequest = /* @__PURE__ */ z
     schedule: ScheduledTaskScheduleSpec,
     prompt: ScheduledTaskAgentConfigInput.shape.prompt,
     targetSessionId: z.string().uuid(),
+    /** A schedule posting into an Only me chat is always Only me. */
+    visibility: SessionVisibility.optional(),
     connectionAccounts: McpConnectionAccountSelections.default([]),
     runMode: z.literal("existing_session").default("existing_session"),
     overlapPolicy: ScheduledTaskOverlapPolicy.default("buffer_one"),
@@ -11074,6 +11317,8 @@ export const UpdateScheduledTaskRequest =
       overlapPolicy: ScheduledTaskOverlapPolicy.optional(),
       action: ScheduledTaskAction.optional(),
       targetSessionId: z.string().uuid().nullable().optional(),
+      /** Change who can see it. Only the owner can, and a schedule posting into an Only me chat stays Only me. */
+      visibility: SessionVisibility.optional(),
       connectionAuthorities: z.never().optional(),
       connectionAccounts: McpConnectionAccountSelections.optional(),
 
@@ -11592,6 +11837,20 @@ export const SessionSkills = /* @__PURE__ */ defineSkillContractSchema(() =>
 export const StoredSessionSkills = /* @__PURE__ */ defineSkillContractSchema(() =>
   z.preprocess(projectStoredSkillMetadata, SessionSkills),
 );
+
+/**
+ * `PUT /v1/workspaces/:workspaceId/sessions/:sessionId/skills`: replace the
+ * Skills a session carries itself. Each entry is validated like a session
+ * create Skill (SKILL.md owns name and description). Uses the session's
+ * `toolPolicyVersion` (shared CAS) and applies from the next attempt.
+ */
+export const UpdateSessionSkillsRequest = /* @__PURE__ */ z
+  .object({
+    skills: z.array(z.unknown()).max(32),
+    expectedVersion: z.number().int().positive(),
+  })
+  .strict();
+export type UpdateSessionSkillsRequest = z.infer<typeof UpdateSessionSkillsRequest>;
 
 function projectStoredSkillMetadata(value: unknown): unknown {
   if (!Array.isArray(value)) return value;
@@ -12235,6 +12494,9 @@ export const OAuthStartRequest = z
     returnPath: z.string().min(1).optional(),
     returnUrl: z.string().min(1).max(4096).optional(),
     connectionId: z.string().uuid().optional(),
+    /** Sign in a further account instead of refreshing the caller's existing
+     * active account for this provider. Never combined with connectionId. */
+    newAccount: z.literal(true).optional(),
     ownership: ConnectionOwnership.optional(),
     oauthClient: z
       .object({
@@ -12249,6 +12511,10 @@ export const OAuthStartRequest = z
   .refine((value) => Boolean(value.mcpUrl ?? value.resource), {
     message: "mcpUrl is required",
     path: ["mcpUrl"],
+  })
+  .refine((value) => !(value.newAccount && value.connectionId), {
+    message: "newAccount cannot target an existing connection",
+    path: ["newAccount"],
   });
 export type OAuthStartRequest = z.infer<typeof OAuthStartRequest>;
 
@@ -13919,6 +14185,7 @@ export const SessionListEntry = /* @__PURE__ */ defineSkillContractSchema(() =>
     archiveVersion: true,
     treeStats: true,
     requiresActionSince: true,
+    admissionBlock: true,
     createdAt: true,
     updatedAt: true,
   }).extend({
@@ -13926,6 +14193,16 @@ export const SessionListEntry = /* @__PURE__ */ defineSkillContractSchema(() =>
     renameSeed: z.string(),
     scheduledTaskId: z.string().nullable(),
     siteOrigin: z.object({ siteId: z.string().uuid(), title: z.string() }).nullable(),
+    /**
+     * Display-only model and reasoning effort for compact rows: the latest
+     * started turn's policy, or the session's stored defaults when an explicit
+     * settings change is newer or no turn has started. A row projected from a
+     * full Session (the SDK fallback for older servers) carries that session's
+     * effective model instead. Detail reads remain authoritative for the
+     * composer default; never use these fields to choose a model.
+     */
+    model: z.string().min(1).optional(),
+    reasoningEffort: ReasoningEffort.optional(),
   }),
 );
 export type SessionListEntry = z.infer<typeof SessionListEntry>;
@@ -14135,11 +14412,18 @@ export const SessionEventType = z.enum([
   "session.mcp.approval_policy.updated",
   "session.tool_policy.updated",
   "session.agent.updated",
+  // The Skills a session carries itself were replaced (names only).
+  "session.skills.updated",
   // Multi-account Codex (P1): the account a session's turn runs on changed
   // (manual switch in P1; failover/rotation in P3 reuse the same event). Drives
   // the in-session "Running on:" indicator's live flip.
   "codex.account.switched",
   "codex.account.selection.changed",
+  // A person chose the account a session runs on (any provider's shared
+  // connection or their own personal one), or returned it to automatic
+  // placement. Payload: provider, connectionId (null for automatic), choice,
+  // appliedTo, turnId and the choosing subject; never credential material.
+  "model_account.selection.changed",
   // credential allocator per-turn selection audit. Payload is metadata only: credential row
   // id, bounded strategy/reason, and pool counts — never token material.
   "codex.credential.selected",
@@ -14376,6 +14660,7 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
     "session.mcp.approval_policy.updated",
     "session.tool_policy.updated",
     "session.agent.updated",
+    "session.skills.updated",
     "session.model_settings.updated",
   ],
   terminal: [
@@ -14435,6 +14720,7 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
     "agent.model.usage",
     "codex.account.switched",
     "codex.account.selection.changed",
+    "model_account.selection.changed",
     "codex.credential.selected",
     "codex.capacity.waiting",
     "codex.capacity.resumed",
@@ -14552,6 +14838,16 @@ export const SessionNotificationPostedPayload = z
     urgency: NotificationUrgency.default("normal"),
     /** True when this post replaced an earlier one with the same key (no new alert). */
     replaced: z.boolean().default(false),
+    /**
+     * Another member of the workspace to notify instead of the person the
+     * session works for. They must allow other members' agents to notify them.
+     */
+    recipientSubjectId: z.string().min(1).max(300).optional(),
+    /** Who it comes from (the person the session works for), shown to that member. */
+    sender: z
+      .object({ subjectId: z.string().min(1).max(300), label: z.string().min(1).max(200) })
+      .strict()
+      .optional(),
   })
   .strict();
 export type SessionNotificationPostedPayload = z.infer<typeof SessionNotificationPostedPayload>;
@@ -14561,6 +14857,8 @@ export const SessionNotificationWithdrawnPayload = z
     key: NotificationKey,
     /** The session that withdrew it, when another session tidied the inbox. */
     bySessionId: z.string().uuid().optional(),
+    /** Withdraw only this member's copy; without it every copy of the key goes. */
+    recipientSubjectId: z.string().min(1).max(300).optional(),
   })
   .strict();
 export type SessionNotificationWithdrawnPayload = z.infer<
@@ -14623,6 +14921,13 @@ export const InboxItem = z.object({
   createdAt: z.string(),
   updatedAt: z.string(),
   resolvedAt: z.string().nullable(),
+  /** Another member whose agent sent this notification; null for the person's own. */
+  sender: z.object({ subjectId: z.string(), label: z.string() }).nullable().default(null),
+  /**
+   * Whether the person can open the session the item came from. False for
+   * another member's private session: the item then shows no session link.
+   */
+  sessionAvailable: z.boolean().default(true),
 });
 export type InboxItem = z.infer<typeof InboxItem>;
 
@@ -14652,14 +14957,20 @@ export const UpdateInboxItemRequest = z
 export type UpdateInboxItemRequest = z.infer<typeof UpdateInboxItemRequest>;
 
 /**
- * Which agents may withdraw or dismiss the person's notifications. Agents never
- * answer or approve on the person's behalf, whatever this says.
+ * What agents may do in the person's inbox. Agents never answer or approve on
+ * the person's behalf, whatever this says.
  */
 export const InboxTidyPolicy = z.enum([
-  /** The session that posted an item, and the sessions above it. */
+  /** Notifications: the session that posted one, and the sessions above it. */
   "own_sessions",
-  /** Any agent acting for the person. */
+  /** Notifications: any agent acting for the person. */
   "any_agent",
+  /**
+   * Any agent acting for the person sees every open item (questions,
+   * approvals, paused goals, replies and notifications) and may snooze,
+   * unsnooze or dismiss it.
+   */
+  "full_access",
 ]);
 export type InboxTidyPolicy = z.infer<typeof InboxTidyPolicy>;
 
@@ -14675,8 +14986,21 @@ export const InboxSettings = z.object({
    * Off by default. Always present in responses; leave it out to keep it.
    */
   replies: z.boolean().optional(),
+  /**
+   * Alert the phone for the agent's questions and approvals as time-sensitive,
+   * so they break through Focus on iPhone. Off by default. Always present in
+   * responses; leave it out to keep it.
+   */
+  timeSensitiveNeedsYou: z.boolean().optional(),
 });
 export type InboxSettings = z.infer<typeof InboxSettings>;
+
+/**
+ * Whether other members' agents may notify this person in one workspace.
+ * Each person decides for themselves; off by default.
+ */
+export const MemberNotificationsSetting = z.object({ allowOthers: z.boolean() }).strict();
+export type MemberNotificationsSetting = z.infer<typeof MemberNotificationsSetting>;
 
 /** The fixed subject of a local install's one built-in human (`productAccessMode` local). */
 export const LOCAL_HUMAN_SUBJECT_ID = "dev";
@@ -16920,6 +17244,12 @@ export const SessionTenancyCreateCapabilities = z.object({
   activated: z.boolean(),
   canCreatePrivate: z.boolean(),
   reason: z.enum(["available", "not_activated", "managed_session_required", "unavailable"]),
+  /**
+   * Who sees a new chat or schedule unless the person picks otherwise: the
+   * organization's default, and always "workspace" when Only me isn't
+   * available here.
+   */
+  defaultVisibility: z.enum(["private", "workspace"]).default("workspace"),
 });
 export type SessionTenancyCreateCapabilities = z.infer<typeof SessionTenancyCreateCapabilities>;
 
@@ -18053,6 +18383,12 @@ export const MachineRuntimeCapabilities = z.object({
   operationResourcePolicy: z.boolean(),
   operationCpuQuota: z.boolean(),
   transactionalFsWrite: z.boolean().default(false),
+  // The agent renews its credentials on request, so consent changes (screen
+  // control turned on) apply in place without reconnecting.
+  credentialRenew: z.boolean().default(false),
+  // Whether the live agent's credentials carry screen-control consent, from its
+  // Hello. Null when not reported since this field shipped (unknown).
+  screenControl: z.boolean().nullable().default(null),
 });
 export type MachineRuntimeCapabilities = z.infer<typeof MachineRuntimeCapabilities>;
 
@@ -18086,6 +18422,14 @@ export const MachineUpdateState = z.object({
 });
 export type MachineUpdateState = z.infer<typeof MachineUpdateState>;
 
+/** The three macOS Privacy & Security grants desktop capture and input need. */
+export const MachineMacPermissions = z.object({
+  screenRecording: z.boolean(),
+  accessibility: z.boolean(),
+  inputMonitoring: z.boolean(),
+});
+export type MachineMacPermissions = z.infer<typeof MachineMacPermissions>;
+
 export const MachineRuntime = z.object({
   installedVersion: z.string().nullable(),
   binarySha256: z
@@ -18098,6 +18442,9 @@ export const MachineRuntime = z.object({
   updateBlockedReason: z.string().nullable().optional(),
   capabilities: MachineRuntimeCapabilities,
   update: MachineUpdateState.nullable(),
+  // Live macOS desktop permissions; null off macOS or when the agent does not
+  // report them (unknown, not denied).
+  macPermissions: MachineMacPermissions.nullable().default(null),
 });
 export type MachineRuntime = z.infer<typeof MachineRuntime>;
 
@@ -18107,6 +18454,39 @@ export const UpdateMachineAgentResponse = z.object({
   targetVersion: z.string(),
 });
 export type UpdateMachineAgentResponse = z.infer<typeof UpdateMachineAgentResponse>;
+
+/** Turn screen control on for one connected machine, in place. The consent is
+ * recorded on the machine's enrollment and the live agent renews its
+ * credentials to carry it. active: the machine now holds screen-control
+ * credentials. pending: allowed, and applies by itself when the machine next
+ * connects (offline) or once its agent is updated (agent_update_required);
+ * renewal_failed: retry the call; reconnect_required: the machine's connection
+ * predates in-place renewal, so run the connect command on it again. */
+export const EnableMachineScreenControlResponse = z.object({
+  status: z.enum(["active", "pending"]),
+  reason: z
+    .enum(["offline", "agent_update_required", "renewal_failed", "reconnect_required"])
+    .nullable(),
+  message: z.string().nullable(),
+});
+export type EnableMachineScreenControlResponse = z.infer<typeof EnableMachineScreenControlResponse>;
+
+/** macOS Privacy & Security panes the agent needs for desktop capture/input. */
+export const MachinePrivacySettingsPane = z.enum([
+  "screen_recording",
+  "accessibility",
+  "input_monitoring",
+]);
+export type MachinePrivacySettingsPane = z.infer<typeof MachinePrivacySettingsPane>;
+
+export const OpenMachinePrivacySettingsRequest = z.object({ pane: MachinePrivacySettingsPane });
+export type OpenMachinePrivacySettingsRequest = z.infer<typeof OpenMachinePrivacySettingsRequest>;
+
+export const OpenMachinePrivacySettingsResponse = z.object({
+  opened: z.boolean(),
+  message: z.string().nullable(),
+});
+export type OpenMachinePrivacySettingsResponse = z.infer<typeof OpenMachinePrivacySettingsResponse>;
 
 const OperationMemoryBytes = z.number().int().positive().max(Number.MAX_SAFE_INTEGER).nullable();
 const OperationCpuMillicores = z.number().int().positive().max(0xffff_ffff).nullable();
@@ -18768,6 +19148,8 @@ export const ModelAvailabilityV1 = /* @__PURE__ */ defineModelContractSchema(() 
         "provider_unhealthy",
         "policy_blocked",
         "unsupported",
+        // The workspace turned Opengeni credits off and this model spends them.
+        "credits_disabled",
       ])
       .nullable(),
     checkedAt: z.string().datetime().nullable(),
@@ -19071,18 +19453,33 @@ export type HealthResponse = {
 export type WorkspaceModelPolicyContract = {
   allowedProviders: string[] | null;
   allowedModels: string[] | null;
+  /**
+   * False blocks every model whose workspace-facing cost is Opengeni credits
+   * (`cost: "credits"`), whatever the two allowlists say, so credit models
+   * added to the catalog later stay blocked too. Omitted reads as true.
+   */
+  allowCreditModels?: boolean;
 };
 
 export type WorkspaceModelPolicyVerdict =
   | { allowed: true }
-  | { allowed: false; reason: "provider" | "model" };
+  | { allowed: false; reason: "provider" | "model" | "credits" };
 
+/**
+ * `chargesCredits` is required on purpose: every enforcement point must say
+ * whether the candidate spends Opengeni credits (its configured `cost` is
+ * "credits"), so the credit switch cannot be skipped by a caller that only
+ * knows the provider and model ids.
+ */
 export function evaluateWorkspaceModelPolicy(
   policy: WorkspaceModelPolicyContract | null | undefined,
-  candidate: { providerId: string; modelId: string },
+  candidate: { providerId: string; modelId: string; chargesCredits: boolean },
 ): WorkspaceModelPolicyVerdict {
   if (!policy) {
     return { allowed: true };
+  }
+  if (policy.allowCreditModels === false && candidate.chargesCredits) {
+    return { allowed: false, reason: "credits" };
   }
   if (policy.allowedProviders !== null && !policy.allowedProviders.includes(candidate.providerId)) {
     return { allowed: false, reason: "provider" };

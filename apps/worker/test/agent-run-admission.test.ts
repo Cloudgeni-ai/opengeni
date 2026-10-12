@@ -30,10 +30,57 @@ function mockCodexBilled(active: boolean): () => void {
 
 describe("worker agent-run admission funding", () => {
   let allowance: ReturnType<typeof spyOn<typeof opengeniDb, "checkWorkspaceAllowance">>;
+  // SuperGrok admission reads its provider route (one receipt read); these
+  // cases run on the legacy route unless a case says otherwise.
+  let routeFunding: ReturnType<typeof spyOn<typeof opengeniDb, "readSubscriptionCoreRouteFunding">>;
   beforeEach(() => {
     allowance = spyOn(opengeniDb, "checkWorkspaceAllowance").mockResolvedValue(null);
+    routeFunding = spyOn(opengeniDb, "readSubscriptionCoreRouteFunding").mockResolvedValue({
+      route: "legacy",
+    });
   });
-  afterEach(() => allowance.mockRestore());
+  afterEach(() => {
+    allowance.mockRestore();
+    routeFunding.mockRestore();
+  });
+
+  test("a SuperGrok organization on the core is funded by the core's answer", async () => {
+    const restoreBalance = mockZeroBalance();
+    const restoreCodex = mockCodexBilled(false);
+    const admit = () =>
+      agentRunAdmissionDenial(
+        {
+          db: {} as opengeniDb.Database,
+          entitlements: null,
+          settings: testSettings({
+            billingMode: "stripe",
+            usageLimitsMode: "managed",
+            supergrokSubscriptionEnabled: true,
+          }),
+        },
+        {
+          accountId: ACCOUNT,
+          workspaceId: WORKSPACE,
+          model: "supergrok/grok-4.7",
+          requestedAgentRuns: 1,
+        },
+      );
+    try {
+      routeFunding.mockResolvedValue({ route: "core", value: true });
+      expect(await admit()).toBeNull();
+      routeFunding.mockResolvedValue({ route: "core", value: false });
+      expect(await admit()).toBe("insufficient_credits");
+      expect(routeFunding.mock.calls.at(-1)?.[1]).toMatchObject({
+        provider: "xai",
+        accountId: ACCOUNT,
+        workspaceId: WORKSPACE,
+        productModelId: "supergrok/grok-4.7",
+      });
+    } finally {
+      restoreCodex();
+      restoreBalance();
+    }
+  });
 
   test("API, run admission and between-call admission all respect eligible models", async () => {
     const balance = spyOn(opengeniDb, "getBillingBalance").mockResolvedValue({

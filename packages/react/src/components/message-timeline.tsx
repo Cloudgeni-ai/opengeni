@@ -71,6 +71,11 @@ import {
   type ReactNode,
 } from "react";
 import { cn } from "../lib/cn";
+import {
+  MessageSenderContext,
+  MessageSenderSlot,
+  type RenderMessageSender,
+} from "../timeline/message-sender";
 import { formatClockTime, formatRelativeTime, truncate } from "../lib/format";
 import { prefersReducedMotion } from "../lib/motion";
 import {
@@ -172,6 +177,7 @@ import {
   noticeTone,
 } from "../timeline/notice-presentation";
 import { TimelineComputeLabelProvider } from "../timeline/compute-label";
+import { ProviderLogoProvider } from "../timeline/provider-logo";
 import { EntranceAnimationProvider, useEntranceAnimation } from "../timeline/entrance";
 import {
   AllowanceExhaustedRow,
@@ -205,6 +211,12 @@ export type MessageTimelineProps = {
   status?: SessionStatus | null | undefined;
   /** Host-owned controls beside Copy and the timestamp on settled message rows. */
   renderMessageActions?: ((item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
+  /**
+   * Who sent a person's message, drawn above its bubble. Called only for
+   * messages that carry a sender; return null for the viewer's own messages
+   * or when the host has no identity to show. Omit to show no senders.
+   */
+  renderMessageSender?: RenderMessageSender | undefined;
   /** Plug a markdown renderer for message bodies (e.g. streamdown). */
   renderMessageText?:
     | ((
@@ -595,6 +607,7 @@ export function MessageTimeline({
   items,
   status: _status,
   renderMessageActions,
+  renderMessageSender,
   renderMessageText,
   onOpenSession,
   resolveSessionTitle,
@@ -3019,13 +3032,15 @@ export function MessageTimeline({
   // Agent-authored object links resolve through the host, never the console.
   return (
     <OpenGeniLinkProvider resolveLink={resolveLink}>
-      <AgentIdentityProvider
-        items={resolvedItems}
-        resolveSessionTitle={resolveSessionTitle}
-        onOpenSession={onOpenSession}
-      >
-        {timeline}
-      </AgentIdentityProvider>
+      <MessageSenderContext.Provider value={renderMessageSender}>
+        <AgentIdentityProvider
+          items={resolvedItems}
+          resolveSessionTitle={resolveSessionTitle}
+          onOpenSession={onOpenSession}
+        >
+          <ProviderLogoProvider value={resolveProviderLogo}>{timeline}</ProviderLogoProvider>
+        </AgentIdentityProvider>
+      </MessageSenderContext.Provider>
     </OpenGeniLinkProvider>
   );
 }
@@ -3494,7 +3509,37 @@ const TimelineGroupView = memo(function TimelineGroupView({
                   />
                 ) : undefined,
               }
-            : workStatus;
+            : workStatus.kind === "waiting"
+              ? {
+                  kind: "waiting",
+                  label: workStatus.label,
+                  since: workStatus.since,
+                  // One quiet line under the row, e.g. that a limit wait
+                  // continues by itself; never a second warning banner.
+                  preview: workStatus.detail ? (
+                    <span
+                      data-og-exchange-wait-detail=""
+                      className="block truncate text-og-sm text-og-fg-subtle"
+                    >
+                      {workStatus.detail}
+                    </span>
+                  ) : undefined,
+                }
+              : group.work.cycles?.summary
+                ? {
+                    ...workStatus,
+                    // Folded quiet cycles say what the agent is waiting on.
+                    preview: (
+                      <p
+                        data-og-cycles-summary=""
+                        className="truncate text-og-sm text-og-fg-subtle"
+                        title={group.work.cycles.summary}
+                      >
+                        {group.work.cycles.summary}
+                      </p>
+                    ),
+                  }
+                : workStatus;
         return (
           // Marks this work row for the live-note fold (list keys can be carried
           // over from an earlier row, so they are not the work id).
@@ -3502,6 +3547,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
             <TurnSummary
               key="work"
               items={group.items}
+              bare={insideTurn || undefined}
               status={status}
               outcome={group.outcome}
               failureText={group.failureText}
@@ -3781,7 +3827,30 @@ type FoldedGroupBehavior = {
   turnSummary?: TurnSummaryOptions | undefined;
 };
 
-/** Children of a folded turn or exchange, each on the shared rail. */
+/**
+ * A search hit inside a nested work row opens that row only. The reveal key
+ * is provided per top-level group, so without narrowing every nested row of
+ * a folded quiet-cycle run would open at once.
+ */
+function NestedSearchReveal({ group, children }: { group: TimelineGroup; children: ReactNode }) {
+  const revealKey = useContext(TimelineSearchRevealContext);
+  const itemId = useMemo(() => {
+    if (!revealKey) return null;
+    try {
+      const [id] = JSON.parse(revealKey) as unknown[];
+      return typeof id === "string" ? id : null;
+    } catch {
+      return null;
+    }
+  }, [revealKey]);
+  const value = itemId && timelineGroupItemIds(group).includes(itemId) ? revealKey : null;
+  return (
+    <TimelineSearchRevealContext.Provider value={value}>
+      {children}
+    </TimelineSearchRevealContext.Provider>
+  );
+}
+
 function renderFoldedGroups(
   groups: readonly TimelineGroup[],
   behavior: FoldedGroupBehavior,
@@ -3818,7 +3887,9 @@ function renderFoldedGroups(
               : undefined
           }
         >
-          <TimelineGroupView {...behavior} group={child} insideTurn startupDismissed />
+          <NestedSearchReveal group={child}>
+            <TimelineGroupView {...behavior} group={child} insideTurn startupDismissed />
+          </NestedSearchReveal>
         </div>
       ) : (
         <TimelineGroupView {...behavior} group={child} insideTurn nestClusterChips={nestClusters} />
@@ -4211,6 +4282,7 @@ function UserMessageRow({
   return (
     <div className={cn(enter && "animate-og-enter", "flex justify-end")}>
       <div className="flex max-w-[85%] min-w-0 flex-col items-end gap-1">
+        <MessageSenderSlot item={item} />
         <CopyHoverFrame
           copyText={
             item.text ||
@@ -4577,10 +4649,16 @@ function WorkerCompletionRow({
 function SessionStatusRow({
   item,
 }: {
-  item: { status: SessionStatus; occurredAt: string; resolvedAt?: string };
+  item: {
+    status: SessionStatus;
+    blocked?: true;
+    occurredAt: string;
+    resolvedAt?: string;
+  };
 }) {
   const enter = useEntranceAnimation();
-  const meta = SESSION_STATUS_META[item.status];
+  const status = item.blocked ? "blocked" : item.status;
+  const meta = SESSION_STATUS_META[status];
   return (
     <div
       className={cn(
@@ -4591,7 +4669,7 @@ function SessionStatusRow({
     >
       <span className="h-px flex-1 bg-og-border" />
       <span className="inline-flex items-center gap-1.5">
-        {item.resolvedAt ? null : <StatusDot status={item.status} className="size-1" />}
+        {item.resolvedAt ? null : <StatusDot status={status} className="size-1" />}
         {item.resolvedAt ? "work resumed" : meta.label.toLowerCase()} ·{" "}
         {formatRelativeTime(item.resolvedAt ?? item.occurredAt)}
       </span>

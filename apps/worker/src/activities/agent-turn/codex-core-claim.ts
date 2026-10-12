@@ -75,20 +75,9 @@ export function claimMayResolveCoreCodexApps(input: {
   return input.codexConnectedAppsEnabled && input.cutover === "enabled";
 }
 
-/** A cutover row of any state means no legacy Codex Apps credential. */
-export function claimMayResolveLegacyCodexApps(input: {
-  codexConnectedAppsEnabled: boolean;
-  cutover: ClaimCodexCutoverState;
-}): boolean {
-  return input.codexConnectedAppsEnabled && input.cutover === "not_configured";
-}
-
 /**
- * The legacy active-credential flag is read only without a cutover row; with
- * an enabled cutover the shared core decides availability at placement.
+ * Only an enabled cutover installs Codex; the core decides availability at placement.
  */
-export function claimCodexActiveFromCutover(
-  cutover: ClaimCodexCutoverState,
-): "read_legacy" | boolean {
-  return cutover === "not_configured" ? "read_legacy" : cutover === "enabled";
+export function claimCodexActiveFromCutover(cutover: ClaimCodexCutoverState): boolean {
+  return cutover === "enabled";
 }

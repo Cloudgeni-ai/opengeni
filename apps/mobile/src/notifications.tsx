@@ -185,7 +185,7 @@ async function devicePushToken(): Promise<string> {
  * registers this device with its own credential, so every account's pushes
  * arrive and sign-out stops them.
  */
-export function useNotificationSettingsSection(): SettingsSection | null {
+export function useNotificationSettingsSection(inbox: InboxSettingsState): SettingsSection | null {
   const { account, client, status } = useAccount();
   const [device, setDevice] = useState<NativePushDevice | null | undefined>(undefined);
   const [permission, setPermission] = useState<Notifications.PermissionStatus | null>(null);
@@ -277,19 +277,40 @@ export function useNotificationSettingsSection(): SettingsSection | null {
     title: "Notifications",
     footer:
       problem ??
+      inbox.problem ??
       (device
         ? "Sent to this device for sessions you start. Tap one to open the session."
         : "Get a push when a session you started needs you."),
     rows: device
-      ? NOTIFICATION_RULES.map(({ rule, title, subtitle }) => ({
-          kind: "toggle" as const,
-          id: rule,
-          title,
-          subtitle,
-          value: rules.includes(rule),
-          onChange: (on: boolean) =>
-            void save(on ? [...rules, rule] : rules.filter((each) => each !== rule)),
-        }))
+      ? NOTIFICATION_RULES.flatMap(({ rule, title, subtitle }) => [
+          {
+            kind: "toggle" as const,
+            id: rule,
+            title,
+            subtitle,
+            value: rules.includes(rule),
+            onChange: (on: boolean) =>
+              void save(on ? [...rules, rule] : rules.filter((each) => each !== rule)),
+          },
+          // Right under "Needs you": let questions and approvals break through
+          // Focus. A person-wide server setting; only iPhone has Focus levels,
+          // and a server that doesn't keep it leaves it out.
+          ...(rule === "needs_input" &&
+          rules.includes("needs_input") &&
+          Platform.OS === "ios" &&
+          typeof inbox.settings?.timeSensitiveNeedsYou === "boolean"
+            ? [
+                {
+                  kind: "toggle" as const,
+                  id: "time-sensitive-needs-you",
+                  title: "Time-sensitive",
+                  subtitle: "Questions and approvals break through Focus",
+                  value: inbox.settings.timeSensitiveNeedsYou,
+                  onChange: (on: boolean) => void inbox.change({ timeSensitiveNeedsYou: on }),
+                },
+              ]
+            : []),
+        ])
       : [
           {
             kind: "action" as const,
@@ -456,11 +477,16 @@ export function NotificationRouting() {
   return null;
 }
 
-/**
- * The Inbox section of Settings: what besides questions, approvals and agents'
- * notes the active account's inbox keeps. The same settings as the web Inbox page.
- */
-export function useInboxSettingsSection(): SettingsSection | null {
+/** The active account's inbox settings, shared by the Notifications and Inbox sections. */
+export interface InboxSettingsState {
+  settings: InboxSettings | null;
+  /** Why the last change couldn't be saved. */
+  problem: string | null;
+  change: (next: Partial<InboxSettings>) => Promise<void>;
+}
+
+/** Loads the active account's inbox settings and saves changes to them. */
+export function useInboxSettings(): InboxSettingsState {
   const { account, client, status } = useAccount();
   const [settings, setSettings] = useState<InboxSettings | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
@@ -495,15 +521,56 @@ export function useInboxSettingsSection(): SettingsSection | null {
     },
     [client, settings],
   );
+  return { settings: status === "ready" ? settings : null, problem, change };
+}
+
+/**
+ * The Inbox sections of Settings: what besides questions, approvals and agents'
+ * notes the active account's inbox keeps, and what agents may do there. The
+ * same settings as the web Inbox page.
+ */
+export function inboxSettingsSections({
+  settings,
+  problem,
+  change,
+}: InboxSettingsState): SettingsSection[] {
   // A server that doesn't know these settings yet leaves them out: show only what it keeps.
   const supportsReplies = typeof settings?.replies === "boolean";
   const supportsPausedGoals = typeof settings?.pausedGoals === "boolean";
-  if (status !== "ready" || !settings || (!supportsReplies && !supportsPausedGoals)) return null;
-  return {
+  if (!settings) return [];
+  const agentAccess: { id: InboxSettings["tidyPolicy"]; title: string; subtitle: string }[] = [
+    {
+      id: "own_sessions",
+      title: "Clear their own notes",
+      subtitle: "Or notes from agents they started",
+    },
+    { id: "any_agent", title: "Tidy any agent's notes", subtitle: "Clear notes that are done" },
+    {
+      id: "full_access",
+      title: "Full access",
+      subtitle: "See everything, snooze and clear it",
+    },
+  ];
+  const agents: SettingsSection = {
+    id: "inbox-agents",
+    title: "What agents can do in your inbox",
+    footer:
+      problem ??
+      "Agents never answer or approve for you. With full access, ask any agent to catch you up on your inbox and clear what's done.",
+    rows: agentAccess.map((each) => ({
+      kind: "choice" as const,
+      id: `inbox-agents-${each.id}`,
+      title: each.title,
+      subtitle: each.subtitle,
+      selected: settings.tidyPolicy === each.id,
+      onPress: () => void change({ tidyPolicy: each.id }),
+    })),
+  };
+  if (!supportsReplies && !supportsPausedGoals) return [agents];
+  const inbox: SettingsSection = {
     id: "inbox",
     title: "Inbox",
     footer:
-      problem ??
       "Questions, approvals and agents' notes always reach your inbox. Replies stay until you swipe them away.",
     rows: [
       ...(supportsReplies
@@ -532,6 +599,8 @@ export function useInboxSettingsSection(): SettingsSection | null {
         : []),
     ],
   };
+  // A save problem shows under the last section, just below what was changed.
+  return [inbox, agents];
 }
 
 /**

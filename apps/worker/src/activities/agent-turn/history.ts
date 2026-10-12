@@ -157,15 +157,20 @@ export function pendingToolCallFromSdkEvent(event: unknown): {
   }
   const raw = item.rawItem as Record<string, unknown>;
   // Provider-executed search/image calls carry their outcome in this item,
-  // not a later function result. Registering them as pending leaves an
-  // impossible receipt behind even after the turn completes. Hosted MCP
-  // approval requests are different: they still require a response.
+  // not a later function result, whether they succeeded or failed.
+  // Registering them as pending leaves an impossible receipt behind even
+  // after the turn completes. Hosted MCP approval requests are different:
+  // they still require a response.
   const providerData = raw.providerData as Record<string, unknown> | undefined;
   if (
     raw.type === "hosted_tool_call" &&
     raw.name !== "mcp_approval_request" &&
     providerData?.type !== "mcp_approval_request" &&
-    (raw.status === "completed" || raw.name === "image_generation_call")
+    (raw.status === "completed" ||
+      raw.status === "failed" ||
+      raw.name === "image_generation_call" ||
+      raw.name === "web_search_call" ||
+      providerData?.type === "web_search_call")
   )
     return null;
   const callId = toolCallIdFromSdkItem(raw) ?? raw.id;

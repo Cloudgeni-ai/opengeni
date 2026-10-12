@@ -20,6 +20,7 @@ import {
 import {
   acquireSharedTestDatabase,
   MemoryEventBus,
+  testSettings,
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import type { AccessGrantAuthorization } from "../src/access";
@@ -29,9 +30,15 @@ import { readSessionAttachmentFiles } from "../src/domain/session-file-access";
 import {
   forkManagedHumanSession,
   getManagedHumanSessionCreateCapabilities,
+  requireManagedHumanPrivateSessionCreate,
   SessionTenancyManagedHumanRequiredError,
   updateManagedHumanSessionVisibility,
 } from "../src/application/session-tenancy";
+import {
+  getOrganizationPrivacySettings,
+  OrganizationPrivacyLockedError,
+  updateOrganizationPrivacySettings,
+} from "../src/application/organization-privacy";
 import {
   issueManagedHumanUserResourceGrant,
   listManagedHumanUserResourceAuthorities,
@@ -155,6 +162,7 @@ describe("managed-human session tenancy application service", () => {
       (candidate) => candidate.workspaceId === access.defaultWorkspaceId,
     );
     if (!grant) throw new Error("managed human has no shared workspace grant");
+    const deps = { db: client.db, settings: testSettings() };
     const canonical = {
       grant,
       accountGrant: access.accountGrants[0] ?? null,
@@ -165,7 +173,7 @@ describe("managed-human session tenancy application service", () => {
 
     await expect(
       getManagedHumanSessionCreateCapabilities(
-        { db: client.db },
+        deps,
         {
           ...canonical,
           grant: {
@@ -181,11 +189,12 @@ describe("managed-human session tenancy application service", () => {
 
     // No activation receipt and no setting row (0611): Only me defaults on.
     await expect(
-      getManagedHumanSessionCreateCapabilities({ db: client.db }, canonical, grant.workspaceId),
+      getManagedHumanSessionCreateCapabilities(deps, canonical, grant.workspaceId),
     ).resolves.toEqual({
       activated: true,
       canCreatePrivate: true,
       reason: "available",
+      defaultVisibility: "workspace",
     });
     // An explicit owner/admin disable is the only thing that turns it off.
     const [membership] = await shared.admin<{ id: string }[]>`
@@ -197,11 +206,12 @@ describe("managed-human session tenancy application service", () => {
         account_id, enabled, version, updated_by_membership_id
       ) values (${grant.accountId}, false, 1, ${membership.id})`;
     await expect(
-      getManagedHumanSessionCreateCapabilities({ db: client.db }, canonical, grant.workspaceId),
+      getManagedHumanSessionCreateCapabilities(deps, canonical, grant.workspaceId),
     ).resolves.toEqual({
       activated: false,
       canCreatePrivate: false,
       reason: "not_activated",
+      defaultVisibility: "workspace",
     });
     await shared.admin`
       update organization_private_session_settings set enabled = true, version = 2
@@ -209,11 +219,12 @@ describe("managed-human session tenancy application service", () => {
     await shared.admin`
       update organization_memberships set role = 'member' where id = ${membership.id}`;
     await expect(
-      getManagedHumanSessionCreateCapabilities({ db: client.db }, canonical, grant.workspaceId),
+      getManagedHumanSessionCreateCapabilities(deps, canonical, grant.workspaceId),
     ).resolves.toEqual({
       activated: true,
       canCreatePrivate: true,
       reason: "available",
+      defaultVisibility: "workspace",
     });
     // A canonical managed human without an ACTIVE organization membership is a
     // capability answer (not private-ready), never an unmapped database error.
@@ -221,11 +232,12 @@ describe("managed-human session tenancy application service", () => {
       update organization_memberships set status = 'suspended' where id = ${membership.id}`;
     try {
       await expect(
-        getManagedHumanSessionCreateCapabilities({ db: client.db }, canonical, grant.workspaceId),
+        getManagedHumanSessionCreateCapabilities(deps, canonical, grant.workspaceId),
       ).resolves.toEqual({
         activated: false,
         canCreatePrivate: false,
         reason: "not_activated",
+        defaultVisibility: "workspace",
       });
     } finally {
       await shared.admin`
@@ -234,7 +246,7 @@ describe("managed-human session tenancy application service", () => {
 
     await expect(
       getManagedHumanSessionCreateCapabilities(
-        { db: client.db },
+        deps,
         { ...canonical, canonicalManagedHumanSession: false },
         grant.workspaceId,
       ),
@@ -242,6 +254,145 @@ describe("managed-human session tenancy application service", () => {
       activated: false,
       canCreatePrivate: false,
       reason: "managed_session_required",
+      defaultVisibility: "workspace",
+    });
+  }, 180_000);
+
+  test("new chats start with the organization's default audience, within the deployment's limits", async () => {
+    if (!shared || !client) return;
+    const userId = `core-privacy-defaults-${crypto.randomUUID()}`;
+    const subjectId = `user:${userId}`;
+    const access = await ensureManagedAccessForUser(client.db, {
+      userId,
+      email: `${userId}@example.test`,
+      name: "Privacy defaults",
+    });
+    const grant = access.workspaceGrants.find(
+      (candidate) => candidate.workspaceId === access.defaultWorkspaceId,
+    );
+    if (!grant) throw new Error("managed human has no shared workspace grant");
+    const canonical = {
+      grant,
+      accountGrant: access.accountGrants[0] ?? null,
+      authenticatedSubjectId: subjectId,
+      contextIntegrity: true,
+      canonicalManagedHumanSession: true,
+    } satisfies AccessGrantAuthorization;
+    const deps = (overrides: Parameters<typeof testSettings>[0] = {}) => ({
+      db: client!.db,
+      settings: testSettings(overrides),
+    });
+    const capabilities = async (overrides: Parameters<typeof testSettings>[0] = {}) =>
+      await getManagedHumanSessionCreateCapabilities(deps(overrides), canonical, grant.workspaceId);
+
+    // The organization's owner picks Only me as the default.
+    expect(await capabilities()).toMatchObject({ defaultVisibility: "workspace" });
+    const chosen = await updateOrganizationPrivacySettings(deps(), {
+      organizationId: grant.accountId,
+      actorSubjectId: subjectId,
+      request: { defaultVisibility: "private" },
+    });
+    expect(chosen).toMatchObject({
+      defaultVisibility: "private",
+      adminsSeePrivateSchedules: true,
+      limits: {
+        onlyMeAllowed: true,
+        defaultVisibilityLocked: false,
+        adminsSeePrivateSchedulesLocked: false,
+      },
+    });
+    expect(await capabilities()).toEqual({
+      activated: true,
+      canCreatePrivate: true,
+      reason: "available",
+      defaultVisibility: "private",
+    });
+
+    // A deployment that requires Workspace as the default wins, and refuses
+    // the organization choosing Only me again.
+    expect(await capabilities({ privacyWorkspaceDefaultRequired: true })).toMatchObject({
+      canCreatePrivate: true,
+      defaultVisibility: "workspace",
+    });
+    await expect(
+      updateOrganizationPrivacySettings(deps({ privacyWorkspaceDefaultRequired: true }), {
+        organizationId: grant.accountId,
+        actorSubjectId: subjectId,
+        request: { defaultVisibility: "private" },
+      }),
+    ).rejects.toBeInstanceOf(OrganizationPrivacyLockedError);
+
+    // A deployment that turns Only me off: no Only me chats in shared
+    // workspaces, whatever the organization chose.
+    expect(await capabilities({ privacyOnlyMeAllowed: false })).toEqual({
+      activated: false,
+      canCreatePrivate: false,
+      reason: "not_activated",
+      defaultVisibility: "workspace",
+    });
+    await expect(
+      requireManagedHumanPrivateSessionCreate(
+        deps({ privacyOnlyMeAllowed: false }),
+        canonical,
+        grant.workspaceId,
+      ),
+    ).rejects.toBeInstanceOf(SessionTenancyNotActivatedError);
+    await expect(
+      requireManagedHumanPrivateSessionCreate(deps(), canonical, grant.workspaceId),
+    ).resolves.toBeUndefined();
+    // Their Personal workspace is theirs alone, so it is unaffected.
+    const personal = access.workspaceGrants.find(
+      (candidate) => candidate.workspaceId !== access.defaultWorkspaceId,
+    );
+    if (personal) {
+      await expect(
+        requireManagedHumanPrivateSessionCreate(
+          deps({ privacyOnlyMeAllowed: false }),
+          { ...canonical, grant: personal },
+          personal.workspaceId,
+        ),
+      ).resolves.toBeUndefined();
+    }
+
+    // Admins can be kept from seeing Only me schedules, unless the deployment
+    // requires it.
+    expect(
+      await updateOrganizationPrivacySettings(deps(), {
+        organizationId: grant.accountId,
+        actorSubjectId: subjectId,
+        request: { adminsSeePrivateSchedules: false },
+      }),
+    ).toMatchObject({ defaultVisibility: "private", adminsSeePrivateSchedules: false });
+    expect(
+      await getOrganizationPrivacySettings(
+        deps({ privacyAdminScheduleSummariesRequired: true }),
+        grant.accountId,
+      ),
+    ).toMatchObject({
+      adminsSeePrivateSchedules: true,
+      limits: { adminsSeePrivateSchedulesLocked: true },
+    });
+    await expect(
+      updateOrganizationPrivacySettings(deps({ privacyAdminScheduleSummariesRequired: true }), {
+        organizationId: grant.accountId,
+        actorSubjectId: subjectId,
+        request: { adminsSeePrivateSchedules: false },
+      }),
+    ).rejects.toBeInstanceOf(OrganizationPrivacyLockedError);
+
+    // Only an owner or admin changes them.
+    const [membership] = await shared.admin<{ id: string }[]>`
+      select id from organization_memberships
+      where account_id = ${grant.accountId} and subject_id = ${subjectId}`;
+    await shared.admin`update organization_memberships set role = 'member' where id = ${membership!.id}`;
+    const denied = await updateOrganizationPrivacySettings(deps(), {
+      organizationId: grant.accountId,
+      actorSubjectId: subjectId,
+      request: { defaultVisibility: "workspace" },
+    }).catch((error: unknown) => error);
+    expect(nestedPostgresSqlState(denied)).toBe("42501");
+    expect(await getOrganizationPrivacySettings(deps(), grant.accountId)).toMatchObject({
+      defaultVisibility: "private",
     });
   }, 180_000);
 
@@ -585,7 +736,7 @@ describe("managed-human session tenancy application service", () => {
       resolveListScope: async () => ({ kind: "all" }),
     };
     const bus = new MemoryEventBus();
-    const deps = { db: client.db, bus, sessionAuthorization };
+    const deps = { db: client.db, bus, sessionAuthorization, settings: testSettings() };
 
     const changed = await updateManagedHumanSessionVisibility(
       deps,
@@ -761,6 +912,7 @@ describe("managed-human session tenancy application service", () => {
     const deps = {
       db: client.db,
       bus: new MemoryEventBus(),
+      settings: testSettings(),
       sessionAuthorization: {
         authorizeSession: async (input) => {
           operations.push(input.operation);
@@ -837,6 +989,7 @@ describe("managed-human session tenancy application service", () => {
     const deps = {
       db: null as never,
       bus: null as never,
+      settings: testSettings(),
       sessionAuthorization: {
         authorizeSession: async () => {
           throw new Error("host authorization must not run");
@@ -886,6 +1039,7 @@ describe("managed-human session tenancy application service", () => {
     const deps = {
       db: null as never,
       bus: null as never,
+      settings: testSettings(),
       sessionAuthorization: {
         authorizeSession: async () => {
           throw new Error("host authorization must not run");
@@ -933,6 +1087,7 @@ describe("managed-human session tenancy application service", () => {
     const deps = {
       db: client.db,
       bus: new MemoryEventBus(),
+      settings: testSettings(),
       sessionAuthorization: {
         authorizeSession: async () => {
           hostCalls += 1;

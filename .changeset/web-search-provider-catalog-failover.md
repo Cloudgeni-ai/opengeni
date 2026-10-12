@@ -1,0 +1,4 @@
+---
+---
+
+Provider web search now has one provider catalog and ordered failover. Search and page reading each take a comma-separated provider list (`OPENGENI_WEB_SEARCH_PROVIDER`, `OPENGENI_WEB_FETCH_PROVIDER`); a call moves to the next provider when one fails, a rate-limited, down or rejected provider cools down behind the others, and only the provider that answered is billed. Keys and base URLs are set per provider (`OPENGENI_WEB_<PROVIDER>_API_KEY` / `_BASE_URL`). Adds Parallel (search in fast mode and extract, $1 per 1,000 calls) and Perplexity (Fast Search, $1 per 1,000). TinyFish (free) is now the default provider and turns on once `OPENGENI_WEB_TINYFISH_API_KEY` is set. `OPENGENI_WEB_SEARCH_PREFER=native|provider` replaces `OPENGENI_WEB_SEARCH_PROVIDER_MODE=fallback|replace`; the earlier single-provider variables keep working.

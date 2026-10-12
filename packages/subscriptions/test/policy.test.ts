@@ -4,9 +4,11 @@ import { join } from "node:path";
 import {
   applyQuotaObservation,
   authorizationIneligibility,
+  bindingStickiness,
   cacheLifetimeMs,
   connectionIneligibility,
   decidePlacement,
+  declaredCacheLifetimeMs,
   DEFAULT_IDLE_CUTOFF_MS,
   effectiveSettings,
   failoverCandidateModels,
@@ -18,6 +20,7 @@ import {
   quotaObservationApplies,
   rankConnections,
   spreadHash,
+  type Ineligibility,
   type PlacementInput,
   type SubscriptionConnection,
   type SubscriptionQuota,
@@ -717,6 +720,309 @@ describe("cache coldness", () => {
   });
 });
 
+describe("cache-aware stickiness: why a binding keeps or leaves its account", () => {
+  const warmBinding = {
+    connectionId: "codex-2",
+    provider: "codex",
+    modelId: "codex/a",
+    choice: "automatic" as const,
+    lastModelCallAt: NOW - 60_000,
+  };
+  // codex-1 is the primary, so normal selection would leave codex-2.
+  const sticky = (
+    patch: {
+      bound?: Partial<SubscriptionConnection> | null;
+      session?: Partial<PlacementInput["session"]>;
+      settings?: Partial<SubscriptionSettingValues>;
+      workspace?: Partial<PlacementInput["workspace"]>;
+      now?: number;
+    } = {},
+  ) =>
+    input({
+      ...(patch.now === undefined ? {} : { now: patch.now }),
+      ...(patch.workspace === undefined ? {} : { workspace: patch.workspace }),
+      settings: {
+        rotation: { codex: { mode: "primary_first", primaryConnectionId: "codex-1" } },
+        ...patch.settings,
+      },
+      connections: [
+        connection("codex-1", "codex"),
+        ...(patch.bound === null ? [] : [connection("codex-2", "codex", patch.bound ?? {})]),
+      ],
+      session: { binding: warmBinding, ...patch.session },
+    });
+
+  test("SUB-STICK-02: a warm, servable automatic binding is kept and placement stays sticky", () => {
+    const world = sticky();
+    expect(bindingStickiness(world)).toEqual({
+      kind: "keep",
+      connectionId: "codex-2",
+      modelId: "codex/a",
+    });
+    expect(decidePlacement(world)).toMatchObject({ connectionId: "codex-2", switch: "sticky" });
+  });
+
+  test("SUB-STICK-03: each forced reason re-selects even while the cache is warm", () => {
+    const cases: Array<{
+      name: string;
+      world: PlacementInput;
+      reason: string;
+      ineligibility?: Ineligibility[];
+    }> = [
+      {
+        name: "exhausted",
+        world: sticky({ bound: { quota: quota({ exhaustedUntil: NOW + 60_000 }) } }),
+        reason: "account_ineligible",
+        ineligibility: ["exhausted"],
+      },
+      {
+        name: "rate limited",
+        world: sticky({
+          bound: { quota: quota({ exhaustedUntil: NOW + 30_000, exhaustedKind: "rate_limit" }) },
+        }),
+        reason: "account_ineligible",
+        ineligibility: ["exhausted"],
+      },
+      {
+        name: "model rate limited",
+        world: sticky({ bound: { quota: quota({ modelCooldowns: { "codex/a": NOW + 30_000 } }) } }),
+        reason: "account_ineligible",
+        ineligibility: ["model_cooling_down"],
+      },
+      {
+        name: "quarantined",
+        world: sticky({ bound: { health: "error" } }),
+        reason: "account_ineligible",
+        ineligibility: ["unhealthy"],
+      },
+      {
+        name: "needs a new sign-in",
+        world: sticky({ bound: { health: "needs_reconnect" } }),
+        reason: "account_ineligible",
+        ineligibility: ["unhealthy"],
+      },
+      {
+        name: "switched off for automatic selection",
+        world: sticky({ bound: { allocatorEnabled: false } }),
+        reason: "account_ineligible",
+        ineligibility: ["allocator_disabled"],
+      },
+      {
+        name: "out of scope for the session's workspace",
+        world: sticky({
+          bound: {
+            ownership: {
+              kind: "shared",
+              scope: {
+                kind: "workspaces",
+                workspaceIds: ["ws-other"],
+                allowPersonalWorkspaces: false,
+              },
+              managedByWorkspaceId: null,
+            },
+          },
+        }),
+        reason: "account_ineligible",
+        ineligibility: ["out_of_scope"],
+      },
+      {
+        name: "disconnected or removed",
+        world: sticky({ bound: null }),
+        reason: "account_unavailable",
+      },
+      {
+        name: "its model no longer allowed in the workspace",
+        world: sticky({ workspace: { allowedModelIds: ["codex/b"] } }),
+        reason: "model_not_permitted",
+      },
+      {
+        name: "its provider switched off for the workspace",
+        world: sticky({
+          settings: { providers: { codex: { useOrganizationAccounts: true, enabled: false } } },
+        }),
+        reason: "model_not_permitted",
+      },
+      {
+        name: "a compaction mode tied to another provider",
+        world: sticky({ session: { compactionProviderLock: "claude" } }),
+        reason: "model_not_permitted",
+      },
+      {
+        name: "paid credits while another account has included allowance",
+        world: sticky({
+          bound: {
+            extraCreditsEnabled: true,
+            quota: quota({
+              windows: [
+                { id: "weekly", usedPercent: 100, resetsAt: NOW + 3_600_000, status: "exhausted" },
+              ],
+            }),
+          },
+        }),
+        reason: "extra_credits",
+      },
+    ];
+    for (const entry of cases) {
+      const verdict = bindingStickiness(entry.world);
+      expect({ name: entry.name, verdict }).toMatchObject({
+        name: entry.name,
+        verdict: { kind: "reselect", reason: entry.reason },
+      });
+      if (entry.ineligibility && verdict.kind === "reselect")
+        expect({ name: entry.name, ineligibility: verdict.ineligibility }).toEqual({
+          name: entry.name,
+          ineligibility: entry.ineligibility,
+        });
+      const decision = decidePlacement(entry.world);
+      // Forced: never back onto the bound account and model.
+      expect({
+        name: entry.name,
+        kept:
+          decision.kind === "run" &&
+          decision.connectionId === "codex-2" &&
+          decision.modelId === "codex/a",
+      }).toEqual({ name: entry.name, kept: false });
+    }
+  });
+
+  test("SUB-STICK-05, SUB-STICK-04: a re-selection point or a cold cache re-runs normal selection", () => {
+    const compacted = sticky({ session: { reselectionPoints: ["compaction_completed"] } });
+    expect(bindingStickiness(compacted)).toEqual({
+      kind: "reselect",
+      reason: "reselection_point",
+      ineligibility: [],
+      points: ["compaction_completed"],
+    });
+    expect(decidePlacement(compacted)).toMatchObject({ connectionId: "codex-1" });
+    // The session's model changed: its bound model is no candidate any more,
+    // which is the re-selection point, not a forced restriction.
+    const changed = sticky({
+      session: { preferredModelId: "codex/b", reselectionPoints: ["model_changed"] },
+    });
+    expect(bindingStickiness(changed)).toEqual({
+      kind: "reselect",
+      reason: "reselection_point",
+      ineligibility: [],
+      points: ["model_changed"],
+    });
+    expect(decidePlacement(changed)).toMatchObject({ connectionId: "codex-1", modelId: "codex/b" });
+    // Idle exactly the declared lifetime is still warm; one millisecond more is cold.
+    const lifetime = cacheLifetimeMs(sticky().cacheFacts.codex);
+    const edge = sticky({
+      session: { binding: { ...warmBinding, lastModelCallAt: NOW - lifetime } },
+    });
+    expect(bindingStickiness(edge).kind).toBe("keep");
+    const cold = sticky({
+      session: { binding: { ...warmBinding, lastModelCallAt: NOW - lifetime - 1 } },
+    });
+    expect(bindingStickiness(cold)).toMatchObject({ kind: "reselect", reason: "cache_cold" });
+    // Rotation applies again: the primary takes the cold session.
+    expect(decidePlacement(cold)).toMatchObject({
+      connectionId: "codex-1",
+      switch: "reselected_cold",
+    });
+    // Cold re-selection may land on the same account when it still ranks first.
+    const coldWithoutPrimary = sticky({
+      settings: { rotation: { codex: { mode: "primary_first", primaryConnectionId: "codex-2" } } },
+      session: { binding: { ...warmBinding, lastModelCallAt: NOW - lifetime - 1 } },
+    });
+    expect(bindingStickiness(coldWithoutPrimary).kind).toBe("reselect");
+    expect(decidePlacement(coldWithoutPrimary)).toMatchObject({
+      connectionId: "codex-2",
+      switch: "sticky",
+    });
+    // A binding that never ran a model call is cold.
+    const unused = sticky({ session: { binding: { ...warmBinding, lastModelCallAt: 0 } } });
+    expect(bindingStickiness(unused)).toMatchObject({ kind: "reselect", reason: "cache_cold" });
+  });
+
+  test("SUB-STICK-04: the lifetime comes from each provider's declared cache facts", () => {
+    const idle = 10 * 60_000;
+    const world = sticky({
+      session: { binding: { ...warmBinding, lastModelCallAt: NOW - idle } },
+    });
+    const declared = (facts: PlacementInput["cacheFacts"][string]) =>
+      bindingStickiness({ ...world, cacheFacts: { codex: facts } }).kind;
+    expect(declared({ kind: "exact_ttl", ttlMs: 5 * 60_000 })).toBe("reselect");
+    expect(declared({ kind: "exact_ttl", ttlMs: 60 * 60_000 })).toBe("keep");
+    expect(declared({ kind: "measured_idle_cutoff", cutoffMs: 9 * 60_000 })).toBe("reselect");
+    expect(declared({ kind: "measured_idle_cutoff", cutoffMs: 20 * 60_000 })).toBe("keep");
+    expect(declaredCacheLifetimeMs({ kind: "exact_ttl", ttlMs: 300_000 })).toBe(300_000);
+    expect(declaredCacheLifetimeMs({ kind: "measured_idle_cutoff", cutoffMs: 3_600_000 })).toBe(
+      3_600_000,
+    );
+    for (const lifetime of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY])
+      expect(() => declaredCacheLifetimeMs({ kind: "exact_ttl", ttlMs: lifetime })).toThrow(
+        "positive whole-millisecond cache lifetime",
+      );
+  });
+
+  test("SUB-STICK-06, SUB-STICK-07: explicit choices are kept, and a shared session leaves a warm personal account", () => {
+    const pinned = sticky({
+      bound: { quota: quota({ exhaustedUntil: NOW + 60_000 }) },
+      session: { binding: { ...warmBinding, choice: "explicit" } },
+    });
+    expect(decidePlacement(pinned)).toMatchObject({
+      kind: "wait",
+      reason: "pinned_account_unavailable",
+    });
+    const mine = personal("codex-mine", "codex");
+    const shared = input({
+      connections: [connection("codex-org", "codex"), mine],
+      session: {
+        visibility: "shared",
+        personalAuthority: [{ provider: "codex", ownerMembershipId: "member-a" }],
+        binding: { ...warmBinding, connectionId: "codex-mine" },
+      },
+    });
+    expect(bindingStickiness(shared)).toMatchObject({
+      kind: "reselect",
+      reason: "account_ineligible",
+      ineligibility: ["personal_not_owners_work"],
+    });
+    expect(decidePlacement(shared)).toMatchObject({ connectionId: "codex-org", personal: false });
+  });
+
+  test("SUB-STICK-03, SUB-STICK-07: a warm personal account is left once its authority or owner is gone", () => {
+    const mine = personal("codex-mine", "codex");
+    const owned = input({
+      connections: [connection("codex-org", "codex"), mine],
+      personalFallbackOptIn: true,
+      session: {
+        visibility: "private",
+        personalAuthority: [{ provider: "codex", ownerMembershipId: "member-a" }],
+        binding: { ...warmBinding, connectionId: "codex-mine" },
+      },
+    });
+    // The owner's private session keeps its warm personal account.
+    expect(bindingStickiness(owned)).toMatchObject({ kind: "keep", connectionId: "codex-mine" });
+    const revoked = { ...owned, session: { ...owned.session, personalAuthority: [] } };
+    const left = {
+      ...owned,
+      people: owned.people.map((person) => ({ ...person, active: false })),
+    };
+    for (const [name, world, why] of [
+      ["no frozen authority", revoked, "personal_authority_missing"],
+      ["the owner left", left, "personal_owner_inactive"],
+    ] as const) {
+      const verdict = bindingStickiness(world);
+      expect({
+        name,
+        kind: verdict.kind,
+        reason: verdict.kind === "reselect" && verdict.reason,
+      }).toEqual({ name, kind: "reselect", reason: "account_ineligible" });
+      expect({
+        name,
+        why: verdict.kind === "reselect" && verdict.ineligibility.includes(why),
+      }).toEqual({ name, why: true });
+      expect({ name, decision: decidePlacement(world) }).toMatchObject({
+        name,
+        decision: { kind: "run", connectionId: "codex-org", personal: false },
+      });
+    }
+  });
+});
+
 describe("placement", () => {
   test("SUB-SEL-04, SUB-STICK-06: an explicit choice waits for its account, including a model cooldown, and is kept at re-selection points", () => {
     const world = input({
@@ -999,7 +1305,7 @@ describe("explicit choices, personal fallback and explained waits", () => {
 });
 
 describe("quota freshness and observations", () => {
-  test("SUB-ELIG-06: a stale reading counts as unknown, so it no longer outranks unknown quota", () => {
+  test("SUB-ELIG-06: fresh and stale telemetry do not outrank unknown quota", () => {
     const weekOld = quota({ observedAt: NOW - 7 * 24 * 3_600_000 });
     expect(quotaCapacity(weekOld, NOW)).toEqual({ kind: "available" });
     expect(quotaCapacity(weekOld, NOW, 3_600_000)).toEqual({ kind: "unknown" });
@@ -1027,8 +1333,8 @@ describe("quota freshness and observations", () => {
         },
         pool,
       ).map((candidate) => candidate.id);
-    expect(ranked(undefined)[0]).toBe("codex-1");
-    // With the bound both are unknown: the spread hash decides.
+    expect(ranked(undefined)).toEqual(ranked(3_600_000));
+    // The same spread hash decides regardless of which account has telemetry.
     expect(new Set(ranked(3_600_000))).toEqual(new Set(["codex-1", "codex-2"]));
   });
 
@@ -1062,6 +1368,84 @@ describe("quota freshness and observations", () => {
     expect(later.modelCooldowns).toEqual({});
     expect(later.exhaustedUntil).toBeNull();
     expect(quotaCapacity(later, NOW)).toEqual({ kind: "unknown" });
+  });
+
+  test("SUB-ELIG-06: a header reading or refusal that omits a running exhausted window keeps it until its reset; a usage reading or one that reports it again replaces it", () => {
+    const weekly = { id: "weekly", usedPercent: 100, resetsAt: NOW + 86_400_000 };
+    // Omitted windows that are not carried: one that is not exhausted, and
+    // an exhausted one that resets exactly when the new reading is made.
+    const current = quota({
+      observedAt: NOW - 1_000,
+      windows: [
+        { id: "primary", usedPercent: 20, resetsAt: NOW + 3_600_000, status: "ok" },
+        { ...weekly, status: "exhausted" },
+        { id: "daily", usedPercent: 92, resetsAt: NOW + 7_200_000, status: "warning" },
+        { id: "burst", usedPercent: 100, resetsAt: NOW, status: "exhausted" },
+      ],
+    });
+    // A partial header reading (only the primary window) does not drop the block.
+    const partial = quota({
+      observedAt: NOW,
+      source: "response_headers",
+      windows: [{ id: "primary", usedPercent: 25, resetsAt: NOW + 3_600_000, status: "ok" }],
+    });
+    const kept = applyQuotaObservation({ refreshGeneration: 1, quota: current }, partial)!;
+    expect(kept.windows).toEqual([...partial.windows, { ...weekly, status: "exhausted" }]);
+    expect(quotaCapacity(kept, NOW + 1_000)).toEqual({
+      kind: "exhausted",
+      resetsAt: NOW + 86_400_000,
+    });
+    expect(quotaCapacity(kept, NOW + 86_400_001)).toEqual({ kind: "available" });
+    // Neither does a refusal (which reports no windows).
+    const refusal = quota({
+      observedAt: NOW,
+      source: "refusal",
+      windows: [],
+      exhaustedUntil: NOW + 60_000,
+      exhaustedKind: "rate_limit",
+    });
+    const refused = applyQuotaObservation({ refreshGeneration: 1, quota: current }, refusal)!;
+    expect(refused.windows).toEqual([{ ...weekly, status: "exhausted" }]);
+    expect(quotaCapacity(refused, NOW + 120_000)).toEqual({
+      kind: "exhausted",
+      resetsAt: NOW + 86_400_000,
+    });
+    // A usage-endpoint reading is complete: omitting the window ends it.
+    const usage = { ...partial, source: "usage_endpoint" as const };
+    expect(applyQuotaObservation({ refreshGeneration: 1, quota: current }, usage)!.windows).toEqual(
+      usage.windows,
+    );
+    // A reading that reports the window again shows an early reset.
+    const reset = quota({
+      observedAt: NOW + 2_000,
+      source: "response_headers",
+      windows: [
+        { id: "primary", usedPercent: 25, resetsAt: NOW + 3_600_000, status: "ok" },
+        { ...weekly, usedPercent: 0, status: "ok" },
+      ],
+    });
+    const replaced = applyQuotaObservation({ refreshGeneration: 1, quota: kept }, reset)!;
+    expect(replaced.windows).toEqual(reset.windows);
+    expect(quotaCapacity(replaced, NOW + 3_000)).toEqual({ kind: "available" });
+    // A window whose reset passed before the reading, or whose reset is
+    // unknown, is not carried forward.
+    const ended = quota({
+      observedAt: NOW - 1_000,
+      windows: [
+        { id: "weekly", usedPercent: 100, resetsAt: NOW - 1, status: "exhausted" },
+        { id: "daily", usedPercent: 100, resetsAt: null, status: "exhausted" },
+      ],
+    });
+    expect(applyQuotaObservation({ refreshGeneration: 1, quota: ended }, partial)!.windows).toEqual(
+      partial.windows,
+    );
+    // A reading for a newer credential generation starts afresh.
+    expect(
+      applyQuotaObservation(
+        { refreshGeneration: 2, quota: current },
+        { ...partial, observedRefreshGeneration: 2 },
+      )!.windows,
+    ).toEqual(partial.windows);
   });
 });
 
@@ -1134,5 +1518,92 @@ describe("Codex credit consent", () => {
         ),
       ).toMatchObject({ kind: "wait" });
     }
+  });
+});
+
+describe("subscription review regressions", () => {
+  test("fresh personal connections work in their owner's Personal workspace without fallback opt-in", () => {
+    const own = input({
+      workspace: { kind: "personal", ownerMembershipId: "member-a" },
+      settings: { personalFallbackAllowed: false },
+      session: {
+        visibility: "private",
+        personalAuthority: [{ provider: "codex", ownerMembershipId: "member-a" }],
+      },
+      connections: [
+        connection("personal", "codex", {
+          ownership: { kind: "personal", ownerMembershipId: "member-a" },
+        }),
+      ],
+    });
+    expect(decidePlacement(own)).toMatchObject({ kind: "run", connectionId: "personal" });
+    expect(checkPlacementDecision(own, decidePlacement(own))).toEqual([]);
+    for (const denied of [
+      { ...own, settings: { ...own.settings, personalConnectionsAllowed: false } },
+      { ...own, session: { ...own.session, personalAuthority: [] } },
+      {
+        ...own,
+        workspace: { ...own.workspace, kind: "shared" as const, ownerMembershipId: null },
+        session: { ...own.session, visibility: "shared" as const },
+      },
+      { ...own, session: { ...own.session, ownerMembershipId: "member-b" } },
+      { ...own, workspace: { ...own.workspace, kind: "shared" as const, ownerMembershipId: null } },
+    ])
+      expect(decidePlacement(denied)).toMatchObject({ kind: "wait" });
+  });
+
+  test("Spread actually sends new sessions to accounts with unknown quota", () => {
+    const seen = new Set<string>();
+    for (let i = 0; i < 100; i++) {
+      const world = input({
+        session: { id: `new-session-${i}` },
+        connections: [
+          connection("known", "codex"),
+          connection("unknown", "codex", { quota: null }),
+        ],
+      });
+      const decision = decidePlacement(world);
+      if (decision.kind === "run") seen.add(decision.connectionId);
+    }
+    expect(seen).toEqual(new Set(["known", "unknown"]));
+  });
+
+  test("independent oracle covers credit consent, included alternatives, pins and provider refusals", () => {
+    for (const reset of [null, NOW - 1, NOW + 60_000])
+      for (const consent of [false, true])
+        for (const refusal of [null, NOW + 30_000])
+          for (const alternative of [false, true])
+            for (const explicit of [false, true]) {
+              const paid = connection("paid", "codex", {
+                extraCreditsEnabled: consent,
+                quota: quota({
+                  windows: [
+                    { id: "primary", usedPercent: 100, status: "exhausted", resetsAt: reset },
+                  ],
+                  exhaustedUntil: refusal,
+                  exhaustedKind: refusal === null ? null : "quota",
+                }),
+              });
+              const world = input({
+                connections: [paid, ...(alternative ? [connection("included", "codex")] : [])],
+                session: {
+                  onlyThisModel: true,
+                  binding: {
+                    connectionId: "paid",
+                    provider: "codex",
+                    modelId: "codex/a",
+                    choice: explicit ? "explicit" : "automatic",
+                    lastModelCallAt: NOW,
+                  },
+                },
+              });
+              const decision = decidePlacement(world);
+              expect(checkPlacementDecision(world, decision)).toEqual([]);
+              const mapped = toReferenceWorld(world);
+              const oracle = decideReference(mapped.world, mapped.sessionId, NOW);
+              expect(oracle.kind).toBe(decision.kind);
+              if (oracle.kind === "run" && decision.kind === "run")
+                expect(oracle.connectionId).toBe(decision.connectionId);
+            }
   });
 });

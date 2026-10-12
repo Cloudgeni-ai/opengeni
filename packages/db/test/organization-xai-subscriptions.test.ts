@@ -31,19 +31,20 @@ import {
   assertModelConnectionAllowsTurn,
   getWorkspaceConnectionModelRestrictions,
   modelAllowedByConnections,
-  upsertOrganizationCodexSubscriptionCredential,
-  updateOrganizationCodexRotationSettings,
-  listCodexAccountStatuses,
   upsertOrganizationModelProviderConnection,
   organizationModelProviderConnectionActiveForWorkspace,
-  getCodexRotationSettings,
-  getCodexCredentialStatus,
-  getOrganizationCodexRotationSettings,
   selectXaiCredentialForUse,
   workspaceXaiSubscriptionActiveForAuthority,
   setXaiSessionAccountPin,
   upsertWorkspaceVercelAiGatewayConnection,
   upsertWorkspaceOpenRouterConnection,
+} from "../src";
+import {
+  connectSubscriptionCoreCodexConnection,
+  setSubscriptionCoreCodexRotation,
+  getSubscriptionCoreCodexWorkspaceProjection,
+  getSubscriptionCoreOrganizationCodexProjection,
+  type Database,
 } from "../src";
 
 const realTest = test.skipIf(process.env.OPENGENI_REQUIRE_REAL_DB !== "1");
@@ -51,6 +52,96 @@ let shared: SharedTestDatabase;
 let client: DbClient;
 const encryptionKey = new Uint8Array(32).fill(41);
 const organizationSnapshot = { version: 1, scope: "organization" } as const;
+
+// Codex now exercises the core reader. The public access-policy writer remains
+// intentionally unavailable until M5; fixtures set policies with the test admin.
+async function upsertOrganizationCodexSubscriptionCredential(
+  db: Database,
+  input: {
+    organizationId: string;
+    actorSubjectId: string;
+    credentialEncrypted: string;
+    chatgptAccountId: string;
+    scopes: null;
+    planType: string;
+    isFedramp: boolean;
+    expiresAt: Date | null;
+    lastRefreshAt: Date | null;
+  },
+) {
+  const result = await connectSubscriptionCoreCodexConnection(db, {
+    ...input,
+    accountId: input.organizationId,
+    workspaceId: null,
+    subjectId: input.actorSubjectId,
+    providerAccountId: input.chatgptAccountId,
+    providerSubjectId: `fixture:${input.chatgptAccountId}`,
+    accountEmail: null,
+    label: null,
+  });
+  if (result.kind !== "connected") throw new Error(`core fixture refused: ${result.reason}`);
+  return result;
+}
+async function coreProjection(db: Database, workspaceId: string) {
+  const [row] = await shared.admin`select account_id from workspaces where id = ${workspaceId}`;
+  return await getSubscriptionCoreCodexWorkspaceProjection(db, {
+    accountId: row!.account_id,
+    workspaceId,
+  });
+}
+async function getCodexRotationSettings(db: Database, workspaceId: string) {
+  return (await coreProjection(db, workspaceId)).rotation;
+}
+async function listCodexAccountStatuses(db: Database, workspaceId: string) {
+  return (await coreProjection(db, workspaceId)).accounts;
+}
+async function getCodexCredentialStatus(db: Database, workspaceId: string) {
+  return { credentialId: (await coreProjection(db, workspaceId)).rotation.activeCredentialId };
+}
+async function getOrganizationCodexRotationSettings(
+  db: Database,
+  input: { organizationId: string; actorSubjectId: string },
+) {
+  return (
+    await getSubscriptionCoreOrganizationCodexProjection(db, {
+      organizationId: input.organizationId,
+      subjectId: input.actorSubjectId,
+    })
+  ).rotation;
+}
+async function updateOrganizationCodexRotationSettings(
+  db: Database,
+  input: { organizationId: string; actorSubjectId: string; rotationEnabled: boolean },
+) {
+  return await setSubscriptionCoreCodexRotation(db, {
+    accountId: input.organizationId,
+    workspaceId: null,
+    subjectId: input.actorSubjectId,
+    rotationEnabled: input.rotationEnabled,
+  });
+}
+async function setCoreFixtureAccess(
+  connectionId: string,
+  input: { allowedModels?: string[] | null; allowedWorkspaces?: string[] | null },
+) {
+  await shared.admin.begin(async (tx) => {
+    const [actor] = await tx`select connection.account_id, membership.subject_id
+      from subscription_connections connection join organization_memberships membership
+        on membership.account_id = connection.account_id
+      where connection.id = ${connectionId} and membership.role = 'owner'
+        and membership.status = 'active' limit 1`;
+    await tx`select set_config('opengeni.account_id', ${actor!.account_id}, true),
+      set_config('opengeni.subject_id', ${actor!.subject_id}, true)`;
+    if (input.allowedModels !== undefined)
+      await tx`update subscription_connections set allowed_model_ids = ${input.allowedModels}::text[] where id = ${connectionId}`;
+    if (input.allowedWorkspaces !== undefined) {
+      await tx`update subscription_connections set scope_kind = ${input.allowedWorkspaces === null ? "organization" : "workspaces"} where id = ${connectionId}`;
+      await tx`delete from subscription_connection_workspaces where connection_id = ${connectionId}`;
+      for (const workspaceId of input.allowedWorkspaces ?? [])
+        await tx`insert into subscription_connection_workspaces(account_id, connection_id, workspace_id) select account_id, id, ${workspaceId} from subscription_connections where id = ${connectionId}`;
+    }
+  });
+}
 
 realTest(
   "connection access restricts shared and Personal workspaces independently and blocks exact model use",
@@ -196,7 +287,22 @@ realTest(
       };
       const initial = await getModelConnectionAccess(client.db, target);
       expect(initial?.allowedWorkspaces).toBeNull();
-      if (kind !== "codex") {
+      if (kind === "codex") {
+        expect(
+          await updateModelConnectionAccess(client.db, target, { ...initial!, allowedModels: [] }),
+        ).toBeNull();
+        expect(await getModelConnectionAccess(client.db, target)).toEqual(initial);
+        await expect(
+          assertModelConnectionAllowsTurn(client.db, {
+            workspaceId: setup.workspaceId,
+            subjectId: setup.actorSubjectId,
+            codexCredentialId: connectionId,
+            modelId: "codex/allowed",
+          }),
+        ).rejects.toThrow("core");
+        continue;
+      }
+      {
         const invalidTarget = { ...target, connectionId: crypto.randomUUID() };
         expect(await getModelConnectionAccess(client.db, invalidTarget)).toBeNull();
         expect(
@@ -219,10 +325,7 @@ realTest(
           }),
         ).toEqual(initial);
       }
-      const modelId =
-        kind === "codex"
-          ? "codex/allowed"
-          : `organization-${kind === "vercel_gateway" ? "gateway" : "openrouter"}/allowed`;
+      const modelId = `organization-${kind === "vercel_gateway" ? "gateway" : "openrouter"}/allowed`;
       const policy = await updateModelConnectionAccess(client.db, target, {
         ...initial!,
         allowedModels: [modelId],
@@ -244,16 +347,13 @@ realTest(
         allowedWorkspaces: [],
         allowPersonalWorkspaces: false,
       });
-      if (kind === "codex")
-        expect(await listCodexAccountStatuses(client.db, setup.workspaceId)).toEqual([]);
-      else
-        expect(
-          await organizationModelProviderConnectionActiveForWorkspace(client.db, {
-            accountId: setup.organizationId,
-            workspaceId: setup.workspaceId,
-            providerKind: kind,
-          }),
-        ).toBe(false);
+      expect(
+        await organizationModelProviderConnectionActiveForWorkspace(client.db, {
+          accountId: setup.organizationId,
+          workspaceId: setup.workspaceId,
+          providerKind: kind,
+        }),
+      ).toBe(false);
       await expect(assertModelConnectionAllowsTurn(client.db, { ...run, modelId })).rejects.toThrow(
         "disabled",
       );
@@ -316,78 +416,83 @@ realTest(
       );
     const codexTarget = { ...target, kind: "codex" as const, connectionId: codex[0]!.id };
     const codexPolicy = await getModelConnectionAccess(client.db, codexTarget);
-    await updateModelConnectionAccess(client.db, codexTarget, {
-      ...codexPolicy!,
-      allowedWorkspaces: [],
-    });
-    expect((await getCodexRotationSettings(client.db, setup.workspaceId))?.activeCredentialId).toBe(
-      codex[1]!.id,
-    );
     expect(
-      (await listCodexAccountStatuses(client.db, setup.workspaceId)).find((row) => row.isActive)
-        ?.id,
-    ).toBe(codex[1]!.id);
-    expect((await getCodexCredentialStatus(client.db, setup.workspaceId))?.credentialId).toBe(
-      codex[1]!.id,
-    );
-    expect((await getOrganizationCodexRotationSettings(client.db, setup))?.activeCredentialId).toBe(
-      codex[0]!.id,
-    );
+      await updateModelConnectionAccess(client.db, codexTarget, {
+        ...codexPolicy!,
+        allowedWorkspaces: [],
+      }),
+    ).toBeNull();
+    await setCoreFixtureAccess(codex[0]!.id, { allowedWorkspaces: [] });
+    // Core catalog reads do not invent/mutate a primary binding. Only the
+    // in-scope account remains visible; placement chooses it under its fence.
+    expect(
+      (await getCodexRotationSettings(client.db, setup.workspaceId))?.activeCredentialId,
+    ).toBeNull();
+    expect(
+      (await listCodexAccountStatuses(client.db, setup.workspaceId)).map((row) => row.id),
+    ).toEqual([codex[1]!.id]);
+    expect((await getCodexCredentialStatus(client.db, setup.workspaceId))?.credentialId).toBeNull();
+    expect(
+      (await getOrganizationCodexRotationSettings(client.db, setup))?.activeCredentialId,
+    ).toBeNull();
   },
 );
 
-realTest("catalog uses the active subscription unless rotation enables the pool", async () => {
-  for (const kind of ["codex", "supergrok"] as const) {
-    const setup = await fixture();
-    // Migration 0680 seeds every organization enabled on the shared core;
-    // the Codex case covers the legacy pool, so it starts from the
-    // pre-cutover world (no Codex cutover row).
-    if (kind === "codex")
-      await shared.admin`delete from subscription_provider_cutovers
-        where account_id = ${setup.organizationId}::uuid and provider = 'codex'`;
-    for (const name of ["first", "second"]) {
-      const id =
-        kind === "supergrok"
-          ? (await connect(setup, name)).account.id
-          : (
-              await upsertOrganizationCodexSubscriptionCredential(client.db, {
-                ...setup,
-                credentialEncrypted: "test-envelope",
-                chatgptAccountId: name,
-                scopes: null,
-                planType: "team",
-                isFedramp: false,
-                expiresAt: null,
-                lastRefreshAt: null,
-              })
-            ).id;
-      const target = {
-        accountId: setup.organizationId,
-        workspaceId: null,
-        subjectId: setup.actorSubjectId,
-        kind,
-        connectionId: id,
-      };
-      const policy = await getModelConnectionAccess(client.db, target);
-      await updateModelConnectionAccess(client.db, target, {
-        ...policy!,
-        allowedModels: [`${kind}/${name}`],
-      });
+realTest(
+  "catalog preserves core unbound-pool reads and SuperGrok active/rotation behavior",
+  async () => {
+    for (const kind of ["codex", "supergrok"] as const) {
+      const setup = await fixture();
+      // Keep the seeded core Codex gate; SuperGrok still uses its legacy repository.
+      for (const name of ["first", "second"]) {
+        const id =
+          kind === "supergrok"
+            ? (await connect(setup, name)).account.id
+            : (
+                await upsertOrganizationCodexSubscriptionCredential(client.db, {
+                  ...setup,
+                  credentialEncrypted: "test-envelope",
+                  chatgptAccountId: name,
+                  scopes: null,
+                  planType: "team",
+                  isFedramp: false,
+                  expiresAt: null,
+                  lastRefreshAt: null,
+                })
+              ).id;
+        const target = {
+          accountId: setup.organizationId,
+          workspaceId: null,
+          subjectId: setup.actorSubjectId,
+          kind,
+          connectionId: id,
+        };
+        const policy = await getModelConnectionAccess(client.db, target);
+        if (kind === "codex")
+          await setCoreFixtureAccess(id, { allowedModels: [`${kind}/${name}`] });
+        else
+          await updateModelConnectionAccess(client.db, target, {
+            ...policy!,
+            allowedModels: [`${kind}/${name}`],
+          });
+      }
+      const read = () =>
+        getWorkspaceConnectionModelRestrictions(client.db, setup.workspaceId, setup.actorSubjectId);
+      const prefix = `${kind}/`;
+      const unboundExpected =
+        kind === "codex" ? [`${kind}/first`, `${kind}/second`] : [`${kind}/first`];
+      expect((await read())[prefix]?.sort()).toEqual(unboundExpected);
+      await (
+        kind === "codex" ? updateOrganizationCodexRotationSettings : updateOrganizationXaiRotation
+      )(client.db, { ...setup, rotationEnabled: true });
+      expect((await read())[prefix]?.sort()).toEqual([`${kind}/first`, `${kind}/second`]);
+      await (
+        kind === "codex" ? updateOrganizationCodexRotationSettings : updateOrganizationXaiRotation
+      )(client.db, { ...setup, rotationEnabled: false });
+      expect((await read())[prefix]?.sort()).toEqual(unboundExpected);
     }
-    const read = () =>
-      getWorkspaceConnectionModelRestrictions(client.db, setup.workspaceId, setup.actorSubjectId);
-    const prefix = `${kind}/`;
-    expect((await read())[prefix]).toEqual([`${kind}/first`]);
-    await (
-      kind === "codex" ? updateOrganizationCodexRotationSettings : updateOrganizationXaiRotation
-    )(client.db, { ...setup, rotationEnabled: true });
-    expect((await read())[prefix]?.sort()).toEqual([`${kind}/first`, `${kind}/second`]);
-    await (
-      kind === "codex" ? updateOrganizationCodexRotationSettings : updateOrganizationXaiRotation
-    )(client.db, { ...setup, rotationEnabled: false });
-    expect((await read())[prefix]).toEqual([`${kind}/first`]);
-  }
-});
+  },
+);
 
 realTest(
   "workspace gateways keep access policy on the actual connection without changing key revision",
@@ -827,7 +932,7 @@ realTest.each([
   ["supergrok", "shared"],
   ["supergrok", "personal"],
 ] as const)(
-  "restoring %s access wakes an armed %s workspace waiter atomically",
+  "%s access in a %s workspace preserves its current writer/wake boundary",
   async (kind, workspaceKind) => {
     const actor = await fixture();
     const workspaceId =
@@ -881,11 +986,18 @@ realTest.each([
       >`select wake_revision from ${shared.admin(waiterTable)} where session_id = ${sessionId}`;
       return Number(row!.wake_revision);
     };
+    const beforePolicyWrite = await revision();
     const removed = await updateModelConnectionAccess(client.db, target, {
       ...initial!,
       allowedWorkspaces: [],
       allowPersonalWorkspaces: false,
     });
+    if (kind === "codex") {
+      expect(removed).toBeNull();
+      expect(await getModelConnectionAccess(client.db, target)).toEqual(initial);
+      expect(await revision()).toBe(beforePolicyWrite);
+      return;
+    }
     const beforeRestore = await revision();
     const restore = { ...removed!, allowedWorkspaces: null, allowPersonalWorkspaces: true };
     await expect(
@@ -904,7 +1016,7 @@ realTest.each([
     const [wake] = await shared.admin<
       { reason: string; due: boolean }[]
     >`select reason, next_attempt_at <= now() as due from session_workflow_wake_outbox where session_id = ${sessionId}`;
-    expect(wake?.reason).toBe(kind === "codex" ? "codex_capacity" : "xai_capacity");
+    expect(wake?.reason).toBe("xai_capacity");
     expect(wake?.due).toBe(true);
   },
 );

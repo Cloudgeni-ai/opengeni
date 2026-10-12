@@ -128,8 +128,8 @@ function fixture(
   });
   const bootstrap = new MessageChannel();
   const ports: MessagePort[] = [];
-  bootstrap.port1.addEventListener("message", (event) => {
-    const port = event.ports[0]!;
+  bootstrap.port1.addEventListener("message", (bootstrapEvent) => {
+    const port = bootstrapEvent.ports[0]!;
     ports.push(port);
     port.addEventListener("message", async (event) => {
       const message = event.data as OpenGeniSiteBridgeRequestMessage;
@@ -292,7 +292,7 @@ describe.each([...clients])(
           if (result.isError) {
             const error = await f.site.tools.docs!.search!({}).then(
               () => undefined,
-              (error) => error,
+              (rejection) => rejection,
             );
             expect(error.code).toBe("provider_unavailable");
             expect(error.result).toEqual(result);

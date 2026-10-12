@@ -37,7 +37,7 @@ test("account routes expose labels with independent tool snapshots and dispatch"
       undefined,
       undefined,
       undefined,
-      label,
+      { model: label, connector: "Mail", providerDomain: "mail.example.com", account: label },
     );
   };
   const personal = create("mail-personal", "Personal: Alice");

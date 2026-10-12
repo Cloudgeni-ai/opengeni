@@ -79,6 +79,9 @@ validation active while restoring wide-session locking and compatibility writes.
 
 Task-tree [locking invariants](run-lifecycle.md).
 
+The macOS Connected Machine LaunchAgent starts in the installing user's home;
+explicit session folders remain authoritative. Service rendering is owned by
+`agent/crates/opengeni-agent-platform/src/service.rs`.
 Heartbeats refresh desktop availability without reconnecting or granting consent;
 see `docs/connected-machines.md`.
 
@@ -194,7 +197,9 @@ complete separate-stream pages and provider terminal/EOF proof. SDK-native
 collection in `sandbox/native-synchronous-collection.ts` begins before Start,
 on the original process streams, rather than parsing bounded shell presentation.
 Provider adapters own trusted page identities and cursors; routing captures
-those pages before acknowledging or settling the original process. Physical
+those pages before acknowledging or settling the original process. Immediate
+unretained Modal terminal pages use collector-scoped, session-bound receipts
+through that snapshot, cleared when the collector returns or rejects. Physical
 exit can settle process custody without proving complete output, but cannot
 authorize a successful filesystem result. Channel A and routing
 keep this separate from interactive/background shell execution; the worker
@@ -628,7 +633,7 @@ Those groups require native ownership for every new turn command while the
 global flag stays false. Read-only scoped RPCs inspect the owner-only ledger;
 existing groups never gain retrospective qualification. Canonical source:
 `packages/db/src/native-command-qualification.ts` and maintenance migrations
-`0693`/`0694`.
+`0730`/`0731`.
 Exact-instance capability verification precedes admission; durable invocation
 retention precedes dispatch. The supervisor starts idle. Only original launch
 releases user code; reconstructed observers never release abandoned reservations.
@@ -910,8 +915,10 @@ This distinction enables worker-death recovery without duplicate external effect
 Semantic naming is attempt-owned auxiliary work: pending titles and exact-session
 policy authorize one bounded, tool-less request, parallel to the main stream and
 separately metered. Normal completion joins it before atomic settlement;
-exceptional/cancelled exits abort and join. Generic title writes lose to human
-renames. Runtimes without this seam serialize `set_session_title`.
+exceptional/cancelled exits abort and join, persisting completed title results
+and checkpointing their separate Codex request custody before failure recovery
+is evaluated. Pending/unknown requests retain their replay fence. Generic title
+writes lose to human renames. Runtimes without this seam serialize `set_session_title`.
 
 `packages/db/src/session-execution-policy.ts` projects defaults;
 `packages/db/src/session-model-settings.ts` records boundaries, preserving accepted
@@ -1127,8 +1134,9 @@ tools (`opengeni__goal_*` lifecycle, `opengeni__command_read`/`command_wait`,
 joins the first-request barrier. Other non-MCP functions/non-eager MCP schemas require search.
 
 Web search is hosted by the model provider where the catalog declares it, or
-worker-run through one deployment-configured search API (`web_search` /
-`web_fetch`) where it does not. One shared plan (`webSearchToolPlan`) decides
+worker-run through deployment-configured search and page-reading providers
+(`web_search` / `web_fetch`, each an ordered failover list from one provider
+catalog) where it does not. One shared plan (`webSearchToolPlan`) decides
 both the worker's tools and the API's effective-tools projection; provider
 calls are credit-billed per call when billing is active. See
 [web search](web-search.md).
@@ -1615,6 +1623,11 @@ but admits no new connection, source configuration, credential delegation, or
 source-fetch execution. Scheduled admission and attempt-bound source fetching
 both enforce that retirement, including existing schedules and accepted work.
 Google Drive keeps its separate native API connection and source features.
+Publishing setup first verifies a folder through a file-only OAuth Picker, then
+uses a separate incremental OAuth step to retain recursive source reads. Both
+steps bind the same subject, account and unchanged connection; only final
+completion replaces the encrypted credential and enables the verified output
+folder. See [`google-drive.md`](google-drive.md#launch-oauth-scope-decision).
 See [`integrations-design.md`](integrations-design.md).
 
 The attempt-frozen Allow/Ask/Block policy and `connector_action_requests` apply
@@ -1729,7 +1742,9 @@ Native macOS operations drain Cocoa pools and clear pending capture starts;
 desktop discovery is independent of semantic inspection.
 
 `ComputerBackend` supplies desktop operations behind the shared `ComputerDriver`.
-Opt-in [CUA](../packages/browserd/CUA-PILOT.md) includes Windows semantic actions; native remains default.
+[CUA](../packages/browserd/CUA-PILOT.md) is the default for macOS and explicitly
+selected isolated Linux desktops. Linux host desktops and Windows retain the
+native default; explicit backend configuration is retained.
 
 Native framed Desktop input negotiates `pointerClickContinuation`. A supported
 viewer sends its first click immediately; the real second human click may be
@@ -2197,8 +2212,8 @@ organization-workspace lifecycle authority; see [external membership operation r
 | --- | --- | --- |
 | Model registry, routing, pricing, provider identity, OpenAI-compatible or Claude inference | `packages/config/src/index.ts`, `packages/runtime/src/model-provider*.ts`, `packages/runtime/src/chat-reasoning.ts`, `packages/runtime/src/anthropic-messages.ts` | [`model-providers.md`](model-providers.md) (start at Configuring inference) |
 | Claude sign-in, renewal or quota | apps/api/src/routes/claude-subscription-accounts.ts, packages/db/src/claude-subscription-account-tokens.ts | [model-providers.md](model-providers.md#claude-subscription-usage) |
-| Codex subscription authority or capacity | `packages/codex/`, `apps/worker/src/activities/codex-rotation.ts` | [`codex-subscription-rotation.md`](codex-subscription-rotation.md) |
-| Shared subscription core (placement policy, settings, eligibility, reference-model conformance, shadow comparison) | `packages/subscriptions/` (reference model in `packages/subscriptions/src/reference-model.ts`), `packages/db/src/legacy-subscription-world.ts`, `apps/worker/src/activities/agent-turn/subscription-core-shadow.ts` | [`subscription-accounts.md`](subscription-accounts.md), [`design/subscription-core-2026-10-07.md`](design/subscription-core-2026-10-07.md) |
+| Codex subscription authority or capacity | `packages/codex/`, `apps/worker/src/activities/agent-turn/codex-core-capacity.ts`, `packages/db/src/subscription-core-codex.ts`, `packages/db/src/subscription-core-codex-adapter.ts` | [`codex-subscription-rotation.md`](codex-subscription-rotation.md) |
+| Shared subscription core (policy, reference model, runtime, adapters) | `packages/subscriptions/` (`src/reference-model.ts`, `src/adapter.ts`), `packages/db/src/subscription-core/`, `packages/db/src/subscription-core-providers.ts`, `packages/db/src/legacy-subscription-world.ts`, `apps/worker/src/activities/agent-turn/subscription-core-shadow.ts` | [`subscription-accounts.md`](subscription-accounts.md), [`design/subscription-core-2026-10-07.md`](design/subscription-core-2026-10-07.md) |
 | SuperGrok/xAI subscription authority or capacity | `packages/xai-subscription/`, `packages/db/src/xai-subscription.ts`, `packages/db/src/subscription-account-repository.ts`, `packages/db/src/subscription-pool-schema.ts`, `packages/db/src/organization-xai-subscriptions.ts` | [`supergrok-subscription.md`](supergrok-subscription.md) |
 | First-party MCP, Codemode, or tool selection | `apps/api/src/mcp/`, `packages/codemode/`, `packages/runtime/src/` | [`mcp-surfaces.md`](mcp-surfaces.md) |
 | Compact MCP session discovery and child management | `packages/contracts/src/session-mcp-projections.ts`, `apps/api/src/mcp/session-view.ts`, `apps/api/src/mcp/server.ts`, `packages/db/src/index.ts` | [`session-monitoring-mcp.md`](session-monitoring-mcp.md) |
@@ -2220,6 +2235,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Editable artifacts | `packages/artifact-tool/`, `packages/core/src/domain/editable-artifacts/` | [`artifact-engine.md`](artifact-engine.md), [`artifact-collaboration.md`](artifact-collaboration.md) |
 | Generated images or media | `apps/worker/src/activities/generated-images.ts`, `packages/contracts/src/image-generation.ts` | [`image-generation.md`](image-generation.md) |
 | Composer voice input or resumable transcription | `packages/contracts/src/transcription-recordings.ts`, `apps/api/src/routes/transcription-recordings.ts`, `packages/react/src/hooks/use-voice-input.ts` | [`transcription.md`](transcription.md) |
+| Stateless single model calls (Chat Completions) or session titles | `apps/api/src/model-calls/`, `apps/api/src/routes/chat-completions.ts`, `packages/runtime/src/single-model-call.ts` | [`chat-completions.md`](chat-completions.md) |
 | Composer draft submission or native embedding host seam | `packages/core/src/application/composer-submit.ts`, `apps/api/src/routes/sessions.ts`, `packages/react/src/embedded-session-client.ts` | [`embedding.md`](embedding.md), package READMEs, and §7.1 |
 | Providers and social connectors | `apps/api/src/integrations/`, `apps/api/src/mcp/server.ts`, `packages/core/src/application/new-session-drafts.ts`, `packages/network/src/mcp-oauth-discovery.ts`, `packages/github/` | [`integrations-design.md`](integrations-design.md), [`github-app.md`](github-app.md), [`google-drive.md`](google-drive.md), [`slack-bot.md`](slack-bot.md), [`social-connectors.md`](social-connectors.md), [`fiken.md`](fiken.md) |
 | Slack user-token MCP tools and shared provider quota | `packages/runtime/src/slack-rest-mcp.ts`, `packages/contracts/src/slack-rest-mcp.ts`, `packages/db/src/slack-api-rate-limits.ts` | [`design/first-party-mcp-bridges.md`](design/first-party-mcp-bridges.md), [`slack-bot.md`](slack-bot.md) |

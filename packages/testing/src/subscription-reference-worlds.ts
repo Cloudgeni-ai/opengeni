@@ -8,6 +8,7 @@ import type {
   Decision,
   Session,
   SubscriptionSettings,
+  Tier,
   World,
 } from "./subscription-reference-model";
 
@@ -32,18 +33,38 @@ export function referenceRandom(seed: number) {
 export type ReferenceRandom = ReturnType<typeof referenceRandom>;
 
 export const REFERENCE_NOW = 1_000_000;
+/**
+ * Reference model declarations. Tiers (D-35) are declared so the derived
+ * fallback order has something to derive: two providers share the
+ * `frontier` tier, one model is `standard` and one declares none. Every
+ * plain generated world names an explicit fallback entry for every model,
+ * so these tiers change none of its decisions.
+ */
 export const REFERENCE_MODELS = [
-  { id: "codex/model-a", provider: "codex", reasoningLevels: ["low", "medium", "high", "xhigh"] },
-  { id: "codex/model-b", provider: "codex", reasoningLevels: ["low", "medium", "high"] },
+  {
+    id: "codex/model-a",
+    provider: "codex",
+    reasoningLevels: ["low", "medium", "high", "xhigh"],
+    tier: "frontier",
+  },
+  {
+    id: "codex/model-b",
+    provider: "codex",
+    reasoningLevels: ["low", "medium", "high"],
+    tier: "standard",
+  },
   {
     id: "claude/model-a",
     provider: "claude",
     reasoningLevels: ["low", "medium", "high", "xhigh", "max"],
+    tier: "frontier",
   },
   { id: "supergrok/model-a", provider: "supergrok", reasoningLevels: ["low", "high"] },
 ] as const;
 export const REFERENCE_MODEL_IDS: readonly string[] = REFERENCE_MODELS.map((model) => model.id);
 export const REFERENCE_PROVIDERS: readonly string[] = ["codex", "claude", "supergrok"];
+/** The contract's model tiers, plus "no tier", for generated declarations (D-35). */
+export const REFERENCE_TIERS: readonly (Tier | null)[] = ["frontier", "standard", "fast", null];
 export const REFERENCE_PEOPLE: readonly string[] = ["person-a", "person-b"];
 const SETTING_KEYS = [
   "rotation",
@@ -192,6 +213,44 @@ export function generateReferenceWorld(seed: number): { world: World; sessionId:
 
 // Scripted scenarios
 
+/**
+ * A generated world for the derived fallback order (D-35): the world of
+ * `generateReferenceWorld(seed)` with randomly declared model tiers (some
+ * models without one), most fallback entries removed (an empty list stays
+ * an explicit entry) and cross-provider failover usually on. It draws from
+ * its own random stream, so the plain world of every seed is unchanged.
+ */
+export function generateTieredReferenceWorld(seed: number): { world: World; sessionId: string } {
+  const { world, sessionId } = generateReferenceWorld(seed);
+  const rng = referenceRandom(seed * 104_729 + 7_919);
+  const thin = (order: Record<string, string[]>) =>
+    Object.fromEntries(Object.entries(order).filter(() => rng.bool(0.25)));
+  const { organization, workspaceOverrides } = world.settings;
+  return {
+    sessionId,
+    world: {
+      ...world,
+      models: world.models.map((model) => ({ ...model, tier: rng.pick(REFERENCE_TIERS) })),
+      settings: {
+        ...world.settings,
+        organization: {
+          ...organization,
+          crossProviderFailover: rng.bool(0.8),
+          fallbackOrder: thin(organization.fallbackOrder),
+        },
+        workspaceOverrides: Object.fromEntries(
+          Object.entries(workspaceOverrides).map(([workspaceId, override]) => [
+            workspaceId,
+            override.fallbackOrder === undefined
+              ? override
+              : { ...override, fallbackOrder: thin(override.fallbackOrder) },
+          ]),
+        ),
+      },
+    },
+  };
+}
+
 export function referenceSharedConnection(id: string, provider: string): Connection {
   return {
     id,
@@ -312,6 +371,19 @@ export function referenceScenarioCheckpoints(): ReferenceScenarioCheckpoint[] {
   });
   const bothClaudeExhausted = (resetsAt: number, secondResetsAt = resetsAt) =>
     exhaust(exhaust(base(), "claude-a", resetsAt), "claude-b", secondResetsAt);
+  const withFallbackOrder = (
+    world: World,
+    fallbackOrder: SubscriptionSettings["fallbackOrder"],
+    crossProviderFailover = true,
+  ): World => ({
+    ...world,
+    settings: {
+      ...world.settings,
+      organization: { ...world.settings.organization, fallbackOrder, crossProviderFailover },
+    },
+  });
+  const derivedTitle =
+    "SUB-FAIL-03, SUB-FAIL-04: with no fallback entry the order is derived from equal tiers of other providers only (D-35)";
 
   const failoverTitle =
     "SUB-FAIL-02: when the primary is exhausted the same accepted work moves to the next account of the same provider";
@@ -503,6 +575,36 @@ export function referenceScenarioCheckpoints(): ReferenceScenarioCheckpoint[] {
       updateReferenceSession(base(), { pinnedConnectionId: "codex-a" }),
       now,
       { kind: "wait", reason: "pinned_account_ineligible", earliestResetAt: null },
+      true,
+    ),
+    checkpoint(
+      derivedTitle + " (crosses to the same-tier model at the nearest reasoning level)",
+      withFallbackOrder(
+        boundTo(bothClaudeExhausted(now + 3_600_000), "claude-a", "claude/model-a", now),
+        {},
+      ),
+      now + 1_000,
+      {
+        kind: "run",
+        connectionId: "codex-a",
+        modelId: "codex/model-a",
+        reasoningLevel: "xhigh",
+        switch: "failover_cross_provider",
+      },
+      true,
+    ),
+    checkpoint(
+      derivedTitle + " (an explicit empty entry derives nothing)",
+      withFallbackOrder(bothClaudeExhausted(now + 3_600_000), { "claude/model-a": [] }),
+      now,
+      { kind: "wait", reason: "no_eligible_capacity", earliestResetAt: now + 3_600_000 },
+      true,
+    ),
+    checkpoint(
+      derivedTitle + " (nothing is derived while cross-provider failover is off)",
+      withFallbackOrder(bothClaudeExhausted(now + 3_600_000), {}, false),
+      now,
+      { kind: "wait", reason: "no_eligible_capacity", earliestResetAt: now + 3_600_000 },
       true,
     ),
   ];

@@ -13,18 +13,20 @@
  *
  *   OPENGENI_AZURE_OPENAI_BASE_URL=https://<resource>.openai.azure.com/openai/v1 \
  *   OPENGENI_AZURE_OPENAI_API_KEY=... \
- *   OPENGENI_WEB_SEARCH_PROVIDER=tinyfish OPENGENI_WEB_SEARCH_API_KEY=... \
+ *   OPENGENI_WEB_SEARCH_PROVIDER=tinyfish OPENGENI_WEB_TINYFISH_API_KEY=... \
  *   bun scripts/web-search-eval.ts [--model gpt-5.6-sol] [--arms hosted,agnostic] [--json out.json]
  *
  * `--arms retrieval` needs no model key: it runs only the provider adapters,
  * reporting latency and whether the reference facts appear in the snippets and
  * in the top fetched pages.
  *
- * Every OPENGENI_WEB_SEARCH_* / OPENGENI_WEB_FETCH_* setting is read exactly
- * as the worker reads it. Set OPENAI_API_KEY (and optionally OPENAI_BASE_URL)
- * instead of the Azure pair to use OpenAI directly.
+ * Every web search setting is read exactly as the worker reads it; the eval
+ * measures the first provider of each slot (no failover). Set OPENAI_API_KEY
+ * (and optionally OPENAI_BASE_URL) instead of the Azure pair to use OpenAI
+ * directly.
  */
 import {
+  getSettings,
   resolveWebSearchProvider,
   webSearchCallPricing,
   type WebSearchProviderConfig,
@@ -232,9 +234,12 @@ async function hostedArm(question: string): Promise<ArmResult> {
 }
 
 async function agnosticArm(question: string, config: WebSearchProviderConfig): Promise<ArmResult> {
-  const search = createWebSearchProvider({ endpoint: config.search, timeoutMs: config.timeoutMs });
-  const reader = config.fetch
-    ? createWebFetchProvider({ endpoint: config.fetch, timeoutMs: config.timeoutMs })
+  const search = createWebSearchProvider({
+    endpoint: config.search[0]!,
+    timeoutMs: config.timeoutMs,
+  });
+  const reader = config.fetch[0]
+    ? createWebFetchProvider({ endpoint: config.fetch[0], timeoutMs: config.timeoutMs })
     : null;
   const tools = [
     {
@@ -277,7 +282,7 @@ async function agnosticArm(question: string, config: WebSearchProviderConfig): P
     const calls = response.output.filter((item) => item.type === "function_call");
     if (calls.length === 0 || round === MAX_TOOL_ROUNDS) {
       return {
-        arm: `agnostic:${config.search.provider}${config.fetch && config.fetch.provider !== config.search.provider ? `+${config.fetch.provider}` : ""}`,
+        arm: `agnostic:${config.search[0]!.provider}${config.fetch[0] && config.fetch[0].provider !== config.search[0]!.provider ? `+${config.fetch[0].provider}` : ""}`,
         answer: finalText(response.output),
         seconds: (performance.now() - started) / 1000,
         toolCalls,
@@ -296,13 +301,15 @@ async function agnosticArm(question: string, config: WebSearchProviderConfig): P
           const request = parseWebSearchArguments(args);
           const result = await search.search(request);
           searchMicros +=
-            result.reportedCostMicros ?? webSearchCallPricing(config, "search").providerMicros;
+            result.reportedCostMicros ??
+            webSearchCallPricing(config, config.search[0]!, "search").providerMicros;
           output = renderWebSearchResults(request.query, result.results);
         } else if (call.name === "web_fetch" && reader) {
           const request = parseWebFetchArguments(args);
           const page = await reader.fetch({ url: request.url });
           searchMicros +=
-            page.reportedCostMicros ?? webSearchCallPricing(config, "fetch").providerMicros;
+            page.reportedCostMicros ??
+            webSearchCallPricing(config, config.fetch[0]!, "fetch").providerMicros;
           output = renderWebPageWindow(page, request);
         } else {
           output = `Unknown tool ${String(call.name)}`;
@@ -320,9 +327,12 @@ async function agnosticArm(question: string, config: WebSearchProviderConfig): P
 }
 
 async function retrievalArm(item: Case, config: WebSearchProviderConfig) {
-  const search = createWebSearchProvider({ endpoint: config.search, timeoutMs: config.timeoutMs });
-  const reader = config.fetch
-    ? createWebFetchProvider({ endpoint: config.fetch, timeoutMs: config.timeoutMs })
+  const search = createWebSearchProvider({
+    endpoint: config.search[0]!,
+    timeoutMs: config.timeoutMs,
+  });
+  const reader = config.fetch[0]
+    ? createWebFetchProvider({ endpoint: config.fetch[0], timeoutMs: config.timeoutMs })
     : null;
   const contains = (text: string) => item.facts.every((fact) => fact.test(text));
   const started = performance.now();
@@ -378,15 +388,8 @@ async function judge(item: Case, answer: string): Promise<{ score: number; reaso
 
 async function main() {
   const resolution = resolveWebSearchProvider({
+    ...getSettings({ OPENGENI_ENV: "test", ...process.env }),
     webSearchEnabled: true,
-    webSearchProvider: process.env.OPENGENI_WEB_SEARCH_PROVIDER,
-    webSearchApiKey: process.env.OPENGENI_WEB_SEARCH_API_KEY,
-    webSearchBaseUrl: process.env.OPENGENI_WEB_SEARCH_BASE_URL,
-    webFetchProvider: process.env.OPENGENI_WEB_FETCH_PROVIDER,
-    webFetchApiKey: process.env.OPENGENI_WEB_FETCH_API_KEY,
-    webFetchBaseUrl: process.env.OPENGENI_WEB_FETCH_BASE_URL,
-    webSearchPricingJson: process.env.OPENGENI_WEB_SEARCH_PRICING_JSON,
-    webSearchRequestTimeoutMs: Number(process.env.OPENGENI_WEB_SEARCH_REQUEST_TIMEOUT_MS ?? 30_000),
   });
   if (arms.includes("agnostic") && resolution.status !== "configured") {
     throw new Error(

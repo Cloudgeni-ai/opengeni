@@ -12,6 +12,8 @@ import {
   claimPendingSessionWorkflowWakes,
   repairPendingChildTerminalResultWakes,
   type ChildTerminalWakeRepairCursor,
+  repairMissingQuiescenceReceiptWakes,
+  type QuiescenceReceiptWakeRepairCursor,
   childRequiresActionDedupeKey,
   getSessionSystemUpdateOutboxByDedupeKey,
   getOrCreateSessionSystemUpdateOutbox,
@@ -43,9 +45,11 @@ export type ReconcileParentSystemUpdateOverrides = Partial<{
 export type ReconcileSessionWorkflowWakeOverrides = Partial<{
   claimPendingSessionWorkflowWakes: typeof claimPendingSessionWorkflowWakes;
   repairPendingChildTerminalResultWakes: typeof repairPendingChildTerminalResultWakes;
+  repairMissingQuiescenceReceiptWakes: typeof repairMissingQuiescenceReceiptWakes;
 }>;
 
 const childTerminalRepairCursors = new WeakMap<Database, ChildTerminalWakeRepairCursor>();
+const quiescenceRepairCursors = new WeakMap<Database, QuiescenceReceiptWakeRepairCursor>();
 
 export type ReconcileAutomaticSessionTitleFanoutOverrides = Partial<{
   claimAutomaticSessionTitleFanout: typeof claimAutomaticSessionTitleFanout;
@@ -406,6 +410,32 @@ export async function reconcilePendingSessionWorkflowWakes(
       examined: inventory.examined,
       registered: inventory.registered,
       failed: inventory.failed,
+    });
+  }
+  const repairQuiescence =
+    overrides.repairMissingQuiescenceReceiptWakes ?? repairMissingQuiescenceReceiptWakes;
+  // Repair discovery must never block delivery of already-pending wakes.
+  try {
+    const quiescenceInventory = await repairQuiescence(
+      svc.db,
+      Math.min(100, limit),
+      quiescenceRepairCursors.get(svc.db) ?? null,
+    );
+    if (quiescenceInventory.cursor) {
+      quiescenceRepairCursors.set(svc.db, quiescenceInventory.cursor);
+    } else {
+      quiescenceRepairCursors.delete(svc.db);
+    }
+    if (quiescenceInventory.failed > 0) {
+      svc.observability.error("Missing quiescence-receipt wake repair failed", {
+        examined: quiescenceInventory.examined,
+        registered: quiescenceInventory.registered,
+        failed: quiescenceInventory.failed,
+      });
+    }
+  } catch (error) {
+    svc.observability.error("Missing quiescence-receipt wake repair failed", {
+      error: error instanceof Error ? error.message : String(error),
     });
   }
   const repairs = await claimPendingSessionWorkflowWakesFn(svc.db, limit);

@@ -27,11 +27,6 @@ export const ACTION_CATALOG_EXEMPTIONS: ReadonlyArray<{ pattern: RegExp; reason:
     reason: "signing the native app in and out, and its push device: the app's own credential",
   },
   { pattern: /^\/v1\/identity(\/|$)/, reason: "sign-in methods and account recovery" },
-  { pattern: /^\/v1\/mcp-connections\//, reason: "approving an agent sign-in" },
-  {
-    pattern: /^\/v1\/organizations\/:organizationId\/mcp-connections/,
-    reason: "managing connected agents: an agent can't widen its own access",
-  },
   {
     pattern: /\/callback$|^\/v1\/(pr-review\/)?github\/setup$|\/client-metadata\.json$/,
     reason: "a provider's browser redirect back to Opengeni",
@@ -51,31 +46,26 @@ export function isActionCatalogExempt(path: string): boolean {
 }
 
 /**
- * Registered actions no MCP caller can ever complete: they need the person's
- * own Opengeni browser session, which neither a connected agent (MCP OAuth)
- * nor an organization API key has. They stay in the catalog, so every route is
- * accounted for, but the MCP server hides them from search and describe and a
- * direct call answers with this reason instead of a bare 401. Matched against
- * "METHOD /path".
+ * Registered actions no MCP caller can ever complete: they act on the
+ * person's own account across organizations, or are an identity ceremony in
+ * their own signed-in browser, which neither a connected agent (MCP OAuth),
+ * an agent with session admin access nor an organization API key has. They
+ * stay in the catalog, so every route is accounted for, but the MCP server
+ * hides them from search and describe and a direct call answers with this
+ * reason instead of a bare 401. Everything else an agent with the person's
+ * full access can do as them. Matched against "METHOD /path".
  */
 export const ACTION_CATALOG_BROWSER_ONLY: ReadonlyArray<{ pattern: RegExp; reason: string }> = [
-  {
-    pattern: /^\w+ \/v1\/inbox(\/|$)/,
-    reason: "the person's inbox requires their own signed-in browser session",
-  },
-  {
-    pattern: /^(GET|PUT) \/v1\/workspaces\/:workspaceId\/sessions\/:sessionId\/inbox-mute$/,
-    reason: "the person's session mute requires their own signed-in browser session",
-  },
   {
     pattern:
       /^(POST \/v1\/organizations(\/additional)?|GET \/v1\/organization-(memberships|invitations)|POST \/v1\/organization-invitations\/:invitationId\/accept)$/,
     reason:
-      "it acts on the person's own account across organizations (creating an organization, listing their memberships or invitations, accepting an invitation), and a connection is limited to one organization",
+      "it acts on the person's own account across organizations (creating an organization, listing their memberships or invitations, accepting an invitation), and an agent works in one organization",
   },
   {
     pattern: /^\w+ \/v1\/organizations\/:organizationId\/recovery(\/|$)/,
-    reason: "organization recovery is a ceremony in the person's own browser session",
+    reason:
+      "organization recovery is for when someone can't sign in, so each step is proven by that person's own browser sign-in",
   },
   {
     pattern: /^\w+ \/v1\/workspaces\/:workspaceId\/identity-links(\/|$)/,
@@ -90,6 +80,67 @@ export function actionCatalogBrowserOnlyReason(method: string, path: string): st
 }
 
 export type RegisteredRoute = { method: string; path: string };
+
+/**
+ * Request bodies the public surface manifest can't name because the SDK sends
+ * them inline, matched against "METHOD /path". Without a name, describe shows
+ * an agent no input and it has to guess the body. Each names a schema exported
+ * by @opengeni/contracts that the route accepts.
+ */
+export const ACTION_REQUEST_SCHEMAS: ReadonlyArray<{ pattern: RegExp; request: string }> = [
+  {
+    pattern:
+      /^PUT \/v1\/(organizations|workspaces)\/:scopeId\/model-connections\/:kind\/:connectionId\/access$/,
+    request: "ModelConnectionAccessPolicy",
+  },
+  {
+    pattern: /^PATCH \/v1\/\w+\/:\w+\/(codex|claude|supergrok)\/accounts\/:accountId$/,
+    request: "SubscriptionAccountRenameRequest",
+  },
+  {
+    pattern:
+      /^PATCH \/v1\/\w+\/:\w+\/(codex|claude|supergrok)\/accounts\/:accountId\/(allocator|extra-credits)$/,
+    request: "SubscriptionAccountToggleRequest",
+  },
+  {
+    pattern: /^PATCH \/v1\/\w+\/:\w+\/(codex|claude|supergrok)\/settings$/,
+    request: "SubscriptionRotationSettingsRequest",
+  },
+  {
+    pattern: /^POST \/v1\/\w+\/:\w+\/(codex|supergrok)\/connect\/poll$/,
+    request: "SubscriptionConnectPollRequest",
+  },
+  {
+    pattern: /^POST \/v1\/workspaces\/:workspaceId\/supergrok\/connect\/start$/,
+    request: "SupergrokConnectStartRequest",
+  },
+  {
+    pattern: /^PATCH \/v1\/workspaces\/:workspaceId\/codex\/source$/,
+    request: "CodexSourceRequest",
+  },
+  {
+    pattern: /^POST \/v1\/workspaces\/:workspaceId\/codex\/apps$/,
+    request: "CodexAppsDesignationRequest",
+  },
+  {
+    pattern: /^POST \/v1\/workspaces\/:workspaceId\/sessions\/:sessionId\/codex-account$/,
+    request: "SessionCodexAccountPinRequest",
+  },
+  {
+    pattern: /^PUT \/v1\/workspaces\/:workspaceId\/model-policy$/,
+    request: "UpdateWorkspaceModelPolicyRequest",
+  },
+  {
+    pattern: /^POST \/v1\/workspaces\/:workspaceId\/sessions\/:sessionId\/control$/,
+    request: "SessionControlRequest",
+  },
+];
+
+function inlineRequestSchemas(method: string, path: string): string[] {
+  const key = `${method} ${path}`;
+  const match = ACTION_REQUEST_SCHEMAS.find((rule) => rule.pattern.test(key));
+  return match ? [match.request] : [];
+}
 
 /**
  * Every callable /v1 route the API registers, with every route-gating flag on,
@@ -166,11 +217,12 @@ export function buildActionCatalog(
     .map((key) => {
       const [method, path] = [key.slice(0, key.indexOf(" ")), key.slice(key.indexOf(" ") + 1)];
       const route = described.get(key);
+      const request = route?.request ?? [];
       return {
         method,
         path,
         sdk: route?.sdk ?? [],
-        request: route?.request ?? [],
+        request: request.length > 0 ? request : inlineRequestSchemas(method, path),
         response: route?.response ?? [],
       };
     })

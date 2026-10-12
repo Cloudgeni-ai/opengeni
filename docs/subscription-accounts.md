@@ -23,6 +23,8 @@ for it until the matching requirement below is implemented:
 - Each requirement ends with a `Verification:` line. It lists the test files
   (unit `*.test.ts(x)`, integration `*.integration.ts` or end-to-end
   `*.e2e.ts`, anywhere CI discovers tests) that assert the requirement, or
+  a shared suite under a `test/helpers/` directory that such a test file
+  imports and runs (for example the subscription-core conformance suite), or
   `pending` with the work item (see
   [Work items](#work-items)) that will add them, or `retired`. A test asserts a requirement
   by naming its ID in its title: the first string argument of a `test`, `it`
@@ -38,9 +40,10 @@ for it until the matching requirement below is implemented:
   source guard on every CI plan (full, focused and documentation-only), and
   `scripts/check-subscription-contract.test.ts` runs the same check as a unit
   test. It fails when an ID is duplicated, has no verification line, names a
-  missing test file, names a test file none of whose titles names the ID,
-  names an unknown work item, or when a test file mentions an ID (anywhere,
-  including comments) that this document does not define.
+  missing test file or a shared suite no test file runs, names a test file
+  none of whose titles names the ID, names an unknown work item, or when a
+  test file or a cited shared suite mentions an ID (anywhere, including
+  comments) that this document does not define.
 - "Must" is a requirement. "Current state" notes describe main today and are
   informative only.
 
@@ -96,7 +99,7 @@ for it until the matching requirement below is implemented:
 - **SUB-OWN-05** An organization administrator can disable personal
   connections for the whole organization. Disabling stops new selection of
   personal connections; work already running on one moves at its next safe
-  point under SUB-ACCESS-06. Verification: pending (personal-connections).
+  point under SUB-ACCESS-06. Verification: `packages/db/test/helpers/subscription-core-conformance.ts`.
 - **SUB-OWN-06** Widening a personal connection to workspaces or the
   organization turns it into a shared connection and shows a short notice
   that consumer plans may limit use to the account holder.
@@ -113,15 +116,23 @@ for it until the matching requirement below is implemented:
 - **SUB-SET-01** Rotation (Primary first or spread), cross-provider failover
   (on or off, plus the fallback order), personal connections allowed, and
   personal fallback allowed are organization settings with defaults.
-  Verification: pending (data-model).
+  Verification: `packages/db/test/subscription-settings-postgres.test.ts`
+  (organization read and write as the application role),
+  `apps/api/test/model-account-settings-routes-postgres.test.ts` (routes).
 - **SUB-SET-02** A workspace administrator can override any of those settings
   for their workspace unless an organization administrator has locked it.
-  Verification: pending (data-model).
+  Verification: `packages/db/test/subscription-settings-postgres.test.ts`
+  (database guard for every writer, lock clearing, concurrency),
+  `packages/subscriptions/test/settings.test.ts` (the guard's TypeScript
+  mirror), `apps/api/test/model-account-settings-routes-postgres.test.ts`
+  (routes).
 - **SUB-SET-03** Every setting resolves to one effective value with a source
   ("Organization default" or "Overridden in this workspace"), and selection
   uses only the effective value. Two settings can never both apply to the same
   pool. Verification: `packages/db/test/subscription-core-m2-postgres.test.ts`
-  (SQL/TypeScript settings parity and source resolution).
+  (SQL/TypeScript settings parity and source resolution),
+  `packages/db/test/subscription-settings-postgres.test.ts` (randomized
+  parity with locks and workspace overrides).
 - **SUB-SET-04** Every settings screen shows the effective value and its
   source, with a one-step reset to the organization default.
   Verification: pending (product-surface).
@@ -153,59 +164,71 @@ for it until the matching requirement below is implemented:
   eligibility. Verification: pending (shared-core).
 - **SUB-ELIG-05** A personal connection serves only its owner's own work in
   their private sessions and Personal workspace. Shared team work is funded by
-  organization connections. Verification: pending (personal-connections).
+  organization connections. Verification: `packages/db/test/helpers/subscription-core-conformance.ts`.
 - **SUB-ELIG-06** Unknown or stale quota stays unknown. Missing metadata never
   manufactures exhaustion: an account with unknown quota is eligible and
-  counts as able to serve. It never ranks ahead of an account with known
-  capacity, except that a Primary-first primary keeps precedence
-  (SUB-SEL-03, D-15). Verification: pending (verification-suite).
+  counts as able to serve. Ordinary primary/spread ordering applies equally
+  to known and unknown capacity; telemetry is not a ranking preference
+  (D-29). Verification: pending (verification-suite).
 
 ### Selection
 
 - **SUB-SEL-01** Automatic selection prefers organization connections.
   Verification: pending (shared-core).
-- **SUB-SEL-02** A personal connection is selected only when its owner chose it
-  explicitly for the session, or when the owner opted in to "fall back to my
-  account when the organization pool is exhausted" (off by default).
-  Verification: pending (personal-connections).
+- **SUB-SEL-02** A connected personal account participates automatically in
+  its owner's Personal workspace. In other workspaces, private sessions need
+  an explicit account choice or permitted, per-person fallback opt-in (off by
+  default). Live ownership, organization permission and accepted-turn personal
+  authority remain required in every case (D-28).
+  Verification: `packages/db/test/helpers/subscription-core-conformance.ts`, `apps/api/test/model-account-choice-routes-postgres.test.ts`.
 - **SUB-SEL-03** Primary first places new work on the primary account while
   it can serve the work (unknown quota counts as able to serve,
   SUB-ELIG-06); when it cannot, failover moves to the next eligible
   account (SUB-FAIL-02). Spread distributes new sessions fairly across
-  eligible accounts. Neither mode moves a session whose cache is warm.
+  eligible accounts. Both preserve warm bindings except when an included
+  allowance can replace automatic extra-credit spending.
   Verification: pending (shared-core).
 - **SUB-SEL-04** A manual pin to an account is binding: the session waits for
-  that account instead of moving. Verification: pending (shared-core).
+  that account instead of moving. Verification: `packages/db/test/helpers/subscription-core-conformance.ts`.
 - **SUB-SEL-05** Selection is atomic and concurrency-safe: concurrent
   reservations cannot oversubscribe the primary account or bypass fairness.
+  Verification: pending (verification-suite).
+- **SUB-CREDITS-01** Codex extra credits require connection-specific consent.
+  Automatic selection uses an eligible included allowance before paid credits,
+  including at a warm binding or configured primary. Explicit pins still bind.
+  A live provider refusal, model cooldown, health or access restriction still
+  blocks the account. When a refusal expires, the next wait deadline considers
+  credit eligibility independently of the included allowance's reset time.
   Verification: pending (verification-suite).
 
 ### Stickiness and the prompt cache
 
 - **SUB-STICK-01** The account belongs to the session, not to whoever sends
-  the message. Verification: pending (cache-stickiness).
+  the message. Verification: `packages/db/test/helpers/subscription-core-conformance.ts`.
 - **SUB-STICK-02** While the prompt cache is warm, a session keeps its account
   across turns, senders, goal continuations, scheduled runs on the same session
   and recovery. Child sessions and new scheduled sessions have their own prompt
-  cache and start with an automatic choice. Verification: pending (cache-stickiness).
+  cache and start with an automatic choice. Verification: `packages/subscriptions/test/policy.test.ts`, `packages/db/test/helpers/subscription-core-conformance.ts`.
 - **SUB-STICK-03** A session moves to another account only when forced
-  (exhausted, disconnected, revoked, out of scope, owner left) or when the
-  cache is predictably cold. Verification: pending (cache-stickiness).
+  (exhausted, disconnected, revoked, out of scope, owner left, or a person
+  changed the session's explicit choice) or when the cache is predictably
+  cold. Verification: `packages/subscriptions/test/policy.test.ts`, `packages/db/test/helpers/subscription-core-conformance.ts`.
 - **SUB-STICK-04** Cache coldness is exact for Claude: the session has been
   idle longer than the cache lifetime Opengeni sent, which each cache read
   refreshes. For Codex and SuperGrok the cut-off comes from recorded cached
-  token counts against idle time, with a conservative default until measured.
-  Verification: pending (cache-stickiness).
-- **SUB-STICK-05** Compaction and a model change are re-selection points
-  regardless of idle time. Verification: pending (cache-stickiness).
+  token counts against idle time, with a conservative default until measured
+  (D-30). Verification: `packages/subscriptions/test/policy.test.ts`, `packages/db/test/helpers/subscription-core-conformance.ts`.
+- **SUB-STICK-05** Compaction, a model change and a change of the session's
+  explicit choice (setting or removing a pin, D-31) are re-selection points
+  regardless of idle time. Verification: `packages/subscriptions/test/policy.test.ts`, `packages/db/test/helpers/subscription-core-conformance.ts`.
 - **SUB-STICK-06** At a re-selection point only automatic choices are
-  re-evaluated; an explicit choice is kept. Verification: pending (cache-stickiness).
+  re-evaluated; an explicit choice is kept. Verification: `packages/subscriptions/test/policy.test.ts`, `packages/db/test/helpers/subscription-core-conformance.ts`.
 - **SUB-STICK-07** A session that was started on a personal account and is
   later shared stops using that account at once, even while its cache is
   warm: SUB-ELIG-05 takes precedence over stickiness, so the personal account
   is out of scope for the shared session (SUB-STICK-03). Its next turn moves
   to an eligible organization account, or waits if none can serve.
-  Verification: pending (cache-stickiness).
+  Verification: `packages/subscriptions/test/policy.test.ts`, `packages/db/test/helpers/subscription-core-conformance.ts`.
 
 ### Exhaustion and failover
 
@@ -437,6 +460,10 @@ by the implementer and recorded here; consequential ones are escalated.
 | D-25 | 2026-10-07 | Implementer decision: workspace overrides of per-provider and per-model settings (rotation, provider switches, fallback order) apply entry by entry, and provider switches field by field, so overriding one provider never resets another. |
 | D-26 | 2026-10-07 | Implementer decision: a provider switched off for the workspace (SUB-SET-06) and a compaction mode that ties a session to one provider (SUB-FAIL-09) restrict models exactly like the workspace model restriction of D-17. When the lock is what keeps a usable model away, the wait says so. |
 | D-27 | 2026-10-07 | Implementer decision, following SUB-STICK-02 and SUB-STICK-03: turning personal fallback off (by the owner or the organization) stops new automatic selections of personal accounts but is not a forced move. A session whose cache is warm on its owner's personal account keeps it and moves at its next re-selection point. Sharing the session (SUB-STICK-07), revoking the account or the owner leaving (SUB-STICK-03, SUB-ACCESS-06) still move it at once, and disabling personal connections (SUB-OWN-05) moves it at its next safe point. |
+| D-28 | 2026-10-09 | Supersedes D-03 for the owner’s Personal workspace: connected personal accounts participate automatically there, with organization permission and accepted authority. Funding private work elsewhere still requires explicit choice or permitted opt-in fallback. |
+| D-29 | 2026-10-09 | Supersedes the known-first portions of D-14, D-15 and D-21: unknown quota participates equally in normal rotation. Provider refusals establish cooldowns; missing telemetry does not deprioritize an account. |
+| D-30 | 2026-10-11 | Implementer decision, for SUB-STICK-02 to SUB-STICK-04: each provider adapter declares a positive cache lifetime, and core placement has no provider default (the reference model's legacy `DEFAULT_IDLE_CUTOFF_MS` applies only to legacy cache facts without a cut-off, never to a core adapter). An unusable declaration fails placement closed. Claude declares the exact 5-minute lifetime Opengeni sends. Codex declares one hour until a measured cut-off exists: the longest in-memory retention OpenAI documents for prompt caching. The SuperGrok core adapter will declare one hour on the same terms when it joins the core, as xAI documents no lifetime. Erring long costs some rotation balance; erring short pays for a cache miss the provider would have avoided. |
+| D-31 | 2026-10-11 | Implementer decision, strictest reading of SUB-STICK-02 to SUB-STICK-05 and of the M5 stickiness brief, which lists a pin change among the forced re-selections: a session's cache clock is recorded with its binding and is the latest placement or reserved model request of that session on its bound account and model; for an adapter that declares an idle cut-off, also the end of its latest completed model call. An exact lifetime is refreshed when a request starts, so the end of a call never extends it. A forced reason is checked before warmth, so a warm cache never keeps an account the session may not use. Moving to another account or model writes the placement time as the new clock; warmth is never carried to another account. Setting or removing a pin clears the clock, so removing a pin re-runs normal selection at the next turn, which may keep the account; a request, a completed call or a retried attempt of a turn already running never restarts a cleared clock, only the next turn's placement does. A placement that is followed by no request (the turn fails first) still counts as a use, so for an exact lifetime warmth can run past the provider's by at most the time since the session's previous request: a bounded, rare error toward keeping the account. A compaction counts as a re-selection point only when it is later than the clock: once the session has made a request after it, the cache was rebuilt on the bound account from the compacted context and is kept while warm. Placement decides from the binding under its row lock, taken before any per-connection lock as a pin takes it, so concurrent placements of one session and a concurrent pin never leave the turn and the binding on different accounts and never deadlock. The reported re-selection reason is the first that applies (forced reasons, then re-selection points, then a cold cache) and is diagnostic only. |
 
 ### Open decisions
 

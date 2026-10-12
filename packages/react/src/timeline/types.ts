@@ -22,6 +22,13 @@ import type {
    and the component demo.
    -------------------------------------------------------------------------- */
 
+/** The person who sent a message: their subject and the label frozen with it. */
+export type MessageSender = {
+  subjectId: string;
+  /** What the deployment knew them as when the message was accepted, such as an email. */
+  label: string | null;
+};
+
 export type TimelineAnnotationSourceDescriptor = Omit<
   TimelineAnnotationSource,
   "startOffset" | "endOffset" | "contextBefore" | "contextAfter"
@@ -51,6 +58,11 @@ export type UserMessageItem = {
   resources: ResourceRef[];
   /** Tools requested for the turn this message starts. */
   tools: ToolRef[];
+  /**
+   * The person who sent this message, as frozen when it was accepted. Absent
+   * for messages from agents, services and schedules, and for older messages.
+   */
+  sender?: MessageSender | undefined;
   occurredAt: string;
   /** Local-only delivery projection; absent for authoritative durable events. */
   delivery?:
@@ -367,6 +379,11 @@ export type SessionStatusItem = {
   kind: "session-status";
   id: string;
   status: SessionStatus;
+  /**
+   * The runtime refused to start the next turn (an admission block). Nothing
+   * is asked of the person, so it reads as stuck, not "waiting on you".
+   */
+  blocked?: true;
   /** Presentation-only evidence that this historical attention state resumed. */
   resolvedAt?: string;
   occurredAt: string;
@@ -395,6 +412,13 @@ export type NoticeItem = {
   text: string;
   /** Presentation-only evidence that a historical approval wait resumed. */
   resolvedAt?: string;
+  /**
+   * A model-capacity wait (no subscription capacity for the turn). Live, the
+   * turn's work row carries it as `label` with `detail` as one quiet secondary
+   * line; once `resolvedAt` is set it leaves no row, and its span is excluded
+   * from the turn's worked duration.
+   */
+  capacityWait?: { turnId: string | null; label: string; detail: string };
   /** A preserved turn-end outcome, not a claim about current session state. */
   recordedOutcome?: true;
   /**
@@ -595,7 +619,12 @@ export type TimelineGroup =
         startedAt: string;
         endedAt?: string;
         responseStartedAt?: string;
-        waiting?: { label: string; since: string };
+        waiting?: { label: string; since: string; detail?: string };
+        /**
+         * Settled capacity-wait time inside this work span. It is not work:
+         * the worked duration and the live working clock exclude it.
+         */
+        pausedMs?: number;
         details: TimelineGroup[];
         /**
          * While the turn is live, its progress notes stay readable above the
@@ -603,6 +632,12 @@ export type TimelineGroup =
          * so an expanded work disclosure can fold the outside copies away.
          */
         liveNoteIds?: string[];
+        /**
+         * Set when this row folds several quiet wake-work-wait cycles (routine
+         * input, work without a visible reply, a finished wait) into one row.
+         * `summary` is the latest wait reason, shown under the collapsed row.
+         */
+        cycles?: { count: number; summary?: string };
       };
     }
   | {

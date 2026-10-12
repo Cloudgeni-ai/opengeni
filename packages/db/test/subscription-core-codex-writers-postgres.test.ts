@@ -44,6 +44,8 @@ import {
   subscriptionCoreCodexResetAuthority,
   subscriptionCoreCodexResetCreditFence,
   SubscriptionCoreCodexOrganizationManagedError,
+  SubscriptionSettingsLockedError,
+  updateOrganizationSubscriptionSettings,
   withSessionRlsActorContext,
   withSubscriptionCoreAcceptedTurn,
   type DbClient,
@@ -56,6 +58,10 @@ import { provisionRoles } from "../src/provision-roles";
 import {
   evaluateRuntimeDatabasePosture,
   inspectRuntimeDatabasePosture,
+  SUBSCRIPTION_AUTHORITY_COMPAT_OWNER_ROUTINES,
+  SUBSCRIPTION_AUTHORITY_FENCE_OWNER_ROUTINES,
+  SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES,
+  SUBSCRIPTION_CORE_PRECURSOR_OWNER_ROUTINES,
 } from "../src/runtime-posture";
 
 setDefaultTimeout(180_000);
@@ -123,7 +129,7 @@ async function organization(): Promise<Org> {
       personal_connections_allowed, personal_fallback_allowed
     ) values (
       ${accountId}::uuid, ${shared!.admin.json({ codex: { mode: "spread" } })}::jsonb,
-      '{}'::jsonb, false, '{}'::jsonb, true, true
+      '{}'::jsonb, false, '{}'::jsonb, true, false
     )`;
   return {
     accountId,
@@ -139,7 +145,11 @@ async function organization(): Promise<Org> {
 async function person(
   org: Org,
   role: "admin" | "member",
-): Promise<{ subjectId: string; membershipId: string; personalWorkspaceId: string }> {
+): Promise<{
+  subjectId: string;
+  membershipId: string;
+  personalWorkspaceId: string;
+}> {
   const subjectId = `user:core-codex-person-${crypto.randomUUID()}`;
   const [workspace] = await shared!.admin<{ id: string }[]>`
     insert into workspaces (account_id, name)
@@ -154,7 +164,11 @@ async function person(
   await shared!.admin`
     insert into workspace_memberships (account_id, workspace_id, subject_id, role)
     values (${org.accountId}::uuid, ${org.sharedWorkspaceId}::uuid, ${subjectId}, ${role})`;
-  return { subjectId, membershipId: membership!.id, personalWorkspaceId: workspace!.id };
+  return {
+    subjectId,
+    membershipId: membership!.id,
+    personalWorkspaceId: workspace!.id,
+  };
 }
 
 async function setCutover(accountId: string, enabled: boolean | null): Promise<void> {
@@ -251,8 +265,11 @@ async function row(connectionId: string) {
 }
 
 function accessToken(encrypted: string): string {
-  return (JSON.parse(decryptEnvironmentValue(key, encrypted)) as { access_token: string })
-    .access_token;
+  return (
+    JSON.parse(decryptEnvironmentValue(key, encrypted)) as {
+      access_token: string;
+    }
+  ).access_token;
 }
 
 async function disconnectDesignationCase() {
@@ -574,7 +591,10 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
           connectionId: connected.id,
         });
       const holding = withSessionRlsActorContext(
-        { subjectId: org.ownerSubjectId, initiatingHumanSubjectId: org.ownerSubjectId },
+        {
+          subjectId: org.ownerSubjectId,
+          initiatingHumanSubjectId: org.ownerSubjectId,
+        },
         () =>
           withRlsContext(
             client!.db,
@@ -633,13 +653,18 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
     const entered = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
     const refreshing = withSessionRlsActorContext(
-      { subjectId: org.ownerSubjectId, initiatingHumanSubjectId: org.ownerSubjectId },
+      {
+        subjectId: org.ownerSubjectId,
+        initiatingHumanSubjectId: org.ownerSubjectId,
+      },
       () =>
         withRlsContext(
           client!.db,
           { accountId: org.accountId, workspaceId: org.sharedWorkspaceId },
           async (tx) => {
-            const [started] = await rawRows<{ refresh_generation: number | string }>(
+            const [started] = await rawRows<{
+              refresh_generation: number | string;
+            }>(
               tx,
               sql`select refresh_generation from opengeni_private.begin_subscription_codex_connection_refresh(
             ${org.accountId}::uuid, ${org.sharedWorkspaceId}::uuid, ${connected.id}::uuid,
@@ -669,7 +694,10 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
       from subscription_connections where id = ${connected.id}::uuid`;
     expect(stored).toEqual({ credential_encrypted: "", disconnected: true });
     await withSessionRlsActorContext(
-      { subjectId: org.ownerSubjectId, initiatingHumanSubjectId: org.ownerSubjectId },
+      {
+        subjectId: org.ownerSubjectId,
+        initiatingHumanSubjectId: org.ownerSubjectId,
+      },
       () =>
         withRlsContext(
           client!.db,
@@ -732,18 +760,31 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
       extraCreditsUpdatedAt: null,
     });
     for (const subject of [org.ownerSubjectId, "service:fixture", "user:other"]) {
-      expect((await change(alias, true, 1, subject)).result).toEqual({ kind: "not_found" });
+      expect((await change(alias, true, 1, subject)).result).toEqual({
+        kind: "not_found",
+      });
     }
     expect(await change(connected.id, true, 1)).toMatchObject({
-      result: { kind: "updated", extraCreditsEnabled: true, extraCreditsVersion: 2 },
-      wake: { accountId: org.accountId, reason: "core_codex_extra_credits_changed" },
+      result: {
+        kind: "updated",
+        extraCreditsEnabled: true,
+        extraCreditsVersion: 2,
+      },
+      wake: {
+        accountId: org.accountId,
+        reason: "core_codex_extra_credits_changed",
+      },
     });
     expect(await change(alias, true, 1)).toMatchObject({
       result: { kind: "unchanged", extraCreditsVersion: 2 },
       wake: null,
     });
     expect(await change(alias, false, 1)).toMatchObject({
-      result: { kind: "conflict", extraCreditsEnabled: true, extraCreditsVersion: 2 },
+      result: {
+        kind: "conflict",
+        extraCreditsEnabled: true,
+        extraCreditsVersion: 2,
+      },
       wake: null,
     });
     await withSessionRlsActorContext({ subjectId: member.subjectId }, () =>
@@ -769,11 +810,6 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
         expectedVersion: 2,
       }),
     );
-    await shared!
-      .admin`update subscription_settings set personal_fallback_allowed = true where account_id = ${org.accountId}::uuid and workspace_id is null`;
-    await shared!
-      .admin`insert into subscription_person_preferences(account_id, organization_membership_id, personal_fallback_opt_in)
-      values (${org.accountId}::uuid, ${member.membershipId}::uuid, true)`;
     const accepted = await withSessionRlsActorContext({ subjectId: member.subjectId }, async () => {
       const session = await createSession(client!.db, {
         accountId: org.accountId,
@@ -818,7 +854,12 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
       observed_refresh_generation, revision) values (${org.accountId}::uuid, ${connected.id}::uuid,
       ${shared!.admin.json({
         windows: [
-          { id: "primary", usedPercent: 100, resetsAt: now + 3600_000, status: "exhausted" },
+          {
+            id: "primary",
+            usedPercent: 100,
+            resetsAt: now + 3600_000,
+            status: "exhausted",
+          },
         ],
         modelCooldowns: {},
         exhaustedUntil: null,
@@ -848,13 +889,21 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
   });
 
   test("runs as the non-superuser, non-bypass application role", async () => {
-    const [role] = await rawRows<{ currentUser: string; superuser: boolean; bypassRls: boolean }>(
+    const [role] = await rawRows<{
+      currentUser: string;
+      superuser: boolean;
+      bypassRls: boolean;
+    }>(
       client!.db,
       sql`select current_user as "currentUser", rolsuper as superuser,
           rolbypassrls as "bypassRls"
         from pg_catalog.pg_roles where rolname = current_user`,
     );
-    expect(role).toEqual({ currentUser: "opengeni_app", superuser: false, bypassRls: false });
+    expect(role).toEqual({
+      currentUser: "opengeni_app",
+      superuser: false,
+      bypassRls: false,
+    });
   });
 
   test("without a cutover row, and with a disabled one, nothing is written or read", async () => {
@@ -895,7 +944,11 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
     const org = await organization();
     await setCutover(org.accountId, true);
     const first = await connect(org, org.ownerSubjectId, null, "org-account");
-    expect(first).toMatchObject({ kind: "connected", isNew: true, ownership: "shared" });
+    expect(first).toMatchObject({
+      kind: "connected",
+      isNew: true,
+      ownership: "shared",
+    });
     if (first.kind !== "connected") throw new Error("connect failed");
     expect(await row(first.id)).toMatchObject({
       ownership: "shared",
@@ -920,11 +973,19 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
         ...credential("org-account"),
         credentialEncrypted: encryptEnvironmentValue(
           key,
-          JSON.stringify({ access_token: "access-rotated", refresh_token: "r", id_token: "i" }),
+          JSON.stringify({
+            access_token: "access-rotated",
+            refresh_token: "r",
+            id_token: "i",
+          }),
         ),
       }),
     );
-    expect(again).toMatchObject({ kind: "connected", id: first.id, isNew: false });
+    expect(again).toMatchObject({
+      kind: "connected",
+      id: first.id,
+      isNew: false,
+    });
     const replaced = await row(first.id);
     expect(replaced!.refresh_generation).toBe("2");
     // A user-shaped grant alone is not proof of a managed browser human.
@@ -962,10 +1023,18 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
       ...login("alice"),
       credentialEncrypted: encryptEnvironmentValue(
         key,
-        JSON.stringify({ access_token: "access-alice-2", refresh_token: "r", id_token: "i" }),
+        JSON.stringify({
+          access_token: "access-alice-2",
+          refresh_token: "r",
+          id_token: "i",
+        }),
       ),
     });
-    expect(again).toMatchObject({ kind: "connected", id: alice.id, isNew: false });
+    expect(again).toMatchObject({
+      kind: "connected",
+      id: alice.id,
+      isNew: false,
+    });
     expect(accessToken((await row(alice.id))!.credential_encrypted)).toBe("access-alice-2");
     expect(accessToken((await row(bob.id))!.credential_encrypted)).toBe("access-team-bob");
   });
@@ -1096,7 +1165,11 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
     const plain = await person(org, "member");
     // An organization administrator connects a workspace account.
     const local = await connect(org, org.ownerSubjectId, org.sharedWorkspaceId, "ws-account");
-    expect(local).toMatchObject({ kind: "connected", isNew: true, ownership: "shared" });
+    expect(local).toMatchObject({
+      kind: "connected",
+      isNew: true,
+      ownership: "shared",
+    });
     if (local.kind !== "connected") throw new Error("connect failed");
     expect(await row(local.id)).toMatchObject({
       scope_kind: "workspaces",
@@ -1107,7 +1180,10 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
       select inference_pool, managed_by_workspace_id::text as managed
       from subscription_connection_assignment_policies
       where connection_id = ${local.id}::uuid and workspace_id = ${org.sharedWorkspaceId}::uuid`;
-    expect(policy).toEqual({ inference_pool: "workspace", managed: org.sharedWorkspaceId });
+    expect(policy).toEqual({
+      inference_pool: "workspace",
+      managed: org.sharedWorkspaceId,
+    });
     const projection = await withSessionRlsActorContext({ subjectId: manager.subjectId }, () =>
       getSubscriptionCoreCodexWorkspaceProjection(client!.db, {
         accountId: org.accountId,
@@ -1153,7 +1229,10 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
     expect(await row(local.id)).not.toBeNull();
     // The administrator removes the workspace account.
     const removed = await disconnect(org, org.ownerSubjectId, org.sharedWorkspaceId, local.id);
-    expect(removed).toMatchObject({ outcome: "removed", connectionId: local.id });
+    expect(removed).toMatchObject({
+      outcome: "removed",
+      connectionId: local.id,
+    });
     expect(await row(local.id)).toBeNull();
   });
 
@@ -1186,7 +1265,10 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
     expect(await row(connected.id)).not.toBeNull();
     // The legacy id resolves to the canonical connection.
     const removed = await disconnect(org, org.ownerSubjectId, null, alias);
-    expect(removed).toMatchObject({ outcome: "removed", connectionId: connected.id });
+    expect(removed).toMatchObject({
+      outcome: "removed",
+      connectionId: connected.id,
+    });
     expect(await row(connected.id)).toBeNull();
   });
 
@@ -1269,7 +1351,11 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
     const [fence] = await shared!.admin<{ attempt_id: string; generation: number }[]>`
       select active_attempt_id::text as attempt_id, execution_generation::int as generation
       from session_turns where id = ${turn.id}::uuid`;
-    const ref = { connectionId: connected.id, holderId: "writers-holder", generation: 1 };
+    const ref = {
+      connectionId: connected.id,
+      holderId: "writers-holder",
+      generation: 1,
+    };
     const request = {
       requestId: crypto.randomUUID(),
       transportAttempt: 1,
@@ -1329,6 +1415,76 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
     // never timeout/expiry, releases the cross-attempt uncertainty fence.
     await shared!.admin`update subscription_operation_leases set request_outcome = 'refused'
       where operation_id = ${crashed}::uuid`;
+    // An explicit Retry claims a new execution generation after the turn
+    // failed. An unknown request from that earlier failed attempt was already
+    // surfaced as the failure; it must not make the retry fail forever. An
+    // earlier generation that paused for capacity (not failed) stays fenced.
+    const earlierAttempt = async (outcome: string) => {
+      const attemptId = crypto.randomUUID();
+      const operationId = crypto.randomUUID();
+      await shared!.admin.begin(async (tx) => {
+        await tx`set local session_replication_role = replica`;
+        await tx`insert into session_turn_attempts (id, account_id, workspace_id, session_id,
+            turn_id, execution_generation, state, outcome, temporal_workflow_id,
+            temporal_workflow_run_id, temporal_activity_id, verified_control_revision,
+            mcp_approval_policies, authority_epoch, authority_visibility, closed_at)
+          select ${attemptId}::uuid, account_id, workspace_id, session_id, turn_id,
+            ${fence!.generation - 1}, 'closed', ${outcome}, temporal_workflow_id,
+            temporal_workflow_run_id, ${crypto.randomUUID()}, verified_control_revision,
+            mcp_approval_policies, authority_epoch, authority_visibility, now()
+          from session_turn_attempts where id = ${fence!.attempt_id}::uuid`;
+        await tx`insert into subscription_operation_leases(account_id, workspace_id, operation_id,
+          attempt_id, operation_kind, session_id, turn_id, provider, connection_id, holder_id,
+          generation, leased_until, request_id, transport_attempt, request_reserved_at, request_outcome)
+          values (${org.accountId}::uuid, ${org.sharedWorkspaceId}::uuid, ${operationId}::uuid,
+            ${attemptId}::uuid, 'model', ${session.id}::uuid, ${turn.id}::uuid,
+            'codex', ${connected.id}::uuid, 'earlier-owner', 1, now() - interval '1 hour',
+            ${crypto.randomUUID()}, 1, now() - interval '2 hours', 'unknown')`;
+      });
+      return operationId;
+    };
+    const failedEarlier = await earlierAttempt("failed");
+    const afterRetry = await reserveSubscriptionCoreCodexRequest(client!.db, identity, ref, {
+      ...request,
+      requestId: crypto.randomUUID(),
+    }).then(
+      () => "admitted",
+      (error: unknown) => String((error as { cause?: unknown } | null)?.cause ?? error),
+    );
+    // Both the writer and the database admission trigger let the retry through.
+    expect(afterRetry).toBe("admitted");
+    const [kept] = await shared!.admin`select request_outcome from subscription_operation_leases
+      where operation_id = ${failedEarlier}::uuid`;
+    expect(kept).toMatchObject({ request_outcome: "unknown" });
+    const pausedEarlier = await earlierAttempt("waiting_capacity");
+    await expect(
+      reserveSubscriptionCoreCodexRequest(client!.db, identity, ref, {
+        ...request,
+        requestId: crypto.randomUUID(),
+      }),
+    ).rejects.toBeInstanceOf(SubscriptionCoreCodexRequestOutcomeUnknownError);
+    await shared!.admin`update subscription_operation_leases set request_outcome = 'refused'
+      where operation_id = ${pausedEarlier}::uuid`;
+    // Worker shutdown, worker loss and a lost lease close the attempt as
+    // recoverable and dispatch a replacement in a new generation. The closed
+    // attempt is fenced from writing, so its ambiguous response can never be
+    // consumed: the replacement's new request is not a replay and must not
+    // fail the turn. The earlier request keeps its unknown outcome.
+    for (const outcome of ["interrupted_recoverable", "lease_lost_recoverable"]) {
+      const interrupted = await earlierAttempt(outcome);
+      const afterRecovery = await reserveSubscriptionCoreCodexRequest(client!.db, identity, ref, {
+        ...request,
+        requestId: crypto.randomUUID(),
+      }).then(
+        () => "admitted",
+        (error: unknown) => String((error as { cause?: unknown } | null)?.cause ?? error),
+      );
+      expect({ outcome, afterRecovery }).toEqual({ outcome, afterRecovery: "admitted" });
+      const [unchanged] = await shared!
+        .admin`select request_outcome from subscription_operation_leases
+        where operation_id = ${interrupted}::uuid`;
+      expect(unchanged).toMatchObject({ request_outcome: "unknown" });
+    }
     expect((await disconnect(org, org.ownerSubjectId, null, connected.id)).outcome).toBe("removed");
     expect(await row(connected.id)).toBeNull();
     const [scrubbed] = await shared!.admin`select credential_encrypted, status, allocator_enabled,
@@ -1354,10 +1510,16 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
     const [leases] = await shared!.admin`select
       (select count(*) from subscription_leases where connection_id = ${connected.id}::uuid)::int as chat,
       (select count(*) from subscription_operation_leases where connection_id = ${connected.id}::uuid)::int as operation`;
-    expect(leases).toEqual({ chat: 1, operation: 3 });
+    // Three request records, the four earlier-generation fixtures, the admitted
+    // retry request and the two admitted recovery requests above; disconnect
+    // deletes none of them.
+    expect(leases).toEqual({ chat: 1, operation: 10 });
     const [unknown] = await shared!.admin`select request_outcome, request_observed_at
       from subscription_operation_leases where operation_id = ${reserved.operationId}::uuid`;
-    expect(unknown).toEqual({ request_outcome: "reserved", request_observed_at: null });
+    expect(unknown).toEqual({
+      request_outcome: "reserved",
+      request_observed_at: null,
+    });
     // Reconnect is a new identity, even with exactly the same upstream person.
     const replacement = await connect(org, org.ownerSubjectId, null, "guarded");
     if (replacement.kind !== "connected") throw new Error("reconnect failed");
@@ -1435,8 +1597,16 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
     const b = await write("upstream-B");
     if (a.kind !== "connected" || b.kind !== "connected") throw new Error("connect failed");
     expect(a.id).not.toBe(b.id);
-    expect(await write("upstream-A")).toMatchObject({ kind: "connected", id: a.id, isNew: false });
-    expect(await write("upstream-B")).toMatchObject({ kind: "connected", id: b.id, isNew: false });
+    expect(await write("upstream-A")).toMatchObject({
+      kind: "connected",
+      id: a.id,
+      isNew: false,
+    });
+    expect(await write("upstream-B")).toMatchObject({
+      kind: "connected",
+      id: b.id,
+      isNew: false,
+    });
     for (const workspaceId of [org.personalWorkspaceId, null]) {
       if (workspaceId === null) await write("upstream-A", workspaceId);
       for (const unresolved of [null, `legacy:${crypto.randomUUID()}`]) {
@@ -1527,7 +1697,10 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
       appUrl.username = "opengeni_app";
       appUrl.password = owned.appPassword;
       ownerClient = createDb(appUrl.toString(), { max: 4 });
-      shared = { ...previous.shared!, admin: owned.admin } as SharedTestDatabase;
+      shared = {
+        ...previous.shared!,
+        admin: owned.admin,
+      } as SharedTestDatabase;
       client = ownerClient;
       const [owner] = await owned.admin<{ rolsuper: boolean; rolbypassrls: boolean }[]>`
         select rolsuper, rolbypassrls from pg_roles where rolname = ${owned.ownerRole}`;
@@ -1546,7 +1719,22 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
       };
       const posture = await inspectRuntimeDatabasePosture(ownerClient!.db, options);
       expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
-      expect(posture.subscriptionOwnerRoutines).toHaveLength(4);
+      // Exactly the four Codex writer internals, the neutral ones (0707, with
+      // 0713's provider-keyed auto-assignment apply path), the cutover-receipt
+      // and cutover-identity triggers (0712), the authority compatibility
+      // internals (0716) and the fences' helpers (0717).
+      expect(posture.subscriptionOwnerRoutines!.map((routine) => routine.name).sort()).toEqual(
+        [
+          "subscription_codex_writer_context(uuid, uuid, text)",
+          "grant_subscription_codex_owner_capability(text, uuid, uuid, text, uuid)",
+          "drop_subscription_codex_owner_capabilities(uuid)",
+          "derive_scheduled_revision_subscription_authority()",
+          ...SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES,
+          ...SUBSCRIPTION_CORE_PRECURSOR_OWNER_ROUTINES,
+          ...SUBSCRIPTION_AUTHORITY_COMPAT_OWNER_ROUTINES,
+          ...SUBSCRIPTION_AUTHORITY_FENCE_OWNER_ROUTINES,
+        ].sort(),
+      );
       await disconnectDesignationCase();
       for (const routine of posture.subscriptionOwnerRoutines!) {
         expect(posture.privateRoutines.some((entry) => entry.name === routine.name)).toBe(false);
@@ -1568,7 +1756,11 @@ async function personalCase(): Promise<void> {
   const member = await person(org, "member");
   // The member connects in their own Personal workspace.
   const first = await connect(org, member.subjectId, member.personalWorkspaceId, "personal-one");
-  expect(first).toMatchObject({ kind: "connected", isNew: true, ownership: "personal" });
+  expect(first).toMatchObject({
+    kind: "connected",
+    isNew: true,
+    ownership: "personal",
+  });
   if (first.kind !== "connected") throw new Error("connect failed");
   expect(await row(first.id)).toMatchObject({
     ownership: "personal",
@@ -1578,7 +1770,12 @@ async function personalCase(): Promise<void> {
     managed_by_workspace_id: null,
   });
   const [authority] = await shared!.admin<
-    { resource_kind: string; status: string; generation: string; origin: string }[]
+    {
+      resource_kind: string;
+      status: string;
+      generation: string;
+      origin: string;
+    }[]
   >`select resource_kind, status, generation::text as generation,
       origin_workspace_id::text as origin
     from organization_user_resource_authorities where resource_id = ${first.id}::uuid`;
@@ -1827,7 +2024,10 @@ async function personalCase(): Promise<void> {
       viewerSubjectId: member.subjectId,
     }),
   );
-  expect(view?.currentSelection).toEqual({ waiting: false, credentialId: third.id });
+  expect(view?.currentSelection).toEqual({
+    waiting: false,
+    credentialId: third.id,
+  });
   expect(view?.currentAccount?.id).toBe(third.id);
   const anonymous = await withSessionRlsActorContext({ subjectId: member.subjectId }, () =>
     getSubscriptionCoreSessionCodexAccounts(client!.db, {
@@ -1838,6 +2038,56 @@ async function personalCase(): Promise<void> {
   );
   expect(anonymous?.currentAccount).toBeNull();
   await shared!.admin`delete from subscription_leases where turn_id = ${turn.id}::uuid`;
+
+  // The personal primary is an upsert: its guard holds the shared settings
+  // lock while it waits for the Personal row a lock change has locked. The
+  // lock change yields and retries (0724), so neither side deadlocks.
+  for (let round = 0; round < 12; round += 1) {
+    await updateOrganizationSubscriptionSettings(client!.db, {
+      organizationId: org.accountId,
+      actorSubjectId: org.ownerSubjectId,
+      patch: { locked: [] },
+    });
+    const [lockChange, primary] = await Promise.allSettled([
+      updateOrganizationSubscriptionSettings(client!.db, {
+        organizationId: org.accountId,
+        actorSubjectId: org.ownerSubjectId,
+        patch: { locked: ["crossProviderFailover"] },
+      }),
+      withSessionRlsActorContext({ subjectId: member.subjectId }, () =>
+        setSubscriptionCoreCodexPrimary(client!.db, personalAdmin),
+      ),
+    ]);
+    expect({ round, lockChange: lockChange.status, primary: primary.status }).toEqual({
+      round,
+      lockChange: "fulfilled",
+      primary: "fulfilled",
+    });
+  }
+  await updateOrganizationSubscriptionSettings(client!.db, {
+    organizationId: org.accountId,
+    actorSubjectId: org.ownerSubjectId,
+    patch: { locked: [] },
+  });
+
+  // A rotation lock (0724) binds the person's own primary too: it is refused
+  // as a lock (not a 500), and nothing is written.
+  await shared!.admin`update subscription_settings set locked_settings = '{rotation}'
+    where account_id = ${org.accountId}::uuid and workspace_id is null`;
+  const lockedPrimary = await withSessionRlsActorContext({ subjectId: member.subjectId }, () =>
+    setSubscriptionCoreCodexPrimary(client!.db, personalAdmin),
+  ).then(
+    () => null,
+    (error: unknown) => error,
+  );
+  expect(lockedPrimary).toBeInstanceOf(SubscriptionSettingsLockedError);
+  expect((lockedPrimary as SubscriptionSettingsLockedError).settings).toEqual(["rotation"]);
+  const [personalRow] = await shared!.admin<{ rotation: unknown }[]>`
+    select rotation from subscription_settings
+    where account_id = ${org.accountId}::uuid and workspace_id = ${member.personalWorkspaceId}::uuid`;
+  expect(personalRow?.rotation ?? null).toBeNull();
+  await shared!.admin`update subscription_settings set locked_settings = '{}'
+    where account_id = ${org.accountId}::uuid and workspace_id is null`;
 }
 
 async function organizationRedemptionCase(): Promise<void> {

@@ -44,7 +44,7 @@ afterAll(async () => {
   await shared?.release();
 }, 180_000);
 
-async function fixture(mode: "legacy" | "core", expired = false, workspaceManaged = false) {
+async function fixture(mode: "core", expired = false, workspaceManaged = false) {
   const userId = crypto.randomUUID();
   const access = await ensureManagedAccessForUser(client!.db, {
     userId,
@@ -63,28 +63,18 @@ async function fixture(mode: "legacy" | "core", expired = false, workspaceManage
     }),
   );
   const expires = new Date(expired ? 0 : Date.now() + 86_400_000).toISOString();
-  if (mode === "legacy") {
-    // Reconstruct the pre-cutover fixture; new organizations are seeded core.
-    await shared!.admin`delete from subscription_provider_cutovers
-      where account_id = ${organizationId} and provider = 'codex'`;
-    await shared!.admin`insert into codex_subscription_credentials (
-      id, account_id, organization_id, authority_scope, credential_encrypted,
-      chatgpt_account_id, plan_type, status, allocator_enabled, allowed_workspace_ids,
-      allow_personal_workspaces, expires_at
-    ) values (${credentialId}, ${organizationId}, ${organizationId}, 'organization',
-      ${encrypted}, ${crypto.randomUUID()}, 'pro', 'active', false, '{}', false, ${expires})`;
-  } else {
-    await shared!.admin`insert into subscription_provider_cutovers (account_id, provider, enabled)
+
+  await shared!.admin`insert into subscription_provider_cutovers (account_id, provider, enabled)
       values (${organizationId}, 'codex', true)
       on conflict (account_id, provider) do update set enabled = true`;
-    await shared!.admin`insert into subscription_connections (
+  await shared!.admin`insert into subscription_connections (
       id, account_id, provider, kind, credential_encrypted, credential_format, provider_account_id,
       plan_type, ownership, scope_kind, status, allocator_enabled, allow_personal_workspaces, expires_at,
       managed_by_workspace_id
     ) values (${credentialId}, ${organizationId}, 'codex', 'subscription', ${encrypted}, 'v2',
       ${crypto.randomUUID()}, 'pro', 'shared', 'workspaces', 'active', false, false, ${expires},
       ${workspaceManaged ? access.workspaceGrants[0]!.workspaceId : null})`;
-  }
+
   return { organizationId, actorSubjectId, credentialId, mode };
 }
 
@@ -409,7 +399,7 @@ describe("organization Codex usage through retained core aliases", () => {
   );
 
   test.skipIf(!real)(
-    "rejects foreign and workspace-managed aliases before provider I/O",
+    "rejects foreign aliases before provider I/O and reads workspace-managed organization accounts",
     async () => {
       const canonical = await fixture("core");
       const alias = await aliasFor(canonical);
@@ -425,12 +415,21 @@ describe("organization Codex usage through retained core aliases", () => {
           )
         ).status,
       ).toBe("error");
-      const managedAlias = await aliasFor(await fixture("core", false, true));
-      expect(
-        (await fetchOrganizationCodexUsageForAccount(client!.db, settings, managedAlias, fetch))
-          .status,
-      ).toBe("error");
       expect(fetch).not.toHaveBeenCalled();
+      // A connection managed by a shared workspace is an organization account
+      // (design 5.4): its administrator reads its usage like any other.
+      const managedAlias = await aliasFor(await fixture("core", false, true));
+      const managedFetch = provider();
+      expect(
+        (
+          await fetchOrganizationCodexUsageForAccount(
+            client!.db,
+            settings,
+            managedAlias,
+            managedFetch,
+          )
+        ).status,
+      ).toBe("ok");
     },
   );
 });
@@ -457,7 +456,7 @@ function provider() {
   );
 }
 
-for (const mode of ["legacy", "core"] as const) {
+for (const mode of ["core"] as const) {
   describe(`organization Codex usage (${mode})`, () => {
     test.skipIf(!real)(
       "retries a rejected unexpired bearer once and surfaces repeated rejection",
@@ -514,15 +513,9 @@ for (const mode of ["legacy", "core"] as const) {
         expect(result.status).toBe("ok");
         expect(result.credits?.balance).toBe("120.50");
         expect(fetch).toHaveBeenCalledTimes(1);
-        const rows =
-          mode === "legacy"
-            ? await shared!
-                .admin`select allocator_enabled, extra_credits_enabled, allowed_workspace_ids
-            from codex_subscription_credentials where id = ${input.credentialId}`
-            : await shared!.admin`select allocator_enabled, extra_credits_enabled
+        const rows = await shared!.admin`select allocator_enabled, extra_credits_enabled
             from subscription_connections where id = ${input.credentialId}`;
         expect(rows[0]).toMatchObject({ allocator_enabled: false, extra_credits_enabled: false });
-        if (mode === "legacy") expect(rows[0]!.allowed_workspace_ids).toEqual([]);
       },
     );
     test.skipIf(!real)(
@@ -585,12 +578,8 @@ for (const mode of ["legacy", "core"] as const) {
             )
           ).reason,
         ).toBe("needs_relogin");
-        const rows =
-          mode === "legacy"
-            ? await shared!
-                .admin`select status from codex_subscription_credentials where id = ${failed.credentialId}`
-            : await shared!
-                .admin`select status from subscription_connections where id = ${failed.credentialId}`;
+        const rows = await shared!
+          .admin`select status from subscription_connections where id = ${failed.credentialId}`;
         expect(rows[0]!.status).toBe("needs_relogin");
       },
     );
@@ -617,15 +606,11 @@ for (const mode of ["legacy", "core"] as const) {
                 .admin`insert into subscription_provider_cutovers (account_id, provider, enabled)
               values (${input.organizationId}, 'codex', false)
               on conflict (account_id, provider) do update set enabled = false`;
-            } else if (mode === "legacy") {
-              await shared!
-                .admin`update codex_subscription_credentials set status = 'error', last_error = 'Synthetic quarantine'
-              where id = ${input.credentialId}`;
-            } else {
+            } else
               await shared!
                 .admin`update subscription_connections set status = 'error', last_error = 'Synthetic quarantine'
               where id = ${input.credentialId}`;
-            }
+
             return {
               accessToken: "rotated-access",
               refreshToken: "rotated-refresh",
@@ -641,13 +626,8 @@ for (const mode of ["legacy", "core"] as const) {
           );
           expect(result.status).toBe("error");
           expect(fetch).not.toHaveBeenCalled();
-          const rows =
-            mode === "legacy"
-              ? await shared!
-                  .admin`select version as generation, status, last_error, credential_encrypted
-              from codex_subscription_credentials where id = ${input.credentialId}`
-              : await shared!
-                  .admin`select refresh_generation as generation, status, last_error, credential_encrypted
+          const rows = await shared!
+            .admin`select refresh_generation as generation, status, last_error, credential_encrypted
               from subscription_connections where id = ${input.credentialId}`;
           expect(Number(rows[0]!.generation)).toBe(2);
           const { decryptEnvironmentValue } = await import("../src/environment-crypto");

@@ -4,8 +4,9 @@ The macOS and Linux adapters use CUA Driver source revision
 `35e376ed509cb8eee49624279256a81da83df8cc`, including its non-invalidating preview
 capture and cursor support. `@trycua/cua-driver` 0.34.0 supplies the private-worker
 transport; the source-built executable performs desktop operations. The narrow
-Windows experiment still uses the published SDK in process. Native remains the
-default until platform acceptance is complete.
+Windows experiment still uses the published SDK in process. CUA is the default
+on macOS and for explicitly selected isolated Linux desktops. Linux host desktops
+and Windows retain the native default.
 
 `ComputerBackend` retains the legacy desktop projection and exposes native CUA calls. The existing `ComputerDriver`
 continues to handle OpenGeni sessions, operation receipts and frame streaming.
@@ -14,8 +15,15 @@ control, attached Chrome and browser profiles are unchanged.
 
 ## Runtime and packaging
 
-Select `OPENGENI_BROWSERD_COMPUTER_BACKEND=cua` with the existing desktop
-environment mode. On macOS, upstream's `createPrivateWorker` owns the child and
+macOS configuration selects CUA with the existing desktop. Linux configuration
+retains the existing native desktop unless
+`OPENGENI_BROWSERD_COMPUTER_ENVIRONMENT_MODE=isolated_linux` is explicitly selected;
+that mode defaults to CUA and requires the Linux desktop dependencies listed below.
+The incompatible CUA/existing-Linux combination is still refused.
+`OPENGENI_BROWSERD_COMPUTER_BACKEND=native` preserves the native backend on every
+platform. These choices do not alter browser control.
+
+On macOS, upstream's `createPrivateWorker` owns the child and
 its AppKit cursor event loop. The child has no reconnectable endpoint and exits
 when its SDK owner closes. A second session cannot take this process's physical
 desktop while the first owns it. Separate visual cursors do not isolate focus or
@@ -81,8 +89,9 @@ and cleanup of a launched non-GUI process. CI builds and runs it on x64 and arm6
   unlocked interactive session on `WinSta0/Default`; Session 0 is refused.
   Only Windows semantic actions and window capture are admitted. Edit values
   and labels copied from those values are redacted when password metadata is absent.
-- Release staging includes macOS and Linux. Signed macOS application acceptance is required before
-  changing the default backend.
+- Release staging includes macOS and Linux. Runtime defaults take effect only in
+  an installed release containing this change; server deployment alone does not
+  update a connected machine's installed helpers. macOS still requires OS consent.
 
 Pointer frames supply coordinate dimensions, not one-shot action permission.
 Repeated gestures may use the same displayed frame. Passive captures use

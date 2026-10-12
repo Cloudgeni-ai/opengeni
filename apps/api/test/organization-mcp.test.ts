@@ -135,26 +135,21 @@ describe("organization MCP action catalog", () => {
       "POST /v1/workspaces/:workspaceId/integrations/slack/user-links",
     ])
       expect(listed.has(key)).toBe(true);
-    // The browser-only boundary stays out.
+    // An agent with the person's full access approves sign-ins and manages
+    // connected agents as them; sign-in methods and recovery stay out.
     for (const key of [
       "POST /v1/mcp-connections/requests/:request",
       "PATCH /v1/organizations/:organizationId/mcp-connections/:connectionId",
-      "POST /v1/identity/login-bindings/:bindingId/recovery",
     ])
-      expect(listed.has(key)).toBe(false);
+      expect(listed.has(key)).toBe(true);
+    expect(listed.has("POST /v1/identity/login-bindings/:bindingId/recovery")).toBe(false);
   });
 
-  test("marks exactly the actions that need the person's own browser session", () => {
+  test("marks exactly the actions no agent can do as the person", () => {
     const browserOnly = ACTION_CATALOG.filter((entry) => entry.browserOnly);
     // A change here is deliberate: each one is refused for every MCP caller.
     expect(browserOnly.map(routeKey).sort()).toEqual(
       [
-        "GET /v1/inbox",
-        "GET /v1/inbox/settings",
-        "PATCH /v1/inbox/items/:itemId",
-        "PUT /v1/inbox/settings",
-        "GET /v1/workspaces/:workspaceId/sessions/:sessionId/inbox-mute",
-        "PUT /v1/workspaces/:workspaceId/sessions/:sessionId/inbox-mute",
         "POST /v1/organizations",
         "POST /v1/organizations/additional",
         "GET /v1/organization-memberships",

@@ -365,6 +365,7 @@ function createS3CompatibleObjectStorage(settings: ObjectStorageSettings): Objec
         contentLength: head.ContentLength,
         contentType: head.ContentType,
         metadata: head.Metadata,
+        versionToken: head.ETag,
       });
     },
     async fileExists(file) {
@@ -642,6 +643,7 @@ function createGcsObjectStorage(settings: ObjectStorageSettings): ObjectStorage 
         contentLength: parseContentLength(metadata.size),
         contentType: metadata.contentType,
         metadata: stringMetadata(metadata.metadata),
+        versionToken: gcsGenerationToken(metadata.generation),
       });
     },
     async fileExists(file) {
@@ -676,7 +678,7 @@ function createGcsObjectStorage(settings: ObjectStorageSettings): ObjectStorage 
           contentLength: parseContentLength(metadata.size),
           contentType: metadata.contentType,
           metadata: stringMetadata(metadata.metadata),
-          versionToken: metadata.generation === undefined ? undefined : String(metadata.generation),
+          versionToken: gcsGenerationToken(metadata.generation),
         });
       } catch (error) {
         if (isGcsNotFound(error)) return null;
@@ -894,13 +896,9 @@ function createAzureBlobObjectStorage(settings: ObjectStorageSettings): ObjectSt
     },
     async headObject(key) {
       try {
-        const properties = await requestContainerClient.getBlobClient(key).getProperties();
-        return objectHead({
-          contentLength: properties.contentLength,
-          contentType: properties.contentType,
-          metadata: properties.metadata,
-          versionToken: properties.etag,
-        });
+        return azureHeadToObjectHead(
+          await requestContainerClient.getBlobClient(key).getProperties(),
+        );
       } catch (error) {
         if (isAzureNotFound(error)) return null;
         throw error;
@@ -1054,7 +1052,12 @@ function azureHeadToObjectHead(head: BlobGetPropertiesResponse): ObjectHead {
     contentLength: head.contentLength,
     contentType: head.contentType,
     metadata: head.metadata,
+    versionToken: head.etag,
   });
+}
+
+function gcsGenerationToken(generation: unknown): string | undefined {
+  return generation === undefined || generation === null ? undefined : String(generation);
 }
 
 async function azureDownloadToBytes(download: BlobDownloadResponseParsed): Promise<Uint8Array> {

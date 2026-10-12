@@ -12,6 +12,7 @@ import {
 import { and, eq, inArray, sql } from "drizzle-orm";
 import type { Database, SessionActivityDatabase } from "./database";
 import { withLosslessContentWriteVersion } from "./lossless-json";
+import { withBoundSessionEventPayloads } from "./session-event-write-bounds";
 import { nestedPostgresSqlState } from "./persistence-errors";
 import { getExternalLinkTurnAuthorization } from "./external-link-work";
 import * as schema from "./schema";
@@ -24,6 +25,7 @@ import {
   childRequiresActionResolvedSummary,
 } from "./child-lifecycle-notices";
 import { closePendingSessionToolCallsInTransaction } from "./session-tool-call-settlement";
+import { copySubscriptionAuthorityCompatInTransaction } from "./subscription-core-acceptance-authority";
 import { deleteSubscriptionCoreCodexWaitersForTurns } from "./subscription-core-codex-waiter-cleanup";
 import {
   mirrorSessionRealtimeContextInTransaction,
@@ -253,10 +255,21 @@ export async function assertAgentCommandAuthorityInTransaction(
     workspaceId: string;
     actor: Extract<SessionCommandActor, { type: "agent_attempt" }>;
     targetSessionId: string;
-    action: "pause" | "resume" | "steer" | "message" | "goal" | "wait" | "model_settings" | "context";
+    action:
+      | "pause"
+      | "resume"
+      | "steer"
+      | "message"
+      | "goal"
+      | "wait"
+      | "model_settings"
+      | "context";
   },
 ): Promise<void> {
-  if (["goal", "wait", "context"].includes(input.action) && input.targetSessionId !== input.actor.sessionId) {
+  if (
+    ["goal", "wait", "context"].includes(input.action) &&
+    input.targetSessionId !== input.actor.sessionId
+  ) {
     throw new SessionControlInvariantError("An agent self command must target its own session");
   }
   // Every command caller establishes the control/workspace prefix first.
@@ -2945,7 +2958,7 @@ async function insertChildOutboxRowInTransaction(
     ...input.childSession,
     parentSessionId,
   });
-  await db
+  const inserted = await db
     .insert(schema.sessionSystemUpdateOutbox)
     .values(
       withLosslessContentWriteVersion(
@@ -2976,7 +2989,16 @@ async function insertChildOutboxRowInTransaction(
         schema.sessionSystemUpdateOutbox.workspaceId,
         schema.sessionSystemUpdateOutbox.dedupeKey,
       ],
-    });
+    })
+    .returning({ id: schema.sessionSystemUpdateOutbox.id });
+  await copySubscriptionAuthorityCompatInTransaction(
+    db,
+    inserted.map((row) => ({
+      kind: "session_system_update_outbox" as const,
+      workspaceId: input.workspaceId,
+      id: row.id,
+    })),
+  );
 }
 
 async function enqueueCancelledChildOutboxInTransaction(
@@ -3241,20 +3263,6 @@ async function cancelSessionSubtreeInTransaction(
         turnGeneration: schema.sessionHumanInputRequests.turnGeneration,
         questions: schema.sessionHumanInputRequests.questions,
       });
-    await db
-      .update(schema.codexCapacityWaiters)
-      .set({
-        status: "superseded",
-        lastWakeReason: "session_cancelled",
-        updatedAt: now,
-      })
-      .where(
-        and(
-          eq(schema.codexCapacityWaiters.workspaceId, input.workspaceId),
-          inArray(schema.codexCapacityWaiters.blockedTurnId, immediatelyCancelledTurnIds),
-          eq(schema.codexCapacityWaiters.status, "waiting"),
-        ),
-      );
     // A core Codex waiter exists only while its turn waits; cancelling the
     // turn removes it (and its pending wake deliveries) in the same commit.
     await deleteSubscriptionCoreCodexWaitersForTurns(db, {
@@ -3383,7 +3391,13 @@ async function cancelSessionSubtreeInTransaction(
       eventValues.length > 0
         ? await db
             .insert(schema.sessionEvents)
-            .values(withLosslessContentWriteVersion(eventValues, "payload", "payloadCodecVersion"))
+            .values(
+              withLosslessContentWriteVersion(
+                withBoundSessionEventPayloads(eventValues),
+                "payload",
+                "payloadCodecVersion",
+              ),
+            )
             .returning({
               id: schema.sessionEvents.id,
               sequence: schema.sessionEvents.sequence,

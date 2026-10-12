@@ -32,6 +32,46 @@ const subscriptionCoreMigrations = [
   "0679_codex_extra_credit_consent.sql",
   "0688_subscription_core_codex_writers.sql",
   "0689_subscription_core_codex_cutover.sql",
+  "0691_subscription_core_codex_disconnect.sql",
+  "0695_subscription_model_catalog_observations.sql",
+  // Patches the request guard created by withheld 0691.
+  "0697_codex_retry_after_unknown_outcome.sql",
+  // Patches ownerless access and lease guards created by withheld 0667 and 0671.
+  "0698_codex_ownerless_person_turns.sql",
+  // Patches the request guard after 0697.
+  "0699_codex_recovery_after_interrupted_attempt.sql",
+  "0700_codex_ownerless_person_refresh.sql",
+  // Replaces the scope guard on the shared connection table from withheld 0642.
+  "0702_subscription_codex_access_editor.sql",
+  // Adds provider-neutral routines over the shared core tables from withheld 0642.
+  "0707_subscription_core_neutral_routines.sql",
+  // Rewrites the operation-lease constraints and guard that withheld 0691 defines; replay after it.
+  "0711_subscription_codex_completion_operations.sql",
+  // Records provider cutover receipts over withheld 0689 and restricts its tables.
+  "0712_subscription_core_generic_precursor.sql",
+  // Keys and redefines the auto-assignment objects the withheld 0689 creates.
+  "0713_subscription_core_provider_keyed_reach.sql",
+  // Redefines the reach setters withheld 0713 creates.
+  "0714_subscription_workspace_managed_organization_accounts.sql",
+  // Rewrites routines 0707, 0713 and 0714 create from their live definitions;
+  // replay after them.
+  "0715_subscription_core_api_key_connections.sql",
+  // Builds on withheld 0712's receipts and patches the helpers it patched.
+  "0716_subscription_authority_compat.sql",
+  // Requires 0716's routines; it follows 0716.
+  "0717_subscription_authority_fences.sql",
+  // Adds a trigger on the session bindings table from withheld 0642.
+  "0723_subscription_binding_cache_clock.sql",
+  // Adds checks and triggers on the settings table from withheld 0642.
+  "0724_subscription_settings_locks.sql",
+  // Patches the acceptance writers withheld 0669, 0688 and 0707 define.
+  "0726_subscription_personal_acceptance_reads.sql",
+  // Patches the operation-lease guard withheld 0671 and 0711 define.
+  "0727_subscription_core_ownerless_video_operations.sql",
+  // Built from the connect writer withheld 0715 rewrites; it follows 0715.
+  "0728_subscription_core_personal_connect_format.sql",
+  // Adds owner policies on the person preferences table from withheld 0642.
+  "0729_subscription_person_preferences_owner.sql",
 ] as const;
 const key = Buffer.alloc(32, 67);
 const ids = {

@@ -4286,6 +4286,75 @@ describe("connections routes", () => {
     }
   });
 
+  test("oauth newAccount signs in a further account without replacing the existing one", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const seeded = await createConnection(client.db, {
+      ...workspace,
+      subjectId: "subject-a",
+      providerDomain: "multi-account.example.com",
+      kind: "oauth2",
+      credentialEncrypted: encryptEnvironmentValue(
+        rawKey,
+        JSON.stringify({ access_token: "first", token_type: "Bearer" }),
+      ),
+      metadata: { mcpUrl: "https://multi-account.example.com/mcp" },
+      createdBySubjectId: "subject-a",
+    });
+    const as = startFakeAuthorizationServer({ clientIdMetadataDocumentSupported: true });
+    const mcp = startTestMcpServer({
+      requiredAuthorization: "Bearer mcp-access-token",
+      unauthorizedAuthenticateHeader: `Bearer resource_metadata="${as.url}/.well-known/oauth-protected-resource"`,
+    });
+    const headers = {
+      authorization: await bearer(workspace, "subject-a", [
+        "connections:read",
+        "connections:write",
+      ]),
+      "content-type": "application/json",
+    };
+    const start = (body: Record<string, unknown>) =>
+      app().request(`/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          providerDomain: "multi-account.example.com",
+          mcpUrl: mcp.url,
+          ownership: "personal",
+          returnPath: "/integrations",
+          ...body,
+        }),
+      });
+    try {
+      expect((await start({ newAccount: true, connectionId: seeded.id })).status).toBe(400);
+
+      const response = await start({ newAccount: true });
+      expect(response.status).toBe(200);
+      const { state } = (await response.json()) as { state: string };
+      expect((await readMcpOAuthState(state)).connectionId).toBeUndefined();
+      const callback = await publicApp(client.db).request(
+        `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(state)}`,
+      );
+      expect(callback.status).toBe(302);
+
+      const accounts = (
+        await listConnectionsMetadata(client.db, workspace.workspaceId, "subject-a")
+      ).filter((connection) => connection.providerDomain === "multi-account.example.com");
+      expect(accounts).toHaveLength(2);
+      // The first account is untouched: same row, same version, still active.
+      expect(accounts.find((connection) => connection.id === seeded.id)).toMatchObject({
+        status: "active",
+        version: seeded.version,
+      });
+      expect(accounts.find((connection) => connection.id !== seeded.id)?.subjectId).toBe(
+        "subject-a",
+      );
+    } finally {
+      mcp.close();
+      as.close();
+    }
+  });
+
   test("oauth start uses DCR fallback when CIMD is unavailable", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();

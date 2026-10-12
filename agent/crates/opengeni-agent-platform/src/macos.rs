@@ -140,6 +140,12 @@ const CAPTURE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_milli
 #[cfg(feature = "macos-desktop")]
 #[async_trait]
 impl DesktopBackend for MacosDesktop {
+    fn can_offer_display(&self) -> bool {
+        // CoreGraphics display metadata does not require Screen Recording. A
+        // pending TCC grant must not hide enrollment's explicit control consent.
+        macffi::list_displays().is_ok_and(|displays| !displays.is_empty())
+    }
+
     fn probe(&self) -> Option<v1::Display> {
         let info = macffi::probe_display()?;
         Some(v1::Display {

@@ -5,7 +5,10 @@ import {
   type CodexRequestContext,
 } from "@opengeni/codex";
 import { SubscriptionCoreCodexRequestOutcomeUnknownError } from "@opengeni/db";
-import { createCoreCodexRequests } from "../src/activities/agent-turn/codex-core-requests";
+import {
+  createCoreCodexRequests,
+  providerRequestIdPrefix,
+} from "../src/activities/agent-turn/codex-core-requests";
 import { sessionTitleCodexRequestContext } from "../src/activities/agent-turn/run";
 
 const request = { requestId: "r1", transportAttempt: 1 };
@@ -204,4 +207,26 @@ test("title responses retain separate custody and cannot be settled by the conve
   expect(title.settled).toEqual([]);
   await title.tracker.checkpoint();
   expect(title.settled).toEqual([{ operationId: "title/1", outcome: "response_received" }]);
+});
+
+test("model request IDs do not repeat across turns that share a Temporal activity ID", () => {
+  // Reservations are unique per account. Activity IDs repeat in every turn
+  // workflow, so two turns on one account must still produce distinct IDs.
+  const first = providerRequestIdPrefix({
+    turnAttemptId: "11111111-1111-4111-8111-111111111111",
+    activityId: "1",
+    activityAttempt: 1,
+  });
+  const second = providerRequestIdPrefix({
+    turnAttemptId: "22222222-2222-4222-8222-222222222222",
+    activityId: "1",
+    activityAttempt: 1,
+  });
+  const retried = providerRequestIdPrefix({
+    turnAttemptId: "11111111-1111-4111-8111-111111111111",
+    activityId: "1",
+    activityAttempt: 2,
+  });
+  expect(new Set([first, second, retried]).size).toBe(3);
+  expect(`${first}:1`).not.toBe("1:1");
 });

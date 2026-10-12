@@ -9,6 +9,9 @@ import {
   type SubscriptionCoreTurnIdentity,
   type SubscriptionCoreCodexLeaseRef,
 } from "@opengeni/db";
+import { createCoreSubscriptionRequests } from "./subscription-core-requests";
+
+export { providerRequestIdPrefix } from "./subscription-core-requests";
 
 /** The usage probe is a finite read, authorized by this attempt's chat lease. */
 export function buildCoreCodexUsageReader(
@@ -66,7 +69,7 @@ export function buildCoreCodexUsageReader(
   };
 }
 
-/** One attempt's bounded request custody; no tokens or response bodies live here. */
+/** One attempt's bounded Codex request custody (the shared custody, Codex errors). */
 export function createCoreCodexRequests(deps: {
   reserve: (request: CodexProviderRequestIdentity) => Promise<{ operationId: string }>;
   settle: (request: {
@@ -74,52 +77,10 @@ export function createCoreCodexRequests(deps: {
     outcome: CodexProviderRequestSettlement["outcome"];
   }) => Promise<void>;
 }) {
-  const requests = new Map<string, { operationId: string; responseReceived: boolean }>();
-  let uncertain = false;
-  let reserving = false;
-  const key = (request: CodexProviderRequestIdentity) =>
-    JSON.stringify([request.requestId, request.transportAttempt]);
-  return {
-    async reserve(request: CodexProviderRequestIdentity): Promise<void> {
-      if (uncertain || requests.size > 0 || reserving) {
-        throw new SubscriptionCoreCodexRequestOutcomeUnknownError();
-      }
-      // The DB also rejects duplicate reservations, including ones already
-      // settled locally. Never turn a repeated callback into a reusable permit.
-      reserving = true;
-      try {
-        const reservation = await deps.reserve(request);
-        requests.set(key(request), { ...reservation, responseReceived: false });
-      } catch (error) {
-        if (error instanceof SubscriptionCoreCodexRequestOutcomeUnknownError) uncertain = true;
-        throw error;
-      } finally {
-        reserving = false;
-      }
-    },
-    async observe(request: CodexProviderRequestSettlement): Promise<void> {
-      const id = key(request);
-      const pending = requests.get(id);
-      if (!pending) throw new Error("Codex request settlement has no reservation");
-      if (request.outcome === "response_received") {
-        pending.responseReceived = true;
-        return;
-      }
-      if (request.outcome === "unknown") uncertain = true;
-      await deps.settle({ operationId: pending.operationId, outcome: request.outcome });
-      requests.delete(id);
-    },
-    /** Call only AFTER the response/history writer has committed durably. */
-    async checkpoint(): Promise<void> {
-      for (const [id, request] of requests) {
-        if (!request.responseReceived) continue;
-        await deps.settle({ operationId: request.operationId, outcome: "response_received" });
-        requests.delete(id);
-      }
-    },
-    /** Absence of a response (including a detached timeout) is never replay proof. */
-    canRecover(): boolean {
-      return !uncertain && !reserving && requests.size === 0;
-    },
-  };
+  return createCoreSubscriptionRequests({
+    ...deps,
+    displayName: "Codex",
+    outcomeUnknown: () => new SubscriptionCoreCodexRequestOutcomeUnknownError(),
+    isOutcomeUnknown: (error) => error instanceof SubscriptionCoreCodexRequestOutcomeUnknownError,
+  });
 }

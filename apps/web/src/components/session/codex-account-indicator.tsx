@@ -142,7 +142,7 @@ export function CodexAccountIndicator({
     null;
   const selectionLabel = current
     ? current.waiting
-      ? "Waiting for capacity"
+      ? "Limit reached"
       : "Current account"
     : "Account selection";
   const displayName = effective

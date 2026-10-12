@@ -72,6 +72,14 @@ const MODEL_FACT_CAPABILITY_ROUTINES = [
     "visible_workspace_insights_model_fact_rows(uuid, timestamp with time zone, timestamp with time zone, text, text, uuid, uuid)",
     "Insights scoped fact projection is missing or unsafe",
   ],
+  [
+    "private_scheduled_task_summaries(uuid, uuid, text, uuid, timestamp with time zone, integer)",
+    "private schedule summary capability is missing or unsafe",
+  ],
+  [
+    "pause_private_scheduled_task(uuid, uuid, text, uuid)",
+    "private schedule pause capability is missing or unsafe",
+  ],
 ] as const;
 
 const AUTOMATIC_SESSION_TITLE_FANOUT_MIGRATION_ROUTINE =
@@ -139,6 +147,44 @@ const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   "grant_subscription_codex_owner_capability(text, uuid, uuid, text, uuid)",
   "drop_subscription_codex_owner_capabilities(uuid)",
   "derive_scheduled_revision_subscription_authority()",
+  // Migration 0707: the provider-neutral writers' owner-only internals.
+  "subscription_core_writer_context(text, uuid, uuid, text)",
+  "grant_subscription_core_owner_capability(text, text, uuid, uuid, text, uuid)",
+  "drop_subscription_core_owner_capabilities(text, uuid)",
+  "subscription_core_connection_target(text, uuid, uuid, uuid, uuid, uuid, text, bigint)",
+  // Migration 0712: owner-only trigger functions of the provider cutover
+  // receipts and the provider-neutral cutover-row identity.
+  "guard_subscription_provider_cutover_receipts()",
+  "keep_subscription_cutover_identity()",
+  // Migration 0716: the authority marker and compatibility guards, the
+  // per-path source resolvers and the deferred compatibility check. The
+  // triggers fire without the writing role holding EXECUTE.
+  "stamp_subscription_authority_inserted_at()",
+  "keep_subscription_authority_inserted_at()",
+  "subscription_authority_compat_entry_valid(jsonb)",
+  "guard_subscription_authority_compat()",
+  "subscription_compat_turn_human(uuid, uuid)",
+  "subscription_compat_v2_has_entry(jsonb, text)",
+  "subscription_compat_receiver_source(uuid, uuid)",
+  "subscription_compat_delivery_sources(uuid, uuid, uuid, uuid, text)",
+  "subscription_compat_compaction_source(uuid, uuid)",
+  "subscription_compat_scheduled_source(uuid, uuid)",
+  "subscription_compat_carrier_sources(text, uuid, uuid, bigint)",
+  "subscription_compat_carrier_state(text, uuid, uuid, bigint)",
+  "subscription_compat_record(text, text, uuid, uuid, bigint)",
+  "subscription_compat_expected(text, timestamp with time zone, uuid, text, uuid, bigint, text)",
+  "subscription_compat_carrier_expected(text, timestamp with time zone, text, uuid, uuid, bigint)",
+  "subscription_compat_enter_scope(uuid, uuid)",
+  "subscription_compat_leave_scope(text[])",
+  "subscription_compat_effective(text, text, uuid, uuid, bigint)",
+  "enforce_subscription_authority_compat()",
+  // Migration 0717: the fences' helpers (the v2 copy rule, a scheduled
+  // firing's v2 value and the personal-entry liveness check), called only by
+  // owner-run fences and functions.
+  "subscription_v2_copy_matches(jsonb, jsonb)",
+  "subscription_scheduled_firing_v2(uuid, uuid, uuid, bigint)",
+  "subscription_personal_entry_serviceable(uuid, jsonb)",
+  "subscription_scheduled_run_personal_entries(uuid, uuid, uuid)",
   // Migration 0689: the owner-only Codex cutover receipt and the trigger that
   // seeds organizations created later onto the shared core.
   "subscription_codex_cutover_v1_active()",
@@ -149,6 +195,9 @@ const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   "auto_assign_subscription_codex_workspace()",
   "auto_assign_subscription_codex_personal_workspace()",
   "read_sender_connection(uuid, uuid, uuid, text)",
+  // Migration 0713: the provider-keyed auto-assignment apply path, run by
+  // 0689's two auto-assignment trigger functions as their owner.
+  "apply_subscription_core_auto_assignments(text, uuid, uuid, boolean)",
   // Lifecycle fact writers (migrations 0532 and 0565): owner-run trigger
   // functions and the migration-owner backfill. Runtime roles may still hold
   // EXECUTE until a follow-up migration revokes it once no pre-0565 binary
@@ -213,6 +262,7 @@ const ORGANIZATION_MEMBERSHIP_LIFECYCLE_ROUTINES = [
   "capture_legacy_codex_turn_sources(uuid, uuid)",
   "list_organization_workspace_ids(uuid)",
   "list_organization_codex_workspace_ids(uuid)",
+  "list_organization_subscription_workspace_ids(uuid)",
   "organization_workspace_command(jsonb)",
   "authorize_organization_shared_workspace_administration(uuid, uuid, text)",
   "resolve_organization_workspace_removal_subject(uuid, text, uuid)",
@@ -699,42 +749,188 @@ export const SUBSCRIPTION_ACCOUNT_CAPABILITY_ROUTINES = [
   ...CLAUDE_SUBSCRIPTION_CAPABILITY_ROUTINES,
 ];
 const CLAUDE_AUTHORITY_ROUTINE_SET = new Set(CLAUDE_AUTHORITY_ROUTINES);
-export const SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES = [
-  "authorize_subscription_ownerless_session_access(uuid, uuid, uuid, uuid)",
-  "authorize_subscription_personal_placement_access(uuid, uuid, uuid, uuid, text, uuid, bigint, text, text)",
-  "subscription_codex_refresh_write_allowed(uuid, uuid, uuid)",
+/**
+ * Migration 0707: the provider-neutral subscription-core routines (the
+ * provider is their first argument). The runtime requires them; each is a
+ * SECURITY DEFINER routine the runtime role executes and PUBLIC does not.
+ */
+export const SUBSCRIPTION_CORE_NEUTRAL_PRIVATE_ROUTINES = [
+  "subscription_core_owner_capability_held(text, uuid, text[], text, uuid, boolean)",
+  "subscription_core_owner_membership_held(uuid, uuid)",
+  "subscription_core_refresh_write_allowed(text, uuid, uuid, uuid)",
+  "begin_subscription_core_refresh(text, uuid, uuid, uuid, uuid, text, text, uuid, text, bigint)",
+  "persist_subscription_core_refresh(text, uuid, uuid, uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone)",
+  "persist_subscription_core_refresh_with_plan(text, uuid, uuid, uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone, text)",
+  "fail_subscription_core_refresh(text, uuid, uuid, uuid, uuid, uuid, bigint, text)",
+  "quarantine_subscription_core_connection(text, uuid, uuid, uuid, uuid, uuid, text, bigint, bigint, text, text, timestamp with time zone)",
+  "recover_subscription_core_connection_health(text, uuid, uuid, uuid, uuid)",
+  "subscription_core_acceptance_authority_v2(text, uuid, uuid, uuid, text)",
+  "subscription_core_task_authority_v2(text, uuid, uuid, uuid, text)",
+  "subscription_core_revision_authority_v2(uuid, uuid, uuid, bigint)",
+  "read_subscription_core_connection_credential(text, uuid, uuid, uuid, uuid, uuid, text, bigint)",
+  "begin_subscription_core_connection_refresh(text, uuid, uuid, uuid, uuid, uuid, text, bigint)",
+  "persist_subscription_core_connection_refresh(text, uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone)",
+  "fail_subscription_core_connection_refresh(text, uuid, uuid, uuid, bigint, text)",
+  "connect_subscription_core_personal(text, uuid, uuid, text, text, text, text, text, jsonb, timestamp with time zone, timestamp with time zone, text, text, text)",
+  "disconnect_subscription_core_connection(text, uuid, uuid, text, uuid)",
+  "manage_subscription_core_personal(text, uuid, uuid, text, uuid, text, text, boolean, integer)",
+  "subscription_core_personal_connections(text, uuid, uuid, text)",
+  // Migration 0713: an organization connection's reach for workspaces
+  // created later, read and replaced by organization administrators.
+  "subscription_core_reach(text, uuid, uuid)",
+  "set_subscription_core_reach(text, uuid, uuid, boolean, boolean)",
+  // Migration 0714: the organization's rotation switch on the reach row alone.
+  "set_subscription_core_reach_allocator(text, uuid, uuid, boolean)",
+  // Migration 0728: the personal connect writer with the credential's format.
+  "connect_subscription_core_personal(text, uuid, uuid, text, text, text, text, text, jsonb, timestamp with time zone, timestamp with time zone, text, text, text, text)",
+] as const;
+
+/** Migration 0707: the neutral writers' owner-only internals. */
+export const SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES = [
+  "subscription_core_writer_context(text, uuid, uuid, text)",
+  "grant_subscription_core_owner_capability(text, text, uuid, uuid, text, uuid)",
+  "drop_subscription_core_owner_capabilities(text, uuid)",
+  "subscription_core_connection_target(text, uuid, uuid, uuid, uuid, uuid, text, bigint)",
+  // Migration 0713: the auto-assignment apply path, run only by 0689's two
+  // auto-assignment trigger functions (triggers fire without the caller
+  // holding EXECUTE).
+  "apply_subscription_core_auto_assignments(text, uuid, uuid, boolean)",
+] as const;
+
+/**
+ * The Codex-named twins of the migration 0707 neutral routines. Migration
+ * 0707 kept them for binaries that still called them; no runtime code calls
+ * them now, and no retained policy, trigger or routine depends on them, so
+ * the M4 retirement migration drops them. Until then they stay exactly as
+ * hardened as before: when one exists it must be the private-schema owner's
+ * SECURITY DEFINER routine with a fixed search path, executable by the
+ * runtime role and not by PUBLIC; its absence is not a violation, so the
+ * drop can apply while this release runs.
+ */
+export const SUBSCRIPTION_CODEX_TWIN_PRIVATE_ROUTINES = [
   "begin_subscription_codex_refresh(uuid, uuid, uuid, uuid, text, text, uuid, text, bigint)",
   "persist_subscription_codex_refresh(uuid, uuid, uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone)",
   "fail_subscription_codex_refresh(uuid, uuid, uuid, uuid, uuid, bigint, text)",
-  // M3 PR 2a: Codex chat waits, connection health and v2 acceptance.
   "quarantine_subscription_codex_connection(uuid, uuid, uuid, uuid, uuid, text, bigint, bigint, text, text, timestamp with time zone)",
   "recover_subscription_codex_connection_health(uuid, uuid, uuid, uuid)",
   "persist_subscription_codex_refresh_with_plan(uuid, uuid, uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone, text)",
   "subscription_codex_acceptance_authority_v2(uuid, uuid, uuid, text)",
+  "read_subscription_codex_connection_credential(uuid, uuid, uuid, uuid, uuid, text, bigint)",
+  "begin_subscription_codex_connection_refresh(uuid, uuid, uuid, uuid, uuid, text, bigint)",
+  "persist_subscription_codex_connection_refresh(uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone)",
+  "fail_subscription_codex_connection_refresh(uuid, uuid, uuid, bigint, text)",
+  "connect_subscription_codex_personal(uuid, uuid, text, text, text, text, text, jsonb, timestamp with time zone, timestamp with time zone, text, text, text)",
+  "disconnect_subscription_codex_connection(uuid, uuid, text, uuid)",
+  "subscription_codex_personal_connections(uuid, uuid, text)",
+  "subscription_codex_task_authority_v2(uuid, uuid, uuid, text)",
+  "subscription_codex_revision_authority_v2(uuid, uuid, uuid, bigint)",
+  "manage_subscription_codex_personal(uuid, uuid, text, uuid, text, text, boolean, integer)",
+  "subscription_codex_reach(uuid, uuid)",
+  "set_subscription_codex_reach(uuid, uuid, boolean, boolean)",
+] as const;
+
+/**
+ * Migration 0712 (M4 generic precursor): the per-provider cutover receipt
+ * reader. The runtime calls it for readiness and its RLS policies call it.
+ */
+export const SUBSCRIPTION_CORE_PRECURSOR_PRIVATE_ROUTINES = [
+  "subscription_provider_cutover_committed(text)",
+] as const;
+
+/** Migration 0712: owner-only trigger functions in opengeni_subscription_internal. */
+export const SUBSCRIPTION_CORE_PRECURSOR_OWNER_ROUTINES = [
+  "guard_subscription_provider_cutover_receipts()",
+  "keep_subscription_cutover_identity()",
+] as const;
+
+/**
+ * Every provider whose drained subscription-core cutover migration is in this
+ * binary's ledger. The binary refuses to start unless each has its receipt
+ * (`opengeni_private.subscription_provider_cutover_committed`). A provider's
+ * cutover PR adds its entry.
+ */
+export const SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS: Readonly<Record<string, string>> = {
+  codex: "0689_subscription_core_codex_cutover.sql",
+};
+
+/**
+ * Migration 0716 (M4 PR 0b): accepted authority across a provider's cutover.
+ * The runtime role may call the copy routine (inert until a provider's
+ * writers call it), the reader, and the list of providers whose records can
+ * exist; it holds no privilege on the compatibility relation itself.
+ */
+export const SUBSCRIPTION_AUTHORITY_COMPAT_PRIVATE_ROUTINES = [
+  "copy_subscription_authority_compat(text, text, uuid, uuid, bigint)",
+  "read_subscription_authority_compat(text, text, uuid, uuid, bigint)",
+  "subscription_authority_compat_providers()",
+  // Migration 0728: whether this transaction inserted a carrier the runtime
+  // role cannot read (a scheduled task revision).
+  "subscription_authority_carrier_inserted_now(text, uuid, uuid, bigint)",
+] as const;
+
+/**
+ * Migration 0716: owner-only marker and guard triggers, the per-path source
+ * resolvers and the deferred compatibility check, in
+ * opengeni_subscription_internal.
+ */
+export const SUBSCRIPTION_AUTHORITY_COMPAT_OWNER_ROUTINES = [
+  "stamp_subscription_authority_inserted_at()",
+  "keep_subscription_authority_inserted_at()",
+  "subscription_authority_compat_entry_valid(jsonb)",
+  "guard_subscription_authority_compat()",
+  "subscription_compat_turn_human(uuid, uuid)",
+  "subscription_compat_v2_has_entry(jsonb, text)",
+  "subscription_compat_receiver_source(uuid, uuid)",
+  "subscription_compat_delivery_sources(uuid, uuid, uuid, uuid, text)",
+  "subscription_compat_compaction_source(uuid, uuid)",
+  "subscription_compat_scheduled_source(uuid, uuid)",
+  "subscription_compat_carrier_sources(text, uuid, uuid, bigint)",
+  "subscription_compat_carrier_state(text, uuid, uuid, bigint)",
+  "subscription_compat_record(text, text, uuid, uuid, bigint)",
+  "subscription_compat_expected(text, timestamp with time zone, uuid, text, uuid, bigint, text)",
+  "subscription_compat_carrier_expected(text, timestamp with time zone, text, uuid, uuid, bigint)",
+  "subscription_compat_enter_scope(uuid, uuid)",
+  "subscription_compat_leave_scope(text[])",
+  "subscription_compat_effective(text, text, uuid, uuid, bigint)",
+  "enforce_subscription_authority_compat()",
+] as const;
+
+/**
+ * Migration 0717: the fences' owner-only helpers in
+ * opengeni_subscription_internal (the v2 copy rule, a scheduled firing's v2
+ * value and the personal-entry liveness check). Only owner-run fences and
+ * functions call them.
+ */
+export const SUBSCRIPTION_AUTHORITY_FENCE_OWNER_ROUTINES = [
+  "subscription_v2_copy_matches(jsonb, jsonb)",
+  "subscription_scheduled_firing_v2(uuid, uuid, uuid, bigint)",
+  "subscription_personal_entry_serviceable(uuid, jsonb)",
+  "subscription_scheduled_run_personal_entries(uuid, uuid, uuid)",
+] as const;
+
+export const SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES = [
+  "authorize_subscription_ownerless_session_access(uuid, uuid, uuid, uuid)",
+  "authorize_subscription_personal_placement_access(uuid, uuid, uuid, uuid, text, uuid, bigint, text, text)",
+  // The Codex refresh-write capability check stays: the Codex refresh
+  // policies on subscription_connections call it.
+  "subscription_codex_refresh_write_allowed(uuid, uuid, uuid)",
   // M3 PR 2b: the Codex Apps designation on the core.
   "resolve_subscription_codex_apps_designation(uuid, uuid)",
   "read_subscription_codex_apps_credential(uuid, uuid, uuid)",
   "begin_subscription_codex_apps_refresh(uuid, uuid, uuid)",
   "persist_subscription_codex_apps_refresh(uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone)",
   "fail_subscription_codex_apps_refresh(uuid, uuid, uuid, bigint, text)",
-  // M3 PR 2c: the connection-level Codex credential seam for operations.
-  "read_subscription_codex_connection_credential(uuid, uuid, uuid, uuid, uuid, text, bigint)",
-  "begin_subscription_codex_connection_refresh(uuid, uuid, uuid, uuid, uuid, text, bigint)",
-  "persist_subscription_codex_connection_refresh(uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone)",
-  "fail_subscription_codex_connection_refresh(uuid, uuid, uuid, bigint, text)",
+  // M3 PR 2c: the Codex reset-credit authority.
   "subscription_codex_reset_authority(uuid, uuid, uuid, text)",
-  // M3 PR 3b: Codex writers, the owner's personal-connection reader, the
-  // cross-workspace reset-credit fence, the scheduled-task v2 writer and the
-  // owner-only policies' capability helpers.
-  "connect_subscription_codex_personal(uuid, uuid, text, text, text, text, text, jsonb, timestamp with time zone, timestamp with time zone, text, text, text)",
-  "disconnect_subscription_codex_connection(uuid, uuid, text, uuid)",
-  "subscription_codex_personal_connections(uuid, uuid, text)",
+  // M3 PR 3b: the cross-workspace reset-credit fence and the owner-only
+  // policies' capability helpers.
   "subscription_codex_reset_credit_fence(uuid, uuid, uuid, text, text, uuid)",
-  "subscription_codex_task_authority_v2(uuid, uuid, uuid, text)",
-  "subscription_codex_revision_authority_v2(uuid, uuid, uuid, bigint)",
-  "manage_subscription_codex_personal(uuid, uuid, text, uuid, text, text, boolean, integer)",
   "subscription_codex_owner_capability_held(uuid, text[], text, uuid, boolean)",
   "subscription_codex_owner_membership_held(uuid, uuid)",
+  // Migration 0707: the provider-neutral equivalents the runtime calls.
+  ...SUBSCRIPTION_CORE_NEUTRAL_PRIVATE_ROUTINES,
+  ...SUBSCRIPTION_CORE_PRECURSOR_PRIVATE_ROUTINES,
+  ...SUBSCRIPTION_AUTHORITY_COMPAT_PRIVATE_ROUTINES,
 ] as const;
 
 /** Owner-only private helpers the runtime role must never be able to execute. */
@@ -759,6 +955,10 @@ export const SUBSCRIPTION_M3_OWNER_ONLY_PRIVATE_ROUTINES = [
   "apply_subscription_codex_auto_assignments(uuid, uuid, boolean)",
   "auto_assign_subscription_codex_workspace()",
   "auto_assign_subscription_codex_personal_workspace()",
+  ...SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES,
+  ...SUBSCRIPTION_CORE_PRECURSOR_OWNER_ROUTINES,
+  ...SUBSCRIPTION_AUTHORITY_COMPAT_OWNER_ROUTINES,
+  ...SUBSCRIPTION_AUTHORITY_FENCE_OWNER_ROUTINES,
 ] as const;
 
 const UNIFIED_KNOWLEDGE_ROUTINES = [
@@ -1033,6 +1233,7 @@ export const FORCE_RLS_TABLES = [
   "editable_artifact_undo_claims",
   "editable_artifact_versions",
   "editable_artifacts",
+  "enrollment_token_redemptions",
   "enrollments",
   "external_identities",
   "external_identity_links",
@@ -1125,6 +1326,7 @@ export const FORCE_RLS_TABLES = [
   "model_call_facts",
   "network_routes",
   "new_session_drafts",
+  "organization_agent_admin_access",
   "organization_api_key_workspaces",
   "organization_codex_rotation_settings",
   "organization_company_profile_agent_policies",
@@ -1141,6 +1343,7 @@ export const FORCE_RLS_TABLES = [
   "organization_model_provider_connection_operations",
   "organization_model_provider_connections",
   "organization_model_provider_custom_models",
+  "organization_privacy_preferences",
   "organization_private_session_setting_events",
   "organization_private_session_settings",
   "organization_profile_events",
@@ -1209,6 +1412,7 @@ export const FORCE_RLS_TABLES = [
   "scheduled_task_runs",
   "scheduled_tasks",
   "self_service_organization_setup_receipts",
+  "session_admin_access",
   "session_attempt_codemode_calls",
   "session_attempt_connected_machine_authorizations",
   "session_attempt_interruptions",
@@ -1435,6 +1639,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "document_chunks",
   "documents",
   "editable_artifact_replica_leases",
+  "enrollment_token_redemptions",
   "enrollments",
   "file_uploads",
   "files",
@@ -1470,6 +1675,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "memory_slack_publications",
   "model_call_facts",
   "new_session_drafts",
+  "organization_agent_admin_access",
   "organization_api_key_workspaces",
   "organization_codex_rotation_settings",
   "organization_credential_providers",
@@ -1477,6 +1683,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "organization_model_provider_connection_operations",
   "organization_model_provider_connections",
   "organization_model_provider_custom_models",
+  "organization_privacy_preferences",
   "organization_service_accounts",
   "organization_webhook_deliveries",
   "organization_webhooks",
@@ -1495,6 +1702,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "sandbox_session_envelopes",
   "sandbox_workspace_mutation_admissions",
   "sandboxes",
+  "session_admin_access",
   "session_attempt_interruptions",
   "session_background_commands",
   "session_command_receipts",
@@ -1981,6 +2189,11 @@ export type RuntimeDatabasePosture = {
   claudeSubscriptionPoolActivationPresent: boolean;
   /** Migration 0689: Codex runs on the shared subscription core. */
   subscriptionCodexCutoverActivationPresent: boolean;
+  /**
+   * Providers of SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS whose cutover
+   * receipt the database holds (migration 0712's readiness function).
+   */
+  subscriptionProviderCutoverReceipts: string[];
 };
 
 export class RuntimeDatabasePostureError extends Error {
@@ -2126,6 +2339,23 @@ export async function inspectRuntimeDatabasePosture(
       );
       const subscriptionCodexCutoverActivationPresent =
         codexCutoverActivationRows[0]?.present === true;
+      // The receipt is read through its boolean readiness function only:
+      // committed_at is never read as a date ('-infinity' for Codex).
+      const receiptReaderRows = resultRows<{ present: boolean }>(
+        await tx.execute(sql`select to_regprocedure(
+          'opengeni_private.subscription_provider_cutover_committed(text)'
+        ) is not null as present`),
+      );
+      const subscriptionProviderCutoverReceipts =
+        receiptReaderRows[0]?.present === true
+          ? resultRows<{ provider: string }>(
+              await tx.execute(sql`select provider from jsonb_array_elements_text(${JSON.stringify(
+                Object.keys(SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS),
+              )}::jsonb) provider
+                where opengeni_private.subscription_provider_cutover_committed(provider)
+                order by provider`),
+            ).map((row) => row.provider)
+          : [];
 
       // Scoped/embedded topology deliberately leaves ownership and isolation to
       // the host. Prove the connection identity is coherent, but do not impose
@@ -2145,6 +2375,7 @@ export async function inspectRuntimeDatabasePosture(
           sessionVariableSetAttachmentsCutoverPresent,
           claudeSubscriptionPoolActivationPresent,
           subscriptionCodexCutoverActivationPresent,
+          subscriptionProviderCutoverReceipts,
         };
       }
 
@@ -2490,6 +2721,7 @@ export async function inspectRuntimeDatabasePosture(
         sessionVariableSetAttachmentsCutoverPresent,
         claudeSubscriptionPoolActivationPresent,
         subscriptionCodexCutoverActivationPresent,
+        subscriptionProviderCutoverReceipts,
       };
     },
     { isolationLevel: "repeatable read", accessMode: "read only" },
@@ -2524,6 +2756,13 @@ export function evaluateRuntimeDatabasePosture(
     violations.push(
       "database is missing the 0689 Codex subscription-core cutover receipt; run the drained migration first",
     );
+  for (const [provider, migration] of Object.entries(SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS)) {
+    if (!posture.subscriptionProviderCutoverReceipts.includes(provider)) {
+      violations.push(
+        `database is missing the ${provider} subscription-core cutover receipt (${migration}); apply the pending migrations first`,
+      );
+    }
+  }
 
   if (!posture.sessionVariableSetAttachmentsCutoverPresent) {
     violations.push("database is missing the 0352 session Variable Set attachment runtime receipt");
@@ -2616,23 +2855,30 @@ export function evaluateRuntimeDatabasePosture(
     `search_path=pg_catalog, ${quotedTargetSchema}, opengeni_private, pg_temp`,
     `search_path=pg_catalog, ${/^[a-z_][a-z0-9_]*$/.test(targetSchema) ? targetSchema : quotedTargetSchema}, opengeni_private, pg_temp`,
   ]);
+  const safeSearchPath = (routine: RuntimeRoutinePosture) =>
+    routine.name === "subscription_codex_refresh_write_allowed(uuid, uuid, uuid)" ||
+    routine.name === "subscription_core_refresh_write_allowed(text, uuid, uuid, uuid)"
+      ? routine.configuration?.includes("search_path=pg_catalog, opengeni_private, pg_temp")
+      : routine.configuration?.some((configuration) => precursorSearchPaths.has(configuration));
+  const hardenedPrivateRoutine = (matches: RuntimeRoutinePosture[]) =>
+    matches.length === 1 &&
+    matches[0]!.execute &&
+    !matches[0]!.publicExecute &&
+    matches[0]!.securityDefiner &&
+    !(privateSchemaOwner && matches[0]!.owner !== privateSchemaOwner) &&
+    safeSearchPath(matches[0]!) === true;
   for (const expectedRoutine of SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES) {
     const matches = posture.privateRoutines.filter((routine) => routine.name === expectedRoutine);
-    const safeSearchPath = (routine: RuntimeRoutinePosture) =>
-      routine.name === "subscription_codex_refresh_write_allowed(uuid, uuid, uuid)"
-        ? routine.configuration?.includes("search_path=pg_catalog, opengeni_private, pg_temp")
-        : routine.configuration?.some((configuration) => precursorSearchPaths.has(configuration));
-    if (
-      matches.length !== 1 ||
-      !matches[0]!.execute ||
-      matches[0]!.publicExecute ||
-      !matches[0]!.securityDefiner ||
-      (privateSchemaOwner && matches[0]!.owner !== privateSchemaOwner) ||
-      !safeSearchPath(matches[0]!)
-    ) {
+    if (!hardenedPrivateRoutine(matches)) {
       violations.push(
         `subscription M3 precursor private routine ${expectedRoutine} is missing or unsafe`,
       );
+    }
+  }
+  for (const twin of SUBSCRIPTION_CODEX_TWIN_PRIVATE_ROUTINES) {
+    const matches = posture.privateRoutines.filter((routine) => routine.name === twin);
+    if (matches.length > 0 && !hardenedPrivateRoutine(matches)) {
+      violations.push(`retiring Codex twin private routine ${twin} is unsafe`);
     }
   }
   for (const ownerOnly of SUBSCRIPTION_M3_OWNER_ONLY_PRIVATE_ROUTINES) {
@@ -2643,17 +2889,44 @@ export function evaluateRuntimeDatabasePosture(
       violations.push(`subscription M3 owner-only private routine ${ownerOnly} is executable`);
     }
   }
+  const privateRoutinePresent = (prefix: string) =>
+    posture.privateRoutines.some((routine) => routine.name.startsWith(prefix));
+  // Keyed on either personal-writer family, not on the Codex twins alone, so
+  // dropping the twins cannot switch off the owner checks below.
   if (
     posture.subscriptionOwnerRoutines !== undefined &&
-    posture.privateRoutines.some((routine) =>
-      routine.name.startsWith("connect_subscription_codex_personal("),
-    )
+    (privateRoutinePresent("connect_subscription_codex_personal(") ||
+      privateRoutinePresent("connect_subscription_core_personal("))
   ) {
     const required = [
-      "subscription_codex_writer_context(uuid, uuid, text)",
+      // Only the Codex twin writers call the Codex writer context.
+      ...(privateRoutinePresent("connect_subscription_codex_personal(")
+        ? ["subscription_codex_writer_context(uuid, uuid, text)"]
+        : []),
+      // The reset-credit fence, which stays, calls these two.
       "grant_subscription_codex_owner_capability(text, uuid, uuid, text, uuid)",
       "drop_subscription_codex_owner_capabilities(uuid)",
       "derive_scheduled_revision_subscription_authority()",
+      ...(privateRoutinePresent("connect_subscription_core_personal(")
+        ? SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES
+        : []),
+      ...(posture.privateRoutines.some((routine) =>
+        routine.name.startsWith("subscription_provider_cutover_committed("),
+      )
+        ? SUBSCRIPTION_CORE_PRECURSOR_OWNER_ROUTINES
+        : []),
+      ...(posture.privateRoutines.some((routine) =>
+        routine.name.startsWith("copy_subscription_authority_compat("),
+      )
+        ? SUBSCRIPTION_AUTHORITY_COMPAT_OWNER_ROUTINES
+        : []),
+      // 0717 adds no runtime routine: once any of its helpers exists, all of
+      // them must, owner-only and with a safe search path.
+      ...(posture.subscriptionOwnerRoutines.some((routine) =>
+        (SUBSCRIPTION_AUTHORITY_FENCE_OWNER_ROUTINES as readonly string[]).includes(routine.name),
+      )
+        ? SUBSCRIPTION_AUTHORITY_FENCE_OWNER_ROUTINES
+        : []),
     ];
     for (const signature of required) {
       const matches = posture.subscriptionOwnerRoutines.filter(
@@ -4715,7 +4988,10 @@ export function evaluateRuntimeDatabasePosture(
     if (routine.owner === expectedRole) {
       violations.push(`runtime role owns private routine ${routine.name}`);
     }
-    if (routine.name === "list_pending_child_terminal_wake_repairs_v1(integer, uuid, uuid)") {
+    if (
+      routine.name === "list_pending_child_terminal_wake_repairs_v1(integer, uuid, uuid)" ||
+      routine.name === "list_quiescence_receipt_wake_repairs_v1(integer, uuid, uuid)"
+    ) {
       const dispatcher = posture.privateRoutines.find(
         (entry) => entry.name === "claim_session_workflow_wakes(integer)",
       );
@@ -4727,7 +5003,9 @@ export function evaluateRuntimeDatabasePosture(
         !routine.execute ||
         !routine.configuration?.includes("search_path=pg_catalog")
       ) {
-        violations.push("child terminal repair inventory has unsafe dispatcher capability posture");
+        violations.push(
+          `wake repair inventory ${routine.name} has unsafe dispatcher capability posture`,
+        );
       }
     }
     const integrationContract = integrationRoutine.find(([name]) => name === routine.name);

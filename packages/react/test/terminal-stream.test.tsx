@@ -170,6 +170,82 @@ describe("useTerminalStream connection boundary", () => {
     await hook.unmount();
   });
 
+  test("plain SSE never acquires input eligibility from a URL or a cold reason alone", async () => {
+    for (const cell of [
+      { ptyCapable: false, reason: "lease_cold" as const },
+      { ptyCapable: true, reason: null },
+    ]) {
+      type Props = Parameters<typeof useTerminalStream>[0];
+      const hook = await renderHook((props: Props) => useTerminalStream(props), {
+        capability: {
+          ...capability("https://terminal.example/untrusted"),
+          ...cell,
+          transport: "sse-events",
+        },
+      } as Props);
+      await flush();
+      const count = FakeWebSocket.instances.length;
+      await actRun(() => hook.result.current.write("must-not-cross\r"));
+      await hook.rerender({ capability: capability("https://terminal.example/granted") });
+      await flush();
+      expect(FakeWebSocket.instances).toHaveLength(count + 1);
+      const socket = FakeWebSocket.instances.at(-1)!;
+      await actRun(() => socket.open());
+      expect(socket.sent.filter((frame) => frame.startsWith("0"))).toEqual([]);
+      await hook.unmount();
+    }
+  });
+
+  test("a real downgrade clears old queued input before a new cold acquisition", async () => {
+    type Props = Parameters<typeof useTerminalStream>[0];
+    const hook = await renderHook((props: Props) => useTerminalStream(props), {
+      capability: capability(null),
+    } as Props);
+    await flush();
+    await actRun(() => hook.result.current.write("old-generation\r"));
+    await hook.rerender({
+      capability: {
+        ...capability(null),
+        transport: "sse-events",
+        ptyCapable: true,
+        reason: "lease_cold",
+      },
+    });
+    await flush();
+    await actRun(() => hook.result.current.write("new-generation\r"));
+    await hook.rerender({ capability: capability("https://terminal.example/new-generation") });
+    await flush();
+    const socket = FakeWebSocket.instances.at(-1)!;
+    await actRun(() => socket.open());
+    expect(socket.sent.filter((frame) => frame.startsWith("0"))).toEqual(["0new-generation\r"]);
+    await hook.unmount();
+  });
+
+  test("cold acquisition overflow rejects the entire pending command", async () => {
+    type Props = Parameters<typeof useTerminalStream>[0];
+    const hook = await renderHook((props: Props) => useTerminalStream(props), {
+      capability: {
+        ...capability(null),
+        transport: "sse-events",
+        ptyCapable: true,
+        reason: "not_provisioned",
+      },
+    } as Props);
+    await flush();
+    await actRun(() => {
+      hook.result.current.write("x".repeat(MAX_PENDING_TERMINAL_INPUT_CODE_UNITS));
+      hook.result.current.write("overflow\r");
+      hook.result.current.write("suffix-must-not-run\r");
+    });
+    expect(hook.result.current.status).toBe("error");
+    await hook.rerender({ capability: capability("https://terminal.example/after-overflow") });
+    await flush();
+    const socket = FakeWebSocket.instances.at(-1)!;
+    await actRun(() => socket.open());
+    expect(socket.sent.filter((frame) => frame.startsWith("0"))).toEqual([]);
+    await hook.unmount();
+  });
+
   test("rejects a stale rolling credential and replays input only to its fresh replacement", async () => {
     type Props = { url: string; expiresAt: string };
     const hook = await renderHook(

@@ -70,6 +70,7 @@ export {
 } from "./managed-session";
 export * from "./transcription";
 export * from "./model-catalog";
+export * from "./model-provider-credentials";
 export * from "./goal-admission";
 export * from "./codex-model-availability";
 export * from "./default-session-model";
@@ -96,6 +97,9 @@ export * from "./session-authorization";
 // Billing / usage-limit admission (checkLimit / requireLimit / recordWorkspaceUsage).
 export * from "./billing/limits";
 export * from "./billing/agent-run-admission";
+export * from "./billing/model-usage-settlement";
+export * from "./billing/model-call-admission";
+export * from "./model-call";
 
 // Domain layer — the off-HTTP V2 surface (createSessionForRequest,
 
@@ -118,6 +122,7 @@ export * from "./domain/session-tool-policy";
 export * from "./domain/agent-config-resolution";
 export * from "./domain/scheduled-tasks";
 export * from "./domain/scheduled-task-access";
+export * from "./domain/scheduled-task-audience";
 export * from "./domain/sessions";
 export * from "./domain/insights";
 export * from "./domain/insights-usage";
@@ -139,6 +144,7 @@ export * from "./application/composer-submit";
 export * from "./application/session-commands";
 export * from "./application/archived-session-imports";
 export * from "./application/session-tenancy";
+export * from "./application/organization-privacy";
 export * from "./application/sandbox-recovery";
 export * from "./application/user-resource-grants";
 export * from "./application/api-integration-servers";

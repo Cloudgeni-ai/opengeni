@@ -1,7 +1,6 @@
 import {
   commitSessionAttemptQuiescence,
   listPendingSessionTurns,
-  recordCodexAccountUsageForFinalization,
   recordClaudeAccountUsage,
   releaseClaudeCredentialLease,
   releaseXaiCredentialLease,
@@ -13,7 +12,7 @@ import { sandboxLeaseTelemetryKey } from "@opengeni/observability";
 import { clearRunCredentialsForAttempt } from "@opengeni/runtime";
 import { fetchXaiSubscriptionQuota } from "@opengeni/xai-subscription";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
-import { signalCodexCapacityWakeTargets } from "../codex-capacity";
+
 import { startActivityHeartbeat, type currentActivityContext } from "../streaming";
 import { startTurnFinalizationMonitor } from "./finalization-monitor";
 import type { CodemodeTokenRenewalController } from "../codemode-token-renewal";
@@ -484,46 +483,6 @@ async function finalizeTurnAttemptSteps(
           ).catch(() => undefined);
         }
       }
-    } else if (providerTurn.effectiveCodexCredentialId) {
-      // Part A: the latest scraped usage-header snapshot → the P2 usage cache. A
-      // full duration-identified snapshot (parseCodexUsageHeaders gates on both),
-      // so untyped response headers cannot mislabel weekly-only quota.
-      if (
-        providerTurn.latestCodexUsage &&
-        attempt.turnId &&
-        leases.codex.held &&
-        leases.codex.holderId &&
-        leases.codex.generation !== null &&
-        providerTurn.effectiveCodexCredentialVersion !== null
-      ) {
-        const usageMutation = await waitForTurnFinalizerStep(
-          recordCodexAccountUsageForFinalization(
-            db,
-            input.workspaceId,
-            providerTurn.effectiveCodexCredentialId,
-            providerTurn.latestCodexUsage,
-            {
-              turnId: attempt.turnId,
-              sessionId: input.sessionId,
-              attemptId: input.attemptId,
-              executionGeneration: attempt.executionGeneration,
-              holderId: leases.codex.holderId,
-              generation: leases.codex.generation,
-              credentialVersion: providerTurn.effectiveCodexCredentialVersion,
-            },
-          ).catch(() => null),
-          finalizerSignal,
-        );
-        if (usageMutation) {
-          await waitForTurnFinalizerStep(
-            signalCodexCapacityWakeTargets(
-              { signalCodexCapacityWorkflow, wakeSessionWorkflow },
-              usageMutation.wakeTargets,
-            ),
-            finalizerSignal,
-          );
-        }
-      }
     }
     leases.codex.stopHeartbeat();
     if (
@@ -537,6 +496,16 @@ async function finalizeTurnAttemptSteps(
         finalizerSignal,
       );
       leases.codex.held = false;
+    }
+    // A core-placed SuperGrok turn releases its core lease (the legacy
+    // release below needs the legacy subject, which a core lease never has).
+    if (providerTurn.xaiSubscriptionCore && leases.xai.held && attempt.turnId) {
+      leases.xai.stopHeartbeat();
+      await waitForTurnFinalizerStep(
+        leases.xai.releaseCurrent().catch(() => false),
+        finalizerSignal,
+      );
+      leases.xai.held = false;
     }
     if (
       providerTurn.effectiveXaiCredentialId &&

@@ -43,3 +43,30 @@ export function installOneLiner(
 export function deviceVerificationUri(baseUrl: string): string {
   return `${originOf(baseUrl)}/device`;
 }
+
+/**
+ * The PowerShell counterpart of {@link installOneLiner} for Windows, with the
+ * same origin pinning. Values are single-quoted so PowerShell never expands them.
+ */
+export function installOneLinerWindows(
+  baseUrl: string,
+  opts?: { workspaceId?: string; enrollToken?: string },
+): string {
+  const origin = originOf(baseUrl);
+  const quote = (value: string) => `'${value.replaceAll("'", "''")}'`;
+  const env = [`$env:OPENGENI_API_URL=${quote(origin)}`];
+  if (opts?.workspaceId) {
+    env.push(`$env:OPENGENI_WORKSPACE_ID=${quote(opts.workspaceId)}`);
+  }
+  if (opts?.enrollToken) {
+    env.push(`$env:OPENGENI_ENROLL_TOKEN=${quote(opts.enrollToken)}`);
+  }
+  return `${env.join("; ")}; irm ${quote(`${origin}/install.ps1`)} | iex`;
+}
+
+export type ConnectPlatform = "unix" | "windows";
+
+/** The platform a connect command should target by default for this browser. */
+export function detectConnectPlatform(userAgent: string | undefined): ConnectPlatform {
+  return userAgent && /windows/i.test(userAgent) ? "windows" : "unix";
+}

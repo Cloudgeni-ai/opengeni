@@ -22,7 +22,8 @@
 //! The coarse outer restart loop (the service manager) sits ABOVE the in-process
 //! full-jitter backoff (the fine loop) — two independent layers of resiliency.
 
-use std::path::PathBuf;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 
 use crate::error::{PlatformError, PlatformResult};
 
@@ -286,9 +287,52 @@ pub fn render_legacy_systemd_unit_before_supervisor_subgroup(spec: &ServiceSpec)
     )
 }
 
+/// Resolve the home used by service installation and dry-run rendering.
+///
+/// # Errors
+///
+/// Returns an OS error when neither HOME nor USERPROFILE is configured.
+pub fn service_user_home() -> PlatformResult<PathBuf> {
+    service_user_home_from_environment(std::env::var_os("HOME"), std::env::var_os("USERPROFILE"))
+}
+
+fn service_user_home_from_environment(
+    home: Option<OsString>,
+    userprofile: Option<OsString>,
+) -> PlatformResult<PathBuf> {
+    home.or(userprofile)
+        .map(PathBuf::from)
+        .ok_or_else(|| PlatformError::os("could not resolve a home directory ($HOME/$USERPROFILE)"))
+}
+
 /// Renders the macOS LaunchAgent plist body for `spec`. PURE + tested.
-#[must_use]
-pub fn render_launchd_plist(spec: &ServiceSpec) -> String {
+/// The user home is explicit: launchd otherwise starts in `/`, which is read-only
+/// on macOS and cannot hold session attachments. Never inherit the installer's
+/// cwd (it can itself be an older launchd process during an update).
+///
+/// # Errors
+///
+/// Returns an OS error if the supplied home is not an absolute non-root path,
+/// or contains characters unsuitable for XML or launchctl line-oriented output.
+pub fn render_launchd_plist(spec: &ServiceSpec, user_home: &Path) -> PlatformResult<String> {
+    // This pure renderer is also tested on Windows; validate macOS/POSIX syntax
+    // rather than the build host's interpretation of an absolute path.
+    let user_home = user_home
+        .to_str()
+        .ok_or_else(|| PlatformError::os("LaunchAgent user home must be a UTF-8 path"))?;
+    if !user_home.starts_with('/')
+        || user_home
+            .split('/')
+            .all(|part| part.is_empty() || part == ".")
+        || user_home.split('/').any(|part| part == "..")
+        || user_home
+            .chars()
+            .any(|ch| ch.is_control() || matches!(ch, '\u{fffe}' | '\u{ffff}'))
+    {
+        return Err(PlatformError::os(
+            "LaunchAgent working directory requires an absolute non-root user home without control or XML-invalid characters",
+        ));
+    }
     let mut args = vec![spec.binary_path.to_string_lossy().into_owned()];
     args.extend(spec.args.iter().cloned());
     let program_args = args
@@ -306,7 +350,7 @@ pub fn render_launchd_plist(spec: &ServiceSpec) -> String {
             )
         })
         .unwrap_or_default();
-    format!(
+    Ok(format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
          <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
          <plist version=\"1.0\">\n\
@@ -318,6 +362,8 @@ pub fn render_launchd_plist(spec: &ServiceSpec) -> String {
          {program_args}\n\
          \x20 </array>\n\
          {environment}\
+         \x20 <key>WorkingDirectory</key>\n\
+         \x20 <string>{working_directory}</string>\n\
          \x20 <key>RunAtLoad</key>\n\
          \x20 <true/>\n\
          \x20 <key>KeepAlive</key>\n\
@@ -328,7 +374,8 @@ pub fn render_launchd_plist(spec: &ServiceSpec) -> String {
          </plist>\n",
         label = ids::LAUNCHD_LABEL,
         program_args = program_args,
-    )
+        working_directory = xml_escape(user_home),
+    ))
 }
 
 /// Renders the `sc.exe create` command line registering the Windows Service. The
@@ -416,11 +463,15 @@ pub fn unsupported_backend() -> PlatformError {
 ///
 /// # Errors
 ///
-/// [`PlatformError::Unsupported`] when the host has no supported service manager.
+/// [`PlatformError::Unsupported`] when the host has no supported service manager,
+/// or an OS error when the LaunchAgent user home cannot be resolved.
 pub fn render_for_host(spec: &ServiceSpec) -> PlatformResult<String> {
     match ServiceSpec::backend() {
         ServiceBackend::Systemd => Ok(render_systemd_unit(spec)),
-        ServiceBackend::Launchd => Ok(render_launchd_plist(spec)),
+        ServiceBackend::Launchd => {
+            let user_home = service_user_home()?;
+            render_launchd_plist(spec, &user_home)
+        }
         ServiceBackend::WindowsScm => Ok(format!(
             "{}\n{}",
             windows_create_command(spec),
@@ -465,7 +516,7 @@ mod tests {
 
     #[test]
     fn launchd_plist_preserves_the_installer_command_path() {
-        let plist = render_launchd_plist(&spec());
+        let plist = render_launchd_plist(&spec(), Path::new("/Users/runner")).unwrap();
         assert!(plist.contains("<key>EnvironmentVariables</key>"));
         assert!(plist.contains("<key>PATH</key>"));
         assert!(plist.contains("/home/u/.local/bin:/usr/bin:/bin"));
@@ -560,12 +611,56 @@ mod tests {
 
     #[test]
     fn launchd_plist_is_a_keepalive_runatload_agent() {
-        let plist = render_launchd_plist(&spec());
+        let plist = render_launchd_plist(&spec(), Path::new("/Users/runner")).unwrap();
         assert!(plist.contains("<string>ai.opengeni.agent</string>"));
         assert!(plist.contains("<key>RunAtLoad</key>"));
         assert!(plist.contains("<key>KeepAlive</key>"));
         assert!(plist.contains("<string>/home/u/.local/bin/opengeni-agent</string>"));
         assert!(plist.contains("<string>run</string>"));
+    }
+
+    #[test]
+    fn launchd_starts_in_the_explicit_user_home() {
+        // The launch root becomes the default cwd for commands and attachments.
+        // It must come from the home passed by the installer, not its ambient cwd
+        // or the binary's bundle directory.
+        let home = Path::new("/Users/Runner & Co");
+        let plist = render_launchd_plist(&spec(), home).unwrap();
+        assert!(plist
+            .contains("<key>WorkingDirectory</key>\n  <string>/Users/Runner &amp; Co</string>"));
+    }
+
+    #[test]
+    fn service_home_resolution_is_shared_with_print_mode() {
+        let home = OsString::from("/Users/user");
+        let profile = OsString::from("/Users/me");
+        assert_eq!(
+            service_user_home_from_environment(Some(home), Some(profile.clone())).unwrap(),
+            PathBuf::from("/Users/user")
+        );
+        assert_eq!(
+            service_user_home_from_environment(None, Some(profile)).unwrap(),
+            PathBuf::from("/Users/me")
+        );
+        assert!(service_user_home_from_environment(None, None).is_err());
+    }
+
+    #[test]
+    fn launchd_refuses_home_characters_that_break_xml_or_loaded_path_observation() {
+        for ch in [
+            '\0', '\u{1}', '\u{b}', '\n', '\r', '\t', '\u{7f}', '\u{fffe}', '\u{ffff}',
+        ] {
+            let home = format!("/Users/Runner{ch}");
+            assert!(render_launchd_plist(&spec(), Path::new(&home)).is_err());
+        }
+        assert!(render_launchd_plist(&spec(), Path::new("/Users/Åsa 🐈")).is_ok());
+    }
+
+    #[test]
+    fn launchd_refuses_an_unusable_home_instead_of_defaulting_to_root() {
+        for home in ["", "/", "/.", "////", "/Users/..", "Users/runner", "~"] {
+            assert!(render_launchd_plist(&spec(), Path::new(home)).is_err());
+        }
     }
 
     #[test]
@@ -592,7 +687,7 @@ mod tests {
     fn plist_escapes_xml_metacharacters() {
         let mut s = spec();
         s.args = vec!["run".to_string(), "--name".to_string(), "a<b&c".to_string()];
-        let plist = render_launchd_plist(&s);
+        let plist = render_launchd_plist(&s, Path::new("/Users/runner")).unwrap();
         assert!(plist.contains("a&lt;b&amp;c"));
         assert!(!plist.contains("a<b&c"));
     }

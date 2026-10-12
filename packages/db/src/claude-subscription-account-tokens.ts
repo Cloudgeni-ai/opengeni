@@ -1,8 +1,4 @@
-import {
-  ClaudeSubscriptionCredential,
-  environmentsEncryptionKeyBytes,
-  type Settings,
-} from "@opengeni/config";
+import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
 import type { Database } from "./database";
 import {
   loadClaudeAccountCredential,
@@ -14,6 +10,7 @@ import {
   refreshOrganizationClaudeSubscriptionAccountSerialized,
 } from "./claude-subscription-accounts";
 import {
+  claudeRefreshedCredential,
   requestClaudeTokenRefresh,
   ClaudeSubscriptionReconnectRequired,
   ClaudeSubscriptionConnectionChanged,
@@ -75,17 +72,11 @@ export async function resolveClaudeAccountCredential(
           current.secret,
           options.fetchImpl ?? globalThis.fetch,
         );
-        const expiresAt = new Date(now() + tokens.expires_in * 1000);
-        const secret = ClaudeSubscriptionCredential.parse({
-          ...current.secret,
-          token: tokens.access_token,
-          oauth: {
-            ...current.secret.oauth,
-            refreshToken: tokens.refresh_token ?? current.secret.oauth.refreshToken,
-            expiresAt: expiresAt.toISOString(),
-            scopes: tokens.scope.split(/\s+/).filter(Boolean),
-          },
-        });
+        const { credential: secret, expiresAt } = claudeRefreshedCredential(
+          current.secret,
+          tokens,
+          now(),
+        );
         return { secret, expiresAt };
       } catch (error) {
         if (!(error instanceof ClaudeSubscriptionReconnectRequired)) throw error;

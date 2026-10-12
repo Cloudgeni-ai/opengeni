@@ -47,6 +47,7 @@ import {
   resolveSessionFirstPartyMcpTools,
   deploymentUnavailableFirstPartyMcpTools,
   resolveFirstPartyMcpToolPolicy,
+  policyChargesCreditsForModel,
   policyProviderIdForModel,
   resolveTurnExecutionPolicyV1,
   WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
@@ -115,6 +116,7 @@ import {
   type TimelineAnnotation,
   type UpdateSessionMcpApprovalPolicyResponse,
   type UpdateSessionToolPolicyRequest,
+  type UpdateSessionSkillsRequest,
   type SessionAuthorizationPort,
   type SessionAuthorizationSurface,
   type SessionToolPolicy,
@@ -165,6 +167,7 @@ import {
   getWorkspaceModelPolicy,
   requireWorkspace,
   initializeSessionStartAtomically,
+  discardUninitializedSessionShell,
   listSessionTurns,
   listSessionMcpServersForChildInheritance,
   requireSession,
@@ -1289,6 +1292,8 @@ export async function createAndStartSessionWithOutcome(input: {
         changed: finished.changed,
       };
     }
+    // A keyed shell whose start fails stays durable: a retry with the same key
+    // repairs it with the parameters it was first accepted with.
     const finished = await finishStartSession(
       targetSeededBeforeCreateCommit ? { ...input, seedTargetSandbox: null } : input,
       keyed,
@@ -1374,7 +1379,7 @@ export async function createAndStartSessionWithOutcome(input: {
     }
     throw error;
   }
-  const finished = await finishStartSession(
+  const finished = await finishNewlyCreatedSession(
     targetSeededBeforeCreateCommit ? { ...input, seedTargetSandbox: null } : input,
     session,
   );
@@ -1385,6 +1390,34 @@ export async function createAndStartSessionWithOutcome(input: {
     replay: false,
     changed: true,
   };
+}
+
+/**
+ * Start an unkeyed shell this call just inserted. If the start fails before
+ * the first event or turn commits, the caller gets the error and has no way to
+ * resume that session, so the bare shell is discarded instead of lingering as
+ * a queued session nothing runs. A shell that did initialize (including an
+ * outcome-unknown commit) is kept.
+ */
+async function finishNewlyCreatedSession(
+  input: Parameters<typeof finishStartSession>[0],
+  session: Session,
+): Promise<Awaited<ReturnType<typeof finishStartSession>>> {
+  try {
+    return await finishStartSession(input, session);
+  } catch (error) {
+    try {
+      await discardUninitializedSessionShell(input.db, {
+        accountId: session.accountId,
+        workspaceId: session.workspaceId,
+        sessionId: session.id,
+      });
+    } catch {
+      // The original start failure is the actionable error; a shell that
+      // cannot be discarded now is no worse than before this cleanup ran.
+    }
+    throw error;
+  }
 }
 
 function recordCreatedSessionUsage(input: {
@@ -1750,13 +1783,16 @@ export async function assertWorkspaceModelPolicyAllows(
   const verdict = evaluateWorkspaceModelPolicy(policy, {
     providerId,
     modelId: canonicalModel,
+    chargesCredits: policyChargesCreditsForModel(settings, canonicalModel),
   });
   if (!verdict.allowed) {
     throw new HTTPException(422, {
       message:
-        verdict.reason === "provider"
-          ? `model "${canonicalModel}" is not allowed by this workspace's model policy: provider "${providerId}" is not in the allowed providers`
-          : `model "${canonicalModel}" is not allowed by this workspace's model policy`,
+        verdict.reason === "credits"
+          ? `model "${canonicalModel}" uses Opengeni credits, which are turned off in this workspace. Choose a model paid by a subscription or API key, or ask a workspace admin to turn Opengeni credits back on`
+          : verdict.reason === "provider"
+            ? `model "${canonicalModel}" is not allowed by this workspace's model policy: provider "${providerId}" is not in the allowed providers`
+            : `model "${canonicalModel}" is not allowed by this workspace's model policy`,
     });
   }
 }
@@ -5488,6 +5524,82 @@ export async function updateSessionAgent(
       };
     },
     { activity: "semantic", lockParentSession: true },
+  );
+  if (events.length > 0) {
+    await publishDurableSessionEvents(deps.bus, grant.workspaceId, sessionId, events);
+  }
+  return await requireSession(deps.db, grant.workspaceId, sessionId);
+}
+
+/**
+ * Replace the Skills a session carries itself. The worker reads them at the
+ * start of every attempt, so the change applies from the next attempt; work
+ * already running keeps the Skill index it started with. Shares the
+ * tool-policy version (409 when stale) with the other agent-configuration
+ * writes. An agent may only remove Skills, never add or change one.
+ */
+export async function updateSessionSkills(
+  deps: {
+    db: Database;
+    bus: EventBus;
+    sessionAuthorization?: SessionAuthorizationPort | null;
+  },
+  grant: AccessGrant,
+  sessionId: string,
+  request: UpdateSessionSkillsRequest,
+): Promise<Session> {
+  await requireSessionAuthorization(deps, grant, {
+    sessionId,
+    operation: "session.tool_policy.write",
+    surface: "core",
+  });
+  requirePermission(grant, "sessions:control");
+  let skills: SessionSkill[];
+  try {
+    skills = SessionSkills.parse(request.skills);
+  } catch (error) {
+    throw new HTTPException(422, {
+      message: error instanceof Error ? error.message : "invalid session Skill selection",
+    });
+  }
+  const agentAttemptCaller = grantHasAgentAttemptAuthority(grant);
+  const events = await appendSessionEventsWithLockedSessionUpdate(
+    deps.db,
+    grant.workspaceId,
+    sessionId,
+    (session) => {
+      const currentVersion = session.toolPolicyVersion ?? 1;
+      if (request.expectedVersion !== currentVersion) {
+        throw new SessionToolPolicyVersionConflictError(currentVersion);
+      }
+      const current = new Set(session.skills.map((skill) => stableJson(skill)));
+      if (agentAttemptCaller && skills.some((skill) => !current.has(stableJson(skill)))) {
+        throw new HTTPException(403, {
+          message: "An agent can only remove Skills from a session.",
+        });
+      }
+      if (stableJson(session.skills) === stableJson(skills)) return { events: [] };
+      const nextVersion = currentVersion + 1;
+      return {
+        events: [
+          {
+            type: "session.skills.updated" as const,
+            payload: {
+              before: session.skills.map((skill) => skill.name),
+              after: skills.map((skill) => skill.name),
+              version: nextVersion,
+              effectiveFrom: "next_attempt",
+            },
+          },
+        ],
+        update: {
+          skills,
+          toolPolicyVersion: nextVersion,
+          expectedToolPolicyVersion: request.expectedVersion,
+        },
+      };
+    },
+    { activity: "semantic" },
   );
   if (events.length > 0) {
     await publishDurableSessionEvents(deps.bus, grant.workspaceId, sessionId, events);

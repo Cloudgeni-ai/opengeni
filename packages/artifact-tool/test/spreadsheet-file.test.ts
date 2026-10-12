@@ -8,6 +8,13 @@ import {
 import { InvalidSpreadsheetImageError, Workbook } from "../src/spreadsheet";
 
 describe("XLSX codec", () => {
+  test("exports an empty workbook as one blank sheet, since XLSX requires a sheet", async () => {
+    const exported = await SpreadsheetFile.exportXlsx(Workbook.create());
+    const imported = await SpreadsheetFile.importXlsx(exported);
+    expect(imported.worksheets.items.map((sheet) => sheet.name)).toEqual(["Sheet1"]);
+    expect([...imported.worksheets.getItem("Sheet1").cellEntries()]).toEqual([]);
+  });
+
   test("round-trips formulas, styles, structure, tables, validation, and images", async () => {
     const workbook = Workbook.create();
     const sheet = workbook.worksheets.add("Summary");

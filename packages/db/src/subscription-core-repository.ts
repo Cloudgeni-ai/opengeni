@@ -10,6 +10,7 @@ import type {
   SubscriptionSettingValues,
 } from "@opengeni/subscriptions";
 import { rawRows, type Database } from "./database";
+import { subscriptionCoreProvider } from "./subscription-core-providers";
 
 export type EffectiveSubscriptionSettingsRow = {
   values: SubscriptionSettingValues;
@@ -96,14 +97,24 @@ export async function listSubscriptionConnectionAssignmentPolicies(
 
 /**
  * Read the provider/workspace-visible connection world for the pure placement
- * policy. Account and workspace are mandatory; provider may narrow the result.
+ * policy. Account and workspace are mandatory; provider and connection kind
+ * may narrow the result (the shared core passes both: a row of another kind
+ * is never placed for a provider, rather than placed and refused at
+ * credential load).
  * Callers cannot accidentally turn this into a viewer-derived or cross-account pool read.
  * Credential ciphertext is deliberately never selected here.
  */
 export async function listSubscriptionConnectionsForPlacement(
   db: Database,
-  input: { accountId: string; workspaceId: string; provider?: ProviderId },
+  input: {
+    accountId: string;
+    workspaceId: string;
+    provider?: ProviderId;
+    kind?: ConnectionKind;
+    now?: Date;
+  },
 ): Promise<SubscriptionConnection[]> {
+  const now = (input.now ?? new Date()).toISOString();
   const rows = await rawRows<{
     id: string;
     provider: ProviderId;
@@ -114,6 +125,7 @@ export async function listSubscriptionConnectionsForPlacement(
     extra_credits_enabled: boolean;
     allocator_enabled: boolean;
     entitled_model_ids: string[] | null;
+    observed_model_slugs: string[] | null;
     excluded_models: string[];
     allowed_model_ids: string[] | null;
     refresh_generation: number | string;
@@ -130,6 +142,10 @@ export async function listSubscriptionConnectionsForPlacement(
       connection.ownership, connection.owner_organization_membership_id::text as owner_membership_id,
       connection.status as health, connection.allocator_enabled, connection.extra_credits_enabled,
       null::text[] as entitled_model_ids, connection.excluded_models,
+      case when quota.model_catalog_refresh_generation = connection.refresh_generation
+        and quota.model_catalog_observed_at <= ${now}::timestamptz
+        and quota.model_catalog_expires_at > ${now}::timestamptz
+        then quota.model_catalog_slugs else null end as observed_model_slugs,
       connection.allowed_model_ids, connection.refresh_generation,
       connection.scope_kind, connection.allow_personal_workspaces,
       connection.managed_by_workspace_id::text as managed_by_workspace_id,
@@ -141,6 +157,7 @@ export async function listSubscriptionConnectionsForPlacement(
       on quota.account_id = connection.account_id and quota.connection_id = connection.id
     where connection.account_id = ${input.accountId}::uuid
       and (${input.provider ?? null}::text is null or connection.provider = ${input.provider ?? null})
+      and (${input.kind ?? null}::text is null or connection.kind = ${input.kind ?? null})
     order by connection.provider, connection.id`,
   );
   if (rows.length === 0) return [];
@@ -232,6 +249,7 @@ export async function listSubscriptionConnectionsForPlacement(
       extraCreditsEnabled: row.extra_credits_enabled,
       allocatorEnabled: row.allocator_enabled,
       entitledModelIds: row.entitled_model_ids,
+      observedModelSlugs: row.observed_model_slugs,
       excludedModelIds: row.excluded_models,
       allowedModelIds: row.allowed_model_ids,
       // A shared connection with no assignment-policy row for this workspace
@@ -388,7 +406,16 @@ export type SubscriptionSessionBinding = {
 
 export async function readSubscriptionSessionBinding(
   db: Database,
-  input: { workspaceId: string; sessionId: string },
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    /**
+     * Lock the row until the transaction ends, so a placement compares and
+     * writes the binding it decided from while parallel placements of the
+     * same session wait (SUB-STICK-02).
+     */
+    forUpdate?: boolean;
+  },
 ): Promise<SubscriptionSessionBinding | null> {
   const [row] = await rawRows<{
     account_id: string;
@@ -408,7 +435,8 @@ export async function readSubscriptionSessionBinding(
       session_id::text as session_id, provider, connection_id::text as connection_id,
       model_id, choice, only_this_model, last_model_call_at, last_switch_reason, version
     from subscription_session_bindings
-    where workspace_id = ${input.workspaceId}::uuid and session_id = ${input.sessionId}::uuid`,
+    where workspace_id = ${input.workspaceId}::uuid and session_id = ${input.sessionId}::uuid
+    ${input.forUpdate ? sql`for update` : sql``}`,
   );
   if (!row) return null;
   return {
@@ -463,6 +491,46 @@ export async function writeSubscriptionSessionBinding(
     returning version`,
   );
   return row ? Number(row.version) : null;
+}
+
+/**
+ * Record a use of the bound account's prompt cache on the session binding
+ * (SUB-STICK-04): the clock placement measures warmth from. It moves only
+ * forward and only while the binding still names this provider's connection,
+ * so a use on an account the session has already left never warms the new
+ * one. The clock is not part of the binding's version: the version guards the
+ * account, model and choice, and a clock-only advance must not make a
+ * concurrent placement or pin lose its compare-and-swap.
+ *
+ * A cleared clock (a pin change, or a switch by a writer that stated none)
+ * means the next turn re-runs selection (SUB-STICK-05, D-31). Only a
+ * placement restarts it (`restart: true`); a request or completed call of the
+ * turn already running never does, so removing a pin mid-turn still takes
+ * effect at the next turn.
+ */
+export async function advanceSubscriptionBindingCacheClock(
+  db: Database,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    provider: ProviderId;
+    connectionId: string;
+    at: Date;
+    /** A placement on the account: may start a cleared clock. */
+    restart?: boolean;
+  },
+): Promise<boolean> {
+  const at = sql`${input.at.toISOString()}::timestamptz`;
+  const rows = await rawRows<{ advanced: boolean }>(
+    db,
+    sql`update subscription_session_bindings
+      set last_model_call_at = ${at}
+      where workspace_id = ${input.workspaceId}::uuid and session_id = ${input.sessionId}::uuid
+        and provider = ${input.provider} and connection_id = ${input.connectionId}::uuid
+        and ${input.restart === true ? sql`(last_model_call_at is null or last_model_call_at < ${at})` : sql`last_model_call_at < ${at}`}
+      returning true as advanced`,
+  );
+  return rows.length > 0;
 }
 
 export async function createSubscriptionConnection(
@@ -574,17 +642,19 @@ export async function acquireSubscriptionTurnLease(
 }
 
 /**
- * Persist one successful Codex token refresh through the private database
- * seam. Call only inside withSubscriptionCoreCodexRefreshLock, immediately
- * after the provider returns. SQL consumes the one-shot authorization that
- * begin_subscription_codex_refresh minted in the same transaction and writes
+ * Persist one successful token refresh through the private database seam.
+ * Call only inside withSubscriptionCoreRefreshLock for the same provider,
+ * immediately after the provider returns. SQL consumes the one-shot
+ * authorization that begin_subscription_core_refresh minted in the same
+ * transaction and writes
  * under the refresh lock and refresh-generation compare-and-swap, so a caller
  * cannot turn the helper into a general credential update API, and a rotated
  * token is not discarded because the lease or visibility changed meanwhile.
  */
-export async function persistSubscriptionCodexRefresh(
+export async function persistSubscriptionCoreRefresh(
   db: Database,
   input: {
+    provider: ProviderId;
     accountId: string;
     workspaceId: string;
     sessionId: string;
@@ -596,10 +666,11 @@ export async function persistSubscriptionCodexRefresh(
     lastRefreshAt: Date;
   },
 ): Promise<boolean> {
+  subscriptionCoreProvider(input.provider);
   assertPositiveGeneration(input.expectedRefreshGeneration);
   const [row] = await rawRows<{ persisted: boolean }>(
     db,
-    sql`select opengeni_private.persist_subscription_codex_refresh(
+    sql`select opengeni_private.persist_subscription_core_refresh(${input.provider},
       ${input.accountId}::uuid, ${input.workspaceId}::uuid,
       ${input.sessionId}::uuid, ${input.turnId}::uuid,
       ${input.connectionId}::uuid, ${input.expectedRefreshGeneration}::bigint,
@@ -611,21 +682,22 @@ export async function persistSubscriptionCodexRefresh(
 }
 
 /**
- * persistSubscriptionCodexRefresh plus the plan the rotated id_token carries
+ * persistSubscriptionCoreRefresh plus the plan the rotated credential reports
  * (M3 PR 2a). Same one-shot authorization, advisory lock and
  * refresh-generation compare-and-swap; a NULL plan keeps the recorded plan,
  * and a changed plan clears the connection's model cooldowns.
  */
-export async function persistSubscriptionCodexRefreshWithPlan(
+export async function persistSubscriptionCoreRefreshWithPlan(
   db: Database,
-  input: Parameters<typeof persistSubscriptionCodexRefresh>[1] & { planType: string | null },
+  input: Parameters<typeof persistSubscriptionCoreRefresh>[1] & { planType: string | null },
 ): Promise<boolean> {
+  subscriptionCoreProvider(input.provider);
   assertPositiveGeneration(input.expectedRefreshGeneration);
   const trimmed = input.planType?.trim() ?? "";
   const planType = /^[A-Za-z0-9_.-]{1,64}$/.test(trimmed) ? trimmed : null;
   const [row] = await rawRows<{ persisted: boolean }>(
     db,
-    sql`select opengeni_private.persist_subscription_codex_refresh_with_plan(
+    sql`select opengeni_private.persist_subscription_core_refresh_with_plan(${input.provider},
       ${input.accountId}::uuid, ${input.workspaceId}::uuid,
       ${input.sessionId}::uuid, ${input.turnId}::uuid,
       ${input.connectionId}::uuid, ${input.expectedRefreshGeneration}::bigint,
@@ -704,7 +776,12 @@ function turnLeaseWhere(input: SubscriptionTurnLeaseIdentity) {
     and generation = ${input.generation}`;
 }
 
-export type SubscriptionOperationKind = "image" | "realtime" | "transcription";
+export type SubscriptionOperationKind =
+  | "image"
+  | "video"
+  | "realtime"
+  | "transcription"
+  | "completion";
 
 export type SubscriptionOperationLeaseIdentity = {
   accountId: string;

@@ -2,7 +2,7 @@
  * Shadow comparison of the shared subscription core at turn placement
  * (docs/design/subscription-core-2026-10-07.md step M1, SUB-COMPAT-03).
  *
- * After the legacy Codex, Claude or SuperGrok selection has decided, the
+ * After the legacy Claude or SuperGrok selection has decided, the
  * worker loads a read-only legacy world for the same session and turn, runs
  * the core's placement on it and records only content-free data:
  *
@@ -47,7 +47,6 @@ import {
   type SubscriptionCoreShadowObservation,
   type SubscriptionCoreShadowParity,
   type SubscriptionCoreShadowPlacement,
-  type SubscriptionCoreShadowProvider,
 } from "../../observability-metrics";
 import type { CapacityPhaseDeps } from "./codex-capacity";
 
@@ -141,9 +140,6 @@ function presentInputs(
   if (inputs.rotationEnabled === true) present.add("rotation_on");
   if (inputs.source === "organization") present.add("organization_pool");
   if (inputs.source === "user") present.add("personal_pool");
-  if (inputs.codexMode !== null && inputs.codexMode !== "automatic") {
-    present.add("codex_mode_override");
-  }
   if (inputs.workspaceModelPolicy !== "none") present.add("model_policy");
   if (input.session.compactionProviderLock !== null) present.add("compaction_lock");
   if (legacy.reusedLease) present.add("lease_reused");
@@ -204,7 +200,6 @@ function debugRecord(
     coreConnection: decision.kind === "run" ? alias(decision.connectionId) : null,
     legacyConnection: alias(legacy.selectedConnectionId),
     legacySource: inputs.source,
-    codexMode: inputs.codexMode,
     rotationEnabled: inputs.rotationEnabled,
     activeConnection: alias(inputs.activeConnectionId),
     pinConnection: alias(inputs.pin?.connectionId),
@@ -290,7 +285,7 @@ export function subscriptionCoreShadowInFlight(): number {
 export type SubscriptionCoreShadowDeps = {
   enabled: boolean;
   /** Fixed metric label, given outside the request so a failing builder is still attributed. */
-  provider: SubscriptionCoreShadowProvider;
+  provider: LegacyPlacementWorldRequest["provider"];
   timeoutMs: number;
   db: Database;
   observability: Pick<Observability, "incrementCounter" | "observeHistogram" | "info">;

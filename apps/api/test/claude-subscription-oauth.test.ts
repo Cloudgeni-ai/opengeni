@@ -17,6 +17,7 @@ import {
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
   createDb,
+  bootstrapWorkspace,
   decryptEnvironmentValue,
   encryptEnvironmentValue,
   loadIntegrationOAuthPendingState,
@@ -1089,4 +1090,77 @@ test("workspace browser permissions are freshly rechecked after spending a code"
     { url: CLAUDE_OAUTH_TOKEN_URL, method: "POST" },
     { url: "https://api.anthropic.com/api/oauth/profile", method: "GET" },
   ]);
+});
+
+test("a key-only deployment connects Claude with its deployment key, never without it", async () => {
+  const deploymentKey = "deployment-key-" + randomUUID();
+  const routeSettings = testSettings({
+    ...settings,
+    productAccessMode: "configured",
+    authRequired: true,
+    accessKey: deploymentKey,
+    delegationSecret: undefined,
+    publicBaseUrl: undefined,
+    claudeSubscriptionEnabled: true,
+  });
+  const context = await bootstrapWorkspace(client.db, {
+    accountExternalSource: "opengeni:configured",
+    accountExternalId: "default",
+    accountName: "Configured",
+    workspaceExternalSource: "opengeni:configured",
+    workspaceExternalId: "default",
+    workspaceName: "Configured",
+    subjectId: "configured:key",
+    subjectLabel: "Configured key",
+  });
+  const grant = context.workspaceGrants[0]!;
+  expect(grant.principalKind).toBe("configured_key");
+  const app = new Hono();
+  app.onError((error) => {
+    if (error instanceof HTTPException) return error.getResponse();
+    throw error;
+  });
+  const mock = provider();
+  registerClaudeSubscriptionOAuthRoutes(
+    app,
+    { db: client.db, settings: routeSettings } as ApiRouteDeps,
+    mock.fetchImpl,
+  );
+  const path = `/v1/workspaces/${grant.workspaceId}/model-providers/claude_subscription/oauth`;
+  const json = { "content-type": "application/json" };
+
+  // Without the key, or with a wrong one, this is still a browser-only step.
+  for (const headers of [json, { ...json, "x-opengeni-access-key": "wrong" }]) {
+    const refused = await app.request(path + "/start", { method: "POST", headers, body: "{}" });
+    expect([401, 403, 503]).toContain(refused.status);
+  }
+  expect(mock.calls).toHaveLength(0);
+
+  for (const headers of [
+    { ...json, "x-opengeni-access-key": deploymentKey },
+    { ...json, authorization: `Bearer ${deploymentKey}` },
+  ]) {
+    const startResponse = await app.request(path + "/start", {
+      method: "POST",
+      headers,
+      body: "{}",
+    });
+    expect(startResponse.status).toBe(200);
+    const start = await startResponse.json();
+    const code = "fixture-code#" + new URL(start.authorizationUrl).searchParams.get("state");
+    const complete = await app.request(path + "/complete", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ attemptId: start.attemptId, code }),
+    });
+    expect(complete.status).toBe(200);
+    expect(await complete.json()).toMatchObject({ connected: true, scope: "workspace" });
+  }
+  const scope: ClaudeOAuthScope = {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    actorSubjectId: "configured:key",
+    browserSessionHash: "unused",
+  };
+  expect((await accountAuthority(scope))?.credentialId).toBeString();
 });

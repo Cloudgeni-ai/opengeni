@@ -198,6 +198,20 @@ message Capabilities {
   // Transactional uploads via OpStart.fs_write / WriteChunk / OpQuery / OpCancel.
   // Independent of op_stream. Absent/false runners MUST NOT receive this path.
   bool transactional_fs_write = 14;
+  // The runner serves CredentialRenewRequest: renew this connection's enrollment
+  // credentials immediately with the install-key proof, so a consent change on
+  // the enrollment (screen control turned on) applies without reconnecting.
+  bool credential_renew = 15;
+  // macOS desktop permissions (TCC), read without prompting. Present only on Mac
+  // builds with desktop support; absence means unknown, never denied.
+  MacDesktopPermissions mac_permissions = 16;
+}
+
+// The three macOS Privacy & Security grants desktop capture and input need.
+message MacDesktopPermissions {
+  bool screen_recording = 1;
+  bool accessibility = 2;
+  bool input_monitoring = 3;
 }
 
 // Capabilities of one live browser-profile bridge endpoint. This describes the
@@ -759,6 +773,8 @@ message Heartbeat {
 message DesktopStatus {
   bool available = 1;
   string unavailable_reason = 2;
+  // Live macOS permission snapshot; absent off macOS or on older runners.
+  MacDesktopPermissions mac_permissions = 3;
 }
 
 // A point-in-time host-capacity sample: the impure sampler's reading of
@@ -963,6 +979,22 @@ message AgentUpdateApplyResponse {
   string current_version = 3;
   string current_sha256 = 4;
   string target_version = 5;
+}
+
+// Renew the credentials of the connection this request arrived on, now, through
+// the same install-key-signed POST /v1/enrollments/renew the periodic renewal
+// uses. Sent when the enrollment's consent changed. The renewed credentials are
+// saved over the same connection file, and the live reconciler adopts them
+// without restarting the process. Requests are served one at a time, and
+// credentials on disk that already carry the consent are reported without
+// renewing, so repeated requests (one per API replica) never churn the link.
+// Requires Capabilities.credential_renew.
+message CredentialRenewRequest {}
+
+message CredentialRenewResponse {
+  bool renewed = 1;
+  // The screen-control consent carried by the credentials now on disk.
+  bool consented_screen_control = 2;
 }
 
 enum AgentUpdateStage {
@@ -1265,6 +1297,7 @@ message ControlRequest {
     BrowserFramesOpenRequest browser_frames_open = 37;
     ComputerFramesOpenRequest computer_frames_open = 38;
     AgentUpdateApplyRequest agent_update_apply = 39;
+    CredentialRenewRequest credential_renew = 40;
   }
 }
 
@@ -1305,6 +1338,7 @@ message ControlResponse {
     BrowserFramesOpenResponse browser_frames_open = 37;
     ComputerFramesOpenResponse computer_frames_open = 38;
     AgentUpdateApplyResponse agent_update_apply = 39;
+    CredentialRenewResponse credential_renew = 40;
   }
 }
 

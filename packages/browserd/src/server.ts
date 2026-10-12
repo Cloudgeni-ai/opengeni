@@ -3,6 +3,7 @@ import { boundComputerNativeReceipt } from "@opengeni/interaction";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { connect, type Socket } from "node:net";
 import {
+  BROWSER_ACTION_RECEIPT_TARGETS_PARAMETER,
   BROWSER_CONTROL_PORT,
   BROWSER_PROFILE_ARTIFACT_FORMAT,
   BrowserActionCommand,
@@ -527,7 +528,13 @@ export class BrowserControlServer {
           409,
         );
       }
-      return success(await this.supervisor.action(command));
+      const receipt = await this.supervisor.action(command);
+      // Older clients parse receipts strictly. Return resolved targets only to
+      // a caller that asked for them.
+      if (url.searchParams.get(BROWSER_ACTION_RECEIPT_TARGETS_PARAMETER) === "1")
+        return success(receipt);
+      const { targets: _targets, ...withoutTargets } = receipt;
+      return success(withoutTargets);
     }
     if (
       segments.length === 6 &&

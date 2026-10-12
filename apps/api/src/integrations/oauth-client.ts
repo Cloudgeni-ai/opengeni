@@ -557,6 +557,7 @@ async function startMcpOAuthWithinDeadline(
       connectionSelection: profile.connectionSelection,
       exactMcpBinding: profile.exactMcpBinding,
       connectionId: context.payload.connectionId,
+      newAccount: context.payload.newAccount === true,
       requestedOwnership: context.payload.ownership,
       newConnectionOwnership: requestedOwnership,
     }),
@@ -1932,10 +1933,21 @@ async function existingOAuthConnectionForStart(
     connectionSelection: OAuthProviderProfile["connectionSelection"];
     exactMcpBinding: boolean;
     connectionId?: string | undefined;
+    newAccount?: boolean;
     requestedOwnership?: ConnectionOwnership | undefined;
     newConnectionOwnership: ConnectionOwnership;
   },
 ) {
+  if (input.newAccount) {
+    // A further account always mints its own row; it never refreshes (and so
+    // never replaces) an account the caller already holds for this provider.
+    if (input.connectionSelection === "canonical_personal") {
+      throw new HTTPException(409, {
+        message: "this connector supports one account per person; reconnect it instead",
+      });
+    }
+    return null;
+  }
   if (input.connectionId) {
     const connection = await getConnectionMetadata(
       db,

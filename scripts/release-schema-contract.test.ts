@@ -43,7 +43,10 @@ describe("release schema contract", () => {
       contract.migrations.find(
         (migration) => migration.path === "0642_shared_subscription_core.sql",
       ),
-    ).toMatchObject({ path: "0642_shared_subscription_core.sql", deploymentMode: "rolling" });
+    ).toMatchObject({
+      path: "0642_shared_subscription_core.sql",
+      deploymentMode: "rolling",
+    });
   });
 
   test("registers the subscription inference-source settings migration as rolling", async () => {
@@ -179,7 +182,9 @@ describe("release schema contract", () => {
   test("checks complete ledger metadata against migration files", async () => {
     const completeSourceContract = await buildCompleteSchemaContract();
     const sourceMigrationPaths = (
-      await readdir(join(import.meta.dir, "../packages/db/drizzle"), { withFileTypes: true })
+      await readdir(join(import.meta.dir, "../packages/db/drizzle"), {
+        withFileTypes: true,
+      })
     )
       .filter((entry) => entry.isFile() && entry.name.endsWith(".sql"))
       .map((entry) => entry.name)
@@ -200,10 +205,10 @@ describe("release schema contract", () => {
     const contract = await buildCompleteSchemaContract();
     expect(
       contract.migrations.find(
-        (migration) => migration.path === "0693_native_pty_command_supervision.sql",
+        (migration) => migration.path === "0730_native_pty_command_supervision.sql",
       ),
     ).toMatchObject({
-      path: "0693_native_pty_command_supervision.sql",
+      path: "0730_native_pty_command_supervision.sql",
       deploymentMode: "maintenance",
     });
   });
@@ -212,10 +217,10 @@ describe("release schema contract", () => {
     const contract = await buildCompleteSchemaContract();
     expect(
       contract.migrations.find(
-        (migration) => migration.path === "0694_native_command_qualification.sql",
+        (migration) => migration.path === "0731_native_command_qualification.sql",
       ),
     ).toMatchObject({
-      path: "0694_native_command_qualification.sql",
+      path: "0731_native_command_qualification.sql",
       deploymentMode: "maintenance",
     });
   });
@@ -2283,6 +2288,44 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
+      "0729_subscription_person_preferences_owner.sql",
+      "0728_subscription_core_personal_connect_format.sql",
+      "0727_subscription_core_ownerless_video_operations.sql",
+      "0726_subscription_personal_acceptance_reads.sql",
+      "0725_organization_privacy_preferences.sql",
+      "0724_subscription_settings_locks.sql",
+      "0723_subscription_binding_cache_clock.sql",
+      "0722_personal_api_keys.sql",
+      "0721_private_scheduled_task_summaries.sql",
+      "0720_scheduled_task_audience.sql",
+      "0719_session_admin_access_time_limit.sql",
+      "0718_inbox_time_sensitive_needs_you.sql",
+      "0717_subscription_authority_fences.sql",
+      "0716_subscription_authority_compat.sql",
+      "0715_subscription_core_api_key_connections.sql",
+      "0714_subscription_workspace_managed_organization_accounts.sql",
+      "0713_subscription_core_provider_keyed_reach.sql",
+      "0712_subscription_core_generic_precursor.sql",
+      "0711_subscription_codex_completion_operations.sql",
+      "0710_drop_discarded_session_create_key_release.sql",
+      "0709_release_discarded_session_create_key.sql",
+      "0708_inbox_member_notifications.sql",
+      "0707_subscription_core_neutral_routines.sql",
+      "0706_organization_claude_models_in_personal_workspaces.sql",
+      "0705_idle_interaction_release.sql",
+      "0704_inactive_inherited_personal_connections.sql",
+      "0703_machine_removal_detaches_waiting_turns.sql",
+      "0702_subscription_codex_access_editor.sql",
+      "0701_quiescence_receipt_wake_repair.sql",
+      "0700_codex_ownerless_person_refresh.sql",
+      "0699_codex_recovery_after_interrupted_attempt.sql",
+      "0698_codex_ownerless_person_turns.sql",
+      "0697_codex_retry_after_unknown_outcome.sql",
+      "0696_enrollment_token_redemptions.sql",
+      "0695_subscription_model_catalog_observations.sql",
+      "0694_inbox_skip_live_call_replies.sql",
+      "0693_inbox_full_agent_access.sql",
+      "0692_session_admin_access.sql",
       "0690_organization_model_defaults.sql",
       "0686_target_tool_approval_bindings.sql",
       "0689_subscription_core_codex_cutover.sql",
@@ -2673,8 +2716,8 @@ describe("release schema contract", () => {
       "0684_claude_haiku_5_5_default_model.sql",
       "0685_sandbox_capture_around_supervised_commands.sql",
       "0687_human_wait_command_containment.sql",
-      "0693_native_pty_command_supervision.sql",
-      "0694_native_command_qualification.sql",
+      "0730_native_pty_command_supervision.sql",
+      "0731_native_command_qualification.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

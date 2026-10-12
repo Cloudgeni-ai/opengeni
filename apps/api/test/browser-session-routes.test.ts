@@ -1113,6 +1113,7 @@ describe("BrowserSession route discipline", () => {
     );
     expect(route).toContain('operation: "browser.download.save"');
     expect(route).toContain("mayReplaceExisting: save.overwrite && dispatched.dispatchedNow");
+    expect(route).toContain("createParents: true");
   });
 
   test("resolves linked browsers through the exact active ComputerSession placement", async () => {

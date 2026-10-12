@@ -28,6 +28,7 @@ import type {
   TimelineItem,
   ToolCallItem,
 } from "@opengeni/react/session";
+import type { SessionDisplayStatus } from "@opengeni/react/timeline-model";
 import type { OpenGeniNativeSessionController } from "./use-native-session";
 import type { NativeFileAttachmentsResult } from "./attachments";
 import {
@@ -851,7 +852,7 @@ function timelineTitle(
     case "startup-phase":
       return labels.activity;
     case "session-status":
-      return nativeSessionStatusLabel(item.status, labels);
+      return nativeSessionStatusLabel(item.blocked ? "blocked" : item.status, labels);
     case "human-input":
       return labels.humanInputAsked;
     case "goal":
@@ -1018,8 +1019,11 @@ function SessionStatusRow({
   labels: OpenGeniNativeLabels;
   theme: OpenGeniNativeTheme;
 }) {
-  const label = nativeSessionStatusLabel(item.status, labels).toLocaleLowerCase();
-  const dotColor = sessionStatusColor(item.status, theme);
+  const label = nativeSessionStatusLabel(
+    item.blocked ? "blocked" : item.status,
+    labels,
+  ).toLocaleLowerCase();
+  const dotColor = sessionStatusColor(item.blocked ? "blocked" : item.status, theme);
   const relativeTime = formatNativeRelativeTime(item.occurredAt, labels);
 
   return (
@@ -1042,11 +1046,9 @@ function SessionStatusRow({
   );
 }
 
-function sessionStatusColor(
-  status: Extract<TimelineItem, { kind: "session-status" }>["status"],
-  theme: OpenGeniNativeTheme,
-): string {
+function sessionStatusColor(status: SessionDisplayStatus, theme: OpenGeniNativeTheme): string {
   switch (status) {
+    case "blocked":
     case "failed":
       return theme.colors.danger;
     case "requires_action":
@@ -1107,7 +1109,7 @@ function timelineSummary(
     case "startup-phase":
       return nativeTimelineStatusLabel(item.status, labels);
     case "session-status":
-      return nativeSessionStatusLabel(item.status, labels);
+      return nativeSessionStatusLabel(item.blocked ? "blocked" : item.status, labels);
     case "human-input":
       return nativeHumanInputSummary(item, labels);
     case "goal":

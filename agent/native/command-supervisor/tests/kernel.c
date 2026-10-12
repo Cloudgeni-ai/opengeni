@@ -3,23 +3,52 @@
  * fixture alone cannot prove that the all-child wait includes clone children.
  */
 #define _GNU_SOURCE
+#include <sys/ioctl.h>
+#include <sys/stat.h>
 #include <termios.h>
 #include <unistd.h>
 static int test_tcsetpgrp(int terminal, pid_t group);
 static int test_setpgid(pid_t pid, pid_t group);
+static int test_ioctl(int fd, unsigned long request, void *argument);
+static int test_fstat(int fd, struct stat *attributes);
 #define tcsetpgrp test_tcsetpgrp
 #define setpgid test_setpgid
+#define ioctl test_ioctl
+#define fstat test_fstat
 #define main supervisor_cli_main
 #include "../supervisor.c"
 #undef main
 #undef tcsetpgrp
 #undef setpgid
+#undef ioctl
+#undef fstat
 #include <assert.h>
 #include <sched.h>
 
 /* Deterministic injection lives only in this separately built test executable,
  * never in production flags/environment. The real terminal ioctls still run. */
 static const char *test_mode;
+static int identity_terminal = -1;
+
+static int test_ioctl(int fd, unsigned long request, void *argument) {
+    if (test_mode && request == TIOCGDEV && !strncmp(test_mode, "identity-", 9)) {
+        identity_terminal = fd;
+        errno = !strcmp(test_mode, "identity-denied") ? EPERM : ENOTTY;
+        return -1;
+    }
+    return ioctl(fd, request, argument);
+}
+
+static int test_fstat(int fd, struct stat *attributes) {
+    /* Model kernels where /dev/tty opens the terminal inode, including on
+     * Linux hosts where the real /dev/tty descriptor is instead a proxy. */
+    if (fd == identity_terminal && test_mode && !strcmp(test_mode, "identity-inode"))
+        return fstat(STDIN_FILENO, attributes);
+    int result = fstat(fd, attributes);
+    if (!result && fd == identity_terminal && test_mode &&
+        !strcmp(test_mode, "identity-mismatch")) attributes->st_ino ^= 1;
+    return result;
+}
 
 static int test_tcsetpgrp(int terminal, pid_t group) {
     if (test_mode && !strcmp(test_mode, "handoff-failure") && group != getpgrp()) {
@@ -58,7 +87,8 @@ int main(int argc, char **argv) {
     if (argc > 2) {
         test_mode = argv[1];
         assert(!strcmp(test_mode, "handoff-signal") || !strcmp(test_mode, "stop-before-ready") ||
-               !strcmp(test_mode, "handoff-failure"));
+               !strcmp(test_mode, "handoff-failure") || !strcmp(test_mode, "identity-inode") ||
+               !strcmp(test_mode, "identity-mismatch") || !strcmp(test_mode, "identity-denied"));
         return supervisor_cli_main(argc - 1, &argv[1]);
     }
     struct sigaction inherited = {.sa_handler = SIG_IGN, .sa_flags = SA_NOCLDWAIT};

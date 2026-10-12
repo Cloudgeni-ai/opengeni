@@ -7,6 +7,7 @@ import {
 } from "@opengeni/core";
 import { testSettings } from "@opengeni/testing";
 import {
+  WebProviderHealth,
   turnWebSearchPlan,
   webSearchToolDefinitions,
 } from "../src/activities/agent-turn/web-search";
@@ -69,27 +70,54 @@ describe("turn web search plan", () => {
   });
 
   test("models with hosted search keep it; others get provider tools", () => {
-    expect(turnWebSearchPlan(model(true), settings)).toEqual({
+    expect(turnWebSearchPlan(model(true), settings, true)).toEqual({
       hostedWebSearch: true,
       providerTools: [],
     });
-    expect(turnWebSearchPlan(model(false), settings)).toEqual({
+    expect(turnWebSearchPlan(model(false), settings, true)).toEqual({
       hostedWebSearch: false,
       providerTools: ["web_search", "web_fetch"],
     });
-    expect(turnWebSearchPlan(model(false), testSettings())).toEqual({
+    expect(turnWebSearchPlan(model(false), testSettings(), true)).toEqual({
       hostedWebSearch: false,
       providerTools: [],
     });
   });
 
-  test("replace mode never touches SuperGrok's native search", () => {
-    const replace = { ...settings, webSearchProviderMode: "replace" };
-    expect(turnWebSearchPlan(model(true), replace).providerTools).toEqual([
+  test("credits off withholds only the provider tools that would spend credits", () => {
+    const billed = { ...settings, billingMode: "stripe" as const };
+    expect(turnWebSearchPlan(model(false), billed, false)).toEqual({
+      hostedWebSearch: false,
+      providerTools: [],
+    });
+    // Replace mode hands hosted search back when the provider tool is withheld.
+    expect(
+      turnWebSearchPlan(model(true), { ...billed, webSearchProviderMode: "replace" }, false),
+    ).toEqual({ hostedWebSearch: true, providerTools: [] });
+    // Keyless (free) providers and unbilled deployments keep their tools.
+    const keyless = testSettings({
+      billingMode: "stripe",
+      webSearchProvider: "searxng",
+      webSearchBaseUrl: "http://searxng.internal",
+      webFetchProvider: "jina",
+    });
+    expect(turnWebSearchPlan(model(false), keyless, false).providerTools).toEqual([
       "web_search",
       "web_fetch",
     ]);
-    expect(turnWebSearchPlan(model(true, "xai-subscription"), replace)).toEqual({
+    expect(turnWebSearchPlan(model(false), settings, false).providerTools).toEqual([
+      "web_search",
+      "web_fetch",
+    ]);
+  });
+
+  test("replace mode never touches SuperGrok's native search", () => {
+    const replace = { ...settings, webSearchProviderMode: "replace" };
+    expect(turnWebSearchPlan(model(true), replace, true).providerTools).toEqual([
+      "web_search",
+      "web_fetch",
+    ]);
+    expect(turnWebSearchPlan(model(true, "xai-subscription"), replace, true)).toEqual({
       hostedWebSearch: true,
       providerTools: [],
     });
@@ -321,5 +349,149 @@ describe("web_search and web_fetch attempt tools", () => {
     const result = await search!.execute({ query: "q" }, context());
     expect(text(result)).toBe("No web results for: q");
     expect(warnings).toEqual(["web search usage settlement failed"]);
+  });
+});
+
+describe("provider failover", () => {
+  const settings = testSettings({
+    webSearchProvider: "tinyfish,parallel",
+    webFetchProvider: "tinyfish,jina",
+    webSearchProviderCredentials: {
+      tinyfish: { apiKey: "tf-key" },
+      parallel: { apiKey: "p-key" },
+    },
+  });
+
+  function routedFetch(routes: Record<string, () => Response>) {
+    const calls: string[] = [];
+    const impl = (async (input: string | URL | Request) => {
+      const url = String(input);
+      calls.push(url);
+      const key = Object.keys(routes).find((prefix) => url.startsWith(prefix));
+      return key ? routes[key]!() : new Response("{}", { status: 404 });
+    }) as typeof fetch;
+    return { impl, calls };
+  }
+
+  const parallelResults = () =>
+    new Response(
+      JSON.stringify({
+        search_id: "s",
+        session_id: "x",
+        results: [{ url: "https://bun.sh", title: "Bun", excerpts: ["fast"] }],
+      }),
+    );
+
+  test("a failed provider hands the call to the next and only the answer is billed", async () => {
+    const { billing, admitted, settled } = fakeBilling();
+    const recorded = recordingObservability();
+    const fake = routedFetch({
+      "https://api.search.tinyfish.ai": () => new Response("slow down", { status: 429 }),
+      "https://api.parallel.ai/v1/search": parallelResults,
+    });
+    const [search] = webSearchToolDefinitions({
+      settings,
+      tools: ["web_search"],
+      scope,
+      billing,
+      observability: recorded.observability,
+      fetch: fake.impl,
+      health: new WebProviderHealth(),
+    });
+    const result = await search!.execute({ query: "bun" }, context());
+    expect(text(result)).toBe("Web results for: bun\n\n1. Bun\n   https://bun.sh\n   fast");
+    expect(admitted).toEqual([0, 1_000]);
+    expect(settled).toHaveLength(1);
+    expect(settled[0]).toMatchObject({
+      provider: "parallel",
+      providerMicros: 1_000,
+      creditMicros: 1_050,
+    });
+    expect(recorded.counters.map((counter) => counter.labels)).toEqual([
+      { operation: "search", provider: "tinyfish", outcome: "provider_retryable" },
+      { operation: "search", provider: "parallel", outcome: "ok" },
+    ]);
+  });
+
+  test("a rate-limited provider moves behind the others until its cooldown passes", async () => {
+    let now = 1_000_000;
+    const health = new WebProviderHealth(() => now);
+    let tinyfishStatus = 429;
+    const fake = routedFetch({
+      "https://api.search.tinyfish.ai": () =>
+        tinyfishStatus === 200
+          ? new Response(JSON.stringify({ results: [{ title: "T", url: "https://t.example" }] }))
+          : new Response("slow down", { status: tinyfishStatus }),
+      "https://api.parallel.ai/v1/search": parallelResults,
+    });
+    const [search] = webSearchToolDefinitions({
+      settings,
+      tools: ["web_search"],
+      scope,
+      billing: fakeBilling().billing,
+      observability: quietObservability(),
+      fetch: fake.impl,
+      health,
+    });
+    await search!.execute({ query: "one" }, context());
+    expect(fake.calls.map((url) => new URL(url).host)).toEqual([
+      "api.search.tinyfish.ai",
+      "api.parallel.ai",
+    ]);
+    fake.calls.length = 0;
+    await search!.execute({ query: "two" }, context());
+    expect(fake.calls.map((url) => new URL(url).host)).toEqual(["api.parallel.ai"]);
+    fake.calls.length = 0;
+    now += 61_000;
+    tinyfishStatus = 200;
+    const third = await search!.execute({ query: "three" }, context());
+    expect(text(third)).toContain("https://t.example");
+    expect(fake.calls.map((url) => new URL(url).host)).toEqual(["api.search.tinyfish.ai"]);
+  });
+
+  test("the model sees an error only when every provider failed", async () => {
+    const fake = routedFetch({
+      "https://api.search.tinyfish.ai": () => new Response("down", { status: 503 }),
+      "https://api.parallel.ai/v1/search": () => new Response("bad key", { status: 401 }),
+    });
+    const [search] = webSearchToolDefinitions({
+      settings,
+      tools: ["web_search"],
+      scope,
+      billing: fakeBilling().billing,
+      observability: quietObservability(),
+      fetch: fake.impl,
+      health: new WebProviderHealth(),
+    });
+    const result = await search!.execute({ query: "q" }, context());
+    expect(result).toMatchObject({ isError: true });
+    expect(text(result)).toBe("Web search failed: Provider returned HTTP 401: bad key.");
+  });
+
+  test("a paid backup refused for credits is skipped, and the free reader still answers", async () => {
+    const { billing, admitted } = fakeBilling(true);
+    const fake = routedFetch({
+      "https://api.search.tinyfish.ai": () => new Response("down", { status: 503 }),
+      "https://api.fetch.tinyfish.ai": () => new Response("down", { status: 503 }),
+      "https://r.jina.ai/": () =>
+        new Response(JSON.stringify({ data: { title: "Doc", content: "page text" } })),
+    });
+    const [search, fetchTool] = webSearchToolDefinitions({
+      settings,
+      tools: ["web_search", "web_fetch"],
+      scope,
+      billing,
+      observability: quietObservability(),
+      fetch: fake.impl,
+      health: new WebProviderHealth(),
+    });
+    const searched = await search!.execute({ query: "q" }, context());
+    expect(text(searched)).toBe(
+      "Web search failed: Provider returned HTTP 503: down. You may retry shortly.",
+    );
+    expect(fake.calls.some((url) => url.startsWith("https://api.parallel.ai"))).toBe(false);
+    const page = await fetchTool!.execute({ url: "https://a.example/doc" }, context());
+    expect(text(page)).toContain("page text");
+    expect(admitted).toEqual([0, 1_000, 0, 0]);
   });
 });

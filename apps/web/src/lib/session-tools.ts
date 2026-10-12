@@ -12,6 +12,7 @@ import type {
 import {
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   FIRST_PARTY_MCP_TOOL_NAMES,
+  SESSION_ADMIN_ACCESS_TOOL_NAMES,
   defaultRepositoryMountPath,
   mergeResourceRefs,
   normalizeRepositoryTransportUri,
@@ -85,7 +86,13 @@ const FIRST_PARTY_ACTION_LABELS: Partial<Record<FirstPartyMcpToolName, string>> 
   run_on: "Choose where work runs",
 };
 
-export const firstPartySessionToolOptions = FIRST_PARTY_MCP_TOOL_NAMES.map((id) => ({
+// Admin access tools are granted only through a session's admin access, never
+// through the per-session tool picker.
+const SESSION_ADMIN_ACCESS_TOOL_SET: ReadonlySet<string> = new Set(SESSION_ADMIN_ACCESS_TOOL_NAMES);
+
+export const firstPartySessionToolOptions = FIRST_PARTY_MCP_TOOL_NAMES.filter(
+  (id) => !SESSION_ADMIN_ACCESS_TOOL_SET.has(id),
+).map((id) => ({
   id,
   name: FIRST_PARTY_ACTION_LABELS[id] ?? firstPartyToolLabel(id),
 }));

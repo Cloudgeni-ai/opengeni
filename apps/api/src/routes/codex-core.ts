@@ -1,7 +1,6 @@
 // Codex routes for organizations whose Codex cutover row exists (M3 PR 2b).
 //
-// `codexRouteDisposition` is read first by every Codex route. Without a
-// cutover row the legacy handler runs unchanged. A disabled row answers a
+// `codexRouteDisposition` is read first by every Codex route. A missing or disabled row answers a
 // typed 503 and reads no legacy Codex table. An enabled row runs the
 // handlers below: the same paths, verbs, request fields and response shapes,
 // projected from the shared subscription core (SUB-COMPAT-02). Operations the
@@ -9,8 +8,8 @@
 import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import * as z from "zod/v4";
+import { CodexAppsDesignationRequest } from "@opengeni/contracts";
 import { hasPermission, requireAccessGrant, type ApiRouteDeps } from "@opengeni/core";
-import { ApiHttpError } from "../http/api-error";
 import {
   clearSubscriptionCoreCodexApps,
   connectSubscriptionCoreCodexConnection,
@@ -21,6 +20,7 @@ import {
   fetchSubscriptionCoreCodexUsage,
   getSubscriptionCoreCodexAppsSettings,
   getSubscriptionCoreCodexWorkspaceProjection,
+  getSubscriptionCoreOrganizationCodexAccount,
   getSubscriptionCoreOrganizationCodexProjection,
   readCodexCutoverDisposition,
   renameSubscriptionCoreCodexConnection,
@@ -44,29 +44,18 @@ import {
   managedHumanOrAgent,
   requireCodexAppsHuman,
 } from "./codex";
+import { SUBSCRIPTION_CORE_CUTOVER_DISABLED, typedHttpError } from "./subscription-core-http";
 
-export const SUBSCRIPTION_CORE_CUTOVER_DISABLED = "subscription_core_cutover_disabled";
-export const SUBSCRIPTION_CORE_ROUTE_UNSUPPORTED = "subscription_core_route_unsupported";
-
-/** The public error envelope with the core reason in `details.reason`. */
-function typedHttpError(status: 409 | 503, reason: string, message: string): ApiHttpError {
-  return new ApiHttpError(status, {
-    code: status === 503 ? "upstream_unavailable" : "conflict",
-    message,
-    retryable: status === 503,
-    outcomeUnknown: false,
-    details: { reason },
-  });
-}
+export { SUBSCRIPTION_CORE_CUTOVER_DISABLED, typedHttpError };
 
 /**
- * `legacy` without a Codex cutover row, `core` with an enabled one. A
- * disabled row is maintenance: fail closed, never fall back to legacy state.
+ * Only an enabled Codex cutover admits a request. Missing and disabled rows
+ * are maintenance: fail closed, never fall back to legacy state.
  */
 export async function codexRouteDisposition(
   deps: ApiRouteDeps,
   accountId: string,
-): Promise<"legacy" | "core"> {
+): Promise<"core"> {
   const disposition = await readCodexCutoverDisposition(deps.db, accountId);
   if (disposition === "maintenance") {
     throw typedHttpError(
@@ -76,15 +65,6 @@ export async function codexRouteDisposition(
     );
   }
   return disposition;
-}
-
-/** An operation the shared core does not serve yet (listed as a PR 3 leftover). */
-export function coreCodexRouteUnsupported(): never {
-  throw typedHttpError(
-    409,
-    SUBSCRIPTION_CORE_ROUTE_UNSUPPORTED,
-    "This Codex operation is not available yet for this organization",
-  );
 }
 
 function projection(
@@ -276,7 +256,7 @@ export async function coreCodexSetSource(
     result = await setSubscriptionCoreWorkspaceCodexSource(deps.db, input);
   } catch (error) {
     if (error instanceof SubscriptionCoreCodexSourceRefusedError) {
-      throw new HTTPException(error.message.includes("personal workspaces") ? 409 : 403, {
+      throw new HTTPException(error.reason === "personal_workspace" ? 409 : 403, {
         message: error.message,
       });
     }
@@ -404,9 +384,7 @@ export async function coreCodexDesignateApps(
   if (!deps.settings.codexConnectedAppsEnabled) {
     throw new HTTPException(409, { message: "Codex Apps is disabled for this deployment" });
   }
-  const parsed = z
-    .object({ accountId: z.string().uuid(), expectedVersion: z.number().int().nonnegative() })
-    .safeParse(await c.req.json().catch(() => null));
+  const parsed = CodexAppsDesignationRequest.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) {
     throw new HTTPException(400, { message: "accountId and expectedVersion are required" });
   }
@@ -518,15 +496,17 @@ export async function coreCodexRename(
     label,
   });
   if (!renamed) throw new HTTPException(404, { message: "codex account not found" });
-  const accounts = admin.workspaceId
-    ? (await projection(deps, admin.accountId, admin.workspaceId, admin.subjectId)).accounts
-    : (
-        await getSubscriptionCoreOrganizationCodexProjection(deps.db, {
-          organizationId: admin.accountId,
-          subjectId: admin.subjectId,
-        })
-      ).accounts;
-  const row = accounts.find((account) => account.id === renamed);
+  // The organization route also renames accounts a shared workspace manages,
+  // which its list does not show: read the renamed one itself.
+  const row = admin.workspaceId
+    ? (await projection(deps, admin.accountId, admin.workspaceId, admin.subjectId)).accounts.find(
+        (account) => account.id === renamed,
+      )
+    : await getSubscriptionCoreOrganizationCodexAccount(deps.db, {
+        organizationId: admin.accountId,
+        subjectId: admin.subjectId,
+        connectionId: renamed,
+      });
   if (!row) throw new HTTPException(404, { message: "codex account not found" });
   return c.json(codexAccountJson(row));
 }

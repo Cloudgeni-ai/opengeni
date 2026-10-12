@@ -47,6 +47,7 @@ This map defines who each doc tier serves and where volatile facts belong.
 | Jev-backed `code_search` tool and Jev settings | `docs/code-search.md` | Architecture, deployment notes, and the `@opengeni/jev` README should link instead of restating the switches or the sandbox command contract. |
 | Agent web search (hosted vs provider), search providers, and their settings and billing | `docs/web-search.md` | Architecture, model-provider, and deployment notes should link instead of restating the provider list, modes, or prices. |
 | Composer voice input | `docs/transcription.md` | Architecture, SDK/React docs, and host-app guides should link instead of restating provider selection or microphone lifecycle rules. |
+| Stateless single model calls (OpenAI-compatible Chat Completions) and title-model routing | `docs/chat-completions.md` | `docs/model-providers.md`, `docs/http-api.md`, and architecture should link instead of restating supported parameters, billing, or subscription admission. |
 | Workbench embedding & production acceptance | `docs/embedding-workbench.md`, `docs/workbench-acceptance.md` | Host-app guides should link instead of weakening or restating the live evidence contract. |
 | Agent behavior eval (real model, manual/nightly) | `scripts/agent-behavior-eval/README.md` | Scenario scoring, variants, and the prompt/agent-configuration release gate; not a CI lane. |
 | Credential taxonomy | `docs/credentials.md` | `docs/embedding.md`, `docs/capabilities.md`, route comments should link instead of re-listing token types. |

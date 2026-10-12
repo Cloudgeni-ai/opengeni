@@ -56,6 +56,7 @@ const places = {
     organization: "Shared",
     everyone: "Everyone",
     selected: "Selected workspaces",
+    none: "No workspaces",
     workspace: "This workspace",
     user: "Only you",
   },

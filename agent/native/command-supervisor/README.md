@@ -33,6 +33,11 @@ background wrapper, or denied terminal-control ioctl fails closed before user
 code. PTY preflight prints exactly `native-subreaper-pty-v1` without a newline.
 It exercises the terminal handoff and attribute-restoration ioctls with the
 current foreground group and unchanged attributes, creating no child or socket.
+If the kernel does not implement `TIOCGDEV` (`ENOTTY` only), identity instead
+requires `/dev/tty` and all three streams to expose the exact same character
+device inode (device, inode and character-device identity). A proxy inode,
+different PTY, or denied identity ioctl still fails closed. Every stream must
+also belong to the supervisor's existing session and foreground process group.
 
 The child enters its own process group before restoring default terminal signal
 dispositions and an empty signal mask. A two-way pipe barrier keeps it from

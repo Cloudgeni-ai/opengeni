@@ -12,6 +12,8 @@ import {
   SessionStatus as SessionStatusBadge,
   SESSION_STATUS_META,
   StatusDot,
+  sessionDisplayStatus,
+  type SessionDisplayStatus,
 } from "@opengeni/react";
 import { ModelMark, modelDisplayName, type SessionEventsConnectionState } from "@opengeni/react";
 import type { SessionSummary } from "@opengeni/sdk";
@@ -30,11 +32,18 @@ import {
   PencilIcon,
   PinIcon,
   SearchIcon,
+  ShieldCheckIcon,
+  ShieldOffIcon,
 } from "lucide-react";
 import { useCallback, useRef, useState, type ReactNode } from "react";
 
 import { BillingClassMark, type BillingClass } from "@/components/billing-class-mark";
 import { ConnectionPill } from "@/components/common";
+import {
+  GrantSessionAdminAccessDialog,
+  SessionAdminAccessIndicator,
+  type SessionAdminAccessControl,
+} from "@/components/session/session-admin-access";
 import { SessionAncestryBreadcrumb } from "@/components/session/subagents";
 import { Button } from "@/components/ui/button";
 import {
@@ -77,6 +86,7 @@ export function SessionHeader({
   onPin,
   onArchive,
   repliesMute,
+  adminAccess,
   sandboxSlot,
   codexSlot,
   accessSlot,
@@ -114,6 +124,11 @@ export function SessionHeader({
    * action (sub-agents, people without an inbox, servers without it).
    */
   repliesMute?: SessionRepliesMute | null;
+  /**
+   * This session's admin access, when the viewer can see it on or give it.
+   * Absent hides the shield and the menu action.
+   */
+  adminAccess?: SessionAdminAccessControl | null;
   /** The "Run on <machine>" control — a live component in production. */
   sandboxSlot?: ReactNode;
   /**
@@ -145,6 +160,11 @@ export function SessionHeader({
   policyLoading?: boolean;
 }) {
   const waiting = sessionInputWait({ ...session, status });
+  // A session the runtime could not start reads as stuck, not "Waiting on you".
+  const displayStatus = sessionDisplayStatus({
+    status,
+    admissionBlock: session.admissionBlock,
+  });
   const startup = useSessionStartup({ ...session, status });
   const startupLabel =
     startup === "starting"
@@ -169,6 +189,7 @@ export function SessionHeader({
   const rename = useInlineRename(session, onRename);
   const pin = useSessionPinToggle(session, onPin);
   const canArchive = Boolean(onArchive) && session.parentSessionId === null;
+  const [grantAdminOpen, setGrantAdminOpen] = useState(false);
   // Menu actions that move focus (rename input, find field) run after the menu
   // has closed, so its focus restoration cannot steal focus back to the trigger.
   const afterMenuClose = useRef<(() => void) | null>(null);
@@ -227,10 +248,16 @@ export function SessionHeader({
           <CompactSessionStatus
             paused={sessionControlPaused(session)}
             waiting={Boolean(waiting)}
-            status={status}
+            status={displayStatus}
             label={startupLabel}
           />
           {accessSlot}
+          {adminAccess ? (
+            <SessionAdminAccessIndicator
+              control={adminAccess}
+              onChangeTimeLimit={() => setGrantAdminOpen(true)}
+            />
+          ) : null}
         </div>
       </div>
       <div className="ml-auto flex shrink-0 items-center justify-end gap-0.5 lg:min-w-0 lg:max-w-full lg:shrink lg:flex-wrap lg:gap-2">
@@ -305,7 +332,7 @@ export function SessionHeader({
                 Waiting
               </span>
             ) : (
-              <SessionStatusBadge status={status} label={startupLabel} />
+              <SessionStatusBadge status={displayStatus} label={startupLabel} />
             )
           ) : (
             <WorkstreamControlIndicator session={session} />
@@ -399,6 +426,22 @@ export function SessionHeader({
                 {repliesMute.muted ? "Unmute replies" : "Mute replies"}
               </DropdownMenuItem>
             ) : null}
+            {adminAccess?.state.active && adminAccess.state.canRevoke ? (
+              <DropdownMenuItem disabled={adminAccess.busy} onSelect={() => adminAccess.revoke()}>
+                <ShieldOffIcon />
+                Turn off admin access
+              </DropdownMenuItem>
+            ) : adminAccess && !adminAccess.state.active && adminAccess.state.canGrant ? (
+              <DropdownMenuItem
+                disabled={adminAccess.busy}
+                onSelect={() => {
+                  afterMenuClose.current = () => setGrantAdminOpen(true);
+                }}
+              >
+                <ShieldCheckIcon />
+                Give admin access…
+              </DropdownMenuItem>
+            ) : null}
             {canArchive ? (
               <>
                 <DropdownMenuSeparator />
@@ -411,6 +454,13 @@ export function SessionHeader({
             ) : null}
           </DropdownMenuContent>
         </DropdownMenu>
+        {adminAccess ? (
+          <GrantSessionAdminAccessDialog
+            control={adminAccess}
+            open={grantAdminOpen}
+            onOpenChange={setGrantAdminOpen}
+          />
+        ) : null}
       </div>
     </header>
   );
@@ -425,7 +475,7 @@ function CompactSessionStatus({
 }: {
   paused: boolean;
   waiting: boolean;
-  status: Session["status"];
+  status: SessionDisplayStatus;
   label?: string;
 }) {
   if (paused) {
@@ -452,8 +502,7 @@ function CompactSessionStatus({
       </span>
     );
   }
-  const name =
-    status === "waiting_capacity" ? "Waiting" : (label ?? SESSION_STATUS_META[status].label);
+  const name = label ?? SESSION_STATUS_META[status].label;
   return (
     <span
       data-compact-session-status={status}

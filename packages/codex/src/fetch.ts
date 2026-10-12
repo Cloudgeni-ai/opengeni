@@ -441,11 +441,7 @@ async function emitRequestEvent(
     audit.terminalOutcome = terminalOutcome;
     await settleProviderRequest(
       audit,
-      event.status !== undefined &&
-        event.status >= 400 &&
-        event.status < 500 &&
-        event.status !== 408 &&
-        event.status !== 409
+      definiteErrorStatus(event.status)
         ? "refused"
         : event.phase === "completed"
           ? "response_received"
@@ -460,6 +456,25 @@ async function emitRequestEvent(
   }
   await audit.ctx.onModelRequestEvent?.(observed);
   return true;
+}
+
+/**
+ * An HTTP error status the provider actually returned is a definite answer:
+ * no model response was produced. That covers 4xx and the 5xx answers of the
+ * provider's edge (for example a 503 after an upstream reset), which the OpenAI
+ * SDK retries as a new request. Timeouts (408, 504) and conflicts (409) stay
+ * ambiguous because the provider may still be processing the request; an
+ * absent response is ambiguous too.
+ */
+function definiteErrorStatus(status: number | undefined): boolean {
+  return (
+    status !== undefined &&
+    status >= 400 &&
+    status < 600 &&
+    status !== 408 &&
+    status !== 409 &&
+    status !== 504
+  );
 }
 
 function providerRequestId(headers: Headers): string | undefined {

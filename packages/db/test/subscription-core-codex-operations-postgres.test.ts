@@ -23,6 +23,8 @@ import {
   releaseSubscriptionCoreCodexOperationLease,
   requestSessionCompaction,
   renewSubscriptionCoreCodexOperationLease,
+  reserveSubscriptionCoreCodexOperationRequest,
+  settleSubscriptionCoreCodexOperationRequest,
   resolveSubscriptionCoreCodexConnectionId,
   withSessionRlsActorContext,
   type DbClient,
@@ -31,6 +33,8 @@ import {
   type SubscriptionCoreTurnIdentity,
 } from "../src";
 import { rawRows } from "../src/database";
+import { subscriptionCoreCodexProvider } from "../src/subscription-core-codex-adapter";
+import { subscriptionCoreOperations } from "../src/subscription-core/operations";
 import { encryptEnvironmentValue } from "../src/environment-crypto";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
@@ -148,6 +152,7 @@ async function sharedConnection(
     managedBy?: string | null;
     expiresAt?: Date;
     pool?: "workspace" | "organization";
+    fedramp?: boolean;
   } = {},
 ): Promise<string> {
   const [row] = await shared!.admin<{ id: string }[]>`
@@ -157,7 +162,7 @@ async function sharedConnection(
     ) values (
       ${org.accountId}::uuid, 'codex', 'subscription', ${encryptedTokens(label)},
       'shared', ${options.scope ?? "organization"}, ${`chatgpt-${label}`}, 'pro',
-      ${shared!.admin.json({ isFedramp: false, resetCreditAvailableCount: 2 })}::jsonb,
+      ${shared!.admin.json({ isFedramp: options.fedramp ?? false, resetCreditAvailableCount: 2 })}::jsonb,
       ${(options.expiresAt ?? new Date(Date.now() + 86_400_000)).toISOString()}::timestamptz,
       ${options.managedBy ?? null}::uuid, ${label}
     ) returning id::text as id`;
@@ -408,9 +413,7 @@ describe.skipIf(!realDb)("Codex operations on the shared core (M3 PR 2c)", () =>
     const scope = workspaceScope(org);
     for (const state of ["absent", "disabled"] as const) {
       if (state === "disabled") await setCutover(org.accountId, false);
-      expect(await readCodexCutoverDisposition(client!.db, org.accountId)).toBe(
-        state === "absent" ? "legacy" : "maintenance",
-      );
+      expect(await readCodexCutoverDisposition(client!.db, org.accountId)).toBe("maintenance");
       expect(await listSubscriptionCoreCodexOperationCandidates(client!.db, scope)).toEqual([]);
       const lease = ref(connectionId, { operationKind: "transcription" });
       expect(await acquireSubscriptionCoreCodexOperationLease(client!.db, scope, lease)).toEqual({
@@ -689,7 +692,7 @@ describe.skipIf(!realDb)("Codex operations on the shared core (M3 PR 2c)", () =>
     const other = await organization();
     await setCutover(org.accountId, true);
     await setCutover(other.accountId, true);
-    const organizationScoped = await sharedConnection(org, "ops-org");
+    const organizationScoped = await sharedConnection(org, "ops-org", { fedramp: true });
     const assignedHere = await sharedConnection(org, "ops-here", {
       scope: "workspaces",
       workspaces: [org.sharedWorkspaceId],
@@ -735,6 +738,29 @@ describe.skipIf(!realDb)("Codex operations on the shared core (M3 PR 2c)", () =>
     expect(await operationLeases(assignedHere)).toEqual([
       { operation_kind: "transcription", session_id: null, turn_id: null },
     ]);
+    // The operation credential read carries the connection's FedRAMP flag.
+    const fedrampLease = ref(organizationScoped, { operationKind: "transcription" });
+    expect(
+      (await acquireSubscriptionCoreCodexOperationLease(client!.db, scope, fedrampLease)).kind,
+    ).toBe("acquired");
+    const fedrampFlags = [];
+    for (const [connectionId, held] of [
+      [assignedHere, lease],
+      [organizationScoped, fedrampLease],
+    ] as const) {
+      const loaded = await loadSubscriptionCoreCodexConnectionCredential(
+        client!.db,
+        settings,
+        scope,
+        connectionId,
+        held,
+      );
+      fedrampFlags.push(loaded.kind === "loaded" ? loaded.credential.isFedramp : loaded.kind);
+    }
+    expect(fedrampFlags).toEqual([false, true]);
+    expect(await releaseSubscriptionCoreCodexOperationLease(client!.db, scope, fedrampLease)).toBe(
+      true,
+    );
     // Only a transcription may be sessionless.
     expect(
       (
@@ -796,6 +822,124 @@ describe.skipIf(!realDb)("Codex operations on the shared core (M3 PR 2c)", () =>
     ).toBeNull();
     expect(await releaseSubscriptionCoreCodexOperationLease(client!.db, scope, lease)).toBe(true);
   });
+
+  test("a sessionless completion holds its own lease and reserves each request in workspace scope", async () => {
+    const org = await organization();
+    await setCutover(org.accountId, true);
+    const connectionId = await sharedConnection(org, "ops-completion");
+    const scope = workspaceScope(org);
+    const lease = ref(connectionId, { operationKind: "completion" });
+    expect((await acquireSubscriptionCoreCodexOperationLease(client!.db, scope, lease)).kind).toBe(
+      "acquired",
+    );
+    expect(await operationLeases(connectionId)).toEqual([
+      { operation_kind: "completion", session_id: null, turn_id: null },
+    ]);
+    const reserved = await reserveSubscriptionCoreCodexOperationRequest(
+      client!.db,
+      scope,
+      lease,
+      connectionId,
+      { requestId: `completion:${lease.operationId}:1`, transportAttempt: 1 },
+    );
+    const [request] = await shared!.admin<{ operation_kind: string; request_outcome: string }[]>`
+      select operation_kind, request_outcome from subscription_operation_leases
+      where operation_id = ${reserved.operationId}::uuid`;
+    expect(request).toEqual({ operation_kind: "completion", request_outcome: "reserved" });
+    await settleSubscriptionCoreCodexOperationRequest(client!.db, scope, {
+      operationId: reserved.operationId,
+      outcome: "response_received",
+    });
+    const [settled] = await shared!.admin<{ request_outcome: string }[]>`
+      select request_outcome from subscription_operation_leases
+      where operation_id = ${reserved.operationId}::uuid`;
+    expect(settled).toEqual({ request_outcome: "response_received" });
+    expect(await releaseSubscriptionCoreCodexOperationLease(client!.db, scope, lease)).toBe(true);
+  });
+
+  // No refresher at all (an API key), or a refresher the credential's format
+  // does not use (a setup token next to renewable OAuth credentials).
+  test.each(["no refresher", "format does not renew"] as const)(
+    "a connection credential that never renews is marked needs-relogin, only under an enabled cutover (%s)",
+    async (shape) => {
+      const org = await organization();
+      const connectionId = await sharedConnection(
+        org,
+        `ops-non-renewing-${shape.replaceAll(" ", "-")}`,
+        {
+          expiresAt: new Date(Date.now() - 60_000),
+        },
+      );
+      const scope = workspaceScope(org);
+      // A binding of the registered provider whose adapter never renews this credential.
+      const codex = subscriptionCoreCodexProvider();
+      let rotations = 0;
+      const operations = subscriptionCoreOperations(
+        shape === "no refresher"
+          ? { ...codex, adapter: { ...codex.adapter, refresh: null } }
+          : {
+              ...codex,
+              adapter: {
+                ...codex.adapter,
+                capabilitiesFor: (format: string) => ({
+                  ...codex.adapter.capabilitiesFor(format),
+                  autoRenews: false,
+                }),
+                refresh: {
+                  ...codex.adapter.refresh!,
+                  rotate: async () => {
+                    rotations += 1;
+                    throw new Error("a non-renewing format must not be rotated");
+                  },
+                },
+              },
+            },
+      );
+      const statusOf = async () =>
+        (
+          await shared!.admin<{ status: string; last_error: string | null }[]>`
+          select status, last_error from subscription_connections where id = ${connectionId}::uuid`
+        )[0];
+      // Without an enabled cutover nothing is written.
+      expect(
+        (
+          await operations.refreshSubscriptionCoreConnectionCredential(
+            client!.db,
+            settings,
+            scope,
+            connectionId,
+            null,
+            1,
+          )
+        ).kind,
+      ).toBe("refused");
+      expect(await statusOf()).toEqual({ status: "active", last_error: null });
+      await setCutover(org.accountId, true);
+      const message = codex.adapter.reloginText("");
+      expect(
+        await operations.refreshSubscriptionCoreConnectionCredential(
+          client!.db,
+          settings,
+          scope,
+          connectionId,
+          null,
+          2,
+        ),
+      ).toEqual({ kind: "superseded" });
+      expect(
+        await operations.refreshSubscriptionCoreConnectionCredential(
+          client!.db,
+          settings,
+          scope,
+          connectionId,
+          null,
+          1,
+        ),
+      ).toEqual({ kind: "relogin", message, marked: true });
+      expect(await statusOf()).toEqual({ status: "needs_relogin", last_error: message });
+      expect(rotations).toBe(0);
+    },
+  );
 
   test("realtime leases are session-bound: owner context for owned sessions, shared-only for ownerless ones", async () => {
     const org = await organization();
@@ -921,6 +1065,99 @@ describe.skipIf(!realDb)("Codex operations on the shared core (M3 PR 2c)", () =>
       select (quota->'windows'->0->>'usedPercent')::int as used
       from subscription_connection_quota where connection_id = ${connectionId}::uuid`;
     expect(quota).toEqual({ used: 40 });
+  });
+
+  test("a /wham/usage reading is recorded as a complete usage reading: it ends a refusal's window and reports recovery only once nothing is exhausted", async () => {
+    const org = await organization();
+    await setCutover(org.accountId, true);
+    const connectionId = await sharedConnection(org, "ops-usage-complete");
+    const [connection] = await shared!.admin<{ generation: number }[]>`
+      select refresh_generation::int as generation from subscription_connections
+      where id = ${connectionId}::uuid`;
+    const now = Date.now();
+    // A credit-policy refusal's hold, as the worker records it.
+    expect(
+      await recordSubscriptionCoreCodexUsageObservation(
+        client!.db,
+        workspaceScope(org),
+        connectionId,
+        {
+          windows: [
+            {
+              id: "included_usage",
+              usedPercent: 100,
+              resetsAt: now + 7_200_000,
+              status: "exhausted",
+            },
+          ],
+          modelCooldowns: {},
+          exhaustedUntil: null,
+          exhaustedKind: null,
+          revision: 0,
+          observedAt: now - 1_000,
+          observedRefreshGeneration: connection!.generation,
+          source: "refusal",
+        },
+      ),
+    ).toEqual({ applied: true, recovered: false });
+    const weeklyReset = Math.floor((now + 3 * 86_400_000) / 1000);
+    const usage = (weeklyPercent: number) =>
+      (async () =>
+        Response.json({
+          plan_type: "pro",
+          rate_limit: {
+            primary_window: {
+              used_percent: 10,
+              limit_window_seconds: 18_000,
+              reset_at: Math.floor((now + 3_600_000) / 1000),
+            },
+            secondary_window: {
+              used_percent: weeklyPercent,
+              limit_window_seconds: 604_800,
+              reset_at: weeklyReset,
+            },
+          },
+        })) as never;
+    const stored = async () => {
+      const [row] = await shared!.admin<{ quota: { source: string; windows: unknown[] } }[]>`
+        select quota from subscription_connection_quota where connection_id = ${connectionId}::uuid`;
+      return row!.quota;
+    };
+    // A reading that shows the weekly window exhausted replaces every window
+    // (the policy hold included), and nothing recovered.
+    const exhausted = await fetchSubscriptionCoreCodexUsage(
+      client!.db,
+      settings,
+      workspaceScope(org),
+      connectionId,
+      usage(100),
+    );
+    expect(exhausted.usage.status).not.toBe("error");
+    expect(exhausted.recovered).toBe(false);
+    expect(await stored()).toMatchObject({
+      source: "usage_endpoint",
+      windows: [
+        { id: "primary", usedPercent: 10, status: "ok" },
+        { id: "secondary", usedPercent: 100, resetsAt: weeklyReset * 1000, status: "exhausted" },
+      ],
+    });
+    expect((await stored()).windows).toHaveLength(2);
+    // A later reading without the block ends it and reports the recovery.
+    const recovered = await fetchSubscriptionCoreCodexUsage(
+      client!.db,
+      settings,
+      workspaceScope(org),
+      connectionId,
+      usage(20),
+    );
+    expect(recovered.recovered).toBe(true);
+    expect(await stored()).toMatchObject({
+      source: "usage_endpoint",
+      windows: [
+        { id: "primary", usedPercent: 10, status: "ok" },
+        { id: "secondary", usedPercent: 20, status: "ok" },
+      ],
+    });
   });
 
   test("compaction turns copy the accepted v2 authority; core usage facts carry the connection", async () => {

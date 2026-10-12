@@ -1335,7 +1335,7 @@ export const organizationServiceAccounts = pgTable(
   }),
 );
 
-export type ApiKeyCredentialKind = "workspace" | "organization" | "legacy_account";
+export type ApiKeyCredentialKind = "workspace" | "organization" | "legacy_account" | "personal";
 
 export const apiKeys = pgTable(
   "api_keys",
@@ -1360,6 +1360,10 @@ export const apiKeys = pgTable(
     permissions: jsonb("permissions").$type<string[]>().notNull().default([]),
     /** Organization keys: the service account that holds the key. */
     serviceAccountId: uuid("service_account_id"),
+    /** Personal keys: the person the key acts as, with their live access. */
+    ownerSubjectId: text("owner_subject_id"),
+    /** Personal keys: the most the key may do; `permissions` stays empty. */
+    ownerPermissions: jsonb("owner_permissions").$type<string[]>(),
     expiresAt: timestamp("expires_at", { withTimezone: true }),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
     lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
@@ -1388,9 +1392,25 @@ export const apiKeys = pgTable(
       "api_keys_access_policy_check",
       sql`${table.workspaceScope} in ('all', 'selected')
         and ${table.permissionMode} in ('legacy', 'explicit')
-        and (${table.workspaceScope} = 'all' or (${table.credentialKind} = 'organization' and ${table.permissionMode} = 'explicit'))
-        and (${table.permissionMode} = 'legacy' or ${table.credentialKind} = 'organization')`,
+        and (${table.workspaceScope} = 'all' or (${table.credentialKind} in ('organization', 'personal') and ${table.permissionMode} = 'explicit'))
+        and (${table.permissionMode} = 'legacy' or ${table.credentialKind} in ('organization', 'personal'))`,
     ),
+    personalOwner: check(
+      "api_keys_personal_owner_check",
+      sql`(${table.credentialKind} = 'personal') = (${table.ownerSubjectId} is not null)
+        and (${table.credentialKind} = 'personal') = (${table.ownerPermissions} is not null)
+        and (${table.credentialKind} <> 'personal' or (
+          ${table.ownerSubjectId} ~ '^user:[^[:space:][:cntrl:]]+$'
+          and length(${table.ownerSubjectId}) <= 1024
+          and jsonb_typeof(${table.ownerPermissions}) = 'array'
+          and ${table.permissions} = '[]'::jsonb
+          and ${table.permissionMode} = 'explicit'
+          and ${table.serviceAccountId} is null
+        ))`,
+    ),
+    personalOwnerIndex: index("api_keys_personal_owner_idx")
+      .on(table.accountId, table.ownerSubjectId, table.createdAt.desc())
+      .where(sql`${table.credentialKind} = 'personal'`),
     descriptionValid: check(
       "api_keys_description_check",
       sql`${table.description} is null or length(${table.description}) between 1 and 500`,
@@ -1407,6 +1427,9 @@ export const apiKeys = pgTable(
         ${table.workspaceId} is null
         and ${table.credentialKind} = 'legacy_account'
         and ${table.revokedAt} is not null
+      ) or (
+        ${table.workspaceId} is null
+        and ${table.credentialKind} = 'personal'
       )`,
     ),
   }),
@@ -4518,6 +4541,55 @@ export const organizationModelDefaults = pgTable("organization_model_defaults", 
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+// Whether owners and admins may give an agent session admin access (0691).
+export const organizationAgentAdminAccess = pgTable("organization_agent_admin_access", {
+  accountId: uuid("account_id")
+    .primaryKey()
+    .references(() => managedAccounts.id, { onDelete: "cascade" }),
+  sessionAdminAccessAllowed: boolean("session_admin_access_allowed").notNull().default(false),
+  updatedBySubjectId: text("updated_by_subject_id"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+// An organization's privacy choices (0723): whether new chats and schedules
+// start as Workspace or Only me, and whether admins see that other people's
+// Only me schedules exist. No row means Workspace and on.
+export const organizationPrivacyPreferences = pgTable("organization_privacy_preferences", {
+  accountId: uuid("account_id")
+    .primaryKey()
+    .references(() => managedAccounts.id, { onDelete: "cascade" }),
+  defaultVisibility: text("default_visibility")
+    .$type<"workspace_shared" | "user_private">()
+    .notNull()
+    .default("workspace_shared"),
+  adminsSeePrivateSchedules: boolean("admins_see_private_schedules").notNull().default(true),
+  updatedBySubjectId: text("updated_by_subject_id"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+// A session an owner or admin gave admin access; the row ends when it is removed.
+export const sessionAdminAccess = pgTable(
+  "session_admin_access",
+  {
+    sessionId: uuid("session_id")
+      .primaryKey()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    grantedBySubjectId: text("granted_by_subject_id").notNull(),
+    grantedAt: timestamp("granted_at", { withTimezone: true }).notNull().defaultNow(),
+    // When admin access ends by itself (0719); null means no time limit.
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+  },
+  (table) => [index("session_admin_access_account_idx").on(table.accountId)],
+);
 
 // One workspace-local short-lived holder per running Codex turn. Selection and
 // insertion happen atomically while codex_rotation_settings is locked FOR
@@ -11746,6 +11818,9 @@ export const scheduledTasks = pgTable(
       .references(() => workspaces.id, { onDelete: "cascade" }),
     name: text("name").notNull(),
     ownerSubjectId: text("owner_subject_id"),
+    // Who can read the schedule (migration 0720): everyone in the workspace, or
+    // only its owner. Not execution configuration; excluded from the digest.
+    visibility: text("visibility").notNull().default("workspace_shared"),
     status: text("status").notNull().default("active"),
     schedule: jsonb("schedule").$type<unknown>().notNull(),
     temporalScheduleId: text("temporal_schedule_id").notNull(),

@@ -4,15 +4,12 @@ import { configuredModels, withCodexCatalogProvider } from "@opengeni/config";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
 import { resolveDefaultSessionModel } from "@opengeni/core";
 import * as opengeniDb from "@opengeni/db";
+import { bootstrapWorkspace, createDb, encryptEnvironmentValue, type DbClient } from "@opengeni/db";
 import {
-  bootstrapWorkspace,
-  createDb,
-  encryptEnvironmentValue,
   ensureCodexRotationSettings,
   setInitialActiveCodexCredential,
   upsertCodexSubscriptionCredential,
-  type DbClient,
-} from "@opengeni/db";
+} from "../../../packages/db/test/fixtures/legacy-codex";
 import {
   acquireSharedTestDatabase,
   MemoryEventBus,
@@ -310,7 +307,7 @@ describe.skipIf(!realDb)("Codex model catalog and default after the cutover", ()
     expect(legacyAccounts).not.toHaveBeenCalled();
   }, 180_000);
 
-  test("without a cutover row the legacy readers decide, unchanged", async () => {
+  test("without a cutover row the catalog fails closed even with legacy rows", async () => {
     const fixture = await organization();
     await setCutover(fixture, null);
     // A core connection is invisible to the legacy path.
@@ -328,14 +325,14 @@ describe.skipIf(!realDb)("Codex model catalog and default after the cutover", ()
     for (const entry of codexEntries(after)) {
       expect({ id: entry.id, selectable: entry.availability.selectable }).toEqual({
         id: entry.id,
-        selectable: entry.id !== unserved.id,
+        selectable: false,
       });
     }
-    expect(after.defaultSelection?.source).toBe("subscription");
-    expect((await defaultModel(fixture)).source).toBe("subscription");
+    expect(after.defaultSelection?.source).not.toBe("subscription");
+    expect((await defaultModel(fixture)).source).not.toBe("subscription");
   }, 180_000);
 
-  test("Codex connection access reads the core connection and refuses legacy writes", async () => {
+  test("Codex connection access reads and writes the core connection, never the legacy row", async () => {
     const fixture = await organization();
     const legacyId = await (async () => {
       await setCutover(fixture, null);
@@ -362,22 +359,53 @@ describe.skipIf(!realDb)("Codex model catalog and default after the cutover", ()
     expect(read.status).toBe(200);
     expect((await read.json()).policy).toEqual({
       allowedModels: [codexModels[0]!.id],
-      allowedWorkspaces: [fixture.workspaceId],
-      allowPersonalWorkspaces: true,
+      // A workspace's own account is never offered to other workspaces.
+      allowedWorkspaces: null,
+      allowPersonalWorkspaces: false,
       version: 1,
     });
     // The frozen legacy row is not a core connection.
     expect((await request(fixture, path(legacyId))).status).toBe(404);
-    const write = await request(fixture, path(core!.id), {
+    const save = () =>
+      request(fixture, path(core!.id), {
+        method: "PUT",
+        body: JSON.stringify({
+          allowedModels: null,
+          allowedWorkspaces: null,
+          allowPersonalWorkspaces: false,
+          version: 1,
+        }),
+      });
+    // The core's management policies admit organization admins and the
+    // managing workspace's admins; anyone else is refused, not told to reload.
+    await shared!.admin`update workspace_memberships set role = 'member'
+      where workspace_id = ${fixture.workspaceId}::uuid and subject_id = ${fixture.subjectId}`;
+    const refused = await save();
+    expect(refused.status).toBe(403);
+    await shared!.admin`update workspace_memberships set role = 'admin'
+      where workspace_id = ${fixture.workspaceId}::uuid and subject_id = ${fixture.subjectId}`;
+    const write = await save();
+    expect(write.status).toBe(200);
+    expect(await write.json()).toEqual({
+      allowedModels: null,
+      allowedWorkspaces: null,
+      allowPersonalWorkspaces: false,
+      version: 2,
+    });
+    const [saved] = await shared!.admin<{ allowed_model_ids: string[] | null }[]>`
+      select allowed_model_ids from subscription_connections where id = ${core!.id}::uuid`;
+    expect(saved?.allowed_model_ids).toBeNull();
+    // A stale version is refused without writing.
+    const stale = await request(fixture, path(core!.id), {
       method: "PUT",
       body: JSON.stringify({
-        allowedModels: null,
+        allowedModels: [codexModels[0]!.id],
         allowedWorkspaces: null,
-        allowPersonalWorkspaces: true,
+        allowPersonalWorkspaces: false,
         version: 1,
       }),
     });
-    expect(write.status).toBe(409);
+    expect(stale.status).toBe(409);
     const [frozen] = await shared!.admin<{ version: number }[]>`
       select access_policy_version as version from codex_subscription_credentials
       where id = ${legacyId}::uuid`;

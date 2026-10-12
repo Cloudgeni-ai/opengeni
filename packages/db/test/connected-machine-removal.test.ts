@@ -433,7 +433,7 @@ describe("connected machine removal lifecycle", () => {
     expect(replay).toEqual(equalRemoval);
   }, 60_000);
 
-  test("blocks active work and live leases, detaches idle routes, rejects stale revisions, and serializes concurrent removal", async () => {
+  test("detaches routes with waiting turns, blocks live leases, rejects stale revisions, and serializes concurrent removal", async () => {
     if (!available) return;
     const { accountId, workspaceId } = await freshWorkspace();
     const routedEnrollment = await createEnrollment(db, {
@@ -499,38 +499,6 @@ describe("connected machine removal lifecycle", () => {
       update sessions
       set active_turn_id = ${activeTurnId}, status = 'running'
       where id = ${session.id}`;
-    const activeTurnBlocked = await removeEnrollment(db, {
-      accountId,
-      workspaceId,
-      enrollmentId: routedEnrollment.id,
-      operationKey: "route-active-turn-blocked",
-    });
-    expect(activeTurnBlocked).toMatchObject({
-      outcome: "blocked",
-      removed: false,
-      code: "active_commands",
-      dependentSessions: [
-        { id: session.id, title: AUTOMATIC_SESSION_TITLE_FALLBACK },
-        { id: secondSession.id, title: "Second routed session" },
-      ],
-    });
-    const [blockedSession] = await admin<
-      {
-        active_sandbox_id: string | null;
-        active_epoch: number;
-      }[]
-    >`
-      select active_sandbox_id, active_epoch
-      from sessions where id = ${session.id}`;
-    expect(blockedSession).toEqual({
-      active_sandbox_id: routedMachine.id,
-      active_epoch: routed.pointer!.activeEpoch,
-    });
-    expect((await getEnrollment(db, workspaceId, routedEnrollment.id))?.status).toBe("active");
-    await admin`
-      update sessions
-      set active_turn_id = null, status = 'idle'
-      where id = ${session.id}`;
 
     const [beforeMove] = await admin<
       {
@@ -582,7 +550,17 @@ describe("connected machine removal lifecycle", () => {
       [secondSession.id, null, secondRouted.pointer!.activeEpoch + 1],
     ]);
     expect(movedSessions.map((row) => row.sandbox_backend)).toEqual(["modal", "modal"]);
+    // The waiting turn and its queue are kept; only the machine route is cleared.
     expect(movedSessions[0]).toMatchObject(beforeMove!);
+    const [detachAudit] = await admin<{ metadata: Record<string, unknown> }[]>`
+      select metadata from audit_events
+      where workspace_id = ${workspaceId}
+        and action = 'connected_machine.sessions_detached'
+        and target_id = ${routedEnrollment.id}`;
+    expect(detachAudit?.metadata).toMatchObject({ waitingTurnIds: [activeTurnId] });
+    expect([...((detachAudit?.metadata.sessionIds ?? []) as string[])].sort()).toEqual(
+      [session.id, secondSession.id].sort(),
+    );
 
     const leasedEnrollment = await createEnrollment(db, {
       accountId,

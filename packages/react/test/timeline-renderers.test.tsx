@@ -56,12 +56,50 @@ test("account-qualified native and Codemode calls render persisted labels after 
       />,
     );
     await flush();
-    expect(r.container.textContent).toContain(
-      "Search documents — Documents — Workspace: Team inbox",
-    );
+    expect(r.container.textContent).toContain("Search documents");
+    expect(r.container.textContent).not.toContain("Workspace: Team inbox");
     expect(r.container.textContent).not.toContain(name);
     await r.unmount();
   }
+});
+
+test("connector tool rows show the connector's logo and a short label", async () => {
+  const name = "b".repeat(64);
+  const events = [
+    timelineEvent("agent.toolCall.created", {
+      id: "call-logo",
+      name,
+      arguments: {},
+      display: {
+        toolName: "list_issues",
+        connector: "Issues",
+        providerDomain: "issues.example.test",
+      },
+    }),
+    timelineEvent("agent.toolCall.output", { id: "call-logo", output: "done" }),
+  ];
+  const withLogo = await renderComponent(
+    <MessageTimeline
+      events={events}
+      resolveProviderLogo={(domain) =>
+        domain === "issues.example.test" ? "/logos/issues.svg" : null
+      }
+    />,
+  );
+  await flush();
+  const logo = withLogo.container.querySelector<HTMLImageElement>("img[data-og-connector-logo]");
+  expect(logo?.getAttribute("src")).toBe("/logos/issues.svg");
+  expect(withLogo.container.textContent).toContain("List issues");
+  expect(withLogo.container.textContent).not.toContain("Issues —");
+  await withLogo.unmount();
+
+  // Without a logo the row keeps its ordinary icon; nothing is drawn in its place.
+  const withoutLogo = await renderComponent(<MessageTimeline events={events} />);
+  await flush();
+  expect(withoutLogo.container.querySelector("img[data-og-connector-logo]")).toBeNull();
+  expect(withoutLogo.container.querySelector("svg")).not.toBeNull();
+  expect(withoutLogo.container.textContent).toContain("List issues");
+  await withoutLogo.unmount();
 });
 
 let timelineSequence = 0;

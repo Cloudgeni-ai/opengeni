@@ -78,14 +78,21 @@ export function nativePushAlert(payload: ClaimedNativePushDelivery["payload"]): 
 }
 
 /**
- * Only an agent notification the agent marked time-sensitive breaks through
- * Focus. Questions, approvals, replies and failures arrive as ordinary alerts,
- * so Focus and the person's own notification settings decide when they show.
+ * What breaks through Focus: an agent notification the agent marked
+ * time-sensitive, and questions and approvals for a person who asked for them
+ * to (their setting puts the urgency on the delivery). Everything else, and
+ * replies and failures always, arrive as ordinary alerts, so Focus and the
+ * person's own notification settings decide when they show.
  */
 export function nativePushInterruptionLevel(
   payload: ClaimedNativePushDelivery["payload"],
 ): "time-sensitive" | "active" {
-  if (payload.rule === "agent" && payload.urgency === "time_sensitive") return "time-sensitive";
+  if (
+    (payload.rule === "agent" || payload.rule === "needs_input") &&
+    payload.urgency === "time_sensitive"
+  ) {
+    return "time-sensitive";
+  }
   return "active";
 }
 

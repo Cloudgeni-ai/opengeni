@@ -1,3 +1,4 @@
+/** TEST ONLY: historical Codex regression fixture, snapshot 8c43a921512078d302f671ae590d43645669f88d. Never import from production. */
 import {
   DEFAULT_CODEX_FLEET_POLICY_V1,
   compareCodexFleetCanonicalStringsV1,
@@ -6,10 +7,14 @@ import {
   type CodexFleetDecisionInputV1,
   type CodexFleetReplayRecordV1,
 } from "@opengeni/contracts";
+
 import type { CodexLeaseAccountStatus } from "@opengeni/db";
+
 import { CancelledFailure } from "@temporalio/activity";
+
 import { createHmac } from "node:crypto";
-import { TurnAttemptFencedError } from "./turn-attempt-fenced";
+
+import { TurnAttemptFencedError } from "../../../src/activities/turn-attempt-fenced";
 
 export const CODEX_FLEET_SHADOW_MAX_PAYLOAD_BYTES = 34 * 1_024;
 
@@ -72,9 +77,9 @@ export type CodexFleetShadowPublicationResultV1 =
     };
 
 export const CODEX_FLEET_SHADOW_DECISION_MAX_METRIC_SERIES = 3 * 3 * 4 * 4 * 2;
+
 export const CODEX_FLEET_SHADOW_ERROR_MAX_METRIC_SERIES = 3 * 2;
 
-/** Fixed low-cardinality labels; workspace/account/tenant identity is structurally absent. */
 export function codexFleetShadowDecisionMetricLabelsV1(payload: CodexFleetShadowPayloadV1) {
   return {
     actual_outcome: payload.actual.outcome,
@@ -91,14 +96,6 @@ export function codexFleetShadowErrorMetricLabelsV1(
   return { stage: result.stage, reason: result.reason } as const;
 }
 
-/**
- * Default-off, bounded, fail-open runtime seam for the shadow record.
- *
- * The typed result intentionally carries no error message: provider, database,
- * or transport errors can include private metadata. Callers may count/log only
- * the bounded stage, reason, name, and size fields returned here. A failure can
- * never replace or clear the credential already selected by the allocator.
- */
 export async function publishCodexFleetShadowDecisionV1(input: {
   enabled: boolean;
   decision: CodexFleetShadowBuildInputV1;

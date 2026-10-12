@@ -321,7 +321,7 @@ export const KnowledgeEntryListResponse = z.object({
   nextCursor: z.string().nullable(),
   searchMode: z.enum(["keyword", "hybrid", "vector"]).optional(),
   fallbackReason: z
-    .enum(["awaiting_funding", "quota", "provider_unavailable", "query_limit"])
+    .enum(["awaiting_funding", "credits_disabled", "quota", "provider_unavailable", "query_limit"])
     .optional(),
 });
 export type KnowledgeEntryListResponse = z.infer<typeof KnowledgeEntryListResponse>;

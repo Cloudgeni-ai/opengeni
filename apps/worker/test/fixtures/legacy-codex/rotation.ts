@@ -1,27 +1,17 @@
+/** TEST ONLY: historical Codex regression fixture, snapshot 8c43a921512078d302f671ae590d43645669f88d. Never import from production. */
 import { subscriptionAccountShardIndex } from "@opengeni/config";
-// Multi-account P3 — the PURE rotation ranker. Zero I/O: no provider calls, no
-// decrypts, no db. It consumes the already-loaded, metadata-only account list
-// (cached usage columns + the exhausted_until cooldown column) and returns the
-// account a turn should run on. The two call sites (turn-start pre-emption and
-// the reactive 429 catch in agent-turn.ts) feed its result into the unchanged
-// `selectCodexCredentialForTurn` precedence gate (pin > active). Keeping the
-// decision pure makes the whole rotation correctness story unit-testable in
-// isolation (see codex-rotation.test.ts).
+
 import type {
   CodexAccountStatus,
   CodexCredentialLeaseSelectionContext,
   CodexLeaseAccountStatus,
   CodexPinSource,
 } from "@opengeni/db";
+
 import { codexPlanExcludesModel, connectionModelAllowed } from "@opengeni/db";
 
 export type CodexRotationAccount = CodexAccountStatus | CodexLeaseAccountStatus;
 
-/**
- * Model-scoped allocation filter: user connection policy plus proven plan
- * entitlement. A plan exclusion applies only until it expires (one request
- * then re-probes the account) or a different plan is observed.
- */
 export function codexAccountServesModel(
   account: Pick<CodexRotationAccount, "allowedModelIds" | "planType" | "planEntitlementExclusion">,
   modelId: string,
@@ -33,7 +23,6 @@ export function codexAccountServesModel(
   );
 }
 
-/** Capacity metadata worth an authoritative live read before/all through an idle. */
 export function codexAccountNeedsLiveCapacityRefresh(
   account: Pick<
     CodexAccountStatus,
@@ -54,42 +43,12 @@ export type CodexRotationStrategy =
   | "drain_then_next"
   | "sharded";
 
-/**
- * The ONE strategy rotation-enabled workspaces run: sticky-sharded. The legacy
- * strategies are all strictly dominated post-cache-affinity — session
- * stickiness is worth ~half the prompt-cache hit rate, and round_robin /
- * most_remaining churn accounts per turn while drain_then_next concentrates
- * every concurrent session on ONE account (the measured concurrency-eviction
- * failure sharding replaced). Stored `rotation_strategy` values are therefore
- * NORMALIZED here at every read site: legacy values (and any future unknown
- * string) behave as "sharded". The column and the legacy branch code are kept
- * intact for old-binary rollback safety — they are simply unreachable through
- * this normalization. The API accepts-but-ignores strategy writes for the same
- * reason (no SDK caller breaks). User-facing choice is intentionally gone: the
- * remaining real intents are rotation on/off, per-account allocator
- * include/exclude, and manual pins — not algorithm selection.
- */
 export function effectiveRotationStrategy(_stored: string): CodexRotationStrategy {
   return "sharded";
 }
 
-/**
- * How a session's codex pin governs THIS turn's account selection (pure). Encodes the
- * policy-pin LIFECYCLE rule: a 'policy' pin is meaningful ONLY while the sharded policy
- * is active.
- *   • "manual"     — a manual pin: honored under EVERY strategy; never moved or cleared.
- *   • "sharded"    — the sharded policy is active and the pin is non-manual: assign / keep
- *                    / re-shard the deterministic home (covers an unpinned first turn AND
- *                    an existing policy pin).
- *   • "clearStale" — a 'policy' pin while the sharded policy is NOT active: IGNORE it
- *                    (never honor it as a sticky pin — that is the no-escape trap) and
- *                    clear it lazily so the session converges to the active strategy.
- *   • "unpinned"   — no pin (or none that applies): follow the active strategy / workspace
- *                    active pointer, unchanged.
- */
 export type CodexPinDisposition = "manual" | "sharded" | "clearStale" | "unpinned";
 
-/** Classify a session's codex pin against the active rotation regime (see {@link CodexPinDisposition}). */
 export function classifyCodexPin(args: {
   pinnedCredentialId: string | null;
   pinSource: CodexPinSource | null;
@@ -144,21 +103,10 @@ export type CodexTurnLeaseSelection = {
   advanceActivePointer?: boolean;
 };
 
-// Invariant 4 (NO THRASH / BOUNDED) safety floors. An all-capped idle MUST be a
-// positive, bounded wait — a null / elapsed / unknown reset can NEVER collapse it
-// into a 0 or a past instant (which the caller would turn into a 0 continueDelayMs
-// and a tight re-dispatch loop that hammers CPU/DB and never runs the model, so the
-// stale usage cache never self-heals).
-/** The minimum all-capped idle: continueDelayMs is clamped to at least this (never 0). */
-export const MIN_IDLE_MS = 60_000; // 60s
-/**
- * Cooldown applied to an exhausted account whose cached reset is null / unknown
- * / already-elapsed (the turn hot path never refreshes usage, so a capped window's
- * reset reads stale). Treating it as "available after a default cooldown" keeps
- * availableAt — and therefore earliestReset — ALWAYS in the future.
- */
-export const DEFAULT_RESET_COOLDOWN_MS = 60_000; // 60s
-/** Cached provider usage becomes unavailable only at actual exhaustion. */
+export const MIN_IDLE_MS = 60_000;
+
+export const DEFAULT_RESET_COOLDOWN_MS = 60_000;
+
 export const CODEX_USAGE_EXHAUSTED_PCT = 100;
 
 function effectiveWindowUsed(usedPercent: number | null, resetAt: Date | null, now: Date): number {
@@ -169,7 +117,6 @@ function effectiveWindowUsed(usedPercent: number | null, resetAt: Date | null, n
   return resetAt && resetAt.getTime() <= now.getTime() ? 0 : (usedPercent ?? 0);
 }
 
-/** The worse live window: weekly binds as hard as 5h. */
 function bindingUsedPct(acct: CodexRotationAccount, now: Date): number {
   return Math.max(
     effectiveWindowUsed(acct.primaryUsedPercent, acct.primaryResetAt, now),
@@ -177,11 +124,6 @@ function bindingUsedPct(acct: CodexRotationAccount, now: Date): number {
   );
 }
 
-/**
- * Remaining quota across the binding window — the P3 rotation key. Mirrors
- * buildCodexUsageWindowFromCache's `remaining = 100 - percent`, taking the MIN
- * across both windows (the scarcer of 5h/weekly). null percent ⇒ 100 remaining.
- */
 function bindingRemaining(acct: CodexRotationAccount, now: Date): number {
   const primaryRemaining =
     100 - effectiveWindowUsed(acct.primaryUsedPercent, acct.primaryResetAt, now);
@@ -194,24 +136,18 @@ function cooling(acct: CodexRotationAccount, now: Date): boolean {
   return acct.exhaustedUntil != null && acct.exhaustedUntil.getTime() > now.getTime();
 }
 
-/** Included allowance is separate from actual provider-refusal cooldowns. */
 export function codexHasIncludedUsage(acct: CodexRotationAccount, now: Date): boolean {
   return (
     !(acct.includedUsageUnavailableUntil && acct.includedUsageUnavailableUntil > now) &&
     bindingUsedPct(acct, now) < CODEX_USAGE_EXHAUSTED_PCT
   );
 }
+
 function preferredCreditTier(accounts: CodexRotationAccount[], now: Date) {
   const included = accounts.filter((account) => codexHasIncludedUsage(account, now));
   return included.length ? included : accounts;
 }
 
-/**
- * Healthy for an already-leased/in-flight turn = connected/usable (status
- * "active", excludes needs_relogin/error), not cooling, and not exhausted in
- * either provider window. Allocator eligibility is
- * deliberately separate so disabling NEW work cannot break an existing live lease.
- */
 export function isCodexCredentialHealthy(acct: CodexRotationAccount, now: Date): boolean {
   return (
     acct.status === "active" &&
@@ -220,41 +156,14 @@ export function isCodexCredentialHealthy(acct: CodexRotationAccount, now: Date):
   );
 }
 
-/** New automatic allocation requires both health and explicit allocator eligibility. */
 export function isCodexCredentialEligible(acct: CodexRotationAccount, now: Date): boolean {
   return acct.allocatorEnabled && isCodexCredentialHealthy(acct, now);
 }
 
-/**
- * Public eligibility predicate (same definition as the private `eligible`): an
- * account is usable this turn iff it is connected/active, not cooling, and below
- * actual exhaustion on both windows. The worker's sharded home
- * health-check uses this to decide whether a session's existing policy pin is still
- * a valid home or must be re-sharded.
- */
 export function isCodexAccountEligible(acct: CodexRotationAccount, now: Date): boolean {
   return isCodexCredentialEligible(acct, now);
 }
 
-/**
- * Session-sharded HOME account (AM-6): the deterministic account a session runs on
- * under the "sharded" strategy — `stableAccountList[ hash(sessionId) % N ]` over the
- * ELIGIBLE (connected, not cooling, not exhausted) accounts in stable created_at
- * order (`listCodexAccountStatuses`).
- *
- * Why deterministic hash over "least-loaded by session count" (AM-6): it needs ZERO
- * coordination — every worker computes the same home for a given (sessionId,
- * eligible-set), so a burst of concurrent first-turns can't all read the same
- * "least-loaded" account and stampede it (read-then-write skew), and there is no
- * shared round-robin cursor to contend on. It is balanced in expectation.
- *
- * Re-shard (AM-5): pass the just-capped account as already-cooling (or simply let it
- * fall over its threshold) and this reshuffles the SURVIVORS deterministically — the
- * sessions that shared a capped account spread across the remaining pool by their own
- * hashes instead of all re-concentrating on one first-eligible failover.
- *
- * Returns null when NO account is eligible (the caller idles until reset).
- */
 export function shardCredentialForSession(args: {
   sessionId: string;
   accounts: CodexRotationAccount[];
@@ -272,28 +181,10 @@ export function shardCredentialForSession(args: {
   return eligibles[index]!.id;
 }
 
-/** earliestResetAt across ALL connected accounts — exported for the sharded all-capped idle. */
 export function earliestCodexReset(accounts: CodexRotationAccount[], now: Date): Date {
   return earliestReset(accounts, now);
 }
 
-/**
- * The proactive SHARDED home decision (pure — zero I/O, like {@link chooseRotationActive}).
- * Decides the account a session should run on THIS turn under the "sharded" strategy,
- * given its current POLICY pin (null on the first turn) and the accounts snapshot:
- *
- *  - keepPin: the current policy pin is still ELIGIBLE → run there, no rewrite. This
- *    is the steady-state cache-warm path (a session stays on its one home account).
- *  - reshard: no policy pin yet (first-turn lazy assignment, AM-7) OR the policy pin
- *    is capped/ineligible (proactive re-shard, AM-4) → deterministically shard over the
- *    ELIGIBLE set (AM-6) and durably (re)write the pin (`rewritePin:true`, AM-3/AM-5).
- *  - allCapped: no account is eligible → the caller idles until the earliest reset.
- *
- * A MANUAL pin is handled by the CALLER (it never reaches here); this function only
- * governs policy homes. Pure so the assignment/re-shard/keep logic is unit-testable
- * without a worker/db env; the caller wraps it with a self-heal usage refresh between
- * two evaluations exactly like chooseRotationActive's allCapped path.
- */
 export function chooseShardedHome(args: {
   sessionId: string;
   currentPolicyPin: string | null;
@@ -323,18 +214,6 @@ export function chooseShardedHome(args: {
   return { kind: "home", credentialId: home, rewritePin: true };
 }
 
-/**
- * The soonest instant `acct` clears EVERY blocking condition: its cooldown end,
- * and each window's reset (only when that window is at/over the threshold). The
- * literal multi-account generalization of #143's single-account resetsInSeconds.
- *
- * GUARANTEE (invariant 4): the result is ALWAYS in the future. A blocking window
- * whose cached reset is null / unknown / already-elapsed does NOT contribute a past
- * instant (the old EPOCH0 seed bug that made earliestReset land in 1970 → a 0
- * continueDelayMs → a tight idle loop). Such a window is treated as clearing after a
- * default cooldown (now + DEFAULT_RESET_COOLDOWN_MS), so the caller always idles a
- * bounded positive time and re-checks (which refreshes usage and self-heals).
- */
 export function availableAt(acct: CodexRotationAccount, now: Date): Date {
   const nowMs = now.getTime();
   // An unknown/elapsed block clears after a default cooldown, never in the past.
@@ -376,19 +255,12 @@ export function availableAt(acct: CodexRotationAccount, now: Date): Date {
   return candidates.reduce((a, b) => (b.getTime() > a.getTime() ? b : a));
 }
 
-/** earliestResetAt across ALL connected accounts (min of each account's availableAt). */
 function earliestReset(accounts: CodexRotationAccount[], now: Date): Date {
   return accounts
     .map((acct) => availableAt(acct, now))
     .reduce((a, b) => (b.getTime() < a.getTime() ? b : a));
 }
 
-/**
- * Earliest provider/cooldown timestamp that is actually authoritative. The
- * ranker's `availableAt` deliberately synthesizes a positive default for
- * unknown/stale state; durable capacity waits must distinguish that bounded
- * refresh backoff from a real provider reset timer.
- */
 export function authoritativeCodexCapacityResetAt(
   accounts: CodexRotationAccount[],
   now: Date,
@@ -420,22 +292,11 @@ export function authoritativeCodexCapacityResetAt(
   );
 }
 
-/**
- * The bounded all-capped idle delay: clamp(earliestResetAt − now) into
- * [MIN_IDLE_MS, maxMs]. NEVER 0 and NEVER negative, so a null / elapsed / unknown
- * reset cannot collapse the hold into a tight re-dispatch loop (invariant 4). The two
- * agent-turn call sites (proactive turn-start + reactive 429) feed allCapped's
- * earliestResetAt through this before returning continueDelayMs.
- */
 export function computeIdleDelayMs(earliestResetAt: Date, now: Date, maxMs: number): number {
   const delta = earliestResetAt.getTime() - now.getTime();
   return Math.min(Math.max(delta, MIN_IDLE_MS), maxMs);
 }
 
-/**
- * THE pure rotation ranker. `accounts` arrives in stable created_at order
- * (listCodexAccountStatuses), which deterministically breaks ranking ties.
- */
 export function chooseRotationActive(args: {
   rotationStrategy: CodexRotationStrategy;
   activeCredentialId: string | null;
@@ -543,12 +404,6 @@ export function chooseRotationActive(args: {
   return decide(chosen);
 }
 
-/**
- * Full pure policy at the transaction boundary. A live same-turn lease is
- * idempotent; manual and rotation-off policy preserve pin>pointer behavior; a
- * healthy pin wins only while eligible, so quota/auth quarantine cannot trap a
- * session on one subscription.
- */
 export function selectCodexCredentialLeaseForTurn<
   TPolicyScope = never,
   TUnavailableDiagnostic = never,

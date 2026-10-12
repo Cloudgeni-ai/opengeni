@@ -58,7 +58,12 @@ import {
 import { focusCapabilitySuccessor } from "@/lib/capability-focus";
 import { analyticsAction, type AnalyticsAction } from "@/lib/analytics-actions";
 import { cn } from "@/lib/utils";
-import type { CapabilityCatalogItem, ConnectionOwnership, SocialConnection } from "@/types";
+import type {
+  CapabilityCatalogItem,
+  ConnectionMetadata,
+  ConnectionOwnership,
+  SocialConnection,
+} from "@/types";
 
 export type ConnectAction =
   | { type: "enable"; item: CapabilityCatalogItem }
@@ -113,6 +118,20 @@ export type ConnectAction =
       item: CapabilityCatalogItem;
       connectionId: string | null;
       ownership: ConnectionOwnership;
+      /** The account's own workspace when it was connected in another one. */
+      connectionWorkspaceId?: string;
+    }
+  // Sign in a further account; never refreshes or replaces an existing one.
+  | {
+      type: "add_oauth_account";
+      item: CapabilityCatalogItem;
+      ownership: ConnectionOwnership;
+    }
+  // Disconnect exactly one account; the connector itself stays as it is.
+  | {
+      type: "remove_connection";
+      item: CapabilityCatalogItem;
+      connection: Pick<ConnectionMetadata, "id" | "workspaceId">;
     }
   | {
       type: "reconnect_api_key";

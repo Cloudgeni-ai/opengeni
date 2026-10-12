@@ -318,7 +318,7 @@ function authorizationCases(harness: "template" | "owner-migrated") {
     const org = await organization();
     const connectionId = await sharedConnection(org, "gate-off");
     await seedHistoricalAppsDesignation(org, connectionId);
-    expect(await readCodexCutoverDisposition(client!.db, org.accountId)).toBe("legacy");
+    expect(await readCodexCutoverDisposition(client!.db, org.accountId)).toBe("maintenance");
     const scope = { accountId: org.accountId, workspaceId: org.sharedWorkspaceId };
     expect(await resolveSubscriptionCoreCodexAppsDesignation(client!.db, scope)).toBeNull();
     expect(await readCredential(org, org.sharedWorkspaceId, connectionId)).toEqual([]);
@@ -834,7 +834,10 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
     ).toBe("automatic");
     await expect(
       setSubscriptionCoreWorkspaceCodexSource(client!.db, { ...stranger, mode: "workspace" }),
-    ).rejects.toThrow("missing permission");
+    ).rejects.toMatchObject({
+      message: expect.stringContaining("missing permission"),
+      reason: "forbidden",
+    });
     await expect(
       setSubscriptionCoreWorkspaceCodexSource(client!.db, {
         accountId: org.accountId,
@@ -842,7 +845,10 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
         subjectId: org.ownerSubjectId,
         mode: "workspace",
       }),
-    ).rejects.toThrow("personal workspaces");
+    ).rejects.toMatchObject({
+      message: expect.stringContaining("personal workspaces"),
+      reason: "personal_workspace",
+    });
 
     // Allocator: legacy optimistic concurrency; strangers see nothing.
     expect(
@@ -1211,8 +1217,8 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
       }),
     ).toMatchObject({ rotation: { activeCredentialId: orgAccount, rotationEnabled: false } });
 
-    // Organization routes manage organization accounts only (legacy parity):
-    // a workspace-managed connection is refused before anything is written.
+    // The organization primary stays within the organization pool: a
+    // workspace-managed connection is refused before anything is written.
     expect(
       (
         await setSubscriptionCoreCodexPrimary(client!.db, {
@@ -1221,14 +1227,17 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
         })
       ).activated,
     ).toBeNull();
+    expect((await orgRow())!.primary_id).toBe(orgAccount);
+    // Otherwise a connection a shared workspace manages is an organization
+    // account (design 5.4): the organization route may rename it.
     expect(
       await renameSubscriptionCoreCodexConnection(client!.db, {
         ...admin,
         connectionId: workspaceManaged,
         label: "renamed by the organization route",
       }),
-    ).toBeNull();
-    expect((await connectionRow(workspaceManaged)).label).toBe("org-write-managed");
+    ).toBe(workspaceManaged);
+    expect((await connectionRow(workspaceManaged)).label).toBe("renamed by the organization route");
     expect((await orgRow())!.primary_id).toBe(orgAccount);
     expect(
       await renameSubscriptionCoreCodexConnection(client!.db, {

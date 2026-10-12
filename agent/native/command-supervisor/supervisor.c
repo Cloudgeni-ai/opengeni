@@ -497,10 +497,32 @@ static void initialize(void) {
 static int inherited_terminal(void) {
     int terminal = open("/dev/tty", O_RDWR | O_NOCTTY | O_CLOEXEC);
     if (terminal < 0) fail("controlling terminal unavailable");
-    unsigned int owned, stream;
-    if (ioctl(terminal, TIOCGDEV, &owned)) fail("terminal identity unavailable");
+    unsigned int owned = 0, stream;
+    bool device_identity = ioctl(terminal, TIOCGDEV, &owned) == 0;
+    struct stat terminal_stat;
+    if (!device_identity) {
+        /* Some kernels expose /dev/tty as the actual terminal inode but do
+         * not implement TIOCGDEV. Only ENOTTY permits this stricter proof:
+         * every descriptor must name that same character-device inode.
+         * A /dev/tty proxy with different inode metadata remains unsupported;
+         * neither a session ID nor a pathname alone establishes identity. */
+        if (errno != ENOTTY || fstat(terminal, &terminal_stat) ||
+            !S_ISCHR(terminal_stat.st_mode)) fail("terminal identity unavailable");
+    }
     for (int fd = 0; fd <= 2; fd++) {
-        if (!isatty(fd) || ioctl(fd, TIOCGDEV, &stream) || stream != owned)
+        if (!isatty(fd)) fail("stdio must share controlling terminal");
+        if (device_identity) {
+            if (ioctl(fd, TIOCGDEV, &stream) || stream != owned)
+                fail("stdio must share controlling terminal");
+        } else {
+            struct stat stream_stat;
+            if (fstat(fd, &stream_stat) || !S_ISCHR(stream_stat.st_mode) ||
+                stream_stat.st_dev != terminal_stat.st_dev ||
+                stream_stat.st_ino != terminal_stat.st_ino ||
+                stream_stat.st_rdev != terminal_stat.st_rdev)
+                fail("stdio must share controlling terminal");
+        }
+        if (tcgetsid(fd) != getsid(0) || tcgetpgrp(fd) != getpgrp())
             fail("stdio must share controlling terminal");
     }
     if (tcgetsid(terminal) != getsid(0) || tcgetpgrp(terminal) != getpgrp())

@@ -47,6 +47,46 @@ const withheldMigrations = [
   // adds, so they run with the withheld tail, in ledger order.
   "0688_subscription_core_codex_writers.sql",
   "0689_subscription_core_codex_cutover.sql",
+  // Disconnect patches the cutover routine; catalog observations and retry
+  // admission extend its tables and guards. Replay after those prerequisites.
+  "0691_subscription_core_codex_disconnect.sql",
+  "0695_subscription_model_catalog_observations.sql",
+  "0697_codex_retry_after_unknown_outcome.sql",
+  // Patches ownerless access and lease guards created by withheld 0667 and 0671.
+  "0698_codex_ownerless_person_turns.sql",
+  // Patches the request guard after 0697.
+  "0699_codex_recovery_after_interrupted_attempt.sql",
+  "0700_codex_ownerless_person_refresh.sql",
+  // Replaces the scope guard on the shared connection table from withheld 0642.
+  "0702_subscription_codex_access_editor.sql",
+  // Patches the capture function installed by withheld 0478 and patched by 0608.
+  "0704_inactive_inherited_personal_connections.sql",
+  // Adds provider-neutral routines over the shared core tables from withheld 0642.
+  "0707_subscription_core_neutral_routines.sql",
+  // Rewrites the inbox routines from the withheld inbox tail and reads its columns.
+  "0708_inbox_member_notifications.sql",
+  // Rewrites the operation-lease constraints and guard that withheld 0691 defines; replay after it.
+  "0711_subscription_codex_completion_operations.sql",
+  // Records receipts over withheld 0689 and patches the capture function from withheld 0478.
+  "0712_subscription_core_generic_precursor.sql",
+  // Keys and redefines the auto-assignment objects the withheld 0689 creates.
+  "0713_subscription_core_provider_keyed_reach.sql",
+  // Redefines the reach setters withheld 0713 creates.
+  "0714_subscription_workspace_managed_organization_accounts.sql",
+  // Rewrites routines 0707, 0713 and 0714 create from their live definitions;
+  // replay after them.
+  "0715_subscription_core_api_key_connections.sql",
+  // Builds on withheld 0712's receipts and patches the helpers it patched.
+  "0716_subscription_authority_compat.sql",
+  // Requires 0716's routines; it follows 0716.
+  "0717_subscription_authority_fences.sql",
+  // Redefines a push routine from withheld 0664 and reads the inbox settings
+  // columns withheld 0663 and 0665 add.
+  "0718_inbox_time_sensitive_needs_you.sql",
+  // Patches the acceptance writers withheld 0688 and 0707 define.
+  "0726_subscription_personal_acceptance_reads.sql",
+  // Built from the connect writer withheld 0715 rewrites; it follows 0715.
+  "0728_subscription_core_personal_connect_format.sql",
 ];
 let database: OwnerMigratedTestDatabase | null = null;
 

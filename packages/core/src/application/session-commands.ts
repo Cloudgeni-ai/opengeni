@@ -59,7 +59,7 @@ import type { SessionWorkflowClient } from "../dependencies";
 import { normalizeResources } from "../domain/resources";
 import { validateDraftTimelineAnnotations } from "../domain/timeline-annotations";
 import { initiatingHumanForAllowance } from "../domain/sessions";
-import { modelFundingForAdmission } from "../billing/limits";
+import { coreRoutedSubscriptionFunding, modelFundingForAdmission } from "../billing/limits";
 import { resolveWorkspaceCatalogSettings } from "../model-catalog";
 import {
   requireSessionAuthorization,
@@ -191,6 +191,12 @@ async function assertFreshAgentCommandAllowance(
       settings,
       target.model,
       codexBilled,
+      await coreRoutedSubscriptionFunding(tx, settings, {
+        accountId: target.accountId,
+        workspaceId: context.workspaceId,
+        model: target.model,
+        subjectId: initiatingHumanForAllowance(frozen),
+      }),
     ).fundedWithoutCredits;
   }
   const refusal = await checkWorkspaceAllowance(tx, {

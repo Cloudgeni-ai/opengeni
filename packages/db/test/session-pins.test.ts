@@ -415,6 +415,9 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     expect(row.siteOrigin).toEqual({ siteId, title: "Example Site" });
     expect(row.scheduledTaskId).toBe("generated-task");
     expect(row.createdBy.label).toBe("Example member");
+    // The row names its model for the sidebar hover without execution config.
+    expect(row.model).toBe(full.pinned[0]!.model);
+    expect(row.reasoningEffort).toBe(full.pinned[0]!.reasoningEffort);
     expect(row).not.toHaveProperty("metadata");
     expect(row).not.toHaveProperty("initialMessage");
     expect(row).not.toHaveProperty("tools");

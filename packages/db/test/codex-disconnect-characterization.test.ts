@@ -11,14 +11,16 @@ import { acquireBlankTestDatabase, testSettings, type SharedTestDatabase } from 
 import {
   createDb,
   createSession,
-  disconnectOrganizationCodexAccount,
   encryptEnvironmentValue,
-  loadCodexCredentialForRun,
-  upsertOrganizationCodexSubscriptionCredential,
   withRlsContext,
   withSessionActivityRlsContext,
   type DbClient,
 } from "../src";
+import {
+  disconnectOrganizationCodexAccount,
+  loadCodexCredentialForRun,
+  upsertOrganizationCodexSubscriptionCredential,
+} from "./fixtures/legacy-codex";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 
@@ -149,7 +151,15 @@ describeRealDatabase("legacy Codex disconnect: known pre-fix behavior", () => {
       // Preserve the original superuser-owned migration baseline here; the
       // positive core suite separately exercises the NOBYPASSRLS owner posture.
       await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
-      await owner`insert into schema_migrations(name) values ('0689_subscription_core_codex_cutover.sql')`;
+      // 0712 requires the committed 0689 cutover, 0713 alters objects it
+      // creates, 0714 redefines 0713's setters and 0715 rewrites routines 0713
+      // and 0714 create, so all are held back with it; 0716 builds on 0712
+      // and 0717 on 0716.
+      await owner`insert into schema_migrations(name) values ('0689_subscription_core_codex_cutover.sql'),
+        ('0712_subscription_core_generic_precursor.sql'), ('0713_subscription_core_provider_keyed_reach.sql'),
+        ('0714_subscription_workspace_managed_organization_accounts.sql'),
+        ('0715_subscription_core_api_key_connections.sql'), ('0716_subscription_authority_compat.sql'),
+        ('0717_subscription_authority_fences.sql')`;
       await migrate(owned.databaseUrl);
       await provisionRoles(owned.databaseUrl, { appPassword: owned.appPassword });
     } finally {

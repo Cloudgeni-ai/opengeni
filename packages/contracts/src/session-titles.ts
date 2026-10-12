@@ -335,6 +335,28 @@ function withoutModelControlTokens(value: string): string {
   return value.replace(MODEL_CONTROL_TOKEN, "\n");
 }
 
+/**
+ * Read-side cleanup for a durable title. Automatic titles written before
+ * control-token stripping can still hold a token ("Release plan<|fim_suffix|>");
+ * those keep only their first real segment, and a token-only title reads as no
+ * title. Human renames and titles without a token are returned unchanged.
+ */
+export function cleanStoredSessionTitle(
+  title: string | null | undefined,
+  titleSource: string | null | undefined,
+): string | null {
+  if (title === null || title === undefined) return null;
+  if (titleSource === "user") return title;
+  const stripped = withoutModelControlTokens(title);
+  if (stripped === title) return title;
+  return (
+    stripped
+      .split("\n")
+      .map((part) => part.trim())
+      .find(Boolean) ?? null
+  );
+}
+
 /** Bound an already-normalized automatic-title candidate without splitting graphemes. */
 export function boundAutomaticSessionTitle(value: string): string {
   const words = value.split(/\s+/u);
@@ -461,13 +483,8 @@ export function deriveSessionDisplayTitle(
     return title || automaticSessionReferenceTitle(input.id);
   }
   if (title && !sessionTitleIsPending(input)) {
-    // Titles stored before control-token stripping keep only their first
-    // real segment ("Release plan<|fim_suffix|>" reads "Release plan").
-    const clean = withoutModelControlTokens(title)
-      .split("\n")
-      .map((part) => part.trim())
-      .find(Boolean);
-    return clean ?? title;
+    const clean = cleanStoredSessionTitle(title, input.titleSource)?.trim();
+    if (clean) return clean;
   }
 
   for (const key of options.metadataKeys ?? []) {

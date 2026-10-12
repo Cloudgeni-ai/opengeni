@@ -1,12 +1,15 @@
 import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
 import * as db from "@opengeni/db";
+import * as coreApi from "@opengeni/core";
 import * as events from "@opengeni/events";
 import {
   CODEX_TRANSPORT_ERROR_HEADER,
   CodexReloginRequired,
   CodexResponseTimeoutError,
+  CodexStreamingTerminalError,
 } from "@opengeni/codex";
 import * as parentWake from "../src/activities/parent-wake";
+import * as turnErrors from "../src/activities/agent-turn/errors";
 import {
   selectCodexTurnCapacity,
   type CapacityPhaseDeps,
@@ -17,16 +20,19 @@ import {
 } from "../src/activities/agent-turn/codex-core-capacity";
 import {
   claimCodexActiveFromCutover,
-  claimMayResolveLegacyCodexApps,
   readClaimCodexCutoverState,
   readSubscriptionLeaseBusyChain,
 } from "../src/activities/agent-turn/codex-core-claim";
 import {
   SubscriptionCoreCodexTurnError,
+  subscriptionCoreAccountRefusedFailure,
   subscriptionCoreCapacityFailure,
+  subscriptionCoreCutoverDisabledFailure,
+  subscriptionCoreFailoverExhaustedFailure,
   subscriptionCoreLeaseBusyChain,
   subscriptionCoreLeaseBusyDelayMs,
   subscriptionCoreLeaseBusyFailure,
+  subscriptionCoreUnsupportedFailure,
   SUBSCRIPTION_CORE_LEASE_BUSY_JITTER_MS,
   SUBSCRIPTION_CORE_LEASE_BUSY_MAX_MS,
 } from "../src/activities/agent-turn/codex-core-errors";
@@ -44,23 +50,33 @@ import {
   type TurnCredentialLeaseDeps,
 } from "../src/activities/agent-turn/credential-leases";
 import { settleTurnFailure } from "../src/activities/agent-turn/failure-settlement";
-import { CodexIncludedUsageExhaustedError } from "../src/activities/agent-turn/codex-credit-policy";
+import {
+  CodexIncludedUsageExhaustedError,
+  CodexIncludedUsageUnknownError,
+} from "../src/activities/agent-turn/codex-credit-policy";
 import {
   coreCodexFailoverDisposition,
   SUBSCRIPTION_CORE_CODEX_TURN_REFUSAL_LIMIT,
 } from "../src/activities/agent-turn/codex-core-failover";
 import type { CodexSubscriptionCoreTurn } from "../src/activities/agent-turn/turn-context";
 import { createCoreCodexRequests } from "../src/activities/agent-turn/codex-core-requests";
+import { startParallelSessionTitleGeneration } from "../src/activities/agent-turn/session-title";
 import {
   ensureRunAllowed,
   turnExecutionPolicyBillingIdentity,
 } from "../src/activities/agent-turn/admission";
 import { testSettings } from "@opengeni/testing";
+import {
+  applyQuotaObservation,
+  quotaCapacity,
+  type SubscriptionQuota,
+} from "@opengeni/subscriptions";
 import { resolveTurnExecutionPolicyV1, withCodexCatalogProvider } from "@opengeni/config";
 import { CODEX_FALLBACK_MODEL_SLUGS } from "@opengeni/codex/constants";
 
 const restores: Array<{ mockRestore(): void }> = [];
 beforeEach(() => {
+  spy(coreApi, "refreshCoreCodexModelEntitlements").mockResolvedValue(undefined);
   spy(db, "isSubscriptionCoreCodexSourceDisconnected").mockResolvedValue(false);
 });
 function spy<T extends object, K extends keyof T>(target: T, key: K) {
@@ -172,13 +188,15 @@ function gate(state: "not_configured" | "disabled" | "enabled") {
 }
 
 describe("Codex cutover gate dispositions", () => {
-  test("no cutover row keeps the legacy selector and never touches the core", async () => {
+  test("no cutover row fails closed and never touches either selector", async () => {
     gate("not_configured");
     const sentinel = new Error("legacy selector reached");
     const legacy = spy(db, "acquireCodexCredentialLease").mockRejectedValue(sentinel);
     const core = spy(db, "placeSubscriptionCoreCodexTurn");
-    await expect(selectCodexTurnCapacity(capacityDeps())).rejects.toBe(sentinel);
-    expect(legacy).toHaveBeenCalledTimes(1);
+    await expect(selectCodexTurnCapacity(capacityDeps())).rejects.toMatchObject({
+      code: "subscription_core_cutover_disabled",
+    });
+    expect(legacy).not.toHaveBeenCalled();
     expect(core).not.toHaveBeenCalled();
   });
 
@@ -213,6 +231,7 @@ describe("Codex cutover gate dispositions", () => {
       leasedUntil: new Date(Date.now() + 60_000),
       eligibleCount: 2,
       connectedCount: 3,
+      reselection: { reason: "unbound", ineligibility: [], points: [] },
     });
     const selected = spy(
       db,
@@ -462,6 +481,24 @@ describe("Codex cutover gate dispositions", () => {
     });
     const error = await selectCodexTurnCapacity(capacityDeps()).catch((caught) => caught);
     expect(error.payload).toMatchObject({ code: "subscription_lease_busy", retryable: true });
+    expect(error.payload.error).toContain("A previous attempt of this turn");
+  });
+
+  test("a binding conflict past its retries is retried like a busy lease, with its own copy", async () => {
+    gate("enabled");
+    spy(db, "readSubscriptionCoreTurnIdentity").mockResolvedValue(identity);
+    spy(db, "placeSubscriptionCoreCodexTurn").mockResolvedValue({
+      kind: "lease_busy",
+      leasedUntil: null,
+      cause: "binding_conflict",
+    });
+    const error = await selectCodexTurnCapacity(capacityDeps()).catch((caught) => caught);
+    expect(error.payload).toEqual({
+      error:
+        "The session's Codex account changed while this turn was starting. The turn will retry.",
+      code: "subscription_lease_busy",
+      retryable: true,
+    });
   });
 
   test("a fenced attempt exits cancelled and acknowledges lost ownership", async () => {
@@ -607,7 +644,10 @@ describe("core Codex credential materialization in the worker", () => {
 
   test("refuses to materialize for a lease that does not hold the placed connection", () => {
     const held = heldLease();
-    held.codex.useLegacyCodexLease();
+    held.codex.useSubscriptionCoreLease(
+      "different-connection",
+      db.subscriptionCoreTurnActor(identity),
+    );
     expect(() =>
       buildCoreCodexRequestTokenResolver({} as db.Database, {} as never, core, held.codex),
     ).toThrow("Core Codex lease does not hold the placed connection");
@@ -722,6 +762,138 @@ describe("core Codex usage, quota and refusal bookkeeping", () => {
       expect.objectContaining({ exhaustedKind: "quota", observedRefreshGeneration: 7 }),
     );
     expect(legacy).not.toHaveBeenCalled();
+  });
+
+  /** The observation a credit-policy refusal writes, captured from the store call. */
+  async function creditPolicyObservation(
+    failure: Parameters<typeof recordCoreCodexRefusal>[0]["failure"],
+    now: Date,
+  ): Promise<SubscriptionQuota> {
+    const quota = spy(db, "recordSubscriptionCoreCodexQuotaObservation").mockResolvedValue(true);
+    const receipt = spy(db, "recordSubscriptionCoreCodexTurnFailure").mockResolvedValue(true);
+    expect(
+      await recordCoreCodexRefusal({
+        db: {} as db.Database,
+        core,
+        lease,
+        failure,
+        credentialVersion: 5,
+        now,
+      }),
+    ).toEqual({ receipt: true, health: true });
+    // A credit-policy refusal is a quota write only; it writes no failure receipt.
+    expect(receipt).not.toHaveBeenCalled();
+    expect(quota).toHaveBeenCalledTimes(1);
+    return quota.mock.calls[0]![3] as SubscriptionQuota;
+  }
+
+  /** A Codex `/wham/usage` reading of both windows (the store's usage observation shape). */
+  function usageReading(observedAt: number, secondary: { usedPercent: number; resetsAt: number }) {
+    return {
+      ...codexUsageHeadersQuotaObservation(
+        {
+          primaryUsedPercent: 10,
+          primaryResetAt: new Date(observedAt + 3_600_000),
+          secondaryUsedPercent: secondary.usedPercent,
+          secondaryResetAt: new Date(secondary.resetsAt),
+          checkedAt: new Date(observedAt),
+        },
+        5,
+      ),
+      source: "usage_endpoint" as const,
+    };
+  }
+
+  test.each([
+    ["usage_verification_policy", { kind: "rate_limit", cooldownSeconds: 60 }],
+    ["included_usage_policy", { kind: "quota", cooldownSeconds: 60 }],
+  ] as const)(
+    "credit-policy refusal (%s) keeps a stored exhausted weekly window; a usage reading still replaces it",
+    async (origin, failure) => {
+      const now = new Date("2026-10-08T12:00:00Z");
+      const weeklyReset = now.getTime() + 3 * 86_400_000;
+      const stored = usageReading(now.getTime() - 60_000, {
+        usedPercent: 100,
+        resetsAt: weeklyReset,
+      });
+      const observation = await creditPolicyObservation({ ...failure, origin }, now);
+      // The write itself: a 60-second rate-limit hold with no windows when
+      // usage could not be verified; one exhausted `included_usage` window
+      // (and no deadline) when included usage is exhausted.
+      const hold = now.getTime() + 60_000;
+      expect(observation).toEqual({
+        windows:
+          origin === "included_usage_policy"
+            ? [{ id: "included_usage", usedPercent: 100, resetsAt: hold, status: "exhausted" }]
+            : [],
+        modelCooldowns: {},
+        exhaustedUntil: origin === "usage_verification_policy" ? hold : null,
+        exhaustedKind: origin === "usage_verification_policy" ? "rate_limit" : null,
+        revision: 0,
+        observedAt: now.getTime(),
+        observedRefreshGeneration: 5,
+        source: "refusal",
+      });
+      const refused = applyQuotaObservation({ refreshGeneration: 5, quota: stored }, observation)!;
+      expect(refused.windows).toContainEqual({
+        id: "secondary",
+        usedPercent: 100,
+        resetsAt: weeklyReset,
+        status: "exhausted",
+      });
+      // After the 60-second policy hold the connection still waits for the weekly reset.
+      expect(quotaCapacity(refused, now.getTime() + 120_000)).toEqual({
+        kind: "exhausted",
+        resetsAt: weeklyReset,
+      });
+      // A real usage reading replaces every window, the policy's own included.
+      const read = usageReading(now.getTime() + 180_000, {
+        usedPercent: 40,
+        resetsAt: weeklyReset,
+      });
+      const replaced = applyQuotaObservation({ refreshGeneration: 5, quota: refused }, read)!;
+      expect(replaced.windows).toEqual(read.windows);
+      expect(quotaCapacity(replaced, now.getTime() + 240_000)).toEqual({ kind: "available" });
+    },
+  );
+
+  test("a header reading keeps the included_usage hold until its reset; a usage reading ends it", async () => {
+    const now = new Date("2026-10-08T12:00:00Z");
+    const holdUntil = now.getTime() + 7_200_000;
+    const observation = await creditPolicyObservation(
+      { kind: "quota", cooldownSeconds: 7_200, origin: "included_usage_policy" },
+      now,
+    );
+    expect(observation.windows).toEqual([
+      { id: "included_usage", usedPercent: 100, resetsAt: holdUntil, status: "exhausted" },
+    ]);
+    const held = applyQuotaObservation({ refreshGeneration: 5, quota: null }, observation)!;
+    // A credit-funded or concurrent turn's headers report only primary and secondary.
+    const headers = codexUsageHeadersQuotaObservation(
+      {
+        primaryUsedPercent: 10,
+        primaryResetAt: new Date(now.getTime() + 3_600_000),
+        secondaryUsedPercent: 5,
+        secondaryResetAt: new Date(now.getTime() + 86_400_000),
+        checkedAt: new Date(now.getTime() + 60_000),
+      },
+      5,
+    );
+    const afterHeaders = applyQuotaObservation({ refreshGeneration: 5, quota: held }, headers)!;
+    expect(afterHeaders.windows).toEqual([...headers.windows, observation.windows[0]]);
+    expect(quotaCapacity(afterHeaders, now.getTime() + 3_600_000)).toEqual({
+      kind: "exhausted",
+      resetsAt: holdUntil,
+    });
+    expect(quotaCapacity(afterHeaders, holdUntil + 1)).toEqual({ kind: "available" });
+    // A usage reading is complete, so it ends the hold early.
+    const read = usageReading(now.getTime() + 120_000, {
+      usedPercent: 5,
+      resetsAt: now.getTime() + 86_400_000,
+    });
+    const afterUsage = applyQuotaObservation({ refreshGeneration: 5, quota: afterHeaders }, read)!;
+    expect(afterUsage.windows).toEqual(read.windows);
+    expect(quotaCapacity(afterUsage, now.getTime() + 180_000)).toEqual({ kind: "available" });
   });
 
   test("finalization records usage and the model-call clock before release", async () => {
@@ -958,7 +1130,7 @@ describe("core Codex failure settlement", () => {
     expect(settle).not.toHaveBeenCalled();
   });
 
-  test.each(["pending_model", "unknown_model", "uncheckpointed_title"] as const)(
+  test.each(["pending_model", "unknown_model"] as const)(
     "lease loss never upgrades %s to replay proof at the history checkpoint",
     async (state) => {
       const outcomes: string[] = [];
@@ -978,7 +1150,7 @@ describe("core Codex failure settlement", () => {
       }
       const { deps } = failureDeps(new db.SubscriptionCoreCodexLeaseLostError(), {
         ...core,
-        ...(state === "uncheckpointed_title" ? { titleRequests: requests } : { requests }),
+        requests,
       });
       const checkpoint = mock(async (_options?: unknown) => undefined);
       deps.historySink.reconcileConversationTruth = checkpoint;
@@ -991,6 +1163,32 @@ describe("core Codex failure settlement", () => {
       expect(requests.canRecover()).toBe(false);
     },
   );
+
+  test("an unsettled session-title request does not block lease-loss recovery", async () => {
+    const titleRequests = createCoreCodexRequests({
+      reserve: async () => ({ operationId: "title" }),
+      settle: async () => {},
+    });
+    // The cancelled title request was reserved but never observed.
+    await titleRequests.reserve({ requestId: "title", transportAttempt: 1 });
+    expect(titleRequests.canRecover()).toBe(false);
+    const { deps, settle } = failureDeps(new db.SubscriptionCoreCodexLeaseLostError(), {
+      ...core,
+      titleRequests,
+    });
+    const recovery = spy(db, "requestSessionTurnRecovery").mockResolvedValue({
+      action: "recovering",
+      events: [],
+    } as never);
+    spy(events, "publishDurableSessionEvents").mockResolvedValue(undefined as never);
+    expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "recovering" });
+    expect(recovery).toHaveBeenCalledWith(
+      {},
+      "workspace-1",
+      expect.objectContaining({ turnId: "turn-1", reason: "codex_lease_lost" }),
+    );
+    expect(settle).not.toHaveBeenCalled();
+  });
 
   test.each(["flush", "history", "request_settlement"] as const)(
     "lease loss cannot recover after the mandatory %s checkpoint fails",
@@ -1146,7 +1344,7 @@ describe("core Codex failure settlement", () => {
     const refusal = spy(db, "recordSubscriptionCoreCodexTurnFailure");
     spy(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(undefined as never);
     expect(await settleTurnFailure(deps as never)).toMatchObject({
-      status: thrown instanceof db.SubscriptionCoreCodexSourceDisconnectedError ? "idle" : "failed",
+      status: "failed",
     });
     expect(recovery).not.toHaveBeenCalled();
     expect(refusal).not.toHaveBeenCalled();
@@ -1197,6 +1395,359 @@ describe("core Codex failure settlement", () => {
       );
     },
   );
+
+  const ownUnknownRequests = async () => {
+    const requests = createCoreCodexRequests({
+      reserve: async () => ({ operationId: "op" }),
+      settle: async () => {},
+    });
+    await requests.reserve({ requestId: "r", transportAttempt: 1 });
+    await requests.observe({ requestId: "r", transportAttempt: 1, outcome: "unknown" });
+    return requests;
+  };
+  const streamTerminal = (code: string, message: string) =>
+    new CodexStreamingTerminalError({
+      status: 502,
+      headers: new Headers({ [CODEX_TRANSPORT_ERROR_HEADER]: "1" }),
+      error: { type: "server_error", code, message },
+    });
+  const httpTransportError = (status: number) =>
+    Object.assign(new Error(`${status} upstream unavailable`), {
+      status,
+      headers: new Headers({ [CODEX_TRANSPORT_ERROR_HEADER]: "1" }),
+    });
+
+  test("a 503 after completed title generation recovers after exceptional title cleanup", async () => {
+    const order: string[] = [];
+    const requestDeps = {
+      reserve: async ({ requestId }: { requestId: string }) => ({ operationId: requestId }),
+      settle: async ({ operationId, outcome }: { operationId: string; outcome: string }) => {
+        order.push(`${operationId}:${outcome}`);
+      },
+    };
+    const requests = createCoreCodexRequests(requestDeps);
+    const titleRequests = createCoreCodexRequests(requestDeps);
+    const titleRequest = { requestId: "title", transportAttempt: 1 };
+    await titleRequests.reserve(titleRequest);
+    const titleTask = startParallelSessionTitleGeneration({
+      generate: async () => {
+        await titleRequests.observe({ ...titleRequest, outcome: "response_received" });
+        return { title: "Relevant partner events", usage: null };
+      },
+      onFinish: async (result) => {
+        expect(result?.title).toBe("Relevant partner events");
+        order.push("persist_title");
+        await titleRequests.checkpoint();
+      },
+    });
+    const mainRequest = { requestId: "main", transportAttempt: 1 };
+    await requests.reserve(mainRequest);
+    await requests.observe({ ...mainRequest, outcome: "refused" });
+    expect(titleRequests.canRecover()).toBe(false);
+    await titleTask.cancel();
+
+    const { deps, settle } = failureDeps(httpTransportError(503), {
+      ...core,
+      requests,
+      titleRequests,
+    });
+    const recovery = spy(db, "requestSessionTurnRecovery").mockImplementation(async () => {
+      order.push("recover");
+      return { action: "recovering", events: [] };
+    });
+    spy(events, "publishDurableSessionEvents").mockResolvedValue(undefined as never);
+
+    expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "recovering" });
+    expect(order).toEqual(["main:refused", "persist_title", "title:response_received", "recover"]);
+    expect(recovery).toHaveBeenCalledWith(
+      {},
+      "workspace-1",
+      expect.objectContaining({
+        turnId: "turn-1",
+        attemptId: "attempt-1",
+        reason: "provider_unavailable",
+        providerRecoveryCount: 1,
+      }),
+    );
+    expect(settle).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    "reserved",
+    "unknown_settlement_failed",
+    "admission_refused",
+    "checkpoint_failed",
+  ] as const)(
+    "a %s session-title request does not block recovery from a main 503",
+    async (state) => {
+      const titleRequests = createCoreCodexRequests({
+        reserve: async () => {
+          if (state === "admission_refused")
+            throw new db.SubscriptionCoreCodexRequestOutcomeUnknownError();
+          return { operationId: "title" };
+        },
+        settle: async () => {
+          if (state === "checkpoint_failed") throw new Error("title checkpoint failed");
+          if (state === "unknown_settlement_failed") throw new Error("unknown receipt failed");
+        },
+      });
+      const request = { requestId: "title", transportAttempt: 1 };
+      const titleTask = startParallelSessionTitleGeneration({
+        generate: async (signal) => {
+          await titleRequests.reserve(request);
+          if (state === "reserved") {
+            await new Promise<void>((resolve) => {
+              if (signal.aborted) resolve();
+              else signal.addEventListener("abort", () => resolve(), { once: true });
+            });
+            return { title: null, usage: null };
+          }
+          await titleRequests.observe({
+            ...request,
+            outcome: state === "unknown_settlement_failed" ? "unknown" : "response_received",
+          });
+          return { title: "Completed title", usage: null };
+        },
+        onFinish: async () => titleRequests.checkpoint(),
+      });
+      if (state === "checkpoint_failed") {
+        await expect(titleTask.cancel()).rejects.toThrow("title checkpoint failed");
+      } else {
+        await titleTask.cancel();
+      }
+      expect(titleRequests.canRecover()).toBe(false);
+      const { deps, settle } = failureDeps(httpTransportError(503), {
+        ...core,
+        titleRequests,
+      });
+      const recovery = spy(db, "requestSessionTurnRecovery").mockResolvedValue({
+        action: "recovering",
+        events: [],
+      } as never);
+      spy(events, "publishDurableSessionEvents").mockResolvedValue(undefined as never);
+
+      // The title request is tool-less and never enters history, so its
+      // custody cannot make a replay unsafe. The durable admission fence
+      // still decides whether the replacement generation may dispatch.
+      expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "recovering" });
+      expect(recovery).toHaveBeenCalledWith(
+        {},
+        "workspace-1",
+        expect.objectContaining({ turnId: "turn-1", reason: "provider_unavailable" }),
+      );
+      expect(settle).not.toHaveBeenCalled();
+    },
+  );
+
+  test.each([
+    ["HTTP 503", "requests", () => httpTransportError(503)],
+    ["HTTP 507", "requests", () => httpTransportError(507)],
+    ["HTTP 504", "titleRequests", () => httpTransportError(504)],
+    [
+      "dropped stream",
+      "requests",
+      () =>
+        streamTerminal(
+          "invalid_sse_terminal",
+          "The Codex response stream ended without a terminal response",
+        ),
+    ],
+    [
+      "provider stream failure",
+      "requests",
+      () => streamTerminal("upstream_failed", "The provider could not finish the response"),
+    ],
+    [
+      "refused SDK retry after the interruption",
+      "requests",
+      () =>
+        Object.assign(new Error("504 retry wrapper"), {
+          cause: new db.SubscriptionCoreCodexRequestOutcomeUnknownError(),
+        }),
+    ],
+  ] as const)(
+    "%s on this attempt's own %s recovers the same turn from its durable checkpoint",
+    async (_name, lane, error) => {
+      const requests = await ownUnknownRequests();
+      const { deps, settle } = failureDeps(error(), { ...core, [lane]: requests });
+      const checkpoint = mock(async (_options?: unknown) => undefined);
+      deps.historySink.reconcileConversationTruth = checkpoint;
+      const recovery = spy(db, "requestSessionTurnRecovery").mockResolvedValue({
+        action: "recovering",
+        events: [],
+      } as never);
+      spy(events, "publishDurableSessionEvents").mockResolvedValue(undefined as never);
+
+      expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "recovering" });
+      expect(checkpoint).toHaveBeenCalledWith({ requireDurable: true });
+      expect(recovery).toHaveBeenCalledTimes(1);
+      const request = recovery.mock.calls[0]![2] as Record<string, unknown>;
+      expect(request).toMatchObject({
+        turnId: "turn-1",
+        attemptId: "attempt-1",
+        providerRecoveryCount: 1,
+        detail: expect.objectContaining({ retryable: true, providerRecoveryCount: 1 }),
+      });
+      expect(settle).not.toHaveBeenCalled();
+    },
+  );
+
+  test("an interrupted request stops recovering once the provider budget is spent", async () => {
+    const requests = await ownUnknownRequests();
+    const { deps, settle } = failureDeps(
+      streamTerminal("invalid_sse_terminal", "The Codex response stream ended"),
+      { ...core, requests },
+    );
+    Object.assign(deps.attempt, { providerRecoveryCount: 5 });
+    const recovery = spy(db, "requestSessionTurnRecovery");
+    spy(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(undefined as never);
+
+    expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "failed" });
+    expect(recovery).not.toHaveBeenCalled();
+    expect(settle).toHaveBeenCalledWith(
+      expect.objectContaining({
+        events: expect.arrayContaining([
+          {
+            type: "turn.failed",
+            payload: expect.objectContaining({ retryable: false, recoveryExhausted: true }),
+          },
+        ]),
+      }),
+    );
+  });
+
+  test("an earlier unresolved request refused at admission stays a terminal replay fence", async () => {
+    const requests = createCoreCodexRequests({
+      reserve: async () => {
+        throw new db.SubscriptionCoreCodexRequestOutcomeUnknownError();
+      },
+      settle: async () => {},
+    });
+    await expect(requests.reserve({ requestId: "r", transportAttempt: 1 })).rejects.toBeInstanceOf(
+      db.SubscriptionCoreCodexRequestOutcomeUnknownError,
+    );
+    const { deps, settle } = failureDeps(new db.SubscriptionCoreCodexRequestOutcomeUnknownError(), {
+      ...core,
+      requests,
+    });
+    const recovery = spy(db, "requestSessionTurnRecovery");
+    spy(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(undefined as never);
+
+    expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "failed" });
+    expect(recovery).not.toHaveBeenCalled();
+    expect(settle).toHaveBeenCalledWith(
+      expect.objectContaining({
+        events: expect.arrayContaining([
+          {
+            type: "turn.failed",
+            payload: expect.objectContaining({
+              code: "subscription_core_request_outcome_unknown",
+              retryable: false,
+            }),
+          },
+        ]),
+      }),
+    );
+  });
+
+  test("an in-flight session-title request does not keep an own interruption terminal", async () => {
+    const requests = await ownUnknownRequests();
+    const title = createCoreCodexRequests({
+      reserve: async () => ({ operationId: "title-op" }),
+      settle: async () => {},
+    });
+    await title.reserve({ requestId: "t", transportAttempt: 1 });
+    const { deps, settle } = failureDeps(httpTransportError(503), {
+      ...core,
+      requests,
+      titleRequests: title,
+    });
+    const recovery = spy(db, "requestSessionTurnRecovery").mockResolvedValue({
+      action: "recovering",
+      events: [],
+    } as never);
+    spy(events, "publishDurableSessionEvents").mockResolvedValue(undefined as never);
+    expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "recovering" });
+    expect(recovery).toHaveBeenCalledWith(
+      {},
+      "workspace-1",
+      expect.objectContaining({ turnId: "turn-1", reason: "provider_unavailable" }),
+    );
+    expect(settle).not.toHaveBeenCalled();
+  });
+
+  test.each([["response_incomplete", "The Codex response was incomplete (max_output_tokens)"]])(
+    "unknown stream outcome preserves the %s diagnostic without replay",
+    async (code, message) => {
+      const requests = createCoreCodexRequests({
+        reserve: async () => ({ operationId: "op" }),
+        settle: async () => {},
+      });
+      await requests.reserve({ requestId: "r", transportAttempt: 1 });
+      await requests.observe({ requestId: "r", transportAttempt: 1, outcome: "unknown" });
+      const error = new CodexStreamingTerminalError({
+        status: 502,
+        headers: new Headers({ [CODEX_TRANSPORT_ERROR_HEADER]: "1" }),
+        error: { type: "server_error", code, message },
+      });
+      const { deps, settle } = failureDeps(error, { ...core, requests });
+      const checkpoint = mock(async (_options?: unknown) => undefined);
+      deps.historySink.reconcileConversationTruth = checkpoint;
+      const recovery = spy(db, "requestSessionTurnRecovery");
+      const refusal = spy(db, "recordSubscriptionCoreCodexTurnFailure");
+      spy(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(undefined as never);
+
+      expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "failed" });
+      expect(checkpoint).toHaveBeenCalledWith({ requireDurable: true });
+      expect(recovery).not.toHaveBeenCalled();
+      expect(refusal).not.toHaveBeenCalled();
+      expect(settle).toHaveBeenCalledWith(
+        expect.objectContaining({
+          events: expect.arrayContaining([
+            {
+              type: "turn.failed",
+              payload: expect.objectContaining({
+                code: "subscription_core_request_outcome_unknown",
+                retryable: false,
+                detail: message,
+              }),
+            },
+          ]),
+        }),
+      );
+    },
+  );
+
+  test("unreadable source diagnostics cannot prevent unknown-outcome settlement", async () => {
+    const requests = createCoreCodexRequests({
+      reserve: async () => ({ operationId: "op" }),
+      settle: async () => {},
+    });
+    await requests.reserve({ requestId: "r", transportAttempt: 1 });
+    await requests.observe({ requestId: "r", transportAttempt: 1, outcome: "unknown" });
+    const { deps, settle } = failureDeps(new Error("unreadable diagnostic"), { ...core, requests });
+    spy(turnErrors, "agentRunFailurePayload").mockImplementation(() => {
+      throw new Error("diagnostic extraction failed");
+    });
+    const recovery = spy(db, "requestSessionTurnRecovery");
+    spy(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(undefined as never);
+    expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "failed" });
+    expect(recovery).not.toHaveBeenCalled();
+    expect(settle).toHaveBeenCalledWith(
+      expect.objectContaining({
+        events: expect.arrayContaining([
+          {
+            type: "turn.failed",
+            payload: {
+              error: new db.SubscriptionCoreCodexRequestOutcomeUnknownError().message,
+              code: "subscription_core_request_outcome_unknown",
+              retryable: false,
+            },
+          },
+        ]),
+      }),
+    );
+  });
 
   test.each([
     ["provider quota refusal", () => usageCap()],
@@ -1249,6 +1800,38 @@ describe("core Codex failure settlement", () => {
       expect(legacyStatuses).not.toHaveBeenCalled();
       expect(legacyQuarantine).not.toHaveBeenCalled();
       expect(legacyFailover).not.toHaveBeenCalled();
+    },
+  );
+
+  test.each([
+    ["provider quota refusal", () => usageCap()],
+    ["unverifiable included usage", () => new CodexIncludedUsageUnknownError()],
+  ] as const)(
+    "%s re-places the turn while a cancelled session-title request is unsettled",
+    async (_label, makeError) => {
+      spy(db, "recordSubscriptionCoreCodexQuotaObservation").mockResolvedValue(true);
+      spy(db, "recordSubscriptionCoreCodexTurnFailure").mockResolvedValue(true);
+      spy(db, "countSubscriptionCoreCodexTurnRefusals").mockResolvedValue(1);
+      const recovery = spy(db, "requestSessionTurnRecovery").mockResolvedValue({
+        action: "recovering",
+        events: [],
+      } as never);
+      spy(events, "publishDurableSessionEvents").mockResolvedValue(undefined as never);
+      // The parallel title request was still running when the turn failed;
+      // cancelling it leaves its reservation without an observed outcome.
+      const titleRequests = createCoreCodexRequests({
+        reserve: async () => ({ operationId: "title" }),
+        settle: async () => {},
+      });
+      await titleRequests.reserve({ requestId: "turn-1:title:1", transportAttempt: 1 });
+      const { deps, settle } = failureDeps(makeError(), { ...core, titleRequests });
+      expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "recovering" });
+      expect(recovery).toHaveBeenCalledWith(
+        {},
+        "workspace-1",
+        expect.objectContaining({ turnId: "turn-1", reason: "codex_credential_failover" }),
+      );
+      expect(settle).not.toHaveBeenCalled();
     },
   );
 
@@ -1502,7 +2085,52 @@ describe("core Codex failure settlement", () => {
       retryable: false,
       recovery: "user_message",
     });
+    expect(String(settled.events[0]!.payload.error)).toContain("holding its Codex account");
     expect(parent).toHaveBeenCalledTimes(1);
+  });
+
+  test("an exhausted lease-busy chain keeps the provider named by the placement error", async () => {
+    spy(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(undefined as never);
+    const { deps, settle } = failureDeps(
+      subscriptionCoreLeaseBusyFailure(null, undefined, "SuperGrok"),
+      null,
+    );
+    Object.assign(deps.attempt, {
+      subscriptionLeaseBusy: {
+        startedAt: Date.now() - SUBSCRIPTION_CORE_LEASE_BUSY_MAX_MS - 1_000,
+        executionGeneration: 2,
+      },
+    });
+    expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "idle" });
+    const settled = settle.mock.calls[0]![0] as {
+      events: Array<{ payload: Record<string, unknown> }>;
+    };
+    expect(settled.events[0]!.payload).toMatchObject({
+      code: "subscription_lease_busy",
+      retryable: false,
+    });
+    expect(String(settled.events[0]!.payload.error)).toBe(
+      "A previous attempt of this turn kept holding its SuperGrok account, so the turn stopped. Send a new message to try again.",
+    );
+  });
+
+  test("every failure-copy builder carries the provider it names; the default stays Codex", () => {
+    const named = (displayName?: string) => [
+      subscriptionCoreFailoverExhaustedFailure(4, 4, displayName),
+      subscriptionCoreCapacityFailure("no_eligible_capacity", null, displayName),
+      subscriptionCoreAccountRefusedFailure("forbidden", displayName),
+      subscriptionCoreUnsupportedFailure("Image generation", displayName),
+      subscriptionCoreCutoverDisabledFailure(displayName),
+      subscriptionCoreLeaseBusyFailure(null, undefined, displayName),
+      subscriptionCoreLeaseBusyFailure(null, "binding_conflict", displayName),
+    ];
+    for (const error of named("SuperGrok")) expect(error.displayName).toBe("SuperGrok");
+    for (const error of named()) expect(error.displayName).toBe("Codex");
+    expect(
+      subscriptionCoreLeaseBusyFailure(null, "binding_conflict", "SuperGrok").payload.error,
+    ).toBe(
+      "The session's SuperGrok account changed while this turn was starting. The turn will retry.",
+    );
   });
 
   test("a database failure while recovering from lease busy keeps the turn recoverable", async () => {
@@ -1656,28 +2284,14 @@ describe("core Codex lease-busy pacing", () => {
 });
 
 describe("claim-time Codex cutover handling", () => {
-  test("a cutover row of any state stops legacy Apps resolution for every turn", () => {
-    expect(
-      claimMayResolveLegacyCodexApps({
-        codexConnectedAppsEnabled: true,
-        cutover: "not_configured",
-      }),
-    ).toBe(true);
-    for (const cutover of ["enabled", "disabled"] as const) {
-      expect(claimMayResolveLegacyCodexApps({ codexConnectedAppsEnabled: true, cutover })).toBe(
-        false,
-      );
+  test("only an explicitly enabled cutover permits Codex claim authority", () => {
+    for (const state of ["not_configured", "disabled", "enabled"] as const) {
+      expect(claimCodexActiveFromCutover(state)).toBe(state === "enabled");
     }
-    expect(
-      claimMayResolveLegacyCodexApps({
-        codexConnectedAppsEnabled: false,
-        cutover: "not_configured",
-      }),
-    ).toBe(false);
   });
 
-  test("the legacy active-credential flag is read only without a cutover row", () => {
-    expect(claimCodexActiveFromCutover("not_configured")).toBe("read_legacy");
+  test("missing and disabled cutovers do not read an active-credential flag", () => {
+    expect(claimCodexActiveFromCutover("not_configured")).toBe(false);
     expect(claimCodexActiveFromCutover("enabled")).toBe(true);
     expect(claimCodexActiveFromCutover("disabled")).toBe(false);
   });

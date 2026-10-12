@@ -239,8 +239,8 @@ test("a large cohort can become visible late without spending its final read res
     },
   });
   expect(requests.some((time) => time >= 150_000)).toBe(true);
-  expect(requests.length).toBeLessThanOrEqual(256);
-  expect(elapsed).toBeLessThan(180_000);
+  expect(requests.length).toBeLessThanOrEqual(30 * 16);
+  expect(elapsed).toBeLessThan(600_000);
 });
 
 test("early matches are rechecked after delayed packages appear", async () => {
@@ -277,11 +277,11 @@ test("early matches are rechecked after delayed packages appear", async () => {
   ).rejects.toThrow("Stable tag changed");
   expect(firstPackageReads).toBe(2);
   expect(elapsed).toBeGreaterThanOrEqual(150_000);
-  expect(elapsed).toBeLessThan(180_000);
-  expect(requests).toBeLessThanOrEqual(256);
+  expect(elapsed).toBeLessThan(600_000);
+  expect(requests).toBeLessThanOrEqual(30 * 16);
 });
 
-test("a hidden large cohort fails within the original deadline and read quota", async () => {
+test("a hidden large cohort fails within the deadline and its read quota", async () => {
   const packages = Array.from({ length: 30 }, (_, index) => archive(`@example/package-${index}`));
   let elapsed = 0,
     requests = 0;
@@ -306,8 +306,69 @@ test("a hidden large cohort fails within the original deadline and read quota", 
     }),
   ).rejects.toThrow("read_limit");
   expect(elapsed).toBeGreaterThanOrEqual(150_000);
-  expect(elapsed).toBeLessThanOrEqual(180_000);
-  expect(requests).toBeLessThanOrEqual(256);
+  expect(elapsed).toBeLessThanOrEqual(600_000);
+  expect(requests).toBeLessThanOrEqual(30 * 16);
+});
+
+// Observed registry behavior: after a complete write phase, most selected
+// versions are visible at once, while a few stay 404 for more than four
+// minutes after their write acknowledgement before becoming visible.
+test("a few packages that stay hidden for minutes still qualify within the default bounds", async () => {
+  const packages = Array.from({ length: 31 }, (_, index) => archive(`@example/package-${index}`));
+  const late = new Set([packages[7]!.name, packages[29]!.name]);
+  let elapsed = 0,
+    requests = 0;
+  const read: typeof readRegistryPackage = (name, _request, _base, options) =>
+    readRegistryPackage(
+      name,
+      async (url) => {
+        requests++;
+        return String(url).includes("/dist-tags")
+          ? Response.json({ latest: "1.0.0", canary: version })
+          : late.has(name) && elapsed < 300_000
+            ? new Response(null, { status: 404 })
+            : Response.json({ name, version, dist });
+      },
+      "https://registry.example.test",
+      options,
+    );
+  await confirmCanaryCohort(packages, read, {
+    now: () => elapsed,
+    sleep: async (ms) => {
+      elapsed += ms;
+    },
+  });
+  expect(elapsed).toBeGreaterThanOrEqual(300_000);
+  expect(elapsed).toBeLessThan(330_000);
+  expect(requests).toBeLessThanOrEqual(31 * 16);
+});
+
+test("the largest admitted cohort keeps polls after its first pass and final reserve", async () => {
+  const packages = Array.from({ length: 64 }, (_, index) => archive(`@example/package-${index}`));
+  let elapsed = 0,
+    requests = 0;
+  const read: typeof readRegistryPackage = (name, _request, _base, options) =>
+    readRegistryPackage(
+      name,
+      async (url) => {
+        requests++;
+        return String(url).includes("/dist-tags")
+          ? Response.json({ latest: "1.0.0", canary: version })
+          : elapsed < 60_000
+            ? new Response(null, { status: 404 })
+            : Response.json({ name, version, dist });
+      },
+      "https://registry.example.test",
+      options,
+    );
+  await confirmCanaryCohort(packages, read, {
+    now: () => elapsed,
+    sleep: async (ms) => {
+      elapsed += ms;
+    },
+  });
+  expect(elapsed).toBeGreaterThanOrEqual(60_000);
+  expect(requests).toBeLessThanOrEqual(64 * 16);
 });
 
 test.each(
@@ -451,7 +512,7 @@ test.each(
   expect(settled).toBe(true);
   await confirmation;
   expect(elapsed).toBeGreaterThanOrEqual(150_000);
-  expect(elapsed).toBeLessThan(180_000);
+  expect(elapsed).toBeLessThan(600_000);
   expect(requests).toBeLessThanOrEqual(scenario.maxReads);
   expect(peak).toBeLessThanOrEqual(4);
   expect(timeouts).toBe(scenario.timeoutRequest === null ? 0 : 1);

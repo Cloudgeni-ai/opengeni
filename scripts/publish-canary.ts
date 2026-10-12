@@ -132,9 +132,25 @@ type RegistryPackage = {
 };
 type RegistryRequest = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 const registry = "https://registry.npmjs.org";
-const CANARY_RECEIPT_TIMEOUT_MS = 180_000;
+// A selected version can remain unreadable for several minutes after its write
+// acknowledgement while the rest of the cohort is already visible.
+const CANARY_RECEIPT_TIMEOUT_MS = 600_000;
 const CANARY_RECEIPT_REQUEST_TIMEOUT_MS = 10_000;
 const CANARY_RECEIPT_POLL_INTERVAL_MS = 1_000;
+// Each receipt costs two GETs. The default budget scales with the cohort so
+// the first pass and the final complete-cohort reserve never consume the whole
+// quota; the floor keeps small cohorts from polling too sparsely.
+const CANARY_RECEIPT_READS_PER_PACKAGE = 16;
+const CANARY_RECEIPT_MIN_READS = 64;
+const CANARY_RECEIPT_MAX_COHORT = 64;
+const CANARY_RECEIPT_MAX_READS = CANARY_RECEIPT_MAX_COHORT * CANARY_RECEIPT_READS_PER_PACKAGE;
+
+export function defaultCanaryReceiptReads(packageCount: number): number {
+  return Math.min(
+    CANARY_RECEIPT_MAX_READS,
+    Math.max(CANARY_RECEIPT_MIN_READS, packageCount * CANARY_RECEIPT_READS_PER_PACKAGE),
+  );
+}
 
 type RegistryReadOptions = {
   signal?: AbortSignal;
@@ -557,10 +573,10 @@ export async function confirmCanaryCohort(
   const sleep = options.sleep ?? Bun.sleep;
   const timeoutMs = options.timeoutMs ?? CANARY_RECEIPT_TIMEOUT_MS;
   const pollIntervalMs = options.pollIntervalMs ?? CANARY_RECEIPT_POLL_INTERVAL_MS;
-  const maxReads = options.maxReads ?? 256;
+  const maxReads = options.maxReads ?? defaultCanaryReceiptReads(packages.length);
   if (
     packages.length === 0 ||
-    packages.length > 64 ||
+    packages.length > CANARY_RECEIPT_MAX_COHORT ||
     new Set(packages.map((pkg) => pkg.name)).size !== packages.length ||
     !Number.isFinite(timeoutMs) ||
     timeoutMs <= 0 ||
@@ -569,7 +585,7 @@ export async function confirmCanaryCohort(
     pollIntervalMs < CANARY_RECEIPT_POLL_INTERVAL_MS ||
     !Number.isInteger(maxReads) ||
     maxReads <= 0 ||
-    maxReads > 256
+    maxReads > CANARY_RECEIPT_MAX_READS
   ) {
     throw new Error("Canary receipt cohort, interval or deadline is invalid");
   }

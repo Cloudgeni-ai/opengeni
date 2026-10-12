@@ -397,6 +397,46 @@ describe("Codex routes with an enabled cutover", () => {
     expect(wakes).toHaveLength(2);
   });
 
+  test("a sign-in started on one API replica polls on another", async () => {
+    cutover("core");
+    poisonLegacyWriters();
+    // Two independent processes configured like a real deployment: no
+    // explicit manifest state secret, only the shared deployment secrets.
+    const replica = () =>
+      createApp({
+        settings: {
+          ...settings,
+          githubAppManifestStateSecret: undefined,
+          integrationsStateSecret: "shared-integrations-state-secret",
+        },
+        db: poisonDb as never,
+        bus: { publish: async () => undefined } as never,
+        workflowClient: {} as never,
+        managedAuth: null,
+      } as never);
+    const headers = {
+      authorization: await bearer(["workspace:read", "connections:write"]),
+      "content-type": "application/json",
+    };
+    mockDevice({
+      usercode: () => json({ device_auth_id: "dev_1", user_code: "ABCD-1234", interval: "5" }),
+      token: () => json({}, 403),
+    });
+    const started = await replica().request(`/v1/workspaces/${WS}/codex/connect/start`, {
+      method: "POST",
+      headers,
+    });
+    expect(started.status).toBe(200);
+    const { state } = (await started.json()) as { state: string };
+    const polled = await replica().request(`/v1/workspaces/${WS}/codex/connect/poll`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ state }),
+    });
+    expect(polled.status).toBe(200);
+    expect(await polled.json()).toEqual({ status: "pending" });
+  });
+
   test("connect start and poll write through the core writer (M3 PR 3b)", async () => {
     cutover("core");
     poisonLegacyWriters();
@@ -489,9 +529,9 @@ describe("Codex routes with an enabled cutover", () => {
       expect({ reason, status: refused.status }).toEqual({ reason, status });
     }
     // The cutover can change while token exchange is in flight. Re-read it
-    // before deciding which writer may run; no stale legacy write is allowed.
+    // before deciding whether its core writer may still run.
     let gateReads = 0;
-    mock("readCodexCutoverDisposition", async () => (++gateReads === 1 ? "legacy" : "core"));
+    mock("readCodexCutoverDisposition", async () => (++gateReads === 1 ? "core" : "maintenance"));
     result = {
       kind: "connected",
       id: CONNECTION,
@@ -499,7 +539,7 @@ describe("Codex routes with an enabled cutover", () => {
       ownership: "shared",
       wake: { accountId: ACCOUNT, reason: "core_codex_connected" },
     };
-    expect((await poll()).status).toBe(200);
+    expect((await poll()).status).toBe(503);
     expect(gateReads).toBe(2);
   });
 
@@ -874,7 +914,7 @@ describe("organization Codex routes with a cutover row", () => {
   const orgPath = `/v1/organizations/${ACCOUNT}/codex`;
   const orgAdmin = { accountId: ACCOUNT, workspaceId: null, subjectId: "user:org-admin" };
 
-  for (const mode of ["legacy", "core"] as const) {
+  for (const mode of ["core"] as const) {
     test(`organization usage keeps administrator authority outside workspace routing (${mode})`, async () => {
       cutover(mode);
       const administrator = mock("assertOrganizationCodexAdministrator", async () => undefined);
@@ -1090,6 +1130,12 @@ describe("organization Codex routes with a cutover row", () => {
     expect(rotation.mock.calls[0]![1]).toEqual({ ...orgAdmin, rotationEnabled: false });
 
     const rename = mock("renameSubscriptionCoreCodexConnection", async () => CONNECTION);
+    // The response reads the renamed account itself: the organization route
+    // also renames accounts a shared workspace manages, which its list omits.
+    const renamedAccount = mock("getSubscriptionCoreOrganizationCodexAccount", async () => ({
+      ...account,
+      label: "Renamed",
+    }));
     const renamed = await app().fetch(
       organizationAdminRequest(`${orgPath}/accounts/${CONNECTION}`, {
         method: "PATCH",
@@ -1102,6 +1148,11 @@ describe("organization Codex routes with a cutover row", () => {
       ...orgAdmin,
       connectionId: CONNECTION,
       label: "Renamed",
+    });
+    expect(renamedAccount.mock.calls[0]![1]).toEqual({
+      organizationId: ACCOUNT,
+      subjectId: orgAdmin.subjectId,
+      connectionId: CONNECTION,
     });
 
     // A refused account (not an organization account, or not manageable) is the legacy 404.
@@ -1116,6 +1167,139 @@ describe("organization Codex routes with a cutover row", () => {
       );
       expect(refused.status).toBe(404);
     }
+  });
+});
+
+describe("the organization access editor for a workspace-managed Codex account", () => {
+  const MANAGER = "00000000-0000-4000-8000-0000000000b2";
+  const PERSON = "00000000-0000-4000-8000-0000000000d4";
+  const path = `/v1/organizations/${ACCOUNT}/model-connections/codex/${CONNECTION}/access`;
+  function editor() {
+    cutover("core");
+    mock("assertOrganizationCodexAdministrator", async () => undefined);
+    mock("getOrganizationAdministrationOverview", async () => ({
+      workspaces: [
+        { id: WS, name: "Research" },
+        { id: MANAGER, name: "Platform" },
+      ],
+    }));
+    const member = (id: string, subjectId: string, status = "active") => ({
+      id,
+      organizationId: ACCOUNT,
+      subjectId,
+      name: subjectId,
+      email: null,
+      role: "member",
+      status,
+      authorizationRevision: 1,
+      sharedWorkspaceAccess: [],
+      revokedAt: null,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    mock("listOrganizationAdministrationMembers", async () => [
+      member(PERSON, "user:ada"),
+      member("00000000-0000-4000-8000-0000000000d5", "service:robot"),
+      member("00000000-0000-4000-8000-0000000000d6", "user:left", "revoked"),
+    ]);
+  }
+
+  test("reads its reach and the managing workspace's own copy; people only when no workspace manages it", async () => {
+    editor();
+    mock("readSubscriptionCoreProviderModelConnectionAccess", async () => ({
+      policy: {
+        allowedModels: null,
+        allowedWorkspaces: [],
+        allowPersonalWorkspaces: false,
+        allowedPeople: null,
+        version: 1,
+      },
+      localWorkspaceIds: [MANAGER],
+      managedByWorkspaceId: MANAGER,
+      peopleSupported: false,
+    }));
+    const response = await app().fetch(organizationAdminRequest(path));
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    // An older form saves exactly what it saved before: no people key.
+    expect(body.policy).toEqual({
+      allowedModels: null,
+      allowedWorkspaces: [],
+      allowPersonalWorkspaces: false,
+      version: 1,
+    });
+    expect(body).toMatchObject({
+      peopleSupported: false,
+      localWorkspaceIds: [MANAGER],
+      managedByWorkspaceId: MANAGER,
+    });
+    expect(body.people).toBeUndefined();
+
+    // A workspace's own copy no workspace manages can be limited to people.
+    mock("readSubscriptionCoreProviderModelConnectionAccess", async () => ({
+      policy: {
+        allowedModels: null,
+        allowedWorkspaces: [],
+        allowPersonalWorkspaces: false,
+        allowedPeople: null,
+        version: 1,
+      },
+      localWorkspaceIds: [MANAGER],
+      managedByWorkspaceId: null,
+      peopleSupported: true,
+    }));
+    const unmanaged = await (await app().fetch(organizationAdminRequest(path))).json();
+    expect(unmanaged).toMatchObject({
+      peopleSupported: true,
+      people: [{ id: PERSON, name: "user:ada", email: null }],
+      localWorkspaceIds: [MANAGER],
+      managedByWorkspaceId: null,
+    });
+
+    // Beyond what the member list can show, people are not offered; the editor
+    // still works. The database refuses with SQLSTATE 54000, wrapped by the
+    // query layer, before any response parsing.
+    mock("listOrganizationAdministrationMembers", async () => {
+      throw Object.assign(new Error("Failed query"), {
+        cause: Object.assign(
+          new Error("organization member inventory exceeds the bounded projection"),
+          { code: "54000" },
+        ),
+      });
+    });
+    const large = await app().fetch(organizationAdminRequest(path));
+    expect(large.status).toBe(200);
+    const largeBody = await large.json();
+    expect(largeBody.peopleSupported).toBe(false);
+    expect(largeBody.people).toBeUndefined();
+    // Any other failure is not hidden.
+    mock("listOrganizationAdministrationMembers", async () => {
+      throw Object.assign(new Error("Failed query"), { cause: { code: "42501" } });
+    });
+    expect((await app().fetch(organizationAdminRequest(path))).status).toBe(500);
+  });
+
+  test("a person outside the organization or a mixed choice is a 422, never a write", async () => {
+    editor();
+    for (const error of [
+      new opengeniDb.SubscriptionCoreAccessPersonNotInOrganizationError(),
+      new opengeniDb.SubscriptionCoreAccessPeopleUnlistableError(),
+      new opengeniDb.SubscriptionCoreAccessInvalidError("mixed"),
+    ]) {
+      mock("updateSubscriptionCoreProviderModelConnectionAccess", async () => {
+        throw error;
+      });
+      const body = JSON.stringify({
+        allowedModels: null,
+        allowedWorkspaces: [],
+        allowPersonalWorkspaces: false,
+        allowedPeople: [PERSON],
+        version: 1,
+      });
+      const response = await app().fetch(organizationAdminRequest(path, { method: "PUT", body }));
+      expect(response.status).toBe(422);
+    }
+    expect(wakes).toEqual([]);
   });
 });
 
@@ -1158,7 +1342,7 @@ describe("the Codex Apps designation for a run", () => {
     expect(lookup.mock.calls.length).toBe(2);
   });
 
-  test("core uses only an active core designation; legacy only the legacy one", async () => {
+  test("uses only an active core designation and preserves the credential-ID alias", async () => {
     const { legacy, core, lookup } = leaves();
     mock("readCodexCutoverDisposition", async () => "core");
     expect(await resolveCodexAppsDesignationForRun(poison, WS, { accountId: ACCOUNT })).toEqual({
@@ -1166,7 +1350,7 @@ describe("the Codex Apps designation for a run", () => {
       accountId: ACCOUNT,
       connectionId: CONNECTION,
     });
-    expect(await resolveCodexAppsCredentialIdForRun(poison, WS)).toBeNull();
+    expect(await resolveCodexAppsCredentialIdForRun(poison, WS)).toBe(CONNECTION);
     mock("resolveSubscriptionCoreCodexAppsDesignation", async () => ({
       connectionId: CONNECTION,
       status: "needs_relogin",
@@ -1174,19 +1358,14 @@ describe("the Codex Apps designation for a run", () => {
     expect(await resolveCodexAppsDesignationForRun(poison, WS, { accountId: ACCOUNT })).toBeNull();
     expect(legacy.mock.calls.length).toBe(0);
 
-    const dispositionRead = mock("readCodexCutoverDisposition", async () => "legacy");
-    expect(await resolveCodexAppsDesignationForRun(poison, WS, { accountId: ACCOUNT })).toEqual({
-      source: "legacy",
-      credentialId: "legacy-apps",
-    });
-    expect(await resolveCodexAppsCredentialIdForRun(poison, WS)).toBe("legacy-apps");
-    // A known disposition skips both the cutover read and the organization lookup.
+    const dispositionRead = mock("readCodexCutoverDisposition", async () => "maintenance");
+    expect(await resolveCodexAppsDesignationForRun(poison, WS, { accountId: ACCOUNT })).toBeNull();
+    expect(await resolveCodexAppsCredentialIdForRun(poison, WS)).toBeNull();
     const lookupsBefore = lookup.mock.calls.length;
     const readsBefore = dispositionRead.mock.calls.length;
-    expect(await resolveCodexAppsDesignationForRun(poison, WS, { disposition: "legacy" })).toEqual({
-      source: "legacy",
-      credentialId: "legacy-apps",
-    });
+    expect(
+      await resolveCodexAppsDesignationForRun(poison, WS, { disposition: "maintenance" }),
+    ).toBeNull();
     expect(lookup.mock.calls.length).toBe(lookupsBefore);
     expect(dispositionRead.mock.calls.length).toBe(readsBefore);
     expect(core.mock.calls.length).toBeGreaterThan(0);
@@ -1194,7 +1373,6 @@ describe("the Codex Apps designation for a run", () => {
 
   test("request authentication follows the designation's source", () => {
     const coreAuth = mock("subscriptionCoreCodexAppsRequestAuth", () => ({ kind: "core" }));
-    const legacyAuth = mock("codexAppsRequestAuth", () => ({ kind: "legacy" }));
     expect(
       codexAppsRequestAuthForDesignation(poison, settings, WS, {
         source: "core",
@@ -1207,12 +1385,5 @@ describe("the Codex Apps designation for a run", () => {
       workspaceId: WS,
       connectionId: CONNECTION,
     });
-    expect(
-      codexAppsRequestAuthForDesignation(poison, settings, WS, {
-        source: "legacy",
-        credentialId: "legacy-apps",
-      }),
-    ).toEqual({ kind: "legacy" } as never);
-    expect(legacyAuth.mock.calls[0]![2]).toEqual({ workspaceId: WS, credentialId: "legacy-apps" });
   });
 });

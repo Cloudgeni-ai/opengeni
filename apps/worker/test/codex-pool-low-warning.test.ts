@@ -1,9 +1,7 @@
 import { expect, test } from "bun:test";
 import { createLogThrottle } from "@opengeni/observability";
-import {
-  CODEX_POOL_LOW_WARNING_INTERVAL_MS,
-  warnCodexPoolLow,
-} from "../src/activities/agent-turn/codex-capacity";
+import { CODEX_POOL_LOW_WARNING_INTERVAL_MS } from "./fixtures/legacy-codex/selection";
+import { warnCodexPoolLow } from "./fixtures/legacy-codex/selection";
 
 test("the low Codex pool warning is logged once per workspace depth per interval", () => {
   let now = 0;

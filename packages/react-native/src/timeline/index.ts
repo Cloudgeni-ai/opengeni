@@ -50,7 +50,7 @@ export { BottomSheet } from "./sheet";
 export { SessionActionsButton } from "./session-actions";
 export type { SessionAction, SessionActionsClient, SessionActionsProps } from "./session-actions";
 export type { ModelPickerSheetProps } from "./model-picker";
-export type { SessionComposerProps } from "./composer";
+export type { ComposerCall, SessionComposerProps } from "./composer";
 export { ApprovalStrip, defaultApprovalStripMessages, HumanInputCard } from "./decisions";
 export type { ApprovalStripMessages, ApprovalStripProps, HumanInputCardProps } from "./decisions";
 export { Button, IconButton } from "./controls";

@@ -594,6 +594,9 @@ export { MessageTimeline, TimelineRow } from "./components/message-timeline";
 export { GeneratedVideoPlayer } from "./components/generated-video-player";
 export type { GeneratedVideoPlayerProps } from "./components/generated-video-player";
 export type { MessageTimelineProps } from "./components/message-timeline";
+export { MessageSenderLabel } from "./timeline/message-sender";
+export type { RenderMessageSender } from "./timeline/message-sender";
+export type { MessageSender } from "./timeline";
 export type { RenderAllowanceExhausted } from "./timeline/allowance-exhausted-row";
 export type { AllowanceLabels, AllowanceScope } from "./usage/allowance-copy";
 export type { TimelineSearchTarget } from "./components/timeline-search";
@@ -634,6 +637,8 @@ export {
 export { CopyButton, CopyHoverFrame } from "./components/copy-button";
 export { copyTextToClipboard, tableElementToTsv } from "./lib/clipboard";
 export { SessionStatus, StatusDot, SESSION_STATUS_META } from "./components/session-status";
+export { sessionAdmissionBlocked, sessionDisplayStatus } from "./session-status-model";
+export type { SessionDisplayStatus } from "./session-status-model";
 export type {
   SessionStatusProps,
   StatusDotProps,

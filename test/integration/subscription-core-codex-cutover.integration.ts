@@ -20,7 +20,6 @@ import {
   type OwnerMigratedTestDatabase,
 } from "@opengeni/testing";
 import {
-  armCodexCapacityWait,
   claimSessionWorkForAttempt,
   createDb,
   createSession,
@@ -30,13 +29,30 @@ import {
   withSessionRlsActorContext,
   type DbClient,
 } from "@opengeni/db";
+import { armCodexCapacityWait } from "../../packages/db/test/fixtures/legacy-codex";
 import { migrate } from "../../packages/db/src/migrate";
 import { provisionRoles } from "../../packages/db/src/provision-roles";
 import { encryptEnvironmentValue } from "../../packages/db/src/environment-crypto";
 import { createCodexCapacityActivities } from "../../apps/worker/src/activities/codex-capacity";
+import { createHistoricalCodexCapacityPeek } from "../../apps/worker/test/fixtures/legacy-codex/peek";
 
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const MIGRATION = "0689_subscription_core_codex_cutover.sql";
+// 0712 requires the committed 0689 cutover, so it is held back with it.
+const PRECURSOR = "0712_subscription_core_generic_precursor.sql";
+// 0713 locks and alters tables 0689 creates, 0714 redefines 0713's reach
+// setters and 0715 rewrites routines 0713 and 0714 create: all are held back
+// and replayed after the cutover.
+const PROVIDER_KEYED_REACH = "0713_subscription_core_provider_keyed_reach.sql";
+const WORKSPACE_MANAGED_ACCOUNTS = "0714_subscription_workspace_managed_organization_accounts.sql";
+const API_KEY_CONNECTIONS = "0715_subscription_core_api_key_connections.sql";
+// The format-aware personal connect writer is built from the live connect
+// writer 0715 rewrites: held back with 0715 and replayed after it.
+const PERSONAL_CONNECT_FORMAT = "0728_subscription_core_personal_connect_format.sql";
+// 0716 builds on 0712's receipts and patches its helpers; it follows 0712.
+const COMPAT = "0716_subscription_authority_compat.sql";
+// 0717 requires 0716's routines; it follows 0716.
+const FENCES = "0717_subscription_authority_fences.sql";
 const MODEL = "codex/gpt-5.5";
 const key = Buffer.alloc(32, 77);
 const settings = { environmentsEncryptionKey: key.toString("base64") } as never;
@@ -77,9 +93,9 @@ describe.skipIf(!realDb)(
       const owner = postgres(owned.ownerUrl, { max: 1 });
       try {
         await owner`CREATE TABLE schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`;
-        await owner`INSERT INTO schema_migrations(name) VALUES(${MIGRATION})`;
+        await owner`INSERT INTO schema_migrations(name) VALUES(${MIGRATION}), (${PRECURSOR}), (${PROVIDER_KEYED_REACH}), (${WORKSPACE_MANAGED_ACCOUNTS}), (${API_KEY_CONNECTIONS}), (${PERSONAL_CONNECT_FORMAT}), (${COMPAT}), (${FENCES})`;
         await migrate(owned.ownerUrl, undefined, { applicationDatabaseRoles: ["opengeni_app"] });
-        await owner`DELETE FROM schema_migrations WHERE name = ${MIGRATION}`;
+        await owner`DELETE FROM schema_migrations WHERE name IN (${MIGRATION}, ${PRECURSOR}, ${PROVIDER_KEYED_REACH}, ${WORKSPACE_MANAGED_ACCOUNTS}, ${API_KEY_CONNECTIONS}, ${PERSONAL_CONNECT_FORMAT}, ${COMPAT}, ${FENCES})`;
       } finally {
         await owner.end();
       }
@@ -191,7 +207,9 @@ describe.skipIf(!realDb)(
 
       // The legacy peek activity completes before the migration; its result
       // is what the workflow history records.
-      const recorded = await activities().getCodexCapacityWait({
+      const recorded = await createHistoricalCodexCapacityPeek(
+        async () => ({ db: client!.db }) as never,
+      ).getCodexCapacityWait({
         accountId,
         workspaceId,
         sessionId: session.id,

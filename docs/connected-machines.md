@@ -310,10 +310,29 @@ durable target authority and commits the active pointer in the same transaction
 as the new session row. If the target is invalid, removed, revoked, or otherwise
 no longer attachable, the create fails without leaving a queued session shell.
 
-Unattended schedules currently accept workspace- and organization-scoped
-machines only. User-scoped machines require an owning human's explicit personal
-resource attachment, which a future scheduled-execution authority flow must
-freeze durably before those machines can be offered safely.
+Workspace- and organization-scoped machines run any schedule. A user-scoped
+(personal) machine runs only an **Only me** schedule owned by the machine's
+owner:
+
+- Saving is the consent. Create and update accept a personal machine only when
+  the final audience is Only me; widening such a schedule to Workspace, or
+  saving it for Workspace, returns 422. The scoped sandbox lookup returns a
+  personal machine to its owner alone, so nobody else can select it.
+- Each run attaches the machine through the owner's scoped authorization and
+  then issues a `session`-mode `connected_machine.use` grant (context
+  `user_private`) for exactly that run's chat. No standing `always` grant is
+  created, so the owner's other chats keep asking.
+- Every attempt goes through the same database admission as an interactive
+  turn (`admit_session_attempt_personal_machine`): the run's causal human must
+  be the machine's owner and still an active member with access to the
+  workspace, the machine's authority must be current, and the run's grant must
+  be active. Removing the person, revoking the machine or revoking the grant
+  stops the next attempt.
+
+On macOS, the enrollment display offer is independent of Screen Recording
+permission. A detected display keeps the existing screen-control consent option
+available while OS grants are pending. Approval does not grant macOS permissions:
+Screen Recording, Accessibility and Input Monitoring still gate capture/input.
 
 ## Discover machines + metrics
 
@@ -726,6 +745,28 @@ Windows retains its running-image replacement mechanism. This forward fix does
 not repair an older agent already executing its previous update handoff; those
 installations may require their service manager to start the verified canonical
 executable path after the old process exits.
+
+On macOS, the generated LaunchAgent sets `WorkingDirectory` to the installing
+user's home directory. This makes the reported default workspace root writable
+for attachment delivery instead of inheriting launchd's `/`. Foreground `run`
+continues to use the directory it was launched from, and an explicit session
+`workingDir` still takes precedence.
+
+After installing a release with this fix, regenerate an older service definition
+with `opengeni-agent service install --restart` when no machine work is running.
+The installer checks launchd's loaded binary and working directory as well as the
+plist on disk. If an earlier install wrote the plist but failed before reloading,
+a retry still reloads the stale job without requiring `--restart`. Dry-run
+rendering and installation share the `HOME`, then `USERPROFILE`, resolver;
+unsupported control characters and XML-invalid home paths are rejected before a
+plist is written. Existing sessions retain their saved absolute folder; restarting the service does not
+change an already-saved `/`. The existing-session Runs on menu changes the machine,
+not the folder. For a session with `/` saved, start a new session on that machine
+with a writable custom path in the new-session **Runs on** settings (or pass an
+explicit `workingDir` to `createSession`). Historical attachments are not restaged
+automatically; retrieve them explicitly through Files or attach them to a new
+message when needed.
+
 `opengeni-agent run` is the explicit foreground alternative.
 
 Self-update requires settled accepted work across every connection. Relay pumps,
@@ -803,6 +844,91 @@ in that workspace until a workspace administrator removes/revokes it. This is
 intentional: possessing the machine credential does not grant workspace-admin
 authority.
 
+### Connect from a chat
+
+Agents connect machines the way they request integrations. When the agent can
+already run commands on the target machine, it installs the agent itself with
+`connected_machine_enroll_token` (below). When the person has to connect their
+own computer, the agent posts the **Connected Machine card**: either
+`capability_catalog_search` (for example "my Mac" or "Chrome") followed by
+`capability_authorization_request` with `api:connected-machine`, or
+`sandbox_provision` with `kind: "selfhosted"`. Both append the ordinary
+`tool.auth_needed` event with that capability id; the event carries no token.
+
+The card (`apps/web/src/components/capabilities/session-machine-card.tsx`):
+
+- lists the workspace's enrolled machines with **Use in this chat**, which swaps
+  the session onto that machine and sends `Use the machine “<name>” for this
+  chat.` (the name quoted, on one line, at most 60 characters) so the agent
+  continues there. A chat that cannot take a Send is not moved; a chat waiting
+  on a question is moved and keeps the question;
+- mints a single-use token in the person's browser on **Connect a machine**
+  (screen control is chosen before copying because it is baked into the token),
+  shows the matching Mac/Linux or PowerShell command, and polls until a new
+  machine, or a known one that was offline, comes online, then puts **Use in
+  this chat** first; Cancel stops the watch;
+- once a machine with a screen is reachable (the chat's own machine first),
+  offers the
+  [OpenGeni Browser extension](https://chromewebstore.google.com/detail/opengeni-browser/phpmmcbeelfkcinjfbbggegjdcdmnnch)
+  for that machine and shows **Connected** when a Chrome profile on that same
+  enrollment links up. It checks once, polls only after **Add to Chrome**, and
+  stops after ten minutes or when the inventory is not readable.
+
+Reading the list needs `enrollments:read`; connecting needs `enrollments:manage`;
+moving the chat needs `sessions:control`. The card says who can act otherwise.
+Like GitHub, the card is posted even when machines are already connected.
+
+### Turn on screen control for a connected machine
+
+Screen-control consent lives on the enrollment row and in the credentials the
+machine holds (its own dispatch gate checks them). Turning it on never needs a
+reconnect, a token or a human click:
+`POST /v1/workspaces/:ws/machines/:enrollmentId/screen-control`
+(`enrollments:manage`; `account:admin` for organization machines; no body)
+sets `allow_screen_control` on the enrollment in place, with the same id,
+scope, owner and credential generation, so the machine's current credentials
+stay valid. The API then sends the live agent a `credential_renew` control
+request. The agent renews its credentials through the same install-key-signed
+`POST /v1/enrollments/renew` it runs on its own schedule. Renewal re-reads the
+consent from the row, and the agent saves the result over the same connection
+file. The live reconciler adopts it without restarting the process, and the
+next Hello reports `consented_screen_control`.
+
+The response is `status: "active"` once the agent holds the new credentials.
+Otherwise it is `status: "pending"` with a `reason`:
+
+- `offline`: the machine applies it when it next says Hello.
+- `agent_update_required`: the agent predates the `credential_renew`
+  capability. Update it, and the successor's Hello applies it.
+- `renewal_failed`: retry the request.
+- `reconnect_required`: the machine's connection predates in-place renewal
+  (for example a legacy-origin connection file). Run the connect command on it
+  again with screen control on.
+
+The Hello-time path is the same request: when a Hello shows the row allows
+screen control but the credentials do not, the API asks that exact process to
+renew. Repeating the request is safe. Once the agent's Hello reports the consent
+the API answers `active` without contacting it. The agent serves renewals one at
+a time and reports consent already on disk without renewing, so several API
+replicas reacting to one Hello cause a single renewal. Each change records a
+`connected_machine.screen_control.allowed` audit event with the acting subject
+(and the session and attempt for an agent).
+
+Agents use the same action through `connected_machine_enable_screen_control`
+(`target` is a `sandboxes_list` id). Personal machines also pass the same
+per-attempt admission `run_on` uses. When computer input is refused because
+screen control is off, the error names that tool.
+
+macOS also needs Screen Recording, Accessibility and Input Monitoring for
+OpenGeni. Mac agents report all three without prompting, on Hello and on each
+desktop heartbeat, as `runtime.macPermissions` in the machine list; older agents
+report only a missing Screen Recording grant, as `desktopUnavailableReason`.
+`POST /v1/workspaces/:ws/machines/:enrollmentId/privacy-settings` with
+`pane: screen_recording | accessibility | input_monitoring` opens that System
+Settings pane on the Mac (bounded to 15 seconds). Opening a pane grants
+nothing; the person switches OpenGeni on there. The chat card walks the missing
+permissions in that order, from what the Mac reports.
+
 ### Zero-click token (fleet / headless)
 
 Agents with the existing `enrollments:manage` permission can call the first-party
@@ -815,14 +941,23 @@ path, then verify readiness with `sandboxes_list`. A token cannot execute the
 installer on a machine for which no access path exists.
 
 The token is returned to the agent in the tool result; never publish it in source
-code or unrelated logs. Missing `enrollments:manage`, an explicit tool selection
-that excludes it, or disabled Connected Machines means the tool is unavailable.
-This addition does not grant the permission to existing sessions. For interactive
-enrollment without this permission, `sandbox_provision` still returns human
-device-flow instructions.
+code, chat, or unrelated logs. Missing `enrollments:manage`, an explicit tool
+selection that excludes it, or disabled Connected Machines means the tool is
+unavailable. This addition does not grant the permission to existing sessions.
+
+Enroll tokens are **single-use**. Each token carries a random `jti`; the exchange
+records it in `enrollment_token_redemptions` (0696) in the same transaction that
+creates the enrollment, so one token connects one machine. The same machine
+(same public key) may repeat the exchange after a lost response or a re-run
+install command, while its enrollment is still active. Any other machine, or a
+machine removed since, receives `401` with "this connect command was already
+used to connect another machine". Mint one token per machine for a
+fleet. Tokens minted before 0696 carry no `jti` and stay multi-use until they
+expire an hour later. Expired redemptions are pruned per workspace during later
+exchanges.
 
 Mint a short-TTL enroll token and hand it to the machine's installer. The token
-is **secret** — surface it once with a copy-now warning; it cannot be re-read.
+is **secret**: anyone holding it can connect one machine until it expires.
 
 ```ts
 const { token, expiresAt, expiresInSeconds } = await client.mintEnrollToken(

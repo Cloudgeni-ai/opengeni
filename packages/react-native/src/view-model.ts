@@ -1,4 +1,5 @@
-import type { HumanInputAnswer, HumanInputQuestion, SessionStatus } from "@opengeni/sdk";
+import type { HumanInputAnswer, HumanInputQuestion } from "@opengeni/sdk";
+import type { SessionDisplayStatus } from "@opengeni/react/timeline-model";
 import type { ActivityItem, TimelineItem } from "@opengeni/react/session";
 import { DEFAULT_OPENGENI_NATIVE_LABELS, type OpenGeniNativeLabels } from "./presentation";
 
@@ -20,7 +21,9 @@ export interface NativeActivityPresentation {
   tone: "neutral" | "running" | "failed";
 }
 
-export function nativeSessionStatusTone(status: SessionStatus | null): NativeSessionStatusTone {
+export function nativeSessionStatusTone(
+  status: SessionDisplayStatus | null,
+): NativeSessionStatusTone {
   switch (status) {
     case "queued":
     case "running":
@@ -29,6 +32,7 @@ export function nativeSessionStatusTone(status: SessionStatus | null): NativeSes
       return "working";
     case "requires_action":
       return "attention";
+    case "blocked":
     case "failed":
       return "failed";
     case "cancelled":
@@ -390,7 +394,7 @@ export function timelineAccessibilityLabel(
     case "startup-phase":
       return `${labels.activity}, ${nativeTimelineStatusLabel(item.status, labels)}`;
     case "session-status":
-      return nativeSessionStatusLabel(item.status, labels);
+      return nativeSessionStatusLabel(item.blocked ? "blocked" : item.status, labels);
     case "goal":
       return `${nativeGoalActionLabel(item.action, labels)}${item.text ? `: ${item.text}` : ""}`;
     case "notice":
@@ -415,7 +419,7 @@ export function timelineAccessibilityLabel(
 }
 
 export function nativeSessionStatusLabel(
-  status: SessionStatus,
+  status: SessionDisplayStatus,
   labels: OpenGeniNativeLabels,
 ): string {
   switch (status) {
@@ -431,6 +435,8 @@ export function nativeSessionStatusLabel(
       return labels.statusIdle;
     case "requires_action":
       return labels.statusRequiresAction;
+    case "blocked":
+      return labels.statusBlocked;
     case "failed":
       return labels.statusFailed;
     case "cancelled":

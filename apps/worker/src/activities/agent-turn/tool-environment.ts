@@ -16,7 +16,6 @@ import {
   previewConnectorActionApproval,
   namedSubjectHasLiveWorkspaceAuthority,
   updateSessionTitleWithEvent,
-  codexAppsRequestAuth,
   subscriptionCoreCodexAppsRequestAuth,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
@@ -124,7 +123,11 @@ import { createListModelsAttemptToolDefinition } from "./list-models";
 import { createRefreshCredentialsAttemptToolDefinition } from "./refresh-credentials";
 import { codeSearchToolDefinitions, codeSearchWorkspaceFromChannel } from "./code-search";
 import { turnWebSearchPlan, webSearchToolDefinitions } from "./web-search";
-import { createWorkspaceSkillTools } from "./skill-tools";
+import {
+  createWorkspaceSkillTools,
+  sessionShadowedSkillNames,
+  withoutSessionShadowedSkills,
+} from "./skill-tools";
 import { loadConfiguredBundledSkills } from "./skill-selection";
 import { guardSkillFilesystem } from "./skill-transfer";
 import { turnCredentialRestriction } from "./credential-restriction";
@@ -180,13 +183,14 @@ export type PrepareTurnToolRuntimeDeps = {
   fileAuthoritySubjectId: ClaimTurnOk["fileAuthoritySubjectId"];
   capabilitySettings: ClaimTurnOk["capabilitySettings"];
   installedApiIntegrations: ClaimTurnOk["installedApiIntegrations"];
-  codexAppsCredentialId: ClaimTurnOk["codexAppsCredentialId"];
   codexAppsCoreConnectionId?: ClaimTurnOk["codexAppsCoreConnectionId"];
   turnExecutionPolicy: ClaimTurnOk["turnExecutionPolicy"];
   trigger: ClaimTurnOk["trigger"];
   runSettings: GovernanceModelOk["runSettings"];
   resolvedModel: GovernanceModelOk["resolvedModel"];
   lazyToolTransport: GovernanceModelOk["lazyToolTransport"];
+  /** The workspace allows Opengeni credits; paid web tools are omitted when not. */
+  workspaceCreditModelsAllowed: GovernanceModelOk["workspaceCreditModelsAllowed"];
   turnTools: ReturnType<typeof withFirstPartyTools>;
   connectionScope: { accountId: string; workspaceId: string };
   sandboxArtifactRuntime: ReturnType<typeof sandboxArtifactRuntimeAdmission>;
@@ -409,13 +413,13 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     turn,
     session,
     installedApiIntegrations,
-    codexAppsCredentialId,
     codexAppsCoreConnectionId,
     turnExecutionPolicy,
     trigger,
     runSettings: canonicalRunSettings,
     resolvedModel,
     lazyToolTransport,
+    workspaceCreditModelsAllowed,
     turnTools: canonicalTurnTools,
     sandboxArtifactRuntime,
     activeSandboxBackend,
@@ -566,20 +570,14 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     resolveCredential,
   });
   const localMcpServers = [...apiIntegrationMcpServers, ...githubRestMcp.localMcpServers];
-  // A core designation (enabled Codex cutover) and a legacy one are mutually
-  // exclusive: claim resolves at most one of them.
+  // Apps authorization is the exact core designation resolved at claim.
   const codexAppsAuth = codexAppsCoreConnectionId
     ? subscriptionCoreCodexAppsRequestAuth(db, runSettings, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
         connectionId: codexAppsCoreConnectionId,
       })
-    : codexAppsCredentialId
-      ? codexAppsRequestAuth(db, runSettings, {
-          workspaceId: input.workspaceId,
-          credentialId: codexAppsCredentialId,
-        })
-      : undefined;
+    : undefined;
   const linkedAuthority = await getExternalLinkTurnAuthorization(
     db,
     {
@@ -704,13 +702,14 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     toolFamilies.skills === false
       ? []
       : [
-          ...sharedSkillDescriptors
-            .filter((entry) => entry.activationMode === "workspace_managed")
-            .map((entry) => ({
-              id: entry.id,
-              name: entry.title,
-              description: entry.description,
-            })),
+          ...withoutSessionShadowedSkills(
+            sharedSkillDescriptors.filter((entry) => entry.activationMode === "workspace_managed"),
+            sessionShadowedSkillNames(selectedSkills),
+          ).map((entry) => ({
+            id: entry.id,
+            name: entry.title,
+            description: entry.description,
+          })),
           ...selectedSkills.map((entry) => ({
             id: entry.id,
             name: entry.artifact.name,
@@ -911,7 +910,8 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   // when the session's agent configuration allows web search (filtered below).
   const webSearchTools = webSearchToolDefinitions({
     settings: runSettings,
-    tools: turnWebSearchPlan(resolvedModel, runSettings).providerTools,
+    tools: turnWebSearchPlan(resolvedModel, runSettings, workspaceCreditModelsAllowed)
+      .providerTools,
     scope: {
       accountId: input.accountId,
       workspaceId: input.workspaceId,

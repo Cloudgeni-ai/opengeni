@@ -677,7 +677,27 @@ describe("BrowserControlServer", () => {
         { method: "POST", token: controlToken, body: command(observation) },
       );
       expect(acted.status).toBe(200);
-      expect((await json(acted)).data.state).toBe("completed");
+      const actedBody = await json(acted);
+      expect(actedBody.data.state).toBe("completed");
+      // Callers that did not ask for resolved targets may parse strictly.
+      expect(actedBody.data).not.toHaveProperty("targets");
+      const traced = await json(
+        await request(
+          server,
+          `/v1/browser-sessions/${reference.browserSessionId}/actions?receiptTargets=1`,
+          { method: "POST", token: controlToken, body: command(observation) },
+        ),
+      );
+      expect(traced.data.state).toBe("completed");
+      expect(traced.data.targets).toEqual([
+        {
+          actionIndex: 0,
+          ref: "e1",
+          role: "button",
+          name: "Close",
+          container: { role: "dialog", name: "Edit item" },
+        },
+      ]);
 
       const protectedCommand = protectedAuthCommand(observation);
       const protectedPath = `/v1/browser-sessions/${reference.browserSessionId}/protected-auth-fills`;
@@ -1519,8 +1539,15 @@ function fakeDriver(
         truncated: false,
       };
     },
-    async dispatch() {
+    async dispatch(_command, trace) {
       options.beforeDriverOperation?.("dispatch");
+      trace?.record({
+        actionIndex: 0,
+        ref: "e1",
+        role: "button",
+        name: "Close",
+        container: { role: "dialog", name: "Edit item" },
+      });
       return observation();
     },
     async protectedFill() {

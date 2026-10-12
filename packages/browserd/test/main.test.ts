@@ -1,6 +1,65 @@
 import { expect, test } from "bun:test";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { computerRuntimeConfig } from "../src/main";
+
+test("desktop configuration selects CUA on Mac without changing the Linux host desktop", () => {
+  expect(computerRuntimeConfig({}, "darwin")).toEqual({
+    computerBackend: "cua",
+    computerEnvironmentMode: "existing",
+  });
+  expect(computerRuntimeConfig({}, "linux")).toEqual({
+    computerBackend: "native",
+    computerEnvironmentMode: "existing",
+  });
+  expect(computerRuntimeConfig({}, "win32")).toEqual({
+    computerBackend: "native",
+    computerEnvironmentMode: "existing",
+  });
+});
+
+test("explicit desktop and backend choices remain authoritative", () => {
+  expect(
+    computerRuntimeConfig(
+      { OPENGENI_BROWSERD_COMPUTER_ENVIRONMENT_MODE: "isolated_linux" },
+      "linux",
+    ),
+  ).toEqual({ computerBackend: "cua", computerEnvironmentMode: "isolated_linux" });
+  expect(
+    computerRuntimeConfig({ OPENGENI_BROWSERD_COMPUTER_ENVIRONMENT_MODE: "existing" }, "linux"),
+  ).toEqual({ computerBackend: "native", computerEnvironmentMode: "existing" });
+  for (const platform of ["darwin", "linux"] as const) {
+    expect(
+      computerRuntimeConfig({ OPENGENI_BROWSERD_COMPUTER_BACKEND: "native" }, platform),
+    ).toEqual({ computerBackend: "native", computerEnvironmentMode: "existing" });
+  }
+  expect(
+    computerRuntimeConfig(
+      {
+        OPENGENI_BROWSERD_COMPUTER_BACKEND: "cua",
+        OPENGENI_BROWSERD_COMPUTER_ENVIRONMENT_MODE: "existing",
+      },
+      "linux",
+    ),
+  ).toEqual({ computerBackend: "cua", computerEnvironmentMode: "existing" });
+  expect(computerRuntimeConfig({ OPENGENI_BROWSERD_COMPUTER_BACKEND: "cua" }, "win32")).toEqual({
+    computerBackend: "cua",
+    computerEnvironmentMode: "existing",
+  });
+  expect(computerRuntimeConfig({ OPENGENI_BROWSERD_COMPUTER_BACKEND: "cua" }, "linux")).toEqual({
+    computerBackend: "cua",
+    computerEnvironmentMode: "existing",
+  });
+});
+
+test("invalid desktop configuration is rejected instead of selecting a fallback", () => {
+  expect(() =>
+    computerRuntimeConfig({ OPENGENI_BROWSERD_COMPUTER_BACKEND: "invalid" }, "darwin"),
+  ).toThrow("OPENGENI_BROWSERD_COMPUTER_BACKEND is invalid");
+  expect(() =>
+    computerRuntimeConfig({ OPENGENI_BROWSERD_COMPUTER_ENVIRONMENT_MODE: "invalid" }, "linux"),
+  ).toThrow("OPENGENI_BROWSERD_COMPUTER_ENVIRONMENT_MODE is invalid");
+});
 
 test("browserd entrypoint reads an owner-only token, becomes healthy, and drains on SIGTERM", async () => {
   const directory = await mkdtemp("/tmp/ogb-main-");
@@ -10,6 +69,8 @@ test("browserd entrypoint reads an owner-only token, becomes healthy, and drains
   const child = Bun.spawn([process.execPath, join(import.meta.dir, "../src/main.ts")], {
     env: {
       ...process.env,
+      OPENGENI_BROWSERD_COMPUTER_BACKEND: undefined,
+      OPENGENI_BROWSERD_COMPUTER_ENVIRONMENT_MODE: undefined,
       OPENGENI_BROWSERD_ROOT: join(directory, "state"),
       OPENGENI_BROWSERD_SOCKET_ROOT: join(directory, "sockets"),
       OPENGENI_BROWSERD_ADMIN_TOKEN_FILE: tokenFile,

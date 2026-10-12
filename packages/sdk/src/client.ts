@@ -272,6 +272,22 @@ import type {
   WorkspaceModelAccessPolicy,
   OrganizationModelDefaults,
   UpdateOrganizationModelDefaultsRequest,
+  ModelAccountSettingsOverview,
+  OrganizationModelAccountSettings,
+  UpdateOrganizationModelAccountSettingsRequest,
+  UpdateWorkspaceModelAccountSettingsRequest,
+  WorkspaceModelAccountSettings,
+  ModelAccountPreferences,
+  SessionModelAccountChoiceResponse,
+  SetSessionModelAccountChoiceRequest,
+  SetSessionModelAccountChoiceResponse,
+  UpdateModelAccountPreferencesRequest,
+  OrganizationAgentAdminAccess,
+  UpdateOrganizationAgentAdminAccessRequest,
+  OrganizationPrivacySettings,
+  UpdateOrganizationPrivacySettingsRequest,
+  SessionAdminAccess,
+  GrantSessionAdminAccessRequest,
   WorkspaceModelCatalogResponse,
   WorkspaceGatewayCustomModel,
   WorkspaceGatewayCustomModelsResponse,
@@ -316,6 +332,9 @@ import type {
   CreateApiKeyResponse,
   CreateOrganizationApiKeyRequest,
   OrganizationMcpConnection,
+  CreatePersonalApiKeyRequest,
+  CreatePersonalApiKeyResponse,
+  ListPersonalApiKeysResponse,
   OrganizationMcpConnectionList,
   OrganizationServiceAccount,
   ListOrganizationServiceAccountsResponse,
@@ -329,6 +348,7 @@ import type {
   NativeAppToken,
   InboxItem,
   InboxSettings,
+  MemberNotificationsSetting,
   SessionInboxMute,
   ListInboxResponse,
   UpdateInboxItemInput,
@@ -439,6 +459,9 @@ import type {
   MachineOperationPolicy,
   UpdateMachineOperationPolicyRequest,
   UpdateMachineAgentResponse,
+  EnableMachineScreenControlResponse,
+  OpenMachinePrivacySettingsRequest,
+  OpenMachinePrivacySettingsResponse,
   SwapActiveSandboxRequest,
   SwapActiveSandboxResponse,
   ListWorkspaceMembersResponse,
@@ -462,6 +485,7 @@ import type {
   VideoGenerationPolicy,
   WorkspaceVideoGenerationSettings,
   PreviewSkillImportRequest,
+  PrivateScheduledTaskSummary,
   ScheduledTask,
   ScheduledTaskAccessAttention,
   ScheduledTaskRun,
@@ -583,6 +607,7 @@ import type {
   UpdateSessionVariableSetsRequest,
   UpdateSessionToolPolicyRequest,
   UpdateSessionAgentRequest,
+  UpdateSessionSkillsRequest,
   UpdateVariableSetRequest,
   UpdateRigRequest,
   UpdateWorkspaceMemberRequest,
@@ -1578,6 +1603,23 @@ export class OpenGeniClient {
   }
 
   /**
+   * Replace every Skill the session carries itself (an empty list removes
+   * them). Uses the tool-policy version (409 when stale) and applies from the
+   * next turn; a running turn keeps the Skills it started with.
+   */
+  async updateSessionSkills(
+    workspaceId: string,
+    sessionId: string,
+    request: UpdateSessionSkillsRequest,
+  ): Promise<Session> {
+    return await this.requestJson<Session>(
+      "PUT",
+      `${sessionPath(workspaceId, sessionId)}/skills`,
+      request,
+    );
+  }
+
+  /**
    * Replace one attached MCP server's approval policy. The change is captured
    * by the next claimed attempt; already-claimed work keeps its immutable
    * policy snapshot.
@@ -2301,6 +2343,33 @@ export class OpenGeniClient {
     );
   }
 
+  /** Turn screen control on for one connected machine, in place: the consent is
+   * recorded and the live agent refreshes its own credentials. Safe to repeat. */
+  async enableMachineScreenControl(
+    workspaceId: string,
+    enrollmentId: string,
+  ): Promise<EnableMachineScreenControlResponse> {
+    return await this.requestJson<EnableMachineScreenControlResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/machines/${enrollmentId}/screen-control`,
+      {},
+    );
+  }
+
+  /** Open one macOS Privacy & Security pane on a connected Mac, so the person
+   * only has to flip the permission for OpenGeni. */
+  async openMachinePrivacySettings(
+    workspaceId: string,
+    enrollmentId: string,
+    input: OpenMachinePrivacySettingsRequest,
+  ): Promise<OpenMachinePrivacySettingsResponse> {
+    return await this.requestJson<OpenMachinePrivacySettingsResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/machines/${enrollmentId}/privacy-settings`,
+      input,
+    );
+  }
+
   /** Revision-fenced update of a Connected Machine's optional command memory
    * policy. Null byte limits preserve unrestricted machine access. */
   async updateMachineOperationPolicy(
@@ -2336,9 +2405,10 @@ export class OpenGeniClient {
   /**
    * Remove one connected self-hosted machine enrollment. The control-plane
    * operation works while the agent is offline, revokes future reconnects,
-   * retains history, and atomically detaches idle dependent sessions (a
-   * machine-home session becomes `backend:none`). Active turns, live leases,
-   * and recovery work remain typed blockers. `idempotencyKey` is replay-safe.
+   * retains history, and atomically detaches the sessions that point at it,
+   * including ones with a queued, paused or recovering turn (a machine-home
+   * session becomes `backend:none`). Only a live machine lease or pending lease
+   * recovery remains a typed blocker. `idempotencyKey` is replay-safe.
    */
   async removeEnrollment(
     workspaceId: string,
@@ -5453,6 +5523,165 @@ export class OpenGeniClient {
     );
   }
 
+  /** Organization model-account settings and locks (owners and admins). */
+  async getOrganizationModelAccountSettings(
+    organizationId: string,
+  ): Promise<OrganizationModelAccountSettings> {
+    return await this.requestJson<OrganizationModelAccountSettings>(
+      "GET",
+      `/v1/organizations/${organizationId}/model-account-settings`,
+    );
+  }
+
+  /** Change organization model-account settings or locks (owners and admins). */
+  async updateOrganizationModelAccountSettings(
+    organizationId: string,
+    request: UpdateOrganizationModelAccountSettingsRequest,
+  ): Promise<OrganizationModelAccountSettings> {
+    return await this.requestJson<OrganizationModelAccountSettings>(
+      "PATCH",
+      `/v1/organizations/${organizationId}/model-account-settings`,
+      request,
+    );
+  }
+
+  /** Every shared workspace's effective model-account settings and their sources (owners and admins). */
+  async getModelAccountSettingsOverview(
+    organizationId: string,
+    options: { after?: string; limit?: number } = {},
+  ): Promise<ModelAccountSettingsOverview> {
+    const query = new URLSearchParams();
+    if (options.after !== undefined) query.set("after", options.after);
+    if (options.limit !== undefined) query.set("limit", String(options.limit));
+    return await this.requestJson<ModelAccountSettingsOverview>(
+      "GET",
+      `/v1/organizations/${organizationId}/model-account-settings/overview${query.size ? `?${query}` : ""}`,
+    );
+  }
+
+  /** A workspace's effective model-account settings, sources and overrides. */
+  async getWorkspaceModelAccountSettings(
+    workspaceId: string,
+  ): Promise<WorkspaceModelAccountSettings> {
+    return await this.requestJson<WorkspaceModelAccountSettings>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/model-account-settings`,
+    );
+  }
+
+  /** Override, or follow again, the organization's unlocked settings (workspace admins). */
+  async updateWorkspaceModelAccountSettings(
+    workspaceId: string,
+    request: UpdateWorkspaceModelAccountSettingsRequest,
+  ): Promise<WorkspaceModelAccountSettings> {
+    return await this.requestJson<WorkspaceModelAccountSettings>(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/model-account-settings`,
+      request,
+    );
+  }
+
+  /** The session's model account, the accounts it may switch to, and the personal settings. */
+  async getSessionModelAccount(
+    workspaceId: string,
+    sessionId: string,
+  ): Promise<SessionModelAccountChoiceResponse> {
+    return await this.requestJson<SessionModelAccountChoiceResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/model-account`,
+    );
+  }
+
+  /** Choose the session's model account, or `connectionId: null` for automatic selection. */
+  async setSessionModelAccount(
+    workspaceId: string,
+    sessionId: string,
+    request: SetSessionModelAccountChoiceRequest,
+  ): Promise<SetSessionModelAccountChoiceResponse> {
+    return await this.requestJson<SetSessionModelAccountChoiceResponse>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/model-account`,
+      request,
+    );
+  }
+
+  /**
+   * Your own model-account preferences in an organization. For a person (a
+   * signed-in browser, or an agent acting as one); other callers get 404.
+   */
+  async getModelAccountPreferences(organizationId: string): Promise<ModelAccountPreferences> {
+    return await this.requestJson<ModelAccountPreferences>(
+      "GET",
+      `/v1/organizations/${organizationId}/me/model-account-preferences`,
+    );
+  }
+
+  /**
+   * Change your own personal-fallback opt-in in an organization. Only a person
+   * can: a same-origin browser, or an agent acting as one with full access.
+   */
+  async updateModelAccountPreferences(
+    organizationId: string,
+    request: UpdateModelAccountPreferencesRequest,
+  ): Promise<ModelAccountPreferences> {
+    return await this.requestJson<ModelAccountPreferences>(
+      "PATCH",
+      `/v1/organizations/${organizationId}/me/model-account-preferences`,
+      request,
+    );
+  }
+
+  /** Whether owners and admins may give agent sessions admin access (owners and admins). */
+  async getOrganizationAgentAdminAccess(
+    organizationId: string,
+  ): Promise<OrganizationAgentAdminAccess> {
+    return await this.requestJson<OrganizationAgentAdminAccess>(
+      "GET",
+      `/v1/organizations/${organizationId}/agent-admin-access`,
+    );
+  }
+
+  /**
+   * Allow or stop admin access for agent sessions. Turning it off ends every
+   * session's admin access. An owner or admin, in the app.
+   */
+  async updateOrganizationAgentAdminAccess(
+    organizationId: string,
+    request: UpdateOrganizationAgentAdminAccessRequest,
+  ): Promise<OrganizationAgentAdminAccess> {
+    return await this.requestJson<OrganizationAgentAdminAccess>(
+      "PATCH",
+      `/v1/organizations/${organizationId}/agent-admin-access`,
+      request,
+    );
+  }
+
+  /**
+   * The organization's privacy choices: who sees new chats and schedules by
+   * default, and whether admins see that other people's Only me schedules
+   * exist. `limits` reports what this deployment fixes. An owner or admin.
+   */
+  async getOrganizationPrivacySettings(
+    organizationId: string,
+  ): Promise<OrganizationPrivacySettings> {
+    return await this.requestJson<OrganizationPrivacySettings>(
+      "GET",
+      `/v1/organizations/${organizationId}/privacy-settings`,
+    );
+  }
+
+  /** Change the organization's privacy choices, within the deployment's limits. */
+  async updateOrganizationPrivacySettings(
+    organizationId: string,
+    request: UpdateOrganizationPrivacySettingsRequest,
+  ): Promise<OrganizationPrivacySettings> {
+    return await this.requestJson<OrganizationPrivacySettings>(
+      "PATCH",
+      `/v1/organizations/${organizationId}/privacy-settings`,
+      request,
+    );
+  }
+
   /** Fully replace the workspace's hard provider/model allowlist. */
   async updateWorkspaceModelAccessPolicy(
     workspaceId: string,
@@ -6615,6 +6844,27 @@ export class OpenGeniClient {
     return await this.requestJson<ScheduledTask>(
       "POST",
       `/v1/workspaces/${workspaceId}/scheduled-tasks/${taskId}/pause`,
+    );
+  }
+
+  /** Admins: other people's Only me schedules, as summaries without names or prompts. */
+  async listPrivateScheduledTaskSummaries(
+    workspaceId: string,
+  ): Promise<{ schedules: PrivateScheduledTaskSummary[] }> {
+    return await this.requestJson<{ schedules: PrivateScheduledTaskSummary[] }>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/scheduled-tasks/private-summaries`,
+    );
+  }
+
+  /** Admins: pause someone else's Only me schedule. Only its owner can resume it. */
+  async pausePrivateScheduledTask(
+    workspaceId: string,
+    taskId: string,
+  ): Promise<PrivateScheduledTaskSummary> {
+    return await this.requestJson<PrivateScheduledTaskSummary>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/scheduled-tasks/private-summaries/${taskId}/pause`,
     );
   }
 
@@ -8949,6 +9199,40 @@ export class OpenGeniClient {
     );
   }
 
+  // --- Personal API keys -----------------------------------------------------------------------
+
+  /**
+   * Keys that act as the person who created them, with their live access in
+   * this organization capped by each key's access setting. Everyone sees their
+   * own; owners and admins see everyone's.
+   */
+  async listPersonalApiKeys(organizationId: string): Promise<ListPersonalApiKeysResponse> {
+    return await this.requestJson<ListPersonalApiKeysResponse>(
+      "GET",
+      `/v1/organizations/${organizationId}/personal-api-keys`,
+    );
+  }
+
+  /** Create a key that acts as you. The token is returned once. */
+  async createPersonalApiKey(
+    organizationId: string,
+    request: CreatePersonalApiKeyRequest,
+  ): Promise<CreatePersonalApiKeyResponse> {
+    return await this.requestJson<CreatePersonalApiKeyResponse>(
+      "POST",
+      `/v1/organizations/${organizationId}/personal-api-keys`,
+      request,
+    );
+  }
+
+  /** Revoke a personal key: its next request is refused. Its person, or an admin. */
+  async revokePersonalApiKey(organizationId: string, apiKeyId: string): Promise<void> {
+    await this.requestVoid(
+      "DELETE",
+      `/v1/organizations/${organizationId}/personal-api-keys/${apiKeyId}`,
+    );
+  }
+
   /** Service accounts: organization identities with no person behind them. */
   async listOrganizationServiceAccounts(
     organizationId: string,
@@ -9055,6 +9339,26 @@ export class OpenGeniClient {
     return await this.requestJson<InboxSettings>("PUT", "/v1/inbox/settings", input);
   }
 
+  /** Whether other members' agents may notify the signed-in person in this workspace. */
+  async getMemberNotifications(workspaceId: string): Promise<MemberNotificationsSetting> {
+    return await this.requestJson<MemberNotificationsSetting>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/inbox/member-notifications`,
+    );
+  }
+
+  /** Let other members' agents notify the signed-in person in this workspace, or stop them. */
+  async updateMemberNotifications(
+    workspaceId: string,
+    input: MemberNotificationsSetting,
+  ): Promise<MemberNotificationsSetting> {
+    return await this.requestJson<MemberNotificationsSetting>(
+      "PUT",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/inbox/member-notifications`,
+      input,
+    );
+  }
+
   /** Whether the signed-in person muted this session's replies. */
   async getSessionInboxMute(workspaceId: string, sessionId: string): Promise<SessionInboxMute> {
     return await this.requestJson<SessionInboxMute>(
@@ -9076,6 +9380,44 @@ export class OpenGeniClient {
       "PUT",
       `${sessionPath(workspaceId, sessionId)}/inbox-mute`,
       input,
+    );
+  }
+
+  /** This session's admin access, and what the viewer may change about it. */
+  async getSessionAdminAccess(workspaceId: string, sessionId: string): Promise<SessionAdminAccess> {
+    return await this.requestJson<SessionAdminAccess>(
+      "GET",
+      `${sessionPath(workspaceId, sessionId)}/admin-access`,
+    );
+  }
+
+  /**
+   * Give your own session admin access: its agent can then do what you can
+   * manage across the organization. An owner or admin, in the app, when the
+   * organization allows it. It lasts one hour unless `durationHours` says
+   * otherwise (1 to 720), or null for no time limit; giving it again while it
+   * is on sets a new time limit from now.
+   */
+  async grantSessionAdminAccess(
+    workspaceId: string,
+    sessionId: string,
+    input: GrantSessionAdminAccessRequest = {},
+  ): Promise<SessionAdminAccess> {
+    return await this.requestJson<SessionAdminAccess>(
+      "PUT",
+      `${sessionPath(workspaceId, sessionId)}/admin-access`,
+      input,
+    );
+  }
+
+  /** End this session's admin access. */
+  async revokeSessionAdminAccess(
+    workspaceId: string,
+    sessionId: string,
+  ): Promise<SessionAdminAccess> {
+    return await this.requestJson<SessionAdminAccess>(
+      "DELETE",
+      `${sessionPath(workspaceId, sessionId)}/admin-access`,
     );
   }
 

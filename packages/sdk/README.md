@@ -227,8 +227,9 @@ versions may ignore `includePinned` and return the default pin projection.
 
 For navigation lists, `listSessionSummaryPage` uses the same filters, ordering,
 pin rules and cursors, returning `SessionListEntry` records. Entries include
-display/rename titles, creator, lifecycle, personal state and hierarchy counts;
-prompts and execution configuration remain on `getSession`. Older APIs return
+display/rename titles, creator, lifecycle, personal state, hierarchy counts and
+the model and reasoning effort shown with a row; prompts and the rest of the
+execution configuration remain on `getSession`. Older APIs return
 full pages that the SDK projects locally. Unknown filters/cursors still fail
 explicitly rather than returning an unfiltered result.
 

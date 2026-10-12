@@ -180,6 +180,10 @@ deployment/workspace connection with the force flag shown in the agent log:
 opengeni-agent connect --force --api-url https://<deployment> --workspace-id <workspace-uuid>
 ```
 
+An authentication handshake timeout is a transient connection failure, not proof
+that the enrollment bearer was rejected. The agent retries the connection without
+recommending re-enrollment for that timeout.
+
 ## Wire protocol — single source of truth
 
 For native large-file editor writes, see [transactional uploads](TRANSACTIONAL-WRITES.md):

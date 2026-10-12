@@ -27,6 +27,8 @@ export type InboxItemRow = {
   createdAt: string;
   updatedAt: string;
   resolvedAt: string | null;
+  /** Another member whose agent sent this notification (0708); null for the person's own. */
+  sender: { subjectId: string; label: string } | null;
 };
 
 type InboxItemRecord = {
@@ -49,6 +51,8 @@ type InboxItemRecord = {
   created_at: Date | string;
   updated_at: Date | string;
   resolved_at: Date | string | null;
+  sender_subject_id: string | null;
+  sender_label: string | null;
 };
 
 function iso(value: Date | string): string {
@@ -101,7 +105,7 @@ export async function listInboxItems(
 ): Promise<InboxItemRow[]> {
   const rows = await rawRows<InboxItemRecord>(
     db,
-    sql`select * from opengeni_private.list_inbox_items_v2(
+    sql`select * from opengeni_private.list_inbox_items_v3(
       ${input.accountId}::uuid, ${input.subjectId}::text
     )`,
   );
@@ -125,6 +129,9 @@ export async function listInboxItems(
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at),
     resolvedAt: isoOrNull(row.resolved_at),
+    sender: row.sender_subject_id
+      ? { subjectId: row.sender_subject_id, label: row.sender_label ?? "A teammate" }
+      : null,
   }));
 }
 
@@ -208,7 +215,7 @@ export async function dismissInboxNotification(
   return Boolean(row?.id);
 }
 
-export type InboxTidyPolicyValue = "own_sessions" | "any_agent";
+export type InboxTidyPolicyValue = "own_sessions" | "any_agent" | "full_access";
 
 export async function getInboxTidyPolicy(
   db: Database,
@@ -240,22 +247,25 @@ export type InboxSettingsValue = {
   tidyPolicy: InboxTidyPolicyValue;
   pausedGoals: boolean;
   replies: boolean;
+  /** Question and approval alerts arrive time-sensitive (0718). */
+  timeSensitiveNeedsYou: boolean;
 };
 
 type InboxSettingsRecord = {
   tidy_policy: InboxTidyPolicyValue;
   paused_goals: boolean;
   replies: boolean;
+  time_sensitive_needs_you: boolean;
 };
 
-/** The person's inbox settings in one account (0663, 0665). */
+/** The person's inbox settings in one account (0663, 0665, 0718). */
 export async function getInboxSettings(
   db: Database,
   input: { accountId: string; subjectId: string },
 ): Promise<InboxSettingsValue> {
   const [row] = await rawRows<InboxSettingsRecord>(
     db,
-    sql`select * from opengeni_private.inbox_settings_v3(
+    sql`select * from opengeni_private.inbox_settings_v4(
       ${input.accountId}::uuid, ${input.subjectId}::text
     )`,
   );
@@ -263,6 +273,7 @@ export async function getInboxSettings(
     tidyPolicy: row?.tidy_policy ?? "own_sessions",
     pausedGoals: row?.paused_goals ?? false,
     replies: row?.replies ?? false,
+    timeSensitiveNeedsYou: row?.time_sensitive_needs_you ?? false,
   };
 }
 
@@ -278,20 +289,22 @@ export async function setInboxSettings(
     tidyPolicy?: InboxTidyPolicyValue | undefined;
     pausedGoals?: boolean | undefined;
     replies?: boolean | undefined;
+    timeSensitiveNeedsYou?: boolean | undefined;
   },
 ): Promise<InboxSettingsValue> {
   const [row] = await rawRows<InboxSettingsRecord>(
     db,
-    sql`select * from opengeni_private.set_inbox_settings_v3(
+    sql`select * from opengeni_private.set_inbox_settings_v4(
       ${input.accountId}::uuid, ${input.subjectId}::text,
       ${input.tidyPolicy ?? null}::text, ${input.pausedGoals ?? null}::boolean,
-      ${input.replies ?? null}::boolean
+      ${input.replies ?? null}::boolean, ${input.timeSensitiveNeedsYou ?? null}::boolean
     )`,
   );
   return {
     tidyPolicy: row?.tidy_policy ?? input.tidyPolicy ?? "own_sessions",
     pausedGoals: row?.paused_goals ?? input.pausedGoals ?? false,
     replies: row?.replies ?? input.replies ?? false,
+    timeSensitiveNeedsYou: row?.time_sensitive_needs_you ?? input.timeSensitiveNeedsYou ?? false,
   };
 }
 
@@ -407,6 +420,38 @@ async function sessionAccount(
       .limit(1);
     return row?.accountId ?? null;
   });
+}
+
+/**
+ * Whether this person lets other members' agents notify them in this
+ * workspace (0708). Off unless they turned it on.
+ */
+export async function getMemberNotificationsAllowed(
+  db: Database,
+  input: { workspaceId: string; subjectId: string },
+): Promise<boolean> {
+  const [row] = await rawRows<{ allowed: boolean }>(
+    db,
+    sql`select opengeni_private.member_notifications_allowed_v1(
+      ${input.workspaceId}::uuid, ${input.subjectId}::text
+    ) as allowed`,
+  );
+  return row?.allowed ?? false;
+}
+
+/** Turn other members' agent notifications on or off for this person in this workspace. */
+export async function setMemberNotificationsAllowed(
+  db: Database,
+  input: { accountId: string; workspaceId: string; subjectId: string; allowed: boolean },
+): Promise<boolean> {
+  const [row] = await rawRows<{ allowed: boolean }>(
+    db,
+    sql`select opengeni_private.set_member_notifications_allowed_v1(
+      ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.subjectId}::text,
+      ${input.allowed}::boolean
+    ) as allowed`,
+  );
+  return row?.allowed ?? input.allowed;
 }
 
 /**

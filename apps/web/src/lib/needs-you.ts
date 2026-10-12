@@ -5,12 +5,24 @@
 import type { RailSession as Session } from "./session-list-entry";
 
 /**
+ * `requires_action` that a person can act on. A session the runtime could not
+ * start (it carries an admission block) reads as Stuck with its own Retry, so
+ * it is not counted as waiting on the person.
+ */
+export function awaitsPerson(session: Session): boolean {
+  return (
+    session.status === "requires_action" &&
+    (session.admissionBlock === undefined || session.admissionBlock === null)
+  );
+}
+
+/**
  * True when the root itself is blocked on a human (approval/input requested,
  * or failed), or any spawned descendant is (`attentionDescendants`).
  */
 export function rootNeedsYou(session: Session): boolean {
   if (session.parentSessionId !== null) return false;
-  if (session.status === "requires_action" || session.status === "failed") return true;
+  if (awaitsPerson(session) || session.status === "failed") return true;
   return (session.treeStats?.attentionDescendants ?? 0) > 0;
 }
 
@@ -33,7 +45,6 @@ export function filterNeedsYou<T extends Session>(sessions: readonly T[]): T[] {
   return sessions.filter(
     (session) =>
       roots.has(session.rootSessionId) ||
-      (session.parentSessionId !== null &&
-        (session.status === "requires_action" || session.status === "failed")),
+      (session.parentSessionId !== null && (awaitsPerson(session) || session.status === "failed")),
   );
 }

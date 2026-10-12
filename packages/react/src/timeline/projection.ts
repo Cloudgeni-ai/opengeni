@@ -209,6 +209,9 @@ export function buildTimeline(
   // receipts have no row. Carry resume evidence on the attention landmarks so
   // grouping cannot mistake historical approval for a live wait.
   const presentationWaits = new Map<string | null, Array<NoticeItem | SessionStatusItem>>();
+  // Admission blocks hold the whole session, not one turn; any later status
+  // (a recheck, a new message, a pause) ends them.
+  let openAdmissionBlocks: SessionStatusItem[] = [];
   const presentationFailures = new Map<string | null, SessionStatusItem[]>();
   let presentationTurnId: string | null = null;
   const rememberPresentationWait = (
@@ -227,6 +230,26 @@ export function buildTimeline(
     const key = turnId ?? presentationTurnId;
     for (const item of presentationWaits.get(key) ?? []) item.resolvedAt = event.occurredAt;
     presentationWaits.delete(key);
+  };
+  // Live model-capacity waits. Later lifecycle evidence that the turn is no
+  // longer blocked (resume, a non-waiting status, its settlement) resolves
+  // them, so a recovered wait never lingers as a warning.
+  let openCapacityWaits: NoticeItem[] = [];
+  const resolveCapacityWaits = (event: SessionEvent, payload: Record<string, unknown>) => {
+    if (openCapacityWaits.length === 0 || !endsCapacityWait(event, payload)) return;
+    const eventTurnId = event.turnId ?? null;
+    openCapacityWaits = openCapacityWaits.filter((item) => {
+      const waitTurnId = item.capacityWait?.turnId ?? null;
+      // Status changes are session-wide; a turn settlement ends only its own wait
+      // (a queued follow-up being cancelled does not unblock the waiting turn).
+      const ends =
+        event.type === "session.status.changed" ||
+        eventTurnId === null ||
+        waitTurnId === null ||
+        eventTurnId === waitTurnId;
+      if (ends) item.resolvedAt = event.occurredAt;
+      return !ends;
+    });
   };
   const queuedAtByTurn = new Map<string, string>();
   const startupRecoveryRevisionByTurn = new Map<string, number>();
@@ -385,6 +408,7 @@ export function buildTimeline(
   for (const event of ordered) {
     const payload = asRecord(event.payload);
     const turnId = event.turnId ?? null;
+    resolveCapacityWaits(event, payload);
     if (
       turnId &&
       (event.type === "turn.started" ||
@@ -501,6 +525,7 @@ export function buildTimeline(
           break;
         }
         const voiceMessage = realtimeVoiceMessage(payload);
+        const sender = messageSender(payload.initiator);
         items.push({
           kind: "user-message",
           id: event.id,
@@ -520,6 +545,7 @@ export function buildTimeline(
           ...(voiceMessage ? { presentation: voiceMessage.presentation } : {}),
           resources: resourceRefs(payload.resources),
           tools: toolRefs(payload.tools),
+          ...(sender ? { sender } : {}),
           occurredAt: event.occurredAt,
         });
         break;
@@ -1055,6 +1081,11 @@ export function buildTimeline(
         if (!isSessionStatus(status)) {
           break;
         }
+        const blocked = status === "requires_action" && payload.code === "admission_blocked";
+        if (!blocked && openAdmissionBlocks.length > 0) {
+          for (const open of openAdmissionBlocks) open.resolvedAt = event.occurredAt;
+          openAdmissionBlocks = [];
+        }
         if (status === "running") resolvePresentationWait(event, turnId);
         // Only attention-worthy statuses earn a timeline divider. queued /
         // running / idle are machinery telemetry: the header pill carries the
@@ -1067,7 +1098,11 @@ export function buildTimeline(
         const previous = [...items]
           .reverse()
           .find((item): item is SessionStatusItem => item.kind === "session-status");
-        if (previous?.status === status && !previous.resolvedAt) {
+        if (
+          previous?.status === status &&
+          !previous.resolvedAt &&
+          Boolean(previous.blocked) === blocked
+        ) {
           break;
         }
         const item: SessionStatusItem = {
@@ -1075,8 +1110,12 @@ export function buildTimeline(
           id: event.id,
           status,
           occurredAt: event.occurredAt,
+          ...(blocked ? { blocked: true as const } : {}),
         };
-        if (status === "requires_action") rememberPresentationWait(item, turnId);
+        if (blocked) {
+          openAdmissionBlocks.push(item);
+          items.push(item);
+        } else if (status === "requires_action") rememberPresentationWait(item, turnId);
         else {
           items.push(item);
           if (status === "failed") {
@@ -1089,17 +1128,29 @@ export function buildTimeline(
         break;
       }
 
-      case "codex.capacity.waiting": {
-        items.push({
+      case "codex.capacity.waiting":
+      case "turn.capacity_waiting": {
+        const capacityWait = capacityWaitPresentation(event.type, payload, turnId);
+        const item: NoticeItem = {
           kind: "notice",
           id: event.id,
           tone: "waiting",
-          text:
-            stringValue(payload.detail) ??
-            stringValue(payload.error) ??
-            "Waiting for Codex capacity.",
+          text: capacityWait.text,
+          capacityWait: {
+            turnId: capacityWait.turnId,
+            label: capacityWait.label,
+            detail: capacityWait.detail,
+          },
           occurredAt: event.occurredAt,
+        };
+        // A re-armed wait continues the same blocked span; one live wait per turn.
+        openCapacityWaits = openCapacityWaits.filter((open) => {
+          if ((open.capacityWait?.turnId ?? null) !== turnId) return true;
+          open.resolvedAt = event.occurredAt;
+          return false;
         });
+        items.push(item);
+        openCapacityWaits.push(item);
         break;
       }
 
@@ -1885,6 +1936,8 @@ export function groupTimeline(
   if (options.readableTurns || options.foldExchanges) return groupReadableTurns(items);
   const groups: TimelineGroup[] = [];
   for (const item of items) {
+    // A recovered capacity wait is over; it leaves no warning behind.
+    if (item.kind === "notice" && item.capacityWait && item.resolvedAt) continue;
     if (isActivityItem(item)) {
       const open = groups[groups.length - 1];
       if (open?.kind === "activity" && open.outcome === undefined) {
@@ -1922,6 +1975,10 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
   >();
   const compactionTurns = new Map<ContextCompactionItem, string>();
   const messages = new Map<string, AgentMessageItem[]>();
+  // Capacity waits per turn: their spans are not work, and a live one is
+  // carried by the turn's work row instead of a separate warning.
+  const capacityPauses = new Map<string, Array<{ startedAt: string; endedAt?: string }>>();
+  const liveCapacityWaits = new Map<string, NoticeItem>();
   const inputs = new Map<string, Extract<TimelineItem, { kind: "machine-input-batch" }>>();
   const itemOrder = new Map(items.map((item, index) => [item.id, index]));
   // Turns that answer a person's message: the first turn after it, and a live
@@ -1944,7 +2001,15 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
         steeredTurn = currentTurn;
       }
     }
-    const key = ("turnId" in item && item.turnId) || legacyTurn;
+    // A capacity wait belongs to the turn it blocks, even before that turn's
+    // first step.
+    const itemTurnId =
+      item.kind === "notice" && item.capacityWait
+        ? item.capacityWait.turnId
+        : "turnId" in item
+          ? item.turnId
+          : null;
+    const key = itemTurnId || legacyTurn;
     if (
       steeredTurn !== undefined &&
       key === steeredTurn &&
@@ -1955,11 +2020,7 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
     }
     // Legacy work still establishes a boundary using its prompt key.
     // A human message alone does not: it may be steering the existing turn.
-    if (
-      ("turnId" in item && item.turnId) ||
-      isActivityItem(item) ||
-      (item.kind === "agent-message" && item.text.trim())
-    ) {
+    if (itemTurnId || isActivityItem(item) || (item.kind === "agent-message" && item.text.trim())) {
       if (key !== currentTurn && !seenTurns.has(key)) {
         const previous = turns.get(currentTurn);
         if (!settlements.has(currentTurn)) {
@@ -2028,6 +2089,20 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
       else
         group.work!.details.push({ kind: "activity", id: `work-item-${item.id}`, items: [item] });
       delete group.work!.waiting;
+    } else if (item.kind === "notice" && item.capacityWait) {
+      const pauses = capacityPauses.get(key) ?? [];
+      pauses.push({
+        startedAt: item.occurredAt,
+        ...(item.resolvedAt ? { endedAt: item.resolvedAt } : {}),
+      });
+      capacityPauses.set(key, pauses);
+      if (!item.resolvedAt) {
+        if (settlements.has(key)) groups.push({ kind: "item", item });
+        else {
+          workForTurn();
+          liveCapacityWaits.set(key, item);
+        }
+      }
     } else if (item.kind === "turn-end") {
       if (!item.resumedAt) {
         settlements.set(key, {
@@ -2101,6 +2176,7 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
       const liveStatusWait =
         item.kind === "session-status" &&
         item.status === "requires_action" &&
+        !item.blocked &&
         !item.resolvedAt &&
         current !== undefined &&
         !current.endedAt;
@@ -2119,6 +2195,7 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
         } else if (
           item.kind === "session-status" &&
           item.status === "requires_action" &&
+          !item.blocked &&
           !item.resolvedAt
         ) {
           current.waiting = { label: "Waiting for you", since: item.occurredAt };
@@ -2144,6 +2221,31 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
           workForTurn();
       }
     }
+  }
+  for (const [key, group] of turns) {
+    const work = group.work!;
+    const live = liveCapacityWaits.get(key);
+    // Re-assert after the loop: a late receipt for the blocked turn must not
+    // turn "Limit reached" back into "Working" while the wait is still open.
+    if (live?.capacityWait && !work.endedAt) {
+      work.waiting = {
+        label: live.capacityWait.label,
+        since: live.occurredAt,
+        detail: live.capacityWait.detail,
+      };
+    }
+    const pausedMs = (capacityPauses.get(key) ?? []).reduce((total, pause) => {
+      if (!pause.endedAt) return total;
+      const start = Math.max(Date.parse(work.startedAt), Date.parse(pause.startedAt));
+      const end = Math.min(
+        work.endedAt ? Date.parse(work.endedAt) : Number.POSITIVE_INFINITY,
+        Date.parse(pause.endedAt),
+      );
+      return Number.isFinite(start) && Number.isFinite(end) && end > start
+        ? total + end - start
+        : total;
+    }, 0);
+    if (pausedMs > 0) work.pausedMs = pausedMs;
   }
   groups = groups.filter((entry) => {
     if (entry.kind !== "item" || entry.item.kind !== "context-compaction") return true;
@@ -2275,14 +2377,207 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
       }
     }
   }
-  return groups.flatMap((group) => {
-    if (group.kind === "activity" && movedRows.has(group)) return [];
-    const hidden =
-      group.kind === "item" && group.item.kind === "agent-message" && foldedProse.has(group.item);
-    const before = beforeRows.get(group);
-    const after = afterRows.get(group);
-    return [...(before ? [before] : []), ...(hidden ? [] : [group]), ...(after ? [after] : [])];
-  });
+  // The work of every turn that answers a person stays visible even when it
+  // said nothing; quiet-cycle folding must never take it.
+  const personWork = new Set<TimelineGroup>(
+    [...answersPerson].flatMap((key) => {
+      const work = turns.get(key);
+      return work ? [work] : [];
+    }),
+  );
+  return compactQuietCycles(
+    groups.flatMap((group) => {
+      if (group.kind === "activity" && movedRows.has(group)) return [];
+      const hidden =
+        group.kind === "item" && group.item.kind === "agent-message" && foldedProse.has(group.item);
+      const before = beforeRows.get(group);
+      const after = afterRows.get(group);
+      return [...(before ? [before] : []), ...(hidden ? [] : [group]), ...(after ? [after] : [])];
+    }),
+    personWork,
+  );
+}
+
+type WorkGroup = Extract<TimelineGroup, { kind: "activity" }> & {
+  work: NonNullable<Extract<TimelineGroup, { kind: "activity" }>["work"]>;
+};
+
+/**
+ * Settled, successful work whose turn left no visible reply, image or blocker.
+ * A failure it recovered from, a failed startup phase or a context compaction
+ * is something to see, so that work is not quiet either.
+ */
+function isQuietWork(group: TimelineGroup): group is WorkGroup {
+  if (group.kind !== "activity" || !group.work?.endedAt || group.work.waiting) return false;
+  if (group.work.cycles || (group.outcome && group.outcome !== "complete")) return false;
+  if (
+    group.items.some(
+      (item) =>
+        item.kind === "startup-phase" && (item.status === "failed" || item.status === "cancelled"),
+    )
+  ) {
+    return false;
+  }
+  const quiet = (entry: TimelineGroup): boolean =>
+    entry.kind === "item"
+      ? entry.item.kind !== "auth-needed" &&
+        entry.item.kind !== "context-compaction" &&
+        entry.item.kind !== "human-input" &&
+        !(entry.item.kind === "notice" && entry.item.tone !== "waiting") &&
+        !(entry.item.kind === "agent-message" && entry.item.text.includes("!["))
+      : entry.kind === "activity"
+        ? isQuietDetail(entry, quiet)
+        : false;
+  return !publishesOutput(group) && group.work.details.every(quiet);
+}
+
+function isQuietDetail(
+  group: Extract<TimelineGroup, { kind: "activity" }>,
+  quiet: (entry: TimelineGroup) => boolean,
+): boolean {
+  return (
+    (!group.outcome || group.outcome === "complete") && (group.work?.details ?? []).every(quiet)
+  );
+}
+
+/**
+ * Work that generated an image or published a file produced output worth
+ * seeing. Checked by tool name only, so the projection stays free of the
+ * renderer's image presentation rules.
+ */
+function publishesOutput(group: TimelineGroup): boolean {
+  if (group.kind !== "activity") return false;
+  return (
+    group.items.some((item) => {
+      if (item.kind !== "tool-call") return false;
+      const name = mcpToolLeaf(item.name);
+      return (
+        name === "generate_image" ||
+        name === "image_generation_call" ||
+        name === "sandbox_file_publish"
+      );
+    }) || (group.work?.details ?? []).some(publishesOutput)
+  );
+}
+
+/**
+ * Whether the work at `index` follows a person's message or answer with only
+ * routine input in between. Complements the turn bookkeeping for legacy rows.
+ */
+function answersPersonAt(groups: TimelineGroup[], index: number): boolean {
+  for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
+    const group = groups[cursor]!;
+    if (
+      group.kind === "item" &&
+      (group.item.kind === "user-message" || group.item.kind === "human-input")
+    ) {
+      return true;
+    }
+    if (!isRoutineInput(group)) return false;
+  }
+  return false;
+}
+
+/**
+ * A routine machine input (agent update, child result, wait timeout, ...). An
+ * agent that failed, paused or needs action is news, not routine.
+ */
+function isRoutineInput(group: TimelineGroup): boolean {
+  return (
+    group.kind === "item" &&
+    group.item.kind === "machine-input-batch" &&
+    !!group.item.compact &&
+    group.item.members.every(
+      (member) =>
+        member.kind !== "child_paused" &&
+        member.classification !== "failure" &&
+        // A parent's direction is always recorded as action_required for the
+        // agent; it is routine orchestration, not something a person must do.
+        (member.classification !== "action_required" || member.kind === "agent_steer_instruction"),
+    )
+  );
+}
+
+/** A recorded wait that later input already ended. */
+function isFinishedWait(group: TimelineGroup): group is Extract<TimelineGroup, { kind: "item" }> & {
+  item: NoticeItem;
+} {
+  return (
+    group.kind === "item" &&
+    group.item.kind === "notice" &&
+    group.item.tone === "waiting" &&
+    !!group.item.recordedOutcome &&
+    !!group.item.waitEndedAt
+  );
+}
+
+/**
+ * Long orchestration runs repeat "agent update / worked / waited" many times
+ * without saying anything. Fold two or more such consecutive quiet cycles into
+ * one work row: "7 updates over 6h 12m", with the latest wait reason under it.
+ * Expanding it shows the original rows unchanged. Visible replies, people's
+ * messages, failures, approvals, live work and the current wait are never folded
+ * and end a run.
+ */
+function compactQuietCycles(
+  groups: TimelineGroup[],
+  personWork: ReadonlySet<TimelineGroup>,
+): TimelineGroup[] {
+  const result: TimelineGroup[] = [];
+  let index = 0;
+  while (index < groups.length) {
+    // A run starts at routine input, never at a leading wait (it belongs to
+    // the reply before it) or at bare work (it belongs to the visible row
+    // before it, such as an agent's failure). Later cycles may lack input,
+    // for example after a wait timeout.
+    let end = index;
+    let lastCycleEnd = index;
+    let cycles = 0;
+    while (end < groups.length) {
+      const input = isRoutineInput(groups[end]!) ? end : -1;
+      if (input < 0 && cycles === 0) break;
+      const workIndex = input >= 0 ? end + 1 : end;
+      const work = groups[workIndex];
+      if (!work || !isQuietWork(work)) break;
+      // Work that follows a person's message is that message's turn, even
+      // when it said nothing; it stays visible.
+      if (personWork.has(work) || answersPersonAt(groups, workIndex)) break;
+      const next = groups[workIndex + 1];
+      // Work directly followed by its reply is not quiet.
+      if (next?.kind === "item" && next.item.kind === "agent-message") break;
+      if (!next || !isFinishedWait(next)) break;
+      cycles += 1;
+      end = workIndex + 2;
+      lastCycleEnd = end;
+    }
+    if (cycles < 2) {
+      result.push(groups[index]!);
+      index += 1;
+      continue;
+    }
+    const run = groups.slice(index, lastCycleEnd);
+    const works = run.filter((group): group is WorkGroup => isQuietWork(group));
+    const waits = run.filter(isFinishedWait);
+    const first = works[0]!;
+    const lastWait = waits.at(-1)!;
+    result.push({
+      kind: "activity",
+      id: `cycles-${first.id}`,
+      items: works.flatMap((group) => group.items),
+      outcome: "complete",
+      work: {
+        startedAt: first.work.startedAt,
+        endedAt: lastWait.item.waitEndedAt!,
+        details: run,
+        cycles: {
+          count: cycles,
+          ...(lastWait.item.text.trim() ? { summary: lastWait.item.text.trim() } : {}),
+        },
+      },
+    });
+    index = lastCycleEnd;
+  }
+  return result;
 }
 
 /** Machine inputs that continue the current exchange rather than start one. */
@@ -3021,6 +3316,15 @@ function resourceRefs(value: unknown): import("@opengeni/sdk").ResourceRef[] {
   });
 }
 
+/** The person behind a message, when its initiator is a signed-in subject. */
+function messageSender(value: unknown): import("./types").MessageSender | undefined {
+  const record = asRecord(value);
+  if (record.kind !== "subject" || typeof record.subjectId !== "string" || !record.subjectId)
+    return undefined;
+  const label = typeof record.label === "string" && record.label.trim() ? record.label : null;
+  return { subjectId: record.subjectId, label };
+}
+
 function timelineAnnotations(value: unknown): TimelineAnnotation[] {
   if (!Array.isArray(value)) return [];
   return value.filter((candidate): candidate is TimelineAnnotation => {
@@ -3237,6 +3541,69 @@ function rememberPendingWaitOutcome(
   const turnId =
     eventTurnId || stringValue(payload.waitTurnId) || stringValue(payload.turnId) || null;
   pending.set(turnId, { id: event.id, reason, occurredAt: event.occurredAt });
+}
+
+/** Wait reasons that need a person or a policy change, not only time. */
+const ACTION_CAPACITY_WAIT_REASONS: ReadonlySet<string> = new Set([
+  "pinned_account_ineligible",
+  "model_not_allowed",
+  // Only sending the work again ends it (design 5.3 decision 4).
+  "accepted_authority_unavailable",
+]);
+
+/**
+ * Recorded wait codes, for any subscription provider, that a person must
+ * resolve: every account disabled for allocation, or the serving account
+ * needing reconnection or refusing the request. None of them is a limit.
+ */
+const ACTION_CAPACITY_WAIT_CODE = /_(?:allocator_disabled|relogin_required|account_forbidden)$/;
+
+/**
+ * A capacity wait reads as "Limit reached" with one plain secondary line. Only
+ * a wait that time alone will not end keeps its recorded, actionable reason.
+ */
+function capacityWaitPresentation(
+  type: string,
+  payload: Record<string, unknown>,
+  turnId: string | null,
+): { turnId: string | null; label: string; detail: string; text: string } {
+  if (
+    ACTION_CAPACITY_WAIT_REASONS.has(stringValue(payload.waitReason)) ||
+    ACTION_CAPACITY_WAIT_CODE.test(stringValue(payload.code))
+  ) {
+    // Claude/SuperGrok waits record the readable sentence as `error` and an
+    // internal note as `detail`; Codex waits keep their recorded order.
+    const [first, second] =
+      type === "turn.capacity_waiting"
+        ? [payload.error, payload.detail]
+        : [payload.detail, payload.error];
+    const detail = stringValue(first) || stringValue(second) || "Waiting for an account.";
+    return { turnId, label: "Waiting", detail, text: detail };
+  }
+  const detail =
+    payload.waitReason === "pinned_account_unavailable"
+      ? "Continues automatically when the chosen account is available."
+      : "Continues automatically when capacity is available.";
+  return { turnId, label: "Limit reached", detail, text: `Limit reached. ${detail}` };
+}
+
+/** Lifecycle evidence that a capacity wait is over. */
+function endsCapacityWait(event: SessionEvent, payload: Record<string, unknown>): boolean {
+  if (event.duplicateOfEventId || (event.turnAssociation && event.turnAssociation !== "current"))
+    return false;
+  switch (event.type) {
+    case "codex.capacity.resumed":
+    case "codex.capacity.superseded":
+    case "turn.completed":
+    case "turn.failed":
+    case "turn.cancelled":
+    case "turn.superseded":
+      return true;
+    case "session.status.changed":
+      return isSessionStatus(payload.status) && payload.status !== "waiting_capacity";
+    default:
+      return false;
+  }
 }
 
 function waitingOutcomeText(reason: string): string {

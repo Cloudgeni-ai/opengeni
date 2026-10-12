@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+
 import { registerClaudeSubscriptionAccountRoutes } from "./routes/claude-subscription-accounts";
 import { isPreparedMcpConnectPath } from "./prepared-mcp-permissions";
 import { registerWorkspaceModelProviderRoutes } from "./routes/workspace-model-providers";
@@ -25,7 +27,11 @@ import {
   registerAnalyticsConsentRoutes,
 } from "./routes/analytics-consent";
 import { codemodeSessionRequest } from "./codemode";
-import { SiteSessionPathError, OrganizationIntegrationDeniedError } from "@opengeni/contracts";
+import {
+  SiteSessionPathError,
+  OrganizationIntegrationDeniedError,
+  normalizeOrganizationAccessPolicy,
+} from "@opengeni/contracts";
 import {
   httpRejectionFactsFromEnvelope,
   httpRejectionFactsFromError,
@@ -101,6 +107,7 @@ import {
   reapManagedAuthIsolatedSessions,
   reapExpiredManagedAuthSessionSets,
   resolveSessionMemoryAgentScope,
+  resolveSessionAdminAuthority,
   rlsContextForWorkspace,
 } from "@opengeni/db";
 import { requireSessionEventDurableFanoutCapability } from "@opengeni/events";
@@ -174,6 +181,8 @@ import {
   SessionAuthorizationUnavailableError,
   createUserPresenceRecorder,
   registerProductUsageMetricBaselines,
+  stampPersonalApiKeyRequest,
+  verifiedDelegatedHumanAuthorizationForRequest,
 } from "@opengeni/core";
 import { createManagedAuthNewSignupsGate } from "./auth/new-signups-gate";
 import {
@@ -261,6 +270,12 @@ import { registerCatalogAssetRoutes } from "./routes/catalog-assets";
 import { registerCodexRoutes } from "./routes/codex";
 import { registerOrganizationModelProviderRoutes } from "./routes/organization-model-providers";
 import { registerOrganizationModelDefaultsRoutes } from "./routes/organization-model-defaults";
+import {
+  registerModelAccountSettingsRoutes,
+  subscriptionSettingsLockedHttpError,
+} from "./routes/model-account-settings";
+import { registerModelAccountChoiceRoutes } from "./routes/model-account-choice";
+import { registerSessionAdminAccessRoutes } from "./routes/session-admin-access";
 import { registerOrganizationIntegrationPolicyRoutes } from "./routes/organization-integration-policy";
 import { registerSuperGrokRoutes } from "./routes/supergrok";
 import { registerConnectionRoutes } from "./routes/connections";
@@ -276,6 +291,7 @@ import { registerEnvironmentRoutes } from "./routes/environments";
 import { registerFileRoutes } from "./routes/files";
 import { registerApiKeyRoutes } from "./routes/api-keys";
 import { registerOrganizationMcpConnectionRoutes } from "./routes/organization-mcp-connections";
+import { registerPersonalApiKeyRoutes } from "./routes/personal-api-keys";
 import { registerOrganizationServiceAccountRoutes } from "./routes/organization-service-accounts";
 import { registerBillingRoutes } from "./routes/billing";
 import { registerBrowserIdentityRoutes } from "./routes/browser-identities";
@@ -320,6 +336,8 @@ import { registerPreferenceRegistryRoutes } from "./routes/preference-registry";
 import { registerInsightsRoutes } from "./routes/insights";
 import { registerInsightsUsageRoutes } from "./routes/insights-usage";
 import { registerTranscriptionRoutes } from "./routes/transcriptions";
+import { registerChatCompletionRoutes } from "./routes/chat-completions";
+import { createModelCallService } from "./model-calls/service";
 import { registerEditableArtifactRoutes } from "./routes/editable-artifacts";
 import { registerSessionArtifactAssociationRoutes } from "./routes/session-artifact-associations";
 import { registerVideoGenerationRoutes } from "./routes/video-generation";
@@ -343,6 +361,7 @@ import { projectClientModel } from "./model-catalog";
 import { createTranscriptionService } from "./transcription/service";
 import { createFfmpegTranscriptionSegmenter } from "./transcription/segmenter";
 import { registerSlackInteractionRoutes } from "./integrations/slack-interactions";
+import { resolveSignedStateSecret } from "./signed-state-secret";
 
 export { allowedCorsOrigin } from "./http/cors";
 
@@ -402,6 +421,25 @@ export async function resolveWorkspaceMcpRouteDeps(
     },
   );
   return { ...routeDeps, catalogSourceSettings, settings: resolvedCatalog.settings };
+}
+
+/**
+ * Signed browser state must verify on every API replica; see
+ * {@link resolveSignedStateSecret}. A per-process key is announced once so a
+ * multi-replica operator knows why such round trips fail.
+ */
+function signedStateSecret(
+  settings: AppDependencies["settings"],
+  observability: Pick<ReturnType<typeof createObservability>, "warn">,
+): string {
+  const resolved = resolveSignedStateSecret(settings);
+  if (resolved.source === "process_random" && !["local", "test"].includes(settings.environment)) {
+    observability.warn(
+      "Signed browser state uses a per-process key; set OPENGENI_GITHUB_APP_MANIFEST_STATE_SECRET or OPENGENI_INTEGRATIONS_STATE_SECRET before running more than one API replica",
+      { source: resolved.source },
+    );
+  }
+  return resolved.secret;
 }
 
 export function createAppComposition(deps: AppDependencies): {
@@ -562,6 +600,20 @@ export function createAppComposition(deps: AppDependencies): {
           ffmpegPath: deps.settings.voiceInputFfmpegPath,
         })
       : deps.transcriptionSegmenter;
+  const modelCalls =
+    deps.modelCalls === undefined
+      ? createModelCallService({
+          db: deps.db,
+          settings: deps.settings,
+          ...(deps.catalogSourceSettings
+            ? { catalogSourceSettings: deps.catalogSourceSettings }
+            : {}),
+          entitlements: deps.entitlements ?? null,
+          ...(deps.codexFetch ? { codexFetch: deps.codexFetch } : {}),
+          ...(deps.xaiFetch ? { xaiFetch: deps.xaiFetch as never } : {}),
+          log: (message, attributes) => observability.error(message, attributes),
+        })
+      : deps.modelCalls;
   registerProductUsageMetricBaselines(observability);
   // Server-side presence counts managed people, so it exists only where
   // canonical managed browser sessions exist. Writes are batched off the
@@ -577,8 +629,7 @@ export function createAppComposition(deps: AppDependencies): {
     resolveCatalogSettings: () => resolveCatalogSettings(deps.db, deps.settings),
     observability,
     userPresence,
-    githubStateSecret:
-      deps.githubStateSecret ?? deps.settings.githubAppManifestStateSecret ?? crypto.randomUUID(),
+    githubStateSecret: deps.githubStateSecret ?? signedStateSecret(deps.settings, observability),
     managedAuth,
     managedAuthSessionAdapter,
     managedEmailTransport,
@@ -587,6 +638,7 @@ export function createAppComposition(deps: AppDependencies): {
     getDocumentServices,
     transcription,
     transcriptionSegmenter,
+    modelCalls,
     ...(sandboxClient ? { sandboxClient } : {}),
     resumeBoxById,
   };
@@ -989,6 +1041,14 @@ export function createAppComposition(deps: AppDependencies): {
       }),
       unmatched.status,
     );
+  });
+
+  // A personal API key acts as its owner. Verify it and stamp this exact raw
+  // Request before any route resolves access; the body limit above may have
+  // rebuilt the Request, so this runs after it.
+  app.use("/v1/*", async (c, next) => {
+    await stampPersonalApiKeyRequest(c.req.raw, deps);
+    await next();
   });
 
   app.use("/v1/*", async (c, next) => {
@@ -1509,6 +1569,9 @@ export function createAppComposition(deps: AppDependencies): {
     let caller: OrganizationMcpCaller;
     try {
       const connection = await resolveOrganizationMcpOAuthAccess(routeDeps, c.req.raw);
+      const personalKey = connection
+        ? null
+        : verifiedDelegatedHumanAuthorizationForRequest(c.req.raw);
       if (connection) {
         caller = {
           kind: "person",
@@ -1516,12 +1579,27 @@ export function createAppComposition(deps: AppDependencies): {
           subjectId: connection.subjectId,
           access: connection.organizationAccess,
         };
+      } else if (personalKey) {
+        // A personal API key: the person who created it, with its access.
+        // Each action rechecks their live access, exactly as for sign-in.
+        await requireAccessContext(c, routeDeps);
+        caller = {
+          kind: "person",
+          accountId: personalKey.organizationId,
+          subjectId: personalKey.subjectId,
+          access: normalizeOrganizationAccessPolicy({
+            preset: "custom",
+            permissions: [...personalKey.permissions],
+            workspaceScope: personalKey.workspaceScope,
+          }),
+        };
       } else {
         const context = await requireAccessContext(c, routeDeps);
         const authorization = c.req.header("authorization");
         if (!accountScopedApiKeyWorkspaceAuthority(context) || !authorization) {
           throw new HTTPException(403, {
-            message: "Connect with Opengeni sign-in or an organization API key.",
+            message:
+              "Connect with Opengeni sign-in, a personal API key or an organization API key.",
           });
         }
         caller = {
@@ -1676,6 +1754,10 @@ export function createAppComposition(deps: AppDependencies): {
       throw error;
     }
     const grant = authorization.grant;
+    // Admin actions dispatch back into this API as a person. Capture the
+    // context now, before this request takes on the agent's database and
+    // billing scope, so none of it carries into those actions.
+    const outsideAgentContext = AsyncLocalStorage.snapshot();
     // The agent-attempt context, this route check, and a tool's own entry check
     // re-read the same caller session and attempt; share those reads.
     return await withSessionAuthorizationReadReuse((reads) =>
@@ -1739,11 +1821,28 @@ export function createAppComposition(deps: AppDependencies): {
                 rootSessionId: null,
               })
             : null;
+        // Checked live: allowed by the organization, given to this session,
+        // and the person who gave it is still an owner or admin.
+        const sessionAdminAccess =
+          typeof boundSessionId === "string" &&
+          (await resolveSessionAdminAuthority(routeDeps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            sessionId: boundSessionId,
+          }))
+            ? {
+                origin: new URL(c.req.url).origin,
+                dispatch: (request: Request) =>
+                  outsideAgentContext(async () => await app.fetch(request, c.env)),
+                signal: c.req.raw.signal,
+              }
+            : null;
         const mcp = buildOpenGeniMcpServer(mcpDeps, grant, {
           requestOrigin: new URL(c.req.url).origin,
           workspaceMemoryEnabled,
           workspaceMemoryPromptMode,
           sessionMemory,
+          sessionAdminAccess,
         });
         // Bind tool handlers' `extra.signal` to the HTTP client's connection: a
         // worker that drops the call (Steer/Pause) aborts a blocking tool here.
@@ -2039,6 +2138,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerSessionArtifactAssociationRoutes(app, routeDeps);
   registerApiKeyRoutes(app, routeDeps);
   registerOrganizationMcpConnectionRoutes(app, routeDeps);
+  registerPersonalApiKeyRoutes(app, routeDeps);
   registerOrganizationServiceAccountRoutes(app, routeDeps);
   registerBillingRoutes(app, routeDeps);
   registerBrowserIdentityRoutes(app, routeDeps);
@@ -2097,6 +2197,9 @@ export function createAppComposition(deps: AppDependencies): {
   registerCodexRoutes(app, routeDeps);
   registerOrganizationModelProviderRoutes(app, routeDeps);
   registerOrganizationModelDefaultsRoutes(app, routeDeps);
+  registerModelAccountSettingsRoutes(app, routeDeps);
+  registerModelAccountChoiceRoutes(app, routeDeps);
+  registerSessionAdminAccessRoutes(app, routeDeps);
   registerWorkspaceModelProviderRoutes(app, routeDeps);
   registerClaudeSubscriptionOAuthRoutes(app, routeDeps);
   registerOrganizationIntegrationPolicyRoutes(app, routeDeps);
@@ -2104,6 +2207,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerSuperGrokRoutes(app, routeDeps);
   registerClaudeSubscriptionAccountRoutes(app, routeDeps);
   registerTranscriptionRoutes(app, routeDeps);
+  registerChatCompletionRoutes(app, { ...routeDeps, modelCalls });
   registerEditableArtifactRoutes(app, routeDeps);
   registerVideoGenerationRoutes(app, routeDeps);
   registerCanonicalHumanIdentityRoutes(app, routeDeps);
@@ -2145,6 +2249,7 @@ export function createAppComposition(deps: AppDependencies): {
       rawError instanceof OrganizationIntegrationDeniedError
         ? new HTTPException(403, { message: rawError.message })
         : (allowanceExhaustedHttpError(rawError) ??
+          subscriptionSettingsLockedHttpError(rawError) ??
           workspaceControlBusyHttpError(rawError) ??
           scheduledTaskTargetAccessHttpError(rawError) ??
           agentConfigHttpError(rawError) ??
@@ -3693,6 +3798,14 @@ const routeLabelPatterns: Array<{
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/machines\/[^/]+\/update$/,
     label: "/v1/workspaces/:workspaceId/machines/:enrollmentId/update",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/machines\/[^/]+\/screen-control$/,
+    label: "/v1/workspaces/:workspaceId/machines/:enrollmentId/screen-control",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/machines\/[^/]+\/privacy-settings$/,
+    label: "/v1/workspaces/:workspaceId/machines/:enrollmentId/privacy-settings",
   },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/machines$/,

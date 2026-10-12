@@ -6,7 +6,7 @@ page exists so you pick the right one in one read.
 
 | Surface | Who configures it | Scope / lifecycle | Credentials | Use it when |
 | --- | --- | --- | --- | --- |
-| **Organization MCP server** (`/v1/mcp`) | The person who connects an agent, on the sign-in page; owners and admins can disconnect any agent | One URL for everyone. Every public API action through three tools (find, describe, run), each running the real route in process as the caller | MCP OAuth sign-in acting as the person, capped by the connection's access setting; or an organization API key | An outside agent (Claude Code, Cursor, Codex) should do what a person can do across an organization |
+| **Organization MCP server** (`/v1/mcp`) | The person who connects an agent, on the sign-in page; owners and admins can disconnect any agent | One URL for everyone. Every public API action through three tools (find, describe, run), each running the real route in process as the caller | MCP OAuth sign-in or a personal API key acting as the person, capped by the connection's or key's access setting; or an organization API key | An outside agent (Claude Code, Cursor, Codex) should do what a person can do across an organization |
 | **Unified workspace tool MCP** (`/v1/workspaces/:id/mcp`) | Workspace enables integrations; session policy may narrow agent attempts | Current-human requests expose the enabled first-party, Files, Docs, capability, API-integration, and Codex Apps tools through one canonical gateway; `OPENGENI_ALLOWED_FIRST_PARTY_MCP_TOOLS` remains a hard ceiling on the broad `opengeni` server across catalog, execution, and OAuth consent, without narrowing Docs or Files. Entries requiring one-shot human approval stay in the canonical catalog but are omitted from this adapter until MCP has a server-verifiable approval transport. Agent attempts retain their exact frozen selection | Existing Opengeni bearer or standard MCP OAuth `mcp:access`, always intersected with live workspace authority | An MCP client needs the callable unified tool surface without provider-specific wrappers |
 | **Codemode** (`/v1/workspaces/:id/codemode`) | Opengeni worker, from the exact tools prepared for one attempt | Immutable attempt-frozen projection of every admitted model tool; approval choices apply uniformly; capable clients receive durable pending handles for review | Exact `agent_attempt` bearer: protected renewable file in managed sandboxes; in-memory, per-exec snapshot on Connected Machines. Execution stays in the owning worker and reuses the same resolved credentials/executor as model MCP | Attempt code needs typed, idempotent tool calls without a model round trip |
 | **Workspace HTTP/SDK tools** (`/v1/workspaces/:id/tools/*`) | Current authenticated human | Live projection of the same unified gateway; `client.tools.forWorkspace(id)` provides catalog, direct typed calls, and declarations. Connection-backed entries that also require one-shot human approval are omitted until their provider adapter supplies side-effect-free credential/resource preflight | Current human's ordinary authenticated browser/API request | A browser or host application needs typed tools without speaking MCP |
@@ -55,11 +55,15 @@ workspace, or selected ones). The connection then acts as that person:
   `scripts/public-api/surface.gen.json` where the SDK has a method
   (`scripts/public-api/action-catalog.ts`; a test fails when a registered route
   is neither in the catalog nor exempt). Exempt, each with its reason in that
-  file: Opengeni sign-in, sign-in methods and account recovery, approving an
-  agent sign-in and managing connected agents (an agent can never approve or
-  widen its own access), provider redirects back to Opengeni, signed calls
-  from other services, git protocol, machine enrollment, browser telemetry and
-  static files.
+  file: Opengeni sign-in, sign-in methods and account recovery, provider
+  redirects back to Opengeni, signed calls from other services, git protocol,
+  machine enrollment, browser telemetry and static files.
+- With Full access over all workspaces, the agent can do what the person can
+  in that organization, including approving an agent sign-in the person
+  started, managing connected agents, giving their sessions admin access,
+  their inbox, API keys and redeeming usage-limit resets. An agent with less
+  is refused the steps that give or approve access
+  (`requireFullAccessIfAgent`), so it can never widen its own.
 - A call runs the route in process with a request-local proof of the person
   (`stampDelegatedHumanAuthorization` in `@opengeni/core`). Nothing a client
   sends can create it, and the route's own permission checks decide.
@@ -79,24 +83,64 @@ workspace, or selected ones). The connection then acts as that person:
   `workspace:admin` is one permission, never a wildcard for the ones left out.
   The person's own role still expands as usual, so Full access reaches
   everything the person can do.
-- Third-party provider sign-in (Codex, SuperGrok and Claude device or OAuth
-  steps, and integration OAuth starts) stays with the person in the browser;
-  calls return a hint to finish there. Actions no MCP caller can ever complete
-  because they need the person's own browser session (creating an
-  organization, listing their organization memberships and invitations,
-  accepting an invitation, organization recovery, and confirming an identity
-  link) are marked `browserOnly` in the catalog (`ACTION_CATALOG_BROWSER_ONLY`
+- Device-code subscription sign-in (Codex and SuperGrok, at workspace or
+  organization level) works for an agent: it starts the sign-in, gives the
+  person the short code and link, and polls until they approve at the
+  provider. Browser-bound provider OAuth (Claude subscription sign-in and
+  integration OAuth starts) stays with the person in the browser; calls
+  return a hint to finish there. Actions no agent can ever complete because
+  they act across the person's organizations (creating an organization,
+  listing their organization memberships and invitations, accepting an
+  invitation) or are an identity ceremony in their own browser sign-in
+  (organization recovery, confirming an identity link) are marked
+  `browserOnly` in the catalog (`ACTION_CATALOG_BROWSER_ONLY`
   in `scripts/public-api/action-catalog.ts`): search never returns them, and
   describe or call answers with the reason without running anything.
-  Organization API keys may call the same server and act as the organization.
+  A personal API key (`ogp_…`) calls the same server as its owner, exactly
+  like a connected agent with the key's access setting. Organization API keys
+  may call it too and act as the organization.
 - `initialize` advertises `serverInfo` title `Opengeni` and the brand mark as
   MCP `icons` (light and dark SVG data URIs, plus `/icon-512.png` on the public
   origin when `OPENGENI_PUBLIC_BASE_URL` is set) for clients that render them.
 
 Connected agents are listed, changed and disconnected at
-`/v1/organizations/:id/mcp-connections` (browser only; SDK
+`/v1/organizations/:id/mcp-connections` (the person, or an agent with their
+Full access; SDK
 `listOrganizationMcpConnections`, `updateOrganizationMcpConnection`,
 `deleteOrganizationMcpConnection`). Migration `0601` is rolling.
+
+### Admin access for agent sessions
+
+An owner or admin can let one of their own Opengeni sessions reach the same
+organization actions, without connecting an outside client:
+
+- The organization allows it first: Organization settings > Security & data >
+  Agents, "Admin access for agent sessions" (off by default;
+  `GET`/`PATCH /v1/organizations/:id/agent-admin-access`, owners and admins).
+  Turning it off removes every session's access at once, and turning it on
+  again restores none.
+- Then, in the session's header menu, "Give admin access…" (`PUT
+  /v1/workspaces/:ws/sessions/:id/admin-access`, body `{ durationHours }`:
+  one hour by default, up to 720, or `null` for no time limit). Only an owner
+  or admin, on a session they started themselves, or an agent acting as them
+  with Full access (such as one with admin access). API keys and limited
+  agents can never give access, to their own session or another.
+  The granter or any owner or admin can turn it off from the shield beside
+  the title or the same menu (`DELETE`; `GET` returns the state and what the
+  viewer may do).
+- While it is on, the session's agent sees `admin_actions_search`,
+  `admin_action_describe` and `admin_action_call`. They are never part of a
+  tool selection or default: the session's Opengeni MCP server lists them only
+  while access is in effect, and every call checks again, so turning it off,
+  the organization turning it off, or the granter losing their owner or admin
+  role applies to the very next call.
+- They cover exactly the organization MCP server's catalog and run each
+  action in process as the granter with Full access over all workspaces,
+  under the same rules (`browserOnly` actions and browser-bound provider OAuth
+  stay with the person). Nothing of the agent's own workspace scope carries
+  into the action.
+
+Migration `0692` is rolling.
 
 The public OAuth authorization server is deliberately narrow: public dynamic
 client registration, authorization-code grant with mandatory PKCE S256, exact
@@ -286,6 +330,28 @@ Native disclosure returns the original SDK tool objects; generic dispatch,
 approvals, and invocation continue through the existing runtime. Listing
 joins deferred preparation but adds no preparation barrier to the first model
 request, no shell dependency, and no change to eager/search policy defaults.
+
+### What the model sees of a tool result
+
+MCP separates content meant for the model from protocol data meant for
+clients, and the runtime keeps that split
+(`mcpResultModelContent` in `packages/runtime/src/mcp-result-custom-data.ts`):
+
+- Text blocks reach the model as text, and image blocks (PNG, JPEG, GIF, WebP)
+  as image input, so a screenshot is seen as a picture rather than as base64
+  text. Models without image input get the usual omission marker instead.
+- An embedded text resource becomes text with its URI. Audio, other image
+  types and binary resources become a one-line description (type, size, URI);
+  their bytes are never sent as text. Resource links and unknown block types are
+  shown as compact JSON without block `_meta`.
+- `structuredContent` is added once as compact JSON, and a text block that only
+  repeats it is dropped.
+- An error result starts with "The tool reported an error."
+- `_meta` and non-standard envelope fields are not sent to the model.
+
+The exact result, including `_meta`, stays in the run item's custom data and in
+the durable `agent.toolCall.output` event (inline media there becomes a
+`media_preview`), so audit, approvals and nested prefixed servers are unchanged.
 
 ### Tool argument errors
 

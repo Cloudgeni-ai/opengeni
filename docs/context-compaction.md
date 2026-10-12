@@ -25,7 +25,7 @@ The implementation lives in:
 
 - `packages/runtime/src/context-compaction.ts`: thresholds, portable rebuild,
   remote v2 retain/rebuild helpers, and the typed compaction signal.
-- `packages/runtime/src/prepared-compaction-request.ts`: retains the actual prepared request prefix at the model dispatch boundary. Responses pre-turn/operator and mid-turn compaction stop there before ordinary inference; no prefix is rebuilt from the original Agent. A missing prepared request fails closed. Remote v2 preserves all prepared model settings; portable Responses preserves the prepared tools and instructions while applying its summary-specific output limit and provider safety settings.
+- `packages/runtime/src/prepared-compaction-request.ts`: retains the actual prepared request prefix at the model dispatch boundary. Responses and Claude pre-turn/operator and mid-turn compaction stop there before ordinary inference; no prefix is rebuilt from the original Agent. A missing prepared request fails closed. Remote v2 preserves all prepared model settings; portable Responses preserves the prepared tools and instructions while applying its summary-specific output limit and provider safety settings; Claude preserves every cache-relevant field (see below).
 - `apps/worker/src/activities/run-input.ts`: operator compaction loads canonical history through ordinary input preparation without a synthetic message or required update batch.
 - `packages/runtime/src/index.ts`: portable summarizer + `requestRemoteCompactionV2`.
 - `apps/worker/src/activities/context-compaction.ts`: mode branch, summarizer
@@ -229,6 +229,15 @@ The compaction model receives:
 3. for Responses providers, the exact prepared system instructions and
    model-visible tool schemas from the ordinary agent request; portable
    compaction sets `tool_choice:none` and cannot execute returned tool calls.
+   Claude caches `tools` → `system` → `messages`, and its thinking mode,
+   `output_config.effort` and `tool_choice` are part of the cache key, so a
+   Claude checkpoint keeps the prepared tools, instructions, thinking, effort
+   and tool choice unchanged, changes only `max_tokens`, and appends a
+   text-only instruction after the checkpoint prompt in the same user turn.
+   Its history is the same projected prefix, so the call reads the warm cache.
+   If the model still calls a tool, one retry sets `tool_choice:none` (tools
+   and instructions stay cached); a reply with a tool call never becomes the
+   checkpoint.
    Chat providers still use a tool-less transcript request and composed
    instructions because their protocol differs;
 4. no provider-side context-management policy.
@@ -439,13 +448,27 @@ bounded status/code/request identifiers, never the provider message or model
 input.
 
 When the latest finished inference has `code="context_compaction_failed"`, an
-active goal remains active and ordinary pending system/child/schedule updates
-remain durable, but neither may start another inference against the unchanged
-history. A queued human/API prompt or Agent Steer instruction remains runnable
-and receives the pending updates at its normal boundary. Explicit `/compact`
-also remains runnable; it does not consume those updates, but a successful
-checkpoint supplies newer finished-turn truth so the existing pending batch can
-run next. This gate neither creates queue work nor consumes a goal
+active goal remains active and the machine inputs that were already pending at
+that failure remain durable, but neither may start another inference against
+the unchanged history. The hold is bounded by the exact `turn.failed` event
+sequence (`compactionFailureHoldSequenceTx` in
+`packages/db/src/compaction-failure-hold.ts`): an input whose own
+`system.update.pending` event is newer than that sequence is genuinely new
+truth. Under the ordinary wake-class rules it makes one new attempt, and the
+held backlog rides along in canonical order (a batch that cannot coalesce
+claims first and the newer input follows). A queued human/API prompt or Agent
+Steer instruction, of any age, remains runnable and receives the pending
+updates at its normal boundary. Explicit `/compact` also remains runnable; it
+does not consume those updates, but a successful checkpoint supplies newer
+finished-turn truth so the existing pending batch can run next. Every reader
+of runnable work applies the same hold: work peek, claim, pre-claim failure,
+goal materialization, final idle settlement, the workflow-wake delivery ACK and
+the child-result wake repair. Held-only input therefore neither keeps a wake
+revision open (the dispatcher would otherwise re-signal a closed workflow
+forever) nor wakes a session, while a sender's new message after the failure
+always wakes it. A further compaction failure starts a new hold at its own
+sequence, so every retry needs another external input and there is no
+self-sustaining loop. This gate neither creates queue work nor consumes a goal
 continuation counter.
 
 Manual `/compact` sets one durable idempotent request. During active inference,

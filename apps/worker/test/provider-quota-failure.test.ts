@@ -1,6 +1,10 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { CODEX_TRANSPORT_ERROR_HEADER } from "@opengeni/codex";
-import { buildOpenAIClientFromSettings, CompactionProviderResponseError } from "@opengeni/runtime";
+import {
+  AnthropicRequestError,
+  buildOpenAIClientFromSettings,
+  CompactionProviderResponseError,
+} from "@opengeni/runtime";
 import { testSettings } from "@opengeni/testing";
 import {
   agentRunFailurePayload,
@@ -324,6 +328,40 @@ describe("provider quota exhaustion fails the turn promptly", () => {
     expect(agentRunFailurePayload(codexQuota)).toMatchObject({
       code: "provider_rate_limited",
       retryable: true,
+    });
+  });
+
+  test("a Claude subscription rate limit during compaction recovers instead of failing as quota", () => {
+    // A transient subscription 429 can carry a long retry hint and limit
+    // wording. The ordinary turn path rotates accounts or waits for capacity;
+    // the checkpoint request must take that same path.
+    const claude429 = (subscription: boolean) =>
+      new AnthropicRequestError(
+        "Claude request failed with HTTP 429",
+        429,
+        "anthropic_http_error",
+        { type: "rate_limit_error", message: "This request would exceed your rate limit." },
+        new Headers({ "retry-after": "3600" }),
+        { subscription },
+      );
+    const subscriptionFailure = new CompactionProviderResponseError(
+      { httpStatus: 429 },
+      claude429(true),
+    );
+    expect(shouldRecoverCompactionProviderFailure(subscriptionFailure)).toBe(true);
+    expect(compactionFailureTurnEventPayload(subscriptionFailure)).not.toHaveProperty("quotaScope");
+    expect(agentRunFailurePayload(claude429(true))).not.toMatchObject({
+      code: "provider_quota_exhausted",
+    });
+
+    // The same refusal on a Claude API key keeps the API-key quota rule.
+    const apiKeyFailure = new CompactionProviderResponseError(
+      { httpStatus: 429 },
+      claude429(false),
+    );
+    expect(shouldRecoverCompactionProviderFailure(apiKeyFailure)).toBe(false);
+    expect(compactionFailureTurnEventPayload(apiKeyFailure)).toMatchObject({
+      quotaScope: "quota",
     });
   });
 

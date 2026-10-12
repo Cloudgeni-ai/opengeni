@@ -295,28 +295,40 @@ describe("capacity activities accept both waiter shapes", () => {
     ).toMatchObject({ waiterId: "waiter-1", nextCheckAt: new Date(0).toISOString() });
   });
 
-  test("without a core waiter the legacy Codex, SuperGrok and Claude peeks run unchanged", async () => {
-    spy(db, "getSubscriptionCoreCodexCapacityWaitForSession").mockResolvedValue(null);
-    const nextCheckAt = new Date("2030-01-01T00:00:00.000Z");
-    spy(db, "getCodexCapacityWaitForSession").mockResolvedValue({
-      id: "legacy-waiter",
-      generation: 7,
-      wakeRevision: 2,
-      observedWakeRevision: 2,
-      nextCheckAt,
-    } as never);
-    expect(
-      await activities().getCodexCapacityWait({
-        workspaceId: "workspace-1",
-        sessionId: "session-1",
-      }),
-    ).toEqual({
-      waiterId: "legacy-waiter",
-      generation: 7,
-      nextCheckAt: nextCheckAt.toISOString(),
-      wakeRevision: 2,
-    });
-  });
+  test.each(["xai", "claude"] as const)(
+    "without a core waiter the %s peek remains unchanged",
+    async (provider) => {
+      spy(db, "getSubscriptionCoreCodexCapacityWaitForSession").mockResolvedValue(null);
+      const legacy = spy(db, "getCodexCapacityWaitForSession");
+      const nextCheckAt = new Date("2030-01-01T00:00:00.000Z");
+      const row = {
+        id: "provider-waiter",
+        generation: 7,
+        wakeRevision: 2,
+        observedWakeRevision: 2,
+        nextCheckAt,
+      };
+      spy(db, "getXaiCapacityWaitForSession").mockResolvedValue(
+        provider === "xai" ? (row as never) : null,
+      );
+      spy(db, "getClaudeCapacityWaitForSession").mockResolvedValue(
+        provider === "claude" ? (row as never) : null,
+      );
+      expect(
+        await activities().getCodexCapacityWait({
+          workspaceId: "workspace-1",
+          sessionId: "session-1",
+        }),
+      ).toEqual({
+        provider,
+        waiterId: row.id,
+        generation: 7,
+        nextCheckAt: nextCheckAt.toISOString(),
+        wakeRevision: 2,
+      });
+      expect(legacy).not.toHaveBeenCalled();
+    },
+  );
 
   test("reconcile resolves a recorded waiter id against the core waiter first", async () => {
     spy(db, "getSubscriptionCoreCodexCapacityWaitById").mockResolvedValue(waiter);
@@ -415,7 +427,7 @@ describe("capacity activities accept both waiter shapes", () => {
     expect(evaluate).not.toHaveBeenCalled();
   });
 
-  test("a waiter id that is not a core waiter falls back to the legacy Codex waiter", async () => {
+  test("a historical Codex waiter missing from core is stale without a legacy read", async () => {
     spy(db, "getSubscriptionCoreCodexCapacityWaitById").mockResolvedValue(null);
     const legacyRead = spy(db, "getCodexCapacityWaitForSession").mockResolvedValue(null);
     expect(
@@ -428,7 +440,7 @@ describe("capacity activities accept both waiter shapes", () => {
         cause: "timer",
       }),
     ).toEqual({ action: "stale" });
-    expect(legacyRead).toHaveBeenCalledWith({}, "workspace-1", "session-1");
+    expect(legacyRead).not.toHaveBeenCalled();
   });
 
   test("SuperGrok and Claude waits never consult the core", async () => {

@@ -114,3 +114,92 @@ export async function withEffectiveSessionPolicy<T extends PolicyRow>(
       : row;
   });
 }
+
+/** Compact-list model projection with a fixed per-row cost.
+ *
+ * Each listed session gets two backward probes of
+ * session_events_workspace_session_type_sequence_idx (its latest
+ * `turn.started` and its latest explicit `session.model_settings.updated`)
+ * and one primary-key lookup of the started turn.
+ * The latest started turn's policy wins unless the settings write is newer (or
+ * no turn has started), in which case the stored defaults are current. Unlike
+ * {@link withEffectiveSessionPolicy} it never walks older turns, so a long
+ * session costs the same as a new one. Read projection only.
+ */
+export async function withSessionListModelPolicy<T extends PolicyRow>(
+  db: Database,
+  workspaceId: string,
+  rows: readonly T[],
+): Promise<T[]> {
+  if (rows.length === 0) return [];
+  // Probe the latest start event alone, then look its turn up by primary key.
+  // Joining inside the LIMIT would keep scanning older events whenever a start
+  // has no turn row (imported history), which is exactly the unbounded walk
+  // this projection exists to avoid.
+  const started = db
+    .select({ sequence: schema.sessionEvents.sequence, turnId: schema.sessionEvents.turnId })
+    .from(schema.sessionEvents)
+    .where(
+      and(
+        eq(schema.sessionEvents.workspaceId, workspaceId),
+        eq(schema.sessionEvents.sessionId, sql`${schema.sessions.id}`),
+        eq(schema.sessionEvents.type, "turn.started"),
+      ),
+    )
+    .orderBy(desc(schema.sessionEvents.sequence))
+    .limit(1)
+    .as("latest_started_turn_event");
+  const settings = db
+    .select({ sequence: schema.sessionEvents.sequence })
+    .from(schema.sessionEvents)
+    .where(
+      and(
+        eq(schema.sessionEvents.workspaceId, workspaceId),
+        eq(schema.sessionEvents.sessionId, sql`${schema.sessions.id}`),
+        eq(schema.sessionEvents.type, "session.model_settings.updated"),
+      ),
+    )
+    .orderBy(desc(schema.sessionEvents.sequence))
+    .limit(1)
+    .as("latest_model_settings_write");
+  // Stored defaults and both probes share one statement snapshot, so a
+  // concurrent settings write cannot pair a newer boundary with stale defaults.
+  // A start without its turn row (imported history) falls back to defaults.
+  const startedIsCurrent = sql`${schema.sessionTurns.id} is not null and ${started.sequence} > coalesce(${settings.sequence}, -1)`;
+  const policies = await db
+    .select({
+      id: schema.sessions.id,
+      model: sql<string>`case when ${startedIsCurrent} then ${schema.sessionTurns.model} else ${schema.sessions.model} end`,
+      reasoningEffort: sql<string>`case when ${startedIsCurrent} then ${schema.sessionTurns.reasoningEffort} else ${schema.sessions.reasoningEffort} end`,
+      latencyMode: sql<string>`case when ${startedIsCurrent} then ${schema.sessionTurns.latencyMode} else ${schema.sessions.latencyMode} end`,
+    })
+    .from(schema.sessions)
+    .leftJoinLateral(started, sql`true`)
+    .leftJoin(
+      schema.sessionTurns,
+      and(
+        eq(schema.sessionTurns.workspaceId, schema.sessions.workspaceId),
+        eq(schema.sessionTurns.sessionId, schema.sessions.id),
+        eq(schema.sessionTurns.id, started.turnId),
+      ),
+    )
+    .leftJoinLateral(settings, sql`true`)
+    .where(
+      and(
+        eq(schema.sessions.workspaceId, workspaceId),
+        inArray(schema.sessions.id, [...new Set(rows.map((row) => row.id))]),
+      ),
+    );
+  const byId = new Map(policies.map((policy) => [policy.id, policy]));
+  return rows.map((row) => {
+    const policy = byId.get(row.id);
+    return policy?.model
+      ? {
+          ...row,
+          model: policy.model,
+          reasoningEffort: policy.reasoningEffort ?? row.reasoningEffort,
+          latencyMode: policy.latencyMode ?? row.latencyMode,
+        }
+      : row;
+  });
+}

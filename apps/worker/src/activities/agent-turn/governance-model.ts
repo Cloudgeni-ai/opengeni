@@ -24,6 +24,7 @@ import {
 } from "@opengeni/runtime";
 import {
   codeSearchDeploymentPolicy,
+  policyChargesCreditsForModel,
   settingsWithResolvedModelContext,
   type Settings,
 } from "@opengeni/config";
@@ -112,6 +113,8 @@ export type GovernanceModelOk = {
   workspaceAgentIdentity: string | null;
   workspaceGovernance: ReturnType<typeof renderWorkspaceGovernanceContext>;
   structuredWorkspacePolicyActive: boolean;
+  /** False when the workspace turned Opengeni credits off (model policy). */
+  workspaceCreditModelsAllowed: boolean;
   workspaceMemory: string | null | undefined;
   buildCompanyBrainContributionReceiptFor: (
     skillCatalogText: string,
@@ -459,6 +462,11 @@ export async function prepareGovernanceAndModel(
       const verdict = evaluateWorkspaceModelPolicy(workspaceModelPolicy, {
         providerId: turnExecutionPolicy.providerId,
         modelId: turnExecutionPolicy.productModelId,
+        // The same cost class the claim bills (`chargesOpenGeniCredits`):
+        // the resolved definition when present, else the frozen product id.
+        chargesCredits: resolvedModel
+          ? resolvedModel.configured.cost === "credits"
+          : policyChargesCreditsForModel(capabilitySettings, turnExecutionPolicy.productModelId),
       });
       if (!verdict.allowed) {
         throw new WorkspaceModelPolicyBlockedError(
@@ -519,6 +527,7 @@ export async function prepareGovernanceAndModel(
       workspaceAgentIdentity,
       workspaceGovernance,
       structuredWorkspacePolicyActive,
+      workspaceCreditModelsAllowed: workspaceModelPolicy?.allowCreditModels !== false,
       workspaceMemory,
       buildCompanyBrainContributionReceiptFor,
       logicalSandboxSettings,

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
 import { nativeCommandQualificationTriggerBindings } from "../src/native-command-readiness";
 import {
   evaluateRuntimeDatabasePosture,
@@ -19,18 +20,33 @@ import {
   RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES,
   NATIVE_COMMAND_QUALIFICATION_PRIVATE_TABLES,
   NATIVE_COMMAND_QUALIFICATION_RUNTIME_ROUTINES,
+  SUBSCRIPTION_AUTHORITY_COMPAT_OWNER_ROUTINES,
+  SUBSCRIPTION_AUTHORITY_FENCE_OWNER_ROUTINES,
+  SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES,
+  SUBSCRIPTION_CORE_PRECURSOR_OWNER_ROUTINES,
   SUBSCRIPTION_M3_OWNER_ONLY_PRIVATE_ROUTINES,
   SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES,
+  SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS,
   SANDBOX_FILE_PUBLICATION_RUNTIME_ROUTINES,
   ARTIFACT_PIN_RUNTIME_ROUTINES,
   SCHEDULED_SLACK_BOT_MESSAGE_RUNTIME_ROUTINES,
   ORGANIZATION_SIGNUP_USE_CASE_RUNTIME_ROUTINES,
   SLACK_FILE_UPLOAD_OPERATIONS_TABLE,
+  SUBSCRIPTION_CODEX_TWIN_PRIVATE_ROUTINES,
   type RuntimeDatabasePosture,
   type RuntimeDatabasePostureOptions,
   type RuntimePrivateTablePosture,
   type RuntimeTablePosture,
 } from "../src/runtime-posture";
+// Namespace access for the owner-routine lists, which other open PRs import
+// by name in the list above: a merge must not duplicate an imported binding.
+import * as runtimePosture from "../src/runtime-posture";
+
+/** Write-allowed probes pin a fixed search path without the target schema. */
+const FIXED_SEARCH_PATH_PRIVATE_ROUTINES: ReadonlySet<string> = new Set([
+  "subscription_codex_refresh_write_allowed(uuid, uuid, uuid)",
+  "subscription_core_refresh_write_allowed(text, uuid, uuid, uuid)",
+]);
 
 const options: RuntimeDatabasePostureOptions = {
   rlsStrategy: "force",
@@ -421,6 +437,7 @@ function safePosture(): RuntimeDatabasePosture {
       }),
     ),
     subscriptionCodexCutoverActivationPresent: true,
+    subscriptionProviderCutoverReceipts: ["codex"],
     tables: [
       {
         name: "tenant_rows",
@@ -594,7 +611,7 @@ function safePosture(): RuntimeDatabasePosture {
         publicExecute: false,
         securityDefiner: true,
         configuration: [
-          name === "subscription_codex_refresh_write_allowed(uuid, uuid, uuid)"
+          FIXED_SEARCH_PATH_PRIVATE_ROUTINES.has(name)
             ? "search_path=pg_catalog, opengeni_private, pg_temp"
             : "search_path=pg_catalog, public, opengeni_private, pg_temp",
         ],
@@ -734,6 +751,111 @@ describe("runtime database posture evaluator", () => {
     }
   });
 
+  test("tolerates an absent Codex twin routine but holds a present one to the precursor hardening", () => {
+    const hardenedTwin = (name: string) => ({
+      name,
+      owner: "opengeni_migrator",
+      execute: true,
+      publicExecute: false,
+      securityDefiner: true,
+      configuration: ["search_path=pg_catalog, public, opengeni_private, pg_temp"],
+    });
+    for (const name of SUBSCRIPTION_CODEX_TWIN_PRIVATE_ROUTINES) {
+      expect(SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES as readonly string[]).not.toContain(name);
+      // Absent (after the retirement migration) and present (before it).
+      expect(evaluateRuntimeDatabasePosture(safePosture(), options)).toEqual([]);
+      const present = safePosture();
+      present.privateRoutines.push(hardenedTwin(name));
+      expect(evaluateRuntimeDatabasePosture(present, options)).toEqual([]);
+      for (const unsafe of [
+        { execute: false },
+        { publicExecute: true },
+        { securityDefiner: false },
+        { owner: "opengeni_app" },
+        { configuration: ["search_path=public"] },
+      ]) {
+        const posture = safePosture();
+        posture.privateRoutines.push({ ...hardenedTwin(name), ...unsafe });
+        expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+          `retiring Codex twin private routine ${name} is unsafe`,
+        );
+      }
+      const duplicated = safePosture();
+      duplicated.privateRoutines.push(hardenedTwin(name), hardenedTwin(name));
+      expect(evaluateRuntimeDatabasePosture(duplicated, options)).toContain(
+        `retiring Codex twin private routine ${name} is unsafe`,
+      );
+    }
+  });
+
+  test("keeps the subscription owner implementation checks once the Codex twin writers are gone", () => {
+    const codexWriterContext = "subscription_codex_writer_context(uuid, uuid, text)";
+    const codexConnect = SUBSCRIPTION_CODEX_TWIN_PRIVATE_ROUTINES.find((name) =>
+      name.startsWith("connect_subscription_codex_personal("),
+    )!;
+    const ownerRoutine = (name: string) => ({
+      name,
+      owner: "opengeni_migrator",
+      execute: false,
+      publicExecute: false,
+      securityDefiner: true,
+      configuration: ["search_path=pg_catalog, public, opengeni_private, pg_temp"],
+    });
+    const ownerRoutines = [
+      "grant_subscription_codex_owner_capability(text, uuid, uuid, text, uuid)",
+      "drop_subscription_codex_owner_capabilities(uuid)",
+      "derive_scheduled_revision_subscription_authority()",
+      ...runtimePosture.SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES,
+      ...runtimePosture.SUBSCRIPTION_CORE_PRECURSOR_OWNER_ROUTINES,
+    ];
+    // The safe posture carries the neutral writers and no Codex twin writer.
+    // Every other owner-only routine is present and safe too, so owner
+    // requirements other PRs add to the same block stay satisfied; only the
+    // Codex writer context is left out, since it is asserted separately below.
+    const withoutTwins = () => {
+      const posture = safePosture();
+      posture.subscriptionOwnerRoutines = [
+        ...new Set([
+          ...ownerRoutines,
+          ...SUBSCRIPTION_M3_OWNER_ONLY_PRIVATE_ROUTINES.filter(
+            (name) => name !== codexWriterContext,
+          ),
+        ]),
+      ].map(ownerRoutine);
+      return posture;
+    };
+    expect(withoutTwins().privateRoutines.some((routine) => routine.name === codexConnect)).toBe(
+      false,
+    );
+    expect(evaluateRuntimeDatabasePosture(withoutTwins(), options)).toEqual([]);
+    for (const name of ownerRoutines) {
+      const missing = withoutTwins();
+      missing.subscriptionOwnerRoutines = missing.subscriptionOwnerRoutines!.filter(
+        (routine) => routine.name !== name,
+      );
+      expect(evaluateRuntimeDatabasePosture(missing, options)).toContain(
+        `subscription owner implementation ${name} is missing or unsafe`,
+      );
+      const executable = withoutTwins();
+      executable.subscriptionOwnerRoutines!.find((routine) => routine.name === name)!.execute =
+        true;
+      expect(evaluateRuntimeDatabasePosture(executable, options)).toContain(
+        `subscription owner implementation ${name} is missing or unsafe`,
+      );
+    }
+    // The Codex writer context is required exactly while a Codex twin writer exists.
+    const twinWriter = withoutTwins();
+    twinWriter.privateRoutines.push({
+      ...ownerRoutine(codexConnect),
+      execute: true,
+    });
+    expect(evaluateRuntimeDatabasePosture(twinWriter, options)).toContain(
+      `subscription owner implementation ${codexWriterContext} is missing or unsafe`,
+    );
+    twinWriter.subscriptionOwnerRoutines!.push(ownerRoutine(codexWriterContext));
+    expect(evaluateRuntimeDatabasePosture(twinWriter, options)).toEqual([]);
+  });
+
   test("requires exact private M3 precursor capabilities and hardened ownership/ACL/search path", () => {
     expect(evaluateRuntimeDatabasePosture(safePosture(), options)).toEqual([]);
     for (const name of SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES) {
@@ -759,6 +881,62 @@ describe("runtime database posture evaluator", () => {
     }
   });
 
+  test("once a fence helper (0717) exists, every one must, owner-only with a safe search path", () => {
+    const ownerRoutine = (name: string) => ({
+      name,
+      owner: "opengeni_migrator",
+      execute: false,
+      publicExecute: false,
+      securityDefiner: false,
+      configuration: ["search_path=pg_catalog, public, opengeni_private, pg_temp"],
+    });
+    const withOwnerRoutines = (names: readonly string[]) => {
+      const posture = safePosture();
+      posture.subscriptionOwnerRoutines = [
+        "subscription_codex_writer_context(uuid, uuid, text)",
+        "grant_subscription_codex_owner_capability(text, uuid, uuid, text, uuid)",
+        "drop_subscription_codex_owner_capabilities(uuid)",
+        "derive_scheduled_revision_subscription_authority()",
+        ...SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES,
+        ...SUBSCRIPTION_CORE_PRECURSOR_OWNER_ROUTINES,
+        ...SUBSCRIPTION_AUTHORITY_COMPAT_OWNER_ROUTINES,
+        ...names,
+      ].map(ownerRoutine);
+      return posture;
+    };
+    // Before 0717 none is required; after it all four are, safely.
+    expect(evaluateRuntimeDatabasePosture(withOwnerRoutines([]), options)).toEqual([]);
+    expect(
+      evaluateRuntimeDatabasePosture(
+        withOwnerRoutines(SUBSCRIPTION_AUTHORITY_FENCE_OWNER_ROUTINES),
+        options,
+      ),
+    ).toEqual([]);
+    for (const name of SUBSCRIPTION_AUTHORITY_FENCE_OWNER_ROUTINES) {
+      const missing = withOwnerRoutines(
+        SUBSCRIPTION_AUTHORITY_FENCE_OWNER_ROUTINES.filter((candidate) => candidate !== name),
+      );
+      expect(evaluateRuntimeDatabasePosture(missing, options)).toContain(
+        `subscription owner implementation ${name} is missing or unsafe`,
+      );
+      for (const unsafe of [
+        { execute: true },
+        { publicExecute: true },
+        { owner: "opengeni_app" },
+        { configuration: ["search_path=public"] },
+      ]) {
+        const posture = withOwnerRoutines(SUBSCRIPTION_AUTHORITY_FENCE_OWNER_ROUTINES);
+        Object.assign(
+          posture.subscriptionOwnerRoutines!.find((routine) => routine.name === name)!,
+          unsafe,
+        );
+        expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+          `subscription owner implementation ${name} is missing or unsafe`,
+        );
+      }
+    }
+  });
+
   test("requires the individual Claude account activation before starting a runtime", () => {
     const posture = safePosture();
     posture.claudeSubscriptionPoolActivationPresent = false;
@@ -773,6 +951,18 @@ describe("runtime database posture evaluator", () => {
     expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
       "database is missing the 0689 Codex subscription-core cutover receipt; run the drained migration first",
     );
+  });
+
+  test("requires the receipt of every provider whose cutover is in the binary's ledger", () => {
+    const posture = safePosture();
+    posture.subscriptionProviderCutoverReceipts = [];
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "database is missing the codex subscription-core cutover receipt (0689_subscription_core_codex_cutover.sql); apply the pending migrations first",
+    );
+    // Each listed cutover migration is in this binary's ledger.
+    for (const migration of Object.values(SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS)) {
+      expect(existsSync(new URL(`../drizzle/${migration}`, import.meta.url))).toBe(true);
+    }
   });
 
   const modelFactCapabilities = [
@@ -799,6 +989,14 @@ describe("runtime database posture evaluator", () => {
     {
       name: "visible_workspace_insights_model_fact_rows(uuid, timestamp with time zone, timestamp with time zone, text, text, uuid, uuid)",
       violation: "Insights scoped fact projection is missing or unsafe",
+    },
+    {
+      name: "private_scheduled_task_summaries(uuid, uuid, text, uuid, timestamp with time zone, integer)",
+      violation: "private schedule summary capability is missing or unsafe",
+    },
+    {
+      name: "pause_private_scheduled_task(uuid, uuid, text, uuid)",
+      violation: "private schedule pause capability is missing or unsafe",
     },
   ];
 
@@ -1431,11 +1629,29 @@ describe("runtime database posture evaluator", () => {
                       ? 8
                       : 0;
         const expectedLength =
+          // 0725 adds organization privacy preferences with full runtime DML.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
+          // 0696 adds the workspace-isolated single-use enroll-token ledger.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
           // 0690 adds one organization-isolated table with full runtime DML.
           (tables === FORCE_RLS_TABLES ||
           tables === RUNTIME_FULL_DML_TABLES ||
           tables === RUNTIME_DML_TABLES
             ? 1
+            : 0) +
+          // 0692 adds the organization allowance and the per-session grant.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 2
             : 0) +
           // Individual Claude accounts share the six subscription runtime tables;
           // the organization key scope join and service accounts add two more.
@@ -1529,7 +1745,9 @@ describe("runtime database posture evaluator", () => {
         1 +
         16 + // M2 and M3 runtime-store migrations add sixteen FORCE-RLS tables with explicit runtime DML contracts.
         1 + // Session content blobs: append-only, session-owned.
-        1; // 0690 organization model defaults: full-DML, FORCE-RLS.
+        1 + // 0690 organization model defaults: full-DML, FORCE-RLS.
+        2 + // 0692 agent admin access allowance and session grants: full-DML, FORCE-RLS.
+        1; // 0696 single-use enroll-token redemptions: full-DML, FORCE-RLS.
       expect(FORCE_RLS_TABLES).toContain("organization_model_defaults");
       expect(RUNTIME_FULL_DML_TABLES).toContain("organization_model_defaults");
       expect(RUNTIME_TABLE_PRIVILEGES.organization_model_defaults).toEqual([
@@ -1590,6 +1808,7 @@ describe("runtime database posture evaluator", () => {
         tableCount +
           2 + // 0600 organization key workspace scope join and 0603 service accounts.
           3 +
+          1 + // 0725 organization privacy preferences.
           personalResourceProtectedTableCount +
           managedAuthSessionSetProtectedTableCount +
           organizationRecoveryProtectedTableCount -
@@ -1599,6 +1818,7 @@ describe("runtime database posture evaluator", () => {
         tableCount +
           2 + // 0600 organization key workspace scope join and 0603 service accounts.
           3 +
+          1 + // 0725 organization privacy preferences.
           personalResourceProtectedTableCount +
           managedAuthSessionSetProtectedTableCount +
           organizationRecoveryProtectedTableCount -
@@ -1762,7 +1982,7 @@ describe("runtime database posture evaluator", () => {
         (SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES as readonly string[]).includes(
           privateRoutine.name,
         ) &&
-        privateRoutine.name !== "subscription_codex_refresh_write_allowed(uuid, uuid, uuid)"
+        !FIXED_SEARCH_PATH_PRIVATE_ROUTINES.has(privateRoutine.name)
       ) {
         privateRoutine.configuration = [
           "search_path=pg_catalog, tenantx, opengeni_private, pg_temp",
@@ -1784,7 +2004,7 @@ describe("runtime database posture evaluator", () => {
         (SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES as readonly string[]).includes(
           privateRoutine.name,
         ) &&
-        privateRoutine.name !== "subscription_codex_refresh_write_allowed(uuid, uuid, uuid)"
+        !FIXED_SEARCH_PATH_PRIVATE_ROUTINES.has(privateRoutine.name)
       ) {
         privateRoutine.configuration = [
           'search_path=pg_catalog, "Tenant Space", opengeni_private, pg_temp',
@@ -2181,7 +2401,7 @@ describe("runtime database posture evaluator", () => {
       if (
         (SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES as readonly string[]).includes(routine.name)
       ) {
-        if (routine.name !== "subscription_codex_refresh_write_allowed(uuid, uuid, uuid)") {
+        if (!FIXED_SEARCH_PATH_PRIVATE_ROUTINES.has(routine.name)) {
           routine.configuration = ["search_path=pg_catalog, tenantx, opengeni_private, pg_temp"];
         }
       }

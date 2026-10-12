@@ -213,7 +213,13 @@ export class BackupRunner {
         const db = this.config.databases.find((d) => `${d.name}.dump.age` === name);
         const command = db
           ? pg("pg_dump", db.service, ["--format=custom", "--compress=6", "--no-owner"])
-          : pg("pg_dumpall", this.config.rolesService!, ["--roles-only"]);
+          : pg("pg_dumpall", this.config.rolesService!, [
+              "--roles-only",
+              // Unlike pg_dump, pg_dumpall otherwise chooses postgres/template1
+              // even when PGSERVICE specifies a different database.
+              `--database=service=${this.config.rolesService!}`,
+              "--no-password",
+            ]);
         await run(
           [
             command,

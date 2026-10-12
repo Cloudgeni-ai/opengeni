@@ -12,7 +12,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "AcceptOrganizationInvitationResponse"
     ],
-    "browserOnly": "it acts on the person's own account across organizations (creating an organization, listing their memberships or invitations, accepting an invitation), and a connection is limited to one organization"
+    "browserOnly": "it acts on the person's own account across organizations (creating an organization, listing their memberships or invitations, accepting an invitation), and an agent works in one organization"
   },
   {
     "id": "acceptOrganizationRecoveryCustody",
@@ -24,7 +24,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "OrganizationRecoveryMutationResponse"
     ],
-    "browserOnly": "organization recovery is a ceremony in the person's own browser session"
+    "browserOnly": "organization recovery is for when someone can't sign in, so each step is proven by that person's own browser sign-in"
   },
   {
     "id": "acknowledgeStream",
@@ -214,6 +214,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "answerMcpConnectionRequest",
+    "method": "POST",
+    "path": "/v1/mcp-connections/requests/:request",
+    "request": [
+      "McpConnectionDecision"
+    ],
+    "response": []
+  },
+  {
     "id": "appendArchivedSessionEvents",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/session-imports/:importId/events",
@@ -267,7 +276,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "OrganizationRecoveryMutationResponse"
     ],
-    "browserOnly": "organization recovery is a ceremony in the person's own browser session"
+    "browserOnly": "organization recovery is for when someone can't sign in, so each step is proven by that person's own browser sign-in"
   },
   {
     "id": "approveSlackUserLinkAccessRequest",
@@ -437,7 +446,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "OrganizationRecoveryMutationResponse"
     ],
-    "browserOnly": "organization recovery is a ceremony in the person's own browser session"
+    "browserOnly": "organization recovery is for when someone can't sign in, so each step is proven by that person's own browser sign-in"
   },
   {
     "id": "cancelSessionBackgroundCommand",
@@ -529,7 +538,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "codexConnectPoll",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/codex/connect/poll",
-    "request": [],
+    "request": [
+      "SubscriptionConnectPollRequest"
+    ],
     "response": []
   },
   {
@@ -629,7 +640,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "OrganizationRecoveryMutationResponse"
     ],
-    "browserOnly": "organization recovery is a ceremony in the person's own browser session"
+    "browserOnly": "organization recovery is for when someone can't sign in, so each step is proven by that person's own browser sign-in"
   },
   {
     "id": "confirmIdentityLink",
@@ -670,7 +681,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "controlSession",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/control",
-    "request": [],
+    "request": [
+      "SessionControlRequest"
+    ],
     "response": [
       "SessionControlResponse"
     ]
@@ -696,7 +709,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "CreateAdditionalOrganizationResponse"
     ],
-    "browserOnly": "it acts on the person's own account across organizations (creating an organization, listing their memberships or invitations, accepting an invitation), and a connection is limited to one organization"
+    "browserOnly": "it acts on the person's own account across organizations (creating an organization, listing their memberships or invitations, accepting an invitation), and an agent works in one organization"
   },
   {
     "id": "createApiKey",
@@ -922,7 +935,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "CreateOrganizationResponse"
     ],
-    "browserOnly": "it acts on the person's own account across organizations (creating an organization, listing their memberships or invitations, accepting an invitation), and a connection is limited to one organization"
+    "browserOnly": "it acts on the person's own account across organizations (creating an organization, listing their memberships or invitations, accepting an invitation), and an agent works in one organization"
   },
   {
     "id": "createOrganizationApiKey",
@@ -989,6 +1002,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "OrganizationWorkspaceAccess"
+    ]
+  },
+  {
+    "id": "createPersonalApiKey",
+    "method": "POST",
+    "path": "/v1/organizations/:organizationId/personal-api-keys",
+    "request": [
+      "CreatePersonalApiKeyRequest"
+    ],
+    "response": [
+      "CreatePersonalApiKeyResponse"
     ]
   },
   {
@@ -1318,6 +1342,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "deleteOrganizationMcpConnection",
+    "method": "DELETE",
+    "path": "/v1/organizations/:organizationId/mcp-connections/:connectionId",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "deleteOrganizationProviderCustomModel",
     "method": "DELETE",
     "path": "/v1/organizations/:organizationId/model-providers/:providerKind/custom-models/:customModelId",
@@ -1436,6 +1467,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "deleteWorkspaceModelAccessPolicy",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:workspaceId/model-policy",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "deleteWorkspaceOpenRouterCustomModel",
     "method": "DELETE",
     "path": "/v1/workspaces/:workspaceId/openrouter-custom-models/:customModelId",
@@ -1484,7 +1522,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "designateCodexAppsAccount",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/codex/apps",
-    "request": [],
+    "request": [
+      "CodexAppsDesignationRequest"
+    ],
     "response": []
   },
   {
@@ -1524,7 +1564,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "OrganizationRecoveryMutationResponse"
     ],
-    "browserOnly": "organization recovery is a ceremony in the person's own browser session"
+    "browserOnly": "organization recovery is for when someone can't sign in, so each step is proven by that person's own browser sign-in"
   },
   {
     "id": "disableSource",
@@ -1639,6 +1679,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "enableMachineScreenControl",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/machines/:enrollmentId/screen-control",
+    "request": [],
+    "response": [
+      "EnableMachineScreenControlResponse"
+    ]
+  },
+  {
     "id": "endBrowserSession",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/end",
@@ -1692,7 +1741,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "OrganizationRecoveryMutationResponse"
     ],
-    "browserOnly": "organization recovery is a ceremony in the person's own browser session"
+    "browserOnly": "organization recovery is for when someone can't sign in, so each step is proven by that person's own browser sign-in"
   },
   {
     "id": "exportCompanyBrainOkf",
@@ -1812,6 +1861,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "GET /v1/organizations/:organizationId/codex/accounts",
     "method": "GET",
     "path": "/v1/organizations/:organizationId/codex/accounts",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "GET /v1/organizations/:organizationId/codex/accounts/:accountId/overview",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/codex/accounts/:accountId/overview",
     "request": [],
     "response": []
   },
@@ -1992,6 +2048,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "GET /v1/workspaces/:workspaceId/knowledge/entries",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/knowledge/entries",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "GET /v1/workspaces/:workspaceId/models",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/models",
     "request": [],
     "response": []
   },
@@ -2415,8 +2478,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "InboxSettings"
-    ],
-    "browserOnly": "the person's inbox requires their own signed-in browser session"
+    ]
   },
   {
     "id": "getInstalledPluginDetails",
@@ -2453,12 +2515,46 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "getMcpConnectionRequest",
+    "method": "GET",
+    "path": "/v1/mcp-connections/requests/:request",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "getMemberNotifications",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/inbox/member-notifications",
+    "request": [],
+    "response": [
+      "MemberNotificationsSetting"
+    ]
+  },
+  {
     "id": "getMemorySlackPublicationConfiguration",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/memory-slack-publications/configuration",
     "request": [],
     "response": [
       "MemorySlackPublicationConfigurationResponse"
+    ]
+  },
+  {
+    "id": "getModelAccountPreferences",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/me/model-account-preferences",
+    "request": [],
+    "response": [
+      "ModelAccountPreferences"
+    ]
+  },
+  {
+    "id": "getModelAccountSettingsOverview",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/model-account-settings/overview",
+    "request": [],
+    "response": [
+      "ModelAccountSettingsOverview"
     ]
   },
   {
@@ -2506,6 +2602,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "OrganizationAdministrationOverview"
+    ]
+  },
+  {
+    "id": "getOrganizationAgentAdminAccess",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/agent-admin-access",
+    "request": [],
+    "response": [
+      "OrganizationAgentAdminAccess"
     ]
   },
   {
@@ -2570,6 +2675,24 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "getOrganizationModelAccountSettings",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/model-account-settings",
+    "request": [],
+    "response": [
+      "OrganizationModelAccountSettings"
+    ]
+  },
+  {
+    "id": "getOrganizationModelDefaults",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/model-defaults",
+    "request": [],
+    "response": [
+      "OrganizationModelDefaults"
+    ]
+  },
+  {
     "id": "getOrganizationModelProviderConnection",
     "method": "GET",
     "path": "/v1/organizations/:organizationId/model-providers/:providerKind",
@@ -2590,6 +2713,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "getOrganizationPrivacySettings",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/privacy-settings",
+    "request": [],
+    "response": [
+      "OrganizationPrivacySettings"
+    ]
+  },
+  {
     "id": "getOrganizationPrivateSessionSettings",
     "method": "GET",
     "path": "/v1/organizations/:organizationId/private-session-settings",
@@ -2606,7 +2738,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "OrganizationRecoveryOverview"
     ],
-    "browserOnly": "organization recovery is a ceremony in the person's own browser session"
+    "browserOnly": "organization recovery is for when someone can't sign in, so each step is proven by that person's own browser sign-in"
   },
   {
     "id": "getOrganizationRetentionPolicy",
@@ -2741,6 +2873,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/:workspaceId/scheduled-tasks/:taskId",
     "request": [],
     "response": [
+      "PrivateScheduledTaskSummary",
       "ScheduledTask",
       "ScheduledTaskAccessAttention"
     ]
@@ -2755,14 +2888,22 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "getSessionAdminAccess",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/admin-access",
+    "request": [],
+    "response": [
+      "SessionAdminAccess"
+    ]
+  },
+  {
     "id": "getSessionInboxMute",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/inbox-mute",
     "request": [],
     "response": [
       "SessionInboxMute"
-    ],
-    "browserOnly": "the person's session mute requires their own signed-in browser session"
+    ]
   },
   {
     "id": "getSessionLineage",
@@ -2779,6 +2920,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/events/:eventId/message-preview",
     "request": [],
     "response": []
+  },
+  {
+    "id": "getSessionModelAccount",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/model-account",
+    "request": [],
+    "response": [
+      "SessionModelAccountChoiceResponse"
+    ]
   },
   {
     "id": "getSessionModelContext",
@@ -3063,6 +3213,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "getWorkspaceModelAccountSettings",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/model-account-settings",
+    "request": [],
+    "response": [
+      "WorkspaceModelAccountSettings"
+    ]
+  },
+  {
     "id": "getWorkspaceModelCatalog",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/model-catalog",
@@ -3158,6 +3317,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "GitStatusResponse"
+    ]
+  },
+  {
+    "id": "grantSessionAdminAccess",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/admin-access",
+    "request": [
+      "GrantSessionAdminAccessRequest"
+    ],
+    "response": [
+      "SessionAdminAccess"
     ]
   },
   {
@@ -3686,8 +3856,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "ListInboxResponse"
-    ],
-    "browserOnly": "the person's inbox requires their own signed-in browser session"
+    ]
   },
   {
     "id": "listInstalledPlugins",
@@ -3863,7 +4032,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "ListOrganizationInvitationsPageResponse"
     ],
-    "browserOnly": "it acts on the person's own account across organizations (creating an organization, listing their memberships or invitations, accepting an invitation), and a connection is limited to one organization"
+    "browserOnly": "it acts on the person's own account across organizations (creating an organization, listing their memberships or invitations, accepting an invitation), and an agent works in one organization"
   },
   {
     "id": "listOrganizationInvitationsForOrganization",
@@ -3875,6 +4044,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "listOrganizationMcpConnections",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/mcp-connections",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "listOrganizationMemberships",
     "method": "GET",
     "path": "/v1/organization-memberships",
@@ -3882,7 +4058,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "ListManagedOrganizationMembershipsResponse"
     ],
-    "browserOnly": "it acts on the person's own account across organizations (creating an organization, listing their memberships or invitations, accepting an invitation), and a connection is limited to one organization"
+    "browserOnly": "it acts on the person's own account across organizations (creating an organization, listing their memberships or invitations, accepting an invitation), and an agent works in one organization"
   },
   {
     "id": "listOrganizationProviderCustomModels",
@@ -3957,6 +4133,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "listPersonalApiKeys",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/personal-api-keys",
+    "request": [],
+    "response": [
+      "ListPersonalApiKeysResponse"
+    ]
+  },
+  {
     "id": "listPersonalGitHubRepositories",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/connections/:connectionId/github/repositories",
@@ -3981,6 +4166,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "PreferenceRegistryListResponse"
+    ]
+  },
+  {
+    "id": "listPrivateScheduledTaskSummaries",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/scheduled-tasks/private-summaries",
+    "request": [],
+    "response": [
+      "PrivateScheduledTaskSummary"
     ]
   },
   {
@@ -4472,6 +4666,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "openMachinePrivacySettings",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/machines/:enrollmentId/privacy-settings",
+    "request": [
+      "OpenMachinePrivacySettingsRequest"
+    ],
+    "response": [
+      "OpenMachinePrivacySettingsResponse"
+    ]
+  },
+  {
     "id": "openWorkspaceControlEventStream",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/control-events/stream",
@@ -4503,7 +4708,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "organizationSupergrokConnectPoll",
     "method": "POST",
     "path": "/v1/organizations/:organizationId/supergrok/connect/poll",
-    "request": [],
+    "request": [
+      "SubscriptionConnectPollRequest"
+    ],
     "response": []
   },
   {
@@ -4517,42 +4724,54 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "PATCH /v1/organizations/:organizationId/codex/accounts/:accountId",
     "method": "PATCH",
     "path": "/v1/organizations/:organizationId/codex/accounts/:accountId",
-    "request": [],
+    "request": [
+      "SubscriptionAccountRenameRequest"
+    ],
     "response": []
   },
   {
     "id": "PATCH /v1/organizations/:organizationId/codex/accounts/:accountId/allocator",
     "method": "PATCH",
     "path": "/v1/organizations/:organizationId/codex/accounts/:accountId/allocator",
-    "request": [],
+    "request": [
+      "SubscriptionAccountToggleRequest"
+    ],
     "response": []
   },
   {
     "id": "PATCH /v1/organizations/:organizationId/codex/accounts/:accountId/extra-credits",
     "method": "PATCH",
     "path": "/v1/organizations/:organizationId/codex/accounts/:accountId/extra-credits",
-    "request": [],
+    "request": [
+      "SubscriptionAccountToggleRequest"
+    ],
     "response": []
   },
   {
     "id": "PATCH /v1/organizations/:organizationId/codex/settings",
     "method": "PATCH",
     "path": "/v1/organizations/:organizationId/codex/settings",
-    "request": [],
+    "request": [
+      "SubscriptionRotationSettingsRequest"
+    ],
     "response": []
   },
   {
     "id": "PATCH /v1/workspaces/:workspaceId/codex/accounts/:accountId/extra-credits",
     "method": "PATCH",
     "path": "/v1/workspaces/:workspaceId/codex/accounts/:accountId/extra-credits",
-    "request": [],
+    "request": [
+      "SubscriptionAccountToggleRequest"
+    ],
     "response": []
   },
   {
     "id": "PATCH /v1/workspaces/:workspaceId/codex/source",
     "method": "PATCH",
     "path": "/v1/workspaces/:workspaceId/codex/source",
-    "request": [],
+    "request": [
+      "CodexSourceRequest"
+    ],
     "response": []
   },
   {
@@ -4561,6 +4780,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/:workspaceId/environments/:variableSetId",
     "request": [],
     "response": []
+  },
+  {
+    "id": "pausePrivateScheduledTask",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/scheduled-tasks/private-summaries/:taskId/pause",
+    "request": [],
+    "response": [
+      "PrivateScheduledTaskSummary"
+    ]
   },
   {
     "id": "pauseScheduledTask",
@@ -4591,7 +4819,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "pinSessionCodexAccount",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/codex-account",
-    "request": [],
+    "request": [
+      "SessionCodexAccountPinRequest"
+    ],
     "response": []
   },
   {
@@ -4602,16 +4832,39 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "POST /v1/organizations/:organizationId/codex/accounts/:accountId/reset-credits/prepare",
+    "method": "POST",
+    "path": "/v1/organizations/:organizationId/codex/accounts/:accountId/reset-credits/prepare",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "POST /v1/organizations/:organizationId/codex/accounts/:accountId/reset-credits/redeem",
+    "method": "POST",
+    "path": "/v1/organizations/:organizationId/codex/accounts/:accountId/reset-credits/redeem",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "POST /v1/organizations/:organizationId/codex/connect/poll",
     "method": "POST",
     "path": "/v1/organizations/:organizationId/codex/connect/poll",
-    "request": [],
+    "request": [
+      "SubscriptionConnectPollRequest"
+    ],
     "response": []
   },
   {
     "id": "POST /v1/organizations/:organizationId/codex/connect/start",
     "method": "POST",
     "path": "/v1/organizations/:organizationId/codex/connect/start",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "POST /v1/workspaces/:workspaceId/chat/completions",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/chat/completions",
     "request": [],
     "response": []
   },
@@ -5027,14 +5280,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "PUT /v1/organizations/:scopeId/model-connections/:kind/:connectionId/access",
     "method": "PUT",
     "path": "/v1/organizations/:scopeId/model-connections/:kind/:connectionId/access",
-    "request": [],
+    "request": [
+      "ModelConnectionAccessPolicy"
+    ],
     "response": []
   },
   {
     "id": "PUT /v1/workspaces/:scopeId/model-connections/:kind/:connectionId/access",
     "method": "PUT",
     "path": "/v1/workspaces/:scopeId/model-connections/:kind/:connectionId/access",
-    "request": [],
+    "request": [
+      "ModelConnectionAccessPolicy"
+    ],
     "response": []
   },
   {
@@ -5331,7 +5588,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "renameClaudeSubscriptionAccount",
     "method": "PATCH",
     "path": "/v1/workspaces/:workspaceId/claude/accounts/:accountId",
-    "request": [],
+    "request": [
+      "SubscriptionAccountRenameRequest"
+    ],
     "response": [
       "ClaudeSubscriptionAccount"
     ]
@@ -5340,28 +5599,36 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "renameCodexAccount",
     "method": "PATCH",
     "path": "/v1/workspaces/:workspaceId/codex/accounts/:accountId",
-    "request": [],
+    "request": [
+      "SubscriptionAccountRenameRequest"
+    ],
     "response": []
   },
   {
     "id": "renameOrganizationClaudeSubscriptionAccount",
     "method": "PATCH",
     "path": "/v1/organizations/:organizationId/claude/accounts/:accountId",
-    "request": [],
+    "request": [
+      "SubscriptionAccountRenameRequest"
+    ],
     "response": []
   },
   {
     "id": "renameOrganizationSuperGrokAccount",
     "method": "PATCH",
     "path": "/v1/organizations/:organizationId/supergrok/accounts/:accountId",
-    "request": [],
+    "request": [
+      "SubscriptionAccountRenameRequest"
+    ],
     "response": []
   },
   {
     "id": "renameSuperGrokAccount",
     "method": "PATCH",
     "path": "/v1/workspaces/:workspaceId/supergrok/accounts/:accountId",
-    "request": [],
+    "request": [
+      "SubscriptionAccountRenameRequest"
+    ],
     "response": []
   },
   {
@@ -5557,6 +5824,22 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "CancelExternalWorkspaceMemberGrantResponse",
       "RevokeOrganizationWorkspaceMemberResponse"
+    ]
+  },
+  {
+    "id": "revokePersonalApiKey",
+    "method": "DELETE",
+    "path": "/v1/organizations/:organizationId/personal-api-keys/:apiKeyId",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "revokeSessionAdminAccess",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/admin-access",
+    "request": [],
+    "response": [
+      "SessionAdminAccess"
     ]
   },
   {
@@ -5803,14 +6086,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "setClaudeSubscriptionAccountAllocator",
     "method": "PATCH",
     "path": "/v1/workspaces/:workspaceId/claude/accounts/:accountId/allocator",
-    "request": [],
+    "request": [
+      "SubscriptionAccountToggleRequest"
+    ],
     "response": []
   },
   {
     "id": "setClaudeSubscriptionRotationSettings",
     "method": "PATCH",
     "path": "/v1/workspaces/:workspaceId/claude/settings",
-    "request": [],
+    "request": [
+      "SubscriptionRotationSettingsRequest"
+    ],
     "response": [
       "SubscriptionPoolSettings"
     ]
@@ -5819,14 +6106,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "setCodexAccountAllocator",
     "method": "PATCH",
     "path": "/v1/workspaces/:workspaceId/codex/accounts/:accountId/allocator",
-    "request": [],
+    "request": [
+      "SubscriptionAccountToggleRequest"
+    ],
     "response": []
   },
   {
     "id": "setCodexRotationSettings",
     "method": "PATCH",
     "path": "/v1/workspaces/:workspaceId/codex/settings",
-    "request": [],
+    "request": [
+      "SubscriptionRotationSettingsRequest"
+    ],
     "response": []
   },
   {
@@ -5855,14 +6146,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "setOrganizationClaudeSubscriptionAccountAllocator",
     "method": "PATCH",
     "path": "/v1/organizations/:organizationId/claude/accounts/:accountId/allocator",
-    "request": [],
+    "request": [
+      "SubscriptionAccountToggleRequest"
+    ],
     "response": []
   },
   {
     "id": "setOrganizationClaudeSubscriptionRotationSettings",
     "method": "PATCH",
     "path": "/v1/organizations/:organizationId/claude/settings",
-    "request": [],
+    "request": [
+      "SubscriptionRotationSettingsRequest"
+    ],
     "response": [
       "SubscriptionPoolSettings"
     ]
@@ -5871,14 +6166,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "setOrganizationSuperGrokAccountAllocator",
     "method": "PATCH",
     "path": "/v1/organizations/:organizationId/supergrok/accounts/:accountId/allocator",
-    "request": [],
+    "request": [
+      "SubscriptionAccountToggleRequest"
+    ],
     "response": []
   },
   {
     "id": "setOrganizationSuperGrokRotationSettings",
     "method": "PATCH",
     "path": "/v1/organizations/:organizationId/supergrok/settings",
-    "request": [],
+    "request": [
+      "SubscriptionRotationSettingsRequest"
+    ],
     "response": []
   },
   {
@@ -5890,21 +6189,35 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "SessionInboxMute"
+    ]
+  },
+  {
+    "id": "setSessionModelAccount",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/model-account",
+    "request": [
+      "SetSessionModelAccountChoiceRequest"
     ],
-    "browserOnly": "the person's session mute requires their own signed-in browser session"
+    "response": [
+      "SetSessionModelAccountChoiceResponse"
+    ]
   },
   {
     "id": "setSuperGrokAccountAllocator",
     "method": "PATCH",
     "path": "/v1/workspaces/:workspaceId/supergrok/accounts/:accountId/allocator",
-    "request": [],
+    "request": [
+      "SubscriptionAccountToggleRequest"
+    ],
     "response": []
   },
   {
     "id": "setSuperGrokRotationSettings",
     "method": "PATCH",
     "path": "/v1/workspaces/:workspaceId/supergrok/settings",
-    "request": [],
+    "request": [
+      "SubscriptionRotationSettingsRequest"
+    ],
     "response": []
   },
   {
@@ -6043,7 +6356,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "OrganizationRecoveryMutationResponse"
     ],
-    "browserOnly": "organization recovery is a ceremony in the person's own browser session"
+    "browserOnly": "organization recovery is for when someone can't sign in, so each step is proven by that person's own browser sign-in"
   },
   {
     "id": "startPersonalGitHubOAuth",
@@ -6111,14 +6424,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "supergrokConnectPoll",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/supergrok/connect/poll",
-    "request": [],
+    "request": [
+      "SubscriptionConnectPollRequest"
+    ],
     "response": []
   },
   {
     "id": "supergrokConnectStart",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/supergrok/connect/start",
-    "request": [],
+    "request": [
+      "SupergrokConnectStartRequest"
+    ],
     "response": []
   },
   {
@@ -6476,8 +6793,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "InboxItem"
     ],
-    "response": [],
-    "browserOnly": "the person's inbox requires their own signed-in browser session"
+    "response": []
   },
   {
     "id": "updateInboxSettings",
@@ -6488,8 +6804,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "InboxSettings"
-    ],
-    "browserOnly": "the person's inbox requires their own signed-in browser session"
+    ]
   },
   {
     "id": "updateMachineAgent",
@@ -6512,6 +6827,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "updateMemberNotifications",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/inbox/member-notifications",
+    "request": [
+      "MemberNotificationsSetting"
+    ],
+    "response": [
+      "MemberNotificationsSetting"
+    ]
+  },
+  {
     "id": "updateMemorySlackPublicationConfiguration",
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/memory-slack-publications/configuration",
@@ -6520,6 +6846,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "MemorySlackPublicationConfiguration"
+    ]
+  },
+  {
+    "id": "updateModelAccountPreferences",
+    "method": "PATCH",
+    "path": "/v1/organizations/:organizationId/me/model-account-preferences",
+    "request": [
+      "UpdateModelAccountPreferencesRequest"
+    ],
+    "response": [
+      "ModelAccountPreferences"
     ]
   },
   {
@@ -6541,6 +6878,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "UpdateSlackChannelRoutesRequest"
     ],
     "response": []
+  },
+  {
+    "id": "updateOrganizationAgentAdminAccess",
+    "method": "PATCH",
+    "path": "/v1/organizations/:organizationId/agent-admin-access",
+    "request": [
+      "UpdateOrganizationAgentAdminAccessRequest"
+    ],
+    "response": [
+      "OrganizationAgentAdminAccess"
+    ]
   },
   {
     "id": "updateOrganizationApiKey",
@@ -6565,6 +6913,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "updateOrganizationMcpConnection",
+    "method": "PATCH",
+    "path": "/v1/organizations/:organizationId/mcp-connections/:connectionId",
+    "request": [
+      "UpdateOrganizationMcpConnectionRequest"
+    ],
+    "response": []
+  },
+  {
     "id": "updateOrganizationMember",
     "method": "PATCH",
     "path": "/v1/organizations/:organizationId/members/:membershipId",
@@ -6576,6 +6933,28 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "updateOrganizationModelAccountSettings",
+    "method": "PATCH",
+    "path": "/v1/organizations/:organizationId/model-account-settings",
+    "request": [
+      "UpdateOrganizationModelAccountSettingsRequest"
+    ],
+    "response": [
+      "OrganizationModelAccountSettings"
+    ]
+  },
+  {
+    "id": "updateOrganizationModelDefaults",
+    "method": "PATCH",
+    "path": "/v1/organizations/:organizationId/model-defaults",
+    "request": [
+      "UpdateOrganizationModelDefaultsRequest"
+    ],
+    "response": [
+      "OrganizationModelDefaults"
+    ]
+  },
+  {
     "id": "updateOrganizationName",
     "method": "PATCH",
     "path": "/v1/organizations/:organizationId",
@@ -6584,6 +6963,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "OrganizationSummary"
+    ]
+  },
+  {
+    "id": "updateOrganizationPrivacySettings",
+    "method": "PATCH",
+    "path": "/v1/organizations/:organizationId/privacy-settings",
+    "request": [
+      "UpdateOrganizationPrivacySettingsRequest"
+    ],
+    "response": [
+      "OrganizationPrivacySettings"
     ]
   },
   {
@@ -6774,6 +7164,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "updateSessionSkills",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/skills",
+    "request": [
+      "UpdateSessionSkillsRequest"
+    ],
+    "response": [
+      "Session"
+    ]
+  },
+  {
     "id": "updateSessionToolPolicy",
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/tool-policy",
@@ -6887,8 +7288,21 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "updateWorkspaceModelAccessPolicy",
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/model-policy",
-    "request": [],
+    "request": [
+      "UpdateWorkspaceModelPolicyRequest"
+    ],
     "response": []
+  },
+  {
+    "id": "updateWorkspaceModelAccountSettings",
+    "method": "PATCH",
+    "path": "/v1/workspaces/:workspaceId/model-account-settings",
+    "request": [
+      "UpdateWorkspaceModelAccountSettingsRequest"
+    ],
+    "response": [
+      "WorkspaceModelAccountSettings"
+    ]
   },
   {
     "id": "updateWorkspaceSettings",

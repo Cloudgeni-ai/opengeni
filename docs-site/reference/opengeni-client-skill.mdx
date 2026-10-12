@@ -732,7 +732,25 @@ Every session in that workspace uses the same credential, so scope it to what
 any member of the workspace may do. The API must be reachable from Opengeni
 over public HTTPS.
 
-## Credentials
+## Direct current-human tools and Sites
+
+Separate agent `toolServer` attachment above from current-human direct calls.
+An authorized host's `client.tools.forWorkspace(id)` invokes known identities or
+canonical symbolic paths without first loading the workspace catalog. Use
+`$resolve({ identity })` plus `expectedDefinitionDigest` when code needs to pin
+the complete public definition; use `$approveTarget` only after the host's human
+approval UI. Never put these capabilities in iframe code. These endpoints do not
+grant organization keys arbitrary human authority, and are not automatically
+added to the session proxy's supported routes.
+
+Modern `@opengeni/sdk/site` clients negotiate targeted calls. Upgraded hosts also
+adapt old bundled Site clients through a bounded saved-version tool manifest;
+local previews still use the frozen Codemode attempt. Use explicit
+`toolGatewayMode: "catalog"` for older hosts/APIs, not speculative fallback.
+Uncertain execution must be reconciled, never automatically replayed. See the SDK
+README's Workspace tools section for approval and migration details.
+
+## Credential handling
 
 Never put tokens in prompts, Skills, `modelContext`, tool URLs, browser code,
 or logs. Opengeni stores Connection and MCP header secrets encrypted and keeps

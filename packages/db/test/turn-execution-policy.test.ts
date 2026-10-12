@@ -9,14 +9,11 @@ import { eq } from "drizzle-orm";
 import {
   applySessionTurnSettlement,
   appendSessionEvents,
-  armCodexCapacityWait,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
   createDb,
   createSession,
   createSessionGoal,
-  ensureCodexRotationSettings,
-  getCodexCapacityWaitForSession,
   getSessionTurn,
   installOrReadTurnExecutionPolicyForAttempt,
   requestSessionTurnRecovery,
@@ -24,6 +21,11 @@ import {
   withWorkspaceSessionActivityRls as withWorkspaceRls,
   withWorkspaceSubjectSessionActivityRls as withWorkspaceSubjectRls,
 } from "../src/index";
+import {
+  armCodexCapacityWait,
+  ensureCodexRotationSettings,
+  getCodexCapacityWaitForSession,
+} from "./fixtures/legacy-codex";
 import * as schema from "../src/schema";
 
 let available = true;

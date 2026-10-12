@@ -1,7 +1,6 @@
 import { withClaudeConnectionCredential } from "@opengeni/config";
 import {
   getSessionAuthorityProjection,
-  canSpendCodexExtraCreditsForTurn,
   canSpendSubscriptionCoreCodexExtraCredits,
   reserveSubscriptionCoreCodexRequest,
   settleSubscriptionCoreCodexRequest,
@@ -40,7 +39,7 @@ import {
   type SandboxFileDownloadFailure,
   type CodemodeTokenWriterSession,
 } from "@opengeni/runtime";
-import { buildCodexTokenResolver } from "../codex-auth";
+
 import {
   buildModelResolver,
   CODEX_CLIENT_VERSION,
@@ -57,7 +56,11 @@ import {
   xaiSubscriptionRequestStorage,
   type XaiSubscriptionRequestContext,
 } from "@opengeni/xai-subscription";
-import { buildXaiTurnRequestAuthorization } from "../xai-auth";
+import {
+  buildXaiTurnRequestAuthorization,
+  xaiTurnRequestContext,
+  type XaiTurnRequestContextOptions,
+} from "../xai-auth";
 import { TurnAttemptFencedError } from "../turn-attempt-fenced";
 import { currentActivityContext } from "../streaming";
 import type {
@@ -102,18 +105,17 @@ import { finalizeTurnAttempt } from "./finalization";
 import { settleTurnFailure } from "./failure-settlement";
 import { runTurnStreamAttempt } from "./stream-attempt";
 import { claimTurnAttempt } from "./claim";
-import {
-  selectCodexTurnCapacity,
-  selectCodexTurnAccount,
-  codexAccountsLackingTurnModel,
-  type CapacityPhaseDeps,
-} from "./codex-capacity";
+import { selectCodexTurnCapacity, type CapacityPhaseDeps } from "./codex-capacity";
 import {
   assertTurnModelConnection,
   assertCoreCodexSourceConnected,
   buildCoreCodexRequestTokenResolver,
 } from "./codex-core-capacity";
-import { createCoreCodexRequests, buildCoreCodexUsageReader } from "./codex-core-requests";
+import {
+  buildCoreCodexUsageReader,
+  createCoreCodexRequests,
+  providerRequestIdPrefix,
+} from "./codex-core-requests";
 import { observeCodexResponseCompletion } from "./codex-core-settlement";
 import { prepareGovernanceAndModel } from "./governance-model";
 import { prepareCompaction, runPostAgentCompaction } from "./compaction-prep";
@@ -123,7 +125,14 @@ import {
   establishTurnSandbox,
   bindLazySandboxProvisioner,
 } from "./sandbox-establish";
-import { selectXaiTurnCapacity, selectClaudeTurnCapacity } from "./xai-capacity";
+import { selectClaudeTurnCapacity } from "./xai-capacity";
+import {
+  buildXaiCoreRequestAuthorization,
+  selectXaiTurnCapacityByRoute,
+  xaiCoreTitleCustody,
+  type XaiCoreRequestAuthorization,
+} from "./xai-core";
+import type { CoreSubscriptionRequests } from "./subscription-core-requests";
 import { prepareRunCredentials } from "./run-credentials";
 import { prepareTurnToolPolicy, prepareTurnToolRuntime } from "./tool-environment";
 import { applyTurnGitHubRepositoryBindings } from "./github-repository-bindings";
@@ -171,6 +180,8 @@ export function sessionTitleCodexRequestContext(
 export function sessionTitleXaiRequestContext(
   context: XaiSubscriptionRequestContext,
   nextRequestId: () => string,
+  /** On the shared core: the turn's dispatch fence and the title custody lane. */
+  core?: { assertDispatch: () => Promise<void>; requests: CoreSubscriptionRequests },
 ): XaiSubscriptionRequestContext {
   return {
     clientVersion: context.clientVersion,
@@ -184,6 +195,15 @@ export function sessionTitleXaiRequestContext(
       : {}),
     ...(context.hostedToolContinuationTimeoutMs !== undefined
       ? { hostedToolContinuationTimeoutMs: context.hostedToolContinuationTimeoutMs }
+      : {}),
+    ...(core
+      ? {
+          beforeProviderDispatch: async (request) => {
+            await core.assertDispatch();
+            await core.requests.reserve(request);
+          },
+          onProviderRequestSettled: core.requests.observe,
+        }
       : {}),
     nextRequestId,
   };
@@ -263,6 +283,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       once: true,
     });
     const dispatchId = activityContext?.info.activityId ?? randomUUID();
+    const requestIdPrefix = providerRequestIdPrefix({
+      turnAttemptId: input.attemptId,
+      activityId: dispatchId,
+      activityAttempt: activityContext?.info.attempt ?? 1,
+    });
     const activityStarted = performance.now();
     const acknowledgeLostAttemptOwnership = (): void => {
       // A stale terminal/recovery settlement can lose either to a benign
@@ -485,7 +510,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         credentialSubjectId,
         fileAuthoritySubjectId,
         capabilitySettings,
-        codexAppsCredentialId,
         codexAppsCoreConnectionId,
         turnExecutionPolicy,
         trigger,
@@ -592,7 +616,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             };
             const codexCapacity = await selectCodexTurnCapacity(capacityDeps);
             if ("exit" in codexCapacity) return codexCapacity.exit;
-            const xaiCapacity = await selectXaiTurnCapacity(capacityDeps);
+            const xaiCapacity = await selectXaiTurnCapacityByRoute(capacityDeps);
             if ("exit" in xaiCapacity) return xaiCapacity.exit;
             const claudeCapacity = await selectClaudeTurnCapacity(capacityDeps);
             if ("exit" in claudeCapacity) return claudeCapacity.exit;
@@ -664,6 +688,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             workspaceAgentIdentity,
             workspaceGovernance,
             structuredWorkspacePolicyActive,
+            workspaceCreditModelsAllowed,
             workspaceMemory,
             buildCompanyBrainContributionReceiptFor,
             logicalSandboxSettings,
@@ -694,10 +719,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           const codexContext: CodexRequestContext | null =
             resolvedModel?.provider.kind === "codex-subscription"
               ? ((): CodexRequestContext => {
-                  // The empty-string fallback yields no row → null credential → the
-                  // existing CodexReloginRequired path (a codex turn with no usable
-                  // account fails closed, exactly as before multi-account).
                   const coreCodex = providerTurn.codexSubscriptionCore;
+                  if (!coreCodex) throw new Error("Codex core placement is required for dispatch");
                   let coreUsageReader: ReturnType<typeof buildCoreCodexUsageReader> | undefined;
                   if (coreCodex) {
                     const ref = {
@@ -730,22 +753,15 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                       execution,
                     );
                   }
-                  const resolver = coreCodex
-                    ? buildCoreCodexRequestTokenResolver(db, runSettings, coreCodex, leases.codex, {
-                        signalCodexCapacityWorkflow,
-                      })
-                    : buildCodexTokenResolver(
-                        db,
-                        runSettings,
-                        input.workspaceId,
-                        providerTurn.effectiveCodexCredentialId ?? "",
-                        undefined,
-                        {
-                          turnId: turn.id,
-                          holderId: leases.codex.holderId!,
-                          generation: leases.codex.generation!,
-                        },
-                      );
+                  const resolver = buildCoreCodexRequestTokenResolver(
+                    db,
+                    runSettings,
+                    coreCodex,
+                    leases.codex,
+                    {
+                      signalCodexCapacityWorkflow,
+                    },
+                  );
                   let resolvedToken: Awaited<ReturnType<typeof resolver.getToken>> | null = null;
                   const trackToken = (token: Awaited<ReturnType<typeof resolver.getToken>>) => {
                     providerTurn.effectiveCodexCredentialVersion = token.credentialVersion;
@@ -756,45 +772,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     ...(coreUsageReader ? { fetchUsage: coreUsageReader } : {}),
                     canSpendCredits: async () => {
                       if (!leases.codex.holderId || leases.codex.generation === null) return false;
-                      if (coreCodex)
-                        return await canSpendSubscriptionCoreCodexExtraCredits(db, {
-                          identity: coreCodex.identity,
-                          connectionId: coreCodex.connectionId,
-                          attemptId: input.attemptId,
-                          executionGeneration: attempt.executionGeneration!,
-                          holderId: leases.codex.holderId,
-                          productModelId: providerTurn.codexProductModelId!,
-                          reasoningLevel: turnExecutionPolicy.reasoningEffort,
-                          leaseTtlMs: 60_000,
-                        });
-                      const lackingModel = await codexAccountsLackingTurnModel(
-                        db,
-                        runSettings,
-                        input.workspaceId,
-                        turnExecutionPolicy.upstreamModelId,
-                      );
-                      return await canSpendCodexExtraCreditsForTurn(
-                        db,
-                        {
-                          accountId: input.accountId,
-                          workspaceId: input.workspaceId,
-                          sessionId: input.sessionId,
-                          turnId: turn.id,
-                          attemptId: input.attemptId,
-                          executionGeneration: attempt.executionGeneration!,
-                          credentialId: providerTurn.effectiveCodexCredentialId!,
-                          holderId: leases.codex.holderId,
-                          generation: leases.codex.generation,
-                        },
-                        (context, acceptedSession) =>
-                          selectCodexTurnAccount({
-                            context,
-                            session: acceptedSession,
-                            sessionId: input.sessionId,
-                            productModelId: turnExecutionPolicy.productModelId,
-                            lackingModel,
-                          }),
-                      );
+                      return await canSpendSubscriptionCoreCodexExtraCredits(db, {
+                        identity: coreCodex.identity,
+                        connectionId: coreCodex.connectionId,
+                        attemptId: input.attemptId,
+                        executionGeneration: attempt.executionGeneration!,
+                        holderId: leases.codex.holderId,
+                        productModelId: providerTurn.codexProductModelId!,
+                        reasoningLevel: turnExecutionPolicy.reasoningEffort,
+                        leaseTtlMs: 60_000,
+                      });
                     },
                     refreshToken: async () => trackToken(await resolver.refresh()),
                     onUsage: (snapshot) => {
@@ -913,7 +900,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                         durationSeconds: event.durationMs / 1000,
                       });
                     },
-                    nextRequestId: () => `${dispatchId}:${++codexModelRequestSequence}`,
+                    nextRequestId: () => `${requestIdPrefix}:${++codexModelRequestSequence}`,
                     onModelRequestEvent: async (event) => {
                       if (!eventing.publish || !attempt.turnId) {
                         throw new Error(
@@ -985,21 +972,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   };
                 })()
               : null;
+          let xaiCoreAuthorization: XaiCoreRequestAuthorization | null = null;
           if (resolvedModel?.provider.kind === "xai-subscription") {
-            if (!providerTurn.effectiveXaiCredentialId || !leases.xai.subjectId) {
+            const xaiCore = providerTurn.xaiSubscriptionCore;
+            if (!providerTurn.effectiveXaiCredentialId || (!xaiCore && !leases.xai.subjectId)) {
               throw new Error("SuperGrok subscription execution has no leased credential");
             }
             let xaiModelRequestSequence = 0;
-            const authorization = await buildXaiTurnRequestAuthorization({
-              db,
-              settings: runSettings,
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              subjectId: leases.xai.subjectId,
+            const xaiRequestOptions: XaiTurnRequestContextOptions = {
               sessionId: input.sessionId,
               turnId: turn.id,
-              credentialId: providerTurn.effectiveXaiCredentialId,
-              authoritySnapshot: turn.xaiProviderAccountAuthoritySnapshot,
               hostedSearch: {
                 webSearch: resolveAgentToolFamilies(session.agent, {
                   webSearch: runSettings.webSearchEnabled,
@@ -1009,7 +991,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 }).webSearch,
               },
               streamIdleTimeoutMs: runSettings.supergrokResponseStreamIdleTimeoutMs,
-              nextRequestId: () => `${dispatchId}:xai:${++xaiModelRequestSequence}`,
+              nextRequestId: () => `${requestIdPrefix}:xai:${++xaiModelRequestSequence}`,
               onModelRequestDiagnostic: (event) => {
                 const requestKey = `${event.requestId}:${event.transportAttempt}`;
                 if (event.phase === "started") {
@@ -1140,8 +1122,35 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   }
                 }
               },
-            });
-            providerTurn.xaiRequestContext = authorization.context;
+            };
+            // On the shared core the bearer, refresh and request custody come
+            // from the core placement; the legacy path keeps its own.
+            xaiCoreAuthorization = xaiCore
+              ? buildXaiCoreRequestAuthorization({
+                  db,
+                  settings: runSettings,
+                  core: xaiCore,
+                  lease: leases.xai,
+                  execution: {
+                    attemptId: input.attemptId,
+                    executionGeneration: attempt.executionGeneration!,
+                  },
+                })
+              : null;
+            providerTurn.xaiRequestContext = xaiCoreAuthorization
+              ? xaiTurnRequestContext(xaiRequestOptions, xaiCoreAuthorization)
+              : (
+                  await buildXaiTurnRequestAuthorization({
+                    db,
+                    settings: runSettings,
+                    accountId: input.accountId,
+                    workspaceId: input.workspaceId,
+                    subjectId: leases.xai.subjectId!,
+                    credentialId: providerTurn.effectiveXaiCredentialId,
+                    authoritySnapshot: turn.xaiProviderAccountAuthoritySnapshot,
+                    ...xaiRequestOptions,
+                  })
+                ).context;
           }
           const claudeUsageObserver = await createClaudeUsageObserver(
             parseModelProvidersJson(runSettings.modelProvidersJson),
@@ -1215,14 +1224,15 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           const codexSessionTitleContext = codexContext
             ? sessionTitleCodexRequestContext(
                 codexContext,
-                () => `${dispatchId}:title:${++codexSessionTitleRequestSequence}`,
+                () => `${requestIdPrefix}:title:${++codexSessionTitleRequestSequence}`,
                 providerTurn.codexSubscriptionCore?.titleRequests,
               )
             : null;
           const xaiSessionTitleContext = providerTurn.xaiRequestContext
             ? sessionTitleXaiRequestContext(
                 providerTurn.xaiRequestContext,
-                () => `${dispatchId}:xai:title:${++xaiSessionTitleRequestSequence}`,
+                () => `${requestIdPrefix}:xai:title:${++xaiSessionTitleRequestSequence}`,
+                xaiCoreTitleCustody(providerTurn.xaiSubscriptionCore, xaiCoreAuthorization),
               )
             : null;
           const withSessionTitleProviderRequestContext = <T>(fn: () => Promise<T>): Promise<T> =>
@@ -1623,13 +1633,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             fileAuthoritySubjectId,
             capabilitySettings,
             installedApiIntegrations,
-            codexAppsCredentialId,
             codexAppsCoreConnectionId,
             turnExecutionPolicy,
             trigger,
             runSettings,
             resolvedModel,
             lazyToolTransport,
+            workspaceCreditModelsAllowed,
             turnTools,
             connectionScope,
             sandboxArtifactRuntime,
@@ -1688,6 +1698,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             workspaceAgentIdentity,
             workspaceGovernance,
             structuredWorkspacePolicyActive,
+            workspaceCreditModelsAllowed,
             workspaceMemory,
             rigVersion,
             rigName,

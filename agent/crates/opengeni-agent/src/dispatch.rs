@@ -165,6 +165,10 @@ async fn dispatch_future<P: Platform>(
             request_id,
             "agent_update_apply must be handled by the process supervisor",
         ),
+        Op::CredentialRenew(_) => protocol_error(
+            request_id,
+            "credential_renew must be handled by the process supervisor",
+        ),
 
         // --- op-stream (v1.1): wire types exist, no runtime serves them yet ----
         // The runner does not advertise `Capabilities.op_stream`, so a compliant

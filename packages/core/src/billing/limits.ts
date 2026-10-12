@@ -19,6 +19,7 @@ import {
   countWorkspacesForAccount,
   getSpendableCreditBalance,
   isCodexBilledTurn,
+  readSubscriptionCoreRouteFunding,
   recordUsageEvent,
   sumUsageQuantity,
 } from "@opengeni/db";
@@ -66,6 +67,12 @@ export function modelFundingForAdmission(
   settings: Settings,
   model: string | null | undefined,
   codexBilled: boolean,
+  /**
+   * The shared core's live funding answer for a connected subscription that
+   * has cut over to the core (`coreRoutedSubscriptionFunding`); undefined
+   * keeps the legacy answer.
+   */
+  coreRoutedFunding?: boolean,
 ): { fundedWithoutCredits: boolean; countsTowardTokenCap: boolean } {
   const resolvedModel = model ? resolveModelProviderForTurn(settings, model)?.model : null;
   const codexSubscriptionModel =
@@ -74,14 +81,56 @@ export function modelFundingForAdmission(
   return {
     // A Codex namespace/definition never bypasses credits by itself: the live
     // workspace credential predicate above remains authoritative. SuperGrok's
-    // static overlay is likewise secret-free; its worker/provider admission
-    // owns live account selection before any upstream request can occur.
+    // static overlay is likewise secret-free on its legacy route; its
+    // worker/provider admission owns live account selection before any
+    // upstream request can occur. On the core route the core's funding
+    // answer is authoritative instead.
     fundedWithoutCredits:
       codexBilled ||
-      (resolvedModel != null && !codexSubscriptionModel && resolvedModel.cost !== "credits"),
+      (coreRoutedFunding ??
+        (resolvedModel != null && !codexSubscriptionModel && resolvedModel.cost !== "credits")),
     countsTowardTokenCap:
       !codexBilled && resolvedModel != null && resolvedModel.billing.upstreamPayer === "deployment",
   };
+}
+
+/**
+ * The shared core's funding answer for a non-Codex connected subscription
+ * whose provider has cut over (design 5.3, EP-N19): the provider-neutral form
+ * of `isCodexBilledTurn`, with explicit workspace, causal human, accepted
+ * work and model. Undefined on the provider's legacy route (one receipt
+ * read) and for every other model (no read). Codex keeps `isCodexBilledTurn`.
+ * A provider opts in at its own chat placement step and only while it is
+ * enabled on the deployment, as its catalog readiness does.
+ */
+const CORE_ROUTED_FUNDING: Partial<Record<string, (settings: Settings) => boolean>> = {
+  xai: (settings) => settings.supergrokSubscriptionEnabled,
+};
+
+export async function coreRoutedSubscriptionFunding(
+  db: LimitDependencies["db"],
+  settings: Settings,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    model: string | null | undefined;
+    subjectId: string | null;
+    acceptedTurn?: { sessionId: string; turnId: string };
+  },
+): Promise<boolean | undefined> {
+  if (!input.model) return undefined;
+  const source = resolveModelProviderForTurn(settings, input.model)?.model.credentialSource;
+  if (source?.kind !== "connected_subscription") return undefined;
+  if (!CORE_ROUTED_FUNDING[source.provider]?.(settings)) return undefined;
+  const answer = await readSubscriptionCoreRouteFunding(db, {
+    provider: source.provider,
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    subjectId: input.subjectId,
+    productModelId: input.model,
+    ...(input.acceptedTurn ? { acceptedTurn: input.acceptedTurn } : {}),
+  });
+  return answer.route === "core" ? answer.value : undefined;
 }
 
 export async function requireLimit(deps: LimitDependencies, input: LimitCheckInput): Promise<void> {
@@ -118,10 +167,20 @@ export async function checkLimit(
         ...(input.acceptedTurn ? { acceptedTurn: input.acceptedTurn } : {}),
       })
     : false;
+  const coreFunding = input.workspaceId
+    ? await coreRoutedSubscriptionFunding(deps.db, deps.settings, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        model: input.model,
+        subjectId: input.initiatingHumanSubjectId ?? null,
+        ...(input.acceptedTurn ? { acceptedTurn: input.acceptedTurn } : {}),
+      })
+    : undefined;
   const { fundedWithoutCredits, countsTowardTokenCap } = modelFundingForAdmission(
     deps.settings,
     input.model,
     codexBilled,
+    coreFunding,
   );
   const creditDecision = await checkCreditBalance(deps, input, fundedWithoutCredits);
   if (!creditDecision.allowed) {

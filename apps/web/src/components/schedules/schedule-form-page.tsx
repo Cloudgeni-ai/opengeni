@@ -6,7 +6,7 @@ import { Link } from "@tanstack/react-router";
  * Advanced section. Knowledge source syncs keep a small editor of their own.
  */
 import { Suspense, lazy, useEffect, useId, useMemo, useRef, useState } from "react";
-import { LaptopIcon, ServerIcon } from "lucide-react";
+import { LaptopIcon, LockIcon, MessageSquareIcon, ServerIcon, UsersIcon } from "lucide-react";
 import { toast } from "sonner";
 import { MACHINES_COMPOSER_POLL_MS } from "@opengeni/react/machines";
 
@@ -287,7 +287,11 @@ function AgentScheduleForm({
   );
   const defaultSandboxBackend = context.clientConfig.defaultSandboxBackend ?? "modal";
   const machineOnly = defaultSandboxBackend === "selfhosted";
-  const scheduledMachines = useMemo(
+  // Without a managed sandbox backend a run off a connected machine has no computer.
+  const noManagedSandbox = defaultSandboxBackend === "none";
+  // Shared machines run any schedule. Your own machines (only you see them) run
+  // only schedules set to Only me, so picking one makes the schedule Only me.
+  const sharedMachines = useMemo(
     () =>
       fleet.machines.filter(
         (machine) =>
@@ -295,8 +299,16 @@ function AgentScheduleForm({
       ),
     [fleet.machines],
   );
+  const personalMachines = useMemo(
+    () =>
+      fleet.machines.filter(
+        (machine) =>
+          machine.kind === "selfhosted" && !machine.isSessionGroup && machine.scope === "user",
+      ),
+    [fleet.machines],
+  );
   const defaultMachineSandboxId =
-    scheduledMachines.find((machine) => isMachineComputeSelectable(machine.state))?.sandboxId ?? "";
+    sharedMachines.find((machine) => isMachineComputeSelectable(machine.state))?.sandboxId ?? "";
   const personal = isPersonalWorkspace(
     context.workspaces.find((item) => item.id === workspaceId) ?? null,
     context.managedSelfContext,
@@ -327,6 +339,7 @@ function AgentScheduleForm({
         cadence: cadenceOfSchedule(task.schedule),
         variableSetId: task.variableSetId,
         rigId: task.rigId,
+        visibility: task.visibility,
       };
       if (editing) return fromTask;
       // Duplicate: a new schedule you own. Someone else's connected accounts
@@ -346,6 +359,7 @@ function AgentScheduleForm({
         cadence: { timeZone: viewerTimeZone(), rule: { frequency: "hourly" } },
         variableSetId: null,
         rigId: null,
+        visibility: "workspace",
       };
     }
     const template = mode.kind === "create" ? templateById(mode.template) : undefined;
@@ -432,13 +446,13 @@ function AgentScheduleForm({
     if (inheritsChatSettings || draft.executionTarget !== "machine" || draft.machineSandboxId) {
       return;
     }
-    const firstSelectable = scheduledMachines.find((machine) =>
+    const firstSelectable = sharedMachines.find((machine) =>
       isMachineComputeSelectable(machine.state),
     );
     if (firstSelectable) {
       setDraft((current) => ({ ...current, machineSandboxId: firstSelectable.sandboxId }));
     }
-  }, [draft.executionTarget, draft.machineSandboxId, inheritsChatSettings, scheduledMachines]);
+  }, [draft.executionTarget, draft.machineSandboxId, inheritsChatSettings, sharedMachines]);
 
   /* ----- destination chats */
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -488,6 +502,65 @@ function AgentScheduleForm({
       live = false;
     };
   }, [client, materializedSessionId, needsSessions, targetSessionId, workspaceId, sessionsRetry]);
+
+  /* ----- who can see it */
+  const [canCreatePrivate, setCanCreatePrivate] = useState<boolean | null>(null);
+  // A new schedule starts with the organization's default audience until the
+  // person picks one.
+  const audienceChosenRef = useRef(false);
+  const creating = mode.kind === "create";
+  useEffect(() => {
+    if (personal) return;
+    let live = true;
+    void client
+      .getSessionTenancyCreateCapabilities(workspaceId)
+      .then((capabilities) => {
+        if (!live) return;
+        setCanCreatePrivate(capabilities.canCreatePrivate === true);
+        if (
+          creating &&
+          capabilities.canCreatePrivate === true &&
+          capabilities.defaultVisibility === "private" &&
+          !audienceChosenRef.current
+        )
+          setDraft((current) =>
+            current.visibility === "private" ? current : { ...current, visibility: "private" },
+          );
+      })
+      .catch(() => {
+        if (live) setCanCreatePrivate(false);
+      });
+    return () => {
+      live = false;
+    };
+  }, [client, creating, personal, workspaceId]);
+  const audienceTarget =
+    draft.runMode === "existing_session"
+      ? sessions.find((session) => session.id === draft.targetSessionId)
+      : undefined;
+  // A schedule that posts into an Only me chat, or saves to personal
+  // knowledge, is always Only me; the server enforces the same rule.
+  const personalMachineChosen =
+    !inheritsChatSettings &&
+    draft.executionTarget === "machine" &&
+    personalMachines.some((machine) => machine.sandboxId === draft.machineSandboxId);
+  const privateReason =
+    audienceTarget?.tenancy?.visibility === "private"
+      ? "It posts into an Only me chat."
+      : draft.knowledgeSource?.destination.kind === "personal"
+        ? "It saves to your personal knowledge."
+        : personalMachineChosen
+          ? "It runs on your own machine."
+          : null;
+  useEffect(() => {
+    if (privateReason)
+      setDraft((current) =>
+        current.visibility === "private" ? current : { ...current, visibility: "private" },
+      );
+  }, [privateReason]);
+  const showAudience =
+    !personal &&
+    (canCreatePrivate === true || draft.visibility === "private" || privateReason !== null);
 
   /* ----- connected accounts for the chosen tools */
   const accountTargetSession = inheritsChatSettings
@@ -629,6 +702,13 @@ function AgentScheduleForm({
   }, [baselineDestinationKey, client, learningRetry, taskId, workspaceId]);
 
   /* ----- where it runs */
+  // Your own machines are offered whenever the schedule can be Only me.
+  const offerPersonalMachines =
+    personalMachines.length > 0 &&
+    (personal || canCreatePrivate === true || draft.visibility === "private");
+  const scheduledMachines = offerPersonalMachines
+    ? [...sharedMachines, ...personalMachines]
+    : sharedMachines;
   const selectableMachines = scheduledMachines.filter((machine) =>
     isMachineComputeSelectable(machine.state),
   );
@@ -646,18 +726,28 @@ function AgentScheduleForm({
   const whereOptions: SelectOption[] = [
     {
       value: "managed",
-      label: "Managed sandbox",
-      description: "A fresh cloud sandbox for each run.",
-      leading: <ServerIcon className="size-4 text-fg-subtle" />,
+      label: noManagedSandbox ? "No computer" : "Managed sandbox",
+      description: noManagedSandbox
+        ? "Each run is a chat without a computer."
+        : "A fresh cloud sandbox for each run.",
+      leading: noManagedSandbox ? (
+        <MessageSquareIcon className="size-4 text-fg-subtle" />
+      ) : (
+        <ServerIcon className="size-4 text-fg-subtle" />
+      ),
       disabled: machineOnly,
       disabledReason: "This Opengeni server doesn't run managed sandboxes.",
     },
     ...scheduledMachines.map((machine) => ({
       value: machine.sandboxId,
       label: machine.name,
-      meta:
-        machine.state === "online" ? "Connected machine" : `Connected machine · ${machine.state}`,
-      description: "Runs on this computer, in its code folder.",
+      meta: `${machine.scope === "user" ? "Your machine" : "Connected machine"}${
+        machine.state === "online" ? "" : ` · ${machine.state}`
+      }`,
+      description:
+        machine.scope === "user"
+          ? "Runs on your own computer. Only you can see this schedule and its chats."
+          : "Runs on this computer, in its code folder.",
       leading: <LaptopIcon className="size-4 text-fg-subtle" />,
       disabled: !isMachineComputeSelectable(machine.state),
       disabledReason: "It's offline. Start Opengeni on it to pick it.",
@@ -675,7 +765,9 @@ function AgentScheduleForm({
   ];
   const whereLabel =
     draft.executionTarget === "managed"
-      ? "Managed sandbox"
+      ? noManagedSandbox
+        ? "No computer"
+        : "Managed sandbox"
       : (scheduledMachines.find((machine) => machine.sandboxId === draft.machineSandboxId)?.name ??
         "Connected machine");
 
@@ -1049,6 +1141,40 @@ function AgentScheduleForm({
                   />
                 </div>
               ) : null}
+            </Field>
+          ) : null}
+          {showAudience ? (
+            <Field
+              label="Who can see it"
+              hint={
+                draft.visibility === "private"
+                  ? `${privateReason ? `${privateReason.slice(0, -1)}, so only` : "Only"} you can see this schedule and its chats. Admins can see that it exists, what it costs, and pause it.`
+                  : "Everyone in this workspace can see this schedule and its chats."
+              }
+            >
+              <FieldSegmented<"workspace" | "private">
+                value={draft.visibility}
+                onValueChange={(visibility) => {
+                  audienceChosenRef.current = true;
+                  update({ visibility });
+                }}
+                options={[
+                  {
+                    value: "workspace",
+                    label: "Workspace",
+                    icon: <UsersIcon aria-hidden="true" />,
+                    disabled: privateReason !== null,
+                    ...(privateReason ? { disabledReason: privateReason } : {}),
+                  },
+                  {
+                    value: "private",
+                    label: "Only me",
+                    icon: <LockIcon aria-hidden="true" />,
+                    disabled: canCreatePrivate === false && draft.visibility !== "private",
+                    disabledReason: "Only me is turned off for this organization.",
+                  },
+                ]}
+              />
             </Field>
           ) : null}
           <Field

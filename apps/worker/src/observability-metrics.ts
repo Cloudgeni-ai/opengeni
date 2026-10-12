@@ -12,6 +12,7 @@ import {
   ACTIVE_USER_WINDOWS,
   type ActiveUserWindow,
   type CreditGrantTotals,
+  type IdleInteractionInspection,
   type SessionEventAppendPhaseObservation,
 } from "@opengeni/db";
 import {
@@ -1565,6 +1566,7 @@ export const SUBSCRIPTION_CORE_SHADOW_PLACEMENTS = [
 /** Requirements the reference checker can report, plus checker failure. */
 export const SUBSCRIPTION_CORE_SHADOW_REQUIREMENTS = [
   "SUB-ACCESS-06",
+  "SUB-CREDITS-01",
   "SUB-ELIG-01",
   "SUB-ELIG-02",
   "SUB-ELIG-03",
@@ -1731,6 +1733,19 @@ export function recordSubscriptionCoreShadowStuckLoad(
     name: "opengeni_subscription_core_shadow_stuck_loads_total",
     help: "Shadow world loads still unsettled at the slot ceiling; the slot was released.",
     labels: { provider },
+  });
+}
+
+/** Idle browser/desktop release inspections by fixed outcome: `checkpointing`
+ * (idle browser saves prepared), `released` (holders released without a save). */
+export function recordSandboxIdleInteractionRelease(
+  observability: Observability,
+  outcome: IdleInteractionInspection,
+): void {
+  observability.incrementCounter({
+    name: "opengeni_sandbox_idle_interaction_release_total",
+    help: "Idle browser and desktop release inspections on warm boxes, by fixed outcome.",
+    labels: { outcome },
   });
 }
 
@@ -2092,6 +2107,7 @@ export function recordModelResponseUsage(
     };
     estimatedProviderCostMicros: number | null;
     pricingSource: "configured_list_price" | "gateway_reported" | null;
+    webSearchRequests?: number;
   },
 ): void {
   const model = boundedModelMetricLabel(observability, input.model);
@@ -2120,6 +2136,14 @@ export function recordModelResponseUsage(
       amount,
     });
   }
+  const searches = nonnegativeSafeInteger(input.webSearchRequests ?? 0);
+  if (searches > 0)
+    observability.incrementCounter({
+      name: "opengeni_model_web_search_requests_total",
+      help: "Provider-run web searches billed with authoritative model responses, by provider, catalog model and payer.",
+      labels: { ...base, payer: input.payer },
+      amount: searches,
+    });
   const cost = nonnegativeSafeInteger(input.estimatedProviderCostMicros);
   if (priced && input.pricingSource !== null && cost > 0) {
     observability.incrementCounter({

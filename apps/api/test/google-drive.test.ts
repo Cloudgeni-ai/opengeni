@@ -136,6 +136,7 @@ function googleFixture(
     refreshScopes?: string[];
     refreshError?: { status: number; error: string; description: string };
     fileListError?: { status: number; reason: string; message: string };
+    writableFolder?: boolean;
   } = {},
 ) {
   const tokenRequests: URLSearchParams[] = [];
@@ -164,9 +165,11 @@ function googleFixture(
         ...(options.omitRefreshToken ? {} : { refresh_token: "google-refresh-token" }),
         token_type: "Bearer",
         expires_in: 3600,
-        scope: (isRefresh
-          ? (options.refreshScopes ?? options.scopes ?? [GOOGLE_DRIVE_READONLY_SCOPE])
-          : (options.scopes ?? [GOOGLE_DRIVE_READONLY_SCOPE])
+        scope: (body.get("code") === "picker-code"
+          ? [GOOGLE_DRIVE_FILE_SCOPE]
+          : isRefresh
+            ? (options.refreshScopes ?? options.scopes ?? [GOOGLE_DRIVE_READONLY_SCOPE])
+            : (options.scopes ?? [GOOGLE_DRIVE_READONLY_SCOPE])
         ).join(" "),
       });
     }
@@ -222,7 +225,7 @@ function googleFixture(
         modifiedTime: "2026-07-31T06:00:00.000Z",
         webViewLink: "https://drive.google.com/drive/folders/folder-1",
         trashed: false,
-        capabilities: { canAddChildren: true },
+        capabilities: { canAddChildren: options.writableFolder ?? true },
       });
     }
     if (url.pathname === "/drive/v3/files/0AF9DylqqXWK2Uk9PVA") {
@@ -345,7 +348,12 @@ describe("Google Drive local source preview", () => {
           JSON.stringify({ mode: "external", identity: { externalId: identity.externalId } }),
         ),
       };
-      const google = googleFixture({ scopes: [...new Set([GOOGLE_DRIVE_READONLY_SCOPE, scope])] });
+      const google = googleFixture({
+        scopes: [
+          ...new Set([GOOGLE_DRIVE_READONLY_SCOPE, scope]),
+          "https://www.googleapis.com/auth/gmail.readonly",
+        ],
+      });
       const server = app(google.fetch);
       const base = `/v1/workspaces/${identity.personalWorkspaceId}/connect/attempts`;
       const returnUrl = "https://HOST.example:443/finish?x=%2f#Drive";
@@ -394,9 +402,30 @@ describe("Google Drive local source preview", () => {
       expect(authorization.searchParams.get("code_challenge_method")).toBe("S256");
       const callback = () =>
         server.request(
-          `/v1/integrations/google-drive/callback?${new URLSearchParams({ code: "fixture-code", state: authorization.searchParams.get("state")!, ...(providerId === "google-drive-publish" ? { picked_file_ids: "folder-1" } : {}) })}`,
+          `/v1/integrations/google-drive/callback?${new URLSearchParams({ code: providerId === "google-drive-publish" ? "picker-code" : "fixture-code", state: authorization.searchParams.get("state")!, ...(providerId === "google-drive-publish" ? { picked_file_ids: "folder-1" } : {}) })}`,
         );
-      expect((await callback()).headers.get("location")).toBe(returnUrl);
+      const picked = await callback();
+      if (providerId === "google-drive-publish") {
+        const upgrade = new URL(picked.headers.get("location")!);
+        expect(upgrade.origin).toBe("https://accounts.google.com");
+        expect(
+          await (await server.request(`${base}/${attempt.id}`, { headers })).json(),
+        ).toMatchObject({
+          state: "requires_user_action",
+          credentialsCommitted: false,
+          nextAction: { type: "authorize", url: upgrade.toString() },
+        });
+        expect((await callback()).headers.get("location")).toBe(upgrade.toString());
+        const finish = () =>
+          server.request(
+            `/v1/integrations/google-drive/callback?${new URLSearchParams({ code: "fixture-code", state: upgrade.searchParams.get("state")! })}`,
+          );
+        expect((await finish()).headers.get("location")).toBe(returnUrl);
+        expect((await finish()).headers.get("location")).toBe(returnUrl);
+      } else {
+        expect(picked.headers.get("location")).toBe(returnUrl);
+        expect((await callback()).headers.get("location")).toBe(returnUrl);
+      }
       expect(
         await (await server.request(`${base}/${attempt.id}`, { headers })).json(),
       ).toMatchObject({
@@ -405,7 +434,7 @@ describe("Google Drive local source preview", () => {
         account: { ownership: "personal", providerId },
       });
       expect((await callback()).headers.get("location")).toBe(returnUrl);
-      expect(google.tokenRequests).toHaveLength(providerId === "google-drive-publish" ? 2 : 1);
+      expect(google.tokenRequests).toHaveLength(providerId === "google-drive-publish" ? 3 : 1);
       const accountsResponse = await server.request(
         `/v1/workspaces/${identity.personalWorkspaceId}/connect/accounts`,
         { headers },
@@ -433,6 +462,134 @@ describe("Google Drive local source preview", () => {
       );
     },
   );
+  test.each([
+    {
+      name: "missing recursive read grant",
+      options: { scopes: [GOOGLE_DRIVE_FILE_SCOPE] },
+      reason: "scope_not_granted",
+    },
+    {
+      name: "missing publishing grant",
+      options: { scopes: [GOOGLE_DRIVE_READONLY_SCOPE] },
+      reason: "scope_not_granted",
+    },
+    {
+      name: "another Google account",
+      options: {
+        permissionId: "another-account",
+        scopes: [GOOGLE_DRIVE_READONLY_SCOPE, GOOGLE_DRIVE_FILE_SCOPE],
+      },
+      reason: "account_mismatch",
+    },
+    {
+      name: "folder no longer writable",
+      options: {
+        writableFolder: false,
+        scopes: [GOOGLE_DRIVE_READONLY_SCOPE, GOOGLE_DRIVE_FILE_SCOPE],
+      },
+      reason: "output_folder_unavailable",
+    },
+    { name: "uncertain token transport", options: {}, reason: null },
+    { name: "token server error", options: {}, reason: null },
+    { name: "malformed token response", options: {}, reason: null },
+  ])("embedded publishing settles $name safely", async ({ name, options, reason }) => {
+    if (!available) throw new Error("PostgreSQL required");
+    const workspace = await freshWorkspace();
+    const identity = await ensureExternalIdentity(client.db, {
+      accountId: workspace.accountId,
+      externalId: "drive-product-user",
+    });
+    const token = randomBytes(24).toString("hex");
+    await createOrganizationApiKey(client.db, {
+      accountId: workspace.accountId,
+      name: "Drive embedding",
+      prefix: "test",
+      keyHash: createHash("sha256").update(token).digest("hex"),
+      permissions: ["workspace:read", "connections:read", "connections:write"],
+    });
+    const headers = {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+      "x-opengeni-external-actor": encodeURIComponent(
+        JSON.stringify({ mode: "external", identity: { externalId: identity.externalId } }),
+      ),
+    };
+    const google = googleFixture();
+    const server = app(google.fetch);
+    const base = `/v1/workspaces/${identity.personalWorkspaceId}/connect/attempts`;
+    const returnUrl = "https://host.example/finish";
+    const begin = async (providerId: string, reconnectAccountId?: string) => {
+      const response = await server.request(base, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          providerId,
+          ...(reconnectAccountId ? { reconnectAccountId } : {}),
+          ownership: "personal",
+          returnUrl,
+          idempotencyKey: randomUUID(),
+        }),
+      });
+      expect(response.status).toBe(200);
+      return await response.json();
+    };
+    const source = await begin("google-drive-knowledge");
+    await server.request(
+      `/v1/integrations/google-drive/callback?${new URLSearchParams({ code: "fixture-code", state: new URL(source.nextAction.url).searchParams.get("state")! })}`,
+    );
+    const completed = await (await server.request(`${base}/${source.id}`, { headers })).json();
+    expect(completed.state).toBe("complete");
+    const connectionSnapshot = () => shared!.admin`
+      select version, credential_encrypted, granted_scopes, metadata from connections
+      where id = ${completed.account.id}::uuid`;
+    const original = await connectionSnapshot();
+    const attempt = await begin("google-drive-publish", completed.account.id);
+    const pickerState = new URL(attempt.nextAction.url).searchParams.get("state")!;
+    const pick = () =>
+      server.request(
+        `/v1/integrations/google-drive/callback?${new URLSearchParams({ code: "picker-code", state: pickerState, picked_file_ids: "folder-1" })}`,
+      );
+    const upgrade = new URL((await pick()).headers.get("location")!);
+    expect(upgrade.origin).toBe("https://accounts.google.com");
+    const provider = googleFixture(options);
+    let exchanges = 0;
+    const completionServer = app(async (input, init) => {
+      exchanges += 1;
+      if (reason === null) {
+        if (name === "token server error") {
+          return Response.json({ error: "server_error" }, { status: 503 });
+        }
+        if (name === "malformed token response") return Response.json({});
+        throw new Error("fixture transport outcome unknown");
+      }
+      return await provider.fetch(input, init);
+    });
+    const finish = () =>
+      completionServer.request(
+        `/v1/integrations/google-drive/callback?${new URLSearchParams({ code: "fixture-code", state: upgrade.searchParams.get("state")! })}`,
+      );
+    expect((await finish()).headers.get("location")).toBe(returnUrl);
+    const polled = await (await server.request(`${base}/${attempt.id}`, { headers })).json();
+    expect(polled.credentialsCommitted).toBe(false);
+    const [stored] = await shared!.admin`
+      select operation_id from connect_attempts where id = ${attempt.id}::uuid`;
+    if (reason) {
+      expect(polled).toMatchObject({
+        state: "failed",
+        nextAction: { type: "none" },
+        error: { code: reason, retryable: false },
+      });
+      expect(stored!.operation_id).toBeNull();
+      expect((await pick()).headers.get("location")).toBe(returnUrl);
+    } else {
+      expect(polled.state).toBe("requires_user_action");
+      expect(stored!.operation_id).not.toBeNull();
+    }
+    const callsBeforeReplay = exchanges;
+    expect((await finish()).headers.get("location")).toBe(returnUrl);
+    expect(exchanges).toBe(callsBeforeReplay);
+    expect(await connectionSnapshot()).toEqual(original);
+  });
   test("starts an explicit read-only OAuth flow with state and PKCE", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
@@ -451,7 +608,7 @@ describe("Google Drive local source preview", () => {
     );
   });
 
-  test("requests drive.file independently and activates only an explicit writable destination", async () => {
+  test("isolates the file-only Picker from incremental authorization and preserves source access", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const source = await connect(workspace, googleFixture());
@@ -462,7 +619,7 @@ describe("Google Drive local source preview", () => {
     expect(start.response.status).toBe(200);
     const authorizationUrl = new URL(start.authorizationUrl);
     expect(authorizationUrl.searchParams.get("scope")).toBe(GOOGLE_DRIVE_FILE_SCOPE);
-    expect(authorizationUrl.searchParams.get("include_granted_scopes")).toBe("true");
+    expect(authorizationUrl.searchParams.get("include_granted_scopes")).toBe("false");
     expect(authorizationUrl.searchParams.get("trigger_onepick")).toBe("true");
     expect(authorizationUrl.searchParams.get("allow_folder_selection")).toBe("true");
     expect(authorizationUrl.searchParams.get("allow_multiple")).toBe("false");
@@ -470,8 +627,34 @@ describe("Google Drive local source preview", () => {
       "application/vnd.google-apps.folder",
     );
     const state = authorizationUrl.searchParams.get("state");
+    const picked = await app(google.fetch).request(
+      `/v1/integrations/google-drive/callback?code=picker-code&picked_file_ids=folder-1&state=${encodeURIComponent(state!)}`,
+    );
+    const upgrade = new URL(picked.headers.get("location")!);
+    expect(upgrade.origin).toBe("https://accounts.google.com");
+    expect(upgrade.searchParams.get("scope")?.split(" ")).toEqual([
+      GOOGLE_DRIVE_READONLY_SCOPE,
+      GOOGLE_DRIVE_FILE_SCOPE,
+    ]);
+    expect(upgrade.searchParams.get("include_granted_scopes")).toBe("true");
+    expect(upgrade.searchParams.has("trigger_onepick")).toBe(false);
+    expect(upgrade.searchParams.get("state")).not.toBe(state);
+    expect(upgrade.searchParams.get("code_challenge")).not.toBe(
+      authorizationUrl.searchParams.get("code_challenge"),
+    );
+    expect(
+      await getConnectionMetadata(
+        client.db,
+        workspace.workspaceId,
+        source.connection.id,
+        "subject-a",
+      ),
+    ).toMatchObject({
+      version: source.connection.version,
+      grantedScopes: [GOOGLE_DRIVE_READONLY_SCOPE],
+    });
     const callback = await app(google.fetch).request(
-      `/v1/integrations/google-drive/callback?code=fixture-code&picked_file_ids=folder-1&state=${encodeURIComponent(state!)}`,
+      `/v1/integrations/google-drive/callback?code=fixture-code&picked_file_ids=attacker-folder&state=${encodeURIComponent(upgrade.searchParams.get("state")!)}`,
     );
     expect(callback.headers.get("location")).toContain("google_drive=connected");
     const [connection] = await listConnectionsMetadata(
@@ -506,7 +689,61 @@ describe("Google Drive local source preview", () => {
         action_name: "create",
       },
     ]);
+    const replay = await app(google.fetch).request(
+      `/v1/integrations/google-drive/callback?code=fixture-code&state=${encodeURIComponent(upgrade.searchParams.get("state")!)}`,
+    );
+    expect(replay.headers.get("location")).toContain("reason=state_replayed");
+    expect(google.tokenRequests).toHaveLength(2);
   });
+
+  test.each([
+    { name: "missing recursive read grant", options: { scopes: [GOOGLE_DRIVE_FILE_SCOPE] } },
+    {
+      name: "another Google account",
+      options: {
+        permissionId: "another-account",
+        scopes: [GOOGLE_DRIVE_READONLY_SCOPE, GOOGLE_DRIVE_FILE_SCOPE],
+      },
+    },
+    {
+      name: "folder no longer writable",
+      options: {
+        writableFolder: false,
+        scopes: [GOOGLE_DRIVE_READONLY_SCOPE, GOOGLE_DRIVE_FILE_SCOPE],
+      },
+    },
+  ])(
+    "refuses publishing completion with $name without changing source credentials",
+    async ({ options }) => {
+      if (!available) throw new Error("PostgreSQL required");
+      const workspace = await freshWorkspace();
+      const source = await connect(workspace, googleFixture());
+      const picker = googleFixture();
+      const started = await startConnection(
+        workspace,
+        picker.fetch,
+        source.connection.id,
+        "publish",
+      );
+      const picked = await app(picker.fetch).request(
+        `/v1/integrations/google-drive/callback?code=picker-code&picked_file_ids=folder-1&state=${encodeURIComponent(new URL(started.authorizationUrl).searchParams.get("state")!)}`,
+      );
+      const upgrade = new URL(picked.headers.get("location")!);
+      const provider = googleFixture(options);
+      const refused = await app(provider.fetch).request(
+        `/v1/integrations/google-drive/callback?code=fixture-code&state=${encodeURIComponent(upgrade.searchParams.get("state")!)}`,
+      );
+      expect(refused.headers.get("location")).toContain("google_drive=error");
+      expect(
+        await getConnectionMetadata(
+          client.db,
+          workspace.workspaceId,
+          source.connection.id,
+          "subject-a",
+        ),
+      ).toEqual(source.connection);
+    },
+  );
 
   test("binds encrypted credentials to the initiating subject and returns to the web origin", async () => {
     if (!available) return;

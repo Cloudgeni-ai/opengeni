@@ -1,275 +1,23 @@
 import {
-  armCodexCapacityWait,
-  fetchCodexUsageForAccount,
   getSubscriptionCoreCodexCapacityWaitForSession,
   subscriptionCoreCodexCapacityWaitRef,
-  getCodexCapacityWaitForSession,
   getXaiCapacityWaitForSession,
   getClaudeCapacityWaitForSession,
   resolveClaudeWaiterSubject,
   reconcileClaudeCapacityWait as reconcileClaudeCapacityWaitDb,
   resolveXaiWaiterSubject,
-  listCodexAccountStatuses,
-  listPendingCodexCapacityWakeTargets,
-  reconcileCodexCapacityWait as reconcileCodexCapacityWaitDb,
   reconcileXaiCapacityWait as reconcileXaiCapacityWaitDb,
-  type CodexCapacityWakeTarget,
-  type CodexCapacitySelectionContext,
 } from "@opengeni/db";
-import { publishDurableSessionEvents } from "@opengeni/events";
+
 import { refreshExhaustedXaiQuota } from "./xai-quota";
 import { reconcileCoreCodexCapacityWait } from "./subscription-core-codex-waits";
-import {
-  authoritativeCodexCapacityResetAt,
-  codexAccountNeedsLiveCapacityRefresh,
-  codexAccountServesModel,
-  isCodexCredentialEligible,
-  isCodexCredentialHealthy,
-  selectCodexCredentialLeaseForTurn,
-} from "./codex-rotation";
+
 import type {
   ControlActivityServices,
   GetCodexCapacityWaitInput,
   ReconcileCodexCapacityWaitInput,
   ReconcileCodexCapacityWaitResult,
 } from "./types";
-
-type CodexCapacitySignalServices = {
-  signalCodexCapacityWorkflow?:
-    | NonNullable<ControlActivityServices["signalCodexCapacityWorkflow"]>
-    | null
-    | undefined;
-  wakeSessionWorkflow: ControlActivityServices["wakeSessionWorkflow"];
-};
-
-/**
- * Run a bounded set of usage refreshes, then repair every committed waiter
- * revision even when an individual provider refresh failed. The database
- * outbox remains authoritative; this helper only guarantees that every worker
- * refresh path reaches the same post-commit delivery seam.
- */
-export async function refreshCodexUsageAndRepairCapacityWaiters(
-  refreshes: readonly (() => Promise<unknown>)[],
-  repairPendingWakes: () => Promise<void>,
-): Promise<void> {
-  await Promise.all(refreshes.map((refresh) => refresh().catch(() => undefined)));
-  await repairPendingWakes();
-}
-
-/** Deliver committed waiter revisions; Postgres remains the repairable outbox. */
-export async function signalCodexCapacityWakeTargets(
-  services: CodexCapacitySignalServices,
-  targets: readonly CodexCapacityWakeTarget[],
-): Promise<void> {
-  await Promise.allSettled(
-    targets.map((target) =>
-      services.signalCodexCapacityWorkflow
-        ? services.signalCodexCapacityWorkflow({
-            accountId: target.accountId,
-            workspaceId: target.workspaceId,
-            sessionId: target.sessionId,
-            workflowId: target.workflowId,
-            wakeRevision: target.wakeRevision,
-          })
-        : services.wakeSessionWorkflow
-          ? services.wakeSessionWorkflow({
-              accountId: target.accountId,
-              workspaceId: target.workspaceId,
-              sessionId: target.sessionId,
-              workflowId: target.workflowId,
-              wakeRevision: target.workflowWakeRevision,
-            })
-          : Promise.resolve(),
-    ),
-  );
-}
-
-/** Repair a commit/signal crash edge by redelivering every pending revision. */
-export async function signalPendingCodexCapacityWakeTargets(
-  services: CodexCapacitySignalServices & { db: ControlActivityServices["db"] },
-  workspaceId: string,
-): Promise<void> {
-  const targets = await listPendingCodexCapacityWakeTargets(services.db, workspaceId).catch(
-    () => [],
-  );
-  await signalCodexCapacityWakeTargets(services, targets);
-}
-
-export function codexCapacityDecision<TPolicyScope = never, TUnavailableDiagnostic = never>(
-  context: CodexCapacitySelectionContext<TPolicyScope, TUnavailableDiagnostic>,
-  now = new Date(),
-): ReturnType<Parameters<typeof reconcileCodexCapacityWaitDb>[2]> {
-  context = {
-    ...context,
-    accounts: context.accounts.filter(
-      (account) => !context.modelId || codexAccountServesModel(account, context.modelId, now),
-    ),
-  };
-  const selected = selectCodexCredentialLeaseForTurn({
-    context,
-    sessionId: context.sessionId,
-    sessionPinnedCredentialId: context.sessionPinnedCredentialId,
-    sessionPinSource: context.sessionPinSource,
-    sessionLastCredentialId: context.sessionLastCredentialId,
-    now,
-  });
-  const selectedAccount = selected.credentialId
-    ? context.accounts.find((account) => account.id === selected.credentialId)
-    : undefined;
-  const selectedIsAvailable =
-    selectedAccount !== undefined &&
-    (selectedAccount.id === context.existingCredentialId
-      ? isCodexCredentialHealthy(selectedAccount, now)
-      : isCodexCredentialEligible(selectedAccount, now));
-  if (selected.credentialId && selectedIsAvailable) {
-    return {
-      kind: "available",
-      credentialId: selected.credentialId,
-      diagnostic: {
-        connectedCount: context.accounts.length,
-        eligibleCount: context.accounts.filter(
-          (account) =>
-            (account.id === selected.credentialId ||
-              !context.failedCredentialIds?.includes(account.id)) &&
-            isCodexCredentialEligible(account, now),
-        ).length,
-      },
-    };
-  }
-  const policyCredentialId =
-    context.sessionPinSource === "manual" && context.sessionPinnedCredentialId
-      ? context.sessionPinnedCredentialId
-      : !context.rotationEnabled
-        ? context.activeCredentialId
-        : null;
-  const capacityAccounts = policyCredentialId
-    ? context.accounts.filter((account) => account.id === policyCredentialId)
-    : context.accounts;
-  const authoritativeReset = authoritativeCodexCapacityResetAt(capacityAccounts, now);
-  const hasReconcilableQuotaCooldown = capacityAccounts.some(
-    (account) =>
-      account.status === "active" &&
-      account.allocatorEnabled &&
-      account.exhaustedKind === "quota" &&
-      account.exhaustedUntil !== null,
-  );
-  const policyAccount = capacityAccounts[0] ?? null;
-  const mutationOnlyStatusBlock =
-    (policyAccount != null &&
-      (!policyAccount.allocatorEnabled || policyAccount.status !== "active")) ||
-    (authoritativeReset === null &&
-      capacityAccounts.length > 0 &&
-      capacityAccounts.every(
-        (account) => !account.allocatorEnabled || account.status !== "active",
-      ));
-  const noneReason =
-    selected.decision.kind === "none"
-      ? context.sessionPinSource === "manual" && context.sessionPinnedCredentialId !== null
-        ? "manual_pin_missing"
-        : !context.rotationEnabled && context.activeCredentialId === null
-          ? "rotation_off_active_pointer_missing"
-          : context.policyScope !== null && context.accounts.length === 0
-            ? "policy_filtered_pool_empty"
-            : context.accounts.length === 0
-              ? "no_connected_credentials"
-              : "no_eligible_credential"
-      : null;
-  return {
-    kind: "unavailable",
-    earliestResetAt: authoritativeReset,
-    resetKind:
-      (selected.decision.kind === "none" && !hasReconcilableQuotaCooldown && !authoritativeReset) ||
-      selected.decision.kind === "allocatorDisabled" ||
-      mutationOnlyStatusBlock
-        ? "mutation_only"
-        : authoritativeReset && !hasReconcilableQuotaCooldown
-          ? "authoritative"
-          : "bounded_refresh",
-    diagnostic: {
-      connectedCount: context.accounts.length,
-      allocatorEnabledCount: context.accounts.filter((account) => account.allocatorEnabled).length,
-      policyHash: context.policyHash,
-      ...(noneReason ? { reason: noneReason } : {}),
-    },
-  };
-}
-
-/**
- * Arm a durable Codex waiter and immediately re-evaluate it under the
- * allocator lock. A capacity mutation that commits just before the waiter is
- * inserted cannot signal a row that does not exist yet, so every arm site must
- * close that edge before returning an hours-away reset timer to the workflow.
- * Mutations after the arm commit still advance the waiter's wake revision.
- */
-export async function armAndReconcileCodexCapacityWait(
-  services: Pick<ControlActivityServices, "db" | "bus">,
-  input: Parameters<typeof armCodexCapacityWait>[1],
-  options: { onArmed?: () => void } = {},
-) {
-  const armed = await armCodexCapacityWait(services.db, input);
-  if (armed.action === "stopped") {
-    options.onArmed?.();
-    await publishDurableSessionEvents(
-      services.bus,
-      input.workspaceId,
-      input.sessionId,
-      armed.events,
-    );
-    return armed;
-  }
-  if (armed.action !== "waiting") return armed;
-
-  options.onArmed?.();
-  await publishDurableSessionEvents(services.bus, input.workspaceId, input.sessionId, armed.events);
-  const evaluated = await reconcileCodexCapacityWaitDb(
-    services.db,
-    {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      sessionId: input.sessionId,
-      waiterId: armed.waiter.id,
-      generation: armed.waiter.generation,
-      ...(input.now ? { now: input.now } : {}),
-    },
-    (context) => codexCapacityDecision(context),
-  );
-  await publishDurableSessionEvents(
-    services.bus,
-    input.workspaceId,
-    input.sessionId,
-    evaluated.events,
-  );
-  return evaluated;
-}
-
-async function refreshCapacityMetadata(
-  services: ControlActivityServices,
-  workspaceId: string,
-  turnId: string,
-): Promise<void> {
-  const accounts = await listCodexAccountStatuses(services.db, workspaceId, turnId).catch(() => []);
-  const now = new Date();
-  const stale = accounts.filter(
-    (account) =>
-      account.allocatorEnabled &&
-      account.status === "active" &&
-      (codexAccountNeedsLiveCapacityRefresh(account, now) || account.usageCheckedAt === null),
-  );
-  await refreshCodexUsageAndRepairCapacityWaiters(
-    stale.map(
-      (account) => () =>
-        fetchCodexUsageForAccount(
-          services.db,
-          services.settings,
-          workspaceId,
-          account.id,
-          undefined,
-          turnId,
-        ),
-    ),
-    () => signalPendingCodexCapacityWakeTargets(services, workspaceId),
-  );
-}
 
 export function createCodexCapacityActivities(services: () => Promise<ControlActivityServices>) {
   async function getCodexCapacityWait(input: GetCodexCapacityWaitInput) {
@@ -282,19 +30,11 @@ export function createCodexCapacityActivities(services: () => Promise<ControlAct
       input.sessionId,
     );
     if (coreWaiter) return subscriptionCoreCodexCapacityWaitRef(coreWaiter);
-    const codexWaiter = await getCodexCapacityWaitForSession(
-      db,
-      input.workspaceId,
-      input.sessionId,
-    );
-    const xaiWaiter = codexWaiter
+    const xaiWaiter = await getXaiCapacityWaitForSession(db, input.workspaceId, input.sessionId);
+    const claudeWaiter = xaiWaiter
       ? null
-      : await getXaiCapacityWaitForSession(db, input.workspaceId, input.sessionId);
-    const claudeWaiter =
-      codexWaiter || xaiWaiter
-        ? null
-        : await getClaudeCapacityWaitForSession(db, input.workspaceId, input.sessionId);
-    const waiter = codexWaiter ?? xaiWaiter ?? claudeWaiter;
+      : await getClaudeCapacityWaitForSession(db, input.workspaceId, input.sessionId);
+    const waiter = xaiWaiter ?? claudeWaiter;
     return waiter
       ? {
           ...(xaiWaiter
@@ -377,56 +117,7 @@ export function createCodexCapacityActivities(services: () => Promise<ControlAct
       waiterId: input.waiterId,
       generation: input.generation,
     });
-    if (core) return core;
-    const current = await getCodexCapacityWaitForSession(
-      resolved.db,
-      input.workspaceId,
-      input.sessionId,
-    );
-    if (!current || current.id !== input.waiterId || current.generation !== input.generation) {
-      return { action: "stale" };
-    }
-    const boundedRefreshAttempted =
-      current.resetKind === "bounded_refresh" &&
-      input.cause === "timer" &&
-      current.nextCheckAt.getTime() <= Date.now();
-    if (boundedRefreshAttempted) {
-      // This is a bounded secret-safe control-plane quota refresh. It creates no
-      // turn, model call, user message, schedule, or entitlement action.
-      await refreshCapacityMetadata(resolved, input.workspaceId, current.blockedTurnId);
-    }
-    const result = await reconcileCodexCapacityWaitDb(
-      resolved.db,
-      {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        waiterId: input.waiterId,
-        generation: input.generation,
-        boundedRefreshAttempted,
-      },
-      (context) => codexCapacityDecision(context),
-    );
-    if (result.events.length > 0) {
-      try {
-        await resolved.bus.publish(input.workspaceId, input.sessionId, result.events);
-      } catch {
-        // Postgres is authoritative; SSE replay/gap fill repairs missed fanout.
-      }
-    }
-    if (result.action === "resumed") {
-      return { action: "resumed" };
-    }
-    if (result.action === "waiting") {
-      return {
-        action: "waiting",
-        waiterId: result.waiter.id,
-        generation: result.waiter.generation,
-        nextCheckAt: result.waiter.nextCheckAt.toISOString(),
-        wakeRevision: result.waiter.wakeRevision,
-      };
-    }
-    return { action: result.action };
+    return core ?? { action: "stale" };
   }
 
   return { getCodexCapacityWait, reconcileCodexCapacityWait };

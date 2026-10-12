@@ -2411,6 +2411,8 @@ function computerFailureMessage(session: ComputerSession): string | null {
       return session.placement.kind === "attached_device"
         ? "Chrome reconnected—open a fresh browser/desktop. Use Browser → New browser → Connected Chrome."
         : "The desktop connection expired. Open a new desktop.";
+    case "idle_released":
+      return "The desktop stopped after it went unused. Open a new desktop.";
     case null:
       return null;
     default:

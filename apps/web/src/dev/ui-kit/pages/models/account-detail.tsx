@@ -414,7 +414,7 @@ function SettingsSection({ account }: { account: CodexAccount }) {
       <SettingRowGroup className="-my-3">
         <SettingRow
           variant={picks.settingRow}
-          label={legacy ? "Use for new automatic turns" : "Available for new chats"}
+          label={legacy ? "Use for new automatic turns" : "Use for new work"}
           description={
             legacy
               ? "Enabled accounts can be picked for new automatic turns."

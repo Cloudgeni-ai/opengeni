@@ -84,6 +84,7 @@ describe("organization model defaults", () => {
     expect(await getWorkspaceModelPolicy(db, org.workspaceId)).toEqual({
       allowedProviders: null,
       allowedModels: ["model-a"],
+      allowCreditModels: true,
     });
 
     // A workspace's own choice wins, including "allow every model".
@@ -96,10 +97,12 @@ describe("organization model defaults", () => {
     expect(await getWorkspaceModelPolicyLayers(db, org.workspaceId)).toEqual({
       workspace: { allowedProviders: null, allowedModels: null },
       organization: { allowedProviders: null, allowedModels: ["model-a"] },
+      allowCreditModels: true,
     });
     expect(await getWorkspaceModelPolicy(db, org.workspaceId)).toEqual({
       allowedProviders: null,
       allowedModels: null,
+      allowCreditModels: true,
     });
 
     // Removing it follows the organization again.
@@ -110,6 +113,7 @@ describe("organization model defaults", () => {
     expect(await getWorkspaceModelPolicy(db, org.workspaceId)).toEqual({
       allowedProviders: null,
       allowedModels: ["model-a"],
+      allowCreditModels: true,
     });
 
     // Another organization's defaults never reach this workspace.
@@ -122,7 +126,70 @@ describe("organization model defaults", () => {
     expect(await getWorkspaceModelPolicy(db, org.workspaceId)).toEqual({
       allowedProviders: null,
       allowedModels: ["model-a"],
+      allowCreditModels: true,
     });
+  });
+
+  test("the workspace credit switch holds whichever allowlist the workspace follows", async () => {
+    if (!client) return;
+    const db = client.db;
+    const org = await organization("org-defaults-credit-switch");
+    await updateOrganizationModelDefaults(db, {
+      organizationId: org.accountId,
+      actorSubjectId: org.owner,
+      patch: { modelPolicy: { allowedProviders: null, allowedModels: ["model-a"] } },
+    });
+
+    // Turning credits off is a workspace setting: no policy row, so the
+    // workspace keeps following the organization's allowlist.
+    await updateWorkspaceSettings(db, org.workspaceId, { allowCreditModels: false });
+    expect(await getWorkspaceModelPolicyLayers(db, org.workspaceId)).toEqual({
+      workspace: null,
+      organization: { allowedProviders: null, allowedModels: ["model-a"] },
+      allowCreditModels: false,
+    });
+    expect(await getWorkspaceModelPolicy(db, org.workspaceId)).toEqual({
+      allowedProviders: null,
+      allowedModels: ["model-a"],
+      allowCreditModels: false,
+    });
+
+    // Saving or removing the workspace's own allowlist never turns it back on.
+    await upsertWorkspaceModelPolicy(db, {
+      accountId: org.accountId,
+      workspaceId: org.workspaceId,
+      allowedProviders: null,
+      allowedModels: null,
+    });
+    expect(await getWorkspaceModelPolicy(db, org.workspaceId)).toEqual({
+      allowedProviders: null,
+      allowedModels: null,
+      allowCreditModels: false,
+    });
+    await deleteWorkspaceModelPolicy(db, {
+      accountId: org.accountId,
+      workspaceId: org.workspaceId,
+    });
+    expect((await getWorkspaceModelPolicy(db, org.workspaceId))?.allowCreditModels).toBe(false);
+
+    // An unrelated settings write keeps it (top-level merge).
+    await updateWorkspaceSettings(db, org.workspaceId, { agentHumanInputEnabled: false });
+    expect((await getWorkspaceModelPolicy(db, org.workspaceId))?.allowCreditModels).toBe(false);
+
+    // With nothing else restricted, credits off still reads as a policy.
+    await updateOrganizationModelDefaults(db, {
+      organizationId: org.accountId,
+      actorSubjectId: org.owner,
+      patch: { modelPolicy: null },
+    });
+    expect(await getWorkspaceModelPolicy(db, org.workspaceId)).toEqual({
+      allowedProviders: null,
+      allowedModels: null,
+      allowCreditModels: false,
+    });
+
+    await updateWorkspaceSettings(db, org.workspaceId, { allowCreditModels: true });
+    expect(await getWorkspaceModelPolicy(db, org.workspaceId)).toBeNull();
   });
 
   test("updates field by field and merges compaction limits by model", async () => {
