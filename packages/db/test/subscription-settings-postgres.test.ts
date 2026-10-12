@@ -1381,10 +1381,10 @@ describe.skipIf(!realDb)("subscription settings with lockable workspace override
   // exclusive settings lock, and writes arriving after it wait behind it.
   test("concurrency: a lock change lands while workspace writes keep arriving", async () => {
     const f = await fixture();
-    let stop = false;
+    const state = { stop: false };
     let writes = 0;
     const loop = async (index: number) => {
-      while (!stop) {
+      while (!state.stop) {
         const outcome = await asApp(f, f.alphaId, f.workspaceAdminSubjectId, (tx) =>
           rawRows(
             tx,
@@ -1409,7 +1409,7 @@ describe.skipIf(!realDb)("subscription settings with lockable workspace override
     });
     const elapsed = Date.now() - startedAt;
     await Bun.sleep(100);
-    stop = true;
+    state.stop = true;
     await Promise.all(loops);
     expect(changed.settings.locked).toEqual(["crossProviderFailover"]);
     expect(elapsed).toBeLessThan(2_000);
