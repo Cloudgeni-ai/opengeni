@@ -37,7 +37,6 @@ import {
   ExpiryBadge,
   ItemTile,
   SecretsLoadFailure,
-  SyncStatus,
   VaultChips,
   VaultSyncNotice,
   VaultTile,
@@ -336,12 +335,8 @@ export function VaultPage({
       <DetailPageHeader
         leading={<VaultTile vault={vault} />}
         title={vault.name}
-        chips={
-          <>
-            <VaultChips vault={vault} showOwner />
-            <SyncStatus vault={vault} variant="outline" />
-          </>
-        }
+        // Sync status is the banner below, so the header doesn't repeat it.
+        chips={<VaultChips vault={vault} showOwner />}
         meta={[
           <span key="count">{itemsLabel(vault.itemCount)}</span>,
           <span key="audience">{vaultAudience(vault, organizationName)}</span>,
