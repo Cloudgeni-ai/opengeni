@@ -1,12 +1,33 @@
 import { Link } from "@tanstack/react-router";
-import { Component, lazy, Suspense, useEffect, useState, type ReactNode } from "react";
+import {
+  Component,
+  lazy,
+  Suspense,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+  type RefObject,
+} from "react";
 import type { RetainedArtifactReference } from "@opengeni/sdk";
+import {
+  createWorkspaceRetainedArtifactLoader,
+  useLightboxGalleryItem,
+  type LightboxGalleryEntry,
+} from "@opengeni/react";
 import { isRetainedImageContentType } from "@opengeni/react/artifacts";
 import { useAppContext } from "@/context";
 import { Button } from "@/components/ui/button";
 import { InlineChatImage } from "./inline-chat-image";
 import { DeferredChatMedia } from "@opengeni/react/artifacts";
 import { isRetainedTextPreview } from "./retained-text-preview-policy";
+import {
+  cachedRetainedArtifactLoader,
+  cachedRetainedMetadata,
+  retainedImageCache,
+  retainedImageScope,
+} from "./retained-image-cache";
 const RetainedTextPreview = lazy(() => import("./retained-text-preview"));
 const PdfFilePreview = lazy(() => import("./pdf-file-preview"));
 
@@ -221,18 +242,73 @@ export function InlineChatArtifact({
   artifactId: string;
   alt: string;
 }) {
+  const host = useRef<HTMLDivElement>(null);
+  useChatImageGalleryEntry(host, workspaceId, artifactId, alt);
   return (
-    <DeferredChatMedia height={400} label={alt || "artifact"}>
-      <div className="h-[400px] overflow-auto">
-        <InlineArtifactBody
-          key={`${workspaceId}:${artifactId}`}
-          workspaceId={workspaceId}
-          artifactId={artifactId}
-          alt={alt}
-        />
-      </div>
-    </DeferredChatMedia>
+    <div ref={host}>
+      <DeferredChatMedia height={400} label={alt || "artifact"}>
+        <div className="h-[400px] overflow-auto">
+          <InlineArtifactBody
+            key={`${workspaceId}:${artifactId}`}
+            workspaceId={workspaceId}
+            artifactId={artifactId}
+            alt={alt}
+          />
+        </div>
+      </DeferredChatMedia>
+    </div>
   );
+}
+
+/**
+ * Lets the lightbox page through every image in the chat, including ones that
+ * have not scrolled into view yet. Reuses the page's retained-image cache.
+ */
+function useChatImageGalleryEntry(
+  host: RefObject<HTMLElement | null>,
+  workspaceId: string,
+  artifactId: string,
+  alt: string,
+) {
+  const { client, accessKeyVersion } = useAppContext();
+  const entry = useMemo((): LightboxGalleryEntry => {
+    const cache = retainedImageCache(client);
+    const scope = retainedImageScope(accessKeyVersion, workspaceId, artifactId);
+    const metadata = () =>
+      cachedRetainedMetadata(cache, scope, () =>
+        client.getRetainedArtifact(workspaceId, artifactId),
+      );
+    const load = cachedRetainedArtifactLoader(
+      cache,
+      accessKeyVersion,
+      workspaceId,
+      createWorkspaceRetainedArtifactLoader(client, workspaceId),
+    );
+    return {
+      isImage: async () => {
+        const artifact = await metadata();
+        return artifact.available && isRetainedImageContentType(artifact.contentType);
+      },
+      load: async () => {
+        const artifact = await metadata();
+        if (!artifact.available || !isRetainedImageContentType(artifact.contentType)) return null;
+        const source = await load(artifact, new AbortController().signal);
+        if (!source) return null;
+        if (!(source instanceof Uint8Array))
+          return source.url.trim() ? { src: source.url, caption: alt || undefined } : null;
+        const url = URL.createObjectURL(
+          new Blob([source as unknown as BlobPart], { type: artifact.contentType }),
+        );
+        return {
+          src: url,
+          caption: alt || undefined,
+          label: "Image",
+          release: () => URL.revokeObjectURL(url),
+        };
+      },
+    };
+  }, [client, accessKeyVersion, workspaceId, artifactId, alt]);
+  useLightboxGalleryItem(host, entry);
 }
 
 function InlineArtifactBody({
@@ -309,13 +385,18 @@ function InlineArtifactBody({
           </Button>
         </p>
       )}
-      <Link
-        to="/workspaces/$workspaceId/artifacts/files/$artifactId"
-        params={{ workspaceId, artifactId }}
-        className="text-sm underline"
-      >
-        Open {alt || "artifact"} in Artifacts
-      </Link>
+      {/* Images open in the lightbox on click; other files keep a way to open them. */}
+      {!current ||
+      (current.artifact &&
+        retainedPreviewKind(current.artifact.contentType, current.filename) === "image") ? null : (
+        <Link
+          to="/workspaces/$workspaceId/artifacts/files/$artifactId"
+          params={{ workspaceId, artifactId }}
+          className="text-sm underline"
+        >
+          Open {alt || "artifact"} in Artifacts
+        </Link>
+      )}
     </div>
   );
 }

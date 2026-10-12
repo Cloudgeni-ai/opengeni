@@ -54,4 +54,57 @@ describe("session catalog discovery", () => {
       });
     }
   });
+  test("includes artifacts published by sub-sessions as the chat's own", async () => {
+    const sources: unknown[] = [];
+    const node = (id: string, children: unknown[] = []) => ({ session: { id }, children });
+    const reconcile = await discoverSessionArtifacts("workspace", "parent", () => true, {
+      getSessionLineage: async () =>
+        ({
+          ancestors: [],
+          truncated: false,
+          children: [node("child", [node("grandchild")]), node("unreadable")],
+        }) as never,
+      listArtifactCatalog: async (_workspaceId, options = {}) => {
+        sources.push(options.sourceSessionId);
+        if (options.status === "archived") return { items: [], nextCursor: null };
+        if (options.sourceSessionId === "unreadable")
+          throw Object.assign(new Error("denied"), { status: 403 });
+        return {
+          items: [
+            {
+              ...item,
+              id: `${options.sourceSessionId}-image`,
+              updatedAt:
+                options.sourceSessionId === "grandchild"
+                  ? "2026-09-03T00:00:00Z"
+                  : "2026-09-01T00:00:00Z",
+            },
+          ],
+          nextCursor: null,
+        };
+      },
+    });
+    const result = reconcile([]);
+    expect(result.status).toBe("ready");
+    expect(result.artifacts.map((artifact) => artifact.id)).toEqual([
+      "grandchild-image",
+      "parent-image",
+      "child-image",
+    ]);
+    expect(new Set(sources)).toEqual(new Set(["parent", "child", "grandchild", "unreadable"]));
+  });
+  test("falls back to the chat's own artifacts when lineage is unavailable", async () => {
+    const sources: unknown[] = [];
+    const reconcile = await discoverSessionArtifacts("workspace", "parent", () => true, {
+      getSessionLineage: async () => {
+        throw new Error("unavailable");
+      },
+      listArtifactCatalog: async (_workspaceId, options = {}) => {
+        sources.push(options.sourceSessionId);
+        return { items: options.status === "active" ? [item] : [], nextCursor: null };
+      },
+    });
+    expect(reconcile([]).artifacts.map((artifact) => artifact.id)).toEqual(["same"]);
+    expect(new Set(sources)).toEqual(new Set(["parent"]));
+  });
 });

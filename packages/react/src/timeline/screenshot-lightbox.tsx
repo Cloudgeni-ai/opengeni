@@ -1,4 +1,4 @@
-import { DownloadIcon, XIcon } from "lucide-react";
+import { ChevronLeftIcon, ChevronRightIcon, DownloadIcon, XIcon } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import {
   createContext,
@@ -6,8 +6,10 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
+  type RefObject,
 } from "react";
 import { Dialog } from "radix-ui";
 import { cn } from "../lib/cn";
@@ -41,9 +43,64 @@ type LightboxController = {
 export type LightboxControlLabels = {
   download?: string | undefined;
   close?: string | undefined;
+  previous?: string | undefined;
+  next?: string | undefined;
 };
 
 const LightboxContext = createContext<LightboxController | null>(null);
+
+/** One image the open lightbox can page to, resolved only when it is shown. */
+export type LightboxGalleryImage = {
+  src: string;
+  caption?: string | undefined;
+  label?: string | undefined;
+  /** Releases a source owned by this load, such as an object URL. */
+  release?: (() => void) | undefined;
+};
+
+export type LightboxGalleryEntry = {
+  /** Whether this entry currently resolves to an image; defaults to yes. */
+  isImage?: (() => Promise<boolean>) | undefined;
+  load: () => Promise<LightboxGalleryImage | null>;
+};
+
+type RegisteredGalleryEntry = {
+  element: HTMLElement;
+  entry: { current: LightboxGalleryEntry };
+};
+
+type LightboxGalleryRegistry = {
+  register: (item: RegisteredGalleryEntry) => () => void;
+};
+
+const LightboxGalleryContext = createContext<LightboxGalleryRegistry | null>(null);
+
+/** Images in one timeline page together; elsewhere the whole document does. */
+const GALLERY_ROOT_SELECTOR = "[data-og-timeline-scroller]";
+
+/**
+ * Adds the element's image to the lightbox gallery so an open lightbox can page
+ * to it with the arrow controls, in document order. The entry is resolved only
+ * when it is shown, so deferred images that never scrolled into view still page.
+ * A lightbox opened from inside the element starts at this entry.
+ */
+export function useLightboxGalleryItem(
+  ref: RefObject<HTMLElement | null>,
+  entry: LightboxGalleryEntry | null,
+): void {
+  const registry = useContext(LightboxGalleryContext);
+  const latest = useRef(entry);
+  latest.current = entry;
+  const enabled = entry !== null;
+  useEffect(() => {
+    const element = ref.current;
+    if (!registry || !element || !enabled) return;
+    return registry.register({
+      element,
+      entry: latest as { current: LightboxGalleryEntry },
+    });
+  }, [registry, ref, enabled]);
+}
 
 /** Open the app-level screenshot lightbox. No-op outside a `LightboxProvider`. */
 export function useLightbox(): LightboxController {
@@ -107,12 +164,54 @@ function LightboxRoot({ children }: { children: ReactNode }) {
   const [tokenSource, setTokenSource] = useState<HTMLElement | null>(null);
   const sourceOwner = useMemo(() => createLightboxSourceOwner(), []);
   const portalStyle = usePortalTokenStyle(tokenSource);
+  const entries = useRef(new Set<RegisteredGalleryEntry>());
+  const [gallery, setGallery] = useState<{
+    items: RegisteredGalleryEntry[];
+    index: number;
+  } | null>(null);
+  // Fences stale gallery discovery and navigation after a newer open or step.
+  const generation = useRef(0);
+
+  const registry = useMemo<LightboxGalleryRegistry>(
+    () => ({
+      register(item) {
+        entries.current.add(item);
+        return () => {
+          entries.current.delete(item);
+        };
+      },
+    }),
+    [],
+  );
 
   const releaseCurrentSource = useCallback(() => {
     sourceOwner.release();
   }, [sourceOwner]);
 
   useEffect(() => releaseCurrentSource, [releaseCurrentSource]);
+
+  const discoverGallery = useCallback((source: HTMLElement, token: number) => {
+    const root = source.closest(GALLERY_ROOT_SELECTOR) ?? source.ownerDocument.body;
+    const candidates = [...entries.current]
+      .filter((item) => item.element.isConnected && root.contains(item.element))
+      .sort((a, b) =>
+        a.element.compareDocumentPosition(b.element) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1,
+      );
+    // The innermost entry holding the clicked image comes last in document order.
+    const current = candidates.filter((item) => item.element.contains(source)).pop();
+    if (!current) return;
+    void Promise.all(
+      candidates.map((item) =>
+        item === current
+          ? Promise.resolve(true)
+          : (item.entry.current.isImage?.() ?? Promise.resolve(true)).catch(() => false),
+      ),
+    ).then((images) => {
+      if (generation.current !== token) return;
+      const items = candidates.filter((_, index) => images[index]);
+      if (items.length > 1) setGallery({ items, index: items.indexOf(current) });
+    });
+  }, []);
 
   const open = useCallback(
     (
@@ -124,8 +223,10 @@ function LightboxRoot({ children }: { children: ReactNode }) {
       controlLabels?: LightboxControlLabels,
       releaseSource?: () => void,
     ) => {
+      const token = ++generation.current;
       sourceOwner.replace(releaseSource);
       setTokenSource(source ?? null);
+      setGallery(null);
       setState({
         src,
         label,
@@ -133,21 +234,72 @@ function LightboxRoot({ children }: { children: ReactNode }) {
         ...(downloadFilename ? { downloadFilename } : {}),
         ...(controlLabels ? { controlLabels } : {}),
       });
+      if (source) discoverGallery(source, token);
     },
-    [sourceOwner],
+    [sourceOwner, discoverGallery],
   );
 
   const close = useCallback(() => {
+    generation.current++;
     releaseCurrentSource();
     setState(null);
     setTokenSource(null);
+    setGallery(null);
   }, [releaseCurrentSource]);
+
+  const step = useCallback(
+    (delta: 1 | -1) => {
+      if (!gallery) return;
+      const token = ++generation.current;
+      const count = gallery.items.length;
+      void (async () => {
+        // Skip entries that no longer resolve, but never loop past the start.
+        for (let offset = 1; offset < count; offset++) {
+          const index = (((gallery.index + delta * offset) % count) + count) % count;
+          const image = await gallery.items[index]!.entry.current.load().catch(() => null);
+          if (generation.current !== token) {
+            image?.release?.();
+            return;
+          }
+          if (!image) continue;
+          sourceOwner.replace(image.release);
+          setGallery({ items: gallery.items, index });
+          setState((previous) =>
+            previous
+              ? {
+                  src: image.src,
+                  label: image.label ?? previous.label,
+                  ...(image.caption ? { caption: image.caption } : {}),
+                  ...(previous.controlLabels ? { controlLabels: previous.controlLabels } : {}),
+                }
+              : previous,
+          );
+          return;
+        }
+      })();
+    },
+    [gallery, sourceOwner],
+  );
+
+  const galleryOpen = state !== null && gallery !== null;
+  useEffect(() => {
+    if (!galleryOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey) return;
+      if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+        event.preventDefault();
+        step(event.key === "ArrowLeft" ? -1 : 1);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [galleryOpen, step]);
 
   const controller = useMemo<LightboxController>(() => ({ open }), [open]);
 
   return (
     <LightboxContext.Provider value={controller}>
-      {children}
+      <LightboxGalleryContext.Provider value={registry}>{children}</LightboxGalleryContext.Provider>
       <Dialog.Root open={state !== null} onOpenChange={(next) => !next && close()}>
         <AnimatePresence>
           {state !== null ? (
@@ -191,6 +343,13 @@ function LightboxRoot({ children }: { children: ReactNode }) {
                   <Dialog.Description className="sr-only">
                     {state.caption ?? `Expanded ${state.label.toLowerCase()}`}
                   </Dialog.Description>
+                  {gallery ? (
+                    <LightboxStepButton
+                      direction="previous"
+                      label={state.controlLabels?.previous ?? "Previous image"}
+                      onClick={() => step(-1)}
+                    />
+                  ) : null}
                   {/* The figure is one self-contained object: image, caption, and
                       its own close control. The close button anchors to a wrapper
                       sized to the IMAGE (w-fit), so it hugs the real top-right
@@ -210,7 +369,16 @@ function LightboxRoot({ children }: { children: ReactNode }) {
                         controlLabels={state.controlLabels}
                       />
                     </div>
-                    {state.caption ? (
+                    {gallery ? (
+                      <figcaption className="flex max-w-2xl flex-col items-center gap-1 text-center font-og-mono text-og-xs">
+                        {state.caption ? (
+                          <span className="text-white/55">{state.caption}</span>
+                        ) : null}
+                        <span className="tabular-nums text-white/35" aria-live="polite">
+                          {gallery.index + 1} of {gallery.items.length}
+                        </span>
+                      </figcaption>
+                    ) : state.caption ? (
                       <figcaption className="max-w-2xl text-center font-og-mono text-og-xs text-white/55">
                         {state.caption}
                       </figcaption>
@@ -220,6 +388,13 @@ function LightboxRoot({ children }: { children: ReactNode }) {
                       </figcaption>
                     )}
                   </figure>
+                  {gallery ? (
+                    <LightboxStepButton
+                      direction="next"
+                      label={state.controlLabels?.next ?? "Next image"}
+                      onClick={() => step(1)}
+                    />
+                  ) : null}
                 </motion.div>
               </Dialog.Content>
             </Dialog.Portal>
@@ -227,6 +402,35 @@ function LightboxRoot({ children }: { children: ReactNode }) {
         </AnimatePresence>
       </Dialog.Root>
     </LightboxContext.Provider>
+  );
+}
+
+/** Pages the open lightbox to the neighboring gallery image, wrapping around. */
+function LightboxStepButton({
+  direction,
+  label,
+  onClick,
+}: {
+  direction: "previous" | "next";
+  label: string;
+  onClick: () => void;
+}) {
+  const Icon = direction === "previous" ? ChevronLeftIcon : ChevronRightIcon;
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label={label}
+      className={cn(
+        "absolute top-1/2 z-10 inline-flex size-11 -translate-y-1/2 items-center justify-center rounded-full",
+        "border border-white/15 bg-black/60 text-white/70 backdrop-blur",
+        "transition-colors hover:border-white/30 hover:text-white",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/50",
+        direction === "previous" ? "left-3 sm:left-6" : "right-3 sm:right-6",
+      )}
+    >
+      <Icon className="size-5" />
+    </button>
   );
 }
 
