@@ -81,11 +81,14 @@ export async function discoverSessionArtifacts(
       ),
     );
     const merged = groups.flat();
-    // Several sources interleave by recency; one source keeps the server order.
+    // Several sources interleave like the catalog orders one: active first, then
+    // pinned, then recency. Ties keep source order (the chat before its
+    // sub-sessions) and each source's server order. One source keeps the server order.
     if (sources.length > 1)
       merged.sort(
         (a, b) =>
           Number(a.status === "archived") - Number(b.status === "archived") ||
+          Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)) ||
           b.updatedAt.localeCompare(a.updatedAt),
       );
     const items = [...new Map(merged.map((item) => [artifactKey(item), item])).values()];
