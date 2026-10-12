@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { UnsettledCleanupError } from "./cleanup-error";
 import {
+  INTERACTION_MAX_CLIPBOARD_BYTES,
   ComputerNativeResult,
   type ComputerNativeCommand,
   ComputerClipboard,
@@ -202,7 +203,12 @@ export class ComputerDriver implements ComputerInteractionDriver {
     try {
       const client = await this.activeClient();
       this.assertClickContinuation(command, client);
-      const observation = await client.dispatch(nativeCommand(command));
+      const native = nativeCommand(command);
+      const observation = await client.dispatch(native).catch(async (error: unknown) => {
+        const text = this.capabilities.clipboard ? untypeableText(command, error) : null;
+        if (text === null) throw error;
+        return await pasteText(client, native, text);
+      });
       return observation === null ? null : this.projectObservation(observation);
     } catch (error) {
       if (error instanceof ComputerBackendError) {
@@ -672,6 +678,47 @@ function nativeCommand(command: ComputerActionCommand): ComputerBackendActionCom
     expectedFrameId: command.expectedFrameId,
     action: command.action,
   };
+}
+
+const UNTYPEABLE_CHARACTER = /keymap cannot type Unicode scalar U\+[0-9A-F]+; use clipboard paste/u;
+
+/** Text the native keymap refused before emitting any key, so all of it is
+ * still untyped. Line breaks and tabs are keys with their own effect (submit,
+ * focus change) and are never replaced by a paste. */
+function untypeableText(command: ComputerActionCommand, error: unknown): string | null {
+  if (
+    command.action.type !== "keyboard" ||
+    command.action.action !== "type" ||
+    !(error instanceof ComputerBackendError) ||
+    error.code !== "unsupported" ||
+    error.dispatched ||
+    !UNTYPEABLE_CHARACTER.test(error.message)
+  ) {
+    return null;
+  }
+  const text = command.action.value;
+  if (
+    /[\u0000-\u001f\u007f-\u009f]/u.test(text) ||
+    new TextEncoder().encode(text).byteLength > INTERACTION_MAX_CLIPBOARD_BYTES
+  ) {
+    return null;
+  }
+  return text;
+}
+
+/** Types `text` by writing the seat clipboard and pasting it into the same
+ * target. Both steps are validated before the clipboard changes. */
+async function pasteText(
+  client: ComputerBackend,
+  command: ComputerBackendActionCommand,
+  text: string,
+): Promise<ComputerBackendObservation | null> {
+  const write = { ...command, action: { type: "clipboard", operation: "write", text } } as const;
+  const paste = { ...command, action: { type: "clipboard", operation: "paste" } } as const;
+  await client.validate(write);
+  await client.validate(paste);
+  await client.dispatch(write);
+  return await client.dispatch(paste);
 }
 
 function predispatchError(error: unknown): Error {
