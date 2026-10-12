@@ -5379,7 +5379,7 @@ core read before C3 fails closed in the registry.
   on the probe's `read` result; and, copied unchanged from C2b, `version` on
   the shared connection row reads with the 0730 owner-only personal version
   reader (renumbered at merge). C2c uses the shared administered usage reads
-  (5.3, "Administered usage reads"; the probe, 0731's owner-only routines
+  (5.3, "Administered usage reads"; the probe, 0735's owner-only routines
   and the shared operations steps), which land in their own
   provider-neutral PR before it.
 
