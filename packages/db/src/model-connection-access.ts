@@ -7,6 +7,7 @@ import {
   subscriptionCoreWakeReason,
   type SubscriptionCoreWake,
 } from "./subscription-core/administration";
+import { SUBSCRIPTION_CORE_CLAUDE_PROVIDER } from "./subscription-core-claude-adapter";
 import {
   getSubscriptionCoreModelConnectionAccess,
   ModelConnectionWorkspaceNotInOrganizationError,
@@ -121,6 +122,7 @@ export async function getModelConnectionAccess(
 function subscriptionCoreProviderOfKind(kind: ModelConnectionKind): string | null {
   if (kind === "codex") return SUBSCRIPTION_CORE_CODEX_PROVIDER;
   if (kind === "supergrok") return SUBSCRIPTION_CORE_XAI_PROVIDER;
+  if (kind === "claude_subscription") return SUBSCRIPTION_CORE_CLAUDE_PROVIDER;
   return null;
 }
 

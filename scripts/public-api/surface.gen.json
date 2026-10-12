@@ -18330,7 +18330,8 @@
         "$.provider": "string!",
         "$.refusal": "ref(ModelAccountChoiceRefusal)! null",
         "$.source": "enum!=[\"\\\"organization\\\"\",\"\\\"personal\\\"\",\"\\\"workspace\\\"\"]",
-        "$.status": "string!"
+        "$.status": "string!",
+        "$.usage": "ref(ModelAccountUsageSnapshot)? null"
       }
     },
     "ModelAccountChoiceRefusal": {
@@ -18453,6 +18454,24 @@
         "$.sources.rotation": "ref(ModelAccountSettingSource)!",
         "$.values": "ref(ModelAccountSettingValues)!",
         "$.workspaceId": "string!"
+      }
+    },
+    "ModelAccountUsageSnapshot": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.exhaustedKind": "enum! null=[\"\\\"quota\\\"\",\"\\\"rate_limit\\\"\"]",
+        "$.exhaustedUntil": "string! null",
+        "$.observedAt": "string! null",
+        "$.source": "enum! null=[\"\\\"refusal\\\"\",\"\\\"response_headers\\\"\",\"\\\"usage_endpoint\\\"\"]",
+        "$.windows": "array!",
+        "$.windows[]": "object",
+        "$.windows[].id": "string!",
+        "$.windows[].resetsAt": "string! null",
+        "$.windows[].status": "enum!=[\"\\\"exhausted\\\"\",\"\\\"ok\\\"\",\"\\\"unknown\\\"\",\"\\\"warning\\\"\"]",
+        "$.windows[].usedPercent": "number! null"
       }
     },
     "ModelAvailabilityV1": {
@@ -22915,6 +22934,11 @@
         "$.binding.choice": "enum!=[\"\\\"automatic\\\"\",\"\\\"explicit\\\"\"]",
         "$.binding.connectionId": "string! null",
         "$.binding.provider": "string!",
+        "$.bindings": "array!",
+        "$.bindings[]": "object",
+        "$.bindings[].choice": "enum!=[\"\\\"automatic\\\"\",\"\\\"explicit\\\"\"]",
+        "$.bindings[].connectionId": "string! null",
+        "$.bindings[].provider": "string!",
         "$.personal": "object!",
         "$.personal.connectionsAllowed": "boolean!",
         "$.personal.fallbackAllowed": "boolean!",
@@ -23330,7 +23354,8 @@
       ],
       "shape": {
         "$": "object",
-        "$.connectionId": "string! null"
+        "$.connectionId": "string! null",
+        "$.provider": "string?"
       }
     },
     "SetSessionModelAccountChoiceResponse": {
@@ -28740,6 +28765,7 @@
       "ModelAccountSettingsOverview": "type",
       "ModelAccountSettingsView": "type",
       "ModelAccountSettingValues": "type",
+      "ModelAccountUsageSnapshot": "type",
       "ModelAvailabilityV1": "type",
       "ModelBillingAttributionV1": "type",
       "ModelCapabilitiesV1": "type",

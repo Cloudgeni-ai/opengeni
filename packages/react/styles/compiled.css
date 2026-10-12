@@ -5470,6 +5470,14 @@
       box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
     }
   }
+:where(.og-root).focus-visible\:ring-current\/40,:where(.og-root) .focus-visible\:ring-current\/40 {
+    &:focus-visible {
+      --tw-ring-color: currentcolor;
+      @supports (color: color-mix(in lab, red, red)) {
+        --tw-ring-color: color-mix(in oklab, currentcolor 40%, transparent);
+      }
+    }
+  }
 :where(.og-root).focus-visible\:ring-og-accent,:where(.og-root) .focus-visible\:ring-og-accent {
     &:focus-visible {
       --tw-ring-color: var(--og-color-accent);
@@ -5590,6 +5598,12 @@
 :where(.og-root).focus-visible\:outline-ring,:where(.og-root) .focus-visible\:outline-ring {
     &:focus-visible {
       outline-color: var(--color-brand);
+    }
+  }
+:where(.og-root).focus-visible\:outline-none,:where(.og-root) .focus-visible\:outline-none {
+    &:focus-visible {
+      --tw-outline-style: none;
+      outline-style: none;
     }
   }
 :where(.og-root).focus-visible\:ring-inset,:where(.og-root) .focus-visible\:ring-inset {
@@ -6316,6 +6330,11 @@
       margin-inline: calc(19px * -1);
     }
   }
+:where(.og-root).pointer-coarse\:-my-2,:where(.og-root) .pointer-coarse\:-my-2 {
+    @media (pointer: coarse) {
+      margin-block: calc(var(--spacing) * -2);
+    }
+  }
 :where(.og-root).pointer-coarse\:flex,:where(.og-root) .pointer-coarse\:flex {
     @media (pointer: coarse) {
       display: flex;
@@ -6404,6 +6423,16 @@
 :where(.og-root).pointer-coarse\:min-w-\[44px\],:where(.og-root) .pointer-coarse\:min-w-\[44px\] {
     @media (pointer: coarse) {
       min-width: 44px;
+    }
+  }
+:where(.og-root).pointer-coarse\:px-1,:where(.og-root) .pointer-coarse\:px-1 {
+    @media (pointer: coarse) {
+      padding-inline: calc(var(--spacing) * 1);
+    }
+  }
+:where(.og-root).pointer-coarse\:py-2,:where(.og-root) .pointer-coarse\:py-2 {
+    @media (pointer: coarse) {
+      padding-block: calc(var(--spacing) * 2);
     }
   }
 :where(.og-root).pointer-coarse\:py-2\.5,:where(.og-root) .pointer-coarse\:py-2\.5 {

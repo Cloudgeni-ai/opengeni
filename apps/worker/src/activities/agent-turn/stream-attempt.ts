@@ -188,6 +188,7 @@ import type {
   SandboxRuntimeState,
   TurnControlState,
 } from "./turn-context";
+import { sdkResponseHasMeaningfulOutput } from "./meaningful-output";
 import { subscriptionCoreTurnOf } from "./turn-context";
 
 export type TurnStreamAttemptDeps = {
@@ -1245,6 +1246,12 @@ export async function runTurnStreamAttempt(
                     provider: streamProvider,
                     dispatchId,
                   }),
+                  // A core-placed turn reports real work for the shared
+                  // capacity breaker (providers with their own request events
+                  // set it there).
+                  ...(subscriptionCoreTurnOf(providerTurn)
+                    ? { meaningfulOutput: sdkResponseHasMeaningfulOutput(next.value) }
+                    : {}),
                 },
               },
             ]);

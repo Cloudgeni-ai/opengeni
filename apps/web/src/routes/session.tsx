@@ -29,6 +29,7 @@ import { useMessageSenderRenderer } from "@/components/session/message-senders";
 import { createFailedSessionRetry, type FailedSessionRetryInput } from "@/lib/failed-session-retry";
 import { useSessionStartupTimeline } from "@/lib/session-startup-timeline";
 import { failedSessionCopy } from "@/lib/failed-session-copy";
+import { timelineShowsFailure } from "@/lib/timeline-failure-owner";
 import { sessionDisplayTitle } from "@/lib/session-rename";
 import { useStreamHealthTelemetry } from "@/lib/stream-health";
 import { markIntegrationConnectRedirect } from "@/lib/integration-connect-redirect";
@@ -2518,11 +2519,11 @@ function SessionChatPane(props: {
     retryOperation?.failureEventId === props.failure?.failureEventId ? retryOperation : null;
   // A failure before a logical turn exists cannot preserve an original intent.
   // Prefer detail evidence; paged timeline absence is not positive eligibility.
-  const retryHasRetainedTurn = Boolean(
+  const failureTurnId =
     props.session.failureDiagnostics?.eventId === props.failure?.failureEventId
       ? props.session.failureDiagnostics?.turnId
-      : props.events.find((event) => event.id === props.failure?.failureEventId)?.turnId,
-  );
+      : props.events.find((event) => event.id === props.failure?.failureEventId)?.turnId;
+  const retryHasRetainedTurn = Boolean(failureTurnId);
   const retryFailedSession = useMemo(
     () =>
       createFailedSessionRetry(
@@ -2959,6 +2960,10 @@ function SessionChatPane(props: {
           <LazyFailedSessionBanner
             key={props.session.id}
             failure={props.failure}
+            shownInTimeline={timelineShowsFailure(timelineWithStartup, {
+              failureEventId: props.failure.failureEventId,
+              turnId: failureTurnId,
+            })}
             analyticsKey={
               props.failure.failureEventId ??
               `${props.session.id}:${props.failure.failedAt ?? "unknown"}`
