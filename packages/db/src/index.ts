@@ -25124,8 +25124,9 @@ export type SubscriptionCoreWaiterProvider = keyof typeof SUBSCRIPTION_CORE_WAIT
 
 /**
  * The session-event vocabulary of one provider's core waiter. Codex keeps
- * the names its core waiter shipped with (M3); SuperGrok keeps the names of
- * its legacy waiter, so a wait reads the same before and after its cutover.
+ * the names its core waiter shipped with (M3); SuperGrok and Claude keep the
+ * names of their legacy waiters, so a wait reads the same before and after
+ * the provider's cutover.
  */
 type SubscriptionCoreWaitVocabulary<
   P extends SubscriptionCoreWaiterProvider = SubscriptionCoreWaiterProvider,
@@ -25222,6 +25223,43 @@ const SUBSCRIPTION_CORE_WAIT_VOCABULARY: {
     }),
     cancelledBy: "xai_capacity_reconcile",
     recheckBeforeReset: true,
+  },
+  // Claude keeps the names of its legacy waiter (Claude track C1b).
+  claude: {
+    label: "Claude",
+    waitingEventType: "turn.capacity_waiting",
+    waitingPayload: {
+      provider: "claude-subscription",
+      recovery: "provider_capacity",
+      retryable: true,
+    },
+    statusReason: "claude_capacity",
+    closeToolsReason: "claude_capacity_wait",
+    exhaustedCode: SUBSCRIPTION_CORE_WAIT_EXHAUSTED_CODES.claude,
+    resumedEvent: (waiter) => ({
+      type: "turn.recovery.requested",
+      payload: {
+        reason: "claude_capacity_available",
+        provider: "claude-subscription",
+        waiterId: waiter.waiterId,
+        generation: waiter.generation,
+        wakeRevision: waiter.wakeRevision,
+      },
+    }),
+    supersededEvent: (waiter, reason) => ({
+      type: "turn.superseded",
+      payload: {
+        provider: "claude-subscription",
+        waiterId: waiter.waiterId,
+        generation: waiter.generation,
+        reason,
+      },
+    }),
+    cancelledBy: "claude_capacity_reconcile",
+    // Claude's adapter reads no usage that can end an exhaustion before its
+    // stored reset (its quota comes from response headers), so its waiter
+    // sleeps until the reset like Codex's.
+    recheckBeforeReset: false,
   },
 };
 
@@ -75923,10 +75961,11 @@ export async function peekSessionWork(
 
     // A core waiter (any provider) is the only waiter written after its
     // provider's cutover; it keeps that provider's legacy reference shape
-    // (`provider: "xai"` for SuperGrok, none for Codex), so the workflow
-    // waits on it exactly as on a legacy waiter. A row that no longer belongs
-    // to the session's active waiting turn becomes an immediate check, whose
-    // reconcile deletes it, rather than a sleep until its next check.
+    // (`provider: "xai"` for SuperGrok, `"claude"` for Claude, none for
+    // Codex), so the workflow waits on it exactly as on a legacy waiter. A
+    // row that no longer belongs to the session's active waiting turn
+    // becomes an immediate check, whose reconcile deletes it, rather than a
+    // sleep until its next check.
     const coreCapacityWait = await readSubscriptionCoreWaiterInTransaction(scopedDb, {
       workspaceId,
       sessionId,

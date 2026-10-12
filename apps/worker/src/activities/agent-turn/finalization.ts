@@ -4,8 +4,6 @@ import {
   recordClaudeAccountUsage,
   releaseClaudeCredentialLease,
   releaseXaiCredentialLease,
-  SUBSCRIPTION_CORE_CLAUDE,
-  type SubscriptionCoreProvider,
   updateXaiQuotaMetadata,
   type SessionAttemptQuiescenceCommit,
 } from "@opengeni/db";
@@ -47,6 +45,7 @@ import { coreCodexModelCallCompletedAt, finalizeCoreCodexUsage } from "./codex-c
 import { finalizeCoreSubscriptionTurn } from "./subscription-core-settlement";
 import { XAI_CORE_REFUSAL } from "./xai-core";
 import { wakeSubscriptionCoreCodexWaitersAndDeliver } from "../subscription-core-codex-waits";
+import { finalizeCoreClaudeTurn } from "./claude-core";
 import { drainPhysicalSandboxResumes } from "./sandbox-provision";
 import { safeErrorDiagnostic, safeErrorForTelemetry } from "./errors";
 import {
@@ -524,15 +523,17 @@ async function finalizeTurnAttemptSteps(
     // The same for a core-placed Claude turn (its legacy usage receipts and
     // legacy release never run: they need the legacy authority and subject).
     if (providerTurn.claudeSubscriptionCore && leases.claude.held && attempt.turnId) {
-      await waitForTurnFinalizerStep(
-        finalizeCoreSubscriptionTurn({
-          db,
-          provider: SUBSCRIPTION_CORE_CLAUDE as SubscriptionCoreProvider,
-          core: providerTurn.claudeSubscriptionCore,
-          lease: leases.claude,
-        }).catch(() => undefined),
-        finalizerSignal,
-      );
+      // Queued quota writes still need this lease's fence. Cancellation and
+      // housekeeping timeouts may detach only the wake, never that write join.
+      // The provider_leases stage monitor contains a genuinely stuck join by
+      // requesting host drain; it must not manufacture completion/release.
+      await finalizeCoreClaudeTurn({
+        db,
+        signalCodexCapacityWorkflow,
+        core: providerTurn.claudeSubscriptionCore,
+        lease: leases.claude,
+        signal: finalizerSignal,
+      }).catch(() => undefined);
       leases.claude.stopHeartbeat();
       await waitForTurnFinalizerStep(
         leases.claude.releaseCurrent().catch(() => false),
