@@ -631,6 +631,13 @@ the model remains independent. Legacy rows require full replay before a receipt
 can be recorded; output lost before capture is explicitly marked unavailable
 without manufacturing consumption or an acknowledgement.
 
+The output-release due probe and claim inventory use the same runner predicate.
+A null connection or an expired/offline connection parks output work without
+changing its custody receipt or retry date. Reconnecting the original runner
+makes overdue work eligible again. A revoked enrollment, replacement runner, or
+explicitly stopped/updated/shut-down runner remains eligible for final retirement
+settlement; temporary disconnection alone never proves output loss.
+
 After process exit and pipe drain, the native runner releases both transport-sized
 read buffers before waiting for result collection. Retained output and the terminal
 record remain replayable until their normal acknowledgement/retention boundary;
