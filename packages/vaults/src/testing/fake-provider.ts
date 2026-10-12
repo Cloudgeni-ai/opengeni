@@ -27,6 +27,8 @@ export interface FakeProviderSeedVault {
   externalVaultId?: string;
   name: string;
   items?: FakeProviderSeedItem[];
+  /** The credential can read but not write this vault (`provider_permission_denied`). */
+  readOnly?: boolean;
 }
 export interface FakeProviderSeed {
   accountName?: string | null;
@@ -71,6 +73,7 @@ interface FakeVault {
   name: string;
   items: FakeItem[];
   contentVersion: number;
+  readOnly: boolean;
 }
 
 let fakeIdCounter = 0;
@@ -122,6 +125,7 @@ export function createFakeVaultProvider(
     externalVaultId: vault.externalVaultId ?? fakeId("fv"),
     name: vault.name,
     contentVersion: 1,
+    readOnly: vault.readOnly ?? false,
     items: (vault.items ?? []).map((item) => ({
       externalItemId: item.externalItemId ?? fakeId("fi"),
       name: item.name,
@@ -162,6 +166,12 @@ export function createFakeVaultProvider(
   function vaultById(id: string): FakeVault {
     const vault = vaults.find((candidate) => candidate.externalVaultId === id);
     if (!vault) throw new VaultProviderError("provider_not_found", "vault not found");
+    return vault;
+  }
+  function writableVault(id: string): FakeVault {
+    const vault = vaultById(id);
+    if (vault.readOnly)
+      throw new VaultProviderError("provider_permission_denied", "vault is read-only for this credential");
     return vault;
   }
   function itemById(vault: FakeVault, id: string): FakeItem {
@@ -224,7 +234,7 @@ export function createFakeVaultProvider(
       );
       if (!capabilities.write)
         throw new VaultProviderError("provider_conflict", "provider is read-only");
-      const vault = vaultById(externalVaultId);
+      const vault = writableVault(externalVaultId);
       let item: FakeItem;
       if (input.externalItemId) {
         item = itemById(vault, input.externalItemId);
@@ -282,7 +292,7 @@ export function createFakeVaultProvider(
         { op: "archiveItem", connectionId: ctx.connectionId, externalVaultId, externalItemId },
         "write",
       );
-      const vault = vaultById(externalVaultId);
+      const vault = writableVault(externalVaultId);
       itemById(vault, externalItemId).archived = true;
       vault.contentVersion += 1;
     },
@@ -295,6 +305,7 @@ export function createFakeVaultProvider(
         name: input.name,
         items: [],
         contentVersion: 1,
+        readOnly: false,
       };
       vaults.push(vault);
       return vaultMeta(vault);
