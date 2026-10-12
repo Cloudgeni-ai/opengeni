@@ -22,9 +22,6 @@ import {
   FileResourceRef,
   MODEL_ATTACHMENT_CATALOG_MARKER,
   MODEL_ATTACHMENT_REFS_FIELD,
-  collapseRepeatedSessionGoalContexts,
-  expandUnchangedSessionGoalContexts,
-  isTransientSessionSystemUpdateBatch,
   latestSkillCatalogContext,
   readSkillCatalogContext,
 } from "@opengeni/contracts";
@@ -48,23 +45,16 @@ export const COMPACTION_SUMMARY_MARKER = "opengeni_context_summary";
 
 export const SUMMARY_BUFFER_TOKENS = 20_000;
 /** Leave input room on models whose entire context is smaller than the normal reserve. */
-export function compactionSummaryOutputTokens(
-  contextWindowTokens: number,
-): number {
-  return Math.min(
-    SUMMARY_BUFFER_TOKENS,
-    Math.max(1, Math.floor(contextWindowTokens / 4)),
-  );
+export function compactionSummaryOutputTokens(contextWindowTokens: number): number {
+  return Math.min(SUMMARY_BUFFER_TOKENS, Math.max(1, Math.floor(contextWindowTokens / 4)));
 }
 // A single cumulative budget for all retained real user messages, matching
 // Codex core's build_compacted_history_with_limit (not a per-message allowance).
 export const COMPACT_USER_MESSAGE_MAX_TOKENS = 20_000;
 /** Codex CLI remote compaction v2 retained-message budget (codex-rs). */
 export const REMOTE_V2_RETAINED_MESSAGE_TOKEN_BUDGET = 64_000;
-export const REMOTE_COMPACTION_V2_IMPLEMENTATION =
-  "responses_compaction_v2" as const;
-export const REMOTE_COMPACTION_V2_BETA_FEATURE =
-  "remote_compaction_v2" as const;
+export const REMOTE_COMPACTION_V2_IMPLEMENTATION = "responses_compaction_v2" as const;
+export const REMOTE_COMPACTION_V2_BETA_FEATURE = "remote_compaction_v2" as const;
 // 0.9: compact as LATE as possible — retained context is worth more than early
 // headroom now that declared per-model windows are honest. Model-catalog
 // explicit limits take precedence; the ratio is used for models without one.
@@ -136,17 +126,13 @@ export function isUserMessage(item: unknown): boolean {
 
 /** Accepted machine-input batches are canonical system messages, not user intent. */
 function isPortableInputMessage(item: unknown): boolean {
-  return (
-    isUserMessage(item) ||
-    (itemType(item) === "message" && itemRole(item) === "system")
-  );
+  return isUserMessage(item) || (itemType(item) === "message" && itemRole(item) === "system");
 }
 
 /** True for our synthetic compaction summary item. */
 export function isCompactionSummary(item: unknown): boolean {
   return (
-    isUserMessage(item) &&
-    (item as Record<string, unknown>)[COMPACTION_SUMMARY_MARKER] === true
+    isUserMessage(item) && (item as Record<string, unknown>)[COMPACTION_SUMMARY_MARKER] === true
   );
 }
 
@@ -178,20 +164,14 @@ export function jsonSerializedLength(value: unknown): number {
 
 function jsonSerializedTokenEstimate(value: unknown): number {
   const characters = jsonSerializedLength(value);
-  const nonAsciiCodeUnits = jsonValueNonAsciiCodeUnits(
-    value,
-    new Set<object>(),
-  );
+  const nonAsciiCodeUnits = jsonValueNonAsciiCodeUnits(value, new Set<object>());
   if (nonAsciiCodeUnits === undefined) {
     throw new TypeError("value has no JSON representation");
   }
   return nonAsciiCodeUnits + Math.ceil((characters - nonAsciiCodeUnits) / 4);
 }
 
-function jsonValueNonAsciiCodeUnits(
-  value: unknown,
-  ancestors: Set<object>,
-): number | undefined {
+function jsonValueNonAsciiCodeUnits(value: unknown, ancestors: Set<object>): number | undefined {
   switch (typeof value) {
     case "string":
       return jsonStringNonAsciiCodeUnits(value);
@@ -217,10 +197,7 @@ function jsonValueNonAsciiCodeUnits(
           let count = 0;
           for (let index = 0; index < arrayValue.length; index += 1) {
             count +=
-              jsonValueNonAsciiCodeUnits(
-                plainJsonArrayValue(arrayValue, index),
-                ancestors,
-              ) ?? 0;
+              jsonValueNonAsciiCodeUnits(plainJsonArrayValue(arrayValue, index), ancestors) ?? 0;
           }
           assertNoNamedEnumerableArrayProperties(arrayValue);
           return count;
@@ -268,17 +245,12 @@ export function jsonSerializedUtf8ByteLength(value: unknown): number {
   return length;
 }
 
-function jsonValueLength(
-  value: unknown,
-  ancestors: Set<object>,
-): number | undefined {
+function jsonValueLength(value: unknown, ancestors: Set<object>): number | undefined {
   switch (typeof value) {
     case "string":
       return jsonStringLength(value);
     case "number":
-      return Number.isFinite(value)
-        ? String(Object.is(value, -0) ? 0 : value).length
-        : 4;
+      return Number.isFinite(value) ? String(Object.is(value, -0) ? 0 : value).length : 4;
     case "boolean":
       return value ? 4 : 5;
     case "undefined":
@@ -300,11 +272,7 @@ function jsonValueLength(
           let length = 2;
           for (let index = 0; index < arrayValue.length; index += 1) {
             if (index > 0) length += 1;
-            length +=
-              jsonValueLength(
-                plainJsonArrayValue(arrayValue, index),
-                ancestors,
-              ) ?? 4;
+            length += jsonValueLength(plainJsonArrayValue(arrayValue, index), ancestors) ?? 4;
           }
           assertNoNamedEnumerableArrayProperties(arrayValue);
           return length;
@@ -356,17 +324,12 @@ function jsonStringLength(value: string): number {
   return length;
 }
 
-function jsonValueUtf8ByteLength(
-  value: unknown,
-  ancestors: Set<object>,
-): number | undefined {
+function jsonValueUtf8ByteLength(value: unknown, ancestors: Set<object>): number | undefined {
   switch (typeof value) {
     case "string":
       return jsonStringUtf8ByteLength(value);
     case "number":
-      return Number.isFinite(value)
-        ? String(Object.is(value, -0) ? 0 : value).length
-        : 4;
+      return Number.isFinite(value) ? String(Object.is(value, -0) ? 0 : value).length : 4;
     case "boolean":
       return value ? 4 : 5;
     case "undefined":
@@ -389,10 +352,7 @@ function jsonValueUtf8ByteLength(
           for (let index = 0; index < arrayValue.length; index += 1) {
             if (index > 0) length += 1;
             length +=
-              jsonValueUtf8ByteLength(
-                plainJsonArrayValue(arrayValue, index),
-                ancestors,
-              ) ?? 4;
+              jsonValueUtf8ByteLength(plainJsonArrayValue(arrayValue, index), ancestors) ?? 4;
           }
           assertNoNamedEnumerableArrayProperties(arrayValue);
           return length;
@@ -422,23 +382,18 @@ function plainJsonContainerKind(value: object): "array" | "object" {
     throw new TypeError("plain JSON estimator does not accept proxies");
   }
   if (Object.getOwnPropertySymbols(value).length > 0) {
-    throw new TypeError(
-      "plain JSON estimator does not accept symbol properties",
-    );
+    throw new TypeError("plain JSON estimator does not accept symbol properties");
   }
   const toJsonDescriptor = Object.getOwnPropertyDescriptor(value, "toJSON");
   if (
     toJsonDescriptor &&
-    (!("value" in toJsonDescriptor) ||
-      typeof toJsonDescriptor.value === "function")
+    (!("value" in toJsonDescriptor) || typeof toJsonDescriptor.value === "function")
   ) {
     throw new TypeError("plain JSON estimator does not accept toJSON hooks");
   }
   if (Array.isArray(value)) {
     if (Object.getPrototypeOf(value) !== Array.prototype) {
-      throw new TypeError(
-        "plain JSON estimator does not accept cross-realm or subclassed arrays",
-      );
+      throw new TypeError("plain JSON estimator does not accept cross-realm or subclassed arrays");
     }
     return "array";
   }
@@ -453,23 +408,15 @@ function plainJsonContainerKind(value: object): "array" | "object" {
 function plainJsonArrayValue(value: unknown[], index: number): unknown {
   const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
   if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) {
-    throw new TypeError(
-      "plain JSON estimator requires dense data-property arrays",
-    );
+    throw new TypeError("plain JSON estimator requires dense data-property arrays");
   }
   return descriptor.value;
 }
 
 function assertNoNamedEnumerableArrayProperties(value: unknown[]): void {
   for (const property in value) {
-    if (
-      !Object.hasOwn(value, property) ||
-      isCanonicalArrayIndex(property, value.length)
-    )
-      continue;
-    throw new TypeError(
-      "plain JSON estimator does not accept named array properties",
-    );
+    if (!Object.hasOwn(value, property) || isCanonicalArrayIndex(property, value.length)) continue;
+    throw new TypeError("plain JSON estimator does not accept named array properties");
   }
 }
 
@@ -483,12 +430,7 @@ function plainJsonObjectValue(value: object, property: string): unknown {
 
 function isCanonicalArrayIndex(property: string, length: number): boolean {
   const index = Number(property);
-  return (
-    Number.isSafeInteger(index) &&
-    index >= 0 &&
-    index < length &&
-    String(index) === property
-  );
+  return Number.isSafeInteger(index) && index >= 0 && index < length && String(index) === property;
 }
 
 /** Count raw UTF-8 bytes using the standard three-byte lone-surrogate replacement. */
@@ -579,49 +521,34 @@ function finitePositiveInteger(value: unknown): number | null {
     : null;
 }
 
-function dimensionsFromRecord(
-  record: Record<string, unknown>,
-): [number, number] | null {
+function dimensionsFromRecord(record: Record<string, unknown>): [number, number] | null {
   const width = finitePositiveInteger(record.width);
   const height = finitePositiveInteger(record.height);
   if (width && height) return [width, height];
   if (Array.isArray(record.dimensions) && record.dimensions.length >= 2) {
     const dimensionsWidth = finitePositiveInteger(record.dimensions[0]);
     const dimensionsHeight = finitePositiveInteger(record.dimensions[1]);
-    if (dimensionsWidth && dimensionsHeight)
-      return [dimensionsWidth, dimensionsHeight];
+    if (dimensionsWidth && dimensionsHeight) return [dimensionsWidth, dimensionsHeight];
   }
   return null;
 }
 
-function dataUrlBytesPrefix(
-  value: string,
-  maxBytes = 262_144,
-): Uint8Array | null {
-  const match = /^data:image\/[a-z0-9.+-]+;base64,([a-z0-9+/=\r\n]+)$/i.exec(
-    value,
-  );
+function dataUrlBytesPrefix(value: string, maxBytes = 262_144): Uint8Array | null {
+  const match = /^data:image\/[a-z0-9.+-]+;base64,([a-z0-9+/=\r\n]+)$/i.exec(value);
   if (!match) return null;
   try {
     const maxBase64CodeUnits = Math.ceil(maxBytes / 3) * 4;
-    return new Uint8Array(
-      Buffer.from(match[1]!.slice(0, maxBase64CodeUnits), "base64"),
-    );
+    return new Uint8Array(Buffer.from(match[1]!.slice(0, maxBase64CodeUnits), "base64"));
   } catch {
     return null;
   }
 }
 
-function base64BytesPrefix(
-  value: string,
-  maxBytes = 262_144,
-): Uint8Array | null {
+function base64BytesPrefix(value: string, maxBytes = 262_144): Uint8Array | null {
   if (!/^[a-z0-9+/=\r\n]+$/i.test(value)) return null;
   try {
     const maxBase64CodeUnits = Math.ceil(maxBytes / 3) * 4;
-    return new Uint8Array(
-      Buffer.from(value.slice(0, maxBase64CodeUnits), "base64"),
-    );
+    return new Uint8Array(Buffer.from(value.slice(0, maxBase64CodeUnits), "base64"));
   } catch {
     return null;
   }
@@ -705,10 +632,8 @@ function dimensionsFromImageBytes(bytes: Uint8Array): [number, number] | null {
     bytes[14] === 0x38 &&
     bytes[15] === 0x58
   ) {
-    const width =
-      1 + (bytes[24] ?? 0) + ((bytes[25] ?? 0) << 8) + ((bytes[26] ?? 0) << 16);
-    const height =
-      1 + (bytes[27] ?? 0) + ((bytes[28] ?? 0) << 8) + ((bytes[29] ?? 0) << 16);
+    const width = 1 + (bytes[24] ?? 0) + ((bytes[25] ?? 0) << 8) + ((bytes[26] ?? 0) << 16);
+    const height = 1 + (bytes[27] ?? 0) + ((bytes[28] ?? 0) << 8) + ((bytes[29] ?? 0) << 16);
     return width > 0 && height > 0 ? [width, height] : null;
   }
   // JPEG SOF markers can appear after variable-length metadata segments.
@@ -760,9 +685,7 @@ function dimensionsFromImageSource(source: unknown): [number, number] | null {
       : typeof rawData === "string" &&
           typeof mediaType === "string" &&
           mediaType.toLowerCase().startsWith("image/")
-        ? dimensionsFromImageBytes(
-            base64BytesPrefix(rawData) ?? new Uint8Array(),
-          )
+        ? dimensionsFromImageBytes(base64BytesPrefix(rawData) ?? new Uint8Array())
         : null;
   return (
     dimensionsFromRecord(record) ??
@@ -792,8 +715,7 @@ function highDetailImageTokens(width: number, height: number): number {
     Math.ceil(scaledHeight / IMAGE_HIGH_DETAIL_TILE_SIZE);
   return Math.min(
     MAX_NATIVE_IMAGE_TOKENS,
-    IMAGE_HIGH_DETAIL_BASE_TOKENS +
-      IMAGE_HIGH_DETAIL_TILE_TOKENS * Math.max(1, tiles),
+    IMAGE_HIGH_DETAIL_BASE_TOKENS + IMAGE_HIGH_DETAIL_TILE_TOKENS * Math.max(1, tiles),
   );
 }
 
@@ -813,17 +735,9 @@ export function estimateNativeImageTokens(input: {
   const width = explicitWidth ?? sourceDimensions?.[0] ?? null;
   const height = explicitHeight ?? sourceDimensions?.[1] ?? null;
   const detail =
-    typeof input.detail === "string" && input.detail.length > 0
-      ? input.detail
-      : "auto";
+    typeof input.detail === "string" && input.detail.length > 0 ? input.detail : "auto";
   if (detail === "low") {
-    return {
-      tokens: IMAGE_LOW_DETAIL_TOKENS,
-      width,
-      height,
-      detail,
-      reason: "dimensions",
-    };
+    return { tokens: IMAGE_LOW_DETAIL_TOKENS, width, height, detail, reason: "dimensions" };
   }
   if (!width || !height) {
     return {
@@ -843,22 +757,14 @@ export function estimateNativeImageTokens(input: {
   };
 }
 
-function imageDescriptor(
-  record: Record<string, unknown>,
-): ImageDescriptor | null {
+function imageDescriptor(record: Record<string, unknown>): ImageDescriptor | null {
   const type = typeof record.type === "string" ? record.type : "";
-  if (
-    !new Set(["input_image", "image_url", "image", "computer_screenshot"]).has(
-      type,
-    )
-  ) {
+  if (!new Set(["input_image", "image_url", "image", "computer_screenshot"]).has(type)) {
     return null;
   }
   const imageUrl = record.image_url;
   const nestedImageUrl =
-    imageUrl && typeof imageUrl === "object"
-      ? (imageUrl as Record<string, unknown>).url
-      : imageUrl;
+    imageUrl && typeof imageUrl === "object" ? (imageUrl as Record<string, unknown>).url : imageUrl;
   const source =
     record.image ??
     record.imageUrl ??
@@ -891,20 +797,12 @@ function imageDescriptor(
   };
 }
 
-function projectNativeImages(
-  value: unknown,
-  seen: WeakSet<object>,
-): NativeImageProjection {
+function projectNativeImages(value: unknown, seen: WeakSet<object>): NativeImageProjection {
   if (!value || typeof value !== "object") {
     return { value, imageTokens: 0, imageCount: 0, imageFallbackCount: 0 };
   }
   if (seen.has(value)) {
-    return {
-      value: "[circular]",
-      imageTokens: 0,
-      imageCount: 0,
-      imageFallbackCount: 0,
-    };
+    return { value: "[circular]", imageTokens: 0, imageCount: 0, imageFallbackCount: 0 };
   }
   seen.add(value);
   if (Array.isArray(value)) {
@@ -975,9 +873,7 @@ function projectNativeImages(
  * Codex CLI `estimate_reasoning_length`: opaque encrypted payloads are not
  * model-visible as raw JSON/base64. Visible bytes ≈ `len * 3/4 - 650`.
  */
-export function estimateOpaqueEncryptedModelVisibleBytes(
-  encodedLen: number,
-): number {
+export function estimateOpaqueEncryptedModelVisibleBytes(encodedLen: number): number {
   const length = Math.max(0, Math.floor(encodedLen));
   return Math.max(0, Math.floor((length * 3) / 4) - 650);
 }
@@ -997,9 +893,7 @@ export function opaqueEncryptedContentLength(item: unknown): number | null {
   const record = item as Record<string, unknown>;
   const type = typeof record.type === "string" ? record.type : "";
   if (
-    (type === "compaction" ||
-      type === "context_compaction" ||
-      type === "reasoning") &&
+    (type === "compaction" || type === "context_compaction" || type === "reasoning") &&
     typeof record.encrypted_content === "string" &&
     record.encrypted_content.length > 0
   ) {
@@ -1022,9 +916,7 @@ export function opaqueEncryptedContentLength(item: unknown): number | null {
 }
 
 /** Native-image-aware item estimate for pre-call accounting and retained budgets. */
-export function estimateItemTokenBreakdown(
-  item: CompactionItem,
-): ModelInputTokenBreakdown {
+export function estimateItemTokenBreakdown(item: CompactionItem): ModelInputTokenBreakdown {
   const opaqueLen = opaqueEncryptedContentLength(item);
   if (opaqueLen !== null) {
     // Match Codex: Compaction / encrypted reasoning use the opaque byte
@@ -1167,10 +1059,7 @@ export function estimateCompleteModelInput(input: {
   );
   return {
     tokens:
-      input.provider.totalTokens +
-      appendedAfterModelTokens +
-      instructionGrowth +
-      toolSchemaGrowth,
+      input.provider.totalTokens + appendedAfterModelTokens + instructionGrowth + toolSchemaGrowth,
     source: "provider_plus_local",
     inputTokens,
     inputTextTokens: inputEstimate.textTokens,
@@ -1217,10 +1106,7 @@ export function estimateCompleteModelInputTokens(input: {
     input.currentToolSchemaTokens - input.previousRequest.toolSchemaTokens,
   );
   return (
-    input.provider.totalTokens +
-    appendedAfterModelTokens +
-    instructionGrowth +
-    toolSchemaGrowth
+    input.provider.totalTokens + appendedAfterModelTokens + instructionGrowth + toolSchemaGrowth
   );
 }
 
@@ -1237,9 +1123,7 @@ export function itemsAfterLastModelGeneratedItem(
   return items.slice();
 }
 
-export function hasModelGeneratedItem(
-  items: readonly CompactionItem[],
-): boolean {
+export function hasModelGeneratedItem(items: readonly CompactionItem[]): boolean {
   return items.some(isModelGeneratedItem);
 }
 
@@ -1249,9 +1133,7 @@ function isModelGeneratedItem(item: unknown): boolean {
   return MODEL_GENERATED_ITEM_TYPES.has(type ?? "");
 }
 
-export function clampCompactionThresholdRatio(
-  value: number | undefined | null,
-): number {
+export function clampCompactionThresholdRatio(value: number | undefined | null): number {
   const numeric =
     typeof value === "number" && Number.isFinite(value)
       ? value
@@ -1275,15 +1157,9 @@ export function compactionThresholdTokens(input: {
     Number.isFinite(input.contextAutoCompactThresholdTokens) &&
     input.contextAutoCompactThresholdTokens > 0
   ) {
-    return Math.min(
-      Math.floor(input.contextAutoCompactThresholdTokens),
-      codexMaximum,
-    );
+    return Math.min(Math.floor(input.contextAutoCompactThresholdTokens), codexMaximum);
   }
-  return Math.floor(
-    window *
-      clampCompactionThresholdRatio(input.contextCompactionThresholdRatio),
-  );
+  return Math.floor(window * clampCompactionThresholdRatio(input.contextCompactionThresholdRatio));
 }
 
 export type CompactionDecision = {
@@ -1411,8 +1287,7 @@ export class CompactionProviderResponseError extends Error {
     );
     this.name = "CompactionProviderResponseError";
     this.diagnostics = diagnostics;
-    if (typeof diagnostics.httpStatus === "number")
-      this.status = diagnostics.httpStatus;
+    if (typeof diagnostics.httpStatus === "number") this.status = diagnostics.httpStatus;
     if (typeof diagnostics.code === "string") this.code = diagnostics.code;
     if (typeof diagnostics.type === "string") this.type = diagnostics.type;
     if (typeof diagnostics.param === "string") this.param = diagnostics.param;
@@ -1446,10 +1321,7 @@ export function compactionProviderRejectionFromDiagnostics(
   diagnostics: Record<string, unknown>,
 ): CompactionProviderRejection | null {
   const httpStatus = diagnostics.httpStatus;
-  if (
-    typeof httpStatus !== "number" ||
-    !DEFINITIVE_PROVIDER_REJECTION_STATUSES.has(httpStatus)
-  ) {
+  if (typeof httpStatus !== "number" || !DEFINITIVE_PROVIDER_REJECTION_STATUSES.has(httpStatus)) {
     return null;
   }
   const text = (value: unknown): string | null =>
@@ -1463,9 +1335,7 @@ export function compactionProviderRejectionFromDiagnostics(
   };
 }
 
-export function compactionProviderRejection(
-  error: unknown,
-): CompactionProviderRejection | null {
+export function compactionProviderRejection(error: unknown): CompactionProviderRejection | null {
   return error instanceof CompactionProviderResponseError
     ? compactionProviderRejectionFromDiagnostics(error.diagnostics)
     : null;
@@ -1501,8 +1371,7 @@ export function findCompactionNeededError(
   seen.add(error);
   const record = error as Record<string, unknown>;
   return (
-    findCompactionNeededError(record.cause, seen) ??
-    findCompactionNeededError(record.error, seen)
+    findCompactionNeededError(record.cause, seen) ?? findCompactionNeededError(record.error, seen)
   );
 }
 
@@ -1510,9 +1379,7 @@ export function findCompactionNeededError(
  * The exact checkpoint input shape: current active history followed by Codex's
  * checkpoint prompt as a synthesized user message.
  */
-export function buildCompactionPromptInput(
-  items: readonly CompactionItem[],
-): CompactionItem[] {
+export function buildCompactionPromptInput(items: readonly CompactionItem[]): CompactionItem[] {
   return [
     ...items,
     {
@@ -1552,8 +1419,7 @@ export function projectRemoteCompactionOverflowRetryInput(
     const item = items[index]!;
     const candidate = minimalRemoteCompactionToolResult(item);
     const replacement =
-      candidate !== item &&
-      estimateItemTokens(candidate) < estimateItemTokens(item)
+      candidate !== item && estimateItemTokens(candidate) < estimateItemTokens(item)
         ? candidate
         : item;
     if (replacement !== item) {
@@ -1569,9 +1435,7 @@ export function projectRemoteCompactionOverflowRetryInput(
   };
 }
 
-function minimalRemoteCompactionToolResult(
-  item: CompactionItem,
-): CompactionItem {
+function minimalRemoteCompactionToolResult(item: CompactionItem): CompactionItem {
   const type = itemType(item);
   switch (type) {
     case "function_call_result":
@@ -1607,14 +1471,10 @@ function minimalRemoteCompactionToolResult(
           outcome: { type: "exit", exitCode: null },
         },
       ];
-      return remoteCompactionShellOutputIsMinimal(item.output)
-        ? item
-        : { ...item, output };
+      return remoteCompactionShellOutputIsMinimal(item.output) ? item : { ...item, output };
     }
     case "tool_search_output":
-      return Array.isArray(item.tools) && item.tools.length === 0
-        ? item
-        : { ...item, tools: [] };
+      return Array.isArray(item.tools) && item.tools.length === 0 ? item : { ...item, tools: [] };
     default:
       return item;
   }
@@ -1623,8 +1483,7 @@ function minimalRemoteCompactionToolResult(
 function remoteCompactionShellOutputIsMinimal(output: unknown): boolean {
   if (!Array.isArray(output) || output.length !== 1) return false;
   const result = output[0];
-  if (!result || typeof result !== "object" || Array.isArray(result))
-    return false;
+  if (!result || typeof result !== "object" || Array.isArray(result)) return false;
   const record = result as Record<string, unknown>;
   const outcome = record.outcome;
   return (
@@ -1693,19 +1552,13 @@ export function prepareCompactionPromptInput(
   maxInputTokens: number,
 ): PreparedCompactionPromptInput {
   const budget = Math.max(0, Math.floor(maxInputTokens));
-  let history = omitOpaqueArtifactsFromPortableCompactionHistory(items).map(
-    (item) => projectHostedSearchEvidence(item),
+  let history = omitOpaqueArtifactsFromPortableCompactionHistory(items).map((item) =>
+    projectHostedSearchEvidence(item),
   );
-  let estimatedInputTokens = estimateTokens(
-    buildCompactionPromptInput(history),
-  );
+  let estimatedInputTokens = estimateTokens(buildCompactionPromptInput(history));
   let rewrittenToolOutputs = 0;
 
-  for (
-    let index = 0;
-    index < history.length && estimatedInputTokens > budget;
-    index += 1
-  ) {
+  for (let index = 0; index < history.length && estimatedInputTokens > budget; index += 1) {
     const current = history[index]!;
     const replacement = minimalToolResultForCompaction(current);
     if (replacement === current) continue;
@@ -1721,15 +1574,12 @@ export function prepareCompactionPromptInput(
   if (estimatedInputTokens > budget && history.length > 0) {
     const prefixTokens = new Array<number>(history.length + 1).fill(0);
     for (let index = 0; index < history.length; index += 1) {
-      prefixTokens[index + 1] =
-        prefixTokens[index]! + estimateItemTokens(history[index]!);
+      prefixTokens[index + 1] = prefixTokens[index]! + estimateItemTokens(history[index]!);
     }
     const cuts = oldestLogicalUnitCuts(history);
     const cut =
-      cuts.find(
-        (candidate) =>
-          estimatedInputTokens - prefixTokens[candidate]! <= budget,
-      ) ?? history.length;
+      cuts.find((candidate) => estimatedInputTokens - prefixTokens[candidate]! <= budget) ??
+      history.length;
     history = sanitizeHistoryItemsForModel(history.slice(cut));
     estimatedInputTokens = estimateTokens(buildCompactionPromptInput(history));
     // The synthesized checkpoint instruction is the irreducible floor. The
@@ -1737,9 +1587,7 @@ export function prepareCompactionPromptInput(
     // and malformed configuration instead of constructing invalid fragments.
     if (estimatedInputTokens > budget) {
       history = [];
-      estimatedInputTokens = estimateTokens(
-        buildCompactionPromptInput(history),
-      );
+      estimatedInputTokens = estimateTokens(buildCompactionPromptInput(history));
     }
   }
 
@@ -1754,11 +1602,7 @@ export function prepareCompactionPromptInput(
 function minimalToolResultForCompaction(item: CompactionItem): CompactionItem {
   const type = itemType(item);
   if (!type || !RESULT_TYPES.has(type)) return item;
-  if (
-    type === "tool_search_output" &&
-    Array.isArray(item.tools) &&
-    item.tools.length > 0
-  ) {
+  if (type === "tool_search_output" && Array.isArray(item.tools) && item.tools.length > 0) {
     return { ...item, tools: [] };
   }
   return boundModelToolOutputItem(item, 0);
@@ -1780,73 +1624,14 @@ function oldestLogicalUnitCuts(items: readonly CompactionItem[]): number[] {
 }
 
 /**
- * Shared preparation for both retention builders.
- *
- * - `source` has every "unchanged goal" stand-in restored to its full goal
- *   context, so whichever message ends up oldest in the retained window can
- *   still carry the goal in full.
- * - `charged` is what the model will see for each message once repeated goal
- *   contexts collapse; the retention budget is charged on this form so
- *   repeated goal copies do not crowd out real input.
- * - Transient machine-status batches (command results, wait timeouts, child
- *   progress, goal nudges) are not retained verbatim once newer input exists:
- *   the summary already carries them. The newest input is always retained,
- *   and it carries the current goal context.
- */
-function prepareRetainedInputs(
-  items: readonly CompactionItem[],
-  isCandidate: (item: CompactionItem) => boolean,
-): {
-  source: CompactionItem[];
-  charged: CompactionItem[];
-  skip: (index: number) => boolean;
-  goalAllowanceTokens: (index: number) => number;
-} {
-  const source = expandUnchangedSessionGoalContexts(items);
-  const charged = collapseRepeatedSessionGoalContexts(source);
-  let newest = -1;
-  for (let index = source.length - 1; index >= 0; index -= 1) {
-    if (isCandidate(source[index]!)) {
-      newest = index;
-      break;
-    }
-  }
-  return {
-    source,
-    charged,
-    skip: (index) =>
-      index !== newest && isTransientSessionSystemUpdateBatch(source[index]!),
-    goalAllowanceTokens: (index) =>
-      source[index] === charged[index]
-        ? 0
-        : Math.max(
-            0,
-            estimateTextTokens(messageText(source[index]!)) -
-              estimateTextTokens(messageText(charged[index]!)),
-          ),
-  };
-}
-
-function isPortableRetentionCandidate(item: CompactionItem): boolean {
-  return (
-    isPortableInputMessage(item) &&
-    !isCompactionSummary(item) &&
-    !isAttachmentCatalog(item)
-  );
-}
-
-/**
  * Build the active history after compaction:
  * the newest user/system input messages that fit one cumulative, model-bounded budget
  * (prior summaries excluded, retained images preserved) plus one marked summary item.
- * Each distinct session goal context is kept once, and answered transient
- * machine-status batches are left to the summary.
  */
 export function buildCompactionReplacementHistory(
   items: readonly CompactionItem[],
   summaryBody: string,
-  retainedItemTokens: (item: CompactionItem) => number = (item) =>
-    estimateTokens([item]),
+  retainedItemTokens: (item: CompactionItem) => number = (item) => estimateTokens([item]),
   retainedMessageBudgetTokens = COMPACT_USER_MESSAGE_MAX_TOKENS,
 ): CompactionItem[] {
   const retainedReversed: CompactionItem[] = [];
@@ -1854,25 +1639,15 @@ export function buildCompactionReplacementHistory(
     0,
     Math.min(COMPACT_USER_MESSAGE_MAX_TOKENS, retainedMessageBudgetTokens),
   );
-  const prepared = prepareRetainedInputs(items, isPortableRetentionCandidate);
-  for (
-    let index = prepared.charged.length - 1;
-    index >= 0 && remaining > 0;
-    index -= 1
-  ) {
-    const item = prepared.charged[index]!;
-    if (!isPortableRetentionCandidate(item) || prepared.skip(index)) {
+  for (let index = items.length - 1; index >= 0 && remaining > 0; index -= 1) {
+    const item = items[index]!;
+    if (!isPortableInputMessage(item) || isCompactionSummary(item) || isAttachmentCatalog(item)) {
       continue;
     }
     const textTokens = estimateTextTokens(messageText(item));
     const nonTextTokens = Math.max(0, retainedItemTokens(item) - textTokens);
     if (nonTextTokens >= remaining) continue;
-    retainedReversed.push(
-      compactRetainedMessage(
-        prepared.source[index]!,
-        remaining - nonTextTokens + prepared.goalAllowanceTokens(index),
-      ),
-    );
+    retainedReversed.push(compactRetainedMessage(item, remaining - nonTextTokens));
     if (textTokens + nonTextTokens > remaining) {
       remaining = 0;
       break;
@@ -1880,10 +1655,7 @@ export function buildCompactionReplacementHistory(
     remaining -= textTokens + nonTextTokens;
   }
   const currentCatalog = latestSkillCatalogContext(items);
-  const history = [
-    ...(currentCatalog ? [currentCatalog] : []),
-    ...collapseRepeatedSessionGoalContexts(retainedReversed.reverse()),
-  ];
+  const history = [...(currentCatalog ? [currentCatalog] : []), ...retainedReversed.reverse()];
   const attachmentCatalog = buildAttachmentCatalogItem(items, history);
   if (attachmentCatalog) history.push(attachmentCatalog);
   history.push(buildSummaryItem(summaryBody));
@@ -1905,17 +1677,12 @@ export function isRemoteCompactionItem(item: unknown): item is CompactionItem {
 
 /** Messages retained beside a remote v2 compaction blob (user + system + developer). */
 export function isRetainedRemoteV2Message(item: unknown): boolean {
-  if (
-    isCompactionSummary(item) ||
-    isAttachmentCatalog(item) ||
-    itemType(item) === "compaction"
-  ) {
+  if (isCompactionSummary(item) || isAttachmentCatalog(item) || itemType(item) === "compaction") {
     return false;
   }
   const role = itemRole(item);
   return (
-    itemType(item) === "message" &&
-    (role === "user" || role === "system" || role === "developer")
+    itemType(item) === "message" && (role === "user" || role === "system" || role === "developer")
   );
 }
 
@@ -1930,62 +1697,38 @@ export function isRetainedRemoteV2Message(item: unknown): boolean {
 export function buildRemoteV2ReplacementHistory(
   items: readonly CompactionItem[],
   compactionItem: CompactionItem,
-  retainedItemTokens: (item: CompactionItem) => number = (item) =>
-    estimateTokens([item]),
+  retainedItemTokens: (item: CompactionItem) => number = (item) => estimateTokens([item]),
 ): CompactionItem[] {
   if (!isRemoteCompactionItem(compactionItem)) {
-    throw new EmptyCompactionSummaryError({
-      stage: "remote_v2_compaction_item",
-    });
+    throw new EmptyCompactionSummaryError({ stage: "remote_v2_compaction_item" });
   }
   const retainedReversed: CompactionItem[] = [];
   let remaining = REMOTE_V2_RETAINED_MESSAGE_TOKEN_BUDGET;
-  const prepared = prepareRetainedInputs(
-    items,
-    (item) =>
-      readSkillCatalogContext(item) === null && isRetainedRemoteV2Message(item),
-  );
-  for (
-    let index = prepared.charged.length - 1;
-    index >= 0 && remaining > 0;
-    index -= 1
-  ) {
-    const item = prepared.charged[index]!;
+  for (let index = items.length - 1; index >= 0 && remaining > 0; index -= 1) {
+    const item = items[index]!;
     if (readSkillCatalogContext(item) !== null) continue;
     if (!isRetainedRemoteV2Message(item)) continue;
-    if (prepared.skip(index)) continue;
     const textTokens = estimateTextTokens(messageText(item));
     const chargeTokens = Math.max(1, retainedItemTokens(item));
     const nonTextTokens = Math.max(0, chargeTokens - textTokens);
     if (nonTextTokens >= remaining) continue;
-    const full = prepared.source[index]!;
-    const allowance = prepared.goalAllowanceTokens(index);
     if (chargeTokens <= remaining) {
-      retainedReversed.push(
-        compactRetainedMessage(full, remaining - nonTextTokens + allowance),
-      );
+      retainedReversed.push(compactRetainedMessage(item, remaining - nonTextTokens));
       remaining -= chargeTokens;
       continue;
     }
-    retainedReversed.push(
-      compactRetainedMessage(full, remaining - nonTextTokens + allowance),
-    );
+    retainedReversed.push(compactRetainedMessage(item, remaining - nonTextTokens));
     remaining = 0;
     break;
   }
   const currentCatalog = latestSkillCatalogContext(items);
-  const history = [
-    ...(currentCatalog ? [currentCatalog] : []),
-    ...collapseRepeatedSessionGoalContexts(retainedReversed.reverse()),
-  ];
+  const history = [...(currentCatalog ? [currentCatalog] : []), ...retainedReversed.reverse()];
   const attachmentCatalog = buildAttachmentCatalogItem(items, history);
   if (attachmentCatalog) history.push(attachmentCatalog);
   history.push({
     type: "compaction",
     encrypted_content: compactionItem.encrypted_content,
-    ...(typeof compactionItem.summary === "string"
-      ? { summary: compactionItem.summary }
-      : {}),
+    ...(typeof compactionItem.summary === "string" ? { summary: compactionItem.summary } : {}),
   });
   const reasoning = latestReasoningConfiguration(items);
   if (reasoning) history.push(reasoningConfigurationItem(reasoning));
@@ -2000,9 +1743,7 @@ function isAttachmentCatalog(item: unknown): boolean {
   );
 }
 
-function attachmentRefsFromCompactionItems(
-  items: readonly CompactionItem[],
-): FileResourceRef[] {
+function attachmentRefsFromCompactionItems(items: readonly CompactionItem[]): FileResourceRef[] {
   const refs: FileResourceRef[] = [];
   const seen = new Set<string>();
   for (const item of items) {
@@ -2022,9 +1763,7 @@ function buildAttachmentCatalogItem(
   original: readonly CompactionItem[],
   retained: readonly CompactionItem[],
 ): CompactionItem | null {
-  const retainedIds = new Set(
-    attachmentRefsFromCompactionItems(retained).map((ref) => ref.fileId),
-  );
+  const retainedIds = new Set(attachmentRefsFromCompactionItems(retained).map((ref) => ref.fileId));
   const omittedRefs = attachmentRefsFromCompactionItems(original).filter(
     (ref) => !retainedIds.has(ref.fileId),
   );
@@ -2060,14 +1799,9 @@ export function buildRemoteCompactionV2PromptInput(
 }
 
 /** Extract exactly one compaction output item from a Responses payload. */
-export function extractRemoteCompactionV2OutputItem(
-  response: unknown,
-): CompactionItem {
+export function extractRemoteCompactionV2OutputItem(response: unknown): CompactionItem {
   if (!response || typeof response !== "object") {
-    throw new EmptyCompactionSummaryError({
-      stage: "remote_v2_extract",
-      reason: "no_response",
-    });
+    throw new EmptyCompactionSummaryError({ stage: "remote_v2_extract", reason: "no_response" });
   }
   const record = response as Record<string, unknown>;
   const output = Array.isArray(record.output) ? record.output : [];
@@ -2082,9 +1816,7 @@ export function extractRemoteCompactionV2OutputItem(
   return compactionItems[0]!;
 }
 
-export function compactionReplacementFingerprint(
-  items: readonly CompactionItem[],
-): string {
+export function compactionReplacementFingerprint(items: readonly CompactionItem[]): string {
   // PostgreSQL JSONB does not preserve JavaScript object-key insertion order.
   // Canonicalize recursively so a replacement has the same identity before
   // and after its durable round trip.
@@ -2110,9 +1842,7 @@ export function latestCompactionReplacementFingerprint(
   for (let index = items.length - 1; index >= 0; index -= 1) {
     if (isCompactionSummary(items[index])) {
       const end =
-        items[index + 1] && readReasoningConfiguration(items[index + 1]!)
-          ? index + 2
-          : index + 1;
+        items[index + 1] && readReasoningConfiguration(items[index + 1]!) ? index + 2 : index + 1;
       return compactionReplacementFingerprint(items.slice(0, end));
     }
   }
@@ -2140,10 +1870,7 @@ export function buildSummaryItem(summaryBody: string): CompactionItem {
  * Retain a suffix message: keep images, truncate text only when the
  * text budget is exceeded (CLI keeps InputImage parts through truncation).
  */
-function compactRetainedMessage(
-  item: CompactionItem,
-  maxTokens: number,
-): CompactionItem {
+function compactRetainedMessage(item: CompactionItem, maxTokens: number): CompactionItem {
   const text = messageText(item);
   const next = { ...item };
   if (estimateTextTokens(text) <= maxTokens) {
@@ -2166,10 +1893,7 @@ function isImageContentPart(part: unknown): boolean {
   return type === "input_image" || type === "image_url";
 }
 
-function truncateMiddleByEstimatedTokens(
-  text: string,
-  maxTokens: number,
-): string {
+function truncateMiddleByEstimatedTokens(text: string, maxTokens: number): string {
   const budget = Math.max(0, Math.floor(maxTokens));
   if (estimateTextTokens(text) <= budget) {
     return text;
@@ -2194,10 +1918,7 @@ function truncateMiddleByEstimatedTokens(
   return best;
 }
 
-function middleTruncationCandidate(
-  text: string,
-  keepCodeUnits: number,
-): string {
+function middleTruncationCandidate(text: string, keepCodeUnits: number): string {
   const headTarget = Math.ceil(keepCodeUnits / 2);
   const tailTarget = Math.floor(keepCodeUnits / 2);
   const headEnd = validPrefixBoundary(text, headTarget);
@@ -2283,9 +2004,7 @@ function messageText(item: CompactionItem): string {
   return "";
 }
 
-export function renderCompactionPromptInputForChat(
-  input: readonly CompactionItem[],
-): string {
+export function renderCompactionPromptInputForChat(input: readonly CompactionItem[]): string {
   return input
     .map((item) => projectHostedSearchEvidence(item))
     .map(renderItem)
