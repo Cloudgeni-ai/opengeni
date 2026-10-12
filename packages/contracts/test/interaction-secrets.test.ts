@@ -160,9 +160,9 @@ describe("computer actions", () => {
     expect(computerActionSecretTexts({ type: "keyboard", action: "type", value: "a" })).toEqual([
       "a",
     ]);
-    expect(computerActionSecretTexts({ type: "keyboard", action: "press", value: "Enter" })).toEqual(
-      [],
-    );
+    expect(
+      computerActionSecretTexts({ type: "keyboard", action: "press", value: "Enter" }),
+    ).toEqual([]);
     expect(
       materializeComputerActionSecrets({
         action: {

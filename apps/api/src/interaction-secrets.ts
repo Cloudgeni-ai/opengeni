@@ -124,7 +124,8 @@ function referenceFailure(
 export function collectStringsDeep(value: unknown, out: string[] = [], depth = 0): string[] {
   if (depth > 32) return out;
   if (typeof value === "string") out.push(value);
-  else if (Array.isArray(value)) for (const entry of value) collectStringsDeep(entry, out, depth + 1);
+  else if (Array.isArray(value))
+    for (const entry of value) collectStringsDeep(entry, out, depth + 1);
   else if (value !== null && typeof value === "object") {
     for (const entry of Object.values(value)) collectStringsDeep(entry, out, depth + 1);
   }
@@ -197,8 +198,7 @@ export async function resolveInteractionSecretValues(input: {
   }
   const values: InteractionSecretValues = {};
   const ordered = [...resolved.values()].sort(
-    (left, right) =>
-      Number(left.material.type === "totp") - Number(right.material.type === "totp"),
+    (left, right) => Number(left.material.type === "totp") - Number(right.material.type === "totp"),
   );
   for (const value of ordered) {
     const material = await secretValueAtDispatch(value, port.clock);

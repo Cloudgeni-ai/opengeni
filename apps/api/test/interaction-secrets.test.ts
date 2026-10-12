@@ -215,9 +215,7 @@ describe("resolveInteractionSecretValues", () => {
     };
     expect(details.reason).toBe("secret_reference_error");
     expect(details.secretReference.error).toBe("secret_reference_error");
-    expect(details.secretReference.failures.map((failure) => failure.code)).toEqual([
-      "not_found",
-    ]);
+    expect(details.secretReference.failures.map((failure) => failure.code)).toEqual(["not_found"]);
     expect(details.secretReference.askCard).not.toBeNull();
     expect(JSON.stringify({ message: missing.message, details })).not.toContain(PASSWORD);
 
@@ -243,8 +241,8 @@ describe("resolveInteractionSecretValues", () => {
       }),
     );
     expect(
-      (file.details as { secretReference: { failures: Array<{ code: string }> } })
-        .secretReference.failures[0]!.code,
+      (file.details as { secretReference: { failures: Array<{ code: string }> } }).secretReference
+        .failures[0]!.code,
     ).toBe("secretfile_not_allowed");
   });
 
