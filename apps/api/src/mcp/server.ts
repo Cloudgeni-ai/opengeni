@@ -1752,7 +1752,7 @@ export function buildOpenGeniMcpServer(
       async ({ limit: requestedLimit, offset: requestedOffset }) => {
         const limit = requestedLimit ?? 25;
         const offset = requestedOffset ?? 0;
-        const viewer = await scheduledTaskViewerForGrant(deps.db, grant);
+        const viewer = await scheduledTaskViewerForGrant(deps.db, grant, deps.settings);
         const rows = await listScheduledTasks(
           deps.db,
           grant.workspaceId,
@@ -1925,7 +1925,7 @@ export function buildOpenGeniMcpServer(
       async ({ id }) => {
         // Admins can pause any schedule, including someone else's Only me one,
         // which they only ever see as a summary.
-        const viewer = await scheduledTaskViewerForGrant(deps.db, grant);
+        const viewer = await scheduledTaskViewerForGrant(deps.db, grant, deps.settings);
         let pausable: Awaited<ReturnType<typeof requirePausableScheduledTask>>;
         try {
           pausable = await requirePausableScheduledTask(deps.db, grant, id, viewer);
@@ -2116,7 +2116,10 @@ export function buildOpenGeniMcpServer(
         const target = await getScheduledTaskIncludingDeleted(deps.db, grant.workspaceId, id);
         if (
           target &&
-          scheduledTaskAccess(await scheduledTaskViewerForGrant(deps.db, grant), target) !== "full"
+          scheduledTaskAccess(
+            await scheduledTaskViewerForGrant(deps.db, grant, deps.settings),
+            target,
+          ) !== "full"
         )
           throw new Error(`Scheduled task not found: ${id}`);
         const { task, changed } = await deleteScheduledTaskWithDurableCleanup(deps, {

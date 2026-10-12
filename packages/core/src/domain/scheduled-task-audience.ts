@@ -15,13 +15,24 @@ import {
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
 import { hasPermission } from "../access";
+import {
+  privacyDeploymentLimits,
+  resolveOrganizationPrivacy,
+  type PrivacySettings,
+} from "../application/organization-privacy";
 import { creationInitiatorForGrant } from "./sessions";
 
 /**
- * Who is reading schedules: the person (or the person an agent acts for), and
- * whether they administer the workspace.
+ * Who is reading schedules: the person (or the person an agent acts for),
+ * whether they administer the workspace, and whether, as an admin, they see
+ * that other people's Only me schedules exist. The organization can turn that
+ * last part off; a deployment can require it.
  */
-export type ScheduledTaskViewer = { subjectId: string | null; admin: boolean };
+export type ScheduledTaskViewer = {
+  subjectId: string | null;
+  admin: boolean;
+  seesPrivateSummaries: boolean;
+};
 
 /**
  * `full`: everything. `summary`: an admin's view of someone else's Only me
@@ -33,6 +44,27 @@ export type ScheduledTaskAccess = "full" | "summary" | "none";
 export async function scheduledTaskViewerForGrant(
   db: Database,
   grant: AccessGrant,
+  settings: PrivacySettings,
+): Promise<ScheduledTaskViewer> {
+  const { subjectId } = await scheduledTaskFullViewerForGrant(db, grant);
+  const admin = hasPermission(grant.permissions, "workspace:admin", grant.permissionMode);
+  return {
+    subjectId,
+    admin,
+    seesPrivateSummaries:
+      admin &&
+      (await resolveOrganizationPrivacy({ db, settings }, grant.accountId))
+        .adminsSeePrivateSchedules,
+  };
+}
+
+/**
+ * The viewer for a check that only asks "may they see it in full?". Summary
+ * access never matters there, so it needs no organization setting.
+ */
+async function scheduledTaskFullViewerForGrant(
+  db: Database,
+  grant: AccessGrant,
 ): Promise<ScheduledTaskViewer> {
   const creator = creationInitiatorForGrant(grant);
   const subjectId = await scheduledTaskViewerSubject(db, {
@@ -41,10 +73,7 @@ export async function scheduledTaskViewerForGrant(
     ...(creator.context ? { createdByContext: creator.context } : {}),
     createdByActor: creator.actor ?? null,
   });
-  return {
-    subjectId,
-    admin: hasPermission(grant.permissions, "workspace:admin", grant.permissionMode),
-  };
+  return { subjectId, admin: false, seesPrivateSummaries: false };
 }
 
 export function scheduledTaskAccess(
@@ -53,7 +82,7 @@ export function scheduledTaskAccess(
 ): ScheduledTaskAccess {
   if (task.visibility !== "private") return "full";
   if (viewer.subjectId !== null && task.ownerSubjectId === viewer.subjectId) return "full";
-  return viewer.admin ? "summary" : "none";
+  return viewer.seesPrivateSummaries ? "summary" : "none";
 }
 
 function scheduledTaskNotFound(): HTTPException {
@@ -69,7 +98,7 @@ export async function requireVisibleScheduledTask(
 ): Promise<ScheduledTask> {
   const task = await getScheduledTask(db, grant.workspaceId, taskId);
   if (!task) throw scheduledTaskNotFound();
-  const resolved = viewer ?? (await scheduledTaskViewerForGrant(db, grant));
+  const resolved = viewer ?? (await scheduledTaskFullViewerForGrant(db, grant));
   if (scheduledTaskAccess(resolved, task) !== "full") throw scheduledTaskNotFound();
   return task;
 }
@@ -83,7 +112,7 @@ export async function privateScheduledTaskSummaryForAdmin(
   taskId: string,
   viewer: ScheduledTaskViewer,
 ): Promise<PrivateScheduledTaskSummary | null> {
-  if (!viewer.admin || !UUID_PATTERN.test(taskId)) return null;
+  if (!viewer.seesPrivateSummaries || !UUID_PATTERN.test(taskId)) return null;
   const [summary] = await listPrivateScheduledTaskSummaries(db, {
     workspaceId: grant.workspaceId,
     excludeOwnerSubjectId: viewer.subjectId,
@@ -102,12 +131,12 @@ export async function requirePausableScheduledTask(
   db: Database,
   grant: AccessGrant,
   taskId: string,
-  viewer?: ScheduledTaskViewer,
+  viewer: ScheduledTaskViewer,
 ): Promise<
   | { access: "full"; task: ScheduledTask }
   | { access: "summary"; summary: PrivateScheduledTaskSummary }
 > {
-  const resolved = viewer ?? (await scheduledTaskViewerForGrant(db, grant));
+  const resolved = viewer;
   const task = await getScheduledTask(db, grant.workspaceId, taskId);
   if (task && scheduledTaskAccess(resolved, task) === "full") return { access: "full", task };
   const summary = await privateScheduledTaskSummaryForAdmin(db, grant, taskId, resolved);
@@ -125,7 +154,7 @@ export async function pausePrivateScheduledTaskAsAdmin(
   taskId: string,
   viewer: ScheduledTaskViewer,
 ): Promise<PrivateScheduledTaskSummary> {
-  if (!viewer.admin) throw scheduledTaskNotFound();
+  if (!viewer.seesPrivateSummaries) throw scheduledTaskNotFound();
   const paused = await pausePrivateScheduledTask(db, {
     workspaceId: grant.workspaceId,
     taskId,
@@ -152,6 +181,7 @@ export const SCHEDULED_TASK_PRIVATE_DISABLED_MESSAGE =
  */
 export async function resolveScheduledTaskVisibility(input: {
   db: Database;
+  settings: PrivacySettings;
   grant: AccessGrant;
   requested: SessionVisibility | undefined;
   current: Pick<ScheduledTask, "visibility"> | null;
@@ -187,7 +217,7 @@ export async function resolveScheduledTaskVisibility(input: {
     const allowed = policy
       ? policy.personalWorkspace
         ? policy.platformAvailable
-        : policy.organizationEnabled
+        : policy.organizationEnabled && privacyDeploymentLimits(input.settings).onlyMeAllowed
       : false;
     if (!allowed)
       throw new HTTPException(403, { message: SCHEDULED_TASK_PRIVATE_DISABLED_MESSAGE });

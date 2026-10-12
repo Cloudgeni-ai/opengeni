@@ -53,18 +53,33 @@ Insights leaves out other people's Only me schedules.
 
 ## Settings
 
-Organization owners and admins choose, under Security:
+Organization owners and admins choose, under Security, in "Chats and
+schedules":
 
 - **Only me chats and schedules**: allowed or not (exists today for chats; it
   now also covers schedules).
-- **Default for new chats and schedules**: Everyone in the workspace, or Only me.
-- **Admins can see private schedules**: on (owner, how often, cost, and pause)
-  or off (fully hidden, like private chats).
+- **New chats and schedules**: start as Workspace or Only me. Shown only while
+  Only me is allowed. The chat composer and the schedule form start on this
+  choice until the person picks another. The API keeps Workspace when a request
+  leaves the audience out, so existing integrations do not change.
+- **Admins see Only me schedules**: on (owner, how often, cost, and pause) or
+  off (fully hidden, like private chats). On by default.
 
-A product that embeds Opengeni can only narrow these: deployment settings can
-turn Only me off, force the shared default, or force admins to see private
-schedules, and the organization cannot widen past them. The settings page
-shows a locked row with a plain explanation when a choice is fixed.
+`GET` and `PATCH /v1/organizations/:organizationId/privacy-settings` read and
+change the last two. Personal workspaces are not affected.
+
+A product that embeds Opengeni can only narrow these, with deployment settings:
+
+- `OPENGENI_PRIVACY_ONLY_ME_ALLOWED=false` turns Only me off for chats and
+  schedules. Existing Only me items stay private; new ones are refused.
+- `OPENGENI_PRIVACY_WORKSPACE_DEFAULT_REQUIRED=true` fixes the default to
+  Workspace.
+- `OPENGENI_PRIVACY_ADMIN_SCHEDULE_SUMMARIES_REQUIRED=true` fixes admin
+  visibility of Only me schedules to on.
+
+The organization cannot widen past them: a change against a fixed choice is
+refused, and the settings page shows the row locked with "This is set for
+everyone using this app."
 
 ## Not changing
 

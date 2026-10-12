@@ -2704,6 +2704,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "getOrganizationPrivacySettings",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/privacy-settings",
+    "request": [],
+    "response": [
+      "OrganizationPrivacySettings"
+    ]
+  },
+  {
     "id": "getOrganizationPrivateSessionSettings",
     "method": "GET",
     "path": "/v1/organizations/:organizationId/private-session-settings",
@@ -6914,6 +6923,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "OrganizationSummary"
+    ]
+  },
+  {
+    "id": "updateOrganizationPrivacySettings",
+    "method": "PATCH",
+    "path": "/v1/organizations/:organizationId/privacy-settings",
+    "request": [
+      "UpdateOrganizationPrivacySettingsRequest"
+    ],
+    "response": [
+      "OrganizationPrivacySettings"
     ]
   },
   {

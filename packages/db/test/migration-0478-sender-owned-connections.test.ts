@@ -84,7 +84,7 @@ const withheldMigrations = [
   // columns withheld 0663 and 0665 add.
   "0718_inbox_time_sensitive_needs_you.sql",
   // Patches the acceptance writers withheld 0688 and 0707 define.
-  "0725_subscription_personal_acceptance_reads.sql",
+  "0726_subscription_personal_acceptance_reads.sql",
 ];
 let database: OwnerMigratedTestDatabase | null = null;
 

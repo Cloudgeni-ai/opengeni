@@ -140,3 +140,111 @@ test("organization admin keys manage private-session settings without a human me
     expect(nestedPostgresSqlState(failure)).toBe("42501");
   }
 });
+
+test("organization admins choose the default audience and admin visibility, within the deployment's limits", async () => {
+  const [account] =
+    await shared.admin`insert into managed_accounts (name) values ('Privacy settings fixture') returning id`;
+  const token = crypto.randomUUID();
+  await createOrganizationApiKey(db.db, {
+    accountId: account!.id,
+    name: "Organization administrator",
+    prefix: "test",
+    keyHash: createHash("sha256").update(token).digest("hex"),
+    permissions: organizationApiKeyPermissionsForAccess("full"),
+  });
+  const appFor = (overrides: Parameters<typeof testSettings>[0] = {}) => {
+    const app = new Hono();
+    app.onError((error, c) => {
+      if (error instanceof HTTPException) return c.json({ message: error.message }, error.status);
+      throw error;
+    });
+    registerOrganizationMembershipRoutes(app, {
+      db: db.db,
+      settings: testSettings({
+        databaseUrl: shared.appUrl,
+        productAccessMode: "managed",
+        ...overrides,
+      }),
+      bus: new MemoryEventBus(),
+    } as unknown as ApiRouteDeps);
+    return app;
+  };
+  const headers = { authorization: `Bearer ${token}`, "content-type": "application/json" };
+  const endpoint = `/v1/organizations/${account!.id}/privacy-settings`;
+  const patch = (app: Hono, body: object) =>
+    app.request(endpoint, { method: "PATCH", headers, body: JSON.stringify(body) });
+
+  const app = appFor();
+  const initial = await app.request(endpoint, { headers });
+  expect(initial.status).toBe(200);
+  expect(await initial.json()).toMatchObject({
+    organizationId: account!.id,
+    defaultVisibility: "workspace",
+    adminsSeePrivateSchedules: true,
+    limits: {
+      onlyMeAllowed: true,
+      defaultVisibilityLocked: false,
+      adminsSeePrivateSchedulesLocked: false,
+    },
+  });
+  const changed = await patch(app, {
+    defaultVisibility: "private",
+    adminsSeePrivateSchedules: false,
+  });
+  expect(changed.status).toBe(200);
+  expect(await changed.json()).toMatchObject({
+    defaultVisibility: "private",
+    adminsSeePrivateSchedules: false,
+  });
+  expect((await patch(app, {})).status).toBe(422);
+
+  // A deployment can only narrow what the organization chose.
+  const narrowed = appFor({
+    privacyOnlyMeAllowed: false,
+    privacyAdminScheduleSummariesRequired: true,
+  });
+  expect(await (await narrowed.request(endpoint, { headers })).json()).toMatchObject({
+    defaultVisibility: "workspace",
+    adminsSeePrivateSchedules: true,
+    limits: {
+      onlyMeAllowed: false,
+      defaultVisibilityLocked: true,
+      adminsSeePrivateSchedulesLocked: true,
+    },
+  });
+  expect((await patch(narrowed, { defaultVisibility: "private" })).status).toBe(409);
+  expect((await patch(narrowed, { adminsSeePrivateSchedules: false })).status).toBe(409);
+  // With Only me off for the deployment, the Only me setting reads as
+  // unavailable and can't be turned on.
+  const onlyMe = `/v1/organizations/${account!.id}/private-session-settings`;
+  expect(await (await narrowed.request(onlyMe, { headers })).json()).toMatchObject({
+    available: false,
+  });
+  const turnOn = await narrowed.request(onlyMe, {
+    method: "PATCH",
+    headers,
+    body: JSON.stringify({ enabled: true, expectedVersion: 0, operationId: crypto.randomUUID() }),
+  });
+  expect(turnOn.status).toBe(409);
+
+  // A key without administration rights can't read or change them.
+  const memberToken = crypto.randomUUID();
+  await createOrganizationApiKey(db.db, {
+    accountId: account!.id,
+    name: "Read-only organization key",
+    prefix: "test",
+    keyHash: createHash("sha256").update(memberToken).digest("hex"),
+    permissions: ["workspace:read"],
+  });
+  const member = { authorization: `Bearer ${memberToken}`, "content-type": "application/json" };
+  expect((await app.request(endpoint, { headers: member })).status).toBe(403);
+  expect(
+    (
+      await app.request(endpoint, {
+        method: "PATCH",
+        headers: member,
+        body: JSON.stringify({ defaultVisibility: "workspace" }),
+      })
+    ).status,
+  ).toBe(403);
+});

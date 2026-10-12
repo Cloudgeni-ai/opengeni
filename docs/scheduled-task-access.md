@@ -147,13 +147,17 @@ organization allows Only me chats.
   Only me. Widening it is refused while that holds. See
   [Connected Machines](connected-machines.md) for how each run re-proves the
   owner's access to the machine.
-- Workspace admins see other people's Only me schedules only as a summary:
+- Unless the organization turns it off under Security, workspace admins see
+  other people's Only me schedules only as a summary:
   the owner, how often it runs, its status, when it last ran and what its runs
   cost over the last 30 days. Never its name, message, settings or runs. An
   admin can pause one (`POST
   /v1/workspaces/:workspaceId/scheduled-tasks/private-summaries/:taskId/pause`);
   only the owner can resume it. The list is
   `GET /v1/workspaces/:workspaceId/scheduled-tasks/private-summaries`.
+  With admin visibility off the list is empty and admins cannot pause them,
+  exactly like private chats. A deployment can require it to stay on with
+  `OPENGENI_PRIVACY_ADMIN_SCHEDULE_SUMMARIES_REQUIRED=true`.
 
 The audience is not execution configuration: like the name and status it is
 left out of the execution digest, so changing it never invalidates accepted

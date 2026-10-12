@@ -145,7 +145,7 @@ export function registerInsightsRoutes(app: Hono, deps: ApiRouteDeps): void {
               rootSessionId,
               sessionId,
               viewerSubjectId: async () =>
-                (await scheduledTaskViewerForGrant(deps.db, grant)).subjectId,
+                (await scheduledTaskViewerForGrant(deps.db, grant, deps.settings)).subjectId,
             },
             observePhase,
           ),

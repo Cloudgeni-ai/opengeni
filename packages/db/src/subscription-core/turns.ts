@@ -216,8 +216,13 @@ export type SubscriptionCorePlacement =
   | { kind: "cutover_not_enabled" }
   /** Another attempt owns the turn, or a newer lease generation exists. */
   | { kind: "attempt_fenced" }
-  /** An older attempt's lease of this turn is still live; it expires at `leasedUntil`. */
-  | { kind: "lease_busy"; leasedUntil: Date | null }
+  /**
+   * An older attempt's lease of this turn is still live; it expires at
+   * `leasedUntil`. With `cause: "binding_conflict"`, no attempt holds the
+   * turn: the session's binding kept changing while this placement was
+   * deciding (retried like a busy lease).
+   */
+  | { kind: "lease_busy"; leasedUntil: Date | null; cause?: "binding_conflict" }
   | {
       kind: "wait";
       reason: WaitReason;
@@ -453,7 +458,8 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
         if (!(error instanceof SubscriptionBindingConflict)) throw error;
         // Only first bindings of one session can race (no row to lock yet);
         // past the retries the worker treats it as a busy lease and retries.
-        if (attempt >= BINDING_CONFLICT_RETRIES) return { kind: "lease_busy", leasedUntil: null };
+        if (attempt >= BINDING_CONFLICT_RETRIES)
+          return { kind: "lease_busy", leasedUntil: null, cause: "binding_conflict" };
       }
     }
   }

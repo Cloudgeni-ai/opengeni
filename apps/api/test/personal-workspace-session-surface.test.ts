@@ -815,6 +815,7 @@ describe("managed-human session surface inside their own personal workspace", ()
     expect(await capabilitiesDefault.json()).toEqual({
       activated: true,
       canCreatePrivate: true,
+      defaultVisibility: "workspace",
       reason: "available",
     });
     const createdResponse = await owner.app.request(endpoint, {
@@ -849,6 +850,7 @@ describe("managed-human session surface inside their own personal workspace", ()
     expect(await capabilitiesDisabled.json()).toEqual({
       activated: false,
       canCreatePrivate: false,
+      defaultVisibility: "workspace",
       reason: "not_activated",
     });
     const replayResponse = await owner.app.request(endpoint, {
@@ -906,6 +908,7 @@ describe("managed-human session surface inside their own personal workspace", ()
     expect(await capabilities.json()).toEqual({
       activated: true,
       canCreatePrivate: true,
+      defaultVisibility: "workspace",
       reason: "available",
     });
     const created = await human.app.request(

@@ -207,5 +207,5 @@ export const embeddingMigrationTail = [
   // Adds checks and triggers on the settings table from withheld 0642.
   "0724_subscription_settings_locks.sql",
   // Patches the acceptance writers withheld 0669, 0688 and 0707 define.
-  "0725_subscription_personal_acceptance_reads.sql",
+  "0726_subscription_personal_acceptance_reads.sql",
 ];

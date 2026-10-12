@@ -4998,9 +4998,9 @@ triggers, the policy `subscription_settings_lock_guard_read`, the four
 routines and the two CHECKs; the stored locks stay and the resolver keeps
 ignoring locked workspace overrides.
 
-### Personal Codex acceptance under row security (0725)
+### Personal Codex acceptance under row security (0726)
 
-Migration `0725_subscription_personal_acceptance_reads.sql` is **rolling**
+Migration `0726_subscription_personal_acceptance_reads.sql` is **rolling**
 and grants nothing. Design record:
 [subscription core, PR 0b](design/subscription-core-2026-10-07.md#pr-0b-authority-compatibility-and-fences).
 It acts on deploy for Codex, on databases whose migration owner is neither a
@@ -5017,17 +5017,17 @@ superuser nor `BYPASSRLS` (the documented posture):
   unchanged; only the read is fixed.
 - Values frozen earlier are not rewritten: the next turn accepted in a
   private session uses the personal account, but a scheduled task keeps the
-  value frozen when it was created, so tasks created before 0725 keep using
+  value frozen when it was created, so tasks created before 0726 keep using
   shared capacity until they are recreated.
 - Health recovery had the same blind spot: a personal Codex account
   quarantined after a refused request (a time-bound `error` status with a
-  retry time) was never returned to service. After 0725 the owner's own turn
+  retry time) was never returned to service. After 0726 the owner's own turn
   whose frozen entry names the account recovers it once the retry time
   passes, as shared accounts already were. Sign-in failures still need a new
   sign-in.
 
 To see whether a database is affected, and which owners' new acceptances
-0725 will freeze the personal entry for, run as a role that bypasses row
+0726 will freeze the personal entry for, run as a role that bypasses row
 security. Placement still applies the effective `personalConnectionsAllowed`
 of the session's workspace (the workspace's own value unless the organization
 has locked the setting, otherwise the organization's), so where it is off

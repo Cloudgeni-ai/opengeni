@@ -211,8 +211,8 @@ Primary key `(workspace_id, session_id)`: `provider`, `connection_id`,
   Setting or removing a pin therefore makes the next turn re-run selection
   (D-31): a request, a completed call or a retried attempt that keeps its
   lease never restarts a cleared clock, only a new selection at placement
-  does, so removing a pin mid-turn still takes effect at the next turn. A compaction is a re-selection point only when it is later than the
-  clock.
+  does, so removing a pin mid-turn still takes effect at the next turn. A
+  compaction is a re-selection point only when it is later than the clock.
 - Placement reads the binding under its row lock (`FOR UPDATE`, in the
   placement world, before the lease) and decides and commits from that row,
   so no pin or other placement of the session changes it in between; only
@@ -327,10 +327,18 @@ request; it marks the lease for failover at the next model-call boundary.
 
 ## 4. Placement
 
-One transaction per placement, following the canonical lock order:
-workspace control, then session, turn and attempt, then the session binding
-row (created with `INSERT … ON CONFLICT DO NOTHING` before it is locked).
-No provider call happens inside it.
+One transaction per placement. No provider call happens inside it. It reads
+the session and the turn without row locks, then locks the session binding
+row (`FOR UPDATE`) and decides and commits from that row. A session's first
+binding has no row to lock yet: its insert's compare-and-swap makes a
+concurrent loser retry. Placement and model requests lock the binding row
+before the per-connection advisory lock (`subscription-refresh:<connection>`)
+and the lease, as a person's pin does (D-31 of the contract): the lease
+triggers and a request's reservation take that lock after the binding, so a
+pin of the account a session is on never deadlocks with the session's
+placement or requests. Turn rows are locked only in shared modes on these
+paths (`FOR KEY SHARE` by the lease triggers, `FOR SHARE` by a request's
+reservation), which never block one another.
 
 1. Read effective settings (SQL).
 2. If the binding is `explicit`, use that connection or wait
@@ -3244,7 +3252,7 @@ of row 0 above lands in exactly one of them:
   patched functions, the existing rows the new comparisons reject, and the
   callers of `validate_scheduled_agent_run_live_authority`); and the defects
   in earlier merged work listed there.
-- **Part 3 (migration 0725), acts on deploy:** a defect fix in earlier
+- **Part 3 (migration 0726), acts on deploy:** a defect fix in earlier
   merged work found while testing part 2: the v2 acceptance writers and the
   two health-recovery routines see the owner's personal connections under an
   owner bound by row security.
@@ -3574,7 +3582,7 @@ provision-roles revokes them from the runtime role). Choices:
   would, and asserts it lists exactly them; after 0717 the same query lists
   them less the repaired authorities.
 
-Part 3 (migration 0725) fixes a defect found while testing part 2 under the
+Part 3 (migration 0726) fixes a defect found while testing part 2 under the
 documented owner posture (finding below). The v2 writers
 (`subscription_core_acceptance_authority_v2`,
 `subscription_core_task_authority_v2` and their Codex forms) count the
@@ -4289,8 +4297,8 @@ step, not the worker's own settlement that live Codex turns use today.
 | The `scheduled_turn_execution_immutable` trigger fires `BEFORE UPDATE OF` a column list with only the xAI snapshot, so a Claude snapshot or v2 update of a scheduled turn never reaches its fence. | 0275 and its xAI successor | PR 0b part 2 (0717) |
 | 0598 copied the xAI policies of `organization_memberships` by the pattern `xai_subscription_capability_%` and missed `xai_subscription_membership_lock`: under a migration owner without `BYPASSRLS` (the documented posture) connecting a personal Claude account fails with `42501`. | 0598 (0442's xAI policy) | PR 0b part 2 (0717) |
 | No policy lets the SuperGrok or Claude lifecycle capability update `organization_user_resource_authorities`, so under such an owner a personal disconnect deletes the credential and leaves its authority active, and runs accepted for the disconnected account keep passing the `user` generation check. Existing tests ran as a superuser. | 0234, 0442, 0598 | PR 0b part 2 (0717): revoke policies, and a repair of the authorities left active |
-| Under such an owner the v2 writers see no personal connection: they count the owner's personal generations holding only an account `lifecycle` capability, which no `subscription_connections` policy honours for personal rows, so every acceptance freezes the empty value and a personal Codex account is never used after the cutover, even in the owner's private session. Existing tests ran the writers on superuser-owned databases. | 0669, 0688, 0707 | PR 0b part 3 (0725): the writers count through the owner-only membership-lifecycle read |
-| Under such an owner the health-recovery routines see no personal connection either, so a due 403 quarantine of a personal account is never lifted, even for the owner's own turn whose frozen entry names it. | 0669, 0707, 0715 | PR 0b part 3 (0725): both collect their candidates under the same marker, restored before they write |
+| Under such an owner the v2 writers see no personal connection: they count the owner's personal generations holding only an account `lifecycle` capability, which no `subscription_connections` policy honours for personal rows, so every acceptance freezes the empty value and a personal Codex account is never used after the cutover, even in the owner's private session. Existing tests ran the writers on superuser-owned databases. | 0669, 0688, 0707 | PR 0b part 3 (0726): the writers count through the owner-only membership-lifecycle read |
+| Under such an owner the health-recovery routines see no personal connection either, so a due 403 quarantine of a personal account is never lifted, even for the owner's own turn whose frozen entry names it. | 0669, 0707, 0715 | PR 0b part 3 (0726): both collect their candidates under the same marker, restored before they write |
 | The `{codex,claude,xai}_primary_connection_id` foreign keys omit `provider`, so a primary can reference another provider's connection. | 0642 `subscription_settings` | PR 0, or M4-A's settings shape |
 | The non-Codex branch of `authorize_subscription_personal_access` compares the owner subject but neither requires the connection's owner membership id to equal the session owner's membership nor checks `personalConnectionsAllowed`. | 0668 | PR 0 |
 | `autoRenews` is a static adapter flag but is documented as false for setup tokens. | `packages/subscriptions/src/adapter.ts` | PR 0 |

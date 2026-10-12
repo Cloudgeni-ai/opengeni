@@ -116,13 +116,20 @@ export function subscriptionCoreCapacityFailure(
   });
 }
 
-/** An older attempt of this same turn still holds its lease until expiry. */
+/**
+ * An older attempt of this same turn still holds its lease until expiry, or
+ * (`binding_conflict`) the session's account changed while this placement
+ * was deciding. Both retry the same way; only the copy differs.
+ */
 export function subscriptionCoreLeaseBusyFailure(
   leasedUntil: Date | null,
+  cause?: "binding_conflict",
 ): SubscriptionCoreCodexTurnError {
   return new SubscriptionCoreCodexTurnError({
     error:
-      "A previous attempt of this turn still holds its Codex account. The turn will retry once that hold ends.",
+      cause === "binding_conflict"
+        ? "The session's Codex account changed while this turn was starting. The turn will retry."
+        : "A previous attempt of this turn still holds its Codex account. The turn will retry once that hold ends.",
     code: "subscription_lease_busy",
     retryable: true,
     ...(leasedUntil ? { resetsAt: leasedUntil.toISOString() } : {}),

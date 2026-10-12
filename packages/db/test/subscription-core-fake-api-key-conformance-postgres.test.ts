@@ -53,34 +53,31 @@ const { describeSubscriptionCoreConformance } =
 
 const upstream = new ScriptedApiKeyUpstream();
 
-// The shared suite includes cache-aware stickiness on real PostgreSQL.
-describe("SUB-STICK-01, SUB-STICK-02, SUB-STICK-03, SUB-STICK-04, SUB-STICK-05, SUB-STICK-06, SUB-STICK-07: shared conformance", () => {
-  describeSubscriptionCoreConformance({
-    name: "fake API-key connector",
-    databaseLabel: "subscription-core-fake-api-key-conformance",
-    provider: fakeApiKeyProvider,
-    models: FAKE_API_KEY_MODELS,
-    credential: (label) => ({ apiKey: `sk-conformance-${label}` }),
-    async identity(_label, credential) {
-      const signedIn = await fakeApiKeySignIn(upstream.origin, credential.apiKey);
-      if (signedIn.kind !== "connected") throw new Error("the scripted upstream refused the key");
-      return signedIn;
-    },
-    providerState: {},
-    // A gateway key is an organization's own upstream account.
-    executionPolicy: {
-      wireApi: "chat",
-      credentialSource: { kind: "organization_connection", mechanism: "api_key" },
-      billing: { upstreamPayer: "organization", metering: "external" },
-    },
-    foreignProvider: "codex",
-    expiresAt: () => null,
-    async prepareDatabase(shared) {
-      await admitTestSubscriptionCoreProvider(shared.admin, fakeApiKeyProvider);
-    },
-    upstream,
-    denyNetwork: installNetworkDenialGuard,
-  });
+describeSubscriptionCoreConformance({
+  name: "fake API-key connector",
+  databaseLabel: "subscription-core-fake-api-key-conformance",
+  provider: fakeApiKeyProvider,
+  models: FAKE_API_KEY_MODELS,
+  credential: (label) => ({ apiKey: `sk-conformance-${label}` }),
+  async identity(_label, credential) {
+    const signedIn = await fakeApiKeySignIn(upstream.origin, credential.apiKey);
+    if (signedIn.kind !== "connected") throw new Error("the scripted upstream refused the key");
+    return signedIn;
+  },
+  providerState: {},
+  // A gateway key is an organization's own upstream account.
+  executionPolicy: {
+    wireApi: "chat",
+    credentialSource: { kind: "organization_connection", mechanism: "api_key" },
+    billing: { upstreamPayer: "organization", metering: "external" },
+  },
+  foreignProvider: "codex",
+  expiresAt: () => null,
+  async prepareDatabase(shared) {
+    await admitTestSubscriptionCoreProvider(shared.admin, fakeApiKeyProvider);
+  },
+  upstream,
+  denyNetwork: installNetworkDenialGuard,
 });
 
 describe("fake API-key connector: adapter shape", () => {

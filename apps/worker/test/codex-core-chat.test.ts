@@ -474,6 +474,24 @@ describe("Codex cutover gate dispositions", () => {
     });
     const error = await selectCodexTurnCapacity(capacityDeps()).catch((caught) => caught);
     expect(error.payload).toMatchObject({ code: "subscription_lease_busy", retryable: true });
+    expect(error.payload.error).toContain("A previous attempt of this turn");
+  });
+
+  test("a binding conflict past its retries is retried like a busy lease, with its own copy", async () => {
+    gate("enabled");
+    spy(db, "readSubscriptionCoreTurnIdentity").mockResolvedValue(identity);
+    spy(db, "placeSubscriptionCoreCodexTurn").mockResolvedValue({
+      kind: "lease_busy",
+      leasedUntil: null,
+      cause: "binding_conflict",
+    });
+    const error = await selectCodexTurnCapacity(capacityDeps()).catch((caught) => caught);
+    expect(error.payload).toEqual({
+      error:
+        "The session's Codex account changed while this turn was starting. The turn will retry.",
+      code: "subscription_lease_busy",
+      retryable: true,
+    });
   });
 
   test("a fenced attempt exits cancelled and acknowledges lost ownership", async () => {

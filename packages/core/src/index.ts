@@ -144,6 +144,7 @@ export * from "./application/composer-submit";
 export * from "./application/session-commands";
 export * from "./application/archived-session-imports";
 export * from "./application/session-tenancy";
+export * from "./application/organization-privacy";
 export * from "./application/sandbox-recovery";
 export * from "./application/user-resource-grants";
 export * from "./application/api-integration-servers";

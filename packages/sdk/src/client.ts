@@ -279,6 +279,8 @@ import type {
   WorkspaceModelAccountSettings,
   OrganizationAgentAdminAccess,
   UpdateOrganizationAgentAdminAccessRequest,
+  OrganizationPrivacySettings,
+  UpdateOrganizationPrivacySettingsRequest,
   SessionAdminAccess,
   GrantSessionAdminAccessRequest,
   WorkspaceModelCatalogResponse,
@@ -5595,6 +5597,32 @@ export class OpenGeniClient {
     return await this.requestJson<OrganizationAgentAdminAccess>(
       "PATCH",
       `/v1/organizations/${organizationId}/agent-admin-access`,
+      request,
+    );
+  }
+
+  /**
+   * The organization's privacy choices: who sees new chats and schedules by
+   * default, and whether admins see that other people's Only me schedules
+   * exist. `limits` reports what this deployment fixes. An owner or admin.
+   */
+  async getOrganizationPrivacySettings(
+    organizationId: string,
+  ): Promise<OrganizationPrivacySettings> {
+    return await this.requestJson<OrganizationPrivacySettings>(
+      "GET",
+      `/v1/organizations/${organizationId}/privacy-settings`,
+    );
+  }
+
+  /** Change the organization's privacy choices, within the deployment's limits. */
+  async updateOrganizationPrivacySettings(
+    organizationId: string,
+    request: UpdateOrganizationPrivacySettingsRequest,
+  ): Promise<OrganizationPrivacySettings> {
+    return await this.requestJson<OrganizationPrivacySettings>(
+      "PATCH",
+      `/v1/organizations/${organizationId}/privacy-settings`,
       request,
     );
   }

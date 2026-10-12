@@ -1,15 +1,15 @@
-// Migration 0725: the v2 accepted-authority writers see the owner's personal
+// Migration 0726: the v2 accepted-authority writers see the owner's personal
 // connections under FORCE row security (design
 // docs/design/subscription-core-2026-10-07.md, "Findings in earlier merged
 // work"). The database is migrated by the NOSUPERUSER, NOBYPASSRLS owner, as
 // the documented posture is; runtime calls run as the restricted application
-// role. Before 0725 every acceptance froze the empty value for an owner with a
+// role. Before 0726 every acceptance froze the empty value for an owner with a
 // serviceable personal Codex account; after it the owner's personal entry is
 // frozen, through the same writers and the same rules. Health recovery had the
-// same defect: before 0725 the owner's own turn never recovered their due
+// same defect: before 0726 the owner's own turn never recovered their due
 // quarantined personal account, even with the entry frozen; after it the turn
 // does. The runbook's inventory queries (docs/deployment.md) run against the
-// fixtures staged before 0725.
+// fixtures staged before 0726.
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -43,7 +43,7 @@ import { withSubscriptionCoreAcceptedTurn } from "../src/subscription-core-place
 setDefaultTimeout(180_000);
 
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
-const MIGRATION = "0725_subscription_personal_acceptance_reads.sql";
+const MIGRATION = "0726_subscription_personal_acceptance_reads.sql";
 const EMPTY = { version: 2, personal: [] };
 const key = Buffer.alloc(32, 61);
 const ROUTINES = [
@@ -58,7 +58,7 @@ const RECOVERY = [
 ];
 const SET_MARKER = "pg_catalog.set_config('opengeni.organization_tenancy_lifecycle',\n";
 /**
- * The exact replacements 0725 makes in each writer, written out here rather
+ * The exact replacements 0726 makes in each writer, written out here rather
  * than read from the migration, so the live definition pins where the marker
  * is set and where it is restored (immediately around the generation count).
  */
@@ -85,7 +85,7 @@ const WRITER_PATCHES: [string, string][] = [
   ],
 ];
 /**
- * The exact replacements 0725 makes in each recovery routine: the candidates
+ * The exact replacements 0726 makes in each recovery routine: the candidates
  * are collected under the marker and it is restored before the first write.
  */
 const RECOVERY_PATCHES: [string, string][] = [
@@ -142,7 +142,7 @@ type Inventory = {
 
 let database: OwnerMigratedTestDatabase | null = null;
 let client: DbClient | null = null;
-/** State staged before 0725, on the same database. */
+/** State staged before 0726, on the same database. */
 let before: {
   owner: Owner;
   sessionId: string;
@@ -153,18 +153,18 @@ let before: {
   core: unknown;
   routines: Routine[];
   recovery: Routine[];
-  /** Recovery by the owner's own turn before 0725, through the core and Codex routines. */
+  /** Recovery by the owner's own turn before 0726, through the core and Codex routines. */
   recovered: { core: number; codex: number };
-  /** The runbook's queries as an operator runs them before deploying 0725. */
+  /** The runbook's queries as an operator runs them before deploying 0726. */
   inventory: Inventory;
 } | null = null;
 let posture: { unprovisioned: string[]; provisioned: string[] } | null = null;
 
-/** The 0725 runbook queries in docs/deployment.md: the owner posture, then the owners served. */
+/** The 0726 runbook queries in docs/deployment.md: the owner posture, then the owners served. */
 async function inventory(): Promise<Inventory> {
   const runbook = await readFile(new URL("../../../docs/deployment.md", import.meta.url), "utf8");
   const section = runbook.slice(
-    runbook.indexOf("### Personal Codex acceptance under row security (0725)"),
+    runbook.indexOf("### Personal Codex acceptance under row security (0726)"),
   );
   const start = section.indexOf("```sql\n") + "```sql\n".length;
   const queries = section
@@ -381,7 +381,7 @@ async function accept(
 
 /**
  * The owner's own claimed turn in their private session with the personal
- * entry frozen. Before 0725 the writers froze the empty value, so the fixture
+ * entry frozen. Before 0726 the writers froze the empty value, so the fixture
  * writes the entry directly with triggers suspended (the frozen value is
  * immutable), and the evidence does not depend on the writers.
  */
@@ -464,9 +464,9 @@ beforeAll(async () => {
   if (!realDb) return;
   database = await acquireOwnerMigratedTestDatabase("subscription-personal-acceptance-reads");
   if (!database) throw new Error("Real PostgreSQL is required");
-  // Stage a provisioned database without 0725, as a deployment is before it:
-  // 0725 and every later migration (which may require 0725, or retire the
-  // routines it patches) are held back, and only 0725 is applied below.
+  // Stage a provisioned database without 0726, as a deployment is before it:
+  // 0726 and every later migration (which may require 0726, or retire the
+  // routines it patches) are held back, and only 0726 is applied below.
   const heldBack = (await readdir(join(import.meta.dir, "../drizzle")))
     .filter((file) => file.endsWith(".sql") && file >= MIGRATION)
     .sort();
@@ -495,7 +495,7 @@ beforeAll(async () => {
   );
   const stagedRecovery = await recoverBoth(stagedOwner, recoveryIdentity);
   if (stagedRecovery.status !== "error")
-    throw new Error("the quarantine was recovered before 0725");
+    throw new Error("the quarantine was recovered before 0726");
   await database.admin`update subscription_connections set status = 'active', last_error = null,
       health_retry_at = null
     where account_id = ${stagedOwner.accountId}::uuid and ownership = 'personal'`;
@@ -513,7 +513,7 @@ beforeAll(async () => {
     inventory: await inventory(),
   };
   // A rolling migration keeps the previous binary's runtime posture until
-  // roles are provisioned again: apply 0725 alone, evaluate as the runtime
+  // roles are provisioned again: apply 0726 alone, evaluate as the runtime
   // role, then provision and evaluate again.
   const applying = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
@@ -521,7 +521,7 @@ beforeAll(async () => {
     await migrate(database.ownerUrl);
     const [applied] = await applying<{ count: number }[]>`
       select count(*)::int as count from schema_migrations where name = ${MIGRATION}`;
-    if (applied?.count !== 1) throw new Error("0725 was not applied by the second migrate");
+    if (applied?.count !== 1) throw new Error("0726 was not applied by the second migrate");
   } finally {
     await applying.end();
   }
@@ -546,7 +546,7 @@ afterAll(async () => {
   await database?.release();
 }, 180_000);
 
-describe.skipIf(!realDb)("0725 personal acceptance reads", () => {
+describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
   test("the owner and the application role are bound by row security; the rolling posture holds", async () => {
     const roles = await database!.admin<{ superuser: boolean; bypass: boolean }[]>`
       select rolsuper as superuser, rolbypassrls as bypass
@@ -563,13 +563,13 @@ describe.skipIf(!realDb)("0725 personal acceptance reads", () => {
     expect(posture).toEqual({ unprovisioned: [], provisioned: [] });
   });
 
-  test("before 0725 every writer froze the empty value for a serviceable personal account", () => {
+  test("before 0726 every writer froze the empty value for a serviceable personal account", () => {
     expect(before!.sessionTurn).toEqual(EMPTY);
     expect(before!.task).toEqual(EMPTY);
     expect({ codex: before!.codex, core: before!.core }).toEqual({ codex: EMPTY, core: EMPTY });
   });
 
-  test("pre-merge inventory: the runbook finds the bound owner and the owner 0725 starts to serve", () => {
+  test("pre-merge inventory: the runbook finds the bound owner and the owner 0726 starts to serve", () => {
     expect(before!.inventory).toEqual({
       posture: [{ rolname: database!.ownerRole, rolsuper: false, rolbypassrls: false }],
       owners: [
@@ -591,7 +591,7 @@ describe.skipIf(!realDb)("0725 personal acceptance reads", () => {
       codex: personal(fresh),
       core: personal(fresh),
     });
-    // The owner staged before 0725 is served by new acceptances; frozen values stay.
+    // The owner staged before 0726 is served by new acceptances; frozen values stay.
     const staged = await ownerSession(before!.owner);
     expect(staged.turn).toEqual(personal(before!.owner));
     expect(await turnAuthority(before!.turnId)).toEqual(EMPTY);
@@ -608,7 +608,7 @@ describe.skipIf(!realDb)("0725 personal acceptance reads", () => {
   });
 
   test("the owner's own turn recovers their due quarantined personal account", async () => {
-    // Before 0725 neither routine saw the row, though the entry was frozen.
+    // Before 0726 neither routine saw the row, though the entry was frozen.
     expect(before!.recovered).toEqual({ core: 0, codex: 0 });
     const fresh = await stageOwner();
     const session = await ownerSession(fresh);
@@ -657,7 +657,7 @@ describe.skipIf(!realDb)("0725 personal acceptance reads", () => {
     });
   });
 
-  test("each recovery routine keeps its attributes and changes by exactly 0725's replacements", async () => {
+  test("each recovery routine keeps its attributes and changes by exactly 0726's replacements", async () => {
     const after = await routines(RECOVERY);
     const attributes = (rows: Routine[]) => rows.map(({ definition: _, ...rest }) => rest);
     expect(attributes(after)).toEqual(attributes(before!.recovery));
@@ -685,7 +685,7 @@ describe.skipIf(!realDb)("0725 personal acceptance reads", () => {
     expect(preset.marker).toBe("caller-value");
   });
 
-  test("each writer keeps its attributes and changes by exactly 0725's replacements", async () => {
+  test("each writer keeps its attributes and changes by exactly 0726's replacements", async () => {
     const after = await routines();
     const attributes = (rows: Routine[]) => rows.map(({ definition: _, ...rest }) => rest);
     expect(attributes(after)).toEqual(attributes(before!.routines));
