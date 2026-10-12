@@ -14,7 +14,6 @@ import {
   type GitCredentialTransport,
   type GitCredentials,
   type ResourceRef,
-  type SandboxSecrets,
   type SessionTurn,
   type TurnInitiator,
   type TurnInitiatorContext,
@@ -122,79 +121,26 @@ type RunGitCredentialOptions = {
   authorizeGitHubTokenMint?: GitHubTokenMintAuthorization;
 };
 
-// §7.6 connection-credential provider — load the run's workspace environment, delegating the DECRYPT to a
-// host `sandboxSecrets` provider when one is bound (the host owns the secret
-// vault + encryption key in embedded/separate topologies) and otherwise running
-// today's local `environmentsEncryptionKeyBytes`-keyed decrypt byte-for-byte.
-//
-// Unattached runs (environmentId === null) short-circuit identically in BOTH
-// modes: zero DB/provider work, returns null. When a provider IS bound it owns
-// the decrypt end-to-end (it reads the host's own store), so the local DB read
-// is skipped — the provider is the sole source of truth for that leg.
+// Load the run's workspace environment (Variable Set) through the local
+// `environmentsEncryptionKeyBytes`-keyed decrypt. The former host
+// `sandboxSecrets` leg is removed: embedders now supply secrets through the
+// `vaultProvider` hook (`VaultConnectionCredentialsPort` in `@opengeni/vaults`).
 export async function loadWorkspaceEnvironmentForRunWithCredentials(
   db: Database,
   settings: Settings,
   scope: ConnectionScope,
   environmentId: string | null,
   authority: VariableSetCredentialAuthority,
-  sandboxSecrets?: ConnectionCredentialsPort["sandboxSecrets"],
-  options: {
-    /**
-     * Exact accepted scheduled-occurrence generation for this Variable Set,
-     * resolved by the caller from the immutable run snapshot; null/omitted for
-     * ordinary live turns.
-     */
-    expectedGeneration?: number | null;
-  } = {},
 ): Promise<WorkspaceEnvironmentForRun | null> {
-  if (!sandboxSecrets) {
-    return loadWorkspaceEnvironmentForRunFromDb(db, settings, {
-      ...scope,
-      variableSetId: environmentId,
-      authority: {
-        kind: "agent_attempt",
-        subjectId: authority.initiatingHumanSubjectId ?? authority.initiator.subjectId,
-        ...authority,
-      },
-    });
-  }
-  if (!environmentId) {
-    return null;
-  }
-  const expectedGeneration = options.expectedGeneration ?? null;
-  const secrets: SandboxSecrets = await sandboxSecrets({
-    accountId: scope.accountId,
-    workspaceId: scope.workspaceId,
-    ...authority,
+  return loadWorkspaceEnvironmentForRunFromDb(db, settings, {
+    ...scope,
     variableSetId: environmentId,
-    ...(expectedGeneration === null ? {} : { expectedGeneration }),
+    authority: {
+      kind: "agent_attempt",
+      subjectId: authority.initiatingHumanSubjectId ?? authority.initiator.subjectId,
+      ...authority,
+    },
   });
-  // workspace-scope cross-check: the provider must echo THIS run's workspace before we apply its
-  // decrypted values into the sandbox.
-  assertWorkspaceEcho("sandboxSecrets", scope, secrets.workspaceId);
-  if (
-    secrets.accountId !== scope.accountId ||
-    secrets.sessionId !== authority.sessionId ||
-    secrets.turnId !== authority.turnId ||
-    secrets.attemptId !== authority.attemptId ||
-    secrets.executionGeneration !== authority.executionGeneration ||
-    secrets.variableSetId !== environmentId ||
-    // A scheduled attempt materializes only the exact accepted generation:
-    // the host must echo it and return that generation's values.
-    (expectedGeneration !== null &&
-      (secrets.expectedGeneration !== expectedGeneration ||
-        secrets.generation !== expectedGeneration))
-  ) {
-    throw new Error("connection-credential provider (sandboxSecrets) returned stale authority");
-  }
-  return {
-    id: secrets.id ?? environmentId,
-    name: secrets.name ?? environmentId,
-    description: secrets.description ?? null,
-    scope: secrets.scope,
-    generation: secrets.generation,
-    values: secrets.values,
-  };
 }
 
 // Workspace-scope cross-check. A credential provider echoes the workspace it scoped

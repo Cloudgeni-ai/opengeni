@@ -125,11 +125,11 @@ export type SharedActivityServices = {
   // delegates to the host instead of self-minting from `settings`:
   //   - `gitCredentials` REPLACES `createGitHubAppInstallationToken(settings,…)`
   //     in `sandboxEnvironmentForRun` (the GH_TOKEN / git-extraheader source).
-  //   - `sandboxSecrets` REPLACES the `environmentsEncryptionKeyBytes(settings)`
-  //     decrypt in `loadWorkspaceEnvironmentForRun`.
+  //   - `vaultProvider` links a host-owned secret store as a `source: "host"`
+  //     vault (see `@opengeni/vaults` `VaultConnectionCredentialsPort`).
   // Each leg is independently optional; an unset leg falls through to today's
-  // self-mint for THAT leg. null/undefined (standalone default) → both legs
-  // self-mint byte-for-byte as today.
+  // self-mint for THAT leg. null/undefined (standalone default) → every leg
+  // self-mints byte-for-byte as today.
   //
   // workspace-scope cross-check CROSS-CHECK: a provider echoes the `workspaceId` it scoped the
   // credential to; the consuming activity ASSERTS agreement with the run's

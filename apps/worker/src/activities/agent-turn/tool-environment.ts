@@ -8,7 +8,6 @@ import {
   getWorkspaceVideoGenerationPolicy,
   listSkillDescriptors,
   completeConnectorActionExecution,
-  getScheduledVariableSetExpectedGenerationForAttempt,
   persistAttemptToolCatalog,
   requireWorkspace,
   prepareConnectorActionApproval,
@@ -149,7 +148,6 @@ export type PrepareTurnToolPolicyDeps = {
   input: RunAgentTurnInput;
   db: ActivityServices["db"];
   cancellationSignal: AbortSignal | undefined;
-  connectionCredentials: ActivityServices["connectionCredentials"];
   turn: ClaimTurnOk["turn"];
   session: ClaimTurnOk["session"];
   fileAuthoritySubjectId: ClaimTurnOk["fileAuthoritySubjectId"];
@@ -220,7 +218,6 @@ export async function prepareTurnToolPolicy(deps: PrepareTurnToolPolicyDeps) {
     input,
     db,
     cancellationSignal,
-    connectionCredentials,
     turn,
     session,
     fileAuthoritySubjectId,
@@ -276,8 +273,7 @@ export async function prepareTurnToolPolicy(deps: PrepareTurnToolPolicyDeps) {
     (tool) => tool.kind !== "mcp" || families.allowsMcpServer(tool.id),
   );
   const turnTools = withFirstPartyTools(runSettings, effectivePolicyTools);
-  // §7.6 connection-credential provider — load (and decrypt) selected Variable Sets via the
-  // host `sandboxSecrets` provider when bound; unset → today's local decrypt. Preserve the
+  // Load (and decrypt) selected Variable Sets locally. Preserve the
   // legacy null-attachment fast path: turns with neither a session set nor rig defaults perform
   // no Variable Set work. Organization/workspace sets use the exact turn actor; personal sets
   // additionally require the causal human frozen into the admitted turn.
@@ -301,22 +297,6 @@ export async function prepareTurnToolPolicy(deps: PrepareTurnToolPolicyDeps) {
       initiator: turn.initiator,
       initiatingHumanSubjectId: fileAuthoritySubjectId,
     };
-    // A scheduled attempt may materialize only the exact generation frozen
-    // on its accepted occurrence; ordinary turns resolve to null.
-    const expectedVariableSetGeneration = async (
-      candidateVariableSetId: string,
-    ): Promise<number | null> =>
-      await getScheduledVariableSetExpectedGenerationForAttempt(db, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        subjectId: fileAuthoritySubjectId ?? turn.initiator.subjectId,
-        initiatingHumanSubjectId: fileAuthoritySubjectId,
-        sessionId: input.sessionId,
-        turnId: turn.id,
-        attemptId: input.attemptId,
-        executionGeneration: turn.executionGeneration,
-        variableSetId: candidateVariableSetId,
-      });
     for (const variableSetId of sessionVariableSetIds) {
       const selected = await waitForTurnOperation(
         (async () =>
@@ -326,10 +306,6 @@ export async function prepareTurnToolPolicy(deps: PrepareTurnToolPolicyDeps) {
             connectionScope,
             variableSetId,
             variableSetAuthority,
-            connectionCredentials?.sandboxSecrets,
-            connectionCredentials?.sandboxSecrets
-              ? { expectedGeneration: await expectedVariableSetGeneration(variableSetId) }
-              : {},
           ))(),
         cancellationSignal,
         undefined,
@@ -343,8 +319,8 @@ export async function prepareTurnToolPolicy(deps: PrepareTurnToolPolicyDeps) {
     }
     // RIG DEFAULT VARIABLE SETS (M3): decrypt the frozen rig version's default
     // variable sets and layer them BELOW the session's own set — the session's
-    // values WIN on any key collision. Loaded through the SAME host-secrets
-    // provider path as the session set (embedded-topology parity). Precedence
+    // values WIN on any key collision. Loaded through the same path as the
+    // session set. Precedence
     // WITHIN the rig defaults is listed order (a later set overrides an earlier
     // one), then the session set overrides all. STABLE-ENV INVARIANT: the rig
     // VERSION is frozen per session, so the SET of default variable sets is
@@ -364,13 +340,6 @@ export async function prepareTurnToolPolicy(deps: PrepareTurnToolPolicyDeps) {
                 connectionScope,
                 rigDefaultVariableSetId,
                 variableSetAuthority,
-                connectionCredentials?.sandboxSecrets,
-                connectionCredentials?.sandboxSecrets
-                  ? {
-                      expectedGeneration:
-                        await expectedVariableSetGeneration(rigDefaultVariableSetId),
-                    }
-                  : {},
               ))(),
             cancellationSignal,
             undefined,

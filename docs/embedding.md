@@ -629,13 +629,14 @@ The port can bind any combination of its four legs:
 ```ts
 type ConnectionCredentialsPort = {
   gitCredentials?(input: GitCredentialsRequest): Promise<GitCredentials>;
-  sandboxSecrets?(input: SandboxSecretsRequest): Promise<SandboxSecrets>;
   runCredentials?(
     input: RunCredentialsRequest,
   ): Promise<RunCredentialsResolution>;
   mcpCredentials?(
     input: McpCredentialsRequest,
   ): Promise<McpCredentialResolution>;
+  // Added by `VaultConnectionCredentialsPort` in `@opengeni/vaults`.
+  vaultProvider?: VaultProvider | null;
 };
 ```
 
@@ -755,13 +756,11 @@ or replace a healthy sibling token. Renewal may rotate a broker bearer but may
 not change its exact routes during the admitted attempt; any route change fails
 closed and waits for a newer turn. Renewal requires no model/MCP call and never
 mutates the manifest.
-`sandboxSecrets` receives the account/workspace/resource ids plus the exact
-session/turn/attempt/execution generation, frozen turn initiator, and nullable
-causal-human subject. Organization/workspace Variable Sets may be resolved for
-a pure service initiator; user-scoped sets must reject a null causal human and
-revalidate the exact admitted personal-resource grant. The provider returns
-plaintext values plus exact scope/resource/attempt echoes, which the worker
-checks before applying any value.
+The former `sandboxSecrets` leg is removed. A host that owns its own secret
+store passes `vaultProvider` (a `VaultProvider` from `@opengeni/vaults`) on
+`connectionCredentials`; Opengeni links it as a `source: "host"` vault and
+resolves values from it live, so the host never returns Variable Set plaintext
+through the credential port.
 
 A standalone product can supply the same material without embedding: a
 workspace credential provider ([`workspace-integrations.md`](workspace-integrations.md))
