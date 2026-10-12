@@ -49,6 +49,7 @@ type ArchivedImportDependencies = {
       variableSetIds: string[];
       firstPartyMcpTools: never[];
       firstPartyMcpPermissions: never[];
+      archivedImport: true;
       beforeCreateCommit: (
         tx: Database,
         sessionId: string,
@@ -383,6 +384,7 @@ async function importArchivedSession(
           variableSetIds: [],
           firstPartyMcpTools: [],
           firstPartyMcpPermissions: [],
+          archivedImport: true,
           beforeCreateCommit: async (createTx, sessionId, context) => {
             const locks = await lockSessionEventWriteRows(createTx, {
               workspaceId: input.workspaceId,

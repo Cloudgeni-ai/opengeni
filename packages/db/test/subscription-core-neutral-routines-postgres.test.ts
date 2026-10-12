@@ -67,6 +67,8 @@ beforeAll(async () => {
     "0716_subscription_authority_compat.sql",
     "0717_subscription_authority_fences.sql",
     "0726_subscription_personal_acceptance_reads.sql",
+    // 0728 adds a format-aware overload next to 0707's personal connect writer.
+    "0728_subscription_core_personal_connect_format.sql",
   ];
   const owner = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
@@ -475,6 +477,47 @@ describe("provider-neutral subscription-core routines (migration 0707)", () => {
             .map((row) => [row.name, row.definition.split(lookup).length - 1]),
         ),
       ).toEqual(kindReads);
+    },
+    180_000,
+  );
+
+  test.skipIf(!realDb)(
+    "the format-aware personal connect writer is the live writer plus exactly 0728's changes",
+    async () => {
+      // 0728 builds its overload from the live 14-argument writer. A later fix
+      // to one overload must reach the other: this compares the two live
+      // bodies after 0728's four substitutions, so any drift fails here.
+      const [row] = await database!.admin<{ base: string; formatted: string }[]>`
+        select
+          pg_get_functiondef('opengeni_private.connect_subscription_core_personal(text,uuid,uuid,text,text,text,text,text,jsonb,timestamptz,timestamptz,text,text,text)'::regprocedure) as base,
+          pg_get_functiondef('opengeni_private.connect_subscription_core_personal(text,uuid,uuid,text,text,text,text,text,jsonb,timestamptz,timestamptz,text,text,text,text)'::regprocedure) as formatted`;
+      const substitutions: Array<[string, string]> = [
+        [
+          "p_connected_by_subject_id text)",
+          "p_connected_by_subject_id text, p_credential_format text)",
+        ],
+        [
+          "credential_encrypted = p_credential_encrypted, credential_format = 'v1',",
+          "credential_encrypted = p_credential_encrypted, credential_format = p_credential_format,",
+        ],
+        [
+          "p_credential_encrypted, 'v1', p_expires_at",
+          "p_credential_encrypted, p_credential_format, p_expires_at",
+        ],
+        [
+          "OR p_credential_encrypted IS NULL OR length(p_credential_encrypted) = 0\n",
+          "OR p_credential_encrypted IS NULL OR length(p_credential_encrypted) = 0\n        OR p_credential_format IS NULL OR p_credential_format !~ '^[a-z][a-z0-9_]{0,63}$'\n",
+        ],
+      ];
+      let expected = row!.base;
+      for (const [from, to] of substitutions) {
+        expect({ from, occurrences: expected.split(from).length - 1 }).toEqual({
+          from,
+          occurrences: 1,
+        });
+        expected = expected.replace(from, () => to);
+      }
+      expect(row!.formatted).toBe(expected);
     },
     180_000,
   );

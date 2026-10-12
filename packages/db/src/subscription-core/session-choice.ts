@@ -19,7 +19,7 @@
  *   allowed there).
  * - `readSubscriptionPersonPreferences` / `writeSubscriptionPersonPreferences`:
  *   the caller's own personal-fallback opt-in, through the owner policies
- *   of migration 0727. Placement reads the opt-in only for the session
+ *   of migration 0729. Placement reads the opt-in only for the session
  *   owner and only while the effective `personalFallbackAllowed` setting
  *   admits fallback.
  *

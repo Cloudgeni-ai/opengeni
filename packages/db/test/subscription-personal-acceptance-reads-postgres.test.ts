@@ -560,7 +560,14 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
       sql`select current_user::text as role`,
     );
     expect(identity!.role).toBe("opengeni_app");
-    expect(posture).toEqual({ unprovisioned: [], provisioned: [] });
+    // 0728 (the personal connect writer with a credential format) is held
+    // back here with every later migration, so this binary's posture reports
+    // exactly the two routines it adds, and nothing else.
+    const heldBack = [
+      "connect_subscription_core_personal(text, uuid, uuid, text, text, text, text, text, jsonb, timestamp with time zone, timestamp with time zone, text, text, text, text)",
+      "subscription_authority_carrier_inserted_now(text, uuid, uuid, bigint)",
+    ].map((routine) => `subscription M3 precursor private routine ${routine} is missing or unsafe`);
+    expect(posture).toEqual({ unprovisioned: heldBack, provisioned: heldBack });
   });
 
   test("before 0726 every writer froze the empty value for a serviceable personal account", () => {

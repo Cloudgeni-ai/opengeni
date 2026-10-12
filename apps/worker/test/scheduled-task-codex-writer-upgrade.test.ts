@@ -42,6 +42,8 @@ test("a pre-writer personal-resource task retains its execution proof across mig
   // 0713 and 0714 create: both are deferred and replayed after them.
   const workspaceManagedAccounts = "0714_subscription_workspace_managed_organization_accounts.sql";
   const apiKeyConnections = "0715_subscription_core_api_key_connections.sql";
+  // Built from the connect writer withheld 0715 rewrites; it follows 0715.
+  const personalConnectFormat = "0728_subscription_core_personal_connect_format.sql";
   // 0716 builds on 0712's receipts and patches its helpers; it follows 0712.
   const compat = "0716_subscription_authority_compat.sql";
   // 0717 requires 0716's routines; it follows 0716.
@@ -57,7 +59,7 @@ test("a pre-writer personal-resource task retains its execution proof across mig
     // the genuine pre-writer fixture, then replay them in ledger order below.
     await database.admin`insert into schema_migrations(name) values (${writer}),
       (${cutover}), (${disconnect}), (${explicitRetry}), (${recovery}), (${neutral}), (${completion}), (${precursor}),
-      (${providerKeyedReach}), (${workspaceManagedAccounts}), (${apiKeyConnections}), (${compat}), (${fences}),
+      (${providerKeyedReach}), (${workspaceManagedAccounts}), (${apiKeyConnections}), (${personalConnectFormat}), (${compat}), (${fences}),
       (${acceptanceReads})`;
     await migrate(database.adminUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
@@ -112,7 +114,7 @@ test("a pre-writer personal-resource task retains its execution proof across mig
       await database.admin`select execution_digest, authority_revision from scheduled_tasks where id = ${taskId}::uuid`;
     await client.close();
     client = undefined;
-    await database.admin`delete from schema_migrations where name in (${writer}, ${cutover}, ${disconnect}, ${explicitRetry}, ${recovery}, ${neutral}, ${completion}, ${precursor}, ${providerKeyedReach}, ${workspaceManagedAccounts}, ${apiKeyConnections}, ${compat}, ${fences}, ${acceptanceReads})`;
+    await database.admin`delete from schema_migrations where name in (${writer}, ${cutover}, ${disconnect}, ${explicitRetry}, ${recovery}, ${neutral}, ${completion}, ${precursor}, ${providerKeyedReach}, ${workspaceManagedAccounts}, ${apiKeyConnections}, ${personalConnectFormat}, ${compat}, ${fences}, ${acceptanceReads})`;
     await migrate(database.adminUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
     client = createDb(appUrl.toString());
