@@ -24,7 +24,11 @@ import {
 import { GenieLoadingOptionsContext, type GenieLoadingOptions } from "../timeline/genie-loading";
 import { ChildSessionLink } from "./child-session-link";
 import { useStartupDetails } from "../timeline/startup-preference";
-import { compactionSkipSubtitle } from "../timeline/compaction-copy";
+import {
+  COMPACTION_FAILURE_TITLE,
+  compactionFailureDetails,
+  compactionSkipSubtitle,
+} from "../timeline/compaction-copy";
 import type {
   DraftTimelineAnnotation,
   MediaGenerationResult,
@@ -39,6 +43,7 @@ import {
   BotIcon,
   CheckCircle2Icon,
   CheckIcon,
+  ChevronDownIcon,
   ChevronRightIcon,
   CornerDownRightIcon,
   PauseCircleIcon,
@@ -57,6 +62,7 @@ import type { ComponentType, CSSProperties } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import {
   Component,
+  Fragment,
   Suspense,
   createContext,
   lazy,
@@ -64,6 +70,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -4198,6 +4205,8 @@ const COMPACTION_TRIGGER_LABEL: Record<NonNullable<ContextCompactionItem["trigge
 
 function CompactionRow({ item }: { item: ContextCompactionItem }) {
   const enter = useEntranceAnimation();
+  const detailsId = useId();
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const trigger =
     item.trigger && item.phase !== "started" ? COMPACTION_TRIGGER_LABEL[item.trigger] : null;
   const before =
@@ -4215,13 +4224,15 @@ function CompactionRow({ item }: { item: ContextCompactionItem }) {
         ? before && after
           ? `Conversation history compacted · ~${before} → ~${after} estimated history tokens`
           : "Conversation history compacted"
-        : "Couldn’t compact conversation history";
+        : COMPACTION_FAILURE_TITLE;
   const subtitle =
     item.phase === "compacted"
       ? "Chat history above is unchanged"
       : item.phase === "skipped"
         ? compactionSkipSubtitle(item.skipReason, item.providerRejection)
         : null;
+  // Provider identifiers are diagnostics: one short line up front, the rest on demand.
+  const details = compactionFailureDetails(item);
   const pill =
     item.phase === "skipped" && item.skipReason === "summarization_failed"
       ? "border-og-status-failed/35 bg-og-status-failed/10 text-og-status-failed"
@@ -4229,23 +4240,64 @@ function CompactionRow({ item }: { item: ContextCompactionItem }) {
         ? WAITING_PILL_CLASS
         : NEUTRAL_PILL;
   return (
-    <div className={cn(enter && "animate-og-enter", "flex justify-center")}>
+    <div className={cn(enter && "animate-og-enter", "flex min-w-0 flex-col items-center gap-1.5")}>
       <div
         className={cn(
-          "inline-flex max-w-full flex-col items-center gap-0.5 rounded-full border px-3 py-1.5 text-og-sm",
+          "inline-flex min-w-0 max-w-full flex-col items-center gap-0.5 rounded-full border px-3 py-1.5 text-og-sm",
           pill,
         )}
         role="status"
       >
-        <span className="inline-flex max-w-full items-center gap-1.5">
+        <span className="inline-flex min-w-0 max-w-full items-center gap-1.5">
           <ShrinkIcon className="size-3.5 shrink-0" />
-          <span className="truncate">
+          <span className="min-w-0 truncate">
             {title}
             {trigger ? ` · ${trigger}` : ""}
           </span>
         </span>
-        {subtitle ? <span className="truncate text-og-xs opacity-80">{subtitle}</span> : null}
+        {subtitle || details ? (
+          <span className="inline-flex min-w-0 max-w-full items-center gap-1 text-og-xs">
+            {subtitle ? <span className="min-w-0 truncate opacity-80">{subtitle}</span> : null}
+            {details ? (
+              <button
+                type="button"
+                aria-expanded={detailsOpen}
+                aria-controls={detailsId}
+                onClick={() => setDetailsOpen((open) => !open)}
+                className={cn(
+                  "inline-flex shrink-0 items-center gap-0.5 rounded-og-sm font-medium underline-offset-2",
+                  "hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-current/40",
+                  "pointer-coarse:-my-2 pointer-coarse:px-1 pointer-coarse:py-2",
+                )}
+              >
+                Details
+                <ChevronDownIcon
+                  aria-hidden
+                  className={cn("size-3 transition-transform", detailsOpen && "rotate-180")}
+                />
+              </button>
+            ) : null}
+          </span>
+        ) : null}
       </div>
+      {details ? (
+        <div
+          id={detailsId}
+          hidden={!detailsOpen}
+          data-og-compaction-details=""
+          className="w-full max-w-md rounded-og-md border border-og-border bg-og-surface-1 px-3 py-2 text-left text-og-xs text-og-fg-muted"
+        >
+          <p>{details.note}</p>
+          <dl className="mt-2 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1">
+            {details.facts.map((fact) => (
+              <Fragment key={fact.label}>
+                <dt className="text-og-fg-subtle">{fact.label}</dt>
+                <dd className="min-w-0 break-words font-mono">{fact.value}</dd>
+              </Fragment>
+            ))}
+          </dl>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -5082,7 +5134,9 @@ function NoticeRow({ item }: { item: NoticeItem }) {
           <details className="mt-2 text-og-control">
             <summary className="cursor-pointer font-medium">{item.details.label}</summary>
             <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-og-sm bg-og-fg/5 p-2 font-mono">
-              {JSON.stringify(item.details.value, null, 2)}
+              {typeof item.details.value === "string"
+                ? item.details.value
+                : JSON.stringify(item.details.value, null, 2)}
             </pre>
           </details>
         ) : null}

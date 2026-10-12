@@ -96,6 +96,8 @@ const PROVIDER_ERROR: KnownFailure = {
 const UNKNOWN_FAILURE = "The session stopped unexpectedly.";
 const EXECUTION_CONNECTION_FAILURE = "Opengeni lost contact with the execution environment.";
 const CODEX_REQUEST_REJECTED = "Codex rejected this request.";
+const COMPACTION_FAILURE =
+  "Couldn’t compact conversation history. If the next message fails too, start a new session.";
 
 /** The worker's closed quota marker, on a quota turn failure or a compaction failure. */
 function quotaScopeFailure(scope: string | null | undefined): KnownFailure | null {
@@ -307,6 +309,20 @@ export function failedSessionCopy(
           : UNKNOWN_FAILURE,
       unavailableModel: false,
       ...(detail ? { detail } : {}),
+    };
+  }
+  // The recorded compaction text is the provider's raw rejection: name the
+  // outcome and keep the exact text behind Details.
+  if (
+    code === "context_compaction_failed" &&
+    !creditExhausted &&
+    !failure.safetyRefusal &&
+    !unavailableModel
+  ) {
+    return {
+      reason: COMPACTION_FAILURE,
+      unavailableModel: false,
+      ...(diagnostic ? { detail: diagnostic } : {}),
     };
   }
   const reason = creditExhausted

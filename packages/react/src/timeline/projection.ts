@@ -23,6 +23,7 @@ import {
   tryParseJson,
 } from "../lib/format";
 import { mcpToolLeaf, toolMatchesLeaf } from "./tool-display-name";
+import { presentTurnFailureText } from "./compaction-copy";
 import type {
   AgentMessageItem,
   ActivityItem,
@@ -1476,13 +1477,29 @@ export function buildTimeline(
         if (allowance) {
           allowanceNotice(event, turnId);
         } else if (!hadActivity) {
-          items.push({
-            kind: "notice",
-            id: event.id,
-            tone: "failed",
-            text: failureText ?? "The turn failed.",
-            occurredAt: event.occurredAt,
-          });
+          // A compaction failure names its outcome and keeps the recorded
+          // provider text behind Details; when the turn's own compaction
+          // landmark already says so, the notice would only repeat it.
+          const failure = presentTurnFailureText(failureText);
+          const repeatsLandmark =
+            failure?.detail !== undefined &&
+            turnId !== null &&
+            items.some(
+              (item) =>
+                item.kind === "context-compaction" &&
+                item.turnId === turnId &&
+                item.phase === "skipped",
+            );
+          if (!repeatsLandmark) {
+            items.push({
+              kind: "notice",
+              id: event.id,
+              tone: "failed",
+              text: failure?.summary ?? "The turn failed.",
+              ...(failure?.detail ? { details: { label: "Details", value: failure.detail } } : {}),
+              occurredAt: event.occurredAt,
+            });
+          }
         }
         break;
       }

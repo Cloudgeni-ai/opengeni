@@ -1,7 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import type { SessionEvent } from "@opengeni/sdk";
 import { CREDIT_EXHAUSTION_MESSAGE } from "../src/lib/format";
-import { compactionSkipSubtitle } from "../src/timeline/compaction-copy";
+import {
+  compactionFailureDetails,
+  compactionSkipSubtitle,
+  presentTurnFailureText,
+} from "../src/timeline/compaction-copy";
 import {
   buildTimeline,
   creditExhaustedFromEvents,
@@ -2150,11 +2154,21 @@ describe("buildTimeline", () => {
     const projected = items[0];
     if (projected?.kind !== "context-compaction") throw new Error("expected a compaction item");
     expect(compactionSkipSubtitle("summarization_failed", projected.providerRejection)).toBe(
-      "The model provider rejected the compaction request (HTTP 400 invalid_request_error, param input[12].encrypted_content). Chat history is unchanged. Repeating it fails the same way until the conversation changes; if a new message fails again, start a new session.",
+      "Chat history is unchanged.",
     );
+    // Identifiers and guidance move behind Details instead of the subtitle.
+    expect(compactionFailureDetails(projected)).toEqual({
+      note: "The provider rejects this request the same way until the conversation changes. If your next message fails too, start a new session.",
+      facts: [
+        { label: "Response", value: "HTTP 400 · invalid_request_error" },
+        { label: "Parameter", value: "input[12].encrypted_content" },
+        { label: "Request ID", value: "e63ad2c3-fab4-44e4-b458-3f5008f3c18f" },
+      ],
+    });
     expect(compactionSkipSubtitle("summarization_failed", null)).toBe(
       "Request it again to retry. Chat history is unchanged.",
     );
+    expect(compactionFailureDetails({ ...projected, providerRejection: null })).toBeNull();
     // A malformed record without a numeric status is not a rejection.
     const malformed = buildTimeline([
       event("session.context.compaction.skipped", {
@@ -2163,6 +2177,41 @@ describe("buildTimeline", () => {
       }),
     ]);
     expect(malformed[0]).toMatchObject({ providerRejection: null });
+  });
+
+  test("names a compaction turn failure and keeps the recorded text as detail", () => {
+    const recorded =
+      "compaction summarization failed: 400 Missing required parameter: 'input[116].status'.";
+    expect(presentTurnFailureText(recorded)).toEqual({
+      summary: "Couldn’t compact conversation history",
+      detail: recorded,
+    });
+    // Every other reason passes through as-is.
+    expect(presentTurnFailureText("Model request rejected")).toEqual({
+      summary: "Model request rejected",
+    });
+    expect(presentTurnFailureText("  ")).toBeNull();
+    expect(presentTurnFailureText(undefined)).toBeNull();
+  });
+
+  test("a compaction turn failure without activity never repeats raw provider text", () => {
+    reset();
+    const recorded = "compaction summarization failed: 400 Missing required parameter.";
+    const failed = { error: recorded, code: "context_compaction_failed" };
+    // Its own landmark already names the failure.
+    const withLandmark = buildTimeline([
+      event("session.context.compaction.skipped", { reason: "summarization_failed" }),
+      event("turn.failed", failed),
+    ]);
+    expect(withLandmark.filter((item) => item.kind === "notice")).toEqual([]);
+    // Without one, the notice is short and keeps the recorded text as details.
+    reset();
+    const alone = buildTimeline([event("turn.failed", failed)]);
+    expect(alone.find((item) => item.kind === "notice")).toMatchObject({
+      tone: "failed",
+      text: "Couldn’t compact conversation history",
+      details: { label: "Details", value: recorded },
+    });
   });
 
   test("hides same-turn recovery control evidence from the user timeline", () => {

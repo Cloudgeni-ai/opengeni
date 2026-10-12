@@ -14,6 +14,7 @@ import { Collapsible } from "radix-ui";
 import { CopyButton } from "../components/copy-button";
 import { cn } from "../lib/cn";
 import { MOTION_INSPECT_SCALE } from "../lib/motion-inspect";
+import { presentTurnFailureText } from "./compaction-copy";
 import { useForcedDefaultOpen } from "./disclosure-context";
 import { useTimelineSearchReveal } from "../components/timeline-search";
 import { useEntranceAnimation } from "./entrance";
@@ -355,6 +356,8 @@ export function TurnSummary({
     () => selectTurnSummaryFacets(facetDefinitions, context, statusKind),
     [context, facetDefinitions, statusKind],
   );
+  // The chip names the failure; recorded technical text stays a hover title.
+  const failure = outcome === "failed" ? presentTurnFailureText(failureText) : null;
 
   // Live open shell: keep the chip in-flow (so settle never inserts layout)
   // and quieter until there is an outcome or a settle beat — but still
@@ -474,8 +477,11 @@ export function TurnSummary({
                       </>
                     </FacetRenderBoundary>
                   ))}
-              {outcome === "failed" && failureText ? (
-                <span className="text-og-status-failed"> · {failureText}</span>
+              {failure ? (
+                <span className="text-og-status-failed" title={failure.detail}>
+                  {" "}
+                  · {failure.summary}
+                </span>
               ) : null}
               {outcome === "cancelled" ? (
                 <span className="text-og-fg-subtle"> · interrupted</span>
